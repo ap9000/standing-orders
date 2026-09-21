@@ -30,7 +30,7 @@ export const WORK_VIEWS: readonly { key: WorkView; label: string; hint: string; 
   { key: "all", label: "All", hint: "Every task in view, most urgent first.", empty: "Nothing is in progress. Describe work in chat or add a task, and it appears here." },
   { key: "needs-you", label: "Needs you", hint: "Tasks waiting on an answer, approval, or your inspection.", empty: "Nothing needs you right now. Queued and running work continues on its own." },
   { key: "running", label: "Running", hint: "Attempts a builder owns right now.", empty: "Nothing is building right now. Approved tasks start when a builder with capacity is connected." },
-  { key: "completed", label: "Completed", hint: "Finished tasks with their evidence status — problems stay visible here.", empty: "No completed work in this view." },
+  { key: "completed", label: "Complete", hint: "Tasks the lead or user has marked complete. Recorded check results remain available.", empty: "No tasks have been marked complete in this view." },
 ];
 
 export function parseWorkView(raw: string | null): WorkView {

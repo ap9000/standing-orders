@@ -1,3 +1,7 @@
+import { repositoryContext, repositoryContextRead } from './repository-context.js';
+import { repositoryContextHtml } from './repository-context-ui.js';
+import { configureLeadFollow, leadFollowStatus, runLeadFollowPass } from './lead-follow.js';
+import { startMaintenance } from './maintenance.js';
 import { codingHandoffPreview, createCodingHandoff } from './coding-handoff.js';
 import { codingShippingHtml, CODING_SHIPPING_CSS } from './coding-shipping-ui.js';
 import { prepareCodingContext } from './coding-context.js';
@@ -19,7 +23,10 @@ import { learningHtml } from "./workspace-ui.js";
 import { createSessionEndpoint } from './session-server.js';
 import { openWorkDecisionOf } from "./work-summary.js";
 import { assignmentOf, checkAssignmentAsOperator, type AssignmentSnapshot } from './assignment.js';
+import { leadBriefHtml, LEAD_CONTEXT_CSS } from './lead-context.js';
+import { assignmentCatchUp } from './assignment-brief.js';
 import { assignmentStatusOf, assignmentSummaryHtml, assignmentWithEvidence, ASSIGNMENT_CSS } from './assignment-ui.js';
+import { assignmentPresentationOf, historicalAssessmentReason } from './assignment-presentation.js';
 import type { TaskFamily } from "./store.js";
 import { ledgerBody } from "./ledger-view.js";
 import { CHAT_CONTINUITY_SCRIPT } from "./chat-continuity.js";
@@ -1039,7 +1046,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       refuse(response,who,404,'No such action in your projects.','/projects');return false;
     }
     const read = new Set(["/settings/skills", "/settings/knowledge", "/settings", "/settings/learning", "/recipes", "/recipes/run", "/recipes/start", "/recipes/new", "/recipes/edit", "/recipes/from-task", "/recipes/preview", "/recipes/export", "/", "/work", "/projects", "/people", "/ledger", "/next", "/board", "/tasks", "/tasks/new", "/runs", "/review", "/done", "/routines", "/menu"]);
-    const write = new Set(["/settings/skills/import", "/settings/skills/change", "/settings/skills/revise", "/settings/knowledge/change", "/settings/learning/change", "/recipes/prepare", "/recipes/preview", "/recipes/import", "/recipes/save", "/recipes/launch", "/projects/select", "/tasks/add", "/routines/add"]);
+    const write = new Set(["/settings/skills/import", "/settings/skills/change", "/settings/skills/revise", "/settings/knowledge/change", "/settings/knowledge/refresh", "/settings/learning/change", "/recipes/prepare", "/recipes/preview", "/recipes/import", "/recipes/save", "/recipes/launch", "/projects/select", "/tasks/add", "/routines/add"]);
     const task = matchTaskPath(path, request.method === "GET" ? "" : "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|next|reopen|steer|accept-proof|accept-revision|reject-revision|route|retry-review|complete|stop|resume-arm|resume)$");
     const resource = request.method === "GET"
       ? /^\/(?:r|d)\/[0-9]{1,15}(?:\/evidence\/[0-9]{1,15})?$/.test(path) || /^\/routines\/[0-9]{1,15}$/.test(path)
@@ -1055,7 +1062,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
     // Every collection except these three must have a concrete project;
     // NULL otherwise means all rows in legacy store APIs.
-    if (!["/settings/skills", "/settings/skills/import", "/settings/skills/change", "/settings/skills/revise", "/settings/knowledge", "/settings/knowledge/change", "/settings", "/settings/learning", "/settings/learning/change", "/projects", "/people", "/ledger", "/projects/select"].includes(path) && !visible(projectOf(who, request) ?? null)) {
+    if (!["/settings/skills", "/settings/skills/import", "/settings/skills/change", "/settings/skills/revise", "/settings/knowledge", "/settings/knowledge/change", "/settings/knowledge/refresh", "/settings", "/settings/learning", "/settings/learning/change", "/projects", "/people", "/ledger", "/projects/select"].includes(path) && !visible(projectOf(who, request) ?? null)) {
       refuse(response, who, 403, "No assigned project is available. Ask an instance operator for access.", "/projects"); return false;
     }
     if (request.method === "GET" && path === "/board") {
@@ -1141,7 +1148,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     // projects without changing the selected project or granting access.
     const needsProject =
       who.via === "cookie" && project === null && !unscopedMode &&
-      url.pathname !== "/" && url.pathname !== "/work" &&
+      url.pathname !== "/" && url.pathname !== "/inbox" && url.pathname !== "/work" &&
       !(url.pathname === "/review" && url.searchParams.has("result")) &&
       url.pathname !== "/menu" &&
       url.pathname !== "/recipes" &&
@@ -1292,7 +1299,9 @@ export function createDecisionServer(options: ServeOptions): Server {
       return void projectsScreen(response, who, url.searchParams.get("said"), 200, safeReturn(url.searchParams.get("return")));
     }
 
-    if (url.pathname === "/") {
+    if (url.pathname === "/") return redirect(response, who.via === "cookie" && !restricted() ? "/chat" : "/work");
+
+    if (url.pathname === "/inbox") {
       // With no project open in scoped mode this is the ROLL-UP inbox:
       // admission binds inside the bounded queries, every row's repo is
       // re-proved here, and rows render as links only (Codex roll-up
@@ -1325,7 +1334,8 @@ export function createDecisionServer(options: ServeOptions): Server {
           requeueables: store.listRequeueablesScoped(project, now, 10, admission).filter(one => visible(one.repo)),
           needsVerification: store
             .listCompletedWorkScoped(project, 10, admission)
-            .filter(one => visible(one.repo) && (one.proofVerdict === "short" || one.proofVerdict === "refuted") && !one.proofAccepted)
+            .filter(one => visible(one.repo) && (one.proofVerdict === "short" || one.proofVerdict === "refuted") && !one.proofAccepted &&
+              assignmentOf(store, one.taskId, now, { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) }, evidenceRoot) === null)
             .map(one => ({
               taskId: one.taskId,
               title: one.title,
@@ -2193,7 +2203,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         `</div>`;
       return page(response, 200, shell("menu", [
         `<h1>tools and settings</h1>`,
-        section("work tools", workToolRows(chrome.projectScoped, chrome.chat)),
+        section("work tools", workToolRows(chrome.projectScoped, chrome.chat, chrome.code)),
         section("settings", settingsRows(chrome.projectScoped, chrome.settings)),
       ].join("\n"), { chrome }));
     }
@@ -2586,6 +2596,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       // writes nothing (slice-2 review, finding 7) — the mint card below
       // starts a new conversation, and minting ends the old session.
       const ceilingStale = enabled.ok && mateSession !== null && principal !== null && mateSession.ceilingDigest !== principal.ceilingDigest;
+      const catchUp = leadBriefHtml(assignmentCatchUp(store, now, { principal: "operator", repos }, { limit: 6 }, evidenceRoot));
       const chatProjects = repos.map((repo, index) => {
         let peek: ProjectPeek | null = null;
         try {
@@ -2596,10 +2607,15 @@ export function createDecisionServer(options: ServeOptions): Server {
         }
         return { id: `r${index + 1}`, label: projectName(repo), path: repo, peek };
       });
-      let fleetSnapshot: ChatSnapshot | null = null;
+      let fleetSnapshot: AssignmentChatSnapshot | null = null;
       if (repos.length > 0) {
         try {
           fleetSnapshot = withDispatchDiagnoses(store, store.chatSnapshot(repos, now), now);
+          fleetSnapshot.assignmentStates = Object.fromEntries(fleetSnapshot.tasks.flatMap(task => {
+            const value = assignmentOf(store, task.rootId ?? task.id, now, { principal: "operator", repos, includeUnplaced: false }, evidenceRoot);
+            return value === null ? [] : [[task.id, { state: value.state, label: assignmentStatusOf(value).label, detail: value.detail }]];
+          }));
+          fleetSnapshot.attentionCount = needsYouBadge(null);
         } catch {
           // The project rail already degrades each pulse independently.
           // A failed briefing query must not make the conversation vanish.
@@ -2620,6 +2636,8 @@ export function createDecisionServer(options: ServeOptions): Server {
               weeklySpent: store.chatWeeklySpendMicrousd(enabled.credentialKey, now),
               projects: chatProjects,
               fleetSnapshot,
+              catchUp,
+              follow: leadFollowStatus(store, who.name),
               focusTask,
               csrf: who.session.csrf,
               problem: url.searchParams.get("said") ?? focusProblem ?? said,
@@ -2643,6 +2661,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           weeklySpent: enabled.ok ? store.chatWeeklySpendMicrousd(enabled.credentialKey, now) : 0,
           projects: chatProjects,
           fleetSnapshot,
+          catchUp,
           focusTask,
           canManage: who.role === "approver",
           config: store.getChatConfig(),
@@ -2659,7 +2678,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           problem:
             url.searchParams.get("said") ??
             focusProblem ??
-            (ceilingStale ? "Your projects changed since this conversation started. Start a new conversation below to continue — the earlier one closes when you do." : null) ??
+            (ceilingStale ? "Project access changed. Your tasks and results are saved. Start a conversation with the current projects to continue." : null) ??
             takeMateNote(who.session.csrf, null),
           resultPanel,
           ...(enabled.ok && who.role === "approver" ? { mateMint: mateMintCard(who.session.csrf, enabled, focusTask === null ? "/chat" : taskChatHref(focusTask.id)) } : {}),
@@ -2762,7 +2781,9 @@ export function createDecisionServer(options: ServeOptions): Server {
             const restore=csrf&&who.role==='approver'&&revision!==view.revision?`<form class="knowledge" method="post" action="/settings/knowledge/change">${hiddenFields({csrf,repo:chosen,identity:view.identity,revision:String(view.revision),action:'restore',restore:String(revision)})}<p>Replaces knowledge for future tasks. Existing runs keep their saved context.</p><button>Restore version ${revision}</button></form>`:'';
             return sendScreen(response,200,screen('Knowledge history',`<p><a href="/settings/knowledge?repo=${encodeURIComponent(chosen)}">Current knowledge</a></p><h1>Version ${revision}</h1>${knowledgeHtml({...view,knowledge:previous,history:[]},'',false)}${restore}`,{chrome:chromeFor(chosen,'settings')}));
           }
-          content = knowledgeHtml(view,csrf,who.role==='approver');
+          const query = (url.searchParams.get('q') ?? '').slice(0, 1000);
+          const result = query.trim() ? repositoryContextRead({ repo: chosen, query, mode: url.searchParams.get('mode') === 'impact' ? 'impact' : 'search', cacheRoot: join(dirname(evidenceRoot), 'repository-context') }) : null;
+          content = repositoryContextHtml(chosen, query, result, who.role === 'approver' ? csrf : '') + knowledgeHtml(view,csrf,who.role==='approver');
           content += `<details class="knowledge"><summary>Learned lessons</summary>${learningHtml(learningView(store,evidenceRoot,chosen,who.name),csrf,who.role==='approver')}</details>`;
         } catch { content = '<p class="problem" role="alert">Project knowledge is unavailable. Reload to retry.</p>'; }
       }
@@ -3443,7 +3464,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     const now = clock();
     const { tasks, truncated } = workTasksInView(project);
     let count = 0;
-    for (const task of tasks) if (task.state !== "cancelled" && needsPerson(diagnoseTaskDispatch(store, task.id, now))) count += 1;
+    for (const task of tasks) if (workRowOf(task, now).status.views.includes("needs-you")) count += 1;
     return { count, saturated: truncated };
   }
 
@@ -3518,7 +3539,9 @@ export function createDecisionServer(options: ServeOptions): Server {
 
   /** Keep detailed receipt diagnostics; shared assignment reads own readiness. */
   function freshAssignment(assignment: AssignmentSnapshot | null, receipt: CompletionReceiptView | null): AssignmentSnapshot | null {
-    return assignment === null ? null : assignmentWithEvidence(assignment, receipt === null ? null : receiptStatusOf(receipt), receipt?.runId ?? null);
+    if (assignment === null) return null;
+    const value = assignmentWithEvidence(assignment, receipt === null ? null : receiptStatusOf(receipt), receipt?.runId ?? null);
+    return receipt === null ? value : { ...value, attention: [...new Set([...value.attention, ...receipt.facts.evidenceProblems, ...receipt.caveats.filter(reason => !historicalAssessmentReason(reason))])] };
   }
 
   /**
@@ -3580,7 +3603,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (status.views.includes("running") && !assignmentStatus.views.includes("running")) assignmentStatus.views = [...assignmentStatus.views, "running"];
     return { ...facts, executionId: task.id, id: task.family?.root.id ?? task.id, title: task.family?.root.title ?? task.title,
       familyNotice: task.family?.problem ?? (otherActive ? `${otherActive} earlier version${otherActive === 1 ? " is" : "s are"} still waiting or running. Open History.` : null),
-      status: assignment === null ? status : { ...assignmentStatus, diagnostics: [...(status.diagnostics ?? []), ...(status.tone === "problem" && status.detail !== assignment.detail ? [status] : [])] }, assignment, assignmentProblem: status.tone === "problem", resultRunId: latest === null ? null : latest.id };
+      status: assignment === null ? status : { ...assignmentStatus, diagnostics: assignmentPresentationOf(assignment, { workStatus: status, diagnostics: [...(status.diagnostics ?? []), ...(status.tone === "problem" && status.detail !== assignment.detail ? [status] : [])] }).diagnostics }, assignment, assignmentProblem: status.tone === "problem", resultRunId: latest === null ? null : latest.id };
   }
 
   /** The compact task list for the master pane, the current row marked. */
@@ -4075,6 +4098,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       title: family.root.title,
       state: task.state,
       status: view?.status ?? workRowOf({ ...task, repo: ref.repo }, now).status,
+      assignment: view?.assignment ?? assignmentOf(store, task.id, now, { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) }, evidenceRoot),
       project: ref.repo === null ? null : projectName(ref.repo),
       now,
       dispatch: diagnoseTaskDispatch(store, taskId, now),
@@ -4747,6 +4771,13 @@ export function createDecisionServer(options: ServeOptions): Server {
         try {content=skillsHtml(skillsView(store,repo,who.name),who.session.csrf,true,{error:message,draft:Object.fromEntries(['method','content','url','sample','sha'].map(k=>[k,body.get(k)??'']))});}catch{/* Do not display unverified packages. */}
         return sendScreen(response,409,screen('Skills',`<h1>Skills</h1>${content}`,{chrome:chromeFor(repo,'settings'),functional:{script:skillsScript()}}));
       }
+    }
+    if (url.pathname === "/settings/knowledge/refresh") {
+      if (who.via !== 'cookie' || who.role !== 'approver') return refuse(response, who, 403, 'Sign in as an approver to refresh project context.', '/settings/knowledge');
+      const repo = body.get('repo') ?? '';
+      if (!visible(repo) || !store.accountCanAccess(who.name, repo) || ![...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()].includes(repo)) return refuse(response, who, 403, 'That project is outside your access.', '/settings/knowledge');
+      const refreshed = await repositoryContext({ repo, query: '', refresh: true, cacheRoot: join(dirname(evidenceRoot), 'repository-context') });
+      return sendScreen(response, refreshed.index.status === 'ready' ? 200 : 503, screen('Project context', `<h1>Project context</h1><p>${refreshed.index.status === 'ready' ? 'Code index refreshed.' : 'The index is unavailable. Source search still works.'}</p><a class="button-link" href="/settings/knowledge?repo=${encodeURIComponent(repo)}">Open knowledge</a>`, { chrome: chromeFor(repo, 'settings') }));
     }
     if (url.pathname === "/settings/knowledge/change") {
       if (who.via !== 'cookie' || who.role !== 'approver') return refuse(response,who,403,'Sign in as an approver to change project knowledge.','/settings/knowledge');
@@ -5906,13 +5937,20 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (!verified.ok) return redirect(response, chatReturnWithSaid(back, "minting a session takes your password, typed again"));
       const ceilingMicrousd = Math.round(ceilingUsd * 1_000_000);
       const termsDigest = createHash("sha256").update(`${ceilingMicrousd}\n${verified.who.ceilingDigest}`).digest("hex");
-      store.mintMateSession(
+      const sessionId = store.mintMateSession(
         { approver: who.name, approverGeneration: verified.who.generation, credentialKey: enabled.credentialKey, ceilingMicrousd, ceilingDigest: verified.who.ceilingDigest, termsDigest },
         now,
       );
-      store.openMateThread(who.name, verified.who.ceilingDigest, now);
+      const thread = store.openMateThread(who.name, verified.who.ceilingDigest, now).thread;
+      if (body.get("follow") === "yes") configureLeadFollow(store, verified.who, store.getMateSession(sessionId)!, thread, true, now);
       mateSaid.delete(who.session.csrf);
       return redirect(response, back);
+    }
+    if (url.pathname === "/chat/mate/follow") {
+      if (who.via !== "cookie") return refuse(response, who, 403, "Open the conversation to change automatic updates.");
+      const principal = matePrincipal(who), session = store.activeMateSession(who.name), thread = store.liveMateThreadFor(who.name);
+      if (!principal || !session || !thread || !configureLeadFollow(store, principal, session, thread, body.get("enabled") === "yes", now)) return refuse(response, who, 409, "Conversation access changed. Start chat again.", "/chat");
+      return redirect(response, safeChatReturn(body.get("return")));
     }
     if (url.pathname === "/chat/mate/end") {
       if (who.via !== "cookie") return refuse(response, who, 403, "the mate is a browser surface");
@@ -6641,7 +6679,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       const resolved = store.resolveIncident(id, who.name, now);
       if (!resolved) return refuse(response, who, 409, "already resolved, or never open");
-      const back = body.get("return") === "inbox" ? "/" : openRow === undefined ? "/" : taskHref(openRow.taskId);
+      const back = body.get("return") === "inbox" ? "/inbox" : openRow === undefined ? "/" : taskHref(openRow.taskId);
       return redirect(response, back);
     }
 
@@ -7102,7 +7140,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           return taskScreen(response, who, taskId, `not requeued: ${requeued.reason}`, 409);
         }
         // Allow-listed return only — never an arbitrary URL from the form.
-        return redirect(response, body.get("return") === "inbox" ? "/" : body.get("return") === "next" ? "/next" : taskHref(taskId));
+        return redirect(response, body.get("return") === "inbox" ? "/inbox" : body.get("return") === "next" ? "/next" : taskHref(taskId));
       }
       case "follow-up": {
         // A scout's proposed follow-up, filed by the operator's tap (mate
@@ -8063,6 +8101,10 @@ export function createDecisionServer(options: ServeOptions): Server {
       history: (() => { const family = familyOf(taskId); return family === null ? "" : familyHistory(family); })(),
       run,
       receipt,
+      assignment: (() => {
+        const value = assignmentOf(store, taskId, now, { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) }, evidenceRoot);
+        return value?.receipt?.runId === run.id && value.activeTaskId === taskId ? freshAssignment(value, receipt) : null;
+      })(),
       handoff,
       proof,
       terminal,
@@ -8139,7 +8181,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       priority: row.priority,
       assignment: (() => {
         const value = assignmentOf(store, row.taskId, now, { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) }, evidenceRoot);
-        return run?.scopeDigest != null && value?.activeTaskId === row.taskId && value.receipt?.runId === run.id ? value : null;
+        return run !== null && value?.activeTaskId === row.taskId && value.receipt?.runId === run.id ? value : null;
       })(),
       intent,
       plan,
@@ -8239,11 +8281,24 @@ export function createDecisionServer(options: ServeOptions): Server {
     response.end(read.content);
   }
 
+  // Only explicitly authorized conversations receive automatic turns. The
+  // deterministic scan is idle without new meaningful work; shutdown drains it.
+  let leadMaintenance: ReturnType<typeof startMaintenance> | null = null;
+  let leadClosing = false;
+  server.once('listening', () => {
+    leadMaintenance = startMaintenance({ intervalMs: 5_000, shouldStop: () => leadClosing,
+      run: () => runLeadFollowPass({ store, repos: managedRepos, evidenceRoot, clock,
+        provider: () => { const enabled = chatEnablement(); return enabled.ok ? { config: enabled.config, key: enabled.key } : null; },
+        fetcher: chatFetcher, ...(options.subscriptionChatRunner ? { subscriptionRunner: options.subscriptionChatRunner } : {}) }),
+      onError: () => { /* Pending delivery is durable and will be read on the next service pass. */ },
+    });
+  });
   // Keep native process custody until shutdown has verified agent/tool exit.
   const closeServer = server.close.bind(server);
   server.close = ((callback?: (error?: Error) => void) => {
-    if (!coding) return closeServer(callback);
-    void coding.close().then(() => closeServer(callback)).catch(error => {
+    leadClosing = true;
+    if (!coding && !leadMaintenance) return closeServer(callback);
+    void (async () => { await leadMaintenance?.stop(); await coding?.close(); })().then(() => closeServer(callback)).catch(error => {
       if (callback) callback(error instanceof Error ? error : Error('Coding session shutdown failed.'));
       else server.emit('error', error);
     });
@@ -11662,7 +11717,7 @@ button.pick-file { min-height: 1.5rem; padding: 0 .5rem; font-size: .6875rem; }
 }
 `;
 
-const WORKSPACE_STYLE = styleAsset(STYLE + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + KNOWLEDGE_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
+const WORKSPACE_STYLE = styleAsset(STYLE + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + KNOWLEDGE_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
@@ -12139,14 +12194,14 @@ function shell(
   // Projects — every old page keeps its own active key and lights the
   // destination it now lives under. The count rides Work: it is the
   // saturated needs-you count, exactly as the inbox row wore it.
-  const primary = chrome.active === "code" ? "code" : chrome.active === "chat" ? "work" : primaryDestinationOf(chrome.active);
+  const primary = chrome.active === "code" ? "work" : primaryDestinationOf(chrome.active);
   const primaryItem = (key: "code" | "chat" | "work" | "projects", href: string, label: string, count?: number): string =>
     `<a href="${href}" aria-label="${escape(label)}" title="${escape(label)}"${primary === key ? ' class="active" aria-current="page"' : ""}${key === "work" && count !== undefined ? ` data-waiting="${count}"` : ""}>` +
     `<span class="glyph">${NAV_ICONS[key] ?? ""}</span>${label}` +
     `${count !== undefined && count > 0 ? ` <span class="count badge badge-open">${count}${chrome.inboxSaturated ? "+" : ""}</span>` : ""}</a>`;
   const side = [
     `<aside class="side">`,
-    `<div class="side-head"><a class="brand" href="/work"><span class="brand-long">standing<span class="dot">·</span>orders</span><span class="brand-short">s·o</span></a>`,
+    `<div class="side-head"><a class="brand" href="${chrome.chat === true ? "/chat" : "/work"}"><span class="brand-long">standing<span class="dot">·</span>orders</span><span class="brand-short">s·o</span></a>`,
     ...(options.sidebarToggle === true
       ? [`<button type="button" class="side-toggle" aria-label="collapse sidebar" aria-expanded="true" title="collapse sidebar">${strokeIcon(`<path d="m15 18-6-6 6-6"/>`)}</button>`]
       : []),
@@ -12155,13 +12210,13 @@ function shell(
     // Chat is present only where the ceiling ever allows it (unchanged
     // gating); Work and Projects always. Every specialist tool is a dim
     // text row inside one of the two accordion groups below.
-    ...(chrome.code ? [primaryItem("code", "/code", "code")] : []),
-    primaryItem("work", "/work", "work", chrome.inboxCount),
-    primaryItem("projects", "/projects", "projects"),
+    ...(chrome.chat ? [primaryItem("chat", "/chat", "Chat")] : []),
+    primaryItem("work", "/work", "Tasks", chrome.inboxCount),
+    primaryItem("projects", "/projects", "Projects"),
     `</nav>`,
     ...(chrome.active === "code" ? [] : [`<a class="new-task" href="/tasks/new" aria-label="new task">+ new task</a>`]),
     `<nav class="nav-groups">`,
-    navGroup("tools", "work tools", workToolRows(chrome.projectScoped, chrome.chat), TOOL_KEYS.has(chrome.active)),
+    navGroup("tools", "work tools", workToolRows(chrome.projectScoped, chrome.chat, chrome.code), TOOL_KEYS.has(chrome.active)),
     navGroup("settings", "settings", settingsRows(chrome.projectScoped, chrome.settings), SETTINGS_KEYS.has(chrome.active)),
     `</nav>`,
     `<span class="grow"></span>`,
@@ -12195,7 +12250,7 @@ function shell(
   // these only below 760px; desktop keeps the sidebar untouched.
   const mobileTop = [
     `<header class="mobile-top">`,
-    `<a class="brand-mini" href="/work">s·o</a>`,
+    `<a class="brand-mini" href="${chrome.chat === true ? "/chat" : "/work"}">s·o</a>`,
     // On a phone the pill IS the scope row (mobile pass): the project's
     // name, its three counts, and the one /projects link at that
     // breakpoint — the scope bar hides below 760px so the header is one
@@ -12232,9 +12287,9 @@ function shell(
   // work, projects. Tools and settings sit behind the header's menu action.
   const tabbar = [
     `<nav class="tabbar">`,
-    ...(chrome.code ? [tab("code", "/code", "code")] : []),
-    tab("work", "/work", "work", chrome.inboxCount),
-    tab("projects", "/projects", "projects"),
+    ...(chrome.chat ? [tab("chat", "/chat", "Chat")] : []),
+    tab("work", "/work", "Tasks", chrome.inboxCount),
+    tab("projects", "/projects", "Projects"),
     `</nav>`,
   ].join("");
 
@@ -13041,6 +13096,7 @@ type TaskChatFocus = {
   family: TaskFamily;
   history: string;
   status: DisplayStatus;
+  assignment: AssignmentSnapshot | null;
   id: string;
   title: string;
   state: TaskState;
@@ -13382,7 +13438,7 @@ function taskChatLiveRegion(focus: TaskChatFocus, csrf: string, fragment = false
   return (
     `<section id="task-chat-live" aria-live="polite" data-task="${escape(focus.id)}" data-execution="${escape(focus.executionId)}" data-source="/chat/task-status?task=${encodeURIComponent(focus.id)}" data-poll="${polling ? "1" : "0"}" data-approval="${escape(focus.approval?.digest ?? "")}" data-plan="${escape(focus.plan ?? "")}">` +
     `<div class="task-live-summary">` +
-    (receiptLeads ? completionReceiptCard(focus.result!, focus.id, "chat", focus.status) : taskStatusCard(focus.status, focus.id, focus.dispatch, focus.liveRun?.id ?? null, focus.approval !== null && focus.dispatch?.action === "approve-scope")) +
+    (focus.assignment !== null ? assignmentSummaryHtml(focus.assignment, { workStatus: focus.status, hideAction: focus.approval !== null && focus.dispatch?.action === "approve-scope", ...(receiptLeads ? { resultHref: chatResultHref(focus.id, focus.result!.runId) } : {}) }) + (receiptLeads ? completionReceiptCard(focus.result!, focus.id, "chat", focus.status, focus.assignment, false) : "") : receiptLeads ? completionReceiptCard(focus.result!, focus.id, "chat", focus.status) : taskStatusCard(focus.status, focus.id, focus.dispatch, focus.liveRun?.id ?? null, focus.approval !== null && focus.dispatch?.action === "approve-scope")) +
     // The exact-run control (v52): the SAME component the task page
     // renders, refreshed with the live region — typed input in the
     // composer is untouched because only this region is replaced.
@@ -13428,18 +13484,20 @@ function chatWorkspace(content: string, projects: readonly ChatProjectPulse[], c
 
 /** The folded overview's one-line summary (UI polish 2026-09-13): the
  * two counts a phone reader scans before deciding to open it. */
-function chatOverviewSummaryHtml(projects: readonly ChatProjectPulse[]): string {
+function chatOverviewSummaryHtml(projects: readonly ChatProjectPulse[], attention?: { count: number; saturated: boolean }): string {
   const total = (key: keyof ProjectPeek): number => projects.reduce((sum, one) => sum + (one.peek?.[key] ?? 0), 0);
-  const needsYou = total("waiting");
+  const needsYou = attention?.count ?? total("waiting");
   const running = total("running");
-  return `<summary>Project overview<span class="meta">${needsYou > 0 ? `<span class="hot">${needsYou} need${needsYou === 1 ? "s" : ""} you</span>` : "nothing waiting"} · ${running} building</span></summary>`;
+  return `<summary>Project overview<span class="meta">${needsYou > 0 ? `<span class="hot">${needsYou}${attention?.saturated ? "+" : ""} need${needsYou === 1 ? "s" : ""} you</span>` : "nothing waiting"} · ${running} building</span></summary>`;
 }
 
 /** A live, server-derived portfolio card. It is deliberately independent
  * of the model's prose: the numbers and links always reflect the current
  * control plane, while chat remains the place to ask what they mean. */
+type AssignmentChatSnapshot = ChatSnapshot & { assignmentStates?: Record<string, { state: AssignmentSnapshot['state']; label: string; detail: string }>; attentionCount?: { count: number; saturated: boolean } };
+
 function chatFleetOverview(
-  snapshot: ChatSnapshot | null,
+  snapshot: AssignmentChatSnapshot | null,
   projects: readonly ChatProjectPulse[],
   csrf: string,
   interactive: boolean,
@@ -13448,7 +13506,7 @@ function chatFleetOverview(
     return `<section class="card chat-overview"><h2>Project summary unavailable</h2><p class="meta">Reload to try again. You can still use chat.</p></section>`;
   }
   const total = (key: keyof ProjectPeek): number => projects.reduce((sum, one) => sum + (one.peek?.[key] ?? 0), 0);
-  const needsYou = total("waiting");
+  const needsYou = snapshot.attentionCount?.count ?? total("waiting");
   const running = total("running");
   const queued = total("queued");
   const done = total("doneRecently");
@@ -13463,7 +13521,7 @@ function chatFleetOverview(
     );
   }
   for (const task of snapshot.tasks
-    .filter(one => one.dispatch?.condition === "waiting")
+    .filter(one => one.dispatch?.condition === "waiting" && one.state !== "done")
     .slice(0, Math.max(0, 3 - rows.length))) {
     const dispatch = task.dispatch as DispatchDiagnosis;
     rows.push(
@@ -13481,16 +13539,15 @@ function chatFleetOverview(
         `<span class="chat-overview-arrow" aria-hidden="true">→</span></a>`,
     );
   }
-  // v39: a finished task whose proof is short or refuted reads here too —
-  // the mate's own result card, one shared verdict word and matrix
-  // summary with every other surface.
+  // Current assignments own attention. The saved assessment is history,
+  // never a second queue after the lead marked the result complete.
   for (const task of snapshot.tasks
-    .filter(one => one.state === "done" && (one.proofVerdict === "short" || one.proofVerdict === "refuted"))
+    .filter(one => one.state === "done" && ["ready-to-check", "needs-decision"].includes(snapshot.assignmentStates?.[one.id]?.state ?? ""))
     .slice(0, Math.max(0, 3 - rows.length))) {
     rows.push(
       `<a class="chat-overview-item failed" href="${taskHref(task.rootId ?? task.id)}">` +
         `<span class="chat-overview-icon">${strokeIcon(`<path d="M12 9v4"/><path d="M12 17h.01"/><circle cx="12" cy="12" r="9"/>`)}</span>` +
-        `<span class="chat-overview-copy"><strong>${escape(task.title)}</strong><span>${escape(projectOf(task.repoIndex))} · ${escape(task.id)} · ${task.proofVerdict === "refuted" ? "conflicting evidence" : "missing evidence"}${task.proofMatrix.length > 0 ? ` · ${task.proofMatrix.length} requirement${task.proofMatrix.length === 1 ? "" : "s"}` : ""}</span></span>` +
+        `<span class="chat-overview-copy"><strong>${escape(task.title)}</strong><span>${escape(projectOf(task.repoIndex))} · ${escape(snapshot.assignmentStates![task.id]!.label)} · ${escape(snapshot.assignmentStates![task.id]!.detail)}</span></span>` +
         `<span class="chat-overview-arrow" aria-hidden="true">→</span></a>`,
     );
   }
@@ -13512,13 +13569,13 @@ function chatFleetOverview(
       : `<a href="/board?scope=all" class="chat-overview-link">open board</a>`) +
     `</div>` +
     `<div class="chat-overview-stats">` +
-    `<a href="/" class="chat-overview-stat attention"><b>${needsYou}</b><span>need you</span></a>` +
+    `<a href="/work?view=needs-you" class="chat-overview-stat attention"><b>${needsYou}${snapshot.attentionCount?.saturated ? "+" : ""}</b><span>need you</span></a>` +
     `<a href="/board?scope=all" class="chat-overview-stat live"><b>${running}</b><span>building</span></a>` +
     `<a href="/board?scope=all&amp;view=order" class="chat-overview-stat"><b>${queued}</b><span>queued</span></a>` +
-    `<a href="/done" class="chat-overview-stat"><b>${done}</b><span>done today</span></a>` +
+    `<a href="/work" class="chat-overview-stat"><b>${done}</b><span>finished today</span></a>` +
     `</div>` +
-    (rows.length === 0 ? `<p class="chat-overview-clear"><span class="dot dot-ok"></span>No tasks are waiting and no builds are running.</p>` : `<div class="chat-overview-items">${rows.join("")}</div>`) +
-    completedWorkHtml(snapshot, projects.map(project => project.label)) +
+    (rows.length === 0 ? `<p class="chat-overview-clear">${needsYou === 0 && running === 0 ? `<span class="dot dot-ok"></span>No tasks are waiting and no builds are running.` : `<a href="/work">Open Tasks to inspect current work.</a>`}</p>` : `<div class="chat-overview-items">${rows.join("")}</div>`) +
+    completedWorkHtml(snapshot, projects.map(project => project.label), snapshot.assignmentStates) +
     (saturated ? `<p class="meta chat-overview-note">Some items aren’t shown. Open Work to see more.</p>` : "") +
     `</section>`
   );
@@ -13594,7 +13651,7 @@ function matePromptStarters(csrf: string, focus: TaskChatFocus | null = null): s
 
 function chatHeading(copy: string, projectCount: number, showProjectToggle = true): string {
   return (
-    `<div class="chat-head"><div><h1>chat</h1>${copy === "" ? "" : `<p class="meta">${escape(copy)}</p>`}</div>` +
+    `<div class="chat-head"><div><h1>Chat</h1>${copy === "" ? "" : `<p class="meta">${escape(copy)}</p>`}</div>` +
     `<div class="chat-head-actions">` +
     (showProjectToggle
       ? `<button type="button" class="chat-project-toggle quiet" aria-controls="chat-project-panel" aria-expanded="false" title="show or hide projects">` +
@@ -13706,7 +13763,8 @@ function chatPage(chrome: Chrome, data: {
   turnsToday: number;
   weeklySpent: number;
   projects: ChatProjectPulse[];
-  fleetSnapshot: ChatSnapshot | null;
+  fleetSnapshot: AssignmentChatSnapshot | null;
+  catchUp?: string;
   /** Optional task lens into the same unified conversation. */
   focusTask: TaskChatFocus | null;
   canManage: boolean;
@@ -13777,7 +13835,7 @@ function chatPage(chrome: Chrome, data: {
     data.focusTask === null
       ? chatHeading("", data.projects.length, data.enabled.ok)
       : taskChatHeading(data.focusTask),
-    data.focusTask === null ? "" : taskChatLiveRegion(data.focusTask, data.csrf, false, data.pending !== null),
+    data.focusTask === null ? (data.catchUp ?? "") : taskChatLiveRegion(data.focusTask, data.csrf, false, data.pending !== null),
   ];
   if (data.problem !== null) parts.push(`<div class="problem">${escape(data.problem)}</div>`);
   if (!data.enabled.ok) {
@@ -13808,7 +13866,7 @@ function chatPage(chrome: Chrome, data: {
   if (data.canManage && data.mateMint !== undefined) parts.push(data.mateMint);
   if (data.canManage && data.coordinatorProposals !== undefined) parts.push(data.coordinatorProposals);
   parts.push(
-    data.focusTask === null ? `<details class="chat-fleet-context">${chatOverviewSummaryHtml(data.projects)}${chatFleetOverview(data.fleetSnapshot, data.projects, data.csrf, false)}</details>` : "",
+    data.focusTask === null ? `<details class="chat-fleet-context">${chatOverviewSummaryHtml(data.projects, data.fleetSnapshot?.attentionCount)}${chatFleetOverview(data.fleetSnapshot, data.projects, data.csrf, false)}</details>` : "",
     chatLimitsHtml({ provider: config.provider, model: config.model, turnsToday: data.turnsToday, dailyTurns: config.dailyTurns, subscription, weekly: subscription ? null : { spent: data.weeklySpent, ceiling: config.weeklyCeilingMicrousd } }),
   );
   for (const turn of data.latched) {
@@ -13928,7 +13986,7 @@ function mateMintCard(
   const subscription = enabled.billing === "subscription";
   return [
     `<div class="card mate-mint" id="latest">`,
-    `<p><strong>Start a conversation</strong> <span class="meta">Ask about your projects and review proposed changes.</span></p>`,
+    `<p><strong>Start a conversation</strong> <span class="meta">Plan work, follow progress, and open results.</span></p>`,
     `<form method="post" action="/chat/mate/mint">`,
     `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
     `<input type="hidden" name="return" value="${escape(returnTo)}">`,
@@ -13941,7 +13999,8 @@ function mateMintCard(
       ? `<p class="meta">Stays open until you end it. Daily turn and membership limits still apply.</p>`
       : `<p class="meta">The conversation stays open until you end it. The weekly chat ceiling (${chatMoney(enabled.config.weeklyCeilingMicrousd)}) still binds above this total.</p>`,
     `<label>Your password <span class="meta">— once per conversation</span><input type="password" name="token" autocomplete="current-password"></label>`,
-    `<button type="submit">Start the conversation</button>`,
+    `<label class="arm"><input type="checkbox" name="follow" value="yes"> Let the lead check crew updates automatically, using this conversation’s limits.</label>`,
+    `<button type="submit">Start chat</button>`,
     `</form>`,
     `</div>`,
   ].join("\n");
@@ -14351,13 +14410,15 @@ function mateAfterComposerHtml(data: { messages: MateMessage[]; pending: MateTur
 
 function matePage(chrome: Chrome, data: MateThreadRows & {
   session: MateSession;
+  follow?: { enabled: boolean; detail: string };
   resultRunId?: number | null;
   latched: ChatTurn[];
   config: import("./store.js").ChatConfig;
   turnsToday: number;
   weeklySpent: number;
   projects: ChatProjectPulse[];
-  fleetSnapshot: ChatSnapshot | null;
+  fleetSnapshot: AssignmentChatSnapshot | null;
+  catchUp?: string;
   csrf: string;
   problem: string | null;
   now: Date;
@@ -14370,10 +14431,10 @@ function matePage(chrome: Chrome, data: MateThreadRows & {
     data.focusTask === null
       ? chatHeading("", data.projects.length)
       : taskChatHeading(data.focusTask),
-    data.focusTask === null ? "" : taskChatLiveRegion(data.focusTask, data.csrf, false, data.pending !== null),
+    data.focusTask === null ? (data.catchUp ?? "") : taskChatLiveRegion(data.focusTask, data.csrf, false, data.pending !== null),
     // The overview folds by default (UI polish 2026-09-13): the chrome
     // script opens it on a desk; a phone keeps the conversation first.
-    data.focusTask === null ? `<details class="chat-fleet-context">${chatOverviewSummaryHtml(data.projects)}${chatFleetOverview(data.fleetSnapshot, data.projects, data.csrf, data.pending === null)}</details>` : "",
+    data.focusTask === null ? `<details class="chat-fleet-context">${chatOverviewSummaryHtml(data.projects, data.fleetSnapshot?.attentionCount)}${chatFleetOverview(data.fleetSnapshot, data.projects, data.csrf, data.pending === null)}</details>` : "",
   ];
   if (data.problem !== null) conversation.push(`<div class="problem">${escape(data.problem)}</div>`);
   for (const turn of data.latched) {
@@ -14406,6 +14467,7 @@ function matePage(chrome: Chrome, data: MateThreadRows & {
     // or sign-in changed under this page; it reloads on the reader's act.
     `<p class="meta composer-hint" id="chat-reconnect" hidden><button type="button" class="quiet">Reconnect</button></p>`,
     mateAfterComposerHtml(data),
+    `<details class="lead-follow"><summary>Automatic crew updates${data.follow?.enabled ? ' · On' : ''}</summary><p class="meta">${escape(data.follow?.detail ?? 'Automatic crew updates are off.')}</p><form method="post" action="/chat/mate/follow"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="return" value="${escape(returnTo)}"><input type="hidden" name="enabled" value="${data.follow?.enabled ? 'no' : 'yes'}">${data.follow?.enabled ? '' : `<p>The lead responds when results or decisions arrive. Uses this conversation’s ${subscription ? 'membership usage, with no dollar maximum' : 'remaining spend allowance'} and daily turn limit. Existing task approvals still apply.</p>`}<button type="submit" class="quiet">${data.follow?.enabled ? 'Pause updates' : 'Enable updates'}</button></form></details>`,
     `<details class="chat-limits chat-session-details"><summary>Conversation details<span class="meta">${escape(subscription ? "membership" : data.config.provider)}</span></summary>`,
     `<div class="chat-budget"><span class="mono">${escape(data.config.provider)} · ${escape(data.config.model)}</span><span>${data.turnsToday} / ${data.config.dailyTurns} turns today</span>` +
       (subscription
@@ -14969,14 +15031,14 @@ function workPage(
   const tools =
     `<details class="work-tools"><summary>Work tools${CHEVRON_ICON}</summary><nav class="work-tools-menu">` +
     [
-      ["/", "inbox"], ["/board", "board"], ["/board?view=order", "order"], ["/tasks", "task list"], ["/recipes", "recipes"], ["/routines", "routines"],
+      ["/inbox", "Inbox"], ...(chrome.code ? [["/code", "Coding sessions"]] : []), ["/board", "board"], ["/board?view=order", "order"], ["/tasks", "task list"], ["/recipes", "recipes"], ["/routines", "routines"],
       ...(chrome.projectScoped ? [] : [["/workbench", "portfolio"]]), ["/ledger", "action ledger"],
     ].map(([href, label]) => `<a href="${href}">${label}</a>`).join("") +
     `</nav></details>`;
   return screen("work", [
     // The tools shortcut appears only when the sidebar tools are hidden.
     // The view's words ride the active tab's title rather than a paragraph.
-    `<div class="work-head"><h1>work</h1>${tools}</div>`,
+    `<div class="work-head"><h1>Tasks</h1>${tools}</div>`,
     tabs,
     list,
     bound,
@@ -16149,10 +16211,10 @@ type NavRow = { key: Chrome["active"]; href: string; label: string; hint: string
  * never disagree, and a project-scoped login sees exactly the rows it
  * saw before: moving a link never widens role or project visibility.
  */
-function workToolRows(scoped = false, offersChat = false): NavRow[] {
+function workToolRows(scoped = false, _offersChat = false, offersCode = false): NavRow[] {
   const rows: NavRow[] = [
-    ...(offersChat && !scoped ? [{key: "chat" as const, href: "/chat", label: "assistant", hint: "manage queued work through chat"}] : []),
-    { key: "inbox", href: "/", label: "inbox", hint: "questions, approvals, and repairs to act on" },
+    ...(offersCode ? [{ key: "code" as const, href: "/code", label: "Coding sessions", hint: "Direct coding sessions and their saved results" }] : []),
+    { key: "inbox", href: "/inbox", label: "inbox", hint: "questions, approvals, and repairs to act on" },
     { key: "board", href: "/board", label: "board", hint: "lanes by state, with the order view" },
     { key: "tasks", href: "/tasks", label: "task list", hint: "everything, filterable by state" },
     { key: "recipes", href: "/recipes", label: "recipes", hint: "choose, customize, and reuse a workflow" },
@@ -16174,7 +16236,7 @@ function settingsRows(scoped = false, offersSettings = false): NavRow[] {
   return scoped ? rows.filter(row => row.key === "people" || row.key === "settings") : rows;
 }
 /** Which accordion group opens by default for a given active page. */
-const TOOL_KEYS = new Set<Chrome["active"]>(["chat", "inbox", "board", "queue", "tasks", "workbench", "recipes", "routines", "ledger"]);
+const TOOL_KEYS = new Set<Chrome["active"]>(["code", "inbox", "board", "queue", "tasks", "workbench", "recipes", "routines", "ledger"]);
 const SETTINGS_KEYS = new Set<Chrome["active"]>(["settings", "fleet", "caps", "people", "mode", "system"]);
 
 /** The builds screen's views (reduction pass §1): done, the review queue,
@@ -17049,6 +17111,15 @@ function taskBody(data: {
       const proof = data.completion ?? null;
       if (proof === null || resultStatus === null) {
         return box("problem", "Marked done without a build record", "The task is done, but no finished attempt is recorded, so there is nothing to verify.", "no-build-record");
+      }
+      if (data.assignment?.receipt?.runId === proof.runId) {
+        const accepted = data.assignment.receipt.proofAcceptance;
+        return `<details class="dispatch-proof-details"><summary>Previous assessment</summary><div class="dispatch-proof-body">` +
+          `<p class="meta">Saved assessment history. Current task status and checks are shown above.</p>` +
+          (accepted === null ? "" : `<p class="meta">Accepted with an exception by ${escape(accepted.approver)}. Check results are unchanged.${accepted.note === null ? "" : ` ${escape(accepted.note)}`}</p>`) +
+          (proof.proofReasons.length === 0 ? "" : `<ul>${proof.proofReasons.map(reason => `<li>${escape(reason)}</li>`).join("")}</ul>`) +
+          criterionMatrixHtml(proof.proofMatrix, { compact: true, runId: proof.runId, links: proof.proofMatrixLinks }) +
+          semanticCoverageHtml(proof.proofMatrix, proof.qualityMode ?? "default") + `</div></details>`;
       }
       // v50: the independent review's own card — attempt counts, what is
       // running or queued, the latest failure in words, and the ONE
@@ -17932,7 +18003,7 @@ function taskBody(data: {
     // The exact-run control (v52), directly under the scheduler's answer:
     // the one place a person stops or resumes THIS attempt.
     taskControlDetailsHtml(data.control ?? { kind: "none" }, task.id, data.csrf, "task"),
-    data.completion?.receipt == null || receiptLeads ? "" : `<details class="task-previous-result"${data.completion.receipt.facts.evidenceProblems.length > 0 || data.completion.receipt.caveats.length > 0 ? " open" : ""}><summary>${data.assignment != null && task.state === "done" ? "Result" : "Previous result"}</summary>${completionReceiptCard(data.completion.receipt, task.id, "task")}</details>`,
+    data.completion?.receipt == null || receiptLeads ? "" : `<details class="task-previous-result"><summary>${data.assignment != null && task.state === "done" ? "Result" : "Previous result"}</summary>${completionReceiptCard(data.completion.receipt, task.id, "task", data.assignment == null ? receiptStatusOf(data.completion.receipt) : assignmentStatusOf(data.assignment), data.assignment ?? null, data.assignment == null)}</details>`,
     progressCard,
     revisionLedgerCard,
     planCard,
@@ -17988,7 +18059,7 @@ function taskBody(data: {
     dependencyChoiceNeeded || approveForm === "" ? "" : data.dispatch?.action === "approve-scope"
       ? `<details class="task-plan-review"><summary data-primary-action><span class="button-link">Review plan</span></summary>${approveForm}</details>`
       : `<details class="task-secondary-approval"><summary>Updated approval terms</summary>${approveForm}</details>`,
-    `<details class="task-status-details" id="task-diagnostics"><summary>Task options</summary>${identity}${dispatchStatus}${dependencyChoiceNeeded ? "" : actsBar}</details>`,
+    `<details class="task-status-details" id="task-diagnostics"${data.assignment?.primaryAction?.code === "unhold" || data.assignment?.primaryAction?.code === "retry-task" ? " open" : ""}><summary>Task options</summary>${identity}${dispatchStatus}${dependencyChoiceNeeded ? "" : actsBar}</details>`,
     // Evidence-first (M5.5): what needs you, then what happened — decisions
     // and incidents above the attempt ledger and spend, the mechanics
     // (scope, holds, acts) after. Only trustworthy facts moved up. The rail
@@ -19499,8 +19570,10 @@ function receiptStatusOf(view: CompletionReceiptView, review: ReviewFacts | null
   );
 }
 
-function completionReceiptCard(view: CompletionReceiptView, taskId: string, place: "task" | "chat", standing: DisplayStatus = receiptStatusOf(view)): string {
-  const status = standing;
+function completionReceiptCard(view: CompletionReceiptView, taskId: string, place: "task" | "chat", standing: DisplayStatus = receiptStatusOf(view), assignment: AssignmentSnapshot | null = null, headline = true): string {
+  const current = assignment?.receipt?.runId === view.runId ? assignment : null;
+  const presentation = current === null ? null : assignmentPresentationOf(current);
+  const status = presentation?.status ?? standing;
   // The verdict on record, whatever review is in flight: the criteria
   // count's source label reads from it, never from the review's tone.
   const stored = receiptStatusOf(view, null);
@@ -19543,7 +19616,7 @@ function completionReceiptCard(view: CompletionReceiptView, taskId: string, plac
             .join("")}</div>`;
   // Caveats and evidence problems stay in the open, ahead of the counts
   // and any readiness words below them.
-  const attention = [...facts.evidenceProblems, ...view.caveats];
+  const attention = current === null ? [...facts.evidenceProblems, ...view.caveats] : [];
   const caveats =
     attention.length === 0
       ? ""
@@ -19555,19 +19628,19 @@ function completionReceiptCard(view: CompletionReceiptView, taskId: string, plac
   const coverage =
     view.coverage.length === 0
       ? ""
-      : view.coverageSecondary
+      : current !== null || view.coverageSecondary
         ? `<details class="receipt-coverage" data-semantic-coverage="secondary"><summary>Previous assessment</summary><ul>${view.coverage.map(one => `<li>${escape(one)}</li>`).join("")}</ul></details>`
         : `<div class="receipt-coverage" data-semantic-coverage=""><strong>Previous assessment</strong><ul>${view.coverage.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`;
   const resultHref = status.token === "review-failed" ? reviewHref(taskId) : place === "chat" ? chatResultHref(taskId, view.runId, status.action?.kind === "open-review" ? "checks" : "summary") : statusActionHref(status, taskId, view.runId, view.publication?.prUrl ?? null) ?? `/r/${view.runId}`;
   return (
     `<section class="card completion-receipt" data-card-kind="result-receipt"${resultFactsAttributes(facts)}>` +
     `<div class="receipt-head"><div><span class="eyebrow">result · build #${view.runId}</span><h2>${escape(receiptHeadingOf(view.outcome, view.publication, view.role))}</h2></div>` +
-    `${statusLineHtml(status)}</div>` +
+    `${headline ? statusLineHtml(status) : ""}</div>` +
     // The agent's handoff is its narrative, labeled as such; the
     // publication line is the observed record — never "shipped".
     lead +
     `<p class="receipt-summary">${escape(conciseOutcomeOf(view.summary ?? (view.outcome === "no-change" ? "The agent found that no repository change was needed." : "The build finished without a concise handoff.")))}</p>` +
-    `<div class="receipt-actions"><a class="button-link" href="${escape(resultHref)}" data-open-result data-primary-action>${escape(status.action?.label ?? "Open result")}</a></div>` +
+    (headline ? `<div class="receipt-actions"><a class="button-link" href="${escape(resultHref)}" data-open-result data-primary-action>${escape(status.action?.label ?? "Open result")}</a></div>` : "") +
     (view.publication?.state === "failed" ? `<p class="problem">${escape(facts.publicationWords)}</p>` : "") +
     caveats +
     coverage +
@@ -19613,6 +19686,7 @@ type ResultDetail = {
   taskId: string;
   run: Run;
   receipt: CompletionReceiptView;
+  assignment?: AssignmentSnapshot | null;
   handoff: StructuredHandoffView | null;
   proof: ProofBundleView | null;
   terminal: TerminalDiffView | null;
@@ -19674,7 +19748,9 @@ function revisionSealFields(comments: readonly { id: number }[], sourceDigest: s
 function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
   const { run, receipt, proof, terminal, handoff } = detail;
   const facts = receipt.facts;
-  let status = receiptStatusOf(receipt);
+  const current = detail.assignment?.receipt?.runId === run.id ? detail.assignment : null;
+  const presentation = current == null ? null : assignmentPresentationOf(current, { additionalAttention: [...facts.evidenceProblems, ...receipt.caveats] });
+  let status = presentation?.status ?? receiptStatusOf(receipt);
   const stored = receiptStatusOf(receipt, null);
   const humanReview = manualReviewOnly(proof === null ? null : { ...proof, verdict: proof.verdict ?? "" });
   const directAssessment = proof?.matrix.some(row => row.assessment !== undefined) === true;
@@ -19699,12 +19775,15 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
   // The visible status already says verification is needed. Only omit the
   // generic repeat; failed checks, specific reasons and damaged evidence stay.
   const missingVerdictNamed = o.headStatus !== false && status.token === "verification-needed" && receipt.verdict === null && receipt.reasons.length === 0;
-  if (!humanReview && !awaitingGoalReview && (!directAssessment || physicalReasons.length > 0) && !missingVerdictNamed && stored.token !== "evidence-damaged" && (stored.tone === "problem" || stored.tone === "attention")) attention.push(verificationExplanation(receipt.verdict, physicalReasons));
-  attention.push(...facts.evidenceProblems);
+  if (current == null && !humanReview && !awaitingGoalReview && (!directAssessment || physicalReasons.length > 0) && !missingVerdictNamed && stored.token !== "evidence-damaged" && (stored.tone === "problem" || stored.tone === "attention")) attention.push(verificationExplanation(receipt.verdict, physicalReasons));
+  // Exact criterion assessment notes are already shown in Requirements;
+  // do not repeat them as a second current attention message.
+  if (presentation !== null) attention.push(...presentation.attention.map(one => one.detail).filter(detail => !assessmentReasons.has(detail)));
+  if (current == null) attention.push(...facts.evidenceProblems);
   if (detail.outsideTouches.length > 0) attention.push(`${detail.outsideTouches.length} changed file${detail.outsideTouches.length === 1 ? "" : "s"} outside the approved paths: ${detail.outsideTouches.join(", ")}.`);
   // A failed caveat can already be quoted in full by its verification
   // reason. Keep that explanation once and retain every other caveat.
-  attention.push(...receipt.caveats.filter(caveat => !attention.some(problem => problem.includes(caveat))));
+  if (current == null) attention.push(...receipt.caveats.filter(caveat => !historicalAssessmentReason(caveat) && !attention.some(problem => problem.includes(caveat))));
   attention.push(...(handoff?.followUps ?? []).map(one => `Follow-up: ${one}`));
   // Publication risks stay in the open (repair 2026-09-14); the routine
   // publication fact lives with the build details below.
@@ -19983,6 +20062,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
       (detail.history ?? "") +
       `<header class="result-head"><div>${o.place === "review" ? "" : `<span class="eyebrow">Build #${runId}</span>`}<h2>${escape(heading)}</h2></div>${o.headStatus === false ? "" : statusLineHtml(status.token === "verification-needed" && !directAssessment ? { ...status, label: "Verification needed" } : status)}</header>` +
       `<p class="result-summary">${escape(outcome)}</p>` +
+      (current == null ? "" : `<p class="${current.receipt?.checks.status === "failed" || current.receipt?.checks.status === "unavailable" ? "problem" : "meta"}" data-current-outcome>${escape(current.detail)}</p>`) +
       action +
       (REVIEW_TOKENS.has(status.token) ? `<details class="receipt-history"><summary>Review history</summary><p class="receipt-review meta" data-receipt-review="${escape(status.token)}">${escape(status.detail)}</p></details>` : "") +
       attentionHtml +
@@ -20018,8 +20098,8 @@ function resultPrimaryAction(detail: ResultDetail, o: ResultPanelOptions, prUrl:
   }
   if (detail.comments.length > 0 && o.csrf !== "") return wrap("revise", `<a class="result-feedback-link" href="#request-changes">Review saved notes</a>`);
   if (detail.publication !== null && detail.publication.prNumber !== null && prUrl !== null) return wrap("open-pr", `<a class="button-link" href="${escape(prUrl)}">Open PR #${detail.publication.prNumber}</a>`);
-  if (detail.proof?.matrix.some(row => row.assessment !== undefined) && detail.proof.reasons.includes(GOAL_ASSESSMENT_PENDING)) return wrap("open-result", `<a class="button-link" href="${reviewHref(detail.taskId)}">Open result</a>`);
-  if (detail.proof?.matrix.some(row => row.assessment !== undefined && row.review?.judgement === "cannot-tell")) return wrap("review-evidence", `<a class="button-link" href="${escape(o.hrefFor("checks"))}">Review evidence</a>`);
+  if (detail.assignment == null && detail.proof?.matrix.some(row => row.assessment !== undefined) && detail.proof.reasons.includes(GOAL_ASSESSMENT_PENDING)) return wrap("open-result", `<a class="button-link" href="${reviewHref(detail.taskId)}">Open result</a>`);
+  if (detail.assignment == null && detail.proof?.matrix.some(row => row.assessment !== undefined && row.review?.judgement === "cannot-tell")) return wrap("review-evidence", `<a class="button-link" href="${escape(o.hrefFor("checks"))}">Review evidence</a>`);
   if (detail.canAnnotate && o.csrf !== "") return wrap("request-changes", `<a class="result-feedback-link" href="#request-changes">Suggest changes</a>`);
   return "";
 }
@@ -20435,15 +20515,14 @@ function permissionModeChoices(name: string, selected: UnattendedPermissionMode)
     `</div>`;
 }
 
-/** One compact two-choice control for evidence depth. Permissions answer
- * what the agent may do; this answers how much proof follows the work. */
+/** Quality selects the configured agent route; permissions remain separate. */
 function qualityModeChoices(name: string, selected: QualityMode): string {
   const choice = (value: QualityMode, title: string, detail: string): string =>
     `<label class="permission-choice"><input type="radio" name="${escape(name)}" value="${escape(value)}"${value === selected ? " checked" : ""}>` +
     `<span><strong>${escape(title)}</strong><small>${escape(detail)}</small></span></label>`;
   return `<div class="permission-toggle" role="radiogroup" aria-label="quality mode">` +
-    choice("default", "Default", "Fast deterministic proof and the configured repository check.") +
-    choice("strict", "Strict / release", "Adds an isolated semantic review and bounded repair when authorized.") +
+    choice("default", "Default", "Uses the everyday configured agents and repository check.") +
+    choice("strict", "Strict / release", "Uses the strongest configured agents and repository check. Release approval stays separate.") +
     `</div>`;
 }
 
@@ -20753,7 +20832,7 @@ function nextPage(chrome: Chrome, data: {
       held > 0
         ? `<p>Nothing left except the ${held} you set aside. <a href="/next">Look at those again</a>, or come back later.</p>`
         : `<p>Nothing needs you. The machine is either working or waiting on its own clocks.</p>`,
-      `<p class="meta"><a href="/board">the board</a> shows what is moving · <a href="/">the inbox</a> lists everything at once</p>`,
+      `<p class="meta"><a href="/board">the board</a> shows what is moving · <a href="/inbox">the inbox</a> lists everything at once</p>`,
     ].join("\n"), { chrome });
   }
 

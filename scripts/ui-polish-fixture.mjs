@@ -57,6 +57,9 @@ import { createDecisionServer } from '../dist/serve.js';
 import { register } from '../dist/runner.js';
 import { queueLearning, recoverLearning, learningContext } from '../dist/project-learning.js';
 import { acquire, release } from '../dist/claim.js';
+import { sealVerificationReceipt } from '../dist/verification-evidence.js';
+import { assignmentOf, checkAssignmentAsOperator } from '../dist/assignment.js';
+import { verifyApproverByPassword } from '../dist/principal.js';
 
 // The real pilot request's path: its unbroken filename overflowed the
 // expanded task scope at 390px. Keep it verbatim in synthetic signed terms.
@@ -236,7 +239,7 @@ export function startFixture(options = {}) {
     fileCount: 2, additions: 13, deletions: 1, binaryCount: 0,
     files: [{ path: 'src/payout.ts', additions: 4, deletions: 1 }, { path: 'src/payout.test.ts', additions: 9, deletions: 0 }], filesTruncated: false,
   };
-  if (options.learning) stat.head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim();
+  if (options.learning || options.assignmentPresentation) stat.head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim();
   const fixturePatch = options.sameTaskRevisions ? PATCH + `diff --git a/${LONG_FEEDBACK_PATH} b/${LONG_FEEDBACK_PATH}\n--- a/${LONG_FEEDBACK_PATH}\n+++ b/${LONG_FEEDBACK_PATH}\n@@ -1 +1 @@\n-old\n+new\n` : PATCH;
   if (options.sameTaskRevisions) { stat.files.push({ path: LONG_FEEDBACK_PATH, additions: 1, deletions: 1 }); stat.fileCount++; stat.additions++; stat.deletions++; }
   const fixtureProof = options.sameTaskRevisions ? { ...PROOF, changed: [...PROOF.changed, LONG_FEEDBACK_PATH] } : PROOF;
@@ -254,7 +257,13 @@ export function startFixture(options = {}) {
     screenshots: [{ path: 'evidence/payout-dashboard.png', ok: true, bytes: png.length, dims: imageDimensions(png, 'png') }],
     approvedCriteria: doneScope.acceptance,
   });
-  if (options.learning) store.recordOutcomeFacts(run, { headRevision: stat.head });
+  if (options.learning || options.assignmentPresentation) store.recordOutcomeFacts(run, { headRevision: stat.head });
+  if (options.assignmentPresentation) {
+    // Display-only synthetic candidate, consistent with the recorded diff-stat.
+    // This fixture never represents an executed production check or deployment.
+    for (const project of [repo, repo2].filter(Boolean)) store.setVerifyCommand({ repo: project, command: 'npm test', timeoutMs: 60000, approvedBy: 'polish-fixture' }, hoursAgo(28));
+    sealVerificationReceipt(store, evidenceRoot, run, stat.head, store.liveVerifyCommand(repo), { configured: true, ran: true, exitCode: 0 }, hoursAgo(8.4));
+  }
   store.saveProofVerdict(run, adjudicated.verdict, adjudicated.reasons, hoursAgo(8.4), adjudicated.matrix);
   store.finishRun(run, { outcome: 'built', committed: true, now: hoursAgo(8.4) });
   store.setTaskState('payout-rounding', 'done', hoursAgo(8.4));
@@ -264,6 +273,7 @@ export function startFixture(options = {}) {
   // only the adjudication facts differ, exactly as the plane records them.
   const finished = (id, title, at, facts) => {
     const where = facts.repo ?? repo;
+    const resultStat = options.assignmentPresentation ? { ...stat, head: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: where, encoding: 'utf8' }).trim() } : stat;
     const filed = fileTaskProposal(store, {
       id, title, repo: where,
       goal: facts.goal ?? `Fix ${title.toLowerCase()} and prove it with the ledger fixtures.`,
@@ -290,7 +300,7 @@ export function startFixture(options = {}) {
     // The capture status is the plane's own (exit 0): a review request
     // reads it before it spends the run's bounded review allowance.
     storeEvidence(store, evidenceRoot, runId, 'terminal-diff', 'terminal-diff.patch', Buffer.from(PATCH, 'utf8'), 'git diff --no-ext-diff --no-textconv --no-color 4b825dc6..HEAD (exit 0) [fixture: synthetic]', hoursAgo(at + 0.2), { captureStatus: 'ok' });
-    storeEvidence(store, evidenceRoot, runId, 'diff-stat', 'diff-stat.json', budgetedStatJson(stat), 'parsed from git diff --numstat -z [fixture: synthetic]', hoursAgo(at + 0.2));
+    storeEvidence(store, evidenceRoot, runId, 'diff-stat', 'diff-stat.json', budgetedStatJson(resultStat), 'parsed from git diff --numstat -z [fixture: synthetic]', hoursAgo(at + 0.2));
     storeEvidence(store, evidenceRoot, runId, 'handoff', 'handoff.json', Buffer.from(JSON.stringify(HANDOFF, null, 2), 'utf8'), 'composed at completion [fixture: synthetic]', hoursAgo(at + 0.1));
     if (facts.noProof !== true) {
       storeEvidence(store, evidenceRoot, runId, 'proof', 'proof.json', Buffer.from(JSON.stringify(proof, null, 2), 'utf8'), 'agent-authored proof (validated) [fixture: synthetic]', hoursAgo(at + 0.1));
@@ -308,6 +318,10 @@ export function startFixture(options = {}) {
       screenshots: facts.noProof === true ? [] : [{ path: 'evidence/payout-dashboard.png', ok: true, bytes: png.length, dims: imageDimensions(png, 'png') }],
       approvedCriteria: scope.acceptance,
     });
+    if (options.assignmentPresentation) {
+      store.recordOutcomeFacts(runId, { headRevision: resultStat.head });
+      if (verify.configured && verify.ran) sealVerificationReceipt(store, evidenceRoot, runId, resultStat.head, store.liveVerifyCommand(facts.repo ?? repo), verify, hoursAgo(at));
+    }
     store.saveProofVerdict(runId, verdict.verdict, verdict.reasons, hoursAgo(at), verdict.matrix);
     store.finishRun(runId, { outcome: 'built', committed: true, now: hoursAgo(at) });
     store.setTaskState(id, 'done', hoursAgo(at));
@@ -490,7 +504,18 @@ export function startFixture(options = {}) {
   const corruptLog = store.artifactsFor(results.corruptLog.runId).find(one => one.kind === 'check-log');
   writeFileSync(join(evidenceRoot, corruptLog.key), '$ npm test\n(exit 0)\n\n--- stdout ---\n0 passed, 214 failed.\n');
 
+  if (options.assignmentPresentation) {
+    results.completed = finished('csv-column-names', 'Preserve the existing CSV column names', 1, { noProof: true });
+    const who = verifyApproverByPassword(store, 'polish-fixture', login.token, [repo]);
+    if (!who.ok) throw new Error('synthetic completion identity');
+    const ready = assignmentOf(store, results.completed.taskId, now, { principal: 'operator', repos: [repo] }, evidenceRoot);
+    if (ready?.state !== 'ready-to-check') throw new Error('synthetic result is not Ready: ' + ready?.detail);
+    const marked = checkAssignmentAsOperator(store, results.completed.taskId, ready.receipt.digest, who.who, now, evidenceRoot);
+    if (!marked.ok) throw new Error('synthetic completion: ' + marked.reason);
+  }
+
   const statusTasks = {
+    ...(results.completed ? { completed: results.completed.taskId } : {}),
     failedChecks: results.failedChecks.taskId, mismatched: results.mismatched.taskId, missingProof: results.missingProof.taskId,
     attested: results.attested.taskId, accepted: results.accepted.taskId, published: results.published.taskId, merged: results.merged.taskId,
     waitingForBuilder: waitingForBuilder.taskId, chained: chained.taskId, held: held.taskId, failed: failed.taskId, cancelled: cancelled.taskId,
@@ -499,6 +524,7 @@ export function startFixture(options = {}) {
     investigation: results.investigation.taskId, damaged: results.damaged.taskId, corruptLog: results.corruptLog.taskId,
   };
   const statusRuns = {
+    ...(results.completed ? { completed: results.completed.runId } : {}),
     failedChecks: results.failedChecks.runId, mismatched: results.mismatched.runId, missingProof: results.missingProof.runId, attested: results.attested.runId, accepted: results.accepted.runId, published: results.published.runId, merged: results.merged.runId, running: liveRun, paused: pausedRun,
     pendingReview: results.pendingReview.runId, reviewing: results.reviewing.runId, reviewFailed: results.reviewFailed.runId,
     investigation: results.investigation.runId, damaged: results.damaged.runId, corruptLog: results.corruptLog.runId,

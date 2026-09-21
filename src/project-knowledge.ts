@@ -2,6 +2,7 @@
 import { execFileSync } from 'node:child_process';
 import { learningIdentity, learningSha } from './project-learning.js';
 import { scanForSecrets } from './evidence.js';
+import { repositoryContextRead, type RepositoryContext } from './repository-context.js';
 import type { Store } from './store.js';
 
 export const KNOWLEDGE_SCHEMA = `
@@ -116,7 +117,7 @@ export function changeKnowledge(store: Store, args: { repo:string; actor:string;
     store.handle.prepare('INSERT INTO project_knowledge VALUES (?,?,?,?,?) ON CONFLICT(repo) DO UPDATE SET identity=excluded.identity,revision=excluded.revision,payload=excluded.payload,sha=excluded.sha').run(args.repo,identity,revision,payload,sha);
   });
 }
-export type KnowledgeSelection = { version:1; revision:number; instructions:string; references:KnowledgeReference[]; omitted:{title:string;reason:string}[]; inheritedFrom:number|null };
+export type KnowledgeSelection = { version:1; revision:number; instructions:string; references:KnowledgeReference[]; omitted:{title:string;reason:string}[]; inheritedFrom:number|null; repository?: RepositoryContext };
 const COMMON_WORDS = new Set(['the','and','for','with','this','that','from','have','should','will','into','our','use']);
 const tokens = (s:string) => new Set((s.toLowerCase().match(/[\p{L}\p{N}_-]{3,}/gu) ?? []).filter(t=>!COMMON_WORDS.has(t)));
 function select(store:Store,repo:string,identity:string,query:string,head:string): KnowledgeSelection {
@@ -152,7 +153,7 @@ export function readKnowledgeSnapshot(store:Store,runId:number): KnowledgeSelect
   return selection;
 }
 /** Freeze at provider admission. Reviewers see the builder's exact project context. */
-export function knowledgeContext(store:Store,runId:number):string {
+export function knowledgeContext(store:Store,runId:number,cacheRoot?:string):string {
   if (!store.schemaCurrent()) throw Error('Project knowledge needs the current database version.');
   return store.transact(()=>{
     const run = store.getRun(runId), ref = run && store.refForId(run.taskRef), repo = ref?.repo;
@@ -171,9 +172,19 @@ export function knowledgeContext(store:Store,runId:number):string {
       // A legacy source without a snapshot did not receive this feature's
       // context. Never give its reviewer newly configured project guidance.
       selection = inherited ? {...inherited,inheritedFrom:parent!.id} : !configured || parent ? {version:1,revision:0,instructions:'',references:[],omitted:[],inheritedFrom:parent?.id??null} : select(store,repo,learningIdentity(repo),`${store.getTask(ref.externalId)?.title ?? ''} ${scope?.goal ?? ''} ${(scope?.touches ?? []).join(' ')}`, run.baseRevision || git(repo,['rev-parse','HEAD']));
+      // Optional source selection is captured once from this crew's actual
+      // checkout. It is reused with the immutable run snapshot on resume.
+      // Index/source failure stays context metadata, never an admission gate.
+      if (!parent && run.worktree && run.baseRevision) {
+        const available = 24000 - Buffer.byteLength(JSON.stringify(selection)) - 30;
+        if (available >= 3000) selection.repository = repositoryContextRead({ repo:run.worktree, project:repo, baseRevision:run.baseRevision, audience:'crew', maxBytes:Math.min(6000,available), ...(cacheRoot === undefined ? {} : {cacheRoot}), query:`${store.getTask(ref.externalId)?.title ?? ''} ${scope?.goal ?? ''} ${(scope?.touches ?? []).join(' ')}` });
+        else selection.omitted.push({title:'Repository context',reason:'Context size limit'});
+      }
       const payload=JSON.stringify(selection);
       store.handle.prepare('INSERT INTO knowledge_snapshot VALUES (?,?,?,?,?)').run(runId,repo,selection.revision===0?'unconfigured':learningIdentity(repo),payload,learningSha(payload));
     }
-    return KNOWLEDGE_GUIDANCE + JSON.stringify(selection) + '\n';
+    // JSON escapes ordinary newlines, but not Unicode line separators. Keep
+    // every source value inside this one data record in the provider brief.
+    return KNOWLEDGE_GUIDANCE + JSON.stringify(selection).replace(/\u2028/g,'\\u2028').replace(/\u2029/g,'\\u2029') + '\n';
   });
 }

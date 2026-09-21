@@ -1,76 +1,44 @@
-# Never Stuck release certification
+# Release certification
 
-`npm run certify:provider` is the real-provider release canary. It creates a
-disposable Git repository and isolated Standing Orders database, then drives
-the public CLI through the same path as a real task:
-
-1. create an approver and a repository-bound worker;
-2. route planning, building, repair, and review to one exact provider/model;
-3. approve a repository verification command;
-4. file a task and ask the provider to inspect the repository and draft its
-   scope and acceptance rubric;
-5. approve that exact digest;
-6. build in a leased worktree, commit on a non-default branch, rerun the
-   approved check, and adjudicate the evidence;
-7. require a `verified` criterion matrix;
-8. with `--review`, request an independent review and require the resulting
-   proof to remain verified, with every signed criterion independently upheld
-   by the requested reviewer (missing, contradictory, and `cannot-tell`
-   judgements fail this self-contained fixture);
-9. prove a second dispatch is empty.
-
-It does not push, open a pull request, mutate a real project, synthesize a
-provider response, or accept `short`/`refuted` proof. A failed run keeps its
-database, worktree, evidence, and live log and prints their location.
+Current certification follows **Plan → Work → Ready → Complete**. It does not
+request a model reviewer or resubmit optional proof packages. The public CLI
+canaries create a disposable repository and isolated database, approve exact
+fixture terms, execute the work, inspect its actual output and approved machine
+check, then have a scoped lead mark the exact saved receipt Complete.
+Completion must preserve the candidate, runs, check results and historical
+assessment. Repeating it must not execute another run.
 
 ```sh
-npm run certify:provider -- --provider claude --model sonnet --review
-npm run certify:provider -- --provider codex --model gpt-5.6-sol --review
-```
-
-To certify the signed auto-approval path, use `--auto-approve` (which also
-requires independent review). The canary files a fixed contract, signs a
-project mode, and pre-authorizes planning through the public CLI. From the
-first planning pass onward it issues no approval or review request. It requires
-the same scope digest to be sealed under that mode, a verified build and
-independent review, one work commit, an unchanged default branch, and refusal
-of a duplicate dispatch:
-
-```sh
+npm run certify:provider -- --provider claude --model sonnet
+npm run certify:provider -- --provider codex --model gpt-5.6-sol
 npm run certify:provider -- --provider claude --model sonnet --auto-approve
-npm run certify:provider -- --provider codex --model gpt-5.6-sol --auto-approve
 npm run certify:crash -- --stage planning --auto-approve --rounds 2
 ```
 
-The last command kills actual watch processes while a fixture planner is
-running. Recovery waits for normal lease expiry and the surviving process;
-then the unchanged plan must automatically approve, build, verify, and receive
-an independent review. Its ledger must contain exactly one automatic approval,
-with no overlapping writer, open run, duplicate commit, or duplicate dispatch.
-Provider output in this crash case is deterministic fixture output. The two
-provider canaries use real models but do not kill them; these are separate
-certification claims.
+`--auto-approve` applies only the signed unchanged-plan policy. It does not add
+a reviewer. The former `--review`, `--review-provider` and `--review-model`
+options are retired. Each provider journey preserves the default branch and
+checks the exact requested changed paths, actual file contents, check result,
+explicit completion and refusal of duplicate dispatch. `--keep` retains a
+passing sandbox; `--output` writes the certificate. A changed runtime during a
+journey prevents a passing result.
 
-The [completion and recovery release result](assessments/COMPLETION_RECOVERY_2026-09-12.md)
-records the final provider journeys, 15 crash cases, controller recovery,
-migration rehearsal and the remaining desktop deployment gate.
+The crash canary kills real CLI workers at planning, setup, building,
+after-commit and verification process barriers. It retains normal lease expiry,
+process custody, saved stop intent and the no-overlapping-writer/no-duplicate-
+commit assertions. The former model-review crash stage was removed with the
+unreachable reviewer engine. Completed work is inspected and explicitly handled;
+no second provider run is needed for completion. Provider responses in this
+crash canary are deterministic fixtures, not model calls.
 
-Use `--keep` to retain a passing sandbox and `--output <file>` to write the
-machine-readable certificate. Version 3 records the source revision, a hash of
-the built runtime and canary scripts, each CLI step's elapsed time and exit
-status, and the participating run identities. Every CLI boundary rechecks the
-runtime; changing the build during a canary prevents a passing certificate.
-The exact changed-path set is also checked against the two requested files.
-Version 2 only checked the completed reviewer and surviving machine verdict;
-that was insufficient when a reviewer could not read its evidence. Version 3
-requires actual upholding judgements. Codex review now receives sealed text
-through stdin and real screenshot attachments while shell access stays disabled.
-General reviews may still truthfully answer `cannot-tell`; that answer does not
-certify this fixture.
+The pilot keeps its distinct scenario, provider and screenshot checks. The
+handoff journey keeps detailed planning, strict/high-risk terms, actual UI work,
+explicit feedback, fresh revision approval and unchanged inherited code. Both
+now certify Ready and explicit lead completion. Real-provider journeys are
+separate opt-in checks; a passing unit suite does not claim they were executed.
 
-The approver and approval are automated fixture setup inside the disposable
-database. A passing result demonstrates this bounded workflow without a manual
-rescue; it does not measure planning-policy quality across arbitrary projects.
+The records below describe earlier releases and their former workflow. Their
+review-stage results remain historical; they are not current certification.
 
 ## Contract handoff integration (2026-09-12 UTC)
 

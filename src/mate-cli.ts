@@ -1,3 +1,4 @@
+import { configureLeadFollow, leadFollowStatus } from './lead-follow.js';
 /**
  * `standing-orders chat` (mate arc §6): the same thread the console shows,
  * driven from a terminal. The password is typed once — it mints the mate
@@ -39,6 +40,7 @@ export type MateCliInput = {
   repos: readonly string[];
   say: string | undefined;
   end: boolean;
+  follow?: boolean;
   ceilingUsd: number | undefined;
   seams?: MateCliSeams;
   /** Where evidence lives — a scout's report reads from here. */
@@ -226,6 +228,11 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
     say(`mate conversation live: ${direct ? `${money(session.spentMicrousd)} of ${money(session.ceilingMicrousd)} spent` : "subscription usage (no dollar ceiling)"} — live until you end it`);
   }
   const thread = store.openMateThread(who.name, who.ceilingDigest, now).thread;
+  if (input.follow !== undefined) {
+    if (!configureLeadFollow(store, who, session, thread, input.follow, now)) return refuse("standing", "Conversation access changed.");
+    say(leadFollowStatus(store, who.name).detail);
+    emit({ ok: true, follow: leadFollowStatus(store, who.name) });
+  }
 
   const pendingProposals = (): MateProposal[] => store.listMateProposals(thread.id, ["pending"]);
   // Ordinals are assigned once per proposal and never reused within this

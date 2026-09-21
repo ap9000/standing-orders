@@ -1,4 +1,6 @@
 import { TASK_SCOPE_TEXT_SCHEMA } from "./task-text.js";
+import { dirname, join } from 'node:path';
+import { repositoryContextRead } from './repository-context.js';
 import { ASSIGNMENT_TOOLS, assignmentForCoordinator } from "./assignment-adapters.js";
 /**
  * `standing-orders mcp` — the MCP stdio server (MCP gateway spec v6).
@@ -185,6 +187,16 @@ function str(args: Record<string, unknown>, name: string, max: number): string |
 }
 
 const TOOLS: Tool[] = [
+  {
+    name: 'get_project_context', description: 'Read bounded source excerpts or advisory static import impact in an admitted project. Falls back to text search without an index.',
+    inputSchema: { type: 'object', properties: { repo: { type: 'string', minLength: 1, maxLength: 4096 }, query: { type: 'string', minLength: 1, maxLength: 1000 }, mode: { type: 'string', enum: ['search', 'impact'] } }, required: ['repo', 'query'], additionalProperties: false },
+    handle: (ctx, args) => {
+      const repo = String(args['repo']);
+      if (!ctx.who.repos.includes(repo) || ctx.enrolled !== null && !ctx.enrolled.includes(repo)) return { ok: false, message: 'That project is outside your access.' };
+      return { ok: true, body: repositoryContextRead({ repo, query: String(args['query']), mode: args['mode'] === 'impact' ? 'impact' : 'search', audience: 'lead',
+        ...(ctx.evidenceRoot === undefined ? {} : { cacheRoot: join(dirname(ctx.evidenceRoot), 'repository-context') }) }) as unknown as Json };
+    },
+  },
   ...ASSIGNMENT_TOOLS.map(spec => ({
     name: spec.name, description: spec.description, inputSchema: spec.inputSchema as unknown as Json,
     handle: (ctx: ToolContext, args: Record<string, unknown>) => {

@@ -125,9 +125,9 @@ describe("the mate's turn", () => {
     });
 
   test("the intake contract treats one outcome as enough and asks only material questions", () => {
-    expect(MATE_CONTRACT_VERSION).toBe(17);
-    expect(MATE_CONTRACT).toContain("call get_acceptance_evidence for the exact task/run");
-    expect(MATE_CONTRACT).toContain("also call get_result_images for that run");
+    expect(MATE_CONTRACT_VERSION).toBe(18);
+    expect(MATE_CONTRACT).toContain("Ready is a saved result, not a reviewer stage");
+    expect(MATE_CONTRACT).toContain("Historical missing assessments never require rerunning work");
     expect(MATE_CONTRACT).toContain("call get_result_images for that exact execution and run");
     expect(MATE_CONTRACT).toContain("say they follow, never that they were delivered");
     expect(MATE_CONTRACT).toContain("call it again with that offset or with the image ids it listed");
@@ -138,6 +138,17 @@ describe("the mate's turn", () => {
     expect(MATE_CONTRACT).toContain("Do not ask the operator for a title, paths, implementation details, acceptance wording, model, budget");
     expect(MATE_CONTRACT).toContain("use your judgment");
     expect(MATE_CONTRACT).toContain("Set propose_task planning to 'required'");
+  });
+
+  test("saved context fits the existing allowance by bounding steps, without increasing spend authority", async () => {
+    const live = session(5_000_000), script = scripted(Array.from({ length: 8 }, (_, i) => answer([{ type: "tool_use", id: `r${i}`, name: "list_repos", input: {} }])));
+    const result = await turn("Catch me up", script.fetcher, { session: live, context: "Saved project context. ".repeat(500) });
+    expect(result).toMatchObject({ ok: true, stoppedAtCap: true });
+    if (!result.ok) throw Error("turn refused");
+    expect(result.steps).toBeLessThan(8);
+    expect(result.reply).toContain("remaining allowance");
+    expect(store.getMateSession(live.id)!.ceilingMicrousd).toBe(5_000_000);
+    expect(store.getMateTurn(result.turn)!.reservedMicrousd).toBeLessThanOrEqual(5_000_000);
   });
 
   test("task intake records an explicit planning choice and defaults it to auto", () => {

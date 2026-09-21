@@ -319,7 +319,9 @@ describe("assignment interface", () => {
       const assignment = snapshot({ attempts: [{ taskId: 'root task', runId: 9, label: 'Done — deployed!', detail: 'Agent says all done.' }] });
       expect(assignmentStatusOf(assignment).label).toBe('Working');
       expect(assignmentStatusOf(assignment).views).toEqual(['all']);
-      expect(assignmentStatusOf(snapshot({ state: 'ready-to-check' })).views).toEqual(['all', 'needs-you', 'completed']);
+      expect(assignmentStatusOf(snapshot({ state: 'ready-to-check' })).views).toEqual(['all', 'needs-you']);
+      expect(assignmentStatusOf(snapshot({ state: 'needs-decision' })).views).toEqual(['all', 'needs-you']);
+      expect(assignmentStatusOf(snapshot({ state: 'complete' })).views).toEqual(['all', 'completed']);
       expect(assignmentStatusOf(snapshot({ state: 'complete' })).label).toBe('Complete');
     });
 
@@ -329,6 +331,7 @@ describe("assignment interface", () => {
       expect(url.pathname).toBe('/review');
       expect(Object.fromEntries(url.searchParams)).toEqual({ result: 'correction/2', run: '18', project: '/project one' });
       expect(assignmentActionHref(snapshot({ primaryAction: { ...assignment.primaryAction!, code: 'answer-decision', target: { taskId: 'correction/2', runId: 18, decisionId: 24 } } }))).toBe('/d/24');
+      expect(assignmentActionHref(snapshot({ primaryAction: { ...assignment.primaryAction!, code: 'unhold', target: { taskId: 'correction/2', runId: null, decisionId: null } } }))).toBe('/t/root%20task?version=correction%2F2#task-actions');
       const window = new Window();
       try {
         window.document.body.innerHTML = assignmentSummaryHtml(assignment);
@@ -360,6 +363,24 @@ describe("assignment interface", () => {
         expect(window.document.body.textContent).toContain('Read the report.');
         expect(window.document.body.textContent).toContain('The saved diff is unreadable.');
       } finally { await window.happyDOM.close(); }
+    });
+
+    test('keeps optional proof absence in history and presents each material limitation once', () => {
+      const html = assignmentSummaryHtml(snapshot({ state: 'complete', detail: 'Checks passed.', attention: [
+        'no proof was written', GOAL_ASSESSMENT_PENDING,
+        'The check log was shortened when stored; only the retained output is available.',
+        'The check output was shortened when it was stored; its download holds only the stored part.',
+      ] }));
+      expect(html).not.toContain('no proof was written');
+      expect(html).not.toContain(GOAL_ASSESSMENT_PENDING);
+      expect(html.match(/class="problem"/g)).toHaveLength(1);
+      expect(html).toContain('download holds only the stored part');
+      const history = assignmentSummaryHtml(snapshot({ attention: [
+        'Saved terminal-diff #999 (run 2) is unavailable or changed.',
+        'The sealed diff was shortened when it was stored; its download holds only the stored part.',
+      ] }));
+      expect(history).toContain('Saved terminal-diff #999 (run 2)');
+      expect(history).toContain('download holds only the stored part');
     });
 
     test('fresh evidence damage remains visible without inventing a retry or changing readiness', () => {

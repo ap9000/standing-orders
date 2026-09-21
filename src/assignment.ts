@@ -10,6 +10,7 @@ import { evidenceRoot, readVerifiedArtifact, readVerifiedReport } from "./eviden
 import { verificationEvidence } from "./verification-evidence.js";
 import { reproveApprover, type VerifiedApprover } from "./principal.js";
 import { noteAssignmentStatus } from "./assignment-status.js";
+import { historicalAssessmentReason } from "./assignment-presentation.js";
 
 export type AssignmentAccess = WorkSummaryAccess;
 export type AssignmentOwner = { kind: "coordinator"; id: string; label: string };
@@ -186,7 +187,7 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
     detail = completionKind === "research-report" ? "The research report is ready for the lead to read."
       : completionKind === "accepted-exception" ? "An operator accepted this result with its recorded limitations. The lead can inspect that decision; the recorded checks are unchanged."
       : receipt.checks.detail;
-    primaryAction = { code: "open-result", label: completionKind === "research-report" ? "Read report" : completionKind === "accepted-exception" ? "Review acceptance" : "Open result", target: { taskId: current.id, runId: result!.id, decisionId: null }, access: "read", retry: "read-again" };
+    primaryAction = { code: "open-result", label: completionKind === "research-report" ? "Read report" : receipt.checks.status === "failed" ? "Inspect failed check" : completionKind === "accepted-exception" ? "Review acceptance" : "Open result", target: { taskId: current.id, runId: result!.id, decisionId: null }, access: "read", retry: "read-again" };
     const checked = store.handle.prepare("SELECT actor,at FROM action_ledger WHERE task_id = ? AND run_id = ? AND action = ? AND outcome = ? AND source = 'work' ORDER BY id DESC")
       .all(family.root.id, result!.id, CHECK_ACTION, receipt.digest).find(row => {
         const actor = String(row["actor"]);
@@ -196,6 +197,7 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
     if (checked !== undefined) {
       completion = { actor: String(checked["actor"]), at: String(checked["at"]), digest: receipt.digest };
       state = "complete";
+      primaryAction = { ...primaryAction, label: completionKind === "research-report" ? "Read report" : "Open result" };
       const label = completion.actor.startsWith("operator:") ? completion.actor.slice(9) : owner!.label;
       detail = completionKind === "research-report" ? `Research report checked by ${label}. No deployment is implied.`
         : `Handled by ${label}. ${receipt.checks.detail} Publication and deployment are separate.`;
@@ -221,7 +223,7 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
   if (state === "needs-decision") attention.push(detail);
   if (receipt !== null) {
     if (finishedBuild && receipt.checks.status !== "passed") attention.push(receipt.checks.detail);
-    if (proof?.verdict !== "verified") attention.push(...(proof?.reasons ?? []));
+    if (proof?.verdict !== "verified") attention.push(...(proof?.reasons ?? []).filter(reason => !historicalAssessmentReason(reason)));
     attention.push(...receipt.caveats.filter(reason => !proof?.reasons.includes(reason)));
   }
   if (state !== "complete") completion = null;

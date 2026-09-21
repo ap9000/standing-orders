@@ -8,6 +8,26 @@ import { presetTerms, modeDigestOf, modeTermsJson } from "./modes.js";
 import { approveRoutine, fireRoutine } from "./routine.js";
 import { createWorkflowPreview, exportRecipe, findRecipe, importRecipe, launchWorkflow, parseRecipe, recipeScheduleWords, saveWorkflowRecipe, savedRecipes, starterRecipes, workflowPreview, type RecipeDocument } from "./recipes.js";
 
+describe("portable recipe parsing", () => {
+  test("all starters round-trip portable work without project identity or authority", () => {
+    const document = starterRecipes().find(one => one.id === "lint-sweep")!.document;
+    expect(starterRecipes()).toHaveLength(6);
+    for (const recipe of starterRecipes()) {
+      expect(importRecipe(exportRecipe(recipe.document))).toEqual(recipe.document);
+      expect(Object.keys(JSON.parse(exportRecipe(recipe.document)))).not.toContain("repo");
+    }
+    for (const extra of ["approvedAt", "permissionMode", "provider", "model", "token", "repo", "publicationGrant", "autoApprove"]) {
+      expect(() => parseRecipe({ ...document, [extra]: true })).toThrow("Recipe fields");
+    }
+    expect(() => parseRecipe({ ...document, version: 3 })).toThrow("not supported");
+    expect(() => importRecipe("not-json")).toThrow("not valid");
+    expect(() => parseRecipe({ ...document, name: "hidden\u202Ename" })).toThrow();
+    expect(() => parseRecipe({ ...document, acceptance: [] })).toThrow("success check");
+    expect(() => parseRecipe({ ...document, acceptance: [{ ...document.acceptance[0], approved: true }] })).toThrow("unsupported fields");
+    expect(() => parseRecipe({ ...document, acceptance: [{ ...document.acceptance[0], evidence: ["trust-me"] }] })).toThrow();
+  });
+});
+
 const now = new Date("2026-09-12T22:00:00Z");
 describe("reusable recipes on the existing work engine", () => {
   let root: string, repo: string, other: string, file: string, token: string, store: Store;
@@ -25,22 +45,7 @@ describe("reusable recipes on the existing work engine", () => {
   afterEach(() => { store.close(); rmSync(root, { recursive: true, force: true }); });
   const preview = (actor = "owner", d = document) => createWorkflowPreview(store, actor, repo, d, "lint-sweep", now);
 
-  test("all starters round-trip portable work without project identity or authority", () => {
-    expect(starterRecipes()).toHaveLength(6);
-    for (const recipe of starterRecipes()) {
-      expect(importRecipe(exportRecipe(recipe.document))).toEqual(recipe.document);
-      expect(Object.keys(JSON.parse(exportRecipe(recipe.document)))).not.toContain("repo");
-    }
-    for (const extra of ["approvedAt", "permissionMode", "provider", "model", "token", "repo", "publicationGrant", "autoApprove"]) {
-      expect(() => parseRecipe({ ...document, [extra]: true })).toThrow("Recipe fields");
-    }
-    expect(() => parseRecipe({ ...document, version: 3 })).toThrow("not supported");
-    expect(() => importRecipe("not-json")).toThrow("not valid");
-    expect(() => parseRecipe({ ...document, name: "hidden\u202Ename" })).toThrow();
-    expect(() => parseRecipe({ ...document, acceptance: [] })).toThrow("success check");
-    expect(() => parseRecipe({ ...document, acceptance: [{ ...document.acceptance[0], approved: true }] })).toThrow("unsupported fields");
-    expect(() => parseRecipe({ ...document, acceptance: [{ ...document.acceptance[0], evidence: ["trust-me"] }] })).toThrow();
-  });
+
 
   test("preview and save create no work; saved scope is an immutable copy", () => {
     const p = preview(); document.goal = "An edit after preview must not change the saved copy";

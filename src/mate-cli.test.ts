@@ -85,6 +85,22 @@ describe("standing-orders chat (mate arc, slice 3): the thread from a terminal",
   };
   const out = () => lines.join("\n");
 
+  test("explicit automatic updates use the existing shared thread and can be paused without a model call", async () => {
+    const args = ["chat", "--as", "alex", "--token", token, "--repo", repo, "--json"];
+    expect(await run([...args, "--follow"])).toBe(0);
+    expect(JSON.parse(out())).toMatchObject({ ok: true, follow: { enabled: true } });
+    const store = openStore(db), thread = store.liveMateThreadFor("alex")!.id;
+    expect(store.listMateMessages(thread, 10)).toHaveLength(0);
+    store.close();
+    expect(await run([...args, "--no-follow"])).toBe(0);
+    expect(JSON.parse(out())).toMatchObject({ ok: true, follow: { enabled: false } });
+    const reopened = openStore(db);
+    expect(reopened.liveMateThreadFor("alex")!.id).toBe(thread);
+    expect(reopened.listMateMessages(thread, 10)).toHaveLength(0);
+    reopened.close();
+    expect(await run([...args, "--follow", "--no-follow"])).toBe(2);
+  });
+
   test("refusals are typed and precede any spend: credentials, key, ceiling", async () => {
     expect(await run(["chat", "--json"])).toBe(2);
     expect(JSON.parse(out())).toMatchObject({ ok: false, reason: "usage" });

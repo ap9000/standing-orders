@@ -14,7 +14,7 @@ import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { assertReviewedCriteria } from "./canary-assertions.mjs";
+import { createFixtureLead, completeFixtureAssignment } from "./canary-assertions.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const bin = join(root, "dist", "bin.js");
@@ -30,29 +30,25 @@ function usage() {
     "Options:",
     "  --provider claude|codex|gemini|openrouter   CLI transport to exercise",
     "  --model <model>           exact model sealed into plan and build",
-    "  --review-provider <p>     optional different reviewer (claude|codex|openrouter)",
-    "  --review-model <model>    required with --review-provider",
     "  --output <file>           write the final JSON certificate",
-    "  --review                  require an independent review of the result",
-    "  --auto-approve            sign an unchanged-plan policy; require automatic review",
+    "  --auto-approve            sign an unchanged-plan policy",
     "  --keep                    keep the disposable repo and evidence",
     "  --json                    print only the final JSON certificate",
   ].join("\n");
 }
 
 function parseArgs(argv) {
-  const result = { provider: null, model: null, reviewProvider: null, reviewModel: null, output: null, keep: false, review: false, autoApprove: false, json: false, help: false };
+  const result = { provider: null, model: null, output: null, keep: false, autoApprove: false, json: false, help: false };
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
     if (arg === "--keep") result.keep = true;
-    else if (arg === "--review") result.review = true;
-    else if (arg === "--auto-approve") { result.autoApprove = true; result.review = true; }
+    else if (arg === "--auto-approve") result.autoApprove = true;
     else if (arg === "--json") result.json = true;
     else if (arg === "--help" || arg === "-h") result.help = true;
-    else if (["--provider", "--model", "--output", "--review-provider", "--review-model"].includes(arg)) {
+    else if (["--provider", "--model", "--output"].includes(arg)) {
       const value = argv[++index];
       if (value === undefined || value.startsWith("--")) throw new Error(`${arg} needs a value`);
-      result[arg === "--review-provider" ? "reviewProvider" : arg === "--review-model" ? "reviewModel" : arg.slice(2)] = value;
+      result[arg.slice(2)] = value;
     } else throw new Error(`unknown option ${arg}`);
   }
   if (result.help) return result;
@@ -62,11 +58,6 @@ function parseArgs(argv) {
   if (typeof result.model !== "string" || result.model.trim() === "") {
     throw new Error("--model is required because task approvals seal exact routing");
   }
-  if ((result.reviewProvider === null) !== (result.reviewModel === null)) throw new Error("--review-provider and --review-model must be supplied together");
-  if (result.reviewProvider !== null) result.review = true;
-  result.reviewProvider ??= result.provider;
-  result.reviewModel ??= result.model;
-  if (result.review && !["claude", "codex", "openrouter"].includes(result.reviewProvider)) throw new Error("Gemini review is unsupported; select --review-provider claude|codex|openrouter and --review-model");
   return result;
 }
 
@@ -204,9 +195,9 @@ async function main() {
     const runnerToken = registered.token;
     if (typeof runnerToken !== "string" || runnerToken === "") throw new Error("runner registration returned no token");
 
-    for (const phase of ["plan", "build", "repair", ...(options.review ? ["review"] : [])]) {
-      const provider = phase === "review" ? options.reviewProvider : options.provider;
-      const model = phase === "review" ? options.reviewModel : options.model;
+    for (const phase of ["plan", "build", "repair"]) {
+      const provider = options.provider;
+      const model = options.model;
       await cli(`route ${phase} to ${provider}`, [
         "config", "set", phase,
         "--provider", provider,
@@ -228,7 +219,7 @@ async function main() {
     await cli("file the task", ["task", "add", title, "--id", TASK_ID, "--repo", repo]);
     let filedDigest = null;
     if (options.autoApprove) {
-      await cli("sign bounded automatic approval with independent reviews", [
+      await cli("sign bounded unchanged-plan approval", [
         "mode", "set", "--repo", repo, "--name", "standard", "--days", "1",
         "--auto-approve", "true", "--plan-auto", "--as", "canary", "--token", password,
       ]);
@@ -280,9 +271,6 @@ async function main() {
 
     let final = await cli("read the terminal task and proof", ["task", "show", TASK_ID]);
     if (final.task?.state !== "done") throw new Error(`task ended ${String(final.task?.state ?? "without a state")}`);
-    if (final.proofVerdict !== "verified") {
-      throw new Error(`proof verdict was ${String(final.proofVerdict)}: ${JSON.stringify(final.proofReasons ?? [])}`);
-    }
     const buildRun = Array.isArray(final.runs)
       ? final.runs.find(runRow => runRow?.role === "builder" && runRow?.outcome === "built")
       : null;
@@ -300,22 +288,10 @@ async function main() {
       throw new Error(`the canary changed unexpected paths: ${JSON.stringify(changed)}`);
     }
 
-    if (options.review) {
-      if (!options.autoApprove) await cli("request an independent review", ["task", "review", String(buildRun.id), "--as", "canary", "--token", password]);
-      // A signed mode can finish its automatic review in the build tick.
-      // Require the same completed review whether it landed there or next.
-      if (!options.autoApprove || final.review?.state !== "succeeded") {
-        const reviewed = await cli("run the independent review", ["tick", "--runner", "canary-worker", "--token", runnerToken, "--repo", repo, "--pool", pool]);
-        if (!reviewed.dispatched?.some(item => item?.outcome === "reviewed")) throw new Error("the requested independent review did not complete");
-      }
-      final = await cli("read the reviewed result", ["task", "show", TASK_ID]);
-      if (final.proofVerdict !== "verified") throw new Error(`review left proof ${final.proofVerdict}: ${JSON.stringify(final.proofReasons ?? [])}`);
-      if (!final.runs?.some(one => one.role === "reviewer" && one.outcome === "no-change" && one.provider === options.reviewProvider && one.model === options.reviewModel)) {
-        throw new Error("no completed reviewer run proved the requested provider and model");
-      }
-      assertReviewedCriteria(final.proofMatrix, afterPlan.scope.acceptance.map(one => one.id), options.reviewProvider, options.reviewModel);
-      if (final.dispatch?.code !== "complete" || final.review?.state !== "succeeded") throw new Error("review did not reach verified completion");
-    }
+    const leadFile = await createFixtureLead(args => cli("scope the fixture lead", args), {
+      repo, auth: ["--as", "canary", "--token", password], tokenFile: join(base, "lead.token"),
+    });
+    const completion = await completeFixtureAssignment(args => cli("inspect and handle saved result", args), TASK_ID, leadFile, { head: branchSha, runId: buildRun.id });
 
     const duplicate = await cli("prove the completed task cannot dispatch twice", [
       "tick", "--runner", "canary-worker", "--token", runnerToken,
@@ -332,8 +308,6 @@ async function main() {
       passed: true,
       provider: options.provider,
       model: options.model,
-      reviewProvider: options.review ? options.reviewProvider : null,
-      reviewModel: options.review ? options.reviewModel : null,
       startedAt: startedAt.toISOString(),
       finishedAt: new Date().toISOString(),
       durationSeconds: Math.round((Date.now() - startedAt.getTime()) / 1000),
@@ -346,14 +320,14 @@ async function main() {
         registration: "passed",
         planning: "passed",
         approval: options.autoApprove ? "unchanged-plan-under-signed-mode" : "passed",
-        humanActionsAfterPlanningStarted: options.autoApprove ? 0 : options.review ? 2 : 1,
+        humanActionsAfterPlanningStarted: options.autoApprove ? 0 : 1,
         filedScopeDigest: filedDigest,
         worktreeBuild: "passed",
         commit: branchSha,
         verificationCommand: "node --test",
         proofVerdict: final.proofVerdict,
         criterionMatrix: final.proofMatrix,
-        independentReview: options.review ? "passed" : "not-requested",
+        leadCompletion: completion,
         duplicateDispatch: "refused-empty",
       },
       providerRun: providerRun == null ? null : {
@@ -378,8 +352,6 @@ async function main() {
       passed: false,
       provider: options.provider,
       model: options.model,
-      reviewProvider: options.review ? options.reviewProvider : null,
-      reviewModel: options.review ? options.reviewModel : null,
       startedAt: startedAt.toISOString(),
       finishedAt: new Date().toISOString(),
       durationSeconds: Math.round((Date.now() - startedAt.getTime()) / 1000),

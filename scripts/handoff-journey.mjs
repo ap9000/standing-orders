@@ -10,7 +10,7 @@ import {dirname,join,resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {Window} from 'happy-dom';
 import {handoffFixture} from './fixtures/handoff-journey.mjs';
-import {assertReviewedCriteria} from './canary-assertions.mjs';
+import {createFixtureLead,completeFixtureAssignment} from './canary-assertions.mjs';
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
 let output=resolve('output/certification/handoff-journey.json'),playwright=null,providers=['claude','codex'],prepareOnly=false;
 for(let i=2;i<process.argv.length;i++) {
@@ -84,7 +84,7 @@ for(const provider of providers) {
     const baseSha=await git('rev-parse','HEAD');
     await cli('bootstrap isolated operator',['approver','add','journey','--password',password]);
     runnerToken=(await cli('repository-bound runner',['runner','register','journey-worker','--repo',repo,...auth])).token;
-    for(const phase of ['plan','build','repair','review'])await cli('route '+phase,['config','set',phase,'--provider',provider,'--model',model,...auth]);
+    for(const phase of ['plan','build','repair'])await cli('route '+phase,['config','set',phase,'--provider',provider,'--model',model,...auth]);
     await cli('approve fixture verification',['verify','set','--repo',repo,'--command','npm test','--timeout-seconds','120','--yes',...auth]);
     store=openStore(db);server=createDecisionServer({store,evidenceRoot:join(dir,'evidence'),repo});await new Promise(r=>server.listen(0,'127.0.0.1',r));base='http://127.0.0.1:'+server.address().port;
     const login=await fetch(base+'/login',{method:'POST',redirect:'manual',body:new URLSearchParams({name:'journey',token:password})});assert.equal(login.status,303);cookie=login.headers.getSetCookie().map(c=>c.split(';')[0]).join('; ');
@@ -98,13 +98,12 @@ for(const provider of providers) {
     console.log(provider+': planning the detailed filed intent');await tick('plan filed intent');
     const planned=await show('catalog','planned');assert.deepEqual(scopeTerms(planned.scope),scopeTerms(filed.scope),'Planner changed the fixed filed requirements');
     await cli('ordinary exact-scope approval',['task','approve','catalog','--yes','--digest',planned.scope.digest,...auth]);
-    console.log(provider+': building and independently reviewing');await tick('approved build');
-    let built=await show('catalog','built');
-    if(!built.runs.some(r=>r.role==='reviewer'&&r.outcome==='no-change'))await tick('automatic strict review');
-    built=await show('catalog','reviewed');assert.equal(built.task.state,'done');assert.equal(built.proofVerdict,'verified');
-    assertReviewedCriteria(built.proofMatrix,fixture.acceptance.map(c=>c.id),provider,model);
+    console.log(provider+': building and checking');await tick('approved build');
+    const built=await show('catalog','built');assert.equal(built.task.state,'done');
     const build=built.runs.find(r=>r.role==='builder'&&r.outcome==='built');assert(build);
     const sourceHead=await git('rev-parse',build.branch),sourceHelper=await git('rev-parse',sourceHead+':filter.js');
+    const leadFile=await createFixtureLead(args=>cli('scope fixture lead',args),{repo,auth,tokenFile:join(dir,'lead.token')});
+    record.initialCompletion=await completeFixtureAssignment(args=>cli('inspect and handle source',args),'catalog',leadFile,{head:sourceHead,runId:build.id});
     await form('/r/'+build.id,'/r/'+build.id+'/comment',{path:'index.html',note:'Change only the visible heading from Catalog to Fruit catalog. Keep filter.js and all filtering behavior unchanged. Refresh desktop and mobile screenshot evidence by running npm test.'});
     const location=await form('/r/'+build.id,'/r/'+build.id+'/revise');
     assert(location?.startsWith('/t/'));const child=decodeURIComponent(location.split('/t/')[1].split(/[?#]/)[0]);record.revisionTask=child;
@@ -112,11 +111,8 @@ for(const provider of providers) {
     for(const key of ['outOfScope','touches','acceptance','qualityMode','riskLevel','budgetMicrousd'])assert.deepEqual(revision.scope[key],filed.scope[key],'Revision dropped '+key);
     assert.equal(revision.scope.approvedAt,null,'Child inherited approval');
     await cli('approve exact revision',['task','approve',child,'--yes','--digest',revision.scope.digest,...auth]);
-    console.log(provider+': building scoped revision and reviewing inherited code');await tick('scoped revision build');
-    let final=await show(child,'revision-built');
-    if(!final.runs.some(r=>r.role==='reviewer'&&r.outcome==='no-change'))await tick('final independent review');
-    final=await show(child,'final');record.final=final;
-    assert.equal(final.task.state,'done');assert.equal(final.proofVerdict,'verified');assertReviewedCriteria(final.proofMatrix,fixture.acceptance.map(c=>c.id),provider,model);
+    console.log(provider+': building scoped revision and checking inherited code');await tick('scoped revision build');
+    const final=await show(child,'revision-built');record.final=final;assert.equal(final.task.state,'done');
     const revisionBuild=final.runs.find(r=>r.role==='builder'&&r.outcome==='built');assert(revisionBuild);
     const head=await git('rev-parse',revisionBuild.branch);
     assert.equal(await git('rev-parse',head+':filter.js'),sourceHelper,'Inherited code changed');
@@ -124,6 +120,7 @@ for(const provider of providers) {
     assert.match(await git('show',head+':index.html'),/Fruit catalog/);
     assert.equal(await git('rev-parse','main'),baseSha,'Default branch changed');
     assert(final.runs.every(r=>r.outcome!==null),'Orphan run');
+    record.revisionCompletion=await completeFixtureAssignment(args=>cli('inspect and handle revision',args),child,leadFile,{head,runId:revisionBuild.id});
     const duplicate=await cli('duplicate dispatch',['tick','--runner','journey-worker','--token',runnerToken,'--repo',repo,'--pool',pool],[3]);assert.equal(duplicate.reason,'empty');
     record.passed=true;record.sourceHead=sourceHead;record.revisionHead=head;record.duplicateDispatch='refused-empty';
     }
@@ -132,5 +129,5 @@ for(const provider of providers) {
   record.finishedAt=new Date().toISOString();results.push(record);await writeFile(join(dir,'result.json'),JSON.stringify(record,null,2));
   console.log(provider+': '+(record.prepared?'PREPARED (no provider invoked)':record.passed?'PASS':'FAIL '+record.error.split('\n')[0]));
 }
-const report={version:1,prepared:prepareOnly&&results.every(r=>r.prepared),passed:!prepareOnly&&results.every(r=>r.passed),runtime,runtimeUnchanged:JSON.stringify(await identity())===JSON.stringify(runtime),startedAt,finishedAt:new Date().toISOString(),retainedAt,manualInterventions:0,results,scope:prepareOnly?'Preparation only: private fixture, routes, verification approval, detailed strict/high-risk filing and ordinary form submission; no provider invoked.':'Detailed filed intent through planning, ordinary approval, real UI build, independent review, annotated revision and inherited-code review under strict/high-risk terms. Fresh disposable repositories; no rescue edits.',exclusions:['Windows reboot','actual account exhaustion','production publication']};
+const report={version:1,prepared:prepareOnly&&results.every(r=>r.prepared),passed:!prepareOnly&&results.every(r=>r.passed),runtime,runtimeUnchanged:JSON.stringify(await identity())===JSON.stringify(runtime),startedAt,finishedAt:new Date().toISOString(),retainedAt,manualInterventions:0,results,scope:prepareOnly?'Preparation only: private fixture, routes, verification approval, detailed strict/high-risk filing and ordinary form submission; no provider invoked.':'Detailed filed intent through planning, ordinary approval, real UI build, explicit lead completion, annotated revision and inherited-code checks under strict/high-risk terms. Fresh disposable repositories; no rescue edits.',exclusions:['Windows reboot','actual account exhaustion','production publication']};
 report.passed&&=report.runtimeUnchanged;await mkdir(dirname(output),{recursive:true});await writeFile(output,JSON.stringify(report,null,2)+'\n');console.log('Handoff journey: '+output);if(!(prepareOnly?report.prepared:report.passed))process.exitCode=1;

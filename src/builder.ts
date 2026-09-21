@@ -1393,7 +1393,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   const pinnedBase = store.firstBuilderBase(taskRef, branch);
   const retryBase = pinnedBase !== null && pinnedBase !== baseRevision ? pinnedBase : null;
   const lessonContext = learningContext(store, root, request.runId, "build", clock());
-  const briefText = projectSkillContext + knowledgeContext(store, request.runId) + lessonContext + brief(
+  const briefText = projectSkillContext + knowledgeContext(store, request.runId, join(root, '..', 'repository-context')) + lessonContext + brief(
     scope as Scope,
     branch,
     mailbox,
