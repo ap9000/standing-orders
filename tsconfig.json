@@ -43,5 +43,5 @@
     "moduleResolution": "nodenext",
   }
   ,"include": ["src/**/*"],
-  "exclude": ["**/*.test.ts"]
+  "exclude": ["**/*.test.ts", "**/*.test.tsx", "src/browser"]
 }

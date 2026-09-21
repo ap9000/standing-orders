@@ -1,0 +1,35 @@
+{
+  "sourceSha256": {
+    "package.json": "89368ab3b945b4e492557d96bb85b3cac60e973553b2f432df1c3ca5670a66f0",
+    "package-lock.json": "2c2e1663fb4285d70b74c8e36a460aae835a10a23b23a67e6e9914fe114e26af",
+    "tsconfig.json": "af342cf8c2133cd475bf440465f7f365d07ab099211bcd59569471d51cfd0dd4",
+    "tsconfig.browser.json": "2a0b96a4c6e9c0aaf622af515efda8e43a1a3878ad82dcfa2b84a9f931c2c83f",
+    "scripts/browser-build.mjs": "b162f5b1a09eecd3979b5d2a8b921117f4d67cd16ba591186078761fb0eea97a",
+    "test/ensure-build.ts": "e51273f4cfbc389795d16bb341adc43be0c591abde70cc23f2a26aaa9efb92e5",
+    "src/serve.ts": "a9de3614044bc84c14e944a6874ec4563720b8c7925cbb482ef96e355f18bd35",
+    "src/serve.test.ts": "c93fb625357608d692f37a235b12df7769198c377d507c847b65f95234f6c31c",
+    "src/browser-shell.ts": "5a487dee96026152035b29b1c75e95764cdd90bb3664c30480bf2cc55f841159",
+    "src/browser-workspace.ts": "089fa27d46f5d209c3a7bf8a307e9330522ade14080931757e8d56fb44b6ea10",
+    "src/browser-workspace.test.ts": "7a242fed60f5996a09a7751af2732e0e2560d6f02d420f06f6e1f045b8ca5393",
+    "src/build-freshness.test.ts": "3aa0eac7ee8d9a08a152f2f118f903c8015e3b30167a48fbfc21ac822f7465a8",
+    "src/browser/app.tsx": "e179ead7e011c033d9387a0d9deeb3c94d664e2c7c5adafe448748474c911284",
+    "src/browser/ui/activity.tsx": "d84b69035e31883bce3477c6f56d4707a16e2c859391d2a80bd027fd3bcbc9d2",
+    "src/browser/ui/assets.d.ts": "35d26ea66c86da9701e4f4b467913481ffeae910761cea34c775c5dacb7f8eaa",
+    "src/browser/ui/conversation.tsx": "4e4b2f1b6c34d42259d8cbe0f23afef09b2fea55ade1306d6e8a7c256098c206",
+    "src/browser/ui/index.ts": "7d13d1816c8f9ec883f4bda7e55cc6b9210583d6e0c3e99521c4ca6786b2b2dd",
+    "src/browser/ui/primitives.tsx": "f50ec36726de9409ff62bdc72a590044c1f17e401546e606cff5b2abb224891b",
+    "src/browser/ui/workflow.tsx": "bacdcbf6581fe7342368b8d4b76ac5b8e78f18d267568a10896e9332157fe927",
+    "src/browser/workspace-client.test.ts": "4e7460dfd4828dfabb7954ddfd3d810bd3507b3b632784941e5b7524c648d1bd",
+    "src/browser/workspace-client.ts": "ae809feed1a9d1c305f1d980812b68f3c99393e0a013ee4d25ddac330155d1cd",
+    "src/browser/workspace.css": "78d40fb89d8cdb641674317d88f41dc42435bb70c271ac9fdf9ebb68c43c31e9"
+  },
+  "focusedTests": {
+    "log": "focused-checks.log",
+    "serverTests": 348,
+    "componentTests": 34,
+    "projectFilterRegression": 1,
+    "note": "The project-filter test is one of the 348 server tests, rerun after the targeted fix. Full verification is reserved for the native release gate."
+  },
+  "uiReport": "ui-report.json",
+  "browserChecks": 6
+}

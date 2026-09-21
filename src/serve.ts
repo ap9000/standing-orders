@@ -1,5 +1,7 @@
 import { repositoryContext, repositoryContextRead } from './repository-context.js';
 import { repositoryContextHtml } from './repository-context-ui.js';
+import { browserAssetsAvailable, browserWorkspaceDocument, serveBrowserAsset, supportsBrowserWorkspace } from './browser-shell.js';
+import { browserCrewOf, browserProjectsOf, browserNavigationOf, type BrowserWorkspace } from './browser-workspace.js';
 import { configureLeadFollow, leadFollowStatus, runLeadFollowPass } from './lead-follow.js';
 import { startMaintenance } from './maintenance.js';
 import { codingHandoffPreview, createCodingHandoff } from './coding-handoff.js';
@@ -750,6 +752,7 @@ export function createDecisionServer(options: ServeOptions): Server {
 
     const method = request.method ?? "GET";
     if (await sessionEndpoint(request, response)) return;
+    if (serveBrowserAsset(request, response, url.pathname)) return;
     // Exact, content-addressed application CSS only. Session-bearing
     // pages and fragments still use no-store and are never compressed.
     if ((method === "GET" || method === "HEAD") && url.pathname === WORKSPACE_STYLE.path) {
@@ -790,7 +793,8 @@ export function createDecisionServer(options: ServeOptions): Server {
       return respond(response, 200, "application/json", JSON.stringify({ proof: createHmac("sha256", Buffer.from(options.desktopIdentity, "hex")).update(challenge).digest("hex") }));
     }
     const fragmentName = url.searchParams.get("fragment");
-    const touch = !(method === "GET" && ((fragmentName !== null && NO_TOUCH_FRAGMENTS.has(fragmentName)) || /^\/code\/[a-f0-9]{32}\/state$/.test(url.pathname)));
+    const workspaceRead = method === "GET" && url.searchParams.get('format') === 'workspace';
+    const touch = !(method === "GET" && (workspaceRead || (fragmentName !== null && NO_TOUCH_FRAGMENTS.has(fragmentName)) || /^\/code\/[a-f0-9]{32}\/state$/.test(url.pathname)));
     const who = identify(request, touch);
 
     if (url.pathname === "/login" && method === "GET") {
@@ -965,6 +969,9 @@ export function createDecisionServer(options: ServeOptions): Server {
       actor: who.name,
       csrf: who.via === "cookie" ? who.session.csrf : "",
       returnTo: safeReturn(url.pathname + url.search),
+      browser: who.via === 'cookie' && supportsBrowserWorkspace(url.pathname),
+      workspaceRead,
+      workspaceRequest: url.searchParams.get('request'),
     };
     if (method === "GET" || method === "POST") return requestContext.run(requestFacts, async () => {
       const taskTextForm = url.pathname === "/tasks/add" || /^\/t\/[^/]+\/scope$/.test(url.pathname);
@@ -1079,6 +1086,17 @@ export function createDecisionServer(options: ServeOptions): Server {
     let project = projectOf(who, request);
     if (project === undefined) {
       return refuse(response, who, 403, "that project is outside what this server was configured to show");
+    }
+    // A project link is a read context, not a session-changing operation.
+    // Prove it against both admission and the known project catalog before
+    // collection queries; unknown/foreign paths reveal no work.
+    if (url.pathname === '/work' && url.searchParams.has('project')) {
+      const wanted = url.searchParams.get('project') ?? '';
+      if (url.searchParams.getAll('project').length !== 1 || !visible(wanted) ||
+          ![...managedRepos(), ...store.listProjects().map(one => one.path)].includes(wanted)) {
+        return refuse(response, who, 404, 'That project is not available in this workspace.', '/projects');
+      }
+      project = wanted;
     }
     // Exact result links carry their own read context. Check the stored
     // placement against both account and instance access before using it;
@@ -1378,6 +1396,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         200,
         workPage(chromeFor(project, "work", undefined, rollup ? "all" : undefined), {
           view,
+          ...(url.searchParams.has('project') && project !== null ? { projectFilter: project } : {}),
           rows,
           truncated,
           cap: WORK_PAGE,
@@ -2538,7 +2557,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       store.sweepCoordinatorProposals(now);
       sweepChatDrafts(Date.now());
       const requestedTask = url.searchParams.get("task");
-      const focusTask = taskChatFocus(requestedTask, now, who);
+      const focusTask = taskChatFocus(requestedTask, now, who, { mintNonce: !requestContext.getStore()?.workspaceRead });
       if (focusTask !== null && requestedTask !== focusTask.id) {
         url.searchParams.set("task", focusTask.id);
         return redirect(response, `/chat?${url.searchParams.toString()}`);
@@ -2577,7 +2596,9 @@ export function createDecisionServer(options: ServeOptions): Server {
               hrefFor: one => chatResultHref(focusTask?.id ?? "", resultRun.id, one),
               returnTo: chatResultHref(focusTask?.id ?? "", resultRun.id),
               back: { href: taskChatHref(focusTask?.id ?? ""), label: "Back to chat" },
-            });
+            }) + (who.role === 'approver' && focusTask?.assignment?.state === 'ready-to-check'
+              && focusTask.assignment.receipt?.runId === resultRun.id
+              ? completionForm(focusTask.assignment.receipt.taskId, resultRun.id, focusTask.assignment.receipt.digest, who.session.csrf) : '');
       const focusProblem = requestedTask !== null && focusTask === null
         ? "That task is not available in this workspace."
         : requestedResult !== null && focusTask !== null && resultRun === null
@@ -3346,6 +3367,44 @@ export function createDecisionServer(options: ServeOptions): Server {
       s.forceSensitive === true ||
       SENSITIVE_INPUT.test(s.body) ||
       (s.chrome?.listPane !== undefined && SENSITIVE_INPUT.test(s.chrome.listPane));
+    const requestFacts = requestContext.getStore();
+    if (requestFacts?.browser && s.chrome && !s.forceSensitive && (requestFacts.workspaceRead || browserAssetsAvailable())) {
+      const path = new URL(requestFacts.returnTo, 'http://standing-orders.local');
+      path.searchParams.delete('format');
+      path.searchParams.delete('request');
+      const currentPath = path.pathname + path.search;
+      path.searchParams.set('format', 'workspace');
+      const pageHtml = s.chrome.listPane === undefined ? s.body : `<div class="workspace-native-detail"><aside>${s.chrome.listPane}</aside><section>${s.body}</section></div>`;
+      const extras = s.workspace ?? {};
+      const notices = [...(extras.notices ?? [])];
+      if (s.chrome.demo) notices.unshift('Demo workspace — synthetic tasks. External work is disabled.');
+      if (s.chrome.modeBanner) notices.push(s.chrome.modeBanner.words);
+      let crew: Pick<BrowserWorkspace, 'crew' | 'crewTruncated'> = { crew: [], crewTruncated: false };
+      try {
+        crew = browserCrewOf(store, clock(), { principal: 'operator', repos: managedRepos(), includeUnplaced: false }, { evidenceRoot, project: s.chrome.active === 'chat' ? null : s.chrome.project });
+      } catch { notices.push('Crew updates are unavailable. Open Tasks to inspect saved work.'); }
+      const conversation = extras.conversation ?? null;
+      const request = requestFacts.workspaceRequest;
+      const workspace: BrowserWorkspace = {
+        version: 1, path: currentPath, title: s.title, user: requestFacts.actor ?? '', csrf: requestFacts.csrf, sensitive,
+        refreshUrl: path.pathname + path.search,
+        receipt: conversation !== null && request && REQUEST_TOKEN.test(request)
+          ? { request, received: store.mateRequestReceipt(conversation.sessionId, request) !== null } : null,
+        projects: browserProjectsOf(s.chrome.projects ?? []), ...crew,
+        conversation, focus: extras.focus ?? null, result: extras.result ?? null,
+        catchUpHtml: extras.catchUpHtml ?? '', controlsHtml: extras.controlsHtml ?? '', notices,
+        pageHtml: extras.pageHtml === undefined ? (conversation === null ? pageHtml : null) : extras.pageHtml,
+        navigation: [...browserNavigationOf(currentPath, s.chrome.project), { label: 'Workspace tools', href: '/menu', active: false }],
+      };
+      if (requestFacts.workspaceRead) return respond(response, status, 'application/json; charset=utf-8', JSON.stringify(workspace));
+      const nonce = randomBytes(16).toString('base64');
+      // React owns the conversation and its refresh/draft lifecycle. Native
+      // guarded forms keep their current behavior after React inserts them.
+      const functional = conversation === null ? (s.functional?.script ?? '') : RESULT_REVIEW_SCRIPT;
+      const document = shell(s.title, s.body, { chrome: s.chrome, sensitive });
+      return page(response, status, browserWorkspaceDocument(document, workspace, nonce,
+        functional + beatScript(!restricted()) + MOBILE_VIEWPORT_SCRIPT), nonce, true);
+    }
     const chromeLayer = !sensitive && s.chrome !== undefined;
     const functional = s.functional?.script ?? "";
     // Sensitive pages strip the palette and keys but keep the MINIMAL beat
@@ -12020,6 +12079,8 @@ type Screen = {
   /** Render sensitive even when no password field is visible — one-time
    * secrets and judgment calls the classifier cannot see. */
   forceSensitive?: boolean;
+  /** Structured conversation; complex guarded forms stay native islands. */
+  workspace?: Partial<Pick<BrowserWorkspace, 'conversation' | 'focus' | 'result' | 'catchUpHtml' | 'controlsHtml' | 'notices' | 'pageHtml'>>;
 };
 
 function screen(
@@ -14427,6 +14488,25 @@ function matePage(chrome: Chrome, data: MateThreadRows & {
 }): Screen {
   const subscription = isSubscriptionChatProvider(data.config.provider);
   const returnTo = data.focusTask === null ? "/chat" : taskChatHref(data.focusTask.id);
+  const controlsHtml = [
+    `<details class="lead-follow"><summary>Automatic crew updates${data.follow?.enabled ? ' · On' : ''}</summary><p class="meta">${escape(data.follow?.detail ?? 'Automatic crew updates are off.')}</p><form method="post" action="/chat/mate/follow"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="return" value="${escape(returnTo)}"><input type="hidden" name="enabled" value="${data.follow?.enabled ? 'no' : 'yes'}">${data.follow?.enabled ? '' : `<p>The lead responds when results or decisions arrive. Uses this conversation’s ${subscription ? 'membership usage, with no dollar maximum' : 'remaining spend allowance'} and daily turn limit. Existing task approvals still apply.</p>`}<button type="submit" class="quiet">${data.follow?.enabled ? 'Pause updates' : 'Enable updates'}</button></form></details>`,
+    `<details class="chat-limits chat-session-details"><summary>Conversation details<span class="meta">${escape(subscription ? "membership" : data.config.provider)}</span></summary>`,
+    `<div class="chat-budget"><span class="mono">${escape(data.config.provider)} · ${escape(data.config.model)}</span><span>${data.turnsToday} / ${data.config.dailyTurns} turns today</span>` +
+      (subscription
+        ? `<span>membership login · no dollar ceiling</span>`
+        : `<span>this conversation: ${chatMoney(data.session.spentMicrousd)} of ${chatMoney(data.session.ceilingMicrousd)}</span>` +
+          `<span>this week ${chatMoney(data.weeklySpent)} of ${chatMoney(data.config.weeklyCeilingMicrousd)}</span>`) +
+      `</div>`,
+    `<p class="meta">Started ${escape(data.session.mintedAt.slice(0, 16).replace("T", " "))}Z. It stays open until you end it; only bounded recent context is sent to the model.</p>`,
+    `<form method="post" action="/chat/mate/end" class="inline"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="return" value="${escape(returnTo)}"><button type="submit" class="quiet">end the conversation and forget the thread</button></form>`,
+    data.recent.length === 0
+      ? ""
+      : `<p class="meta">recent turns: ${data.recent
+          .map(turn => `<span class="mono">#${turn.id}</span> ${escape(turn.state)}${turn.failureReason === null ? "" : ` · ${escape(turn.failureReason)}`} · ${subscription ? "membership" : chatMoney(turn.settledMicrousd ?? turn.reservedMicrousd)}`)
+          .join(" · ")}</p>`,
+    `<p class="meta">Chat settings return to this page once the conversation ends.</p>`,
+    `</details>`,
+  ].join("\n");
   const conversation: string[] = [
     data.focusTask === null
       ? chatHeading("", data.projects.length)
@@ -14466,28 +14546,36 @@ function matePage(chrome: Chrome, data: MateThreadRows & {
     // or sign-in changed under this page; it reloads on the reader's act.
     `<p class="meta composer-hint" id="chat-reconnect" hidden><button type="button" class="quiet">Reconnect</button></p>`,
     mateAfterComposerHtml(data),
-    `<details class="lead-follow"><summary>Automatic crew updates${data.follow?.enabled ? ' · On' : ''}</summary><p class="meta">${escape(data.follow?.detail ?? 'Automatic crew updates are off.')}</p><form method="post" action="/chat/mate/follow"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="return" value="${escape(returnTo)}"><input type="hidden" name="enabled" value="${data.follow?.enabled ? 'no' : 'yes'}">${data.follow?.enabled ? '' : `<p>The lead responds when results or decisions arrive. Uses this conversation’s ${subscription ? 'membership usage, with no dollar maximum' : 'remaining spend allowance'} and daily turn limit. Existing task approvals still apply.</p>`}<button type="submit" class="quiet">${data.follow?.enabled ? 'Pause updates' : 'Enable updates'}</button></form></details>`,
-    `<details class="chat-limits chat-session-details"><summary>Conversation details<span class="meta">${escape(subscription ? "membership" : data.config.provider)}</span></summary>`,
-    `<div class="chat-budget"><span class="mono">${escape(data.config.provider)} · ${escape(data.config.model)}</span><span>${data.turnsToday} / ${data.config.dailyTurns} turns today</span>` +
-      (subscription
-        ? `<span>membership login · no dollar ceiling</span>`
-        : `<span>this conversation: ${chatMoney(data.session.spentMicrousd)} of ${chatMoney(data.session.ceilingMicrousd)}</span>` +
-          `<span>this week ${chatMoney(data.weeklySpent)} of ${chatMoney(data.config.weeklyCeilingMicrousd)}</span>`) +
-      `</div>`,
-    `<p class="meta">Started ${escape(data.session.mintedAt.slice(0, 16).replace("T", " "))}Z. It stays open until you end it; only bounded recent context is sent to the model.</p>`,
-    `<form method="post" action="/chat/mate/end" class="inline"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="return" value="${escape(returnTo)}"><button type="submit" class="quiet">end the conversation and forget the thread</button></form>`,
-    data.recent.length === 0
-      ? ""
-      : `<p class="meta">recent turns: ${data.recent
-          .map(turn => `<span class="mono">#${turn.id}</span> ${escape(turn.state)}${turn.failureReason === null ? "" : ` · ${escape(turn.failureReason)}`} · ${subscription ? "membership" : chatMoney(turn.settledMicrousd ?? turn.reservedMicrousd)}`)
-          .join(" · ")}</p>`,
-    `<p class="meta">Chat settings return to this page once the conversation ends.</p>`,
-    `</details>`,
+    controlsHtml,
+
   );
   return screen(
     "chat",
     chatWorkspace(conversation.join("\n"), data.projects, data.csrf, false, data.focusTask, data.resultPanel ?? null),
-    { chrome, functional: { script: CHAT_CONTINUITY_SCRIPT + CHAT_UI_SCRIPT + (data.focusTask === null ? "" : RESULT_REVIEW_SCRIPT), fetches: true } },
+    { chrome, functional: { script: CHAT_CONTINUITY_SCRIPT + CHAT_UI_SCRIPT + (data.focusTask === null ? "" : RESULT_REVIEW_SCRIPT), fetches: true },
+      workspace: {
+        conversation: {
+          sessionId: data.session.id, user: data.session.approver, version: mateChatVersion(data),
+          messages: data.messages.map(message => ({
+            id: message.id, role: message.role, text: message.text,
+            html: message.role === 'operator' ? `<p>${escape(message.text)}</p>` : renderChatText(message.text),
+            activity: message.activity, createdAt: message.createdAt,
+            cardsHtml: message.turn === null ? '' : data.proposals.filter(one => one.turn === message.turn)
+              .map(one => mateProposalCard(one, data.csrf, data.pending !== null, data.decisions.get(typeof one.payload['decision'] === 'number' ? one.payload['decision'] : -1) ?? null, data.focusTask === null ? null : returnTo)).join(''),
+          })),
+          pendingTurnId: data.pending?.id ?? null, requestId: randomBytes(16).toString('hex'), maxChars: MATE_MESSAGE_MAX_CHARS,
+          taskId: data.focusTask?.id ?? null, resultRunId: data.resultRunId ?? null,
+        },
+        focus: data.focusTask === null ? null : { id: data.focusTask.id, title: data.focusTask.title,
+          html: taskChatLiveRegion(data.focusTask, data.csrf, requestContext.getStore()?.workspaceRead === true, data.pending !== null) },
+        result: data.resultPanel && data.resultRunId != null ? { runId: data.resultRunId, html: data.resultPanel } : null,
+        catchUpHtml: (data.focusTask === null ? data.catchUp ?? '' : '')
+          + coordinatorProposalsSection(data.coordinatorProposals, data.decisions, data.csrf, data.now, true, data.focusTask === null ? null : returnTo)
+          + data.latched.map(turn => `<p class="problem">Chat is paused because usage is unconfirmed. <a href="/chat/ack/${turn.id}">Inspect turn #${turn.id}</a>.</p>`).join(''),
+        controlsHtml,
+        notices: data.problem === null ? [] : [data.problem], pageHtml: null,
+      },
+    },
   );
 }
 
@@ -14956,6 +15044,7 @@ function workPage(
   chrome: Chrome,
   data: {
     view: WorkView;
+    projectFilter?: string;
     rows: readonly WorkRow[];
     /** The probe found more tasks in view than the page holds. */
     truncated: boolean;
@@ -14971,11 +15060,17 @@ function workPage(
   // Honest counts (review fixes, finding 1): a count speaks for the
   // bounded page only, and All says "200+" when the probe found more.
   const countWords = (key: WorkView): string => (data.truncated && key === "all" ? `${data.cap}+` : String(counts[key]));
+  const viewHref = (view: WorkView): string => {
+    const query = new URLSearchParams();
+    if (data.projectFilter !== undefined) query.set('project', data.projectFilter);
+    if (view !== 'all') query.set('view', view);
+    return `/work${query.size ? `?${query}` : ''}`;
+  };
   const tabs =
     `<nav class="work-views" aria-label="work views"${data.truncated ? ` data-work-bound="${data.cap}"` : ""}>` +
     WORK_VIEWS.map(
       one =>
-        `<a href="${one.key === "all" ? "/work" : `/work?view=${one.key}`}"${one.key === data.view ? ' class="active" aria-current="page"' : ""} title="${escape(data.truncated ? (one.key === "all" ? `More than ${data.cap} tasks are in view; the newest ${data.cap} are listed.` : `Counted among the newest ${data.cap} tasks in view.`) : one.hint)}">` +
+        `<a href="${escape(viewHref(one.key))}"${one.key === data.view ? ' class="active" aria-current="page"' : ""} title="${escape(data.truncated ? (one.key === "all" ? `More than ${data.cap} tasks are in view; the newest ${data.cap} are listed.` : `Counted among the newest ${data.cap} tasks in view.`) : one.hint)}">` +
         `${one.label}<span class="count">${countWords(one.key)}</span></a>`,
     ).join("") +
     `</nav>`;
@@ -15021,7 +15116,7 @@ function workPage(
       ? `<div class="work-empty" data-work-empty="${data.view}"${data.truncated ? ` data-work-bound="${data.cap}"` : ""}><p>${escape(emptyWords)}</p>` +
         (data.view === "all"
           ? `<p class="row"><a class="button-link" href="${chrome.chat === true ? "/chat" : "/tasks/new"}">${chrome.chat === true ? "Start in chat" : "Add a task"}</a> <a href="/tasks/new">Use a form →</a></p>`
-          : `<p class="row"><a href="/work">See all work →</a></p>`) +
+          : `<p class="row"><a href="${escape(viewHref('all'))}">See all work →</a></p>`) +
         `</div>`
       : `<div class="work-list">${shown.map(rowHtml).join("\n")}</div>`;
   const bound = data.truncated
@@ -16083,7 +16178,7 @@ function projectsPage(
  * to. AsyncLocalStorage follows the request's own async chain, so two
  * interleaved requests never read each other's token.
  */
-const requestContext = new AsyncLocalStorage<{ csrf: string; returnTo: string; actor?: string; createdTask?: string }>();
+const requestContext = new AsyncLocalStorage<{ csrf: string; returnTo: string; actor?: string; createdTask?: string; browser?: boolean; workspaceRead?: boolean; workspaceRequest?: string | null }>();
 
 /** A same-site path or "/": never a scheme, a host, or a protocol-relative road. */
 function safeReturn(raw: string | null | undefined): string {
@@ -18667,7 +18762,7 @@ function reviewCockpitDetail(view: ReviewCockpitView, csrf: string, noted: boole
   );
 
   if (assignment?.state === "ready-to-check" && assignment.receipt !== null && canRetryReview && csrf !== "") {
-    parts.push(`<form method="post" action="${taskHref(view.taskId)}/complete" class="card result-complete"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="receipt" value="${assignment.receipt.digest}"><input type="hidden" name="run" value="${run.id}"><p class="meta">Mark this saved result complete after inspecting its work and checks. This does not change check results, approve execution, publish, or deploy.</p><button type="submit" style="min-height:44px">Mark complete</button></form>`);
+    parts.push(completionForm(view.taskId, run.id, assignment.receipt.digest, csrf));
   }
 
   if (view.notes.length > 0) {
@@ -18679,6 +18774,10 @@ function reviewCockpitDetail(view: ReviewCockpitView, csrf: string, noted: boole
   }
 
   return `<section class="cockpit-detail">${parts.join("\n")}</section>`;
+}
+
+function completionForm(taskId: string, runId: number, digest: string, csrf: string): string {
+  return `<form method="post" action="${taskHref(taskId)}/complete" class="card result-complete"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="receipt" value="${escape(digest)}"><input type="hidden" name="run" value="${runId}"><p class="meta">After inspecting the work, mark this result complete. Checks stay unchanged; nothing is published or deployed.</p><button type="submit" style="min-height:44px">Mark complete</button></form>`;
 }
 
 /** Exactly one primary road per result, chosen from its state; the

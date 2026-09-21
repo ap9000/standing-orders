@@ -6,10 +6,10 @@
     "doc": "docs"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && node scripts/postbuild.mjs",
+    "build": "tsc -p tsconfig.build.json && node scripts/browser-build.mjs && node scripts/postbuild.mjs",
     "test": "vitest run",
     "dev": "tsx src/cli.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.browser.json",
     "certify:provider": "npm run build && node scripts/provider-canary.mjs",
     "certify:recovery": "npm run build && node scripts/recovery-canary.mjs",
     "certify:crash": "npm run build && node scripts/crash-canary.mjs",
@@ -21,7 +21,8 @@
     "build:desktop": "node scripts/build-desktop.mjs",
     "certify:restart": "npm run build && node scripts/restart-certification.mjs",
     "certify:launchd": "npm run build && node scripts/launchd-certification.mjs",
-    "test:native-containment": "vitest run src/containment-native.test.ts src/containment.test.ts"
+    "test:native-containment": "vitest run src/containment-native.test.ts src/containment.test.ts",
+    "build:browser": "node scripts/browser-build.mjs"
   },
   "repository": {
     "type": "git",
@@ -58,6 +59,9 @@
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "esbuild": "0.28.2",
     "happy-dom": "^20.12.0",
     "tsx": "^4.23.12",
     "typescript": "^7.0.2",
@@ -75,12 +79,18 @@
     "scripts/proof-preflight.mjs",
     "scripts/restart-certification.mjs",
     "scripts/launchd-certification.mjs",
-    "scripts/fixtures/restart-service.mjs"
+    "scripts/fixtures/restart-service.mjs",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "dependencies": {
+    "@radix-ui/react-dialog": "1.1.23",
+    "@radix-ui/react-slot": "1.3.3",
     "@slack/socket-mode": "3.0.1",
     "discord.js": "14.27.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
     "typescript-parser": "npm:typescript@6.0.3",
+    "use-stick-to-bottom": "1.1.6",
     "yaml": "^2.9.1"
   }
 }
