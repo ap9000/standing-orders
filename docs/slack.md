@@ -6,6 +6,8 @@ Choose **Create pairing code**, then send the displayed message to the app in a 
 
 Ask for tasks, project skills, knowledge, MCP configuration, status, result evidence, or a proposed change. Slack uses the same saved assistant session and action records as the console. It uses the configured membership login; it does not grant API spending authority. An incompatible existing session must be ended in the console before Slack can start one.
 
+The shared assistant can read a current brief from the local database and search bounded source excerpts or advisory import impact in your enrolled projects. These reads use the same tools as Telegram and the console; source search works without a refreshed index. Index refresh remains a local CLI action. The [shared tool matrix](TELEGRAM_ACTION_PARITY_2026-09-16.md) records coverage and gaps, including the new reads' unverified dedicated channel journeys.
+
 - Ordinary changes have **Confirm** and **Dismiss** buttons. Irreversible decisions require a second confirmation.
 - Password approvals, cancellation, acceptance, and other protected or long actions open the existing signed-in review screen. Their full terms remain available before confirmation.
 - Result screenshots use their original verified bytes. Files are checked again before upload and sharing. A changed artifact is reported instead of sent.

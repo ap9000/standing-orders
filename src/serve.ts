@@ -1045,7 +1045,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       if(action&&proposal&&store.getMateThread(proposal.thread)?.approver===who.name&&visible(action.repo)&&store.accountCanAccess(who.name,action.repo))return true;
       refuse(response,who,404,'No such action in your projects.','/projects');return false;
     }
-    const read = new Set(["/settings/skills", "/settings/knowledge", "/settings", "/settings/learning", "/recipes", "/recipes/run", "/recipes/start", "/recipes/new", "/recipes/edit", "/recipes/from-task", "/recipes/preview", "/recipes/export", "/", "/work", "/projects", "/people", "/ledger", "/next", "/board", "/tasks", "/tasks/new", "/runs", "/review", "/done", "/routines", "/menu"]);
+    const read = new Set(["/settings/skills", "/settings/knowledge", "/settings", "/settings/learning", "/recipes", "/recipes/run", "/recipes/start", "/recipes/new", "/recipes/edit", "/recipes/from-task", "/recipes/preview", "/recipes/export", "/", "/inbox", "/work", "/projects", "/people", "/ledger", "/next", "/board", "/tasks", "/tasks/new", "/runs", "/review", "/done", "/routines", "/menu"]);
     const write = new Set(["/settings/skills/import", "/settings/skills/change", "/settings/skills/revise", "/settings/knowledge/change", "/settings/knowledge/refresh", "/settings/learning/change", "/recipes/prepare", "/recipes/preview", "/recipes/import", "/recipes/save", "/recipes/launch", "/projects/select", "/tasks/add", "/routines/add"]);
     const task = matchTaskPath(path, request.method === "GET" ? "" : "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|next|reopen|steer|accept-proof|accept-revision|reject-revision|route|retry-review|complete|stop|resume-arm|resume)$");
     const resource = request.method === "GET"

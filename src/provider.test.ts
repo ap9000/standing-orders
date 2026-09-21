@@ -914,11 +914,15 @@ describe("the historical Telegram delivery manifest", () => {
   });
 });
 
-test("provider certification refuses unsupported reviewers and incomplete mixed routes before dispatch", () => {
+test("provider certification rejects retired review flags and invalid routes before dispatch", () => {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   for (const [args, message] of [
-    [["--provider", "gemini", "--model", "gemini-test", "--review"], "Gemini review is unsupported"],
-    [["--provider", "claude", "--model", "test", "--review-provider", "codex"], "must be supplied together"],
+    [["--provider", "gemini", "--model", "gemini-test", "--review"], "unknown option --review"],
+    [["--provider", "claude", "--model", "test", "--review-provider", "codex"], "unknown option --review-provider"],
+    [["--provider", "claude", "--model", "test", "--review-model", "test"], "unknown option --review-model"],
+    [["--provider", "unsupported", "--model", "test"], "--provider is claude, codex, gemini or openrouter"],
+    [["--provider", "claude"], "--model is required because task approvals seal exact routing"],
+    [["--provider"], "--provider needs a value"],
   ] as const) {
     const check = spawnSync(process.execPath, ["scripts/provider-canary.mjs", ...args], { cwd: root, encoding: "utf8", timeout: 10_000 });
     expect(check.error).toBeUndefined();

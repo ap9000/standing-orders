@@ -214,6 +214,61 @@ describe("the builder's gates", () => {
     expect(store.handle.prepare("SELECT note FROM run_note WHERE run = ?").all(req.runId as number).some(row => String(row["note"]).includes(`Prepared candidate ${candidate} checked out; no agent ran.`))).toBe(true);
   });
 
+  test.each(['clean', 'tracked edit', 'untracked addition'] as const)("prepared setup reads the candidate manifests, preserves its base, and rejects setup drift: %s", async drift => {
+    const { execFileSync } = await import('node:child_process');
+    const { mkdirSync, readFileSync } = await import('node:fs');
+    const { run } = await import('./exec.js');
+    const sh = (...args: string[]) => execFileSync('git', ['-C', wt, ...args], { encoding: 'utf8', env: {
+      ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x',
+    } }).trim();
+    sh('init', '-q', '-b', 'main'); sh('config', 'user.name', 't'); sh('config', 'user.email', 't@x');
+    writeSync2(join2(wt, '.gitignore'), '.evidence/\nnode_modules/\n');
+    writeSync2(join2(wt, 'package.json'), '{"dependencies":{"base":"1"}}\n');
+    writeSync2(join2(wt, 'package-lock.json'), 'base lock\n');
+    sh('add', '.'); sh('commit', '-q', '-m', 'base'); const base = sh('rev-parse', 'HEAD');
+    sh('checkout', '-q', '-b', 'prepared');
+    const manifest = '{"dependencies":{"candidate-only":"2"}}\n';
+    writeSync2(join2(wt, 'package.json'), manifest); writeSync2(join2(wt, 'package-lock.json'), 'candidate lock\n');
+    sh('add', '.'); sh('commit', '-q', '-m', 'candidate'); const candidate = sh('rev-parse', 'HEAD');
+    sh('checkout', '-q', '-b', 'feat/a', base);
+    propose(store, { taskId: 't-1', goal: 'Check the exact prepared commit', candidate, now: T0 });
+    approve(store, 't-1', 'alex', T0, store.getScope('t-1')!.digest, approverToken); claimIt();
+    const setup = store.setWorktreeSetup({ repo: REPO, command: 'npm ci', timeoutMs: 60_000, approvedBy: 'alex' }, T0);
+    // A cache hit on the base cannot establish dependencies for this candidate.
+    store.stampWorktreeSetup(wt, setup.digest);
+    store.setVerifyCommand({ repo: REPO, command: 'candidate-check', timeoutMs: 5_000, approvedBy: 'alex' }, T0);
+    let setups = 0, checks = 0;
+    const actualGit: Runner = async (file, args, options) => {
+      if (options?.cwd === REPO && args.includes('symbolic-ref')) return { ...OK, stdout: 'main\n' };
+      return run(file, args, { ...options, cwd: options?.cwd === REPO ? wt : options?.cwd });
+    };
+    const req = request({ git: actualGit, setup: (async () => {
+      setups++;
+      expect(readFileSync(join2(wt, 'package.json'), 'utf8')).toBe(manifest);
+      expect(readFileSync(join2(wt, 'package-lock.json'), 'utf8')).toBe('candidate lock\n');
+      expect(sh('rev-parse', 'HEAD')).toBe(base);
+      mkdirSync(join2(wt, 'node_modules'), { recursive: true }); writeSync2(join2(wt, 'node_modules', 'candidate-only'), 'installed');
+      if (drift === 'tracked edit') writeSync2(join2(wt, 'package.json'), 'setup rewrote the manifest\n');
+      if (drift === 'untracked addition') writeSync2(join2(wt, 'setup-extra.js'), 'unapproved addition\n');
+      return OK;
+    }) as Runner, verify: (async () => {
+      checks++;
+      expect(readFileSync(join2(wt, 'node_modules', 'candidate-only'), 'utf8')).toBe('installed');
+      return { ...OK, stdout: 'candidate dependencies present' };
+    }) as Runner });
+    const result = await build(store, req);
+    expect(setups).toBe(1); expect(agentCalls).toHaveLength(0);
+    expect(store.getRun(req.runId)?.baseRevision).toBe(base);
+    expect(store.getScope('t-1')?.candidate).toBe(candidate);
+    if (drift === 'clean') {
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, committed: true });
+      expect(checks).toBe(1); expect(sh('rev-parse', 'HEAD^{tree}')).toBe(sh('rev-parse', `${candidate}^{tree}`));
+    } else {
+      expect(result).toMatchObject({ ok: false, reason: drift === 'tracked edit' ? 'setup' : 'commit-failure' });
+      expect(checks).toBe(0); expect(sh('rev-parse', 'HEAD')).toBe(base);
+    }
+  });
+
   test("a rerun (task regate) dispatches through the builder with no agent call and reruns the check on the last head (v70)", async () => {
     const { regateTask } = await import("./dispose.js");
     approveScope();
