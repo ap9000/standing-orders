@@ -1,0 +1,27 @@
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-process-tracking
+
+
+> standing-orders@0.4.3 build
+> tsc -p tsconfig.build.json && node scripts/browser-build.mjs && node scripts/postbuild.mjs
+
+
+  dist/browser/workspace.js   292.5kb
+  dist/browser/workspace.css   21.1kb
+
+⚡ Done in 54ms
+Build source: unavailable (no clean Git checkout)
+ ✓ src/restart-certification.test.ts > restart certification > c6: the baseline records boot, runtime, service, containment and live custody — and never a credential 404ms
+ ✓ src/restart-certification.test.ts > restart certification > c6: after a VERIFIED boot change the old boot's custody settles by the controller's own rules, and a fresh heartbeat plus a running service pass 313ms
+ ✓ src/restart-certification.test.ts > restart certification > c6: the same boot is reported as such — a reboot expectation fails honestly, a login expectation passes — and a live pid keeps the stop pending, unforced 363ms
+ ✓ src/restart-certification.test.ts > restart certification > c6: a loaded-but-not-running service, a stale heartbeat, a missing runtime and an unknown boot are each named, never glossed 241ms
+ ✓ src/restart-certification.test.ts > restart certification > a different database, changed runtime, missing stop, and incomplete completion task each refuse certification 372ms
+(node:47649) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/restart-certification.test.ts > restart certification > c6: the installed definition is read back from the unit on disk for the certificate's service view 119ms
+
+ Test Files  1 passed (1)
+      Tests  6 passed (6)
+   Start at  22:19:19
+   Duration  4.78s (transform 947ms, setup 17ms, import 1.11s, tests 1.81s, environment 0ms)
+
