@@ -56,7 +56,8 @@ describe("database assignment catch-up", () => {
     const before = read();
     expect(before.assignments.map(one => one.state)).toEqual(["needs-decision", "ready-to-check", "complete"]);
     expect(before.assignments[0]).toMatchObject({ goal: "Deliver question safely", outcome: "Saved outcome for question", decisions: [{ state: "open", overdue: true, question: "Should retries keep the original key?" }] });
-    expect(before.assignments[0]?.nextAction).toEqual(assignmentOf(store, "question", NOW, access, directory)?.primaryAction);
+    expect(before.assignments[0]?.nextAction).toMatchObject({ code: "answer-decision", label: "Answer question", access: "proposal-only",
+      target: { taskId: "question", decisionId: before.assignments[0]!.decisions[0]!.id } });
     expect(before.assignments[0]?.nextAction?.access).not.toBe("operator-control");
     expect(before.projects[0]?.knowledge).toMatchObject({ status: "stored", revision: 1, instructions: "Keep labels short.", sources: [{ id: "source-1", sourceRevision: "c".repeat(40) }] });
     expect(JSON.stringify(before)).not.toContain("Full reference is read separately.");
@@ -65,7 +66,7 @@ describe("database assignment catch-up", () => {
     expect(read()).toEqual(before);
   });
 
-  test("project admission precedes assignment and knowledge hydration", () => {
+  test("project admission precedes selected assignment and knowledge reads", () => {
     finished("mine"); finished("private-sentinel", { repo: FOREIGN }); knowledge(REPO); knowledge(FOREIGN, 1, "PRIVATE KNOWLEDGE SENTINEL");
     const family = vi.spyOn(store, "taskFamilyOf");
     const result = read();
@@ -122,6 +123,21 @@ describe("database assignment catch-up", () => {
     expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(16_000);
   });
 
+  test("selected family decisions include admitted revisions but reject an unrelated revision brief", () => {
+    const parentRun = finished("parent", { question: true });
+    const childRun = finished("child", { question: true });
+    const unrelated = finished("unrelated");
+    const brief = (run: number) => store.saveArtifact({ run, kind: "revision-brief", key: `brief-${run}`,
+      bytesOriginal: 2, bytesStored: 2, truncated: false, sha256: hash("{}"), capture: "fixture" }, NOW);
+    store.markRevision(store.lookupRef("child")!.id, "parent", brief(parentRun));
+    finished("invalid", { question: true });
+    store.markRevision(store.lookupRef("invalid")!.id, "parent", brief(unrelated));
+    const parent = read().assignments.find(one => one.rootId === "parent")!;
+    expect(parent.taskId).toBe("child");
+    expect(parent.decisions.map(one => one.runId).sort()).toEqual([parentRun, childRun]);
+    expect(parent.nextAction?.target).toMatchObject({ taskId: "child", runId: childRun });
+  });
+
   test("old completion is omitted, but handling an old result today is recent", () => {
     const old = new Date(NOW.getTime() - 10 * 24 * 60 * 60_000);
     finished("old", { at: old }); complete("old", old);
@@ -138,9 +154,21 @@ describe("database assignment catch-up", () => {
     expect(read().assignments[0]).toMatchObject({ taskId: "continuing", runId: live, resultRunId, outcome: "Saved outcome for continuing" });
   });
 
-  test("without evidence root the brief labels checks uninspected and returns no saved artifact bytes", () => {
+  test("catch-up uses saved index metadata without artifact, process or whole-family inspection", () => {
+    finished("ready"); finished("question", { question: true }); knowledge();
+    for (const method of ["taskFamilyOf", "taskFamiliesAdmitted", "artifactsFor", "getArtifact", "stopQuiescenceProblem"] as const) {
+      vi.spyOn(store, method).mockImplementation(() => { throw Error(`Catch-up called ${method}`); });
+    }
+    const result = read();
+    expect(result.assignments.map(one => one.taskId)).toEqual(["question", "ready"]);
+    expect(result.assignments.every(one => one.checks?.status === "not-read")).toBe(true);
+    expect(result.omissions.notes.join(" ")).toContain("recorded database metadata");
+    expect(result.projects[0]?.knowledge.status).toBe("stored");
+  });
+
+  test.each([false, true])("brief labels checks uninspected and returns no saved artifact bytes even with an evidence root: %s", supplied => {
     finished("ready");
-    const result = assignmentCatchUp(store, NOW, access, {});
+    const result = assignmentCatchUp(store, NOW, access, {}, supplied ? directory : undefined);
     expect(result.assignments[0]?.checks).toMatchObject({ status: "not-read", exitCode: null });
     expect(result.omissions.notes.join(" ")).toContain("availability was not read");
     expect(result.assignments[0]).not.toHaveProperty("savedContext");

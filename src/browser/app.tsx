@@ -9,7 +9,7 @@ import {
 } from "./ui/index.js";
 import {
   carryDraft, editDraft, emptyDraft, isWorkspace, readWorkspace, receiveDraft, rejectDraft,
-  restoreDraft, sameConversation, saveDraft, sendMessage, submitDraft, WorkspaceAuthError,
+  restoreDraft, sameConversation, saveDraft, sendMessage, submitDraft, workspacePollDelay, WorkspaceAuthError,
 } from "./workspace-client.js";
 import type { ChatDraft, DraftScope, DraftStorage } from "./workspace-client.js";
 import "./workspace.css";
@@ -52,7 +52,9 @@ function scopeOf(workspace: BrowserWorkspace): DraftScope | null {
   return workspace.conversation ? { user: workspace.user, session: workspace.conversation.sessionId, task: workspace.conversation.taskId } : null;
 }
 
-function useWorkspace(initial: BrowserWorkspace) {
+function canRefreshWorkspace(): boolean { return !document.hidden && navigator.onLine !== false; }
+
+export function useWorkspace(initial: BrowserWorkspace) {
   const [workspace, setWorkspace] = useState(initial);
   const scope = scopeOf(initial);
   const [draft, setDraft] = useState<ChatDraft>(() => initial.conversation && scope
@@ -63,9 +65,13 @@ function useWorkspace(initial: BrowserWorkspace) {
   const [sending, setSending] = useState(false);
   const [stale, setStale] = useState(false);
   const [offline, setOffline] = useState(() => navigator.onLine === false);
-  const state = useRef({ workspace, draft, stale, sending });
-  state.current = { workspace, draft, stale, sending };
+  const state = useRef({ workspace, draft, stale, sending, notice });
+  state.current = { workspace, draft, stale, sending, notice };
   const polling = useRef(false);
+  const refreshQueued = useRef(false);
+  const refreshTimer = useRef<number | undefined>(undefined);
+  const refreshTag = useRef<string | null>(null);
+  const pollDelay = useRef(5_000);
   const mounted = useRef(true);
   const sendLatch = useRef(false);
 
@@ -76,13 +82,28 @@ function useWorkspace(initial: BrowserWorkspace) {
     if (owner) setStorageAvailable(saveDraft(browserStorage(), owner, next));
   }, [initial]);
 
-  const check = useCallback(async () => {
-    if (polling.current || state.current.stale || !initial.conversation || document.hidden) return;
+  const check = useCallback(async (force = true): Promise<void> => {
+    if (!mounted.current || state.current.stale || !initial.conversation || !canRefreshWorkspace()) return;
+    // A send or explicit refresh during a read must run immediately afterward,
+    // rather than lose its receipt check or start an overlapping request.
+    if (polling.current) { if (force) refreshQueued.current = true; return; }
+    refreshQueued.current = false;
+    clearTimeout(refreshTimer.current);
+    if (force) pollDelay.current = 5_000;
     polling.current = true;
     const asked = state.current.draft.pending?.request ?? null;
+    let unchanged = false;
     try {
-      const next = await readWorkspace(state.current.workspace, asked);
+      const read = await readWorkspace(state.current.workspace, asked, fetch, { etag: refreshTag.current, force });
       if (!mounted.current) return;
+      // A receipt query is a different representation from the ordinary view.
+      refreshTag.current = asked ? null : read.etag;
+      if (read.kind === "unchanged") {
+        unchanged = true;
+        if (!state.current.draft.pending && state.current.notice) setNotice("");
+        return;
+      }
+      const next = read.workspace;
       if (!sameConversation(initial, next)) {
         state.current.stale = true;
         setStale(true);
@@ -98,23 +119,34 @@ function useWorkspace(initial: BrowserWorkspace) {
       if (!mounted.current) return;
       if (error instanceof WorkspaceAuthError) { state.current.stale = true; setStale(true); }
       setNotice(error instanceof Error ? error.message : "Updates are unavailable. Your work is still saved.");
-    } finally { polling.current = false; }
+    } finally {
+      polling.current = false;
+      if (mounted.current && !state.current.stale && canRefreshWorkspace()) {
+        if (refreshQueued.current) {
+          refreshQueued.current = false;
+          void check(true);
+        } else {
+          const busy = state.current.draft.pending !== null || state.current.workspace.conversation?.pendingTurnId != null || sendLatch.current;
+          pollDelay.current = workspacePollDelay(pollDelay.current, unchanged, busy);
+          refreshTimer.current = window.setTimeout(() => { void check(false); }, pollDelay.current);
+        }
+      }
+    }
   }, [initial, updateDraft]);
 
   useEffect(() => {
     mounted.current = true;
     if (!initial.conversation) return;
     void check();
-    const timer = window.setInterval(() => { void check(); }, 5_000);
-    const visible = () => { if (!document.hidden) void check(); };
+    const visible = () => { if (!document.hidden) void check(true); else clearTimeout(refreshTimer.current); };
     const online = () => { setOffline(false); void check(); };
-    const offlineNow = () => setOffline(true);
+    const offlineNow = () => { setOffline(true); clearTimeout(refreshTimer.current); };
     document.addEventListener("visibilitychange", visible);
     window.addEventListener("online", online);
     window.addEventListener("offline", offlineNow);
     return () => {
       mounted.current = false;
-      clearInterval(timer);
+      clearTimeout(refreshTimer.current);
       document.removeEventListener("visibilitychange", visible);
       window.removeEventListener("online", online);
       window.removeEventListener("offline", offlineNow);
@@ -404,7 +436,7 @@ export function WorkspaceApp({ initial }: { initial: BrowserWorkspace }) {
     <a href="#workspace-main" className="so-skip-link">Skip to content</a>
     <aside className="so-sidebar"><Navigation workspace={workspace} /></aside>
     <div className={`so-main-column${isChat ? " so-main-column--chat" : ""}`}>
-      <header className="so-workspace-header"><PhoneNavigation workspace={workspace} /><h1>{isChat ? "Lead" : workspace.title === "work" ? "Tasks" : workspace.title}</h1>
+      <header className="so-workspace-header"><PhoneNavigation workspace={workspace} /><h1>{isChat ? "Lead" : workspace.title === "work" ? "Tasks" : workspace.title.startsWith("task · ") ? "Task" : workspace.title}</h1>
         {workspace.focus && isChat && <span className="so-focus-label" title={workspace.focus.title}>{workspace.focus.title}</span>}
         <CommandMenu workspace={workspace} />
         {isChat && <Button variant="secondary" size="sm" className="so-phone-work-button" onClick={() => setPhoneView("work")}>{hasWork ? "Open work" : "Crew"}</Button>}

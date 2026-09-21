@@ -1,0 +1,70 @@
+
+ RUN  v4.1.10 <candidate checkout>
+
+(node:25770) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+····························································································································································································································································································································································(node:13773) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·······························································································(node:35782) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+······················(node:41987) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+···········(node:47737) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+······························(node:65826) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+···············(node:71675) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+···········(node:75721) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+········(node:78870) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·-··(node:81669) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+---------------------------------------------------------------------------------------------------------------·····(node:83959) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+···(node:86039) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·············(node:87535) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+············(node:89755) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+······················(node:92978) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+···
+
+ Test Files  17 passed (17)
+      Tests  601 passed | 112 skipped (713)
+   Start at  23:25:43
+   Duration  146.94s (transform 3.01s, setup 167ms, import 8.38s, tests 136.28s, environment 287ms)
+
+Follow-up for the CI cache-test timeout: real cache eviction tested directly; all six HTTP behavior tests retained.
+
+ RUN  v4.1.10 <candidate checkout>
+
+(node:65135) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+····(node:65134) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·········
+
+ Test Files  2 passed (2)
+      Tests  13 passed (13)
+   Start at  23:41:47
+   Duration  3.73s (transform 2.67s, setup 52ms, import 3.19s, tests 2.82s, environment 0ms)
+
+
+Follow-up for Windows setup timeouts: batch fixture writes; file-backed reopen and rollback assertions unchanged.
+
+ RUN  v4.1.10 <candidate checkout>
+
+········(node:28012) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+·(node:29165) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+······
+
+ Test Files  2 passed (2)
+      Tests  15 passed (15)
+   Start at  23:43:53
+   Duration  3.54s (transform 715ms, setup 32ms, import 962ms, tests 2.35s, environment 0ms)

@@ -8971,7 +8971,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
       window.document.body.innerHTML = filtered.pageHtml!;
       expect(window.document.querySelector('[data-work-empty="running"]')).not.toBeNull();
       const allWork = window.document.querySelector<HTMLAnchorElement>('[data-work-empty="running"] a')!;
-      expect(allWork.textContent).toBe('See all work →');
+      expect(allWork.textContent).toBe('See all tasks →');
       const allPath = new URL(allWork.getAttribute('href')!, base);
       expect(allPath.pathname).toBe('/work');
       expect(allPath.searchParams.get('project')).toBe(repoDir);
@@ -13260,10 +13260,10 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     store.finishRun(run, { outcome: "parked", now: earlier });
     const cookie = await login();
     const work = await page(cookie, "/work");
-    expect(work).toContain(`class="work-action" href="/d/${decision}">Answer question →</a>`);
+    expect(work).toContain(`class="work-action" data-primary-action href="/d/${decision}">Answer question →</a>`);
     expect(work).toContain('data-work-status="assignment-needs-decision"');
-    expect(work).toContain('data-work-diagnostic="no-worker-online"');
     const task = await page(cookie, "/t/t-question");
+    expect(task).toContain('data-work-diagnostic="no-worker-online"');
     expect(task).toContain(`href="/d/${decision}" data-primary-action>Answer question</a>`);
     expect(task).toContain('id="task-questions"');
   });
@@ -13275,9 +13275,9 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const cookie = await login();
     const work = await page(cookie, "/work");
     const row = /<article class="work-row" data-task="t-navigation"[^>]*>([\s\S]*?)<\/article>/.exec(work)?.[1] ?? "";
-    const link = /class="work-action" href="([^"]+)"/.exec(row)?.[1]?.replaceAll("&amp;", "&") ?? "";
+    const link = /class="work-action" data-primary-action href="([^"]+)"/.exec(row)?.[1]?.replaceAll("&amp;", "&") ?? "";
     expect(link).toBe(`/review?result=t-navigation&run=${run}&project=${encodeURIComponent(beta)}`);
-    expect(row).toContain(">Review for acceptance →</a>");
+    expect(row).toContain(">Open result →</a>");
     const signedOut = await fetch(url(link), { redirect: "manual" });
     expect(signedOut.headers.get("location")).toBe(`/login?return=${encodeURIComponent(link)}`);
     const signIn = await fetch(url("/login"), { method: "POST", body: new URLSearchParams({ name: "alex", token: approverToken, return: link }), redirect: "manual" });
@@ -13502,12 +13502,16 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
       const work = await readStanding(await page(cookie, "/work"), taskId);
       const assignmentState = ["ready", "waiting-dependency", "running"].includes(token) ? "working" : "needs-decision";
       expect(work.token).toBe(`assignment-${assignmentState}`);
-      if (action !== undefined) expect(work.action).toBe(action);
-      expect(await readStanding(await page(cookie, `/t/${taskId}`))).toEqual(work);
+      // List metadata links to the exact result; opening it reads saved
+      // checks and may name the particular failure or missing evidence.
+      const recordedResult = ["checks-failed", "verification-needed"].includes(token);
+      if (action !== undefined) expect(work.action).toBe(recordedResult ? "Open result" : action);
+      const task = await readStanding(await page(cookie, `/t/${taskId}`));
+      expect(task).toEqual({ ...work, action: action ?? work.action });
       for (const path of [`/chat?task=${taskId}`, `/chat/task-status?task=${taskId}`]) {
         const exactTask = await readStanding(await page(cookie, path));
         expect(exactTask.token, path).toBe(`assignment-${assignmentState}`);
-        expect(exactTask.action, path).toBe(work.action);
+        expect(exactTask.action, path).toBe(task.action);
       }
     };
     await agree(id, "needs-approval", "Review plan");
@@ -13635,7 +13639,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const cookie = await login();
     await openProject(cookie, alpha);
     const work = await page(cookie, "/work");
-    expect(work).toContain('<a class="work-action" href="/t/t-held?version=t-held#task-actions">Review hold →</a>');
+    expect(work).toContain('<a class="work-action" data-primary-action href="/t/t-held?version=t-held#task-actions">Review hold →</a>');
     const chat = await page(cookie, "/chat?task=t-held");
     expect(chat).toContain('<a class="button-link" href="/t/t-held?version=t-held#task-actions" data-primary-action>Review hold</a>');
     const task = await page(cookie, "/t/t-held");
@@ -13665,7 +13669,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(empty).toContain('data-work-empty="all"');
     expect(empty).toContain("Nothing is in progress.");
     expect(countsOf(empty)).toEqual({ All: 0, "Needs you": 0, Running: 0, Complete: 0 });
-    expect(empty).toContain('<a href="/work" class="active" aria-current="page" title="Every task in view, most urgent first.">All<span class="count">0</span></a>');
+    expect(empty).toContain('<a href="/work" class="active" aria-current="page">All<span class="count">0</span></a>');
 
     // Approved and waiting for a builder; chained behind it; on hold;
     // failed; cancelled; running under a live claim; and finished builds.
@@ -13728,19 +13732,20 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
       expect(rowsOf(html).map(row => row.id).sort(), view).toEqual([...expected].sort());
       expect(html, view).toMatch(new RegExp(`<a href="/work\\?view=${view}" class="active" aria-current="page"[^>]*>`));
     }
-    // The rows lead with the title; the id rides inside Details (concise
-    // revision); no raw "done" badge, and nothing says shipped, deployed,
-    // or verified where it is not.
+    // Summary rows keep exact task links; saved evidence and all attempts
+    // are read on the task page, without asserting fresh checks here.
     expect(all).toContain('<a class="work-title" href="/t/t-checks">Escape quotes</a>');
-    expect(all).toContain('<p class="work-meta work-id">Task <span class="mono">t-checks</span></p></details>');
+    expect(all).toContain('data-task="t-checks"');
+    expect(all).not.toContain('<details class="assignment-attempts">');
     expect(all).not.toContain('badge-done">done');
     expect(all).not.toMatch(/\bshipped\b/i);
     expect(all).not.toContain("Deployed");
-    expect(all).toContain("Deployment is not confirmed by any record here.");
-    // The next action names the act: the failed check, the exception, the PR.
-    expect(all).toContain(`href="/review?result=t-checks&amp;run=${store.runsFor(store.lookupRef("t-checks")!.id)[0]!.id}&amp;project=${encodeURIComponent(alpha)}">Review the failed check →</a>`);
-    expect(all).toContain(`href="/review?result=t-accepted&amp;run=${store.runsFor(store.lookupRef("t-accepted")!.id)[0]!.id}&amp;project=${encodeURIComponent(alpha)}">Review the recorded exception →</a>`);
-    expect(all).toContain('href="https://github.com/owner/repo/pull/482">Open the pull request →</a>');
+    expect(all).not.toContain("Checks passed");
+    // Recorded result links preserve the exact task/run/project. Detailed
+    // check and exception labels are resolved after opening the result.
+    expect(all).toContain(`href="/review?result=t-checks&amp;run=${store.runsFor(store.lookupRef("t-checks")!.id)[0]!.id}&amp;project=${encodeURIComponent(alpha)}">Open result →</a>`);
+    expect(all).toContain(`href="/review?result=t-accepted&amp;run=${store.runsFor(store.lookupRef("t-accepted")!.id)[0]!.id}&amp;project=${encodeURIComponent(alpha)}">Open result →</a>`);
+    expect(await page(cookie, "/t/t-pr")).toContain('href="https://github.com/owner/repo/pull/482"');
     // Bad view values fall back to All; an unknown view is never an error.
     expect(await page(cookie, "/work?view=bogus")).toMatch(/<a href="\/work" class="active" aria-current="page"[^>]*>All/);
     // Every shortcut view has its own honest empty state.
@@ -13749,7 +13754,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     for (const view of ["needs-you", "running", "completed"] as const) {
       const html = await page(cookie, `/work?view=${view}`);
       expect(html, view).toContain(`data-work-empty="${view}"`);
-      expect(html, view).toContain('<a href="/work">See all work →</a>');
+      expect(html, view).toContain('<a href="/work">See all tasks →</a>');
     }
     expect(await page(cookie, "/work?view=running")).toContain("Nothing is building right now.");
     expect(await page(cookie, "/work?view=needs-you")).toContain("Nothing needs you right now.");
@@ -13839,7 +13844,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const accepted = await page(cookie, "/t/t-accepted");
     expect(accepted).toContain("verification command exited 2");
     expect(accepted).toContain("Accepted with an exception by alex. Check results are unchanged.");
-    expect(work).toContain("The machine&#39;s verdict is unchanged: the approved check failed against it (exit 2).");
+    expect(work).not.toContain("Checks passed");
     expect(accepted).not.toContain("not passed by the machine");
     expect(work).not.toContain("not passed by the machine");
   });
@@ -13882,10 +13887,10 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(rowsOf(await page(member, "/work")).map(row => row.id)).toEqual(["t-alpha"]);
   });
 
-  test("Work admits before it limits (review fixes, finding 1): a selected project past the cap says 200+ with a bound, newer excluded tasks never starve the roll-up, empty shortcut views over a bounded page say so, and a restricted account keeps its own view", async () => {
-    // 201 tasks in alpha, oldest first, so the two oldest are the ones a
-    // bounded page must drop — and one newer task in beta, so the roll-up's
-    // merge across admitted projects is exercised too.
+  test("Work admits before it pages: exact counts, 40-row cursors reach older needs-you tasks, and excluded projects never consume a page", async () => {
+    // Older needs-you tasks remain reachable, even beyond the old 200-row cap.
+    // The same cursors must remain bound to the admitted project and view.
+    const nextOf = (html: string): string | null => /rel="next" href="([^"]+)"/.exec(html)?.[1]?.replaceAll("&amp;", "&") ?? null;
     const at = (minutes: number): Date => new Date(now.getTime() - 24 * 3_600_000 + minutes * 60_000);
     // Each batch is fixture setup; no request reads its intermediate rows.
     // One commit preserves the same records without hundreds of fsyncs.
@@ -13902,32 +13907,52 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     await openProject(cookie, alpha);
     const scoped = await page(cookie, "/work");
     const scopedRows = rowsOf(scoped).map(row => row.id);
-    expect(scopedRows).toHaveLength(200);
+    expect(scopedRows).toHaveLength(40);
     expect(scopedRows).not.toContain("alpha-000");
     expect(scopedRows).toContain("alpha-200");
     expect(scopedRows).not.toContain("beta-newest");
-    // The bound is said, the All count is honest, and the tab counts wear
-    // their page-only meaning.
-    expect(scoped).toContain('<nav class="work-views" aria-label="work views" data-work-bound="200">');
-    expect(countsOf(scoped)).toMatchObject({ "Needs you": expect.any(Number), Running: 0, Complete: 0 });
-    expect(scoped).toContain('<span class="count">200+</span>');
-    expect(scoped).toContain('<p class="meta work-bound" data-work-bound="200">Showing the newest 200 tasks in view — there are more. The view counts cover these 200 only.');
+    expect(countsOf(scoped)).toEqual({ All: 201, "Needs you": 201, Running: 0, Complete: 0 });
+    expect(scoped).not.toContain("200+");
+    expect(scoped).not.toContain("data-work-bound");
     expect(scoped).not.toContain('data-work-empty="all"');
-    // An empty shortcut view over the bounded page claims nothing about
-    // the tasks it did not read.
+    const firstNext = nextOf(scoped)!;
+    expect(firstNext).toContain("cursor=");
+    const seen = [...scopedRows];
+    let next: string | null = firstNext;
+    while (next !== null) {
+      const html = await page(cookie, next);
+      const rows = rowsOf(html).map(row => row.id);
+      expect(rows.length).toBeLessThanOrEqual(40);
+      expect(countsOf(html)).toEqual({ All: 201, "Needs you": 201, Running: 0, Complete: 0 });
+      seen.push(...rows);
+      expect(seen.length).toBeLessThanOrEqual(201);
+      next = nextOf(html);
+    }
+    expect(seen).toHaveLength(201);
+    expect(new Set(seen).size).toBe(201);
+    expect(seen.at(-1)).toBe("alpha-000");
+    const needs = await page(cookie, "/work?view=needs-you");
+    const olderNeeds = await page(cookie, nextOf(needs)!);
+    expect(rowsOf(olderNeeds)).toHaveLength(40);
+    expect(rowsOf(olderNeeds).some(row => scopedRows.includes(row.id))).toBe(false);
+    const wrongView = new URL(firstNext, base);
+    wrongView.searchParams.set("view", "needs-you");
+    expect((await fetch(wrongView, { headers: { cookie } })).status).toBe(400);
+    // Shortcut views query their complete admitted set, independent of All's page.
     const running = await page(cookie, "/work?view=running");
-    expect(running).toContain('<div class="work-empty" data-work-empty="running" data-work-bound="200"><p>Nothing among the newest 200 tasks in view is building or in review. Older tasks stay in the task list, filtered by state.</p>');
-    expect(running).not.toContain("Nothing is building right now.");
+    expect(running).toContain('data-work-empty="running"');
+    expect(running).toContain("Nothing is building right now.");
+    expect(nextOf(running)).toBeNull();
     const completed = await page(cookie, "/work?view=completed");
-    expect(completed).toContain("Nothing among the newest 200 tasks in view has finished.");
-    expect(completed).not.toContain("No tasks have been marked complete in this view.");
-    // Exactly at the cap: no bound, no "+", the ordinary empty copy.
+    expect(completed).toContain("No tasks have been marked complete in this view.");
+    expect(nextOf(completed)).toBeNull();
     store.cancelTask("alpha-000", now);
     await openProject(cookie, beta);
+    expect((await fetch(url(firstNext), { headers: { cookie } })).status).toBe(400);
     const small = await page(cookie, "/work");
     expect(rowsOf(small).map(row => row.id)).toEqual(["beta-newest"]);
-    expect(small).not.toContain("data-work-bound");
-    expect(small).toContain('<span class="count">1</span>');
+    expect(nextOf(small)).toBeNull();
+    expect(countsOf(small)).toEqual({ All: 1, "Needs you": 1, Running: 0, Complete: 0 });
     expect(await page(cookie, "/work?view=completed")).toContain("No tasks have been marked complete in this view.");
 
     // 501 newer tasks in a repository outside the ceiling: the roll-up's
@@ -13945,27 +13970,28 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(/<span class="name">all projects/.test(await page(all, "/work"))).toBe(true);
     const rollup = await page(all, "/work");
     const rollupRows = rowsOf(rollup).map(row => row.id);
-    expect(rollupRows).toHaveLength(200);
+    expect(rollupRows).toHaveLength(40);
     expect(rollupRows.filter(id => id.startsWith("foreign-"))).toEqual([]);
     expect(rollupRows).toContain("beta-newest");
     expect(rollupRows).toContain("alpha-200");
     expect(rollupRows).not.toContain("alpha-001");
     expect(rollup).not.toContain('data-work-empty="all"');
-    expect(rollup).toContain('data-work-bound="200"');
+    expect(countsOf(rollup)).toEqual({ All: 202, "Needs you": 201, Running: 0, Complete: 0 });
+    expect(nextOf(rollup)).not.toBeNull();
     expect(rollup).toContain('<span class="project-label">beta</span>');
-    // The chrome's needs-you badge reads the same bounded, admitted page.
+    // The chrome badge uses the same exact admitted count, not only this page.
     const waitingBadge = /<a href="\/work"[^>]*data-waiting="([0-9]+)"/.exec(rollup);
     expect(waitingBadge).not.toBeNull();
     expect(Number(waitingBadge![1])).toBe(countsOf(rollup)['Needs you']);
     expect(workspaceOf(rollup).crew.every(one => !one.id.startsWith('foreign-'))).toBe(true);
 
     // A project-scoped account admitted to alpha alone sees alpha's newest
-    // 200, nothing foreign, nothing from beta — with no project selected.
+    // 40-row page, nothing foreign, nothing from beta — with no project selected.
     const minted = store.mintInvite("approver", "alex", now, undefined, [alpha]);
     expect(store.consumeInviteAndCreateAccount({ tokenValue: minted.token, name: "member", credentialHash: hashPassword(memberPassword) }, now).ok).toBe(true);
     const member = await login("member", memberPassword);
     const memberRows = rowsOf(await page(member, "/work")).map(row => row.id);
-    expect(memberRows).toHaveLength(200);
+    expect(memberRows).toHaveLength(40);
     expect(memberRows.every(id => id.startsWith("alpha-"))).toBe(true);
     expect(memberRows).not.toContain("beta-newest");
     // A member of two projects opens Work and an admitted run without
@@ -13979,9 +14005,10 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(memberWork.status).toBe(200);
     const memberHtml = await memberWork.text();
     const memberWorkRows = rowsOf(memberHtml).map(row => row.id);
-    expect(memberWorkRows).toHaveLength(200);
+    expect(memberWorkRows).toHaveLength(40);
     expect(memberWorkRows.every(id => id.startsWith("alpha-"))).toBe(true);
-    expect(memberHtml).toContain('data-work-bound="200"');
+    expect(countsOf(memberHtml)).toEqual({ All: 201, "Needs you": 200, Running: 0, Complete: 0 });
+    expect(nextOf(memberHtml)).not.toBeNull();
     expect((await fetch(url(`/r/${run}`), { headers: { cookie: member2 }, redirect: "manual" })).status).toBe(200);
     await selectProject(member2, beta);
     expect(rowsOf(await page(member2, "/work")).map(row => row.id).sort()).toEqual(["beta-newest", "t-visible"]);
@@ -13997,14 +14024,15 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(memberAfter).not.toContain("data-work-bound");
     await selectProject(member2, alpha);
     const memberAlpha = await page(member2, "/work");
-    expect(rowsOf(memberAlpha).map(row => row.id)).toHaveLength(200);
+    expect(rowsOf(memberAlpha).map(row => row.id)).toHaveLength(40);
     expect(rowsOf(memberAlpha).some(row => row.id.startsWith("unplaced-"))).toBe(false);
-    expect(memberAlpha).toContain('data-work-bound="200"');
+    expect(countsOf(memberAlpha)).toEqual({ All: 201, "Needs you": 200, Running: 0, Complete: 0 });
+    expect(nextOf(memberAlpha)).not.toBeNull();
     // The unrestricted viewer still sees unplaced rows, newest first among
     // the admitted projects, with the honest bound.
     const withUnplaced = rowsOf(await page(all, "/work")).map(row => row.id);
-    expect(withUnplaced).toHaveLength(200);
-    expect(withUnplaced.filter(id => id.startsWith("unplaced-"))).toHaveLength(200);
+    expect(withUnplaced).toHaveLength(40);
+    expect(withUnplaced.filter(id => id.startsWith("unplaced-"))).toHaveLength(40);
     // 700 newer unplaced tasks the member cannot see (past the legacy
     // read's 500-row ceiling): the store binds the member's admission and
     // the unplaced exclusion before the limit, so its permitted work is
@@ -14022,19 +14050,18 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(hidden).not.toContain('data-work-empty="all"');
     expect(countsOf(hidden)).toMatchObject({ Running: 0, Complete: 0 });
     expect(hidden).toContain('<span class="count">2</span>');
-    // Clearing the selection lands a project-scoped account on its first
-    // admitted project (never a roll-up): alpha's newest 200, still without
-    // an unplaced row, and the bound is the honest 201st-row probe.
+    // Clearing selection still chooses the first admitted project, with
+    // exact counts and a cursor, without admitting any unplaced rows.
     await selectProject(member2, "");
     const memberFirst = await page(member2, "/work");
     const memberFirstRows = rowsOf(memberFirst).map(row => row.id);
-    expect(memberFirstRows).toHaveLength(200);
+    expect(memberFirstRows).toHaveLength(40);
     expect(memberFirstRows.every(id => id.startsWith("alpha-"))).toBe(true);
-    expect(memberFirst).toContain('data-work-bound="200"');
-    expect(memberFirst).toContain('<span class="count">200+</span>');
+    expect(countsOf(memberFirst)).toEqual({ All: 201, "Needs you": 200, Running: 0, Complete: 0 });
+    expect(nextOf(memberFirst)).not.toBeNull();
     // The unrestricted viewer still sees the unplaced rows, newest first.
     const unrestricted = rowsOf(await page(all, "/work")).map(row => row.id);
-    expect(unrestricted).toHaveLength(200);
+    expect(unrestricted).toHaveLength(40);
     expect(unrestricted[0]).toBe("unplaced-699");
     expect(unrestricted.every(id => id.startsWith("unplaced-"))).toBe(true);
   });
@@ -14148,7 +14175,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(await page(cookie, "/t/t-rev")).not.toContain("data-receipt-review=");
   });
 
-  test("concise pass: a Work row is title, status, next act, and a native Details disclosure over the diagnosis; the head is one line; the receipt folds only what is not owed", async () => {
+  test("concise pass: a Work row is recorded title, status and next act; opening its result keeps the full diagnosis and receipt", async () => {
     const cookie = await login();
     await openProject(cookie, alpha);
     const checks = finished("t-checks", "Escape quotes", alpha, { verdict: "refuted", reasons: ["the repository's approved verification command exited 1"] });
@@ -14162,17 +14189,18 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     // The head is the title and the tools control — no hint paragraph; the view's words ride the tab's title.
     expect(work).toContain('<div class="work-head"><h1>Tasks</h1><details class="work-tools">');
     expect(work).not.toContain('<p class="hint">Every task in view, most urgent first.</p>');
-    expect(work).toContain('<a href="/work" class="active" aria-current="page" title="Every task in view, most urgent first.">All<span class="count">');
-    // The row: the status line, then the next act, then the diagnosis behind a native disclosure — never dropped.
+    expect(work).toContain('<a href="/work" class="active" aria-current="page">All<span class="count">');
+    // The list avoids loading attempts and artifact diagnostics for every row.
+    // The exact result link leads to the full diagnosis checked below.
     const row = /<article class="work-row" data-task="t-checks"[^>]*>([\s\S]*?)<\/article>/.exec(work)?.[1] ?? "";
     expect(row).toMatch(/^<div class="work-row-main"><a class="work-title" href="\/t\/t-checks">Escape quotes<\/a><p class="work-meta"><span>[^<]+<\/span><\/p><\/div>/);
     expect(row).toContain('data-work-status="assignment-needs-decision"');
-    expect(row).toContain('class="problem assignment-detail">The repository&#39;s approved check failed against this build (exit 1)');
-    expect(row).toContain('Review the failed check →</a>');
-    expect(row).toContain('<details class="assignment-attempts"><summary>Attempts ');
-    // Every root has one native disclosure for internal attempts.
+    expect(row).not.toContain("Checks passed");
+    expect(row).toContain('Open result →</a>');
+    expect(row).not.toContain('<details class="assignment-attempts">');
+    // Each family is one row; internal attempts belong to detail pages.
     expect(work.match(/<article class="work-row"/g)).toHaveLength(3);
-    expect(work.match(/<details class="assignment-attempts">/g)).toHaveLength(3);
+    expect(work.match(/<details class="assignment-attempts">/g)).toBeNull();
     const css = await stylesOf(work, base);
     expect(css).toContain('.assignment-attempts summary,.assignment-notices summary{min-height:44px;');
     // The receipt: an optional, unsettled review folds behind a disclosure; the machine verdict and the facts stay in the open.
@@ -14190,7 +14218,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     void checks;
   });
 
-  test("concise revision (review of build 1548): the Work tools menu keeps its right anchor on a phone, the row's id rides inside Details beside project and age, and the task title never repeats the status box — while the receipt, an older run, the exact terms, and every action stay", async () => {
+  test("concise revision: the Work menu keeps its phone anchor, rows retain exact identity, and opening a task preserves history, terms and actions", async () => {
     const cookie = await login();
     await openProject(cookie, alpha);
     const { run: older } = finished("t-rev", "Escape quotes", alpha, { verdict: "verified", reasons: ["the approved verification command passed"] });
@@ -14209,19 +14237,18 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(css).not.toMatch(/\.work-tools-menu\s*\{[^}]*left:/);
     expect(work).toContain('<details class="work-tools"><summary>Work tools');
     expect([...work.matchAll(/<nav class="work-tools-menu">([\s\S]*?)<\/nav>/g)][0]?.[1]?.match(/<a href="/g)).toHaveLength(9);
-    // The row: the visible meta is the age (and the project label when rows
-    // span projects); the stable id sits inside the same Details as the
-    // diagnosis, still in the HTML and still the row's data-task.
+    // The visible meta is age/project; exact task identity stays in the
+    // title link and row data attribute instead of repeating diagnostics.
     const row = /<article class="work-row" data-task="t-checks"[^>]*>([\s\S]*?)<\/article>/.exec(work)?.[1] ?? "";
     const meta = /<p class="work-meta">([\s\S]*?)<\/p>/.exec(row)?.[1] ?? "";
     expect(meta).toMatch(/^<span>[^<]+<\/span>$/);
     expect(meta).not.toContain("t-checks");
-    expect(row).toContain('<details class="assignment-attempts"><summary>Attempts ');
-    expect(row).toContain('<p class="work-meta work-id">Task <span class="mono">t-checks</span></p></details>');
+    expect(row).not.toContain('<details class="assignment-attempts">');
+    expect(row).toContain('href="/t/t-checks"');
     expect(row).toContain('<span class="status-label">Needs your decision</span>');
-    expect(row).toContain('class="problem assignment-detail">The repository&#39;s approved check failed against this build (exit 1)');
-    expect(row).toContain(`<a class="work-action" href="/review?result=t-checks&amp;run=${checks.run}&amp;project=${encodeURIComponent(alpha)}">Review the failed check →</a>`);
-    for (const id of ["t-rev", "t-queued"]) expect(work).toContain(`<p class="work-meta work-id">Task <span class="mono">${id}</span></p></details>`);
+    expect(row).not.toContain("Checks passed");
+    expect(row).toContain(`<a class="work-action" data-primary-action href="/review?result=t-checks&amp;run=${checks.run}&amp;project=${encodeURIComponent(alpha)}">Open result →</a>`);
+    for (const id of ["t-rev", "t-queued"]) expect(work).toContain(`data-task="${id}"`);
     // The task page: the status box leads with the result's words, the
     // receipt agrees, and the title is the bare title — the words appear
     // once above the fold. The failed check's exit code, its review action,

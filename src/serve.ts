@@ -1,7 +1,7 @@
 import { repositoryContext, repositoryContextRead } from './repository-context.js';
 import { repositoryContextHtml } from './repository-context-ui.js';
 import { browserAssetsAvailable, browserWorkspaceDocument, serveBrowserAsset, supportsBrowserWorkspace } from './browser-shell.js';
-import { browserCrewOf, browserProjectsOf, browserNavigationOf, type BrowserWorkspace } from './browser-workspace.js';
+import { browserCrewOf, browserCrewFromIndex, browserWorkActionHref, browserProjectsOf, browserNavigationOf, type BrowserWorkspace } from './browser-workspace.js';
 import { configureLeadFollow, leadFollowStatus, runLeadFollowPass } from './lead-follow.js';
 import { startMaintenance } from './maintenance.js';
 import { codingHandoffPreview, createCodingHandoff } from './coding-handoff.js';
@@ -23,6 +23,8 @@ import { changeKnowledge, knowledgeView, knowledgeVersion, readKnowledgeSnapshot
 import { knowledgeHtml, knowledgeContextHtml, KNOWLEDGE_CSS } from "./knowledge-ui.js";
 import { learningHtml } from "./workspace-ui.js";
 import { createSessionEndpoint } from './session-server.js';
+import { prepareWorkspaceRevision, WorkspaceValidatorCache } from "./workspace-revision.js";
+import { workIndexPage, workCountsByProject, WorkIndexCursorError, type WorkIndexPage, type WorkIndexItem } from "./work-index.js";
 import { openWorkDecisionOf } from "./work-summary.js";
 import { assignmentOf, checkAssignmentAsOperator, type AssignmentSnapshot } from './assignment.js';
 import { leadBriefHtml, LEAD_CONTEXT_CSS } from './lead-context.js';
@@ -112,7 +114,7 @@ import { recipeFromForm, recipeLibraryHtml, recipeEditorHtml, workflowPreviewHtm
 import { EVIDENCE_CAPS, readVerifiedArtifact, readVerifiedReport, readVerifiedProofForRun, storeEvidence, writeEvidenceFile, scanForSecrets, type ReportView } from "./evidence.js";
 import { GOAL_ASSESSMENT_PENDING, reviewConflict, manualReviewOnly, dispatchStatusToken, passFraction, semanticCoverage, coverageWords, coverageStateWords, type ProofVerdict, type CriterionMatrixRow, type CriterionEvidenceRef } from "./proof.js";
 import {
-  WORK_VIEWS, REVIEW_TOKENS, parseWorkView, resultStatusOf, receiptHeadingOf, receiptPublicationWords, reviewFactsOf, workStatusOf, workCounts, compareWorkRows, primaryDestinationOf, needsPerson, dispatchActionLabel,
+  WORK_VIEWS, REVIEW_TOKENS, parseWorkView, resultStatusOf, receiptHeadingOf, receiptPublicationWords, reviewFactsOf, workStatusOf, primaryDestinationOf, needsPerson, dispatchActionLabel,
   type WorkView, type WorkFacts, type WorkStatus, type DisplayStatus, type PublicationFacts, type ReviewFacts,
 } from "./workspace-ui.js";
 import { PRICED_BUILD_MODELS } from "./pricing.js";
@@ -506,6 +508,9 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
   }
   const clock = options.clock ?? (() => new Date());
+  const workspaceRevision = prepareWorkspaceRevision(store);
+  const workspaceIncarnation = randomBytes(16).toString('hex');
+  const workspaceValidators = new WorkspaceValidatorCache();
   const providerHome = options.connectionHome ?? homedir();
   const connectionCheck = createConnectionChecker({ home: providerHome, clock, ...(options.connectionProbe === undefined ? {} : { probe: options.connectionProbe }) });
   const modelCatalog = openRouterModelsCache(options.modelCatalogFetcher);
@@ -979,7 +984,29 @@ export function createDecisionServer(options: ServeOptions): Server {
       const target = actionTarget(url, who, request, body);
       const execute = async () => {
         if (!projectRequestAllowed(url, who, request, response)) return;
-        if (method === "GET") return handleGet(url, who, request, response);
+        if (method === "GET") {
+          // Authorize every read before considering a conditional response.
+          // Task/result opening and receipt reconciliation always re-read work.
+          const facts = requestContext.getStore();
+          if (facts?.workspaceRead && who.via === 'cookie' && url.pathname === '/chat' &&
+              !url.searchParams.has('task') && !url.searchParams.has('result') && !url.searchParams.has('request')) {
+            const key = createHash('sha256').update(JSON.stringify([workspaceIncarnation, who.name,
+              who.session.generation, who.session.csrf, who.session.project, who.session.projectRevision,
+              admissionList(), url.pathname + url.search])).digest('hex');
+            const revision = workspaceRevision.current(), now = clock();
+            const prior = workspaceValidators.get(key);
+            if (prior && prior.revision === revision && prior.expiresAt > now.getTime() && request.headers['if-none-match'] === prior.etag) {
+              response.setHeader('ETag', prior.etag);
+              return respond(response, 304, 'application/json; charset=utf-8', '');
+            }
+            const expiresAt = workspaceRevision.expiresAt(now);
+            // A clock-bound refresh receives a different validator even when
+            // no database row changed (for example an expired worker lease).
+            facts.workspaceValidator = { key, revision, expiresAt,
+              etag: '"' + createHash('sha256').update(`${key}:${revision}:${expiresAt}`).digest('hex') + '"' };
+          }
+          return handleGet(url, who, request, response);
+        }
         return handlePost(url, who, request, response, body!);
       };
       if (method === "GET" || url.pathname === "/session/attended-beats") return projectAuthority.run({ actor: who.name, repo: target.repo }, execute);
@@ -1090,7 +1117,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     // A project link is a read context, not a session-changing operation.
     // Prove it against both admission and the known project catalog before
     // collection queries; unknown/foreign paths reveal no work.
-    if (url.pathname === '/work' && url.searchParams.has('project')) {
+    if ((url.pathname === '/work' || url.pathname === '/system') && url.searchParams.has('project')) {
       const wanted = url.searchParams.get('project') ?? '';
       if (url.searchParams.getAll('project').length !== 1 || !visible(wanted) ||
           ![...managedRepos(), ...store.listProjects().map(one => one.path)].includes(wanted)) {
@@ -1388,20 +1415,31 @@ export function createDecisionServer(options: ServeOptions): Server {
       // is re-proved here.
       const view = parseWorkView(url.searchParams.get("view"));
       const rollup = project === null && !unscopedMode;
-      const { tasks: bounded, truncated } = workTasksInView(project);
-      const rows = bounded.map(task => workRowOf(task, now));
-      const csrf = who.via === "cookie" ? who.session.csrf : "";
+      let work: WorkIndexPage;
+      try {
+        work = workIndexPage(store, now, workAccess(), { view, limit: 40, cursor: url.searchParams.get('cursor'), project });
+        const facts = requestContext.getStore();
+        if (facts !== undefined) {
+          // These counts cover the exact admitted project lens, including
+          // unplaced tasks where permitted. Crew excludes unplaced rows.
+          if (project === null) facts.workCounts = work.projects;
+          const admitted = workAccess().repos;
+          const crewLens = project !== null || admitted !== null && JSON.stringify([...admitted].sort()) === JSON.stringify(managedRepos().sort()) && !work.projects.some(one => one.repo === null);
+          if (view === 'all' && !url.searchParams.has('cursor') && crewLens) facts.workCrew = { project, page: work };
+        }
+      } catch (error) {
+        if (error instanceof WorkIndexCursorError) return refuse(response, who, 400, 'This task page has expired. Open the first page.', '/work');
+        throw error;
+      }
       return sendScreen(
         response,
         200,
         workPage(chromeFor(project, "work", undefined, rollup ? "all" : undefined), {
           view,
           ...(url.searchParams.has('project') && project !== null ? { projectFilter: project } : {}),
-          rows,
-          truncated,
-          cap: WORK_PAGE,
-          multiProject: new Set(bounded.map(task => task.repo ?? "")).size > 1,
-          csrf,
+          work,
+          previous: url.searchParams.has('cursor'),
+          multiProject: new Set(work.items.map(task => task.repo ?? "")).size > 1,
           now,
         }),
       );
@@ -2636,11 +2674,10 @@ export function createDecisionServer(options: ServeOptions): Server {
       let fleetSnapshot: AssignmentChatSnapshot | null = null;
       if (repos.length > 0) {
         try {
-          fleetSnapshot = withDispatchDiagnoses(store, store.chatSnapshot(repos, now), now);
-          fleetSnapshot.assignmentStates = Object.fromEntries(fleetSnapshot.tasks.flatMap(task => {
-            const value = assignmentOf(store, task.rootId ?? task.id, now, { principal: "operator", repos, includeUnplaced: false }, evidenceRoot);
-            return value === null ? [] : [[task.id, { state: value.state, label: assignmentStatusOf(value).label, detail: value.detail }]];
-          }));
+          fleetSnapshot = store.chatSnapshot(repos, now);
+          const summaries = workIndexPage(store, now, { principal: 'operator', repos, includeUnplaced: false }, { limit: 100 }).items;
+          fleetSnapshot.assignmentStates = Object.fromEntries(summaries.flatMap(value =>
+            [value.rootId, value.activeTaskId].map(id => [id, { state: value.assignmentState, label: value.status.label, detail: value.status.detail }])));
           fleetSnapshot.attentionCount = needsYouBadge(null);
         } catch {
           // The project rail already degrades each pulse independently.
@@ -3381,7 +3418,9 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (s.chrome.modeBanner) notices.push(s.chrome.modeBanner.words);
       let crew: Pick<BrowserWorkspace, 'crew' | 'crewTruncated'> = { crew: [], crewTruncated: false };
       try {
-        crew = browserCrewOf(store, clock(), { principal: 'operator', repos: managedRepos(), includeUnplaced: false }, { evidenceRoot, project: s.chrome.active === 'chat' ? null : s.chrome.project });
+        const project = s.chrome.active === 'chat' ? null : s.chrome.project;
+        crew = requestFacts.workCrew?.project === project ? browserCrewFromIndex(requestFacts.workCrew.page)
+          : browserCrewOf(store, clock(), { principal: 'operator', repos: managedRepos(), includeUnplaced: false }, { evidenceRoot, project });
       } catch { notices.push('Crew updates are unavailable. Open Tasks to inspect saved work.'); }
       const conversation = extras.conversation ?? null;
       const request = requestFacts.workspaceRequest;
@@ -3396,7 +3435,14 @@ export function createDecisionServer(options: ServeOptions): Server {
         pageHtml: extras.pageHtml === undefined ? (conversation === null ? pageHtml : null) : extras.pageHtml,
         navigation: [...browserNavigationOf(currentPath, s.chrome.project), { label: 'Workspace tools', href: '/menu', active: false }],
       };
-      if (requestFacts.workspaceRead) return respond(response, status, 'application/json; charset=utf-8', JSON.stringify(workspace));
+      if (requestFacts.workspaceRead) {
+        const validator = requestFacts.workspaceValidator;
+        if (status === 200 && validator !== undefined) {
+          workspaceValidators.set(validator.key, validator);
+          response.setHeader('ETag', validator.etag);
+        }
+        return respond(response, status, 'application/json; charset=utf-8', JSON.stringify(workspace));
+      }
       const nonce = randomBytes(16).toString('base64');
       // React owns the conversation and its refresh/draft lifecycle. Native
       // guarded forms keep their current behavior after React inserts them.
@@ -3521,45 +3567,33 @@ export function createDecisionServer(options: ServeOptions): Server {
     };
   }
 
-  /** The Needs-you count the chrome wears: the tasks in view whose
-   * diagnosis says a person must act, over the same bounded page Work
-   * lists. Saturated when the page is full — never a sum of unbounded reads. */
-  function needsYouCount(project: string | null): { count: number; saturated: boolean } {
-    const now = clock();
-    const { tasks, truncated } = workTasksInView(project);
-    let count = 0;
-    for (const task of tasks) if (workRowOf(task, now).status.views.includes("needs-you")) count += 1;
-    return { count, saturated: truncated };
+  function workAccess() {
+    return { principal: 'operator' as const, repos: admissionList(), includeUnplaced: visible(null) };
   }
-
-  /**
-   * The one bounded page Work and its counts read (independent review,
-   * 2026-09-13, finding 1; workspace package 1 query): the viewer's
-   * admission binds in the store's SQL BEFORE the ordering and the limit,
-   * and one extra row probes for overflow so the page can say "there are
-   * more" instead of silently stopping at the cap. The permitted repo set
-   * is the open project, else the admission list (null = unrestricted,
-   * empty = no placed project); unplaced rows join the read only when
-   * this viewer may see them (`visible(null)`), so rows a project-scoped
-   * account cannot see never spend its page — however many there are.
-   * Every row's repo is still re-proved through `visible` — the query is
-   * the bound, that check is the law.
-   */
+  // All project counts are read together. No task artifacts or processes are
+  // inspected to paint a badge or a project switcher.
+  function projectCounts(now: Date) {
+    const facts = requestContext.getStore();
+    if (facts?.workCounts !== undefined) return facts.workCounts;
+    const counts = workCountsByProject(store, now, workAccess());
+    if (facts !== undefined) facts.workCounts = counts;
+    return counts;
+  }
+  function needsYouCount(project: string | null): { count: number; saturated: boolean } {
+    const count = projectCounts(clock()).filter(one => project === null || one.repo === project)
+      .reduce((sum, one) => sum + one.totals['needs-you'], 0);
+    return { count, saturated: false };
+  }
   function projectFamilyPeek(repo: string, now: Date): ProjectPeek {
-    const projects = visible(repo) ? [repo] : [];
-    const live = store.taskActivityCandidates(projects, false, now)
-      .filter(task => workRowOf(task, now).status.views.includes("running")).map(task => task.id);
-    return { waiting: needsYouBadge(repo).count, ...store.taskFamilyCounts(projects, false, now, live) };
+    const row = projectCounts(now).find(one => one.repo === repo);
+    return { waiting: row?.totals['needs-you'] ?? 0, running: row?.totals.running ?? 0,
+      queued: row?.queued ?? 0, doneRecently: row?.doneRecently ?? 0 };
   }
   function familiesInView(project: string | null, options: Parameters<Store["taskFamiliesAdmitted"]>[2] = {}): TaskFamily[] {
     return store.taskFamiliesAdmitted(project === null ? admissionList() : visible(project) ? [project] : [], visible(null), options);
   }
   function familyOf(taskId: string): TaskFamily | null {
     return store.taskFamilyOf(taskId, admissionList(), visible(null));
-  }
-  function workTasksInView(project: string | null): { tasks: (Task & { repo: string | null; family?: TaskFamily })[]; truncated: boolean } {
-    const families = familiesInView(project, { limit: WORK_PAGE + 1 });
-    return { tasks: families.slice(0, WORK_PAGE).map(family => ({ ...family.current, family })), truncated: families.length > WORK_PAGE };
   }
   function familyTasksInView(project: string | null, state?: TaskState, limit = 200): (Task & { repo: string | null })[] {
     return familiesInView(project, { ...(state === undefined ? {} : { states: [state] }), limit })
@@ -10628,7 +10662,7 @@ const STYLE = `
   .project-label { display: inline-block; padding: 0 .4rem; border: 1px solid var(--border); border-radius: 999px; font-size: .6875rem; line-height: 1.5; color: var(--foreground); }
   .work-detail { margin: 0 0 .25rem; font-size: .8125rem; line-height: 1.45; color: var(--muted-foreground); overflow-wrap: anywhere; }
   .work-details .work-id { margin: 0 0 .25rem; }
-  .work-action { display: inline-flex; align-items: center; min-height: 2.25rem; font-size: .8125rem; font-weight: 500; }
+  .work-action { display: inline-flex; align-items: center; min-height: 44px; font-size: .8125rem; font-weight: 500; }
   .work-empty { padding: 2rem 0 1rem; max-width: 34rem; }
   .work-empty p { margin: 0 0 .75rem; color: var(--muted-foreground); line-height: 1.5; }
   .work-empty .row { display: flex; align-items: center; gap: 1rem; }
@@ -10651,7 +10685,7 @@ const STYLE = `
     .work-row { grid-template-columns: minmax(0, 1fr); gap: .125rem; padding: .625rem 0; }
     .work-head { align-items: center; }
     .work-head h1 { margin-bottom: 0; }
-    .work-details > summary, .work-action { min-height: 2.5rem; }
+    .work-details > summary, .work-action { min-height: 44px; }
     /* The tools control sits at the head's right edge on every width, so
        its menu keeps the desk's right-aligned anchor here too. A phone
        override once re-anchored it at left: 0, which pushed the opened
@@ -15006,9 +15040,6 @@ function taskComposerHtml(data: {
   ].join("\n");
 }
 
-/** A task list page's ceiling: the newest rows, the bound printed. */
-const WORK_PAGE = 200;
-
 type WorkRow = WorkFacts & { assignment?: AssignmentSnapshot | null; assignmentProblem?: boolean; executionId?: string; familyNotice?: string | null; status: WorkStatus; resultRunId: number | null };
 
 function publicationFactsOf(publication: Publication | null): PublicationFacts {
@@ -15042,101 +15073,45 @@ function workDiagnosticsHtml(diagnostics: WorkStatus["diagnostics"]): string {
 
 function workPage(
   chrome: Chrome,
-  data: {
-    view: WorkView;
-    projectFilter?: string;
-    rows: readonly WorkRow[];
-    /** The probe found more tasks in view than the page holds. */
-    truncated: boolean;
-    cap: number;
-    /** Rows span more than one project — every row wears its label. */
-    multiProject: boolean;
-    csrf: string;
-    now: Date;
-  },
+  data: { view: WorkView; projectFilter?: string; work: WorkIndexPage; previous: boolean; multiProject: boolean; now: Date },
 ): Screen {
-  const counts = workCounts(data.rows.map(row => row.status));
-  const shown = data.rows.filter(row => row.status.views.includes(data.view)).sort((a, b) => compareWorkRows({ rank: a.status.rank, updatedAt: a.updatedAt }, { rank: b.status.rank, updatedAt: b.updatedAt }));
-  // Honest counts (review fixes, finding 1): a count speaks for the
-  // bounded page only, and All says "200+" when the probe found more.
-  const countWords = (key: WorkView): string => (data.truncated && key === "all" ? `${data.cap}+` : String(counts[key]));
-  const viewHref = (view: WorkView): string => {
+  const href = (view: WorkView, cursor?: string): string => {
     const query = new URLSearchParams();
     if (data.projectFilter !== undefined) query.set('project', data.projectFilter);
     if (view !== 'all') query.set('view', view);
+    if (cursor !== undefined) query.set('cursor', cursor);
     return `/work${query.size ? `?${query}` : ''}`;
   };
-  const tabs =
-    `<nav class="work-views" aria-label="work views"${data.truncated ? ` data-work-bound="${data.cap}"` : ""}>` +
-    WORK_VIEWS.map(
-      one =>
-        `<a href="${escape(viewHref(one.key))}"${one.key === data.view ? ' class="active" aria-current="page"' : ""} title="${escape(data.truncated ? (one.key === "all" ? `More than ${data.cap} tasks are in view; the newest ${data.cap} are listed.` : `Counted among the newest ${data.cap} tasks in view.`) : one.hint)}">` +
-        `${one.label}<span class="count">${countWords(one.key)}</span></a>`,
-    ).join("") +
-    `</nav>`;
-  const current = WORK_VIEWS.find(one => one.key === data.view) ?? WORK_VIEWS[0]!;
-  // An empty shortcut view over a truncated page never claims "nothing"
-  // about tasks it did not read.
-  const emptyWords = (() => {
-    if (!data.truncated) return current.empty;
-    switch (data.view) {
-      case "needs-you": return `Nothing among the newest ${data.cap} tasks in view needs you. Older tasks stay in the task list, filtered by state.`;
-      case "running": return `Nothing among the newest ${data.cap} tasks in view is building or in review. Older tasks stay in the task list, filtered by state.`;
-      case "completed": return `Nothing among the newest ${data.cap} tasks in view has finished. Older tasks stay in the task list, filtered by state.`;
-      default: return current.empty;
-    }
-  })();
-  const rowHtml = (row: WorkRow): string => {
-    const actionHref = row.status.token === "waiting-decision" && row.openDecision ? `/d/${row.openDecision.id}` : row.executionId !== row.id && row.status.action?.kind === "open-result" && row.resultRunId !== null ? chatResultHref(row.id, row.resultRunId) : statusActionHref(row.status, row.status.action?.kind === "open-review" || row.status.action?.kind === "open-pr" ? row.executionId ?? row.id : row.id, row.status.action?.kind === "open-run" && row.liveRunId !== null ? row.liveRunId : row.resultRunId, row.publication?.prUrl ?? null, row.repo);
-    const action = row.status.action === null || actionHref === null ? "" : `<a class="work-action" href="${escape(actionHref)}">${escape(row.status.action.label)} →</a>`;
-    // The human-readable title leads; the project label appears when rows
-    // span projects (or the row is unplaced); the age stays beside it. The
-    // stable id is a machine fact — it rides inside Details (revision of
-    // the concise pass), still in the HTML and on the row's data-task.
-    const project = data.multiProject || row.repo === null ? `<span class="project-label">${row.repo === null ? "unplaced" : escape(projectName(row.repo))}</span>` : "";
-    return (
-      `<article class="work-row" data-task="${escape(row.id)}" data-work-status="${escape(row.status.token)}" data-work-views="${row.status.views.join(" ")}">` +
-      `<div class="work-row-main"><a class="work-title" href="${taskHref(row.id)}">${escape(row.title)}</a>` +
+  const tabs = `<nav class="work-views" aria-label="Task views">` + WORK_VIEWS.map(one =>
+    `<a href="${escape(href(one.key))}"${one.key === data.view ? ' class="active" aria-current="page"' : ''}>${one.label}<span class="count">${data.work.totals[one.key]}</span></a>`
+  ).join('') + `</nav>`;
+  const rowHtml = (row: WorkIndexItem): string => {
+    const target = row.primaryAction?.target;
+    const actionHref = row.primaryAction?.code === 'open-result' && target?.runId != null
+      ? `/review?result=${encodeURIComponent(target.taskId)}&run=${target.runId}${row.repo === null ? '' : '&project=' + encodeURIComponent(row.repo)}`
+      : browserWorkActionHref(row);
+    const action = actionHref === null || row.primaryAction === null ? '' : `<a class="work-action" data-primary-action href="${escape(actionHref)}">${escape(row.primaryAction.label)} →</a>`;
+    const project = data.multiProject || row.repo === null ? `<span class="project-label">${row.repo === null ? 'Unplaced' : escape(projectName(row.repo))}</span>` : '';
+    return `<article class="work-row" data-task="${escape(row.rootId)}" data-work-status="${escape(row.status.token)}" data-work-views="${row.status.views.join(' ')}">` +
+      `<div class="work-row-main"><a class="work-title" href="${taskHref(row.rootId)}">${escape(row.title)}</a>` +
       `<p class="work-meta">${project}<span>${escape(relativeAge(row.updatedAt, data.now))}</span></p></div>` +
-      // The status and the next act share one line (concise pass,
-      // 2026-09-13); the diagnosis sentence is secondary, behind a native
-      // disclosure that works without script and by keyboard — never
-      // removed, never shrunk. The label itself names a failed check, a
-      // needed approval, or an exception, so nothing critical folds away.
-      (row.assignment != null ? `<div class="work-row-status">${assignmentSummaryHtml(row.assignment, { compact: true, workStatus: row.status, problem: row.assignmentProblem === true, diagnostics: row.status.diagnostics })}</div>` :
-      `<div class="work-row-status">${statusLineHtml(row.status)}${action}${row.familyNotice == null ? "" : `<p class="problem">${escape(row.familyNotice)}</p>`}` +
-      `<details class="work-details"><summary>Details</summary><p class="work-detail">${escape(row.status.detail)}</p>` +
-      workDiagnosticsHtml(row.status.diagnostics) +
-      `<p class="work-meta work-id">Task <span class="mono">${escape(row.id)}</span></p></details></div>`) +
-      `</article>`
-    );
+      `<div class="work-row-status">${statusLineHtml(row.status)}${action}` +
+      (row.familyProblem === null ? '' : `<p class="problem">${escape(row.familyProblem)}</p>`) +
+      (row.status.views.includes('needs-you') && !['write-scope', 'approve-scope'].includes(row.primaryAction?.code ?? '') && row.status.detail !== row.status.label && row.status.detail !== row.familyProblem ? `<p class="work-detail">${escape(row.status.detail)}</p>` : '') +
+      workDiagnosticsHtml(row.status.diagnostics) + `</div></article>`;
   };
-  const list =
-    shown.length === 0
-      ? `<div class="work-empty" data-work-empty="${data.view}"${data.truncated ? ` data-work-bound="${data.cap}"` : ""}><p>${escape(emptyWords)}</p>` +
-        (data.view === "all"
-          ? `<p class="row"><a class="button-link" href="${chrome.chat === true ? "/chat" : "/tasks/new"}">${chrome.chat === true ? "Start in chat" : "Add a task"}</a> <a href="/tasks/new">Use a form →</a></p>`
-          : `<p class="row"><a href="${escape(viewHref('all'))}">See all work →</a></p>`) +
-        `</div>`
-      : `<div class="work-list">${shown.map(rowHtml).join("\n")}</div>`;
-  const bound = data.truncated
-    ? `<p class="meta work-bound" data-work-bound="${data.cap}">Showing the newest ${data.cap} tasks in view — there are more. The view counts cover these ${data.cap} only. Older tasks stay in the <a href="/tasks">task list</a>, filtered by state.</p>`
-    : "";
-  const tools =
-    `<details class="work-tools"><summary>Work tools${CHEVRON_ICON}</summary><nav class="work-tools-menu">` +
-    [
-      ["/inbox", "Inbox"], ...(chrome.code ? [["/code", "Coding sessions"]] : []), ["/board", "board"], ["/board?view=order", "order"], ["/tasks", "task list"], ["/recipes", "recipes"], ["/routines", "routines"],
-      ...(chrome.projectScoped ? [] : [["/workbench", "portfolio"]]), ["/ledger", "action ledger"],
-    ].map(([href, label]) => `<a href="${href}">${label}</a>`).join("") +
-    `</nav></details>`;
-  return screen("work", [
-    // The tools shortcut appears only when the sidebar tools are hidden.
-    // The view's words ride the active tab's title rather than a paragraph.
-    `<div class="work-head"><h1>Tasks</h1>${tools}</div>`,
-    tabs,
-    list,
-    bound,
-  ].join("\n"), { chrome });
+  const current = WORK_VIEWS.find(one => one.key === data.view)!;
+  const list = data.work.items.length === 0
+    ? `<div class="work-empty" data-work-empty="${data.view}"><p>${escape(data.previous ? 'There are no more tasks on this page.' : current.empty)}</p>` +
+      (data.view === 'all' && !data.previous ? `<p><a class="button-link" href="${chrome.chat === true ? '/chat' : '/tasks/new'}">${chrome.chat === true ? 'Start in chat' : 'Add a task'}</a></p>` : `<a href="${escape(href('all'))}">See all tasks →</a>`) + `</div>`
+    : `<div class="work-list">${data.work.items.map(rowHtml).join('')}</div>`;
+  const pages = !data.previous && data.work.nextCursor === null ? '' : `<nav class="row work-pagination" aria-label="Task pages">` +
+    (data.previous ? `<a class="button-link" href="${escape(href(data.view))}">First page</a>` : '') +
+    (data.work.nextCursor === null ? '' : `<a class="button-link" rel="next" href="${escape(href(data.view, data.work.nextCursor))}">Next page</a>`) + `</nav>`;
+  const tools = `<details class="work-tools"><summary>Work tools${CHEVRON_ICON}</summary><nav class="work-tools-menu">` +
+    [['/inbox', 'Inbox'], ...(chrome.code ? [['/code', 'Coding sessions']] : []), ['/board', 'Board'], ['/board?view=order', 'Order'], ['/tasks', 'Task list'], ['/recipes', 'Recipes'], ['/routines', 'Routines'], ...(chrome.projectScoped ? [] : [['/workbench', 'Portfolio']]), ['/ledger', 'Action ledger']]
+      .map(([path, label]) => `<a href="${path}">${label}</a>`).join('') + `</nav></details>`;
+  return screen('work', `<div class="work-head"><h1>Tasks</h1>${tools}</div>${tabs}${list}${pages}`, { chrome });
 }
 
 function tasksPage(
@@ -16178,7 +16153,7 @@ function projectsPage(
  * to. AsyncLocalStorage follows the request's own async chain, so two
  * interleaved requests never read each other's token.
  */
-const requestContext = new AsyncLocalStorage<{ csrf: string; returnTo: string; actor?: string; createdTask?: string; browser?: boolean; workspaceRead?: boolean; workspaceRequest?: string | null }>();
+const requestContext = new AsyncLocalStorage<{ csrf: string; returnTo: string; actor?: string; createdTask?: string; browser?: boolean; workspaceRead?: boolean; workspaceRequest?: string | null; workCounts?: ReturnType<typeof workCountsByProject>; workCrew?: { project: string | null; page: WorkIndexPage }; workspaceValidator?: { key: string; revision: string; expiresAt: number; etag: string } }>();
 
 /** A same-site path or "/": never a scheme, a host, or a protocol-relative road. */
 function safeReturn(raw: string | null | undefined): string {

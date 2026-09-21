@@ -4,7 +4,7 @@ import { createRoot } from "react-dom/client";
 import type { Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { BrowserWorkspace } from "../browser-workspace.js";
-import { CommandMenu, GuardedHtml, workspaceCommands } from "./app.js";
+import { CommandMenu, GuardedHtml, useWorkspace, workspaceCommands } from "./app.js";
 import {
   carryDraft, DRAFT_TTL, editDraft, emptyDraft, isWorkspace, readWorkspace, receiveDraft,
   restoreDraft, sameConversation, saveDraft, sendMessage, submitDraft, WorkspaceAuthError,
@@ -31,6 +31,8 @@ beforeEach(() => {
 afterEach(async () => {
   if (root) await act(async () => root?.unmount());
   root = null;
+  vi.useRealTimers();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
@@ -91,7 +93,7 @@ test("a normal HTML redirect response is not mistaken for confirmed delivery", a
 test("snapshot checks use same-origin read transport and reject incomplete data before receipts", async () => {
   const complete = fixture(); complete.receipt = { request: a, received: true };
   const fetcher = vi.fn<typeof fetch>().mockResolvedValue(json(complete));
-  await expect(readWorkspace(fixture(), a, fetcher)).resolves.toEqual(complete);
+  await expect(readWorkspace(fixture(), a, fetcher)).resolves.toEqual({ kind: "changed", workspace: complete, etag: null });
   const [url, init] = fetcher.mock.calls[0]!;
   expect(String(url)).toContain("task=task-a&result=9&format=workspace&request=" + a);
   expect(init?.method).toBeUndefined();
@@ -109,6 +111,167 @@ test("auth and changed conversation identities require explicit reconnection", a
   expect(sameConversation(fixture(), changed)).toBe(false);
   const otherRun = fixture(); otherRun.conversation!.resultRunId = 10;
   expect(sameConversation(fixture(), otherRun)).toBe(false);
+});
+
+test("conditional reads preserve an unchanged view without parsing a body, and still honor auth failures", async () => {
+  const response = new Response(null, { status: 304, headers: { etag: '"revision-1"' } });
+  const parse = vi.spyOn(response, "json");
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response);
+  await expect(readWorkspace(fixture(), null, fetcher, { etag: '"revision-1"' })).resolves.toEqual({ kind: "unchanged", etag: '"revision-1"' });
+  expect(new Headers(fetcher.mock.calls[0]![1]?.headers).get("if-none-match")).toBe('"revision-1"');
+  expect(parse).not.toHaveBeenCalled();
+  await expect(readWorkspace(fixture(), null, fetcher)).rejects.toThrow("incomplete");
+  fetcher.mockResolvedValue(new Response(null, { status: 403 }));
+  await expect(readWorkspace(fixture(), null, fetcher, { etag: '"revision-1"' })).rejects.toBeInstanceOf(WorkspaceAuthError);
+});
+
+test("receipt and forced reads omit the validator and keep the exact receipt identity", async () => {
+  const complete = fixture(); complete.receipt = { request: a, received: true };
+  const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => new Response(JSON.stringify(complete), { headers: { etag: '"revision-2"' } }));
+  await expect(readWorkspace(fixture(), a, fetcher, { etag: '"revision-1"' })).resolves.toEqual({ kind: "changed", workspace: complete, etag: '"revision-2"' });
+  await readWorkspace(fixture(), null, fetcher, { etag: '"revision-1"', force: true });
+  for (const [, init] of fetcher.mock.calls) expect(new Headers(init?.headers).has("if-none-match")).toBe(false);
+  expect(String(fetcher.mock.calls[0]![0])).toContain(`request=${a}`);
+});
+
+async function workspaceProbe(initial = fixture()) {
+  let current!: ReturnType<typeof useWorkspace>;
+  let renders = 0;
+  function Probe() { current = useWorkspace(initial); renders++; return null; }
+  const node = document.createElement("div"); document.body.append(node); root = createRoot(node);
+  await act(async () => root!.render(createElement(Probe)));
+  return { current: () => current, renders: () => renders };
+}
+const tagged = (workspace = fixture()) => new Response(JSON.stringify(workspace), { headers: { etag: '"revision-1"' } });
+const unchanged = () => new Response(null, { status: 304, headers: { etag: '"revision-1"' } });
+
+test("idle polling backs off to a bounded interval without replacing or rendering unchanged workspace", async () => {
+  vi.useFakeTimers();
+  vi.spyOn(document, "hidden", "get").mockReturnValue(false);
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(tagged()).mockImplementation(async () => unchanged());
+  vi.stubGlobal("fetch", fetcher);
+  const probe = await workspaceProbe();
+  const view = probe.current().workspace, renders = probe.renders();
+  for (const delay of [5_000, 10_000, 20_000, 30_000, 30_000]) {
+    const count = fetcher.mock.calls.length;
+    await act(async () => vi.advanceTimersByTimeAsync(delay - 1));
+    expect(fetcher).toHaveBeenCalledTimes(count);
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(fetcher).toHaveBeenCalledTimes(count + 1);
+  }
+  expect(probe.current().workspace).toBe(view);
+  expect(probe.renders()).toBe(renders);
+  const updated = fixture(); updated.crewTruncated = true;
+  fetcher.mockResolvedValueOnce(tagged(updated));
+  await act(async () => probe.current().check(true));
+  expect(probe.current().workspace.crewTruncated).toBe(true);
+  expect(new Headers(fetcher.mock.calls.at(-1)![1]?.headers).has("if-none-match")).toBe(false);
+  const count = fetcher.mock.calls.length;
+  await act(async () => vi.advanceTimersByTimeAsync(5_000));
+  expect(fetcher).toHaveBeenCalledTimes(count + 1);
+  await act(async () => root!.unmount()); root = null;
+  await act(async () => vi.advanceTimersByTimeAsync(60_000));
+  expect(fetcher).toHaveBeenCalledTimes(count + 1);
+});
+
+test("visibility refresh queues once behind an active read, pauses hidden/offline, and stops on auth expiry", async () => {
+  vi.useFakeTimers();
+  const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(false);
+  const online = vi.spyOn(navigator, "onLine", "get").mockReturnValue(true);
+  let resolve!: (response: Response) => void;
+  const fetcher = vi.fn<typeof fetch>().mockImplementationOnce(() => new Promise(done => { resolve = done; }))
+    .mockImplementation(async () => tagged());
+  vi.stubGlobal("fetch", fetcher);
+  const probe = await workspaceProbe();
+  await act(async () => { document.dispatchEvent(new Event("visibilitychange")); document.dispatchEvent(new Event("visibilitychange")); });
+  expect(fetcher).toHaveBeenCalledTimes(1);
+  await act(async () => resolve(tagged()));
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  expect(new Headers(fetcher.mock.calls[1]![1]?.headers).has("if-none-match")).toBe(false);
+  hidden.mockReturnValue(true);
+  await act(async () => document.dispatchEvent(new Event("visibilitychange")));
+  await act(async () => vi.advanceTimersByTimeAsync(60_000));
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  hidden.mockReturnValue(false); online.mockReturnValue(false);
+  await act(async () => { window.dispatchEvent(new Event("offline")); document.dispatchEvent(new Event("visibilitychange")); });
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  online.mockReturnValue(true);
+  fetcher.mockResolvedValueOnce(new Response(null, { status: 401 }));
+  await act(async () => window.dispatchEvent(new Event("online")));
+  expect(probe.current().stale).toBe(true);
+  expect(new Headers(fetcher.mock.calls[2]![1]?.headers).has("if-none-match")).toBe(false);
+  await act(async () => vi.advanceTimersByTimeAsync(60_000));
+  expect(fetcher).toHaveBeenCalledTimes(3);
+});
+
+test("pending receipt and lead work stay at five seconds and only the exact receipt settles the draft", async () => {
+  vi.useFakeTimers();
+  vi.spyOn(document, "hidden", "get").mockReturnValue(false);
+  const sent = submitDraft(editDraft(emptyDraft(a), "Keep my message"));
+  saveDraft(sessionStorage, scope, sent);
+  const working = fixture(); working.conversation!.pendingTurnId = 10;
+  const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => tagged(working));
+  vi.stubGlobal("fetch", fetcher);
+  const probe = await workspaceProbe();
+  for (let i = 0; i < 3; i++) await act(async () => vi.advanceTimersByTimeAsync(5_000));
+  expect(fetcher).toHaveBeenCalledTimes(4);
+  expect(probe.current().draft.pending?.request).toBe(a);
+  for (const [url, init] of fetcher.mock.calls) {
+    expect(String(url)).toContain(`request=${a}`);
+    expect(new Headers(init?.headers).has("if-none-match")).toBe(false);
+  }
+  const received = { ...working, receipt: { request: a, received: true } };
+  fetcher.mockResolvedValueOnce(tagged(received));
+  await act(async () => vi.advanceTimersByTimeAsync(5_000));
+  expect(probe.current().draft.pending).toBeNull();
+  fetcher.mockImplementation(async () => unchanged());
+  const count = fetcher.mock.calls.length;
+  await act(async () => vi.advanceTimersByTimeAsync(15_000));
+  expect(fetcher).toHaveBeenCalledTimes(count + 3);
+});
+
+test("a send during a conditional read queues its receipt read without another POST or overlapping GET", async () => {
+  vi.useFakeTimers();
+  vi.spyOn(document, "hidden", "get").mockReturnValue(false);
+  let resolve!: (response: Response) => void;
+  let reads = 0;
+  const fetcher = vi.fn<typeof fetch>().mockImplementation(async (_url, init) => {
+    if (init?.method === "POST") return json({ ok: true });
+    reads++;
+    if (reads === 2) return new Promise(done => { resolve = done; });
+    const next = fixture();
+    if (reads === 3) next.receipt = { request: a, received: true };
+    return tagged(next);
+  });
+  vi.stubGlobal("fetch", fetcher);
+  const probe = await workspaceProbe();
+  await act(async () => probe.current().edit("Review this result"));
+  await act(async () => vi.advanceTimersByTimeAsync(5_000));
+  await act(async () => probe.current().send({ preventDefault() {} } as Parameters<ReturnType<typeof useWorkspace>["send"]>[0]));
+  expect(reads).toBe(2);
+  expect(probe.current().draft.pending?.request).toBe(a);
+  await act(async () => resolve(unchanged()));
+  expect(reads).toBe(3);
+  expect(fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+  const [url, init] = fetcher.mock.calls.at(-1)!;
+  expect(String(url)).toContain(`request=${a}`);
+  expect(new Headers(init?.headers).has("if-none-match")).toBe(false);
+  expect(probe.current().draft.pending).toBeNull();
+});
+
+test("a changed session stops refreshes and retains the old view and unsent draft until reconnect", async () => {
+  vi.useFakeTimers();
+  vi.spyOn(document, "hidden", "get").mockReturnValue(false);
+  saveDraft(sessionStorage, scope, editDraft(emptyDraft(a), "Preserve this draft"));
+  const changed = fixture(); changed.conversation!.sessionId = 8;
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValue(tagged(changed));
+  vi.stubGlobal("fetch", fetcher);
+  const original = fixture(), probe = await workspaceProbe(original);
+  expect(probe.current().workspace).toBe(original);
+  expect(probe.current().stale).toBe(true);
+  expect(probe.current().draft.text).toBe("Preserve this draft");
+  await act(async () => { await vi.advanceTimersByTimeAsync(60_000); await probe.current().check(true); });
+  expect(fetcher).toHaveBeenCalledTimes(1);
 });
 
 async function renderHtml(html: string, immutable = false) {

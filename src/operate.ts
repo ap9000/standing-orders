@@ -207,6 +207,9 @@ import { propose, approve, addApprover, authenticateApprover, describeScope, app
 import { presetTerms, modeTermsJson, modeDigestOf, modeTermsFromJson, modeWords, MODE_MAX_DAYS, type ModeName } from "./modes.js";
 import { WorktreePool } from "./worktree.js";
 import { requestTaskStop, resumeTaskStop, taskControlOf } from "./task-control.js";
+import { worktreeAdoptionNotice } from "./worktree-notices.js";
+import { workIndexPage, WorkIndexCursorError } from "./work-index.js";
+import { parseWorkView } from "./workspace-ui.js";
 import { taskWorkSummaryOf } from "./work-summary.js";
 import { assignmentOf, assignmentBrief, syncAssignmentHandoffs } from "./assignment.js";
 import {
@@ -299,7 +302,7 @@ export const OPERATE_HELP = `standing-orders — operating the queue
 
   standing-orders ready                     what could be dispatched right now
   standing-orders task add <title>          queue work
-  standing-orders task list [--state <s>]   everything, or one state
+  standing-orders task list [--view <v>] [--limit <n>] [--cursor <c>]   paginated saved task status
   standing-orders task show <id>
   standing-orders project use <path>        remember a saved project (optional --token-file)
   standing-orders project show              show the current project and credential reference
@@ -637,7 +640,7 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "label", "reviewers", "limit", "role", "key-file", "weekly-usd", "daily-turns", "per-hour", "token-file", "race", "compare", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd", "sync-max-age", "merge-method",
   "phase", "risk", "tier", "clear-phase",
   "run", "containment",
-  "token-env", "after", "repair-max-attempts", "consumer", "batch", "feedback", "source",
+  "token-env", "after", "repair-max-attempts", "consumer", "batch", "feedback", "source", "view", "cursor",
 ]);
 export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "json", "yes", "all", "local", "history", "latest-watch", "dry-run", "file", "allow-paid-fallback",
@@ -4344,18 +4347,9 @@ async function reconcileCommand(
   });
   const adoption = await worktrees.adopt(repo, clock());
   if (adoption.ok) {
-    for (const path of adoption.adopted) {
-      store.enqueueNotification(
-        {
-          source: { project: repo },
-          dedupeKey: `adopt:${path}:${clock().toISOString()}`,
-          kind: "worktree-adopted",
-          subject: `Adopted an unrecorded worktree`,
-          body: `${path} existed in the pool with no row — a crash between creation and record. It is released and unverified; somebody should look.`,
-        },
-        clock(),
-      );
-    }
+    const now = clock();
+    const notice = worktreeAdoptionNotice(repo, adoption.adopted, now);
+    if (notice !== null) store.enqueueNotification(notice, now);
   }
   if (!adoption.ok) {
     // The claim and lease work above is real and stands; only the worktree
@@ -9896,27 +9890,38 @@ async function capCommand(
 
 function listTasks(flags: Map<string, string | true>, context: Context): number {
   const { store, write, json, now } = context;
-  const wanted = text(flags, "state");
+  const wanted = text(flags, 'state');
+  const rawView = text(flags, 'view');
+  const rawLimit = text(flags, 'limit');
+  const limit = rawLimit === undefined ? 40 : Number(rawLimit);
   if (wanted !== undefined && !STATES.includes(wanted as TaskState)) {
-    return fail(write, json, "task list", "usage", `--state takes one of ${STATES.join(", ")}`, EXIT.usage);
+    return fail(write, json, 'task list', 'usage', `--state takes one of ${STATES.join(', ')}`, EXIT.usage);
   }
-
-  const tasks = store.listTasks(wanted as TaskState | undefined);
-
+  if (rawView !== undefined && !['all', 'needs-you', 'running', 'completed'].includes(rawView) ||
+      !Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+    return fail(write, json, 'task list', 'usage', '--view takes all, needs-you, running or completed; --limit takes 1–100', EXIT.usage);
+  }
+  let page;
+  try {
+    page = workIndexPage(store, now, { principal: 'operator', repos: null, includeUnplaced: true }, {
+      view: parseWorkView(rawView ?? null), limit, cursor: text(flags, 'cursor') ?? null,
+      ...(wanted === undefined ? {} : { state: wanted as TaskState }),
+      ...(text(flags, 'repo') === undefined ? {} : { project: text(flags, 'repo')! }),
+    });
+  } catch (error) {
+    if (!(error instanceof WorkIndexCursorError)) throw error;
+    return fail(write, json, 'task list', 'usage', 'Invalid page cursor. Start again without --cursor.', EXIT.usage);
+  }
+  const tasks = page.items.map(item => ({ ...item, id: item.rootId }));
   if (json) {
-    write(envelopeJson({ ok: true, command: "task list", count: tasks.length, tasks }));
+    write(envelopeJson({ ok: true, command: 'task list', count: tasks.length, tasks,
+      totals: page.totals, nextCursor: page.nextCursor, limit: page.limit, view: page.view, evidence: 'recorded' }));
     return EXIT.ok;
   }
-  if (tasks.length === 0) {
-    write(wanted === undefined ? "The queue is empty." : `Nothing is ${wanted}.`);
-    return EXIT.ok;
-  }
-  const width = Math.max(...tasks.map(task => task.id.length));
-  for (const task of tasks) {
-    const held = store.activeHold(store.refFor(BUILT_IN, task.id).id, now);
-    const suffix = held === null ? "" : `  (held: ${held.reason})`;
-    write(`  ${task.id.padEnd(width)}  ${task.state.padEnd(9)}  ${task.title}${suffix}`);
-  }
+  if (tasks.length === 0) write(wanted === undefined ? 'The task list is empty.' : `Nothing is ${wanted}.`);
+  const width = Math.max(0, ...tasks.map(task => task.id.length));
+  for (const task of tasks) write(`  ${task.id.padEnd(width)}  ${task.status.label.padEnd(16)}  ${task.title}`);
+  if (page.nextCursor !== null) write(`Next page: --cursor ${page.nextCursor}`);
   return EXIT.ok;
 }
 

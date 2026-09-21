@@ -538,6 +538,36 @@ describe("operating the queue from the command line", () => {
       expect(payload()).toMatchObject({ reason: "not-queued" });
     });
 
+    test("task lists page and filter saved summaries without losing older work", async () => {
+      const store = openStore(db);
+      try {
+        for (let i = 0; i < 53; i++) {
+          const id = `page-${String(i).padStart(3, '0')}`;
+          store.createTask({ id, title: `Task ${i}` }, later(i));
+          store.placeTask(store.lookupRef(id)!.id, REPO);
+          if (i < 3) store.setTaskState(id, 'failed', later(i));
+        }
+      } finally { store.close(); }
+      expect(await run(['task', 'list', '--json'])).toBe(EXIT.ok);
+      const first = payload();
+      expect(first.count).toBe(40);
+      expect(first.totals.all).toBe(53);
+      expect(first.evidence).toBe('recorded');
+      expect(typeof first.nextCursor).toBe('string');
+      expect(await run(['task', 'list', '--cursor', first.nextCursor, '--json'])).toBe(EXIT.ok);
+      const second = payload();
+      expect(second.count).toBe(13);
+      expect(second.nextCursor).toBeNull();
+      expect(new Set([...first.tasks, ...second.tasks].map((one: { id: string }) => one.id)).size).toBe(53);
+      expect(await run(['task', 'list', '--state', 'failed', '--limit', '2', '--json'])).toBe(EXIT.ok);
+      expect(payload().tasks).toHaveLength(2);
+      expect(payload().tasks.every((one: {state:string}) => one.state === 'failed')).toBe(true);
+      expect(await run(['task', 'list', '--repo', '/elsewhere', '--json'])).toBe(EXIT.ok);
+      expect(payload().count).toBe(0);
+      expect(await run(['task', 'list', '--cursor', 'broken', '--json'])).toBe(EXIT.usage);
+      expect(await run(['task', 'list', '--limit', '500', '--json'])).toBe(EXIT.usage);
+    });
+
     test("lists nothing without inventing an error", async () => {
       expect(await run(["task", "list"])).toBe(EXIT.ok);
       expect(out()).toContain("empty");

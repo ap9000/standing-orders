@@ -55,11 +55,15 @@ describe("saved recipe creation and repeated use", () => {
   let root: string, repo: string, other: string, file: string, store: Store;
   beforeEach(() => {
     root = realpathSync(mkdtempSync(join(tmpdir(), "so-creator-"))); repo = join(root, "project"); other = join(root, "other"); mkdirSync(repo); mkdirSync(other); file = join(root, "state.db");
-    store = openStore(file); addApprover(store, "owner", now);
-    for (const [name, role] of [["member", "approver"], ["viewer", "viewer"]] as const) {
-      const invite = store.mintInvite(role, "owner", now, undefined, [repo]);
-      store.consumeInviteAndCreateAccount({ tokenValue: invite.token, name, credentialHash: hashPassword("fixture-password") }, now);
-    }
+    store = openStore(file);
+    // Only the complete fixture is observed; avoid one disk commit per row.
+    store.transact(() => {
+      addApprover(store, "owner", now);
+      for (const [name, role] of [["member", "approver"], ["viewer", "viewer"]] as const) {
+        const invite = store.mintInvite(role, "owner", now, undefined, [repo]);
+        store.consumeInviteAndCreateAccount({ tokenValue: invite.token, name, credentialHash: hashPassword("fixture-password") }, now);
+      }
+    });
   });
   afterEach(() => { store.close(); rmSync(root, { recursive: true, force: true }); });
   function save(d = definition() as RecipeDocument, actor = "owner", project = repo) {

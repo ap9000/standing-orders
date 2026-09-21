@@ -1,11 +1,11 @@
 /** The browser consumes this contract with a type-only import. All HTML is
  * produced by the existing trusted server renderers, never by a model-supplied
  * fragment. These projections do not authenticate, mutate or grant authority. */
-import { assignmentOf, type AssignmentSnapshot } from './assignment.js';
-import { assignmentActionHref, assignmentStatusOf } from './assignment-ui.js';
+import type { AssignmentSnapshot } from './assignment.js';
 import { chatControlHref, chatResultHref } from './chat-controls.js';
 import type { Store } from './store.js';
-import { taskWorkSummaryOf, type WorkSummaryAccess } from './work-summary.js';
+import type { WorkSummaryAccess } from './work-summary.js';
+import { workIndexPage, type WorkIndexItem, type WorkIndexPage } from './work-index.js';
 import type { StatusTone } from './workspace-ui.js';
 
 export type BrowserProject = { name: string; path: string; href: string; knowledgeHref: string };
@@ -44,6 +44,29 @@ export function serializeBrowserWorkspace(workspace: BrowserWorkspace): string {
 export const BROWSER_CREW_LIMIT = 40;
 export type BrowserCrewOptions = { evidenceRoot?: string; limit?: number; project?: string | null };
 
+/** The index is navigation only. Controls retain their exact owning task, run,
+ * decision and approval ceremony; opening a result keeps its saved execution. */
+export function browserWorkActionHref(item: WorkIndexItem): string | null {
+  const action = item.primaryAction;
+  if (action === null) return null;
+  const { taskId, runId, decisionId } = action.target;
+  if (decisionId !== null) return `/d/${decisionId}`;
+  if (action.code === 'inspect-decisions') return '/';
+  if (action.code === 'open-result' && runId !== null) return chatResultHref(taskId, runId);
+  if (action.code === 'open-pr' && /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+$/.test(item.publicationUrl ?? '')) return item.publicationUrl!;
+  if (runId !== null && (action.code === 'open-pr' || action.code === 'retry-review')) {
+    return `/review?result=${encodeURIComponent(taskId)}&run=${runId}${item.repo === null ? '' : '&project=' + encodeURIComponent(item.repo)}`;
+  }
+  if (runId !== null && (action.code === 'inspect-run' || action.code === 'reconcile-run')) return `/r/${runId}`;
+  const anchor = action.code === 'approve-scope' ? '#approve'
+    : action.code === 'inspect-stop' || action.code === 'resume-run' ? '#task-control'
+    : action.code === 'unhold' || action.code === 'retry-task' ? '#task-actions'
+    : action.code === 'write-scope' || action.code === 'select-agent' ? '#scope'
+    : action.code === 'inspect-hold' ? '#holds'
+    : action.code === 'start-worker' || action.code === 'repair-dependency' ? '#run-status' : '';
+  return `/t/${encodeURIComponent(item.rootId)}?version=${encodeURIComponent(taskId)}` + anchor;
+}
+
 /** A bounded recent family list. The caller supplies its already admitted
  * access; an optional project can only narrow it. Admission and family grouping
  * happen before the SQL limit and before reading questions or saved evidence. */
@@ -52,39 +75,31 @@ export function browserCrewOf(store: Store, now: Date, access: WorkSummaryAccess
 } {
   const project = options.project ?? null;
   if (project !== null && access.repos !== null && !access.repos.includes(project)) return { crew: [], crewTruncated: false };
-  const repos = project === null ? access.repos : [project];
-  const includeUnplaced = project === null && access.principal === 'operator' && access.includeUnplaced === true;
-  const admitted: WorkSummaryAccess = access.principal === 'operator'
-    ? { principal: 'operator', repos, includeUnplaced }
-    : { principal: 'coordinator', repos: repos! };
   const limit = Number.isFinite(options.limit)
     ? Math.max(1, Math.min(BROWSER_CREW_LIMIT, Math.floor(options.limit!))) : BROWSER_CREW_LIMIT;
-  const families = store.taskFamiliesAdmitted(repos, includeUnplaced, { limit: limit + 1, order: 'updated' });
-  const rows = families.slice(0, limit).flatMap(family => {
-    const assignment = assignmentOf(store, family.root.id, now, admitted, options.evidenceRoot);
-    if (assignment === null) return [];
-    const work = taskWorkSummaryOf(store, assignment.activeTaskId, now, admitted);
-    const status = assignmentStatusOf(assignment, work?.status);
-    const receipt = assignment.receipt;
-    const result = receipt === null ? null : store.getRun(receipt.runId);
-    const resultHref = receipt === null || result === null || (result.outcome !== 'built' && result.outcome !== 'no-change')
-      ? null : chatResultHref(receipt.taskId, receipt.runId);
-    const href = chatControlHref('task', assignment.rootId);
-    // Opening a result names the action's exact run. Other controls retain
-    // their owning destination and its approval/recovery ceremony.
-    const action = assignment.primaryAction;
-    const actionHref = action?.code === 'open-result' && action.target.runId !== null
-      ? chatResultHref(action.target.taskId, action.target.runId) : assignmentActionHref(assignment);
+  const page = workIndexPage(store, now, access, { limit, project });
+  return browserCrewFromIndex(page);
+}
+
+/** Render an already-admitted page without repeating its database query. */
+export function browserCrewFromIndex(page: WorkIndexPage): { crew: BrowserCrewItem[]; crewTruncated: boolean } {
+  const rows = page.items.map(summary => {
+    const status = summary.status;
+    const resultHref = summary.resultRunId === null || summary.resultTaskId === null || (summary.resultOutcome !== 'built' && summary.resultOutcome !== 'no-change')
+      ? null : chatResultHref(summary.resultTaskId, summary.resultRunId);
+    const href = chatControlHref('task', summary.rootId);
+    const action = summary.primaryAction;
+    const actionHref = browserWorkActionHref(summary);
     const item: BrowserCrewItem = {
-      id: assignment.rootId, title: assignment.title, project: assignment.repo,
-      state: assignment.state, label: status.label, tone: status.tone, href, resultHref,
+      id: summary.rootId, title: summary.title, project: summary.repo,
+      state: summary.assignmentState, label: status.label, tone: status.tone, href, resultHref,
       action: action === null || actionHref === null ? null : { label: action.label, href: actionHref },
     };
-    return [{ item, rank: status.rank }];
+    return { item, rank: status.rank };
   });
   // Stable ordering retains recency within each shared presentation rank.
   rows.sort((a, b) => a.rank - b.rank);
-  return { crew: rows.map(row => row.item), crewTruncated: families.length > limit };
+  return { crew: rows.map(row => row.item), crewTruncated: page.nextCursor !== null };
 }
 
 /** Navigation input must already be admitted by the caller. No extra project

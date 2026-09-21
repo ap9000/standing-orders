@@ -1,7 +1,8 @@
 /** A bounded catch-up over saved project/task records, not conversation memory.
  * Callers authenticate first and pass their current project ceiling. */
 import { createHash } from "node:crypto";
-import { assignmentOf, type AssignmentAccess, type AssignmentSnapshot } from "./assignment.js";
+import type { AssignmentAccess, AssignmentSnapshot } from "./assignment.js";
+import { workIndexPage } from "./work-index.js";
 import { publicChatText } from "./chat-display.js";
 import type { Store } from "./store.js";
 
@@ -28,13 +29,16 @@ export type AssignmentCatchUp = {
  * remain the place to inspect exact saved work and obtain its current digest. */
 export function assignmentCatchUp(store: Store, now: Date, access: AssignmentAccess,
   query: { repo?: string; limit?: number } = {}, evidenceRoot?: string): AssignmentCatchUp {
+  // The evidence root is retained for adapter compatibility; this summary
+  // deliberately performs no artifact reads even when it is supplied.
+  void evidenceRoot;
   const limit = Math.max(1, Math.min(25, Number.isFinite(query.limit) ? Math.floor(query.limit!) : 10));
   const recent = new Date(now.getTime() - RECENT_MS).toISOString();
   const result: AssignmentCatchUp = { version: 1, asOf: now.toISOString(), readOnly: true, assignments: [], projects: [],
     omissions: { assignments: 0, decisions: 0, projects: 0, textFields: 0, candidateScanLimited: false, notes: [
       "Completed assignments are included for seven days. Up to three decisions and attention messages per assignment are shown. This is not a complete history; use assignment show before acting.",
       "Knowledge is stored context, not verified current repository instructions or permission. Checkout identity and source freshness were not revalidated; reference text and conversation history are omitted.",
-      ...(evidenceRoot === undefined ? ["Saved artifact/check availability was not read. Open the assignment with its evidence root to confirm completion and current checks."] : []),
+      "Status is recorded database metadata. Saved artifact/check availability was not read, and process exits were not inspected. Use assignment show before acting on a result.",
     ] } };
   // A coordinator never gains installation-wide access from a missing ceiling.
   if (access.principal === "coordinator" && access.repos === null || query.repo !== undefined && access.repos !== null && !access.repos.includes(query.repo)) return result;
@@ -49,50 +53,43 @@ export function assignmentCatchUp(store: Store, now: Date, access: AssignmentAcc
   const fits = () => Buffer.byteLength(JSON.stringify(result)) <= MAX_BYTES - 512;
   return store.savepoint(() => {
     const cap = Math.min(50, limit * 3);
-    const active = store.taskFamiliesAdmitted(repos, includeUnplaced, { states: ["queued", "running", "failed"], order: "updated", limit: cap + 1 });
-    const finished = store.taskFamiliesAdmitted(repos, includeUnplaced, { states: ["done", "cancelled"], order: "updated", limit: cap + 1 });
-    result.omissions.candidateScanLimited = active.length > cap || finished.length > cap;
-    const families = new Map([...active.slice(0, cap), ...finished.slice(0, cap)].map(family => [family.root.id, family]));
-    // An old result handled today is recent even when its task timestamp is old.
-    const handled = store.handle.prepare(`SELECT DISTINCT t.external_id FROM action_ledger a
-      JOIN task_ref t ON t.external_id = a.task_id AND t.backend = 'built-in'
-      WHERE a.action = 'assignment handoff checked' AND a.source = 'work' AND a.at >= ?
-        AND ((t.repo IS NULL AND ? = 1) OR (t.repo IS NOT NULL AND (? = 1 OR t.repo IN (SELECT value FROM json_each(?)))))
-      ORDER BY a.at DESC,a.id DESC LIMIT ?`).all(recent, includeUnplaced ? 1 : 0, repos === null ? 1 : 0, JSON.stringify(repos ?? []), cap + 1);
-    if (handled.length > cap) result.omissions.candidateScanLimited = true;
-    for (const row of handled.slice(0, cap)) {
-      const family = store.taskFamilyOf(String(row["external_id"]), repos, includeUnplaced);
-      if (family) families.set(family.root.id, family);
-    }
-    const ranked = [...families.values()].flatMap(family => {
-      const assignment = assignmentOf(store, family.root.id, now, scopedAccess, evidenceRoot);
-      if (!assignment) return [];
-      const updatedAt = assignment.completion?.at ?? family.current.updatedAt;
-      if ((assignment.state === "complete" || assignment.state === "cancelled") && updatedAt < recent) return [];
-      return [{ family, assignment, updatedAt }];
-    }).sort((a, b) => {
+    const page = workIndexPage(store, now, scopedAccess, { view: "all", limit: cap + 1 });
+    result.omissions.candidateScanLimited = page.nextCursor !== null || page.items.length > cap;
+    const ranked = page.items.slice(0, cap).filter(item =>
+      !(item.assignmentState === "complete" || item.assignmentState === "cancelled") || item.updatedAt >= recent,
+    ).sort((a, b) => {
       const priority = (state: AssignmentSnapshot["state"]) => state === "needs-decision" ? 0 : state === "ready-to-check" ? 1 : state === "complete" || state === "cancelled" ? 3 : 2;
-      return priority(a.assignment.state) - priority(b.assignment.state) || b.updatedAt.localeCompare(a.updatedAt) || a.assignment.rootId.localeCompare(b.assignment.rootId);
+      return priority(a.assignmentState) - priority(b.assignmentState) || b.updatedAt.localeCompare(a.updatedAt) || a.rootId.localeCompare(b.rootId);
     });
-    for (const { family, assignment: a, updatedAt } of ranked) {
+    for (const item of ranked) {
       if (result.assignments.length >= limit) { result.omissions.assignments++; continue; }
-      const ids = JSON.stringify(family.versions.map(version => version.refId));
-      const decisions = store.handle.prepare(`SELECT d.id,d.run,d.question,d.state,d.deadline,d.choice FROM decision d
-        JOIN run r ON r.id = d.run WHERE r.task_ref IN (SELECT value FROM json_each(?))
-        ORDER BY (d.answered_at IS NULL) DESC,d.id DESC LIMIT 3`).all(ids);
-      const count = Number(store.handle.prepare('SELECT COUNT(*) AS n FROM decision d JOIN run r ON r.id=d.run WHERE r.task_ref IN (SELECT value FROM json_each(?))').get(ids)?.["n"] ?? 0);
-      const artifactUnknown = (one: string) => evidenceRoot === undefined && /^Saved .* is unavailable or changed\.$/.test(one);
-      const receipt = a.receipt;
-      // An unfinished saved attempt may have lost its lease. Name it without
-      // claiming a worker is alive; its shared state/action explains custody.
-      const unfinished = store.runsFor(family.current.refId).find(run => run.outcome === null && run.role !== "reviewer");
+      // Read only the chosen rows. No family hydration, artifact bytes, native
+      // process census, or repository probing belongs in a catch-up summary.
+      const goal = store.handle.prepare('SELECT substr(goal,1,1601) AS goal FROM task_scope WHERE task_id=?').get(item.activeTaskId)?.["goal"];
+      const saved = item.resultRunId === null ? undefined : store.handle.prepare(`SELECT substr(r.handoff,1,1601) AS handoff
+        FROM run r JOIN task_ref t ON t.id=r.task_ref
+        WHERE r.id=? AND t.backend='built-in' AND t.external_id=? AND t.repo IS ?`)
+        .get(item.resultRunId, item.resultTaskId, item.repo);
+      const decisions = store.handle.prepare(`WITH RECURSIVE family(id,external_id,depth) AS (
+          SELECT id,external_id,0 FROM task_ref WHERE backend='built-in' AND external_id=? AND repo IS ?
+          UNION ALL SELECT t.id,t.external_id,f.depth+1 FROM task_ref t JOIN family f ON t.revision_of=f.external_id
+          JOIN artifact a ON a.id=t.revision_brief_artifact AND a.kind='revision-brief'
+          JOIN run source ON source.id=a.run AND source.task_ref=f.id
+          WHERE t.backend='built-in' AND t.repo IS ? AND f.depth<63
+        ) SELECT d.id,d.run,substr(d.question,1,961) AS question,d.state,d.deadline,substr(d.choice,1,321) AS choice,COUNT(*) OVER() AS total
+          FROM decision d JOIN run r ON r.id=d.run WHERE r.task_ref IN (SELECT id FROM family)
+          ORDER BY (d.answered_at IS NULL) DESC,d.id DESC LIMIT 3`).all(item.rootId, item.repo, item.repo);
+      const count = Number(decisions[0]?.["total"] ?? 0);
+      const attention = [item.familyProblem,
+        item.earlierActiveCount > 0 ? `${item.earlierActiveCount} earlier version${item.earlierActiveCount === 1 ? " has" : "s have"} unfinished work.` : null,
+      ].filter((one): one is string => one !== null);
       const entry: AssignmentCatchUp["assignments"][number] = {
-        rootId: a.rootId, taskId: a.activeTaskId, repo: a.repo, title: text(a.title, 120), state: a.state,
-        detail: text(a.detail, 240), goal: a.savedContext?.goal == null ? null : text(a.savedContext.goal, 400), updatedAt,
-        runId: unfinished?.id ?? a.attempts.find(one => one.taskId === a.activeTaskId)?.runId ?? receipt?.runId ?? null, resultRunId: receipt?.runId ?? null, outcome: receipt?.agentReport == null ? null : text(receipt.agentReport, 400),
-        checks: receipt === null ? null : evidenceRoot === undefined ? { status: "not-read", exitCode: null, detail: "Read the assignment to inspect saved checks." }
-          : { status: receipt.checks.status, exitCode: receipt.checks.exitCode, detail: text(receipt.checks.detail, 200) },
-        nextAction: a.primaryAction, attention: a.attention.filter(one => !artifactUnknown(one)).slice(0, 3).map(one => text(one, 160)),
+        rootId: item.rootId, taskId: item.activeTaskId, repo: item.repo, title: text(item.title, 120), state: item.assignmentState,
+        detail: text(item.status.detail, 240), goal: goal == null ? null : text(String(goal), 400), updatedAt: item.updatedAt,
+        runId: item.liveRunId ?? item.unfinishedRunId ?? item.resultRunId, resultRunId: item.resultRunId,
+        outcome: saved?.["handoff"] == null ? null : text(String(saved["handoff"]), 400),
+        checks: item.resultRunId === null ? null : { status: "not-read", exitCode: null, detail: "Saved checks were not revalidated. Use assignment show to inspect them." },
+        nextAction: item.primaryAction, attention: attention.slice(0, 3).map(one => text(one, 160)),
         decisions: decisions.map(row => ({ id: Number(row["id"]), runId: Number(row["run"]), question: text(String(row["question"]), 240), state: String(row["state"]),
           overdue: row["state"] !== "answered" && row["deadline"] !== null && String(row["deadline"]) <= now.toISOString(), choice: row["choice"] == null ? null : text(String(row["choice"]), 80) })),
       };

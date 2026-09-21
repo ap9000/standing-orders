@@ -9,9 +9,10 @@ import { mintCoordinator } from './coordinator.js';
 import { assignmentOf, checkAssignment, claimAssignment, type AssignmentOwner } from './assignment.js';
 import { assignmentStatusOf } from './assignment-ui.js';
 import { taskWorkSummaryOf } from './work-summary.js';
+import * as workIndex from './work-index.js';
 import { storeEvidence } from './evidence.js';
 import { requestResultChanges } from './result-actions.js';
-import { BROWSER_CREW_LIMIT, browserCrewOf, browserNavigationOf, browserProjectsOf, serializeBrowserWorkspace, type BrowserWorkspace } from './browser-workspace.js';
+import { BROWSER_CREW_LIMIT, browserCrewOf, browserNavigationOf, browserProjectsOf, browserWorkActionHref, serializeBrowserWorkspace, type BrowserWorkspace } from './browser-workspace.js';
 
 const NOW = new Date('2026-09-20T10:00:00Z');
 const REPO = '/repos/workspace';
@@ -64,12 +65,15 @@ describe('admitted browser workspace projection', () => {
     for (let index = 0; index < 45; index++) task(`foreign-${index}`, '/private', new Date(NOW.getTime() + 1_000));
     const getTask = vi.spyOn(store, 'getTask');
     const families = vi.spyOn(store, 'taskFamiliesAdmitted');
+    const page = vi.spyOn(workIndex, 'workIndexPage');
     expect(browserCrewOf(store, NOW, access, { limit: 1 })).toMatchObject({ crew: [{ id: 'allowed', project: REPO }], crewTruncated: false });
-    expect(families).toHaveBeenCalledWith([REPO], false, { limit: 2, order: 'updated' });
-    expect(getTask.mock.calls.every(([id]) => id === 'allowed')).toBe(true);
-    families.mockClear(); getTask.mockClear();
+    expect(page).toHaveBeenCalledWith(store, NOW, access, { limit: 1, project: null });
+    expect(families).not.toHaveBeenCalled();
+    expect(getTask).not.toHaveBeenCalled();
+    page.mockClear();
     expect(browserCrewOf(store, NOW, access, { project: '/private' })).toEqual({ crew: [], crewTruncated: false });
     expect(families).not.toHaveBeenCalled();
+    expect(page).not.toHaveBeenCalled();
     expect(getTask).not.toHaveBeenCalled();
     expect(browserCrewOf(store, NOW, { principal: 'coordinator', repos: [] })).toEqual({ crew: [], crewTruncated: false });
     expect(browserCrewOf(store, NOW, { principal: 'operator', repos: [], includeUnplaced: true }).crew.map(row => row.id)).toEqual(['unplaced']);
@@ -77,11 +81,11 @@ describe('admitted browser workspace projection', () => {
 
   test('bounds the recent family list and reports whether more admitted work exists', () => {
     for (let index = 0; index < BROWSER_CREW_LIMIT + 1; index++) task(`item-${index}`);
-    const families = vi.spyOn(store, 'taskFamiliesAdmitted');
+    const index = vi.spyOn(workIndex, 'workIndexPage');
     const page = browserCrewOf(store, NOW, access, { limit: 10_000 });
     expect(page.crew).toHaveLength(BROWSER_CREW_LIMIT);
     expect(page.crewTruncated).toBe(true);
-    expect(families).toHaveBeenCalledWith([REPO], false, { limit: BROWSER_CREW_LIMIT + 1, order: 'updated' });
+    expect(index).toHaveBeenCalledWith(store, NOW, access, { limit: BROWSER_CREW_LIMIT, project: null });
   });
 
   test('Ready and Complete match native assignment state without the browser writing anything', () => {
@@ -134,6 +138,27 @@ describe('admitted browser workspace projection', () => {
     expect(row).toMatchObject({ state: 'needs-decision', resultHref: null,
       action: { label: native.primaryAction!.label } });
     expect(row.action!.href).not.toContain('&result=');
+  });
+
+  test('index action links retain exact decision, result, run and task owners and reject unsafe publication URLs', () => {
+    task('root & original');
+    const item = workIndex.workIndexPage(store, NOW, access).items[0]!;
+    const action = (code: NonNullable<typeof item.primaryAction>['code'], decisionId: number | null = null) => ({
+      ...item, primaryAction: { code, label: 'Open', target: { taskId: 'revision #2', runId: 42, decisionId }, access: 'read' as const, retry: 'read-again' as const },
+    });
+    expect(browserWorkActionHref(action('answer-decision', 13))).toBe('/d/13');
+    expect(browserWorkActionHref(action('open-result'))).toBe('/chat?task=revision%20%232&result=42');
+    expect(browserWorkActionHref(action('inspect-run'))).toBe('/r/42');
+    expect(browserWorkActionHref(action('reconcile-run'))).toBe('/r/42');
+    expect(browserWorkActionHref(action('inspect-decisions'))).toBe('/');
+    const pr = action('open-pr');
+    expect(browserWorkActionHref({ ...pr, publicationUrl: 'https://github.com/owner/repository/pull/42' })).toBe('https://github.com/owner/repository/pull/42');
+    expect(browserWorkActionHref({ ...pr, publicationUrl: 'javascript:alert(1)' })).toBe('/review?result=revision%20%232&run=42&project=%2Frepos%2Fworkspace');
+    const anchors = { 'approve-scope': '#approve', 'inspect-stop': '#task-control', 'resume-run': '#task-control', unhold: '#task-actions',
+      'retry-task': '#task-actions', 'write-scope': '#scope', 'select-agent': '#scope', 'inspect-hold': '#holds',
+      'start-worker': '#run-status', 'repair-dependency': '#run-status', 'inspect-task': '' } as const;
+    for (const [code, anchor] of Object.entries(anchors)) expect(browserWorkActionHref(action(code as keyof typeof anchors))).toBe('/t/root%20%26%20original?version=revision%20%232' + anchor);
+    expect(browserWorkActionHref({ ...item, primaryAction: null })).toBeNull();
   });
 });
 

@@ -138,17 +138,30 @@ export function isWorkspace(value: unknown): value is BrowserWorkspace {
 
 export class WorkspaceAuthError extends Error {}
 
-export async function readWorkspace(workspace: BrowserWorkspace, request: string | null, fetcher: typeof fetch = fetch): Promise<BrowserWorkspace> {
+export type WorkspaceRead = { kind: "changed"; workspace: BrowserWorkspace; etag: string | null }
+  | { kind: "unchanged"; etag: string };
+
+export function workspacePollDelay(previous: number, unchanged: boolean, busy: boolean): number {
+  return unchanged && !busy ? Math.min(30_000, previous * 2) : 5_000;
+}
+
+export async function readWorkspace(workspace: BrowserWorkspace, request: string | null, fetcher: typeof fetch = fetch,
+  options: { etag?: string | null; force?: boolean } = {}): Promise<WorkspaceRead> {
   const url = new URL(localUrl(workspace.refreshUrl), window.location.origin);
   url.searchParams.set("format", "workspace");
   if (request) url.searchParams.set("request", request);
   else url.searchParams.delete("request");
-  const response = await fetcher(url.pathname + url.search, { credentials: "same-origin", cache: "no-store", headers: { accept: "application/json" }, signal: AbortSignal.timeout(12_000) });
+  const etag = request || options.force ? null : options.etag;
+  const response = await fetcher(url.pathname + url.search, { credentials: "same-origin", cache: "no-store", headers: { accept: "application/json", ...(etag ? { "if-none-match": etag } : {}) }, signal: AbortSignal.timeout(12_000) });
   if (response.status === 401 || response.status === 403 || response.redirected) throw new WorkspaceAuthError("Sign in again to reconnect. Your draft stays in this tab.");
+  if (response.status === 304) {
+    if (!etag) throw new Error("The update was incomplete. Your current view is preserved.");
+    return { kind: "unchanged", etag: response.headers.get("etag") ?? etag };
+  }
   if (!response.ok) throw new Error("Updates are unavailable. Your work is still saved.");
   const data: unknown = await response.json();
   if (!isWorkspace(data)) throw new Error("The update was incomplete. Your current view is preserved.");
-  return data;
+  return { kind: "changed", workspace: data, etag: response.headers.get("etag") };
 }
 
 /** Exactly one POST. A lost response is resolved only through readWorkspace. */

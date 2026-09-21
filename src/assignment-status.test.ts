@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -38,6 +38,29 @@ describe("private observed assignment status stream", () => {
   const snapshot = (id = "one") => assignmentOf(store, id, NOW, { principal: "operator", repos: [REPO] }, dir)!;
   const events = (id = "one") => store.actionLedger({ repos: [REPO], taskId: id, limit: 100 }).filter(row => row.action === ASSIGNMENT_STATUS_ACTION).reverse();
   const payloads = (id = "one") => events(id).map(row => parseAssignmentStatusEvent(row.outcome)!);
+
+  test('status reconciliation releases the writer between families and preserves progress', () => {
+    for (let i = 0; i < 3; i++) task(`bounded-${i}`);
+    const transact = store.transact.bind(store);
+    const family = store.taskFamilyOf.bind(store);
+    let depth = 0, families = 0;
+    const batches: number[] = [];
+    const transactionSpy = vi.spyOn(store, 'transact').mockImplementation(body => {
+      const outer = depth++ === 0;
+      if (outer) families = 0;
+      try { return transact(body); }
+      finally { depth--; if (outer) batches.push(families); }
+    });
+    const familySpy = vi.spyOn(store, 'taskFamilyOf').mockImplementation((...args) => {
+      families++;
+      return family(...args);
+    });
+    try {
+      syncAssignmentStatuses(store, NOW, [REPO], dir);
+      expect(batches.filter(size => size > 0)).toEqual([1, 1, 1]);
+      expect(store.handle.prepare("SELECT value FROM service_cursor WHERE key LIKE 'assignment-status:%'").get()?.['value']).toBe(0);
+    } finally { familySpy.mockRestore(); transactionSpy.mockRestore(); }
+  });
 
   test("claim records Working once; reads and restarted scans do not dispatch or page people", () => {
     const ref = task();
