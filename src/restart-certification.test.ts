@@ -8,6 +8,7 @@
  */
 
 import { afterEach, describe, expect, test } from "vitest";
+import { createHash } from "node:crypto";
 import { hostname } from "node:os";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,7 +18,7 @@ import { register } from "./runner.js";
 import { acquire } from "./claim.js";
 import { injectBootIdentity } from "./boot-identity.js";
 import { installedServiceDefinition, planDaemon, type DaemonPlan } from "./daemon.js";
-import { assertNoSecret, recordRestartBaseline, RESTART_LIMITS, verifyRestartRecovery } from "./restart-certification.js";
+import { assertNoSecret, recordRestartBaseline as recordBaseline, RESTART_LIMITS, restartRuntimeDigest, verifyRestartRecovery as verifyRecovery, type BaselineInputs, type VerifyInputs } from "./restart-certification.js";
 
 const BOOT_A = "4cdea6bb-1ac8-4e7c-bfcf-646f89b8a8a7";
 const BOOT_B = "9b1d0e2f-3a4b-4c5d-8e6f-a1b2c3d4e5f6";
@@ -41,6 +42,12 @@ describe("restart certification", () => {
   let dir: string;
   let token = "";
 
+  // Exercise the real fresh-byte fingerprint without reopening the Node binary
+  // and this entire source tree for every boot/custody assertion on Windows.
+  const runtimeDigest = (): string => restartRuntimeDigest(join(dir, "node"), join(dir, "runtime"));
+  const recordRestartBaseline = (inputs: BaselineInputs) => recordBaseline({ ...inputs, runtimeDigest });
+  const verifyRestartRecovery = (inputs: VerifyInputs) => verifyRecovery({ ...inputs, runtimeDigest });
+
   afterEach(() => {
     injectBootIdentity(null);
     store?.close();
@@ -50,6 +57,9 @@ describe("restart certification", () => {
   /** A runner, a running task with an open run under a live claim, and a stop pending on a witness of boot A. */
   function seed(): { runId: number; taskRef: number; plan: DaemonPlan } {
     dir = mkdtempSync(join(tmpdir(), "so-restart-cert-"));
+    mkdirSync(join(dir, "runtime"));
+    writeFileSync(join(dir, "node"), "fixture executable\n");
+    writeFileSync(join(dir, "runtime", "controller.js"), "export const version = 1;\n");
     store = openStore(join(dir, "orders.db"));
     const registration = register(store, { name: "r", host, capacity: 1, repos: [REPO], now: T0 });
     token = registration.token;
@@ -83,6 +93,14 @@ describe("restart certification", () => {
       database: { schemaVersion: SCHEMA_VERSION, runningTasks: ["t"], openRuns: [{ id: runId, role: "builder", runner: "r" }], pendingStops: [{ run: runId, problem: expect.stringContaining("still open") }], witnesses: [{ run: runId, pid: process.pid, bootId: BOOT_A }] },
       limits: RESTART_LIMITS,
     });
+    expect(baseline.runtime.digest).toBe(createHash("sha256")
+      .update("fixture executable\n").update("controller.js").update("export const version = 1;\n").digest("hex"));
+    // Cover the production default once as well: no injected reader, real Node
+    // and module files. The remaining cases use the bounded runtime fixture.
+    const actualRuntime = (await recordBaseline({ store, now: T0 })).runtime;
+    expect(actualRuntime).toMatchObject({ execPath: process.execPath, nodeVersion: process.version });
+    expect(actualRuntime.digest).toMatch(/^[a-f0-9]{64}$/);
+    expect(actualRuntime.digest).not.toBe(baseline.runtime.digest);
     expect(baseline.limits.join(" ")).toContain("FileVault");
     expect(baseline.limits.join(" ")).toContain("enable-linger");
     expect(baseline.limits.join(" ")).toContain("logon trigger");
@@ -186,8 +204,10 @@ describe("restart certification", () => {
       expect(wrong.checks.find(check => check.name === "pending-stops")?.ok).toBe(false);
       expect(wrong.ok).toBe(false);
     } finally { other.close(); }
-    const changed = { ...baseline, runtime: { ...baseline.runtime, digest: "changed" } };
-    const result = await verifyRestartRecovery({ store, baseline: changed, now: later, recover: false });
+    // The same path and byte length now contain a different runtime. A cached
+    // digest would miss this; verification must actually read the changed bytes.
+    writeFileSync(join(dir, "runtime", "controller.js"), "export const version = 2;\n");
+    const result = await verifyRestartRecovery({ store, baseline, now: later, recover: false });
     expect(result.checks.find(check => check.name === "runtime")?.ok).toBe(false);
     expect(result.checks.find(check => check.name === "completion:t")?.ok).toBe(false);
     expect(store.stopOf(runId)?.settledAt).toBeNull();

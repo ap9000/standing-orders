@@ -70,6 +70,8 @@ export type BaselineInputs = {
   boot?: BootIdentity;
   runnerName?: string;
   completionTasks?: string[];
+  /** Injectable reader for runtime fixtures; production re-reads its actual files. */
+  runtimeDigest?: () => string;
 };
 
 function bootFacts(identity: BootIdentity): RestartBaseline["boot"] {
@@ -85,9 +87,8 @@ function databaseIdentity(store: Store): string {
   const path = realpathSync(file), stat = statSync(path);
   return createHash("sha256").update(JSON.stringify([path, stat.dev, stat.ino])).digest("hex");
 }
-function runtimeDigest(): string {
-  const hash = createHash("sha256").update(readFileSync(process.execPath));
-  const root = dirname(fileURLToPath(import.meta.url));
+export function restartRuntimeDigest(executable = process.execPath, root = dirname(fileURLToPath(import.meta.url))): string {
+  const hash = createHash("sha256").update(readFileSync(executable));
   for (const name of readdirSync(root).filter(name => /\.(js|ts|ps1)$/.test(name)).sort()) hash.update(name).update(readFileSync(join(root, name)));
   return hash.digest("hex");
 }
@@ -111,7 +112,7 @@ export async function recordRestartBaseline(inputs: BaselineInputs): Promise<Res
     recordedAt: now.toISOString(),
     host: hostname(),
     boot: bootFacts(inputs.boot ?? bootIdentity()),
-    runtime: { digest: runtimeDigest(), nodeVersion: process.version, execPath: process.execPath, platform: process.platform, packageVersion: inputs.packageVersion ?? readPackageVersion() },
+    runtime: { digest: (inputs.runtimeDigest ?? restartRuntimeDigest)(), nodeVersion: process.version, execPath: process.execPath, platform: process.platform, packageVersion: inputs.packageVersion ?? readPackageVersion() },
     containment: containmentStatus(currentContainment()),
     service,
     database: {
