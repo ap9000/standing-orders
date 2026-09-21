@@ -4,7 +4,7 @@ Chat now shows one DB catch-up instead of repeating the portfolio overview. Conv
 
 Projects makes Open primary and Knowledge secondary, removes repeated setup copy, and preserves exact paths and clone consent. Tasks disclose partial retained output and unavailable earlier material while keeping failed checks and current damage visible. A regression fixes shortened-log caveats overwriting a damage warning for the same artifact.
 
-Validation: typecheck and 381 affected tests passed. The synthetic desktop (1440×900) and phone (390×844) journey passed 308 assertions, including result → feedback → explicit revision, recoverable drafts, current and historical status, keyboard actions, 44px primary targets, empty states, long content, and actual check failures. Selected captures below were visually inspected. These fixtures are illustrative data, not live agent output. Physical mobile keyboard/device behavior was not exercised.
+Validation: typecheck and 398 affected tests passed. The synthetic desktop (1440×900) and phone (390×844) journey passed 308 assertions, including result → feedback → explicit revision, recoverable drafts, current and historical status, keyboard actions, 44px primary targets, empty states, long content, and actual check failures. Selected captures below were visually inspected. These fixtures are illustrative data, not live agent output. Physical mobile keyboard/device behavior was not exercised.
 
 The Impeccable detector ran once on the changed UI files and reported three existing thick side borders; all three were reduced to 1px. The browser harness uses Playwright’s animation handling for settled captures, avoiding a paused-animation wait. No model review, automatic retry, authorization, or evidence requirement was introduced or removed by this pass. The full unchanged verifier runs separately through the native release gate.
 
@@ -15,3 +15,5 @@ The Impeccable detector ran once on the changed UI files and reported three exis
 - [Partial output stays available](phone-status-complete.png)
 
 [Machine-readable check manifest](checks.json) binds the affected sources and fixture scripts. [Browser results](browser.json) records each assertion and the selected captures.
+
+The first full native run (1959) passed 4,117 tests and found one remaining old assertion expecting partial output to be a red error. That assertion now requires one partial-output disclosure. Its 17-test file passes; UI source and browser results are unchanged. The failed native record is retained, and the corrected candidate gets a fresh full native gate.

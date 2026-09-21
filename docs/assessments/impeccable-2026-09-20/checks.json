@@ -7,10 +7,11 @@
     "src/assignment.test.ts": "2c03fdfe16ddfbbc2058ff9a9d13aa4f9b328b60930764097b765849bfa84719",
     "src/chat-polish.ts": "236a7d7a02fd9e3ffd8d7aa25f1ccf054d1128d3e0b783cc7f0f9f7a3c4c1d67",
     "src/serve.test.ts": "2150a4b3c7b25754e36b1fb102eea00b58eb8634b244e3e6e1d4487b894c20ac",
-    "src/serve.ts": "072a88aaac45fca1f31fcf5659c269745d45829cd5694d4c900a1f798734d7c7"
+    "src/serve.ts": "072a88aaac45fca1f31fcf5659c269745d45829cd5694d4c900a1f798734d7c7",
+    "src/workspace-ui.test.ts": "54fcf6021ab8b402dba182093e7ee40c80a6a8ef7243a8b57963ffa603e8cdb1"
   },
   "focusedTests": {
-    "passed": 381,
+    "passed": 398,
     "log": "focused-tests.txt"
   },
   "browserChecks": 308,

@@ -11,3 +11,14 @@
    Start at  18:15:46
    Duration  50.91s (transform 3.34s, setup 25ms, import 5.24s, tests 54.92s, environment 0ms)
 
+
+Additional existing workspace-interface tests after updating its stale red-warning assertion:
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-impeccable
+
+
+ Test Files  1 passed (1)
+      Tests  17 passed (17)
+   Start at  18:26:15
+   Duration  726ms (transform 176ms, setup 14ms, import 552ms, tests 31ms, environment 0ms)
+
