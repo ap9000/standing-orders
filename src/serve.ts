@@ -23,6 +23,9 @@ import { changeKnowledge, knowledgeView, knowledgeVersion, readKnowledgeSnapshot
 import { knowledgeHtml, knowledgeContextHtml, KNOWLEDGE_CSS } from "./knowledge-ui.js";
 import { learningHtml } from "./workspace-ui.js";
 import { createSessionEndpoint } from './session-server.js';
+import { handleTeamHttp } from './team-http.js';
+import { teamWorkspaceHtml } from './team-ui.js';
+import { createTeamRuntime } from './team-runtime.js';
 import { prepareWorkspaceRevision, WorkspaceValidatorCache } from "./workspace-revision.js";
 import { workIndexPage, workCountsByProject, WorkIndexCursorError, type WorkIndexPage, type WorkIndexItem } from "./work-index.js";
 import { openWorkDecisionOf } from "./work-summary.js";
@@ -603,6 +606,38 @@ export function createDecisionServer(options: ServeOptions): Server {
   };
   const codingProjects = (): string[] => [...new Set([...managedRepos(), ...store.listProjects().map(project => project.path)])].filter(repo => rowVisible(liveCeiling(), repo));
   function codingProjectAllowed(repo: string): boolean { return codingProjects().includes(repo); }
+  const teamStreams = new Set<ServerResponse>();
+  const team = createTeamRuntime({ store, repos: codingProjects, evidenceRoot, clock, workspaceRevision,
+    ...(options.chatFetcher ? { fetcher: options.chatFetcher } : {}),
+    provider: () => { const enabled = chatEnablement(); return enabled.ok ? { config: enabled.config, key: enabled.key } : null; },
+    ...(options.subscriptionChatRunner ? { subscriptionRunner: options.subscriptionChatRunner } : {}),
+  });
+  const teamEndpoint = (request: IncomingMessage, response: ServerResponse) => handleTeamHttp(request, response, {
+    authenticate: request => {
+      const who = identify(request, request.method === 'POST');
+      const account = who === null ? null : store.accountOf(who.name);
+      return who && account && account.revokedAt === null ? { name: who.name, generation: account.generation } : null;
+    },
+    revalidate: (request, actor) => {
+      const account = store.accountOf(actor.name);
+      if (!account || account.revokedAt !== null || account.generation !== actor.generation) return false;
+      // Bearer was proved when this connection opened. Cookie expiry/revocation
+      // is rechecked without allowing a passive stream to extend its lifetime.
+      if (request.headers.authorization) return true;
+      const who = identify(request, false);
+      return who?.name === actor.name && who.via === 'cookie' && who.session.generation === actor.generation;
+    },
+    authorizeMutation: (request, actor) => {
+      const who = identify(request, false);
+      if (!who || who.name !== actor.name) return false;
+      if (who.via === 'bearer') return request.headers.origin === undefined;
+      const origin = request.headers.origin, referer = request.headers.referer;
+      const named = typeof origin === 'string' && origin !== 'null' ? origin : typeof referer === 'string' ? referer : null;
+      if (named !== null && !allowedHost(named.replace(/^https?:\/\//, '').split('/')[0])) return false;
+      return request.headers['x-csrf-token'] === who.session.csrf;
+    },
+    execute: team.execute, cursor: team.cursor, streams: teamStreams,
+  });
   const sessionEndpoint = createSessionEndpoint({ store, workspace: coding, projects: codingProjects, projectAllowed: repo => rowVisible(liveCeiling(), repo) });
   /** The enumerable admission list for roll-up SQL: repos-only ceilings
    * enumerate themselves; root ceilings enumerate the STORED repos that
@@ -757,6 +792,7 @@ export function createDecisionServer(options: ServeOptions): Server {
 
     const method = request.method ?? "GET";
     if (await sessionEndpoint(request, response)) return;
+    if (await teamEndpoint(request, response)) return;
     if (serveBrowserAsset(request, response, url.pathname)) return;
     // Exact, content-addressed application CSS only. Session-bearing
     // pages and fragments still use no-store and are never compressed.
@@ -1049,7 +1085,21 @@ export function createDecisionServer(options: ServeOptions): Server {
       return { repo, taskId: null, runId: null, action: `coding ${body ? url.pathname.split('/').at(-1) : 'view'}` };
     }
     const shared=/^\/chat\/(?:action\/([0-9]{1,15})|proposal\/([0-9]{1,15})\/(?:confirm|dismiss))$/.exec(url.pathname);
-    if(shared){const proposal=store.getMateProposal(Number(shared[1]??shared[2])),action=proposal?.kind==='action'?sharedActionPayload(proposal.payload):null;if(action&&proposal&&store.getMateThread(proposal.thread)?.approver===who.name)return {repo:action.repo,taskId:typeof action.request['task']==='string'?action.request['task']:null,runId:typeof action.request['run']==='number'?action.request['run']:null,action:action.operation};}
+    if (shared) {
+      const proposal = store.getMateProposal(Number(shared[1] ?? shared[2]));
+      const action = proposal?.kind === 'action' ? sharedActionPayload(proposal.payload) : null;
+      const room = proposal ? store.handle.prepare('SELECT id FROM team_conversation WHERE thread=?').get(proposal.thread) : null;
+      let admitted = proposal && store.getMateThread(proposal.thread)?.approver === who.name;
+      if (room && who.via === 'cookie') {
+        try { team.domain.access({ name: who.name, generation: who.session.generation }, String(room['id']), 'contributor'); admitted = true; }
+        catch { admitted = false; }
+      }
+      if (admitted && proposal) {
+        const taskId = typeof action?.request['task'] === 'string' ? action.request['task'] : typeof proposal.payload['task'] === 'string' ? proposal.payload['task'] : null;
+        const repo = action?.repo ?? (taskId ? store.lookupRef(taskId)?.repo : null) ?? (typeof proposal.payload['repo'] === 'string' ? proposal.payload['repo'] : null);
+        return { repo, taskId, runId: typeof action?.request['run'] === 'number' ? action.request['run'] : null, action: action?.operation ?? `chat ${proposal.kind}` };
+      }
+    }
     if (url.pathname.startsWith('/settings/skills')) return {repo:body?.get('repo')??url.searchParams.get('repo')??projectOf(who,request)??null,taskId:null,runId:null,action:body?'project skills change':'project skills view'};
     if (url.pathname.startsWith('/settings/knowledge')) return {repo:body?.get('repo')??url.searchParams.get('repo')??projectOf(who,request)??null,taskId:null,runId:null,action:body?'project knowledge change':'project knowledge view'};
     const task = matchTaskPath(url.pathname, "(?:/([a-z-]+))?$");
@@ -1072,10 +1122,23 @@ export function createDecisionServer(options: ServeOptions): Server {
   function projectRequestAllowed(url: URL, who: Who, request: IncomingMessage, response: ServerResponse): boolean {
     if (!restricted()) return true;
     const path = url.pathname;
+    // Shared coordination has its own complete audience/project admission.
+    // A person's open-project filter does not deny an explicitly scoped room.
+    if (path === '/chat' && request.method === 'GET' && who.via === 'cookie' && url.searchParams.get('private') !== '1' && ((!url.searchParams.has('task') && !url.searchParams.has('result')) || url.searchParams.has('conversation'))) {
+      try {
+        const snapshot = team.domain.snapshot({ name: who.name, generation: who.session.generation }, url.searchParams.get('conversation') ?? undefined, url.searchParams.get('lead') ?? undefined);
+        if ((snapshot.leads.length > 0 || url.searchParams.get('team') === '1') && (!snapshot.selected || snapshot.selected.projects.every(visible))) return true;
+      } catch { refuse(response, who, 404, 'This conversation is unavailable.', '/projects'); return false; }
+    }
     // Coding routes require an instance operator, then prove saved ownership and project access.
     if (path === "/code" || path.startsWith("/code/")) return true;
     if((request.method==='GET'&&/^\/chat\/action\/[0-9]{1,15}$/.test(path))||(request.method==='POST'&&/^\/chat\/proposal\/[0-9]{1,15}\/(confirm|dismiss)$/.test(path))){
       const proposal=store.getMateProposal(Number(path.split('/')[3])),action=proposal?.kind==='action'?sharedActionPayload(proposal.payload):null;
+      const shared = proposal ? store.handle.prepare('SELECT id FROM team_conversation WHERE thread=?').get(proposal.thread) : null;
+      if (shared && who.via === 'cookie') {
+        try { const access = team.domain.access({ name: who.name, generation: who.session.generation }, String(shared['id']), 'contributor'); if (access.conversation.projects.every(visible)) return true; }
+        catch { /* The same scoped refusal below also covers revoked membership. */ }
+      }
       if(action&&proposal&&store.getMateThread(proposal.thread)?.approver===who.name&&visible(action.repo)&&store.accountCanAccess(who.name,action.repo))return true;
       refuse(response,who,404,'No such action in your projects.','/projects');return false;
     }
@@ -2590,6 +2653,32 @@ export function createDecisionServer(options: ServeOptions): Server {
       // Cookie sessions only (Codex v3 review, change 7): drafts live in
       // THIS session's memory; a bearer caller has nowhere to keep them.
       if (who.via !== "cookie") return refuse(response, who, 403, "chat is a browser surface — it keeps your drafts in the session");
+      if (url.searchParams.get('private') !== '1' && !url.searchParams.has('task') && !url.searchParams.has('result')) {
+        const reply = await team.execute({ name: who.name, generation: who.session.generation }, {
+          operation: url.searchParams.has('conversation') ? 'show' : 'list',
+          args: { ...(url.searchParams.has('conversation') ? { conversationId: url.searchParams.get('conversation') } : {}),
+            ...(url.searchParams.has('lead') ? { leadId: url.searchParams.get('lead') } : {}) },
+        });
+        if (!reply.ok || !reply.snapshot) return refuse(response, who, 403, reply.message, '/chat?private=1');
+        if (url.searchParams.has('proposal')) {
+          const id = Number(url.searchParams.get('proposal')), selected = reply.snapshot.selected;
+          const proposal = Number.isSafeInteger(id) && id > 0 ? store.getMateProposal(id) : null;
+          if (!selected || !proposal || proposal.thread !== selected.threadId) return refuse(response, who, 404, 'This proposal is unavailable.', '/chat');
+          const back = '/chat?conversation=' + encodeURIComponent(selected.id);
+          const decision = proposal.kind === 'answer' && typeof proposal.payload['decision'] === 'number' ? store.getDecision(proposal.payload['decision']) : null;
+          const active = reply.snapshot.messages.some(message => message.status === 'running');
+          const canAct = reply.snapshot.canSend && reply.snapshot.chatAuthorization?.enabled === true;
+          let card = mateProposalCard(proposal, who.session.csrf, !canAct || active, decision, back);
+          if (!canAct) card = card.replace('Available when the current turn finishes.', reply.snapshot.canSend ? 'Enable chat in this conversation before acting on a proposal.' : 'An authorized contributor can act on this proposal.');
+          return sendScreen(response, 200, screen('Review action', `<p><a href="${escape(back)}">Back to conversation</a></p>` + card, { chrome: chromeFor(null, 'chat', undefined, 'all') }));
+        }
+        if (reply.snapshot.leads.length > 0 || url.searchParams.has('conversation') || url.searchParams.get('team') === '1') {
+          const said = url.searchParams.get('said')?.slice(0, 1_000);
+          return sendScreen(response, 200, screen('Chat', (said ? `<p role="alert">${escape(said)}</p>` : '') + teamWorkspaceHtml(reply.snapshot), {
+            chrome: chromeFor(null, 'chat', undefined, 'all'), workspace: { team: reply.snapshot, ...(said ? { notices: [said] } : {}) },
+          }));
+        }
+      }
       store.sweepStaleChatTurns(now);
       store.sweepStaleMateTurns(now);
       store.sweepCoordinatorProposals(now);
@@ -2621,6 +2710,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (runIsLive(found) || (found.outcome !== "built" && found.outcome !== "no-change")) return null;
         return found;
       })();
+      const roomId = url.searchParams.get('conversation');
+      const resultLink = (href: string) => roomId ? href + '&conversation=' + encodeURIComponent(roomId) : href;
       const resultPanel =
         resultRun === null
           ? null
@@ -2631,9 +2722,9 @@ export function createDecisionServer(options: ServeOptions): Server {
               user: who.name,
               noted: url.searchParams.get("noted") !== null,
               requestToken: randomBytes(16).toString("hex"),
-              hrefFor: one => chatResultHref(focusTask?.id ?? "", resultRun.id, one),
-              returnTo: chatResultHref(focusTask?.id ?? "", resultRun.id),
-              back: { href: taskChatHref(focusTask?.id ?? ""), label: "Back to chat" },
+              hrefFor: one => resultLink(chatResultHref(focusTask?.id ?? "", resultRun.id, one)),
+              returnTo: resultLink(chatResultHref(focusTask?.id ?? "", resultRun.id)),
+              back: { href: roomId ? "/chat?conversation=" + encodeURIComponent(roomId) : taskChatHref(focusTask?.id ?? ""), label: "Back to chat" },
             }) + (who.role === 'approver' && focusTask?.assignment?.state === 'ready-to-check'
               && focusTask.assignment.receipt?.runId === resultRun.id
               ? completionForm(focusTask.assignment.receipt.taskId, resultRun.id, focusTask.assignment.receipt.digest, who.session.csrf) : '');
@@ -2642,6 +2733,19 @@ export function createDecisionServer(options: ServeOptions): Server {
         : requestedResult !== null && focusTask !== null && resultRun === null
           ? "That result is not available for this task. The conversation is shown without it."
           : null;
+      if (roomId) {
+        const shared = await team.execute({ name: who.name, generation: who.session.generation }, { operation: 'show', args: { conversationId: roomId } });
+        if (!shared.ok || !shared.snapshot?.selected) return refuse(response, who, 404, shared.message, '/chat');
+        if (focusTask && !shared.snapshot.selected.projects.includes(store.lookupRef(focusTask.executionId)?.repo ?? '')) return refuse(response, who, 404, 'This task is outside the conversation’s projects.', '/chat?conversation=' + encodeURIComponent(roomId));
+        return sendScreen(response, 200, screen('Chat', teamWorkspaceHtml(shared.snapshot) + (resultPanel ?? ''), {
+          chrome: chromeFor(null, 'chat', undefined, 'all'), functional: { script: RESULT_REVIEW_SCRIPT, fetches: true },
+          workspace: { team: shared.snapshot,
+            focus: focusTask ? { id: focusTask.id, title: focusTask.title, html: taskChatLiveRegion(focusTask, who.session.csrf, true, false, taskHref(focusTask.executionId) + "#approve") } : null,
+            result: resultPanel && resultRun ? { runId: resultRun.id, html: resultPanel } : null,
+            notices: focusProblem ? [focusProblem] : [],
+          },
+        }));
+      }
       // Pending cards, and the recently answered ones so the door's words are read (last 30).
       const repos = managedRepos();
       const allCoordinatorRows = who.role === "approver" ? store.listCoordinatorProposals({ repos, states: ["pending", "confirmed", "refused"], limit: 30 }) : [];
@@ -2800,10 +2904,20 @@ export function createDecisionServer(options: ServeOptions): Server {
     const sharedReview = /^\/chat\/action\/([0-9]{1,15})$/.exec(url.pathname);
     if (sharedReview !== null) {
       if(who.via!=='cookie'||who.role!=='approver')return refuse(response,who,403,'Sign in to review this action.','/projects');
-      const principal=matePrincipal(who);if(principal===null)return refuse(response,who,403,'Your access changed. Sign in again.','/chat');
+      const reviewProposal = store.getMateProposal(Number(sharedReview[1]));
+      const sharedConversation = reviewProposal ? store.handle.prepare('SELECT id FROM team_conversation WHERE thread=?').get(reviewProposal.thread) : null;
+      let principal: VerifiedApprover | null = null;
+      if (sharedConversation) {
+        try {
+          const access = team.domain.access({ name: who.name, generation: who.session.generation }, String(sharedConversation['id']), 'contributor');
+          const checked = verifyApproverStanding(store, who.name, who.session.generation, access.conversation.projects);
+          principal = checked.ok ? checked.who : null;
+        } catch { return refuse(response, who, 404, 'This proposal is unavailable.', '/chat'); }
+      } else principal = matePrincipal(who);
+      if(principal===null)return refuse(response,who,403,'Your access changed. Sign in again.','/chat');
       try {
         const id=Number(sharedReview[1]),saved=store.getMateProposal(id),savedAction=saved?.kind==='action'?sharedActionPayload(saved.payload):null;
-        if(saved&&savedAction&&saved.state!=='pending'&&store.getMateThread(saved.thread)?.approver===principal.name&&principal.repos.includes(savedAction.repo)&&store.accountCanAccess(principal.name,savedAction.repo)) {
+        if(saved&&savedAction&&saved.state!=='pending'&&(sharedConversation!==null||store.getMateThread(saved.thread)?.approver===principal.name)&&principal.repos.includes(savedAction.repo)&&store.accountCanAccess(principal.name,savedAction.repo)) {
           const task = typeof saved.outcome?.['taskId']==='string' ? saved.outcome['taskId'] : typeof savedAction.request['task']==='string' ? savedAction.request['task'] : null;
           const destination = task ? taskHref(task) : `/settings/${savedAction.operation.startsWith('skill_')?'skills':'knowledge'}?repo=${encodeURIComponent(savedAction.repo)}`;
           const said = typeof saved.outcome?.['said']==='string' ? saved.outcome['said'] : saved.state==='dismissed'?'Action dismissed.':saved.state==='expired'?'This proposal expired. Ask for a fresh proposal.':'This action has no completed outcome yet.';
@@ -3400,6 +3514,11 @@ export function createDecisionServer(options: ServeOptions): Server {
    * are what sensitivity strips.
    */
   function sendScreen(response: ServerResponse, status: number, s: Screen): void {
+    const teamEntry = requestContext.getStore()?.returnTo;
+    if (teamEntry?.startsWith('/chat') && !s.workspace?.team && !teamEntry.includes('task=') && !teamEntry.includes('proposal=')) {
+      s.body = '<p class="team-entry"><a href="/chat?team=1">Open team chat</a></p>' + s.body;
+      if (s.workspace?.conversation) s.workspace.controlsHtml = '<p><a href="/chat?team=1">Open team chat</a></p>' + (s.workspace.controlsHtml ?? '');
+    }
     const sensitive =
       s.forceSensitive === true ||
       SENSITIVE_INPUT.test(s.body) ||
@@ -3419,7 +3538,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       let crew: Pick<BrowserWorkspace, 'crew' | 'crewTruncated'> = { crew: [], crewTruncated: false };
       try {
         const project = s.chrome.active === 'chat' ? null : s.chrome.project;
-        crew = requestFacts.workCrew?.project === project ? browserCrewFromIndex(requestFacts.workCrew.page)
+        crew = extras.team?.tasks ? browserCrewFromIndex(extras.team.tasks, extras.team.selected?.id) : requestFacts.workCrew?.project === project ? browserCrewFromIndex(requestFacts.workCrew.page)
           : browserCrewOf(store, clock(), { principal: 'operator', repos: managedRepos(), includeUnplaced: false }, { evidenceRoot, project });
       } catch { notices.push('Crew updates are unavailable. Open Tasks to inspect saved work.'); }
       const conversation = extras.conversation ?? null;
@@ -3430,7 +3549,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         receipt: conversation !== null && request && REQUEST_TOKEN.test(request)
           ? { request, received: store.mateRequestReceipt(conversation.sessionId, request) !== null } : null,
         projects: browserProjectsOf(s.chrome.projects ?? []), ...crew,
-        conversation, focus: extras.focus ?? null, result: extras.result ?? null,
+        conversation, ...(extras.team ? { team: extras.team } : {}), focus: extras.focus ?? null, result: extras.result ?? null,
         catchUpHtml: extras.catchUpHtml ?? '', controlsHtml: extras.controlsHtml ?? '', notices,
         pageHtml: extras.pageHtml === undefined ? (conversation === null ? pageHtml : null) : extras.pageHtml,
         navigation: [...browserNavigationOf(currentPath, s.chrome.project), { label: 'Workspace tools', href: '/menu', active: false }],
@@ -3601,7 +3720,9 @@ export function createDecisionServer(options: ServeOptions): Server {
   }
   function revisionDestination(child: string, back: string): string {
     const root = familyOf(child)?.root.id ?? child;
-    return back.startsWith("/chat?") ? `${taskChatHref(root)}&revision=${encodeURIComponent(child)}` : `${taskHref(root)}?version=${encodeURIComponent(child)}`;
+    if (!back.startsWith("/chat?")) return `${taskHref(root)}?version=${encodeURIComponent(child)}`;
+    const conversation = new URL(back, 'http://localhost').searchParams.get('conversation');
+    return `${taskChatHref(root)}&revision=${encodeURIComponent(child)}${conversation ? '&conversation=' + encodeURIComponent(conversation) : ''}`;
   }
   function earlierLiveVersions(family: TaskFamily, now: Date): string[] {
     const ids = family.versions.filter(one => one.id !== family.current.id).map(one => one.id);
@@ -6081,9 +6202,17 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (mateProposal !== null) {
       if (who.via !== "cookie") return refuse(response, who, 403, "the mate is a browser surface");
       const back = safeChatReturn(body.get("return"));
-      const principal = matePrincipal(who);
-      if (principal === null) return refuse(response, who, 403, "your approver standing changed — sign in again", back);
       const id = Number(mateProposal[1]);
+      const proposalRow=store.getMateProposal(id);
+      const shared=proposalRow&&store.handle.prepare('SELECT id FROM team_conversation WHERE thread=?').get(proposalRow.thread);
+      const proposalTaskHref = (taskId: string) => taskChatHref(taskId) + (shared ? '&conversation=' + encodeURIComponent(String(shared['id'])) : '');
+      let principal:VerifiedApprover|null=null;
+      if(shared){
+        try { const access=team.domain.access({name:who.name,generation:who.session.generation},String(shared['id']),'contributor');
+          const proof=verifyApproverStanding(store,who.name,who.session.generation,access.conversation.projects); principal=proof.ok?proof.who:null;
+        } catch { return refuse(response,who,404,'This proposal is unavailable.',back); }
+      } else principal=matePrincipal(who);
+      if (principal === null) return refuse(response, who, 403, "your approver standing changed — sign in again", back);
       if (mateProposal[2] === "dismiss") {
         if (!dismissMateProposal(store, principal, id, now)) noteMate(who.session.csrf, null, "that proposal was already acted on");
         return redirect(response, chatReturnWithLatest(back));
@@ -6096,6 +6225,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (!outcome.ok && outcome.reason === "needs-confirm") return refuse(response,who,409,outcome.said,sharedActionReviewPath(id));
         return redirect(response,sharedActionReviewPath(id));
       }
+      if (!outcome.ok && shared) return redirect(response, chatReturnWithSaid(back, outcome.said));
       if (!outcome.ok && outcome.reason === "needs-confirm") noteMate(who.session.csrf, null, outcome.said);
       // A confirmed task proposal leads to the task it actually created
       // (package 2): the lens over this same conversation, whose journey
@@ -6104,7 +6234,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       // replayed, or unavailable confirmation returns as before, with
       // the card carrying the door's words.
       if (outcome.ok && outcome.kind === "task" && outcome.taskId !== null && taskChatFocus(outcome.taskId, now, who, { mintNonce: false }) !== null) {
-        return redirect(response, `${taskChatHref(outcome.taskId)}#task-chat-live`);
+        return redirect(response, `${proposalTaskHref(outcome.taskId)}#task-chat-live`);
       }
       if (outcome.ok && outcome.kind === "review" && outcome.taskId !== null) {
         const proposal = store.getMateProposal(id)!;
@@ -6113,15 +6243,15 @@ export function createDecisionServer(options: ServeOptions): Server {
         // plan. Landing at the top left that message under the phone's
         // fixed composer (build #1604 feedback).
         return redirect(response, proposal.payload["operation"] === "revise"
-          ? chatReturnWithLatest(revisionDestination(outcome.taskId, taskChatHref(outcome.taskId)))
-          : `${taskChatHref(outcome.taskId)}&result=${Number(proposal.payload["run"])}#request-changes`);
+          ? chatReturnWithLatest(revisionDestination(outcome.taskId, proposalTaskHref(outcome.taskId)))
+          : `${proposalTaskHref(outcome.taskId)}&result=${Number(proposal.payload["run"])}#request-changes`);
       }
       if (outcome.ok && outcome.kind === "task_action" && outcome.taskId !== null) {
         const proposal = store.getMateProposal(id)!;
         if (proposal.payload["operation"] === "resume") {
           return armTaskResume(response, who, outcome.taskId, String(proposal.payload["run"]), "chat", now);
         }
-        return redirect(response, `${taskChatHref(outcome.taskId)}#task-chat-live`);
+        return redirect(response, `${proposalTaskHref(outcome.taskId)}#task-chat-live`);
       }
       return redirect(response, chatReturnWithLatest(back));
     }
@@ -8381,6 +8511,7 @@ export function createDecisionServer(options: ServeOptions): Server {
   let leadMaintenance: ReturnType<typeof startMaintenance> | null = null;
   let leadClosing = false;
   server.once('listening', () => {
+    team.start();
     leadMaintenance = startMaintenance({ intervalMs: 5_000, shouldStop: () => leadClosing,
       run: () => runLeadFollowPass({ store, repos: managedRepos, evidenceRoot, clock,
         provider: () => { const enabled = chatEnablement(); return enabled.ok ? { config: enabled.config, key: enabled.key } : null; },
@@ -8392,8 +8523,9 @@ export function createDecisionServer(options: ServeOptions): Server {
   const closeServer = server.close.bind(server);
   server.close = ((callback?: (error?: Error) => void) => {
     leadClosing = true;
-    if (!coding && !leadMaintenance) return closeServer(callback);
-    void (async () => { await leadMaintenance?.stop(); await coding?.close(); })().then(() => closeServer(callback)).catch(error => {
+    for (const stream of teamStreams) stream.end();
+    teamStreams.clear();
+    void (async () => { await team.close(); await leadMaintenance?.stop(); await coding?.close(); })().then(() => closeServer(callback)).catch(error => {
       if (callback) callback(error instanceof Error ? error : Error('Coding session shutdown failed.'));
       else server.emit('error', error);
     });
@@ -12114,7 +12246,7 @@ type Screen = {
    * secrets and judgment calls the classifier cannot see. */
   forceSensitive?: boolean;
   /** Structured conversation; complex guarded forms stay native islands. */
-  workspace?: Partial<Pick<BrowserWorkspace, 'conversation' | 'focus' | 'result' | 'catchUpHtml' | 'controlsHtml' | 'notices' | 'pageHtml'>>;
+  workspace?: Partial<Pick<BrowserWorkspace, 'conversation' | 'team' | 'focus' | 'result' | 'catchUpHtml' | 'controlsHtml' | 'notices' | 'pageHtml'>>;
 };
 
 function screen(
@@ -13521,12 +13653,12 @@ function taskChatApproval(focus: TaskChatFocus, csrf: string): string {
 
 /** One live, server-derived journey from request to proof. The fragment is
  * safe to refresh independently, so an in-progress message is never lost. */
-function taskChatLiveRegion(focus: TaskChatFocus, csrf: string, fragment = false, inert = false): string {
+function taskChatLiveRegion(focus: TaskChatFocus, csrf: string, fragment = false, inert = false, approvalHref = taskChatHref(focus.id) + "#task-chat-action"): string {
   const receiptLeads = focus.state === "done" && focus.result !== null;
   const approvalContent = (inert && focus.approval !== null && focus.plan !== "requested"
       ? `<section class="card chat-action-card"><span class="eyebrow">approval ready</span><h2>Finish the current chat response first</h2><p class="meta">The secure approval step appears here as soon as this response lands.</p></section>`
       : fragment && focus.approval !== null && focus.plan !== "requested"
-        ? `<section class="card chat-action-card chat-refresh-action"><a class="button-link" href="${taskChatHref(focus.id)}#task-chat-action" data-primary-action>Review plan</a></section>`
+        ? `<section class="card chat-action-card chat-refresh-action"><a class="button-link" href="${escape(approvalHref)}" data-primary-action>Review plan</a></section>`
         : taskChatApproval(focus, csrf));
   const approvalCard = focus.approval !== null && focus.dispatch?.action !== "approve-scope"
     ? `<details class="task-secondary-approval"><summary>Updated approval terms</summary>${approvalContent}</details>` : approvalContent;
@@ -16218,6 +16350,9 @@ function safeChatReturn(raw: string | null | undefined): string {
   try {
     const parsed = new URL(safe, "http://standing-orders.local");
     if (parsed.pathname !== "/chat") return "/chat";
+    const conversation=parsed.searchParams.get('conversation');
+    if(conversation&&/^[a-f0-9-]{36}$/.test(conversation))return `/chat?conversation=${encodeURIComponent(conversation)}`;
+    if(parsed.searchParams.get('private')==='1')return '/chat?private=1';
     const task = parsed.searchParams.get("task");
     return task !== null && task.length > 0 && task.length <= 64 && !hasForbiddenControls(task)
       ? taskChatHref(task)

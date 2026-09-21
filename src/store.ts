@@ -104,7 +104,7 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // screenshots one answered mate turn selected for an exact result; readers
 // below v64 refuse it.
 // v65 adds immutable skill packages, project selections, run snapshots and skill tests.
-export const SCHEMA_VERSION = 70;
+export const SCHEMA_VERSION = 71;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -3840,6 +3840,73 @@ export function openStore(file: string, options: OpenOptions = {}): Store {
   }
 }
 
+/** v71: shared lead identity and admission. Existing mate history remains private. */
+export const TEAM_TABLES = ["team_lead", "team_lead_project", "team_lead_member", "team_conversation", "team_participant", "team_message", "team_read", "team_follow", "team_mate_session", "team_task_owner", "team_event", "team_request"] as const;
+const TEAM_SCHEMA = `
+CREATE TABLE IF NOT EXISTS team_lead (
+ id TEXT PRIMARY KEY, name TEXT NOT NULL, instructions TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1,
+ status TEXT NOT NULL CHECK(status IN ('active','paused')), created_by TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS team_lead_project (
+ lead TEXT NOT NULL REFERENCES team_lead(id), project TEXT NOT NULL, PRIMARY KEY(lead,project)
+);
+CREATE TABLE IF NOT EXISTS team_lead_member (
+ lead TEXT NOT NULL REFERENCES team_lead(id), account TEXT NOT NULL REFERENCES approver(name),
+ role TEXT NOT NULL CHECK(role IN ('viewer','contributor','manager')), active INTEGER NOT NULL DEFAULT 1,
+ revision INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(lead,account)
+);
+CREATE TABLE IF NOT EXISTS team_conversation (
+ id TEXT PRIMARY KEY, lead TEXT NOT NULL REFERENCES team_lead(id), title TEXT NOT NULL,
+ visibility TEXT NOT NULL CHECK(visibility IN ('private','team')), projects_json TEXT NOT NULL,
+ revision INTEGER NOT NULL DEFAULT 1, thread INTEGER NOT NULL UNIQUE REFERENCES mate_thread(id),
+ created_by TEXT NOT NULL REFERENCES approver(name), created_at TEXT NOT NULL, last_claimed_at TEXT
+);
+CREATE TABLE IF NOT EXISTS team_participant (
+ conversation TEXT NOT NULL REFERENCES team_conversation(id), account TEXT NOT NULL REFERENCES approver(name),
+ role TEXT NOT NULL CHECK(role IN ('viewer','contributor','manager')), active INTEGER NOT NULL DEFAULT 1,
+ revision INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(conversation,account)
+);
+CREATE TABLE IF NOT EXISTS team_message (
+ message INTEGER PRIMARY KEY REFERENCES mate_message(id), conversation TEXT NOT NULL REFERENCES team_conversation(id),
+ author TEXT NOT NULL REFERENCES approver(name), author_generation INTEGER NOT NULL, lead_member_revision INTEGER NOT NULL, participant_revision INTEGER NOT NULL, request_id TEXT NOT NULL,
+ payload_hash TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('queued','running','answered','failed','cancelled','uncertain')),
+ revision INTEGER NOT NULL DEFAULT 1, generation INTEGER NOT NULL DEFAULT 0, runner TEXT, claimed_at TEXT,
+ turn_id INTEGER REFERENCES mate_turn(id), stop_requested INTEGER NOT NULL DEFAULT 0, error TEXT,
+ UNIQUE(conversation,author,request_id)
+);
+CREATE INDEX IF NOT EXISTS team_message_queue ON team_message(status,message);
+CREATE INDEX IF NOT EXISTS team_message_conversation ON team_message(conversation,message);
+CREATE UNIQUE INDEX IF NOT EXISTS team_message_single_writer ON team_message(conversation) WHERE status='running';
+CREATE TABLE IF NOT EXISTS team_read (
+ conversation TEXT NOT NULL REFERENCES team_conversation(id), account TEXT NOT NULL REFERENCES approver(name),
+ message INTEGER NOT NULL, PRIMARY KEY(conversation,account)
+);
+CREATE TABLE IF NOT EXISTS team_follow (
+ conversation TEXT NOT NULL REFERENCES team_conversation(id), account TEXT NOT NULL REFERENCES approver(name),
+ generation INTEGER NOT NULL, lead_member_revision INTEGER NOT NULL, participant_revision INTEGER NOT NULL, enabled INTEGER NOT NULL, PRIMARY KEY(conversation,account)
+);
+CREATE TABLE IF NOT EXISTS team_mate_session (
+ session INTEGER PRIMARY KEY REFERENCES mate_session(id), thread INTEGER NOT NULL REFERENCES mate_thread(id)
+);
+CREATE INDEX IF NOT EXISTS team_mate_session_thread ON team_mate_session(thread,session);
+CREATE TABLE IF NOT EXISTS team_task_owner (
+ task_ref INTEGER PRIMARY KEY REFERENCES task_ref(id), lead TEXT NOT NULL REFERENCES team_lead(id), conversation TEXT REFERENCES team_conversation(id),
+ revision INTEGER NOT NULL DEFAULT 1, changed_by TEXT NOT NULL, changed_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS team_event (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, lead TEXT NOT NULL REFERENCES team_lead(id),
+ conversation TEXT REFERENCES team_conversation(id), kind TEXT NOT NULL, actor TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS team_event_conversation ON team_event(conversation,id);
+CREATE INDEX IF NOT EXISTS team_event_lead ON team_event(lead,id);
+CREATE INDEX IF NOT EXISTS team_lead_member_account ON team_lead_member(account,active,lead);
+CREATE INDEX IF NOT EXISTS team_participant_account ON team_participant(account,active,conversation);
+CREATE TABLE IF NOT EXISTS team_request (
+ account TEXT NOT NULL, generation INTEGER NOT NULL, request_id TEXT NOT NULL, payload_hash TEXT NOT NULL,
+ response_json TEXT NOT NULL, PRIMARY KEY(account,generation,request_id)
+);
+`;
+
 function initializeStore(db: Database, file: string): Store {
   // THE EPOCH, BEFORE ANY DDL (implementation review, finding 3): even
   // the fresh-SCHEMA exec below adds this build's new tables and indexes
@@ -3855,6 +3922,9 @@ function initializeStore(db: Database, file: string): Store {
   const preflight = schemaVersionPreflight(db, file);
   if (preflight !== null && Math.abs(preflight) >= 70 && !tableExists(db, "service_cursor")) {
     throw new Error(`${file}: service progress is missing; refusing to silently reset worker cursors`);
+  }
+  if (preflight !== null && Math.abs(preflight) >= 71) {
+    for (const table of TEAM_TABLES) if (!tableExists(db, table)) throw new Error(`${file}: team history is missing; refusing to recreate membership or queued work`);
   }
   // Check existing authority metadata before even stamping a migration.
   if (preflight !== null && Math.abs(preflight) >= 54) {
@@ -3933,6 +4003,7 @@ function initializeStore(db: Database, file: string): Store {
   db.exec(SKILLS_SCHEMA);
   db.exec(SLACK_SCHEMA);
   db.exec(chatSchema("discord"));
+  db.exec(TEAM_SCHEMA);
   migrate(db, preflight === null ? null : Math.abs(preflight));
   addColumn(db, "approver", "projects_json", "TEXT");
   addColumn(db, "invite", "projects_json", "TEXT");
@@ -19966,9 +20037,9 @@ export class Store {
     return this.transact(() => {
       // One live session per approver: minting ends the previous one and
       // fences any turn still in flight under it (slice-2 review, finding 7).
-      this.failLiveMateTurnsFor(args.approver, "superseded", now);
+      this.failLiveMateTurnsFor(args.approver, "superseded", now, true);
       this.db
-        .prepare("UPDATE mate_session SET ended_at = ?, ended_by = ? WHERE approver = ? AND ended_at IS NULL")
+        .prepare("UPDATE mate_session SET ended_at = ?, ended_by = ? WHERE approver = ? AND ended_at IS NULL AND NOT EXISTS (SELECT 1 FROM team_mate_session tm WHERE tm.session=mate_session.id)")
         .run(now.toISOString(), args.approver, args.approver);
       const inserted = this.db
         .prepare(
@@ -19980,10 +20051,53 @@ export class Store {
     });
   }
 
+  /** Team sessions are independently signed, actor-owned spending grants for one conversation. */
+  mintTeamMateSession(args: { approver: string; approverGeneration: number; credentialKey: string; ceilingMicrousd: number; ceilingDigest: string; termsDigest: string; thread: number }, now: Date): number {
+    return this.transact(() => {
+      if (!this.teamMateThreadAllows(args.thread, args.approver, args.approverGeneration)) throw new Error("Current conversation contribution access is required.");
+      const existing = this.teamMateSession(args.approver, args.thread);
+      if (existing !== null) {
+        if (this.db.prepare("SELECT 1 FROM mate_turn WHERE session=? AND state IN ('queued','running')").get(existing.id)) throw new Error("Stop the active conversation turn before renewing its session.");
+        this.endMateSession(existing.id, args.approver, now);
+      }
+      const row = this.db.prepare("INSERT INTO mate_session(approver,approver_generation,credential_key,ceiling_microusd,ceiling_digest,terms_digest,minted_at) VALUES(?,?,?,?,?,?,?)")
+        .run(args.approver,args.approverGeneration,args.credentialKey,args.ceilingMicrousd,args.ceilingDigest,args.termsDigest,now.toISOString());
+      const id = Number(row.lastInsertRowid);
+      this.db.prepare("INSERT INTO team_mate_session(session,thread) VALUES(?,?)").run(id,args.thread);
+      return id;
+    });
+  }
+
+  teamMateSession(approver: string, thread: number): MateSession | null {
+    const row = this.db.prepare("SELECT ms.* FROM mate_session ms JOIN team_mate_session tm ON tm.session=ms.id WHERE ms.approver=? AND tm.thread=? AND ms.ended_at IS NULL ORDER BY ms.id DESC LIMIT 1").get(approver,thread);
+    return row === undefined ? null : readMateSession(row);
+  }
+
+  openTeamMateThread(approver: string, ceilingDigest: string, now: Date): MateThread {
+    const result = this.db.prepare("INSERT INTO mate_thread(approver,ceiling_digest,opened_at) VALUES(?,?,?)").run(approver,ceilingDigest,now.toISOString());
+    return this.getMateThread(Number(result.lastInsertRowid))!;
+  }
+
+  canUseTeamMateThread(approver: string, generation: number, thread: number): boolean { return this.teamMateThreadAllows(thread, approver, generation); }
+
+  /** Rechecked at admission; membership never grants project or approval standing. */
+  teamMateThreadAllows(thread: number, approver: string, generation: number): boolean {
+    const account = this.accountOf(approver);
+    if (account === null || account.revokedAt !== null || account.generation !== generation || account.role !== "approver") return false;
+    const row = this.db.prepare(`SELECT tc.projects_json FROM team_conversation tc
+      JOIN team_lead tl ON tl.id=tc.lead AND tl.status='active'
+      JOIN team_lead_member lm ON lm.lead=tc.lead AND lm.account=? AND lm.active=1 AND lm.role IN ('contributor','manager')
+      JOIN team_participant tp ON tp.conversation=tc.id AND tp.account=lm.account AND tp.active=1 AND tp.role IN ('contributor','manager')
+      WHERE tc.thread=? AND (tc.visibility='team' OR tc.created_by=?)`).get(approver,thread,approver);
+    if (row === undefined) return false;
+    const projects = readProjectAccess(row["projects_json"]);
+    return projects !== null && projects.length > 0 && projects.every(repo => projectAccessAllows(account.projects,repo) && this.db.prepare("SELECT 1 FROM team_lead_project lp JOIN team_conversation tc ON tc.lead=lp.lead WHERE tc.thread=? AND lp.project=?").get(thread,repo) !== undefined);
+  }
+
   /** The live session — explicitly ended or still active. Exhaustion is the caller's arithmetic. */
   activeMateSession(approver: string): MateSession | null {
     const row = this.db
-      .prepare("SELECT * FROM mate_session WHERE approver = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1")
+      .prepare("SELECT * FROM mate_session WHERE approver = ? AND ended_at IS NULL AND NOT EXISTS (SELECT 1 FROM team_mate_session tm WHERE tm.session=mate_session.id) ORDER BY id DESC LIMIT 1")
       .get(approver);
     return row === undefined ? null : readMateSession(row);
   }
@@ -20012,7 +20126,7 @@ export class Store {
    * another ceiling is closed first (ruling 9) — the surface says why. */
   openMateThread(approver: string, ceilingDigest: string, now: Date): { thread: MateThread; ceilingChanged: boolean } {
     return this.transact(() => {
-      const live = this.db.prepare("SELECT * FROM mate_thread WHERE approver = ? AND closed_at IS NULL ORDER BY id DESC LIMIT 1").get(approver);
+      const live = this.db.prepare("SELECT * FROM mate_thread WHERE approver = ? AND closed_at IS NULL AND NOT EXISTS (SELECT 1 FROM team_conversation tc WHERE tc.thread=mate_thread.id) ORDER BY id DESC LIMIT 1").get(approver);
       let ceilingChanged = false;
       if (live !== undefined && String(live["ceiling_digest"]) !== ceilingDigest) {
         this.db.prepare("UPDATE mate_thread SET closed_at = ? WHERE id = ?").run(now.toISOString(), Number(live["id"]));
@@ -20033,7 +20147,7 @@ export class Store {
 
   /** The approver's live thread, read only — null when none is open. */
   liveMateThreadFor(approver: string): MateThread | null {
-    const row = this.db.prepare("SELECT * FROM mate_thread WHERE approver = ? AND closed_at IS NULL ORDER BY id DESC LIMIT 1").get(approver);
+    const row = this.db.prepare("SELECT * FROM mate_thread WHERE approver = ? AND closed_at IS NULL AND NOT EXISTS (SELECT 1 FROM team_conversation tc WHERE tc.thread=mate_thread.id) ORDER BY id DESC LIMIT 1").get(approver);
     return row === undefined ? null : readMateThread(row);
   }
 
@@ -20046,7 +20160,7 @@ export class Store {
    * deleted; the thread row stays as closed metadata (when, whose). */
   closeMateThreadsFor(approver: string, now: Date): number {
     return this.transact(() => {
-      const rows = this.db.prepare("SELECT id FROM mate_thread WHERE approver = ? AND closed_at IS NULL").all(approver);
+      const rows = this.db.prepare("SELECT id FROM mate_thread WHERE approver = ? AND closed_at IS NULL AND NOT EXISTS (SELECT 1 FROM team_conversation tc WHERE tc.thread=mate_thread.id)").all(approver);
       for (const row of rows) {
         const id = Number(row["id"]);
         this.db.prepare("DELETE FROM mate_message WHERE thread = ?").run(id);
@@ -20202,20 +20316,19 @@ export class Store {
       const session = this.getMateSession(args.session);
       const thread = this.getMateThread(args.thread);
       if (session === null || thread === null) return { ok: false as const, reason: "not-yours" as const };
-      if (session.approver !== args.approver || thread.approver !== args.approver || session.credentialKey !== args.credentialKey) {
+      const teamBinding = this.db.prepare("SELECT 1 FROM team_mate_session WHERE session=? AND thread=?").get(args.session,args.thread) !== undefined;
+      if (session.approver !== args.approver || (teamBinding ? !this.teamMateThreadAllows(args.thread,args.approver,session.approverGeneration) : thread.approver !== args.approver || this.db.prepare("SELECT 1 FROM team_conversation WHERE thread=?").get(args.thread) !== undefined) || session.credentialKey !== args.credentialKey) {
         return { ok: false as const, reason: "not-yours" as const };
       }
-      if (thread.closedAt !== null || thread.ceilingDigest !== session.ceilingDigest) return { ok: false as const, reason: "thread-closed" as const };
+      if (thread.closedAt !== null || (!teamBinding && thread.ceilingDigest !== session.ceilingDigest)) return { ok: false as const, reason: "thread-closed" as const };
       const latched = this.db
         .prepare("SELECT 1 AS hit FROM chat_turn WHERE credential_key = ? AND unknown_spend = 1 AND acknowledged_at IS NULL LIMIT 1")
         .get(args.credentialKey);
       if (latched !== undefined) return { ok: false as const, reason: "latched" as const };
-      const live = this.db
-        .prepare("SELECT 1 AS hit FROM mate_turn WHERE approver = ? AND state IN ('queued','running') LIMIT 1")
-        .get(args.approver);
-      const liveChat = this.db
-        .prepare("SELECT 1 AS hit FROM chat_turn WHERE approver = ? AND state IN ('queued','running') LIMIT 1")
-        .get(args.approver);
+      const live = teamBinding
+        ? this.db.prepare("SELECT 1 FROM mate_turn WHERE thread=? AND state IN ('queued','running') LIMIT 1").get(args.thread)
+        : this.db.prepare("SELECT 1 FROM mate_turn WHERE approver=? AND state IN ('queued','running') AND NOT EXISTS (SELECT 1 FROM team_conversation tc WHERE tc.thread=mate_turn.thread) LIMIT 1").get(args.approver);
+      const liveChat = this.db.prepare("SELECT 1 FROM chat_turn WHERE approver=? AND state IN ('queued','running') AND mate_turn IS NULL LIMIT 1").get(args.approver);
       if (live !== undefined || liveChat !== undefined) return { ok: false as const, reason: "concurrent" as const };
       if (this.chatTurnsToday(args.approver, now) >= args.dailyTurns) return { ok: false as const, reason: "daily-cap" as const };
       if (session.endedAt !== null) {
@@ -20328,9 +20441,9 @@ export class Store {
   /** Revocation's companion for a loop in flight (finding 5): every live
    * turn of the approver fails NOW, charged its whole reservation, its
    * generation moved so the returning loop's terminal CAS loses. */
-  failLiveMateTurnsFor(approver: string, reason: string, now: Date): number {
+  failLiveMateTurnsFor(approver: string, reason: string, now: Date, privateOnly = false): number {
     return this.transact(() => {
-      const rows = this.db.prepare("SELECT id, session, reserved_microusd AS reserved FROM mate_turn WHERE approver = ? AND state IN ('queued','running')").all(approver);
+      const rows = this.db.prepare("SELECT id, session, reserved_microusd AS reserved FROM mate_turn WHERE approver = ? AND state IN ('queued','running') AND (?=0 OR NOT EXISTS (SELECT 1 FROM team_conversation tc WHERE tc.thread=mate_turn.thread))").all(approver, privateOnly ? 1 : 0);
       for (const row of rows) {
         const id = Number(row["id"]);
         this.db

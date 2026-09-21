@@ -181,6 +181,7 @@ describe("result-first review (workspace package 3): the pure presentation rules
     expect(resultReturnTarget("/review?result=t-1&run=6", 5)).toBe("/r/5");
     expect(resultReturnTarget("/review?result=t-1&run=5&run=6", 5)).toBe("/r/5");
     expect(resultReturnTarget("/chat?task=t-1&result=5", 5)).toBe("/chat?task=t-1&result=5");
+    expect(resultReturnTarget("/chat?task=t-1&result=5&conversation=room-1", 5)).toBe("/chat?task=t-1&result=5&conversation=room-1");
     expect(resultReturnTarget("/chat?task=t-1&result=6", 5)).toBe("/r/5");
     expect(resultReturnTarget("/chat?task=t-1&result=5&tab=checks", 5)).toBe("/r/5");
     expect(resultReturnTarget("https://evil.example/review?result=t-1", 5)).toBe("/r/5");

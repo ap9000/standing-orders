@@ -60,6 +60,11 @@ export type MateTurnInput = {
   /** Stable browser send identity. A retry returns the original turn,
    * including a failed one; it never dispatches the provider again. */
   requestId?: string;
+  /** A central conversation saved this operator message before acknowledging
+   * delivery. Bind it to this turn instead of inserting a second copy. */
+  queuedMessageId?: number;
+  /** Called inside turn admission. A failed queue fence rolls admission back. */
+  onAdmitted?: (turn: number) => void;
   /** Safe, server-authored context for this turn only. Kept out of the
    * visible thread so a task-scoped composer still reads like a normal
    * conversation. */
@@ -134,15 +139,19 @@ export const MATE_REFUSAL_COPY: Record<MateRefusal, string> = {
 const READ_TOOLS = new Set(["get_brief", "get_project_context", "get_actions", "get_action_status", "get_skills", "get_acceptance_evidence", "recap", "list_repos", "list_tasks", "get_task", "get_result", "get_result_images", "get_controls", "get_agents", "get_project_knowledge", "list_decisions", "get_decision", "queue"]);
 
 /** The last messages of the thread as provider-neutral history, newest kept first until the byte cap. */
-export function historyFor(store: Store, thread: number): MateHistoryMessage[] {
+export function historyFor(store: Store, thread: number, queuedMessageId?: number): MateHistoryMessage[] {
   const rows = store.listMateMessages(thread, MATE_HISTORY_MAX_MESSAGES);
   const kept: MateHistoryMessage[] = [];
   let bytes = 0;
   for (let index = rows.length - 1; index >= 0; index--) {
     const row = rows[index]!;
+    // Other teammates may have already queued later messages. They do not
+    // enter model history until admitted, and the current message appears once.
+    if (queuedMessageId !== undefined && (row.id === queuedMessageId || row.role === 'operator' && row.turn === null)) continue;
     bytes += Buffer.byteLength(row.text, "utf8");
     if (bytes > MATE_HISTORY_CAP_BYTES) break;
-    kept.unshift(row.role === "operator" ? { role: "operator", text: row.text } : { role: "assistant", text: row.text, calls: [] });
+    const author = queuedMessageId !== undefined && row.role === 'operator' && row.turn !== null ? store.getMateTurn(row.turn)?.approver : undefined;
+    kept.unshift(row.role === "operator" ? { role: "operator", text: author ? `From ${author}:\n${row.text}` : row.text } : { role: "assistant", text: row.text, calls: [] });
   }
   // A history must open with the operator: a leading assistant reply without its question is dropped.
   while (kept[0]?.role === "assistant") kept.shift();
@@ -194,7 +203,9 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
   // session/thread snapshots supplied by a previous browser page.
   const liveSession = store.getMateSession(session.id);
   const liveThread = store.getMateThread(thread.id);
-  if (liveSession?.approver !== who.name || liveThread?.approver !== who.name || liveSession.credentialKey !== credentialKey) return refuse("not-yours");
+  const sharedThread = liveThread !== null && store.canUseTeamMateThread(who.name, who.generation, liveThread.id);
+  if (liveSession?.approver !== who.name || (liveThread?.approver !== who.name && !sharedThread) || liveSession.credentialKey !== credentialKey) return refuse("not-yours");
+  if (input.queuedMessageId !== undefined && (!sharedThread || !Number.isSafeInteger(input.queuedMessageId) || input.onAdmitted === undefined)) return refuse('invalid-request');
   if (liveSession.endedAt !== null) return refuse("session-ended");
   if (liveThread.closedAt !== null) return refuse("thread-closed");
   if (liveSession.ceilingDigest !== who.ceilingDigest || liveThread.ceilingDigest !== who.ceilingDigest) return refuse("ceiling-changed");
@@ -209,8 +220,9 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
 
   const view = mateViewContextFor(store, who);
   const document = redactForMate(leadContext(store, who.repos, now, input.evidenceRoot), view);
-  const historyMessage = input.context === undefined ? message : `${redactForMate(input.context, view)}\n\n${message}`;
-  const history: MateHistoryMessage[] = [...historyFor(store, thread.id), { role: "operator", text: historyMessage }];
+  const authoredMessage = input.queuedMessageId === undefined ? message : `From ${who.name}:\n${message}`;
+  const historyMessage = input.context === undefined ? authoredMessage : `${redactForMate(input.context, view)}\n\n${authoredMessage}`;
+  const history: MateHistoryMessage[] = [...historyFor(store, thread.id, input.queuedMessageId), { role: "operator", text: historyMessage }];
   const composeDirect = (key: string): { url: string; headers: Record<string, string>; body: string } => {
     if (!direct) throw new Error("not a direct chat provider");
     return composeMateRequest({ provider: directProvider as DirectChatProviderId, model: config.model, key, system: MATE_CONTRACT, dataDocument: document, history, tools: MATE_TOOL_SCHEMAS });
@@ -256,7 +268,13 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
     const turnId = opened.id;
     const started = store.startMateTurn(turnId, now);
     if (!started.ok) throw new Error("new mate turn could not start");
-    store.appendMateMessage({ thread: thread.id, turn: turnId, role: "operator", text: message }, now);
+    if (input.queuedMessageId === undefined) store.appendMateMessage({ thread: thread.id, turn: turnId, role: "operator", text: message }, now);
+    else {
+      const bound = store.handle.prepare("UPDATE mate_message SET turn=? WHERE id=? AND thread=? AND role='operator' AND turn IS NULL AND text=?")
+        .run(turnId, input.queuedMessageId, thread.id, message);
+      if (Number(bound.changes) !== 1) throw new Error('The queued message changed before admission.');
+    }
+    input.onAdmitted?.(turnId);
     if (request !== undefined) store.replay({ idempotencyKey: `mate-send:${session.id}:${request}`, actor: who.name, at: now }, "mate-send", () => ({ digest, turn: turnId }));
     return { ok: true as const, turnId, generation: started.generation };
   });

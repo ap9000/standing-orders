@@ -12,6 +12,9 @@ import {
   restoreDraft, sameConversation, saveDraft, sendMessage, submitDraft, workspacePollDelay, WorkspaceAuthError,
 } from "./workspace-client.js";
 import type { ChatDraft, DraftScope, DraftStorage } from "./workspace-client.js";
+import { TeamChat } from "./team-chat.js";
+import { browserCrewFromIndex } from "../browser-crew.js";
+import type { TeamSnapshot } from "../team-contract.js";
 import "./workspace.css";
 
 let renderNoticeQueued = false;
@@ -426,7 +429,8 @@ function LeadChat({ controller }: { controller: ReturnType<typeof useWorkspace> 
 
 export function WorkspaceApp({ initial }: { initial: BrowserWorkspace }) {
   const controller = useWorkspace(initial);
-  const { workspace } = controller;
+  const [teamSnapshot, setTeamSnapshot] = useState<TeamSnapshot | undefined>(initial.team);
+  const workspace = teamSnapshot?.tasks ? { ...controller.workspace, ...browserCrewFromIndex(teamSnapshot.tasks, teamSnapshot.selected?.id) } : controller.workspace;
   const [phoneView, setPhoneView] = useState<"chat" | "work">(workspace.result || workspace.focus ? "work" : "chat");
   const hasWork = workspace.focus !== null || workspace.result !== null;
   const selectedTask = workspace.crew.find(item => item.id === workspace.focus?.id);
@@ -443,12 +447,12 @@ export function WorkspaceApp({ initial }: { initial: BrowserWorkspace }) {
       </header>
       {workspace.notices.length > 0 && <div className="so-workspace-notices">{workspace.notices.map((notice, index) => <Alert key={index}>{notice}</Alert>)}</div>}
       <main id="workspace-main" className="so-main-content" tabIndex={-1}>
-        {workspace.conversation ? <LeadChat controller={controller} /> : <div className="so-page-content" data-workspace-page><GuardedHtml html={initial.pageHtml ?? ""} immutable /></div>}
+        {workspace.team ? <TeamChat initial={workspace.team} user={workspace.user} csrf={workspace.csrf} onSnapshot={setTeamSnapshot} /> : workspace.conversation ? <LeadChat controller={controller} /> : <div className="so-page-content" data-workspace-page><GuardedHtml html={initial.pageHtml ?? ""} immutable /></div>}
       </main>
     </div>
     <aside className={`so-supporting-panel${hasWork ? " so-supporting-panel--detail" : ""}`} data-workspace-detail>
       <div className="so-work-panel-header"><Button variant="ghost" size="sm" className="so-phone-back" onClick={() => setPhoneView("chat")}><Icon name="arrow" />{isChat ? "Back to chat" : "Back"}</Button>
-        {hasWork && <><h2>{workspace.result ? "Result" : "Task"}</h2>{workspace.result && selectedTask && <Badge tone={badgeTone(selectedTask.tone)} className="so-current-task-state" data-workspace-current-task-state>Task: {selectedTask.label}</Badge>}<a href="/chat" className="so-close-work" aria-label="Close work and return to the main chat"><Icon name="close" /></a></>}
+        {hasWork && <><h2>{workspace.result ? "Result" : "Task"}</h2>{workspace.result && selectedTask && <Badge tone={badgeTone(selectedTask.tone)} className="so-current-task-state" data-workspace-current-task-state>Task: {selectedTask.label}</Badge>}<a href={teamSnapshot?.selected ? "/chat?conversation=" + encodeURIComponent(teamSnapshot.selected.id) : "/chat"} className="so-close-work" aria-label="Close work and return to the main chat"><Icon name="close" /></a></>}
       </div>
       {hasWork ? <div className="so-work-detail-content">
         {workspace.focus && (workspace.result

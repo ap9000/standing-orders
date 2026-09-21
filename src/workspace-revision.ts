@@ -8,7 +8,7 @@ const KEY = 'workspace-content:v1';
 const PREFIX = 'workspace_revision_v1_';
 const MAX_AGE_MS = 60_000;
 const OMIT = new Set(['schema_version', 'service_cursor', 'wake', 'notification_delivery',
-  'push_delivery', 'telegram_update', 'telegram_outbound_message', 'telegram_retry', 'bridge_lease']);
+  'team_read', 'team_request', 'push_delivery', 'telegram_update', 'telegram_outbound_message', 'telegram_retry', 'bridge_lease']);
 const QUIET: Record<string, readonly string[]> = {
   runner: ['heartbeat_at'], claim: ['heartbeat_at', 'expires_at'], watch_lease: ['heartbeat_at', 'expires_at'],
   watch_episode: ['ticks'], provider_readiness: ['observed_at'],

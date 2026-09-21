@@ -57,7 +57,7 @@ export function parseAssignmentStatusEvent(value: string): AssignmentStatusEvent
       !["working", "checking", "needs-decision", "ready-to-check", "complete", "cancelled"].includes(String(a["state"])) ||
       !Array.isArray(a["attention"]) || a["attention"].length > 8 || !a["attention"].every(one => string(one, 500))) return null;
     const owner = a["owner"], action = a["primaryAction"], result = a["result"], completion = a["completion"], publication = a["publication"];
-    if (!object(owner) || !keys(owner, ["kind", "id", "label"]) || owner["kind"] !== "coordinator" || !string(owner["id"], 128) || !string(owner["label"], 100)) return null;
+    if (!object(owner) || !keys(owner, ["kind", "id", "label"]) || !["coordinator", "lead"].includes(String(owner["kind"])) || !string(owner["id"], 128) || !string(owner["label"], 100)) return null;
     if (action !== null && (!object(action) || !keys(action, ["code", "label", "target"]) || !string(action["code"], 80) || !string(action["label"], 160) ||
       !object(action["target"]) || !keys(action["target"], ["taskId", "runId", "decisionId"]) || !string(action["target"]["taskId"], 64) || !id(action["target"]["runId"]) || !id(action["target"]["decisionId"]))) return null;
     if (result !== null && (!object(result) || !keys(result, ["digest", "runId", "checks", "checksDigest"]) || !sha(result["digest"]) || !id(result["runId"]) || result["runId"] === null || !sha(result["checksDigest"]) ||
@@ -80,12 +80,17 @@ export function noteAssignmentStatus(store: Store, snapshot: AssignmentSnapshot,
     const owner = snapshot.owner!;
     const ref = store.lookupRef(snapshot.rootId);
     if (!ref || ref.repo !== snapshot.repo || ref.revisionOf !== null) return null;
-    const claimed = store.handle.prepare("SELECT actor FROM action_ledger WHERE task_id=? AND action='assignment claimed' AND source='work' ORDER BY id DESC LIMIT 1").get(snapshot.rootId);
-    if ((claimed === undefined ? ref.coordinatorCid : String(claimed["actor"]).replace(/^coordinator:/, "")) !== owner.id) return null;
-    const credential = store.handle.prepare("SELECT repos FROM coordinator_credential WHERE cid=? AND revoked_at IS NULL").get(owner.id);
-    let repos: unknown;
-    try { repos = JSON.parse(String(credential?.["repos"] ?? "null")); } catch { return null; }
-    if (!Array.isArray(repos) || !repos.includes(snapshot.repo)) return null;
+    if (owner.kind === "lead") {
+      const held = store.handle.prepare("SELECT o.lead,l.status FROM team_task_owner o JOIN team_lead l ON l.id=o.lead WHERE o.task_ref=?").get(ref.id);
+      if (held?.["lead"] !== owner.id || held["status"] !== "active") return null;
+    } else {
+      const claimed = store.handle.prepare("SELECT actor FROM action_ledger WHERE task_id=? AND action='assignment claimed' AND source='work' ORDER BY id DESC LIMIT 1").get(snapshot.rootId);
+      if ((claimed === undefined ? ref.coordinatorCid : String(claimed["actor"]).replace(/^coordinator:/, "")) !== owner.id) return null;
+      const credential = store.handle.prepare("SELECT repos FROM coordinator_credential WHERE cid=? AND revoked_at IS NULL").get(owner.id);
+      let repos: unknown;
+      try { repos = JSON.parse(String(credential?.["repos"] ?? "null")); } catch { return null; }
+      if (!Array.isArray(repos) || !repos.includes(snapshot.repo)) return null;
+    }
     const assignment = assignmentStatusBrief(snapshot);
     if (assignment.owner === null) return null;
     const stateDigest = hash(assignment);
@@ -96,7 +101,7 @@ export function noteAssignmentStatus(store: Store, snapshot: AssignmentSnapshot,
     }
     const digest = hash({ rootRef: ref.id, owner: owner.id, previous: previous === undefined ? null : Number(previous["id"]), stateDigest });
     const event: AssignmentStatusEvent = { version: 1, digest, stateDigest, assignment: { ...assignment, owner: assignment.owner } };
-    return store.recordAction({ at: now.toISOString(), actor: `coordinator:${owner.id}`, repo: snapshot.repo,
+    return store.recordAction({ at: now.toISOString(), actor: `${owner.kind}:${owner.id}`, repo: snapshot.repo,
       taskId: snapshot.rootId, runId: assignment.runId, action: ASSIGNMENT_STATUS_ACTION,
       outcome: JSON.stringify(event), source: ASSIGNMENT_STATUS_SOURCE });
   });
@@ -111,7 +116,7 @@ export function syncAssignmentStatuses(store: Store, now: Date, repos: readonly 
   const rows = store.handle.prepare(`SELECT t.id,t.external_id FROM task_ref t
     WHERE t.backend='built-in' AND t.revision_of IS NULL
     AND t.repo IN (SELECT value FROM json_each(?)) AND t.id>?
-    AND (t.coordinator_cid IS NOT NULL OR EXISTS
+    AND (t.coordinator_cid IS NOT NULL OR EXISTS(SELECT 1 FROM team_task_owner o WHERE o.task_ref=t.id) OR EXISTS
       (SELECT 1 FROM action_ledger a WHERE a.task_id=t.external_id AND a.action='assignment claimed' AND a.source='work'))
     ORDER BY t.id LIMIT 50`).all(JSON.stringify(allowed), store.serviceCursor(key));
   // Release the writer between families. Each observation and its durable

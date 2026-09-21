@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openStore, type Store } from './store.js';
+import { TeamLeads } from './team-leads.js';
 import { addApprover } from './scope.js';
 import { prepareWorkspaceRevision, WorkspaceValidatorCache, type WorkspaceRevision } from './workspace-revision.js';
 
@@ -131,4 +132,15 @@ test('provider observation renewals and watch tick/lease renewal are quiet but c
   expect(revision.expiresAt(NOW)).toBe(NOW.getTime() + 30_000);
   store.raw().exec('UPDATE watch_episode SET built=built+1');
   expect(revision.current()).not.toBe(watch);
+});
+
+
+test('personal shared-chat reading and saved request receipts do not invalidate everyone’s workspace',()=>{
+  store.saveApprover('alex','hash-alex',NOW);const actor={name:'alex',generation:1},domain=new TeamLeads(store,()=>['/repo']);
+  const leadId=(domain.execute(actor,{operation:'create-lead',args:{name:'Lead',projects:['/repo']}},NOW).result as {leadId:string}).leadId;
+  const conversationId=(domain.execute(actor,{operation:'create-conversation',args:{leadId,title:'Room',visibility:'team',projects:['/repo']}},NOW).result as {conversationId:string}).conversationId;
+  const sent=domain.execute(actor,{operation:'send',args:{conversationId,text:'Saved request',requestId:'send'}},NOW);const messageId=(sent.result as {messageId:number}).messageId;
+  const before=revision.current();
+  const read=domain.execute(actor,{operation:'read',args:{conversationId,messageId,requestId:'read-receipt'}},NOW);
+  expect(read.ok).toBe(true);expect(read.snapshot).toBeUndefined();expect(revision.current()).toBe(before);
 });

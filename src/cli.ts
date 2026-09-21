@@ -23,6 +23,7 @@ import { parseGithubRepo, previewGithubRepo, cloneGithubRepo, isLargeRepo } from
 import { run as execRun } from "./exec.js";
 import { COMMAND_GUIDE, SURFACE_NOTES, SURFACE_SCHEMA_VERSION } from "./surface.js";
 import { runSessionCommand, SESSION_CLI_ACTIONS, type SessionCliOptions } from "./session-cli.js";
+import { maybeRunTeamCommand, TEAM_CLI_ACTIONS, type TeamCliOptions } from "./team-cli.js";
 import { discover, inspectAll, type RepoSnapshot } from "./discover.js";
 import { readPulls } from "./pulls.js";
 import {
@@ -94,6 +95,10 @@ Usage
   standing-orders demo             a seeded throwaway sandbox — see it working in 90 seconds
   standing-orders up               app + builder for every saved project — the normal start
   standing-orders session          native coding sessions through the running service
+  standing-orders connect          save a private connection to your central service
+  standing-orders lead             named leads on the connected service
+  standing-orders conversation     shared and private conversations on that service
+  standing-orders chat --lead <id> --conversation <id>  central chat (use --local for local chat)
 
 Operating the queue — \`standing-orders task\` prints the whole surface,
 and any queue command + --help prints it too
@@ -207,6 +212,7 @@ export const TOP_LEVEL_COMMANDS: readonly string[] = [
   "", "pulls", "graph", "repos", "repos add", "repos remove", "repos add-from-github",
   "link", "unlink", "contract", "skills list", "skills get", "skills install", "demo",
   ...SESSION_CLI_ACTIONS.map(action => `session ${action}`),
+  ...TEAM_CLI_ACTIONS,
 ];
 
 export const OPERATE_COMMANDS = new Set([
@@ -259,6 +265,7 @@ export type MainOptions = {
   binSource?: string;
   operate?: OperateOptions;
   session?: SessionCliOptions;
+  team?: TeamCliOptions;
   /** Injected by tests: the gh-facing halves of `repos add-from-github` —
    * the verb's parsing, gating, and enrollment are what CLI tests prove;
    * gh itself is proved by onboard.test.ts. */
@@ -388,6 +395,9 @@ async function dispatch(
   write: Write,
   mainOptions: MainOptions,
 ): Promise<number> {
+  const team = await maybeRunTeamCommand(argv, write, mainOptions.team);
+  if (team !== null) return team;
+  if ((argv[0] === "chat" || argv[0] === "brief") && argv.includes("--local")) argv = argv.filter(arg => arg !== "--local");
   const [first, ...rest] = argv;
   if (first === "help") {
     // The bare word, because somebody will type it — never scanned as a

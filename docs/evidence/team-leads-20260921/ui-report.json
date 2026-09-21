@@ -1,0 +1,107 @@
+{
+  "version": 1,
+  "recordedAt": "2026-09-21T15:46:12.522832+00:00",
+  "candidate": "Source hashes identify the tested implementation; exact release commit is recorded by the native release task.",
+  "checks": [
+    {
+      "command": "npm run typecheck",
+      "ok": true,
+      "logSection": "output/team-ui/typecheck.log"
+    },
+    {
+      "command": "npm test -- --run src/team-server.test.ts src/browser/team-chat.test.ts src/team-http.test.ts src/team-ui.test.ts src/browser-workspace.test.ts src/result-review.test.ts --reporter=dot",
+      "files": 6,
+      "tests": 38,
+      "ok": true,
+      "logSection": "output/team-ui/focused-tests.log"
+    }
+  ],
+  "browser": {
+    "tool": "CUA Codex In-app Browser",
+    "synthetic": true,
+    "providers": "isolated in-memory database and mock runner; no live provider calls, task approvals or execution",
+    "viewports": [
+      {
+        "width": 1280,
+        "height": 800,
+        "horizontalOverflow": false,
+        "journey": "Shared room \u2192 exact result build 1 \u2192 Changes (2 files) \u2192 102-character feedback \u2192 explicit revision with exact child and conversation retained"
+      },
+      {
+        "width": 390,
+        "height": 844,
+        "horizontalOverflow": false,
+        "composerBottom": 844,
+        "visiblePrimaryButtonHeight": 44,
+        "journey": "Same exact result \u2192 Changes \u2192 86-character feedback \u2192 second explicit revision with exact child and conversation retained"
+      }
+    ],
+    "statesInspected": [
+      "Long conversation title and author message",
+      "Team and private audience",
+      "Empty private conversation",
+      "Provider consent before Send",
+      "Alex running and Sam queued with distinct author names, then saved replies (earlier fixture using same queue UI)",
+      "Exact result and diff panel",
+      "Explicit action-refusal notice in shared chat",
+      "Native result revision remains unapproved"
+    ],
+    "captures": "Actual CUA screenshot captures were visually inspected in the conversation; no supported disk export was used. Final navigation-only fixes were checked separately without another visual pass.",
+    "screenshots": [],
+    "remainingLimits": [
+      "Viewport checks use the in-app browser; physical iPhone Safari and software keyboard behavior unverified.",
+      "Native scope approval intentionally opens the existing task page; shared chat does not create a second approval system.",
+      "Browser fixture was started before the final navigation-only proposal return / Review plan target fixes; final focused tests and typecheck cover the final source."
+    ],
+    "independentInspection": "Root independently inspected the desktop fixture screenshot and confirmed readable lead selector, author attribution, exact result link, scoped Crew, long content and composer."
+  },
+  "findings": [
+    {
+      "before": "Phone lead selector could shrink to an arrow with a long title",
+      "after": "Dedicated selector grid row; label readable at 390px"
+    },
+    {
+      "before": "Assistant result URL consumed trailing sentence punctuation",
+      "after": "Link parser excludes punctuation and preserves exact task/run plus room; regression passing"
+    },
+    {
+      "before": "Opening shared result fell back to the old private composer",
+      "after": "Shared conversation stays visible beside the existing result controls; phone uses existing result drawer"
+    },
+    {
+      "before": "Shared result scope compared project display name to canonical repository",
+      "after": "Scope uses saved canonical execution repository; integrated regression passing"
+    },
+    {
+      "before": "Provider limits could be hidden when chat was already enabled",
+      "after": "Waiting reason is displayed before the enabled shortcut; focused assertion passing"
+    },
+    {
+      "before": "Native shared proposal refusal could disappear into legacy flash state",
+      "after": "Shared redirect displays escaped refusal notice; integrated cancellation remains pending"
+    }
+  ],
+  "verificationNotes": [
+    "One added refusal fixture initially drafted after turn finalization, leaving drafting state; corrected fixture order, then all 38 tests passed. Failure log retained separately.",
+    "No tests skipped or deleted. No full verification gate, commits or deployment performed by this child."
+  ],
+  "fixtureCheckpoint": "22cd60d6315a63bb30a31789fa5b0cacbf991790",
+  "originalTaskBase": "fae73c47f7487f45de069217bc9d75e0f6bda6e1",
+  "source": {
+    "src/team-http.ts": "e9c5617bc0fd6d728cfc2dcdafdae7ebd157bbf077590cf036d58c9a0224b99c",
+    "src/team-ui.ts": "033da833652fd0bed97d3eb8777d87b9fbc4ed4036f38801932dae09f8d1bccd",
+    "src/browser/team-chat.tsx": "28e7889e6d19c41cdb8ed88ca043d979a4847b3510b30b72baaaefb7a8a80dff",
+    "src/browser-crew.ts": "efa1a362c94ba9e271df1dd156cdf1701cb92d851af3210f778b09cde0cfe4d1",
+    "src/browser-workspace.ts": "5345ce850fe7dee9dab0203fbe6aeaa69757d5288aed312356e0c5b0d94d8d5c",
+    "src/browser/app.tsx": "29d5ee6a0a568f0012a3c6f529570a67154fb1f05335d1ba1f2c86980456549c",
+    "src/browser/workspace.css": "5815bdd4ffb7e71826c72b35494ef960f48adae399c8ec4ee8d86d9501016463",
+    "src/serve.ts": "2ef096fd84fd690d2989865b5fd207023aa5393ea93894a1f35eadbbcc8e1a11",
+    "src/result-review.ts": "b8238db3cc376319a8b4ba95eca92b738a5b2a495aa729e11111d3e5f651a695",
+    "src/team-http.test.ts": "24791524980964211ddd245d5b22c74a77e5c7a1cfa9198eabfc663d082f630d",
+    "src/team-ui.test.ts": "1273b6e272692ae3eeac2295c7b0b2f88cead940a4ba98ee4a0b23fe6875a1e0",
+    "src/browser/team-chat.test.ts": "de61c348af253fd609b00560e8a019e6bed3cd439da3d5f670f54017da613f49",
+    "src/team-server.test.ts": "f76cf1df01ebc258280db633291d39889794849c28a1017d088136bd2103dcfd",
+    "src/result-review.test.ts": "31ededfab812b8db7afe67fcc22410bd0885778c0b7d0f649b0e10b0dd6016be"
+  },
+  "screenshots": []
+}

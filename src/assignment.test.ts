@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { openStore, type Store, type RunStop } from "./store.js";
+import { openStore, TEAM_TABLES, type Store, type RunStop } from "./store.js";
 import { addApprover, approve, propose } from "./scope.js";
 import { mintCoordinator, revokeCoordinator, authenticateCoordinator, taskDetailFor } from "./coordinator.js";
 import { assignmentForCoordinator, runAssignmentCommand } from "./assignment-adapters.js";
@@ -16,6 +16,8 @@ import { reviewContextBindingOf, parseReviewContext, reviewContextCustodyProblem
 import { maybeTriggerRepair } from "./dispose.js";
 import { modeDigestOf, modeTermsJson, presetTerms } from "./modes.js";
 import { taskWorkSummaryOf } from "./work-summary.js";
+import { TeamLeads } from "./team-leads.js";
+import { workIndexPage } from "./work-index.js";
 import { assignmentSummaryHtml } from "./assignment-ui.js";
 import { GOAL_ASSESSMENT_PENDING } from "./proof.js";
 import { createDecisionServer } from "./serve.js";
@@ -174,6 +176,64 @@ describe("continuous assignments over existing task families", () => {
     expect(claimAssignment(store, "retry", lead, NOW, dir)).toMatchObject({ ok: false, reason: "not-found" });
     expect(claimAssignment(store, "retry", other, NOW, dir).ok).toBe(true);
     expect(assignmentOf(store, "retry", NOW, { principal: "coordinator", repos: ["/private"] }, dir)).toBeNull();
+  });
+
+  test("candidate result inspection can read authentic pre-upgrade v70 without creating team tables", () => {
+    built(); claimAssignment(store, "retry", lead, NOW, dir);
+    const before = assignmentOf(store, "retry", NOW, access, dir)!;
+    for (const table of [...TEAM_TABLES].reverse()) store.handle.exec(`DROP TABLE ${table}`);
+    store.handle.prepare("UPDATE schema_version SET version=70").run();
+    const schema = store.handle.prepare("SELECT name,sql FROM sqlite_master ORDER BY name").all();
+    expect(assignmentOf(store, "retry", NOW, access, dir)).toMatchObject({ state: "ready-to-check", receipt: before.receipt, owner: before.owner });
+    expect(store.handle.prepare("SELECT name,sql FROM sqlite_master ORDER BY name").all()).toEqual(schema);
+    store.handle.prepare("UPDATE schema_version SET version=71").run();
+    expect(() => assignmentOf(store, "retry", NOW, access, dir)).toThrow(/ownership history is missing/);
+  });
+
+  test("past completion survives signer rotation and departure while old action authority ends", () => {
+    built();
+    const principal = verifyApproverStanding(store, "operator", store.accountOf("operator")!.generation, [REPO]);
+    if (!principal.ok) throw Error("operator fixture");
+    const ready = assignmentOf(store, "retry", NOW, access, dir)!;
+    expect(checkAssignmentAsOperator(store, "retry", ready.receipt!.digest, principal.who, NOW, dir).ok).toBe(true);
+    const signed = assignmentOf(store, "retry", NOW, access, dir)!.completion;
+    store.saveApprover("operator", "rotated-test-hash", NOW);
+    expect(assignmentOf(store, "retry", NOW, access, dir)).toMatchObject({ state: "complete", completion: signed });
+    expect(workIndexPage(store, NOW, access).totals.completed).toBe(1);
+    expect(checkAssignmentAsOperator(store, "retry", ready.receipt!.digest, principal.who, NOW, dir)).toMatchObject({ ok: false, reason: "unauthenticated" });
+    store.saveApprover("remaining", "remaining-test-hash", NOW);
+    expect(store.revokeAccount("operator", "remaining", NOW).ok).toBe(true);
+    expect(assignmentOf(store, "retry", NOW, access, dir)).toMatchObject({ state: "complete", completion: signed });
+    expect(workIndexPage(store, NOW, access).items[0]?.completion).toEqual(signed);
+  });
+
+  test("stable lead transfer preserves completed results and prevents credential owners taking them back", () => {
+    built(); claimAssignment(store, "retry", lead, NOW, dir);
+    const ready = assignmentOf(store, "retry", NOW, access, dir)!;
+    expect(checkAssignment(store, "retry", ready.receipt!.digest, lead, NOW, dir).ok).toBe(true);
+    const signed = assignmentOf(store, "retry", NOW, access, dir)!.completion;
+    const team = new TeamLeads(store, () => [REPO]), actor = { name: "operator", generation: store.accountOf("operator")!.generation };
+    const makeLead = (name: string) => {
+      const response = team.execute(actor, { operation: "create-lead", args: { name, projects: [REPO] } }, NOW);
+      expect(response.ok).toBe(true); return (response.result as { leadId: string }).leadId;
+    };
+    const first = makeLead("Engineering"), second = makeLead("Product");
+    expect(team.recordTaskOwner("retry", first, null, actor, NOW)).toBe(true);
+    expect(assignmentOf(store, "retry", NOW, access, dir)).toMatchObject({ state: "complete", completion: signed, owner: { kind: "lead", id: first } });
+    expect(claimAssignment(store, "retry", lead, NOW, dir)).toMatchObject({ ok: false, reason: "owned" });
+    expect(checkAssignment(store, "retry", ready.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: false, reason: "not-owner" });
+    expect(workIndexPage(store, NOW, access, { leadId: first }).totals.completed).toBe(1);
+    expect(team.execute(actor, { operation: "transfer", args: { taskId: "retry", leadId: second, expectedRevision: 1 } }, NOW).ok).toBe(true);
+    expect(workIndexPage(store, NOW, access, { leadId: first }).totals.all).toBe(0);
+    expect(workIndexPage(store, NOW, access, { leadId: second }).totals.completed).toBe(1);
+    expect(assignmentOf(store, "retry", NOW, access, dir)).toMatchObject({ state: "complete", completion: signed, owner: { kind: "lead", id: second } });
+    revokeCoordinator(store, lead.id, "operator", NOW);
+    expect(assignmentOf(store, "retry", NOW, access, dir)).toMatchObject({ state: "complete", completion: signed });
+    expect(team.execute(actor, { operation: "update-lead", args: { leadId: second, expectedRevision: 1, status: "paused" } }, NOW).ok).toBe(true);
+    const other = mintCoordinator(store, { name: "replacement", repos: [REPO], by: "operator", now: NOW });
+    if (!other.ok) throw Error("replacement fixture");
+    expect(claimAssignment(store, "retry", { kind: "coordinator", id: other.cid, label: "replacement" }, NOW, dir)).toMatchObject({ ok: false, reason: "owned" });
+    expect(assignmentOf(store, "retry", NOW, access, dir)?.attention).toContain("This lead is paused. A manager can resume it or transfer responsibility.");
   });
 
   test("the root follows an automatically approved correction without losing the original owner", () => {

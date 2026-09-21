@@ -547,13 +547,14 @@ function savedActionContext(
       proposal?.kind === "action"
         ? sharedActionPayload(proposal.payload)
         : null;
-  const session = store.activeMateSession(who.name),
+  const shared=proposal&&store.handle.prepare('SELECT id FROM team_conversation WHERE thread=?').get(proposal.thread);
+  const session = shared&&proposal ? store.teamMateSession(who.name,proposal.thread) : store.activeMateSession(who.name),
     turn = proposal ? store.getMateTurn(proposal.turn) : null;
   if (
     !proposal ||
     !payload ||
     proposal.state !== state ||
-    store.getMateThread(proposal.thread)?.approver !== who.name
+    (shared ? !store.canUseTeamMateThread(who.name,who.generation,proposal.thread) : store.getMateThread(proposal.thread)?.approver !== who.name)
   )
     throw Error("This action is no longer waiting for your review.");
   if (
@@ -561,8 +562,8 @@ function savedActionContext(
     session.approverGeneration !== who.generation ||
     session.ceilingDigest !== who.ceilingDigest ||
     proposal.ceilingDigest !== who.ceilingDigest ||
-    turn?.session !== session.id ||
-    turn.state !== "answered"
+    (!shared && turn?.session !== session.id) ||
+    turn?.state !== "answered"
   )
     throw Error(
       "This conversation ended or its project access changed. Ask for a fresh proposal.",
