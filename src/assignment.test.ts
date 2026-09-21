@@ -302,6 +302,7 @@ describe("continuous assignments over existing task families", () => {
       detail: "Required evidence is missing, so this result is not verified.", tone: "problem", action: null }] });
     expect(html).toContain('class="meta assignment-detail">Checks passed.');
     expect(html).toContain("The saved source inventory is truncated; a screenshot is missing.");
+    expect(html.split("<details")[0]).toContain('<p class="problem">The saved source inventory is truncated; a screenshot is missing.</p>');
     expect(html.split("<details")[0]).not.toContain("Result saved — verification needed");
     const before = store.proofVerdictFor(run), runs = store.runsFor(store.lookupRef("retry")!.id);
     expect(checkAssignment(store, "retry", ready.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: true, assignment: { state: "complete" } });
@@ -322,6 +323,7 @@ describe("continuous assignments over existing task families", () => {
     const currentHtml = assignmentSummaryHtml(result, { diagnostics: [{ token: "checks-failed", label: "Changes saved, but checks failed",
       detail: "The repository's approved check failed against this build (exit 1), so the result is not verified.", tone: "problem" }] }).split("<details")[0]!;
     expect(currentHtml.match(/Checks failed \(exit 1\)/g)).toHaveLength(1);
+    expect(currentHtml).toContain('class="problem assignment-detail">Checks failed (exit 1).');
     expect(currentHtml).not.toContain("Changes saved, but checks failed");
     expect(currentHtml).toContain("Inspect failed check");
     const proof = store.proofVerdictFor(run), runs = store.runsFor(store.lookupRef("retry")!.id);
@@ -410,6 +412,9 @@ describe("continuous assignments over existing task families", () => {
     writeFileSync(join(dir, artifact.key), "changed check output");
     expect(checkAssignment(store, "retry", receipt.digest, lead, NOW, dir)).toMatchObject({ ok: false, reason: "stale" });
     const changed = assignmentOf(store, "retry", NOW, access, dir)!;
+    const visible = assignmentSummaryHtml(changed).split('<details')[0]!;
+    expect(visible).toContain('class="problem assignment-detail"');
+    expect(visible).toContain(`Saved check-log #${artifact.id} (run ${run}) is unavailable or changed.`);
     const runs = store.runsFor(store.lookupRef("retry")!.id);
     expect(checkAssignment(store, "retry", changed.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: true, assignment: { state: "complete", receipt: { checks: { status: "unavailable" } } } });
     for (const one of read()) expect(one).toMatchObject({ state: "complete" });
@@ -543,14 +548,27 @@ describe("continuous assignments over existing task families", () => {
     expect(checkAssignment(store, "retry", ready.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: false, reason: "stale" });
   });
 
-  test("a shortened check log retains its limitation without invalidating its sealed passing gate", () => {
+  test("a shortened check log retains its limitation without invalidating its sealed passing gate", async () => {
     const run = built(task(), true, true); reviewed(run); claimAssignment(store, "retry", lead, NOW, dir);
-    const receipt = assignmentOf(store, "retry", NOW, access, dir)!.receipt!;
+    const ready = assignmentOf(store, "retry", NOW, access, dir)!, receipt = ready.receipt!;
     expect(receipt.artifacts.find(a => a.kind === "check-log")?.complete).toBe(false);
     expect(receipt.caveats).toContain("The check log was shortened when stored; only the retained output is available.");
+    const window = new Window();
+    try {
+      window.document.body.innerHTML = assignmentSummaryHtml(ready, { compact: true });
+      expect(window.document.querySelector('.assignment-detail')?.textContent).toBe('Checks passed.');
+      expect(window.document.querySelector('.assignment-summary>.problem')).toBeNull();
+      const notice = window.document.querySelector('details.assignment-notices');
+      expect(notice?.hasAttribute('open')).toBe(false);
+      expect(notice?.querySelector('summary')?.textContent).toBe('Saved output is partial');
+      expect(notice?.textContent).toContain('only the retained output is available');
+    } finally { await window.happyDOM.close(); }
     expect(checkAssignment(store, "retry", receipt.digest, lead, NOW, dir)).toMatchObject({ ok: true, assignment: { state: "complete" } });
     const log = store.artifactsFor(run).find(a => a.kind === "check-log")!;
     writeFileSync(join(dir, log.key), "changed retained output");
+    const damagedHtml = assignmentSummaryHtml(assignmentOf(store, "retry", NOW, access, dir)!).split('<details')[0]!;
+    expect(damagedHtml).toContain('class="problem assignment-detail"');
+    expect(damagedHtml).toContain(`Saved check-log #${log.id} (run ${run}) is unavailable or changed.`);
     expect(checkAssignment(store, "retry", receipt.digest, lead, NOW, dir)).toMatchObject({ ok: false, reason: "stale" });
   });
 
@@ -609,6 +627,10 @@ describe("continuous assignments over existing task families", () => {
     writeFileSync(join(dir, ancestorProof.key), "changed ancestor proof");
     const current = assignmentOf(store, "retry", NOW, access, dir)!;
     expect(current).toMatchObject({ state: "ready-to-check", attention: [expect.stringContaining("unavailable or changed")] });
+    const html = assignmentSummaryHtml(current);
+    expect(html).toContain('<details class="assignment-notices"><summary>Earlier material unavailable</summary>');
+    expect(html).toContain(`Saved proof #${ancestorProof.id} (run ${original}) is unavailable or changed.`);
+    expect(html.split('<details')[0]).not.toContain('unavailable or changed');
     expect(checkAssignment(store, "retry", ready.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: false, reason: "stale" });
     expect(checkAssignment(store, "retry", current.receipt!.digest, lead, NOW, dir)).toMatchObject({ ok: true, assignment: { state: "complete" } });
     expect(store.actionLedger({ repos: null }).filter(a => a.action === "assignment handoff checked")).toHaveLength(1);

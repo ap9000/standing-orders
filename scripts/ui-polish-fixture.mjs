@@ -308,7 +308,7 @@ export function startFixture(options = {}) {
     }
     const verify = facts.verify ?? { configured: true, ran: true, exitCode: 0 };
     if (verify.configured && verify.ran) {
-      storeEvidence(store, evidenceRoot, runId, 'check-log', 'check-log.txt', Buffer.from(`$ npm test\n(exit ${verify.exitCode})\n\n--- stdout ---\n${verify.exitCode === 0 ? '214 tests passed.' : '213 passed, 1 failed: settle rounds half-cents up (expected 31.16, got 31.15).'}\n\n--- stderr ---\n`, 'utf8'), `sh -c "npm test" (exit ${verify.exitCode}) [fixture: synthetic]`, hoursAgo(at + 0.1));
+      storeEvidence(store, evidenceRoot, runId, 'check-log', 'check-log.txt', Buffer.from(`$ npm test\n(exit ${verify.exitCode})\n\n--- stdout ---\n${verify.exitCode === 0 ? '214 tests passed.' : '213 passed, 1 failed: settle rounds half-cents up (expected 31.16, got 31.15).'}\n\n--- stderr ---\n`, 'utf8'), `sh -c "npm test" (exit ${verify.exitCode}) [fixture: synthetic]`, hoursAgo(at + 0.1), facts.shortenedLog ? { sourceBytesOriginal: 200_000 } : {});
     }
     const verdict = adjudicate({
       proofArtifactPresent: facts.noProof !== true, proofParse: facts.noProof === true ? null : parseProof(JSON.stringify(proof)),
@@ -505,7 +505,7 @@ export function startFixture(options = {}) {
   writeFileSync(join(evidenceRoot, corruptLog.key), '$ npm test\n(exit 0)\n\n--- stdout ---\n0 passed, 214 failed.\n');
 
   if (options.assignmentPresentation) {
-    results.completed = finished('csv-column-names', 'Preserve the existing CSV column names', 1, { noProof: true });
+    results.completed = finished('csv-column-names', 'Preserve the existing CSV column names', 1, { noProof: true, shortenedLog: true });
     const who = verifyApproverByPassword(store, 'polish-fixture', login.token, [repo]);
     if (!who.ok) throw new Error('synthetic completion identity');
     const ready = assignmentOf(store, results.completed.taskId, now, { principal: 'operator', repos: [repo] }, evidenceRoot);

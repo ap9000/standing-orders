@@ -43,6 +43,11 @@ export const CHAT_POLISH_CSS = `
   .chat-workspace .completion-receipt { background: var(--card); box-shadow: none; }
   .chat-workspace .completion-receipt::after { content: none; }
   .chat-workspace .thread { min-height: 0; }
+  .chat-workspace .chat-turn-history { margin: 1rem 0; border: 0; border-top: 1px solid var(--border); border-radius: 0; background: transparent; box-shadow: none; padding: 0; }
+  .chat-turn-history > summary { display: flex; align-items: center; gap: .75rem; min-height: 44px; cursor: pointer; font-size: .875rem; }
+  .chat-turn-history > summary .meta { margin-left: auto; }
+  .chat-turn-history .row { display: flex; flex-wrap: wrap; gap: .4rem; }
+  .chat-turn-history .row .right { float: none; margin-left: auto; }
   .chat-workspace .task-live-summary { margin-bottom: .75rem; padding-bottom: .25rem; }
   .chat-workspace .task-journey > details, .chat-workspace .result-feedback-history,
   .chat-workspace .chat-limits, .chat-workspace .task-chat-agents {

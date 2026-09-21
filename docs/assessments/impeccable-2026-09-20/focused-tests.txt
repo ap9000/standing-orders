@@ -1,0 +1,13 @@
+
+ RUN  v4.1.10 /Users/alekseypelletier/Developer/standing-orders-impeccable
+
+(node:32721) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:32720) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+ Test Files  2 passed (2)
+      Tests  381 passed (381)
+   Start at  18:15:46
+   Duration  50.91s (transform 3.34s, setup 25ms, import 5.24s, tests 54.92s, environment 0ms)
+

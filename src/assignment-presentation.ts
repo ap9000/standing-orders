@@ -19,6 +19,16 @@ export function historicalAssessmentReason(reason: string): boolean {
     /^semantic coverage: .* — (?:required .*|independent review is optional .*)$/.test(reason);
 }
 
+/** Known storage-cap notices do not mean the retained bytes are damaged. */
+export function shortenedMaterialReason(detail: string): boolean {
+  return detail === 'The check output was shortened when it was stored; its download holds only the stored part.' ||
+    detail === 'The sealed diff was shortened when it was stored; its download holds only the stored part, not the full change.' ||
+    detail === 'The report was shortened when it was stored; its download holds only the stored part.' ||
+    detail === 'The check log was shortened when stored; only the retained output is available.' ||
+    detail === 'The changed-file list was cut short; the counts are complete.' ||
+    /^Saved (?:terminal-diff|report) #\d+ is incomplete\.$/.test(detail);
+}
+
 export function assignmentPresentationOf(assignment: AssignmentSnapshot, options: {
   workStatus?: AssignmentWorkStatus; diagnostics?: WorkStatus['diagnostics']; additionalAttention?: readonly string[];
 } = {}) {
@@ -57,6 +67,9 @@ export function assignmentPresentationOf(assignment: AssignmentSnapshot, options
     // assessment cannot claim failure after the actual check passed.
     if (id === 'checks' && (checks?.status === 'passed' || assignment.detail.includes(checks!.detail))) continue;
     if ([...attention.values()].some(one => one.detail.includes(detail))) continue;
+    const previous = attention.get(id);
+    // Damage to the retained bytes outranks their earlier storage limit.
+    if (previous !== undefined && shortenedMaterialReason(detail) && !shortenedMaterialReason(previous.detail)) continue;
     attention.set(id, { id, detail: id === 'checks' ? checks!.detail : detail, tone: 'problem' });
   }
   const diagnostics = (options.diagnostics ?? []).filter(one => {
