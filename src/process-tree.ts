@@ -2,6 +2,7 @@ import { execFileSync, type ChildProcess } from "node:child_process";
 import { processMayBeAlive } from "./process-liveness.js";
 
 type ProcessRow = { pid: number; parent: number; group: number };
+export type ObservedProcess = { pid: number; group: boolean };
 export type ProcessObservationFailure = {
   phase: "sample" | "periodic" | "final-exit" | "stop" | "supervisor";
   operation: "snapshot" | "descendant-write" | "exit-write" | "signal" | "diagnostic-read";
@@ -12,6 +13,9 @@ export type ProcessObservationFailure = {
 };
 export type ProcessTreeObserver = {
   onDescendant?: (pid: number, group: boolean) => void;
+  /** A dedicated durable fallback for the exact identities already observed.
+   * Return true only after preserving every row. Never replay arbitrary callbacks. */
+  onDescendantWriteFailure?: (rows: readonly ObservedProcess[]) => boolean;
   /** An observed PID (and its group, when recorded) is now proven absent.
    * This never follows merely from reparenting or the root's exit. */
   onDescendantExit?: (pid: number, group: boolean) => void;
@@ -43,14 +47,28 @@ function descendants(rows: ProcessRow[], root: number): ProcessRow[] {
   return found;
 }
 function live(child: ChildProcess): boolean { return child.pid !== undefined && child.exitCode === null && child.signalCode === null; }
-function remember(child: ChildProcess, rows: ProcessRow[]): void {
+function remember(child: ChildProcess, rows: ProcessRow[], phase: "sample" | "periodic" | "stop"): void {
   const tracked = observed.get(child);
   if (!tracked) return;
-  for (const row of rows) {
-    const group = row.group === row.pid, key = `${row.pid}:${group}`;
-    if (tracked.seen.has(key)) continue;
-    tracked.observer.onDescendant?.(row.pid, group);
-    tracked.seen.set(key, { pid: row.pid, group });
+  // Keep the entire observed set before a persistence callback can throw.
+  const fresh = rows.map(row => ({ pid: row.pid, group: row.group === row.pid }))
+    .filter(row => !tracked.seen.has(`${row.pid}:${row.group}`));
+  for (let index = 0; index < fresh.length; index++) {
+    const row = fresh[index]!;
+    try { tracked.observer.onDescendant?.(row.pid, row.group); }
+    catch (error) {
+      // A stop must not signal from a snapshot made stale by waiting for a
+      // fallback write. Preserve its existing conservative failure path.
+      if (phase === "stop") throw error;
+      const remaining = fresh.slice(index);
+      let preserved = false;
+      try { preserved = tracked.observer.onDescendantWriteFailure?.(remaining) === true; } catch { /* The unknown safeguard remains. */ }
+      if (!preserved) throw error;
+      for (const one of remaining) tracked.seen.set(`${one.pid}:${one.group}`, one);
+      failed(child, phase, "descendant-write", error, true);
+      return;
+    }
+    tracked.seen.set(`${row.pid}:${row.group}`, row);
   }
 }
 function recordExits(child: ChildProcess, rows: ProcessRow[]): void {
@@ -67,7 +85,7 @@ function recordExits(child: ChildProcess, rows: ProcessRow[]): void {
   }
 }
 // Only fixed error codes survive; error messages/output can contain private data.
-const observationCodes = new Set(["EAGAIN", "EMFILE", "ENFILE", "ETIMEDOUT", "ENOBUFS", "ENOENT", "EPERM", "EACCES", "EIO", "ESRCH", "MALFORMED_SNAPSHOT", "SUPERVISOR_DIAGNOSTIC"]);
+const observationCodes = new Set(["EAGAIN", "EMFILE", "ENFILE", "ETIMEDOUT", "ENOBUFS", "ENOENT", "EPERM", "EACCES", "EIO", "ESRCH", "MALFORMED_SNAPSHOT", "SUPERVISOR_DIAGNOSTIC", "SQLITE_BUSY", "SQLITE_LOCKED", "SQLITE_READONLY", "SQLITE_IOERR", "SQLITE_CORRUPT", "SQLITE_FULL", "SQLITE_CONSTRAINT"]);
 /** Private supervisor pipe input. Keep only validated identifier diagnostics. */
 export function readProcessObservationFailure(value: unknown): ProcessObservationFailure | null {
   if (typeof value !== "object" || value === null) return null;
@@ -76,16 +94,19 @@ export function readProcessObservationFailure(value: unknown): ProcessObservatio
   if (!["sample", "periodic", "final-exit", "stop", "supervisor"].includes(String(phase)) || !["snapshot", "descendant-write", "exit-write", "signal", "diagnostic-read"].includes(String(operation)) || typeof code !== "string" || (code !== "UNKNOWN" && !observationCodes.has(code)) || (rootPid !== null && (!Number.isSafeInteger(rootPid) || Number(rootPid) <= 0)) || typeof at !== "string" || !Number.isFinite(Date.parse(at)) || new Date(at).toISOString() !== at || typeof identityUnknown !== "boolean") return null;
   return { phase: phase as ProcessObservationFailure["phase"], operation: operation as ProcessObservationFailure["operation"], code, rootPid: rootPid as number | null, at, identityUnknown };
 }
-function failed(child: ChildProcess, phase: ProcessObservationFailure["phase"], operation: ProcessObservationFailure["operation"], error: unknown): void {
+function failed(child: ChildProcess, phase: ProcessObservationFailure["phase"], operation: ProcessObservationFailure["operation"], error: unknown, identitiesPreserved = false): void {
   const tracked = observed.get(child);
   if (!tracked) return;
   const rawCode = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
-  const code = typeof rawCode === "string" && observationCodes.has(rawCode) ? rawCode : "UNKNOWN";
+  const sqliteCodes: Record<number, string> = { 5: "SQLITE_BUSY", 6: "SQLITE_LOCKED", 8: "SQLITE_READONLY", 10: "SQLITE_IOERR", 11: "SQLITE_CORRUPT", 13: "SQLITE_FULL", 19: "SQLITE_CONSTRAINT" };
+  const sqlite = typeof error === "object" && error !== null && "errcode" in error && Number.isSafeInteger(error.errcode)
+    ? sqliteCodes[Number(error.errcode) & 0xff] : undefined;
+  const code = sqlite ?? (typeof rawCode === "string" && observationCodes.has(rawCode) ? rawCode : "UNKNOWN");
   // Exit-only checks retire already-durable identities; they discover no
   // children. Any failure leaves those witnesses intact for later OS probes.
   // Discovery and descendant persistence failures can lose an identity.
-  const identityUnknown = phase !== "final-exit" && operation !== "exit-write";
-  const key = `${phase}:${operation}:${code}`;
+  const identityUnknown = !identitiesPreserved && phase !== "final-exit" && operation !== "exit-write";
+  const key = `${phase}:${operation}:${code}:${identityUnknown}`;
   if (!tracked.failures.has(key)) {
     try {
       tracked.observer.onObservationFailure?.({ phase, operation, code, rootPid: child.pid ?? null, at: new Date().toISOString(), identityUnknown });
@@ -101,7 +122,7 @@ function failed(child: ChildProcess, phase: ProcessObservationFailure["phase"], 
 function observeRows(child: ChildProcess, rows: ProcessRow[], phase: "sample" | "periodic"): void {
   try { recordExits(child, rows); }
   catch (error) { failed(child, phase, "exit-write", error); }
-  try { remember(child, descendants(rows, child.pid!)); }
+  try { remember(child, descendants(rows, child.pid!), phase); }
   catch (error) { failed(child, phase, "descendant-write", error); }
 }
 
@@ -161,7 +182,7 @@ export function stopProcessTree(child: ChildProcess): boolean {
       operation = "snapshot";
       const rows = descendants(snapshot(), child.pid!);
       operation = "descendant-write";
-      remember(child, rows);
+      remember(child, rows, "stop");
       operation = "signal";
       const fresh = rows.filter(row => !stopped.has(row.pid));
       if (fresh.length === 0) {

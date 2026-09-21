@@ -4,6 +4,12 @@ Failed checks preserve known PIDs/groups. Failed discovery or saving an unidenti
 
 Passing tests, empty ancestry or service restart alone cannot prove exit. Normal [deployment](../scripts/deploy-browser.mjs) still drains, backs up, checks database compatibility and installs one verified UI/worker build. Fresh positive proof can enable this narrow legacy recovery without a Mac restart.
 
+## Preserve known IDs after a recording failure
+
+The observer captures every process ID in a scan before calling persistence. If a normal descendant write fails, the built-in recorder reserves a new guard, then saves the failed ID and all remaining IDs together in one transaction. A successful commit lets ordinary exit checks continue. A crash or failed transaction leaves the fresh guard unresolved. External observer callbacks are not replayed; process scans that fail still retain the unknown-process safeguard. Stop operations keep their conservative failure path rather than signalling from a snapshot delayed by fallback persistence.
+
+SQLite failures retain a fixed error code in diagnostics, without paths, arguments or raw messages. This prevention does not reconstruct an ID lost by an older build, settle an existing unknown row, or establish that a process exited. Historical recovery below still needs its positive source and OS observations.
+
 ## Inspect and record
 
 The local API is `recoverPreparedObserverGap(store, { profilePath, compilationDirectory, evidenceRoot, mode })`. Start with `mode: "inspect"`; it changes no custody. `"record"` recollects internally. No caller-supplied executable/anchor/serialized success, general CLI, remote endpoint, force-clear flag or migration is added.

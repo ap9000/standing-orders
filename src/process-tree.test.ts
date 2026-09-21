@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import * as childProcess from "node:child_process";
-import { observeProcessTree, sampleProcessTree, readProcessObservationFailure } from "./process-tree.js";
+import { observeProcessTree, sampleProcessTree, stopProcessTree, readProcessObservationFailure } from "./process-tree.js";
 
 vi.mock("node:child_process", { spy: true });
 const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
@@ -100,4 +100,58 @@ test("becoming a group leader records the stronger group witness too", () => {
   observeProcessTree(child, { onDescendant: appeared }); sampleProcessTree(child);
   rows = "100 1 100\n200 100 200\n"; sampleProcessTree(child);
   expect(appeared.mock.calls).toEqual([[200, false], [200, true]]);
+});
+
+
+test("a durable fallback preserves the failed ID and every unprocessed sibling without replaying callbacks", () => {
+  rows = "100 1 100\n200 100 200\n300 100 100\n400 300 400\n";
+  const appeared = vi.fn((pid: number) => {
+    if (pid === 300) throw Object.assign(new Error("private database path"), { code: "ERR_SQLITE_ERROR", errcode: 5 });
+  });
+  const fallback = vi.fn(() => true), unknown = vi.fn(), exited = vi.fn(), diagnostic = vi.fn();
+  observeProcessTree(child, { onDescendant: appeared, onDescendantWriteFailure: fallback,
+    onDescendantExit: exited, onUnknown: unknown, onObservationFailure: diagnostic });
+  sampleProcessTree(child);
+  expect(appeared.mock.calls).toEqual([[200, true], [300, false]]);
+  expect(fallback).toHaveBeenCalledExactlyOnceWith([{ pid: 300, group: false }, { pid: 400, group: true }]);
+  expect(unknown).not.toHaveBeenCalled();
+  expect(diagnostic.mock.calls[0]![0]).toMatchObject({ operation: "descendant-write", code: "SQLITE_BUSY", identityUnknown: false });
+  expect(JSON.stringify(diagnostic.mock.calls)).not.toContain("private");
+  // The processes can disappear or reparent before the next scan: every ID
+  // remains available for the ordinary positive-exit probe.
+  rows = "100 1 100\n"; sampleProcessTree(child);
+  expect(exited.mock.calls).toEqual([[200, true], [300, false], [400, true]]);
+  expect(appeared).toHaveBeenCalledTimes(2);
+});
+
+test.each(["refused", "throws"])("a %s durable fallback preserves the unknown safeguard", mode => {
+  const unknown = vi.fn(), diagnostic = vi.fn();
+  observeProcessTree(child, { onDescendant: () => { throw new Error("write failed"); },
+    onDescendantWriteFailure: () => { if (mode === "throws") throw new Error("commit failed"); return false; },
+    onUnknown: unknown, onObservationFailure: diagnostic });
+  sampleProcessTree(child);
+  expect(unknown).toHaveBeenCalledOnce();
+  expect(diagnostic.mock.calls[0]![0]).toMatchObject({ operation: "descendant-write", identityUnknown: true });
+});
+
+test("a known-ID fallback cannot settle a failed process scan", () => {
+  const fallback = vi.fn(() => true), unknown = vi.fn();
+  observeProcessTree(child, { onDescendant: vi.fn(), onDescendantWriteFailure: fallback, onUnknown: unknown });
+  vi.mocked(childProcess.execFileSync).mockImplementation(() => { throw Object.assign(new Error("scan failed"), { code: "EIO" }); });
+  sampleProcessTree(child);
+  expect(fallback).not.toHaveBeenCalled(); expect(unknown).toHaveBeenCalledOnce();
+});
+
+
+test("a stop never signals descendants from a snapshot delayed by fallback persistence", () => {
+  child.kill = vi.fn(() => true);
+  const fallback = vi.fn(() => true), unknown = vi.fn();
+  observeProcessTree(child, { onDescendant: () => { throw new Error("write failed"); },
+    onDescendantWriteFailure: fallback, onUnknown: unknown });
+  expect(stopProcessTree(child)).toBe(false);
+  expect(fallback).not.toHaveBeenCalled();
+  expect(process.kill).not.toHaveBeenCalled();
+  expect(child.kill).toHaveBeenCalledWith("SIGSTOP");
+  expect(child.kill).not.toHaveBeenCalledWith("SIGKILL");
+  expect(unknown).toHaveBeenCalledOnce();
 });

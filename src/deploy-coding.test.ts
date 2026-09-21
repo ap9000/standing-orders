@@ -3,10 +3,11 @@ import { mkdtempSync, mkdirSync, existsSync, readFileSync, writeFileSync, rmSync
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync, backup } from 'node:sqlite';
+import { spawn } from 'node:child_process';
 import { openStore } from './store.js';
 import { CodingWorkspace } from './coding-workspace.js';
-import { installUpdateGate } from './desktop-update-gate.js';
+import { installUpdateGate, updateGateOwned } from './desktop-update-gate.js';
 import { loadCodingDeploymentRuntime, observeCodingDeployment, backupCodingDeployment, verifyCodingDeploymentBackup, assertCodingDeploymentStopped } from '../scripts/deploy-coding.mjs';
 
 function fixture() {
@@ -165,8 +166,8 @@ test('browser phase wiring verifies the coding backup before stop and custody be
   const prepare = source.slice(source.indexOf('async function prepare('), source.indexOf('async function rehearse('));
   const frozen = prepare.indexOf('save(r, "frozen")');
   expect(prepare.lastIndexOf('observeCodingDeployment(', frozen)).toBeGreaterThan(prepare.indexOf('freezeUpdateGate('));
-  expect(frozen).toBeLessThan(prepare.indexOf('await backup(original'));
-  expect(prepare.indexOf('await ensureCodingBackup(')).toBeGreaterThan(prepare.indexOf('await backup(original'));
+  expect(frozen).toBeLessThan(prepare.indexOf('await snapshotBackup(original'));
+  expect(prepare.indexOf('await ensureCodingBackup(')).toBeGreaterThan(prepare.indexOf('await snapshotBackup(original'));
   expect(prepare.indexOf('await ensureCodingBackup(')).toBeLessThan(prepare.indexOf('db.exec("COMMIT")'));
   const swap = source.slice(source.indexOf('async function swap('), source.indexOf('async function finish('));
   expect(swap.indexOf('await ensureCodingBackup(')).toBeLessThan(swap.indexOf('save(r, "stopping")'));
@@ -197,4 +198,55 @@ test('browser phase wiring verifies the coding backup before stop and custody be
   expect(restore.indexOf('await ensureCodingBackup(')).toBeLessThan(restore.lastIndexOf('await verifyServiceStopped('));
   expect(restore.indexOf('verifyCodingBackup(')).toBeGreaterThan(restore.lastIndexOf('await '));
   expect(swap.lastIndexOf('await ensureCodingBackup(await loadCodingDeploymentRuntime(nextDist), r)')).toBeGreaterThan(swap.indexOf('save(r, "started")'));
+});
+
+function browserDatabaseHelpers(snapshot: (db: DatabaseSync) => unknown = () => [], copy: typeof backup = backup) {
+  const source = readFileSync(resolve('scripts/deploy-browser.mjs'), 'utf8');
+  // Exercise the CLI's exact helpers without executing its launchd entry point.
+  const functions = source.slice(source.indexOf('function openDeploymentDatabase('), source.indexOf('const args = process.argv.slice(2);'));
+  return new Function('DatabaseSync', 'snapshot', 'backup', functions + '\nreturn { openDeploymentDatabase, snapshotBackup };')(DatabaseSync, snapshot, copy) as {
+    openDeploymentDatabase(file: string, options?: { readOnly?: boolean }, waitMs?: number): DatabaseSync;
+    snapshotBackup(db: DatabaseSync, target: string): Promise<unknown>;
+  };
+}
+
+test('browser deployment waits through a competing writer before installing its admission gate', async () => {
+  const f = fixture(), helpers = browserDatabaseHelpers();
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `import {DatabaseSync} from 'node:sqlite';
+    const db=new DatabaseSync(process.argv[1]); db.exec('BEGIN IMMEDIATE');
+    process.stdout.write('locked'); setTimeout(()=>db.close(),1500);`, f.database], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const ended = new Promise<void>(resolve => child.once('close', () => resolve()));
+  let db: DatabaseSync | undefined;
+  try {
+    await new Promise<void>((resolve, reject) => { child.stdout.once('data', () => resolve()); child.once('error', reject); child.once('exit', code => { if (code !== 0) reject(Error('lock fixture failed')); }); });
+    db = helpers.openDeploymentDatabase(f.database);
+    expect(db.prepare('PRAGMA busy_timeout').get()?.timeout).toBe(5000);
+    installUpdateGate(db, f.record.id);
+    expect(updateGateOwned(db, f.record.id)).toBe(true);
+    // A resumed preparing phase reuses its gate identity, rather than replacing it.
+    installUpdateGate(db, f.record.id);
+    expect(() => installUpdateGate(db, randomUUID())).toThrow('Another or unrecognized update');
+    const source = readFileSync(resolve('scripts/deploy-browser.mjs'), 'utf8');
+    expect(source.match(/new DatabaseSync\(/g)).toHaveLength(1);
+    expect(source).toContain('openDeploymentDatabase(database, {}, 10000)');
+    expect(source).toContain('existsSync(journalFile) ? loadPhase("preparing") : null');
+    expect(source).toContain('const r = resumed ??');
+  } finally { child.kill(); await ended; db?.close(); f.close(); }
+}, 8000);
+
+test('browser backup preserves its read snapshot across concurrent WAL writes and releases it afterward', async () => {
+  const f = fixture(), target = join(f.stage, 'orders.backup.db');
+  f.store.raw().exec('CREATE TABLE snapshot_probe(value INTEGER); INSERT INTO snapshot_probe VALUES(1)');
+  const helpers = browserDatabaseHelpers(db => db.prepare('SELECT value FROM snapshot_probe').all(), async (db, path, options) => {
+    expect(options?.rate).toBe(100000);
+    f.store.raw().exec('INSERT INTO snapshot_probe VALUES(2)');
+    return backup(db, path, options);
+  });
+  const original = helpers.openDeploymentDatabase(f.database, { readOnly: true });
+  try {
+    expect(await helpers.snapshotBackup(original, target)).toEqual([{ value: 1 }]);
+    const copy = helpers.openDeploymentDatabase(target, { readOnly: true });
+    try { expect(copy.prepare('SELECT value FROM snapshot_probe').all()).toEqual([{ value: 1 }]); } finally { copy.close(); }
+    expect(original.prepare('SELECT value FROM snapshot_probe').all()).toEqual([{ value: 1 }, { value: 2 }]);
+  } finally { original.close(); f.close(); }
 });

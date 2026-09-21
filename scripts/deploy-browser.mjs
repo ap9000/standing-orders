@@ -25,6 +25,25 @@ import { homedir, tmpdir, userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { loadCodingDeploymentRuntime, observeCodingDeployment, backupCodingDeployment, verifyCodingDeploymentBackup, assertCodingDeploymentStopped } from "./deploy-coding.mjs";
 
+// Every direct connection waits at the same bounded lock boundary as Store.
+// This queues a brief competing writer; no transaction body is replayed.
+function openDeploymentDatabase(file, options = {}, waitMs = 5000) {
+  const db = new DatabaseSync(file, options);
+  try { db.exec(`PRAGMA busy_timeout=${waitMs}`); return db; }
+  catch (error) { db.close(); throw error; }
+}
+
+async function snapshotBackup(original, target) {
+  original.exec("BEGIN");
+  try {
+    const before = snapshot(original, true);
+    // Keep one read view through the copy. Larger steps avoid repeated small
+    // backup batches while a live service continues unrelated heartbeats.
+    await backup(original, target, { rate: 100000 });
+    return before;
+  } finally { original.exec("ROLLBACK"); }
+}
+
 const args = process.argv.slice(2);
 const flag = (name, fallback = undefined) => { const at = args.indexOf(`--${name}`); return at >= 0 ? args[at + 1] : fallback; };
 const has = name => args.includes(`--${name}`);
@@ -62,7 +81,7 @@ const save = (r, phase) => { r.phase = phase; r.updatedAt = new Date().toISOStri
 const loadPhase = phase => {
   // The plane's records are re-read before every phase, not only at entry:
   // a revoked approval or a changed command between phases stops the swap.
-  const current = (() => { const db = new DatabaseSync(database, { readOnly: true }); try { return facts(db); } finally { db.close(); } })();
+  const current = (() => { const db = openDeploymentDatabase(database, { readOnly: true }); try { return facts(db); } finally { db.close(); } })();
   const r = readJournal();
   requireTrue(current.completion.digest === r.completion?.digest && current.gateDigest === r.gateDigest, "The completed result or its passing check changed since staging.");
   requireTrue(r.phase === phase && r.candidate === candidateHead && r.database === database, `Journal is at ${r.phase} for ${r.candidate?.slice(0, 7)}, expected ${phase} for ${short}.`);
@@ -230,35 +249,48 @@ async function ensureCodingBackup(runtime, r) {
 }
 
 async function prepare(staged) {
-  requireTrue(!existsSync(journalFile), "This staging directory already has a deployment; resume it with --phase.");
+  // A failure to acquire the admission lock can leave the original preparing
+  // journal intact. Reuse its identity; never delete it or mint a second gate.
+  const resumed = existsSync(journalFile) ? loadPhase("preparing") : null;
   requireTrue(lstatSync(database).isFile() && !lstatSync(database).isSymbolicLink(), "Unexpected database path.");
   staged = { ...staged, distFiles: proveStaged().distFiles };
-  const db = new DatabaseSync(database); db.exec("PRAGMA busy_timeout=1000");
+  const db = openDeploymentDatabase(database);
   try {
     const schema = db.prepare("SELECT version FROM schema_version").get().version;
     const nextSchema = (await load(nextDist, "store.js")).SCHEMA_VERSION;
     const f = facts(db);
-    writeFileSync(join(stageDir, "release.json"), JSON.stringify({ ...f, run: runId, head: candidateHead, at: new Date().toISOString(), ...staged }, null, 1));
-    const r = { id: randomUUID(), candidate: candidateHead, database, phase: "preparing", schema, nextSchema, createdAt: new Date().toISOString(), backup: join(stageDir, "orders.backup.db"), priorRuntime: priorDist, nextRuntime: nextDist, builder: runId, completion: f.completion, gateDigest: f.gateDigest, task: f.taskId, repo: f.repo, scopeDigest: f.scopeDigest, ...staged, proofVerdict: f.proofVerdict, manualAcceptance: f.acceptance, publicUrl };
+    if (!resumed) writeFileSync(join(stageDir, "release.json"), JSON.stringify({ ...f, run: runId, head: candidateHead, at: new Date().toISOString(), ...staged }, null, 1));
+    const r = resumed ?? { id: randomUUID(), candidate: candidateHead, database, phase: "preparing", schema, nextSchema, createdAt: new Date().toISOString(), backup: join(stageDir, "orders.backup.db"), priorRuntime: priorDist, nextRuntime: nextDist, builder: runId, completion: f.completion, gateDigest: f.gateDigest, task: f.taskId, repo: f.repo, scopeDigest: f.scopeDigest, ...staged, proofVerdict: f.proofVerdict, manualAcceptance: f.acceptance, publicUrl };
+    requireTrue(r.schema === schema && r.nextSchema === nextSchema && r.priorRuntime === priorDist &&
+      r.backup === join(stageDir, "orders.backup.db") && !r.backupSha256 && !r.snapshotSha256 && !existsSync(r.backup) &&
+      r.task === f.taskId && r.repo === f.repo && r.scopeDigest === f.scopeDigest && r.publicUrl === publicUrl,
+      "The preparing deployment's schema, runtime, backup or task identity changed. Preserve the journal and inspect it.");
     observeCodingDeployment(oldRt.coding, database, r);
     quiet(db);
-    r.oldService = service(priorDist);
-    requireTrue(r.oldService, "The installed service is not running from the runtime its definition names.");
+    const currentService = service(priorDist);
+    requireTrue(currentService, "The installed service is not running from the runtime its definition names.");
+    requireTrue(!resumed || (r.oldService?.supervisor === currentService.supervisor &&
+      JSON.stringify(r.oldService.children) === JSON.stringify(currentService.children)),
+      "The installed service identity changed since preparation. Preserve the journal and inspect it.");
+    if (!resumed) r.oldService = currentService;
     save(r, "preparing");
     for (const [input, output] of [[plist, "browser.saved.plist"], [join(stateDir, "repos.json"), "repos.saved.json"], [join(stateDir, "up-login.txt"), "up-login.saved.txt"], [join(stateDir, "console-url"), "console-url.saved.txt"]]) {
-      if (!existsSync(input)) continue;
+      const retained = join(stageDir, output);
+      if (!existsSync(input)) { requireTrue(!existsSync(retained), `Saved configuration disappeared: ${input}`); continue; }
       requireTrue(lstatSync(input).isFile() && !lstatSync(input).isSymbolicLink(), `Unexpected configuration path: ${input}`);
-      copyFileSync(input, join(stageDir, output)); chmodSync(join(stageDir, output), 0o600);
+      if (existsSync(retained)) requireTrue(lstatSync(retained).isFile() && !lstatSync(retained).isSymbolicLink() &&
+        readFileSync(retained).equals(readFileSync(input)), `Saved configuration changed: ${input}`);
+      else { copyFileSync(input, retained); chmodSync(retained, 0o600); }
     }
     oldRt.gate.installUpdateGate(db, r.id); save(r, "admission-paused");
     requireTrue(oldRt.gate.freezeUpdateGate(db, r.id), "Work raced admission; let it finish and rerun.");
     quiet(db); observeCodingDeployment(oldRt.coding, database, r); save(r, "frozen");
     db.exec("BEGIN IMMEDIATE");
-    const original = new DatabaseSync(database, { readOnly: true });
+    const original = openDeploymentDatabase(database, { readOnly: true });
     let before;
-    try { before = snapshot(original, true); await backup(original, r.backup); } finally { original.close(); }
+    try { before = await snapshotBackup(original, r.backup); } finally { original.close(); }
     chmodSync(r.backup, 0o600);
-    const copied = new DatabaseSync(r.backup, { readOnly: true });
+    const copied = openDeploymentDatabase(r.backup, { readOnly: true });
     try { assertPreserved(copied, before); } finally { copied.close(); }
     await ensureCodingBackup(oldRt.coding, r);
     db.exec("COMMIT");
@@ -274,10 +306,10 @@ async function rehearse() {
   await ensureCodingBackup(oldRt.coding, r);
   copyFileSync(r.backup, target); chmodSync(target, 0o600);
   const next = await load(nextDist, "store.js");
-  let db = new DatabaseSync(target, { readOnly: true });
+  let db = openDeploymentDatabase(target, { readOnly: true });
   const before = snapshot(db); db.close();
   next.openStore(target).close(); next.openStore(target).close();
-  db = new DatabaseSync(target, { readOnly: true });
+  db = openDeploymentDatabase(target, { readOnly: true });
   let upgraded, upgradedSchema;
   try {
     requireTrue(db.prepare("SELECT version FROM schema_version").get().version === r.nextSchema && oldRt.gate.updateGateOwned(db, r.id), "Rehearsal schema or gate mismatch.");
@@ -285,7 +317,7 @@ async function rehearse() {
   } finally { db.close(); }
   if (r.schema === r.nextSchema) {
     oldRt.store.openStore(target).close();
-    db = new DatabaseSync(target, { readOnly: true });
+    db = openDeploymentDatabase(target, { readOnly: true });
     try { assertPreserved(db, upgraded); requireTrue(schemaDigest(db) === upgradedSchema && oldRt.gate.updateGateOwned(db, r.id), "The previous runtime changed the compatible copy."); } finally { db.close(); }
   }
   r.rehearsal = { from: r.schema, to: r.nextSchema, preservedTables: before.length, preservedRows: before.reduce((n, t) => n + t.count, 0), integrity: "ok", previousRuntimeCompatible: r.schema === r.nextSchema };
@@ -306,12 +338,12 @@ async function swap() {
   await ensureCodingBackup(oldRt.coding, r);
   save(r, "stopped");
   // Migrate the live database with the new runtime (a no-op for a same-schema build).
-  let db = new DatabaseSync(database); db.exec("PRAGMA busy_timeout=1000");
+  let db = openDeploymentDatabase(database);
   let before;
   try { requireTrue(db.prepare("SELECT version FROM schema_version").get().version === r.schema && oldRt.gate.updateGateOwned(db, r.id), "Expected the owned gate on the live database."); quiet(db); assertCodingDeploymentStopped(oldRt.coding, database, db, r); before = snapshot(db); } finally { db.close(); }
   save(r, "migrating");
   (await load(nextDist, "store.js")).openStore(database).close();
-  db = new DatabaseSync(database, { readOnly: true });
+  db = openDeploymentDatabase(database, { readOnly: true });
   try { requireTrue(db.prepare("SELECT version FROM schema_version").get().version === r.nextSchema && oldRt.gate.updateGateOwned(db, r.id), "Migration or gate mismatch."); assertPreserved(db, before); } finally { db.close(); }
   r.migration = { from: r.schema, to: r.nextSchema, preservedTables: before.length, preservedRows: before.reduce((n, t) => n + t.count, 0) };
   save(r, "migrated");
@@ -325,7 +357,7 @@ async function swap() {
   await ensureCodingBackup(oldRt.coding, r);
   await verifyServiceStopped(oldPids);
   verifyCodingBackup(oldRt.coding, r);
-  const beforeReplace = new DatabaseSync(database, { readOnly: true });
+  const beforeReplace = openDeploymentDatabase(database, { readOnly: true });
   try { assertCodingDeploymentStopped(oldRt.coding, database, beforeReplace, r); } finally { beforeReplace.close(); }
   writeFileSync(plist, nextPlist);
   const booted = spawnSync("/bin/launchctl", ["bootstrap", `gui/${uid}`, plist], { encoding: "utf8" });
@@ -349,7 +381,7 @@ async function swap() {
     await ensureCodingBackup(coding, r);
     await verifyServiceStopped(failedPids);
     verifyCodingBackup(coding, r);
-    const stopped = new DatabaseSync(database, { readOnly: true });
+    const stopped = openDeploymentDatabase(database, { readOnly: true });
     try { assertCodingDeploymentStopped(coding, database, stopped, r); } finally { stopped.close(); }
     writeFileSync(plist, livePlist);
     spawnSync("/bin/launchctl", ["bootstrap", `gui/${uid}`, plist], { encoding: "utf8" });
@@ -380,7 +412,7 @@ async function finish() {
   }
   const repos = JSON.parse(readFileSync(join(stateDir, "repos.json"), "utf8")).repos ?? [];
   const runner = (livePlist.match(/<string>--runner<\/string>\s*<string>([^<]+)<\/string>/) ?? [])[1];
-  const db = new DatabaseSync(database); db.exec("PRAGMA busy_timeout=10000");
+  const db = openDeploymentDatabase(database, {}, 10000);
   try {
     requireTrue(db.prepare("SELECT version FROM schema_version").get().version === r.nextSchema && oldRt.gate.updateGateOwned(db, r.id), "Unexpected live schema or update owner.");
     let leases = [];
@@ -405,7 +437,7 @@ async function finish() {
 // service is touched, until its approved check passed and its exact result is complete.
 const phases = { stage, prepare, rehearse, swap, finish };
 requireTrue(phaseWanted === "all" || phases[phaseWanted], "Use --phase stage|prepare|rehearse|swap|finish, or omit it for all.");
-const proven = (() => { const db = new DatabaseSync(database, { readOnly: true }); try { return facts(db); } finally { db.close(); } })();
+const proven = (() => { const db = openDeploymentDatabase(database, { readOnly: true }); try { return facts(db); } finally { db.close(); } })();
 say(`Candidate ${short} — task ${proven.taskId}, run ${runId}, checks passed, marked complete by ${proven.completion.actor}.`);
 say(`Installed runtime: ${priorDist}`);
 say(`Staging directory: ${stageDir}`);

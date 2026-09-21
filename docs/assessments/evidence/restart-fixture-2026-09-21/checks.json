@@ -1,0 +1,29 @@
+{
+  "originalBase": "d57da0475674d6a7d6f0d3ad43084a2d95629249",
+  "sourceSha256": {
+    "src/restart-certification.ts": "d1a919de086dea2e6d0deb1c77cbb39637c511d86aebd7702e9e1a05b678ab91",
+    "src/restart-certification.test.ts": "4ab8ebe4db275f6dea20cd46eb5ad47d9030be31114a7e09ba6d08058d32aae9"
+  },
+  "focusedChecks": [
+    {
+      "command": "Node 22.22.0: vitest run src/restart-certification.test.ts",
+      "result": "6 passed",
+      "log": "docs/assessments/evidence/restart-fixture-2026-09-21/restart-node22.log"
+    },
+    {
+      "command": "Node 24.20.0: vitest run src/restart-certification.test.ts",
+      "result": "6 passed",
+      "log": "docs/assessments/evidence/restart-fixture-2026-09-21/restart-node24.log"
+    },
+    {
+      "command": "npm run typecheck",
+      "result": "passed",
+      "log": "docs/assessments/evidence/restart-fixture-2026-09-21/restart-typecheck.log"
+    }
+  ],
+  "coverage": "The same six restart recovery scenarios use a small freshly hashed runtime fixture. The default production digest is exercised once; a same-length file edit must fail verification. Production retains fresh hashing of the actual executable and runtime. No safety assertions or timeouts changed.",
+  "limitations": [
+    "Windows execution remains for CI.",
+    "The unchanged full native check runs once for the final committed candidate."
+  ]
+}
