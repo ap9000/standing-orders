@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS chat_binding (
  team TEXT NOT NULL, app TEXT NOT NULL, member TEXT NOT NULL, channel TEXT NOT NULL,
  approver TEXT NOT NULL, generation INTEGER NOT NULL, created TEXT NOT NULL, revoked TEXT
 );
-CREATE UNIQUE INDEX IF NOT EXISTS chat_one_binding ON chat_binding(installation) WHERE revoked IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS chat_one_binding_member ON chat_binding(installation, member) WHERE revoked IS NULL;
 CREATE TABLE IF NOT EXISTS chat_pair (
  hash TEXT PRIMARY KEY, installation TEXT NOT NULL, approver TEXT NOT NULL,
  generation INTEGER NOT NULL, expires TEXT NOT NULL, consumed TEXT
@@ -130,22 +130,55 @@ export class ChatState {
   get db() {
     return this.store.handle;
   }
-  binding(installation: string): ChatBinding | null {
+  /** Every unrevoked binding for an installation, oldest first: one per
+   * paired person (v73). Liveness is checked per binding with `live`. */
+  bindings(installation: string): ChatBinding[] {
+    return this.prepare(
+      "SELECT * FROM chat_binding WHERE installation=? AND revoked IS NULL ORDER BY id",
+    ).all(installation) as ChatBinding[];
+  }
+  /** The unrevoked binding one channel member holds, if any. */
+  bindingFor(installation: string, member: string): ChatBinding | null {
     return (
       (this.prepare(
-        "SELECT * FROM chat_binding WHERE installation=? AND revoked IS NULL",
-      ).get(installation) as ChatBinding | undefined) ?? null
+        "SELECT * FROM chat_binding WHERE installation=? AND member=? AND revoked IS NULL",
+      ).get(installation, member) as ChatBinding | undefined) ?? null
     );
   }
+  bindingById(id: number): ChatBinding | null {
+    return (
+      (this.prepare("SELECT * FROM chat_binding WHERE id=? AND revoked IS NULL").get(id) as
+        | ChatBinding
+        | undefined) ?? null
+    );
+  }
+  /** The oldest unrevoked binding — the single-person reading kept for
+   * status lines and fixtures; inbound, delivery and notices read
+   * `bindingFor` / `bindingById` / `bindings`. */
+  binding(installation: string): ChatBinding | null {
+    return this.bindings(installation)[0] ?? null;
+  }
   live(binding: ChatBinding): boolean {
-    const current = this.binding(binding.installation);
+    const current = this.bindingById(binding.id);
     const account = this.store.accountOf(binding.approver);
     return (
-      current?.id === binding.id &&
+      current !== null &&
       account?.role === "approver" &&
       account.revokedAt === null &&
       account.generation === binding.generation
     );
+  }
+  /** End one person's pairing and everything their chat could still do; teammates' bindings stay. */
+  revokeBinding(binding: ChatBinding, now = new Date()): void {
+    this.store.transact(() => {
+      this.prepare("UPDATE chat_binding SET revoked=? WHERE id=? AND revoked IS NULL").run(now.toISOString(), binding.id);
+      this.prepare(
+        "UPDATE chat_event SET state='dropped',payload='{}',problem='Chat disconnected' WHERE binding=? AND state='queued'",
+      ).run(binding.id);
+      this.prepare(
+        "UPDATE chat_part SET state='dropped',problem='Chat disconnected' WHERE state='pending' AND event IN (SELECT id FROM chat_event WHERE binding=?)",
+      ).run(binding.id);
+    });
   }
   revoke(installation: string, now = new Date()): void {
     this.store.transact(() => {
@@ -171,9 +204,10 @@ export class ChatState {
   ): string {
     const code = randomBytes(16).toString("hex");
     this.store.transact(() => {
+      // A fresh code replaces this person's outstanding ones; a teammate's pending code is theirs.
       this.prepare(
-        "UPDATE chat_pair SET consumed=? WHERE installation=? AND consumed IS NULL",
-      ).run(now.toISOString(), installation);
+        "UPDATE chat_pair SET consumed=? WHERE installation=? AND approver=? AND consumed IS NULL",
+      ).run(now.toISOString(), installation, approver);
       this.prepare("INSERT INTO chat_pair VALUES(?,?,?,?,?,NULL)").run(
         chatHash(code),
         installation,
@@ -195,7 +229,10 @@ export class ChatState {
       const pair = this.prepare(
         "SELECT approver,generation FROM chat_pair WHERE hash=? AND installation=? AND consumed IS NULL AND expires>?",
       ).get(hash, identity.installation, now.toISOString());
-      if (!pair || this.binding(identity.installation)) return null;
+      if (!pair) return null;
+      // One binding per channel member, and one channel identity per person.
+      if (this.bindingFor(identity.installation, member)) return null;
+      if (this.bindings(identity.installation).some(one => one.approver === String(pair.approver) && this.live(one))) return null;
       const account = this.store.accountOf(String(pair.approver));
       if (
         account?.role !== "approver" ||
@@ -219,13 +256,13 @@ export class ChatState {
         Number(pair.generation),
         now.toISOString(),
       );
+      // The installation's notice cursor starts from now on its FIRST pairing;
+      // a later person joins the running cursor (their own history is fenced
+      // by their binding's creation time).
       this.prepare(
-        "INSERT OR IGNORE INTO chat_runtime(installation) VALUES(?)",
+        "INSERT OR IGNORE INTO chat_runtime(installation, notification) VALUES(?, (SELECT COALESCE(MAX(id),0) FROM notification))",
       ).run(identity.installation);
-      this.prepare(
-        "UPDATE chat_runtime SET notification=(SELECT COALESCE(MAX(id),0) FROM notification) WHERE installation=?",
-      ).run(identity.installation);
-      return this.binding(identity.installation);
+      return this.bindingFor(identity.installation, member);
     });
   }
   enqueue(event: Omit<ChatEvent, "session" | "state" | "next_at">): boolean {

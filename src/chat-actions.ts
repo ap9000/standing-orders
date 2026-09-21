@@ -618,7 +618,8 @@ export function executeSharedAction(
   const config = CHAT_ACTIONS[live.operation],
     req = live.request;
   const challenged =
-    options.via === "telegram" &&
+    options.via !== "web" &&
+    options.via !== "cli" &&
     options.confirm === true &&
     sharedActionAllowsChallenge(payload);
   if (sharedActionNeedsReview(payload) && !challenged) {

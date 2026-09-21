@@ -20,6 +20,8 @@ import {
   proposalPreview,
   proposalLink,
   proposalOutcomeText,
+  armedCardText,
+  armedYesLabel,
 } from "./chat-channel.js";
 import {
   resultImageFileName,
@@ -129,13 +131,12 @@ export function receiveDiscord(
     member === identity.bot
   )
     return false;
-  const binding = state.binding(identity.installation);
+  const binding = state.bindingFor(identity.installation, member);
   if (
     kind === "pair"
       ? !!binding
       : !binding ||
         !state.live(binding) ||
-        binding.member !== member ||
         binding.channel !== channel
   )
     return false;
@@ -240,10 +241,9 @@ export async function deliverDiscordPart(
     ) as ChatPart | undefined;
   if (!row) return false;
   const event = state.event(row.event)!,
-    binding = state.binding(identity.installation);
+    binding = event.binding === null ? null : state.bindingById(event.binding);
   if (
     !binding ||
-    binding.id !== event.binding ||
     new Date(row.created).getTime() + 86_400_000 < now.getTime()
   ) {
     state
@@ -307,10 +307,10 @@ export async function deliverDiscordPart(
       else if (proposal.state !== "pending")
         text = proposalOutcomeText(proposal);
       else {
-        const preview = proposalPreview(store, proposal, repos);
+        const preview = proposalPreview(store, proposal, repos, "discord");
         text =
           content.phase === "armed"
-            ? `⚠ Irreversible choice\n${preview.text.split("\n\nConfirm or Dismiss below")[0]}\n\nConfirm this answer?`
+            ? armedCardText(proposal, preview.text)
             : preview.text.replace(
                 "\n\nConfirm or Dismiss below. Nothing changes until you confirm.",
                 "",
@@ -331,7 +331,7 @@ export async function deliverDiscordPart(
                 action.phase === "yes" ? 4 : action.phase === "confirm" ? 1 : 2,
               label:
                 action.phase === "yes"
-                  ? "Yes, answer"
+                  ? armedYesLabel(proposal)
                   : action.phase === "cancel"
                     ? "Cancel"
                     : action.phase === "dismiss"

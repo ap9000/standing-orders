@@ -9,21 +9,26 @@ import { CHAT_CONTROLS, chatControlHref, chatResultHref, type ChatControl } from
 export type PhoneCommand = { kind: "status" } | { kind: "help" } | { kind: "task"; id: string };
 
 export function phoneCommand(text: string): PhoneCommand | null {
-  if (/^\/(?:help|start)\s*$/.test(text)) return { kind: "help" };
-  if (/^\/status\s*$/.test(text)) return { kind: "status" };
-  const task = /^\/task\s+([A-Za-z0-9][A-Za-z0-9._-]{0,63})\s*$/.exec(text);
+  // Slash forms everywhere; the bare words too, because Slack and Discord
+  // keep unregistered slash text for themselves. Only a whole message that
+  // is exactly the command counts — prose never is.
+  const t = text.trim();
+  if (/^\/?(?:help|start)$/i.test(t)) return { kind: "help" };
+  if (/^\/?status$/i.test(t)) return { kind: "status" };
+  const task = /^\/?task\s+([A-Za-z0-9][A-Za-z0-9._-]{0,63})$/i.exec(t);
   if (task !== null) return { kind: "task", id: task[1]! };
-  // A mistyped command gets help, but arbitrary prose is not a command.
-  return /^\/(?:status|task|help|start)(?:\s|$)/.test(text) ? { kind: "help" } : null;
+  // A mistyped slash command gets help, but arbitrary prose is not a command.
+  return /^\/(?:status|task|help|start)(?:\s|$)/i.test(t) ? { kind: "help" } : null;
 }
 
 export const PHONE_HELP = [
-  "Standing Orders on your phone",
+  "Standing Orders in chat",
   "",
   "Send a message to talk with the same assistant as the console and the terminal. It proposes changes as cards; nothing changes until you tap Confirm.",
   "",
   "/status — recent work across your connected projects",
   "/task <id> — status, checks, and the next step for one task",
+  "/team — the team conversations you can talk in; /team <number> to talk there, /team off for your private assistant",
   "/help — these commands",
   "",
   "The slash commands only read status. To answer an agent's question, tap its decision buttons; reply to that decision message to attach a note. Reply to a result message to ask for changes to that exact result, or ask for its screenshots to receive the saved images as files.",

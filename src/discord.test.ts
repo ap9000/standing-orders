@@ -40,6 +40,8 @@ import { followDiscord, discordReadyMatches } from "./discord.js";
 import { knowledgeView } from "./project-knowledge.js";
 import { resolveChannelMate } from "./chat-channel.js";
 import { prepareSharedAction } from "./chat-actions.js";
+import { verifyApproverStanding } from "./principal.js";
+import { assignmentOf } from "./assignment.js";
 import { discordSettingsHtml } from "./discord-settings.js";
 import { effectivePrimary, savePrimary } from "./webhooks.js";
 import { createDecisionServer } from "./serve.js";
@@ -561,7 +563,7 @@ test("irreversible answers need a second confirmation and record Discord", async
   const c = card();
   await tap(c.token, c.message);
   expect(store.getDecision(decision)?.state).toBe("open");
-  expect(sentText()).toContain("Irreversible");
+  expect(sentText()).toMatch(/irreversible/i);
   const yes = String(
     state
       .prepare(
@@ -920,4 +922,60 @@ test("punctuation-heavy headings fit Discord without losing any approval text", 
   expect(embed.title).toBe("Standing Orders");
   expect(embed.description).toContain("\\".repeat(300));
   expect(embed.description).toContain("Review the exact result");
+});
+
+/** A Ready result of the fixture task: approved scope, a finished attempt with a recorded head, the task done. */
+function ready() {
+  const { ref, run } = source();
+  store.recordOutcomeFacts(run, { headRevision: "a".repeat(40), handoff: "Progress is clear." });
+  store.setTaskState("sample", "done", now);
+  return { ref, run };
+}
+test("teammates pair their own Discord accounts, and status, task and help answer from the database without a model", async () => {
+  const sam = addApprover(store, "sam", now, { name: "alex", token: password });
+  if (!sam.ok) throw Error("sam");
+  const original = options.api;
+  const SAM = snow(), DSAM = snow();
+  options = { ...options, api: async (method, path, body = {}, file) => {
+    if (path === `/users/${SAM}`) return { id: SAM };
+    if (path === `/channels/${DSAM}`) return { id: DSAM, type: 1, recipients: [{ id: SAM }] };
+    return original(method, path, body, file);
+  } };
+  const code = state.pairing(ID.installation, "sam", store.accountOf("sam")!.generation, now);
+  expect(state.pair(ID, chatHash(code), SAM, DSAM, now)).toMatchObject({ approver: "sam", member: SAM });
+  expect(state.bindings(ID.installation).map(one => one.approver)).toEqual(["alex", "sam"]);
+  expect(receive("status")).toBe(true);
+  await processDiscordEvent(options);
+  await drain();
+  expect(sends().at(-1)?.path).toContain(`/channels/${CHANNEL}/messages`);
+  expect(sentText()).toContain("Recent work");
+  expect(receive("help", { author: { id: SAM }, channel_id: DSAM })).toBe(true);
+  await processDiscordEvent(options);
+  await drain();
+  expect(sends().at(-1)?.path).toContain(`/channels/${DSAM}/messages`);
+  expect(sentText()).toContain("Standing Orders in chat");
+  expect(options.subscriptionRunner).not.toHaveBeenCalled();
+  state.revokeBinding(state.bindingFor(ID.installation, SAM)!, now);
+  expect(state.bindings(ID.installation).map(one => one.approver)).toEqual(["alex"]);
+  expect(receive("status", { author: { id: SAM }, channel_id: DSAM })).toBe(false);
+});
+test("mark complete confirms behind a second tap in Discord and records the assignment check for the exact result", async () => {
+  const { run } = ready();
+  const who = verifyApproverStanding(store, "alex", store.accountOf("alex")!.generation, projects);
+  if (!who.ok) throw Error("who");
+  const payload = prepareSharedAction(store, who.who, "result_accept", { task: "sample", run }, join(dir, "evidence"), now);
+  draft({ ...payload });
+  await drain();
+  const c = card();
+  expect(sentText()).toContain("Mark complete: Clear Discord progress");
+  await tap(c.token, c.message);
+  expect(sentText()).toContain("This records that you handled this exact result. Confirm?");
+  expect(JSON.stringify(sends().at(-1)?.body.components)).toContain("Yes, mark complete");
+  expect(assignmentOf(store, "sample", now, { principal: "operator", repos: projects }, join(dir, "evidence"))?.state).toBe("ready-to-check");
+  const yes = state.prepare("SELECT token FROM chat_action WHERE part=? AND phase='yes' AND consumed IS NULL").get(c.id)!;
+  await tap(String(yes.token), c.message);
+  expect(assignmentOf(store, "sample", now, { principal: "operator", repos: projects }, join(dir, "evidence"))).toMatchObject({ state: "complete", completion: { actor: "operator:alex" } });
+  expect(store.proofAcceptance(run)).toBeNull();
+  expect(sentText()).toContain("Marked complete.");
+  expect(store.getMateProposal(c.proposal)?.outcome).toMatchObject({ ok: true, via: "discord" });
 });

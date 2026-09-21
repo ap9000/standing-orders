@@ -104,7 +104,7 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // screenshots one answered mate turn selected for an exact result; readers
 // below v64 refuse it.
 // v65 adds immutable skill packages, project selections, run snapshots and skill tests.
-export const SCHEMA_VERSION = 72;
+export const SCHEMA_VERSION = 73;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -4385,6 +4385,12 @@ function migrate(db: Database, origin: number | null): void {
   // several teammates can pair their own chats. The schema text already
   // created the new index; the old rule is dropped here, idempotently.
   db.exec("DROP INDEX IF EXISTS telegram_binding_live");
+  // v73: the same rule for Slack and Discord — one binding per (installation,
+  // member) instead of one per installation — plus a room override on parts.
+  db.exec("DROP INDEX IF EXISTS slack_one_binding");
+  db.exec("DROP INDEX IF EXISTS discord_one_binding");
+  addColumn(db, "slack_part", "channel", "TEXT");
+  addColumn(db, "discord_part", "channel", "TEXT");
   rebuild(db);
   rebuildDecisionVia(db);
   // v4 CHECK widenings, each a copy-rename against an exactly recognized

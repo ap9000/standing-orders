@@ -10,6 +10,8 @@ import {
   proposalPreview,
   proposalLink,
   proposalOutcomeText,
+  armedCardText,
+  armedYesLabel,
 } from "./chat-channel.js";
 import { MATE_MESSAGE_MAX_CHARS } from "./mate.js";
 import { type DoorOptions } from "./mate-doors.js";
@@ -90,9 +92,9 @@ export function receiveSlack(
   }
   if (type === "events_api" && event.type === "user_change") {
     const user = object(event.user),
-      binding = state.binding(identity.installation);
-    if (binding?.member === user.id && user.deleted === true)
-      state.revoke(identity.installation, now);
+      binding = typeof user.id === "string" ? state.bindingFor(identity.installation, user.id) : null;
+    if (binding !== null && user.deleted === true)
+      state.revokeBinding(binding, now);
     return true;
   }
   let member: unknown,
@@ -158,12 +160,11 @@ export function receiveSlack(
     member === identity.bot
   )
     return false;
-  const binding = state.binding(identity.installation);
+  const binding = state.bindingFor(identity.installation, member);
   if (
     kind !== "pair" &&
     (!binding ||
       !state.live(binding) ||
-      binding.member !== member ||
       binding.channel !== channel)
   )
     return false;
@@ -282,8 +283,8 @@ export async function deliverSlackPart(
     ) as SlackPart | undefined;
   if (!row) return false;
   const event = state.event(row.event)!,
-    binding = state.binding(identity.installation);
-  if (!binding || binding.id !== event.binding) {
+    binding = event.binding === null ? null : state.bindingById(event.binding);
+  if (!binding) {
     state.db
       .prepare(
         "UPDATE slack_part SET state='dropped',problem='Chat access changed' WHERE id=?",
@@ -430,10 +431,10 @@ export async function deliverSlackPart(
       else if (proposal.state !== "pending")
         text = proposalOutcomeText(proposal);
       else {
-        const preview = proposalPreview(store, proposal, repos);
+        const preview = proposalPreview(store, proposal, repos, "slack");
         text =
           content.phase === "armed"
-            ? `⚠️ Irreversible choice\n${preview.text.split("\n\nConfirm or Dismiss below")[0]}\n\nConfirm this answer?`
+            ? armedCardText(proposal, preview.text)
             : preview.text.replace(
                 "\n\nConfirm or Dismiss below. Nothing changes until you confirm.",
                 "",
@@ -450,7 +451,7 @@ export async function deliverSlackPart(
               type: "plain_text",
               text:
                 action.phase === "yes"
-                  ? "Yes, answer"
+                  ? armedYesLabel(proposal)
                   : action.phase === "cancel"
                     ? "Cancel"
                     : action.phase === "dismiss"

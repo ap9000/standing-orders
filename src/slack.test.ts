@@ -35,6 +35,8 @@ import {
 import { knowledgeView } from "./project-knowledge.js";
 import { resolveChannelMate, parityGaps } from "./chat-channel.js";
 import { prepareSharedAction } from "./chat-actions.js";
+import { verifyApproverStanding } from "./principal.js";
+import { assignmentOf } from "./assignment.js";
 import { telegramProgressCard } from "./telegram-progress.js";
 import { slackSettingsHtml } from "./slack-settings.js";
 import { effectivePrimary, savePrimary } from "./webhooks.js";
@@ -864,6 +866,66 @@ describe("Slack shared chat", () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
+  /** A Ready result of the fixture task: approved scope, a finished attempt with a recorded head, the task done. */
+  function ready() {
+    const { ref, run } = source();
+    store.recordOutcomeFacts(run, { headRevision: "a".repeat(40), handoff: "Progress is clear." });
+    store.setTaskState("sample", "done", now);
+    return { ref, run };
+  }
+  test("teammates pair their own Slack accounts, and status, task and help answer from the database without a model", async () => {
+    const sam = addApprover(store, "sam", now, { name: "alex", token: password });
+    if (!sam.ok) throw Error("sam");
+    const original = options.api;
+    options = { ...options, api: vi.fn(async (method, args = {}) => {
+      if (method === "users.info") return { user: { id: args.user, team_id: ID.team, deleted: false, is_bot: false } };
+      if (method === "conversations.info") return { channel: { id: args.channel, is_im: true, user: args.channel === "DSAM" ? "USAM" : MEMBER } };
+      return original(method, args);
+    }) };
+    const code = state.pairing(ID.installation, "sam", store.accountOf("sam")!.generation, now);
+    expect(state.pair(ID, slackHash(code), "USAM", "DSAM", now)).toMatchObject({ approver: "sam", member: "USAM" });
+    expect(state.bindings(ID.installation).map(one => one.approver)).toEqual(["alex", "sam"]);
+    // alex cannot pair a second Slack identity; sam cannot pair alex's member id.
+    const again = state.pairing(ID.installation, "alex", store.accountOf("alex")!.generation, now);
+    expect(state.pair(ID, slackHash(again), "UALEX2", "DALEX2", now)).toBeNull();
+    expect(receive("status")).toBe(true);
+    await processSlackEvent(options);
+    await drain();
+    expect(String(sends().at(-1)?.args["channel"])).toBe(CHANNEL);
+    expect(String(sends().at(-1)?.args["text"])).toContain("Recent work");
+    expect(receive("/help", { user: "USAM", channel: "DSAM" })).toBe(true);
+    await processSlackEvent(options);
+    await drain();
+    expect(String(sends().at(-1)?.args["channel"])).toBe("DSAM");
+    expect(String(sends().at(-1)?.args["text"])).toContain("Standing Orders in chat");
+    expect(runner).not.toHaveBeenCalled();
+    // Unpairing sam leaves alex's binding live.
+    state.revokeBinding(state.bindingFor(ID.installation, "USAM")!, now);
+    expect(state.bindings(ID.installation).map(one => one.approver)).toEqual(["alex"]);
+    expect(receive("status", { user: "USAM", channel: "DSAM" })).toBe(false);
+  });
+  test("mark complete confirms behind a second tap in Slack and records the assignment check for the exact result", async () => {
+    const { run } = ready();
+    const who = verifyApproverStanding(store, "alex", store.accountOf("alex")!.generation, projects);
+    if (!who.ok) throw Error("who");
+    const payload = prepareSharedAction(store, who.who, "result_accept", { task: "sample", run }, join(dir, "evidence"), now);
+    draft({ ...payload });
+    await drain();
+    const c = latestCard();
+    expect(String(sends().at(-1)?.args["text"])).toContain("Mark complete: Clarify Slack progress");
+    await tap(c.token, c.ts);
+    const armed = sends().at(-1)!;
+    expect(String(armed.args["text"])).toContain("This records that you handled this exact result. Confirm?");
+    expect(JSON.stringify(armed.args["blocks"])).toContain("Yes, mark complete");
+    expect(assignmentOf(store, "sample", now, { principal: "operator", repos: projects }, join(dir, "evidence"))?.state).toBe("ready-to-check");
+    const yes = state.db.prepare("SELECT token FROM slack_action WHERE part=? AND phase='yes' AND consumed IS NULL").get(c.id)!;
+    await tap(String(yes.token), c.ts);
+    expect(assignmentOf(store, "sample", now, { principal: "operator", repos: projects }, join(dir, "evidence"))).toMatchObject({ state: "complete", completion: { actor: "operator:alex" } });
+    expect(store.proofAcceptance(run)).toBeNull();
+    expect(String(sends().at(-1)?.args["text"])).toContain("Marked complete.");
+    expect(store.getMateProposal(c.proposal)?.outcome).toMatchObject({ ok: true, via: "slack" });
+  });
+
 });
 
 test("Socket Mode validates the app on every hello and preserves Slack's real envelope shape", async () => {
@@ -939,4 +1001,5 @@ test("Slack wire errors omit secrets, honor Retry-After, and never follow upload
   expect(fetcher).not.toHaveBeenCalled();
   const blocks = slackBlocks("Result\n<!channel> <https://evil.example|click>");
   expect(JSON.stringify(blocks)).not.toContain('"mrkdwn"');
+
 });

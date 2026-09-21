@@ -26,7 +26,7 @@ import {
   type ChatIdentity,
 } from "./chat-delivery-state.js";
 import { telegramProgressCard } from "./telegram-progress.js";
-import { phoneText } from "./telegram-status.js";
+import { phoneText, PHONE_HELP, phoneCommand, phoneStatus, phoneTaskView } from "./telegram-status.js";
 import { isTelegramProgressNotification, type Store } from "./store.js";
 import type { SubscriptionMateRunner } from "./subscription-chat.js";
 export const chatObject = (v: unknown): Record<string, unknown> =>
@@ -159,8 +159,8 @@ export async function processChatEvent(
       );
       return true;
     }
-    const binding = state.binding(identity.installation);
-    if (!binding || binding.id !== event.binding) {
+    const binding = event.binding === null ? null : state.bindingById(event.binding);
+    if (!binding) {
       state.finish(event.id, true);
       return true;
     }
@@ -175,6 +175,18 @@ export async function processChatEvent(
       return true;
     }
     const text = String(input.text ?? "");
+    // Read-only commands answer from the database, never from a model.
+    const command = phoneCommand(text);
+    if (command !== null) {
+      const now_ = nowOf(options);
+      if (command.kind === "help") state.plan(event.id, [{ text: PHONE_HELP }], now_);
+      else if (command.kind === "status") state.plan(event.id, [{ text: phoneStatus(store, repos, now_) }], now_);
+      else {
+        const view = phoneTaskView(store, repos, command.id, now_);
+        state.plan(event.id, [{ text: view.text, ...(view.link === null ? {} : { link: view.link }) }], now_);
+      }
+      return true;
+    }
     if (text.length > MATE_MESSAGE_MAX_CHARS) {
       state.plan(
         event.id,
@@ -475,7 +487,7 @@ export function applyChatAction(
       proposal: proposal.id,
       edit: event.ts,
     };
-    const preview = proposalPreview(store, proposal, repos);
+    const preview = proposalPreview(store, proposal, repos, options.state.channel);
     const phase = String(action.phase);
     if (proposal.state !== "pending")
       content = { text: proposalOutcomeText(proposal), edit: event.ts };
@@ -565,25 +577,23 @@ export async function planChatNotifications(
 ): Promise<void> {
   const state = options.state,
     { store, identity } = options,
-    binding = state.binding(identity.installation);
+    bindings = state.bindings(identity.installation).filter(one => state.live(one));
   if (
-    !binding ||
-    !state.live(binding) ||
+    bindings.length === 0 ||
     !state.owns(identity.installation, options.owner, nowOf(options)) ||
     !options.current()
   )
     return;
-  const repos = channelRepos(
-    store,
-    binding.approver,
-    await options.readProjects(),
-  );
+  const registry = await options.readProjects();
   const cursor = Number(
     state
       .prepare("SELECT notification FROM chat_runtime WHERE installation=?")
       .get(identity.installation)?.notification ?? 0,
   );
+  // Every paired person is a destination of their own, under their own ceiling.
   for (const notification of store.notificationsAfter(cursor, 100)) {
+    for (const binding of bindings) {
+    const repos = channelRepos(store, binding.approver, registry);
     store.transact(() => {
       if (
         notification.createdAt >= binding.created &&
@@ -688,9 +698,10 @@ export async function planChatNotifications(
           );
         }
       }
-      state
-        .prepare("UPDATE chat_runtime SET notification=? WHERE installation=?")
-        .run(notification.id, identity.installation);
     });
+    }
+    state
+      .prepare("UPDATE chat_runtime SET notification=? WHERE installation=?")
+      .run(notification.id, identity.installation);
   }
 }

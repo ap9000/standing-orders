@@ -2992,7 +2992,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
     if (url.pathname === "/settings/discord") {
       if(who.via!=="cookie"||who.role!=="approver"||restricted()||!options.configDir) return refuse(response,who,403,"An installation approver can connect Discord.","/settings");
-      return sendScreen(response,200,screen("Discord",discordSettingsHtml(store,options.configDir,who.session.csrf),{chrome:chromeFor(project,"settings"),forceSensitive:true}));
+      return sendScreen(response,200,screen("Discord",discordSettingsHtml(store,options.configDir,who.session.csrf,{who:who.name}),{chrome:chromeFor(project,"settings"),forceSensitive:true}));
     }
     if (url.pathname === "/settings/slack" || url.pathname === "/settings/slack/manifest") {
       if (who.via !== "cookie" || who.role !== "approver" || restricted() || !options.configDir) return refuse(response,who,403,"An installation approver can connect Slack.","/settings");
@@ -3000,7 +3000,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         response.writeHead(200,{"Content-Type":"application/json; charset=utf-8","Content-Disposition":'attachment; filename="standing-orders-slack.json"',"Cache-Control":"no-store"});
         response.end(JSON.stringify(SLACK_MANIFEST,null,2));return;
       }
-      return sendScreen(response,200,screen("Slack",slackSettingsHtml(store,options.configDir,who.session.csrf),{chrome:chromeFor(project,"settings"),forceSensitive:true}));
+      return sendScreen(response,200,screen("Slack",slackSettingsHtml(store,options.configDir,who.session.csrf,{who:who.name}),{chrome:chromeFor(project,"settings"),forceSensitive:true}));
     }
 
     if (url.pathname === "/settings" && (options.telegramTokenFile === undefined || restricted())) {
@@ -5070,14 +5070,14 @@ export function createDecisionServer(options: ServeOptions): Server {
       return redirect(response, "/control");
     }
 
-    if (["connect","pair","disconnect","alerts"].some(action=>url.pathname===`/settings/slack/${action}`)) {
+    if (["connect","pair","unpair","disconnect","alerts"].some(action=>url.pathname===`/settings/slack/${action}`)) {
       if (who.via !== "cookie" || who.role !== "approver" || restricted() || !options.configDir) return refuse(response,who,403,"An installation approver can connect Slack.","/settings");
       const dir=options.configDir, state=new SlackState(store), action=url.pathname.split("/").at(-1);
-      const show=(problem:string,status=400)=>sendScreen(response,status,screen("Slack",slackSettingsHtml(store,dir,who.session.csrf,{problem}),{chrome:chromeFor(projectOf(who,request)??null,"settings"),forceSensitive:true}));
+      const show=(problem:string,status=400)=>sendScreen(response,status,screen("Slack",slackSettingsHtml(store,dir,who.session.csrf,{problem,who:who.name}),{chrome:chromeFor(projectOf(who,request)??null,"settings"),forceSensitive:true}));
       if (["password","app-token","bot-token"].some(key=>body.getAll(key).length>1)) return show("Submit one value for each field.");
       const credentials=loadSlackCredentials(dir);
       if(action==="alerts") {
-        if(!credentials || !state.binding(credentials.installation) || !state.live(state.binding(credentials.installation)!)) return show("Pair your Slack account first.",409);
+        if(!credentials || !state.bindings(credentials.installation).some(one=>state.live(one))) return show("Pair your Slack account first.",409);
         savePrimary(dir,"slack");return redirect(response,"/settings/slack");
       }
       if(!authenticateApprover(store,who.name,body.get("password")??"").ok) return show("Enter your Standing Orders password to change Slack access.",403);
@@ -5093,13 +5093,16 @@ export function createDecisionServer(options: ServeOptions): Server {
       } else if(action==="disconnect") {
         if(credentials) state.revoke(credentials.installation,now);
         clearSlackCredentials(dir);
+      } else if(action==="unpair") {
+        const mine=credentials?state.bindings(credentials.installation).find(one=>one.approver===who.name):undefined;
+        if(mine) state.revokeBinding(mine,now);
       } else if(action==="pair") {
         if(!credentials) return show("Connect your Slack app first.",409);
-        const binding=state.binding(credentials.installation);
-        if(binding&&state.live(binding)) return show("Slack is already paired. Disconnect before pairing another account.",409);
-        if(binding) state.revoke(credentials.installation,now);
+        const mine=state.bindings(credentials.installation).find(one=>one.approver===who.name);
+        if(mine&&state.live(mine)) return show("Your Slack account is already paired. Unpair it before pairing another.",409);
+        if(mine) state.revokeBinding(mine,now);
         const code=state.pairing(credentials.installation,who.name,generation,now);
-        return sendScreen(response,200,screen("Pair Slack",slackSettingsHtml(store,dir,who.session.csrf,{code}),{chrome:chromeFor(projectOf(who,request)??null,"settings"),forceSensitive:true}));
+        return sendScreen(response,200,screen("Pair Slack",slackSettingsHtml(store,dir,who.session.csrf,{code,who:who.name}),{chrome:chromeFor(projectOf(who,request)??null,"settings"),forceSensitive:true}));
       }
       return redirect(response,"/settings/slack");
     }
@@ -5125,14 +5128,14 @@ export function createDecisionServer(options: ServeOptions): Server {
       return sendScreen(response, 200, screen("Pair Telegram", telegramSettingsHtml(store, botId, who.name, who.session.csrf, { code }), { chrome: chromeFor(projectOf(who, request) ?? null, "settings"), forceSensitive: true }));
     }
 
-    if (["connect","pair","disconnect","alerts"].some(action=>url.pathname===`/settings/discord/${action}`)) {
+    if (["connect","pair","unpair","disconnect","alerts"].some(action=>url.pathname===`/settings/discord/${action}`)) {
       if (who.via !== "cookie" || who.role !== "approver" || restricted() || !options.configDir) return refuse(response,who,403,"An installation approver can connect Discord.","/settings");
       const dir=options.configDir, state=new ChatState(store,"discord"), action=url.pathname.split("/").at(-1);
-      const show=(problem:string,status=400)=>sendScreen(response,status,screen("Discord",discordSettingsHtml(store,dir,who.session.csrf,{problem}),{chrome:chromeFor(projectOf(who,request)??null,"settings"),forceSensitive:true}));
+      const show=(problem:string,status=400)=>sendScreen(response,status,screen("Discord",discordSettingsHtml(store,dir,who.session.csrf,{problem,who:who.name}),{chrome:chromeFor(projectOf(who,request)??null,"settings"),forceSensitive:true}));
       if (["password","bot-token"].some(key=>body.getAll(key).length>1)) return show("Submit one value for each field.");
       const credentials=loadDiscordCredentials(dir);
       if(action==="alerts") {
-        if(!credentials || !state.binding(credentials.installation) || !state.live(state.binding(credentials.installation)!)) return show("Pair your Discord account first.",409);
+        if(!credentials || !state.bindings(credentials.installation).some(one=>state.live(one))) return show("Pair your Discord account first.",409);
         savePrimary(dir,"discord");return redirect(response,"/settings/discord");
       }
       if(!authenticateApprover(store,who.name,body.get("password")??"").ok) return show("Enter your Standing Orders password to change Discord access.",403);
@@ -5148,13 +5151,16 @@ export function createDecisionServer(options: ServeOptions): Server {
       } else if(action==="disconnect") {
         if(credentials) state.revoke(credentials.installation,now);
         clearDiscordCredentials(dir);
+      } else if(action==="unpair") {
+        const mine=credentials?state.bindings(credentials.installation).find(one=>one.approver===who.name):undefined;
+        if(mine) state.revokeBinding(mine,now);
       } else if(action==="pair") {
         if(!credentials) return show("Connect your Discord app first.",409);
-        const binding=state.binding(credentials.installation);
-        if(binding&&state.live(binding)) return show("Discord is already paired. Disconnect before pairing another account.",409);
-        if(binding) state.revoke(credentials.installation,now);
+        const mine=state.bindings(credentials.installation).find(one=>one.approver===who.name);
+        if(mine&&state.live(mine)) return show("Your Discord account is already paired. Unpair it before pairing another.",409);
+        if(mine) state.revokeBinding(mine,now);
         const code=state.pairing(credentials.installation,who.name,generation,now);
-        return sendScreen(response,200,screen("Pair Discord",discordSettingsHtml(store,dir,who.session.csrf,{code}),{chrome:chromeFor(projectOf(who,request)??null,"settings"),forceSensitive:true}));
+        return sendScreen(response,200,screen("Pair Discord",discordSettingsHtml(store,dir,who.session.csrf,{code,who:who.name}),{chrome:chromeFor(projectOf(who,request)??null,"settings"),forceSensitive:true}));
       }
       return redirect(response,"/settings/discord");
     }
