@@ -13887,11 +13887,15 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     // bounded page must drop — and one newer task in beta, so the roll-up's
     // merge across admitted projects is exercised too.
     const at = (minutes: number): Date => new Date(now.getTime() - 24 * 3_600_000 + minutes * 60_000);
-    for (let i = 0; i < 201; i++) {
-      const id = `alpha-${String(i).padStart(3, "0")}`;
-      store.createTask({ id, title: `alpha task ${i}` }, at(i));
-      store.placeTask(store.refFor("built-in", id).id, alpha);
-    }
+    // Each batch is fixture setup; no request reads its intermediate rows.
+    // One commit preserves the same records without hundreds of fsyncs.
+    store.transact(() => {
+      for (let i = 0; i < 201; i++) {
+        const id = `alpha-${String(i).padStart(3, "0")}`;
+        store.createTask({ id, title: `alpha task ${i}` }, at(i));
+        store.placeTask(store.refFor("built-in", id).id, alpha);
+      }
+    });
     store.createTask({ id: "beta-newest", title: "beta newest" }, at(300));
     store.placeTask(store.refFor("built-in", "beta-newest").id, beta);
     const cookie = await login();
@@ -13930,11 +13934,13 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     // window belongs to admitted tasks, so the page is full and honest —
     // never the false empty claim the old post-filter produced.
     const forbidden = join(root, "forbidden");
-    for (let i = 0; i < 501; i++) {
-      const id = `foreign-${String(i).padStart(3, "0")}`;
-      store.createTask({ id, title: `foreign task ${i}` }, at(1_000 + i));
-      store.placeTask(store.refFor("built-in", id).id, forbidden);
-    }
+    store.transact(() => {
+      for (let i = 0; i < 501; i++) {
+        const id = `foreign-${String(i).padStart(3, "0")}`;
+        store.createTask({ id, title: `foreign task ${i}` }, at(1_000 + i));
+        store.placeTask(store.refFor("built-in", id).id, forbidden);
+      }
+    });
     const all = await login();
     expect(/<span class="name">all projects/.test(await page(all, "/work"))).toBe(true);
     const rollup = await page(all, "/work");
@@ -13983,7 +13989,9 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     // Unplaced rows ride every project-bound read the store makes, and a
     // project-scoped account may not see them: 201 newer unplaced tasks
     // must neither appear for the member nor spend its page.
-    for (let i = 0; i < 201; i++) store.createTask({ id: `unplaced-${String(i).padStart(3, "0")}`, title: `unplaced task ${i}` }, at(2_000 + i));
+    store.transact(() => {
+      for (let i = 0; i < 201; i++) store.createTask({ id: `unplaced-${String(i).padStart(3, "0")}`, title: `unplaced task ${i}` }, at(2_000 + i));
+    });
     const memberAfter = await page(member2, "/work");
     expect(rowsOf(memberAfter).map(row => row.id).sort()).toEqual(["beta-newest", "t-visible"]);
     expect(memberAfter).not.toContain("data-work-bound");
@@ -14002,7 +14010,9 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     // the unplaced exclusion before the limit, so its permitted work is
     // listed in full, with no bound and no "read was cut short" notice —
     // never an empty page (the reviewer's fifth boundary case).
-    for (let i = 201; i < 700; i++) store.createTask({ id: `unplaced-${String(i).padStart(3, "0")}`, title: `unplaced task ${i}` }, at(2_000 + i));
+    store.transact(() => {
+      for (let i = 201; i < 700; i++) store.createTask({ id: `unplaced-${String(i).padStart(3, "0")}`, title: `unplaced task ${i}` }, at(2_000 + i));
+    });
     await selectProject(member2, beta);
     const hidden = await page(member2, "/work");
     expect(rowsOf(hidden).map(row => row.id).sort()).toEqual(["beta-newest", "t-visible"]);

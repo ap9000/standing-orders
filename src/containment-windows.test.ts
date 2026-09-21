@@ -67,17 +67,26 @@ describe("native containment (Windows Job Object)", { timeout: 40_000 }, () => {
   test.skipIf(!native)("c2: a detached grandchild dies with the root's natural exit; the job is reported empty; no writes after settlement", async () => {
     let id = "";
     const pending = run(process.execPath, [join(dir, "root.mjs")], { processGroup: true, timeoutMs: 30_000, env: { SO_DIR: dir, SO_MODE: "exit" }, onContainer: info => { id = info.id; } });
-    // Cold PowerShell/Add-Type startup varies on hosted runners. Bound the
-    // actual target-to-settlement interval independently of helper startup.
-    expect(await waitFor(() => existsSync(join(dir, "pids.json")), 20_000)).toBe(true);
+    // Admission already has a 15-second deadline in the Job Object transport.
+    // Race its actual result against target startup, so a refused helper is
+    // reported (and reaped) instead of hidden by an unrelated file timeout.
+    const pidsFile = join(dir, "pids.json");
+    while (!existsSync(pidsFile)) {
+      const outcome = await Promise.race([pending, sleep(50).then(() => null)]);
+      if (outcome !== null) {
+        expect(existsSync(pidsFile), `Target never started; helper result: ${JSON.stringify(outcome)}`).toBe(true);
+        break;
+      }
+    }
+    // Bound target-to-settlement separately from cold PowerShell/Add-Type.
     const targetStarted = Date.now();
     const result = await pending;
-    expect(Date.now() - targetStarted).toBeLessThan(6_000);
     expect(result.stderr).toBe("");
     expect(result.code).toBe(0);
     expect(result.timedOut).toBe(false);
+    expect(Date.now() - targetStarted).toBeLessThan(6_000);
     expect(result.containment).toEqual({ backend: "job-object", id, empty: true });
-    const pids = JSON.parse(readFileSync(join(dir, "pids.json"), "utf8")) as { root: number; escaped: number };
+    const pids = JSON.parse(readFileSync(pidsFile, "utf8")) as { root: number; escaped: number };
     expect(await waitFor(() => !alive(pids.escaped), 5_000)).toBe(true);
     expect(await stableAfterSettlement(join(dir, "ticks.log"))).toBe(true);
   });
