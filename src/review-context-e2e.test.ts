@@ -218,7 +218,7 @@ describe("inherited review context and historical ingestion (v51)", () => {
     await run(["task", "show", revisionId], none);
     expect(lines.join("\n")).toContain(`context: inherited — sealed context ${itemIdFor!("src/limit.ts")}`);
     expect(lines.join("\n")).toContain("context: judged from this run's own patch");
-    expect(lines.join("\n")).toMatch(/semantic coverage: 0\/3 upheld by an independent reviewer — independent review is optional under default quality — none has settled/);
+    expect(lines.join("\n")).not.toContain("semantic coverage:");
 
     // 4. Retained historical judgements still bind to the exact source context.
     // Seed through the store boundary; the retired model runner is not executable.

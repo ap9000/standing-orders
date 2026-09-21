@@ -33,7 +33,7 @@ import {
 import { readVerifiedArtifact, scanForSecrets } from "./evidence.js";
 import { readAuthModeStrict } from "./keys.js";
 import { parseProof } from "./proof.js";
-import { validateNote } from "./decision.js";
+import { assignmentOf, checkAssignmentAsOperator } from "./assignment.js";
 import { resumeTaskStop, taskControlOf } from "./task-control.js";
 
 export const CHAT_ACTIONS = {
@@ -63,11 +63,15 @@ export const CHAT_ACTIONS = {
     password: false,
   },
   scope_approve: { label: "Approve work", protected: true, password: true },
-  result_accept: { label: "Accept result", protected: true, password: false },
+  result_accept: { label: "Mark complete", protected: true, password: false },
   task_cancel: { label: "Cancel task", protected: true, password: false },
   task_resume: { label: "Resume task", protected: true, password: true },
 } as const;
 export type ChatAction = keyof typeof CHAT_ACTIONS;
+/** Protected actions a paired phone may confirm behind its own explicit
+ * yes/cancel challenge instead of the console's secure screen. Password
+ * actions and long or redacted terms never qualify. */
+export const CHALLENGE_ACTIONS: ReadonlySet<ChatAction> = new Set<ChatAction>(["result_accept"]);
 export function isChatAction(value: unknown): value is ChatAction {
   return typeof value === "string" && Object.hasOwn(CHAT_ACTIONS, value);
 }
@@ -93,7 +97,7 @@ export const CHAT_ACTION_FIELDS: Record<ChatAction, readonly string[]> = {
   knowledge_remove: ["repo", "id"],
   knowledge_restore: ["repo", "restore"],
   scope_approve: ["task"],
-  result_accept: ["task", "run", "note"],
+  result_accept: ["task", "run"],
   task_cancel: ["task"],
   task_resume: ["task", "run"],
 };
@@ -391,98 +395,37 @@ export function prepareSharedAction(
         "Cancel this task. It will no longer be scheduled. Existing work and evidence are preserved.",
       );
     } else {
-      const run = resultOf(store, task!, integer(input, "run"), repo),
-        proof = store.proofVerdictFor(run.id);
+      const run = resultOf(store, task!, integer(input, "run"), repo);
       state["run"] = { id: run.id, head: run.headRevision };
-      state["proof"] = proof;
-      state["acceptance"] = store.proofAcceptance(run.id);
-      state["reviews"] = store.criterionReviewsFor(run.id);
-      if (operation === "result_accept") {
-        if (state["acceptance"])
-          throw Error("Acceptance is already recorded for this result.");
-        const note = text(input, "note", 2000, true);
-        if (note) {
-          const checked = validateNote(note);
-          if (!checked.ok) throw Error(checked.problem);
-        }
-        terms.push(
-          `Result #${run.id}\n${run.headRevision ?? "No commit recorded"}`,
-          "Records your human acceptance of this exact result. Machine checks and reviewer findings remain unchanged.",
+      const assignment = assignmentOf(
+        store,
+        task!,
+        now,
+        { principal: "operator", repos: who.repos },
+        root,
+      );
+      const receipt = assignment?.receipt ?? null;
+      if (assignment === null || receipt === null || receipt.runId !== run.id)
+        throw Error(
+          "This result changed. Open the current result before marking it complete.",
         );
-        if (!proof) terms.push("No machine verdict is recorded.");
-        else {
-          terms.push(`Machine verdict: ${proof.verdict}`, ...proof.reasons);
-          for (const criterion of proof.matrix)
-            terms.push(
-              [
-                `Requirement ${criterion.id}: ${criterion.state}`,
-                criterion.statement,
-                ...criterion.detail,
-                ...(criterion.review
-                  ? [
-                      `Reviewer: ${criterion.review.judgement}`,
-                      criterion.review.note,
-                    ]
-                  : []),
-                ...(criterion.coverage?.gaps ?? []),
-              ]
-                .filter(Boolean)
-                .join("\n"),
-            );
-          const unreviewed = proof.matrix.filter(
-            (criterion) => !criterion.review,
-          ).length;
-          if (unreviewed)
-            terms.push(
-              `Independent review is not recorded for ${unreviewed} requirement${unreviewed === 1 ? "" : "s"}.`,
-            );
-        }
-        const artifacts = store.artifactsFor(run.id);
-        state["artifacts"] = artifacts.map((a) => ({
-          id: a.id,
-          sha: a.sha256,
-          truncated: a.truncated,
-        }));
-        for (const artifact of artifacts.filter((a) =>
-          [
-            "proof",
-            "check-log",
-            "terminal-diff",
-            "report",
-            "screenshot",
-          ].includes(a.kind),
-        )) {
-          if (!root) {
-            terms.push("Evidence files are unavailable.");
-            break;
-          }
-          const read = readVerifiedArtifact(root, artifact);
-          if (!read.ok)
-            terms.push(
-              `Evidence unavailable: ${artifact.kind} #${artifact.id}.`,
-            );
-          else if (artifact.kind === "proof") {
-            const parsed = parseProof(read.content.toString("utf8"));
-            if (parsed.ok)
-              terms.push(
-                ...parsed.proof.caveats.map((c) => `Limitation: ${c}`),
-              );
-            else terms.push("The proof document cannot be read.");
-          }
-          if (artifact.captureStatus === "failed")
-            terms.push(`The ${artifact.kind} capture failed.`);
-          if (artifact.redacted)
-            terms.push(
-              `Sensitive text was removed from ${artifact.kind}; it cannot support the missing evidence.`,
-            );
-          if (artifact.truncated)
-            terms.push(`The saved ${artifact.kind} is shortened.`);
-        }
-        if (note) terms.push(`Your note:\n${note}`);
-      } else
+      if (assignment.state === "complete")
+        throw Error("This result is already marked complete.");
+      if (assignment.state !== "ready-to-check")
+        throw Error(`This result is not ready to complete: ${assignment.detail}`);
+      state["receipt"] = receipt.digest;
+      terms.push(
+        `Result #${run.id} · ${run.headRevision === null ? "no commit recorded" : `commit ${run.headRevision.slice(0, 12)}`}`,
+        "Marks this exact result complete: you handled it. Recorded checks stay unchanged, and publication or deployment is separate.",
+        `Checks: ${receipt.checks.detail}`,
+      );
+      if (receipt.proof !== null && receipt.proof.matrix.length > 0)
         terms.push(
-          `Request independent review of result #${run.id}. Existing review limits and approvals apply.`,
+          `Requirements: ${receipt.proof.matrix.filter((row) => row.state === "pass").length}/${receipt.proof.matrix.length} satisfied in the saved record.`,
         );
+      for (const line of assignment.attention) terms.push(line);
+      for (const caveat of receipt.caveats)
+        if (!assignment.attention.includes(caveat)) terms.push(`Limitation: ${caveat}`);
     }
   }
   const stamp = hash({
@@ -514,18 +457,35 @@ export function sharedActionPayload(
     ? (value as unknown as SharedAction)
     : null;
 }
-export function sharedActionNeedsReview(action: SharedAction): boolean {
-  // A shortened or redacted preview is not complete consent. This rule lives
-  // in the shared door, so a forged transport callback cannot bypass it.
+/** A shortened or redacted preview is not complete consent. This rule lives
+ * in the shared door, so a forged transport callback cannot bypass it. */
+function sharedActionContentNeedsReview(action: SharedAction): boolean {
   const content = [action.title, ...action.terms];
   return (
-    CHAT_ACTIONS[action.operation].protected ||
     action.terms.join("\n").length > 1200 ||
     content.some(
       (value, index) =>
         publicChatText(value, index === 0 ? 200 : 1200) !==
         value.replace(/\s+/g, " ").trim(),
     )
+  );
+}
+export function sharedActionNeedsReview(action: SharedAction): boolean {
+  return (
+    CHAT_ACTIONS[action.operation].protected ||
+    sharedActionContentNeedsReview(action)
+  );
+}
+/** Whether a paired phone may confirm this protected action behind its own
+ * explicit challenge: the action is on the challenge list, needs no
+ * password, and every term fits the card unshortened. */
+export function sharedActionAllowsChallenge(action: SharedAction): boolean {
+  const config = CHAT_ACTIONS[action.operation];
+  return (
+    CHALLENGE_ACTIONS.has(action.operation) &&
+    config.protected &&
+    !config.password &&
+    !sharedActionContentNeedsReview(action)
   );
 }
 export function sharedActionReviewPath(id: number): string {
@@ -657,7 +617,11 @@ export function executeSharedAction(
   payload = live;
   const config = CHAT_ACTIONS[live.operation],
     req = live.request;
-  if (sharedActionNeedsReview(payload)) {
+  const challenged =
+    options.via === "telegram" &&
+    options.confirm === true &&
+    sharedActionAllowsChallenge(payload);
+  if (sharedActionNeedsReview(payload) && !challenged) {
     if (options.via !== "web" || !options.review || options.confirm !== true)
       return refuse(
         "needs-confirm",
@@ -775,14 +739,17 @@ export function executeSharedAction(
           !store.approveTournamentTerms(race.id, actor, race.raceDigest, now)
         )
           throw Error("The comparison terms changed. Nothing was approved.");
-      } else if (payload.operation === "result_accept")
-        store.acceptProof(
-          Number(req["run"]),
-          verifiedAuthor(actor),
-          String(req["note"] ?? "").trim() || null,
+      } else if (payload.operation === "result_accept") {
+        const completed = checkAssignmentAsOperator(
+          store,
+          task!,
+          String(payload.state["receipt"] ?? ""),
+          who,
           now,
+          options.root,
         );
-      else if (payload.operation === "task_cancel") {
+        if (!completed.ok) throw Error(completed.message);
+      } else if (payload.operation === "task_cancel") {
         const result = store.cancelTask(task!, now);
         if (!result.ok)
           throw Error(`Task was not cancelled: ${result.reason}.`);
@@ -808,7 +775,7 @@ export function executeSharedAction(
         payload.operation === "skill_test"
           ? "Skill test created. Existing approval rules apply."
           : payload.operation === "result_accept"
-              ? "Human acceptance recorded. The recorded checks are unchanged."
+              ? "Marked complete. The recorded checks are unchanged."
               : payload.operation === "scope_approve"
                 ? "The exact work is approved."
                 : payload.operation === "task_cancel"

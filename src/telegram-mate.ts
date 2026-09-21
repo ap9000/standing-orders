@@ -1,3 +1,4 @@
+import { CHAT_ACTIONS, sharedActionAllowsChallenge, sharedActionPayload } from "./chat-actions.js";
 import { taskInCeiling, channelRepos as telegramConversationRepos, resolveChannelMate as resolveTelegramMate, tooLongText, whichTaskText, replyContextFor, NO_PHONE_LINK, NO_TASK_LINK, proposalLink, confirmedLink, proposalPreview, proposalOutcomeText, handoffCardText, confirmedCardText, type PhoneLink } from "./chat-channel.js";
 export { channelRepos as telegramConversationRepos, resolveChannelMate as resolveTelegramMate, tooLongText, whichTaskText, replyContextFor, NO_PHONE_LINK, NO_TASK_LINK, proposalLink, confirmedLink, proposalPreview, proposalOutcomeText, handoffCardText, confirmedCardText, CHAT_ACTION_PARITY as TELEGRAM_ACTION_PARITY, parityGaps, type PhoneLink, type ResolvedMate, type ParitySupport } from "./chat-channel.js";
 /**
@@ -202,7 +203,7 @@ export function applyProposalTap(
     return { effects, confirmed: false, ignored: true };
   }
   const who = verified.who;
-  const preview = proposalPreview(store, proposal, repos);
+  const preview = proposalPreview(store, proposal, repos, "telegram");
   const origin = options.phoneOrigin?.() ?? null;
 
   if (action.phase === "dismiss") {
@@ -226,28 +227,42 @@ export function applyProposalTap(
     // A forged keyboard on a handoff card: nothing acts; the card is
     // repainted with its current link (or the honest absence of one).
     store.consumeTelegramProposalActions(proposal.id, now);
-    const wanted = proposalLink(store, proposal, repos);
+    const wanted = proposalLink(store, proposal, repos, "telegram");
     const link = phoneLinkButton(origin, wanted);
     ack(link === null ? "this step finishes on the computer" : "open the button below to finish this step");
     edit(handoffCardText(preview.text, linkNote(origin, wanted)), keyboardWith(null, link));
     return { effects, confirmed: false, ignored: true };
   }
   const irreversible = proposal.kind === "answer" && proposal.payload["reversible"] === false;
-  if (action.phase === "confirm" && irreversible) {
-    // The arm: two fresh one-time tokens make a real challenge, exactly as
-    // a decision button does. Nothing is answered here.
-    if (!store.consumeTelegramProposalAction(token, now)) { ack("that button was already used"); return { effects, confirmed: false, ignored: true }; }
+  const sharedAction = proposal.kind === "action" ? sharedActionPayload(proposal.payload) : null;
+  const challenged = sharedAction !== null && sharedActionAllowsChallenge(sharedAction);
+  // The arm: two fresh one-time tokens make a real challenge, exactly as a
+  // decision button does. Nothing is answered or recorded here.
+  const arm = (): void => {
     store.consumeTelegramProposalActions(proposal.id, now, ["yes", "cancel"]);
     const yes = randomBytes(16).toString("hex");
     const cancel = randomBytes(16).toString("hex");
     const placedOn = String(message.message_id);
     store.createTelegramProposalAction({ token: yes, binding: binding.id, proposal: proposal.id, phase: "yes", chatId: binding.chatId, messageId: placedOn, ttlMs: CHALLENGE_TTL_MS }, now);
     store.createTelegramProposalAction({ token: cancel, binding: binding.id, proposal: proposal.id, phase: "cancel", chatId: binding.chatId, messageId: placedOn, ttlMs: CHALLENGE_TTL_MS }, now);
+    const body = preview.text.split("\n\nConfirm or Dismiss below")[0];
+    if (challenged) {
+      ack("confirm it");
+      edit(`${body}\n\nThis records that you handled this exact result. Confirm?`, [
+        [{ text: `✓ Yes, ${CHAT_ACTIONS[sharedAction!.operation].label.toLowerCase()}`, callback_data: yes }],
+        [{ text: "Cancel", callback_data: cancel }],
+      ]);
+      return;
+    }
     ack("irreversible — confirm it");
-    edit(`⚠ This answer is IRREVERSIBLE.\n\n${preview.text.split("\n\nConfirm or Dismiss below")[0]}\n\nConfirm?`, [
+    edit(`⚠ This answer is IRREVERSIBLE.\n\n${body}\n\nConfirm?`, [
       [{ text: "⚠ Yes, answer it", callback_data: yes }],
       [{ text: "Cancel", callback_data: cancel }],
     ]);
+  };
+  if (action.phase === "confirm" && (irreversible || challenged)) {
+    if (!store.consumeTelegramProposalAction(token, now)) { ack("that button was already used"); return { effects, confirmed: false, ignored: true }; }
+    arm();
     return { effects, confirmed: false, ignored: false };
   }
   if (!store.consumeTelegramProposalAction(token, now)) {
@@ -263,16 +278,7 @@ export function applyProposalTap(
   });
   if (!outcome.ok && outcome.reason === "needs-confirm") {
     // Not armed yet (a card drafted without the reversible mark): arm now, the tap is not lost.
-    const yes = randomBytes(16).toString("hex");
-    const cancel = randomBytes(16).toString("hex");
-    const placedOn = String(message.message_id);
-    store.createTelegramProposalAction({ token: yes, binding: binding.id, proposal: proposal.id, phase: "yes", chatId: binding.chatId, messageId: placedOn, ttlMs: CHALLENGE_TTL_MS }, now);
-    store.createTelegramProposalAction({ token: cancel, binding: binding.id, proposal: proposal.id, phase: "cancel", chatId: binding.chatId, messageId: placedOn, ttlMs: CHALLENGE_TTL_MS }, now);
-    ack("irreversible — confirm it");
-    edit(`⚠ This answer is IRREVERSIBLE.\n\n${preview.text.split("\n\nConfirm or Dismiss below")[0]}\n\nConfirm?`, [
-      [{ text: "⚠ Yes, answer it", callback_data: yes }],
-      [{ text: "Cancel", callback_data: cancel }],
-    ]);
+    arm();
     return { effects, confirmed: false, ignored: false };
   }
   store.consumeTelegramProposalActions(proposal.id, now);
@@ -559,7 +565,7 @@ async function runTelegramConversation(row: TelegramConversation, args: TurnArgs
         const selected = store.getMateTurn(turn)?.state === "answered" ? store.listMateTurnEvidence(turn) : [];
         for (const image of selected) parts.push({ kind: "image", text: image.caption, taskId: image.taskId, run: image.run, artifact: image.artifact, sha256: image.sha256 });
         for (const proposal of proposals) {
-          const preview = proposalPreview(store, proposal, repos);
+          const preview = proposalPreview(store, proposal, repos, "telegram");
           const keyboard = preview.buttons ? mintCardTokens(store, binding, proposal.id, now).keyboard : null;
           parts.push({ kind: "card", text: preview.text, proposal: proposal.id, keyboard });
         }

@@ -21,7 +21,8 @@ import { bridgePass, createTransport, followBridge, hashPairingCode, mintPairing
 import { ceilingDigestOf, verifyApproverStanding } from "./principal.js";
 import { subscriptionCredentialKey } from "./converse.js";
 import { knowledgeView } from './project-knowledge.js';
-import { mintSharedActionReview } from './chat-actions.js';
+import { mintSharedActionReview, prepareSharedAction } from './chat-actions.js';
+import { assignmentOf } from './assignment.js';
 import { confirmMateProposal } from "./mate-doors.js";
 import { MATE_TOOL_SCHEMAS, executeMateTool } from "./mate-tools.js";
 import { runMateCli } from "./mate-cli.js";
@@ -991,6 +992,56 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       expect(await tapPass(yes2, hard.messageId)).toMatchObject({ ok: true, report: { chatConfirmed: 1 } });
       expect(store.getDecision(second)).toMatchObject({ state: "answered", choice: "closed", answeredVia: "telegram" });
       expect(outcome(hard.id).outcome).toMatchObject({ ok: true, via: "telegram" });
+    });
+
+    test("mark complete: the phone card confirms behind its own yes/cancel challenge, records the assignment check for the exact result, and cancel restores the card", async () => {
+      const ref = task("done-1", "Keep the guard readable");
+      propose(store, { taskId: "done-1", goal: "Keep the guard readable", touches: ["src/guard.ts"], acceptance: [{ id: "c1", statement: "The guard stays readable", how: null, evidence: ["check"] }], now });
+      const scope = store.getScope("done-1")!;
+      const approved = approve(store, "done-1", "alex", now, scope.digest, token);
+      if (!approved.ok) throw new Error(`approval refused: ${approved.reason}`);
+      const route = store.routeAuthorityFor(ref, "builder", null);
+      if (!route?.ok) throw new Error("route");
+      const run = store.startRun({ taskRef: ref, leaseId: "l-done-1", runner: "builder-1", branch: "so/done-1", worktree: "/pool/done-1", route: route.stamp, now });
+      store.stampRun(run, { scopeDigest: scope.digest, baseRevision: "b".repeat(40) });
+      store.recordOutcomeFacts(run, { headRevision: "a".repeat(40), handoff: "The guard reads well." });
+      store.finishRun(run, { outcome: "built", committed: true, now });
+      store.setTaskState("done-1", "done", now);
+      const assignment = () => assignmentOf(store, "done-1", now, { principal: "operator", repos: [repo] }, evidenceRoot);
+      expect(assignment()?.state).toBe("ready-to-check");
+      const payload = prepareSharedAction(store, who(), "result_accept", { task: "done-1", run }, evidenceRoot, now);
+      const complete = card("action", { ...payload });
+      const preview = proposalPreview(store, store.getMateProposal(complete.id)!, [repo], "telegram");
+      expect(preview.buttons).toBe(true);
+      expect(preview.text).toContain("Mark complete: Keep the guard readable");
+      expect(preview.text).toContain("Confirm asks once more before anything is recorded.");
+      // Other channels keep the secure handoff for the same card.
+      expect(complete.preview.buttons).toBe(false);
+      // Confirm arms the challenge; nothing is recorded yet.
+      expect(await tapPass(complete.confirm, complete.messageId)).toMatchObject({ ok: true, report: { ignored: 0 } });
+      expect(script.acks().at(-1)).toBe("confirm it");
+      expect(assignment()?.state).toBe("ready-to-check");
+      const armed = script.calls.filter(call => call.method === "editMessageText").at(-1)!;
+      expect(String(armed.params["text"])).toContain("This records that you handled this exact result. Confirm?");
+      const keyboard = (armed.params["reply_markup"] as { inline_keyboard: { text: string; callback_data: string }[][] }).inline_keyboard.flat();
+      const yes = keyboard.find(one => one.text === "✓ Yes, mark complete")!.callback_data;
+      const cancel = keyboard.find(one => one.text === "Cancel")!.callback_data;
+      // Cancel restores the card; the stale yes changes nothing.
+      expect(await tapPass(cancel, complete.messageId)).toMatchObject({ ok: true, report: { ignored: 0 } });
+      expect(await tapPass(yes, complete.messageId)).toMatchObject({ ok: true, report: { ignored: 1 } });
+      expect(assignment()?.state).toBe("ready-to-check");
+      const restored = script.calls.filter(call => call.method === "editMessageText").at(-1)!;
+      const again = (restored.params["reply_markup"] as { inline_keyboard: { text: string; callback_data: string }[][] }).inline_keyboard.flat();
+      expect(await tapPass(again.find(one => one.text === "Confirm")!.callback_data, complete.messageId)).toMatchObject({ ok: true });
+      const rearmed = script.calls.filter(call => call.method === "editMessageText").at(-1)!;
+      const yes2 = (rearmed.params["reply_markup"] as { inline_keyboard: { text: string; callback_data: string }[][] }).inline_keyboard.flat().find(one => one.text === "✓ Yes, mark complete")!.callback_data;
+      expect(await tapPass(yes2, complete.messageId)).toMatchObject({ ok: true, report: { chatConfirmed: 1 } });
+      expect(assignment()).toMatchObject({ state: "complete", completion: { actor: "operator:alex" } });
+      expect(store.proofAcceptance(run)).toBeNull();
+      expect(outcome(complete.id).outcome).toMatchObject({ ok: true, via: "telegram", said: "Marked complete. The recorded checks are unchanged." });
+      expect(String(script.calls.filter(call => call.method === "editMessageText").at(-1)!.params["text"])).toContain("✓ Marked complete.");
+      // A repeated yes is spent; the record is unchanged.
+      expect(await tapPass(yes2, complete.messageId)).toMatchObject({ ok: true, report: { ignored: 1 } });
     });
 
     test("task actions: retry, plan, dependencies and a stop confirm through the shared door — the stop is audited as telegram; resume only opens the password step", async () => {

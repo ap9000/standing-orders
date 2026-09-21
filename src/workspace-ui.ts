@@ -109,36 +109,12 @@ const retriesLeft = (count: number, explicit = true): string => `${count}${expli
  * the v50 dispatch contract; nothing here changes the lifecycle.
  */
 export function reviewStatusOf(review: ReviewFacts | null): DisplayStatus | null {
-  if (review === null || review.state === "unrequested" || review.state === "succeeded") return null;
-  const ordinal = `attempt ${review.attempt ?? review.attempts} of ${review.cap}`;
-  const open: NextAction = { label: "Open the result", kind: "open-result" };
-  if (review.state === "running") {
-    return review.reviewerAlive
-      ? { token: "reviewing", label: review.attempt === 1 ? "Reviewing" : `Reviewing (retry ${(review.attempt ?? 1) - 1} of ${review.cap - 1})`, detail: `The build is preserved while an independent reviewer checks its sealed evidence (${ordinal}).`, tone: "live", action: open }
-      : { token: "review-failed", label: "Review interrupted", detail: `The reviewer has no live worker; recovery must settle the interrupted attempt (${ordinal}) before it can be retried.`, tone: "attention", action: open };
-  }
-  if (review.state === "queued") {
-    return review.attempt === 1
-      ? { token: "review-pending", label: "Waiting for review", detail: "The build finished and its requested independent review is waiting for a worker.", tone: "attention", action: open }
-      : { token: "review-pending", label: `Review retry queued (${ordinal})`, detail: `${review.queuedOrigin === "automatic" ? "The signed mode queued this retry. It" : `The review retry${review.queuedBy === null ? "" : `, asked by ${review.queuedBy},`}`} is waiting for a worker; ${retriesLeft(review.retriesRemaining, review.queuedOrigin !== "automatic")} would remain after it.`, tone: "attention", action: open };
-  }
-  if (review.state === "retryable") {
-    const what = review.interrupted ? "was interrupted" : "failed";
-    return {
-      token: "review-failed",
-      label: review.interrupted ? "Review interrupted — retry available" : "Review failed — retry available",
-      detail: `Review ${ordinal} ${what}${review.latestReason === null ? "" : ` (${review.latestReason})`}. The build is preserved; ask for an explicit retry — ${retriesLeft(review.retriesRemaining)} left.`,
-      tone: "attention",
-      action: { label: "Retry the review", kind: "open-review" },
-    };
-  }
-  return {
-    token: "review-exhausted",
-    label: "Review retries exhausted",
-    detail: `All ${review.cap} review attempts ended without a review${review.latestReason === null ? "" : ` (latest: ${review.latestReason})`}. Nothing retries a fourth time; open the result to accept it with an exception or file a revision.`,
-    tone: "attention",
-    action: open,
-  };
+  // Model review is retired (2026-09-21): nothing schedules, retries or
+  // waits for a reviewer, so a recorded review request or attempt is
+  // history and never the result's primary status. The stored verdict and
+  // the assignment's Ready/Complete state speak instead.
+  void review;
+  return null;
 }
 
 export type PublicationFacts = {

@@ -91,27 +91,19 @@ describe("the shared status projection (workspace package 1)", () => {
     expect(mismatchAccepted.detail).not.toMatch(/check failed|checks failed/i);
   });
 
-  test("a review in flight leads on every surface, keeps the earlier verdict as history, and never masks an accepted, scout, or older result", () => {
+  test("a recorded review is history on every surface and never masks the stored verdict, an accepted, scout, or older result", () => {
     const review = (over: Partial<ReviewFacts>): ReviewFacts => ({ state: "queued", attempt: 1, cap: 3, attempts: 0, retriesRemaining: 2, latestReason: null, interrupted: false, queuedBy: "operator", reviewerAlive: false, ...over });
     expect(reviewStatusOf(null)).toBeNull();
     expect(reviewStatusOf(review({ state: "unrequested" }))).toBeNull();
     expect(reviewStatusOf(review({ state: "succeeded", attempt: 2, attempts: 2 }))).toBeNull();
-    expect(reviewStatusOf(review({}))).toMatchObject({ token: "review-pending", label: "Waiting for review", tone: "attention", action: { kind: "open-result" } });
-    expect(reviewStatusOf(review({ attempt: 2, attempts: 1, retriesRemaining: 1 }))).toMatchObject({ token: "review-pending", label: "Review retry queued (attempt 2 of 3)" });
-    expect(reviewStatusOf(review({ attempt: 2, attempts: 1, retriesRemaining: 1 }))?.detail).toContain("asked by operator");
-    const automatic = reviewStatusOf(review({ attempt: 2, attempts: 1, retriesRemaining: 1, queuedOrigin: "automatic", queuedBy: "alex" }));
-    expect(automatic?.detail).toContain("The signed mode queued this retry");
-    expect(automatic?.detail).not.toMatch(/explicit|asked by/);
-    expect(reviewStatusOf(review({ state: "running", attempts: 1, reviewerAlive: true }))).toMatchObject({ token: "reviewing", label: "Reviewing", tone: "live" });
-    expect(reviewStatusOf(review({ state: "running", attempt: 2, attempts: 2, reviewerAlive: true }))).toMatchObject({ token: "reviewing", label: "Reviewing (retry 1 of 2)" });
-    expect(reviewStatusOf(review({ state: "running", attempts: 1, reviewerAlive: false }))).toMatchObject({ token: "review-failed", label: "Review interrupted", tone: "attention" });
-    const failed = reviewStatusOf(review({ state: "retryable", attempts: 1, latestReason: "reviewer-ingestion: database busy" }));
-    expect(failed).toMatchObject({ token: "review-failed", label: "Review failed — retry available", action: { kind: "open-review" } });
-    expect(failed?.detail).toContain("Review attempt 1 of 3 failed (reviewer-ingestion: database busy)");
-    expect(reviewStatusOf(review({ state: "retryable", attempts: 1, interrupted: true }))).toMatchObject({ label: "Review interrupted — retry available" });
-    const exhausted = reviewStatusOf(review({ state: "exhausted", attempt: 3, attempts: 3, retriesRemaining: 0, latestReason: "reviewer-agent" }));
-    expect(exhausted).toMatchObject({ token: "review-exhausted", label: "Review retries exhausted" });
-    expect(exhausted?.detail).toContain("All 3 review attempts ended without a review (latest: reviewer-agent)");
+    // Model review is retired: a queued, running, failed or exhausted review
+    // record is history and never the result's primary status.
+    expect(reviewStatusOf(review({}))).toBeNull();
+    expect(reviewStatusOf(review({ attempt: 2, attempts: 1, retriesRemaining: 1 }))).toBeNull();
+    expect(reviewStatusOf(review({ state: "running", attempts: 1, reviewerAlive: true }))).toBeNull();
+    expect(reviewStatusOf(review({ state: "running", attempts: 1, reviewerAlive: false }))).toBeNull();
+    expect(reviewStatusOf(review({ state: "retryable", attempts: 1, latestReason: "reviewer-ingestion: database busy" }))).toBeNull();
+    expect(reviewStatusOf(review({ state: "exhausted", attempt: 3, attempts: 3, retriesRemaining: 0, latestReason: "reviewer-agent" }))).toBeNull();
 
     // Inside the result projection: the review is primary, the stored
     // verdict is the secondary history — for a verified AND a refuted result.
