@@ -749,6 +749,16 @@ describe("provider keys & auth mode, over HTTP", () => {
     // The path-typing road is still reachable (now behind a details).
     expect(page).toContain("Enter an exact path instead");
     expect(page).toContain("path on this server");
+    const window = new Window();
+    try {
+      window.document.body.innerHTML = page;
+      const card = window.document.querySelector('.project-card');
+      expect(card?.textContent).toContain(real);
+      expect(card?.querySelector('button.button-link')?.textContent).toBe('Open');
+      expect(card?.querySelector('a[href^="/settings/knowledge"]')?.classList.contains('button-link')).toBe(false);
+      expect(card?.querySelector('input[name="path"]')?.getAttribute('value')).toBe(real);
+      expect(window.document.querySelector('.project-add-card')?.textContent).not.toContain('add a repository');
+    } finally { await window.happyDOM.close(); }
     rmSync(repoDir, { recursive: true, force: true });
   });
 
@@ -1341,7 +1351,7 @@ describe("the operations console", () => {
     const list = /<ol class="cockpit-queue-list">(.*?)<\/ol>/s.exec(queue)?.[1] ?? "";
     expect(list.indexOf("PR #102")).toBeLessThan(list.indexOf("PR #101"));
     expect(list.indexOf("PR #102")).toBeGreaterThanOrEqual(0);
-    expect(list).toContain("CI failing on its pull request — observed, not inferred");
+    expect(list).toContain("CI is failing");
     // The failing result is selected by default; its publication card says
     // exactly what the watcher saw, and offers the repair draft.
     expect(queue).toContain('data-review-task="t-pr2"');
@@ -3892,7 +3902,7 @@ describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
     expect(html).not.toContain("chat is off.");
   });
 
-  test("the live chat overview uses the shared repair diagnosis", async () => {
+  test("the saved chat catch-up identifies the unfinished prerequisite", async () => {
     for (const id of ["t-blocker", "t-dependent"]) {
       store.createTask({ id, title: id === "t-dependent" ? "must not wait forever" : "obsolete prerequisite" }, T0);
       store.placeTask(store.refFor("built-in", id).id, repoDir);
@@ -3903,8 +3913,8 @@ describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
     const cookie = await login();
 
     const html = await (await fetch(url("/chat"), { headers: { cookie } })).text();
-    expect(html).toContain('data-dispatch-status="terminal-dependency"');
-    expect(html).toContain("a required task did not finish");
+    expect(html).toContain('<a href="/chat?task=t-dependent">must not wait forever</a>');
+    expect(html).toContain("t-blocker was cancelled before it finished.");
   });
 
   test("the whole loop: password-gated ask, reply, draft card, password-gated file through the door", async () => {
@@ -6313,6 +6323,8 @@ describe("the onboarding ceremony over real HTTP, and root-mode placement proofs
     });
     const page = await previewed.text();
     expect(page).toContain("ap9000/fresh-thing");
+    expect(page).toContain('<details class="project-add-more" open><summary>Review repository</summary>');
+    expect(page).toContain('Large-file (LFS) objects are not downloaded.');
     const nonce = /name="nonce" value="([0-9a-f]{32})"/.exec(page)?.[1] as string;
     expect(nonce).toBeTruthy();
 
@@ -6418,6 +6430,8 @@ describe("the onboarding ceremony over real HTTP, and root-mode placement proofs
     const cookie = await login();
     const listMode = await (await fetch(url("/projects"), { headers: { cookie } })).text();
     expect(listMode).toContain("--project-root");
+    expect(listMode.match(/--project-root/g)).toHaveLength(1);
+    expect(listMode).not.toContain('<h2>add a repository</h2>');
     expect(listMode).not.toContain('action="/projects/onboard-preview"');
     await new Promise<void>(resolve => server.close(() => resolve()));
     store.close();
@@ -6432,6 +6446,7 @@ describe("the onboarding ceremony over real HTTP, and root-mode placement proofs
     const cookie2 = await login();
     const rootMode = await (await fetch(url("/projects"), { headers: { cookie: cookie2 } })).text();
     expect(rootMode).toContain('action="/projects/onboard-preview"');
+    expect(rootMode).toContain('<details class="project-add-more"><summary>Paste a GitHub link</summary>');
   });
 
   test("placement across the modes: blank falls into the open project; scoped-no-project refuses; unscoped keeps unplaced", async () => {
@@ -8920,8 +8935,8 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(css).toContain('.chat-main:has(.chat-empty) .thread { min-height: 0; margin-bottom: .5rem; }');
     expect(css).toContain('width: 100%; min-width: 0; max-width: 100%; margin: 0; padding: 2rem 0 .75rem;');
     expect(css).toContain('.chat-main:has(.chat-empty) .composer { position: static; width: 100%; margin-top: .5rem; }');
-    expect(thread).toContain('data-card-kind="fleet-overview"');
-    expect(thread).toContain('aria-label="live portfolio overview"');
+    expect(thread).toContain('aria-label="Project catch-up"');
+    expect(thread).not.toContain('data-card-kind="fleet-overview"');
     expect(thread).toContain('aria-label="projects in this conversation"');
     expect(thread).toContain('name="message" value="Brief me on what needs my attention, what is building, and the highest-leverage next action across every project."');
     expect(thread).toMatch(/<span class="name">all projects/);
@@ -9425,18 +9440,18 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(html).not.toContain('class="thread"');
   });
 
-  test("UI polish 2026-09-13: the start action leads the chat page, the overview folds, and provider limits sit under one disclosure", async () => {
+  test("the shared catch-up appears once, starting chat is clear, and provider limits stay available", async () => {
     const cookie = await login();
     const before = await page(cookie);
     const mintAt = before.indexOf('<div class="card mate-mint" id="latest">');
-    const overviewAt = before.indexOf('<details class="chat-fleet-context"><summary>Project overview<span class="meta">');
+    const catchUpAt = before.indexOf('aria-label="Project catch-up"');
     const limitsAt = before.indexOf('<details class="chat-limits"><summary>Model &amp; limits');
     expect(mintAt).toBeGreaterThan(-1);
-    expect(overviewAt).toBeGreaterThan(mintAt);
-    expect(limitsAt).toBeGreaterThan(overviewAt);
-    // The overview is not forced open on the server; the chrome script
-    // opens it on a desk, so a phone reads the start card first.
-    expect(before).not.toContain('<details class="chat-fleet-context" open>');
+    expect(catchUpAt).toBeGreaterThan(-1);
+    expect(catchUpAt).toBeLessThan(mintAt);
+    expect(limitsAt).toBeGreaterThan(mintAt);
+    expect(before.match(/aria-label="Project catch-up"/g)).toHaveLength(1);
+    expect(before).not.toContain('<details class="chat-fleet-context">');
     // The start card speaks plainly and its act is the primary button.
     expect(before).toContain("<strong>Start a conversation</strong>");
     expect(before).toContain("<button type=\"submit\">Start chat</button>");
@@ -9484,11 +9499,13 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(live).not.toContain("answering with");
     expect(live).toContain('<details class="chat-limits chat-session-details"><summary>Conversation details<span class="meta">anthropic-api</span></summary>');
     expect(live).toContain("<span>this conversation: $0.00 of $50.00</span>");
-    expect(live.indexOf('<details class="chat-fleet-context"><summary>Project overview<span class="meta">')).toBeLessThan(live.indexOf('<div class="thread" data-key="thread" data-chat-list>'));
+    expect(live.match(/aria-label="Project catch-up"/g)).toHaveLength(1);
+    expect(live).not.toContain('<details class="chat-fleet-context">');
+    expect(live.indexOf('aria-label="Project catch-up"')).toBeLessThan(live.indexOf('<div class="thread" data-key="thread" data-chat-list>'));
     expect(live.indexOf('<div class="thread" data-key="thread" data-chat-list>')).toBeLessThan(live.indexOf('class="card composer"'));
   });
 
-  test("follow-up on build 1540: a NEW empty conversation folds the desktop overview behind its summary and tightens the empty state", async () => {
+  test("a new conversation has one catch-up and a compact empty state before its composer", async () => {
     const cookie = await login();
     await mint(cookie);
     const fresh = await page(cookie);
@@ -9496,16 +9513,9 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(fresh).toContain('<div class="chat-empty" data-key="empty"><strong>What do you want to get done?</strong>');
     expect(fresh).not.toContain('data-message-role=');
     expect(fresh.indexOf('<div class="chat-empty" data-key="empty">')).toBeLessThan(fresh.indexOf('class="card composer"'));
-    // The overview is folded on the server and the chrome script no longer forces it open over an empty thread;
-    // its summary still carries the two counts a reader scans.
-    expect(fresh).toContain('<details class="chat-fleet-context"><summary>Project overview<span class="meta">');
-    expect(fresh).not.toContain('<details class="chat-fleet-context" open>');
-    expect(fresh).toContain('var fleet=document.querySelector(".chat-fleet-context");if(fleet&&!document.querySelector(".chat-empty")){');
-    // On a desk the summary is visible (and focusable) only for the fresh thread, and the empty state gives up its slack.
+    expect(fresh.match(/aria-label="Project catch-up"/g)).toHaveLength(1);
+    expect(fresh).not.toContain('<details class="chat-fleet-context">');
     const css = await stylesOf(fresh, base);
-    expect(css).toContain('.chat-fleet-context > summary { display: none; }');
-    expect(css).toContain('.chat-fleet-context > summary .hot { color: var(--brand); font-weight: 600; }');
-    expect(css).toContain('.chat-main:has(.chat-empty) .chat-fleet-context > summary { display: flex; align-items: center; gap: .6rem; min-height: 2.5rem; padding: .5rem .9rem; color: var(--muted-foreground); font-size: .78rem; cursor: pointer; }');
     expect(css).toContain('.chat-main:has(.chat-empty) .thread { min-height: 0; margin: .75rem 0 .75rem; }');
     expect(css).toContain('.chat-main:has(.chat-empty) .chat-empty { padding: clamp(1.25rem, 4vh, 2.25rem) 1rem 1rem; }');
     // The desktop rules live behind the desk breakpoint; the phone's own empty-state rules are untouched.
@@ -10943,29 +10953,30 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
 
     const html = await (await fetch(url("/review"), { headers: { cookie } })).text();
     const queue = queueOf(html);
-    // Only done tasks inside the ceiling; the older short proof ranks first.
+    // Only done tasks inside the ceiling. Both need a decision, so newest
+    // comes first; a retired proof verdict does not create another priority.
     expect(queue).toContain("t-older");
     expect(queue).toContain("t-ours");
     expect(queue).not.toContain("t-live");
     expect(queue).not.toContain("t-theirs");
     expect(html).not.toContain("never shown");
-    expect(queue.indexOf("t-older")).toBeLessThan(queue.indexOf("t-ours"));
-    expect(html).toContain("1 needs attention");
-    // The queue explains the order in words, next to the row it elevates.
-    expect(queue).toContain("missing evidence");
+    expect(queue.indexOf("t-ours")).toBeLessThan(queue.indexOf("t-older"));
+    expect(html).toContain("2 need your attention");
+    expect(queue).toContain("Needs your decision");
+    expect(queue).not.toContain("missing evidence");
     // Escaped everywhere the title lands.
     expect(html).toContain("ours — the &lt;b&gt;title&lt;/b&gt;");
     expect(html).not.toContain("<b>title</b>");
     // The first-ranked row is selected by default and marked current.
-    expect(html).toContain('data-review-task="t-older"');
+    expect(html).toContain('data-review-task="t-ours"');
     const olderRun = store.runsFor(store.lookupRef("t-older")!.id)[0]!.id;
-    expect(queue).toContain(`class="cockpit-row current" href="/review?result=t-older&amp;run=${olderRun}&amp;project=%2Frepo%2Fmain" aria-current="page"`);
+    const oursRun = store.runsFor(store.lookupRef("t-ours")!.id)[0]!.id;
+    expect(queue).toContain(`class="cockpit-row current" href="/review?result=t-ours&amp;run=${oursRun}&amp;project=%2Frepo%2Fmain" aria-current="page"`);
 
     // A stable deep link selects, and the row it names is current.
-    const picked = await (await fetch(url("/review?result=t-ours"), { headers: { cookie } })).text();
-    expect(picked).toContain('data-review-task="t-ours"');
-    const oursRun = store.runsFor(store.lookupRef("t-ours")!.id)[0]!.id;
-    expect(queueOf(picked)).toContain(`class="cockpit-row current" href="/review?result=t-ours&amp;run=${oursRun}&amp;project=%2Frepo%2Fmain"`);
+    const picked = await (await fetch(url("/review?result=t-older"), { headers: { cookie } })).text();
+    expect(picked).toContain('data-review-task="t-older"');
+    expect(queueOf(picked)).toContain(`class="cockpit-row current" href="/review?result=t-older&amp;run=${olderRun}&amp;project=%2Frepo%2Fmain"`);
     expect(picked).not.toContain("is in view here");
 
     // A hidden result and a nonexistent one read identically: a note, and
@@ -11055,9 +11066,8 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
 
     const manual = await (await fetch(url("/review?result=t-manual"), { headers: { cookie } })).text();
     expect(manual).toContain('data-review-task="t-manual"');
-    expect(manual).toContain("Marked done without a build record");
-    expect(manual).toContain('data-work-status="no-build-record"');
-    expect(manual).toContain("no build record");
+    expect(manual).toContain('data-work-status="assignment-needs-decision"');
+    expect(manual).toContain("This task was marked complete without a build record.");
     expect(manual).toContain("No scope was filed for this task");
     expect(manual).toContain("no finished build record");
     expect(manual).toContain('data-next-action="inspect-task"');
@@ -11424,7 +11434,8 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(done).not.toContain("Checks passed");
     expect(done).toContain("Accepted with an exception by <span class=\"mono\">alex</span>");
     expect(done).toContain("read it myself");
-    expect(done).toContain("missing evidence — accepted with exception");
+    expect(queueOf(done)).toContain("Needs your decision");
+    expect(queueOf(done)).not.toContain("missing evidence — accepted with exception");
     expect(done).toContain('data-next-action="revise"');
     // The stored verdict never moved.
     expect(store.proofVerdictFor(run)?.verdict).toBe("short");
@@ -11611,6 +11622,9 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     const cookie = await login();
     const html = await (await fetch(url(`/review?result=t-complete&run=${run}`), { headers: { cookie } })).text();
     expect(html).toContain('>Ready</span>');
+    expect(queueOf(html)).toContain('data-work-status="assignment-ready-to-check"');
+    expect(queueOf(html)).not.toContain('conflicting evidence');
+    expect(html).toContain('1 needs your attention');
     expect(html).toContain('Mark complete</button>');
     expect(html).toContain('does not change check results, approve execution, publish, or deploy');
     const receipt = /name="receipt" value="([a-f0-9]{64})"/.exec(html)?.[1];
@@ -11631,6 +11645,28 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(after).not.toContain('Mark complete</button>');
     expect(after).toContain('data-actual-checks="failed"');
     expect(after).toContain('Checks failed (exit 1).');
+    expect(queueOf(after)).toContain('data-work-status="assignment-complete"');
+    expect(queueOf(after)).not.toContain('conflicting evidence');
+    expect(after).not.toContain('needs your attention');
+    expect(mainOf(after).match(/<h1>/g)).toHaveLength(1);
+    expect(after).not.toContain('<h1>Results</h1>');
+    expect(after).not.toContain('data-current-outcome');
+    expect(after).not.toContain('Check results are unchanged.');
+
+    // Current decisions and Ready results rank ahead of this completed
+    // result, even though its stored verdict remains refuted.
+    const readyRef = seed('t-ready', 'Ready for the lead');
+    const readyRun = build('t-ready', readyRef, { finishedAt: at(1) });
+    store.stampRun(readyRun, { scopeDigest: store.getScope('t-ready')!.digest });
+    const decisionRef = seed('t-decision', 'Needs the current scope');
+    build('t-decision', decisionRef, { finishedAt: at(2) });
+    const mixed = await (await fetch(url(`/review?result=t-complete&run=${run}`), { headers: { cookie } })).text();
+    const queue = queueOf(mixed);
+    expect(mixed).toContain('2 need your attention');
+    expect(queue.indexOf('result=t-decision')).toBeLessThan(queue.indexOf('result=t-ready'));
+    expect(queue.indexOf('result=t-ready')).toBeLessThan(queue.indexOf('result=t-complete'));
+    expect(mixed).toContain('data-actual-checks="failed"');
+    expect(store.proofVerdictFor(run)).toEqual(before);
   });
 
   // ---- workspace package 3 (2026-09-13): result-first review -------------
@@ -12572,7 +12608,12 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
       const texts = await Promise.all([read(`/r/${sample.run}`), read(`/review?result=${sample.id}`), read(`/chat?task=${sample.id}&result=${sample.run}`), read(`/t/${sample.id}`), read(`/chat?task=${sample.id}`)]);
       for (const html of texts) {
         expect(factsOf(html)[0]?.evidence).toBe("problems:1");
-        expect(html).toMatch(/data-result-attention=|class="problem"/);
+        if (sample.kind === "shortened") {
+          expect(html).toMatch(/data-result-attention=|class="problem"|<details class="assignment-notices"><summary>Saved output is partial<\/summary>/);
+        } else {
+          // Missing, damaged, and unreadable current material stays expanded.
+          expect(html).toMatch(/data-result-attention=|class="problem"/);
+        }
         if (sample.kind !== "shortened") {
           expect(html).toContain('data-work-status="assignment-needs-decision"');
           expect(html).not.toContain('class="status-label">Ready to review</span>');
@@ -13121,7 +13162,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(review).toContain(`data-result-run="${run}"`);
     expect(review).not.toContain("Check completed builds against their approved scope and evidence.");
     expect(review).not.toContain(`<span class="eyebrow">Build #${run}</span>`);
-    expect(review).toContain(`build #${run}`);
+    expect(review).toContain(`Build #${run}`);
     expect(review).toContain(`name="return" value="/review?result=t-navigation&amp;run=${run}"`);
     expect(review).not.toContain('<p class="meta board-view">');
     expect(review).not.toContain('class="badge badge-manual-review review-priority"');
@@ -13994,7 +14035,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(work.match(/<article class="work-row"/g)).toHaveLength(3);
     expect(work.match(/<details class="assignment-attempts">/g)).toHaveLength(3);
     const css = await stylesOf(work, base);
-    expect(css).toContain('.assignment-attempts summary{min-height:44px;');
+    expect(css).toContain('.assignment-attempts summary,.assignment-notices summary{min-height:44px;');
     // The receipt: an optional, unsettled review folds behind a disclosure; the machine verdict and the facts stay in the open.
     const task = await page(cookie, `/t/t-optional`);
     expect(task).not.toContain('class="receipt-coverage"');
