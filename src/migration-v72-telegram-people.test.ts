@@ -1,6 +1,6 @@
 /** Isolated fixtures only: production databases are never opened here. */
 import { afterEach, describe, expect, test } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -32,10 +32,12 @@ describe("v72 one Telegram binding per person", () => {
     expect(pairAs("alex", "4242")).toMatchObject({ ok: true });
     store.close(); store = undefined;
     const old = new DatabaseSync(file);
+    old.exec("DROP TABLE telegram_team_chat");
     old.exec("DROP INDEX IF EXISTS telegram_binding_live_user");
     old.exec("CREATE UNIQUE INDEX telegram_binding_live ON telegram_binding (bot_id) WHERE revoked_at IS NULL");
     old.prepare("UPDATE schema_version SET version = ?").run(version);
     const before = old.prepare("SELECT * FROM telegram_binding ORDER BY id").all();
+    expect(old.prepare("SELECT name FROM sqlite_master WHERE name = 'telegram_team_chat'").get()).toBeUndefined();
     old.close();
     store = openStore(file);
     expect(SCHEMA_VERSION).toBe(72);
@@ -44,6 +46,10 @@ describe("v72 one Telegram binding per person", () => {
     expect(indexes).toContain("telegram_binding_live_user");
     expect(indexes).not.toContain("telegram_binding_live");
     expect(store.handle.prepare("SELECT * FROM telegram_binding ORDER BY id").all()).toEqual(before);
+    expect(store.handle.prepare("SELECT * FROM telegram_team_chat").all()).toEqual([]);
+    expect(store.handle.prepare("PRAGMA table_info(telegram_team_chat)").all()).toContainEqual(expect.objectContaining({ name: "binding", notnull: 1 }));
+    expect(store.handle.prepare("PRAGMA foreign_key_list(telegram_team_chat)").all()).toContainEqual(expect.objectContaining({ table: "telegram_binding", from: "binding", to: "id" }));
+    expect(store.handle.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     expect(store.liveTelegramBindings(BOT).map(one => one.approver)).toEqual(["alex"]);
     // The rule the index now enforces: a second person pairs; the same person cannot pair twice.
     expect(pairAs("sam", "8800").ok).toBe(true);
@@ -51,5 +57,21 @@ describe("v72 one Telegram binding per person", () => {
     expect(store.liveTelegramBindings(BOT).map(one => one.approver)).toEqual(["alex", "sam"]);
     store.close(); store = openStore(file);
     expect(store.liveTelegramBindings(BOT)).toHaveLength(2);
+  });
+
+  test.each([
+    ["missing subscriptions", "DROP TABLE telegram_team_chat", "Telegram team chat history is missing"],
+    ["missing pairing identity", "ALTER TABLE telegram_team_chat DROP COLUMN binding", "Telegram team chat pairing metadata is missing"],
+  ])("a v72 file with %s refuses before changing it", (_name, damage, problem) => {
+    dir = mkdtempSync(join(tmpdir(), "so-v72-damaged-"));
+    const file = join(dir, "orders.db");
+    store = openStore(file);
+    store.close(); store = undefined;
+    const broken = new DatabaseSync(file);
+    broken.exec(damage);
+    broken.close();
+    const before = readFileSync(file);
+    expect(() => openStore(file)).toThrow(problem);
+    expect(readFileSync(file)).toEqual(before);
   });
 });

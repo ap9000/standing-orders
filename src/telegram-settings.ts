@@ -42,9 +42,9 @@ export function telegramSettingsHtml(
     } else if (mine.length === 0) {
       content += post("pair", password + '<button type="submit">Pair my phone</button>');
     } else {
-      content += post("unpair", password + '<p class="meta">Unpairing ends every open button in that chat. Pair again from a new phone afterwards.</p><button type="submit">Unpair my phone</button>');
+      content += post("unpair", password + '<p class="meta">This phone will lose access. Its existing Telegram buttons will stop working.</p><button type="submit">Unpair my phone</button>');
     }
   }
   if (options.problem !== undefined) content = `<p role="status">${escape(options.problem)}</p>` + content;
-  return `<h1>Telegram</h1>${content}<p class="meta">Each teammate pairs their own private chat. Group chats join a team conversation from its People settings.</p>`;
+  return `<h1>Telegram</h1>${content}<p class="meta">Each teammate pairs their own private chat. To connect a group, a conversation manager sends <code>/team</code> there and chooses a conversation. Everyone in the group can read its replies.</p>`;
 }

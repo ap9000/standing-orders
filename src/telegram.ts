@@ -514,7 +514,7 @@ async function deliverTeam(
   let projects: readonly string[];
   try { projects = await readProjects?.() ?? []; } catch { report.problems.push("team chats: current project access could not be read"); return; }
   const team = { sent: 0, problems: [] as string[] };
-  await deliverTeamChats(store, botId, transport, clock, team, projects, phoneOrigin);
+  await deliverTeamChats(store, botId, transport, clock, team, projects, phoneOrigin, { ...(readProjects === undefined ? {} : { readProjects }), ...(canDeliver === undefined ? {} : { canDeliver }) });
   report.sent += team.sent;
   report.problems.push(...team.problems);
 }
@@ -1059,9 +1059,13 @@ async function projectsForTap(context: Context, update: Update): Promise<readonl
   const binding = callback.from === undefined ? null : context.store.liveTelegramBindingFor(context.botId, String(callback.from.id));
   if (
     binding === null || callback.from === undefined ||
-    callback.message?.chat === undefined || String(callback.message.chat.id) !== binding.chatId ||
+    callback.message?.chat === undefined ||
     context.store.getTelegramProposalAction(callback.data ?? "") === null
   ) return null;
+  const chat = callback.message.chat;
+  const chatId = String(chat.id);
+  const trusted = chatId === binding.chatId || context.store.telegramTeamChat(context.botId, chatId)?.kind === "group";
+  if (!trusted) return null;
   try {
     return telegramConversationRepos(context.store, binding.approver, await context.readProjects());
   } catch {

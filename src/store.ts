@@ -1176,6 +1176,7 @@ export type TelegramTeamChat = {
   id: number;
   botId: string;
   chatId: string;
+  binding: number;
   kind: "group" | "private";
   conversation: string;
   boundBy: string;
@@ -2714,6 +2715,7 @@ CREATE TABLE IF NOT EXISTS telegram_team_chat (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   bot_id       TEXT NOT NULL,
   chat_id      TEXT NOT NULL,
+  binding      INTEGER NOT NULL REFERENCES telegram_binding(id) ON DELETE RESTRICT,
   kind         TEXT NOT NULL CHECK (kind IN ('group','private')),
   conversation TEXT NOT NULL REFERENCES team_conversation(id) ON DELETE RESTRICT,
   bound_by     TEXT NOT NULL,
@@ -3959,6 +3961,10 @@ function initializeStore(db: Database, file: string): Store {
   }
   if (preflight !== null && Math.abs(preflight) >= 71) {
     for (const table of TEAM_TABLES) if (!tableExists(db, table)) throw new Error(`${file}: team history is missing; refusing to recreate membership or queued work`);
+  }
+  if (preflight !== null && Math.abs(preflight) >= 72) {
+    if (!tableExists(db, "telegram_team_chat")) throw new Error(`${file}: Telegram team chat history is missing; refusing to recreate subscriptions`);
+    if (!hasColumn(db, "telegram_team_chat", "binding")) throw new Error(`${file}: Telegram team chat pairing metadata is missing; refusing to recreate subscription authority`);
   }
   // Check existing authority metadata before even stamping a migration.
   if (preflight !== null && Math.abs(preflight) >= 54) {
@@ -19258,22 +19264,25 @@ export class Store {
    * chat that just arrived. A group already following another conversation
    * elsewhere, or a conversation already followed by another group, refuses.
    */
-  bindTelegramTeamChat(args: { botId: string; chatId: string; kind: "group" | "private"; conversation: string; by: string }, now: Date):
+  bindTelegramTeamChat(args: { botId: string; chatId: string; binding: number; kind: "group" | "private"; conversation: string; by: string }, now: Date):
     { ok: true; chat: TelegramTeamChat } | { ok: false; reason: "group-taken" } {
-    return this.transact(() => {
+    return this.transact(() => this.savepoint(() => {
+      // Check the expected collision before revoking the current selection.
+      // The IMMEDIATE transaction excludes another group winning between
+      // this check and insertion; unexpected failures roll back the switch.
+      if (args.kind === "group") {
+        const group = this.db.prepare("SELECT bot_id, chat_id FROM telegram_team_chat WHERE conversation = ? AND kind = 'group' AND revoked_at IS NULL").get(args.conversation);
+        if (group !== undefined && (group["bot_id"] !== args.botId || group["chat_id"] !== args.chatId)) return { ok: false as const, reason: "group-taken" as const };
+      }
       const stamp = now.toISOString();
       this.db.prepare("UPDATE telegram_team_chat SET revoked_at = ?, revoked_by = ? WHERE bot_id = ? AND chat_id = ? AND revoked_at IS NULL").run(stamp, args.by, args.botId, args.chatId);
       const thread = this.db.prepare("SELECT thread FROM team_conversation WHERE id = ?").get(args.conversation);
       if (thread === undefined) throw new Error("no such team conversation");
       const cursor = Number(this.db.prepare("SELECT COALESCE(MAX(id), 0) AS n FROM mate_message WHERE thread = ?").get(Number(thread["thread"]))?.["n"] ?? 0);
-      try {
-        this.db.prepare("INSERT INTO telegram_team_chat (bot_id, chat_id, kind, conversation, bound_by, bound_at, cursor) VALUES (?, ?, ?, ?, ?, ?, ?)")
-          .run(args.botId, args.chatId, args.kind, args.conversation, args.by, stamp, cursor);
-      } catch {
-        return { ok: false as const, reason: "group-taken" as const };
-      }
+      this.db.prepare("INSERT INTO telegram_team_chat (bot_id, chat_id, binding, kind, conversation, bound_by, bound_at, cursor) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(args.botId, args.chatId, args.binding, args.kind, args.conversation, args.by, stamp, cursor);
       return { ok: true as const, chat: this.telegramTeamChat(args.botId, args.chatId)! };
-    });
+    }));
   }
 
   unbindTelegramTeamChat(botId: string, chatId: string, by: string, now: Date): boolean {
@@ -23645,6 +23654,7 @@ function readTelegramTeamChat(row: Record<string, unknown>): TelegramTeamChat {
     id: Number(row["id"]),
     botId: String(row["bot_id"]),
     chatId: String(row["chat_id"]),
+    binding: Number(row["binding"]),
     kind: row["kind"] === "group" ? "group" : "private",
     conversation: String(row["conversation"]),
     boundBy: String(row["bound_by"]),

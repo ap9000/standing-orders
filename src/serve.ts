@@ -1131,6 +1131,11 @@ export function createDecisionServer(options: ServeOptions): Server {
         if ((snapshot.leads.length > 0 || url.searchParams.get('team') === '1') && (!snapshot.selected || snapshot.selected.projects.every(visible))) return true;
       } catch { refuse(response, who, 404, 'This conversation is unavailable.', '/projects'); return false; }
     }
+    // Personal pairing changes only the signed-in person's phone. The route
+    // separately proves cookie, approver standing and password; instance bot
+    // settings remain outside this exact allowlist.
+    if ((request.method === "GET" && path === "/settings/telegram") ||
+      (request.method === "POST" && ["/settings/telegram/pair", "/settings/telegram/unpair"].includes(path))) return true;
     // Coding routes require an instance operator, then prove saved ownership and project access.
     if (path === "/code" || path.startsWith("/code/")) return true;
     if((request.method==='GET'&&/^\/chat\/action\/[0-9]{1,15}$/.test(path))||(request.method==='POST'&&/^\/chat\/proposal\/[0-9]{1,15}\/(confirm|dismiss)$/.test(path))){
@@ -2981,7 +2986,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
     if (url.pathname === "/settings/telegram") {
       // Any approver pairs their OWN phone here; the bot token stays on /settings.
-      if (who.via !== "cookie" || who.role !== "approver" || restricted()) return refuse(response, who, 403, "An approver can pair their own phone.", "/settings");
+      if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "An approver can pair their own phone.", "/settings");
       const botId = options.telegramTokenFile === undefined ? null : loadBotToken(process.env, options.telegramTokenFile)?.botId ?? null;
       return sendScreen(response, 200, screen("Telegram", telegramSettingsHtml(store, botId, who.name, who.session.csrf), { chrome: chromeFor(project, "settings"), forceSensitive: true }));
     }
@@ -2999,7 +3004,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
 
     if (url.pathname === "/settings" && (options.telegramTokenFile === undefined || restricted())) {
-      return sendScreen(response, 200, screen("Settings", '<h1>Settings</h1><p><a href="/settings/skills">Skills</a> · <a href="/settings/knowledge">Project knowledge</a></p><details><summary>Learning history</summary><a href="/settings/learning">Learning</a></details>', { chrome: chromeFor(project, "settings") }));
+      return sendScreen(response, 200, screen("Settings", '<h1>Settings</h1><p><a href="/settings/skills">Skills</a> · <a href="/settings/knowledge">Project knowledge</a> · <a href="/settings/telegram">Telegram</a></p><details><summary>Learning history</summary><a href="/settings/learning">Learning</a></details>', { chrome: chromeFor(project, "settings") }));
     }
 
     if (url.pathname === "/settings" && options.telegramTokenFile !== undefined) {
@@ -5103,12 +5108,13 @@ export function createDecisionServer(options: ServeOptions): Server {
       // The person's own pairing, under their password: a code minted for
       // them alone, or their own chats revoked. Teammates' pairings are
       // never touched from here.
-      if (who.via !== "cookie" || who.role !== "approver" || restricted()) return refuse(response, who, 403, "An approver can pair their own phone.", "/settings");
+      if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "An approver can pair their own phone.", "/settings");
       const botId = options.telegramTokenFile === undefined ? null : loadBotToken(process.env, options.telegramTokenFile)?.botId ?? null;
       const show = (problem: string, status = 400) => sendScreen(response, status, screen("Telegram", telegramSettingsHtml(store, botId, who.name, who.session.csrf, { problem }), { chrome: chromeFor(projectOf(who, request) ?? null, "settings"), forceSensitive: true }));
       if (body.getAll("password").length > 1) return show("Submit one value for each field.");
       if (botId === null) return show("Connect the Telegram bot first.", 409);
-      if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return show("Enter your Standing Orders password to change your phone pairing.", 403);
+      const pairingIdentity = authenticateAccount(store, who.name, body.get("password") ?? "");
+      if (!pairingIdentity.ok || pairingIdentity.role !== "approver" || pairingIdentity.generation !== who.session.generation) return show("Enter your Standing Orders password to change your phone pairing.", 403);
       if (url.pathname.endsWith("/unpair")) {
         store.unpairTelegram(botId, who.name, now);
         return redirect(response, "/settings/telegram");

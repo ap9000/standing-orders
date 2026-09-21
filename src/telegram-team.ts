@@ -150,7 +150,7 @@ export function applyTeamInbound(input: TeamInbound): boolean {
     }
     const chosen = rows[command.index - 1];
     if (chosen === undefined) { say(chatId, `Choose a number from the list: send /team to see it.`); return true; }
-    const bound = store.bindTelegramTeamChat({ botId, chatId, kind: isGroup ? "group" : "private", conversation: chosen.conversation.id, by: actor.name }, now);
+    const bound = store.bindTelegramTeamChat({ botId, chatId, kind: isGroup ? "group" : "private", conversation: chosen.conversation.id, by: actor.name, binding: binding.id }, now);
     if (!bound.ok) { say(chatId, "Another group already follows that conversation. Stop it there first, or choose a different conversation."); return true; }
     say(chatId, isGroup
       ? `This group now follows ${phoneText(chosen.conversation.title, 80)} (lead ${phoneText(chosen.leadName, 40)}). Paired members' messages go there; everyone here reads its replies. Send /team off to stop.`
@@ -167,6 +167,22 @@ export function applyTeamInbound(input: TeamInbound): boolean {
     // Unpaired members' chatter is nobody's message. A slash attempt gets the one hint.
     if (text.trimStart().startsWith("/")) { say(chatId, PAIR_FIRST); report.statusReplies = (report.statusReplies ?? 0) + 1; }
     else report.ignored++;
+    return true;
+  }
+  // A current sender must not queue into a destination whose sharing grant
+  // ended: it could run successfully while every reply is withheld.
+  const grant = store.liveTelegramBindingById(teamChat.binding);
+  let connected = false;
+  try {
+    if (grant !== null && grant.botId === botId && grant.approver === teamChat.boundBy &&
+      (isGroup || grant.id === binding.id)) {
+      const access = domain.access(actorOf(grant), teamChat.conversation, isGroup ? "manager" : "viewer");
+      connected = !isGroup || access.conversation.visibility === "team";
+    }
+  } catch { /* Give a reconnect instruction without disclosing conversation content. */ }
+  if (!connected) {
+    say(chatId, isGroup ? "This group's connection ended. Ask a conversation manager to send /team and connect it again." : "This chat's connection ended. Send /team and choose the conversation again.");
+    report.chatRefused = (report.chatRefused ?? 0) + 1;
     return true;
   }
   const trimmed = text.trim();
@@ -211,8 +227,27 @@ type TeamDeliveryReport = { sent: number; problems: string[] };
 export async function deliverTeamChats(
   store: Store, botId: string, transport: TelegramTransport, clock: () => Date, report: TeamDeliveryReport,
   projects: readonly string[], phoneOrigin?: () => string | null,
+  options: { readProjects?: () => Promise<readonly string[]>; canDeliver?: () => boolean } = {},
 ): Promise<void> {
   for (const chat of store.listTelegramTeamChats(botId)) {
+    // Selection is a grant from an exact pairing. Current membership, scope,
+    // and the selection itself are rechecked after each await and before each
+    // send; another person's new pairing cannot inherit this destination.
+    const access = async (): Promise<readonly string[] | null> => {
+      try {
+        if (options.canDeliver !== undefined && !options.canDeliver()) return null;
+        const enrolled = options.readProjects === undefined ? projects : await options.readProjects();
+        if (options.canDeliver !== undefined && !options.canDeliver()) return null;
+        if (store.telegramTeamChat(botId, chat.chatId)?.id !== chat.id) return null;
+        const binding = store.liveTelegramBindingById(chat.binding);
+        if (binding === null || binding.botId !== botId || binding.approver !== chat.boundBy ||
+          (chat.kind === "private" && binding.chatId !== chat.chatId)) return null;
+        const allowed = domainFor(store, enrolled).access(actorOf(binding), chat.conversation, chat.kind === "group" ? "manager" : "viewer");
+        if (chat.kind === "group" && allowed.conversation.visibility !== "team") return null;
+        return allowed.conversation.projects;
+      } catch { return null; }
+    };
+    if (await access() === null) continue;
     const row = conversationRow(store, chat.conversation);
     if (row === null) continue;
     const pending = store.handle.prepare(`SELECT m.id, m.role, m.text, m.turn, q.author, q.request_id, q.status FROM mate_message m
@@ -224,26 +259,42 @@ export async function deliverTeamChats(
       const ownMessage = requestId !== null && requestId.startsWith(`telegram:${chat.chatId}:`);
       const status = message["status"] === null || message["status"] === undefined ? null : String(message["status"]);
       const skip = role === "operator" && (ownMessage || status === "cancelled" || String(message["author"] ?? "").length === 0);
+      const prefix = `telegram-team:${chat.id}:`;
       if (!skip) {
         const text = role === "assistant" ? String(message["text"]) : `${phoneText(String(message["author"]), 40)}: ${String(message["text"])}`;
-        const sent = await sendParts(transport, chat.chatId, text);
+        const sent = await sendParts(store, transport, chat.chatId, text, `${prefix}message:${id}`, clock, access, report);
         if (sent !== null) { report.problems.push(`team chat ${chat.chatId}: ${sent}`); break; }
-        report.sent++;
       }
-      store.advanceTelegramTeamCursor(chat.id, id);
-      if (role !== "assistant" || message["turn"] === null) continue;
-      const turn = Number(message["turn"]);
-      const cardBinding = cardBindingFor(store, botId, chat, turn);
-      for (const proposal of store.listMateProposals(row.thread, ["pending"]).filter(one => one.turn === turn)) {
-        const preview = proposalPreview(store, proposal, projects, "telegram");
-        const keyboard: InlineButton[][] = [];
-        if (preview.buttons && cardBinding !== null) keyboard.push(...mintCardTokens(store, cardBinding, proposal.id, clock(), undefined, chat.chatId).keyboard);
-        const link = preview.buttons ? null : phoneLinkButton(phoneOrigin?.() ?? null, { label: "Open in Standing Orders", path: `/chat?conversation=${encodeURIComponent(row.conversation)}&proposal=${proposal.id}` });
-        if (link !== null) keyboard.push(link);
-        const problem = await sendParts(transport, chat.chatId, preview.text, keyboard.length === 0 ? undefined : keyboard);
-        if (problem !== null) { report.problems.push(`team card ${proposal.id}: ${problem}`); break; }
-        report.sent++;
+      let complete = true;
+      if (role === "assistant" && message["turn"] !== null) {
+        const turn = Number(message["turn"]);
+        const cardBinding = cardBindingFor(store, botId, chat, turn);
+        for (const proposal of store.listMateProposals(row.thread, ["pending"]).filter(one => one.turn === turn)) {
+          const enrolled = await access();
+          if (enrolled === null) { complete = false; break; }
+          const preview = proposalPreview(store, proposal, enrolled, "telegram");
+          if (store.serviceCursor(`${prefix}proposal:${proposal.id}`) >= splitParts(preview.text).length) continue;
+          const keyboard: InlineButton[][] = [];
+          let tokens: string[] = [];
+          if (preview.buttons && cardBinding !== null) {
+            const minted = mintCardTokens(store, cardBinding, proposal.id, clock(), undefined, chat.chatId);
+            keyboard.push(...minted.keyboard); tokens = minted.tokens;
+          }
+          const link = preview.buttons ? null : phoneLinkButton(phoneOrigin?.() ?? null, { label: "Open in Standing Orders", path: `/chat?conversation=${encodeURIComponent(row.conversation)}&proposal=${proposal.id}` });
+          if (link !== null) keyboard.push(link);
+          const problem = await sendParts(store, transport, chat.chatId, preview.text, `${prefix}proposal:${proposal.id}`, clock, access, report, keyboard.length === 0 ? undefined : keyboard, tokens);
+          if (problem !== null) {
+            for (const token of tokens) store.consumeTelegramProposalAction(token, clock());
+            report.problems.push(`team card ${proposal.id}: ${problem}`); complete = false; break;
+          }
+        }
       }
+      if (!complete || await access() === null) break;
+      // Commit only after the body and every card are delivered. Confirmed
+      // parts survive a retry, so a failed card does not repeat the body.
+      store.transact(() => {
+        if (store.advanceTelegramTeamCursor(chat.id, id)) store.handle.prepare("DELETE FROM service_cursor WHERE key LIKE ?").run(`${prefix}%`);
+      });
     }
   }
 }
@@ -259,13 +310,26 @@ function cardBindingFor(store: Store, botId: string, chat: TelegramTeamChat, tur
   return bindings.find(one => members.has(one.approver)) ?? null;
 }
 
-async function sendParts(transport: TelegramTransport, chatId: string, text: string, keyboard?: InlineButton[][]): Promise<string | null> {
+async function sendParts(
+  store: Store, transport: TelegramTransport, chatId: string, text: string, receipt: string, clock: () => Date,
+  access: () => Promise<readonly string[] | null>, report: TeamDeliveryReport, keyboard?: InlineButton[][], tokens: string[] = [],
+): Promise<string | null> {
   const parts = splitParts(text);
+  const delivered = store.serviceCursor(receipt);
   for (const [index, part] of parts.entries()) {
+    if (index < delivered) continue;
+    if (await access() === null) return "conversation access changed; delivery stopped";
     const last = index === parts.length - 1;
     try {
       const answer = await transport("sendMessage", { chat_id: chatId, text: part, link_preview_options: { is_disabled: true }, ...(last && keyboard !== undefined ? { reply_markup: { inline_keyboard: keyboard } } : {}) });
       if (!answer.ok) return answer.description ?? "Telegram did not accept the message";
+      const messageId = typeof answer.result === "object" && answer.result !== null ? (answer.result as { message_id?: unknown }).message_id : undefined;
+      if (typeof messageId !== "number") return "Telegram did not confirm a message id";
+      store.transact(() => {
+        if (last && tokens.length > 0) store.placeTelegramProposalActions(tokens, String(messageId));
+        store.setServiceCursor(receipt, index + 1, clock());
+      });
+      report.sent++;
     } catch (error) {
       return `Telegram transport failed: ${error instanceof Error ? error.message : String(error)}`;
     }

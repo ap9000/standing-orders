@@ -39,6 +39,9 @@ test("each teammate pairs and unpairs their own phone from the console; a code s
     const page = await (await fetch(`${base}/settings/telegram`, { headers: { cookie } })).text();
     expect(page).toContain("Your phone is not paired.");
     expect(page).toContain("Pair my phone");
+    expect(page).toContain("a conversation manager sends <code>/team</code>");
+    expect(page).toContain("Everyone in the group can read its replies.");
+    expect(page).not.toContain("People settings");
     const csrf = /name="csrf" value="([^"]+)"/.exec(page)![1]!;
     const post = (path: string, fields: Record<string, string>, who = cookie) =>
       fetch(`${base}${path}`, { method: "POST", headers: { cookie: who, origin: base }, body: new URLSearchParams(fields), redirect: "manual" });
@@ -49,12 +52,20 @@ test("each teammate pairs and unpairs their own phone from the console; a code s
     const code = /\/pair ([0-9a-f]{32})/.exec(shown)![1]!;
     // The code pairs alex's own chat; sam's simultaneous code pairs sam's.
     expect(store.consumeTelegramPairing({ codeHash: hashPairingCode(code), botId: "777000", chatId: "4242", userId: "4242", updateId: 1 }, new Date())).toMatchObject({ ok: true });
+    // A project-scoped teammate can manage their own phone without gaining
+    // installation bot settings or affecting another person's pairing.
+    expect(store.setAccountProjects("sam", [], "alex", new Date()).ok).toBe(true);
     const samCookie = await signIn("sam", samPassword);
     const samPage = await (await fetch(`${base}/settings/telegram`, { headers: { cookie: samCookie } })).text();
     expect(samPage).toContain("Your phone is not paired.");
     expect(samPage).toContain("1 teammate is paired.");
     const samCsrf = /name="csrf" value="([^"]+)"/.exec(samPage)![1]!;
-    const samMinted = await (await post("/settings/telegram/pair", { csrf: samCsrf, password: samPassword }, samCookie)).text();
+    const samSettings = await (await fetch(`${base}/settings`, { headers: { cookie: samCookie } })).text();
+    expect(samSettings).toContain('href="/settings/telegram"');
+    expect((await post("/settings/telegram-token", { csrf: samCsrf, password: samPassword, token: BOT_TOKEN }, samCookie)).status).toBe(403);
+    const samResponse = await post("/settings/telegram/pair", { csrf: samCsrf, password: samPassword }, samCookie);
+    expect(samResponse.status).toBe(200);
+    const samMinted = await samResponse.text();
     const samCode = /\/pair ([0-9a-f]{32})/.exec(samMinted)![1]!;
     expect(store.consumeTelegramPairing({ codeHash: hashPairingCode(samCode), botId: "777000", chatId: "8800", userId: "8800", updateId: 2 }, new Date())).toMatchObject({ ok: true });
     expect(store.liveTelegramBindings("777000").map(one => one.approver)).toEqual(["alex", "sam"]);
@@ -66,6 +77,8 @@ test("each teammate pairs and unpairs their own phone from the console; a code s
     expect((await post("/settings/telegram/unpair", { csrf, password })).status).toBe(303);
     expect(store.liveTelegramBindings("777000").map(one => one.approver)).toEqual(["sam"]);
     expect(await (await fetch(`${base}/settings/telegram`, { headers: { cookie } })).text()).toContain("Your phone is not paired.");
+    expect((await post("/settings/telegram/unpair", { csrf: samCsrf, password: samPassword }, samCookie)).status).toBe(303);
+    expect(store.liveTelegramBindings("777000")).toEqual([]);
   } finally {
     server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));

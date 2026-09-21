@@ -47,8 +47,29 @@ describe("Telegram team chats", () => {
   };
   const actor = (name: string) => ({ name, generation: store.accountOf(name)!.generation });
   const consent = (name: string) => store.mintTeamMateSession({ approver: name, approverGeneration: actor(name).generation, thread, credentialKey: "fixture", ceilingMicrousd: 0, ceilingDigest: ceilingDigestOf([REPO]), termsDigest: "t".repeat(64) }, T0);
-  const pass = (script: ReturnType<typeof scripted>) => bridgePass(store, { botId: BOT, transport: script.transport, clock: () => T0, readProjects: async () => [REPO], conversation: { evidenceRoot: dir, phoneOrigin: () => "https://console.example" } });
+  const pass = (script: ReturnType<typeof scripted>, extra: Partial<Parameters<typeof bridgePass>[1]> = {}) => bridgePass(store, { botId: BOT, transport: script.transport, clock: () => T0, readProjects: async () => [REPO], conversation: { evidenceRoot: dir, phoneOrigin: () => "https://console.example" }, ...extra });
   const queued = () => store.handle.prepare("SELECT q.author, q.request_id, q.status, m.text FROM team_message q JOIN mate_message m ON m.id = q.message WHERE q.conversation = ? ORDER BY q.message").all(conversation);
+
+  const replyWithCard = () => {
+    const session = store.teamMateSession("alex", thread)?.id ?? consent("alex");
+    store.createTask({ id: "target", title: "Launch page" }, T0);
+    store.placeTask(store.lookupRef("target")!.id, REPO);
+    const opened = store.openMateTurn({ approver: "alex", session, thread, credentialKey: "fixture", reservedMicrousd: 0, dailyTurns: 50, weeklyCeilingMicrousd: 0, deadlineMs: 60_000 }, T0);
+    if (!opened.ok) throw new Error(opened.reason);
+    const started = store.startMateTurn(opened.id, T0);
+    if (!started.ok) throw new Error("start");
+    const proposal = store.draftMateProposal({ thread, turn: opened.id, kind: "hold", payload: { task: "target", taskTitle: "Launch page", reason: "Wait for the audit", sawHold: null }, ceilingDigest: ceilingDigestOf([REPO]) }, T0);
+    expect(store.finalizeMateTurn(opened.id, started.generation, { state: "answered", settledMicrousd: 0, tokensIn: 0, tokensOut: 0, message: { text: "The launch needs an audit.", activity: "" } }, T0)).toBe(true);
+    return proposal;
+  };
+  const groupTap = (id: number, user: number, token: string, messageId: number) => ({ update_id: id, callback_query: { id: `cb-${id}`, data: token, from: { id: user }, message: { message_id: messageId, chat: group } } });
+  const sentCard = (script: ReturnType<typeof scripted>) => {
+    const sent = script.sends().find(call => String(call.params["chat_id"]) === String(GROUP) &&
+      ((call.params["reply_markup"] as { inline_keyboard?: { text: string; callback_data?: string }[][] } | undefined)?.inline_keyboard ?? []).flat().some(button => button.text === "Confirm" && button.callback_data !== undefined))!;
+    const buttons = (sent.params["reply_markup"] as { inline_keyboard: { text: string; callback_data: string }[][] }).inline_keyboard.flat();
+    const token = buttons.find(button => button.text === "Confirm")!.callback_data;
+    return { token, messageId: Number(store.getTelegramProposalAction(token)!.messageId) };
+  };
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "so-telegram-team-"));
@@ -207,4 +228,127 @@ describe("Telegram team chats", () => {
     await pass(script);
     expect(script.texts(31337).at(-1)).toBe(PAIR_FIRST);
   });
+
+  test.each(["membership", "lead-membership", "projects", "unpair", "rotation", "unpair-and-repair"])("private delivery stops after %s without deleting shared history", async change => {
+    const script = scripted();
+    script.updates.push([textUpdate(1, priv(SAM.chat), SAM.user, "/team 1")]);
+    await pass(script);
+    const id = store.appendMateMessage({ thread, turn: null, role: "assistant", text: "Private launch details" }, T0);
+    if (change === "membership") expect(domain.execute(actor("alex"), { operation: "member", args: { conversationId: conversation, account: "sam", role: "contributor", active: false, expectedRevision: 2 } }, T0).ok).toBe(true);
+    if (change === "lead-membership") {
+      const lead = domain.access(actor("alex"), conversation).lead;
+      expect(domain.execute(actor("alex"), { operation: "member", args: { leadId: lead.id, account: "sam", role: "contributor", active: false, expectedRevision: lead.revision } }, T0).ok).toBe(true);
+    }
+    if (change === "projects") expect(store.setAccountProjects("sam", [], "alex", T0).ok).toBe(true);
+    if (change === "rotation") expect(addApprover(store, "sam", T0, { name: "alex", token: alexToken }).ok).toBe(true);
+    if (change.startsWith("unpair")) store.unpairTelegram(BOT, "sam", T0);
+    if (change === "unpair-and-repair") pairAs("sam", SAM);
+    expect(await pass(script)).toMatchObject({ ok: true, report: { sent: 0 } });
+    expect(script.texts(SAM.chat)).not.toContain("Private launch details");
+    expect(store.listMateMessages(thread, 10).some(message => message.id === id)).toBe(true);
+  });
+
+  test("group delivery stops when its granting manager is unpaired, even if another contributor remains paired", async () => {
+    const script = scripted();
+    script.updates.push([textUpdate(1, group, ALEX.user, "/team 1")]);
+    await pass(script);
+    store.appendMateMessage({ thread, turn: null, role: "assistant", text: "Do not send after the grant ends" }, T0);
+    store.unpairTelegram(BOT, "alex", T0);
+    expect(await pass(script)).toMatchObject({ ok: true, report: { sent: 0 } });
+    expect(script.texts(GROUP)).not.toContain("Do not send after the grant ends");
+  });
+
+  test("delivery rechecks membership between parts and does not advance an unfinished message", async () => {
+    const script = scripted();
+    script.updates.push([textUpdate(1, priv(SAM.chat), SAM.user, "/team 1")]);
+    await pass(script);
+    const before = script.sends().length;
+    store.appendMateMessage({ thread, turn: null, role: "assistant", text: "Details ".repeat(1200) }, T0);
+    const transport: TelegramTransport = async (...args) => {
+      const result = await script.transport(...args);
+      if (args[0] === "sendMessage") expect(domain.execute(actor("alex"), { operation: "member", args: { conversationId: conversation, account: "sam", role: "contributor", active: false, expectedRevision: 2 } }, T0).ok).toBe(true);
+      return result;
+    };
+    await pass(script, { transport });
+    expect(script.sends().length - before).toBe(1);
+    expect(store.telegramTeamChat(BOT, String(SAM.chat))!.cursor).toBe(0);
+  });
+
+  test("a failed card keeps its message pending and retries only its unsent parts", async () => {
+    const script = scripted();
+    script.updates.push([textUpdate(1, group, ALEX.user, "/team 1")]);
+    await pass(script);
+    const proposal = replyWithCard();
+    const transport: TelegramTransport = async (method, params, ...rest) => method === "sendMessage" && params["reply_markup"] !== undefined
+      ? { ok: false, description: "fixture card failure" } : script.transport(method, params, ...rest);
+    const failed = await pass(script, { transport });
+    expect(failed.ok && failed.report.problems).toContain(`team card ${proposal}: fixture card failure`);
+    expect(store.telegramTeamChat(BOT, String(GROUP))!.cursor).toBe(0);
+    expect(await pass(script)).toMatchObject({ ok: true, report: { sent: 1 } });
+    expect(script.texts(GROUP).filter(text => text === "The launch needs an audit.")).toHaveLength(1);
+    expect(sentCard(script).messageId).toBeGreaterThan(0);
+    expect(await pass(script)).toMatchObject({ ok: true, report: { sent: 0 } });
+  });
+
+  test("a paired group contributor confirms under their own account through the bridge callback", async () => {
+    const script = scripted();
+    consent("sam");
+    script.updates.push([textUpdate(1, group, ALEX.user, "/team 1")]);
+    await pass(script);
+    const proposal = replyWithCard();
+    await pass(script);
+    const card = sentCard(script);
+    script.updates.push([groupTap(2, SAM.user, card.token, card.messageId)]);
+    expect(await pass(script, { readProjects: async () => [REPO, "/test/unrelated-project"] })).toMatchObject({ ok: true, report: { chatConfirmed: 1 } });
+    expect(store.getMateProposal(proposal)).toMatchObject({ state: "confirmed", resolvedBy: "sam", outcome: { ok: true, via: "telegram" } });
+  });
+
+  test("a removed group member sees no card details and cannot consume the shared confirmation", async () => {
+    const script = scripted();
+    script.updates.push([textUpdate(1, group, ALEX.user, "/team 1")]);
+    await pass(script);
+    const proposal = replyWithCard();
+    await pass(script);
+    const card = sentCard(script);
+    expect(domain.execute(actor("alex"), { operation: "member", args: { conversationId: conversation, account: "sam", role: "contributor", active: false, expectedRevision: 2 } }, T0).ok).toBe(true);
+    const before = script.calls.length;
+    script.updates.push([groupTap(2, SAM.user, card.token, card.messageId)]);
+    await pass(script);
+    expect(script.calls.slice(before).filter(call => call.method === "editMessageText")).toEqual([]);
+    expect(store.getTelegramProposalAction(card.token)!.consumedAt).toBeNull();
+    expect(store.getMateProposal(proposal)!.state).toBe("pending");
+  });
+
+  test("rebinding a group to another conversation makes its old card unavailable", async () => {
+    const script = scripted();
+    script.updates.push([textUpdate(1, group, ALEX.user, "/team 1")]);
+    await pass(script);
+    const proposal = replyWithCard();
+    await pass(script);
+    const card = sentCard(script);
+    const lead = domain.access(actor("alex"), conversation).lead;
+    const created = domain.execute(actor("alex"), { operation: "create-conversation", args: { leadId: lead.id, title: "Other launch", visibility: "team", projects: [REPO] } }, T0);
+    expect(created.ok).toBe(true);
+    const other = String((created.result as { conversationId: string }).conversationId);
+    expect(store.bindTelegramTeamChat({ botId: BOT, chatId: String(GROUP), kind: "group", conversation: other, by: "alex", binding: store.liveTelegramBindingFor(BOT, String(ALEX.user))!.id }, T0).ok).toBe(true);
+    script.updates.push([groupTap(2, ALEX.user, card.token, card.messageId)]);
+    await pass(script);
+    expect(store.getMateProposal(proposal)!.state).toBe("pending");
+    expect(script.calls.filter(call => call.method === "answerCallbackQuery").at(-1)!.params["text"]).toContain("no longer available");
+  });
+
+
+  test("a re-paired phone must reconnect its selected conversation before saving new work", async () => {
+    const script = scripted();
+    consent("sam");
+    script.updates.push([textUpdate(1, priv(SAM.chat), SAM.user, "/team 1")]);
+    await pass(script);
+    store.unpairTelegram(BOT, "sam", T0);
+    pairAs("sam", SAM);
+    script.updates.push([textUpdate(2, priv(SAM.chat), SAM.user, "Do not save without a reply channel")]);
+    expect(await pass(script)).toMatchObject({ ok: true, report: { chatRefused: 1 } });
+    expect(queued()).toEqual([]);
+    expect(script.texts(SAM.chat).at(-1)).toContain("Send /team and choose the conversation again");
+  });
+
 });
