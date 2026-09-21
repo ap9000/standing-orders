@@ -49,15 +49,16 @@
     "src/work-index.test.ts": "df33ec4099644886c8f788ec2b3c7c2fa756962704f0841216789da4f1c64371",
     "src/work-index.ts": "50e9ebcb15b2a402d20a2b7a465f8faf25a8141216ab7becd7a323a6888cb7b5",
     "src/workspace-revision.test.ts": "72f01d9b40f742f52a7476d28ed6cc3e3e2835ab314d0a4c1331f1cbd95cb165",
-    "src/workspace-revision.ts": "3de93ec528559b13158affc883b5f9ebb63f789a91c11334468ddf43e012bac5"
+    "src/workspace-revision.ts": "3de93ec528559b13158affc883b5f9ebb63f789a91c11334468ddf43e012bac5",
+    "src/up.test.ts": "8bf998d53f344f91a003c29ee5662ce38c97383ba439a3d12b6e2795b47bb123"
   },
   "typecheck": "passed",
   "focusedTests": {
     "log": "checks.log.gz",
     "logEncoding": "gzip",
-    "logSha256": "d971dce9b26e2b06c7c292a5e19223b49a5e5eec256b44d5f5032f2bcb73d3b9",
-    "decodedSha256": "884eaeecaa3ab60afc48e088a5fff4ec3e2c3fe12ec36549e3e21c9177708fc3",
-    "decodedBytes": 8679,
+    "logSha256": "eb7bbd171bf48f71d796a3c9c96b6f5377668003d1ad7414fc08c4f24cc55063",
+    "decodedSha256": "ef74f502a5ae79d1af818da6a0d9c80feeed8502b1253f68e1a90c9f40a8517f",
+    "decodedBytes": 15818,
     "initial": {
       "passed": 326,
       "failed": 1,
@@ -68,8 +69,24 @@
       "failed": 0,
       "files": 1
     },
-    "note": "Only the failing test fixture order changed after the broad run; its affected test file passed on rerun. Separate UI suite:38 passed. Exact candidate full check pending native release."
+    "note": "Only the failing test fixture order changed after the broad run; its affected test file passed on rerun. Separate UI suite:38 passed. Exact candidate full check pending native release.",
+    "correctedUpFixture": {
+      "passed": 14,
+      "failed": 0,
+      "files": 1,
+      "typecheck": "passed"
+    }
   },
   "uiReport": "ui-report.json",
-  "browserChecks": 2
+  "browserChecks": 2,
+  "priorNativeRun": {
+    "run": 1967,
+    "candidate": "4f34e6d6740c643bbbdddc9bb0a001d9c3e79674",
+    "head": "154e050103202635e4a4c2ebacffc6a978dc41fa",
+    "passed": 4299,
+    "failed": 1,
+    "existingPlatformSkips": 23,
+    "problem": "Existing hot-project-enrollment fixture could expire its lifetime before async connection. Corrected test observes the saved connection while up is running and then stops its own service. Production behavior and test deadline unchanged.",
+    "result": "Preserved as failed; it does not verify this new candidate."
+  }
 }

@@ -158,7 +158,7 @@ describe("standing-orders up", () => {
     expect(named.startsWith(normalizeRunnerName(hostname()).slice(0, 8))).toBe(true);
   });
 
-  test("a project added while up is running connects without a restart", async () => {
+  test("a project added while up is running connects without a restart", async ({ onTestFinished }) => {
     const secondPath = join(base, "second-project");
     execFileSync("mkdir", ["-p", secondPath]);
     const second = realpathSync(secondPath);
@@ -167,31 +167,62 @@ describe("standing-orders up", () => {
     git(["add", "."], second);
     git(["commit", "-qm", "first"], second);
 
+    let ready: () => void = () => {};
+    let connected: () => void = () => {};
+    const startup = new Promise<void>(resolve => { ready = resolve; });
+    const connection = new Promise<void>(resolve => { connected = resolve; });
+    let finished = false;
     const running = runOperate(
       "up",
-      ["--repo", repo, "--project-root", base, "--port", String(PORT + 6), "--for", "2200", "--json"],
-      line => lines.push(line),
-      { databaseFile: db },
-    );
-    for (let attempt = 0; attempt < 100 && lines.length === 0; attempt += 1) {
-      await new Promise(resolve => setTimeout(resolve, 20));
-    }
-    expect(lines.length).toBeGreaterThan(0);
-    const runnerName = String(envelope()["runner"]);
-
-    const registry = join(base, "repos.json");
-    const added = await updateRepos(registry, current => addRepos(current, [second]));
-    expect(added).toMatchObject({ ok: true });
-    expect(await running).toBe(0);
-
-    const store = openStore(db);
+      ["--repo", repo, "--project-root", base, "--port", String(PORT + 6), "--json"],
+      line => { lines.push(line); ready(); },
+      {
+        databaseFile: db,
+        openDatabase: file => {
+          const store = openStore(file);
+          const startEpisode = store.startWatchEpisode.bind(store);
+          store.startWatchEpisode = (episode, now) => {
+            const result = startEpisode(episode, now);
+            // Observe the real durable connection; retain every production write.
+            if (episode.repo === second) connected();
+            return result;
+          };
+          return store;
+        },
+      },
+    ).finally(() => { finished = true; });
+    // This journey owns shutdown. A short --for trial could expire before
+    // the async registry write/refresh under parallel load, testing shutdown
+    // timing instead of hot project enrollment. The suite deadline is unchanged.
+    onTestFinished(async () => {
+      if (!finished) process.emit("SIGINT");
+      await running;
+    });
     try {
-      expect(store.getRunner(runnerName)?.runner.repos).toContain(second);
-      expect(store.latestWatchEpisode(second)).toMatchObject({ repo: second, runner: runnerName });
+      const stoppedEarly = running.then(code => { throw new Error(`up stopped before the connection was observed (exit ${code})`); });
+      await Promise.race([startup, stoppedEarly]);
+      expect(envelope()).toMatchObject({ ok: true, repos: [realpathSync(repo)] });
+      const runnerName = String(envelope()["runner"]);
+
+      const registry = join(base, "repos.json");
+      const added = await updateRepos(registry, current => addRepos(current, [second]));
+      expect(added).toMatchObject({ ok: true });
+      await Promise.race([connection, stoppedEarly]);
+
+      const store = openStore(db);
+      try {
+        expect(finished).toBe(false);
+        expect(store.getRunner(runnerName)?.runner).toMatchObject({ repos: expect.arrayContaining([second]), retiredAt: null });
+        expect(store.latestWatchEpisode(second)).toMatchObject({ repo: second, runner: runnerName });
+      } finally {
+        store.close();
+      }
+      expect(await loadProjectRegistry(registry)).toMatchObject({ roots: [realpathSync(base)], repos: expect.arrayContaining([realpathSync(repo), second]) });
     } finally {
-      store.close();
+      if (!finished) process.emit("SIGINT");
+      await running;
     }
-    expect(await loadProjectRegistry(registry)).toMatchObject({ roots: [realpathSync(base)], repos: expect.arrayContaining([realpathSync(repo), second]) });
+    expect(await running).toBe(0);
   });
 
   test("the remembered login answers for every operator verb: after one up, register and approve ask for nothing", async () => {
