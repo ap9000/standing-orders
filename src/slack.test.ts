@@ -619,7 +619,7 @@ describe("Slack shared chat", () => {
       ),
     ) as SlackContent;
     expect(content.text).toBe(
-      telegramProgressCard(store, store.getRun(run)!, "sample", repo, now).text,
+      telegramProgressCard(store, store.getRun(run)!, "sample", repo, now, options.evidenceRoot).text,
     );
   });
   test("rate limits are persisted and a second owner cannot take a live connection", async () => {

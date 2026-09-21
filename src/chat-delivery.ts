@@ -604,6 +604,7 @@ export async function planChatNotifications(
             notification.taskId,
             notification.project,
             now,
+            options.evidenceRoot,
           );
           const content: ChatContent = {
             text: card.text,

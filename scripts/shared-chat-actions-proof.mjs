@@ -252,7 +252,7 @@ try {
       );
       await page
         .getByText(
-          "Human acceptance recorded. Machine and reviewer findings are unchanged.",
+          "Human acceptance recorded. The recorded checks are unchanged.",
           { exact: true },
         )
         .waitFor();

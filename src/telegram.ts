@@ -494,8 +494,8 @@ type OutboundSender = (text: string, keyboard?: InlineButton[][], messageRows?: 
  * under the trusted origin read now — the same road `/task` uses. The label
  * names where the path goes; nothing in it comes from the fact's text. */
 function factLinkLabel(path: string): string {
-  if (/^\/review\?result=[^&]+&run=\d+&tab=checks$/.test(path)) return "Review for acceptance";
-  if (/^\/chat\?task=[^&]+&result=/.test(path)) return "Review result";
+  if (/^\/review\?result=[^&]+&run=\d+&tab=checks$/.test(path)) return "Inspect result";
+  if (/^\/chat\?task=[^&]+&result=/.test(path)) return "Open result";
   if (/^\/(?:chat\?task=|t\/)/.test(path)) return "Open task";
   if (/^\/d\//.test(path)) return "Open decision";
   return "Open console";
@@ -624,7 +624,7 @@ async function deliverOutbox(
       if (problem !== null) return { ok: false, error: problem };
       const messageId = store.telegramProgressMessage(binding, progressRun);
       if (messageId === null && onlyExisting) return null;
-      const card = telegramProgressCard(store, store.getRun(progressRun.id)!, row.taskId, row.project, clock());
+      const card = telegramProgressCard(store, store.getRun(progressRun.id)!, row.taskId, row.project, clock(), evidenceRoot);
       let button: InlineButton[] | null = null;
       try { button = phoneLinkButton(phoneOrigin?.() ?? null, card.link); } catch { /* No trusted origin. */ }
       const keyboard = button === null ? [] : [button];

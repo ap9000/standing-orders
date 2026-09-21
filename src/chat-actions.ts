@@ -64,7 +64,6 @@ export const CHAT_ACTIONS = {
   },
   scope_approve: { label: "Approve work", protected: true, password: true },
   result_accept: { label: "Accept result", protected: true, password: false },
-  result_review: { label: "Request review", protected: false, password: false },
   task_cancel: { label: "Cancel task", protected: true, password: false },
   task_resume: { label: "Resume task", protected: true, password: true },
 } as const;
@@ -95,7 +94,6 @@ export const CHAT_ACTION_FIELDS: Record<ChatAction, readonly string[]> = {
   knowledge_restore: ["repo", "restore"],
   scope_approve: ["task"],
   result_accept: ["task", "run", "note"],
-  result_review: ["task", "run"],
   task_cancel: ["task"],
   task_resume: ["task", "run"],
 };
@@ -182,7 +180,6 @@ export function prepareSharedAction(
   now = new Date(),
 ): SharedAction {
   if (!isChatAction(operation)) throw Error("Choose an available action.");
-  if (operation === "result_review") throw Error("Separate model review has been removed. Open the saved result and mark it complete or request changes.");
   const allowed = CHAT_ACTION_FIELDS[operation];
   if (Object.keys(input).some((key) => !allowed.includes(key)))
     throw Error("This action contains an unsupported field.");
@@ -785,9 +782,7 @@ export function executeSharedAction(
           String(req["note"] ?? "").trim() || null,
           now,
         );
-      else if (payload.operation === "result_review") {
-        throw Error("Separate model review has been removed. Inspect the saved result.");
-      } else if (payload.operation === "task_cancel") {
+      else if (payload.operation === "task_cancel") {
         const result = store.cancelTask(task!, now);
         if (!result.ok)
           throw Error(`Task was not cancelled: ${result.reason}.`);
@@ -812,10 +807,8 @@ export function executeSharedAction(
       const said =
         payload.operation === "skill_test"
           ? "Skill test created. Existing approval rules apply."
-          : payload.operation === "result_review"
-            ? "Independent review requested."
-            : payload.operation === "result_accept"
-              ? "Human acceptance recorded. Machine and reviewer findings are unchanged."
+          : payload.operation === "result_accept"
+              ? "Human acceptance recorded. The recorded checks are unchanged."
               : payload.operation === "scope_approve"
                 ? "The exact work is approved."
                 : payload.operation === "task_cancel"

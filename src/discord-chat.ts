@@ -297,7 +297,7 @@ export async function deliverDiscordPart(
         );
       }
       buttons = link(options.origin(), {
-        label: "Review result",
+        label: "Open result",
         path: chatResultHref(content.image.taskId, content.image.run, "checks"),
       });
     }

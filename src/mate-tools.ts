@@ -440,12 +440,12 @@ export const MATE_TOOLS: MateTool[] = [
     name: "get_actions",
     description: "List shared actions and required inputs. All channels use the same approvals.",
     inputSchema: schema({}),
-    handle: () => ({ok:true,body:{actions:Object.entries(CHAT_ACTIONS).filter(([operation])=>operation!=="result_review").map(([operation,value])=>({operation,label:value.label,secureReview:value.protected,inputs:CHAT_ACTION_FIELDS[operation as keyof typeof CHAT_ACTIONS].filter(field=>field!=='nonce'&&field!=='files')})),notice:'Passwords and credentials never belong in a tool call or conversation. Secure review links complete protected actions.'}}),
+    handle: () => ({ok:true,body:{actions:Object.entries(CHAT_ACTIONS).map(([operation,value])=>({operation,label:value.label,secureReview:value.protected,inputs:CHAT_ACTION_FIELDS[operation as keyof typeof CHAT_ACTIONS].filter(field=>field!=='nonce'&&field!=='files')})),notice:'Passwords and credentials never belong in a tool call or conversation. Secure review links complete protected actions.'}}),
   },
   {
     name: "propose_action",
     description: "Read get_actions and relevant skills/evidence first. Save an exact-state proposal only; protected or long terms require full secure review.",
-    inputSchema: schema({operation:{type:'string',enum:Object.keys(CHAT_ACTIONS).filter(operation=>operation!=="result_review")},repo:{type:'string'},task:TASK_ARG,version:{type:'string'},restore:{type:'integer',minimum:1},sample:{type:'string',maxLength:800},content:{type:'string',maxLength:12000},instructions:{type:'string',maxLength:4000},title:{type:'string',maxLength:120},id:{type:'string'},run:{type:'integer',minimum:1},note:{type:'string',maxLength:2000}},['operation']),
+    inputSchema: schema({operation:{type:'string',enum:Object.keys(CHAT_ACTIONS)},repo:{type:'string'},task:TASK_ARG,version:{type:'string'},restore:{type:'integer',minimum:1},sample:{type:'string',maxLength:800},content:{type:'string',maxLength:12000},instructions:{type:'string',maxLength:4000},title:{type:'string',maxLength:120},id:{type:'string'},run:{type:'integer',minimum:1},note:{type:'string',maxLength:2000}},['operation']),
     handle:(ctx,args)=>{
       const operation=args['operation'];if(!isChatAction(operation))return {ok:false,message:'Choose an action from get_actions.'};
       const input={...args};delete input['operation'];

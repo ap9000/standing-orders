@@ -472,7 +472,7 @@ async function runTelegramConversation(row: TelegramConversation, args: TurnArgs
           // file repaired meanwhile is sent and one still wrong is refused
           // again. The row is never done while the notice is unconfirmed.
           report.problems.push(`telegram chat image for update ${row.updateId} was not sent: ${image.problem}`);
-          const link = part.taskId !== null && part.run !== null && taskInCeiling(store, part.taskId, repos) ? { label: "Review result", path: chatResultHref(part.taskId, part.run) } : null;
+          const link = part.taskId !== null && part.run !== null && taskInCeiling(store, part.taskId, repos) ? { label: "Open result", path: chatResultHref(part.taskId, part.run) } : null;
           const button = phoneLinkButton(options.phoneOrigin?.() ?? null, link);
           const problem = image.problem;
           method = "sendMessage";

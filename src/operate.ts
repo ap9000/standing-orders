@@ -7554,7 +7554,7 @@ async function runWatchLoop(args: {
             ((cycle.chatQueued ?? 0) > 0 ? `, chat received ${cycle.chatQueued}` : "") +
             ((cycle.chatAnswered ?? 0) > 0 ? `, chat replied ${cycle.chatAnswered}` : "") +
             ((cycle.chatConfirmed ?? 0) > 0 ? `, chat confirmed ${cycle.chatConfirmed}` : "") +
-            (cycle.problems.length > 0 ? ` — ${cycle.problems.length} problem(s)` : ""),
+            (cycle.problems.length > 0 ? ` — ${cycle.problems.length} problem(s): ${cycle.problems[0]!.slice(0, 200)}` : ""),
         );
       },
     }).catch(error => {
@@ -8811,7 +8811,7 @@ async function bridgeCommand(
             write(
               `bridge: sent ${cycle.sent}, answered ${cycle.answered}, paired ${cycle.paired}` +
                 ((cycle.statusReplies ?? 0) > 0 ? `, status replies ${cycle.statusReplies}` : "") +
-                (cycle.problems.length > 0 ? ` — ${cycle.problems.length} problem(s)` : ""),
+                (cycle.problems.length > 0 ? ` — ${cycle.problems.length} problem(s): ${cycle.problems[0]!.slice(0, 200)}` : ""),
             );
           }
         },

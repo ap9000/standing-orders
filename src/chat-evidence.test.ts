@@ -100,7 +100,7 @@ describe("shared result image selection", () => {
     const me = who([repos.a]);
     const ctx = { store, who: me, now: T0, evidenceRoot, step: 1, readDecisions: new Map<number, number>(), draft: () => null };
     expect(executeMateTool(ctx, "get_acceptance_evidence", { task: "alpha", run })).toMatchObject({ ok: true, body: {
-      status: "Awaiting human review", accepted: false, run, criteriaTotal: 4, nextCriterionOffset: 3, problems: [],
+      status: "Ready to inspect", accepted: false, run, criteriaTotal: 4, nextCriterionOffset: 3, problems: [],
       criteria: [{ id: "c1", state: "Human review required", reviewer: { judgement: "upholds" } }, { id: "c2" }, { id: "c3" }],
       caveats: ["Physical Telegram rendering was not tested."],
     } });
@@ -111,7 +111,7 @@ describe("shared result image selection", () => {
     expect(readAcceptanceEvidence(store, who([repos.a, repos.b]), evidenceRoot, "alpha", foreign).ok).toBe(false);
     expect(executeMateTool(ctx, "recap", {})).toMatchObject({ ok: true, body: { repos: [{ needsVerification: 1 }] } });
     store.acceptProof(run, "alex", "Inspected both viewports; physical device gap acknowledged.", T0);
-    expect(readAcceptanceEvidence(store, me, evidenceRoot, "alpha", run)).toMatchObject({ ok: true, body: { status: "Accepted after human review", recordedVerdict: "short", accepted: true } });
+    expect(readAcceptanceEvidence(store, me, evidenceRoot, "alpha", run)).toMatchObject({ ok: true, body: { status: "Accepted by a person", recordedVerdict: "short", accepted: true } });
     expect(executeMateTool(ctx, "recap", {})).toMatchObject({ ok: true, body: { repos: [{ needsVerification: 0 }] } });
     writeFileSync(join(evidenceRoot, String(run), "proof.json"), "changed");
     expect(readAcceptanceEvidence(store, me, evidenceRoot, "alpha", run)).toMatchObject({ ok: true, body: { accepted: true, problems: expect.arrayContaining([expect.stringContaining("proof")]), caveats: [] } });

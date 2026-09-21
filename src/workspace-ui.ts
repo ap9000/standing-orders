@@ -268,7 +268,7 @@ function storedResultStatusOf(result: ResultFacts | null, publication: Publicati
   const withPublication = (detail: string): string => (published === null ? detail : `${detail} ${published.detail}`);
   const humanReview = manualReviewOnly({ verdict: result.verdict ?? "", reasons: result.reasons });
   if (result.accepted && humanReview) {
-    return { token: "accepted-exception", label: "Accepted after human review", detail: withPublication("Human acceptance is recorded for this result. The machine verdict remains unchanged."), tone: "done", action: { label: "Review acceptance", kind: "open-review" } };
+    return { token: "accepted-exception", label: "Accepted by a person", detail: withPublication("A person accepted this result. The recorded checks are unchanged."), tone: "done", action: { label: "Open the acceptance", kind: "open-review" } };
   }
   if (result.accepted) {
     return {
@@ -279,7 +279,7 @@ function storedResultStatusOf(result: ResultFacts | null, publication: Publicati
       // restated as recorded.
       detail: withPublication(`An approver accepted this result by hand, and the recorded exception says why. The machine's verdict is unchanged: ${machineVerdictWords(result)}.`),
       tone: "done",
-      action: { label: "Review the recorded exception", kind: "open-review" },
+      action: { label: "Open the recorded exception", kind: "open-review" },
     };
   }
   const problem = evidenceProblemOf(result.verdict, result.reasons);
@@ -290,30 +290,30 @@ function storedResultStatusOf(result: ResultFacts | null, publication: Publicati
       label: "Changes saved, but checks failed",
       detail: withPublication(`The repository's approved check failed against this build${exit === null ? "" : ` (exit ${exit})`}, so the result is not verified.`),
       tone: "problem",
-      action: { label: "Review the failed check", kind: "open-review" },
+      action: { label: "Open the failed check", kind: "open-review" },
     };
   }
   if (problem === "mismatched") {
     return {
       token: "evidence-mismatch",
-      label: "Result saved, but its evidence does not match",
+      label: "Result saved, but its record does not match",
       // A structural refutation is settled before the approved check is
       // weighed, so it says nothing about whether that check passed.
       detail: withPublication("The proof's claims disagree with the sealed record. Whether the approved check passed is not settled by this verdict."),
       tone: "problem",
-      action: { label: "Review the evidence", kind: "open-review" },
+      action: { label: "Open the record", kind: "open-review" },
     };
   }
   if (result.verdict === "short" && humanReview) {
-    return { token: "verification-needed", label: "Ready for your review", detail: withPublication("The remaining requirements need human review. Inspect the evidence and record your decision."), tone: "attention", action: { label: "Review for acceptance", kind: "open-review" } };
+    return { token: "verification-needed", label: "Ready to inspect", detail: withPublication("The remaining requirements need a person's inspection. Open the result and record your decision."), tone: "attention", action: { label: "Inspect the result", kind: "open-review" } };
   }
   if (result.verdict === "short") {
     return {
       token: "verification-needed",
       label: "Result saved — verification needed",
-      detail: withPublication("Required evidence is missing, so this result is not verified."),
+      detail: withPublication("Required saved material is missing, so this result is not verified."),
       tone: "problem",
-      action: { label: "Review the missing evidence", kind: "open-review" },
+      action: { label: "See what is missing", kind: "open-review" },
     };
   }
   if (result.outcome === "no-change") {
@@ -321,8 +321,8 @@ function storedResultStatusOf(result: ResultFacts | null, publication: Publicati
     // at adjudication; only a verdict-less no-change reads its two
     // presence facts here.
     return result.recordComplete === false && result.verdict === null
-      ? { token: "record-incomplete", label: "No-change result, record incomplete", detail: "The build concluded nothing needed to change, but its handoff or sealed diff is missing.", tone: "problem", action: { label: "Review the record", kind: "open-run" } }
-      : { token: "no-change", label: "No changes were needed", detail: withPublication("The build concluded nothing needed to change; its handoff and sealed diff are on record."), tone: "done", action: { label: "Review the result", kind: "open-result" } };
+      ? { token: "record-incomplete", label: "No-change result, record incomplete", detail: "The build concluded nothing needed to change, but its handoff or sealed diff is missing.", tone: "problem", action: { label: "Open the record", kind: "open-run" } }
+      : { token: "no-change", label: "No changes were needed", detail: withPublication("The build concluded nothing needed to change; its handoff and sealed diff are on record."), tone: "done", action: { label: "Open the result", kind: "open-result" } };
   }
   if (result.verdict === null) {
     return {
@@ -330,7 +330,7 @@ function storedResultStatusOf(result: ResultFacts | null, publication: Publicati
       label: "Result saved — verification needed",
       detail: withPublication("No verification result is recorded for this build."),
       tone: "problem",
-      action: { label: "Review the missing evidence", kind: "open-review" },
+      action: { label: "See what is missing", kind: "open-review" },
     };
   }
   if (result.verdict === "attested") {
@@ -339,24 +339,24 @@ function storedResultStatusOf(result: ResultFacts | null, publication: Publicati
       label: "Result saved — checks reported by the agent",
       detail: withPublication("No independent project check ran; the checks listed are the agent's own report."),
       tone: "neutral",
-      action: { label: "Review the result", kind: "open-result" },
+      action: { label: "Open the result", kind: "open-result" },
     };
   }
   if (published !== null && (published.token === "merge-observed" || published.token === "pr-opened" || published.token === "pr-closed")) {
     return {
       token: published.token,
       label: published.label,
-      detail: `Standing Orders independently verified this result. ${published.detail}`,
+      detail: `The approved check passed against this result. ${published.detail}`,
       tone: published.token === "pr-closed" ? "muted" : "done",
-      action: published.token === "merge-observed" ? { label: "Review the result", kind: "open-result" } : { label: "Open the pull request", kind: "open-pr" },
+      action: published.token === "merge-observed" ? { label: "Open the result", kind: "open-result" } : { label: "Open the pull request", kind: "open-pr" },
     };
   }
   return {
     token: "ready-to-review",
-    label: "Ready to review",
-    detail: withPublication("Standing Orders independently verified this result."),
+    label: "Ready",
+    detail: withPublication("The approved check passed against this result."),
     tone: "ready",
-    action: { label: "Review the result", kind: "open-result" },
+    action: { label: "Open the result", kind: "open-result" },
   };
 }
 
@@ -427,7 +427,7 @@ export function needsPerson(dispatch: DispatchDiagnosis | null): boolean {
 /** Navigation labels describe the available help, not a mutation: opening
  * a hold or pause must never promise that the task has already resumed. */
 const DISPATCH_ACTION_LABELS: Record<DispatchAction, string> = {
-  "open-result": "Review the result",
+  "open-result": "Open the result",
   "retry-task": "Review and retry",
   "place-task": "Choose a project",
   "write-scope": "Define the task",

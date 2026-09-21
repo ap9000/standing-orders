@@ -7985,7 +7985,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     const stop = store.stopOf(runId);
     const run = store.getRun(runId);
     if (stop === null || run === null || stop.taskRef !== ref.id) return taskScreen(response, who, taskId, `run #${runId} is not a stopped attempt of this task`, 409);
-    if (run.role === "reviewer") return taskScreen(response, who, taskId, `run #${runId} is a review — a stopped review is retried with Review again, which keeps its bounded attempts`, 409);
+    if (run.role === "reviewer") return taskScreen(response, who, taskId, `run #${runId} is a historical review run — nothing reruns it; open the saved result instead`, 409);
     if (stop.resumedAt !== null) return taskScreen(response, who, taskId, `run #${runId} was already resumed by ${escape(stop.resumedBy ?? "?")}`, 409);
     const control = taskControlOf(store, ref.id, now);
     if (control.kind !== "paused" || control.run !== runId) {

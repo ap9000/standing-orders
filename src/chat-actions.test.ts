@@ -586,7 +586,7 @@ describe("shared chat action lifecycle", () => {
       now,
       { captureStatus: "ok" },
     );
-    expect(() => proposal("result_review", { task: id, run })).toThrow("Separate model review has been removed");
+    expect(() => proposal("result_review" as never, { task: id, run })).toThrow("Choose an available action.");
     expect(
       store.handle
         .prepare("SELECT COUNT(*) AS n FROM review_request WHERE run=?")

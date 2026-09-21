@@ -751,7 +751,7 @@ try {
   const tamperedFetch = await fetch(`${fixture.url}/r/${fixture.statusRuns.damaged}/evidence/${tamperedArtifact.id}`, { headers: { cookie: cookieHeader } });
   check('c2 damaged evidence is named in the open BEFORE the views: tampered screenshot not shown or called validated, failed change-summary capture, shortened check log, and the caveat', damaged.evidence?.startsWith('problems:') && damaged.attentionAboveTabs && /Screenshot evidence\/payout-dashboard\.png no longer verifies/.test(damaged.attention) && /change summary is unavailable/.test(damaged.attention) && /check output was shortened/.test(damaged.attention) && /USD only/.test(damaged.attention) && damaged.images === 0 && !damaged.validatedWords && /0 validated screenshots, 1 unavailable/.test(damaged.evidenceFact) && damaged.caveats === '1', JSON.stringify(damaged));
   check('c2 the evidence road refuses the tampered screenshot bytes (410)', tamperedFetch.status === 410, String(tamperedFetch.status));
-  check('c2 the damaged result is not called ready: its status says some evidence is unavailable (repair 2026-09-14)', /some evidence is unavailable/i.test(damaged.status ?? ''), damaged.status);
+  check('c2 the damaged result is not called ready: its status says some saved material is unavailable (repair 2026-09-14)', /some saved material is unavailable/i.test(damaged.status ?? ''), damaged.status);
   await shot(page, 'desktop-damaged-evidence', 'Desktop 1440×900: a result whose screenshot was altered after sealing — problems first, nothing called validated (synthetic fixture)');
   const damagedChat = await factsOf(`/chat?task=${fixture.statusTasks.damaged}`);
   check('c2 the chat receipt counts the tampered screenshot as unavailable, not validated', damagedChat.text.includes('1 unavailable — not validated') && damagedChat.first?.evidence === damaged.evidence, `${damagedChat.first?.evidence}`);
@@ -1061,7 +1061,7 @@ try {
   const logSurfaces = { 'task receipt': await factsOf(`/t/${logTask}`), 'chat receipt': await factsOf(`/chat?task=${logTask}`), 'run page': await factsOf(`/r/${logRun}?tab=checks`), 'review cockpit': await factsOf(`/review?result=${logTask}`) };
   for (const [name, one] of Object.entries(logSurfaces)) {
     const shared = one.text.slice(one.text.indexOf('data-result-run="'), one.text.lastIndexOf('</section>'));
-    check(`c9 ${name}: the corrupted check log counts as an evidence problem, the readiness word is gone, the problem is named, and no download of it is offered`, one.first?.evidence === 'problems:1' && one.text.includes('data-work-status="evidence-damaged"') && !one.text.includes('Ready to review') && one.text.includes('The check log no longer verifies (') && !shared.includes(`/evidence/${logArtifact.id}"`) && !one.text.includes('0 passed, 214 failed'), JSON.stringify({ facts: one.first, damaged: one.text.includes('data-work-status="evidence-damaged"') }));
+    check(`c9 ${name}: the corrupted check log counts as an evidence problem, the readiness word is gone, the problem is named, and no download of it is offered`, one.first?.evidence === 'problems:1' && one.text.includes('data-work-status="evidence-damaged"') && !one.text.includes('data-work-status="ready-to-review"') && one.text.includes('The check log no longer verifies (') && !shared.includes(`/evidence/${logArtifact.id}"`) && !one.text.includes('0 passed, 214 failed'), JSON.stringify({ facts: one.first, damaged: one.text.includes('data-work-status="evidence-damaged"') }));
   }
   const logRoad = await fetch(`${fixture.url}/r/${logRun}/evidence/${logArtifact.id}`, { headers: { cookie: cookieHeader } });
   check('c9 the evidence road refuses the corrupted check log bytes (410)', logRoad.status === 410, String(logRoad.status));
@@ -1069,7 +1069,7 @@ try {
   page = c9.page;
   await goto(page, `/r/${logRun}?tab=checks`);
   const logView = await page.evaluate(() => ({ status: document.querySelector('.result-head .status-line')?.textContent.trim(), attention: document.querySelector('[data-result-attention]')?.textContent ?? '', damaged: document.querySelector('[data-check-log="damaged"]')?.textContent ?? '', fullLink: /Open the full check log|Download the full/.test(document.body.textContent) }));
-  check('c9 the run page says it in the open: status, attention, and the withheld output with nothing to download', /some evidence is unavailable/.test(logView.status ?? '') && /check log no longer verifies/.test(logView.attention) && /nothing to download/.test(logView.damaged) && !logView.fullLink, JSON.stringify(logView));
+  check('c9 the run page says it in the open: status, attention, and the withheld output with nothing to download', /some saved material is unavailable/.test(logView.status ?? '') && /check log no longer verifies/.test(logView.attention) && /nothing to download/.test(logView.damaged) && !logView.fullLink, JSON.stringify(logView));
   await shot(page, 'desktop-c9-corrupt-check-log', 'Desktop 1440×900: a verified build whose check log was altered on disk — evidence unavailable, output withheld, no download (synthetic fixture)');
   // A SHORTENED log (the damaged fixture) is described as the stored part, never the full bytes.
   const shortenedText = await html(`/r/${fixture.statusRuns.damaged}?tab=checks`);
@@ -1123,7 +1123,7 @@ try {
     // Risks stay in the open: the damaged result's problems precede the tabs at this width too.
     await goto(page, chatResult(fixture.statusTasks.damaged, fixture.statusRuns.damaged));
     const risks = await page.evaluate(() => { const a = document.querySelector('.result-panel [data-result-attention]'); const t = document.querySelector('.result-tabs'); return { open: a !== null && a.checkVisibility(), aboveTabs: a !== null && t !== null && a.getBoundingClientRect().bottom <= t.getBoundingClientRect().top, status: document.querySelector('.result-head .status-line')?.textContent.trim() }; });
-    check(`c11 ${name}: the damaged result keeps its risks open ahead of the tabs`, risks.open && risks.aboveTabs && /some evidence is unavailable/.test(risks.status ?? ''), JSON.stringify(risks));
+    check(`c11 ${name}: the damaged result keeps its risks open ahead of the tabs`, risks.open && risks.aboveTabs && /some saved material is unavailable/.test(risks.status ?? ''), JSON.stringify(risks));
     if (name === 'phone') await shot(page, 'phone-c11-risks-open', '390×844: a damaged result keeps its problems in the open ahead of the tabs (synthetic fixture)');
     await c11.ctx.close();
   }

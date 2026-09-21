@@ -36,7 +36,7 @@ configuration and pairing. Slack transport tests also use scripted responses.
 | `get_project_context` | direct | Reads bounded source excerpts or advisory import impact in an accessible enrolled project through the shared engine, with source-search fallback when its index is unavailable. | Source retrieval and fallback (`repository-context.test.ts`), MCP scope checks (`mcp.test.ts`); catalogue parity checks | Index refresh uses the local CLI. Dedicated Telegram and Slack journeys for this tool and live channel rendering remain unverified. |
 | `get_action_status` | direct | Reads the exact saved shared action and its outcome, including completion through secure review. | Shared action lifecycle and secure-review regressions (`chat-actions.test.ts`) | none |
 | `get_actions` | direct | Lists the shared action catalogue and required inputs. | Shared action lifecycle and secure-review regressions (`chat-actions.test.ts`) | none |
-| `propose_action` | direct | Prepares exact shared skill, knowledge, approval, acceptance, review, cancel and resume actions. Short ordinary changes confirm here; protected or long changes use one secure review and record the result on the same proposal. | Shared action lifecycle and secure-review regressions (`chat-actions.test.ts`) | Secure review requires a working HTTPS console connection. Real transport verification is required. |
+| `propose_action` | direct | Prepares exact shared skill, knowledge, approval, acceptance, cancel and resume actions (the separate review request was removed on 2026-09-21). Short ordinary changes confirm here; protected or long changes use one secure review and record the result on the same proposal. | Shared action lifecycle and secure-review regressions (`chat-actions.test.ts`) | Secure review requires a working HTTPS console connection. Real transport verification is required. |
 | `recap` | direct | Read by the model during a phone turn over the enrolled ceiling. | journey turn (`telegram-mate.test.ts`, first test) reads through the engine | none |
 | `list_repos` | direct | Read during a turn; projects are r1..rN in enrollment order, as on the console. | ceiling digest equality with the console/CLI (first test) | none |
 | `get_skills` | direct | Reads the same project skill library, saved selections and enabled versions as the console. Use propose_action for changes and tests. | Project skills chat index, version read and project handoff regression (`project-skills.test.ts`) | Skill import and long content require secure review. Folder and GitHub import still use the project Skills screen. |
@@ -69,7 +69,9 @@ configuration and pairing. Slack transport tests also use scripted responses.
 ## Shared actions (2026-09-17)
 
 `propose_action` adds a shared proposal for skills, project knowledge, scope
-approval, human acceptance, review requests, cancellation and resume. Short
+approval, human acceptance, cancellation and resume. There is no review-request
+action: a finished result is Ready, a person or the lead inspects it and marks it
+complete or requests changes (2026-09-21). Short
 ordinary changes confirm in the conversation. Protected, long or redacted changes link
 to a complete, signed-in review of that exact proposal. Completion updates the
 same saved proposal; `get_action_status` reads its actual outcome. Opening a

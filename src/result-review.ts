@@ -29,10 +29,10 @@ export function evidenceResultStatusOf(result: ResultFacts, publication: Publica
   if (!result.accepted && !["checks-failed", "evidence-mismatch"].includes(recorded.token) && (evidence.damaged > 0 || (result.role === "scout" && evidence.missing > 0))) {
     stored = {
       token: "evidence-damaged",
-      label: "Result saved, but some evidence is unavailable",
-      detail: `Some evidence is missing, damaged, or could not be read. The machine's verdict at completion is unchanged: ${result.verdict === "verified" ? "the approved check passed against it then" : recorded.label.toLowerCase()}.`,
+      label: "Result saved, but some saved material is unavailable",
+      detail: `Some saved material is missing, damaged, or could not be read. The machine's verdict at completion is unchanged: ${result.verdict === "verified" ? "the approved check passed against it then" : recorded.label.toLowerCase()}.`,
       tone: "problem",
-      action: { label: "Review the evidence problems", kind: "open-result" },
+      action: { label: "See what is missing", kind: "open-result" },
     };
   }
   const shortened = evidenceShortenedWords(evidence);
@@ -361,7 +361,7 @@ export const RESULT_REVIEW_SCRIPT = String.raw`
     document.addEventListener('click',function(ev){
       var button=ev.target&&ev.target.closest?ev.target.closest('button.pick-file,button.pick-line'):null;if(!button)return;
       var reviewNote=button.getAttribute('data-review-note');
-      if(reviewNote!==null&&noteBox&&noteBox.value&&!window.confirm('Replace the feedback draft with this review note?'))return;
+      if(reviewNote!==null&&noteBox&&noteBox.value&&!window.confirm('Replace the feedback draft with this note?'))return;
       if(reviewNote!==null&&noteBox)noteBox.value=reviewNote;
       if(pathBox)pathBox.value=button.getAttribute('data-path')||'';
       if(lineBox)lineBox.value=button.getAttribute('data-line')||'';

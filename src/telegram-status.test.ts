@@ -76,9 +76,9 @@ describe("read-only phone status", () => {
 
   test("`/task` names ONE precise destination from the recorded state: the exact result's checks or changes, the approval control, the recovery page, or the task itself", () => {
     const { run } = result("verified-one", "verified");
-    expect(phoneTaskView(store, [REPO], "verified-one", NOW).link).toEqual({ label: "Review checks", path: `/chat?task=verified-one&result=${run}&tab=checks` });
+    expect(phoneTaskView(store, [REPO], "verified-one", NOW).link).toEqual({ label: "Open checks", path: `/chat?task=verified-one&result=${run}&tab=checks` });
     const bare = result("no-verdict", null);
-    expect(phoneTaskView(store, [REPO], "no-verdict", NOW).link).toEqual({ label: "Review changes", path: `/chat?task=no-verdict&result=${bare.run}&tab=changes` });
+    expect(phoneTaskView(store, [REPO], "no-verdict", NOW).link).toEqual({ label: "Open changes", path: `/chat?task=no-verdict&result=${bare.run}&tab=changes` });
     // The result named is this execution's own recorded run, not the newest run anywhere.
     expect(bare.run).not.toBe(run);
     task("scoped");
@@ -140,11 +140,11 @@ describe("read-only phone status", () => {
     s.updates.push([command(2, "/task verified-one")]);
     expect(await passWith()).toMatchObject({ ok: true, report: { statusReplies: 1 } });
     expect(sends().at(-1)!.params["reply_markup"]).toBeUndefined();
-    expect(s.texts().at(-1)).toContain("Read-only status. Evidence files and full actions are in the console.");
+    expect(s.texts().at(-1)).toContain("Read-only status. Saved files and full actions are in the console.");
     origin = "https://console.example";
     s.updates.push([command(3, "/task verified-one")]);
     expect(await passWith()).toMatchObject({ ok: true, report: { statusReplies: 1 } });
-    expect(sends().at(-1)!.params["reply_markup"]).toEqual({ inline_keyboard: [[{ text: "Review checks", url: `https://console.example/chat?task=verified-one&result=${run}&tab=checks` }]] });
+    expect(sends().at(-1)!.params["reply_markup"]).toEqual({ inline_keyboard: [[{ text: "Open checks", url: `https://console.example/chat?task=verified-one&result=${run}&tab=checks` }]] });
     expect(s.texts().at(-1)).not.toContain("Read-only status");
     expect(s.texts().at(-1)).toContain("Next: Open this task's result");
     // /status and /help never carry a button, and nothing changed.
@@ -198,8 +198,8 @@ describe("read-only phone status", () => {
     const detail = phoneTask(store, [REPO], "accepted", NOW);
     expect(detail).toContain("Accepted with an exception");
     expect(detail).not.toContain("Checks passed");
-    expect(detail).toContain("Required evidence is missing");
-    expect(detail).toContain("does not upgrade its evidence");
+    expect(detail).toContain("Required saved material is missing");
+    expect(detail).toContain("does not change its recorded checks");
     expect(detail).toContain("Pull request #7 opened; not recorded as merged");
     store.recordPublicationRemoteState(publication, "MERGED", NOW);
     expect(phoneTask(store, [REPO], "accepted", NOW)).toContain("Merge observed on GitHub");

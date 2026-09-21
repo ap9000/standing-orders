@@ -1,16 +1,17 @@
 # Product priorities
 
-Current checkpoint (2026-09-13 UTC): main includes contract handoffs,
-Stop/Resume, platform process containment, and workflow recipes through schema
-57. The installed desktop reached that schema, but its selected Documents
-projects remain behind the [recorded Mac access gate](assessments/DESKTOP_ROLLOUT_2026-09-13.md).
-New [stable signing and worker-access checks](assessments/STABLE_DESKTOP_ACCESS_2026-09-13.md)
-are implemented and tested locally, not installed or certified for permission
-persistence. The operator is away; do not keep attempting permission changes.
-The [mobile chatbot is the primary phone-control surface](PHONE_STATUS.md),
-with read-only Telegram status as an optional shortcut. Conversation continuity
-is implemented locally over the existing mate engine. Earlier milestone narratives below are
-implementation history, not current deployment claims.
+Current checkpoint (2026-09-21 UTC): main `33d686f` (PR #38) is the
+installed build, schema 71, running as one central browser service with the
+background worker and the global CLI on the same package. Shared team leads,
+durable central conversations, individual membership and spending
+authorization are live; see [Shared leads for a team](team-leads.md). Finished
+work reaches a Ready state and a person or lead marks it complete or requests
+changes; there is no model-review, evidence-repair or resubmission loop
+([Task to completion](LEAD_REVIEW_FLOW.md)). Telegram still uses the personal
+conversation path; connecting it to the team API is the active work
+(per-person pairing, one group per team conversation, direct completion behind
+a confirmation). The sequence below is implementation history from the
+13 September checkpoint, kept for its records, not a current plan.
 
 ### Next sequence
 

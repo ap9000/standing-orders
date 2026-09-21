@@ -9075,7 +9075,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     const card = /<article[^>]*data-card-kind="control"[^>]*>([\s\S]*?)<\/article>/.exec(html)?.[1];
     expect(card).toBeDefined();
     expect(card).toContain('<h3>task a</h3>');
-    expect(card).toContain('href="/chat?task=a" aria-label="Review result: task a"');
+    expect(card).toContain('href="/chat?task=a" aria-label="Open result: task a"');
     expect(card?.match(/<a /g)).toHaveLength(1);
     expect(card).not.toMatch(/pending|proposed by|Open control|<form/);
     const hold = /<article[^>]*data-card-kind="hold"[^>]*>([\s\S]*?)<\/article>/.exec(html)?.[1];
@@ -11822,8 +11822,8 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     }
     // The receipt's one primary road opens the shared detail; the detail
     // itself is the same panel on every surface, and the deliverable leads.
-    expect(pages.chat).toContain(`href="/chat?task=t-shared&amp;result=${run}" data-open-result data-primary-action>Review the result</a>`);
-    expect(pages.task).toContain(`data-primary-action>Review the result</a>`);
+    expect(pages.chat).toContain(`href="/chat?task=t-shared&amp;result=${run}" data-open-result data-primary-action>Open the result</a>`);
+    expect(pages.task).toContain(`data-primary-action>Open the result</a>`);
     for (const html of [pages.detail, pages.run, pages.review]) {
       expect(html).toContain('data-result-panel');
       expect(html).toContain('data-result-lead="screenshots"');
@@ -13563,9 +13563,9 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     store.setTaskState('t-scope-status', 'failed', now);
     await agree('t-scope-status', 'failed', 'Review and retry');
     finished('t-status-check', 'Failed check', alpha, { verdict: 'refuted', reasons: ["the repository's approved verification command exited 1"] });
-    await agree('t-status-check', 'checks-failed', 'Review the failed check');
+    await agree('t-status-check', 'checks-failed', 'Open the failed check');
     finished('t-status-missing', 'Missing proof', alpha, null);
-    await agree('t-status-missing', 'verification-needed', 'Review the missing evidence');
+    await agree('t-status-missing', 'verification-needed', 'See what is missing');
     const oldResultScope = store.getScope('t-status-check')!;
     propose(store, { taskId: 't-status-check', goal: 'A new scope after the failed check', touches: oldResultScope.touches, acceptance: oldResultScope.acceptance, now });
     store.setTaskState('t-status-check', 'queued', now);
@@ -13774,11 +13774,11 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const work = await page(cookie, "/work");
     const expected: Record<string, [string, string]> = {
       "t-checks": ["checks-failed", "Changes saved, but checks failed"],
-      "t-mismatch": ["evidence-mismatch", "Result saved, but its evidence does not match"],
+      "t-mismatch": ["evidence-mismatch", "Result saved, but its record does not match"],
       "t-missing": ["verification-needed", "Result saved — verification needed"],
       "t-attested": ["agent-attested", "Result saved — checks reported by the agent"],
       "t-accepted": ["accepted-exception", "Accepted with an exception"],
-      "t-verified": ["ready-to-review", "Ready to review"],
+      "t-verified": ["ready-to-review", "Ready"],
       "t-pr": ["pr-opened", "PR opened"],
     };
     for (const [id, [token, label]] of Object.entries(expected)) {
@@ -14211,7 +14211,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     // The failed check and its exact result link stay visible; its saved assessment is secondary.
     const failed = await page(cookie, `/t/t-checks`);
     expect(failed).toContain("check failed against this build (exit 1)");
-    expect(failed).toContain(`href="/review?result=t-checks&amp;run=${checks.run}&amp;project=${encodeURIComponent(alpha)}" data-primary-action>Review the failed check</a>`);
+    expect(failed).toContain(`href="/review?result=t-checks&amp;run=${checks.run}&amp;project=${encodeURIComponent(alpha)}" data-primary-action>Open the failed check</a>`);
     expect(failed).not.toContain('<details class="proof-exception">');
     expect(failed).toContain('<summary>Previous assessment</summary>');
     expect(failed).not.toContain('<details class="receipt-history">');
@@ -14258,7 +14258,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(failed.match(/<h2 class="assignment-state">Needs your decision<\/h2>/g)).toHaveLength(1);
     expect(failed).toContain('data-work-status="assignment-needs-decision"');
     expect(failed).toContain("check failed against this build (exit 1)");
-    expect(failed).toContain(`href="/review?result=t-checks&amp;run=${checks.run}&amp;project=${encodeURIComponent(alpha)}" data-primary-action>Review the failed check</a>`);
+    expect(failed).toContain(`href="/review?result=t-checks&amp;run=${checks.run}&amp;project=${encodeURIComponent(alpha)}" data-primary-action>Open the failed check</a>`);
     expect(failed).not.toContain('<details class="proof-exception">');
     expect(failed).toContain('<summary>Previous assessment</summary>');
     // A task without a result keeps its state chip in the title: the box

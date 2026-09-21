@@ -47,7 +47,7 @@ describe("the shared status projection (workspace package 1)", () => {
   test("each finished-evidence state has its own words, and none of the weak ones reads as verified", () => {
     expect(resultStatusOf(built({ verdict: "refuted", reasons: ["the repository's approved verification command exited 1"] }))).toMatchObject({ token: "checks-failed", label: "Changes saved, but checks failed", tone: "problem", action: { kind: "open-review" } });
     expect(resultStatusOf(built({ verdict: "refuted", reasons: ["the repository's approved verification command exited 1"] })).detail).toContain("(exit 1)");
-    expect(resultStatusOf(built({ verdict: "refuted", reasons: ["claimed changed path not in the sealed diff: src/x.ts"] }))).toMatchObject({ token: "evidence-mismatch", label: "Result saved, but its evidence does not match", tone: "problem" });
+    expect(resultStatusOf(built({ verdict: "refuted", reasons: ["claimed changed path not in the sealed diff: src/x.ts"] }))).toMatchObject({ token: "evidence-mismatch", label: "Result saved, but its record does not match", tone: "problem" });
     // A structural refutation is settled before the approved check is
     // weighed, so it neither claims a failed check nor denies one.
     const mismatch = resultStatusOf(built({ verdict: "refuted", reasons: ["claimed changed path not in the sealed diff: src/x.ts"] })).detail;
@@ -56,7 +56,7 @@ describe("the shared status projection (workspace package 1)", () => {
     expect(resultStatusOf(built({ verdict: "short", reasons: ["no proof was written"] }))).toMatchObject({ token: "verification-needed", label: "Result saved — verification needed", tone: "problem" });
     expect(resultStatusOf(built({ verdict: null, reasons: [] }))).toMatchObject({ token: "verification-needed", label: "Result saved — verification needed" });
     expect(resultStatusOf(built({ verdict: "attested", reasons: [] }))).toMatchObject({ token: "agent-attested", label: "Result saved — checks reported by the agent", tone: "neutral" });
-    expect(resultStatusOf(built())).toMatchObject({ token: "ready-to-review", label: "Ready to review", tone: "ready", action: { kind: "open-result" } });
+    expect(resultStatusOf(built())).toMatchObject({ token: "ready-to-review", label: "Ready", tone: "ready", action: { kind: "open-result" } });
     expect(resultStatusOf(null)).toMatchObject({ token: "no-build-record", label: "Marked done without a build record", tone: "problem" });
     expect(resultStatusOf(built({ role: "scout" }))).toMatchObject({ token: "report-ready", label: "Report ready" });
     for (const weak of [
@@ -203,7 +203,7 @@ describe("the shared status projection (workspace package 1)", () => {
 
   test("navigation CTAs name the available help for each diagnosis without claiming to resume work", () => {
     const labels: Record<DispatchAction, string> = {
-      "open-result": "Review the result", "retry-task": "Review and retry",
+      "open-result": "Open the result", "retry-task": "Review and retry",
       "place-task": "Choose a project", "write-scope": "Define the task",
       "select-agent": "Choose an agent", "approve-scope": "Review plan",
       "answer-decision": "Answer the question", unhold: "Review hold",

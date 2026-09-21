@@ -16,7 +16,11 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isLifecycleNotification, LIFECYCLE_KEY_PREFIX, openStore, type Notification, type Store } from "./store.js";
-import { addApprover } from "./scope.js";
+import { addApprover, approve, propose } from "./scope.js";
+import { storeEvidence } from "./evidence.js";
+import { sealVerificationReceipt } from "./verification-evidence.js";
+import { verifyApproverStanding } from "./principal.js";
+import { assignmentOf, checkAssignmentAsOperator } from "./assignment.js";
 import { register } from "./runner.js";
 import { adjudicate } from "./proof.js";
 import { telegramProgressCard } from "./telegram-progress.js";
@@ -290,6 +294,7 @@ describe("lifecycle facts through the Telegram transport", () => {
   let now: Date;
   let projects: string[];
   let origin: string | null;
+  let token = "";
 
   const pair = (chat = CHAT, updateId = 1) => {
     const code = mintPairingCode();
@@ -314,7 +319,9 @@ describe("lifecycle facts through the Telegram transport", () => {
     now = T0;
     projects = [ALPHA, BETA];
     origin = ORIGIN;
-    expect(addApprover(store, "alex", now).ok).toBe(true);
+    const alex = addApprover(store, "alex", now);
+    expect(alex.ok).toBe(true);
+    token = alex.ok ? alex.token : "";
   });
   afterEach(() => { store.close(); rmSync(dir, { recursive: true, force: true }); });
 
@@ -349,7 +356,7 @@ describe("lifecycle facts through the Telegram transport", () => {
     return { ref, run };
   };
 
-  test("build, checks and independent review update one message; replies still identify the saved builder result after a restart", async () => {
+  test("build and checks update one message without announcing a reviewer; replies still identify the saved builder result after a restart", async () => {
     const { ref, run } = progressAttempt();
     const script = scriptedTransport();
     await pass(script);
@@ -360,23 +367,17 @@ describe("lifecycle facts through the Telegram transport", () => {
     const matrix = [{ id: "c1", statement: "The result is readable", requiredEvidence: ["check"], state: "pass", detail: [], answered: [], review: null }];
     store.saveProofVerdict(run, "attested", [], now, matrix as never);
     await pass(script);
-    const request = store.requestReview(run, "alex", now);
-    if (!request.ok) throw Error(request.reason);
-    await pass(script);
     store.close(); store = openStore(file);
-    const reviewer = store.startRun({ taskRef: ref, leaseId: "l-review", runner: RUNNER, role: "reviewer", parentRun: run, request: request.id, ...bareLegacy("review"), now });
-    await pass(script);
     store.saveProofVerdict(run, "verified", [], now, matrix as never);
-    store.finishRun(reviewer, { outcome: "no-change", reason: "reviewed", now });
-    expect(await pass(script)).toMatchObject({ ok: true, report: { sent: 1, problems: [] } });
+    expect((await pass(script)).ok).toBe(true);
     expect(script.sends()).toHaveLength(1);
     const edits = script.calls.filter(call => call.method === "editMessageText");
-    expect(edits).toHaveLength(5);
+    expect(edits.length).toBeGreaterThanOrEqual(2);
     expect(new Set(edits.map(call => call.params["message_id"]))).toEqual(new Set([100]));
-    expect(edits.at(-1)?.params["text"]).toContain("✓ Build saved\n✓ Checks · 1/1 requirements\n✓ Review complete");
-    expect(edits.at(-1)?.params["text"]).toContain("Ready for your review");
+    expect(edits.at(-1)?.params["text"]).toContain("✓ Build saved\n○ Checks did not run");
     expect(edits.at(-1)?.params["text"]).toContain("Saved locally · Not published");
-    expect(script.buttons(edits.at(-1)!)).toEqual([{ text: "Review result", url: `${ORIGIN}/chat?task=clear-acceptance&result=${run}&tab=checks` }]);
+    expect(edits.at(-1)?.params["text"]).not.toMatch(/Review|reviewer/);
+    expect(script.buttons(edits.at(-1)!)).toEqual([{ text: "Open result", url: `${ORIGIN}/chat?task=clear-acceptance&result=${run}` }]);
     expect(store.telegramMessageBindings(store.liveTelegramBinding(BOT)!, "100")).toEqual([{ taskId: "clear-acceptance", taskRef: ref, run, project: ALPHA }]);
     expect(receipts().filter(one => one.run !== null).every(one => one.deliveredAt !== null)).toBe(true);
     expect(store.proofAcceptance(run)).toBeNull();
@@ -496,7 +497,7 @@ describe("lifecycle facts through the Telegram transport", () => {
     expect(text).toContain("Next: restore the worker’s folder access, then resume.");
     expect(text).not.toMatch(/retryable-infra|\/Users|Review optional|20\d\d-\d\d-\d\dT/);
     expect(card.params["entities"]).toEqual(telegramProgressCard(store, store.getRun(run)!, "clear-acceptance", ALPHA, now).entities);
-    expect(script.buttons(card)[0]?.text).toBe("Review hold");
+    expect(script.buttons(card)[0]?.text).toBe("Open task");
     expect(store.telegramMessageBindings(store.liveTelegramBinding(BOT)!, "100")).toEqual([{ taskId: "clear-acceptance", taskRef: ref, run, project: ALPHA }]);
     store.unhold(ref, {}, now);
     await pass(script);
@@ -525,24 +526,22 @@ describe("lifecycle facts through the Telegram transport", () => {
     expect(card.entities.map(e => card.text.slice(e.offset, e.offset + e.length))).toEqual(["😀 **Ship & test**", "⏳ Working"]);
   });
 
-  test("progress distinguishes required human acceptance, accepted results and evidence gaps without changing the verdict", () => {
+  test("progress shows a person's acceptance plainly and never turns a record gap into a reviewer stage", () => {
     const { run } = humanReviewResult();
     const view = () => telegramProgressCard(store, store.getRun(run)!, "alpha-1", ALPHA).text;
-    expect(view()).toContain("Next: your acceptance.");
     expect(view()).toContain("Checks · 0/1");
+    expect(view()).not.toMatch(/Review|reviewer/);
     store.acceptProof(run, "alex", "Inspected the saved screenshots.", now);
-    expect(view()).toContain("Human acceptance recorded");
-    expect(view()).not.toContain("Next: your acceptance.");
+    expect(view()).toContain("Accepted by a person · Recorded checks unchanged");
     expect(store.proofVerdictFor(run)?.verdict).toBe("short");
     const proof = store.proofVerdictFor(run)!;
     proof.matrix[0]!.coverage = { state: "context", inherited: true, items: [], gaps: ["Missing inherited screenshot"], priorSupport: "none" };
     store.saveProofVerdict(run, proof.verdict, proof.reasons, now, proof.matrix);
-    expect(view()).toContain("Evidence needs attention");
-    expect(view()).toContain("1 requirement needs better evidence.");
-    expect(view()).toContain("Human acceptance recorded");
+    expect(view()).not.toContain("Evidence needs attention");
+    expect(view()).toContain("Accepted by a person");
   });
 
-  test("direct assessment shows passed checks and pending review without inventing a check failure", () => {
+  test("direct assessment shows passed checks and an old review request changes nothing", () => {
     const { run } = progressAttempt();
     store.finishRun(run, { outcome: "built", committed: true, now });
     const proof = adjudicate({ directAssessment: true, proofArtifactPresent: false, proofParse: null, handoffPresent: true,
@@ -551,34 +550,57 @@ describe("lifecycle facts through the Telegram transport", () => {
       approvedCriteria: [{ id: "c1", statement: "Saved values survive reload", evidence: ["check"] }] });
     store.saveProofVerdict(run, proof.verdict, proof.reasons, now, proof.matrix, proof.machineVerdict);
     const card = telegramProgressCard(store, store.getRun(run)!, "clear-acceptance", ALPHA, now);
-    expect(card.text).toContain("Ready for goal review");
     expect(card.text).toContain("✓ Checks passed");
     expect(card.text).not.toContain("failed or missing checks");
-    expect(card.text).not.toContain("Evidence needs attention");
+    expect(card.text).not.toMatch(/Review|reviewer/);
     store.saveArtifact({ run, kind: "terminal-diff", key: `${run}/diff.patch`, bytesOriginal: 12, bytesStored: 12, truncated: false, sha256: "a".repeat(64), capture: "git diff (exit 0)", captureStatus: "ok" }, now);
     expect(store.requestReview(run, "alex", now).ok).toBe(true);
-    expect(telegramProgressCard(store, store.getRun(run)!, "clear-acceptance", ALPHA, now).text).toContain("Waiting for review");
+    expect(telegramProgressCard(store, store.getRun(run)!, "clear-acceptance", ALPHA, now).text).toBe(card.text);
   });
 
-  test("progress does not invent an optional review blocker or mark required review complete without its judgements", () => {
+  test("strict quality terms and historical reviewer runs never put a review stage on the card", () => {
     const { ref, run } = progressAttempt();
     store.finishRun(run, { outcome: "built", committed: true, now });
     const view = (strict = false) => telegramProgressCard(store, { ...store.getRun(run)!, qualityMode: strict ? "strict" : "default" }, "clear-acceptance", ALPHA).text;
     expect(view()).toContain("Checks not recorded");
-    expect(view()).not.toContain("Ready for your review");
     const matrix = [{ id: "c1", statement: "Readable progress", requiredEvidence: ["check"], state: "pass", detail: [], answered: [], review: null }];
     store.saveProofVerdict(run, "verified", [], now, matrix as never);
-    expect(view()).toContain("Ready for your review");
-    expect(view()).not.toContain("Review optional");
-    expect(view()).not.toContain("request independent review");
-    expect(view(true)).toContain("Next: independent review.");
+    expect(view()).toContain("✓ Checks · 1/1 requirements");
+    expect(view(true)).not.toMatch(/Review|reviewer/);
     store.saveArtifact({ run, kind: "terminal-diff", key: `${run}/diff.patch`, bytesOriginal: 12, bytesStored: 12, truncated: false, sha256: "a".repeat(64), capture: "git diff (exit 0)", captureStatus: "ok" }, now);
     const request = store.requestReview(run, "alex", now);
     if (!request.ok) throw Error(request.reason);
     const reviewer = store.startRun({ taskRef: ref, leaseId: "l-review", runner: RUNNER, role: "reviewer", parentRun: run, request: request.id, ...bareLegacy("review"), now });
     store.finishRun(reviewer, { outcome: "no-change", reason: "comments only", now });
-    expect(view(true)).toContain("Review incomplete");
-    expect(view(true)).not.toContain("Ready for your review");
+    expect(view(true)).not.toMatch(/Review|reviewer/);
+    expect(view(true)).toContain("✓ Checks · 1/1 requirements");
+  });
+
+  test("a saved result reads Ready, then Complete once a person marks that exact result", () => {
+    for (const phase of ["build", "plan", "review"] as const) store.setPhaseConfig("installation", phase, "claude", "sonnet", "alex", now);
+    const ref = placed("ready-1", ALPHA, "Keep the guard readable");
+    propose(store, { taskId: "ready-1", goal: "Keep the guard readable", touches: ["src/guard.ts"], acceptance: [{ id: "c1", statement: "The guard stays readable.", how: null, evidence: ["check"] }], now });
+    expect(approve(store, "ready-1", "alex", now, store.getScope("ready-1")!.digest, token).ok).toBe(true);
+    const authority = store.routeAuthorityFor(ref, "builder");
+    if (!authority?.ok) throw new Error("route fixture");
+    const run = store.startRun({ taskRef: ref, leaseId: "l-ready", runner: RUNNER, branch: "so/ready-1", worktree: "/pool/ready-1", route: authority.stamp, now });
+    store.stampRun(run, { scopeDigest: store.getScope("ready-1")!.digest, baseRevision: "b".repeat(40) });
+    store.recordOutcomeFacts(run, { headRevision: "a".repeat(40), handoff: "The guard reads well." });
+    store.finishRun(run, { outcome: "built", committed: true, now });
+    store.setTaskState("ready-1", "done", now);
+    store.saveProofVerdict(run, "verified", [], now, [{ id: "c1", statement: "The guard stays readable.", requiredEvidence: ["check"], state: "pass", detail: [], answered: [], review: null }] as never, "verified");
+    store.setVerifyCommand({ repo: ALPHA, command: "npm test", timeoutMs: 300_000, approvedBy: "alex" }, now);
+    storeEvidence(store, dir, run, "check-log", "checks.txt", Buffer.from("1 test passed"), "npm test", now, { captureStatus: "ok" });
+    sealVerificationReceipt(store, dir, run, "a".repeat(40), store.liveVerifyCommand(ALPHA)!, { configured: true, ran: true, exitCode: 0 }, now);
+    const view = () => telegramProgressCard(store, store.getRun(run)!, "ready-1", ALPHA, now, dir);
+    expect(view().text).toContain("✅ Ready\n\n✓ Build saved\n✓ Checks passed\n\nNext: open the result, then mark it complete or request changes.");
+    expect(view().link).toEqual({ label: "Open result", path: `/chat?task=ready-1&result=${run}` });
+    const who = verifyApproverStanding(store, "alex", store.accountOf("alex")!.generation, [ALPHA]);
+    if (!who.ok) throw new Error("approver fixture");
+    const receipt = assignmentOf(store, "ready-1", now, { principal: "operator", repos: [ALPHA] }, dir)!.receipt!;
+    expect(checkAssignmentAsOperator(store, "ready-1", receipt.digest, who.who, now, dir).ok).toBe(true);
+    expect(view().text).toContain("✅ Complete\n\n✓ Build saved\n✓ Checks passed\n\nHandled by alex.");
+    expect(view().text).not.toMatch(/Review|reviewer/);
   });
 
   test.each(["immediate", "digest"] as const)("%s: human acceptance automatically sends a review summary, separately receipted screenshots and a final secure link; retries preserve ordering", async mode => {
@@ -598,16 +620,16 @@ describe("lifecycle facts through the Telegram transport", () => {
     expect(script.texts().join("\n")).toContain("Saved screenshots and the acceptance summary follow.");
     expect(script.texts().join("\n")).not.toContain("required evidence is missing");
     expect(script.calls.filter(one => one.method === "sendDocument")).toHaveLength(1);
-    expect(script.calls.flatMap(script.buttons).some(button => button.text === "Review for acceptance")).toBe(false);
+    expect(script.calls.flatMap(script.buttons).some(button => button.text === "Inspect result")).toBe(false);
     now = later(2000);
     store.close(); store = openStore(file);
     expect((await pass(script)).ok).toBe(true);
     expect(script.calls.filter(one => one.method === "sendDocument")).toHaveLength(2);
-    expect(script.buttons(script.sends().at(-1)!)).toEqual([{ text: "Review for acceptance", url: `${ORIGIN}/review?result=alpha-1&run=${run}&tab=checks` }]);
+    expect(script.buttons(script.sends().at(-1)!)).toEqual([{ text: "Inspect result", url: `${ORIGIN}/review?result=alpha-1&run=${run}&tab=checks` }]);
     expect(receipts().filter(one => one.kind === "acceptance-evidence").every(one => one.deliveredAt !== null)).toBe(true);
     expect(script.texts().at(-1)).toContain("Project checks: No machine verification receipt available");
-    expect(script.texts().at(-1)).toContain("Evidence problem: No readable saved proof is available.");
-    expect(script.texts().at(-1)).toContain("Reviewer supports this finding: The layout matches");
+    expect(script.texts().at(-1)).toContain("Saved material problem: No readable saved proof is available.");
+    expect(script.texts().at(-1)).toContain("Earlier assessment supported this finding: The layout matches");
     expect(store.proofAcceptance(run)).toBeNull();
     expect(shots).toHaveLength(2);
   });
@@ -622,7 +644,7 @@ describe("lifecycle facts through the Telegram transport", () => {
     expect(script.calls.filter(one => one.method === "sendDocument")).toHaveLength(0);
     expect(receipts().filter(one => one.kind === "acceptance-evidence").map(one => [one.receipt, one.deliveredAt, one.attempts])).toEqual([["skipped:already-accepted", null, 1], ["skipped:already-accepted", null, 1]]);
     expect(script.texts().at(-1)).toContain("Acceptance recorded");
-    expect(script.calls.flatMap(script.buttons).some(button => button.text === "Review for acceptance")).toBe(false);
+    expect(script.calls.flatMap(script.buttons).some(button => button.text === "Inspect result")).toBe(false);
     // Several recorded facts now share one progress message; the report
     // still counts settled outbox rows, excluding skipped screenshots.
     expect(report.ok && report.report.sent).toBe(receipts().filter(one => one.deliveredAt !== null).length);
@@ -833,9 +855,9 @@ describe("lifecycle facts through the Telegram transport", () => {
       "beta / beta-1 · New task: Rotate the API keys\n\nFiled and waiting in the queue.",
     ]);
     expect(script.texts().at(-1)).toContain(`alpha · #${run}`);
-    expect(script.texts().at(-1)).toContain("✓ Build saved\n○ Checks not recorded");
+    expect(script.texts().at(-1)).toContain("✓ Build saved\n○ Checks did not run");
     expect(script.calls.filter(call => call.method === "editMessageText")).toHaveLength(1);
-    expect(script.buttons(script.sends().at(-1)!)).toEqual([{ text: "Review result", url: `${ORIGIN}/chat?task=alpha-1&result=${run}&tab=checks` }]);
+    expect(script.buttons(script.sends().at(-1)!)).toEqual([{ text: "Open result", url: `${ORIGIN}/chat?task=alpha-1&result=${run}` }]);
     expect(script.calls.filter(call => ["sendMessage", "editMessageText"].includes(call.method)).slice(-4).every(send => String(send.params["chat_id"]) === String(CHAT + 1))).toBe(true);
   });
 });
