@@ -15,6 +15,7 @@ import { WorktreePool } from './worktree.js';
 import { build } from './builder.js';
 import { run } from './exec.js';
 import { learningSha } from './project-learning.js';
+import { readKnowledgeSnapshot } from './project-knowledge.js';
 import { PREPARED_EVIDENCE_FILE, readPreparedEvidence, writePreparedEvidence } from './prepared-evidence.js';
 import { proofFileName, readVerifiedArtifact } from './evidence.js';
 
@@ -196,6 +197,9 @@ test('prepared screenshots use the worker receipt and existing capture with one 
   expect(await build(store, { ...fixture.request, agent, verify })).toMatchObject({ ok: true, committed: true });
   expect(agent).not.toHaveBeenCalled(); expect(verify).toHaveBeenCalledTimes(1);
   expect(store.getRun(fixture.runId)?.baseRevision).toBe(session.base);
+  expect(readKnowledgeSnapshot(store, fixture.runId)?.repository?.checkout).toMatchObject({
+    repo: fixture.path, head: session.base, baseRevision: session.base, source: 'working-tree',
+  });
   expect(sh(fixture.path, 'rev-parse', 'HEAD^{tree}')).toBe(sh(repo, 'rev-parse', `${made.receipt.candidate}^{tree}`));
   expect(sh(repo, 'rev-parse', 'main')).toBe(newerMain);
   expect(store.proofVerdictFor(fixture.runId)).toMatchObject({ verdict: 'short', machineVerdict: 'verified' });
