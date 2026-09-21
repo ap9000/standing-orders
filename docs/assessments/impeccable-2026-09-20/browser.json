@@ -1,0 +1,1465 @@
+{
+  "generatedAt": "2026-09-21T01:20:12.958Z",
+  "fixture": "synthetic \u2014 scripts/ui-polish-fixture.mjs { secondProject: true }",
+  "mode": "current-journey",
+  "rev": null,
+  "checks": [
+    {
+      "name": "shell desktop: signed-in home opens Chat",
+      "ok": true
+    },
+    {
+      "name": "simple desktop: Chat has one saved catch-up",
+      "ok": true
+    },
+    {
+      "name": "simple desktop: Open is the project action and Knowledge is secondary",
+      "ok": true
+    },
+    {
+      "name": "simple desktop: Projects fits",
+      "ok": true
+    },
+    {
+      "name": "simple desktop: result queue and detail agree on Complete",
+      "ok": true
+    },
+    {
+      "name": "simple desktop: completed result fits",
+      "ok": true
+    },
+    {
+      "name": "simple desktop: damaged current material stays visible",
+      "ok": true
+    },
+    {
+      "name": "shell desktop: primary destinations are Chat, Tasks and Projects",
+      "ok": true
+    },
+    {
+      "name": "shell desktop: the appropriate navigation is visible",
+      "ok": true
+    },
+    {
+      "name": "state desktop: Ready stays outside Complete",
+      "ok": true,
+      "detail": "[{\"id\":\"subtotal-rows\",\"token\":\"assignment-ready-to-check\",\"views\":[\"all\",\"needs-you\"],\"label\":\"Ready\"},{\"id\":\"csv-quoting\",\"token\":\"assignment-ready-to-check\",\"views\":[\"all\",\"needs-you\"],\"label\":\"Ready\"}]"
+    },
+    {
+      "name": "state desktop: only explicit completion enters Complete",
+      "ok": true
+    },
+    {
+      "name": "counts desktop: filters describe the same rows",
+      "ok": true,
+      "detail": "{\"All\":21,\"Needs you\":17,\"Running\":1,\"Complete\":1}"
+    },
+    {
+      "name": "fit desktop: every task filter remains readable and reachable",
+      "ok": true,
+      "detail": "[{\"label\":\"All\",\"count\":\"21\",\"left\":272,\"right\":340,\"top\":165,\"bottom\":205,\"width\":68,\"height\":40,\"fontPx\":14,\"clipped\":false,\"insideViewport\":true,\"insideStrip\":true,\"stripScrolls\":false},{\"label\":\"Needs you\",\"count\":\"17\",\"left\":344,\"right\":462,\"top\":165,\"bottom\":205,\"width\":118,\"height\":40,\"fontPx\":14,\"clipped\":false,\"insideViewport\":true,\"insideStrip\":true,\"stripScrolls\":false},{\"label\":\"Running\",\"count\":\"1\",\"left\":466,\"right\":565,\"top\":165,\"bottom\":205,\"width\":99,\"height\":40,\"fontPx\":14,\"clipped\":false,\"insideViewport\":true,\"insideStrip\":true,\"stripScrolls\":false},{\"label\":\"Complete\",\"count\":\"1\",\"left\":569,\"right\":678,\"top\":165,\"bottom\":205,\"width\":108,\"height\":40,\"fontPx\":14,\"clipped\":false,\"insideViewport\":true,\"insideStrip\":true,\"stripScrolls\":false}]"
+    },
+    {
+      "name": "shell desktop: keyboard opens Tools inside the viewport, including Code and the legacy inbox",
+      "ok": true,
+      "detail": "[{\"href\":\"/code\",\"left\":29,\"right\":202,\"top\":289,\"bottom\":323,\"width\":173,\"height\":34,\"positiveSize\":true,\"insideViewport\":true,\"computedVisible\":true},{\"href\":\"/inbox\",\"left\":29,\"right\":202,\"top\":325,\"bottom\":359,\"width\":173,\"height\":34,\"positiveSize\":true,\"insideViewport\":true,\"computedVisible\":true},{\"href\":\"/board\",\"left\":29,\"right\":202,\"top\":361,\"bottom\":395,\"width\":173,\"height\":34,\"positiveSize\":true,\"insideViewport\":true,\"computedVisible\":true},{\"href\":\"/tasks\",\"left\":29,\"right\":202,\"top\":397,\"bottom\":431,\"width\":173,\"height\":34,\"positiveSize\":true,\"insideViewport\":true,\"computedVisible\":true},{\"href\":\"/recipes\",\"left\":29,\"right\":202,\"top\":433,\"bottom\":467,\"width\":173,\"height\":34,\"positiveSize\":true,\"insideViewport\":true,\"computedVisible\":true},{\"href\":\"/routines\",\"left\":29,\"right\":202,\"top\":469,\"bottom\":503,\"width\":173,\"height\":34,\"positiveSize\":true,\"insideViewport\":true,\"computedVisible\":true},{\"href\":\"/workbench\",\"left\":29,\"right\":202,\"top\":505,\"bottom\":539,\"width\":173,\"height\":34,\"positiveSize\":true,\"insideViewport\":true,\"computedVisible\":true},{\"href\":\"/ledger\",\"left\":29,\"right\":202,\"top\":541,\"bottom\":575,\"width\":173,\"height\":34,\"positiveSize\":true,\"insideViewport\":true,\"computedVisible\":true}]"
+    },
+    {
+      "name": "agree desktop ledger-export task: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\",\"action\":\"Review plan\"},\"seen\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\"},\"actions\":[{\"label\":\"Review plan\",\"href\":null}]}"
+    },
+    {
+      "name": "fit desktop ledger-export task: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Review plan\",\"height\":44,\"left\":627,\"right\":730.40625,\"lines\":1}]"
+    },
+    {
+      "name": "fit desktop ledger-export task: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":1440,\"clientWidth\":1440,\"ok\":true}"
+    },
+    {
+      "name": "current desktop ledger-export task: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree desktop ledger-export chat: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\",\"action\":\"Review plan\"},\"seen\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\"},\"actions\":[{\"label\":\"Review plan\",\"href\":null}]}"
+    },
+    {
+      "name": "fit desktop ledger-export chat: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Review plan\",\"height\":44,\"left\":620.1875,\"right\":723.59375,\"lines\":1}]"
+    },
+    {
+      "name": "fit desktop ledger-export chat: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":1440,\"clientWidth\":1440,\"ok\":true}"
+    },
+    {
+      "name": "current desktop ledger-export chat: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree desktop csv-progress task: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-working\",\"label\":\"Waiting for another task\",\"action\":\"View task details\"},\"seen\":{\"token\":\"assignment-working\",\"label\":\"Waiting for another task\"},\"actions\":[{\"label\":\"View task details\",\"href\":\"/t/csv-progress?version=csv-progress\"}]}"
+    },
+    {
+      "name": "fit desktop csv-progress task: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"View task details\",\"height\":44,\"left\":631,\"right\":763.84375,\"lines\":1}]"
+    },
+    {
+      "name": "fit desktop csv-progress task: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":1440,\"clientWidth\":1440,\"ok\":true}"
+    },
+    {
+      "name": "current desktop csv-progress task: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree desktop csv-progress chat: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-working\",\"label\":\"Waiting for another task\",\"action\":\"View task details\"},\"seen\":{\"token\":\"assignment-working\",\"label\":\"Waiting for another task\"},\"actions\":[{\"label\":\"View task details\",\"href\":\"/t/csv-progress?version=csv-progress\"}]}"
+    },
+    {
+      "name": "fit desktop csv-progress chat: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"View task details\",\"height\":44,\"left\":622.1875,\"right\":755.03125,\"lines\":1}]"
+    },
+    {
+      "name": "fit desktop csv-progress chat: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":1440,\"clientWidth\":1440,\"ok\":true}"
+    },
+    {
+      "name": "current desktop csv-progress chat: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree desktop csv-streaming task: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\",\"action\":\"Check connection\"},\"seen\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\"},\"actions\":[{\"label\":\"Check connection\",\"href\":\"/t/csv-streaming?version=csv-streaming#run-status\"}]}"
+    },
+    {
+      "name": "fit desktop csv-streaming task: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Check connection\",\"height\":44,\"left\":631,\"right\":767.828125,\"lines\":1}]"
+    },
+    {
+      "name": "fit desktop csv-streaming task: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":1440,\"clientWidth\":1440,\"ok\":true}"
+    },
+    {
+      "name": "current desktop csv-streaming task: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree desktop csv-streaming chat: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\",\"action\":\"Check connection\"},\"seen\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\"},\"actions\":[{\"label\":\"Check connection\",\"href\":\"/t/csv-streaming?version=csv-streaming#run-status\"}]}"
+    },
+    {
+      "name": "fit desktop csv-streaming chat: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Check connection\",\"height\":44,\"left\":622.1875,\"right\":759.015625,\"lines\":1}]"
+    },
+    {
+      "name": "fit desktop csv-streaming chat: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":1440,\"clientWidth\":1440,\"ok\":true}"
+    },
+    {
+      "name": "current desktop csv-streaming chat: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree desktop csv-range-tests task: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-working\",\"label\":\"Running now\",\"action\":\"Watch the build\"},\"seen\":{\"token\":\"assignment-working\",\"label\":\"Running now\"},\"actions\":[{\"label\":\"Watch the build\",\"href\":\"/r/9\"}]}"
+    },
+    {
+      "name": "fit desktop csv-range-tests task: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Watch the build\",\"height\":44,\"left\":631,\"right\":755.90625,\"lines\":1}]"
+    },
+    {
+      "name": "fit desktop csv-range-tests task: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":1440,\"clientWidth\":1440,\"ok\":true}"
+    },
+    {
+      "name": "current desktop csv-range-tests task: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree desktop csv-range-tests chat: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-working\",\"label\":\"Running now\",\"action\":\"Watch the build\"},\"seen\":{\"token\":\"assignment-working\",\"label\":\"Running now\"},\"actions\":[{\"label\":\"Watch the build\",\"href\":\"/r/9\"}]}"
+    },
+    {
+      "name": "fit desktop csv-range-tests chat: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Watch the build\",\"height\":44,\"left\":622.1875,\"right\":747.09375,\"lines\":1}]"
+    },
+    {
+      "name": "fit desktop csv-range-tests chat: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":1440,\"clientWidth\":1440,\"ok\":true}"
+    },
+    {
+      "name": "current desktop csv-range-tests chat: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree desktop csv-docs task: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\",\"action\":\"Review hold\"},\"seen\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\"},\"actions\":[{\"label\":\"Review hold\",\"href\":\"/t/csv-docs?version=csv-docs#task-actions\"}]}"
+    },
+    {
+      "name": "fit desktop csv-docs task: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Review hold\",\"height\":44,\"left\":631,\"right\":734.453125,\"lines\":1}]"
+    },
+    {
+      "name": "fit desktop csv-docs task: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":1440,\"clientWidth\":1440,\"ok\":true}"
+    },
+    {
+      "name": "current desktop csv-docs task: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree desktop csv-docs chat: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\",\"action\":\"Review hold\"},\"seen\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\"},\"actions\":[{\"label\":\"Review hold\",\"href\":\"/t/csv-docs?version=csv-docs#task-actions\"}]}"
+    },
+    {
+      "name": "fit desktop csv-docs chat: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Review hold\",\"height\":44,\"left\":622.1875,\"right\":725.640625,\"lines\":1}]"
+    },
+    {
+      "name": "fit desktop csv-docs chat: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":1440,\"clientWidth\":1440,\"ok\":true}"
+    },
+    {
+      "name": "current desktop csv-docs chat: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree desktop csv-parser-matrix task: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\",\"action\":\"Review pause\"},\"seen\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\"},\"actions\":[{\"label\":\"Review pause\",\"href\":\"/t/csv-parser-matrix?version=csv-parser-matrix#task-control\"}]}"
+    },
+    {
+      "name": "fit desktop csv-parser-matrix task: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Review pause\",\"height\":44,\"left\":631,\"right\":744.328125,\"lines\":1}]"
+    },
+    {
+      "name": "fit desktop csv-parser-matrix task: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":1440,\"clientWidth\":1440,\"ok\":true}"
+    },
+    {
+      "name": "current desktop csv-parser-matrix task: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree desktop csv-parser-matrix chat: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\",\"action\":\"Review pause\"},\"seen\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\"},\"actions\":[{\"label\":\"Review pause\",\"href\":\"/t/csv-parser-matrix?version=csv-parser-matrix#task-control\"}]}"
+    },
+    {
+      "name": "fit desktop csv-parser-matrix chat: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Review pause\",\"height\":44,\"left\":622.1875,\"right\":735.515625,\"lines\":1}]"
+    },
+    {
+      "name": "fit desktop csv-parser-matrix chat: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":1440,\"clientWidth\":1440,\"ok\":true}"
+    },
+    {
+      "name": "current desktop csv-parser-matrix chat: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree desktop csv-benchmark task: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\",\"action\":\"Review and retry\"},\"seen\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\"},\"actions\":[{\"label\":\"Review and retry\",\"href\":\"/t/csv-benchmark?version=csv-benchmark#task-actions\"}]}"
+    },
+    {
+      "name": "fit desktop csv-benchmark task: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Review and retry\",\"height\":44,\"left\":631,\"right\":762.84375,\"lines\":1}]"
+    },
+    {
+      "name": "fit desktop csv-benchmark task: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":1440,\"clientWidth\":1440,\"ok\":true}"
+    },
+    {
+      "name": "current desktop csv-benchmark task: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree desktop csv-benchmark chat: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\",\"action\":\"Review and retry\"},\"seen\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\"},\"actions\":[{\"label\":\"Review and retry\",\"href\":\"/t/csv-benchmark?version=csv-benchmark#task-actions\"}]}"
+    },
+    {
+      "name": "fit desktop csv-benchmark chat: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Review and retry\",\"height\":44,\"left\":622.1875,\"right\":754.03125,\"lines\":1}]"
+    },
+    {
+      "name": "fit desktop csv-benchmark chat: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":1440,\"clientWidth\":1440,\"ok\":true}"
+    },
+    {
+      "name": "current desktop csv-benchmark chat: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree desktop csv-quoting task: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\",\"action\":\"Inspect failed check\"},\"seen\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\"},\"actions\":[{\"label\":\"Inspect failed check\",\"href\":\"/review?result=csv-quoting&run=2&project=%2Fprivate%2Fvar%2Ffolders%2Fgy%2Fqjcnx5hj1m3420l6dnpzkfsh0000gn%2FT%2Fstanding-orders-ui-polish-NIYUsh%2Fportfolio-console\"}]}"
+    },
+    {
+      "name": "fit desktop csv-quoting task: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Inspect failed check\",\"height\":44,\"left\":631,\"right\":783.171875,\"lines\":1}]"
+    },
+    {
+      "name": "fit desktop csv-quoting task: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":1440,\"clientWidth\":1440,\"ok\":true}"
+    },
+    {
+      "name": "current desktop csv-quoting task: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree desktop csv-quoting chat: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\",\"action\":\"Inspect failed check\"},\"seen\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\"},\"actions\":[{\"label\":\"Inspect failed check\",\"href\":\"/chat?task=csv-quoting&result=2\"}]}"
+    },
+    {
+      "name": "fit desktop csv-quoting chat: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Inspect failed check\",\"height\":44,\"left\":622.1875,\"right\":774.359375,\"lines\":1}]"
+    },
+    {
+      "name": "fit desktop csv-quoting chat: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":1440,\"clientWidth\":1440,\"ok\":true}"
+    },
+    {
+      "name": "current desktop csv-quoting chat: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree desktop subtotal-rows task: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\",\"action\":\"Open result\"},\"seen\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\"},\"actions\":[{\"label\":\"Open result\",\"href\":\"/review?result=subtotal-rows&run=4&project=%2Fprivate%2Fvar%2Ffolders%2Fgy%2Fqjcnx5hj1m3420l6dnpzkfsh0000gn%2FT%2Fstanding-orders-ui-polish-NIYUsh%2Fportfolio-console\"}]}"
+    },
+    {
+      "name": "fit desktop subtotal-rows task: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Open result\",\"height\":44,\"left\":631,\"right\":731.078125,\"lines\":1}]"
+    },
+    {
+      "name": "fit desktop subtotal-rows task: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":1440,\"clientWidth\":1440,\"ok\":true}"
+    },
+    {
+      "name": "current desktop subtotal-rows task: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree desktop subtotal-rows chat: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\",\"action\":\"Open result\"},\"seen\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\"},\"actions\":[{\"label\":\"Open result\",\"href\":\"/chat?task=subtotal-rows&result=4\"}]}"
+    },
+    {
+      "name": "fit desktop subtotal-rows chat: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Open result\",\"height\":44,\"left\":622.1875,\"right\":722.265625,\"lines\":1}]"
+    },
+    {
+      "name": "fit desktop subtotal-rows chat: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":1440,\"clientWidth\":1440,\"ok\":true}"
+    },
+    {
+      "name": "current desktop subtotal-rows chat: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree desktop csv-timings task: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\",\"action\":\"Open result\"},\"seen\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\"},\"actions\":[{\"label\":\"Open result\",\"href\":\"/review?result=csv-timings&run=18&project=%2Fprivate%2Fvar%2Ffolders%2Fgy%2Fqjcnx5hj1m3420l6dnpzkfsh0000gn%2FT%2Fstanding-orders-ui-polish-NIYUsh%2Fportfolio-console\"}]}"
+    },
+    {
+      "name": "fit desktop csv-timings task: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Open result\",\"height\":44,\"left\":631,\"right\":731.078125,\"lines\":1}]"
+    },
+    {
+      "name": "fit desktop csv-timings task: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":1440,\"clientWidth\":1440,\"ok\":true}"
+    },
+    {
+      "name": "current desktop csv-timings task: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree desktop csv-timings chat: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\",\"action\":\"Open result\"},\"seen\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\"},\"actions\":[{\"label\":\"Open result\",\"href\":\"/chat?task=csv-timings&result=18\"}]}"
+    },
+    {
+      "name": "fit desktop csv-timings chat: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Open result\",\"height\":44,\"left\":622.1875,\"right\":722.265625,\"lines\":1}]"
+    },
+    {
+      "name": "fit desktop csv-timings chat: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":1440,\"clientWidth\":1440,\"ok\":true}"
+    },
+    {
+      "name": "current desktop csv-timings chat: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree desktop csv-header-row task: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\",\"action\":\"Open result\"},\"seen\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\"},\"actions\":[{\"label\":\"Open result\",\"href\":\"/review?result=csv-header-row&run=11&project=%2Fprivate%2Fvar%2Ffolders%2Fgy%2Fqjcnx5hj1m3420l6dnpzkfsh0000gn%2FT%2Fstanding-orders-ui-polish-NIYUsh%2Fportfolio-console\"}]}"
+    },
+    {
+      "name": "fit desktop csv-header-row task: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Open result\",\"height\":44,\"left\":631,\"right\":731.078125,\"lines\":1}]"
+    },
+    {
+      "name": "fit desktop csv-header-row task: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":1440,\"clientWidth\":1440,\"ok\":true}"
+    },
+    {
+      "name": "current desktop csv-header-row task: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree desktop csv-header-row chat: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\",\"action\":\"Open result\"},\"seen\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\"},\"actions\":[{\"label\":\"Open result\",\"href\":\"/chat?task=csv-header-row&result=11\"}]}"
+    },
+    {
+      "name": "fit desktop csv-header-row chat: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Open result\",\"height\":44,\"left\":622.1875,\"right\":722.265625,\"lines\":1}]"
+    },
+    {
+      "name": "fit desktop csv-header-row chat: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":1440,\"clientWidth\":1440,\"ok\":true}"
+    },
+    {
+      "name": "current desktop csv-header-row chat: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree desktop csv-null-cells task: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\",\"action\":\"Review the result\"},\"seen\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\"},\"actions\":[{\"label\":\"Review the result\",\"href\":\"/review?result=csv-null-cells&run=12&project=%2Fprivate%2Fvar%2Ffolders%2Fgy%2Fqjcnx5hj1m3420l6dnpzkfsh0000gn%2FT%2Fstanding-orders-ui-polish-NIYUsh%2Fportfolio-console\"}]}"
+    },
+    {
+      "name": "fit desktop csv-null-cells task: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Review the result\",\"height\":44,\"left\":631,\"right\":765.75,\"lines\":1}]"
+    },
+    {
+      "name": "fit desktop csv-null-cells task: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":1440,\"clientWidth\":1440,\"ok\":true}"
+    },
+    {
+      "name": "current desktop csv-null-cells task: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree desktop csv-null-cells chat: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\",\"action\":\"Review the result\"},\"seen\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\"},\"actions\":[{\"label\":\"Review the result\",\"href\":\"/chat?task=csv-null-cells&result=12\"}]}"
+    },
+    {
+      "name": "fit desktop csv-null-cells chat: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Review the result\",\"height\":44,\"left\":622.1875,\"right\":756.9375,\"lines\":1}]"
+    },
+    {
+      "name": "fit desktop csv-null-cells chat: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":1440,\"clientWidth\":1440,\"ok\":true}"
+    },
+    {
+      "name": "current desktop csv-null-cells chat: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree desktop csv-large-file task: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\",\"action\":\"Open result\"},\"seen\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\"},\"actions\":[{\"label\":\"Open result\",\"href\":\"/review?result=csv-large-file&run=14&project=%2Fprivate%2Fvar%2Ffolders%2Fgy%2Fqjcnx5hj1m3420l6dnpzkfsh0000gn%2FT%2Fstanding-orders-ui-polish-NIYUsh%2Fportfolio-console\"}]}"
+    },
+    {
+      "name": "fit desktop csv-large-file task: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Open result\",\"height\":44,\"left\":631,\"right\":731.078125,\"lines\":1}]"
+    },
+    {
+      "name": "fit desktop csv-large-file task: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":1440,\"clientWidth\":1440,\"ok\":true}"
+    },
+    {
+      "name": "current desktop csv-large-file task: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree desktop csv-large-file chat: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\",\"action\":\"Open result\"},\"seen\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\"},\"actions\":[{\"label\":\"Open result\",\"href\":\"/chat?task=csv-large-file&result=14\"}]}"
+    },
+    {
+      "name": "fit desktop csv-large-file chat: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Open result\",\"height\":44,\"left\":622.1875,\"right\":722.265625,\"lines\":1}]"
+    },
+    {
+      "name": "fit desktop csv-large-file chat: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":1440,\"clientWidth\":1440,\"ok\":true}"
+    },
+    {
+      "name": "current desktop csv-large-file chat: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree desktop csv-column-names task: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-complete\",\"label\":\"Complete\",\"action\":\"Open result\"},\"seen\":{\"token\":\"assignment-complete\",\"label\":\"Complete\"},\"actions\":[{\"label\":\"Open result\",\"href\":\"/review?result=csv-column-names&run=19&project=%2Fprivate%2Fvar%2Ffolders%2Fgy%2Fqjcnx5hj1m3420l6dnpzkfsh0000gn%2FT%2Fstanding-orders-ui-polish-NIYUsh%2Fportfolio-console\"}]}"
+    },
+    {
+      "name": "fit desktop csv-column-names task: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Open result\",\"height\":44,\"left\":631,\"right\":731.078125,\"lines\":1}]"
+    },
+    {
+      "name": "fit desktop csv-column-names task: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":1440,\"clientWidth\":1440,\"ok\":true}"
+    },
+    {
+      "name": "current desktop csv-column-names task: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "simple desktop: partial passing output has a visible disclosure",
+      "ok": true
+    },
+    {
+      "name": "simple desktop: keyboard reveals the retained-output limitation",
+      "ok": true
+    },
+    {
+      "name": "agree desktop csv-column-names chat: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-complete\",\"label\":\"Complete\",\"action\":\"Open result\"},\"seen\":{\"token\":\"assignment-complete\",\"label\":\"Complete\"},\"actions\":[{\"label\":\"Open result\",\"href\":\"/chat?task=csv-column-names&result=19\"}]}"
+    },
+    {
+      "name": "fit desktop csv-column-names chat: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Open result\",\"height\":44,\"left\":622.1875,\"right\":722.265625,\"lines\":1}]"
+    },
+    {
+      "name": "fit desktop csv-column-names chat: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":1440,\"clientWidth\":1440,\"ok\":true}"
+    },
+    {
+      "name": "current desktop csv-column-names chat: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "one-action desktop csv-docs: keyboard primary action reveals its controls",
+      "ok": true
+    },
+    {
+      "name": "one-action desktop csv-parser-matrix: keyboard primary action reveals its controls",
+      "ok": true
+    },
+    {
+      "name": "one-action desktop csv-streaming: keyboard primary action reveals its controls",
+      "ok": true
+    },
+    {
+      "name": "one-action desktop: Review plan opens the full exact terms before password approval",
+      "ok": true
+    },
+    {
+      "name": "one-action desktop: the risk and its consequences are reachable before consent",
+      "ok": true,
+      "detail": "Routine: every role uses the everyday configured agent unless the work itself asks for more (strict quality, screenshots, or a self-merging mode)."
+    },
+    {
+      "name": "fit desktop: expanded approval fits",
+      "ok": true
+    },
+    {
+      "name": "fit desktop: the exact live-pilot allowed path wraps fully",
+      "ok": true,
+      "detail": "{\"text\":\"touches src/export/csv.ts, src/export/csv.test.ts, src/export/range.ts, src/export/range.test.ts, src/ui/project-export.ts, src/ui/project-export.test.ts, docs/assessments/WORKSPACE_5_LONG_REQUEST_RESULT_2026-09-14.md, fixtures/ledger-sample.csv\",\"width\":394,\"scroll\":394,\"right\":1025,\"overflow\":\"visible\",\"wrap\":\"anywhere\",\"exact\":true,\"document\":1440}"
+    },
+    {
+      "name": "one-action desktop: the path reply refresh preserves the composer, draft, focus and selection",
+      "ok": true,
+      "detail": "{\"same\":true,\"focused\":true,\"value\":\"Unsent desktop feedback stays here.\",\"start\":3,\"end\":8}"
+    },
+    {
+      "name": "fit desktop: the exact live-pilot chat path wraps in sent text and plain/code replies without clipping",
+      "ok": true,
+      "detail": "[{\"role\":\"operator\",\"text\":\"Slowly read AGENTS.md and docs/assessments/WORKSPACE_5_REAL_WORK_PILOT_2026-09-14.md.\",\"width\":608,\"scroll\":608,\"left\":772,\"right\":1380,\"overflow\":\"visible\",\"wrap\":\"anywhere\",\"clamp\":\"none\",\"document\":1440},{\"role\":\"assistant\",\"text\":\"Read AGENTS.md and docs/assessments/WORKSPACE_5_REAL_WORK_PILOT_2026-09-14.md.\",\"width\":705,\"scroll\":705,\"left\":662.375,\"right\":1367.1875,\"overflow\":\"visible\",\"wrap\":\"anywhere\",\"clamp\":\"none\",\"document\":1440},{\"role\":\"assistant\",\"text\":\"Keep the full path visible: docs/assessments/WORKSPACE_5_REAL_WORK_PILOT_2026-09-14.md.\",\"width\":705,\"scroll\":705,\"left\":662.375,\"right\":1367.1875,\"overflow\":\"visible\",\"wrap\":\"anywhere\",\"clamp\":\"none\",\"document\":1440}]"
+    },
+    {
+      "name": "one-action desktop: reloading the long-message chat preserves the unsent draft",
+      "ok": true
+    },
+    {
+      "name": "one-action desktop: Changes opens the preserved diff",
+      "ok": true
+    },
+    {
+      "name": "one-action desktop: Checks is readable",
+      "ok": true
+    },
+    {
+      "name": "one-action desktop: refresh preserves the feedback draft",
+      "ok": true
+    },
+    {
+      "name": "one-action desktop: one note is saved",
+      "ok": true,
+      "detail": "[\"Keep the full allowed path visible at 1440px. Wrap long filenames without hiding their suffixes, preserve the existing column names and row order, and make the check failure easy to find from this result. Keep this request attached to the same assignment when creating the revision.\"]"
+    },
+    {
+      "name": "one-action desktop: revision has its own unapproved scope",
+      "ok": true
+    },
+    {
+      "name": "one-action desktop: result/revision navigation preserves the unsent chat draft",
+      "ok": true
+    },
+    {
+      "name": "fit desktop: empty Work fits and offers Start in chat",
+      "ok": true
+    },
+    {
+      "name": "shell phone: signed-in home opens Chat",
+      "ok": true
+    },
+    {
+      "name": "simple phone: Chat has one saved catch-up",
+      "ok": true
+    },
+    {
+      "name": "simple phone: Open is the project action and Knowledge is secondary",
+      "ok": true
+    },
+    {
+      "name": "simple phone: Projects fits",
+      "ok": true
+    },
+    {
+      "name": "simple phone: result queue and detail agree on Complete",
+      "ok": true
+    },
+    {
+      "name": "simple phone: completed result fits",
+      "ok": true
+    },
+    {
+      "name": "simple phone: damaged current material stays visible",
+      "ok": true
+    },
+    {
+      "name": "shell phone: primary destinations are Chat, Tasks and Projects",
+      "ok": true
+    },
+    {
+      "name": "shell phone: the appropriate navigation is visible",
+      "ok": true
+    },
+    {
+      "name": "state phone: Ready stays outside Complete",
+      "ok": true,
+      "detail": "[{\"id\":\"subtotal-rows\",\"token\":\"assignment-ready-to-check\",\"views\":[\"all\",\"needs-you\"],\"label\":\"Ready\"},{\"id\":\"csv-quoting\",\"token\":\"assignment-ready-to-check\",\"views\":[\"all\",\"needs-you\"],\"label\":\"Ready\"}]"
+    },
+    {
+      "name": "state phone: only explicit completion enters Complete",
+      "ok": true
+    },
+    {
+      "name": "counts phone: filters describe the same rows",
+      "ok": true,
+      "detail": "{\"All\":21,\"Needs you\":17,\"Running\":1,\"Complete\":1}"
+    },
+    {
+      "name": "fit phone: every task filter remains readable and reachable",
+      "ok": true,
+      "detail": "[{\"label\":\"All\",\"count\":\"21\",\"left\":16,\"right\":106,\"top\":143,\"bottom\":187,\"width\":90,\"height\":44,\"fontPx\":12,\"clipped\":false,\"insideViewport\":true,\"insideStrip\":true,\"stripScrolls\":false},{\"label\":\"Needs you\",\"count\":\"17\",\"left\":106,\"right\":195,\"top\":143,\"bottom\":187,\"width\":90,\"height\":44,\"fontPx\":12,\"clipped\":false,\"insideViewport\":true,\"insideStrip\":true,\"stripScrolls\":false},{\"label\":\"Running\",\"count\":\"1\",\"left\":195,\"right\":285,\"top\":143,\"bottom\":187,\"width\":90,\"height\":44,\"fontPx\":12,\"clipped\":false,\"insideViewport\":true,\"insideStrip\":true,\"stripScrolls\":false},{\"label\":\"Complete\",\"count\":\"1\",\"left\":285,\"right\":374,\"top\":143,\"bottom\":187,\"width\":90,\"height\":44,\"fontPx\":12,\"clipped\":false,\"insideViewport\":true,\"insideStrip\":true,\"stripScrolls\":false}]"
+    },
+    {
+      "name": "shell phone: keyboard opens Tools inside the viewport, including Code and the legacy inbox",
+      "ok": true,
+      "detail": "[{\"href\":\"/inbox\",\"left\":204.8,\"right\":361.9,\"top\":162,\"bottom\":204,\"width\":157,\"height\":43,\"positiveSize\":true,\"insideViewport\":true,\"computedVisible\":true},{\"href\":\"/code\",\"left\":204.8,\"right\":361.9,\"top\":204,\"bottom\":247,\"width\":157,\"height\":43,\"positiveSize\":true,\"insideViewport\":true,\"computedVisible\":true},{\"href\":\"/board\",\"left\":204.8,\"right\":361.9,\"top\":247,\"bottom\":290,\"width\":157,\"height\":43,\"positiveSize\":true,\"insideViewport\":true,\"computedVisible\":true},{\"href\":\"/board?view=order\",\"left\":204.8,\"right\":361.9,\"top\":290,\"bottom\":333,\"width\":157,\"height\":43,\"positiveSize\":true,\"insideViewport\":true,\"computedVisible\":true},{\"href\":\"/tasks\",\"left\":204.8,\"right\":361.9,\"top\":333,\"bottom\":375,\"width\":157,\"height\":43,\"positiveSize\":true,\"insideViewport\":true,\"computedVisible\":true},{\"href\":\"/recipes\",\"left\":204.8,\"right\":361.9,\"top\":375,\"bottom\":418,\"width\":157,\"height\":43,\"positiveSize\":true,\"insideViewport\":true,\"computedVisible\":true},{\"href\":\"/routines\",\"left\":204.8,\"right\":361.9,\"top\":418,\"bottom\":461,\"width\":157,\"height\":43,\"positiveSize\":true,\"insideViewport\":true,\"computedVisible\":true},{\"href\":\"/workbench\",\"left\":204.8,\"right\":361.9,\"top\":461,\"bottom\":503,\"width\":157,\"height\":43,\"positiveSize\":true,\"insideViewport\":true,\"computedVisible\":true},{\"href\":\"/ledger\",\"left\":204.8,\"right\":361.9,\"top\":503,\"bottom\":546,\"width\":157,\"height\":43,\"positiveSize\":true,\"insideViewport\":true,\"computedVisible\":true}]"
+    },
+    {
+      "name": "agree phone ledger-export task: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\",\"action\":\"Review plan\"},\"seen\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\"},\"actions\":[{\"label\":\"Review plan\",\"href\":null}]}"
+    },
+    {
+      "name": "fit phone ledger-export task: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Review plan\",\"height\":44,\"left\":47,\"right\":150.40625,\"lines\":1}]"
+    },
+    {
+      "name": "fit phone ledger-export task: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "current phone ledger-export task: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree phone ledger-export chat: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\",\"action\":\"Review plan\"},\"seen\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\"},\"actions\":[{\"label\":\"Review plan\",\"href\":null}]}"
+    },
+    {
+      "name": "fit phone ledger-export chat: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Review plan\",\"height\":44,\"left\":33,\"right\":136.40625,\"lines\":1}]"
+    },
+    {
+      "name": "fit phone ledger-export chat: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "current phone ledger-export chat: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree phone csv-progress task: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-working\",\"label\":\"Waiting for another task\",\"action\":\"View task details\"},\"seen\":{\"token\":\"assignment-working\",\"label\":\"Waiting for another task\"},\"actions\":[{\"label\":\"View task details\",\"href\":\"/t/csv-progress?version=csv-progress\"}]}"
+    },
+    {
+      "name": "fit phone csv-progress task: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"View task details\",\"height\":44,\"left\":51,\"right\":183.84375,\"lines\":1}]"
+    },
+    {
+      "name": "fit phone csv-progress task: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "current phone csv-progress task: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree phone csv-progress chat: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-working\",\"label\":\"Waiting for another task\",\"action\":\"View task details\"},\"seen\":{\"token\":\"assignment-working\",\"label\":\"Waiting for another task\"},\"actions\":[{\"label\":\"View task details\",\"href\":\"/t/csv-progress?version=csv-progress\"}]}"
+    },
+    {
+      "name": "fit phone csv-progress chat: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"View task details\",\"height\":44,\"left\":35,\"right\":167.84375,\"lines\":1}]"
+    },
+    {
+      "name": "fit phone csv-progress chat: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "current phone csv-progress chat: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree phone csv-streaming task: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\",\"action\":\"Check connection\"},\"seen\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\"},\"actions\":[{\"label\":\"Check connection\",\"href\":\"/t/csv-streaming?version=csv-streaming#run-status\"}]}"
+    },
+    {
+      "name": "fit phone csv-streaming task: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Check connection\",\"height\":44,\"left\":51,\"right\":187.828125,\"lines\":1}]"
+    },
+    {
+      "name": "fit phone csv-streaming task: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "current phone csv-streaming task: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree phone csv-streaming chat: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\",\"action\":\"Check connection\"},\"seen\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\"},\"actions\":[{\"label\":\"Check connection\",\"href\":\"/t/csv-streaming?version=csv-streaming#run-status\"}]}"
+    },
+    {
+      "name": "fit phone csv-streaming chat: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Check connection\",\"height\":44,\"left\":35,\"right\":171.828125,\"lines\":1}]"
+    },
+    {
+      "name": "fit phone csv-streaming chat: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "current phone csv-streaming chat: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree phone csv-range-tests task: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-working\",\"label\":\"Running now\",\"action\":\"Watch the build\"},\"seen\":{\"token\":\"assignment-working\",\"label\":\"Running now\"},\"actions\":[{\"label\":\"Watch the build\",\"href\":\"/r/9\"}]}"
+    },
+    {
+      "name": "fit phone csv-range-tests task: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Watch the build\",\"height\":44,\"left\":51,\"right\":175.90625,\"lines\":1}]"
+    },
+    {
+      "name": "fit phone csv-range-tests task: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "current phone csv-range-tests task: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree phone csv-range-tests chat: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-working\",\"label\":\"Running now\",\"action\":\"Watch the build\"},\"seen\":{\"token\":\"assignment-working\",\"label\":\"Running now\"},\"actions\":[{\"label\":\"Watch the build\",\"href\":\"/r/9\"}]}"
+    },
+    {
+      "name": "fit phone csv-range-tests chat: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Watch the build\",\"height\":44,\"left\":35,\"right\":159.90625,\"lines\":1}]"
+    },
+    {
+      "name": "fit phone csv-range-tests chat: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "current phone csv-range-tests chat: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree phone csv-docs task: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\",\"action\":\"Review hold\"},\"seen\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\"},\"actions\":[{\"label\":\"Review hold\",\"href\":\"/t/csv-docs?version=csv-docs#task-actions\"}]}"
+    },
+    {
+      "name": "fit phone csv-docs task: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Review hold\",\"height\":44,\"left\":51,\"right\":154.453125,\"lines\":1}]"
+    },
+    {
+      "name": "fit phone csv-docs task: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "current phone csv-docs task: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree phone csv-docs chat: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\",\"action\":\"Review hold\"},\"seen\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\"},\"actions\":[{\"label\":\"Review hold\",\"href\":\"/t/csv-docs?version=csv-docs#task-actions\"}]}"
+    },
+    {
+      "name": "fit phone csv-docs chat: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Review hold\",\"height\":44,\"left\":35,\"right\":138.453125,\"lines\":1}]"
+    },
+    {
+      "name": "fit phone csv-docs chat: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "current phone csv-docs chat: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree phone csv-parser-matrix task: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\",\"action\":\"Review pause\"},\"seen\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\"},\"actions\":[{\"label\":\"Review pause\",\"href\":\"/t/csv-parser-matrix?version=csv-parser-matrix#task-control\"}]}"
+    },
+    {
+      "name": "fit phone csv-parser-matrix task: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Review pause\",\"height\":44,\"left\":51,\"right\":164.328125,\"lines\":1}]"
+    },
+    {
+      "name": "fit phone csv-parser-matrix task: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "current phone csv-parser-matrix task: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree phone csv-parser-matrix chat: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\",\"action\":\"Review pause\"},\"seen\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\"},\"actions\":[{\"label\":\"Review pause\",\"href\":\"/t/csv-parser-matrix?version=csv-parser-matrix#task-control\"}]}"
+    },
+    {
+      "name": "fit phone csv-parser-matrix chat: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Review pause\",\"height\":44,\"left\":35,\"right\":148.328125,\"lines\":1}]"
+    },
+    {
+      "name": "fit phone csv-parser-matrix chat: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "current phone csv-parser-matrix chat: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree phone csv-benchmark task: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\",\"action\":\"Review and retry\"},\"seen\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\"},\"actions\":[{\"label\":\"Review and retry\",\"href\":\"/t/csv-benchmark?version=csv-benchmark#task-actions\"}]}"
+    },
+    {
+      "name": "fit phone csv-benchmark task: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Review and retry\",\"height\":44,\"left\":51,\"right\":182.84375,\"lines\":1}]"
+    },
+    {
+      "name": "fit phone csv-benchmark task: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "current phone csv-benchmark task: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree phone csv-benchmark chat: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\",\"action\":\"Review and retry\"},\"seen\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\"},\"actions\":[{\"label\":\"Review and retry\",\"href\":\"/t/csv-benchmark?version=csv-benchmark#task-actions\"}]}"
+    },
+    {
+      "name": "fit phone csv-benchmark chat: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Review and retry\",\"height\":44,\"left\":35,\"right\":166.84375,\"lines\":1}]"
+    },
+    {
+      "name": "fit phone csv-benchmark chat: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "current phone csv-benchmark chat: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree phone csv-quoting task: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\",\"action\":\"Inspect failed check\"},\"seen\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\"},\"actions\":[{\"label\":\"Inspect failed check\",\"href\":\"/review?result=csv-quoting&run=2&project=%2Fprivate%2Fvar%2Ffolders%2Fgy%2Fqjcnx5hj1m3420l6dnpzkfsh0000gn%2FT%2Fstanding-orders-ui-polish-NIYUsh%2Fportfolio-console\"}]}"
+    },
+    {
+      "name": "fit phone csv-quoting task: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Inspect failed check\",\"height\":44,\"left\":51,\"right\":203.171875,\"lines\":1}]"
+    },
+    {
+      "name": "fit phone csv-quoting task: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "current phone csv-quoting task: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree phone csv-quoting chat: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\",\"action\":\"Inspect failed check\"},\"seen\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\"},\"actions\":[{\"label\":\"Inspect failed check\",\"href\":\"/chat?task=csv-quoting&result=2\"}]}"
+    },
+    {
+      "name": "fit phone csv-quoting chat: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Inspect failed check\",\"height\":44,\"left\":35,\"right\":187.171875,\"lines\":1}]"
+    },
+    {
+      "name": "fit phone csv-quoting chat: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "current phone csv-quoting chat: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree phone subtotal-rows task: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\",\"action\":\"Open result\"},\"seen\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\"},\"actions\":[{\"label\":\"Open result\",\"href\":\"/review?result=subtotal-rows&run=4&project=%2Fprivate%2Fvar%2Ffolders%2Fgy%2Fqjcnx5hj1m3420l6dnpzkfsh0000gn%2FT%2Fstanding-orders-ui-polish-NIYUsh%2Fportfolio-console\"}]}"
+    },
+    {
+      "name": "fit phone subtotal-rows task: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Open result\",\"height\":44,\"left\":51,\"right\":151.078125,\"lines\":1}]"
+    },
+    {
+      "name": "fit phone subtotal-rows task: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "current phone subtotal-rows task: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree phone subtotal-rows chat: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\",\"action\":\"Open result\"},\"seen\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\"},\"actions\":[{\"label\":\"Open result\",\"href\":\"/chat?task=subtotal-rows&result=4\"}]}"
+    },
+    {
+      "name": "fit phone subtotal-rows chat: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Open result\",\"height\":44,\"left\":35,\"right\":135.078125,\"lines\":1}]"
+    },
+    {
+      "name": "fit phone subtotal-rows chat: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "current phone subtotal-rows chat: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree phone csv-timings task: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\",\"action\":\"Open result\"},\"seen\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\"},\"actions\":[{\"label\":\"Open result\",\"href\":\"/review?result=csv-timings&run=18&project=%2Fprivate%2Fvar%2Ffolders%2Fgy%2Fqjcnx5hj1m3420l6dnpzkfsh0000gn%2FT%2Fstanding-orders-ui-polish-NIYUsh%2Fportfolio-console\"}]}"
+    },
+    {
+      "name": "fit phone csv-timings task: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Open result\",\"height\":44,\"left\":51,\"right\":151.078125,\"lines\":1}]"
+    },
+    {
+      "name": "fit phone csv-timings task: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "current phone csv-timings task: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree phone csv-timings chat: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\",\"action\":\"Open result\"},\"seen\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\"},\"actions\":[{\"label\":\"Open result\",\"href\":\"/chat?task=csv-timings&result=18\"}]}"
+    },
+    {
+      "name": "fit phone csv-timings chat: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Open result\",\"height\":44,\"left\":35,\"right\":135.078125,\"lines\":1}]"
+    },
+    {
+      "name": "fit phone csv-timings chat: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "current phone csv-timings chat: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree phone csv-header-row task: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\",\"action\":\"Open result\"},\"seen\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\"},\"actions\":[{\"label\":\"Open result\",\"href\":\"/review?result=csv-header-row&run=11&project=%2Fprivate%2Fvar%2Ffolders%2Fgy%2Fqjcnx5hj1m3420l6dnpzkfsh0000gn%2FT%2Fstanding-orders-ui-polish-NIYUsh%2Fportfolio-console\"}]}"
+    },
+    {
+      "name": "fit phone csv-header-row task: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Open result\",\"height\":44,\"left\":51,\"right\":151.078125,\"lines\":1}]"
+    },
+    {
+      "name": "fit phone csv-header-row task: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "current phone csv-header-row task: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree phone csv-header-row chat: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\",\"action\":\"Open result\"},\"seen\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\"},\"actions\":[{\"label\":\"Open result\",\"href\":\"/chat?task=csv-header-row&result=11\"}]}"
+    },
+    {
+      "name": "fit phone csv-header-row chat: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Open result\",\"height\":44,\"left\":35,\"right\":135.078125,\"lines\":1}]"
+    },
+    {
+      "name": "fit phone csv-header-row chat: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "current phone csv-header-row chat: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree phone csv-null-cells task: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\",\"action\":\"Review the result\"},\"seen\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\"},\"actions\":[{\"label\":\"Review the result\",\"href\":\"/review?result=csv-null-cells&run=12&project=%2Fprivate%2Fvar%2Ffolders%2Fgy%2Fqjcnx5hj1m3420l6dnpzkfsh0000gn%2FT%2Fstanding-orders-ui-polish-NIYUsh%2Fportfolio-console\"}]}"
+    },
+    {
+      "name": "fit phone csv-null-cells task: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Review the result\",\"height\":44,\"left\":51,\"right\":185.75,\"lines\":1}]"
+    },
+    {
+      "name": "fit phone csv-null-cells task: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "current phone csv-null-cells task: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree phone csv-null-cells chat: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\",\"action\":\"Review the result\"},\"seen\":{\"token\":\"assignment-needs-decision\",\"label\":\"Needs your decision\"},\"actions\":[{\"label\":\"Review the result\",\"href\":\"/chat?task=csv-null-cells&result=12\"}]}"
+    },
+    {
+      "name": "fit phone csv-null-cells chat: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Review the result\",\"height\":44,\"left\":35,\"right\":169.75,\"lines\":1}]"
+    },
+    {
+      "name": "fit phone csv-null-cells chat: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "current phone csv-null-cells chat: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree phone csv-large-file task: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\",\"action\":\"Open result\"},\"seen\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\"},\"actions\":[{\"label\":\"Open result\",\"href\":\"/review?result=csv-large-file&run=14&project=%2Fprivate%2Fvar%2Ffolders%2Fgy%2Fqjcnx5hj1m3420l6dnpzkfsh0000gn%2FT%2Fstanding-orders-ui-polish-NIYUsh%2Fportfolio-console\"}]}"
+    },
+    {
+      "name": "fit phone csv-large-file task: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Open result\",\"height\":44,\"left\":51,\"right\":151.078125,\"lines\":1}]"
+    },
+    {
+      "name": "fit phone csv-large-file task: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "current phone csv-large-file task: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree phone csv-large-file chat: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\",\"action\":\"Open result\"},\"seen\":{\"token\":\"assignment-ready-to-check\",\"label\":\"Ready\"},\"actions\":[{\"label\":\"Open result\",\"href\":\"/chat?task=csv-large-file&result=14\"}]}"
+    },
+    {
+      "name": "fit phone csv-large-file chat: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Open result\",\"height\":44,\"left\":35,\"right\":135.078125,\"lines\":1}]"
+    },
+    {
+      "name": "fit phone csv-large-file chat: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "current phone csv-large-file chat: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "agree phone csv-column-names task: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-complete\",\"label\":\"Complete\",\"action\":\"Open result\"},\"seen\":{\"token\":\"assignment-complete\",\"label\":\"Complete\"},\"actions\":[{\"label\":\"Open result\",\"href\":\"/review?result=csv-column-names&run=19&project=%2Fprivate%2Fvar%2Ffolders%2Fgy%2Fqjcnx5hj1m3420l6dnpzkfsh0000gn%2FT%2Fstanding-orders-ui-polish-NIYUsh%2Fportfolio-console\"}]}"
+    },
+    {
+      "name": "fit phone csv-column-names task: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Open result\",\"height\":44,\"left\":51,\"right\":151.078125,\"lines\":1}]"
+    },
+    {
+      "name": "fit phone csv-column-names task: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "current phone csv-column-names task: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "simple phone: partial passing output has a visible disclosure",
+      "ok": true
+    },
+    {
+      "name": "simple phone: keyboard reveals the retained-output limitation",
+      "ok": true
+    },
+    {
+      "name": "agree phone csv-column-names chat: status and one primary action match Work",
+      "ok": true,
+      "detail": "{\"expected\":{\"token\":\"assignment-complete\",\"label\":\"Complete\",\"action\":\"Open result\"},\"seen\":{\"token\":\"assignment-complete\",\"label\":\"Complete\"},\"actions\":[{\"label\":\"Open result\",\"href\":\"/chat?task=csv-column-names&result=19\"}]}"
+    },
+    {
+      "name": "fit phone csv-column-names chat: primary action fits on one line with a 44px target",
+      "ok": true,
+      "detail": "[{\"label\":\"Open result\",\"height\":44,\"left\":35,\"right\":135.078125,\"lines\":1}]"
+    },
+    {
+      "name": "fit phone csv-column-names chat: document fits",
+      "ok": true,
+      "detail": "{\"scrollWidth\":390,\"clientWidth\":390,\"ok\":true}"
+    },
+    {
+      "name": "current phone csv-column-names chat: no retired review action",
+      "ok": true
+    },
+    {
+      "name": "one-action phone csv-docs: keyboard primary action reveals its controls",
+      "ok": true
+    },
+    {
+      "name": "one-action phone csv-parser-matrix: keyboard primary action reveals its controls",
+      "ok": true
+    },
+    {
+      "name": "one-action phone csv-streaming: keyboard primary action reveals its controls",
+      "ok": true
+    },
+    {
+      "name": "one-action phone: Review plan opens the full exact terms before password approval",
+      "ok": true
+    },
+    {
+      "name": "one-action phone: the risk and its consequences are reachable before consent",
+      "ok": true,
+      "detail": "Routine: every role uses the everyday configured agent unless the work itself asks for more (strict quality, screenshots, or a self-merging mode)."
+    },
+    {
+      "name": "fit phone: expanded approval fits",
+      "ok": true
+    },
+    {
+      "name": "fit phone: the exact live-pilot allowed path wraps fully",
+      "ok": true,
+      "detail": "{\"text\":\"touches src/export/csv.ts, src/export/csv.test.ts, src/export/range.ts, src/export/range.test.ts, src/ui/project-export.ts, src/ui/project-export.test.ts, docs/assessments/WORKSPACE_5_LONG_REQUEST_RESULT_2026-09-14.md, fixtures/ledger-sample.csv\",\"width\":288,\"scroll\":288,\"right\":339,\"overflow\":\"visible\",\"wrap\":\"anywhere\",\"exact\":true,\"document\":390}"
+    },
+    {
+      "name": "one-action phone: the path reply refresh preserves the composer, draft, focus and selection",
+      "ok": true,
+      "detail": "{\"same\":true,\"focused\":true,\"value\":\"Unsent phone feedback stays here.\",\"start\":3,\"end\":8}"
+    },
+    {
+      "name": "fit phone: the exact live-pilot chat path wraps in sent text and plain/code replies without clipping",
+      "ok": true,
+      "detail": "[{\"role\":\"operator\",\"text\":\"Slowly read AGENTS.md and docs/assessments/WORKSPACE_5_REAL_WORK_PILOT_2026-09-14.md.\",\"width\":290,\"scroll\":290,\"left\":67.8125,\"right\":358,\"overflow\":\"visible\",\"wrap\":\"anywhere\",\"clamp\":\"none\",\"document\":390},{\"role\":\"assistant\",\"text\":\"Read AGENTS.md and docs/assessments/WORKSPACE_5_REAL_WORK_PILOT_2026-09-14.md.\",\"width\":313,\"scroll\":313,\"left\":60.796875,\"right\":374,\"overflow\":\"visible\",\"wrap\":\"anywhere\",\"clamp\":\"none\",\"document\":390},{\"role\":\"assistant\",\"text\":\"Keep the full path visible: docs/assessments/WORKSPACE_5_REAL_WORK_PILOT_2026-09-14.md.\",\"width\":313,\"scroll\":313,\"left\":60.796875,\"right\":374,\"overflow\":\"visible\",\"wrap\":\"anywhere\",\"clamp\":\"none\",\"document\":390}]"
+    },
+    {
+      "name": "one-action phone: reloading the long-message chat preserves the unsent draft",
+      "ok": true
+    },
+    {
+      "name": "one-action phone: Changes opens the preserved diff",
+      "ok": true
+    },
+    {
+      "name": "one-action phone: Checks is readable",
+      "ok": true
+    },
+    {
+      "name": "one-action phone: refresh preserves the feedback draft",
+      "ok": true
+    },
+    {
+      "name": "one-action phone: one note is saved",
+      "ok": true,
+      "detail": "[\"Keep the full allowed path visible at 390px. Wrap long filenames without hiding their suffixes, preserve the existing column names and row order, and make the check failure easy to find from this result. Keep this request attached to the same assignment when creating the revision.\"]"
+    },
+    {
+      "name": "one-action phone: revision has its own unapproved scope",
+      "ok": true
+    },
+    {
+      "name": "one-action phone: result/revision navigation preserves the unsent chat draft",
+      "ok": true
+    },
+    {
+      "name": "fit phone: empty Work fits and offers Start in chat",
+      "ok": true
+    },
+    {
+      "name": "context desktop: DB catch-up is available before chat authorization",
+      "ok": true
+    },
+    {
+      "name": "context desktop: catch-up fits",
+      "ok": true
+    },
+    {
+      "name": "context desktop: saved task links support keyboard and touch",
+      "ok": true,
+      "detail": "{\"focused\":true,\"height\":44,\"text\":\"Add per-currency subtotal rows\"}"
+    },
+    {
+      "name": "context desktop: empty code search fits",
+      "ok": true
+    },
+    {
+      "name": "context desktop: code search supports keyboard and touch",
+      "ok": true,
+      "detail": "{\"focused\":true,\"height\":44,\"inputHeight\":44}"
+    },
+    {
+      "name": "context desktop: local source search returns the actual fixture code",
+      "ok": true
+    },
+    {
+      "name": "context desktop: expanded code fits without widening the document",
+      "ok": true
+    },
+    {
+      "name": "context desktop: no-match state stays readable",
+      "ok": true
+    },
+    {
+      "name": "context desktop: catch-up and source search made no model request",
+      "ok": true
+    },
+    {
+      "name": "context phone: DB catch-up is available before chat authorization",
+      "ok": true
+    },
+    {
+      "name": "context phone: catch-up fits",
+      "ok": true
+    },
+    {
+      "name": "context phone: saved task links support keyboard and touch",
+      "ok": true,
+      "detail": "{\"focused\":true,\"height\":44,\"text\":\"Add per-currency subtotal rows\"}"
+    },
+    {
+      "name": "context phone: empty code search fits",
+      "ok": true
+    },
+    {
+      "name": "context phone: code search supports keyboard and touch",
+      "ok": true,
+      "detail": "{\"focused\":true,\"height\":44,\"inputHeight\":44}"
+    },
+    {
+      "name": "context phone: local source search returns the actual fixture code",
+      "ok": true
+    },
+    {
+      "name": "context phone: expanded code fits without widening the document",
+      "ok": true
+    },
+    {
+      "name": "context phone: no-match state stays readable",
+      "ok": true
+    },
+    {
+      "name": "context phone: catch-up and source search made no model request",
+      "ok": true
+    }
+  ],
+  "payloads": {},
+  "screenshots": [
+    {
+      "path": "desktop-chat-home.png",
+      "caption": "Synthetic fixture: desktop chat home"
+    },
+    {
+      "path": "desktop-result-complete.png",
+      "caption": "Synthetic fixture: desktop result complete"
+    },
+    {
+      "path": "phone-projects.png",
+      "caption": "Synthetic fixture: phone projects"
+    },
+    {
+      "path": "phone-status-failure.png",
+      "caption": "Synthetic fixture: phone status failure"
+    },
+    {
+      "path": "phone-status-complete.png",
+      "caption": "Synthetic fixture: phone status complete"
+    }
+  ],
+  "statuses": {},
+  "source": {
+    "scripts/ui-polish-fixture.mjs": "15db89c45b40b4e549a74dbcc0f6c7e3d1126bc81118992433993a1e2d04e17d",
+    "scripts/workspace-proof.mjs": "c9cb54c079b562fc2696672fa8182787dd02891c5f3f4b52d99c4b2fbe96a961",
+    "src/assignment-presentation.ts": "dc974f5392efe6dd89e606e8fc2f00543e47ff86de3137bb7417a71c290d8c83",
+    "src/assignment-ui.ts": "8b1405c8b6b7a566aa415733f2cf7d10c5ae08d0ff8eb04d017bf3909a51222e",
+    "src/assignment.test.ts": "2c03fdfe16ddfbbc2058ff9a9d13aa4f9b328b60930764097b765849bfa84719",
+    "src/chat-polish.ts": "236a7d7a02fd9e3ffd8d7aa25f1ccf054d1128d3e0b783cc7f0f9f7a3c4c1d67",
+    "src/serve.test.ts": "2150a4b3c7b25754e36b1fb102eea00b58eb8634b244e3e6e1d4487b894c20ac",
+    "src/serve.ts": "072a88aaac45fca1f31fcf5659c269745d45829cd5694d4c900a1f798734d7c7",
+    "src/workspace-ui.test.ts": "54fcf6021ab8b402dba182093e7ee40c80a6a8ef7243a8b57963ffa603e8cdb1"
+  }
+}

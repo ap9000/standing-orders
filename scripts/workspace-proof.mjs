@@ -77,8 +77,10 @@ async function context(viewport, extra = {}) {
 const shot = async (page, name, caption) => {
   const path = join(out, `${name}.png`);
   await page.evaluate(() => { document.documentElement.style.scrollBehavior = 'auto'; });
-  await page.evaluate(async () => { await document.fonts.ready; await document.getAnimations().filter(animation => animation.effect?.getComputedTiming().iterations !== Infinity).reduce((done, animation) => done.then(() => animation.finished.catch(() => {})), Promise.resolve()); await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))); });
-  await page.screenshot({ path, fullPage: false });
+  await page.evaluate(async () => { await document.fonts.ready; await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))); });
+  // Playwright completes finite motion and pauses infinite decoration for
+  // the capture; an unrelated paused animation must not stall the journey.
+  await page.screenshot({ path, fullPage: false, animations: 'disabled' });
   report.screenshots.push({ path, caption });
   return path;
 };
@@ -285,6 +287,20 @@ async function statusPass() {
     await openProject(page, fixture.repos.main);
     await page.goto(`${fixture.url}/`);
     check(`shell ${name}: signed-in home opens Chat`, new URL(page.url()).pathname === '/chat');
+    check(`simple ${name}: Chat has one saved catch-up`, await page.locator('.lead-brief').count() === 1 && await page.locator('.chat-fleet-context').count() === 0);
+    await shot(page, `${name}-chat-home`, `${viewport.width}×${viewport.height}: one saved catch-up without the duplicate overview (synthetic fixture)`);
+    await page.goto(`${fixture.url}/projects`);
+    const projectActions = await page.locator('.project-card form[action="/projects/open"] button.button-link').evaluateAll(els => els.map(el => ({label: el.textContent.trim(), height: el.getBoundingClientRect().height})));
+    check(`simple ${name}: Open is the project action and Knowledge is secondary`, projectActions.length > 0 && projectActions.every(one => one.label === 'Open' && one.height >= 44) && await page.locator('.project-card a.button-link[href*="/settings/knowledge"]').count() === 0);
+    check(`simple ${name}: Projects fits`, (await noOverflow(page)).ok);
+    await shot(page, `${name}-projects`, `${viewport.width}×${viewport.height}: Open project leads, secondary knowledge and adding choices stay available (synthetic fixture)`);
+    await page.goto(`${fixture.url}/review?result=${T.completed}&run=${R.completed}`);
+    check(`simple ${name}: result queue and detail agree on Complete`, await page.locator('.cockpit-row.current [data-work-status="assignment-complete"]').count() === 1 && await page.locator('.cockpit-head [data-work-status="assignment-complete"]').count() === 1 && await page.locator('h1').count() === 1);
+    check(`simple ${name}: completed result fits`, (await noOverflow(page)).ok);
+    await shot(page, `${name}-result-complete`, `${viewport.width}×${viewport.height}: current queue and result share Complete with one title (synthetic fixture)`);
+    await page.goto(`${fixture.url}/t/${T.damaged}`);
+    check(`simple ${name}: damaged current material stays visible`, await page.locator('.assignment-summary > .problem').count() > 0 && (await page.locator('.assignment-summary').innerText()).includes('unavailable or changed'));
+    await shot(page, `${name}-material-notices`, `${viewport.width}×${viewport.height}: storage limits are secondary while damaged material remains visible (synthetic fixture)`);
     await page.goto(`${fixture.url}/work`);
     const destinations = ['/chat', '/work', '/projects'];
     check(`shell ${name}: primary destinations are Chat, Tasks and Projects`, JSON.stringify(await hrefs(page, 'aside.side > nav:first-of-type')) === JSON.stringify(destinations) && JSON.stringify(await hrefs(page, 'nav.tabbar')) === JSON.stringify(destinations));
@@ -327,7 +343,13 @@ async function statusPass() {
         check(`fit ${name} ${id} ${surface}: document fits`, bounds.ok, JSON.stringify(bounds));
         check(`current ${name} ${id} ${surface}: no retired review action`, await page.locator('form[action$="/review"], form[action$="/review/retry"]').count() === 0);
         if (id === T.failedChecks && surface === 'task') await shot(page, `${name}-status-failure`, `${viewport.width}×${viewport.height}: Ready with actual failed check (synthetic fixture)`);
-        if (id === T.completed && surface === 'task') await shot(page, `${name}-status-complete`, `${viewport.width}×${viewport.height}: explicitly completed result (synthetic fixture)`);
+        if (id === T.completed && surface === 'task') {
+          check(`simple ${name}: partial passing output has a visible disclosure`, await page.locator('.assignment-notices > summary').isVisible() && (await page.locator('.assignment-detail').innerText()).includes('Checks passed'));
+          await page.focus('.assignment-notices > summary');
+          await page.keyboard.press('Enter');
+          check(`simple ${name}: keyboard reveals the retained-output limitation`, await page.locator('.assignment-notices > p').isVisible() && (await page.locator('.assignment-notices').innerText()).includes('its download holds only the stored part'));
+          await shot(page, `${name}-status-complete`, `${viewport.width}×${viewport.height}: explicitly completed result with partial-output disclosure expanded by keyboard (synthetic fixture)`);
+        }
       }
     }
     for (const [id, target] of [[T.held, 'form[action$="/unhold"] button'], [T.paused, '.task-resume-form button'], [T.waitingForBuilder, '.dispatch-recovery-command']]) {

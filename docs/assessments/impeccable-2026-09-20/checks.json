@@ -1,0 +1,19 @@
+{
+  "sourceSha256": {
+    "scripts/ui-polish-fixture.mjs": "15db89c45b40b4e549a74dbcc0f6c7e3d1126bc81118992433993a1e2d04e17d",
+    "scripts/workspace-proof.mjs": "c9cb54c079b562fc2696672fa8182787dd02891c5f3f4b52d99c4b2fbe96a961",
+    "src/assignment-presentation.ts": "dc974f5392efe6dd89e606e8fc2f00543e47ff86de3137bb7417a71c290d8c83",
+    "src/assignment-ui.ts": "8b1405c8b6b7a566aa415733f2cf7d10c5ae08d0ff8eb04d017bf3909a51222e",
+    "src/assignment.test.ts": "2c03fdfe16ddfbbc2058ff9a9d13aa4f9b328b60930764097b765849bfa84719",
+    "src/chat-polish.ts": "236a7d7a02fd9e3ffd8d7aa25f1ccf054d1128d3e0b783cc7f0f9f7a3c4c1d67",
+    "src/serve.test.ts": "2150a4b3c7b25754e36b1fb102eea00b58eb8634b244e3e6e1d4487b894c20ac",
+    "src/serve.ts": "072a88aaac45fca1f31fcf5659c269745d45829cd5694d4c900a1f798734d7c7",
+    "src/workspace-ui.test.ts": "54fcf6021ab8b402dba182093e7ee40c80a6a8ef7243a8b57963ffa603e8cdb1"
+  },
+  "focusedTests": {
+    "passed": 398,
+    "log": "focused-tests.txt"
+  },
+  "browserChecks": 308,
+  "uiReport": "browser.json"
+}

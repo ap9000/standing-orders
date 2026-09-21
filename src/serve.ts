@@ -1675,9 +1675,14 @@ export function createDecisionServer(options: ServeOptions): Server {
       // stored verdict, and the sealed patch downloads exactly as stored.
       // Admission binds BEFORE the SQL limit (the done page's own rule),
       // and every row is re-proved against the ceiling before ranking.
+      const resultRow = (row: CompletedWorkRow) => {
+        const assignment = assignmentOf(store, row.taskId, now, { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) }, evidenceRoot);
+        return { ...row, proofReasons: row.runId === null ? [] : store.proofVerdictFor(row.runId)?.reasons ?? [], ciFailing: ciFailingFor(row.runId, row.prNumber),
+          assignment: assignment?.activeTaskId === row.taskId && (assignment.receipt?.runId ?? null) === row.runId ? assignment : null };
+      };
       const rows = familiesInView(project, { states: ["done"], limit: REVIEW_QUEUE_CAP }).flatMap(family => {
           const row = completedRowFor(family.current.id, project);
-          return row === null ? [] : [{ ...row, proofReasons: row.runId === null ? [] : store.proofVerdictFor(row.runId)?.reasons ?? [], title: family.root.title, ciFailing: ciFailingFor(row.runId, row.prNumber) }];
+          return row === null ? [] : [{ ...resultRow(row), title: family.root.title }];
         });
       const ranked = rankReviewQueue(rows);
       const wanted = url.searchParams.get("result");
@@ -1690,7 +1695,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       // ceiling — so an old receipt never reads as unfinished or foreign.
       // The ranked queue itself stays bounded and says so.
       const beyond = wantedId === null || inQueue !== null ? null : completedRowFor(wantedId, project);
-      const beyondRow = beyond === null ? null : { ...beyond, proofReasons: beyond.runId === null ? [] : store.proofVerdictFor(beyond.runId)?.reasons ?? [], ciFailing: ciFailingFor(beyond.runId, beyond.prNumber) };
+      const beyondRow = beyond === null ? null : resultRow(beyond);
       const chosen = inQueue ?? (beyondRow === null ? null : { ...beyondRow, priority: reviewPriorityOf(beyondRow) });
       const selectedRow = wantedId === null ? ranked[0] ?? null : chosen;
       const csrf = who.via === "cookie" ? who.session.csrf : "";
@@ -8179,10 +8184,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       completedAt: row.completedAt,
       historyProblem: row.historyProblem ?? null,
       priority: row.priority,
-      assignment: (() => {
-        const value = assignmentOf(store, row.taskId, now, { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) }, evidenceRoot);
-        return run !== null && value?.activeTaskId === row.taskId && value.receipt?.runId === run.id ? value : null;
-      })(),
+      assignment: row.assignment ?? null,
       intent,
       plan,
       contest: contestOf(),
@@ -9565,7 +9567,7 @@ const STYLE = `
   .receipt-shot { display: grid; gap: .35rem; color: var(--muted-foreground); font-size: .7rem; text-decoration: none; }
   .receipt-shot img { display: block; width: 100%; aspect-ratio: 16 / 10; object-fit: cover; border: 1px solid var(--glass-border); border-radius: calc(var(--radius) - 3px); background: var(--muted); }
   .receipt-shot:hover { color: var(--foreground); }
-  .receipt-caveats, .receipt-coverage { margin-top: .8rem; padding: .7rem .8rem; border-left: 2px solid var(--border); border-radius: 0 calc(var(--radius) - 3px) calc(var(--radius) - 3px) 0; background: color-mix(in srgb, var(--muted) 62%, transparent); font-size: .78rem; }
+  .receipt-caveats, .receipt-coverage { margin-top: .8rem; padding: .7rem .8rem; border-left: 1px solid var(--border); border-radius: 0 calc(var(--radius) - 3px) calc(var(--radius) - 3px) 0; background: color-mix(in srgb, var(--muted) 62%, transparent); font-size: .78rem; }
   .receipt-caveats ul, .receipt-coverage ul { margin: .3rem 0 0; padding-left: 1.15rem; }
   /* Secondary receipt detail (concise pass, 2026-09-13): native
      disclosures in the receipt's own quiet tone — no card chrome. */
@@ -9606,8 +9608,7 @@ const STYLE = `
   .cockpit-primary { margin: .85rem 0 1rem; }
   .cockpit-primary .button-link { white-space: nowrap; }
   .cockpit-detail { min-width: 0; }
-  .cockpit-head h2 { margin: .2rem 0 .55rem; color: var(--foreground); font-size: clamp(1.2rem, 2vw, 1.45rem); font-weight: 600; line-height: 1.3; letter-spacing: -.025em; overflow-wrap: anywhere; }
-  .cockpit-head .eyebrow { margin: 0; }
+  .cockpit-head h1 { margin: .2rem 0 .55rem; color: var(--foreground); font-size: clamp(1.2rem, 2vw, 1.45rem); font-weight: 600; line-height: 1.3; letter-spacing: -.025em; overflow-wrap: anywhere; }
   .cockpit-chips { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem .75rem; margin: 0 0 .35rem; }
   .cockpit-next { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin: .85rem 0 1rem; padding: .85rem 1rem;
     border-color: var(--glass-border); background: color-mix(in srgb, var(--glass-strong) 88%, transparent); }
@@ -10452,7 +10453,7 @@ const STYLE = `
   .result-notes > summary:hover, .result-details > summary:hover { color: var(--foreground); }
   .result-details > summary .meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: .68rem; font-weight: 400; }
   .result-notes .recap { margin: .25rem 0 .4rem; font-size: .875rem; }
-  .result-attention { margin: .75rem 0 .25rem; padding: .7rem .85rem; border-left: 3px solid var(--warning); border-radius: 0 calc(var(--radius) - 3px) calc(var(--radius) - 3px) 0; background: var(--warning-soft); font-size: .8125rem; }
+  .result-attention { margin: .75rem 0 .25rem; padding: .7rem .85rem; border-left: 1px solid var(--warning); border-radius: 0 calc(var(--radius) - 3px) calc(var(--radius) - 3px) 0; background: var(--warning-soft); font-size: .8125rem; }
   .result-attention strong { display: block; font-size: .78rem; }
   .result-attention ul { margin: .3rem 0 0; padding-left: 1.15rem; }
   .result-attention li { margin: .15rem 0; overflow-wrap: anywhere; }
@@ -11390,7 +11391,7 @@ const STYLE = `
   .mate-terms .inline-field { white-space: nowrap; }
   button.quiet { background: transparent; color: var(--fg-muted); border-color: var(--border); }
   .answer-options { list-style: none; padding: 0; margin: 0.4rem 0; }
-  .answer-options li { padding: 0.35rem 0.6rem; border-left: 3px solid var(--border); margin: 0.25rem 0; }
+  .answer-options li { padding: 0.35rem 0.6rem; border-left: 1px solid var(--border); margin: 0.25rem 0; }
   .answer-options li.picked { border-left-color: var(--foreground); }
   .shared-action { max-width: 49rem; overflow-wrap: anywhere; }
   .shared-action form { margin-top: 1.5rem; }
@@ -13856,17 +13857,15 @@ function chatPage(chrome: Chrome, data: {
   }
   const config = (data.enabled as unknown as { config: { provider: ChatProviderId; model: string; dailyTurns: number; weeklyCeilingMicrousd: number } }).config;
   const subscription = isSubscriptionChatProvider(config.provider);
-  // The start action leads (UI polish 2026-09-13): the mint card is the
-  // one thing a person can do here, so it is the first card; the portfolio
-  // overview follows, folded on phones and opened by the chrome script on
-  // a desk; provider, model, and limits sit under one disclosure.
+  // The saved catch-up owns orientation. Keep the older overview only as
+  // a fallback; provider and spend terms remain available before consent.
   if (!data.canManage) {
     parts.push(`<div class="card chat-readonly"><strong>Read-only view</strong><p class="meta">An approver can start the unified conversation and confirm its proposed actions. You can still open every live card and project board here.</p></div>`);
   }
   if (data.canManage && data.mateMint !== undefined) parts.push(data.mateMint);
   if (data.canManage && data.coordinatorProposals !== undefined) parts.push(data.coordinatorProposals);
   parts.push(
-    data.focusTask === null ? `<details class="chat-fleet-context">${chatOverviewSummaryHtml(data.projects, data.fleetSnapshot?.attentionCount)}${chatFleetOverview(data.fleetSnapshot, data.projects, data.csrf, false)}</details>` : "",
+    data.focusTask === null && !data.catchUp ? `<details class="chat-fleet-context">${chatOverviewSummaryHtml(data.projects, data.fleetSnapshot?.attentionCount)}${chatFleetOverview(data.fleetSnapshot, data.projects, data.csrf, false)}</details>` : "",
     chatLimitsHtml({ provider: config.provider, model: config.model, turnsToday: data.turnsToday, dailyTurns: config.dailyTurns, subscription, weekly: subscription ? null : { spent: data.weeklySpent, ceiling: config.weeklyCeilingMicrousd } }),
   );
   for (const turn of data.latched) {
@@ -13947,7 +13946,7 @@ function chatPage(chrome: Chrome, data: {
     );
   }
   if (data.recent.length > 0) {
-    parts.push(`<h2>recent turns</h2>`);
+    parts.push(`<details class="chat-turn-history"><summary>Conversation activity <span class="meta">${data.recent.length} recent turns</span></summary>`);
     for (const turn of data.recent) {
       parts.push(
         `<p class="row"><span class="mono">#${turn.id}</span> ${escape(turn.state)}` +
@@ -13955,6 +13954,7 @@ function chatPage(chrome: Chrome, data: {
           ` <span class="right meta">${turn.tokensIn ?? "–"} in / ${turn.tokensOut ?? "–"} out · ${subscription ? "membership" : `${chatMoney(turn.settledMicrousd ?? turn.reservedMicrousd)}${turn.settledMicrousd === null ? " reserved" : ""}`}</span></p>`,
       );
     }
+    parts.push(`</details>`);
   }
   return screen("chat", chatWorkspace(parts.join("\n"), data.projects, data.csrf, true, data.focusTask, data.resultPanel ?? null), { chrome, functional: { script: CHAT_UI_SCRIPT + (data.focusTask === null ? "" : RESULT_REVIEW_SCRIPT), fetches: data.focusTask !== null } });
 }
@@ -14432,9 +14432,8 @@ function matePage(chrome: Chrome, data: MateThreadRows & {
       ? chatHeading("", data.projects.length)
       : taskChatHeading(data.focusTask),
     data.focusTask === null ? (data.catchUp ?? "") : taskChatLiveRegion(data.focusTask, data.csrf, false, data.pending !== null),
-    // The overview folds by default (UI polish 2026-09-13): the chrome
-    // script opens it on a desk; a phone keeps the conversation first.
-    data.focusTask === null ? `<details class="chat-fleet-context">${chatOverviewSummaryHtml(data.projects, data.fleetSnapshot?.attentionCount)}${chatFleetOverview(data.fleetSnapshot, data.projects, data.csrf, data.pending === null)}</details>` : "",
+    // The DB catch-up replaces the older, duplicate portfolio summary.
+    data.focusTask === null && !data.catchUp ? `<details class="chat-fleet-context">${chatOverviewSummaryHtml(data.projects, data.fleetSnapshot?.attentionCount)}${chatFleetOverview(data.fleetSnapshot, data.projects, data.csrf, data.pending === null)}</details>` : "",
   ];
   if (data.problem !== null) conversation.push(`<div class="problem">${escape(data.problem)}</div>`);
   for (const turn of data.latched) {
@@ -15923,7 +15922,7 @@ function projectsPage(
   open: string | null,
   csrf: string,
   problem: string | null,
-  unscopedMode: boolean,
+  _unscopedMode: boolean,
   browsable = false,
   onboard: OnboardCardState | null = null,
   peeks: Record<string, ProjectPeek | null> = {},
@@ -15936,9 +15935,9 @@ function projectsPage(
     onboard === null
       ? ""
       : !onboard.enabled
-        ? `<h2>add a repository</h2><p class="meta">${escape(onboard.why)}</p>`
+        ? `<p class="meta">${escape(onboard.why)}</p>`
         : [
-            `<h2>add a repository</h2>`,
+            `<details class="project-add-more"${onboard.record === null ? '' : ' open'}><summary>${onboard.record === null ? 'Paste a GitHub link' : 'Review repository'}</summary>`,
             `<p class="meta">paste a GitHub repository — you will preview it before anything is downloaded. It goes into your saved projects folder and the builder connects automatically. Large-file (LFS) objects are not downloaded.</p>`,
             onboard.record === null
               ? [
@@ -15967,6 +15966,7 @@ function projectsPage(
                   `</form>`,
                   `</div>`,
                 ].join("\n"),
+            `</details>`,
           ].join("\n");
   // Opening a project is a POST (the session's scope changes); a card's
   // name and counts are the same form, returning to the screen that count
@@ -15977,7 +15977,7 @@ function projectsPage(
       `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
       `<input type="hidden" name="path" value="${escape(path)}">`,
       `<input type="hidden" name="return" value="${escape(destination)}">`,
-      `<button type="submit"${className === undefined ? "" : ` class="${className}"`}>${escape(label)}</button>`,
+      `<button type="submit"${className === undefined ? "" : ` class="${className}"`}${className === "button-link" ? ' style="min-height:44px"' : ''}>${escape(label)}</button>`,
       `</form>`,
     ].join("");
 
@@ -16006,12 +16006,11 @@ function projectsPage(
           : openForm(one.path, one.name, returnTo, "project-name")
       }`,
       `<span class="right">${
-        open !== null && open === one.path ? `<span class="badge badge-done">open now</span>` : openForm(one.path, "open \u2192")
+        open !== null && open === one.path ? `<span class="badge badge-done">open now</span>` : openForm(one.path, "Open", returnTo, "button-link")
       }</span></div>`,
       `<p class="meta mono" style="overflow-wrap:anywhere;margin:.2rem 0">${escape(one.path)}</p>`,
       `<p class="row" style="gap:.35rem;flex-wrap:wrap">${peekChips(one.path, one.peek)}</p>`,
-      `<p class="meta">${escape(one.note)}</p>`,
-      `<a class="button-link" href="/settings/knowledge?repo=${encodeURIComponent(one.path)}">Knowledge</a>`,
+      `<p class="meta row" style="justify-content:space-between;margin-bottom:0"><span>${escape(one.note)}</span><a href="/settings/knowledge?repo=${encodeURIComponent(one.path)}" style="display:inline-flex;align-items:center;min-height:44px">Knowledge</a></p>`,
       `</div>`,
     ].join("\n");
   const cards = (items: { path: string; name: string; note: string }[]): string =>
@@ -16031,7 +16030,6 @@ function projectsPage(
   const addCard = [
     `<div class="card project-add-card">`,
     `<h2 class="project-add-title">add a project</h2>`,
-    `<p class="meta project-add-intro">Choose where the project already lives. Standing Orders will remember it and connect its work automatically.</p>`,
     `<div class="project-add-actions">`,
     browsable
       ? addAction("/projects/browse", FOLDER_PATHS, "Choose a local folder", "Browse the project folders on this machine")
@@ -16045,7 +16043,7 @@ function projectsPage(
           "Choose from repositories available to your GitHub login",
         ),
     `</div>`,
-    browsable
+    browsable || onboard !== null && !onboard.enabled && onboard.why.includes('--project-root')
       ? ""
       : `<p class="meta">Choose a projects folder once with <code>standing-orders up --project-root &lt;dir&gt;</code>. Standing Orders remembers it after that.</p>`,
     onboardCard === "" ? "" : `<div style="margin-top:.5rem">${onboardCard}</div>`,
@@ -16062,9 +16060,6 @@ function projectsPage(
   return screen("projects", [
     `<h1>projects</h1>`,
     `<p class="meta">add a local folder or GitHub repository once; its tasks, builds, and chat context stay available here</p>`,
-    unscopedMode
-      ? `<p class="meta">no projects folder is set yet \u2014 start with <code>standing-orders up --project-root &lt;dir&gt;</code> once</p>`
-      : "",
     problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
     recentItems.length === 0 && candidateItems.length === 0
       ? `<div class="card"><p><strong>Nothing to open yet.</strong></p><p class="meta">Add one below \u2014 opening it registers it here for next time.</p></div>`
@@ -18176,6 +18171,8 @@ const REVIEW_RETURN = /^\/review\?result=[A-Za-z0-9._~%-]{1,200}$/;
 export type ReviewPriority = { band: 0 | 1 | 2; label: "needs action" | "review" | "no flags"; reasons: string[] };
 
 export type ReviewQueueFacts = {
+  /** Only an exact current task/run match carries the assignment status. */
+  assignment?: AssignmentSnapshot | null;
   proofReasons?: readonly string[];
   runId: number | null;
   outcome: string | null;
@@ -18189,6 +18186,11 @@ export type ReviewQueueFacts = {
 const PRIORITY_LABELS: Record<ReviewPriority["band"], ReviewPriority["label"]> = { 0: "needs action", 1: "review", 2: "no flags" };
 
 export function reviewPriorityOf(row: ReviewQueueFacts): ReviewPriority {
+  if (row.assignment != null && (row.assignment.receipt?.runId ?? null) === row.runId) {
+    const presentation = assignmentPresentationOf(row.assignment);
+    const band = row.assignment.state === "needs-decision" ? 0 : row.assignment.state === "ready-to-check" ? 1 : 2;
+    return { band, label: PRIORITY_LABELS[band], reasons: band === 2 ? [] : [presentation.status.label] };
+  }
   const reasons: string[] = [];
   let band: ReviewPriority["band"] = 2;
   const raise = (to: ReviewPriority["band"], why: string): void => {
@@ -18228,6 +18230,8 @@ export function rankReviewQueue<T extends ReviewQueueFacts & { completedAt: stri
     .sort((a, b) =>
       a.priority.band !== b.priority.band
         ? a.priority.band - b.priority.band
+        : a.ciFailing !== b.ciFailing
+          ? Number(b.ciFailing) - Number(a.ciFailing)
         : a.completedAt !== b.completedAt
           ? b.completedAt.localeCompare(a.completedAt)
           : a.taskId.localeCompare(b.taskId),
@@ -18338,7 +18342,7 @@ export function orderChangedFiles(files: readonly ReviewFileRow[], proofCitesPat
 }
 
 type CompletedWorkRow = ReturnType<Store["listCompletedWorkScoped"]>[number] & { historyProblem?: string | null };
-type RankedReviewRow = CompletedWorkRow & { ciFailing: boolean; priority: ReviewPriority };
+type RankedReviewRow = CompletedWorkRow & { ciFailing: boolean; priority: ReviewPriority; assignment?: AssignmentSnapshot | null };
 
 /** What the cockpit shows of one selected result — a projection of the
  * scope, plan, run, artifact, verdict, contest, and publication records,
@@ -18401,7 +18405,7 @@ const reviewHref = (taskId: string, runId: number | null = null, repo: string | 
 function cockpitStatusOf(view: ReviewCockpitView): DisplayStatus {
   // The receipt's own status (package 3): the same projection the chat
   // receipt and the run page print, read from the shared detail.
-  if (view.run === null || view.detail === null) return resultStatusOf(null, null);
+  if (view.run === null || view.detail === null) return view.assignment === null ? resultStatusOf(null, null) : assignmentPresentationOf(view.assignment).status;
   const receiptStatus = receiptStatusOf(view.detail.receipt);
   if (view.assignment !== null) return assignmentStatusOf(assignmentWithEvidence(view.assignment, receiptStatus, view.run.id));
   return receiptStatus;
@@ -18535,23 +18539,25 @@ function reviewCockpitPage(
         queue
           .map(row => {
             const current = selected !== null && selected.taskId === row.taskId;
-            // The selected result already states that human review is due.
-            // Keep concrete failure and history diagnostics in the queue.
-            const reasons = row.priority.reasons.filter(reason => !current || reason !== "human review needed");
-            const why = reasons.length === 0 ? "" : `<span class="cockpit-why">${escape(reasons[0] as string)}${reasons.length > 1 ? ` · +${reasons.length - 1} more` : ""}</span>`;
+            const status = row.assignment == null ? null : assignmentPresentationOf(row.assignment).status;
+            const reasons = row.priority.reasons;
+            const why = status === null
+              ? reasons.length === 0 ? "" : `<span class="cockpit-why">${escape(reasons[0] as string)}${reasons.length > 1 ? ` · +${reasons.length - 1} more` : ""}</span>`
+              : `<span class="cockpit-why">${statusLineHtml(status)}</span>`;
             return (
               `<li data-review-priority="${row.priority.band}"><a class="cockpit-row${current ? " current" : ""}" href="${escape(reviewHref(row.taskId, row.runId, row.repo))}"${current ? ` aria-current="page"` : ""}>` +
               `<span class="cockpit-row-head"><strong>${escape(row.title)}</strong></span>` +
               `<span class="cockpit-row-meta">${escape(when(row.completedAt))}${row.runId === null ? " · no build" : row.outcome === "no-change" ? " · no change" : ""}${row.prNumber === null ? "" : ` · PR #${row.prNumber}`}</span>` +
               (row.historyProblem ? `<span class="cockpit-why" data-history-problem>History unavailable</span>` : why) +
+              (status !== null && row.ciFailing ? `<span class="cockpit-why">CI is failing</span>` : "") +
               `</a></li>`
             );
           })
           .join("\n") +
         `</ol>`;
   const queuePane =
-    `<aside class="cockpit-queue" aria-label="review queue"><h2>Results <span class="lane-count">${queue.length}</span></h2>` +
-    (queue.length > 1 ? `<p class="meta cockpit-queue-hint">${elevated} ${elevated === 1 ? "needs" : "need"} attention · highest priority first${queue.length >= data.queueCap ? `. Showing the newest ${data.queueCap}; older results still open from their task` : ""}</p>` : "") +
+    `<aside class="cockpit-queue" aria-label="review queue"><h2>Recent results <span class="lane-count">${queue.length}</span></h2>` +
+    (elevated > 0 || queue.length >= data.queueCap ? `<p class="meta cockpit-queue-hint">${elevated === 0 ? "" : `${elevated} ${elevated === 1 ? "needs" : "need"} your attention`}${queue.length >= data.queueCap ? `${elevated > 0 ? ". " : ""}Showing the newest ${data.queueCap}; older results still open from their task` : ""}</p>` : "") +
     queueRows +
     `</aside>`;
   const missingNote =
@@ -18564,7 +18570,7 @@ function reviewCockpitPage(
       : `<p class="meta cockpit-beyond" data-cockpit-beyond="1">This result is not in the current review list.</p>`;
   const detail = selected === null ? `<section class="cockpit-detail"><p class="meta">Nothing to review yet.</p></section>` : reviewCockpitDetail(selected, csrf, data.noted, data.canRetryReview, data.tab, data.user);
   return screen("review", [
-    `<h1>Results</h1>`,
+    selected === null ? `<h1>Results</h1>` : "",
     missingNote,
     beyondNote,
     `<div class="cockpit">${queuePane}${detail}</div>`,
@@ -18586,8 +18592,8 @@ function reviewCockpitDetail(view: ReviewCockpitView, csrf: string, noted: boole
   // Header: what this is, its verdict word, and why it sits where it does.
   parts.push(
     `<header class="cockpit-head" data-review-task="${escape(view.taskId)}">` +
-      `<p class="eyebrow mono">${run === null ? "no build" : `build #${run.id}`} · <a href="${taskHref(view.taskId)}">open task</a>${projectChip(view.repo)}</p>` +
-      `<h2>${escape(view.title)}</h2>` +
+      `<h1>${escape(view.title)}</h1>` +
+      `<p class="meta">${run === null ? "No build" : `Build #${run.id}`} · <a href="${taskHref(view.taskId)}">Open task</a>${projectChip(view.repo)}</p>` +
       `<p class="cockpit-chips">${statusLineHtml(cockpitStatusOf(view))}</p>` +
       `</header>`,
   );
@@ -18639,7 +18645,7 @@ function reviewCockpitDetail(view: ReviewCockpitView, csrf: string, noted: boole
   const assignment = view.assignment === null ? null : assignmentWithEvidence(view.assignment, receiptStatusOf(view.detail.receipt), run.id);
   const checks = assignment?.receipt?.checks;
   if (checks !== undefined) parts.push(`<p class="${checks.status === "failed" || checks.status === "unavailable" ? "problem" : "meta"}" data-actual-checks="${checks.status}">${escape(checks.detail)}${checks.logArtifactId === null ? "" : ` <a href="/r/${run.id}/evidence/${checks.logArtifactId}">Open check output</a>`}</p>`);
-  if (assignment?.completion != null) parts.push(`<p class="meta" data-result-completed>Marked complete by ${escape(assignment.completion.actor.replace(/^operator:/, ""))}. Check results are unchanged.</p>`);
+  if (assignment?.completion != null) parts.push(`<p class="meta" data-result-completed>Marked complete by ${escape(assignment.completion.actor.replace(/^operator:/, ""))}.</p>`);
   parts.push(
     `<div id="verification" data-cockpit-section="result">` +
       resultPanelHtml(view.detail, {
@@ -20062,7 +20068,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
       (detail.history ?? "") +
       `<header class="result-head"><div>${o.place === "review" ? "" : `<span class="eyebrow">Build #${runId}</span>`}<h2>${escape(heading)}</h2></div>${o.headStatus === false ? "" : statusLineHtml(status.token === "verification-needed" && !directAssessment ? { ...status, label: "Verification needed" } : status)}</header>` +
       `<p class="result-summary">${escape(outcome)}</p>` +
-      (current == null ? "" : `<p class="${current.receipt?.checks.status === "failed" || current.receipt?.checks.status === "unavailable" ? "problem" : "meta"}" data-current-outcome>${escape(current.detail)}</p>`) +
+      (current == null || o.place === "review" && (current.state === "ready-to-check" || current.state === "complete") ? "" : `<p class="${current.receipt?.checks.status === "failed" || current.receipt?.checks.status === "unavailable" ? "problem" : "meta"}" data-current-outcome>${escape(current.detail)}</p>`) +
       action +
       (REVIEW_TOKENS.has(status.token) ? `<details class="receipt-history"><summary>Review history</summary><p class="receipt-review meta" data-receipt-review="${escape(status.token)}">${escape(status.detail)}</p></details>` : "") +
       attentionHtml +

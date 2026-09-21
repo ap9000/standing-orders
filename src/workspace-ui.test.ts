@@ -373,7 +373,9 @@ describe("assignment interface", () => {
       ] }));
       expect(html).not.toContain('no proof was written');
       expect(html).not.toContain(GOAL_ASSESSMENT_PENDING);
-      expect(html.match(/class="problem"/g)).toHaveLength(1);
+      expect(html).not.toContain('class="problem"');
+      expect(html.match(/<details class="assignment-notices">/g)).toHaveLength(1);
+      expect(html).toContain('<summary>Saved output is partial</summary>');
       expect(html).toContain('download holds only the stored part');
       const history = assignmentSummaryHtml(snapshot({ attention: [
         'Saved terminal-diff #999 (run 2) is unavailable or changed.',
