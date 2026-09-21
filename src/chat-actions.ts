@@ -34,6 +34,7 @@ import { readVerifiedArtifact, scanForSecrets } from "./evidence.js";
 import { readAuthModeStrict } from "./keys.js";
 import { parseProof } from "./proof.js";
 import { assignmentOf, checkAssignmentAsOperator } from "./assignment.js";
+import { getDecision, recordDecision, retireDecision } from "./project-memory.js";
 import { resumeTaskStop, taskControlOf } from "./task-control.js";
 
 export const CHAT_ACTIONS = {
@@ -62,6 +63,8 @@ export const CHAT_ACTIONS = {
     protected: false,
     password: false,
   },
+  decision_record: { label: "Record decision", protected: false, password: false },
+  decision_retire: { label: "Retire decision", protected: false, password: false },
   scope_approve: { label: "Approve work", protected: true, password: true },
   result_accept: { label: "Mark complete", protected: true, password: false },
   task_cancel: { label: "Cancel task", protected: true, password: false },
@@ -96,6 +99,8 @@ export const CHAT_ACTION_FIELDS: Record<ChatAction, readonly string[]> = {
   knowledge_save: ["repo", "title", "content", "id"],
   knowledge_remove: ["repo", "id"],
   knowledge_restore: ["repo", "restore"],
+  decision_record: ["repo", "claim", "why", "supersedes", "source"],
+  decision_retire: ["repo", "decision", "reason"],
   scope_approve: ["task"],
   result_accept: ["task", "run"],
   task_cancel: ["task"],
@@ -188,7 +193,7 @@ export function prepareSharedAction(
   if (Object.keys(input).some((key) => !allowed.includes(key)))
     throw Error("This action contains an unsupported field.");
   const task =
-    operation.startsWith("skill_") || operation.startsWith("knowledge_")
+    operation.startsWith("skill_") || operation.startsWith("knowledge_") || operation.startsWith("decision_")
       ? null
       : text(input, "task", 64);
   const repo =
@@ -264,6 +269,31 @@ export function prepareSharedAction(
         !/^[a-f0-9-]{36}$/.test(text(input, "nonce", 36))
       )
         throw Error("This test request has no saved identity.");
+    }
+  } else if (operation.startsWith("decision_")) {
+    // The staleness fence: the newest decision id and the active count, so a
+    // card drafted before a teammate recorded or retired one is refused.
+    const stamp = store.handle.prepare("SELECT COALESCE(MAX(id),0) AS newest, COUNT(*) AS active FROM project_decision WHERE repo=? AND status='active'").get(repo);
+    state = { newest: Number(stamp?.["newest"] ?? 0), active: Number(stamp?.["active"] ?? 0) };
+    if (operation === "decision_record") {
+      const claim = text(input, "claim", 240), why = text(input, "why", 2000);
+      if (!claim || !why) throw Error("A decision needs the choice in one sentence and the reason.");
+      terms.push(`Decision: ${claim}`, `Why: ${why}`);
+      if (input["supersedes"] !== undefined) {
+        const older = getDecision(store, repo, who.name, integer(input, "supersedes"));
+        if (older === null || older.status !== "active") throw Error("The decision being replaced is not active.");
+        terms.push(`Replaces decision ${older.id}: ${older.claim}`);
+        state["supersedes"] = older.id;
+      }
+      if (input["source"] !== undefined) terms.push(`Source: ${text(input, "source", 200)}`);
+      terms.push("Records a settled choice with its reason for everyone on this project. It is context, never an instruction or a permission.");
+    } else {
+      const older = getDecision(store, repo, who.name, integer(input, "decision"));
+      if (older === null || older.status !== "active") throw Error("That decision is not active.");
+      const reason = text(input, "reason", 500);
+      if (!reason) throw Error("Say why this decision no longer holds.");
+      terms.push(`Retire decision ${older.id}: ${older.claim}`, `Reason: ${reason}`, "The decision stays in history and stops being offered as context.");
+      state["decision"] = older.id;
     }
   } else if (operation.startsWith("knowledge_")) {
     const view = knowledgeView(store, repo, who.name);
@@ -702,6 +732,11 @@ export function executeSharedAction(
           },
           now,
         );
+      else if (payload.operation === "decision_record")
+        recordDecision(store, { repo, actor, draft: { claim: String(req["claim"]), why: String(req["why"]), sourceKind: "conversation",
+          ...(req["source"] === undefined ? {} : { sourceRef: String(req["source"]) }), ...(payload.state["supersedes"] === undefined ? {} : { supersedes: Number(payload.state["supersedes"]) }) } }, now);
+      else if (payload.operation === "decision_retire")
+        retireDecision(store, { repo, actor, id: Number(payload.state["decision"]), reason: String(req["reason"]) }, now);
       else if (payload.operation.startsWith("knowledge_"))
         changeKnowledge(
           store,
@@ -789,6 +824,10 @@ export function executeSharedAction(
                         ? "Skill disabled for future runs."
                         : payload.operation === "skill_restore"
                           ? "Saved skills restored."
+                          : payload.operation === "decision_record"
+                            ? "Decision recorded for this project."
+                            : payload.operation === "decision_retire"
+                              ? "Decision retired; its history stays."
                           : payload.operation === "knowledge_remove"
                             ? "Reference removed."
                             : payload.operation === "knowledge_restore"

@@ -34,6 +34,10 @@ To enable sending noninteractively, inspect the terms in the brief, then use `ch
 
 `lead create/update/member/transfer` and `conversation create/member/edit/withdraw/read/follow/stop` expose the same central operations. Membership edits and transfers require the current revision. Transfer keeps the task, approved scope, attempts and completed result; it changes the responsible lead.
 
+## Project memory
+
+Every lead reads the project's memory — instructions, references, lessons and decisions — and records settled choices as decisions with their reason. See [Project memory](PROJECT_MEMORY.md).
+
 ## Slack, Discord and Teams
 
 The same rules apply in Slack and Discord: each teammate pairs their own account under Settings, `status`, `task <id>` and `help` answer from the database, a channel follows one team conversation with `team` and `team <number>` from a conversation manager, and Mark complete confirms with a second tap on the card. See [Slack](slack.md) and [Teams](teams.md); Teams needs an internet-reachable messaging endpoint.

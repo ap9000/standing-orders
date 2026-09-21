@@ -29,6 +29,7 @@ export const PHONE_HELP = [
   "/status — recent work across your connected projects",
   "/task <id> — status, checks, and the next step for one task",
   "/team — the team conversations you can talk in; /team <number> to talk there, /team off for your private assistant",
+  "Ask about project memory in plain words: decisions, references and lessons are searched before the assistant answers, and a settled choice can be recorded from a card.",
   "/help — these commands",
   "",
   "The slash commands only read status. To answer an agent's question, tap its decision buttons; reply to that decision message to attach a note. Reply to a result message to ask for changes to that exact result, or ask for its screenshots to receive the saved images as files.",

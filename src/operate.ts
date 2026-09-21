@@ -5,6 +5,7 @@ import {loadDiscordCredentials} from "./discord-api.js";
 import { loadSlackCredentials } from "./slack-api.js";
 import { followSlack } from "./slack.js";
 import { validateScopeText } from "./task-text.js";
+import { runMemoryCommand } from "./memory-cli.js";
 import { runKnowledgeCommand } from "./knowledge-cli.js";
 import { runAssignmentCommand } from "./assignment-adapters.js";
 import { applyProjectProfile, runProjectCommand } from "./project-cli.js";
@@ -641,13 +642,13 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "label", "reviewers", "limit", "role", "key-file", "weekly-usd", "daily-turns", "per-hour", "token-file", "race", "compare", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd", "sync-max-age", "merge-method",
   "phase", "risk", "tier", "clear-phase",
   "run", "containment",
-  "token-env", "after", "repair-max-attempts", "consumer", "batch", "feedback", "source", "view", "cursor",
+  "token-env", "after", "repair-max-attempts", "consumer", "batch", "feedback", "source", "view", "cursor", "why", "supersedes", "decision", "sessions",
 ]);
 export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "json", "yes", "all", "local", "history", "latest-watch", "dry-run", "file", "allow-paid-fallback",
   "clear", "follow", "ready", "all-tasks", "inbound-only", "help", "undo", "anyone", "allow-dispatch", "allow-merge", "merge-delete-branch",
   "no-open", "no-verify", "no-follow", "end", "report", "off", "tmux",
-  "self-heal", "plan-auto", "repair-auto", "review-retry-auto",
+  "self-heal", "plan-auto", "repair-auto", "review-retry-auto", "no-local",
 ]);
 
 export function parseOperateArgs(argv: readonly string[]): Args | { error: string } {
@@ -914,6 +915,14 @@ async function dispatch(
       return runAssignmentCommand(positional, flags, context);
     case "knowledge":
       return runKnowledgeCommand(positional, flags, { ...context, now: context.clock() });
+    case "memory": {
+      // The remembered local login (or --as/--token) names the person; reads
+      // and writes both record who asked.
+      const acting = await askCredentials(flags, context);
+      const verified = acting === null ? null : verifyApproverByPassword(context.store, acting.name, acting.token, context.store.knownRepos().filter(repo => context.store.accountCanAccess(acting.name, repo)));
+      const who = verified !== null && verified.ok ? verified.who : null;
+      return runMemoryCommand(positional, flags, { store: context.store, write: context.write, json: context.json, now: context.clock(), actor: who?.name ?? null, repos: who?.repos ?? [], configDir: dirname(context.databaseFile), ...(context.evidenceRoot === undefined ? {} : { evidenceRoot: context.evidenceRoot }) });
+    }
     case "claim":
       return claimCommand(positional, flags, context);
     case "heartbeat":

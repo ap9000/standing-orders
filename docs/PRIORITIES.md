@@ -9,7 +9,9 @@ work reaches a Ready state and a person or lead marks it complete or requests
 changes; there is no model-review, evidence-repair or resubmission loop
 ([Task to completion](LEAD_REVIEW_FLOW.md)). Telegram, Slack, Discord and Teams share one chat layer: per-person pairing,
 database-backed commands, rooms that follow a team conversation, and Mark
-complete behind a second tap. Teams needs an internet-reachable endpoint. The sequence below is implementation history from the
+complete behind a second tap. Teams needs an internet-reachable endpoint.
+Project memory adds decisions, one search over the memory, and a backward pass
+that proposes evidence-backed edits from sessions ([Project memory](PROJECT_MEMORY.md)). The sequence below is implementation history from the
 13 September checkpoint, kept for its records, not a current plan.
 
 ### Next sequence
