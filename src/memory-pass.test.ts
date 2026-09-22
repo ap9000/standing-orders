@@ -9,6 +9,7 @@ import { changeKnowledge, knowledgeView } from './project-knowledge.js';
 import { listDecisions } from './project-memory.js';
 import { analysisPrompt, claudeProjectDir, collectSessions, decideProposal, distillClaude, listProposals, memoryStatus, memorySurface, parseVerdict, runMemoryPass, type MemoryAnalyzer } from './memory-pass.js';
 import { runMemoryCommand } from './memory-cli.js';
+import { TeamLeads } from './team-leads.js';
 
 describe('the backward pass over project memory', () => {
   let root: string, repo: string, home: string, store: Store;
@@ -100,6 +101,26 @@ describe('the backward pass over project memory', () => {
     expect(status.openGaps).toBe(0);
     expect(calls.every(kind => kind === 'claude')).toBe(true);
     expect(collectSessions(store, repo, { home, local: false })).toEqual([]);
+  });
+
+  test('the plane\'s own lead conversations are sessions too, keyed by their last message so a growing thread is analysed again', async () => {
+    const domain = new TeamLeads(store, () => [repo]);
+    const actor = { name: 'alex', generation: store.accountOf('alex')!.generation };
+    const lead = domain.execute(actor, { operation: 'create-lead', args: { name: 'Engineering', instructions: 'Keep it simple.', projects: [repo] } }, now); if (!lead.ok) throw Error(lead.message);
+    const made = domain.execute(actor, { operation: 'create-conversation', args: { leadId: (lead.result as { leadId: string }).leadId, title: 'Launch', visibility: 'team', projects: [repo] } }, now); if (!made.ok) throw Error(made.message);
+    const thread = (made.result as { threadId: number }).threadId;
+    store.appendMateMessage({ thread, turn: null, role: 'operator', text: 'Please keep the gateway sandbox until launch day.' }, now);
+    store.appendMateMessage({ thread, turn: null, role: 'assistant', text: 'Understood: the sandbox stays until launch.' }, now);
+    const [session] = collectSessions(store, repo, { home, local: false });
+    expect(session).toMatchObject({ kind: 'lead', source: `conversation:${(made.result as { conversationId: string }).conversationId}` });
+    expect(session!.trace()).toBe('operator: Please keep the gateway sandbox until launch day.\nassistant: Understood: the sandbox stays until launch.');
+    const seen: string[] = [];
+    const analyzer: MemoryAnalyzer = async input => { seen.push(input.kind); return { ok: true, text: '{"positive":[],"negative":[],"gaps":[]}' }; };
+    await runMemoryPass(store, { repo, actor: 'alex', analyzer, home, local: false }, now);
+    store.appendMateMessage({ thread, turn: null, role: 'operator', text: 'And tell the crew.' }, now);
+    await runMemoryPass(store, { repo, actor: 'alex', analyzer, home, local: false }, now);
+    expect(seen).toEqual(['lead', 'lead']);
+    expect(memoryStatus(store, repo, 'alex').sessions).toEqual({ total: 2, analyzed: 2, failed: 0 });
   });
 
   test('harm from following an instruction proposes its removal; an over-budget addition becomes a decision proposal; the CLI drives it', async () => {
