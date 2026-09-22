@@ -27,7 +27,9 @@ type Snapshot = { schema: { name: string; type: string; sql: string }[]; rows: R
 /** Every table's DDL and every row, in rowid order — the whole file. */
 function snapshot(file: string): Snapshot {
   const db = new sqlite.DatabaseSync(file, { readOnly: true });
-  const schema = (db.prepare("SELECT name, type, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name").all() as { name: string; type: string; sql: string }[]).map(one => ({ ...one }));
+  // The FTS5 memory index and its shadow tables are a derived view (some
+  // are WITHOUT ROWID); the stores of record beside them are what this dump proves.
+  const schema = (db.prepare("SELECT name, type, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name").all() as { name: string; type: string; sql: string }[]).filter(one => !one.name.startsWith("memory_search")).map(one => ({ ...one }));
   const rows: Record<string, Record<string, unknown>[]> = {};
   for (const table of schema.filter(one => one.type === "table")) {
     // sqlite_sequence has no stable rowid order across a table rebuild

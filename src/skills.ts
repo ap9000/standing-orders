@@ -61,7 +61,11 @@ answers to branch on, not errors to retry. Details:
 \`.claude/skills/standing-orders/SKILL.md\`, or \`standing-orders --help\`,
 which is authoritative — and \`standing-orders skills get <name>\` serves
 version-matched guides straight from the binary (\`skills list\` names
-them). Never approve, push, or merge anything yourself.
+them). Project memory (instructions, references, lessons, decisions) lives
+in the plane: read \`skills get knowledge\`, search it with
+\`standing-orders memory search\`, and record settled choices with
+\`memory decide\` instead of editing this file. Never approve, push, or
+merge anything yourself.
 ${CONTEXT_END}`;
 }
 

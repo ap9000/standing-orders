@@ -87,7 +87,8 @@ function snapshot(file: string): unknown {
   const db = new sqlite.DatabaseSync(file, { readOnly: true });
   const schema = db.prepare("SELECT name, type, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name").all() as { name: string; type: string; sql: string }[];
   const rows: Record<string, unknown[]> = {};
-  for (const table of schema.filter(one => one.type === "table")) {
+  // The FTS5 memory index and its shadow tables are derived (some WITHOUT ROWID); the stores of record are the proof.
+  for (const table of schema.filter(one => one.type === "table" && !one.name.startsWith("memory_search"))) {
     rows[table.name] = (db.prepare(`SELECT * FROM "${table.name}" ORDER BY rowid`).all() as Record<string, unknown>[]).map(row => ({ ...row }));
   }
   db.close();

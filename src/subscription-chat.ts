@@ -54,7 +54,9 @@ function outputSchema(tools: readonly MateToolSchema[]): Record<string, unknown>
     type: "object",
     properties: {
       text: { type: "string", maxLength: MATE_STEP_TEXT_CAP_BYTES },
-      calls: {
+      // With no tools offered there is nothing to name: an empty enum is not
+      // a valid schema, so the calls array is simply required to be empty.
+      calls: tools.length === 0 ? { type: "array", maxItems: 0 } : {
         type: "array",
         maxItems: MATE_MAX_CALLS_PER_STEP,
         items: {

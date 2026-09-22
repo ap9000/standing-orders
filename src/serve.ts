@@ -20,7 +20,9 @@ import { changeSkills, githubSkill, importSkill, readSkillsSnapshot, reviseSkill
 import { skillsHtml, skillsScript, skillsSnapshotHtml, skillTestFeedbackHtml, SKILLS_CSS } from "./skills-ui.js";
 import { changeLearning, learningView } from "./project-learning.js";
 import { changeKnowledge, knowledgeView, knowledgeVersion, readKnowledgeSnapshot, type KnowledgeDraft } from "./project-knowledge.js";
-import { knowledgeHtml, knowledgeContextHtml, KNOWLEDGE_CSS } from "./knowledge-ui.js";
+import { knowledgeHtml, knowledgeContextHtml, KNOWLEDGE_CSS, decisionsHtml, memorySearchHtml, MEMORY_INTRO, proposalsHtml } from "./knowledge-ui.js";
+import { listDecisions, recordDecision, retireDecision, searchMemory } from "./project-memory.js";
+import { decideProposal, listProposals, memoryStatus } from "./memory-pass.js";
 import { learningHtml } from "./workspace-ui.js";
 import { createSessionEndpoint } from './session-server.js';
 import { handleTeamHttp } from './team-http.js';
@@ -2972,7 +2974,12 @@ export function createDecisionServer(options: ServeOptions): Server {
           }
           const query = (url.searchParams.get('q') ?? '').slice(0, 1000);
           const result = query.trim() ? repositoryContextRead({ repo: chosen, query, mode: url.searchParams.get('mode') === 'impact' ? 'impact' : 'search', cacheRoot: join(dirname(evidenceRoot), 'repository-context') }) : null;
-          content = repositoryContextHtml(chosen, query, result, who.role === 'approver' ? csrf : '') + knowledgeHtml(view,csrf,who.role==='approver');
+          const memoryQuery = (url.searchParams.get('memory') ?? '').slice(0, 300);
+          const hits = memoryQuery.trim() ? searchMemory(store, { actor: who.name, repos: [chosen], query: memoryQuery, limit: 20 }) : null;
+          let proposals = '';
+          try { proposals = proposalsHtml(chosen, listProposals(store, chosen), memoryStatus(store, chosen, who.name), csrf, who.role === 'approver'); } catch { proposals = ''; }
+          content = `<p class="meta">${MEMORY_INTRO}</p>` + memorySearchHtml(chosen, memoryQuery, hits) + proposals + decisionsHtml(chosen, listDecisions(store, chosen, who.name, { limit: 50 }), csrf, who.role === 'approver')
+            + repositoryContextHtml(chosen, query, result, who.role === 'approver' ? csrf : '') + knowledgeHtml(view,csrf,who.role==='approver');
           content += `<details class="knowledge"><summary>Learned lessons</summary>${learningHtml(learningView(store,evidenceRoot,chosen,who.name),csrf,who.role==='approver')}</details>`;
         } catch { content = '<p class="problem" role="alert">Project knowledge is unavailable. Reload to retry.</p>'; }
       }
@@ -5019,6 +5026,31 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (!visible(repo) || !store.accountCanAccess(who.name, repo) || ![...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()].includes(repo)) return refuse(response, who, 403, 'That project is outside your access.', '/settings/knowledge');
       const refreshed = await repositoryContext({ repo, query: '', refresh: true, cacheRoot: join(dirname(evidenceRoot), 'repository-context') });
       return sendScreen(response, refreshed.index.status === 'ready' ? 200 : 503, screen('Project context', `<h1>Project context</h1><p>${refreshed.index.status === 'ready' ? 'Code index refreshed.' : 'The index is unavailable. Source search still works.'}</p><a class="button-link" href="/settings/knowledge?repo=${encodeURIComponent(repo)}">Open knowledge</a>`, { chrome: chromeFor(repo, 'settings') }));
+    }
+    if (url.pathname === "/settings/knowledge/proposal") {
+      if (who.via !== 'cookie' || who.role !== 'approver') return refuse(response, who, 403, 'Sign in as an approver to decide memory proposals.', '/settings/knowledge');
+      const repo = body.get('repo') ?? '', decision = body.get('decision') ?? '';
+      if (!visible(repo) || ![...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()].includes(repo)) return refuse(response, who, 403, 'That project is outside your access.', '/settings/knowledge');
+      if (!['accept', 'reject'].includes(decision) || !/^[0-9]{1,12}$/.test(body.get('proposal') ?? '')) return refuse(response, who, 400, 'Choose accept or reject for one proposal.', '/settings/knowledge');
+      try { decideProposal(store, { repo, actor: who.name, id: Number(body.get('proposal')), decision: decision as 'accept' | 'reject' }, now); }
+      catch (error) { return sendScreen(response, 409, screen('Knowledge', `<h1>Knowledge</h1><p role="alert">${escape(error instanceof Error ? error.message : 'That proposal could not be decided.')}</p><p><a href="/settings/knowledge?repo=${encodeURIComponent(repo)}">Back to knowledge</a></p>`, { chrome: chromeFor(repo, 'settings') })); }
+      return redirect(response, `/settings/knowledge?repo=${encodeURIComponent(repo)}&saved=1`);
+    }
+    if (url.pathname === "/settings/knowledge/decision") {
+      if (who.via !== 'cookie' || who.role !== 'approver') return refuse(response, who, 403, 'Sign in as an approver to change project decisions.', '/settings/knowledge');
+      const repo = body.get('repo') ?? '', action = body.get('action') ?? '';
+      if (!visible(repo) || ![...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()].includes(repo)) return refuse(response, who, 403, 'That project is outside your access.', '/settings/knowledge');
+      if (['repo', 'action', 'claim', 'why', 'decision', 'reason'].some(k => body.getAll(k).length > 1) || !['record', 'retire'].includes(action)) return refuse(response, who, 400, 'Choose record or retire.', '/settings/knowledge');
+      try {
+        if (action === 'record') recordDecision(store, { repo, actor: who.name, draft: { claim: body.get('claim') ?? '', why: body.get('why') ?? '', sourceKind: 'manual' } }, now);
+        else retireDecision(store, { repo, actor: who.name, id: Number(body.get('decision')), reason: body.get('reason') ?? '' }, now);
+      } catch (error) {
+        const draft = { claim: body.get('claim') ?? '', why: body.get('why') ?? '' };
+        let content = '';
+        try { content = decisionsHtml(repo, listDecisions(store, repo, who.name, { limit: 50 }), who.session.csrf, true, draft, error instanceof Error ? error.message : 'Save failed. Your draft is below.'); } catch { content = `<p role="alert">Project decisions are unavailable. Your unsaved draft is below.</p><pre class="knowledge">${escape(JSON.stringify(draft, null, 2))}</pre>`; }
+        return sendScreen(response, 409, screen('Knowledge', `<h1>Knowledge</h1>${content}`, { chrome: chromeFor(repo, 'settings') }));
+      }
+      return redirect(response, `/settings/knowledge?repo=${encodeURIComponent(repo)}&saved=1`);
     }
     if (url.pathname === "/settings/knowledge/change") {
       if (who.via !== 'cookie' || who.role !== 'approver') return refuse(response,who,403,'Sign in as an approver to change project knowledge.','/settings/knowledge');

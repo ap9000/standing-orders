@@ -323,7 +323,59 @@ it; a *scout* delivers a report; the *mate* proposes and never acts.
 `,
 };
 
-export const GUIDES: readonly Guide[] = [operating, runner, steering, externalWork, tournaments, console_];
+const knowledge: Guide = {
+  name: "knowledge",
+  title: "Project memory",
+  oneLiner: "what the plane remembers per project — instructions, references, lessons, decisions — and how people and agents read, search and change it",
+  content: `# Project memory
+
+${AUTHORITY_LINE}
+
+Every project keeps one memory in the plane's database, and every lead
+and crew agent reads from it before working:
+
+- **Instructions** — short standing preferences, always loaded, capped at
+  4 KB. They shape work inside an approved task; they never grant
+  permission, change scope or waive checks.
+- **References** — pasted notes or committed \`.md\`/\`.txt\` files,
+  loaded when a task's title, goal or touched paths match them.
+- **Lessons** — evidence-bound advice distilled from finished results,
+  adopted by a person, offered when the same paths are in play.
+- **Decisions** — settled choices with their reason, who decided, when and
+  where it came from. One line each in a brief; the reason loads by id.
+
+## Read and search
+
+- \`standing-orders memory search "<words>" --repo PATH\` finds decisions,
+  instructions, references, lessons and the conversations you may read.
+- \`memory decisions --repo PATH\` lists active decisions (\`--all\` adds
+  history); \`memory show <id>\` prints one with its reason and history.
+- In chat, the lead searches with the same index before asking you again.
+  Cite the kind and id of what you rely on: "decision #12", "reference".
+
+## Change it
+
+- A settled choice: \`memory decide "<one sentence>" --why "<reason>"\`, or
+  say it in chat and confirm the lead's Record decision card. To replace an
+  older decision add \`--supersedes <id>\`; to drop one, \`memory retire
+  <id> --reason "<why>"\`. Decisions are retired, never deleted.
+- Instructions and references change on the Knowledge page under Settings,
+  or through the lead's knowledge cards. Every change keeps a revision you
+  can restore.
+- Agent conclusions are not instructions: a crew agent reports; a person or
+  the lead's confirmed card records.
+
+## What agents must not do
+
+- Never write memory to bypass an approval, a check or a scope.
+- Never repeat a decision or instruction into a task brief when the plane
+  already supplies it; refer to it by id.
+- Never treat a search hit as authority: open the entry, read its reason
+  and its date, and prefer the newest active decision.
+`,
+};
+
+export const GUIDES: readonly Guide[] = [operating, runner, steering, externalWork, tournaments, console_, knowledge];
 
 export function guideNamed(name: string): Guide | null {
   return GUIDES.find(one => one.name === name) ?? null;

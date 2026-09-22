@@ -4,6 +4,7 @@ import { assessmentFromSavedEvidence, verificationEvidence } from "./verificatio
 import { LEARNING_SCHEMA, queueLearning } from "./project-learning.js";
 import { SKILLS_SCHEMA } from "./project-skills.js";
 import { KNOWLEDGE_SCHEMA } from "./project-knowledge.js";
+import { MEMORY_SCHEMA } from "./project-memory.js";
 import { validateTaskText } from "./task-text.js";
 import { chatControlHref, chatResultHref } from "./chat-controls.js";
 import { scanForSecrets } from "./evidence.js";
@@ -104,7 +105,7 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // screenshots one answered mate turn selected for an exact result; readers
 // below v64 refuse it.
 // v65 adds immutable skill packages, project selections, run snapshots and skill tests.
-export const SCHEMA_VERSION = 74;
+export const SCHEMA_VERSION = 75;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -4040,6 +4041,7 @@ function initializeStore(db: Database, file: string): Store {
   db.exec(SCHEMA);
   db.exec(LEARNING_SCHEMA);
   db.exec(KNOWLEDGE_SCHEMA);
+  db.exec(MEMORY_SCHEMA);
   db.exec(SKILLS_SCHEMA);
   db.exec(SLACK_SCHEMA);
   db.exec(chatSchema("discord"));

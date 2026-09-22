@@ -37,7 +37,9 @@ export function prepareWorkspaceRevision(store: Store): WorkspaceRevision {
   const bump = `INSERT INTO service_cursor(key,value,updated_at) VALUES ('${KEY}',1,strftime('%Y-%m-%dT%H:%M:%fZ','now'))
     ON CONFLICT(key) DO UPDATE SET value=service_cursor.value+1,updated_at=excluded.updated_at;`;
   const wanted = new Map<string, string>();
-  const tables = db.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'").all();
+  // Virtual tables (the FTS5 memory index) cannot carry triggers, and their
+  // shadow tables are derived views rebuilt from the stores of record.
+  const tables = db.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' AND sql NOT LIKE 'CREATE VIRTUAL%' AND name NOT LIKE 'memory_search%'").all();
   for (const row of tables) {
     const table = String(row['name']);
     if (OMIT.has(table)) continue;

@@ -20,7 +20,7 @@ export type AssignmentCatchUp = {
   }[];
   projects: { repo: string; knowledge: {
     status: "stored" | "none" | "unavailable"; revision: number | null; identity: string | null; sha256: string | null;
-    instructions: string; sources: { id: string; title: string; kind: "saved-note" | "repository-document"; path: string | null; sourceRevision: string | null; sourceSha: string | null }[];
+    instructions: string; sources: { id: string; title: string; kind: "saved-note" | "repository-document"; path: string | null; sourceRevision: string | null; sourceSha: string | null }[]; decisions: { id: number; claim: string }[];
   } }[];
   omissions: { assignments: number; decisions: number; projects: number; textFields: number; candidateScanLimited: boolean; notes: string[] };
 };
@@ -104,7 +104,7 @@ export function assignmentCatchUp(store: Store, now: Date, access: AssignmentAcc
     result.omissions.projects = Math.max(0, projectCount - 8);
     for (const project of projectRows.slice(0, 8)) {
       const repo = String(project["repo"]);
-      const knowledge: AssignmentCatchUp["projects"][number]["knowledge"] = { status: "unavailable", revision: null, identity: null, sha256: null, instructions: "", sources: [] };
+      const knowledge: AssignmentCatchUp["projects"][number]["knowledge"] = { status: "unavailable", revision: null, identity: null, sha256: null, instructions: "", sources: [], decisions: [] };
       const row = store.handle.prepare('SELECT * FROM project_knowledge WHERE repo=?').get(repo)!;
       try {
         const payload = String(row["payload"]), revision = Number(row["revision"]), identity = String(row["identity"]);
@@ -121,6 +121,7 @@ export function assignmentCatchUp(store: Store, now: Date, access: AssignmentAcc
         });
         Object.assign(knowledge, { status: "stored", revision, identity: /^[a-f0-9]{64}$/.test(identity) ? identity : null, sha256: String(row["sha"]), instructions: text(saved.instructions, 600), sources });
       } catch { /* Integrity failures are explicit; never replay an older version as current. */ }
+      try { knowledge.decisions = store.handle.prepare("SELECT id,claim FROM project_decision WHERE repo=? AND status='active' ORDER BY id DESC LIMIT 8").all(repo).map(row => ({ id: Number(row["id"]), claim: text(String(row["claim"]), 160) })); } catch { /* memory absent on an older database reads as no decisions */ }
       result.projects.push({ repo, knowledge });
       if (!fits()) { result.projects.pop(); result.omissions.projects++; }
     }

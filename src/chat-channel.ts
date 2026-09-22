@@ -674,6 +674,7 @@ export const CHAT_ACTION_PARITY: Record<
     how: "Read during a turn.",
     gap: null,
   },
+  search_project_memory: { support: "direct", how: "Read during a turn: one search over decisions, references, lessons and the conversations the person may read.", gap: null },
   list_tasks: { support: "direct", how: "Read during a turn.", gap: null },
   get_task: {
     support: "direct",
