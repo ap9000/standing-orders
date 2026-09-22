@@ -7,7 +7,7 @@ import { openStore, type Store } from './store.js';
 import { addApprover } from './scope.js';
 import { changeKnowledge, knowledgeView } from './project-knowledge.js';
 import { listDecisions } from './project-memory.js';
-import { analysisPrompt, claudeProjectDir, collectSessions, decideProposal, distillClaude, listProposals, memoryStatus, memorySurface, parseVerdict, runMemoryPass, type MemoryAnalyzer } from './memory-pass.js';
+import { analysisPrompt, claudeProjectDir, collectSessions, decideProposal, defaultAnalyzer, distillClaude, listProposals, memoryStatus, memorySurface, parseVerdict, runMemoryPass, type MemoryAnalyzer } from './memory-pass.js';
 import { runMemoryCommand } from './memory-cli.js';
 import { TeamLeads } from './team-leads.js';
 
@@ -121,6 +121,26 @@ describe('the backward pass over project memory', () => {
     await runMemoryPass(store, { repo, actor: 'alex', analyzer, home, local: false }, now);
     expect(seen).toEqual(['lead', 'lead']);
     expect(memoryStatus(store, repo, 'alex').sessions).toEqual({ total: 2, analyzed: 2, failed: 0 });
+  });
+
+  test('the default analyser goes through the subscription runner with no tools, a valid schema and no session persistence, and returns the model\'s text', async () => {
+    store.setChatConfig({ provider: 'claude-subscription', model: 'opus', dailyTurns: 50, weeklyCeilingMicrousd: 0, priceInMicrousd: 0, priceOutMicrousd: 0 }, 'alex', now);
+    const seen: { file: string; args: readonly string[]; stdin: string }[] = [];
+    const verdict = { positive: [], negative: [], gaps: [{ mistake: 'm', proposedInstruction: 'p', domain: 'project', quote: 'assistant: hi there' }] };
+    const analyzer = defaultAnalyzer(store, { runner: async (file, args, options) => {
+      seen.push({ file, args, stdin: String((options as { stdin?: string }).stdin ?? '') });
+      return { code: 0, stdout: JSON.stringify({ type: 'result', subtype: 'success', is_error: false, structured_output: { text: JSON.stringify(verdict), calls: [] }, usage: { input_tokens: 10, output_tokens: 5 } }), stderr: '', timedOut: false, notFound: false };
+    } });
+    const surface = memorySurface(store, repo, 'alex');
+    const answer = await analyzer({ trace: 'user: hello\nassistant: hi there', surface, openGaps: [], kind: 'claude' });
+    expect(answer.ok).toBe(true);
+    expect(parseVerdict(answer.ok ? answer.text : '', 'user: hello\nassistant: hi there', surface)?.gaps.map(g => g.mistake)).toEqual(['m']);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.file).toBe('claude');
+    const schema = JSON.parse(seen[0]!.args[seen[0]!.args.indexOf('--json-schema') + 1]!) as { properties: { calls: Record<string, unknown> } };
+    expect(schema.properties.calls).toEqual({ type: 'array', maxItems: 0 });
+    expect(seen[0]!.args).toContain('--no-session-persistence');
+    expect(seen[0]!.stdin).toContain('[IN-001] Run the focused tests before handing off.');
   });
 
   test('harm from following an instruction proposes its removal; an over-budget addition becomes a decision proposal; the CLI drives it', async () => {

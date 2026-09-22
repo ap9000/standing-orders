@@ -171,7 +171,7 @@ export function analysisPrompt(surface: MemorySurface, openGaps: { key: string; 
 }
 
 /** The production analyser: one call through the configured chat provider, no tools, no history. */
-export function defaultAnalyzer(store: Store, options: { configDir?: string; env?: NodeJS.ProcessEnv; fetcher?: typeof fetch; timeoutMs?: number }): MemoryAnalyzer {
+export function defaultAnalyzer(store: Store, options: { configDir?: string; env?: NodeJS.ProcessEnv; fetcher?: typeof fetch; timeoutMs?: number; runner?: Parameters<typeof performSubscriptionMateRequest>[1] }): MemoryAnalyzer {
   return async input => {
     const config = store.getChatConfig();
     if (config === null) return { ok: false, problem: 'Chat is not configured; the backward pass uses the chat model.' };
@@ -187,7 +187,7 @@ export function defaultAnalyzer(store: Store, options: { configDir?: string; env
       const answer = await performMateRequest(request, config.provider as DirectChatProviderId, AbortSignal.timeout(options.timeoutMs ?? 120_000), options.fetcher);
       return answer.ok ? { ok: true, text: answer.answer.text } : { ok: false, problem: answer.problem };
     }
-    const answer = await performSubscriptionMateRequest({ provider: config.provider as SubscriptionChatProviderId, model: config.model, system, dataDocument, history, tools: [], timeoutMs: options.timeoutMs ?? 180_000 });
+    const answer = await performSubscriptionMateRequest({ provider: config.provider as SubscriptionChatProviderId, model: config.model, system, dataDocument, history, tools: [], timeoutMs: options.timeoutMs ?? 180_000 }, options.runner);
     return answer.ok ? { ok: true, text: answer.answer.text } : { ok: false, problem: answer.problem };
   };
 }
