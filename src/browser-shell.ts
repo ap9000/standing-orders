@@ -51,9 +51,15 @@ export function browserWorkspaceDocument(html: string, workspace: BrowserWorkspa
     .replace('</body>', `</div><script type="application/json" id="standing-orders-workspace-data" nonce="${nonce}">${serializeBrowserWorkspace(workspace)}</script><script nonce="${nonce}">${initialize}</script><script type="module" src="/assets/workspace.js" nonce="${nonce}"></script></body>`);
 }
 
+/** Signed-in pages share the workspace shell, so the app keeps one
+ * navigation and one look. The coding workspace keeps its own full-screen
+ * editor layout. Pages without chrome (sign-in, one-time secrets) never
+ * reach the shell whatever this returns. */
 export function supportsBrowserWorkspace(path: string): boolean {
   const pathname = path.split('?')[0]!;
-  return ['/chat', '/work', '/tasks', '/projects', '/settings', '/settings/knowledge', '/review'].includes(pathname)
-    || /^\/(?:t|r)\/[^/]+(?:\/[^/]+)?$/.test(pathname)
-    || pathname.startsWith('/settings/knowledge/') || pathname.startsWith('/projects/');
+  if (pathname === '/code' || pathname.startsWith('/code/')) return false;
+  // Live operations pages still own their refresh, pollers and keyboard
+  // palette in the console chrome; they share the palette until they move.
+  return !LIVE_CONSOLE_PAGES.has(pathname);
 }
+const LIVE_CONSOLE_PAGES = new Set(['/system', '/board', '/inbox', '/next', '/done', '/workbench']);

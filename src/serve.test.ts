@@ -5620,7 +5620,7 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     expect(settings).toMatch(/^<summary>settings<svg.*?<nav class="nav-group-items"><a href="\/settings" aria-label="settings" title="settings">settings<\/a>/s);
     // The phone's overflow drawer mirrors it — its own headed section, last.
     const menu = await (await fetch(url("/menu"), { headers: { cookie } })).text();
-    expect(menu).toContain('<h2 class="menu-group-label">settings</h2>');
+    expect(menu).toContain('<h2 class="menu-group-label">Settings</h2>');
     expect(menu).toContain('<a class="menu-row" href="/settings">');
     // And the phone's tab bar never carries it: settings is a header action.
     const tabbar = /<nav class="tabbar">(.*?)<\/nav>/s.exec(html)?.[1] ?? "";
@@ -8447,18 +8447,28 @@ describe("the phone shell (mobile pass): one header row, drawn controls, thumb-s
     expect(html).toContain('<meta name="apple-mobile-web-app-capable" content="yes">');
   });
 
-  test("the design system (v2): one token ramp in two schemes, a theme color per scheme, icons on the sidebar's primary rows", async () => {
+  test("the design system (v3): one palette in two schemes, a pinned theme, a theme color per scheme, icons on the sidebar's primary rows", async () => {
     const cookie = await login();
     const html = await (await fetch(url("/inbox"), { headers: { cookie } })).text();
     const css = await stylesOf(html, base);
-    expect(css).toContain("color-scheme: light dark;");
-    // The light block redefines the same names — never a color that lives in one scheme only.
-    const light = /@media \(prefers-color-scheme: light\) \{\s*:root \{(.*?)\}\s*\}/s.exec(css)?.[1] ?? "";
-    for (const token of ["--background", "--foreground", "--card", "--muted", "--muted-foreground", "--border", "--input", "--brand", "--brand-foreground", "--running", "--success", "--destructive", "--ring"]) {
-      expect(light).toContain(`${token}:`);
+    // Light is the root; dark follows the device unless a theme is pinned.
+    const root = /:root \{\s*color-scheme: light;(.*?)\n  \}/s.exec(css)?.[1] ?? "";
+    const dark = /:root\[data-theme="dark"\] \{\s*color-scheme: dark;(.*?)\n  \}/s.exec(css)?.[1] ?? "";
+    expect(css).toContain(':root:not([data-theme="light"]) {');
+    for (const token of ["--so-ground", "--so-paper", "--so-ink", "--so-muted", "--so-line", "--so-accent", "--so-on-accent", "--so-danger", "--so-success", "--so-warning", "--so-info"]) {
+      expect(root).toContain(`${token}:`);
+      expect(dark).toContain(`${token}:`);
     }
-    expect(html).toContain('<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0b0c0e">');
-    expect(html).toContain('<meta name="theme-color" media="(prefers-color-scheme: light)" content="#fafafa">');
+    // The console's names are views onto the palette, never a second ramp.
+    for (const token of ["--background", "--foreground", "--card", "--muted", "--muted-foreground", "--border", "--input", "--brand", "--running", "--success", "--destructive", "--ring"]) {
+      expect(root).toMatch(new RegExp(`${token}: var\\(--so-`));
+    }
+    expect(html).toContain('<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0f1311">');
+    expect(html).toContain('<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f8f9f7">');
+    // A pinned theme reaches the document before any script runs.
+    const pinned = await (await fetch(url("/inbox"), { headers: { cookie: `${cookie}; so-theme=dark` } })).text();
+    expect(pinned).toContain('<html lang="en" data-theme="dark">');
+    expect(pinned).toContain('<meta name="theme-color" content="#0f1311">');
     // Sidebar primary rows carry a drawn icon; the foot's rows stay text.
     expect(html).toMatch(/<a href="\/work"[^>]*><span class="glyph"><svg/);
     expect(html).toMatch(/<a href="\/projects"[^>]*><span class="glyph"><svg/);
@@ -10703,8 +10713,8 @@ describe("the reduction pass (Laws of UX): five always-visible rows and two acco
 
     // /menu mirrors the same two groups, nothing else.
     const menu = await (await fetch(url("/menu"), { headers: { cookie } })).text();
-    expect(menu).toContain('<h2 class="menu-group-label">work tools</h2>');
-    expect(menu).toContain('<h2 class="menu-group-label">settings</h2>');
+    expect(menu).toContain('<h2 class="menu-group-label">Work tools</h2>');
+    expect(menu).toContain('<h2 class="menu-group-label">Settings</h2>');
     const rows = [...menu.matchAll(/<a class="menu-row" href="([^"]+)">/g)].map(m => m[1]);
     expect(rows).toEqual(["/code", "/inbox", "/board", "/tasks", "/recipes", "/routines", "/workbench", "/ledger", "/settings", "/fleet", "/caps", "/people", "/mode", "/system"]);
   });

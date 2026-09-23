@@ -1027,6 +1027,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
 
     const requestFacts = {
+      theme: pinnedTheme(request.headers.cookie),
       actor: who.name,
       csrf: who.via === "cookie" ? who.session.csrf : "",
       returnTo: safeReturn(url.pathname + url.search),
@@ -2351,10 +2352,9 @@ export function createDecisionServer(options: ServeOptions): Server {
         `<h2 class="menu-group-label">${label}</h2><div class="menu-list">` +
         rows.map(row => `<a class="menu-row" href="${row.href}"><strong>${row.label}</strong><span class="meta">${row.hint}</span></a>`).join("\n") +
         `</div>`;
-      return page(response, 200, shell("menu", [
-        `<h1>tools and settings</h1>`,
-        section("work tools", workToolRows(chrome.projectScoped, chrome.chat, chrome.code)),
-        section("settings", settingsRows(chrome.projectScoped, chrome.settings)),
+      return sendScreen(response, 200, screen("Workspace tools", [
+        section("Work tools", workToolRows(chrome.projectScoped, chrome.chat, chrome.code)),
+        section("Settings", settingsRows(chrome.projectScoped, chrome.settings)),
       ].join("\n"), { chrome }));
     }
 
@@ -3618,7 +3618,9 @@ export function createDecisionServer(options: ServeOptions): Server {
       path.searchParams.delete('request');
       const currentPath = path.pathname + path.search;
       path.searchParams.set('format', 'workspace');
-      const pageHtml = s.chrome.listPane === undefined ? s.body : `<div class="workspace-native-detail"><aside>${s.chrome.listPane}</aside><section>${s.body}</section></div>`;
+      // The legacy list pane (every task or build as links) duplicates the
+      // Crew panel and Tasks page; inside the workspace the page stands alone.
+      const pageHtml = s.body;
       const extras = s.workspace ?? {};
       const notices = [...(extras.notices ?? [])];
       if (s.chrome.demo) notices.unshift('Demo workspace — synthetic tasks. External work is disabled.');
@@ -5078,6 +5080,17 @@ export function createDecisionServer(options: ServeOptions): Server {
         try {content=skillsHtml(skillsView(store,repo,who.name),who.session.csrf,true,{error:message,draft:Object.fromEntries(['method','content','url','sample','sha'].map(k=>[k,body.get(k)??'']))});}catch{/* Do not display unverified packages. */}
         return sendScreen(response,409,screen('Skills',`<h1>Skills</h1>${content}`,{chrome:chromeFor(repo,'settings'),functional:{script:skillsScript()}}));
       }
+    }
+    if (url.pathname === "/settings/appearance") {
+      // A per-browser preference, not a shared setting: it lives in this
+      // person's own cookie and never in the database.
+      const theme = body.get("theme") ?? "";
+      if (!["system", "light", "dark"].includes(theme)) return refuse(response, who, 400, "Choose System, Light or Dark.", "/settings");
+      const back = safeReturn(body.get("return") ?? "/settings");
+      response.setHeader("Set-Cookie", theme === "system"
+        ? "so-theme=; SameSite=Lax; Path=/; Max-Age=0"
+        : `so-theme=${theme}; SameSite=Lax; Path=/; Max-Age=31536000`);
+      return redirect(response, back);
     }
     if (url.pathname.startsWith("/settings/models/")) {
       if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "Sign in as an approver to change models.", "/settings/models");
@@ -9541,6 +9554,42 @@ function escape(text: string): string {
  * not worth that posture. The same semantic tokens render both system light
  * and dark themes.
  */
+/** The shared palette, light and dark. Semantic names only; every surface
+ * (server pages, the React workspace, the pre-script fallback) reads these. */
+const THEME_LIGHT = `
+    --so-ground: #f8f9f7; --so-paper: #ffffff; --so-sidebar: #f0f2ee; --so-raised: #f3f5f1;
+    --so-ink: #252d29; --so-muted: #5f6a63; --so-line: #dde2db; --so-input-line: #c7d1c5;
+    --so-accent: #294f43; --so-accent-hover: #1c3b31; --so-accent-text: #294f43; --so-on-accent: #ffffff; --so-soft: #e7eee8;
+    --so-nav-ink: #556057; --so-nav-hover: #e5ebe2; --so-nav-current: #e0e8dc; --so-nav-current-ink: #294b36;
+    --so-danger: #9a332d; --so-danger-soft: #fae9e5; --so-success: #305b3e; --so-success-soft: #e7f0e4;
+    --so-warning: #80530b; --so-warning-soft: #fff1d2; --so-info: #325970; --so-info-soft: #e8eff3;
+    --so-neutral-ink: #535d56; --so-neutral-soft: #edf0eb; --so-live: #56825c;
+    --so-overlay: rgb(22 35 28 / .33); --so-shadow-overlay: 0 18px 55px rgb(10 33 26 / .15);
+    --so-selection: #d7e5d8; --so-scroll: #b7c2b8; --so-code-bg: #f7f8f5; --so-user-bubble: #f0f2ee;`;
+const THEME_DARK = `
+    --so-ground: #0f1311; --so-paper: #151a17; --so-sidebar: #0c100e; --so-raised: #1b221e;
+    --so-ink: #e3e8e4; --so-muted: #9aa69e; --so-line: #29322d; --so-input-line: #3a463f;
+    --so-accent: #86c2a6; --so-accent-hover: #a0d4bb; --so-accent-text: #8fcaae; --so-on-accent: #0c1d15; --so-soft: #1f2a24;
+    --so-nav-ink: #aab5ad; --so-nav-hover: #19211c; --so-nav-current: #1f2b24; --so-nav-current-ink: #cfe6d9;
+    --so-danger: #f19486; --so-danger-soft: rgb(241 148 134 / .12); --so-success: #8fcf9c; --so-success-soft: rgb(143 207 156 / .12);
+    --so-warning: #e6b660; --so-warning-soft: rgb(230 182 96 / .13); --so-info: #8dbde0; --so-info-soft: rgb(141 189 224 / .12);
+    --so-neutral-ink: #b3bfb7; --so-neutral-soft: #202823; --so-live: #7fc08f;
+    --so-overlay: rgb(0 0 0 / .55); --so-shadow-overlay: 0 18px 55px rgb(0 0 0 / .5);
+    --so-selection: #2d4a3c; --so-scroll: #3a463f; --so-code-bg: #111613; --so-user-bubble: #1d2520;`;
+/** The console's original token names, now views onto the palette. */
+const THEME_MAPPING = `
+    --background: var(--so-ground); --foreground: var(--so-ink); --card: var(--so-paper);
+    --muted: var(--so-raised); --muted-foreground: var(--so-muted); --border: var(--so-line); --input: var(--so-input-line);
+    --primary: var(--so-accent); --primary-foreground: var(--so-on-accent); --secondary: var(--so-raised); --secondary-foreground: var(--so-ink);
+    --accent: var(--so-soft); --destructive: var(--so-danger); --destructive-strong: var(--so-danger); --destructive-soft: var(--so-danger-soft);
+    --success: var(--so-success); --success-soft: var(--so-success-soft); --warning: var(--so-warning); --warning-soft: var(--so-warning-soft);
+    --running: var(--so-info); --running-soft: var(--so-info-soft); --ring: var(--so-accent);
+    --brand: var(--so-accent); --brand-foreground: var(--so-on-accent); --brand-soft: var(--so-soft);
+    --glass: var(--so-paper); --glass-strong: var(--so-paper); --glass-border: var(--so-line); --glass-highlight: transparent;
+    --ambient-one: transparent; --ambient-two: transparent; --user-message: var(--so-user-bubble);
+    --surface: var(--so-paper); --ok: var(--so-success); --danger: var(--so-danger); --fg-muted: var(--so-muted);
+    --shadow: 0 1px 2px rgb(0 0 0 / .04); --shadow-overlay: var(--so-shadow-overlay);`;
+
 const STYLE = `
 /* The Console — the design system, v3 (2026-09-06). Quiet operational density
    now sits on a softer, glass-backed shell: translucent layers, generous
@@ -9571,93 +9620,28 @@ const STYLE = `
     font-family: "IBM Plex Mono"; font-style: normal; font-weight: 600;
     font-display: swap; src: url("/fonts/plex-mono-600.woff2") format("woff2");
   }
+  /* One palette for every page (2026-09-23): the workspace's sage-and-paper
+   * identity, light by day and dark after hours. The device decides unless
+   * the person pins a theme (html[data-theme], set from their cookie). The
+   * console's older token names map onto it, so the React workspace, the
+   * server-rendered pages and the pre-script fallback all paint the same. */
   :root {
-    color-scheme: light dark;
-    /* Dark: the after-hours scene. A true neutral ramp with a whisper of
-     * cool, Vercel's grays with Linear's temperature. */
-    --background: #0b0c0e;
-    --foreground: #ededef;
-    --card: #121316;
-    --muted: #1a1c20;
-    --muted-foreground: #8b919c;
-    --border: #24272d;
-    --input: #3a3e46;
-    --primary: #ededef;
-    --primary-foreground: #0b0c0e;
-    --secondary: #1a1c20;
-    --secondary-foreground: #ededef;
-    --accent: #1a1c20;
-    --destructive: #f06a5e;
-    --destructive-strong: #f06a5e;
-    --destructive-soft: color-mix(in srgb, #f06a5e 12%, transparent);
-    --success: #3ecf8e;
-    --success-soft: color-mix(in srgb, #3ecf8e 12%, transparent);
-    --warning: #f5a524;
-    --warning-soft: color-mix(in srgb, #f5a524 12%, transparent);
-    --running: #52a8ff;
-    --running-soft: color-mix(in srgb, #52a8ff 12%, transparent);
-    --ring: #52a8ff;
-    /* amber — the one accent; it marks what waits on a person, only. */
-    --brand: #f5a524;
-    --brand-foreground: #201503;
-    --brand-soft: color-mix(in srgb, #f5a524 12%, transparent);
-    --radius: 0.875rem;
-    --glass: rgb(18 20 25 / .72);
-    --glass-strong: rgb(20 22 28 / .9);
-    --glass-border: rgb(255 255 255 / .085);
-    --glass-highlight: rgb(255 255 255 / .045);
-    --ambient-one: rgb(113 92 255 / .14);
-    --ambient-two: rgb(50 145 255 / .09);
-    --user-message: #292c35;
-    --surface: var(--glass);
-    --ok: var(--success);
-    --danger: var(--destructive);
-    --fg-muted: var(--muted-foreground);
-    --shadow: 0 1px 2px rgb(0 0 0 / .18), 0 10px 30px -22px rgb(0 0 0 / .8);
-    --shadow-overlay: 0 18px 70px -28px rgb(0 0 0 / .8), 0 1px 0 var(--glass-highlight) inset;
+    color-scheme: light;
+${THEME_LIGHT}
+${THEME_MAPPING}
+    --radius: 0.75rem;
     --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
     --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
   }
-  @media (prefers-color-scheme: light) {
-    :root {
-      /* Light: a phone in daylight, a laptop by a window. Paper ground,
-       * white surfaces, the same names; every status hue re-picked to hold
-       * 4.5:1 as text on white. */
-      --background: #fafafa;
-      --foreground: #171717;
-      --card: #ffffff;
-      --muted: #f1f2f4;
-      --muted-foreground: #64697a;
-      --border: #e4e5e9;
-      --input: #c4c7cf;
-      --primary: #171717;
-      --primary-foreground: #fafafa;
-      --secondary: #f1f2f4;
-      --secondary-foreground: #171717;
-      --accent: #f1f2f4;
-      --destructive: #d1332e;
-      --destructive-strong: #d1332e;
-      --destructive-soft: color-mix(in srgb, #d1332e 10%, transparent);
-      --success: #118a4f;
-      --success-soft: color-mix(in srgb, #118a4f 10%, transparent);
-      --warning: #a15c00;
-      --warning-soft: color-mix(in srgb, #f5a524 14%, transparent);
-      --running: #0b6fd6;
-      --running-soft: color-mix(in srgb, #0b6fd6 10%, transparent);
-      --ring: #0b6fd6;
-      --brand: #a15c00;
-      --brand-foreground: #ffffff;
-      --brand-soft: color-mix(in srgb, #f5a524 16%, transparent);
-      --glass: rgb(255 255 255 / .72);
-      --glass-strong: rgb(255 255 255 / .9);
-      --glass-border: rgb(23 23 23 / .09);
-      --glass-highlight: rgb(255 255 255 / .75);
-      --ambient-one: rgb(115 88 255 / .10);
-      --ambient-two: rgb(45 141 255 / .08);
-      --user-message: #202124;
-      --shadow: 0 1px 2px rgb(0 0 0 / .04), 0 12px 32px -24px rgb(21 24 36 / .24);
-      --shadow-overlay: 0 18px 60px -28px rgb(28 33 48 / .3), 0 1px 0 var(--glass-highlight) inset;
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+${THEME_DARK}
     }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+${THEME_DARK}
   }
   * { box-sizing: border-box; }
   ::selection { background: color-mix(in srgb, var(--running) 30%, transparent); }
@@ -11525,7 +11509,7 @@ const STYLE = `
   .thread .msg.op {
     align-self: flex-end; max-width: min(82%, 40rem); padding: .75rem 1rem;
     border: 1px solid var(--glass-border); border-radius: 1.2rem 1.2rem .35rem 1.2rem;
-    background: var(--user-message); color: #f7f7f8;
+    background: var(--user-message); color: var(--so-ink);
     box-shadow: 0 10px 30px -24px rgb(0 0 0 / .9), 0 1px 0 rgb(255 255 255 / .07) inset;
   }
   .thread .msg.mate {
@@ -12168,7 +12152,9 @@ button.pick-file { min-height: 1.5rem; padding: 0 .5rem; font-size: .6875rem; }
 }
 `;
 
-const WORKSPACE_STYLE = styleAsset(STYLE + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
+/** Appearance: a three-way segmented switch, one tap per choice. */
+const THEME_CONTROLS_CSS = `.appearance{margin:0 0 28px}.appearance h2{margin:0 0 10px}.theme-switch{display:inline-flex;flex-wrap:wrap;gap:4px;padding:4px;margin:0;border:1px solid var(--so-line);border-radius:10px;background:var(--so-raised)}.theme-switch .theme-choice{min-height:40px;padding:8px 16px;border:0;border-radius:7px;background:transparent;color:var(--so-muted);font:inherit;font-weight:550;box-shadow:none;cursor:pointer}.theme-switch .theme-choice:hover{color:var(--so-ink)}.theme-switch .theme-choice[aria-pressed="true"]{background:var(--so-paper);color:var(--so-ink);box-shadow:0 1px 2px rgb(0 0 0 / .1)}.appearance .meta{margin:8px 0 0}@media(max-width:600px){.theme-switch .theme-choice{min-height:44px}}`;
+const WORKSPACE_STYLE = styleAsset(STYLE + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
@@ -12540,12 +12526,13 @@ function shell(
 ): string {
   const head = [
     "<!doctype html>",
-    `<html lang="en"><head><meta charset="utf-8">`,
+    `<html lang="en"${themeAttribute()}><head><meta charset="utf-8">`,
     // viewport-fit=cover is what makes env(safe-area-inset-*) non-zero on a
     // notched phone; without it the tab bar sits under the home indicator.
     `<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">`,
-    `<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0b0c0e">`,
-    `<meta name="theme-color" media="(prefers-color-scheme: light)" content="#fafafa">`,
+    ...(requestContext.getStore()?.theme
+      ? [`<meta name="theme-color" content="${requestContext.getStore()?.theme === "dark" ? "#0f1311" : "#f8f9f7"}">`]
+      : [`<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0f1311">`, `<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f8f9f7">`]),
     `<meta name="mobile-web-app-capable" content="yes">`,
     `<meta name="apple-mobile-web-app-capable" content="yes">`,
     `<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">`,
@@ -16515,7 +16502,16 @@ function projectsPage(
  * to. AsyncLocalStorage follows the request's own async chain, so two
  * interleaved requests never read each other's token.
  */
-const requestContext = new AsyncLocalStorage<{ csrf: string; returnTo: string; actor?: string; createdTask?: string; browser?: boolean; workspaceRead?: boolean; workspaceRequest?: string | null; workCounts?: ReturnType<typeof workCountsByProject>; workCrew?: { project: string | null; page: WorkIndexPage }; workspaceValidator?: { key: string; revision: string; expiresAt: number; etag: string } }>();
+/** The person's pinned theme from their own cookie; null follows the device. */
+export function pinnedTheme(cookieHeader: string | undefined): "light" | "dark" | null {
+  const value = /(?:^|;\s*)so-theme=(light|dark)(?:;|$)/.exec(cookieHeader ?? "")?.[1];
+  return value === "light" || value === "dark" ? value : null;
+}
+function themeAttribute(): string {
+  const theme = requestContext.getStore()?.theme ?? null;
+  return theme === null ? "" : ` data-theme="${theme}"`;
+}
+const requestContext = new AsyncLocalStorage<{ theme?: "light" | "dark" | null; csrf: string; returnTo: string; actor?: string; createdTask?: string; browser?: boolean; workspaceRead?: boolean; workspaceRequest?: string | null; workCounts?: ReturnType<typeof workCountsByProject>; workCrew?: { project: string | null; page: WorkIndexPage }; workspaceValidator?: { key: string; revision: string; expiresAt: number; etag: string } }>();
 
 /** A same-site path or "/": never a scheme, a host, or a protocol-relative road. */
 function safeReturn(raw: string | null | undefined): string {
@@ -21220,6 +21216,7 @@ function settingsPage(
   return screen("settings", [
     "<h1>settings</h1>",
     '<p><a href="/settings/models">Models</a> · <a href="/settings/skills">Skills</a> · <a href="/settings/knowledge">Project knowledge</a> · <a href="/settings/telegram">Telegram</a> · <a href="/settings/slack">Slack</a> · <a href="/settings/discord">Discord</a> · <a href="/settings/teams">Teams</a></p><details><summary>Learning history</summary><a href="/settings/learning">Learning</a></details>',
+    appearanceCard(csrf),
     permissionCard,
     qualityCard,
     pushCard,
@@ -21238,6 +21235,19 @@ function settingsPage(
     ` <code>standing-orders bridge telegram pair --as you --token …</code> and send the code to your bot.</p>`,
     `<p class="meta">Once paired, send <code>/status</code> for recent work, <code>/task &lt;id&gt;</code> for a task's evidence and next step, or <code>/help</code>. These are read-only and use no AI model. The computer and bridge must be awake and connected.</p>`,
   ].join("\n"), { chrome, ...(pushScript === null ? {} : { functional: { script: pushScript, fetches: true } }) });
+}
+
+/** Light, dark or the device's choice, one tap each. Per browser (a cookie). */
+function appearanceCard(csrf: string): string {
+  if (csrf === "") return "";
+  const pinned = requestContext.getStore()?.theme ?? null;
+  const current = pinned ?? "system";
+  const option = (value: string, label: string) =>
+    `<button type="submit" name="theme" value="${value}" class="theme-choice" aria-pressed="${current === value}">${label}</button>`;
+  return `<section class="appearance" aria-labelledby="appearance-title"><h2 id="appearance-title">Appearance</h2>` +
+    `<form method="post" action="/settings/appearance" class="theme-switch"><input type="hidden" name="csrf" value="${escape(csrf)}">` +
+    option("system", "Match device") + option("light", "Light") + option("dark", "Dark") +
+    `</form><p class="meta">Saved in this browser.</p></section>`;
 }
 
 /**
