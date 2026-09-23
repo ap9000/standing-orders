@@ -195,6 +195,11 @@ export function replyContextFor(taskId: string, run: number | null): string {
   ].join(" ");
 }
 
+/** The context a chosen task (/tasks, /task <name>) carries into each turn from that chat. */
+export function focusContextFor(taskId: string): string {
+  return `Current task: ${taskId}. The operator chose this task in their chat app; their messages there are about it until they switch back. Read it with get_task before answering or proposing changes, and bind new actions to its currentExecution. Read get_task_conversation when they refer to earlier discussion. Keep this turn about that task unless the operator explicitly asks to broaden it.`;
+}
+
 /** A step the phone cannot take itself: said once; the button (or its absence) says where. */
 const HANDOFF = "This step finishes in Standing Orders.";
 /** No trusted https origin is configured: one honest line, no localhost, no promise. */
