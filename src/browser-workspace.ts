@@ -11,7 +11,8 @@ import { workIndexPage, type WorkIndexItem, type WorkIndexPage } from './work-in
 import type { StatusTone } from './workspace-ui.js';
 
 export type BrowserProject = { name: string; path: string; href: string; knowledgeHref: string };
-export type BrowserNavigationItem = { label: string; href: string; active: boolean };
+/** count: tasks waiting on a person, shown beside Tasks when above zero. */
+export type BrowserNavigationItem = { label: string; href: string; active: boolean; count?: number };
 export type BrowserCrewItem = {
   id: string; title: string; project: string | null;
   state: AssignmentSnapshot['state']; label: string; tone: StatusTone;
@@ -73,13 +74,14 @@ export function browserProjectsOf(projects: readonly { name: string; path: strin
   });
 }
 
-export function browserNavigationOf(path: string, project: string | null = null): BrowserNavigationItem[] {
+export function browserNavigationOf(path: string, project: string | null = null, needsYou = 0): BrowserNavigationItem[] {
   const pathname = path.split('?')[0]!.split('#')[0]!;
   const knowledge = pathname === '/settings/knowledge' || pathname.startsWith('/settings/knowledge/');
   return [
     { label: 'Chat', href: '/chat', active: pathname === '/chat' },
     { label: 'Tasks', href: `/work${project === null ? '' : `?project=${encodeURIComponent(project)}`}`,
-      active: pathname === '/work' || pathname === '/tasks' || pathname.startsWith('/t/') },
+      active: pathname === '/work' || pathname === '/tasks' || pathname.startsWith('/t/') || pathname.startsWith('/r/'),
+      ...(needsYou > 0 ? { count: needsYou } : {}) },
     { label: 'Projects', href: '/projects', active: pathname === '/projects' },
     { label: 'Knowledge', href: `/settings/knowledge${project === null ? '' : `?repo=${encodeURIComponent(project)}`}`, active: knowledge },
     { label: 'Settings', href: '/settings', active: !knowledge && (pathname === '/settings' || pathname.startsWith('/settings/')) },
