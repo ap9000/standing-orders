@@ -16,6 +16,7 @@ import { TeamChat } from "./team-chat.js";
 import { browserCrewFromIndex } from "../browser-crew.js";
 import type { TeamSnapshot } from "../team-contract.js";
 import { GuardedHtml, notifyWorkspaceRendered, regionIsEditing } from "./guarded-html.js";
+import { ActionCards, CHAT_COMMANDS } from "./chat-cards.js";
 import { ViewHost } from "./views/index.js";
 import { Toaster } from "./components/ui/index.js";
 import "./workspace.css";
@@ -423,6 +424,18 @@ function LeadChat({ controller, docked = null }: { controller: ReturnType<typeof
   const dock = docked === null ? null : DOCKED_SUGGESTIONS[docked] ?? DOCKED_SUGGESTIONS.task!;
   const box = useRef<HTMLTextAreaElement>(null);
   const busy = chat.pendingTurnId !== null;
+  // "/" opens quick starts for this conversation's context.
+  const commands = CHAT_COMMANDS[docked ?? (chat.taskId ? "task" : chat.project ? "tasks" : "lead")] ?? CHAT_COMMANDS.lead!;
+  const commandQuery = /^\/(\w*)$/.exec(draft.text)?.[1]?.toLowerCase();
+  const [commandIndex, setCommandIndex] = useState(0);
+  const [commandsClosed, setCommandsClosed] = useState(false);
+  const commandMatches = commandQuery === undefined || commandsClosed ? [] : commands.filter(one => one.command.startsWith(commandQuery));
+  const commandList = useId();
+  const applyCommand = (one: { text: string }) => {
+    controller.edit(one.text);
+    setCommandIndex(0);
+    requestAnimationFrame(() => { const node = box.current; if (node) { node.focus(); node.setSelectionRange(node.value.length, node.value.length); } });
+  };
   // Watch once the send has returned (the server has begun the turn), or
   // while a turn is known to be running.
   const live = useLiveReply(chat, busy || (draft.pending !== null && !sending), () => { void controller.check(); });
@@ -439,7 +452,9 @@ function LeadChat({ controller, docked = null }: { controller: ReturnType<typeof
       <div id="chat-thread" data-chat-region="thread">{chat.messages.map(message => <Message from={message.role === "operator" ? "user" : "assistant"} key={message.id} data-message-id={message.id}>
         <div className="so-message-label">{message.role === "operator" ? "You" : "Lead"}</div>
         <MessageContent><GuardedHtml html={message.html} />{message.activity && <Disclosure summary="Activity"><p className="so-activity-copy">{message.activity}</p></Disclosure>}
-          {message.cardsHtml && <GuardedHtml html={message.cardsHtml} className="so-message-cards" />}
+          {message.cards !== undefined && message.cards.length > 0
+            ? <ActionCards cards={message.cards} csrf={workspace.csrf} onChanged={() => { void controller.check(); }} />
+            : message.cardsHtml && <GuardedHtml html={message.cardsHtml} className="so-message-cards" />}
         </MessageContent>
       </Message>)}</div>
       {(busy || live !== null) && <LiveReplyBubble live={live} />}
@@ -450,11 +465,24 @@ function LeadChat({ controller, docked = null }: { controller: ReturnType<typeof
       </div>}
       <form onSubmit={controller.send} action="/chat" method="post" data-workspace-composer aria-busy={sending}>
         <Label htmlFor="lead-message" className="so-sr-only">Message your lead</Label>
+        {commandMatches.length > 0 && <ul id={commandList} role="listbox" aria-label="Commands" className="so-slash-menu">
+          {commandMatches.map((one, index) => <li key={one.command} role="option" aria-selected={index === Math.min(commandIndex, commandMatches.length - 1)}
+            onMouseDown={event => { event.preventDefault(); applyCommand(one); }}>
+            <span className="so-slash-name">/{one.command}</span><span className="so-slash-hint">{one.hint}</span>
+          </li>)}
+        </ul>}
         <Textarea ref={box} id="lead-message" name="message" rows={2} maxLength={chat.maxChars} placeholder={dock?.placeholder ?? "Message your lead…"} value={draft.text}
-          onChange={event => controller.edit(event.target.value)} onKeyDown={event => {
+          role={commandMatches.length > 0 ? "combobox" : undefined} aria-expanded={commandMatches.length > 0 ? true : undefined} aria-controls={commandMatches.length > 0 ? commandList : undefined}
+          onChange={event => { setCommandsClosed(false); controller.edit(event.target.value); }} onKeyDown={event => {
+            if (commandMatches.length > 0) {
+              const current = Math.min(commandIndex, commandMatches.length - 1);
+              if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); setCommandIndex((current + (event.key === "ArrowDown" ? 1 : commandMatches.length - 1)) % commandMatches.length); return; }
+              if ((event.key === "Enter" && !event.shiftKey) || event.key === "Tab") { event.preventDefault(); applyCommand(commandMatches[current]!); return; }
+              if (event.key === "Escape") { event.preventDefault(); setCommandsClosed(true); return; }
+            }
             if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); if (!disabled) event.currentTarget.form?.requestSubmit(); }
           }} aria-describedby="composer-hint" />
-        <div className="so-composer-actions"><span id="composer-hint">{!storageAvailable ? "Draft stays on this page only." : draft.text.length > chat.maxChars - 200 ? `${draft.text.length} / ${chat.maxChars}` : "Shift + Enter for a new line"}</span>
+        <div className="so-composer-actions"><span id="composer-hint">{!storageAvailable ? "Draft stays on this page only." : draft.text.length > chat.maxChars - 200 ? `${draft.text.length} / ${chat.maxChars}` : "/ for commands · Shift + Enter for a new line"}</span>
           <Button type="submit" disabled={disabled} aria-label="Send message"><Icon name="send" /><span>Send</span></Button>
         </div>
       </form>
