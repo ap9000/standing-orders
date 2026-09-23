@@ -1,7 +1,7 @@
 import { repositoryContext, repositoryContextRead } from './repository-context.js';
 import { repositoryContextHtml } from './repository-context-ui.js';
 import { browserAssetsAvailable, browserWorkspaceDocument, serveBrowserAsset, supportsBrowserWorkspace } from './browser-shell.js';
-import { browserCrewOf, browserCrewFromIndex, browserWorkActionHref, browserProjectsOf, browserNavigationOf, type BrowserWorkspace } from './browser-workspace.js';
+import { browserCrewOf, browserCrewFromIndex, browserWorkActionHref, browserProjectsOf, browserNavigationOf, type BrowserWorkspace, type BrowserTasksView, type BrowserSettingsView } from './browser-workspace.js';
 import { configureLeadFollow, leadFollowStatus, runLeadFollowPass } from './lead-follow.js';
 import { startMaintenance } from './maintenance.js';
 import { codingHandoffPreview, createCodingHandoff } from './coding-handoff.js';
@@ -3680,7 +3680,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           ? { request, received: store.mateRequestReceipt(conversation.sessionId, request) !== null } : null,
         projects: browserProjectsOf(s.chrome.projects ?? []), ...crew,
         conversation, ...(extras.team ? { team: extras.team } : {}), focus: extras.focus ?? null, result: extras.result ?? null,
-        catchUpHtml: extras.catchUpHtml ?? '', controlsHtml: extras.controlsHtml ?? '', notices,
+        catchUpHtml: extras.catchUpHtml ?? '', controlsHtml: extras.controlsHtml ?? '', notices, view: extras.view ?? null,
         pageHtml: extras.pageHtml === undefined ? (conversation === null ? pageHtml : null) : extras.pageHtml,
         navigation: [...browserNavigationOf(currentPath, s.chrome.project, needsYou), { label: 'Workspace tools', href: '/menu', active: path.pathname === '/menu' }],
       };
@@ -5424,8 +5424,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         response,
         `/settings?said=${encodeURIComponent(
           wanted === "bypassPermissions"
-            ? "new tasks now default to Full access — existing scopes and approvals are unchanged"
-            : "new tasks now default to Auto — existing scopes and approvals are unchanged",
+            ? "New tasks now start with Full access. Approved tasks keep their setting."
+            : "New tasks now start with Auto. Approved tasks keep their setting.",
         )}`,
       );
     }
@@ -5440,8 +5440,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         response,
         `/settings?said=${encodeURIComponent(
           wanted === "strict"
-            ? "new tasks now default to Strict / release — existing scopes and approvals are unchanged"
-            : "new tasks now default to Default quality — existing scopes and approvals are unchanged",
+            ? "New tasks now use Strict / release. Approved tasks keep their setting."
+            : "New tasks now use Default quality. Approved tasks keep their setting.",
         )}`,
       );
     }
@@ -5454,7 +5454,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (!(wanted in allowed)) return refuse(response, who, 400, "the digest cadence is one of the listed choices", "/settings");
       const minutes = allowed[wanted] ?? null;
       store.setTelegramDigest(minutes === null ? null : minutes * 60_000, who.name, now);
-      return redirect(response, `/settings?said=${encodeURIComponent(minutes === null ? "digest off — every fact pages as it lands" : `digest every ${minutes >= 60 ? `${minutes / 60}h` : `${minutes}m`} — decisions still page at once`)}`);
+      return redirect(response, `/settings?said=${encodeURIComponent(minutes === null ? "Digest off: each update arrives as it happens." : `Digest every ${minutes >= 60 ? `${minutes / 60}h` : `${minutes}m`}. Anything that needs you still arrives at once.`)}`);
     }
 
     if (url.pathname === "/settings/provider-key" || url.pathname === "/settings/provider-key-clear") {
@@ -12500,7 +12500,7 @@ type Screen = {
    * secrets and judgment calls the classifier cannot see. */
   forceSensitive?: boolean;
   /** Structured conversation; complex guarded forms stay native islands. */
-  workspace?: Partial<Pick<BrowserWorkspace, 'conversation' | 'team' | 'focus' | 'result' | 'catchUpHtml' | 'controlsHtml' | 'notices' | 'pageHtml'>>;
+  workspace?: Partial<Pick<BrowserWorkspace, 'conversation' | 'team' | 'focus' | 'result' | 'catchUpHtml' | 'controlsHtml' | 'notices' | 'pageHtml' | 'view'>>;
 };
 
 const ROLE_TITLES: Record<"plan" | "build" | "review" | "repair", string> = { plan: "Planner", build: "Builder", review: "Reviewer", repair: "Repair" };
@@ -15525,7 +15525,36 @@ function workPage(
   const tools = `<details class="work-tools"><summary>Work tools${CHEVRON_ICON}</summary><nav class="work-tools-menu">` +
     [['/inbox', 'Inbox'], ...(chrome.code ? [['/code', 'Coding sessions']] : []), ['/board', 'Board'], ['/board?view=order', 'Order'], ['/tasks', 'Task list'], ['/recipes', 'Recipes'], ['/routines', 'Routines'], ...(chrome.projectScoped ? [] : [['/workbench', 'Portfolio']]), ['/ledger', 'Action ledger']]
       .map(([path, label]) => `<a href="${path}">${label}</a>`).join('') + `</nav></details>`;
-  return screen('work', `<div class="work-head"><h1>Tasks</h1>${tools}</div>${tabs}${list}${pages}`, { chrome });
+  const toolLinks = [['/inbox', 'Inbox'], ...(chrome.code ? [['/code', 'Coding sessions']] : []), ['/board', 'Board'], ['/board?view=order', 'Order'], ['/tasks', 'Task list'], ['/recipes', 'Recipes'], ['/routines', 'Routines'], ...(chrome.projectScoped ? [] : [['/workbench', 'Portfolio']])];
+  const view: BrowserTasksView = {
+    kind: 'tasks',
+    tabs: WORK_VIEWS.map(one => ({ label: one.label, href: href(one.key), count: data.work.totals[one.key], active: one.key === data.view })),
+    rows: data.work.items.map(row => {
+      const target = row.primaryAction?.target;
+      const actionHref = row.primaryAction?.code === 'open-result' && target?.runId != null
+        ? `/review?result=${encodeURIComponent(target.taskId)}&run=${target.runId}${row.repo === null ? '' : '&project=' + encodeURIComponent(row.repo)}`
+        : browserWorkActionHref(row);
+      const needsYouDetail = row.status.views.includes('needs-you') && !['write-scope', 'approve-scope'].includes(row.primaryAction?.code ?? '') && row.status.detail !== row.status.label && row.status.detail !== row.familyProblem;
+      return {
+        id: row.rootId, title: row.title, href: taskHref(row.rootId),
+        project: data.multiProject || row.repo === null ? (row.repo === null ? 'Unplaced' : projectName(row.repo)) : null,
+        age: relativeAge(row.updatedAt, data.now),
+        status: { label: row.status.label, tone: row.status.tone, token: row.status.token },
+        action: actionHref === null || row.primaryAction === null ? null : { label: row.primaryAction.label, href: actionHref },
+        detail: needsYouDetail ? row.status.detail : null,
+        problem: row.familyProblem,
+        notes: (row.status.diagnostics ?? []).map(one => `${one.label} · ${one.detail}`),
+      };
+    }),
+    empty: data.work.items.length > 0 ? null : {
+      text: data.previous ? 'There are no more tasks on this page.' : current.empty,
+      action: data.view === 'all' && !data.previous ? { label: chrome.chat === true ? 'Start in chat' : 'Add a task', href: chrome.chat === true ? '/chat' : '/tasks/new' } : { label: 'See all tasks', href: href('all') },
+    },
+    pages: { first: data.previous ? href(data.view) : null, next: data.work.nextCursor === null ? null : href(data.view, data.work.nextCursor) },
+    tools: toolLinks.map(([path, label]) => ({ label: label!, href: path! })),
+    newTask: { label: 'New task', href: '/tasks/new' },
+  };
+  return screen('work', `<div class="work-head"><h1>Tasks</h1>${tools}</div>${tabs}${list}${pages}`, { chrome, workspace: { view } });
 }
 
 function tasksPage(
@@ -21317,6 +21346,33 @@ function settingsPage(
       : existing === null
         ? "not set"
         : `saved: ${escape(redactToken(existing.token))} (bot ${escape(existing.botId)})`;
+  const theme = requestContext.getStore()?.theme ?? "system";
+  const view: BrowserSettingsView = {
+    kind: "settings",
+    said: problem,
+    tiles: SETTINGS_TILES.map(([href, label]) => ({ href, label })),
+    theme,
+    permission: permissionDefault === null ? null : { mode: permissionDefault.mode, canManage: permissionDefault.canManage && csrf !== "", changed: permissionDefault.updatedAt === null ? null : `Changed ${when(permissionDefault.updatedAt)}${permissionDefault.updatedBy === null ? "" : ` by ${permissionDefault.updatedBy}`}` },
+    quality: qualityDefault === null ? null : { mode: qualityDefault.mode, canManage: qualityDefault.canManage && csrf !== "", changed: qualityDefault.updatedAt === null ? null : `Changed ${when(qualityDefault.updatedAt)}${qualityDefault.updatedBy === null ? "" : ` by ${qualityDefault.updatedBy}`}` },
+    providers: providerKeys === null || csrf === "" ? null : providerKeys.map(one => {
+      const name = ASSISTANTS[one.provider as ProviderId]?.name ?? one.provider;
+      const status = one.connection !== undefined && one.connection.state === "connected"
+        ? { tone: "ok" as const, words: [connectionWords(one.connection), one.connection.plan].filter(Boolean).join(" · ") }
+        : one.mode === "subscription"
+          ? { tone: one.connection === undefined ? "neutral" as const : "warn" as const, words: one.connection === undefined ? "Uses its own sign-in" : connectionWords(one.connection) }
+          : one.set ? { tone: "ok" as const, words: "API key saved" } : one.ambient ? { tone: "ok" as const, words: "Key from this computer’s environment" } : { tone: "off" as const, words: "Not set up" };
+      return {
+        provider: one.provider, name, tone: status.tone, words: status.words,
+        connection: one.connection === undefined ? null : { words: connectionWords(one.connection), facts: [one.connection.email, one.connection.plan, one.connection.method].filter(Boolean).join(" · "), checkHref: `/settings?check-connection=${encodeURIComponent(one.provider)}#providers` },
+        usage: `${one.mode === "subscription" ? "Uses its own sign-in, so no API-key spend" : "Uses the API key"} · ${one.set ? `key stored${one.updatedAt === null ? "" : ` ${one.updatedAt.slice(0, 10)}`}` : one.ambient ? "key in this server's environment" : "no key stored"}`,
+        envName: one.envName, subscriptionCapable: one.subscriptionCapable, mode: one.mode, set: one.set,
+      };
+    }),
+    services: messaging === null || messaging.configured.length === 0 ? null : { configured: messaging.configured, channel: messaging.channel, implicit: messaging.implicit },
+    push: push === null || csrf === "" ? null : { available: push.available, devices: push.devices.filter(one => one.retiredAt === null || one.retiredReason === "gone").map(one => ({ id: one.id, words: `${one.uaWords} · since ${when(one.createdAt)}`, state: one.retiredAt !== null ? "expired" : one.consecutiveFailures >= 20 ? "failing" : "ok", removable: one.retiredAt === null })) },
+    digest: digest === null || csrf === "" ? null : { every: digest.everyMs === null ? "off" : String(Math.round(digest.everyMs / 60_000)), held: digest.everyMs === null ? null : `${digest.held} routine fact(s) held` },
+    telegram: { state: hasEnv ? "from the environment" : existing === null ? "not set" : "saved", current },
+  };
   return screen("Settings", [
     "<h1>Settings</h1>",
     settingsTiles(),
@@ -21338,7 +21394,7 @@ function settingsPage(
     "</form>",
     `<p class="meta">Stored privately on this computer. Then pair your phone under <a href="/settings/telegram">Telegram</a>. In Telegram, send <code>/status</code>, <code>/task &lt;id&gt;</code> or <code>/help</code>; these use no AI model.</p>`,
     `</details>`,
-  ].join("\n"), { chrome, functional: { script: SETTINGS_AUTOSAVE_SCRIPT + (pushScript ?? ""), ...(pushScript === null ? {} : { fetches: true }) } });
+  ].join("\n"), { chrome, workspace: { view }, functional: { script: SETTINGS_AUTOSAVE_SCRIPT + (pushScript ?? ""), ...(pushScript === null ? {} : { fetches: true }) } });
 }
 
 /** Choices save the moment they change; without the script the Save
@@ -21347,7 +21403,10 @@ const SETTINGS_AUTOSAVE_SCRIPT = `(function(){document.querySelectorAll('form[da
 
 /** Settings destinations as a scannable grid: an icon and a name each. */
 function settingsTiles(): string {
-  const tiles: [string, string, string][] = [
+  const tiles = SETTINGS_TILE_ICONS;
+  return `<nav class="settings-tiles" aria-label="Settings sections">${tiles.map(([href, label, icon]) => `<a href="${href}">${strokeIcon(icon)}<span>${label}</span></a>`).join("")}</nav>`;
+}
+const SETTINGS_TILE_ICONS: [string, string, string][] = [
     ["/settings/models", "Models", `<rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/>`],
     ["/settings/skills", "Skills", `<path d="m12 3 1.9 5.8L20 10l-5 3.6L16.8 20 12 16.4 7.2 20 9 13.6 4 10l6.1-1.2z"/>`],
     ["/settings/knowledge", "Knowledge", `<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5z"/><path d="M4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5"/>`],
@@ -21356,9 +21415,8 @@ function settingsTiles(): string {
     ["/settings/discord", "Discord", `<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>`],
     ["/settings/teams", "Teams", `<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8"/>`],
     ["/settings/learning", "Learning", `<path d="M3 3v18h18"/><path d="m7 15 4-4 3 3 5-6"/>`],
-  ];
-  return `<nav class="settings-tiles" aria-label="Settings sections">${tiles.map(([href, label, icon]) => `<a href="${href}">${strokeIcon(icon)}<span>${label}</span></a>`).join("")}</nav>`;
-}
+];
+const SETTINGS_TILES = SETTINGS_TILE_ICONS.map(([href, label]) => [href, label] as const);
 
 /** Light, dark or the device's choice, one tap each. Per browser (a cookie). */
 function appearanceCard(csrf: string): string {

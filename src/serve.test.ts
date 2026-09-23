@@ -8973,6 +8973,14 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     const data = await response.json() as import('./browser-workspace.js').BrowserWorkspace;
     expect(data.crew.map(one => one.id).sort()).toEqual(['a', 'b']);
     expect(data.path).toBe(`/work?project=${encodeURIComponent(repoDir)}`);
+    // The rebuilt Tasks view carries the same facts as the HTML fallback:
+    // tabs keep the project filter, rows keep their ids and task links.
+    expect(data.view?.kind).toBe('tasks');
+    const tasksView = data.view as import('./browser-workspace.js').BrowserTasksView;
+    expect(tasksView.tabs.map(tab => new URL(tab.href, base).searchParams.get('project'))).toEqual([repoDir, repoDir, repoDir, repoDir]);
+    expect(tasksView.tabs.find(tab => tab.active)?.label).toBe('All');
+    expect(tasksView.rows.map(row => row.id).sort()).toEqual(['a', 'b']);
+    expect(tasksView.rows.every(row => row.href.startsWith('/t/'))).toBe(true);
     const window = new Window();
     try {
       window.document.body.innerHTML = data.pageHtml!;
@@ -10240,6 +10248,9 @@ describe("scout tasks and the digest card on the console (mate arc §10)", () =>
     let settings = await (await fetch(`${base}/settings`, { headers: { cookie } })).text();
     expect(settings).toContain("Unattended permissions");
     expect(settings).toContain('name="permission-mode" value="auto" checked');
+    // The rebuilt Settings view reads the same defaults the fallback shows.
+    const settingsData = await (await fetch(`${base}/settings?format=workspace`, { headers: { cookie } })).json() as import("./browser-workspace.js").BrowserWorkspace;
+    expect(settingsData.view).toMatchObject({ kind: "settings", permission: { mode: "auto", canManage: true }, quality: { mode: "default", canManage: true } });
     const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(settings)?.[1] ?? "";
     const permissionForm = /<form method="post" action="\/settings\/permission-default"[\s\S]*?<\/form>/.exec(settings)?.[0] ?? "";
     expect(permissionForm).toContain(`name="csrf" value="${csrf}"`);

@@ -256,6 +256,13 @@ Source inspected 20 September 2026, revision
 individual Radix packages, default buttons to type=button, and leave dialog
 close controls to the calling surface. Radix supplies focus and dismissal behavior.
 
+The rebuilt views (23 September 2026) add `src/browser/components/ui/`:
+button, badge, card, tabs, radio-group, select, switch, label, input,
+textarea, separator, collapsible, dropdown-menu and sonner (Toaster), adapted
+from the same new-york-v4 registry. They keep shadcn/ui's Tailwind + CVA +
+tailwind-merge composition, map colors to the shared palette tokens instead of
+shadcn's defaults, raise phone targets to 44px, and add a whole-card RadioCard.
+
 MIT License
 
 Copyright (c) 2023 shadcn
