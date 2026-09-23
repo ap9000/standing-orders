@@ -1,7 +1,7 @@
 import { repositoryContext, repositoryContextRead } from './repository-context.js';
 import { repositoryContextHtml } from './repository-context-ui.js';
 import { browserAssetsAvailable, browserWorkspaceDocument, serveBrowserAsset, supportsBrowserWorkspace } from './browser-shell.js';
-import { browserCrewOf, browserCrewFromIndex, browserWorkActionHref, browserProjectsOf, browserNavigationOf, type BrowserWorkspace, type BrowserTasksView, type BrowserSettingsView } from './browser-workspace.js';
+import { browserCrewOf, browserCrewFromIndex, browserWorkActionHref, browserProjectsOf, browserNavigationOf, type BrowserWorkspace, type BrowserTasksView, type BrowserSettingsView, type BrowserTaskView, type BrowserTaskFact, type BrowserTaskSection } from './browser-workspace.js';
 import { configureLeadFollow, leadFollowStatus, runLeadFollowPass } from './lead-follow.js';
 import { startMaintenance } from './maintenance.js';
 import { codingHandoffPreview, createCodingHandoff } from './coding-handoff.js';
@@ -34,7 +34,7 @@ import { openWorkDecisionOf } from "./work-summary.js";
 import { assignmentOf, checkAssignmentAsOperator, type AssignmentSnapshot } from './assignment.js';
 import { leadBriefHtml, LEAD_CONTEXT_CSS } from './lead-context.js';
 import { assignmentCatchUp } from './assignment-brief.js';
-import { assignmentStatusOf, assignmentSummaryHtml, assignmentWithEvidence, ASSIGNMENT_CSS } from './assignment-ui.js';
+import { assignmentCardOf, assignmentStatusOf, assignmentSummaryHtml, assignmentWithEvidence, ASSIGNMENT_CSS } from './assignment-ui.js';
 import { assignmentPresentationOf, historicalAssessmentReason } from './assignment-presentation.js';
 import type { TaskFamily } from "./store.js";
 import { ledgerBody } from "./ledger-view.js";
@@ -17306,7 +17306,7 @@ function revisionLineageHtml(lineage: RevisionLineage | null): string {
   return `<ul class="meta revision-lineage">${revisionLineageWords(lineage).map(one => `<li>${escape(one)}</li>`).join("")}</ul>`;
 }
 
-function taskBody(data: {
+function taskBodyParts(data: {
   assignment?: AssignmentSnapshot | null;
   rootId?: string;
   rootTitle?: string;
@@ -17450,7 +17450,7 @@ function taskBody(data: {
     open: { id: string; state: string; expiresAt: string; turnsUsed: number; cap: number; spentMicrousd: number; budgetMicrousd: number; running: boolean } | null;
   } | null;
   now: Date;
-}): string {
+}): { html: string; view: BrowserTaskView } {
   const { task, scope } = data;
   const stopControlsActive = data.control !== undefined && ["stopping", "paused", "review-stopped"].includes(data.control.kind);
   // The result's shared status (workspace package 1): the same projection
@@ -18313,6 +18313,27 @@ function taskBody(data: {
         : prop("scope", approval.reason === "changed" ? "rewritten since its approval — needs a new yes" : "not approved");
   const strikesRow = data.strikes > 0 ? prop("strikes", `${data.strikes} failed attempt(s)`) : "";
   const propsCard = `<div class="card props">${workerRow}${queueRow}${scopeRow}${publishesRow}${economics}${strikesRow}</div>`;
+  // The same facts for the rebuilt page, row for row.
+  const facts: BrowserTaskFact[] = [];
+  const lastRun = data.runs[0];
+  if (liveRun !== undefined) facts.push({ label: "Worker", parts: [`${liveRun.runner} · `, { label: `build #${liveRun.id}`, href: `/r/${liveRun.id}` }, " running"] });
+  else if (lastRun !== undefined) facts.push({ label: "Last attempt", parts: [{ label: `${runNoun(lastRun)} #${lastRun.id}`, href: `/r/${lastRun.id}` },
+    ` · ${lastRun.role === "planner" && lastRun.reason === "plan-drafted" ? "planned" : lastRun.reason === "interrupted" ? "interrupted" : lastRun.id === liveHistoryRunId ? "running" : lastRun.outcome ?? "never finished"} · ${lastRun.runner}`] });
+  if (data.position !== null && data.position !== undefined && task.state === "queued") {
+    facts.push({ label: "Queue", parts: [`${data.position.position} of ${data.position.total}${data.position.column === null ? " in the shared queue" : ` in ${data.position.column}'s queue`} · `, { label: "Reorder", href: "/board?view=order" }] });
+  }
+  facts.push(scope === null ? { label: "Scope", parts: ["none yet"] }
+    : approval.approved ? { label: "Approved scope", parts: [{ seal: `signs ${scope.digest.length <= 12 ? scope.digest : `${scope.digest.slice(0, 12)}…`}` }, ` · ${qualityModeTitle(scope.qualityMode ?? "default")} · approved by ${approval.by} · ${when(approval.at)}`] }
+    : { label: "Scope", parts: [approval.reason === "changed" ? "rewritten since its approval — needs a new yes" : "not approved"] });
+  facts.push({ label: "Publishes as", parts: [publishesAs] });
+  if (data.publication !== null && data.publication !== undefined) {
+    const prHref = safePrUrl(data.publication.prUrl), pr = `PR #${data.publication.prNumber ?? "?"}`;
+    facts.push({ label: "Published", parts: [prHref === null ? pr : { label: pr, href: prHref },
+      ` · ${data.publication.state}${data.publication.remoteState !== null ? ` · ${data.publication.remoteState.toLowerCase()} on GitHub` : ""}${data.publication.lastCheckState !== null ? ` · CI ${data.publication.lastCheckState} at last observation` : " · no checks observed"}`] });
+  }
+  facts.push({ label: "This attempt", parts: [thisAttempt === undefined ? "no attempt yet" : spendWords([thisAttempt])] });
+  facts.push({ label: "Task total", parts: [spendWords(data.runs)] });
+  if (data.strikes > 0) facts.push({ label: "Strikes", parts: [`${data.strikes} failed attempt(s)`] });
   // Open decisions as the shared partial — answerable inline when the
   // page is not sensitive; link-only cards otherwise.
   const openDecisions = data.decisions.filter(one => one.state === "open" || one.state === "expired");
@@ -18482,24 +18503,27 @@ function taskBody(data: {
   ].join("\n");
   // Cancel gets the same ceremony as an irreversible answer: armed behind
   // one deliberate tap, styled as the destructive act it is.
-  const cancelAct =
+  const cancelForm =
     task.state === "queued" || task.state === "running" || task.state === "failed"
       ? [
-          `<details class="arm-danger"${data.cancelDraft === undefined ? "" : " open"}><summary>Cancel task</summary>`,
           `<form method="post" action="${taskHref(task.id)}/cancel">`,
           `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
           data.coordinator == null ? "" : `<label>Reason for cancellation<textarea name="reason" rows="3" maxlength="500" required>${escape(data.cancelDraft ?? "")}</textarea></label>`,
           `<button type="submit" class="danger">Confirm cancellation</button>`,
-          `</form></details>`,
+          `</form>`,
         ].join("")
       : "";
+  const cancelAct = cancelForm === "" ? "" : `<details class="arm-danger"${data.cancelDraft === undefined ? "" : " open"}><summary>Cancel task</summary>${cancelForm}</details>`;
   // Long sections fold, each with its count in the header: what needs
-  // reading stays open; a ledger or a form folds until asked.
-  const section = (title: string, html: string, open: boolean, count?: number): string =>
-    html === ""
-      ? ""
-      : `<details class="section" id="${title.replace(/\s+/g, "-")}"${open ? " open" : ""}><summary><h2>${title}${count === undefined ? "" : ` <span class="lane-count">${count}</span>`}</h2></summary>` +
-        html.replace(`<h2>${title}</h2>`, "") + `</details>`;
+  // reading stays open; a ledger or a form folds until asked. The rebuilt
+  // page receives the same bodies, so its folds carry the same forms.
+  const sectionParts: BrowserTaskSection[] = [];
+  const section = (title: string, html: string, open: boolean, count?: number, id = title.replace(/\s+/g, "-")): string => {
+    if (html === "") return "";
+    const inner = html.replace(`<h2>${title}</h2>`, "");
+    sectionParts.push({ id, title: title[0]!.toUpperCase() + title.slice(1), html: inner, open, count: count ?? null });
+    return `<details class="section" id="${id}"${open ? " open" : ""}><summary><h2>${title}${count === undefined ? "" : ` <span class="lane-count">${count}</span>`}</h2></summary>` + inner + `</details>`;
+  };
 
   const receiptLeads = data.assignment == null && task.state === "done" && data.completion?.receipt != null;
   // Exact identity stays available in Task options; failures stay in the
@@ -18514,59 +18538,56 @@ function taskBody(data: {
             ? ""
             : ` · filed via ${escape(data.filedVia)}`
       }${data.deliverable === "report" ? ` · <span class="badge">scout</span>` : ""}</p>`;
-  return [
-    // The title is bare; the receipt or shared task status leads once.
-    `<div class="task-title-row"><h1 class="task-main-title">${escape(data.rootTitle ?? task.title)}</h1>${data.csrf === "" ? "" : taskViewSwitch(data.rootId ?? task.id, "overview")}</div>`,
-    data.versionLabel == null ? "" : `<p class="meta">${escape(data.versionLabel)} · <a href="${taskHref(data.rootId ?? task.id)}">Current work</a></p>`,
-    data.history ?? "",
-    // The result takes over from the task status as soon as it is ready.
-    data.assignment != null ? assignmentSummaryHtml(data.assignment, { workStatus: status, hideAction: approveForm !== "" && data.dispatch?.action === "approve-scope", problem: status.tone === "problem", diagnostics: [...((status as WorkStatus).diagnostics ?? []), ...(status.tone === "problem" && status.detail !== data.assignment.detail ? [status] : [])] }) : receiptLeads ? completionReceiptCard(data.completion!.receipt!, task.id, "task", status) : taskStatusCard(status, task.id, data.dispatch ?? null, liveRunId, approveForm !== "" && data.dispatch?.action === "approve-scope"),
-    // The exact-run control (v52), directly under the scheduler's answer:
-    // the one place a person stops or resumes THIS attempt.
-    taskControlDetailsHtml(data.control ?? { kind: "none" }, task.id, data.csrf, "task"),
-    data.completion?.receipt == null || receiptLeads ? "" : `<details class="task-previous-result"><summary>${data.assignment != null && task.state === "done" ? "Result" : "Previous result"}</summary>${completionReceiptCard(data.completion.receipt, task.id, "task", data.assignment == null ? receiptStatusOf(data.completion.receipt) : assignmentStatusOf(data.assignment), data.assignment ?? null, data.assignment == null)}</details>`,
-    progressCard,
-    revisionLedgerCard,
-    planCard,
-    // External work wears its tracker on the page: the link, the last
-    // observed state, and — when the tracker closed it and has been seen
-    // open again — the authenticated reopen act. Done + closed is display
-    // only: completed here stays completed.
-    (() => {
-      const mirror = data.mirror ?? null;
-      if (mirror === null) return "";
-      const link =
-        mirror.backend === "github-issues"
-          ? `<a href="https://github.com/${escape(mirror.remoteRepo)}/issues/${escape(mirror.remoteId)}">${escape(mirror.remoteRepo)}#${escape(mirror.remoteId)}</a>`
-          : `<span class="mono">${escape(mirror.remoteRepo)}#${escape(mirror.remoteId)}</span>`;
-      const state =
-        task.state === "done" && mirror.remoteState !== "open"
-          ? "completed here; closed on the tracker"
-          : mirror.remoteState === "open"
-            ? mirror.dispatchOk
-              ? "open on the tracker"
-              : "seen open again — reopen below to resume"
-            : mirror.remoteState === "closed"
-              ? "closed on the tracker"
-              : "gone from the tracker";
-      const reopenable =
-        mirror.remoteState === "open" && !mirror.dispatchOk && mirror.closeGeneration !== null &&
-        mirror.syncGeneration > mirror.closeGeneration && ["cancelled", "failed", "queued"].includes(task.state) && data.csrf !== "";
-      return (
-        `<div class="card"><p><strong>external work</strong> <span class="meta">${link} · ${escape(state)}</span></p>` +
-        (reopenable
-          ? `<form method="post" action="${taskHref(task.id)}/reopen" class="row">` +
-            `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
-            `<input type="password" name="token" placeholder="your password" aria-label="your password" autocomplete="current-password">` +
-            `<button type="submit">reopen — the approved scope stands</button></form>`
-          : "") +
-        `</div>`
-      );
-    })(),
-    data.problem === null || data.scopeDraft !== undefined ? "" : `<div class="problem">${escape(data.problem)}</div>`,
-    // The board sent them here saying "needs you" — the page must open by
-    // saying WHY and pointing at the act, not read as a fact sheet
-    // (operator finding: clicking a needs-you card landed with no context).
+  const assignmentOptions = data.assignment == null ? null : { workStatus: status, hideAction: approveForm !== "" && data.dispatch?.action === "approve-scope", problem: status.tone === "problem", diagnostics: [...((status as WorkStatus).diagnostics ?? []), ...(status.tone === "problem" && status.detail !== data.assignment.detail ? [status] : [])] };
+  // The result takes over from the task status as soon as it is ready.
+  const statusHtml = data.assignment != null && assignmentOptions !== null ? assignmentSummaryHtml(data.assignment, assignmentOptions) : receiptLeads ? completionReceiptCard(data.completion!.receipt!, task.id, "task", status) : taskStatusCard(status, task.id, data.dispatch ?? null, liveRunId, approveForm !== "" && data.dispatch?.action === "approve-scope");
+  // The exact-run control (v52), directly under the scheduler's answer:
+  // the one place a person stops or resumes THIS attempt.
+  const controlHtml = taskControlDetailsHtml(data.control ?? { kind: "none" }, task.id, data.csrf, "task");
+  const previousResult = data.completion?.receipt == null || receiptLeads ? null : {
+    title: data.assignment != null && task.state === "done" ? "Result" : "Previous result",
+    html: completionReceiptCard(data.completion.receipt, task.id, "task", data.assignment == null ? receiptStatusOf(data.completion.receipt) : assignmentStatusOf(data.assignment), data.assignment ?? null, data.assignment == null),
+  };
+  // External work wears its tracker on the page: the link, the last
+  // observed state, and — when the tracker closed it and has been seen
+  // open again — the authenticated reopen act. Done + closed is display
+  // only: completed here stays completed.
+  const mirrorCard = (() => {
+    const mirror = data.mirror ?? null;
+    if (mirror === null) return "";
+    const link =
+      mirror.backend === "github-issues"
+        ? `<a href="https://github.com/${escape(mirror.remoteRepo)}/issues/${escape(mirror.remoteId)}">${escape(mirror.remoteRepo)}#${escape(mirror.remoteId)}</a>`
+        : `<span class="mono">${escape(mirror.remoteRepo)}#${escape(mirror.remoteId)}</span>`;
+    const state =
+      task.state === "done" && mirror.remoteState !== "open"
+        ? "completed here; closed on the tracker"
+        : mirror.remoteState === "open"
+          ? mirror.dispatchOk
+            ? "open on the tracker"
+            : "seen open again — reopen below to resume"
+          : mirror.remoteState === "closed"
+            ? "closed on the tracker"
+            : "gone from the tracker";
+    const reopenable =
+      mirror.remoteState === "open" && !mirror.dispatchOk && mirror.closeGeneration !== null &&
+      mirror.syncGeneration > mirror.closeGeneration && ["cancelled", "failed", "queued"].includes(task.state) && data.csrf !== "";
+    return (
+      `<div class="card"><p><strong>external work</strong> <span class="meta">${link} · ${escape(state)}</span></p>` +
+      (reopenable
+        ? `<form method="post" action="${taskHref(task.id)}/reopen" class="row">` +
+          `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
+          `<input type="password" name="token" placeholder="your password" aria-label="your password" autocomplete="current-password">` +
+          `<button type="submit">reopen — the approved scope stands</button></form>`
+        : "") +
+      `</div>`
+    );
+  })();
+  const problemHtml = data.problem === null || data.scopeDraft !== undefined ? "" : `<div class="problem">${escape(data.problem)}</div>`;
+  // The board sent them here saying "needs you" — the page must open by
+  // saying WHY and pointing at the act, not read as a fact sheet
+  // (operator finding: clicking a needs-you card landed with no context).
+  const needsScopeCard =
     scope === null && data.plan === null && task.state === "queued" && data.dispatch?.code !== "needs-scope" && data.dispatch?.code !== "waiting-dependency" && !dependencyChoiceNeeded
       ? data.coordinator !== null && data.coordinator !== undefined
         // The quarantine speaks here too (round-2 finding 5): the planner
@@ -18576,11 +18597,28 @@ function taskBody(data: {
           `<p class="meta">filed by <span class="mono">${escape(data.coordinator.label)}</span> — nothing plans, claims, or runs until you write a scope below and sign it. Your signature runs their request.</p></div>`
         : `<div class="card task-scope-needed"><p><strong>No approved scope yet</strong></p>` +
           `<p class="meta"><strong>Plan first</strong> drafts it from the repository, or <a href="#scope">write it yourself</a>.</p></div>`
-      : "",
-    dependencyChoiceNeeded || approveForm === "" ? "" : data.dispatch?.action === "approve-scope"
-      ? `<details class="task-plan-review"><summary data-primary-action><span class="button-link">Review plan</span></summary>${approveForm}</details>`
-      : `<details class="task-secondary-approval"><summary>Updated approval terms</summary>${approveForm}</details>`,
-    `<details class="task-status-details" id="task-diagnostics"${data.assignment?.primaryAction?.code === "unhold" || data.assignment?.primaryAction?.code === "retry-task" ? " open" : ""}><summary>Task options</summary>${identity}${dispatchStatus}${dependencyChoiceNeeded ? "" : actsBar}</details>`,
+      : "";
+  const approvalHtml = dependencyChoiceNeeded || approveForm === "" ? "" : data.dispatch?.action === "approve-scope"
+    ? `<details class="task-plan-review"><summary data-primary-action><span class="button-link">Review plan</span></summary>${approveForm}</details>`
+    : `<details class="task-secondary-approval"><summary>Updated approval terms</summary>${approveForm}</details>`;
+  const optionsHtml = `${identity}${dispatchStatus}${dependencyChoiceNeeded ? "" : actsBar}`;
+  const optionsOpen = data.assignment?.primaryAction?.code === "unhold" || data.assignment?.primaryAction?.code === "retry-task";
+  const html = [
+    // The title is bare; the receipt or shared task status leads once.
+    `<div class="task-title-row"><h1 class="task-main-title">${escape(data.rootTitle ?? task.title)}</h1>${data.csrf === "" ? "" : taskViewSwitch(data.rootId ?? task.id, "overview")}</div>`,
+    data.versionLabel == null ? "" : `<p class="meta">${escape(data.versionLabel)} · <a href="${taskHref(data.rootId ?? task.id)}">Current work</a></p>`,
+    data.history ?? "",
+    statusHtml,
+    controlHtml,
+    previousResult === null ? "" : `<details class="task-previous-result"><summary>${previousResult.title}</summary>${previousResult.html}</details>`,
+    progressCard,
+    revisionLedgerCard,
+    planCard,
+    mirrorCard,
+    problemHtml,
+    needsScopeCard,
+    approvalHtml,
+    `<details class="task-status-details" id="task-diagnostics"${optionsOpen ? " open" : ""}><summary>Task options</summary>${optionsHtml}</details>`,
     // Evidence-first (M5.5): what needs you, then what happened — decisions
     // and incidents above the attempt ledger and spend, the mechanics
     // (scope, holds, acts) after. Only trustworthy facts moved up. The rail
@@ -18618,7 +18656,7 @@ function taskBody(data: {
             : " · no checks observed"
         }</span></p>`,
     section("report", reportCard, true),
-    data.assignment == null ? section("attempts", runs, true, data.runs.length) : section("Build activity", runs.replace("<h2>attempts</h2>", ""), false, data.runs.length).replace('id="Build-activity"', 'id="attempts"'),
+    data.assignment == null ? section("attempts", runs, true, data.runs.length) : section("Build activity", runs.replace("<h2>attempts</h2>", ""), false, data.runs.length, "attempts"),
     section("usage", spendCard, false),
     section("steering", steeringCard, (data.steering ?? []).length > 0, (data.steering ?? []).length),
     section(
@@ -18633,6 +18671,48 @@ function taskBody(data: {
     cancelAct,
     `</div><aside class="task-rail">${rail}</aside></div>`,
   ].join("\n");
+
+  // The rebuilt page (shadcn/ui): the same parts in a calmer order — what
+  // needs a person, then facts, then folds; the mechanics under Manage.
+  const MANAGE = new Set(["steering", "waits-for", "holds"]);
+  const finished = task.state === "done" || task.state === "cancelled";
+  const view: BrowserTaskView = {
+    kind: "task",
+    id: task.id,
+    title: data.rootTitle ?? task.title,
+    project: data.repo === null ? null : projectName(data.repo),
+    scout: data.deliverable === "report",
+    tabs: data.csrf === "" ? [] : [
+      { label: "Overview", href: taskHref(data.rootId ?? task.id), active: true },
+      { label: "Ask", href: taskChatHref(data.rootId ?? task.id), active: false },
+    ],
+    version: data.versionLabel == null ? null : { label: data.versionLabel, current: { label: "Current work", href: taskHref(data.rootId ?? task.id) } },
+    status: data.assignment != null && assignmentOptions !== null ? assignmentCardOf(data.assignment, assignmentOptions) : null,
+    statusHtml,
+    approval: approvalHtml,
+    lead: [
+      { key: "history", html: data.history ?? "" }, { key: "control", html: controlHtml }, { key: "problem", html: problemHtml },
+      { key: "needs-scope", html: needsScopeCard }, { key: "progress", html: progressCard }, { key: "revisions", html: revisionLedgerCard },
+      { key: "plan", html: planCard }, { key: "mirror", html: mirrorCard }, { key: "contest", html: contestCard }, { key: "attempt", html: attemptPanel },
+    ].filter(one => one.html !== ""),
+    questions: decisionRail,
+    facts,
+    sections: [
+      ...(previousResult === null ? [] : [{ id: "result", title: previousResult.title, html: previousResult.html, open: false, count: null }]),
+      // A finished task leads with its result; its scope folds until asked.
+      ...sectionParts.filter(one => !MANAGE.has(one.id)).map(one => one.id === "scope" && finished && data.scopeDraft === undefined ? { ...one, open: false } : one),
+    ],
+    manage: [
+      ...sectionParts.filter(one => MANAGE.has(one.id)),
+      { id: "task-diagnostics", title: "Task options", html: optionsHtml, open: optionsOpen, count: null },
+    ],
+    cancel: cancelForm === "" ? null : { html: cancelForm, open: data.cancelDraft !== undefined },
+  };
+  return { html, view };
+}
+
+function taskBody(data: Parameters<typeof taskBodyParts>[0]): string {
+  return taskBodyParts(data).html;
 }
 
 function taskPage(chrome: Chrome, data: Parameters<typeof taskBody>[0]): Screen {
@@ -18646,18 +18726,22 @@ function taskPage(chrome: Chrome, data: Parameters<typeof taskBody>[0]): Screen 
   // when the body (or the chrome's list pane) shows a password input, the
   // page re-renders degraded — no poller, static attempt line, link-only
   // decisions — and ships no functional script at all.
-  const first = taskBody(data);
+  const first = taskBodyParts(data);
   const sensitive =
-    SENSITIVE_INPUT.test(first) || (chrome.listPane !== undefined && SENSITIVE_INPUT.test(chrome.listPane));
-  if (sensitive) return screen(`task \u00b7 ${data.task.id}`, taskBody({ ...data, degraded: "sensitive" }), { chrome });
+    SENSITIVE_INPUT.test(first.html) || (chrome.listPane !== undefined && SENSITIVE_INPUT.test(chrome.listPane));
+  if (sensitive) {
+    const degraded = taskBodyParts({ ...data, degraded: "sensitive" });
+    return screen(`task \u00b7 ${data.task.id}`, degraded.html, { chrome, workspace: { view: degraded.view } });
+  }
   const liveRunId = data.liveRunId ?? null;
   const liveRun = liveRunId === null ? undefined : data.runs.find(one => one.id === liveRunId);
   const script =
     (liveRun !== undefined && data.peekable === true ? regionScript("run-peek", "peek", 15, `/r/${liveRun.id}`) : "") +
     (liveRun !== undefined && data.peekable === true && liveRun.provider === "claude" ? transcriptScript(`/r/${liveRun.id}`) : "") +
     (data.csrf !== "" && data.decisions.some(one => one.state === "open" || one.state === "expired") ? decisionAnswerScript() : "");
-  return screen(`task \u00b7 ${data.task.id}`, first, {
+  return screen(`task \u00b7 ${data.task.id}`, first.html, {
     chrome,
+    workspace: { view: first.view },
     ...(script === "" ? {} : { functional: { script, fetches: true } }),
   });
 }

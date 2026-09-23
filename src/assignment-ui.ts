@@ -1,7 +1,7 @@
 /** Presentation only. Assignment state and retry authority belong to their
  * existing projections and signed operating-mode terms, never this renderer. */
 import type { AssignmentSnapshot } from './assignment.js';
-import type { DisplayStatus, WorkStatus } from './workspace-ui.js';
+import type { DisplayStatus, StatusTone, WorkStatus } from './workspace-ui.js';
 import { assignmentPresentationOf, shortenedMaterialReason, type AssignmentWorkStatus } from './assignment-presentation.js';
 
 const escape = (value: string): string => value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!);
@@ -43,10 +43,21 @@ export function assignmentActionHref(assignment: AssignmentSnapshot): string | n
   return taskHref(assignment, taskId) + anchor;
 }
 
+export type AssignmentAttemptRow = { taskId: string; label: string; href: string; runId: number | null; detail: string | null };
+
+/** Every version of the assignment, oldest first, as the card lists them. */
+export function assignmentAttemptsOf(assignment: AssignmentSnapshot): AssignmentAttemptRow[] {
+  return assignment.attempts.map((attempt, index) => ({
+    taskId: attempt.taskId, label: `${index === 0 ? 'Original' : `Correction ${index}`} · ${attempt.label}`,
+    href: taskHref(assignment, attempt.taskId), runId: attempt.runId,
+    detail: (assignment.state === 'checking' && attempt.taskId === assignment.activeTaskId) || attempt.detail === assignment.detail ? null : attempt.detail,
+  }));
+}
+
 export function assignmentAttemptsHtml(assignment: AssignmentSnapshot): string {
   if (assignment.attempts.length === 0) return '';
-  return `<details class="assignment-attempts"><summary>Attempts <span class="meta">${assignment.attempts.length}</span></summary><ol>` + assignment.attempts.map((attempt, index) =>
-    `<li data-attempt-task="${escape(attempt.taskId)}" data-history-version="${escape(attempt.taskId)}"><a href="${escape(taskHref(assignment, attempt.taskId))}">${index === 0 ? 'Original' : `Correction ${index}`} · ${escape(attempt.label)}</a>${attempt.runId === null ? '' : ` <a href="/r/${attempt.runId}">Run #${attempt.runId}</a>`}${(assignment.state === 'checking' && attempt.taskId === assignment.activeTaskId) || attempt.detail === assignment.detail ? '' : `<p class="meta">${escape(attempt.detail)}</p>`}</li>`
+  return `<details class="assignment-attempts"><summary>Attempts <span class="meta">${assignment.attempts.length}</span></summary><ol>` + assignmentAttemptsOf(assignment).map(attempt =>
+    `<li data-attempt-task="${escape(attempt.taskId)}" data-history-version="${escape(attempt.taskId)}"><a href="${escape(attempt.href)}">${escape(attempt.label)}</a>${attempt.runId === null ? '' : ` <a href="/r/${attempt.runId}">Run #${attempt.runId}</a>`}${attempt.detail === null ? '' : `<p class="meta">${escape(attempt.detail)}</p>`}</li>`
   ).join('') + `</ol>${assignment.owner === null ? '' : `<p class="meta">Lead: ${escape(assignment.owner.label)}${assignment.owner.active ? '' : ' · access ended'}</p>`}<p class="work-meta work-id">Task <span class="mono">${escape(assignment.rootId)}</span></p></details>`;
 }
 
@@ -59,7 +70,24 @@ function savedMaterialNotice(detail: string, assignment: AssignmentSnapshot): 'p
     !assignment.receipt.artifacts.some(one => one.id === Number(earlier[1])) ? 'history' : null;
 }
 
-export function assignmentSummaryHtml(assignment: AssignmentSnapshot, options: { compact?: boolean; hideAction?: boolean; problem?: boolean; diagnostics?: WorkStatus['diagnostics']; workStatus?: AssignmentWorkStatus; resultHref?: string } = {}): string {
+type AssignmentCardOptions = { hideAction?: boolean; problem?: boolean; diagnostics?: WorkStatus['diagnostics']; workStatus?: AssignmentWorkStatus; resultHref?: string };
+
+/** The status card's content: one projection for the server HTML and the
+ * rebuilt task page, so the two never word the same state differently. */
+export type AssignmentCard = {
+  token: string; tone: StatusTone; label: string;
+  action: { label: string; href: string; openResult: boolean } | null;
+  /** Ready with passing checks: a verdict chip replaces the detail sentence. */
+  passed: { by: string | null } | null;
+  detail: { text: string; problem: boolean };
+  problems: string[];
+  diagnostics: { token: string; label: string; detail: string; problem: boolean }[];
+  notices: { summary: string; lines: string[] } | null;
+  attempts: AssignmentAttemptRow[];
+  lead: { label: string; active: boolean } | null;
+};
+
+export function assignmentCardOf(assignment: AssignmentSnapshot, options: AssignmentCardOptions = {}): AssignmentCard {
   const presentation = assignmentPresentationOf(assignment, options);
   const { status, diagnostics } = presentation;
   const href = assignment.primaryAction?.code === 'open-result' && options.resultHref !== undefined ? options.resultHref : assignmentActionHref(assignment);
@@ -67,19 +95,35 @@ export function assignmentSummaryHtml(assignment: AssignmentSnapshot, options: {
   const notices = [...attention, ...diagnostics.map(one => one.detail)].filter(one => savedMaterialNotice(one, assignment) !== null);
   const partial = notices.some(one => savedMaterialNotice(one, assignment) === 'partial');
   const history = notices.some(one => savedMaterialNotice(one, assignment) === 'history');
-  const noticeSummary = [partial ? 'Saved output is partial' : '', history ? 'Earlier material unavailable' : ''].filter(Boolean).join(' · ');
   const ready = assignment.state === "ready-to-check" || assignment.state === "complete";
   const checkProblem = ready && assignment.receipt !== null && assignment.receipt.completionKind !== 'research-report' && assignment.receipt.checks.status !== 'passed';
-  return `<section class="${options.compact ? 'assignment-summary' : 'card assignment-summary'}" aria-label="assignment progress" data-assignment="${escape(assignment.rootId)}" data-work-status="${status.token}" data-tone="${status.tone}"${options.compact ? '' : ' data-task-status'}>` +
-    (options.compact ? `<span class="status-line" data-work-status="${status.token}" data-tone="${status.tone}"><i class="status-dot" aria-hidden="true"></i><span class="status-label">${status.label}</span></span>` : `<h2 class="assignment-state">${status.label}</h2>`) +
-    (options.hideAction || href === null ? '' : `<a class="${options.compact ? 'work-action' : 'button-link'}" href="${escape(href)}"${options.resultHref === undefined ? '' : ' data-open-result'}${options.compact ? '' : ' data-primary-action'}>${escape(assignment.primaryAction!.label)}${options.compact ? ' →' : ''}</a>`) +
-    (!options.compact && ready && !checkProblem && assignment.receipt !== null && assignment.receipt.checks.status === 'passed'
-      // A good outcome at a glance; the same words stay in the result.
-      ? `<p class="meta assignment-detail assignment-verdict"><span class="verdict-chip verdict-chip--success">Checks passed</span>${assignment.completion === null ? '' : ` Completed by ${escape(assignment.completion.actor.replace(/^(?:operator|coordinator|lead):/, ''))}`}</p>`
-      : `<p class="${checkProblem || options.problem && !ready ? 'problem' : 'meta'} assignment-detail">${escape(assignment.detail)}</p>`) +
-    attention.filter(one => savedMaterialNotice(one, assignment) === null).map(one => `<p class="problem">${escape(one)}</p>`).join('') +
-    diagnostics.filter(one => savedMaterialNotice(one.detail, assignment) === null).map(one => `<p class="${one.tone === 'problem' || one.tone === 'attention' ? 'problem' : 'meta'}" data-work-diagnostic="${escape(one.token)}">${escape(one.label)} · ${escape(one.detail)}</p>`).join('') +
-    (notices.length === 0 ? '' : `<details class="assignment-notices"><summary>${noticeSummary}</summary>${[...new Set(notices)].map(one => `<p class="meta">${escape(one)}</p>`).join('')}</details>`) +
+  return {
+    token: status.token, tone: status.tone, label: status.label,
+    action: options.hideAction || href === null ? null : { label: assignment.primaryAction!.label, href, openResult: options.resultHref !== undefined },
+    // A good outcome at a glance; the same words stay in the result.
+    passed: ready && !checkProblem && assignment.receipt !== null && assignment.receipt.checks.status === 'passed'
+      ? { by: assignment.completion === null ? null : assignment.completion.actor.replace(/^(?:operator|coordinator|lead):/, '') } : null,
+    detail: { text: assignment.detail, problem: checkProblem || options.problem === true && !ready },
+    problems: attention.filter(one => savedMaterialNotice(one, assignment) === null),
+    diagnostics: diagnostics.filter(one => savedMaterialNotice(one.detail, assignment) === null)
+      .map(one => ({ token: one.token, label: one.label, detail: one.detail, problem: one.tone === 'problem' || one.tone === 'attention' })),
+    notices: notices.length === 0 ? null : { summary: [partial ? 'Saved output is partial' : '', history ? 'Earlier material unavailable' : ''].filter(Boolean).join(' · '), lines: [...new Set(notices)] },
+    attempts: assignmentAttemptsOf(assignment),
+    lead: assignment.owner === null ? null : { label: assignment.owner.label, active: assignment.owner.active },
+  };
+}
+
+export function assignmentSummaryHtml(assignment: AssignmentSnapshot, options: AssignmentCardOptions & { compact?: boolean } = {}): string {
+  const card = assignmentCardOf(assignment, options);
+  return `<section class="${options.compact ? 'assignment-summary' : 'card assignment-summary'}" aria-label="assignment progress" data-assignment="${escape(assignment.rootId)}" data-work-status="${card.token}" data-tone="${card.tone}"${options.compact ? '' : ' data-task-status'}>` +
+    (options.compact ? `<span class="status-line" data-work-status="${card.token}" data-tone="${card.tone}"><i class="status-dot" aria-hidden="true"></i><span class="status-label">${card.label}</span></span>` : `<h2 class="assignment-state">${card.label}</h2>`) +
+    (card.action === null ? '' : `<a class="${options.compact ? 'work-action' : 'button-link'}" href="${escape(card.action.href)}"${card.action.openResult ? ' data-open-result' : ''}${options.compact ? '' : ' data-primary-action'}>${escape(card.action.label)}${options.compact ? ' →' : ''}</a>`) +
+    (!options.compact && card.passed !== null
+      ? `<p class="meta assignment-detail assignment-verdict"><span class="verdict-chip verdict-chip--success">Checks passed</span>${card.passed.by === null ? '' : ` Completed by ${escape(card.passed.by)}`}</p>`
+      : `<p class="${card.detail.problem ? 'problem' : 'meta'} assignment-detail">${escape(card.detail.text)}</p>`) +
+    card.problems.map(one => `<p class="problem">${escape(one)}</p>`).join('') +
+    card.diagnostics.map(one => `<p class="${one.problem ? 'problem' : 'meta'}" data-work-diagnostic="${escape(one.token)}">${escape(one.label)} · ${escape(one.detail)}</p>`).join('') +
+    (card.notices === null ? '' : `<details class="assignment-notices"><summary>${card.notices.summary}</summary>${card.notices.lines.map(one => `<p class="meta">${escape(one)}</p>`).join('')}</details>`) +
     assignmentAttemptsHtml(assignment) + `</section>`;
 }
 

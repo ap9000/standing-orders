@@ -379,3 +379,14 @@ body:has(.so-workspace) { margin: 0; padding: 0; background: var(--so-ground); o
   .so-team-toolbar .so-team-audience[open] { grid-column: 1 / -1; grid-row: 3; }
   .so-team-lead-select { width: 150px; max-width: 100%; }
 }
+
+/* Rebuilt task page (views/task-view.tsx): the approval ceremony sits inside
+ * the status card without a second card, and its opener is the one action. */
+.so-task-approval details:is(.task-plan-review, .task-secondary-approval) { margin: 0; padding: 0; border: 0; background: none; box-shadow: none; }
+.so-task-approval .task-plan-review > summary { list-style: none; width: fit-content; }
+.so-task-approval .task-plan-review > summary::-webkit-details-marker { display: none; }
+.so-task-approval .task-plan-review > summary .button-link { background: var(--so-attention); color: var(--so-on-attention); border-color: transparent; }
+.so-task-approval .task-plan-review[open] > summary { margin-bottom: 12px; }
+/* A fold holding a single server card shows its content, not a second card. */
+.so-task-fold > div > .card:only-child { border: 0; padding: 0; background: none; box-shadow: none; }
+.so-task-fold > div > .card:only-child::before, .so-task-fold > div > .card:only-child::after { content: none; }

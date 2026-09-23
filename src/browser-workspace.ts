@@ -9,6 +9,7 @@ import type { Store } from './store.js';
 import type { WorkSummaryAccess } from './work-summary.js';
 import { workIndexPage, type WorkIndexItem, type WorkIndexPage } from './work-index.js';
 import type { StatusTone } from './workspace-ui.js';
+import type { AssignmentCard } from './assignment-ui.js';
 
 export type BrowserProject = { name: string; path: string; href: string; knowledgeHref: string };
 /** count: tasks waiting on a person, shown beside Tasks when above zero. */
@@ -60,7 +61,30 @@ export type BrowserSettingsView = {
   digest: { every: string; held: string | null } | null;
   telegram: { state: string; current: string };
 };
-export type BrowserView = BrowserTasksView | BrowserSettingsView;
+/** A fold on the task page. Its HTML is the server's own section body, so
+ * forms, ids and page scripts are unchanged. */
+export type BrowserTaskSection = { id: string; title: string; html: string; open: boolean; count: number | null };
+export type BrowserTaskFact = { label: string; parts: (string | BrowserLink | { seal: string })[] };
+export type BrowserTaskView = {
+  kind: 'task';
+  id: string; title: string; project: string | null; scout: boolean;
+  tabs: (BrowserLink & { active: boolean })[];
+  version: { label: string; current: BrowserLink } | null;
+  /** The status card; `statusHtml` stands in when no assignment projection exists. */
+  status: AssignmentCard | null;
+  statusHtml: string;
+  /** The approval ceremony or its updated terms, exactly as signed. */
+  approval: string;
+  /** Server cards that may need a person now (stop/resume, scope prompt, plan, live attempt). */
+  lead: { key: string; html: string }[];
+  questions: string;
+  facts: BrowserTaskFact[];
+  sections: BrowserTaskSection[];
+  manage: BrowserTaskSection[];
+  /** The armed cancel form; null once the task cannot be cancelled. */
+  cancel: { html: string; open: boolean } | null;
+};
+export type BrowserView = BrowserTasksView | BrowserSettingsView | BrowserTaskView;
 
 export type BrowserWorkspace = {
   version: 1; path: string; title: string; user: string; csrf: string; sensitive: boolean;
