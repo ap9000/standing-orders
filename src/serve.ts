@@ -1286,6 +1286,9 @@ export function createDecisionServer(options: ServeOptions): Server {
       !(url.pathname === "/review" && url.searchParams.has("result")) &&
       url.pathname !== "/menu" &&
       url.pathname !== "/recipes" &&
+      // New work names its project in the form (a dropdown of known
+      // projects); /tasks/add still admits the posted repo on its own.
+      url.pathname !== "/tasks/new" && url.pathname !== "/tasks/add" &&
       !/^\/t\/[^/]+$/.test(url.pathname) &&
       !/^\/r\/[0-9]{1,15}(?:\/evidence\/[0-9]{1,15})?$/.test(url.pathname) &&
       !url.pathname.startsWith("/d/") && !url.pathname.startsWith("/contest/") &&
@@ -15375,6 +15378,7 @@ function taskComposerHtml(data: {
   const after = values?.get("after") ?? "";
   const candidates = data.candidates ?? (after === "" ? [] : [{ id: after, title: after }]);
   const projectLabel = data.project === null ? "repository required" : projectName(data.project);
+  const showPicker = data.project === null || (data.projects !== undefined && data.projects.length > 1);
   return [
     `<form method="post" action="/tasks/add" class="card task-composer">`,
     `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
@@ -15387,10 +15391,12 @@ function taskComposerHtml(data: {
       : `<p class="meta" style="margin:.35rem .75rem .15rem">pre-filled from a template. Change anything; it still waits for your approval.</p>`,
     `<label class="task-prompt"><span class="visually-hidden">What should get done?</span>` +
       `<textarea name="title" rows="4" maxlength="200" required autofocus placeholder="Describe the outcome you want. The planner will inspect the repository and work out the implementation details.">${prefill === null ? "" : escape(prefill.title)}</textarea></label>`,
-    data.project === null ? projectPickerHtml(data.projects ?? [], values?.get("repo") ?? "") : "",
+    // The project is always a visible, changeable choice when the page knows
+    // the person's projects; the open project is simply preselected.
+    showPicker ? projectPickerHtml(data.projects ?? [], values?.get("repo") ?? data.project ?? "") : "",
     `<div class="task-composer-footer">`,
     `<div class="task-context">` +
-      (data.project === null ? "" : `<span class="task-context-chip" title="${escape(data.project)}">${escape(projectLabel)}</span>`) +
+      (showPicker || data.project === null ? "" : `<span class="task-context-chip" title="${escape(data.project)}">${escape(projectLabel)}</span>`) +
       `<span class="task-context-chip">planner inspects first</span>` +
       `</div>`,
     `<label class="task-quality"><span class="visually-hidden">quality mode</span><select name="quality-mode" aria-label="quality mode">` +
