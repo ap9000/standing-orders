@@ -299,8 +299,9 @@ function CrewRows({ workspace, items }: { workspace: BrowserWorkspace; items: Br
 
 /** Active work leads; finished work waits behind one disclosure. */
 function Crew({ workspace }: { workspace: BrowserWorkspace }) {
-  const active = workspace.crew.filter(item => item.tone !== "done");
-  const finished = workspace.crew.filter(item => item.tone === "done");
+  const isFinished = (item: BrowserWorkspace["crew"][number]) => item.tone === "done" || item.state === "cancelled";
+  const active = workspace.crew.filter(item => !isFinished(item));
+  const finished = workspace.crew.filter(isFinished);
   return <section className="so-crew" aria-labelledby="crew-title" data-workspace-crew>
     <div className="so-section-heading"><h2 id="crew-title">Crew</h2><a href="/work">All tasks</a></div>
     {workspace.crew.length === 0 ? <div className="so-crew-empty"><p>No tasks yet.</p><p>Work you start with the lead appears here.</p></div> : <>

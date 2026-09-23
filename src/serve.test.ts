@@ -6880,7 +6880,7 @@ describe("the continuation ceremony (Phase 2E, A4)", () => {
   test("a finished run offers continuation; the follow-up enters the SIGNED terms; the mint binds parent and head", async () => {
     const cookie = await login();
     const page = await (await fetch(url(`/r/${parentRun}`), { headers: { cookie } })).text();
-    expect(page).toContain("continue this attempt while you watch");
+    expect(page).toContain("Continue while you watch");
     const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(page)?.[1] as string;
 
     const preview = await fetch(url("/t/t-fin/attend-preview"), {
@@ -6921,7 +6921,7 @@ describe("the continuation ceremony (Phase 2E, A4)", () => {
     const cookie = await login();
     store.raw().prepare("UPDATE run SET outcome = 'failed' WHERE id = ?").run(parentRun);
     const page = await (await fetch(url(`/r/${parentRun}`), { headers: { cookie } })).text();
-    expect(page).not.toContain("continue this attempt while you watch");
+    expect(page).not.toContain("Continue while you watch");
     const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(page)?.[1] as string;
     const preview = await fetch(url("/t/t-fin/attend-preview"), {
       method: "POST",
@@ -9646,7 +9646,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     const html = await page(cookie);
     expect(html).toContain('<details class="chat-limits"><summary>Model &amp; limits<span class="meta">membership</span></summary>');
     expect(html).toContain("<span>membership login · no dollar ceiling</span>");
-    expect(html).toContain("Uses your logged-in Codex membership. No dollar maximum applies.");
+    expect(html).toContain("Uses your Codex membership · no dollar limit · daily turn limits apply");
     const limits = /<details class="chat-limits">.*?<\/details>/s.exec(html)?.[0] ?? "";
     expect(limits).not.toContain("$0.00");
   });
