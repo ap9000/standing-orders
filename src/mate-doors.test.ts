@@ -36,8 +36,8 @@ describe("the mate's confirm doors (mate arc, ruling 7; slice-2 review)", () => 
   const session = () =>
     store.mintMateSession({ approver: "alex", approverGeneration: who.generation, credentialKey: CREDENTIAL, ceilingMicrousd: 5_000_000, ceilingDigest: who.ceilingDigest, termsDigest: "t".repeat(64) }, clock());
   /** An answered turn holding one pending proposal of the given kind. */
-  const pending = (kind: "task" | "next" | "reserve" | "hold" | "steer" | "answer" | "repair" | "agents" | "task_action" | "control", payload: Record<string, unknown>): number => {
-    const thread = store.openMateThread("alex", who.ceilingDigest, clock()).thread;
+  const pending = (kind: "task" | "next" | "reserve" | "hold" | "steer" | "answer" | "repair" | "agents" | "task_action" | "control", payload: Record<string, unknown>, scope?: import("./store.js").MateThreadScope): number => {
+    const thread = store.openMateThread("alex", who.ceilingDigest, clock(), scope).thread;
     const live = store.activeMateSession("alex")!;
     const opened = store.openMateTurn({ approver: "alex", session: live.id, thread: thread.id, credentialKey: CREDENTIAL, reservedMicrousd: 10, dailyTurns: 50, weeklyCeilingMicrousd: 25_000_000, deadlineMs: 60_000 }, clock());
     if (!opened.ok) throw new Error(opened.reason);
@@ -60,6 +60,28 @@ describe("the mate's confirm doors (mate arc, ruling 7; slice-2 review)", () => 
     }
   });
   afterEach(() => store.close());
+
+  test("a card about a task confirmed outside that task's chat is recorded there, and the lead can read that chat", () => {
+    session();
+    const fromPhone = pending("steer", { task: "a", taskTitle: "task a", note: "Start with the mobile flow." });
+    expect(confirmMateProposal(store, who, fromPhone, clock(), { via: "telegram" })).toMatchObject({ ok: true });
+    const taskChat = store.liveMateThreadFor("alex", { kind: "task", key: "a" })!;
+    expect(store.listMateMessages(taskChat.id, 10).map(one => [one.role, one.text])).toEqual([["assistant", expect.stringMatching(/^From Telegram — Guidance for the next attempt: \S/)]]);
+    const ctx = { store, who, now: clock(), step: 1, readDecisions: new Map(), draft: () => 1 };
+    expect(executeMateTool(ctx, "get_task_conversation", { task: "a" })).toMatchObject({ ok: true, body: { task: "a", title: "task a", messages: [{ from: "lead", text: expect.stringContaining("From Telegram") }] } });
+    expect(executeMateTool(ctx, "get_task_conversation", { task: "b" })).toMatchObject({ ok: true, body: { messages: [], notice: "No conversation about this task yet." } });
+    expect(executeMateTool(ctx, "get_task_conversation", { task: "nope" })).toMatchObject({ ok: false });
+    // A card drafted in the task's own chat is already there: nothing is added.
+    clockAt += 60_000;
+    const inPlace = pending("steer", { task: "a", taskTitle: "task a", note: "Then the desktop flow." }, { kind: "task", key: "a" });
+    expect(confirmMateProposal(store, who, inPlace, clock(), { via: "web" })).toMatchObject({ ok: true });
+    expect(store.listMateMessages(taskChat.id, 10)).toHaveLength(1);
+    // From the lead chat on the web it says so.
+    clockAt += 60_000;
+    const fromLead = pending("steer", { task: "b", taskTitle: "task b", note: "Keep it small." });
+    expect(confirmMateProposal(store, who, fromLead, clock(), { via: "web" })).toMatchObject({ ok: true });
+    expect(store.listMateMessages(store.liveMateThreadFor("alex", { kind: "task", key: "b" })!.id, 10)[0]!.text).toMatch(/^From the lead chat — Guidance for the next attempt: /);
+  });
 
   test("chat task actions share retry, planning and dependency records; stale cards and cycles refuse", () => {
     session();

@@ -100,6 +100,31 @@ function payloadPlanning(payload: Record<string, unknown>): "auto" | "required" 
  * generation under this ceiling; its turn answered; `pending →
  * confirming` CAS; the primitive; `confirming → confirmed | refused`.
  */
+const VIA_WORDS: Record<DoorOptions["via"], string> = {
+  web: "From the lead chat", cli: "From the command line", telegram: "From Telegram", slack: "From Slack", discord: "From Discord", teams: "From Teams",
+};
+const CARD_WORDS: Partial<Record<ProposalKind, string>> = {
+  task: "New task", next: "Queue priority", reserve: "Worker assignment", hold: "Pause work", unhold: "Resume work",
+  steer: "Guidance for the next attempt", scope: "Scope revision", answer: "Decision answer", repair: "Waiting task",
+  agents: "Agents change", task_action: "Task update", action: "Action",
+};
+
+/** A card about a task, confirmed anywhere but that task's own chat (the
+ * lead chat, a project chat, a phone), is recorded in the task's chat too,
+ * so each task keeps the whole story of what was asked of it. */
+function recordInTaskChat(store: Store, who: VerifiedApprover, proposal: NonNullable<ReturnType<Store["getMateProposal"]>>, outcome: Extract<DoorOutcome, { ok: true }>, via: DoorOptions["via"], now: Date): void {
+  const target = typeof proposal.payload["task"] === "string" ? proposal.payload["task"] : proposal.kind === "task" ? outcome.taskId : null;
+  if (target === null) return;
+  const root = store.taskFamilyOf(target, who.repos, false)?.root.id ?? target;
+  const source = store.getMateThread(proposal.thread);
+  if (source === null || (source.scope.kind === "task" && source.scope.key === root)) return;
+  const where = via !== "web" ? VIA_WORDS[via] : source.scope.kind === "project" ? "From the project chat" : VIA_WORDS.web;
+  const label = proposal.kind === "review" ? (proposal.payload["operation"] === "revise" ? "Changes to make" : "Note for later") : CARD_WORDS[proposal.kind] ?? "Action";
+  const said = outcome.said.charAt(0).toUpperCase() + outcome.said.slice(1);
+  const thread = store.openMateThread(who.name, who.ceilingDigest, now, { kind: "task", key: root }).thread;
+  store.appendMateMessage({ thread: thread.id, turn: null, role: "assistant", text: `${where} — ${label}: ${said}` }, now);
+}
+
 export function confirmMateProposal(store: Store, who: VerifiedApprover, proposalId: number, now: Date, options: DoorOptions): DoorOutcome {
   if (!isVerifiedApprover(who)) return { ok: false, kind: null, reason: "standing", said: "your approver standing changed — sign in again" };
   const signals: (() => void)[] = [];
@@ -150,6 +175,7 @@ export function confirmMateProposal(store: Store, who: VerifiedApprover, proposa
     // The recorded outcome names the surface that confirmed — the audit a
     // card shows on every other surface afterwards.
     store.casMateProposal(proposalId, "confirming", outcome.ok ? "confirmed" : "refused", who.name, { ...outcome, via: options.via }, now);
+    if (outcome.ok && !shared) recordInTaskChat(store, who, proposal, outcome, options.via, now);
     if(shared){
       if(outcome.ok&&outcome.kind==='task'&&outcome.taskId) new TeamLeads(store,()=>store.handle.prepare('SELECT project FROM team_lead_project WHERE lead=?').all(shared['lead']).map(row=>String(row['project']))).recordTaskOwner(outcome.taskId,String(shared['lead']),String(shared['id']),{name:who.name,generation:who.generation},now);
       store.handle.prepare('INSERT INTO team_event(lead,conversation,kind,actor,created_at) VALUES(?,?,?,?,?)').run(shared['lead'],shared['id'],'proposal-changed',who.name,now.toISOString());

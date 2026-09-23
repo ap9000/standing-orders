@@ -1,5 +1,5 @@
 import { CHAT_ACTIONS, sharedActionAllowsChallenge, sharedActionPayload } from "./chat-actions.js";
-import { taskInCeiling, channelRepos as telegramConversationRepos, resolveChannelMate as resolveTelegramMate, tooLongText, whichTaskText, replyContextFor, NO_PHONE_LINK, NO_TASK_LINK, proposalLink, confirmedLink, proposalPreview, proposalOutcomeText, handoffCardText, confirmedCardText, type PhoneLink } from "./chat-channel.js";
+import { taskInCeiling, mirrorToTaskChat, channelRepos as telegramConversationRepos, resolveChannelMate as resolveTelegramMate, tooLongText, whichTaskText, replyContextFor, NO_PHONE_LINK, NO_TASK_LINK, proposalLink, confirmedLink, proposalPreview, proposalOutcomeText, handoffCardText, confirmedCardText, type PhoneLink } from "./chat-channel.js";
 export { channelRepos as telegramConversationRepos, resolveChannelMate as resolveTelegramMate, tooLongText, whichTaskText, replyContextFor, NO_PHONE_LINK, NO_TASK_LINK, proposalLink, confirmedLink, proposalPreview, proposalOutcomeText, handoffCardText, confirmedCardText, CHAT_ACTION_PARITY as TELEGRAM_ACTION_PARITY, parityGaps, type PhoneLink, type ResolvedMate, type ParitySupport } from "./chat-channel.js";
 /**
  * The paired phone as one more way to use the same assistant.
@@ -709,6 +709,7 @@ async function runTelegramConversation(row: TelegramConversation, args: TurnArgs
     return;
   }
   if (outcome.replayed) { await recover(session.id, outcome.turn, who.repos); return; }
+  if (row.taskId !== null) mirrorToTaskChat(store, who, row.taskId, "Telegram", row.text, outcome.reply, clock());
 
   // 7. The reply and its cards: durable first, then sent.
   const proposals = store.listMateProposals(thread.id, ["pending"]).filter(one => one.turn === outcome.turn);

@@ -7,6 +7,7 @@ import {
   confirmedLink,
   confirmedCardText,
   replyContextFor,
+  mirrorToTaskChat,
   tooLongText,
 } from "./chat-channel.js";
 import { MATE_MESSAGE_MAX_CHARS, runMateTurn } from "./mate.js";
@@ -330,6 +331,8 @@ export async function processChatEvent(
           }
         },
       });
+      if (outcome.ok && !outcome.replayed && context?.task)
+        mirrorToTaskChat(store, resolved.who, context.task, options.label, text, outcome.reply, nowOf(options));
       if (
         !state.owns(identity.installation, options.owner, nowOf(options)) ||
         !options.current()
