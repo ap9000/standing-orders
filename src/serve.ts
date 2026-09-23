@@ -4014,7 +4014,7 @@ export function createDecisionServer(options: ServeOptions): Server {
               ? {
                   enabled: false as const,
                   why: options.upConsole === true
-                    ? "choose a projects folder once with `standing-orders up --project-root <dir>` — it is remembered on later starts"
+                    ? "Choose a projects folder once: standing-orders up --project-root <dir>"
                     : "choose which folder this server may use with --project-root <dir>",
                 }
               : { enabled: true as const, roots: ceiling.roots, record: [...(who.session.onboard?.entries() ?? [])][0] ?? null };
@@ -12166,7 +12166,7 @@ button.pick-file { min-height: 1.5rem; padding: 0 .5rem; font-size: .6875rem; }
 `;
 
 /** Appearance: a three-way segmented switch, one tap per choice. */
-const THEME_CONTROLS_CSS = `.appearance{margin:0 0 28px}.appearance h2{margin:0 0 10px}.theme-switch{display:inline-flex;flex-wrap:nowrap;max-width:100%;gap:4px;padding:4px;margin:0;border:1px solid var(--so-line);border-radius:10px;background:var(--so-raised)}.theme-switch .theme-choice,.so-native-region .theme-switch .theme-choice{flex:1 1 0;width:auto;white-space:nowrap;min-height:40px;padding:8px 16px;border:0;border-radius:7px;background:transparent;color:var(--so-muted);font:inherit;font-weight:550;box-shadow:none;cursor:pointer}.theme-switch .theme-choice:hover{color:var(--so-ink)}.theme-switch .theme-choice[aria-pressed="true"]{background:var(--so-paper);color:var(--so-ink);box-shadow:0 1px 2px rgb(0 0 0 / .1)}.appearance .meta{margin:8px 0 0}@media(max-width:600px){.theme-switch .theme-choice{min-height:44px}}`;
+const THEME_CONTROLS_CSS = `.settings-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(8.5rem,1fr));gap:.5rem;margin:0 0 2rem}.settings-tiles a{display:flex;align-items:center;gap:.6rem;min-height:3rem;padding:.65rem .8rem;border:1px solid var(--so-line);border-radius:.625rem;background:var(--so-paper);color:var(--so-ink);text-decoration:none;font-weight:550;font-size:.875rem}.settings-tiles a:hover{border-color:var(--so-input-line);background:var(--so-raised)}.settings-tiles svg{width:1.1rem;height:1.1rem;flex-shrink:0;color:var(--so-accent-text)}details.settings-more{margin:.25rem 0 1.25rem}details.settings-more>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:550}details.settings-more>summary .meta{font-weight:400;margin-left:.35rem}.settings-changed{margin-top:-.25rem}.appearance{margin:0 0 28px}.appearance h2{margin:0 0 10px}.theme-switch{display:inline-flex;flex-wrap:nowrap;max-width:100%;gap:4px;padding:4px;margin:0;border:1px solid var(--so-line);border-radius:10px;background:var(--so-raised)}.theme-switch .theme-choice,.so-native-region .theme-switch .theme-choice{flex:1 1 0;width:auto;white-space:nowrap;min-height:40px;padding:8px 16px;border:0;border-radius:7px;background:transparent;color:var(--so-muted);font:inherit;font-weight:550;box-shadow:none;cursor:pointer}.theme-switch .theme-choice:hover{color:var(--so-ink)}.theme-switch .theme-choice[aria-pressed="true"]{background:var(--so-paper);color:var(--so-ink);box-shadow:0 1px 2px rgb(0 0 0 / .1)}.appearance .meta{margin:8px 0 0}@media(max-width:600px){.theme-switch .theme-choice{min-height:44px}}`;
 const WORKSPACE_STYLE = styleAsset(STYLE + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
 
 /** Everything the sidebar needs to draw itself for one request. */
@@ -14443,20 +14443,17 @@ function mateMintCard(
   const subscription = enabled.billing === "subscription";
   return [
     `<div class="card mate-mint" id="latest">`,
-    `<p><strong>Start a conversation</strong> <span class="meta">Plan work, follow progress, and open results.</span></p>`,
+    `<p><strong>Start a conversation</strong></p>`,
     `<form method="post" action="/chat/mate/mint">`,
     `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
     `<input type="hidden" name="return" value="${escape(returnTo)}">`,
     `<div class="mate-terms">`,
     subscription
-      ? `<span>Uses your logged-in ${enabled.config.provider === "codex-subscription" ? "Codex" : "Anthropic"} membership. No dollar maximum applies.</span>`
-      : `<label>this conversation may spend up to <span class="inline-field">$<input type="text" name="ceiling-usd" inputmode="decimal" value="5" style="width:5rem"></span></label>`,
+      ? `<span class="meta">Uses your ${enabled.config.provider === "codex-subscription" ? "Codex" : "Anthropic"} membership · no dollar limit · daily turn limits apply</span>`
+      : `<label>Spend up to <span class="inline-field">$<input type="text" name="ceiling-usd" inputmode="decimal" value="5" style="width:5rem"></span> <span class="meta">(weekly chat ceiling ${chatMoney(enabled.config.weeklyCeilingMicrousd)} still applies)</span></label>`,
     `</div>`,
-    subscription
-      ? `<p class="meta">Stays open until you end it. Daily turn and membership limits still apply.</p>`
-      : `<p class="meta">The conversation stays open until you end it. The weekly chat ceiling (${chatMoney(enabled.config.weeklyCeilingMicrousd)}) still binds above this total.</p>`,
-    `<label>Your password <span class="meta">— once per conversation</span><input type="password" name="token" autocomplete="current-password"></label>`,
-    `<label class="arm"><input type="checkbox" name="follow" value="yes"> Let the lead check crew updates automatically, using this conversation’s limits.</label>`,
+    `<label>Your password <span class="meta">(once per conversation)</span><input type="password" name="token" autocomplete="current-password"></label>`,
+    `<label class="arm"><input type="checkbox" name="follow" value="yes"> Let the lead follow crew updates</label>`,
     `<button type="submit">Start chat</button>`,
     `</form>`,
     `</div>`,
@@ -16491,7 +16488,7 @@ function projectsPage(
 
   return screen("projects", [
     `<h1>projects</h1>`,
-    `<p class="meta">add a local folder or GitHub repository once; its tasks, builds, and chat context stay available here</p>`,
+    `<p class="meta">Add a folder or GitHub repository once. Its tasks and chat stay here.</p>`,
     problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
     recentItems.length === 0 && candidateItems.length === 0
       ? `<div class="card"><p><strong>Nothing to open yet.</strong></p><p class="meta">Add one below \u2014 opening it registers it here for next time.</p></div>`
@@ -20847,10 +20844,9 @@ function runPage(
       : `<form method="post" action="${taskHref(continueOffer.taskId)}/attend-preview" class="card">` +
         `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
         `<input type="hidden" name="parent" value="${run.id}">` +
-        `<p><strong>continue this attempt while you watch</strong></p>` +
-        `<p class="meta">picks up from exactly where this attempt finished — one watched session, your password signs every term including the follow-up below</p>` +
-        `<label>what next<textarea name="followup" rows="2" maxlength="2000" placeholder="what should the agent do next, within the same scope"></textarea></label>` +
-        `<button type="submit">read the terms</button>` +
+        `<p><strong>Continue while you watch</strong> <span class="meta">from where this attempt stopped</span></p>` +
+        `<label>What next<textarea name="followup" rows="2" maxlength="2000" placeholder="What should the agent do next, within the same scope…"></textarea></label>` +
+        `<button type="submit">Review the terms</button>` +
         `</form>`;
 
   // Outcome first (UI polish 2026-09-13): a finished build leads with its
@@ -21052,48 +21048,44 @@ function settingsPage(
       ? ""
       : [
           "<h2>Unattended permissions</h2>",
-          `<p class="meta">the starting choice for every new task. Each task can change it before approval; an approved scope always keeps the exact setting you signed.</p>`,
           permissionDefault.canManage && csrf !== ""
             ? `<form method="post" action="/settings/permission-default" class="card permission-policy">` +
               `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
-              `<p><strong>Default for new tasks</strong></p>` +
               permissionModeChoices("permission-mode", permissionDefault.mode) +
-              `<p class="meta permission-note">Full access is for repositories and setup commands you trust. Changing this default does not alter any existing scope or approval.</p>` +
+              `<p class="meta permission-note">Use Full access only for repositories you trust. Approved tasks keep their setting.</p>` +
               `<button type="submit">Save default</button></form>`
             : `<div class="card"><p><strong>${permissionDefault.mode === "bypassPermissions" ? "Full access" : "Auto"}</strong></p><p class="meta">an approver can change this default</p></div>`,
           permissionDefault.updatedAt === null
             ? ""
-            : `<p class="meta">last changed ${escape(when(permissionDefault.updatedAt))}${permissionDefault.updatedBy === null ? "" : ` by ${escape(permissionDefault.updatedBy)}`}</p>`,
+            : `<p class="meta settings-changed">Changed ${escape(when(permissionDefault.updatedAt))}${permissionDefault.updatedBy === null ? "" : ` by ${escape(permissionDefault.updatedBy)}`}</p>`,
         ].join("\n");
   const qualityCard =
     qualityDefault === null
       ? ""
       : [
           "<h2>Quality mode</h2>",
-          `<p class="meta">the starting evidence depth for new tasks. It is separate from permissions and autonomy, and each approved scope keeps the exact choice you signed.</p>`,
           qualityDefault.canManage && csrf !== ""
             ? `<form method="post" action="/settings/quality-default" class="card permission-policy">` +
               `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
-              `<p><strong>Default for new tasks</strong></p>` +
               qualityModeChoices("quality-mode", qualityDefault.mode) +
-              `<p class="meta permission-note">Inspect the saved work and actual check results when it is ready. Publication and deployment need their own authorization.</p>` +
+              `<p class="meta permission-note">Publishing and deploying still need their own approval.</p>` +
               `<button type="submit">Save default</button></form>`
             : `<div class="card"><p><strong>${escape(qualityModeTitle(qualityDefault.mode))}</strong></p><p class="meta">an approver can change this default</p></div>`,
           qualityDefault.updatedAt === null
             ? ""
-            : `<p class="meta">last changed ${escape(when(qualityDefault.updatedAt))}${qualityDefault.updatedBy === null ? "" : ` by ${escape(qualityDefault.updatedBy)}`}</p>`,
+            : `<p class="meta settings-changed">Changed ${escape(when(qualityDefault.updatedAt))}${qualityDefault.updatedBy === null ? "" : ` by ${escape(qualityDefault.updatedBy)}`}</p>`,
         ].join("\n");
   const digestCard =
     digest === null || csrf === ""
       ? ""
       : [
           "<h2>Telegram digest</h2>",
-          `<p class="meta">away mode: routine facts (merges, reports, retries, plans ready) are held and sent as one digest on this cadence. A decision and anything that needs a person now still page the moment they land.</p>`,
+          `<p class="meta">Bundle routine updates. Anything that needs you still arrives at once.</p>`,
           `<form method="post" action="/settings/telegram-digest" class="card">`,
           `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
-          `<label>send a digest<select name="every">` +
+          `<label>Send a digest<select name="every">` +
             [
-              ["off", "off — every fact pages as it lands"],
+              ["off", "Off: send each update"],
               ["30", "every 30 minutes"],
               ["60", "every hour"],
               ["240", "every 4 hours"],
@@ -21108,10 +21100,10 @@ function settingsPage(
             `</select></label>`,
           `<p class="meta">${
             digest.everyMs === null
-              ? "off"
+              ? ""
               : `${digest.held} routine fact(s) held · next digest ${digest.lastSentAt === null ? "at the next bridge pass" : `no earlier than ${escape(new Date(new Date(digest.lastSentAt).getTime() + digest.everyMs).toISOString())}`}`
           }</p>`,
-          `<button type="submit">Save</button>`,
+          `<button type="submit">Save digest</button>`,
           `</form>`,
         ].join("\n");
   const keysCard =
@@ -21119,7 +21111,8 @@ function settingsPage(
       ? ""
       : [
           '<h2 id="providers">AI providers</h2><p><a href="/control">Set up this project</a></p>',
-          `<p class="meta">stored as private files on this machine — never shown back, never in the database. A key reaches its provider only when that provider's sign-in is set to "the API key"; subscription mode strips that provider's key from the agent process, so the logged-in membership cannot silently become API billing.</p>`,
+          `<p class="meta">Keys stay on this computer and are never shown again.</p>`,
+          `<details class="settings-more"><summary>How keys are used</summary><p class="meta">A key is used only when that provider’s sign-in is set to API key. With a subscription sign-in the key is kept out of the agent, so your membership never turns into API billing. Keys are private files beside the database, never stored in it.</p></details>`,
           ...providerKeys.map(one =>
             [
               `<form method="post" action="/settings/provider-key" class="card">`,
@@ -21137,13 +21130,13 @@ function settingsPage(
                       : "no key stored"
                 }</span></p>`,
               one.subscriptionCapable
-                ? `<label>sign-in<select name="auth-mode">` +
-                  `<option value="subscription"${one.mode === "subscription" ? " selected" : ""}>use my ${escape(one.provider)} subscription / login</option>` +
-                  `<option value="api-key"${one.mode === "api-key" ? " selected" : ""}>use the API key below</option>` +
+                ? `<label>Sign-in<select name="auth-mode">` +
+                  `<option value="subscription"${one.mode === "subscription" ? " selected" : ""}>${escape(one.provider)} subscription</option>` +
+                  `<option value="api-key"${one.mode === "api-key" ? " selected" : ""}>API key</option>` +
                   `</select></label>`
                 : "",
-              `<label>API key <span class="meta">(kept as your fallback; saving replaces it)</span><input type="password" name="value" autocomplete="off"></label>`,
-              `<button type="submit">Save</button>`,
+              `<label>API key<input type="password" name="value" autocomplete="off" placeholder="${one.set ? "Paste to replace the stored key" : "Paste a key"}"></label>`,
+              `<button type="submit">Save ${escape(one.provider)}</button>`,
               one.set
                 ? ` <details class="confirm-remove"><summary>Remove the stored key</summary><p class="meta">Runs that use this API key stop until you add one again.</p><button type="submit" formaction="/settings/provider-key-clear" class="danger">Remove key</button></details>`
                 : "",
@@ -21158,17 +21151,16 @@ function settingsPage(
           "<h2>Alerts on this device</h2>",
           push.available
             ? [
-                `<p class="meta">a notification when a decision, a pick, or a pull request needs a person — fixed phrases only; task content never rides a notification.</p>`,
-                `<p class="meta">on iPhone or iPad: add this console to the Home Screen first, then enable from inside it.</p>`,
+                `<p class="meta">A notification when something needs you. On iPhone, add this app to your Home Screen first.</p>`,
                 `<form method="post" action="/push/subscribe" id="push-form" class="card">`,
                 `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
                 `<input type="hidden" name="endpoint" value=""><input type="hidden" name="p256dh" value=""><input type="hidden" name="auth" value="">`,
-                `<label>your password, typed again <input type="password" name="token" autocomplete="current-password"></label>`,
+                `<label>Your password <input type="password" name="token" autocomplete="current-password"></label>`,
                 `<button type="submit" id="push-enable">Get alerts on this device</button>`,
                 `<p class="meta" id="push-state"></p>`,
                 `</form>`,
               ].join("\n")
-            : `<p class="meta">alerts to this device need a secure address — put TLS in front (tailscale serve works) and start serve with --public-url https://…</p>`,
+            : `<p class="meta">Alerts need a secure (https) address for this app.</p>`,
           ...push.devices
             .filter(one => one.retiredAt === null || one.retiredReason === "gone")
             .map(
@@ -21212,7 +21204,7 @@ function settingsPage(
       ? ""
       : [
           "<h2>Connected messaging</h2>",
-          `<p class="meta">alerts are sent through one service — the others stay quiet so you are never notified twice${
+          `<p class="meta">Alerts go through one service, so you are never notified twice${
             messaging.implicit ? " · <strong>Several are connected and none was chosen. Pick one.</strong>" : ""
           }</p>`,
           `<form method="post" action="/settings/messaging" class="card">`,
@@ -21227,7 +21219,7 @@ function settingsPage(
           ),
           `<button type="submit">Use this service</button>`,
           `</form>`,
-          `<p class="meta">Telegram keeps accepting taps and replies even when another service delivers the alerts. Connect services from the terminal: <code>standing-orders webhook set slack|discord &lt;url&gt;</code>.</p>`,
+          `<p class="meta">Telegram still accepts taps and replies when another service sends alerts.</p>`,
         ].join("\n");
   const current =
     hasEnv
@@ -21237,26 +21229,40 @@ function settingsPage(
         : `saved: ${escape(redactToken(existing.token))} (bot ${escape(existing.botId)})`;
   return screen("Settings", [
     "<h1>Settings</h1>",
-    '<p><a href="/settings/models">Models</a> · <a href="/settings/skills">Skills</a> · <a href="/settings/knowledge">Project knowledge</a> · <a href="/settings/telegram">Telegram</a> · <a href="/settings/slack">Slack</a> · <a href="/settings/discord">Discord</a> · <a href="/settings/teams">Teams</a></p><details><summary>Learning history</summary><a href="/settings/learning">Learning</a></details>',
+    settingsTiles(),
     appearanceCard(csrf),
     permissionCard,
     qualityCard,
-    pushCard,
     keysCard,
+    pushCard,
     messagingCard,
     digestCard,
-    "<h2>Telegram bot token</h2>",
-    `<p class="meta">current: ${current}</p>`,
     problem === null ? "" : `<p class="problem" role="alert">${escape(problem)}</p>`,
+    `<details class="settings-more" id="telegram-token"><summary>Telegram bot token <span class="meta">${hasEnv ? "from the environment" : existing === null ? "not set" : "saved"}</span></summary>`,
+    `<p class="meta">Current: ${current}</p>`,
     `<form method="post" action="/settings/telegram-token">`,
     `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
-    `<label>token from @BotFather<input type="password" name="token" autocomplete="off"></label>`,
-    `<button type="submit">Save</button>`,
+    `<label>Token from @BotFather<input type="password" name="token" autocomplete="off"></label>`,
+    `<button type="submit">Save token</button>`,
     "</form>",
-    `<p class="meta">Written owner-only beside the database. Then pair your chat:`,
-    ` <code>standing-orders bridge telegram pair --as you --token …</code> and send the code to your bot.</p>`,
-    `<p class="meta">Once paired, send <code>/status</code> for recent work, <code>/task &lt;id&gt;</code> for a task's evidence and next step, or <code>/help</code>. These are read-only and use no AI model. The computer and bridge must be awake and connected.</p>`,
+    `<p class="meta">Stored privately on this computer. Then pair your phone under <a href="/settings/telegram">Telegram</a>. In Telegram, send <code>/status</code>, <code>/task &lt;id&gt;</code> or <code>/help</code>; these use no AI model.</p>`,
+    `</details>`,
   ].join("\n"), { chrome, ...(pushScript === null ? {} : { functional: { script: pushScript, fetches: true } }) });
+}
+
+/** Settings destinations as a scannable grid: an icon and a name each. */
+function settingsTiles(): string {
+  const tiles: [string, string, string][] = [
+    ["/settings/models", "Models", `<rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/>`],
+    ["/settings/skills", "Skills", `<path d="m12 3 1.9 5.8L20 10l-5 3.6L16.8 20 12 16.4 7.2 20 9 13.6 4 10l6.1-1.2z"/>`],
+    ["/settings/knowledge", "Knowledge", `<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5z"/><path d="M4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5"/>`],
+    ["/settings/telegram", "Telegram", `<path d="m22 2-7 20-4-9-9-4z"/><path d="M22 2 11 13"/>`],
+    ["/settings/slack", "Slack", `<path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/>`],
+    ["/settings/discord", "Discord", `<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>`],
+    ["/settings/teams", "Teams", `<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8"/>`],
+    ["/settings/learning", "Learning", `<path d="M3 3v18h18"/><path d="m7 15 4-4 3 3 5-6"/>`],
+  ];
+  return `<nav class="settings-tiles" aria-label="Settings sections">${tiles.map(([href, label, icon]) => `<a href="${href}">${strokeIcon(icon)}<span>${label}</span></a>`).join("")}</nav>`;
 }
 
 /** Light, dark or the device's choice, one tap each. Per browser (a cookie). */

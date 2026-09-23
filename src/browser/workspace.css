@@ -200,7 +200,7 @@ body:has(.so-workspace) { margin: 0; padding: 0; background: var(--so-ground); o
 .so-native-region :where(pre, .diff, .diff-table, .result-code, .result-diff) { max-width: 100%; overflow-x: auto; }
 .so-native-region :where(input, textarea, select) { max-width: 100%; }
 .so-native-region :where(h1) { font-size: 25px; line-height: 1.25; letter-spacing: -.025em; margin-top: 0; }
-.so-native-region :where(h2) { font-size: 18px; line-height: 1.4; }
+.so-native-region :where(h2) { font-size: 18px; line-height: 1.4; color: var(--so-ink); }
 .so-native-region :where(h3) { font-size: 15px; line-height: 1.45; }
 .so-task-context #task-chat-live { margin-bottom: 0; }
 .so-task-context .chat-action-card { margin: 0 0 16px; }
