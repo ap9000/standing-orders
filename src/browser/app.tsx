@@ -362,7 +362,7 @@ const DOCKED_SUGGESTIONS: Record<string, { title: string; hint: string; placehol
   task: { title: "Ask about this task", hint: "Questions, changes and next steps. Actions come back as cards you confirm.", placeholder: "Ask about this task…",
     suggestions: ["Where does this task stand?", "What changed in the latest result?", "Request changes: "] },
   result: { title: "Ask about this result", hint: "Ask what changed or why, or request a revision. Actions come back as cards you confirm.", placeholder: "Ask about this result…",
-    suggestions: ["Summarize what changed", "Are there any risks in this change?", "Request changes: "] },
+    suggestions: ["Summarize what changed", "What does the check log say?", "Request changes: "] },
   tasks: { title: "Ask about this project", hint: "Plan work, file tasks and check progress. Actions come back as cards you confirm.", placeholder: "Ask about this project…",
     suggestions: ["What needs my attention here?", "What should we build next?", "File a task: "] },
 };
