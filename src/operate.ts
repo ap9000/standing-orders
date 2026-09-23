@@ -250,6 +250,8 @@ import { run, terminateLiveProviders, run as execRun } from "./exec.js";
 import { containmentStatus, currentContainment, describeContainment, resolveContainment } from "./containment.js";
 import { readPulls } from "./pulls.js";
 import { startMaintenance } from "./maintenance.js";
+import { livePin, modelWatchPass } from "./model-catalog.js";
+import { runModelsCommand } from "./models-cli.js";
 import { updateAdmissionPaused, UPDATE_PAUSED } from "./desktop-update-gate.js";
 import { beads } from "./beads.js";
 import { githubIssues } from "./issues.js";
@@ -915,6 +917,11 @@ async function dispatch(
       return runAssignmentCommand(positional, flags, context);
     case "knowledge":
       return runKnowledgeCommand(positional, flags, { ...context, now: context.clock() });
+    case "models": {
+      const acting = await askCredentials(flags, context);
+      const verified = acting === null ? null : authenticateApprover(context.store, acting.name, acting.token);
+      return runModelsCommand(positional, flags, { store: context.store, write: context.write, json: context.json, now: context.clock(), actor: verified !== null && verified.ok ? acting!.name : null });
+    }
     case "memory": {
       // The remembered local login (or --as/--token) names the person; reads
       // and writes both record who asked.
@@ -5974,8 +5981,9 @@ async function configCommand(
     if (!validModelId(model)) {
       return fail(write, json, "config set", "usage", "--model must be 1–128 letters, digits, dots, slashes, colons, underscores, or dashes", EXIT.usage);
     }
-    if (isDirectChatProvider(provider) && priceOf(model) === null) {
-      return fail(write, json, "config set", "unpriced-model", `chat reserves worst-case spend up front, so the model needs a pinned price — priced today: ${PRICED_MODELS.join(", ")}`, EXIT.refused);
+    const priced = isDirectChatProvider(provider) ? livePin(store, provider, model) ?? priceOf(model) : null;
+    if (isDirectChatProvider(provider) && priced === null) {
+      return fail(write, json, "config set", "unpriced-model", `chat reserves worst-case spend up front, so the model needs a price — run "standing-orders models check" to load live prices, or pick one priced today: ${PRICED_MODELS.join(", ")}`, EXIT.refused);
     }
     const weekly = Number(weeklyUsd);
     if (isDirectChatProvider(provider) && (weeklyUsd === undefined || !Number.isFinite(weekly) || weekly <= 0)) {
@@ -5987,7 +5995,7 @@ async function configCommand(
     }
     // The CLI pins from the compiled table (the console additionally offers
     // OpenRouter's live catalog — priced by the party that bills it).
-    const pinned = isDirectChatProvider(provider) ? priceOf(model) : { inMicrousd: 0, outMicrousd: 0 };
+    const pinned = isDirectChatProvider(provider) ? priced : { inMicrousd: 0, outMicrousd: 0 };
     if (pinned === null) {
       return fail(write, json, "config set", "unpriced-model", `no compiled price for ${model}`, EXIT.refused);
     }
@@ -7656,6 +7664,15 @@ async function runWatchLoop(args: {
     },
   });
 
+  // Settings → Models: a quiet check of the public model lists and CLI
+  // versions, only when the person turned it on. It never touches work.
+  const modelWatch = startMaintenance({
+    intervalMs: 15 * 60_000,
+    shouldStop: stopping,
+    onError: error => progress(`watch: the model check failed — ${describe(error)}; it retries later`),
+    run: async () => { if (await modelWatchPass(store, context.clock())) progress("watch: checked models and CLI versions"); },
+  });
+
   try {
     // Startup recovery still precedes the first dispatch.
     await maintenance.runNow();
@@ -7778,6 +7795,7 @@ async function runWatchLoop(args: {
     }
   } finally {
     await maintenance.stop();
+    await modelWatch.stop();
     clearInterval(heartbeat);
     followController.abort();
     if (follower !== null) await follower;
