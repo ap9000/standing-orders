@@ -29,19 +29,18 @@ export function phoneCommand(text: string): PhoneCommand | null {
 export const PHONE_HELP = [
   "Standing Orders in chat",
   "",
-  "Send a message to talk with the same assistant as the console and the terminal. It proposes changes as cards; nothing changes until you tap Confirm.",
+  "Say what you want in plain words: ask how something is going, ask for a change, or describe new work. The lead answers here and shows a card before anything changes; nothing changes until you act.",
   "",
-  "/status — recent work across your connected projects",
-  "/tasks — pick a task to talk about; your messages are then about that task",
-  "/task <name, number or id> — the same, found by a word from its title",
-  "/lead — back to talking with the lead about everything",
-  "/team — the team conversations you can talk in; /team <number> to talk there, /team off for your private assistant",
-  "Ask about project memory in plain words: decisions, references and lessons are searched before the assistant answers, and a settled choice can be recorded from a card.",
-  "/help — these commands",
+  "Reply to any message about a task (an update, a result, a status or the lead's answer) to talk about that task.",
   "",
-  "The slash commands only read status. To answer an agent's question, tap its decision buttons; reply to that decision message to attach a note. Reply to a result message to ask for changes to that exact result, or ask for its screenshots to receive the saved images as files.",
+  "/tasks — pick a task to talk about",
+  "/task <name or number> — the same, by a word from its name",
+  "/lead — back to talking about everything",
+  "/status — what's happening across your projects",
+  "/team — team conversations; /team <number> to talk in one, /team off to leave",
+  "/help — this message",
   "",
-  "Password approvals, cancelling and publishing happen in the Standing Orders console. A button that opens the console only takes you there — sign in, and nothing changes until you act. The computer and bridge must be awake and connected to reply.",
+  "To answer an agent's question, tap its buttons; reply to the question to add a note. Approvals that need your password, cancelling and publishing finish in the Standing Orders console, and a console button only takes you there. The computer must be awake and connected to reply.",
 ].join("\n");
 
 /** A third-party transport receives a small display copy, not logs, paths,
@@ -171,7 +170,7 @@ export function phoneTaskListText(choices: readonly PhoneTaskChoice[], focused: 
 }
 
 /** Said under a task's status when a chat app chooses it. */
-export const PHONE_FOCUS_LINE = "Talking about this task now: ask anything or say what to change. /lead goes back to the lead.";
+export const PHONE_FOCUS_LINE = "Talking about this task now: ask anything or say what to change. Reply to this message later to come back to it; /lead goes back to the lead.";
 
 /** A chosen task's status, then the line that says the chat now talks about it. */
 export function phoneFocusText(view: string): string {
@@ -208,14 +207,16 @@ export function phoneTask(store: Store, repos: readonly string[], id: string, no
   return phoneTaskView(store, repos, id, now).text;
 }
 
-export function phoneTaskView(store: Store, repos: readonly string[], id: string, now: Date): { text: string; link: PhoneTaskLink | null } {
+/** One task's status for a chat app: the words, its one console link, and
+ * the saved result it shows (a reply to it is about that result). */
+export function phoneTaskView(store: Store, repos: readonly string[], id: string, now: Date): { text: string; link: PhoneTaskLink | null; run: number | null } {
   return store.transact(() => {
     const ref = store.lookupRef(id);
     // Check admission before reading a title, run, proof, or diagnosis.
     const task = ref?.repo != null && repos.includes(ref.repo) ? store.getTask(id) : null;
-    if (task === null || ref?.repo == null) return { text: "No such task in your connected projects. Send /status for task IDs.", link: null };
+    if (task === null || ref?.repo == null) return { text: "No such task in your connected projects. Send /status for task IDs.", link: null, run: null };
     const d = diagnoseTaskDispatch(store, id, now);
-    if (d === null) return { text: "This task's status is unavailable. Open it in the console before retrying.", link: null };
+    if (d === null) return { text: "This task's status is unavailable. Open it in the console before retrying.", link: null, run: null };
     const lines = [plain(task.title, 140), `${plain(id, 64)} · ${projectLabel(ref.repo)}`, `As of ${now.toISOString().replace("T", " ").slice(0, 19)} UTC`, "", plain(d.summary, 160)];
     const blocker = d.blockerTaskId === null ? null : store.lookupRef(d.blockerTaskId);
     const hiddenDependency = blocker !== null && (blocker.repo === null || !repos.includes(blocker.repo));
@@ -251,7 +252,7 @@ export function phoneTaskView(store: Store, repos: readonly string[], id: string
     if (result === undefined) link = taskLinkFor(id, d, null);
     // Said once: the button is where; the sender adds the closing line when no button can ride.
     lines.push("", `Next: ${nextStep(d)}`);
-    return { text: lines.join("\n"), link };
+    return { text: lines.join("\n"), link, run: result?.id ?? null };
   });
 }
 

@@ -109,7 +109,8 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // v76 adds the live model catalog, CLI version checks and the model watch.
 // v77 gives lead threads a scope: the lead conversation, a project, or a task.
 // v78 remembers the task a paired chat (Telegram, Slack, Discord, Teams) chose to talk about.
-export const SCHEMA_VERSION = 78;
+// v79 remembers which Telegram status message showed which task, so a reply to it is about that task.
+export const SCHEMA_VERSION = 79;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -460,6 +461,21 @@ export type MateProposal = {
   resolvedBy: string | null;
   outcome: Record<string, unknown> | null;
 };
+
+/** The one task a card is about: a task its confirmation created (a new
+ * task, a revision), else the task it names (and, for feedback on a result,
+ * that result). Null for a card about no single task. A pointer for
+ * replies, never an authority. */
+export function proposalTaskOf(proposal: MateProposal | null): { task: string; run: number | null } | null {
+  if (proposal === null) return null;
+  const named = typeof proposal.payload["task"] === "string" && proposal.payload["task"] !== "" ? proposal.payload["task"] : null;
+  const creates = proposal.kind === "task" || (proposal.kind === "review" && proposal.payload["operation"] === "revise");
+  const made = creates && proposal.state === "confirmed" ? proposal.outcome?.["taskId"] : undefined;
+  if (typeof made === "string" && made !== "" && made !== named) return { task: made, run: null };
+  if (named === null) return null;
+  const run = proposal.kind === "review" ? proposal.payload["run"] : null;
+  return { task: named, run: typeof run === "number" && Number.isSafeInteger(run) ? run : null };
+}
 
 export type MateTurn = {
   id: number;
@@ -2037,6 +2053,19 @@ CREATE TABLE IF NOT EXISTS chat_focus (
   task       TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   PRIMARY KEY (surface, binding)
+);
+
+-- v79: a Telegram message that showed one task (a /task status, a task
+-- picked from /tasks): a reply to it is about that task. Like chat_focus,
+-- a pointer and never an authority — the turn re-proves the task.
+CREATE TABLE IF NOT EXISTS telegram_task_message (
+  binding    INTEGER NOT NULL,
+  chat_id    TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  task_id    TEXT NOT NULL,
+  source_run INTEGER,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (binding, chat_id, message_id)
 );
 
 CREATE TABLE IF NOT EXISTS mate_proposal (
@@ -20343,6 +20372,19 @@ export class Store {
     else this.db.prepare("INSERT INTO chat_focus (surface, binding, task, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT (surface, binding) DO UPDATE SET task = excluded.task, updated_at = excluded.updated_at").run(surface, binding, task, now.toISOString());
   }
 
+  /** A Telegram message this bot sent that showed one task (v79): a reply to
+   * it is about that task (and that result, when it showed one). A message
+   * edited to show something else forgets it. */
+  recordTelegramTaskMessage(binding: TelegramBinding, messageId: string, taskId: string | null, run: number | null, now: Date): void {
+    if (taskId === null) {
+      this.db.prepare("DELETE FROM telegram_task_message WHERE binding = ? AND chat_id = ? AND message_id = ?").run(binding.id, binding.chatId, messageId);
+      return;
+    }
+    this.db.prepare(`INSERT INTO telegram_task_message (binding, chat_id, message_id, task_id, source_run, created_at) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT (binding, chat_id, message_id) DO UPDATE SET task_id = excluded.task_id, source_run = excluded.source_run, created_at = excluded.created_at`)
+      .run(binding.id, binding.chatId, messageId, taskId, run, now.toISOString());
+  }
+
   /** The approver's live personal threads that have messages, most recent
    * first — the chat list. Team conversations list themselves. */
   listMateThreads(approver: string, limit = 30): MateThreadSummary[] {
@@ -22655,8 +22697,10 @@ export class Store {
   }
 
   /** The exact task/run bindings of one outbound message this bot sent: a
-   * plain fact names one, a digest part may name several, a reply names none,
-   * and (v64) a confirmed result image names its exact task and run. */
+   * plain fact names one, a digest part may name several, (v64) a confirmed
+   * result image names its exact task and run, the lead's reply names the
+   * task its turn was about, a card names its task, and (v79) a status
+   * message names the task it showed. */
   telegramMessageBindings(binding: TelegramBinding, messageId: string): { taskId: string | null; taskRef: number | null; run: number | null; project: string | null }[] {
     const facts = this.db
       .prepare(
@@ -22683,7 +22727,29 @@ export class Store {
         const ref = this.lookupRef(taskId);
         return { taskId, taskRef: ref?.id ?? null, run: Number(row["source_run"]), project: ref?.repo ?? null };
       });
-    return [...facts, ...images].filter((one, index, all) => all.findIndex(fact => fact.taskId === one.taskId && fact.taskRef === one.taskRef && fact.run === one.run && fact.project === one.project) === index);
+    // The lead's own messages: a reply from a turn that was about one task,
+    // and a card, which names its task (or, once it filed one, the new task).
+    const lead = this.db
+      .prepare(
+        `SELECT c.task_id, c.source_run, p.kind, p.proposal FROM telegram_conversation_part p
+          JOIN telegram_conversation c ON c.id = p.conversation
+          WHERE c.binding = ? AND c.chat_id = ? AND p.message_id = ? AND p.state = 'sent' AND p.kind IN ('reply', 'card')
+          ORDER BY p.conversation, p.ordinal`,
+      )
+      .all(binding.id, binding.chatId, messageId)
+      .map(row => row["kind"] === "card"
+        ? proposalTaskOf(row["proposal"] === null ? null : this.getMateProposal(Number(row["proposal"])))
+        : row["task_id"] === null ? null : { task: String(row["task_id"]), run: row["source_run"] === null ? null : Number(row["source_run"]) });
+    const shown = this.db
+      .prepare("SELECT task_id, source_run FROM telegram_task_message WHERE binding = ? AND chat_id = ? AND message_id = ?")
+      .all(binding.id, binding.chatId, messageId)
+      .map(row => ({ task: String(row["task_id"]), run: row["source_run"] === null ? null : Number(row["source_run"]) }));
+    const pointed = [...lead, ...shown].flatMap(one => {
+      if (one === null) return [];
+      const ref = this.lookupRef(one.task);
+      return [{ taskId: one.task, taskRef: ref?.id ?? null, run: one.run, project: ref?.repo ?? null }];
+    });
+    return [...facts, ...images, ...pointed].filter((one, index, all) => all.findIndex(fact => fact.taskId === one.taskId && fact.taskRef === one.taskRef && fact.run === one.run && fact.project === one.project) === index);
   }
 
   // ---- proposal-card tokens (v62) ---------------------------------------------

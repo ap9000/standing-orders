@@ -360,7 +360,7 @@ function PhoneNavigation({ workspace }: { workspace: BrowserWorkspace }) {
  * space means the words start a message for the person to finish. */
 const DOCKED_SUGGESTIONS: Record<string, { title: string; hint: string; placeholder: string; suggestions: string[] }> = {
   task: { title: "Ask about this task", hint: "Questions, changes and next steps. Actions come back as cards you confirm.", placeholder: "Ask about this task…",
-    suggestions: ["Where does this task stand?", "What changed in the latest result?", "Request changes: "] },
+    suggestions: ["Where does this task stand?", "Move this forward", "Request changes: "] },
   result: { title: "Ask about this result", hint: "Ask what changed or why, or request a revision. Actions come back as cards you confirm.", placeholder: "Ask about this result…",
     suggestions: ["Summarize what changed", "What does the check log say?", "Request changes: "] },
   tasks: { title: "Ask about this project", hint: "Plan work, file tasks and check progress. Actions come back as cards you confirm.", placeholder: "Ask about this project…",

@@ -88,6 +88,7 @@ export const CHAT_COMMANDS: Record<string, { command: string; hint: string; text
   ],
   task: [
     { command: "status", hint: "Where this task stands", text: "Where does this task stand?" },
+    { command: "next", hint: "Take the next step", text: "Move this forward" },
     { command: "revise", hint: "Request changes", text: "Request changes: " },
     { command: "diff", hint: "Walk through the changes", text: "Walk me through the changes file by file." },
     { command: "log", hint: "What the checks said", text: "What does the check log say?" },

@@ -222,6 +222,23 @@ const ACCEPTANCE_ARG_SCHEMA = {
 } as const;
 
 const tooMany = (): MateToolResult => ({ ok: false, message: `this turn already holds ${MATE_MAX_PROPOSALS_PER_TURN} proposals` });
+
+/** How far back a task search reads: enough for a busy month, bounded. */
+const SEARCH_FAMILIES = 400;
+/** Words that never name work on their own. */
+const SEARCH_FILLER = new Set(["a", "an", "and", "the", "of", "to", "for", "in", "on", "at", "by", "with", "about", "from", "that", "this", "these", "those", "it", "its", "is", "was", "my", "our", "your", "thing", "things", "stuff", "one", "task", "tasks", "work", "job", "please", "fix", "make"]);
+
+/** The operator's words for a task, lowercased, without filler. */
+function searchWords(text: string): string[] {
+  return [...new Set(text.toLowerCase().split(/[^a-z0-9]+/).filter(word => word.length > 1 && !SEARCH_FILLER.has(word)))].slice(0, 12);
+}
+
+/** How many of the words appear in the task's own text (a word also matches its plural or a longer form). */
+function searchHits(words: readonly string[], fields: readonly string[]): number {
+  const text = fields.join(" ").toLowerCase();
+  return words.filter(word => text.includes(word.length > 3 && word.endsWith("s") ? word.slice(0, -1) : word)).length;
+}
+
 const notFound = (): MateToolResult => ({ ok: false, message: "not-found: no such task in your projects" });
 
 const schema = (properties: Record<string, unknown>, required: string[] = []): Record<string, unknown> => ({
@@ -793,13 +810,22 @@ export const MATE_TOOLS: MateTool[] = [
   },
   {
     name: "list_tasks",
-    description: "Newest tasks with state, age (hours) and failed-attempt strikes; one project or all.",
-    inputSchema: schema({ repo: REPO_ARG, state: { type: "string", enum: ["queued", "running", "done", "failed", "cancelled"] }, limit: { type: "integer", minimum: 1, maximum: 50 } }),
+    description: "Newest tasks with state, age (hours) and failed-attempt strikes; one project or all. search finds tasks by the operator's own words for them (title or goal), older ones included, best match first.",
+    inputSchema: schema({ repo: REPO_ARG, state: { type: "string", enum: ["queued", "running", "done", "failed", "cancelled"] }, limit: { type: "integer", minimum: 1, maximum: 50 }, search: { type: "string", maxLength: 200 } }),
     handle: (ctx, args) => {
       const repo = args["repo"] === undefined ? null : repoPathOf(ctx.who, args["repo"]);
       if (args["repo"] !== undefined && repo === null) return { ok: false, message: "repo must be one of the ids from list_repos" };
+      if (args["search"] !== undefined && typeof args["search"] !== "string") return { ok: false, message: "search is the words to look for" };
       const limit = typeof args["limit"] === "number" ? Math.min(50, Math.max(1, Math.floor(args["limit"]))) : 20;
-      const families = ctx.store.taskFamiliesAdmitted(repo === null ? ctx.who.repos : [repo], false, { limit: limit + 1, ...(args["state"] === undefined ? {} : { states: [args["state"] as import("./store.js").TaskState] }) });
+      const words = searchWords(typeof args["search"] === "string" ? args["search"] : "");
+      if (typeof args["search"] === "string" && words.length === 0) return { ok: false, message: "search needs a word that names the work, such as a page, feature or file" };
+      // A search reads further back than the newest page, then ranks by how many of the words each task's title and goal hold.
+      const listed = ctx.store.taskFamiliesAdmitted(repo === null ? ctx.who.repos : [repo], false, { limit: words.length === 0 ? limit + 1 : SEARCH_FAMILIES, order: words.length === 0 ? "created" : "updated", ...(args["state"] === undefined ? {} : { states: [args["state"] as import("./store.js").TaskState] }) });
+      const families = words.length === 0 ? listed : listed
+        .map((one, index) => ({ one, index, hits: searchHits(words, [one.root.id, one.root.title, one.current.title, ctx.store.getScope(one.current.id)?.goal ?? "", ctx.store.getScope(one.root.id)?.goal ?? ""]) }))
+        .filter(match => match.hits > 0)
+        .sort((a, b) => b.hits - a.hits || a.index - b.index)
+        .map(match => match.one);
       const tasks = families.slice(0, limit).map(one => ({
         repo: `r${ctx.who.repos.indexOf(one.current.repo!) + 1}`, task: one.root.id, execution: one.current.id,
         title: one.root.title, state: one.current.state, historyProblem: one.problem, otherActive: one.otherActive.map(version => version.id),

@@ -178,10 +178,12 @@ export function tooLongText(length: number): string {
   return `That message is ${length.toLocaleString("en-US")} characters; chat takes up to ${MATE_MESSAGE_MAX_CHARS.toLocaleString("en-US")}. Nothing was sent to the assistant. Send it in shorter parts, or say which part matters most.`;
 }
 
-export function whichTaskText(taskIds: readonly string[]): string {
+/** A reply to a message about several tasks is never guessed: it names them and says how to choose. */
+export function whichTaskText(titles: readonly string[]): string {
   return [
-    "That message mentions more than one task. Reply to a message about the one you mean, or name it:",
-    ...taskIds.map((id) => `• ${phoneText(id, 64)}`),
+    "That message is about more than one task:",
+    ...titles.map((title) => `• ${phoneText(title, 64)}`),
+    "Reply to a message about just one of them, or send /tasks to pick one.",
   ].join("\n");
 }
 
