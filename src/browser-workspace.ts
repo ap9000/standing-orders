@@ -27,6 +27,41 @@ export type BrowserConversation = {
   pendingTurnId: number | null; requestId: string; maxChars: number;
   taskId: string | null; resultRunId: number | null;
 };
+/** A page rebuilt as React components (shadcn/ui). The server still renders
+ * its HTML as the no-JavaScript fallback; forms post to the same routes. */
+export type BrowserLink = { label: string; href: string };
+export type BrowserTasksView = {
+  kind: 'tasks';
+  tabs: (BrowserLink & { count: number; active: boolean })[];
+  rows: {
+    id: string; title: string; href: string; project: string | null; age: string;
+    status: { label: string; tone: StatusTone; token: string };
+    action: BrowserLink | null; detail: string | null; problem: string | null; notes: string[];
+  }[];
+  empty: { text: string; action: BrowserLink | null } | null;
+  pages: { first: string | null; next: string | null };
+  tools: BrowserLink[];
+  newTask: BrowserLink;
+};
+export type BrowserSettingsView = {
+  kind: 'settings';
+  said: string | null;
+  tiles: BrowserLink[];
+  theme: 'system' | 'light' | 'dark';
+  permission: { mode: string; canManage: boolean; changed: string | null } | null;
+  quality: { mode: string; canManage: boolean; changed: string | null } | null;
+  providers: {
+    provider: string; name: string; tone: 'ok' | 'warn' | 'off' | 'neutral'; words: string;
+    connection: { words: string; facts: string; checkHref: string } | null;
+    usage: string; envName: string; subscriptionCapable: boolean; mode: 'subscription' | 'api-key'; set: boolean;
+  }[] | null;
+  services: { configured: string[]; channel: string | null; implicit: boolean } | null;
+  push: { available: boolean; devices: { id: number; words: string; state: string; removable: boolean }[] } | null;
+  digest: { every: string; held: string | null } | null;
+  telegram: { state: string; current: string };
+};
+export type BrowserView = BrowserTasksView | BrowserSettingsView;
+
 export type BrowserWorkspace = {
   version: 1; path: string; title: string; user: string; csrf: string; sensitive: boolean;
   refreshUrl: string; receipt: { request: string; received: boolean } | null;
@@ -37,6 +72,7 @@ export type BrowserWorkspace = {
   result: { runId: number; html: string } | null;
   catchUpHtml: string; controlsHtml: string; notices: string[]; pageHtml: string | null;
   navigation: BrowserNavigationItem[];
+  view?: BrowserView | null;
 };
 
 /** Safe inside a script[type=application/json] element. JSON escaping alone

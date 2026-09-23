@@ -15,6 +15,8 @@ import type { ChatDraft, DraftScope, DraftStorage } from "./workspace-client.js"
 import { TeamChat } from "./team-chat.js";
 import { browserCrewFromIndex } from "../browser-crew.js";
 import type { TeamSnapshot } from "../team-contract.js";
+import { ViewHost } from "./views/index.js";
+import { Toaster } from "./components/ui/index.js";
 import "./workspace.css";
 
 let renderNoticeQueued = false;
@@ -453,7 +455,7 @@ export function WorkspaceApp({ initial }: { initial: BrowserWorkspace }) {
   // The Tasks page already lists every task; the Crew panel would repeat it.
   const hidePanel = pageOnly && !hasWork && (new URL(workspace.path, window.location.origin).pathname === "/work");
   useEffect(notifyWorkspaceRendered, []);
-  return <div className={`so-workspace${hidePanel ? " so-workspace--single" : ""}`} data-workspace-shell data-workspace-phone-view={phoneView} data-workspace-has-result={workspace.result !== null}>
+  return <><Toaster /><div className={`so-workspace${hidePanel ? " so-workspace--single" : ""}`} data-workspace-shell data-workspace-phone-view={phoneView} data-workspace-has-result={workspace.result !== null}>
     <a href="#workspace-main" className="so-skip-link">Skip to content</a>
     <aside className="so-sidebar"><Navigation workspace={workspace} /></aside>
     <div className={`so-main-column${isChat ? " so-main-column--chat" : ""}`}>
@@ -466,7 +468,7 @@ export function WorkspaceApp({ initial }: { initial: BrowserWorkspace }) {
       </header>
       {workspace.notices.length > 0 && <div className="so-workspace-notices">{workspace.notices.map((notice, index) => <Alert key={index}>{notice}</Alert>)}</div>}
       <main id="workspace-main" className="so-main-content" tabIndex={-1}>
-        {workspace.team ? <TeamChat initial={workspace.team} user={workspace.user} csrf={workspace.csrf} onSnapshot={setTeamSnapshot} /> : workspace.conversation ? <LeadChat controller={controller} /> : <div className="so-page-content" data-workspace-page><GuardedHtml html={initial.pageHtml ?? ""} immutable /></div>}
+        {workspace.team ? <TeamChat initial={workspace.team} user={workspace.user} csrf={workspace.csrf} onSnapshot={setTeamSnapshot} /> : workspace.conversation ? <LeadChat controller={controller} /> : <div className="so-page-content" data-workspace-page>{workspace.view ? <ViewHost view={workspace.view} csrf={workspace.csrf} /> : <GuardedHtml html={initial.pageHtml ?? ""} immutable />}</div>}
       </main>
     </div>
     {!hidePanel && <aside className={`so-supporting-panel${hasWork ? " so-supporting-panel--detail" : ""}`} data-workspace-detail>
@@ -480,7 +482,7 @@ export function WorkspaceApp({ initial }: { initial: BrowserWorkspace }) {
         {workspace.result && <Artifact data-workspace-result={workspace.result.runId}><ArtifactContent><GuardedHtml key={workspace.result.runId} html={workspace.result.html} immutable /></ArtifactContent></Artifact>}
       </div> : <Crew workspace={workspace} />}
     </aside>}
-  </div>;
+  </div></>;
 }
 
 const mount = document.getElementById("standing-orders-workspace");

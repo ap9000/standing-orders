@@ -31,6 +31,17 @@ const result = await build({
   logLevel: "info",
 });
 
+// Tailwind (shadcn/ui components) compiles from src/browser/tailwind.css and
+// is appended to the one workspace stylesheet, after the workspace's own rules.
+{
+  const { execFileSync } = await import("node:child_process");
+  const compiled = join(outdir, ".tailwind.css");
+  execFileSync(process.execPath, [join(root, "node_modules/@tailwindcss/cli/dist/index.mjs"), "-i", join(root, "src/browser/tailwind.css"), "-o", compiled, "--minify"], { cwd: root, stdio: ["ignore", "ignore", "inherit"] });
+  const css = join(outdir, "workspace.css");
+  await writeFile(css, (await readFile(css, "utf8")) + "\n" + (await readFile(compiled, "utf8")));
+  await rm(compiled);
+}
+
 // Browser dependencies are bundled, so their package LICENSE files would
 // otherwise be absent from the deployed dist. Include only packages actually
 // present in the bundle, in a stable order without machine-specific paths.
