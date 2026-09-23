@@ -158,6 +158,22 @@ export function resolveChannelMate(
   };
 }
 
+/** A phone exchange about one task (a reply to that task's or result's
+ * message) stays in the lead conversation, and is kept in the task's own
+ * chat as well, so the task shows everything asked of it wherever it was
+ * asked. Best effort: the phone conversation never depends on it. */
+export function mirrorToTaskChat(store: Store, who: VerifiedApprover, taskId: string, surface: string, message: string, reply: string, now: Date): void {
+  try {
+    const root = store.taskFamilyOf(taskId, who.repos, false)?.root.id ?? taskId;
+    if (!taskInCeiling(store, root, who.repos)) return;
+    const thread = store.openMateThread(who.name, who.ceilingDigest, now, { kind: "task", key: root }).thread;
+    store.appendMateMessage({ thread: thread.id, turn: null, role: "operator", text: `From ${surface}: ${message}` }, now);
+    store.appendMateMessage({ thread: thread.id, turn: null, role: "assistant", text: reply }, now);
+  } catch {
+    // The task chat is a copy; the phone's own conversation already has it.
+  }
+}
+
 export function tooLongText(length: number): string {
   return `That message is ${length.toLocaleString("en-US")} characters; chat takes up to ${MATE_MESSAGE_MAX_CHARS.toLocaleString("en-US")}. Nothing was sent to the assistant. Send it in shorter parts, or say which part matters most.`;
 }
@@ -675,6 +691,7 @@ export const CHAT_ACTION_PARITY: Record<
     gap: null,
   },
   get_models: { support: "direct", how: "Read during a turn: default agents with the exact model each runs, CLI versions and new models. Changes use the labelled Settings → Models page.", gap: null },
+  get_task_conversation: { support: "direct", how: "Read during a turn: what the person and the lead said in one task's own chat, including what was confirmed there.", gap: null },
   search_project_memory: { support: "direct", how: "Read during a turn: one search over decisions, references, lessons and the conversations the person may read.", gap: null },
   list_tasks: { support: "direct", how: "Read during a turn.", gap: null },
   get_task: {

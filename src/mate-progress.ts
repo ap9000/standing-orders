@@ -26,6 +26,7 @@ const TOOL_LABELS: Record<string, string> = {
   get_models: "Checking the models",
   list_tasks: "Listing tasks",
   get_task: "Reading the task",
+  get_task_conversation: "Reading the task's conversation",
   get_agents: "Checking the agents",
   list_decisions: "Reading decisions",
   get_decision: "Reading a decision",

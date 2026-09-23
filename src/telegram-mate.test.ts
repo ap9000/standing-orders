@@ -368,6 +368,14 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     // A manual approval: the door's one sentence, and ONE button to the exact revision's approval control — no second instruction.
     expect(script.edits().at(-1)).toBe("✓ Revision created. Review and approve it to start.");
     expect(urlButtons(lastEdit())).toEqual([["Review & start", `https://console.example/chat?task=${encodeURIComponent(child)}#task-chat-action`]]);
+    // The task keeps the exchange in its own chat too: the phone's words,
+    // the lead's reply and what was confirmed, each labelled Telegram.
+    const taskChat = store.liveMateThreadFor("alex", { kind: "task", key: "payout" })!;
+    expect(store.listMateMessages(taskChat.id, 10).map(one => [one.role, one.text])).toEqual([
+      ["operator", "From Telegram: Rename the guard and add a test for the over-limit case."],
+      ["assistant", "I proposed a revision of payout with your feedback. Confirm it to create the revision."],
+      ["assistant", "From Telegram — Changes to make: Revision created. Review and approve it to start."],
+    ]);
     expect(store.getScope(child)?.approvedDigest ?? null).toBeNull();
     // The revision's own status reads from the phone, on the same records, with the same precise button.
     script.updates.push([textUpdate(nextUpdate++, `/task ${child}`)]);
