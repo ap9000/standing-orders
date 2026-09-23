@@ -104,7 +104,55 @@ export type BrowserProjectsView = {
   /** The add roads; `html` carries the server's GitHub-link and exact-path forms. */
   add: { browse: string | null; github: string | null; html: string };
 };
-export type BrowserView = BrowserTasksView | BrowserSettingsView | BrowserTaskView | BrowserProjectsView;
+export type BrowserResultTab = 'summary' | 'changes' | 'checks';
+export type BrowserResultChip = { tone: 'success' | 'danger' | 'warning' | 'info' | 'neutral'; label: string; icon: 'check' | 'x' | null; title: string | null };
+/** The shared result panel in parts. Each tab's content, the feedback
+ * section and the learning card are the server's own HTML; the page script
+ * binds to the same data attributes and ids (tabs, drafts, line notes). */
+export type BrowserResultPanel = {
+  attributes: Record<string, string>;
+  heading: string;
+  outcome: string;
+  verdict: { chips: BrowserResultChip[]; by: string | null } | null;
+  reviewHistory: string | null;
+  attention: string[];
+  /** Storage limits on saved output (shortened logs or diffs): shown on request. */
+  limits: string[];
+  tabs: { key: BrowserResultTab; label: string; count: string; href: string; active: boolean }[];
+  views: { key: BrowserResultTab; html: string }[];
+  history: string;
+  learning: string;
+  request: string | null;
+  /** A browser session may attach feedback to this result's sealed diff. */
+  canRequest: boolean;
+  /** The feedback section holds only the closed form (no notes, revisions or history). */
+  requestQuiet: boolean;
+};
+export type BrowserResultView = {
+  kind: 'result';
+  results: { title: string; href: string; at: string; status: { label: string; tone: StatusTone } | null; notes: string[]; current: boolean; needsYou: boolean }[];
+  /** How many results need a person; the list's cap when it is full. */
+  attention: number;
+  capped: number | null;
+  missing: string | null;
+  beyond: boolean;
+  selected: {
+    taskId: string; title: string; project: string | null; build: number | null;
+    taskHref: string; chatHref: string;
+    status: { label: string; tone: StatusTone; token: string };
+    problem: string | null;
+    next: { kind: string; title: string; detail: string; control: string } | null;
+    complete: { action: string; receipt: string; run: number } | null;
+    checks: { detail: string; problem: boolean; logHref: string | null } | null;
+    /** The signed scope; null when none was filed. */
+    intent: { approval: string; html: string } | null;
+    noRun: string | null;
+    panel: BrowserResultPanel | null;
+    contest: string;
+    notes: { author: string; at: string; note: string }[];
+  } | null;
+};
+export type BrowserView = BrowserTasksView | BrowserSettingsView | BrowserTaskView | BrowserProjectsView | BrowserResultView;
 
 export type BrowserWorkspace = {
   version: 1; path: string; title: string; user: string; csrf: string; sensitive: boolean;

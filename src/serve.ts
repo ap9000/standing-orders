@@ -1,7 +1,7 @@
 import { repositoryContext, repositoryContextRead } from './repository-context.js';
 import { repositoryContextHtml } from './repository-context-ui.js';
 import { browserAssetsAvailable, browserWorkspaceDocument, serveBrowserAsset, supportsBrowserWorkspace } from './browser-shell.js';
-import { browserCrewOf, browserCrewFromIndex, browserWorkActionHref, browserProjectsOf, browserNavigationOf, type BrowserWorkspace, type BrowserTasksView, type BrowserSettingsView, type BrowserTaskView, type BrowserTaskFact, type BrowserTaskSection, type BrowserProjectsView, type BrowserProjectRow } from './browser-workspace.js';
+import { browserCrewOf, browserCrewFromIndex, browserWorkActionHref, browserProjectsOf, browserNavigationOf, type BrowserWorkspace, type BrowserTasksView, type BrowserSettingsView, type BrowserTaskView, type BrowserTaskFact, type BrowserTaskSection, type BrowserProjectsView, type BrowserProjectRow, type BrowserResultChip, type BrowserResultPanel, type BrowserResultView } from './browser-workspace.js';
 import { configureLeadFollow, leadFollowStatus, runLeadFollowPass } from './lead-follow.js';
 import { startMaintenance } from './maintenance.js';
 import { codingHandoffPreview, createCodingHandoff } from './coding-handoff.js';
@@ -35,7 +35,7 @@ import { assignmentOf, checkAssignmentAsOperator, type AssignmentSnapshot } from
 import { leadBriefHtml, LEAD_CONTEXT_CSS } from './lead-context.js';
 import { assignmentCatchUp } from './assignment-brief.js';
 import { assignmentCardOf, assignmentStatusOf, assignmentSummaryHtml, assignmentWithEvidence, ASSIGNMENT_CSS } from './assignment-ui.js';
-import { assignmentPresentationOf, historicalAssessmentReason } from './assignment-presentation.js';
+import { assignmentPresentationOf, historicalAssessmentReason, shortenedMaterialReason } from './assignment-presentation.js';
 import type { TaskFamily } from "./store.js";
 import { ledgerBody } from "./ledger-view.js";
 import { CHAT_CONTINUITY_SCRIPT } from "./chat-continuity.js";
@@ -126,7 +126,7 @@ import {
 } from "./workspace-ui.js";
 import { PRICED_BUILD_MODELS } from "./pricing.js";
 import {
-  RESULT_TABS, RESULT_REVIEW_SCRIPT, isRevisionFeedback, evidenceResultStatusOf, evidenceShortenedWords, parseResultTab, resultLeadOf, evidenceProblemDetailsOf, evidenceHealthOf, resultFactsAttributes, resultReturnTarget, commentSourceKey, REQUEST_TOKEN,
+  RESULT_TABS, RESULT_REVIEW_SCRIPT, isRevisionFeedback, evidenceResultStatusOf, evidenceShortenedWords, parseResultTab, resultLeadOf, evidenceProblemDetailsOf, evidenceHealthOf, resultFactsAttributes, resultFactsAttributeMap, resultReturnTarget, commentSourceKey, REQUEST_TOKEN,
   revisionBatchOf, parseRevisionBatch, revisionSourceOf,
   type ResultTab, type ResultScreenshot, type SharedResultFacts,
 } from "./result-review.js";
@@ -19201,7 +19201,29 @@ function reviewCockpitPage(
     !data.beyondQueue || selected === null
       ? ""
       : `<p class="meta cockpit-beyond" data-cockpit-beyond="1">This result is not in the current review list.</p>`;
-  const detail = selected === null ? `<section class="cockpit-detail"><p class="meta">Nothing to review yet.</p></section>` : reviewCockpitDetail(selected, csrf, data.noted, data.canRetryReview, data.tab, data.user);
+  const detailParts = selected === null ? null : reviewCockpitDetailParts(selected, csrf, data.noted, data.canRetryReview, data.tab, data.user);
+  const detail = detailParts === null ? `<section class="cockpit-detail"><p class="meta">Nothing to review yet.</p></section>` : detailParts.html;
+  // The rebuilt page (shadcn/ui): the selected result at full width, the
+  // list one tap away in the header.
+  const view: BrowserResultView = {
+    kind: "result",
+    results: queue.map(row => {
+      const status = row.assignment == null ? null : assignmentPresentationOf(row.assignment).status;
+      const reasons = row.priority.reasons;
+      return {
+        title: row.title, href: reviewHref(row.taskId, row.runId, row.repo), at: row.completedAt,
+        status: status === null ? null : { label: status.label, tone: status.tone },
+        notes: [...(row.historyProblem ? ["History unavailable"] : status === null && reasons.length > 0 ? [reasons[0] as string] : []), ...(status !== null && row.ciFailing ? ["CI is failing"] : [])],
+        current: selected !== null && selected.taskId === row.taskId,
+        needsYou: row.priority.band < 2,
+      };
+    }),
+    attention: elevated,
+    capped: queue.length >= data.queueCap ? data.queueCap : null,
+    missing: data.missing === null ? null : `No completed task ${data.missing} is in view here — it may not be finished, or it is outside this console's projects.`,
+    beyond: data.beyondQueue && selected !== null,
+    selected: detailParts === null ? null : detailParts.selected,
+  };
   return screen("review", [
     selected === null ? `<h1>Results</h1>` : "",
     missingNote,
@@ -19209,6 +19231,7 @@ function reviewCockpitPage(
     `<div class="cockpit">${queuePane}${detail}</div>`,
   ].join("\n"), {
     chrome,
+    workspace: { view },
     functional: { script: reviewEvidenceScript() + (selected !== null && selected.detail !== null ? RESULT_REVIEW_SCRIPT : ""), fetches: false },
   });
 }
@@ -19216,18 +19239,25 @@ function reviewCockpitPage(
 /** The selected result: intent → proof → changes → publication → acts,
  * one scan path, every fact labeled by its source. */
 function reviewCockpitDetail(view: ReviewCockpitView, csrf: string, noted: boolean, canRetryReview = false, tab: ResultTab = "summary", user = ""): string {
+  return reviewCockpitDetailParts(view, csrf, noted, canRetryReview, tab, user).html;
+}
+
+/** The selected result's HTML and, for the rebuilt page, the same result
+ * as data: every form and panel body is the one the HTML carries. */
+function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: boolean, canRetryReview: boolean, tab: ResultTab, user: string): { html: string; selected: NonNullable<BrowserResultView["selected"]> } {
   const parts: string[] = [];
   const run = view.run;
   const proof = view.detail?.proof ?? null;
   const accepted = proof?.accepted !== null && proof?.accepted !== undefined;
   const canAnnotate = canAnnotateDiff(view, csrf);
+  const status = cockpitStatusOf(view);
 
   // Header: what this is, its verdict word, and why it sits where it does.
   parts.push(
     `<header class="cockpit-head" data-review-task="${escape(view.taskId)}">` +
       `<h1>${escape(view.title)}</h1>` +
       `<p class="meta">${run === null ? "No build" : `Build #${run.id}`} · <a href="${taskHref(view.taskId)}">Open task</a>${projectChip(view.repo)}</p>` +
-      `<p class="cockpit-chips">${statusLineHtml(cockpitStatusOf(view))}</p>` +
+      `<p class="cockpit-chips">${statusLineHtml(status)}</p>` +
       `</header>`,
   );
 
@@ -19237,28 +19267,42 @@ function reviewCockpitDetail(view: ReviewCockpitView, csrf: string, noted: boole
 
   // Approved intent: the signed scope's words, the plan's approach.
   const intent = view.intent;
+  let intentView: { approval: string; html: string } | null = null;
   if (intent === null) {
     parts.push(`<section class="card cockpit-section" data-cockpit-section="intent"><h3>approved scope</h3><p class="meta">No scope was filed for this task, so there is no approved goal or boundary to review.</p></section>`);
   } else {
-    const approval = intent.approval.approved
-      ? `approved by ${escape(intent.approvedBy ?? "an operator")} · ${escape(when(intent.approval.at))}`
+    const approvalWords = intent.approval.approved
+      ? `approved by ${intent.approvedBy ?? "an operator"} · ${when(intent.approval.at)}`
       : intent.approval.reason === "changed"
         ? "the scope changed after approval — the words below are the current text, not the signed one"
         : "never approved — the result was built without a signed scope";
+    const approval = intent.approval.approved
+      ? `approved by ${escape(intent.approvedBy ?? "an operator")} · ${escape(when(intent.approval.at))}`
+      : approvalWords;
+    const body =
+      `<p class="recap" style="margin-top:.25rem"><strong>goal</strong> ${escape(intent.goal)}</p>` +
+      (intent.outOfScope === null ? `<p class="meta">no boundary was stated</p>` : `<p class="recap"><strong>not this</strong> ${escape(intent.outOfScope)}</p>`) +
+      (intent.touches.length === 0
+        ? `<p class="meta">no expected paths were signed — every changed file reads as in bounds</p>`
+        : `<p class="row"><span class="meta">expected to touch</span> ${intent.touches.map(one => `<span class="mono">${escape(one)}</span>`).join(" ")}</p>`) +
+      (view.plan === null
+        ? ""
+        : `<p class="meta">plan revision ${view.plan.revision} · <span class="mono" title="${escape(view.plan.sha256)}">${escape(view.plan.sha256.slice(0, 12))}…</span>${view.plan.approach === null ? "" : ` — ${escape(view.plan.approach)}`}</p>`);
+    intentView = { approval: approvalWords, html: body };
     parts.push(
       `<details class="card cockpit-section cockpit-disclosure" data-cockpit-section="intent"><summary><h3>Approved scope<small>What this build was asked to do · ${approval}</small></h3><span class="cockpit-disclosure-action">View</span></summary>` +
-        `<div class="cockpit-disclosure-body">` +
-        `<p class="recap" style="margin-top:.25rem"><strong>goal</strong> ${escape(intent.goal)}</p>` +
-        (intent.outOfScope === null ? `<p class="meta">no boundary was stated</p>` : `<p class="recap"><strong>not this</strong> ${escape(intent.outOfScope)}</p>`) +
-        (intent.touches.length === 0
-          ? `<p class="meta">no expected paths were signed — every changed file reads as in bounds</p>`
-          : `<p class="row"><span class="meta">expected to touch</span> ${intent.touches.map(one => `<span class="mono">${escape(one)}</span>`).join(" ")}</p>`) +
-        (view.plan === null
-          ? ""
-          : `<p class="meta">plan revision ${view.plan.revision} · <span class="mono" title="${escape(view.plan.sha256)}">${escape(view.plan.sha256.slice(0, 12))}…</span>${view.plan.approach === null ? "" : ` — ${escape(view.plan.approach)}`}</p>`) +
-        `</div></details>`,
+        `<div class="cockpit-disclosure-body">` + body + `</div></details>`,
     );
   }
+
+  const selected: NonNullable<BrowserResultView["selected"]> = {
+    taskId: view.taskId, title: view.title, project: view.repo === null ? null : projectName(view.repo), build: run === null ? null : run.id,
+    taskHref: taskHref(view.taskId), chatHref: taskChatHref(view.taskId),
+    status: { label: status.label, tone: status.tone, token: status.token },
+    problem: view.detail === null ? view.historyProblem : null,
+    next: reviewNextActionOf(view, csrf), complete: null, checks: null, intent: intentView, noRun: null, panel: null, contest: "",
+    notes: view.notes.map(one => ({ author: one.author, at: one.createdAt, note: one.note })),
+  };
 
   if (run === null || view.detail === null) {
     parts.push(
@@ -19266,7 +19310,7 @@ function reviewCockpitDetail(view: ReviewCockpitView, csrf: string, noted: boole
         `<p class="meta">This task has no finished build record, so there are no captured changes or checks to review.</p>` +
         `<p class="row"><a href="${taskHref(view.taskId)}">Open the task →</a></p></section>`,
     );
-    return `<section class="cockpit-detail">${parts.join("\n")}</section>`;
+    return { html: `<section class="cockpit-detail">${parts.join("\n")}</section>`, selected: { ...selected, noRun: "This task has no finished build record, so there are no captured changes or checks to review." } };
   }
 
   // The result itself (package 3): the same panel the run page and the
@@ -19279,29 +19323,26 @@ function reviewCockpitDetail(view: ReviewCockpitView, csrf: string, noted: boole
   const checks = assignment?.receipt?.checks;
   if (checks !== undefined) parts.push(`<p class="${checks.status === "failed" || checks.status === "unavailable" ? "problem" : "meta"}" data-actual-checks="${checks.status}">${escape(checks.detail)}${checks.logArtifactId === null ? "" : ` <a href="/r/${run.id}/evidence/${checks.logArtifactId}">Open check output</a>`}</p>`);
   if (assignment?.completion != null) parts.push(`<p class="meta" data-result-completed>Marked complete by ${escape(assignment.completion.actor.replace(/^operator:/, ""))}.</p>`);
-  parts.push(
-    `<div id="verification" data-cockpit-section="result">` +
-      resultPanelHtml(view.detail, {
-        place: "review",
-        tab,
-        csrf,
-        user,
-        noted,
-        requestToken: randomBytes(16).toString("hex"),
-        hrefFor: one => `${here}&run=${run.id}${one === "summary" ? "" : `&tab=${one}`}`,
-        returnTo: `${here}&run=${run.id}`,
-        back: null,
-        extraChecks,
-        headStatus: false,
-        action: false,
-      }) +
-      (view.contest === null ? "" : `<p class="row"><a href="/contest/${view.contest.id}">${view.contest.state === "pick-wait" ? `compare the ${contestNoun(view.contest.kind)} and pick →` : `the ${contestNoun(view.contest.kind)} (${escape(view.contest.state)}) →`}</a></p>`) +
-      `</div>`,
-  );
+  const panel = resultPanelParts(view.detail, {
+    place: "review",
+    tab,
+    csrf,
+    user,
+    noted,
+    requestToken: randomBytes(16).toString("hex"),
+    hrefFor: one => `${here}&run=${run.id}${one === "summary" ? "" : `&tab=${one}`}`,
+    returnTo: `${here}&run=${run.id}`,
+    back: null,
+    extraChecks,
+    headStatus: false,
+    action: false,
+  });
+  const contest = view.contest === null ? "" : `<p class="row"><a href="/contest/${view.contest.id}">${view.contest.state === "pick-wait" ? `compare the ${contestNoun(view.contest.kind)} and pick →` : `the ${contestNoun(view.contest.kind)} (${escape(view.contest.state)}) →`}</a></p>`;
+  parts.push(`<div id="verification" data-cockpit-section="result">` + panel.html + contest + `</div>`);
 
-  if (assignment?.state === "ready-to-check" && assignment.receipt !== null && canRetryReview && csrf !== "") {
-    parts.push(completionForm(view.taskId, run.id, assignment.receipt.digest, csrf));
-  }
+  const complete = assignment?.state === "ready-to-check" && assignment.receipt !== null && canRetryReview && csrf !== ""
+    ? { action: `${taskHref(view.taskId)}/complete`, receipt: assignment.receipt.digest, run: run.id } : null;
+  if (complete !== null) parts.push(completionForm(view.taskId, run.id, complete.receipt, csrf));
 
   if (view.notes.length > 0) {
     parts.push(
@@ -19311,7 +19352,13 @@ function reviewCockpitDetail(view: ReviewCockpitView, csrf: string, noted: boole
     );
   }
 
-  return `<section class="cockpit-detail">${parts.join("\n")}</section>`;
+  return {
+    html: `<section class="cockpit-detail">${parts.join("\n")}</section>`,
+    selected: {
+      ...selected, complete, panel: panel.panel, contest,
+      checks: checks === undefined ? null : { detail: checks.detail, problem: checks.status === "failed" || checks.status === "unavailable", logHref: checks.logArtifactId === null ? null : `/r/${run.id}/evidence/${checks.logArtifactId}` },
+    },
+  };
 }
 
 function completionForm(taskId: string, runId: number, digest: string, csrf: string): string {
@@ -19322,11 +19369,15 @@ function completionForm(taskId: string, runId: number, digest: string, csrf: str
  * others stay reachable from their own sections. Every form posts to the
  * endpoint that already owns the act, with the session's CSRF token; a
  * bearer session (no token) sees the road named, never a form. */
-function reviewNextAction(view: ReviewCockpitView, csrf: string, accepted: boolean, canAnnotate: boolean): string {
+function reviewNextAction(view: ReviewCockpitView, csrf: string, _accepted: boolean, _canAnnotate: boolean): string {
+  const next = reviewNextActionOf(view, csrf);
+  return next === null ? "" : `<div class="card cockpit-next" data-next-action="${escape(next.kind)}"><div><strong>${escape(next.title)}</strong><span class="meta">${escape(next.detail)}</span></div>${next.control}</div>`;
+}
+
+function reviewNextActionOf(view: ReviewCockpitView, csrf: string): { kind: string; title: string; detail: string; control: string } | null {
   const run = view.run;
   const detail = view.detail;
-  const card = (kind: string, title: string, detailWords: string, control: string): string =>
-    `<div class="card cockpit-next" data-next-action="${escape(kind)}"><div><strong>${escape(title)}</strong><span class="meta">${escape(detailWords)}</span></div>${control}</div>`;
+  const card = (kind: string, title: string, detailWords: string, control: string) => ({ kind, title, detail: detailWords, control });
   if (run === null || detail === null) {
     return card("inspect-task", "No build to review", "This task was marked complete without a build record.", `<a class="button-link" href="${taskHref(view.taskId)}">Open the task</a>`);
   }
@@ -19339,7 +19390,7 @@ function reviewNextAction(view: ReviewCockpitView, csrf: string, accepted: boole
   if (detail.comments.length > 0 && csrf !== "") {
     return card("revise", `${detail.comments.length} note${detail.comments.length === 1 ? "" : "s"} ready`, "Create one revision from these notes. You approve it before it runs.", `<form method="post" action="/r/${run.id}/revise"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="return" value="${escape(reviewHref(view.taskId))}">${revisionSealFields(detail.comments, detail.sourceDigest)}<button type="submit">Revise</button></form>`);
   }
-  return "";
+  return null;
 }
 
 /**
@@ -20405,6 +20456,11 @@ export function plainConclusionOf(conclusion: string): string {
 }
 
 function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
+  return resultPanelParts(detail, o).html;
+}
+
+/** The panel's HTML and the same panel in parts, for the rebuilt result page. */
+function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: string; panel: BrowserResultPanel } {
   const { run, receipt, proof, terminal, handoff } = detail;
   const facts = receipt.facts;
   const current = detail.assignment?.receipt?.runId === run.id ? detail.assignment : null;
@@ -20716,7 +20772,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
   const view = (tab: ResultTab, parts: string[]): string =>
     `<div class="result-view" role="tabpanel" data-result-view="${tab}"${tab === o.tab ? "" : " hidden"}>${parts.join("\n")}</div>`;
   const heading = receiptHeadingOf(run.outcome, receipt.publication, run.role);
-  return (
+  const html = (
     `<section class="card result-panel" id="result" data-result-panel data-result-place="${o.place}" data-result-lead="${lead}" data-result-task="${escape(detail.rootId ?? detail.taskId)}" data-result-user="${escape(o.user)}"${resultFactsAttributes(facts)}>` +
       (o.back === null ? "" : `<p class="result-back"><a href="${escape(o.back.href)}" data-result-back>← ${escape(o.back.label)}</a></p>`) +
       (detail.history ?? "") +
@@ -20736,27 +20792,53 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
       (detail.skillTest ? "" : `<section class="result-request" id="request-changes">${requestParts.join("\n")}</section>`) +
     `</section>`
   );
+  const panel: BrowserResultPanel = {
+    attributes: { "data-result-panel": "", "data-result-place": o.place, "data-result-lead": lead, "data-result-task": detail.rootId ?? detail.taskId, "data-result-user": o.user, ...resultFactsAttributeMap(facts) },
+    heading, outcome,
+    verdict: current == null ? null : verdictChipsOf(current, facts),
+    reviewHistory: REVIEW_TOKENS.has(status.token) ? status.detail : null,
+    attention: attention.filter(one => !shortenedMaterialReason(one)),
+    limits: attention.filter(one => shortenedMaterialReason(one)),
+    tabs: RESULT_TABS.map(tab => ({ key: tab.key, label: tab.key === "checks" && proof?.matrix.some(row => row.assessment !== undefined) ? "Requirements" : tab.label, count: tabCounts[tab.key], href: o.hrefFor(tab.key), active: tab.key === o.tab })),
+    views: [{ key: "summary", html: summaryParts.join("\n") }, { key: "changes", html: changeParts.join("\n") }, { key: "checks", html: checkParts.join("\n") }],
+    history: detail.history ?? "",
+    learning: detail.learning ?? "",
+    request: detail.skillTest ? null : requestParts.join("\n"),
+    canRequest: detail.canAnnotate && o.csrf !== "",
+    requestQuiet: detail.canAnnotate && o.csrf !== "" && detail.comments.length === 0 && (detail.pastComments?.length ?? 0) === 0 && detail.revisions.length === 0,
+  };
+  return { html, panel };
+}
+
+const CHIP_ICONS = { check: `<path d="M20 6 9 17l-5-5"/>`, x: `<path d="M18 6 6 18M6 6l12 12"/>` } as const;
+
+/** The chips as data: the server list below and the rebuilt result page. */
+function verdictChipsOf(current: AssignmentSnapshot, facts: SharedResultFacts): { chips: BrowserResultChip[]; by: string | null } {
+  const chips: BrowserResultChip[] = [];
+  const checks = current.receipt?.checks.status ?? null;
+  if (checks === "passed") chips.push({ tone: "success", label: "Checks passed", icon: "check", title: null });
+  else if (checks === "failed") chips.push({ tone: "danger", label: "Checks failed", icon: "x", title: null });
+  else if (checks === "unavailable") chips.push({ tone: "warning", label: "Check unavailable", icon: null, title: null });
+  const publication: Record<string, [BrowserResultChip["tone"], string]> = { none: ["neutral", "Branch only"], intended: ["info", "Publishing"], pushed: ["info", "Pushed"], opened: ["info", "Pull request open"], failed: ["danger", "Publish failed"] };
+  const [tone, label] = publication[facts.publicationState] ?? ["neutral", facts.publicationState];
+  chips.push({ tone, label, icon: null, title: facts.publicationWords });
+  const health = facts.evidenceHealth;
+  if (health.damaged > 0) chips.push({ tone: "danger", label: "Damaged evidence", icon: null, title: null });
+  else if (health.missing > 0) chips.push({ tone: "warning", label: "Missing evidence", icon: null, title: null });
+  else if (health.shortened > 0) chips.push({ tone: "warning", label: "Partial output", icon: null, title: "Some saved output was shortened when stored" });
+  return { chips, by: current.completion === null ? null : current.completion.actor.replace(/^(?:operator|coordinator|lead):/, "") };
 }
 
 /** The verdict at a glance: checks, where the work lives, and whether any
  * saved output is partial, as chips instead of sentences. The same facts
  * stay available in words on the Checks tab and in Build details. */
 function verdictChipsHtml(current: AssignmentSnapshot, facts: SharedResultFacts): string {
-  const chip = (tone: string, label: string, title = label): string => `<li class="verdict-chip verdict-chip--${tone}" title="${escape(title)}">${label}</li>`;
-  const chips: string[] = [];
-  const checks = current.receipt?.checks.status ?? null;
-  if (checks === "passed") chips.push(chip("success", `${strokeIcon(`<path d="M20 6 9 17l-5-5"/>`)}Checks passed`));
-  else if (checks === "failed") chips.push(chip("danger", `${strokeIcon(`<path d="M18 6 6 18M6 6l12 12"/>`)}Checks failed`));
-  else if (checks === "unavailable") chips.push(chip("warning", "Check unavailable"));
-  const publication: Record<string, [string, string]> = { none: ["neutral", "Branch only"], intended: ["info", "Publishing"], pushed: ["info", "Pushed"], opened: ["info", "Pull request open"], failed: ["danger", "Publish failed"] };
-  const [tone, label] = publication[facts.publicationState] ?? ["neutral", facts.publicationState];
-  chips.push(chip(tone, label, facts.publicationWords));
-  const health = facts.evidenceHealth;
-  if (health.damaged > 0) chips.push(chip("danger", "Damaged evidence"));
-  else if (health.missing > 0) chips.push(chip("warning", "Missing evidence"));
-  else if (health.shortened > 0) chips.push(chip("warning", "Partial output", "Some saved output was shortened when stored"));
-  const by = current.completion === null ? null : current.completion.actor.replace(/^(?:operator|coordinator|lead):/, "");
-  return `<ul class="verdict-chips" aria-label="Result at a glance">${chips.join("")}</ul>` + (by === null ? "" : `<p class="meta verdict-by">Completed by ${escape(by)}</p>`);
+  const { chips, by } = verdictChipsOf(current, facts);
+  const items = chips.map(one => {
+    const label = `${one.icon === null ? "" : strokeIcon(CHIP_ICONS[one.icon])}${one.label}`;
+    return `<li class="verdict-chip verdict-chip--${one.tone}" title="${escape(one.title ?? label)}">${label}</li>`;
+  });
+  return `<ul class="verdict-chips" aria-label="Result at a glance">${items.join("")}</ul>` + (by === null ? "" : `<p class="meta verdict-by">Completed by ${escape(by)}</p>`);
 }
 
 /** The outcome in one bounded sentence (repair 2026-09-14): the handoff's

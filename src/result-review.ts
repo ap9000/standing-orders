@@ -172,18 +172,23 @@ export type SharedResultFacts = {
 /** The `data-result-*` attributes every surface stamps on its result
  * element. Values are short, escaped, and deterministic for one run, so
  * two surfaces rendering the same result carry byte-identical attributes. */
+/** The shared facts as the panel's data attributes, unescaped (the rebuilt
+ * result page sets them through React). */
+export function resultFactsAttributeMap(facts: SharedResultFacts): Record<string, string> {
+  return {
+    "data-result-run": String(facts.runId),
+    "data-result-head": facts.head === null ? "" : facts.head.slice(0, 12),
+    "data-result-base": facts.base === null ? "" : facts.base.slice(0, 12),
+    "data-result-head-source": facts.headSource ?? "none",
+    "data-result-checks": facts.checks === null ? "none" : `${facts.checks.passed}/${facts.checks.total}`,
+    "data-result-caveats": String(facts.caveats.length),
+    "data-result-evidence": facts.evidenceProblems.length === 0 ? "ok" : `problems:${facts.evidenceProblems.length}`,
+    "data-result-publication": facts.publicationState,
+  };
+}
+
 export function resultFactsAttributes(facts: SharedResultFacts): string {
-  const attr = (name: string, value: string): string => ` data-result-${name}="${escapeAttribute(value)}"`;
-  return (
-    attr("run", String(facts.runId)) +
-    attr("head", facts.head === null ? "" : facts.head.slice(0, 12)) +
-    attr("base", facts.base === null ? "" : facts.base.slice(0, 12)) +
-    attr("head-source", facts.headSource ?? "none") +
-    attr("checks", facts.checks === null ? "none" : `${facts.checks.passed}/${facts.checks.total}`) +
-    attr("caveats", String(facts.caveats.length)) +
-    attr("evidence", facts.evidenceProblems.length === 0 ? "ok" : `problems:${facts.evidenceProblems.length}`) +
-    attr("publication", facts.publicationState)
-  );
+  return Object.entries(resultFactsAttributeMap(facts)).map(([name, value]) => ` ${name}="${escapeAttribute(value)}"`).join("");
 }
 
 /** The shared fact names, in the order `resultFactsAttributes` writes them. */
