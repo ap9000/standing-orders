@@ -84,7 +84,27 @@ export type BrowserTaskView = {
   /** The armed cancel form; null once the task cannot be cancelled. */
   cancel: { html: string; open: boolean } | null;
 };
-export type BrowserView = BrowserTasksView | BrowserSettingsView | BrowserTaskView;
+/** One project on the Projects page; opening it is a POST to /projects/open. */
+export type BrowserProjectRow = {
+  name: string; path: string; shortPath: string; open: boolean;
+  /** When it was last opened here; null for a project only seen in the queue. */
+  openedAt: string | null;
+  knowledgeHref: string;
+  /** What waits, runs, queues or finished today; null when not scanned. */
+  peek: { label: string; href: string; tone: 'attention' | 'info' | 'neutral' | 'success' }[] | null;
+};
+export type BrowserProjectsView = {
+  kind: 'projects';
+  /** Arrived from New task: choosing where the task belongs. */
+  choosing: boolean;
+  problem: string | null;
+  returnTo: string;
+  recent: BrowserProjectRow[];
+  available: BrowserProjectRow[];
+  /** The add roads; `html` carries the server's GitHub-link and exact-path forms. */
+  add: { browse: string | null; github: string | null; html: string };
+};
+export type BrowserView = BrowserTasksView | BrowserSettingsView | BrowserTaskView | BrowserProjectsView;
 
 export type BrowserWorkspace = {
   version: 1; path: string; title: string; user: string; csrf: string; sensitive: boolean;

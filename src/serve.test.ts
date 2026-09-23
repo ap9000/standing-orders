@@ -8965,6 +8965,24 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect((await fetch(url('/chat?format=workspace'), { redirect: 'manual' })).status).toBe(303);
   });
 
+  test('React projects page lists the same projects as compact rows', async () => {
+    const cookie = await login();
+    const response = await fetch(url('/projects?format=workspace'), { headers: { cookie } });
+    expect(response.status).toBe(200);
+    const data = await response.json() as import('./browser-workspace.js').BrowserWorkspace;
+    expect(data.view?.kind).toBe('projects');
+    const projects = data.view as import('./browser-workspace.js').BrowserProjectsView;
+    const rows = [...projects.recent, ...projects.available];
+    const row = rows.find(one => one.path === repoDir);
+    expect(row).toMatchObject({ path: repoDir, knowledgeHref: `/settings/knowledge?repo=${encodeURIComponent(repoDir)}` });
+    expect(row!.peek?.find(chip => chip.label === '2 queued')).toMatchObject({ href: '/board?view=order', tone: 'neutral' });
+    expect(projects).toMatchObject({ choosing: false, problem: null });
+    // The add forms are the fallback's own markup.
+    expect(data.pageHtml).toContain(projects.add.html);
+    const choosing = await (await fetch(url('/projects?return=%2Ftasks%2Fnew&format=workspace'), { headers: { cookie } })).json() as import('./browser-workspace.js').BrowserWorkspace;
+    expect(choosing.view).toMatchObject({ kind: 'projects', choosing: true, returnTo: '/tasks/new' });
+  });
+
   test('React task page frames the same parts as the HTML fallback', async () => {
     const cookie = await login();
     const response = await fetch(url('/t/a?format=workspace'), { headers: { cookie } });
