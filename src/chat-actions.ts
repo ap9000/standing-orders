@@ -36,6 +36,23 @@ import { parseProof } from "./proof.js";
 import { assignmentOf, checkAssignmentAsOperator } from "./assignment.js";
 import { getDecision, recordDecision, retireDecision } from "./project-memory.js";
 import { resumeTaskStop, taskControlOf } from "./task-control.js";
+import { addToolTo, catalogTool, projectToolsOf, removeToolFrom, toolCommandLine, validateToolSpec, type ToolSpec } from "./project-tools.js";
+
+/** A tool from the lead's card: a common tool by its id, or the operator's own program or address. */
+function toolSpecFromRequest(input: Record<string, unknown>): ToolSpec {
+  if (input["catalog"] !== undefined) {
+    const chosen = catalogTool(String(input["catalog"]));
+    if (chosen === null) throw Error("Choose a tool from get_project_tools' common list.");
+    const { label: _label, ...spec } = chosen;
+    return spec;
+  }
+  const secrets = Array.isArray(input["secrets"]) ? input["secrets"].map((one) => String(one)) : [];
+  const url = typeof input["url"] === "string" ? input["url"] : null;
+  return validateToolSpec({
+    name: input["name"], transport: url === null ? "stdio" : "http", command: input["command"], args: input["args"] ?? [], url,
+    secrets: secrets.map((name) => ({ name, optional: false })), bearer: url === null ? null : secrets[0] ?? null, about: input["about"],
+  });
+}
 
 export const CHAT_ACTIONS = {
   skill_import: { label: "Add skill", protected: true, password: false },
@@ -63,6 +80,9 @@ export const CHAT_ACTIONS = {
     protected: false,
     password: false,
   },
+  // A tool runs on this computer for every build the operator approves from now on: the password screen, like an approval.
+  tool_add: { label: "Add tool", protected: true, password: true },
+  tool_remove: { label: "Remove tool", protected: false, password: false },
   decision_record: { label: "Record decision", protected: false, password: false },
   decision_retire: { label: "Retire decision", protected: false, password: false },
   scope_approve: { label: "Approve work", protected: true, password: true },
@@ -99,6 +119,8 @@ export const CHAT_ACTION_FIELDS: Record<ChatAction, readonly string[]> = {
   knowledge_save: ["repo", "title", "content", "id"],
   knowledge_remove: ["repo", "id"],
   knowledge_restore: ["repo", "restore"],
+  tool_add: ["repo", "catalog", "name", "command", "args", "url", "secrets", "about"],
+  tool_remove: ["repo", "name"],
   decision_record: ["repo", "claim", "why", "supersedes", "source"],
   decision_retire: ["repo", "decision", "reason"],
   scope_approve: ["task"],
@@ -193,7 +215,7 @@ export function prepareSharedAction(
   if (Object.keys(input).some((key) => !allowed.includes(key)))
     throw Error("This action contains an unsupported field.");
   const task =
-    operation.startsWith("skill_") || operation.startsWith("knowledge_") || operation.startsWith("decision_")
+    operation.startsWith("skill_") || operation.startsWith("knowledge_") || operation.startsWith("decision_") || operation.startsWith("tool_")
       ? null
       : text(input, "task", 64);
   const repo =
@@ -269,6 +291,35 @@ export function prepareSharedAction(
         !/^[a-f0-9-]{36}$/.test(text(input, "nonce", 36))
       )
         throw Error("This test request has no saved identity.");
+    }
+  } else if (operation.startsWith("tool_")) {
+    // The staleness fence: the project's tools as the card saw them.
+    const current = projectToolsOf(store, repo);
+    state = { tools: current.map((one) => `${one.name}:${one.digest}`) };
+    const project = repo.split(/[\\/]/).filter(Boolean).at(-1) ?? repo;
+    if (operation === "tool_add") {
+      const spec = toolSpecFromRequest(input);
+      if (current.some((one) => one.name === spec.name))
+        throw Error(`${project} already has a tool called ${spec.name}.`);
+      // The request is rewritten to exactly what was checked, so confirming re-checks the same words.
+      for (const key of ["name", "command", "args", "url", "secrets", "about"]) delete request[key];
+      if (input["catalog"] === undefined) Object.assign(request, { name: spec.name, ...(spec.transport === "http" ? { url: spec.url } : { command: spec.command, args: spec.args }), secrets: spec.secrets.map((one) => one.name), about: spec.about });
+      const needs = spec.secrets.filter((one) => !one.optional).map((one) => one.name);
+      title = `Add ${spec.name} to ${project}`;
+      terms.push(
+        spec.about,
+        `Starts: ${toolCommandLine(spec)}`,
+        "It runs on this computer with the same access as your builds. Work you approve from now on can use it; tasks approved earlier need approving again to use it.",
+        needs.length > 0
+          ? `Needs ${needs.join(" and ")}. Set ${needs.length === 1 ? "it" : "them"} on the Tools page after adding, never in chat.`
+          : "Test it on the Tools page after adding.",
+      );
+    } else {
+      const name = text(input, "name", 40);
+      if (!current.some((one) => one.name === name))
+        throw Error(`${project} has no tool called ${name}.`);
+      title = `Remove ${name} from ${project}`;
+      terms.push("Builds stop using it right away. Its stored secrets are deleted.");
     }
   } else if (operation.startsWith("decision_")) {
     // The staleness fence: the newest decision id and the active count, so a
@@ -732,6 +783,12 @@ export function executeSharedAction(
           },
           now,
         );
+      else if (payload.operation === "tool_add") {
+        const added = addToolTo(store, repo, toolSpecFromRequest(req), req["catalog"] === undefined ? "the lead, confirmed by you" : "the common tools list", actor, now);
+        if (!added.ok) throw Error(added.message);
+      } else if (payload.operation === "tool_remove") {
+        if (!removeToolFrom(store, repo, String(req["name"]), actor, now)) throw Error("That tool was already removed.");
+      }
       else if (payload.operation === "decision_record")
         recordDecision(store, { repo, actor, draft: { claim: String(req["claim"]), why: String(req["why"]), sourceKind: "conversation",
           ...(req["source"] === undefined ? {} : { sourceRef: String(req["source"]) }), ...(payload.state["supersedes"] === undefined ? {} : { supersedes: Number(payload.state["supersedes"]) }) } }, now);
@@ -828,6 +885,10 @@ export function executeSharedAction(
                             ? "Decision recorded for this project."
                             : payload.operation === "decision_retire"
                               ? "Decision retired; its history stays."
+                          : payload.operation === "tool_add"
+                            ? "Tool added for work you approve from now on. Set any secrets it needs and test it on the Tools page."
+                          : payload.operation === "tool_remove"
+                            ? "Tool removed from every build."
                           : payload.operation === "knowledge_remove"
                             ? "Reference removed."
                             : payload.operation === "knowledge_restore"

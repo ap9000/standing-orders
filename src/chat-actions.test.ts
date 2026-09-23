@@ -22,6 +22,7 @@ import {
   type ChatAction,
 } from "./chat-actions.js";
 import { confirmMateProposal } from "./mate-doors.js";
+import { projectToolsOf } from "./project-tools.js";
 import { skillsView, importSkill, changeSkills } from "./project-skills.js";
 import { knowledgeView, changeKnowledge } from "./project-knowledge.js";
 import { executeMateTool } from "./mate-tools.js";
@@ -194,6 +195,28 @@ describe("shared chat action lifecycle", () => {
         : {}),
     });
   }
+  test("the lead proposes a project tool as a card that needs the password screen; removal is an ordinary card", () => {
+    const add = proposal("tool_add", { repo, catalog: "github" });
+    const saved = store.getMateProposal(add)!.payload as { title: string; terms: string[] };
+    expect(saved.title).toBe(`Add github to ${repo.split("/").at(-1)}`);
+    expect(saved.terms.join("\n")).toContain("Starts: https://api.githubcopilot.com/mcp/ (signs in with GITHUB_TOKEN)");
+    expect(saved.terms.join("\n")).toContain("Needs GITHUB_TOKEN. Set it on the Tools page after adding, never in chat.");
+    // A phone or chat tap is not enough: the secure screen and the password are.
+    expect(confirm(add)).toMatchObject({ ok: false, reason: "needs-confirm" });
+    expect(projectToolsOf(store, repo)).toEqual([]);
+    expect(confirm(add, true, "wrong")).toMatchObject({ ok: false });
+    const again = proposal("tool_add", { repo, catalog: "github" });
+    expect(confirm(again, true)).toMatchObject({ ok: true });
+    expect(projectToolsOf(store, repo).map(one => [one.name, one.source])).toEqual([["github", "the common tools list"]]);
+    // The lead's own command is checked and rewritten to exactly what was reviewed.
+    const custom = prepareSharedAction(store, who, "tool_add", { repo, name: "db", command: "npx", args: ["-y", "some-db-mcp@1.2.3"], secrets: ["DATABASE_URL"] }, root, now);
+    expect(custom.request).toMatchObject({ name: "db", command: "npx", args: ["-y", "some-db-mcp@1.2.3"], secrets: ["DATABASE_URL"] });
+    expect(() => prepareSharedAction(store, who, "tool_add", { repo, catalog: "nope" }, root, now)).toThrow(/common list/);
+    expect(() => prepareSharedAction(store, who, "tool_add", { repo, catalog: "github" }, root, now)).toThrow(/already has a tool called github/);
+    const remove = proposal("tool_remove", { repo, name: "github" });
+    expect(confirm(remove)).toMatchObject({ ok: true, said: "Tool removed from every build." });
+    expect(projectToolsOf(store, repo)).toEqual([]);
+  });
   function skill() {
     return importSkill(
       store,

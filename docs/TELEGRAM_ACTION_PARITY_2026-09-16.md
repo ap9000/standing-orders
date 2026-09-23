@@ -44,6 +44,7 @@ configuration and pairing. Slack transport tests also use scripted responses.
 | `get_models` | direct | Read during a turn: default agents with the exact model each runs, CLI versions and new models. Changes use the labelled Settings → Models page. | model catalog (`model-catalog.test.ts`), same turn path | none |
 | `get_diff` | direct | Read during a turn: the exact result's changed files, then one file's diff, so a requested change names the right file and line. | result reading (`mate-results.test.ts`), same turn path | none |
 | `get_check_log` | direct | Read during a turn: the end of the exact result's check log, a page of it, or the lines matching a search. | result reading (`mate-results.test.ts`), same turn path | none |
+| `get_project_tools` | direct | Read during a turn: a project's tools, the common tools list and servers found on the computer. Adding one is a secure-review card; secrets are set only on the console's Tools page. | project tools (`project-tools.test.ts`), same turn path | none |
 | `get_task_conversation` | direct | Read during a turn: what the person and the lead said in one task's own chat, including what was confirmed there. | task chat (`mate-doors.test.ts`), same turn path | none |
 | `search_project_memory` | direct | Read during a turn: one search over decisions, references, lessons and the conversations the person may read. | project memory search (`project-memory.test.ts`), same turn path | none |
 | `list_tasks` | direct | Read during a turn. | engine read tools (`mate.test.ts`), same turn path | none |

@@ -1,0 +1,48 @@
+/** Settings → Tools: one project's MCP servers, in plain words. Secrets are
+ * entered here and nowhere else, and never shown again. */
+import { toolCommandLine, toolStanding, type FoundTool, type ProjectTool, type ToolSpec } from "./project-tools.js";
+
+const e = (value: unknown) =>
+  String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+const hidden = (data: Record<string, string>) =>
+  Object.entries(data).map(([k, v]) => `<input type="hidden" name="${e(k)}" value="${e(v)}">`).join("");
+
+export const TOOLS_CSS = `.tools{max-width:780px;min-width:0;overflow-wrap:anywhere}.tools .card{padding:16px 18px;margin:12px 0;min-width:0}.tools .card h2{font-size:1.05rem;margin:0;color:var(--so-ink);font-weight:600}.tools .tool-heading{display:flex;align-items:baseline;justify-content:space-between;gap:12px}.tools .tool-state{font-size:.85rem;flex-shrink:0;color:var(--so-muted)}.tools .tool-state[data-ready="false"]{color:var(--so-warning)}.tools .card>p{margin:6px 0 0}.tools code{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font-size:.85rem}.tools form{display:grid;gap:10px;margin:0}.tools label{display:grid;gap:6px}.tools input,.tools select{box-sizing:border-box;width:100%;max-width:100%;min-width:0}.tools button{justify-self:start;white-space:nowrap;min-height:44px}.tools details:not(.card){margin:6px 0 0;padding:0;border:0;border-radius:0;background:none;box-shadow:none}.tools details:not(.card)>summary{min-height:36px;display:flex;align-items:center;font-size:.9rem;color:var(--so-muted);cursor:pointer}.tools details:not(.card)[open]>summary{color:var(--so-ink)}.tools details.card>summary{cursor:pointer;min-height:44px;display:flex;align-items:center;font-weight:600}.tools summary{list-style:none;gap:10px}.tools summary::-webkit-details-marker{display:none}.tools summary::before{content:"";flex-shrink:0;width:6px;height:6px;margin:0 2px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(-45deg);transition:transform .15s}.tools details[open]>summary::before{transform:rotate(45deg)}.tools details:not(.card) form{padding:4px 0 10px}.tools .tool-facts{margin:0 0 8px;display:grid;gap:4px;font-size:.9rem}.tools .tool-facts p{margin:0}.tools .tool-controls{display:flex;gap:12px;flex-wrap:wrap;margin-top:12px}.tools .tool-found{display:flex;gap:10px;align-items:flex-start}.tools .tool-found input{flex:0 0 auto;width:18px;height:18px;margin-top:3px}.tools .tool-found span{min-width:0}.tools .problem{padding:10px 12px;margin:8px 0 0}@media(max-width:600px){.tools input,.tools select{font-size:16px}.tools .card{padding:14px}.tools .tool-heading{align-items:flex-start}}`;
+
+export type ToolsView = {
+  repo: string;
+  project: string;
+  tools: { tool: ProjectTool; secretsSet: string[] }[];
+  catalog: (ToolSpec & { label: string })[];
+  found: FoundTool[];
+};
+
+const password = '<label>Your Standing Orders password<input type="password" name="password" autocomplete="current-password" required></label>';
+
+function toolCard(one: { tool: ProjectTool; secretsSet: string[] }, base: Record<string, string>, manage: boolean): string {
+  const { tool, secretsSet } = one;
+  const standing = toolStanding(tool, secretsSet);
+  // One line per secret: the disclosure is both where it stands and where it is set.
+  const secrets = manage ? tool.spec.secrets.map(secret => {
+    const set = secretsSet.includes(secret.name);
+    return `<details><summary>${set ? `Replace ${e(secret.name)}` : `Set ${e(secret.name)}${secret.optional ? " (optional)" : ""}`}</summary><form method="post" action="/settings/tools/change">${hidden({ ...base, action: "secret", name: tool.name, secret: secret.name })}<label>${e(secret.name)}<input type="password" name="value" autocomplete="off" required></label>${password}<button>Save</button></form></details>`;
+  }).join("") : "";
+  const tested = tool.lastTest?.ok ? `<p>Tested ${e(tool.lastTest.at.slice(0, 16).replace("T", " "))} UTC: ${e(tool.lastTest.tools.join(", ") || "it lists no tools")}</p>` : "";
+  const details = `<details><summary>Details</summary><div class="tool-facts"><p>Starts: <code>${e(toolCommandLine(tool.spec))}</code></p><p>From ${e(tool.source)} · added by ${e(tool.createdBy)}</p>${tested}</div></details>`;
+  const failed = tool.lastTest !== null && !tool.lastTest.ok ? `<p class="problem" role="status">${e(tool.lastTest.problem ?? "The last test failed.")}</p>` : "";
+  const controls = manage ? `<div class="tool-controls"><form method="post" action="/settings/tools/change">${hidden({ ...base, action: "test", name: tool.name })}<button>Test</button></form><form method="post" action="/settings/tools/change">${hidden({ ...base, action: "remove", name: tool.name })}<button class="secondary">Remove</button></form></div>` : "";
+  return `<article class="card" id="tool-${e(tool.name)}"><div class="tool-heading"><h2>${e(tool.name)}</h2><span class="tool-state" data-ready="${standing.ready}">${e(standing.words)}</span></div><p>${e(tool.spec.about)}</p>${failed}${secrets}${details}${controls}</article>`;
+}
+
+export function toolsHtml(view: ToolsView, csrf: string, canManage: boolean, message: { said?: string | null; problem?: string | null } = {}): string {
+  const manage = canManage && csrf !== "";
+  const base = { csrf, repo: view.repo };
+  const intro = `<p>Builds in ${e(view.project)} use exactly these tools. MCP servers set up elsewhere on this computer aren't used.</p><details><summary>How tools work</summary><ul><li>A tool you add reaches work you approve from now on. Approve a task again to give it a new tool.</li><li>Removing a tool takes it away from every build right away.</li><li>Secrets stay on this computer, are never shown again, and go only to the tool that needs them.</li><li>Reviewers and the lead chat never get tools. Gemini builds don't use tools yet.</li></ul></details>`;
+  const cards = view.tools.length === 0 ? '<p class="meta">No tools yet. Builds in this project get none.</p>' : view.tools.map(one => toolCard(one, base, manage)).join("");
+  const fromList = view.catalog.length === 0 ? "" : `<form method="post" action="/settings/tools/change">${hidden({ ...base, action: "add-catalog" })}<label>Common tools<select name="catalog">${view.catalog.map(one => `<option value="${e(one.name)}">${e(one.label)}: ${e(one.about)}</option>`).join("")}</select></label>${password}<button>Add</button></form>`;
+  const custom = `<details><summary>Add your own</summary><form method="post" action="/settings/tools/change">${hidden({ ...base, action: "add-custom" })}<label>Name<input name="name" pattern="[a-z0-9][a-z0-9_-]{0,39}" maxlength="40" required placeholder="for example: postgres"></label><label>It runs as<select name="transport"><option value="stdio">A program on this computer</option><option value="http">A web address</option></select></label><label>Command or address<input name="target" required placeholder="npx -y some-mcp-server@1.2.3, or https://…"></label><label>Secrets it needs (names, comma separated)<input name="secrets" placeholder="for example: DATABASE_URL"></label><p class="meta">For a web address, the first secret is sent as its sign-in token. Set each secret's value after adding.</p>${password}<button>Add</button></form></details>`;
+  const add = manage ? `<details class="card"${view.tools.length === 0 ? " open" : ""}><summary>Add a tool</summary>${fromList}${custom}</details>` : "";
+  const found = manage && view.found.length > 0 ? `<details class="card"><summary>Found on this computer (${view.found.length})</summary><p class="meta">MCP servers your other apps use. Adding one copies its settings, and any secrets it has, into this project.</p><form method="post" action="/settings/tools/change">${hidden({ ...base, action: "import" })}${view.found.map(one => `<label class="tool-found"><input type="checkbox" name="import" value="${e(one.spec.name)}"><span><strong>${e(one.spec.name)}</strong> · ${e(one.source)}<br><code>${e(toolCommandLine(one.spec))}</code>${one.spec.secrets.length === 0 ? "" : `<br><span class="meta">Brings ${e(one.spec.secrets.map(s => s.name).join(", "))}</span>`}</span></label>`).join("")}${password}<button>Add selected</button></form></details>` : "";
+  const note = message.problem ? `<p class="problem" role="alert">${e(message.problem)}</p>` : message.said ? `<p role="status">${e(message.said)}</p>` : "";
+  return `<section class="tools">${note}${intro}${cards}${add}${found}</section>`;
+}

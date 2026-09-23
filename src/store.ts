@@ -110,7 +110,8 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // v77 gives lead threads a scope: the lead conversation, a project, or a task.
 // v78 remembers the task a paired chat (Telegram, Slack, Discord, Teams) chose to talk about.
 // v79 remembers which Telegram status message showed which task, so a reply to it is about that task.
-export const SCHEMA_VERSION = 79;
+// v80 adds project tools: the MCP servers a project's builds get, the list sealed at each approval, and what each run launched with.
+export const SCHEMA_VERSION = 80;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -2053,6 +2054,40 @@ CREATE TABLE IF NOT EXISTS chat_focus (
   task       TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   PRIMARY KEY (surface, binding)
+);
+
+-- v80: project tools. The MCP servers one project's builds may use (the
+-- list replaces every other MCP source a build could load); secret values
+-- live in 0600 files, never here. tool_seal is the list a task's approval
+-- saw: a tool added later reaches only work approved after it, and a
+-- removed tool leaves every build at once. run_tool is what one attempt
+-- actually launched with, and what was left out and why.
+CREATE TABLE IF NOT EXISTS project_tool (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo           TEXT NOT NULL,
+  name           TEXT NOT NULL,
+  spec_json      TEXT NOT NULL,
+  digest         TEXT NOT NULL,
+  source         TEXT NOT NULL,
+  state          TEXT NOT NULL CHECK (state IN ('active','removed')),
+  created_at     TEXT NOT NULL,
+  created_by     TEXT NOT NULL,
+  removed_at     TEXT,
+  removed_by     TEXT,
+  last_test_json TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS project_tool_live ON project_tool (repo, name) WHERE state = 'active';
+CREATE TABLE IF NOT EXISTS tool_seal (
+  task            TEXT NOT NULL,
+  approved_digest TEXT NOT NULL,
+  tools_json      TEXT NOT NULL,
+  sealed_at       TEXT NOT NULL,
+  PRIMARY KEY (task, approved_digest)
+);
+CREATE TABLE IF NOT EXISTS run_tool (
+  run        INTEGER PRIMARY KEY,
+  tools_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
 );
 
 -- v79: a Telegram message that showed one task (a /task status, a task
@@ -9128,6 +9163,8 @@ export class Store {
           )
           .run(now.toISOString(), by, basis === undefined ? "password" : basis.kind, basis === undefined ? null : basis.modeDigest, taskId);
         if (changed.changes > 0) {
+          // The project's tools this yes saw (v80): a later addition needs a later yes.
+          this.sealProjectTools(taskId, String(working["digest"]), now);
           // A fresh yes lifts the stale-approval hold and closes its page
           // (setup review): the approval is what was stale, and it is new.
           const ref = this.db.prepare("SELECT id FROM task_ref WHERE backend = ? AND external_id = ?").get(BUILT_IN, taskId);
@@ -20370,6 +20407,74 @@ export class Store {
   setChatFocus(surface: string, binding: number, task: string | null, now: Date): void {
     if (task === null) this.db.prepare("DELETE FROM chat_focus WHERE surface = ? AND binding = ?").run(surface, binding);
     else this.db.prepare("INSERT INTO chat_focus (surface, binding, task, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT (surface, binding) DO UPDATE SET task = excluded.task, updated_at = excluded.updated_at").run(surface, binding, task, now.toISOString());
+  }
+
+  // ---- project tools (v80) -------------------------------------------------
+
+  /** The tools a project's builds get now (active only), oldest first. */
+  projectTools(repo: string): { id: number; repo: string; name: string; specJson: string; digest: string; source: string; createdAt: string; createdBy: string; lastTestJson: string | null }[] {
+    return this.db.prepare("SELECT * FROM project_tool WHERE repo = ? AND state = 'active' ORDER BY id").all(repo).map(row => ({
+      id: Number(row["id"]), repo: String(row["repo"]), name: String(row["name"]), specJson: String(row["spec_json"]), digest: String(row["digest"]),
+      source: String(row["source"]), createdAt: String(row["created_at"]), createdBy: String(row["created_by"]),
+      lastTestJson: row["last_test_json"] === null ? null : String(row["last_test_json"]),
+    }));
+  }
+
+  /** Add one tool; false when the project already has an active tool of that name. */
+  addProjectTool(tool: { repo: string; name: string; specJson: string; digest: string; source: string; by: string }, now: Date): boolean {
+    const clash = this.db.prepare("SELECT 1 AS hit FROM project_tool WHERE repo = ? AND name = ? AND state = 'active'").get(tool.repo, tool.name);
+    if (clash !== undefined) return false;
+    this.db.prepare("INSERT INTO project_tool (repo, name, spec_json, digest, source, state, created_at, created_by) VALUES (?, ?, ?, ?, ?, 'active', ?, ?)")
+      .run(tool.repo, tool.name, tool.specJson, tool.digest, tool.source, now.toISOString(), tool.by);
+    return true;
+  }
+
+  /** Remove one tool from every build at once. False when it was not active. */
+  removeProjectTool(repo: string, name: string, by: string, now: Date): boolean {
+    const { changes } = this.db.prepare("UPDATE project_tool SET state = 'removed', removed_at = ?, removed_by = ? WHERE repo = ? AND name = ? AND state = 'active'")
+      .run(now.toISOString(), by, repo, name);
+    return Number(changes) === 1;
+  }
+
+  recordProjectToolTest(repo: string, name: string, testJson: string): void {
+    this.db.prepare("UPDATE project_tool SET last_test_json = ? WHERE repo = ? AND name = ? AND state = 'active'").run(testJson, repo, name);
+  }
+
+  /** Record the project's active tools under this approval (re-approving the same bytes re-seals with today's list). */
+  sealProjectTools(taskId: string, approvedDigest: string, now: Date): void {
+    const repo = this.db.prepare("SELECT repo FROM task_ref WHERE backend = ? AND external_id = ?").get(BUILT_IN, taskId)?.["repo"];
+    if (typeof repo !== "string") return;
+    const tools = this.projectTools(repo).map(one => ({ name: one.name, digest: one.digest }));
+    this.db.prepare("INSERT INTO tool_seal (task, approved_digest, tools_json, sealed_at) VALUES (?, ?, ?, ?) ON CONFLICT (task, approved_digest) DO UPDATE SET tools_json = excluded.tools_json, sealed_at = excluded.sealed_at")
+      .run(taskId, approvedDigest, JSON.stringify(tools), now.toISOString());
+  }
+
+  /** The tools an approval saw, or null for an approval made before tools were sealed. */
+  toolSealFor(taskId: string, approvedDigest: string): { name: string; digest: string }[] | null {
+    const row = this.db.prepare("SELECT tools_json FROM tool_seal WHERE task = ? AND approved_digest = ?").get(taskId, approvedDigest);
+    if (row === undefined) return null;
+    try {
+      const parsed = JSON.parse(String(row["tools_json"])) as unknown;
+      return Array.isArray(parsed) ? parsed.filter((one): one is { name: string; digest: string } => typeof one?.name === "string" && typeof one?.digest === "string") : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /** What one attempt launched with (first launch of the run wins its record; a resumed turn updates it). */
+  recordRunTools(run: number, toolsJson: string, now: Date): void {
+    this.db.prepare("INSERT INTO run_tool (run, tools_json, created_at) VALUES (?, ?, ?) ON CONFLICT (run) DO UPDATE SET tools_json = excluded.tools_json").run(run, toolsJson, now.toISOString());
+  }
+
+  runTools(run: number): { tools: { name: string; digest: string }[]; skipped: { name: string; reason: string }[] } | null {
+    const row = this.db.prepare("SELECT tools_json FROM run_tool WHERE run = ?").get(run);
+    if (row === undefined) return null;
+    try {
+      const parsed = JSON.parse(String(row["tools_json"])) as { tools?: unknown; skipped?: unknown };
+      return { tools: Array.isArray(parsed.tools) ? parsed.tools as { name: string; digest: string }[] : [], skipped: Array.isArray(parsed.skipped) ? parsed.skipped as { name: string; reason: string }[] : [] };
+    } catch {
+      return null;
+    }
   }
 
   /** A Telegram message this bot sent that showed one task (v79): a reply to

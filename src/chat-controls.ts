@@ -21,6 +21,7 @@ export const CHAT_CONTROLS = {
   permissions: { label: "Review permissions", href: "/settings" },
   providers: { label: "Connect an agent", href: "/settings#providers" },
   skills: { label: "Manage skills", href: "/settings/skills" },
+  tools: { label: "Manage tools", href: "/settings/tools" },
   knowledge: { label: "Edit project knowledge", href: "/settings/knowledge" },
   learning: { label: "Review learning history", href: "/settings/learning" },
   mode: { label: "Review automatic approvals", href: "/mode" },
@@ -38,7 +39,7 @@ export function chatResultHref(task: string, run: number, tab: ChatResultTab = "
 }
 export function chatControlHref(control: ChatControl, task: string, run?: unknown, project?: unknown): string {
   const entry = CHAT_CONTROLS[control];
-  if (control === "skills") return "/settings/skills" + (typeof project === "string" && project ? "?repo=" + encodeURIComponent(project) : "");
+  if (control === "skills" || control === "tools") return CHAT_CONTROLS[control].href + (typeof project === "string" && project ? "?repo=" + encodeURIComponent(project) : "");
   if ("href" in entry) return entry.href;
   if (control === "acceptance") return `/review?result=${encodeURIComponent(task)}&run=${Number.isSafeInteger(run) && Number(run) > 0 ? run : 0}&tab=checks`;
   if (control === "result" && Number.isSafeInteger(run) && Number(run) > 0) return chatResultHref(task, Number(run));

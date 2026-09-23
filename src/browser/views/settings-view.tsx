@@ -1,7 +1,7 @@
 /** Settings, rebuilt with shadcn/ui. Every control posts to the same server
  * route as before (CSRF included); choices save the moment they change and
  * the server's confirmation arrives as a toast. */
-import { BookOpen, ChevronDown, Cpu, Hash, LineChart, MessageSquare, Monitor, Moon, Send, Sparkles, Sun, Users } from "lucide-react";
+import { BookOpen, ChevronDown, Cpu, Hash, LineChart, MessageSquare, Monitor, Moon, Send, Sparkles, Sun, Users, Wrench } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { BrowserSettingsView } from "../../browser-workspace.js";
@@ -11,7 +11,7 @@ import {
 } from "../components/ui/index.js";
 
 const TILE_ICONS: Record<string, ReactNode> = {
-  "/settings/models": <Cpu />, "/settings/skills": <Sparkles />, "/settings/knowledge": <BookOpen />, "/settings/telegram": <Send />,
+  "/settings/models": <Cpu />, "/settings/skills": <Sparkles />, "/settings/tools": <Wrench />, "/settings/knowledge": <BookOpen />, "/settings/telegram": <Send />,
   "/settings/slack": <Hash />, "/settings/discord": <MessageSquare />, "/settings/teams": <Users />, "/settings/learning": <LineChart />,
 };
 

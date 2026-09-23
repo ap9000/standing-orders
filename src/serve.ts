@@ -18,6 +18,8 @@ import { SlackState } from "./slack-state.js";
 import { CHAT_ACTIONS, sharedActionPayload, sharedActionNeedsReview, sharedActionReviewPath, mintSharedActionReview } from './chat-actions.js';
 import { changeSkills, githubSkill, importSkill, readSkillsSnapshot, reviseSkillTest, skillTestResult, skillsView, testSkill, type SkillFile } from "./project-skills.js";
 import { skillsHtml, skillsScript, skillsSnapshotHtml, skillTestFeedbackHtml, SKILLS_CSS } from "./skills-ui.js";
+import { toolsHtml, TOOLS_CSS, type ToolsView } from "./tools-ui.js";
+import { TOOL_CATALOG, addToolTo, catalogTool, discoverTools, projectToolsOf, removeToolFrom, secretsSetFor, setToolSecret, splitCommandLine, testToolOf, type ToolSpec } from "./project-tools.js";
 import { changeLearning, learningView } from "./project-learning.js";
 import { changeKnowledge, knowledgeView, knowledgeVersion, readKnowledgeSnapshot, type KnowledgeDraft } from "./project-knowledge.js";
 import { knowledgeHtml, knowledgeContextHtml, KNOWLEDGE_CSS, decisionsHtml, memorySearchHtml, MEMORY_INTRO, proposalsHtml } from "./knowledge-ui.js";
@@ -237,7 +239,7 @@ import { approveRoutine, describeSchedule, fireRoutine, parseSchedule, refreshRo
 import { effectivePrimary, isMessagingChannel, savePrimary } from "./webhooks.js";
 import { resolvePhaseAgent, resolveRoutineAuthority, INSTALLATION_SCOPE, routeOfTask, agentChoicesFor, type AgentChoice } from "./agentconfig.js";
 import { isRiskLevel, projectRoute, riskTitle, riskConsequence, chosenWords, agentsSummary, postureWords, RISK_CHOICES, RISK_LEVELS, PHASES as ROUTE_PHASES, type PhaseRoute, type RouteProjection, type RouteOverride, type RouteStamp, type RiskLevel } from "./phase-routing.js";
-import { isProviderId, reportsCost, PROVIDER_IDS, validModelId, validateSpec, type Phase, type ProviderId } from "./provider.js";
+import { ALL_CREDENTIAL_ENV, isProviderId, reportsCost, PROVIDER_IDS, validModelId, validateSpec, type Phase, type ProviderId } from "./provider.js";
 import { authenticateAccount, hashPassword, modeFilingCoverage, PLACEHOLDER_RUBRIC } from "./scope.js";
 import { modeTermsFromJson, modeWords, presetTerms, modeTermsJson, modeDigestOf, MODE_MAX_DAYS, type ModeName, type ModeTerms } from "./modes.js";
 import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, readProviderKey, keyStatus, plausibleKey, readAuthMode, readAuthModeStrict, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
@@ -321,6 +323,10 @@ export type ServeOptions = {
   /** Subscription-backed mate transport; injected in tests so no real
    * Codex or Claude membership turn is consumed. */
   subscriptionChatRunner?: SubscriptionMateRunner;
+  /** Tests: stands in for `codex mcp list --json` in the project (the Tools page's "Found on this computer"). */
+  codexToolList?: (cwd: string) => Promise<string | null>;
+  /** Tests: the home whose ~/.standing-orders/tool-secrets and ~/.claude.json the Tools page uses. */
+  toolHome?: string;
   chatEnv?: Record<string, string | undefined>;
   /**
    * The live peek's locality ASSERTION (live-peek v3 §3): the administrator
@@ -623,6 +629,31 @@ export function createDecisionServer(options: ServeOptions): Server {
       repos.push(canonical);
     }
     return repos;
+  };
+  /** Codex's own MCP servers for a project (`codex mcp list --json`), for "Found on this computer"; null when Codex can't say. */
+  const codexServers = async (repo: string): Promise<unknown[] | null> => {
+    try {
+      const listed = await (options.codexToolList ?? (async (cwd: string) => {
+        const result = await execRun("codex", ["mcp", "list", "--json"], { cwd, timeoutMs: 10_000, omitEnv: ALL_CREDENTIAL_ENV });
+        return result.code === 0 ? result.stdout : null;
+      }))(repo);
+      const parsed = listed === null ? null : JSON.parse(listed) as unknown;
+      return Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  };
+  /** One project's Tools page: its tools with which secrets are set (never values), the common tools not yet added, and what this computer already has. */
+  const toolHome = options.toolHome ?? homedir();
+  const toolsViewOf = (repo: string, codex: unknown[] | null): ToolsView => {
+    const tools = projectToolsOf(store, repo);
+    const names = new Set(tools.map(one => one.name));
+    return {
+      repo, project: repo.split(/[\\/]/).filter(Boolean).at(-1) ?? repo,
+      tools: tools.map(tool => ({ tool, secretsSet: secretsSetFor(repo, tool.spec, toolHome) })),
+      catalog: TOOL_CATALOG.filter(one => !names.has(one.name)),
+      found: discoverTools(repo, codex, toolHome).filter(one => !names.has(one.spec.name)),
+    };
   };
   const codingProjects = (): string[] => [...new Set([...managedRepos(), ...store.listProjects().map(project => project.path)])].filter(repo => rowVisible(liveCeiling(), repo));
   function codingProjectAllowed(repo: string): boolean { return codingProjects().includes(repo); }
@@ -3061,6 +3092,21 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       return sendScreen(response,200,screen('Skills',`<p><a href="/settings">Settings</a></p><h1>Skills</h1>${url.searchParams.get('saved')==='1'?'<p role="status">Saved.</p>':''}${selector}${content}`,{chrome:chromeFor(chosen||project,'settings'),functional:{script:skillsScript()}}));
     }
+    if (url.pathname === "/settings/tools") {
+      const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
+      const chosen = url.searchParams.get("repo") ?? project ?? projects[0] ?? "";
+      if (chosen && !projects.includes(chosen)) return refuse(response, who, 403, "That project is outside your access.", "/projects");
+      const selector = projects.length > 1 ? `<form class="tools" method="get" action="/settings/tools"><label>Project<select name="repo">${projects.map(p => `<option value="${escape(p)}"${p === chosen ? " selected" : ""}>${escape(p.split("/").at(-1) ?? p)}</option>`).join("")}</select></label><button>Show project</button></form>` : "";
+      let content = "<p>Add a project to give its builds tools.</p>";
+      if (chosen) {
+        try {
+          const approver = who.role === "approver" && who.via === "cookie";
+          content = toolsHtml(toolsViewOf(chosen, approver ? await codexServers(chosen) : null), who.via === "cookie" ? who.session.csrf : "", approver,
+            { said: url.searchParams.get("said"), problem: url.searchParams.get("problem") });
+        } catch { content = '<p class="problem" role="alert">Tools are unavailable. Reload to retry.</p>'; }
+      }
+      return sendScreen(response, 200, screen("Tools", `<p><a href="/settings">Settings</a></p><h1>Tools</h1>${selector}${content}`, { chrome: chromeFor(chosen || project, "settings"), forceSensitive: true }));
+    }
     if (url.pathname === "/settings/knowledge") {
       const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
       const chosen = url.searchParams.get("repo") ?? project ?? projects[0] ?? "";
@@ -3129,7 +3175,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
 
     if (url.pathname === "/settings" && (options.telegramTokenFile === undefined || restricted())) {
-      return sendScreen(response, 200, screen("Settings", '<h1>Settings</h1><p><a href="/settings/models">Models</a> · <a href="/settings/skills">Skills</a> · <a href="/settings/knowledge">Project knowledge</a> · <a href="/settings/telegram">Telegram</a></p><details><summary>Learning history</summary><a href="/settings/learning">Learning</a></details>', { chrome: chromeFor(project, "settings") }));
+      return sendScreen(response, 200, screen("Settings", '<h1>Settings</h1><p><a href="/settings/models">Models</a> · <a href="/settings/skills">Skills</a> · <a href="/settings/tools">Tools</a> · <a href="/settings/knowledge">Project knowledge</a> · <a href="/settings/telegram">Telegram</a></p><details><summary>Learning history</summary><a href="/settings/learning">Learning</a></details>', { chrome: chromeFor(project, "settings") }));
     }
 
     if (url.pathname === "/settings" && options.telegramTokenFile !== undefined) {
@@ -5271,6 +5317,73 @@ export function createDecisionServer(options: ServeOptions): Server {
         let content=`<p role="alert">${escape(message)}</p><a href="${escape(back)}">Reload Skills</a>`;
         try {content=skillsHtml(skillsView(store,repo,who.name),who.session.csrf,true,{error:message,draft:Object.fromEntries(['method','content','url','sample','sha'].map(k=>[k,body.get(k)??'']))});}catch{/* Do not display unverified packages. */}
         return sendScreen(response,409,screen('Skills',`<h1>Skills</h1>${content}`,{chrome:chromeFor(repo,'settings'),functional:{script:skillsScript()}}));
+      }
+    }
+    if (url.pathname === "/settings/tools/change") {
+      if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "Sign in as an approver to manage tools.", "/settings/tools");
+      const repo = body.get("repo") ?? "";
+      if (!visible(repo) || ![...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()].includes(repo)) return refuse(response, who, 403, "That project is outside your access.", "/projects");
+      const back = (key: "said" | "problem", words: string, anchor = "") => redirect(response, `/settings/tools?repo=${encodeURIComponent(repo)}&${key}=${encodeURIComponent(words)}${anchor}`);
+      const action = body.get("action") ?? "";
+      const name = body.get("name") ?? "";
+      // Anything that adds what a build can run or reach, or a secret, needs the password.
+      if (["add-catalog", "add-custom", "import", "secret"].includes(action) && !authenticateApprover(store, who.name, body.get("password") ?? "").ok) {
+        return back("problem", "Enter your Standing Orders password to change this project's tools.");
+      }
+      const now = clock();
+      const finish = (added: { ok: true; spec: ToolSpec } | { ok: false; message: string }, label: string) => {
+        if (!added.ok) return back("problem", added.message);
+        const needs = added.spec.secrets.filter(one => !one.optional).map(one => one.name);
+        return back("said", `Added ${label}. ${needs.length > 0 ? `Set ${needs.join(" and ")} below to finish.` : "Test it to check it starts."} Work you approve from now on can use it.`, `#tool-${added.spec.name}`);
+      };
+      try {
+        if (action === "add-catalog") {
+          const chosen = catalogTool(body.get("catalog") ?? "");
+          if (chosen === null) return back("problem", "Choose a tool from the list.");
+          const { label: _label, ...spec } = chosen;
+          return finish(addToolTo(store, repo, spec, "the common tools list", who.name, now, { home: toolHome }), chosen.label);
+        }
+        if (action === "add-custom") {
+          const transport = body.get("transport") === "http" ? "http" : "stdio";
+          const target = body.get("target") ?? "";
+          const secrets = (body.get("secrets") ?? "").split(",").map(one => one.trim()).filter(Boolean);
+          const parts = transport === "stdio" ? splitCommandLine(target) : [];
+          const spec = { name, transport, command: parts[0] ?? null, args: parts.slice(1), url: transport === "http" ? target : null,
+            secrets: secrets.map(one => ({ name: one, optional: false })), bearer: transport === "http" ? secrets[0] ?? null : null, headerSecrets: {}, about: "" } as ToolSpec;
+          return finish(addToolTo(store, repo, spec, "added by hand", who.name, now, { home: toolHome }), name);
+        }
+        if (action === "import") {
+          const wanted = body.getAll("import");
+          if (wanted.length === 0) return back("problem", "Choose at least one tool to add.");
+          const found = discoverTools(repo, await codexServers(repo), toolHome);
+          const added: string[] = [], problems: string[] = [];
+          for (const one of wanted) {
+            const match = found.find(tool => tool.spec.name === one);
+            if (match === undefined) { problems.push(`${one} is no longer on this computer`); continue; }
+            const result = addToolTo(store, repo, match.spec, match.source, who.name, now, { values: match.values, home: toolHome });
+            if (result.ok) added.push(one); else problems.push(result.message);
+          }
+          return problems.length > 0 ? back("problem", `${added.length > 0 ? `Added ${added.join(", ")}. ` : ""}${problems.join(" ")}`) : back("said", `Added ${added.join(", ")}. Test each to check it starts. Work you approve from now on can use them.`);
+        }
+        const tool = projectToolsOf(store, repo).find(one => one.name === name);
+        if (tool === undefined) return back("problem", "That tool is no longer on this project.");
+        if (action === "remove") {
+          removeToolFrom(store, repo, name, who.name, now, toolHome);
+          return back("said", `Removed ${name}. No build uses it from now on.`);
+        }
+        if (action === "test") {
+          const test = await testToolOf(store, repo, name, now, { omitEnv: ALL_CREDENTIAL_ENV, home: toolHome });
+          return test === null || !test.ok ? back("problem", `${name}: ${test?.problem ?? "the test did not run."}`, `#tool-${name}`) : back("said", `${name} works: ${test.tools.length} tool${test.tools.length === 1 ? "" : "s"}.`, `#tool-${name}`);
+        }
+        if (action === "secret") {
+          const secret = body.get("secret") ?? "";
+          if (!tool.spec.secrets.some(one => one.name === secret)) return back("problem", "Choose one of this tool's secrets.");
+          setToolSecret(repo, name, secret, body.get("value") ?? "", toolHome);
+          return back("said", `Saved ${secret} for ${name}. It is never shown again.`, `#tool-${name}`);
+        }
+        return back("problem", "Choose a supported tools action.");
+      } catch (error) {
+        return back("problem", error instanceof Error ? error.message : "Tools could not be changed. Try again.");
       }
     }
     if (url.pathname === "/settings/appearance") {
@@ -12371,7 +12484,7 @@ button.pick-file { min-height: 1.75rem; padding: 0 .55rem; font-size: .75rem; }
 
 /** Appearance: a three-way segmented switch, one tap per choice. */
 const THEME_CONTROLS_CSS = `.task-repo select{width:100%;min-height:2.75rem;font-size:1rem}.task-repo-add{margin:.35rem .1rem .5rem}.task-repo-add a{display:inline-flex;align-items:center;min-height:2.25rem}details.result-request-open.result-request-form>summary{border:0;background:transparent;padding:.5rem 0;min-height:2.75rem;font-weight:600;display:list-item;list-style:revert}details.result-request-open.result-request-form>summary::-webkit-details-marker{display:revert}form.js-autosave button[type=submit]{display:none}.provider-row{border-bottom:1px solid var(--so-line);padding:.35rem 0}.provider-row:first-of-type{border-top:1px solid var(--so-line)}.provider-head{display:flex;align-items:center;gap:.75rem;margin:.4rem 0 0}.provider-status{display:inline-flex;align-items:center;gap:.4rem;color:var(--so-muted);font-size:.875rem}.provider-status i{width:.5rem;height:.5rem;border-radius:50%;background:var(--so-muted)}.provider-status--ok i{background:var(--so-success)}.provider-status--warn i{background:var(--so-attention)}.provider-status--off i{background:transparent;border:1.5px solid var(--so-muted)}details.provider-manage>summary{cursor:pointer;color:var(--so-accent-text);font-size:.875rem;min-height:2.5rem;display:list-item;padding-block:.5rem}.card.props .row{display:grid;gap:.1rem;margin:0 0 .75rem}.card.props .row>.meta{display:block;font-size:.75rem}.card.props .row>.meta::first-letter{text-transform:uppercase}.card.props .row>.mono{font-family:var(--font-sans);font-size:.875rem}.card.props .row>.mono .seal{font-family:var(--font-mono);font-size:.8125rem}details.evidence-files{margin:1rem 0}details.evidence-files>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:600}details.evidence-files ul{list-style:none;margin:0;padding:0}details.evidence-files li{display:flex;justify-content:space-between;gap:1rem;padding:.5rem 0;border-bottom:1px solid var(--so-line)}.result-action .result-feedback-link{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;text-decoration:none}.result-action .result-feedback-link:hover{background:var(--so-raised)}.so-sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}.verdict{margin:.5rem 0 .75rem}.verdict-chips{display:flex;flex-wrap:wrap;gap:.4rem;list-style:none;padding:0;margin:0}.verdict-chip{display:inline-flex;align-items:center;gap:.3rem;min-height:1.75rem;padding:.2rem .65rem;border-radius:999px;font-size:.8125rem;font-weight:600;background:var(--so-neutral-soft);color:var(--so-neutral-ink)}.verdict-chip svg{width:.9rem;height:.9rem}.verdict-chip--success{background:var(--so-success-soft);color:var(--so-success)}.verdict-chip--danger{background:var(--so-danger-soft);color:var(--so-danger)}.verdict-chip--warning{background:var(--so-warning-soft);color:var(--so-warning)}.verdict-chip--info{background:var(--so-info-soft);color:var(--so-info)}.verdict-by{margin:.4rem 0 0}details.result-request-open{margin:.5rem 0}details.result-request-open>summary{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;cursor:pointer;list-style:none}details.result-request-open>summary::-webkit-details-marker{display:none}details.result-request-open[open]>summary{margin-bottom:.75rem}.settings-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(8.5rem,1fr));gap:.5rem;margin:0 0 2rem}.settings-tiles a{display:flex;align-items:center;gap:.6rem;min-height:3rem;padding:.65rem .8rem;border:1px solid var(--so-line);border-radius:.625rem;background:var(--so-paper);color:var(--so-ink);text-decoration:none;font-weight:550;font-size:.875rem}.settings-tiles a:hover{border-color:var(--so-input-line);background:var(--so-raised)}.settings-tiles svg{width:1.1rem;height:1.1rem;flex-shrink:0;color:var(--so-accent-text)}details.settings-more{margin:.25rem 0 1.25rem}details.settings-more>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:550}details.settings-more>summary .meta{font-weight:400;margin-left:.35rem}.settings-changed{margin-top:-.25rem}.appearance{margin:0 0 28px}.appearance h2{margin:0 0 10px}.theme-switch{display:inline-flex;flex-wrap:nowrap;max-width:100%;gap:4px;padding:4px;margin:0;border:1px solid var(--so-line);border-radius:10px;background:var(--so-raised)}.theme-switch .theme-choice,.so-native-region .theme-switch .theme-choice{flex:1 1 0;width:auto;white-space:nowrap;min-height:40px;padding:8px 16px;border:0;border-radius:7px;background:transparent;color:var(--so-muted);font:inherit;font-weight:550;box-shadow:none;cursor:pointer}.theme-switch .theme-choice:hover{color:var(--so-ink)}.theme-switch .theme-choice[aria-pressed="true"]{background:var(--so-paper);color:var(--so-ink);box-shadow:0 1px 2px rgb(0 0 0 / .1)}.appearance .meta{margin:8px 0 0}@media(max-width:600px){.theme-switch .theme-choice{min-height:44px}}`;
-const WORKSPACE_STYLE = styleAsset(STYLE + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
+const WORKSPACE_STYLE = styleAsset(STYLE + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
@@ -21822,6 +21935,7 @@ function settingsTiles(): string {
 const SETTINGS_TILE_ICONS: [string, string, string][] = [
     ["/settings/models", "Models", `<rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/>`],
     ["/settings/skills", "Skills", `<path d="m12 3 1.9 5.8L20 10l-5 3.6L16.8 20 12 16.4 7.2 20 9 13.6 4 10l6.1-1.2z"/>`],
+    ["/settings/tools", "Tools", `<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>`],
     ["/settings/knowledge", "Knowledge", `<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5z"/><path d="M4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5"/>`],
     ["/settings/telegram", "Telegram", `<path d="m22 2-7 20-4-9-9-4z"/><path d="M22 2 11 13"/>`],
     ["/settings/slack", "Slack", `<path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/>`],
