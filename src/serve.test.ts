@@ -8983,6 +8983,40 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(choosing.view).toMatchObject({ kind: 'projects', choosing: true, returnTo: '/tasks/new' });
   });
 
+  test('v77: task and project pages dock their own threads, and the chat list names them', async () => {
+    const cookie = await login(); const csrf = await mint(cookie);
+    type Workspace = import('./browser-workspace.js').BrowserWorkspace;
+    // The task page docks task a's own conversation beside its view, and
+    // drops its own Ask tab (the panel is the Ask view).
+    const taskRead = await (await fetch(url('/t/a?format=workspace'), { headers: { cookie } })).json() as Workspace;
+    expect(taskRead.view?.kind).toBe('task');
+    expect(taskRead.conversation).toMatchObject({ taskId: 'a', messages: [] });
+    expect((taskRead.view as import('./browser-workspace.js').BrowserTaskView).tabs).toEqual([]);
+    // A project message lands in the project's thread, not the lead's.
+    script.push(() => answer([{ type: 'text', text: 'Two tasks are queued here.' }]));
+    const sent = await sendJson(cookie, { csrf, project: repoDir, message: 'What is queued?', request: 'a'.repeat(32), 'request-session': '1' });
+    expect(sent.status).toBe(202);
+    expect(await sent.json()).toMatchObject({ ok: true, project: repoDir });
+    await settle();
+    const projectThread = store.liveMateThreadFor('alex', { kind: 'project', key: repoDir })!;
+    expect(store.listMateMessages(projectThread.id, 10).map(one => one.text)).toEqual(['What is queued?', 'Two tasks are queued here.']);
+    const lead = store.liveMateThreadFor('alex');
+    expect(lead === null ? [] : store.listMateMessages(lead.id, 10)).toEqual([]);
+    // The project's Tasks page docks it, and the chat list names it.
+    const projectRead = await (await fetch(url(`/work?project=${encodeURIComponent(repoDir)}&format=workspace`), { headers: { cookie } })).json() as Workspace;
+    expect(projectRead.view?.kind).toBe('tasks');
+    expect(projectRead.conversation).toMatchObject({ project: repoDir, taskId: null });
+    expect(projectRead.conversation!.messages.map(one => one.text)).toEqual(['What is queued?', 'Two tasks are queued here.']);
+    expect(projectRead.chats).toEqual([expect.objectContaining({ kind: 'project', href: `/chat?project=${encodeURIComponent(repoDir)}`, active: false })]);
+    // The project's own chat page speaks in the same thread.
+    const projectChat = await (await fetch(url(`/chat?project=${encodeURIComponent(repoDir)}&format=workspace`), { headers: { cookie } })).json() as Workspace;
+    expect(projectChat.conversation!.messages).toHaveLength(2);
+    expect(projectChat.chats![0]).toMatchObject({ active: true });
+    // A project outside this console is refused, on the page and on send.
+    expect((await fetch(url('/chat?project=%2Fnot%2Fhere'), { headers: { cookie }, redirect: 'manual' })).status).toBe(404);
+    expect((await sendJson(cookie, { csrf, project: '/not/here', message: 'Hi', request: 'b'.repeat(32), 'request-session': '1' })).status).toBe(404);
+  });
+
   test('React task page frames the same parts as the HTML fallback', async () => {
     const cookie = await login();
     const response = await fetch(url('/t/a?format=workspace'), { headers: { cookie } });
@@ -9919,7 +9953,9 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(lensFragments["live"]).toContain('data-primary-action>Review plan</a>');
     expect(lensFragments["live"]).not.toContain('type="password"');
     expect(lensFragments["live"]).not.toContain('name="nonce"');
-    expect(lensFragments["thread"]).toContain('data-key="m1"');
+    // The task keeps its own thread (v77): the lead conversation's message
+    // is not in it.
+    expect(lensFragments["thread"]).not.toContain('data-key="m1"');
     expect(focusedVersion).not.toBe(String(answered["version"]));
     // Another lens answers with ITS task; an unavailable one says so.
     expect(await status(cookie, "?task=b&version=x")).toMatchObject({ task: "b" });
@@ -10003,11 +10039,12 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(store.recentMateTurns("alex", 10)).toHaveLength(2);
     expect(subscriptionRequests).toHaveLength(2);
     expect(await (await fetch(url("/chat?task=b"), { headers: { cookie } })).text()).toContain("different text or task context");
-    // The unified page shows both messages once, in order; each lens's page
-    // is the same thread with its own binding.
+    // Each task keeps its own thread (v77): the lead conversation shows
+    // neither message, and each lens's page shows only its own.
     const unified = await page(cookie);
-    expect(unified.match(/data-message-role="operator"/g)).toHaveLength(2);
+    expect(unified.match(/data-message-role="operator"/g)).toBeNull();
     expect(unified).toContain('data-chat-task=""');
+    for (const lens of ["a", "b"]) expect((await (await fetch(url(`/chat?task=${lens}`), { headers: { cookie } })).text()).match(/data-message-role="operator"/g)).toHaveLength(1);
   });
 
   test("package 2: changed terms during password entry — the stale form is refused by the server, the status names the new digest, and the fresh page's form approves", async () => {
@@ -12294,7 +12331,8 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     if (!verified.ok) throw new Error(verified.reason);
     store.setChatConfig({ provider: "claude-subscription", model: "opus", dailyTurns: 50, weeklyCeilingMicrousd: 0, priceInMicrousd: 0, priceOutMicrousd: 0 }, "alex", now);
     const session = store.mintMateSession({ approver: "alex", approverGeneration: verified.who.generation, credentialKey: subscriptionCredentialKey("claude-subscription"), ceilingMicrousd: 0, ceilingDigest: verified.who.ceilingDigest, termsDigest: "fixture" }, now);
-    const thread = store.openMateThread("alex", verified.who.ceilingDigest, now).thread;
+    // Messages about a task speak in that task's own thread (v77).
+    const thread = store.openMateThread("alex", verified.who.ceilingDigest, now, { kind: "task", key: root }).thread;
     const answers: MateProviderAnswer[] = [];
     const contexts: string[] = [];
     const tool = (name: string, args: Record<string, unknown>): MateProviderAnswer => ({ text: "", calls: [{ id: name, name, args }], tokensIn: 1, tokensOut: 1, reportedCostMicrousd: null });

@@ -107,7 +107,8 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // below v64 refuse it.
 // v65 adds immutable skill packages, project selections, run snapshots and skill tests.
 // v76 adds the live model catalog, CLI version checks and the model watch.
-export const SCHEMA_VERSION = 76;
+// v77 gives lead threads a scope: the lead conversation, a project, or a task.
+export const SCHEMA_VERSION = 77;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -413,7 +414,13 @@ export type MateSession = {
   endedBy: string | null;
 };
 
-export type MateThread = { id: number; approver: string; ceilingDigest: string; openedAt: string; lastTurnAt: string | null; closedAt: string | null };
+/** What one lead thread is about (v77): the lead conversation across every
+ * project, one project, or one task (keyed by its root id). */
+export type MateThreadScope = { kind: "lead" } | { kind: "project"; key: string } | { kind: "task"; key: string };
+export const LEAD_THREAD: MateThreadScope = { kind: "lead" };
+export type MateThread = { id: number; approver: string; ceilingDigest: string; openedAt: string; lastTurnAt: string | null; closedAt: string | null; scope: MateThreadScope };
+/** A thread as the chat list shows it: its scope and its latest message. */
+export type MateThreadSummary = MateThread & { lastMessageAt: string | null; lastMessage: string | null; messages: number };
 
 export type MateMessage = { id: number; thread: number; turn: number | null; role: "operator" | "assistant"; text: string; activity: string | null; createdAt: string };
 
@@ -2003,7 +2010,9 @@ CREATE TABLE IF NOT EXISTS mate_thread (
   ceiling_digest TEXT NOT NULL,
   opened_at      TEXT NOT NULL,
   last_turn_at   TEXT,
-  closed_at      TEXT
+  closed_at      TEXT,
+  scope_kind     TEXT NOT NULL DEFAULT 'lead' CHECK (scope_kind IN ('lead','project','task')),
+  scope_key      TEXT
 );
 CREATE INDEX IF NOT EXISTS mate_thread_live ON mate_thread (approver, closed_at);
 
@@ -4383,6 +4392,10 @@ function migrate(db: Database, origin: number | null): void {
   addColumn(db, "notification", "claim_owner", "TEXT");
   addColumn(db, "notification", "claim_expires_at", "TEXT");
   addColumn(db, "approver", "generation", "INTEGER NOT NULL DEFAULT 1");
+  // v77: a lead thread belongs to the lead conversation, a project or a task.
+  addColumn(db, "mate_thread", "scope_kind", "TEXT NOT NULL DEFAULT 'lead' CHECK (scope_kind IN ('lead','project','task'))");
+  addColumn(db, "mate_thread", "scope_key", "TEXT");
+  db.exec("CREATE INDEX IF NOT EXISTS mate_thread_scope ON mate_thread (approver, scope_kind, scope_key, closed_at)");
   // v4 additive: failure strikes and the watch incarnation a claim was
   // dispatched under.
   addColumn(db, "task_ref", "strikes", "INTEGER NOT NULL DEFAULT 0");
@@ -20276,11 +20289,13 @@ export class Store {
     return Number(changed.changes);
   }
 
-  /** The live thread for this approver under THIS ceiling; a thread under
-   * another ceiling is closed first (ruling 9) — the surface says why. */
-  openMateThread(approver: string, ceilingDigest: string, now: Date): { thread: MateThread; ceilingChanged: boolean } {
+  /** The live thread for this approver and scope under THIS ceiling; a
+   * thread under another ceiling is closed first (ruling 9) — the surface
+   * says why. The lead conversation is the default scope. */
+  openMateThread(approver: string, ceilingDigest: string, now: Date, scope: MateThreadScope = LEAD_THREAD): { thread: MateThread; ceilingChanged: boolean } {
+    const key = scope.kind === "lead" ? null : scope.key;
     return this.transact(() => {
-      const live = this.db.prepare("SELECT * FROM mate_thread WHERE approver = ? AND closed_at IS NULL AND NOT EXISTS (SELECT 1 FROM team_conversation tc WHERE tc.thread=mate_thread.id) ORDER BY id DESC LIMIT 1").get(approver);
+      const live = this.db.prepare("SELECT * FROM mate_thread WHERE approver = ? AND scope_kind = ? AND scope_key IS ? AND closed_at IS NULL AND NOT EXISTS (SELECT 1 FROM team_conversation tc WHERE tc.thread=mate_thread.id) ORDER BY id DESC LIMIT 1").get(approver, scope.kind, key);
       let ceilingChanged = false;
       if (live !== undefined && String(live["ceiling_digest"]) !== ceilingDigest) {
         this.db.prepare("UPDATE mate_thread SET closed_at = ? WHERE id = ?").run(now.toISOString(), Number(live["id"]));
@@ -20292,17 +20307,32 @@ export class Store {
         return { thread: readMateThread(live), ceilingChanged: false };
       }
       const inserted = this.db
-        .prepare("INSERT INTO mate_thread (approver, ceiling_digest, opened_at) VALUES (?, ?, ?)")
-        .run(approver, ceilingDigest, now.toISOString());
+        .prepare("INSERT INTO mate_thread (approver, ceiling_digest, opened_at, scope_kind, scope_key) VALUES (?, ?, ?, ?, ?)")
+        .run(approver, ceilingDigest, now.toISOString(), scope.kind, key);
       const row = this.db.prepare("SELECT * FROM mate_thread WHERE id = ?").get(Number(inserted.lastInsertRowid));
       return { thread: readMateThread(row as Record<string, unknown>), ceilingChanged };
     });
   }
 
-  /** The approver's live thread, read only — null when none is open. */
-  liveMateThreadFor(approver: string): MateThread | null {
-    const row = this.db.prepare("SELECT * FROM mate_thread WHERE approver = ? AND closed_at IS NULL AND NOT EXISTS (SELECT 1 FROM team_conversation tc WHERE tc.thread=mate_thread.id) ORDER BY id DESC LIMIT 1").get(approver);
+  /** The approver's live thread for one scope, read only — null when none is open. */
+  liveMateThreadFor(approver: string, scope: MateThreadScope = LEAD_THREAD): MateThread | null {
+    const row = this.db.prepare("SELECT * FROM mate_thread WHERE approver = ? AND scope_kind = ? AND scope_key IS ? AND closed_at IS NULL AND NOT EXISTS (SELECT 1 FROM team_conversation tc WHERE tc.thread=mate_thread.id) ORDER BY id DESC LIMIT 1").get(approver, scope.kind, scope.kind === "lead" ? null : scope.key);
     return row === undefined ? null : readMateThread(row);
+  }
+
+  /** The approver's live personal threads that have messages, most recent
+   * first — the chat list. Team conversations list themselves. */
+  listMateThreads(approver: string, limit = 30): MateThreadSummary[] {
+    const rows = this.db.prepare(
+      `SELECT t.*, (SELECT MAX(m.created_at) FROM mate_message m WHERE m.thread = t.id) AS last_message_at,
+         (SELECT m.text FROM mate_message m WHERE m.thread = t.id ORDER BY m.id DESC LIMIT 1) AS last_message,
+         (SELECT COUNT(*) FROM mate_message m WHERE m.thread = t.id) AS messages
+       FROM mate_thread t
+       WHERE t.approver = ? AND t.closed_at IS NULL AND NOT EXISTS (SELECT 1 FROM team_conversation tc WHERE tc.thread = t.id)
+         AND EXISTS (SELECT 1 FROM mate_message m WHERE m.thread = t.id)
+       ORDER BY last_message_at DESC, t.id DESC LIMIT ?`,
+    ).all(approver, Math.max(1, Math.min(100, limit)));
+    return rows.map(row => ({ ...readMateThread(row), lastMessageAt: row["last_message_at"] === null ? null : String(row["last_message_at"]), lastMessage: row["last_message"] === null ? null : String(row["last_message"]), messages: Number(row["messages"]) }));
   }
 
   getMateThread(id: number): MateThread | null {
@@ -24190,7 +24220,12 @@ function readMateThread(row: Record<string, unknown>): MateThread {
     openedAt: String(row["opened_at"]),
     lastTurnAt: maybe("last_turn_at"),
     closedAt: maybe("closed_at"),
+    scope: scopeOfThread(maybe("scope_kind"), maybe("scope_key")),
   };
+}
+
+function scopeOfThread(kind: string | null, key: string | null): MateThreadScope {
+  return (kind === "project" || kind === "task") && key !== null ? { kind, key } : LEAD_THREAD;
 }
 
 function readCoordinatorProposal(row: Record<string, unknown>): CoordinatorProposal {
