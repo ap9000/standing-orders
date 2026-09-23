@@ -28,7 +28,8 @@ import { validateNote } from "./decision.js";
 import { isLifecycleNotification, isTelegramProgressNotification, TELEGRAM_HOLD_REASONS, type Store, type Decision, type Notification, type TelegramBinding, type TelegramDelivery } from "./store.js";
 import { telegramProgressCard, type ProgressEntity } from "./telegram-progress.js";
 import { applyTeamInbound, deliverTeamChats, teamCommand } from "./telegram-team.js";
-import { phoneCommand, phoneStatus, phoneTaskView, PHONE_CONSOLE_FOOTER, PHONE_HELP, notificationIdentity } from "./telegram-status.js";
+import { focusContextFor, taskInCeiling } from "./chat-channel.js";
+import { phoneCommand, phoneStatus, phoneTaskView, PHONE_CONSOLE_FOOTER, PHONE_HELP, notificationIdentity, phoneTaskChoices, resolvePhoneTask, phoneFocusText, phoneTaskListText, phoneText, PHONE_NO_MATCH, PHONE_BACK_TO_LEAD, type PhoneTaskChoice } from "./telegram-status.js";
 import { MATE_MESSAGE_MAX_CHARS } from "./mate.js";
 import {
   applyProposalTap,
@@ -351,6 +352,14 @@ export type FollowReport = {
  * back off exponentially and are counted, not hidden; cancellation aborts
  * the in-flight long poll instead of waiting it out.
  */
+/** What Telegram lists when the person taps "/". */
+export const TELEGRAM_COMMANDS = [
+  { command: "tasks", description: "Pick a task to talk about" },
+  { command: "status", description: "Recent work across your projects" },
+  { command: "lead", description: "Back to the lead" },
+  { command: "help", description: "What you can do here" },
+];
+
 export async function followBridge(
   store: Store,
   options: {
@@ -392,6 +401,7 @@ export async function followBridge(
       }));
 
   const total: FollowReport = { cycles: 0, sent: 0, answered: 0, paired: 0, ignored: 0, problems: [] };
+  let commandsListed = false;
   let failures = 0;
   // Queued turns run BESIDE the poll, never inside a cycle: a long model
   // turn must not stall the long poll, and each cycle's lease re-acquire is
@@ -423,6 +433,12 @@ export async function followBridge(
         continue;
       }
 
+      // The "/" menu in Telegram, once, by the poller that holds the lease:
+      // the picker first. Best effort; typed commands work either way.
+      if (!commandsListed && options.conversation !== undefined) {
+        commandsListed = true;
+        try { await transport("setMyCommands", { commands: TELEGRAM_COMMANDS }); } catch { /* typed commands still work */ }
+      }
       const startedAt = Date.now();
       const report: BridgeReport = { sent: 0, answered: 0, paired: 0, ignored: 0, backlog: false, problems: [] };
       if (options.deliver !== false) {
@@ -1060,7 +1076,8 @@ async function projectsForTap(context: Context, update: Update): Promise<readonl
   if (
     binding === null || callback.from === undefined ||
     callback.message?.chat === undefined ||
-    context.store.getTelegramProposalAction(callback.data ?? "") === null
+    // Proposal cards and task picks read the chat's project ceiling.
+    (context.store.getTelegramProposalAction(callback.data ?? "") === null && !(callback.data ?? "").startsWith("pick:"))
   ) return null;
   const chat = callback.message.chat;
   const chatId = String(chat.id);
@@ -1243,6 +1260,15 @@ function applyConversation(context: Context, update: Update, effects: Effect[]):
       context_ = replyContextFor(taskId, sourceRun);
     }
   }
+  // No reply target: the task this chat chose to talk about, if any. The
+  // turn re-proves it; a task no longer in reach reads as a plain message.
+  if (taskId === null) {
+    const focused = store.chatFocus("telegram", binding.id);
+    if (focused !== null) {
+      taskId = focused;
+      context_ = focusContextFor(focused);
+    }
+  }
   store.enqueueTelegramConversation(
     {
       binding, updateId: update.update_id, messageId: String(message.message_id), replyTo,
@@ -1251,6 +1277,25 @@ function applyConversation(context: Context, update: Update, effects: Effect[]):
     clock(),
   );
   report.chatQueued = (report.chatQueued ?? 0) + 1;
+}
+
+/** The picker's buttons: one task per row (its title and where it stands),
+ * carried by the task's numeric reference so the data fits Telegram's 64
+ * bytes; a tap re-proves the task against the ceiling. */
+function pickKeyboard(store: Store, choices: readonly PhoneTaskChoice[], focused: boolean): InlineButton[][] {
+  const rows: InlineButton[][] = [];
+  for (const one of choices) {
+    const ref = store.lookupRef(one.id);
+    if (ref !== null) rows.push([{ text: `${one.title} · ${one.label}`.slice(0, 60), callback_data: `pick:${ref.id}` }]);
+  }
+  if (focused) rows.push([{ text: "Back to the lead", callback_data: "pick:lead" }]);
+  return rows;
+}
+
+/** The title of the task this Telegram chat chose to talk about, if any. */
+function focusedTitle(store: Store, binding: TelegramBinding): { id: string; title: string } | null {
+  const id = store.chatFocus("telegram", binding.id);
+  return id === null ? null : { id, title: phoneText(store.getTask(id)?.title ?? id, 64) };
 }
 
 function applyPhoneRead(context: Context, update: Update, effects: Effect[]): boolean {
@@ -1281,7 +1326,12 @@ function applyPhoneRead(context: Context, update: Update, effects: Effect[]): bo
     // `/task` may carry ONE url button to the exact recorded task or result:
     // minted from the trusted origin read now, never persisted, never a token.
     let button: InlineButton[] | null = null;
-    if (command.kind !== "help") {
+    // `/tasks` and an ambiguous `/task <name>` offer tasks as buttons.
+    let keyboard: InlineButton[][] | null = null;
+    if (command.kind === "lead") {
+      store.setChatFocus("telegram", binding.id, null, clock());
+      response = PHONE_BACK_TO_LEAD;
+    } else if (command.kind !== "help") {
       try {
         // The registry, then — after the await — the pairing again and the
         // account's OWN ceiling over it: a project this approver was never
@@ -1289,12 +1339,25 @@ function applyPhoneRead(context: Context, update: Update, effects: Effect[]): bo
         const registry = await context.readProjects?.() ?? [];
         if (!stillPaired()) return;
         const repos = telegramConversationRepos(store, binding.approver, registry);
-        if (command.kind === "status") response = phoneStatus(store, repos, clock());
-        else {
-          const view = phoneTaskView(store, repos, command.id, clock());
-          button = phoneLinkButton(context.conversation?.phoneOrigin?.() ?? null, view.link);
-          // A destination with no trusted origin to carry it: the words say where instead.
-          response = button === null && view.link !== null ? `${view.text}\n\n${PHONE_CONSOLE_FOOTER}` : view.text;
+        const focused = focusedTitle(store, binding);
+        if (command.kind === "status") response = phoneStatus(store, repos, clock(), focused?.title ?? null);
+        else if (command.kind === "tasks") {
+          const choices = phoneTaskChoices(store, repos, clock());
+          response = choices.length === 0 ? phoneTaskListText([], null) : `${focused === null ? "" : `Talking about: ${focused.title}\n\n`}Pick a task to talk about:`;
+          if (choices.length > 0) keyboard = pickKeyboard(store, choices, focused !== null);
+        } else {
+          const pick = resolvePhoneTask(store, repos, clock(), command.id);
+          if (pick.kind === "many") {
+            response = "Several tasks match. Pick one:";
+            keyboard = pickKeyboard(store, pick.choices, false);
+          } else if (pick.kind === "none") response = PHONE_NO_MATCH;
+          else {
+            store.setChatFocus("telegram", binding.id, pick.id, clock());
+            const view = phoneTaskView(store, repos, pick.view, clock());
+            button = phoneLinkButton(context.conversation?.phoneOrigin?.() ?? null, view.link);
+            // A destination with no trusted origin to carry it: the words say where instead.
+            response = phoneFocusText(button === null && view.link !== null ? `${view.text}\n\n${PHONE_CONSOLE_FOOTER}` : view.text);
+          }
         }
       } catch {
         // No registry paths, SQLite errors, credentials, or stale snapshots
@@ -1315,7 +1378,7 @@ function applyPhoneRead(context: Context, update: Update, effects: Effect[]): bo
       text: response,
       reply_parameters: { message_id: message.message_id },
       link_preview_options: { is_disabled: true },
-      ...(button === null ? {} : { reply_markup: { inline_keyboard: [button] } }),
+      ...(keyboard !== null ? { reply_markup: { inline_keyboard: keyboard } } : button === null ? {} : { reply_markup: { inline_keyboard: [button] } }),
     });
     if (sent.ok) report.statusReplies = (report.statusReplies ?? 0) + 1;
     else report.problems.push(`phone status reply failed for update ${update.update_id}; send a new command to retry`);
@@ -1477,6 +1540,33 @@ function applyCallback(context: Context, update: Update, effects: Effect[]): voi
     return;
   }
 
+  // A task picked from /tasks: this private chat now talks about it (or,
+  // "Back to the lead", about everything again). The task is re-proved
+  // against the chat's ceiling at the tap.
+  if (token.startsWith("pick:")) {
+    if (tapChat !== binding.chatId) { report.ignored++; return; }
+    if (token === "pick:lead") {
+      store.setChatFocus("telegram", binding.id, null, clock());
+      ack("Back to the lead");
+      editText(PHONE_BACK_TO_LEAD);
+      return;
+    }
+    const refId = /^pick:([1-9][0-9]{0,14})$/.exec(token)?.[1];
+    const taskId = refId === undefined ? null : store.externalIdFor(Number(refId));
+    const repos = context.projects === null ? null : telegramConversationRepos(store, binding.approver, context.projects);
+    if (taskId === null || repos === null || !taskInCeiling(store, taskId, repos)) {
+      ack("That task isn't available here now.");
+      return;
+    }
+    const root = store.taskFamilyOf(taskId, repos, false)?.root ?? null;
+    const id = root?.id ?? taskId;
+    const title = phoneText(root?.title ?? store.getTask(taskId)?.title ?? taskId, 64);
+    store.setChatFocus("telegram", binding.id, id, clock());
+    ack(`Talking about: ${title}`.slice(0, 190));
+    const current = store.taskFamilyOf(taskId, repos, false)?.current.id ?? id;
+    editText(phoneFocusText(phoneTaskView(store, repos, current, clock()).text), [[{ text: "Back to the lead", callback_data: "pick:lead" }]]);
+    return;
+  }
   const action = store.getTelegramAction(token);
   if (action === null && context.conversation !== undefined && store.getTelegramProposalAction(token) !== null) {
     // A proposal card's button: the shared confirm door, inside this

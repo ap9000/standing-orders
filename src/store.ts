@@ -108,7 +108,8 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // v65 adds immutable skill packages, project selections, run snapshots and skill tests.
 // v76 adds the live model catalog, CLI version checks and the model watch.
 // v77 gives lead threads a scope: the lead conversation, a project, or a task.
-export const SCHEMA_VERSION = 77;
+// v78 remembers the task a paired chat (Telegram, Slack, Discord, Teams) chose to talk about.
+export const SCHEMA_VERSION = 78;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -2026,6 +2027,17 @@ CREATE TABLE IF NOT EXISTS mate_message (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS mate_message_thread ON mate_message (thread, id);
+
+-- v78: the task a paired chat chose to talk about (/tasks, /task <name>),
+-- per surface and binding; cleared by /lead. A choice, not an authority:
+-- every turn and tool still re-proves the task against the ceiling.
+CREATE TABLE IF NOT EXISTS chat_focus (
+  surface    TEXT NOT NULL,
+  binding    INTEGER NOT NULL,
+  task       TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (surface, binding)
+);
 
 CREATE TABLE IF NOT EXISTS mate_proposal (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -20318,6 +20330,17 @@ export class Store {
   liveMateThreadFor(approver: string, scope: MateThreadScope = LEAD_THREAD): MateThread | null {
     const row = this.db.prepare("SELECT * FROM mate_thread WHERE approver = ? AND scope_kind = ? AND scope_key IS ? AND closed_at IS NULL AND NOT EXISTS (SELECT 1 FROM team_conversation tc WHERE tc.thread=mate_thread.id) ORDER BY id DESC LIMIT 1").get(approver, scope.kind, scope.kind === "lead" ? null : scope.key);
     return row === undefined ? null : readMateThread(row);
+  }
+
+  /** The task a paired chat is talking about (v78), or null for the lead conversation. */
+  chatFocus(surface: string, binding: number): string | null {
+    const row = this.db.prepare("SELECT task FROM chat_focus WHERE surface = ? AND binding = ?").get(surface, binding);
+    return row === undefined ? null : String(row["task"]);
+  }
+
+  setChatFocus(surface: string, binding: number, task: string | null, now: Date): void {
+    if (task === null) this.db.prepare("DELETE FROM chat_focus WHERE surface = ? AND binding = ?").run(surface, binding);
+    else this.db.prepare("INSERT INTO chat_focus (surface, binding, task, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT (surface, binding) DO UPDATE SET task = excluded.task, updated_at = excluded.updated_at").run(surface, binding, task, now.toISOString());
   }
 
   /** The approver's live personal threads that have messages, most recent

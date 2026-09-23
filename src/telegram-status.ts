@@ -6,7 +6,7 @@ import { diagnoseTaskDispatch, withDispatchDiagnoses, type DispatchDiagnosis } f
 import type { Notification, Store } from "./store.js";
 import { CHAT_CONTROLS, chatControlHref, chatResultHref, type ChatControl } from "./chat-controls.js";
 
-export type PhoneCommand = { kind: "status" } | { kind: "help" } | { kind: "task"; id: string };
+export type PhoneCommand = { kind: "status" } | { kind: "help" } | { kind: "task"; id: string } | { kind: "tasks" } | { kind: "lead" };
 
 export function phoneCommand(text: string): PhoneCommand | null {
   // Slash forms everywhere; the bare words too, because Slack and Discord
@@ -15,10 +15,15 @@ export function phoneCommand(text: string): PhoneCommand | null {
   const t = text.trim();
   if (/^\/?(?:help|start)$/i.test(t)) return { kind: "help" };
   if (/^\/?status$/i.test(t)) return { kind: "status" };
-  const task = /^\/?task\s+([A-Za-z0-9][A-Za-z0-9._-]{0,63})$/i.exec(t);
-  if (task !== null) return { kind: "task", id: task[1]! };
+  // The picker: /tasks (or /task alone) lists them to choose from; /lead
+  // goes back to the lead conversation.
+  if (/^\/?tasks?$/i.test(t)) return { kind: "tasks" };
+  if (/^\/?lead$/i.test(t)) return { kind: "lead" };
+  // An id, a number from the list, or words from the title.
+  const task = /^\/?task\s+([A-Za-z0-9][A-Za-z0-9 ._'-]{0,63})$/i.exec(t);
+  if (task !== null) return { kind: "task", id: task[1]!.trim() };
   // A mistyped slash command gets help, but arbitrary prose is not a command.
-  return /^\/(?:status|task|help|start)(?:\s|$)/i.test(t) ? { kind: "help" } : null;
+  return /^\/(?:status|tasks?|lead|help|start)(?:\s|$)/i.test(t) ? { kind: "help" } : null;
 }
 
 export const PHONE_HELP = [
@@ -27,7 +32,9 @@ export const PHONE_HELP = [
   "Send a message to talk with the same assistant as the console and the terminal. It proposes changes as cards; nothing changes until you tap Confirm.",
   "",
   "/status — recent work across your connected projects",
-  "/task <id> — status, checks, and the next step for one task",
+  "/tasks — pick a task to talk about; your messages are then about that task",
+  "/task <name, number or id> — the same, found by a word from its title",
+  "/lead — back to talking with the lead about everything",
   "/team — the team conversations you can talk in; /team <number> to talk there, /team off for your private assistant",
   "Ask about project memory in plain words: decisions, references and lessons are searched before the assistant answers, and a settled choice can be recorded from a card.",
   "/help — these commands",
@@ -79,11 +86,11 @@ function nextStep(d: DispatchDiagnosis): string {
 
 /** repos is the transport's explicit enrollment ceiling, never opened-project
  * history. This snapshot is intentionally bounded and advertises that bound. */
-export function phoneStatus(store: Store, repos: readonly string[], now: Date): string {
+export function phoneStatus(store: Store, repos: readonly string[], now: Date, focused: string | null = null): string {
   if (repos.length === 0) return "No connected projects are available to this bridge. Add a project in Standing Orders, then send /status again.";
   return store.transact(() => {
     const snapshot = withDispatchDiagnoses(store, store.chatSnapshot(repos, now), now);
-    const lines = ["Recent work", `As of ${now.toISOString().replace("T", " ").slice(0, 19)} UTC · ${repos.length} project(s)`, ""];
+    const lines = [...(focused === null ? [] : [`Talking about: ${focused} · /lead to switch back`, ""]), "Recent work", `As of ${now.toISOString().replace("T", " ").slice(0, 19)} UTC · ${repos.length} project(s)`, ""];
     if (snapshot.tasksSaturated) lines.push("Newest 60 tasks only — older work may still need attention.", "");
     if (snapshot.tasks.length === 0) lines.push("No tasks are recorded in these projects.");
     for (const group of ["Needs attention", "Working", "Waiting / next up", "Finished", "Cancelled"]) {
@@ -96,10 +103,83 @@ export function phoneStatus(store: Store, repos: readonly string[], now: Date): 
       if (rows.length > 2) lines.push(`  +${rows.length - 2} more in the console`);
       lines.push("");
     }
-    lines.push("Send /task <id> for the next step. Status is a snapshot, not a promise that the next attempt will succeed.");
+    lines.push("Send /tasks to pick one, or /task <name> for its next step. Status is a snapshot, not a promise that the next attempt will succeed.");
     return lines.join("\n");
   });
 }
+
+/** One task a person can pick to talk about from a chat app. */
+export type PhoneTaskChoice = { id: string; title: string; label: string; group: string };
+const PICK_GROUPS = ["Needs attention", "Working", "Waiting / next up", "Finished"];
+
+/** The tasks a paired chat can pick from: what needs the person first,
+ * then work in progress, waiting work and recent results; one entry per
+ * task (its revisions share it), optionally narrowed by words in the id or
+ * title. Bounded, within the chat's own project ceiling. */
+export function phoneTaskChoices(store: Store, repos: readonly string[], now: Date, query: string | null = null, limit = 8): PhoneTaskChoice[] {
+  if (repos.length === 0) return [];
+  return store.transact(() => {
+    const snapshot = withDispatchDiagnoses(store, store.chatSnapshot(repos, now), now);
+    const words = query === null ? [] : query.toLowerCase().split(/\s+/).filter(Boolean);
+    const rows = snapshot.tasks
+      .filter(one => one.dispatch !== null && one.dispatch !== undefined && PICK_GROUPS.includes(groupOf(one.dispatch)))
+      .sort((a, b) => PICK_GROUPS.indexOf(groupOf(a.dispatch!)) - PICK_GROUPS.indexOf(groupOf(b.dispatch!)) || a.ageHours - b.ageHours);
+    const seen = new Set<string>();
+    const choices: PhoneTaskChoice[] = [];
+    for (const row of rows) {
+      const id = row.rootId ?? row.id;
+      if (seen.has(id) || !words.every(word => `${id} ${row.title}`.toLowerCase().includes(word))) continue;
+      seen.add(id);
+      choices.push({ id, title: plain(row.title, 64), label: plain(row.dispatch!.summary, 48), group: groupOf(row.dispatch!) });
+      if (choices.length >= limit) break;
+    }
+    return choices;
+  });
+}
+
+/** `id` keys the chat's choice (the task's first version, where its chat
+ * lives); `view` is what to show: the exact version named, else the current one. */
+export type PhoneTaskPick = { kind: "one"; id: string; view: string; title: string } | { kind: "many"; choices: PhoneTaskChoice[] } | { kind: "none" };
+
+/** `/task <what>`: an exact task id, a number from the /tasks list, or
+ * words from a title — one match is chosen, several are offered. */
+export function resolvePhoneTask(store: Store, repos: readonly string[], now: Date, query: string): PhoneTaskPick {
+  const ref = store.lookupRef(query);
+  if (ref?.repo != null && repos.includes(ref.repo)) {
+    const root = store.taskFamilyOf(query, repos, false)?.root ?? null;
+    return { kind: "one", id: root?.id ?? query, view: query, title: plain(root?.title ?? store.getTask(query)?.title ?? query, 64) };
+  }
+  const chosen = (one: PhoneTaskChoice): PhoneTaskPick => ({ kind: "one", id: one.id, view: store.taskFamilyOf(one.id, repos, false)?.current.id ?? one.id, title: one.title });
+  if (/^\d{1,2}$/.test(query)) {
+    const pick = phoneTaskChoices(store, repos, now)[Number(query) - 1];
+    return pick === undefined ? { kind: "none" } : chosen(pick);
+  }
+  const matches = phoneTaskChoices(store, repos, now, query);
+  return matches.length === 0 ? { kind: "none" } : matches.length === 1 ? chosen(matches[0]!) : { kind: "many", choices: matches };
+}
+
+/** The picker as text, for chat apps without buttons. */
+export function phoneTaskListText(choices: readonly PhoneTaskChoice[], focused: string | null): string {
+  if (choices.length === 0) return "No open or recent tasks in your connected projects. Describe what you want done and the lead will draft one.";
+  return [
+    ...(focused === null ? [] : [`Talking about: ${focused}`, ""]),
+    "Your tasks",
+    ...choices.map((one, index) => `${index + 1}. ${one.title} — ${one.label}`),
+    "",
+    "Send /task <number or name> to talk about one. /lead goes back to the lead.",
+  ].join("\n");
+}
+
+/** Said under a task's status when a chat app chooses it. */
+export const PHONE_FOCUS_LINE = "Talking about this task now: ask anything or say what to change. /lead goes back to the lead.";
+
+/** A chosen task's status, then the line that says the chat now talks about it. */
+export function phoneFocusText(view: string): string {
+  return `${view}\n\n${PHONE_FOCUS_LINE}`;
+}
+
+export const PHONE_NO_MATCH = "No such task in your connected projects. Send /tasks to pick one.";
+export const PHONE_BACK_TO_LEAD = "Back to the lead. Your messages here are about all your work again.";
 
 /** A fixed console destination for one task, named beside its label; the origin joins it only on the wire. */
 export type PhoneTaskLink = { label: string; path: string };

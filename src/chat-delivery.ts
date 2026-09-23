@@ -8,6 +8,8 @@ import {
   confirmedCardText,
   replyContextFor,
   mirrorToTaskChat,
+  focusContextFor,
+  taskInCeiling,
   tooLongText,
 } from "./chat-channel.js";
 import { MATE_MESSAGE_MAX_CHARS, runMateTurn } from "./mate.js";
@@ -27,7 +29,7 @@ import {
   type ChatIdentity,
 } from "./chat-delivery-state.js";
 import { telegramProgressCard } from "./telegram-progress.js";
-import { phoneText, PHONE_HELP, phoneCommand, phoneStatus, phoneTaskView } from "./telegram-status.js";
+import { phoneText, PHONE_HELP, phoneCommand, phoneStatus, phoneTaskView, phoneTaskChoices, phoneTaskListText, resolvePhoneTask, phoneFocusText, PHONE_NO_MATCH, PHONE_BACK_TO_LEAD } from "./telegram-status.js";
 import { applyRoomInbound, conversationRow, roomCardApprover, roomCommand, roomGrantAllowed, roomMessagesAfter, roomMessageText, teamDomain } from "./chat-rooms.js";
 import { isTelegramProgressNotification, type Store } from "./store.js";
 import type { SubscriptionMateRunner } from "./subscription-chat.js";
@@ -181,11 +183,25 @@ export async function processChatEvent(
     const command = phoneCommand(text);
     if (command !== null) {
       const now_ = nowOf(options);
+      // The task this chat chose to talk about (/tasks, /task <name>), if any.
+      const surface = options.label.toLowerCase();
+      const focusedId = store.chatFocus(surface, binding.id);
+      const focusedTitle = focusedId === null ? null : phoneText(store.getTask(focusedId)?.title ?? focusedId, 64);
       if (command.kind === "help") state.plan(event.id, [{ text: PHONE_HELP }], now_);
-      else if (command.kind === "status") state.plan(event.id, [{ text: phoneStatus(store, repos, now_) }], now_);
-      else {
-        const view = phoneTaskView(store, repos, command.id, now_);
-        state.plan(event.id, [{ text: view.text, ...(view.link === null ? {} : { link: view.link }) }], now_);
+      else if (command.kind === "status") state.plan(event.id, [{ text: phoneStatus(store, repos, now_, focusedTitle) }], now_);
+      else if (command.kind === "tasks") state.plan(event.id, [{ text: phoneTaskListText(phoneTaskChoices(store, repos, now_), focusedTitle) }], now_);
+      else if (command.kind === "lead") {
+        store.setChatFocus(surface, binding.id, null, now_);
+        state.plan(event.id, [{ text: PHONE_BACK_TO_LEAD }], now_);
+      } else {
+        const pick = resolvePhoneTask(store, repos, now_, command.id);
+        if (pick.kind === "one") {
+          store.setChatFocus(surface, binding.id, pick.id, now_);
+          const view = phoneTaskView(store, repos, pick.view, now_);
+          state.plan(event.id, [{ text: phoneFocusText(view.text), ...(view.link === null ? {} : { link: view.link }) }], now_);
+        } else if (pick.kind === "many") {
+          state.plan(event.id, [{ text: ["Several tasks match. Add a word from the title, or send one of these:", ...pick.choices.map(one => `• ${one.title} — /task ${one.id}`)].join("\n") }], now_);
+        } else state.plan(event.id, [{ text: PHONE_NO_MATCH }], now_);
       }
       return true;
     }
@@ -300,7 +316,10 @@ export async function processChatEvent(
         );
         return true;
       }
-      const context = targets[0] ?? null;
+      // No reply target: the task this chat chose, when it still exists here.
+      const focused = targets.length === 0 ? store.chatFocus(options.label.toLowerCase(), binding.id) : null;
+      const focusTask = focused !== null && taskInCeiling(store, focused, repos) ? focused : null;
+      const context = targets[0] ?? (focusTask === null ? null : { text: "", task: focusTask, run: null });
       const outcome = await runMateTurn({
         store,
         who: resolved.who,
@@ -311,7 +330,7 @@ export async function processChatEvent(
         message: text,
         requestId: request,
         ...(context?.task
-          ? { context: replyContextFor(context.task, context.run ?? null) }
+          ? { context: focusTask !== null && targets.length === 0 ? focusContextFor(context.task) : replyContextFor(context.task, context.run ?? null) }
           : {}),
         ...(options.subscriptionRunner
           ? { subscriptionRunner: options.subscriptionRunner }
