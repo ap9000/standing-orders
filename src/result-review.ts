@@ -344,6 +344,12 @@ export const RESULT_REVIEW_SCRIPT = String.raw`
       review.querySelectorAll('button[data-diff-mode]').forEach(function(one){one.setAttribute('aria-pressed',String(one===mode));});
     });
   }
+  // The feedback form waits behind "Request changes"; anything that points
+  // at it (a line pin, the result's own link, a saved draft) opens it first.
+  var formShell=form?form.closest('details.result-request-open'):null;
+  function openForm(){if(formShell&&!formShell.open)formShell.open=true;}
+  if(formShell&&location.hash==='#request-changes')openForm();
+  document.addEventListener('click',function(ev){var link=ev.target&&ev.target.closest?ev.target.closest('a[href="#request-changes"]'):null;if(link)openForm();});
   if(form){
     var noteBox=form.querySelector('[name=note]'),pathBox=form.querySelector('[name=path]'),lineBox=form.querySelector('[name=line]'),pin=form.querySelector('details.result-pin');
     var limit=document.getElementById('comment-note-limit'),requestBox=form.querySelector('[name=request]');
@@ -366,6 +372,7 @@ export const RESULT_REVIEW_SCRIPT = String.raw`
       if(pathBox)pathBox.value=button.getAttribute('data-path')||'';
       if(lineBox)lineBox.value=button.getAttribute('data-line')||'';
       if(pin)pin.open=true;
+      openForm();
       save();
       form.scrollIntoView({behavior:window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth',block:'center'});if(noteBox){noteBox.dispatchEvent(new Event('input',{bubbles:true}));noteBox.focus();}
     });
@@ -389,11 +396,13 @@ export const RESULT_REVIEW_SCRIPT = String.raw`
     // fragment URL and move focus to the fragment's target on load, so the
     // just-posted form's note box is focused after that step.
     if(noted&&noteBox&&!noteBox.value){
+      openForm();
       var focusNote=function(){setTimeout(function(){noteBox.focus({preventScroll:true});},0);};
       if(document.readyState==='complete')focusNote();else window.addEventListener('load',focusNote);
     }
     if(saved&&typeof saved.note==='string'&&saved.note.length<=2000){
       if(noteBox&&!noteBox.value)noteBox.value=saved.note;
+      if(saved.note)openForm();
       if(pathBox&&!pathBox.value&&typeof saved.path==='string')pathBox.value=saved.path;
       if(lineBox&&!lineBox.value&&typeof saved.line==='string')lineBox.value=saved.line;
       if(pin&&(pathBox&&pathBox.value||lineBox&&lineBox.value))pin.open=true;

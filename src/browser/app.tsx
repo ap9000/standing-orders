@@ -29,7 +29,7 @@ function notifyWorkspaceRendered() {
   });
 }
 
-function Icon({ name }: { name: "menu" | "chat" | "tasks" | "projects" | "knowledge" | "settings" | "arrow" | "close" | "send" | "tools" }) {
+function Icon({ name }: { name: "menu" | "chat" | "tasks" | "projects" | "knowledge" | "settings" | "arrow" | "close" | "send" | "tools" | "plus" }) {
   const paths: Record<typeof name, ReactNode> = {
     menu: <path d="M4 6h16M4 12h16M4 18h16" />,
     chat: <path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6 3V6a2 2 0 0 1 2-2Z" />,
@@ -41,6 +41,7 @@ function Icon({ name }: { name: "menu" | "chat" | "tasks" | "projects" | "knowle
     close: <path d="m6 6 12 12M6 18 18 6" />,
     send: <path d="m12 19 0-14m-6 6 6-6 6 6" />,
     tools: <><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z" /></>,
+    plus: <path d="M12 5v14M5 12h14" />,
   };
   return <svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
 }
@@ -319,6 +320,7 @@ function Navigation({ workspace }: { workspace: BrowserWorkspace }) {
     || workspace.crew.find(task => task.id === workspace.focus?.id)?.project === project.path);
   return <div className="so-navigation-content">
     <a href="/chat" className="so-wordmark"><span className="so-brand-mark" aria-hidden="true"><i /><i /><i /></span>Standing Orders</a>
+    <a href="/tasks/new" className="so-new-task"><Icon name="plus" />New task</a>
     {workspace.projects.length > 0 && <div className="so-project-switch">
       <Label htmlFor={projectId}>Project</Label>
       <select id={projectId} value={currentProject?.href ?? "/work"} onChange={event => { window.location.assign(event.target.value); }}>

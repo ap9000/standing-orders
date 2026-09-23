@@ -83,6 +83,9 @@ body:has(.so-workspace) { margin: 0; padding: 0; background: var(--so-ground); o
 .so-brand-mark { width: 18px; height: 22px; display: flex; align-items: center; gap: 3px; transform: skewY(-10deg); }
 .so-brand-mark i { display: block; width: 4px; height: 15px; background: var(--so-accent); border-radius: 1px; }
 .so-brand-mark i:nth-child(2) { height: 22px; }
+.so-new-task { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 40px; margin: -12px 5px 22px; border-radius: 8px; background: var(--so-accent); color: var(--so-on-accent) !important; font-size: 13px; font-weight: 600; text-decoration: none; }
+.so-new-task:hover { background: var(--so-accent-hover); }
+.so-new-task svg { width: 16px; height: 16px; }
 .so-project-switch { padding: 0 5px; margin-bottom: 22px; }
 .so-project-switch .ui-label { color: var(--so-muted); font-size: 11px; }
 .so-project-switch select { width: 100%; min-height: 38px; border: 1px solid var(--so-input-line); border-radius: 7px; padding: 7px 23px 7px 9px; background: var(--so-paper); color: var(--so-ink); font-size: 12px; text-overflow: ellipsis; }
@@ -202,6 +205,8 @@ body:has(.so-workspace) { margin: 0; padding: 0; background: var(--so-ground); o
 .so-native-region :where(h1) { font-size: 25px; line-height: 1.25; letter-spacing: -.025em; margin-top: 0; }
 .so-native-region :where(h2) { font-size: 18px; line-height: 1.4; color: var(--so-ink); }
 .so-native-region :where(h3) { font-size: 15px; line-height: 1.45; }
+/* Sentence case everywhere in the workspace, without rewriting shared markup. */
+.so-native-region :where(h1, h2, h3, h4, legend)::first-letter { text-transform: uppercase; }
 .so-task-context #task-chat-live { margin-bottom: 0; }
 .so-task-context .chat-action-card { margin: 0 0 16px; }
 .so-native-region .sticky-actions { position: static; flex-wrap: wrap; }
@@ -257,6 +262,10 @@ body:has(.so-workspace) { margin: 0; padding: 0; background: var(--so-ground); o
   .ui-button--sm { min-height: 44px; }
   .so-native-region summary { min-height: 44px; padding-block: 11px; box-sizing: border-box; }
   .so-header-title { font-size: 16px; }
+  /* Standalone links get a thumb-sized target; inline links in prose stay inline. */
+  .so-native-region :where(a.work-title, .lead-brief > a, .team-entry a, .result-links a, .provider-connection a, p.meta > a:only-child) { display: inline-flex; align-items: center; min-height: 44px; }
+  .so-native-region :where(input[type="text"], input[type="password"], input[type="search"], input:not([type])) { min-height: 44px; }
+  .theme-switch .theme-choice { min-height: 44px; }
   .so-phone-work-button { margin-left: auto; flex-shrink: 0; }
   .so-command-trigger { margin-left: auto; min-height: 44px; }
   .so-command-hint { display: none; }
