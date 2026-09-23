@@ -23,6 +23,20 @@ export type BrowserCrewItem = {
 export type BrowserMessage = {
   id: number; role: 'operator' | 'assistant'; text: string; html: string;
   activity: string | null; createdAt: string; cardsHtml: string;
+  /** The same cards as data, confirmed in place (chat cards). */
+  cards?: BrowserActionCard[];
+};
+/** A card the lead proposed: what it would do (the server's own body) and
+ * the one act it offers. Confirming posts to the card's own door. */
+export type BrowserActionCard = {
+  id: number; kind: string; label: string;
+  state: 'drafting' | 'pending' | 'confirming' | 'confirmed' | 'refused' | 'dismissed' | 'expired';
+  body: string;
+  said: string | null;
+  links: BrowserLink[];
+  primary: { kind: 'confirm'; label: string; irreversible: boolean; native: boolean } | { kind: 'link'; label: string; href: string } | null;
+  dismissable: boolean;
+  note: string | null;
 };
 export type BrowserConversation = {
   sessionId: number; user: string; version: string; messages: BrowserMessage[];

@@ -1,7 +1,7 @@
 import { repositoryContext, repositoryContextRead } from './repository-context.js';
 import { repositoryContextHtml } from './repository-context-ui.js';
 import { browserAssetsAvailable, browserWorkspaceDocument, serveBrowserAsset, supportsBrowserWorkspace } from './browser-shell.js';
-import { browserCrewOf, browserCrewFromIndex, browserWorkActionHref, browserProjectsOf, browserNavigationOf, type BrowserWorkspace, type BrowserChatLink, type BrowserTasksView, type BrowserSettingsView, type BrowserTaskView, type BrowserTaskFact, type BrowserTaskSection, type BrowserProjectsView, type BrowserProjectRow, type BrowserResultChip, type BrowserResultPanel, type BrowserResultView } from './browser-workspace.js';
+import { browserCrewOf, browserCrewFromIndex, browserWorkActionHref, browserProjectsOf, browserNavigationOf, type BrowserWorkspace, type BrowserChatLink, type BrowserTasksView, type BrowserSettingsView, type BrowserTaskView, type BrowserTaskFact, type BrowserTaskSection, type BrowserProjectsView, type BrowserProjectRow, type BrowserResultChip, type BrowserResultPanel, type BrowserResultView, type BrowserActionCard } from './browser-workspace.js';
 import { configureLeadFollow, leadFollowStatus, runLeadFollowPass } from './lead-follow.js';
 import { startMaintenance } from './maintenance.js';
 import { codingHandoffPreview, createCodingHandoff } from './coding-handoff.js';
@@ -6637,12 +6637,24 @@ export function createDecisionServer(options: ServeOptions): Server {
           const proof=verifyApproverStanding(store,who.name,who.session.generation,access.conversation.projects); principal=proof.ok?proof.who:null;
         } catch { return refuse(response,who,404,'This proposal is unavailable.',back); }
       } else principal=matePrincipal(who);
-      if (principal === null) return refuse(response, who, 403, "your approver standing changed — sign in again", back);
+      // Confirm in place (chat cards): the same door and checks, answered in
+      // JSON so the conversation stays where it is; the card's refreshed
+      // state carries the result. The secure review screen stays a form.
+      const cardJson = String(request.headers["accept"] ?? "").includes("application/json") && !body.has("nonce");
+      const cardAnswer = (status: number, ok: boolean, said: string, taskId: string | null = null): void =>
+        respond(response, status, "application/json", JSON.stringify({ ok, said, taskId }));
+      if (principal === null) return cardJson ? cardAnswer(403, false, "Your approver standing changed. Sign in again.") : refuse(response, who, 403, "your approver standing changed — sign in again", back);
       if (mateProposal[2] === "dismiss") {
-        if (!dismissMateProposal(store, principal, id, now)) noteMate(who.session.csrf, null, "that proposal was already acted on");
+        const dismissed = dismissMateProposal(store, principal, id, now);
+        if (cardJson) return cardAnswer(dismissed ? 200 : 409, dismissed, dismissed ? "Dismissed." : "That card was already acted on.");
+        if (!dismissed) noteMate(who.session.csrf, null, "that proposal was already acted on");
         return redirect(response, chatReturnWithLatest(back));
       }
       const outcome = confirmMateProposal(store, principal, id, now, { confirm: body.get("confirm") === "yes", via: "web", evidenceRoot, held: options.attended?.coordinator, ...(body.has("nonce") ? {actionReview:{nonce:body.get("nonce")??"",password:body.get("token")??""}} : {}) });
+      if (cardJson) {
+        if (!outcome.ok) return cardAnswer(outcome.reason === "standing" ? 403 : outcome.reason === "not-yours" ? 404 : 409, false, outcome.said);
+        return cardAnswer(200, true, outcome.said, outcome.taskId);
+      }
       if (!outcome.ok && (outcome.reason === "not-yours" || outcome.reason === "standing")) {
         return refuse(response, who, outcome.reason === "standing" ? 403 : 404, outcome.said, back);
       }
@@ -14686,6 +14698,12 @@ type ProposalCardView = {
  * page itself uses (ruling 12).
  */
 function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, decision: Decision | null, returnTo: string | null = null): string {
+  return proposalCardParts(view, csrf, inert, decision, returnTo).html;
+}
+
+/** The card's HTML and, for the chat's confirm-in-place cards, the same
+ * card as data: the body is the HTML's own, the act is the same door. */
+function proposalCardParts(view: ProposalCardView, csrf: string, inert: boolean, decision: Decision | null, returnTo: string | null = null): { html: string; card: BrowserActionCard } {
   const payload = view.payload;
   const text = (key: string): string => (typeof payload[key] === "string" ? (payload[key] as string) : "");
   const task = text("task");
@@ -14751,9 +14769,13 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
     // link, not a proposal header that falsely reads as unfinished work.
     if (isChatControl(control) && view.state === "pending" && !inert) {
       const title = text("taskTitle");
-      return `<article class="card proposal proposal-control" data-card-kind="control">` +
-        (title === "" ? "" : `<div class="proposal-body"><h3>${escape(title)}</h3></div>`) +
-        `<footer class="proposal-actions"><a class="button-link" href="${escape(chatControlHref(control, task, payload["run"], payload["project"]))}" aria-label="${escape(title === "" ? label : `${label}: ${title}`)}">${escape(label)}</a></footer></article>`;
+      const href = chatControlHref(control, task, payload["run"], payload["project"]);
+      return {
+        html: `<article class="card proposal proposal-control" data-card-kind="control">` +
+          (title === "" ? "" : `<div class="proposal-body"><h3>${escape(title)}</h3></div>`) +
+          `<footer class="proposal-actions"><a class="button-link" href="${escape(href)}" aria-label="${escape(title === "" ? label : `${label}: ${title}`)}">${escape(label)}</a></footer></article>`,
+        card: { id: view.id, kind: view.kind, label: title === "" ? label : title, state: "pending", body: "", said: null, links: [], primary: { kind: "link", label, href }, dismissable: false, note: null },
+      };
     }
     what = `<h3>${escape(label)}</h3>${text("taskTitle") === "" ? "" : `<p>${escape(text("taskTitle"))}</p>`}`;
   } else if (view.kind === "review") {
@@ -14908,7 +14930,7 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
     acts = `<p class="meta">${escape(view.state)}</p>`;
   }
   const stateClass = view.state === "confirmed" ? "badge-done" : view.state === "refused" ? "badge-failed" : "";
-  return (
+  const html = (
     `<article class="card proposal proposal-${escape(view.kind)} ${escape(view.state)}" data-card-kind="${escape(view.kind)}">` +
     `<header class="proposal-head"><span class="proposal-icon">${strokeIcon(presentation.icon)}</span>` +
     `<span><strong>${escape(presentation.label)}</strong><small>proposed by ${provenance}</small></span>` +
@@ -14916,10 +14938,34 @@ function proposalCard(view: ProposalCardView, csrf: string, inert: boolean, deci
     `<div class="proposal-body">${what}</div>` +
     `<footer class="proposal-actions">${acts}</footer></article>`
   );
+  // The same card as data (chat cards): one act, in the door's own words.
+  const filedTask = outcome !== null && typeof outcome.taskId === "string" ? outcome.taskId : null;
+  const reviewAction = view.kind === "action" ? sharedActionPayload(payload) : null;
+  const sentence = (words: string): string => words.charAt(0).toUpperCase() + words.slice(1);
+  const pending = view.state === "pending" && !inert;
+  const primary: BrowserActionCard["primary"] = !pending ? null
+    : reviewAction !== null && sharedActionNeedsReview(reviewAction) ? { kind: "link", label: "Review action", href: sharedActionReviewPath(view.id) }
+    : view.kind === "control" ? (isChatControl(payload["control"]) ? { kind: "link", label: CHAT_CONTROLS[payload["control"]].label, href: chatControlHref(payload["control"], task, payload["run"], payload["project"]) } : null)
+    : view.kind === "cancel" ? { kind: "link", label: "Open task", href: taskHref(task) }
+    : { kind: "confirm", label: sentence(presentation.action), irreversible, native: view.kind === "task_action" && payload["operation"] === "resume" };
+  const card: BrowserActionCard = {
+    id: view.id, kind: view.kind, label: presentation.label, state: view.state as BrowserActionCard["state"], body: what,
+    said: view.state === "confirmed" || view.state === "refused" ? said : null,
+    links: view.state !== "confirmed" || filedTask === null ? [] : [{ label: view.kind === "task" ? "Open the new task" : "Open the task", href: taskHref(filedTask) }],
+    primary,
+    dismissable: pending && view.kind !== "control",
+    note: view.state === "pending" && inert ? "Available when the current reply finishes."
+      : pending && view.kind === "cancel" ? "Cancelling is confirmed on the task itself."
+      : view.state === "dismissed" ? "Dismissed." : view.state === "expired" ? "Expired — this conversation moved on." : null,
+  };
+  return { html, card };
 }
 
 function mateProposalCard(proposal: MateProposal, csrf: string, inert: boolean, decision: Decision | null, returnTo: string | null = null): string {
-  return proposalCard({ id: proposal.id, kind: proposal.kind, payload: proposal.payload, state: proposal.state, outcome: proposal.outcome, by: { mate: true }, actionBase: "/chat/proposal" }, csrf, inert, decision, returnTo);
+  return mateProposalCardParts(proposal, csrf, inert, decision, returnTo).html;
+}
+function mateProposalCardParts(proposal: MateProposal, csrf: string, inert: boolean, decision: Decision | null, returnTo: string | null = null): { html: string; card: BrowserActionCard } {
+  return proposalCardParts({ id: proposal.id, kind: proposal.kind, payload: proposal.payload, state: proposal.state, outcome: proposal.outcome, by: { mate: true }, actionBase: "/chat/proposal" }, csrf, inert, decision, returnTo);
 }
 
 function coordinatorProposalCard(proposal: CoordinatorProposal, csrf: string, now: Date, decision: Decision | null, returnTo: string | null = null): string {
@@ -14970,8 +15016,11 @@ function mateBrowserMessages(rows: Pick<MateThreadRows, "messages" | "proposals"
     id: message.id, role: message.role, text: message.text,
     html: message.role === 'operator' ? `<p>${escape(message.text)}</p>` : renderChatText(message.text),
     activity: message.activity, createdAt: message.createdAt,
-    cardsHtml: message.turn === null ? '' : rows.proposals.filter(one => one.turn === message.turn)
-      .map(one => mateProposalCard(one, csrf, rows.pending !== null, rows.decisions.get(typeof one.payload['decision'] === 'number' ? one.payload['decision'] : -1) ?? null, back)).join(''),
+    ...(() => {
+      const parts = message.turn === null ? [] : rows.proposals.filter(one => one.turn === message.turn)
+        .map(one => mateProposalCardParts(one, csrf, rows.pending !== null, rows.decisions.get(typeof one.payload['decision'] === 'number' ? one.payload['decision'] : -1) ?? null, back));
+      return { cardsHtml: parts.map(one => one.html).join(''), cards: parts.map(one => one.card) };
+    })(),
   }));
 }
 

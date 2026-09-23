@@ -12385,7 +12385,22 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     const saved = await send("Save this feedback: use shorter labels.");
     expect(contexts.some(one => one.includes(`viewing result #${run} from execution ${root}`))).toBe(true);
     expect(store.liveDiffComments(run)).toHaveLength(0);
-    expect((await post(cookie, `/chat/proposal/${saved.id}/confirm`, { csrf })).status).toBe(303);
+    // The card arrives as data too (chat cards): its label, one act, a dismiss.
+    const read2 = await (await fetch(url(`/t/${root}?format=workspace`), { headers: { cookie } })).json() as import("./browser-workspace.js").BrowserWorkspace;
+    const cards = read2.conversation!.messages.flatMap(one => one.cards ?? []);
+    expect(cards.find(one => one.id === saved.id)).toMatchObject({ kind: "review", label: "Note for later", state: "pending", primary: { kind: "confirm", label: "Save for later", irreversible: false, native: false }, dismissable: true, said: null });
+    // Confirmed in place: the same door, answered in JSON; the page stays.
+    const inPlace = await fetch(url(`/chat/proposal/${saved.id}/confirm`), { method: "POST", headers: { cookie, origin: base, accept: "application/json" }, body: new URLSearchParams({ csrf }), redirect: "manual" });
+    expect(inPlace.status).toBe(200);
+    expect(await inPlace.json()).toMatchObject({ ok: true, said: expect.any(String) });
+    const again = await fetch(url(`/chat/proposal/${saved.id}/confirm`), { method: "POST", headers: { cookie, origin: base, accept: "application/json" }, body: new URLSearchParams({ csrf }), redirect: "manual" });
+    expect(await again.json()).toMatchObject({ ok: false });
+    const late = await fetch(url(`/chat/proposal/${saved.id}/dismiss`), { method: "POST", headers: { cookie, origin: base, accept: "application/json" }, body: new URLSearchParams({ csrf }), redirect: "manual" });
+    expect(late.status).toBe(409);
+    expect(await late.json()).toEqual({ ok: false, said: "That card was already acted on.", taskId: null });
+    const after = (await (await fetch(url(`/t/${root}?format=workspace`), { headers: { cookie } })).json() as import("./browser-workspace.js").BrowserWorkspace)
+      .conversation!.messages.flatMap(one => one.cards ?? []).find(one => one.id === saved.id);
+    expect(after).toMatchObject({ state: "confirmed", primary: null, dismissable: false, links: [{ label: "Open the task" }] });
     const note = store.liveDiffComments(run)[0]!;
     expect(note).toMatchObject({ note: "Use shorter labels.", author: "alex" });
     for (const page of [`/chat?task=${root}&result=${run}`, `/r/${run}`, `/review?result=${root}`]) expect(await read(page)).toContain("Use shorter labels.");
