@@ -99,6 +99,11 @@ export type RunOptions = ProcessTreeObserver & {
   /** Rechecked at each actual spawn, including transient spawn retries. */
   beforeSpawn?: () => boolean;
   /**
+   * Live stdout for a process-group run, chunk by chunk as it arrives (the
+   * full buffer is still returned). A listener error never affects the run.
+   */
+  onStdout?: (chunk: string) => void;
+  /**
    * Called the moment the stream announces its session (codex:
    * thread.started), so a crash mid-turn cannot lose the id (M6.9 —
    * currently only the streaming transport can deliver this early).
@@ -613,6 +618,7 @@ export function run(file: string, args: readonly string[], options: RunOptions =
         ...(options.onSpawn === undefined ? {} : { onSpawn: options.onSpawn }),
         ...(options.owner === undefined ? {} : { owner: options.owner }),
         ...(options.beforeSpawn === undefined ? {} : { beforeSpawn: options.beforeSpawn }),
+        ...(options.onStdout === undefined ? {} : { onStdout: options.onStdout }),
         ...(options.onDescendant === undefined ? {} : { onDescendant: options.onDescendant }),
         ...(options.onDescendantWriteFailure === undefined ? {} : { onDescendantWriteFailure: options.onDescendantWriteFailure }),
         ...(options.onDescendantExit === undefined ? {} : { onDescendantExit: options.onDescendantExit }),
@@ -663,7 +669,7 @@ export function run(file: string, args: readonly string[], options: RunOptions =
 function runBufferedGroup(
   file: string,
   args: readonly string[],
-  bag: ProcessTreeObserver & { cwd?: string; stdin?: string; timeoutMs: number; maxBuffer: number; childEnv?: Record<string, string | undefined>; onSpawn?: (pid: number) => void; owner?: string; beforeSpawn?: () => boolean; onContainer?: RunOptions["onContainer"]; onContainerEmpty?: RunOptions["onContainerEmpty"] },
+  bag: ProcessTreeObserver & { cwd?: string; stdin?: string; timeoutMs: number; maxBuffer: number; childEnv?: Record<string, string | undefined>; onSpawn?: (pid: number) => void; owner?: string; beforeSpawn?: () => boolean; onContainer?: RunOptions["onContainer"]; onContainerEmpty?: RunOptions["onContainerEmpty"]; onStdout?: (chunk: string) => void },
 ): Promise<SpawnAttempt> {
   return new Promise(resolve => {
     let child!: ReturnType<typeof spawn>;
@@ -715,6 +721,7 @@ function runBufferedGroup(
         overflowed = true;
         killGroup(child);
       }
+      try { bag.onStdout?.(chunk); } catch { /* a listener never breaks the run */ }
     });
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (chunk: string) => {
