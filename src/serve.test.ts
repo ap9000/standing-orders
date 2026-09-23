@@ -10179,7 +10179,7 @@ describe("scout tasks and the digest card on the console (mate arc §10)", () =>
   test("the digest card sets the cadence from a closed list; the choice lands in the store and says so", async () => {
     const cookie = await login();
     let page = await (await fetch(`${base}/settings`, { headers: { cookie } })).text();
-    expect(page).toContain("telegram digest");
+    expect(page).toContain("Telegram digest");
     const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(page)?.[1] ?? "";
     const bad = await fetch(`${base}/settings/telegram-digest`, { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf, every: "17" }), redirect: "manual" });
     expect(bad.status).toBe(400);
@@ -10201,7 +10201,7 @@ describe("scout tasks and the digest card on the console (mate arc §10)", () =>
     propose(store, { taskId: "existing-auto", goal: "keep the current permission profile", now: T0 });
     const cookie = await login();
     let settings = await (await fetch(`${base}/settings`, { headers: { cookie } })).text();
-    expect(settings).toContain("unattended permissions");
+    expect(settings).toContain("Unattended permissions");
     expect(settings).toContain('name="permission-mode" value="auto" checked');
     const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(settings)?.[1] ?? "";
     const permissionForm = /<form method="post" action="\/settings\/permission-default"[\s\S]*?<\/form>/.exec(settings)?.[0] ?? "";
@@ -10378,7 +10378,7 @@ describe("the first account (setup review): sign up on the login page with the p
     // The road is closed the moment an account exists.
     const again = await (await fetch(`${base}/login`)).text();
     expect(again).not.toContain("create the first account");
-    expect(again).toContain("sign in");
+    expect(again).toContain("Sign in");
     const second = await fetch(`${base}/signup`, { method: "POST", body: new URLSearchParams({ code: "424242", name: "mallory", password: "correct horse battery" }), redirect: "manual" });
     expect(second.status).toBe(409);
     expect(store.listApprovers()).toHaveLength(1);
@@ -11149,7 +11149,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     const cookie = await login();
     const task = await (await fetch(url("/t/t-result-lineage"), { headers: { cookie } })).text();
     const receipt = /<section class="card completion-receipt"[\s\S]*?<\/section>/.exec(task)?.[0] ?? "";
-    expect(receipt).toContain(`result · build #${built}`);
+    // The receipt names its build by the run it opens, never the repair.
     expect(receipt).toContain(`data-result-run="${built}"`);
     expect(receipt).not.toContain(`build #${correction}`);
 

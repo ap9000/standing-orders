@@ -3631,6 +3631,11 @@ export function createDecisionServer(options: ServeOptions): Server {
         crew = extras.team?.tasks ? browserCrewFromIndex(extras.team.tasks, extras.team.selected?.id) : requestFacts.workCrew?.project === project ? browserCrewFromIndex(requestFacts.workCrew.page)
           : browserCrewOf(store, clock(), { principal: 'operator', repos: managedRepos(), includeUnplaced: false }, { evidenceRoot, project });
       } catch { notices.push('Crew updates are unavailable. Open Tasks to inspect saved work.'); }
+      // "Wake me only for these": the navigation carries the count of tasks
+      // waiting on a person across everything this person may see.
+      let needsYou = 0;
+      try { needsYou = (requestFacts.workCounts ?? workCountsByProject(store, clock(), workAccess())).reduce((sum, one) => sum + one.totals['needs-you'], 0); }
+      catch { needsYou = 0; }
       const conversation = extras.conversation ?? null;
       const request = requestFacts.workspaceRequest;
       const workspace: BrowserWorkspace = {
@@ -3642,7 +3647,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         conversation, ...(extras.team ? { team: extras.team } : {}), focus: extras.focus ?? null, result: extras.result ?? null,
         catchUpHtml: extras.catchUpHtml ?? '', controlsHtml: extras.controlsHtml ?? '', notices,
         pageHtml: extras.pageHtml === undefined ? (conversation === null ? pageHtml : null) : extras.pageHtml,
-        navigation: [...browserNavigationOf(currentPath, s.chrome.project), { label: 'Workspace tools', href: '/menu', active: false }],
+        navigation: [...browserNavigationOf(currentPath, s.chrome.project, needsYou), { label: 'Workspace tools', href: '/menu', active: path.pathname === '/menu' }],
       };
       if (requestFacts.workspaceRead) {
         const validator = requestFacts.workspaceValidator;
@@ -9564,6 +9569,7 @@ const THEME_LIGHT = `
     --so-danger: #9a332d; --so-danger-soft: #fae9e5; --so-success: #305b3e; --so-success-soft: #e7f0e4;
     --so-warning: #80530b; --so-warning-soft: #fff1d2; --so-info: #325970; --so-info-soft: #e8eff3;
     --so-neutral-ink: #535d56; --so-neutral-soft: #edf0eb; --so-live: #56825c;
+    --so-attention: #94600a; --so-on-attention: #ffffff; --so-attention-soft: #fdf1d8;
     --so-overlay: rgb(22 35 28 / .33); --so-shadow-overlay: 0 18px 55px rgb(10 33 26 / .15);
     --so-selection: #d7e5d8; --so-scroll: #b7c2b8; --so-code-bg: #f7f8f5; --so-user-bubble: #f0f2ee;`;
 const THEME_DARK = `
@@ -9574,6 +9580,7 @@ const THEME_DARK = `
     --so-danger: #f19486; --so-danger-soft: rgb(241 148 134 / .12); --so-success: #8fcf9c; --so-success-soft: rgb(143 207 156 / .12);
     --so-warning: #e6b660; --so-warning-soft: rgb(230 182 96 / .13); --so-info: #8dbde0; --so-info-soft: rgb(141 189 224 / .12);
     --so-neutral-ink: #b3bfb7; --so-neutral-soft: #202823; --so-live: #7fc08f;
+    --so-attention: #e8b45a; --so-on-attention: #231703; --so-attention-soft: rgb(232 180 90 / .13);
     --so-overlay: rgb(0 0 0 / .55); --so-shadow-overlay: 0 18px 55px rgb(0 0 0 / .5);
     --so-selection: #2d4a3c; --so-scroll: #3a463f; --so-code-bg: #111613; --so-user-bubble: #1d2520;`;
 /** The console's original token names, now views onto the palette. */
@@ -9584,7 +9591,8 @@ const THEME_MAPPING = `
     --accent: var(--so-soft); --destructive: var(--so-danger); --destructive-strong: var(--so-danger); --destructive-soft: var(--so-danger-soft);
     --success: var(--so-success); --success-soft: var(--so-success-soft); --warning: var(--so-warning); --warning-soft: var(--so-warning-soft);
     --running: var(--so-info); --running-soft: var(--so-info-soft); --ring: var(--so-accent);
-    --brand: var(--so-accent); --brand-foreground: var(--so-on-accent); --brand-soft: var(--so-soft);
+    /* Amber means one thing: a person is needed (approve, answer, decide). */
+    --brand: var(--so-attention); --brand-foreground: var(--so-on-attention); --brand-soft: var(--so-attention-soft);
     --glass: var(--so-paper); --glass-strong: var(--so-paper); --glass-border: var(--so-line); --glass-highlight: transparent;
     --ambient-one: transparent; --ambient-two: transparent; --user-message: var(--so-user-bubble);
     --surface: var(--so-paper); --ok: var(--so-success); --danger: var(--so-danger); --fg-muted: var(--so-muted);
@@ -9841,6 +9849,11 @@ ${THEME_DARK}
     background: transparent; font-weight: 500;
   }
   button.danger:hover, .approve-form button[type=submit].danger:hover { background: var(--destructive-soft); }
+  /* Removing a credential takes a second, deliberate tap. */
+  details.confirm-remove { display: inline-block; margin: 0 0 0 .5rem; vertical-align: top; }
+  details.confirm-remove > summary { cursor: pointer; color: var(--destructive); font-size: .8125rem; min-height: 2.5rem; display: inline-flex; align-items: center; }
+  details.confirm-remove[open] { display: block; margin: .75rem 0 0; }
+  .project-card .project-name:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; border-radius: .375rem; }
 
   label { display: block; font-size: 0.8125rem; font-weight: 500; margin: .75rem 0 0; color: var(--foreground); }
   input[type=text], input[type=password], input[type=number], input[type=url], input[type=email], input[type=search], input[type=time], textarea, select {
@@ -12153,7 +12166,7 @@ button.pick-file { min-height: 1.5rem; padding: 0 .5rem; font-size: .6875rem; }
 `;
 
 /** Appearance: a three-way segmented switch, one tap per choice. */
-const THEME_CONTROLS_CSS = `.appearance{margin:0 0 28px}.appearance h2{margin:0 0 10px}.theme-switch{display:inline-flex;flex-wrap:wrap;gap:4px;padding:4px;margin:0;border:1px solid var(--so-line);border-radius:10px;background:var(--so-raised)}.theme-switch .theme-choice{min-height:40px;padding:8px 16px;border:0;border-radius:7px;background:transparent;color:var(--so-muted);font:inherit;font-weight:550;box-shadow:none;cursor:pointer}.theme-switch .theme-choice:hover{color:var(--so-ink)}.theme-switch .theme-choice[aria-pressed="true"]{background:var(--so-paper);color:var(--so-ink);box-shadow:0 1px 2px rgb(0 0 0 / .1)}.appearance .meta{margin:8px 0 0}@media(max-width:600px){.theme-switch .theme-choice{min-height:44px}}`;
+const THEME_CONTROLS_CSS = `.appearance{margin:0 0 28px}.appearance h2{margin:0 0 10px}.theme-switch{display:inline-flex;flex-wrap:nowrap;max-width:100%;gap:4px;padding:4px;margin:0;border:1px solid var(--so-line);border-radius:10px;background:var(--so-raised)}.theme-switch .theme-choice,.so-native-region .theme-switch .theme-choice{flex:1 1 0;width:auto;white-space:nowrap;min-height:40px;padding:8px 16px;border:0;border-radius:7px;background:transparent;color:var(--so-muted);font:inherit;font-weight:550;box-shadow:none;cursor:pointer}.theme-switch .theme-choice:hover{color:var(--so-ink)}.theme-switch .theme-choice[aria-pressed="true"]{background:var(--so-paper);color:var(--so-ink);box-shadow:0 1px 2px rgb(0 0 0 / .1)}.appearance .meta{margin:8px 0 0}@media(max-width:600px){.theme-switch .theme-choice{min-height:44px}}`;
 const WORKSPACE_STYLE = styleAsset(STYLE + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
 
 /** Everything the sidebar needs to draw itself for one request. */
@@ -12752,9 +12765,9 @@ function joinFormPage(token: string, problem: string | null, name: string): stri
     `<h1>standing<span class="dot">\u00b7</span>orders</h1>`,
     `<p class="meta hint">you were invited \u2014 pick a name and a password to sign in</p>`,
     `<div class="login-card">`,
-    problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
+    problem === null ? "" : `<div class="problem" role="alert">${escape(problem)}</div>`,
     `<form method="post" action="/join/${escape(token)}">`,
-    `<label>username<input type="text" name="name" autocomplete="username" value="${escape(name)}" autofocus></label>`,
+    `<label>Username<input type="text" name="name" autocomplete="username" autocapitalize="none" spellcheck="false" required value="${escape(name)}" autofocus></label>`,
     `<label>password<input type="password" name="password" autocomplete="new-password"></label>`,
     `<button type="submit">create my sign-in</button>`,
     "</form>",
@@ -12782,12 +12795,12 @@ function loginPage(problem: string | null, returnTo = "/"): string {
     `<div class="login-viewport"><div class="login-shell">`,
     `<h1>standing<span class="dot">\u00b7</span>orders</h1>`,
     `<div class="login-card">`,
-    problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
+    problem === null ? "" : `<div class="problem" role="alert">${escape(problem)}</div>`,
     `<form method="post" action="/login">`,
     returnTo === "/" ? "" : `<input type="hidden" name="return" value="${escape(returnTo)}">`,
-    `<label>username<input type="text" name="name" autocomplete="username" autofocus></label>`,
+    `<label>Username<input type="text" name="name" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus></label>`,
     `<label>password<input type="password" name="token" autocomplete="current-password"></label>`,
-    `<button type="submit">sign in</button>`,
+    `<button type="submit">Sign in</button>`,
     "</form>",
     `</div>`,
     `<p class="login-foot">your login was shown when the console was first started, and saved beside its database as <code>up-login.txt</code>.<br>no account? ask whoever runs this console for an invite link.</p>`,
@@ -12809,7 +12822,7 @@ function signupPage(problem: string | null, attemptsLeft: number): string {
       : [
           `<form method="post" action="/signup">`,
           `<label>setup code<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" autofocus></label>`,
-          `<label>username<input type="text" name="name" autocomplete="username"></label>`,
+          `<label>Username<input type="text" name="name" autocomplete="username" autocapitalize="none" spellcheck="false" required></label>`,
           `<label>password<input type="password" name="password" autocomplete="new-password"></label>`,
           `<button type="submit">create account and sign in</button>`,
           "</form>",
@@ -20075,7 +20088,7 @@ function completionReceiptCard(view: CompletionReceiptView, taskId: string, plac
   const resultHref = status.token === "review-failed" ? reviewHref(taskId) : place === "chat" ? chatResultHref(taskId, view.runId, status.action?.kind === "open-review" ? "checks" : "summary") : statusActionHref(status, taskId, view.runId, view.publication?.prUrl ?? null) ?? `/r/${view.runId}`;
   return (
     `<section class="card completion-receipt" data-card-kind="result-receipt"${resultFactsAttributes(facts)}>` +
-    `<div class="receipt-head"><div><span class="eyebrow">result · build #${view.runId}</span><h2>${escape(receiptHeadingOf(view.outcome, view.publication, view.role))}</h2></div>` +
+    `<div class="receipt-head"><div><h2>${escape(receiptHeadingOf(view.outcome, view.publication, view.role))}</h2></div>` +
     `${headline ? statusLineHtml(status) : ""}</div>` +
     // The agent's handoff is its narrative, labeled as such; the
     // publication line is the observed record — never "shipped".
@@ -20186,6 +20199,15 @@ function revisionSealFields(comments: readonly { id: number }[], sourceDigest: s
   return `<input type="hidden" name="batch" value="${escape(revisionBatchOf(comments))}"><input type="hidden" name="source" value="${escape(revisionSourceOf(sourceDigest))}">`;
 }
 
+/** Older machine-checked results saved a mechanical sentence; say the same
+ * facts in plain words (the version id stays, shortened). */
+export function plainConclusionOf(conclusion: string): string {
+  const prepared = /^Prepared candidate ([0-9a-f]{7,40}) was checked out by the machine; no agent ran\. (The branch already matched it\.|The sealed diff spans this task's base to that candidate\.)/.exec(conclusion);
+  if (prepared === null) return conclusion;
+  const rest = conclusion.slice(prepared[0].length).trim();
+  return `Checked the prepared version ${prepared[1]!.slice(0, 7)}; no agent ran. ${prepared[2]!.startsWith("The branch") ? "The branch already matched it." : "The changes cover everything since the task started."}${rest === "" ? "" : ` ${rest}`}`;
+}
+
 function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
   const { run, receipt, proof, terminal, handoff } = detail;
   const facts = receipt.facts;
@@ -20240,7 +20262,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
   // ---- one outcome, one action (repair 2026-09-14) ------------------------
   // The outcome is the handoff's first sentence, bounded; the agent's full
   // account waits behind a disclosure in Summary so nothing is said twice.
-  const conclusion = receipt.summary ?? (run.outcome === "no-change" ? "The agent found that no repository change was needed." : "The build finished without a concise handoff.");
+  const conclusion = plainConclusionOf(receipt.summary ?? (run.outcome === "no-change" ? "The agent found that no repository change was needed." : "The build finished without a concise handoff."));
   const outcome = conciseOutcomeOf(conclusion);
   const action = o.action === false ? "" : resultPrimaryAction(detail, o, prUrl);
 
@@ -20501,7 +20523,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
     `<section class="card result-panel" id="result" data-result-panel data-result-place="${o.place}" data-result-lead="${lead}" data-result-task="${escape(detail.rootId ?? detail.taskId)}" data-result-user="${escape(o.user)}"${resultFactsAttributes(facts)}>` +
       (o.back === null ? "" : `<p class="result-back"><a href="${escape(o.back.href)}" data-result-back>← ${escape(o.back.label)}</a></p>`) +
       (detail.history ?? "") +
-      `<header class="result-head"><div>${o.place === "review" ? "" : `<span class="eyebrow">Build #${runId}</span>`}<h2>${escape(heading)}</h2></div>${o.headStatus === false ? "" : statusLineHtml(status.token === "verification-needed" && !directAssessment ? { ...status, label: "Verification needed" } : status)}</header>` +
+      `<header class="result-head"><div><h2>${escape(heading)}</h2></div>${o.headStatus === false ? "" : statusLineHtml(status.token === "verification-needed" && !directAssessment ? { ...status, label: "Verification needed" } : status)}</header>` +
       `<p class="result-summary">${escape(outcome)}</p>` +
       (current == null || o.place === "review" && (current.state === "ready-to-check" || current.state === "complete") ? "" : `<p class="${current.receipt?.checks.status === "failed" || current.receipt?.checks.status === "unavailable" ? "problem" : "meta"}" data-current-outcome>${escape(current.detail)}</p>`) +
       action +
@@ -20857,7 +20879,7 @@ function runPage(
           back: null,
         });
   return screen(`build #${run.id}`, [
-    `<h1>build #${run.id} <span class="meta"><a href="${taskHref(taskId)}">${escape(taskId)}</a></span></h1>`,
+    `<h1>Build #${run.id} <span class="meta"><a href="${taskHref(taskId)}">${escape(taskId)}</a></span></h1>`,
     running ? facts : "",
     conversation,
     transcript,
@@ -21029,15 +21051,15 @@ function settingsPage(
     permissionDefault === null
       ? ""
       : [
-          "<h2>unattended permissions</h2>",
+          "<h2>Unattended permissions</h2>",
           `<p class="meta">the starting choice for every new task. Each task can change it before approval; an approved scope always keeps the exact setting you signed.</p>`,
           permissionDefault.canManage && csrf !== ""
             ? `<form method="post" action="/settings/permission-default" class="card permission-policy">` +
               `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
-              `<p><strong>default for new tasks</strong></p>` +
+              `<p><strong>Default for new tasks</strong></p>` +
               permissionModeChoices("permission-mode", permissionDefault.mode) +
               `<p class="meta permission-note">Full access is for repositories and setup commands you trust. Changing this default does not alter any existing scope or approval.</p>` +
-              `<button type="submit">save default</button></form>`
+              `<button type="submit">Save default</button></form>`
             : `<div class="card"><p><strong>${permissionDefault.mode === "bypassPermissions" ? "Full access" : "Auto"}</strong></p><p class="meta">an approver can change this default</p></div>`,
           permissionDefault.updatedAt === null
             ? ""
@@ -21047,15 +21069,15 @@ function settingsPage(
     qualityDefault === null
       ? ""
       : [
-          "<h2>quality mode</h2>",
+          "<h2>Quality mode</h2>",
           `<p class="meta">the starting evidence depth for new tasks. It is separate from permissions and autonomy, and each approved scope keeps the exact choice you signed.</p>`,
           qualityDefault.canManage && csrf !== ""
             ? `<form method="post" action="/settings/quality-default" class="card permission-policy">` +
               `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
-              `<p><strong>default for new tasks</strong></p>` +
+              `<p><strong>Default for new tasks</strong></p>` +
               qualityModeChoices("quality-mode", qualityDefault.mode) +
               `<p class="meta permission-note">Inspect the saved work and actual check results when it is ready. Publication and deployment need their own authorization.</p>` +
-              `<button type="submit">save default</button></form>`
+              `<button type="submit">Save default</button></form>`
             : `<div class="card"><p><strong>${escape(qualityModeTitle(qualityDefault.mode))}</strong></p><p class="meta">an approver can change this default</p></div>`,
           qualityDefault.updatedAt === null
             ? ""
@@ -21065,7 +21087,7 @@ function settingsPage(
     digest === null || csrf === ""
       ? ""
       : [
-          "<h2>telegram digest</h2>",
+          "<h2>Telegram digest</h2>",
           `<p class="meta">away mode: routine facts (merges, reports, retries, plans ready) are held and sent as one digest on this cadence. A decision and anything that needs a person now still page the moment they land.</p>`,
           `<form method="post" action="/settings/telegram-digest" class="card">`,
           `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
@@ -21089,7 +21111,7 @@ function settingsPage(
               ? "off"
               : `${digest.held} routine fact(s) held · next digest ${digest.lastSentAt === null ? "at the next bridge pass" : `no earlier than ${escape(new Date(new Date(digest.lastSentAt).getTime() + digest.everyMs).toISOString())}`}`
           }</p>`,
-          `<button type="submit">save</button>`,
+          `<button type="submit">Save</button>`,
           `</form>`,
         ].join("\n");
   const keysCard =
@@ -21121,9 +21143,9 @@ function settingsPage(
                   `</select></label>`
                 : "",
               `<label>API key <span class="meta">(kept as your fallback; saving replaces it)</span><input type="password" name="value" autocomplete="off"></label>`,
-              `<button type="submit">save</button>`,
+              `<button type="submit">Save</button>`,
               one.set
-                ? ` <button type="submit" formaction="/settings/provider-key-clear">remove the stored key</button>`
+                ? ` <details class="confirm-remove"><summary>Remove the stored key</summary><p class="meta">Runs that use this API key stop until you add one again.</p><button type="submit" formaction="/settings/provider-key-clear" class="danger">Remove key</button></details>`
                 : "",
               `</form>`,
             ].join("\n"),
@@ -21133,7 +21155,7 @@ function settingsPage(
     push === null || csrf === ""
       ? ""
       : [
-          "<h2>receives alerts on this device</h2>",
+          "<h2>Alerts on this device</h2>",
           push.available
             ? [
                 `<p class="meta">a notification when a decision, a pick, or a pull request needs a person — fixed phrases only; task content never rides a notification.</p>`,
@@ -21142,7 +21164,7 @@ function settingsPage(
                 `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
                 `<input type="hidden" name="endpoint" value=""><input type="hidden" name="p256dh" value=""><input type="hidden" name="auth" value="">`,
                 `<label>your password, typed again <input type="password" name="token" autocomplete="current-password"></label>`,
-                `<button type="submit" id="push-enable">get alerts on this device</button>`,
+                `<button type="submit" id="push-enable">Get alerts on this device</button>`,
                 `<p class="meta" id="push-state"></p>`,
                 `</form>`,
               ].join("\n")
@@ -21154,7 +21176,7 @@ function settingsPage(
                 `<p class="row">${escape(one.uaWords)} · since ${escape(when(one.createdAt))}` +
                 `${one.retiredAt !== null ? ` · <span class="meta">expired</span>` : one.consecutiveFailures >= 20 ? ` · <span class="meta">failing</span>` : ""}` +
                 (one.retiredAt === null
-                  ? ` <form method="post" action="/push/remove" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="id" value="${one.id}"><button type="submit">remove</button></form>`
+                  ? ` <form method="post" action="/push/remove" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="id" value="${one.id}"><button type="submit">Remove</button></form>`
                   : "") +
                 `</p>`,
             ),
@@ -21189,9 +21211,9 @@ function settingsPage(
     messaging === null || messaging.configured.length === 0
       ? ""
       : [
-          "<h2>connected messaging</h2>",
+          "<h2>Connected messaging</h2>",
           `<p class="meta">alerts are sent through one service — the others stay quiet so you are never notified twice${
-            messaging.implicit ? " · <strong>several are connected and none was chosen — pick one</strong>" : ""
+            messaging.implicit ? " · <strong>Several are connected and none was chosen. Pick one.</strong>" : ""
           }</p>`,
           `<form method="post" action="/settings/messaging" class="card">`,
           `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
@@ -21203,7 +21225,7 @@ function settingsPage(
                 channel === "telegram" ? ` <span class="meta">· can carry answer buttons and reply-notes</span>` : ` <span class="meta">· messages with console links; acting stays here</span>`
               }</label>`,
           ),
-          `<button type="submit">use this service</button>`,
+          `<button type="submit">Use this service</button>`,
           `</form>`,
           `<p class="meta">Telegram keeps accepting taps and replies even when another service delivers the alerts. Connect services from the terminal: <code>standing-orders webhook set slack|discord &lt;url&gt;</code>.</p>`,
         ].join("\n");
@@ -21213,8 +21235,8 @@ function settingsPage(
       : existing === null
         ? "not set"
         : `saved: ${escape(redactToken(existing.token))} (bot ${escape(existing.botId)})`;
-  return screen("settings", [
-    "<h1>settings</h1>",
+  return screen("Settings", [
+    "<h1>Settings</h1>",
     '<p><a href="/settings/models">Models</a> · <a href="/settings/skills">Skills</a> · <a href="/settings/knowledge">Project knowledge</a> · <a href="/settings/telegram">Telegram</a> · <a href="/settings/slack">Slack</a> · <a href="/settings/discord">Discord</a> · <a href="/settings/teams">Teams</a></p><details><summary>Learning history</summary><a href="/settings/learning">Learning</a></details>',
     appearanceCard(csrf),
     permissionCard,
@@ -21223,13 +21245,13 @@ function settingsPage(
     keysCard,
     messagingCard,
     digestCard,
-    "<h2>telegram bot token</h2>",
+    "<h2>Telegram bot token</h2>",
     `<p class="meta">current: ${current}</p>`,
-    problem === null ? "" : `<p class="meta">${escape(problem)}</p>`,
+    problem === null ? "" : `<p class="problem" role="alert">${escape(problem)}</p>`,
     `<form method="post" action="/settings/telegram-token">`,
     `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
     `<label>token from @BotFather<input type="password" name="token" autocomplete="off"></label>`,
-    `<button type="submit">save</button>`,
+    `<button type="submit">Save</button>`,
     "</form>",
     `<p class="meta">Written owner-only beside the database. Then pair your chat:`,
     ` <code>standing-orders bridge telegram pair --as you --token …</code> and send the code to your bot.</p>`,
