@@ -2827,7 +2827,7 @@ describe("the board — the pipeline as lanes, live in place", () => {
     expect(moved.headers.get("location")).toBe("/activity");
 
     const activity = await (await fetch(url("/activity"), { headers: { cookie } })).text();
-    expect(activity).toContain("<h1>activity</h1>");
+    expect(activity).toContain("<h1>Activity</h1>");
     expect(activity).not.toContain("morning");
     expect(activity).not.toContain("overnight");
     expect(activity).not.toContain("the night");
@@ -6003,7 +6003,7 @@ describe("arc 6 — editor links, the review flow, and their guards", () => {
     test("UI polish 2026-09-13 / package 3: a finished build leads with its result panel and diff; the machine facts fold under Build details", async () => {
       const cookie = await login();
       const html = await (await fetch(url(`/r/${runId}`), { headers: { cookie } })).text();
-      const details = html.indexOf('<details class="run-facts-details"><summary>Build details<span class="meta">builder-1 · claude · built</span></summary><div id="run-facts">');
+      const details = html.indexOf('<details class="run-facts-details"><summary>Run record<span class="meta">builder-1 · claude · built</span></summary><div id="run-facts">');
       const panel = html.indexOf('class="card result-panel" id="result"');
       const diff = html.indexOf('<div class="diff-review" data-review-diff>');
       const review = html.indexOf('<section class="result-request" id="request-changes">');
@@ -8254,7 +8254,7 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
       return match[1] as string;
     };
     seed("t-none", "no grant");
-    expect(await words("t-none")).toBe("no publication grant — built work stays on its branch");
+    expect(await words("t-none")).toBe("branch only — publishing is not set up");
 
     const grant = (capabilities: ("push-branch" | "open-pr")[], merge: boolean) =>
       store.savePublicationGrant(
@@ -10576,7 +10576,7 @@ describe("the board's order view (operator request): the one place a drag does a
     expect(state).not.toContain('class="queue-handle"');
 
     const order = await (await fetch(`${base}/board?view=order`, { headers: { cookie } })).text();
-    expect(order).toContain("<h1>board</h1>");
+    expect(order).toContain("<h1>Board</h1>");
     expect(order).toContain('<a href="/board">state</a>');
     expect(order).toContain("first in line");
     expect(order).toContain("second in line");

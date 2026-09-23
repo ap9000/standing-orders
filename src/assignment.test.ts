@@ -360,7 +360,7 @@ describe("continuous assignments over existing task families", () => {
     expect(ready).toMatchObject({ state: "ready-to-check", attention: ["The saved source inventory is truncated; a screenshot is missing."], receipt: { completionKind: "checked-build" } });
     const html = assignmentSummaryHtml(ready, { problem: true, diagnostics: [{ token: "verification-needed", label: "Result saved — verification needed",
       detail: "Required saved material is missing, so this result is not verified.", tone: "problem", action: null }] });
-    expect(html).toContain('class="meta assignment-detail">Checks passed.');
+    expect(html).toContain('class="meta assignment-detail assignment-verdict"><span class="verdict-chip verdict-chip--success">Checks passed</span>');
     expect(html).toContain("The saved source inventory is truncated; a screenshot is missing.");
     expect(html.split("<details")[0]).toContain('<p class="problem">The saved source inventory is truncated; a screenshot is missing.</p>');
     expect(html.split("<details")[0]).not.toContain("Result saved — verification needed");

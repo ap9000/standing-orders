@@ -42,7 +42,7 @@ export function telegramSettingsHtml(
     } else if (mine.length === 0) {
       content += post("pair", password + '<button type="submit">Pair my phone</button>');
     } else {
-      content += post("unpair", password + '<p class="meta">This phone will lose access. Its existing Telegram buttons will stop working.</p><button type="submit">Unpair my phone</button>');
+      content += post("unpair", password + '<p class="meta">This phone will lose access. Its existing Telegram buttons will stop working.</p><button type="submit" class="danger">Unpair my phone</button>');
     }
   }
   if (options.problem !== undefined) content = `<p role="status">${escape(options.problem)}</p>` + content;

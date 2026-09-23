@@ -1794,7 +1794,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           response,
           200,
           screen("board", [
-            `<h1>board</h1>`,
+            `<h1>Board</h1>`,
             `<p class="meta board-view"><a href="/board">state</a> \u00b7 <strong>order</strong> <span class="meta">\u2014 drag to reorder, or onto a worker to reserve; the state view is where cards move on their own</span></p>`,
             `<div id="queue-region">${region}</div>`,
             `<p class="meta" id="queue-region-stamp"></p>`,
@@ -2099,8 +2099,8 @@ export function createDecisionServer(options: ServeOptions): Server {
             if (rows.length === 0) return "";
             return [
               `<div class="card">`,
-              `<h2 style="margin-top:0">coordinators</h2>`,
-              `<p class="meta">agents holding the MCP filing credential — they may propose work; only you admit it</p>`,
+              `<h2 style="margin-top:0">Agent filers</h2>`,
+              `<p class="meta">Agents that can propose tasks. You approve what runs.</p>`,
               ...rows.map(one =>
                 `<p class="row">` +
                 `<span class="mono">${escape(`${one.name}#${one.cid.slice(0, 4)}`)}</span> ` +
@@ -2109,14 +2109,14 @@ export function createDecisionServer(options: ServeOptions): Server {
                   : `<span class="meta">${one.perHour}/hour · files into ${one.repos.map(repo => escape(repo)).join(", ")} · last filed ${one.lastFiledAt === null ? "never" : escape(one.lastFiledAt.slice(0, 16).replace("T", " "))}</span>`) +
                 `</p>`,
               ),
-              `<p class="meta">revoke: \`standing-orders coordinator revoke &lt;cid&gt; --as you\`</p>`,
+              `<details class="settings-more"><summary>Revoke an agent filer</summary><p class="meta">Run <code>standing-orders coordinator revoke &lt;cid&gt; --as you</code> on this computer.</p></details>`,
               `</div>`,
             ].join("\n");
           })();
       return sendScreen(
         response,
         200,
-        screen("people", [`<h1>people</h1>`, ...cards, coordinatorCard, inviteCard].join("\n"), {
+        screen("people", [`<h1>People</h1>`, ...cards, coordinatorCard, inviteCard].join("\n"), {
           chrome: chromeFor(project, "people"),
         }),
       );
@@ -2253,7 +2253,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         screen(
           "peek",
           [
-            `<h1>peek</h1>`,
+            `<h1>Peek</h1>`,
             panes.length === 0
               ? `<p class="meta">no agent is working right now \u2014 this page follows them the moment one starts</p>`
               : panes.join("\n"),
@@ -2280,7 +2280,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const fleetScreen = screen(
         "fleet",
         [
-          `<h1>fleet</h1>`,
+          `<h1>Fleet</h1>`,
           `<p class="hint">one lane per worker — drag a queued card onto another worker to re-reserve it</p>`,
           ...(said === null ? [] : [`<p class="meta">${escape(said)}</p>`]),
           `<div id="fleet-region">${body}</div>`,
@@ -3029,7 +3029,10 @@ export function createDecisionServer(options: ServeOptions): Server {
       // Any approver pairs their OWN phone here; the bot token stays on /settings.
       if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "An approver can pair their own phone.", "/settings");
       const botId = options.telegramTokenFile === undefined ? null : loadBotToken(process.env, options.telegramTokenFile)?.botId ?? null;
-      return sendScreen(response, 200, screen("Telegram", telegramSettingsHtml(store, botId, who.name, who.session.csrf), { chrome: chromeFor(project, "settings"), forceSensitive: true }));
+      // The settings view holds no secret (a pairing code only appears in
+      // the response to Pair, which stays script-free), so it joins the
+      // workspace like every other settings page.
+      return sendScreen(response, 200, screen("Telegram", telegramSettingsHtml(store, botId, who.name, who.session.csrf), { chrome: chromeFor(project, "settings") }));
     }
     if (url.pathname === "/settings/teams") {
       if (who.via !== "cookie" || who.role !== "approver" || restricted() || !options.configDir) return refuse(response, who, 403, "An installation approver can connect Teams.", "/settings");
@@ -5800,7 +5803,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const tokenScreen = screen(
         "fleet",
         [
-          `<h1>fleet</h1>`,
+          `<h1>Fleet</h1>`,
           `<div class="card">`,
           `<h2 style="margin-top:0">${escape(name)} is registered</h2>`,
           `<p class="meta">its token — shown once, stored only as a hash, never recoverable:</p>`,
@@ -5946,7 +5949,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const linkScreen = screen(
         "people",
         [
-          `<h1>people</h1>`,
+          `<h1>People</h1>`,
           `<div class="card">`,
           `<h2 style="margin-top:0">the invite link \u2014 shown once</h2>`,
           `<p class="mono" style="overflow-wrap:anywhere">${escape(`${origin}/join/${minted.token}`)}</p>`,
@@ -8896,7 +8899,7 @@ function refuse(
     response,
     status,
     shell("refused", [
-      `<h1>request refused</h1>`,
+      `<h1>Request refused</h1>`,
       `<div class="problem">${escape(message)}</div>`,
       `<p class="meta refusal-back"><a href="${escape(backHref)}">\u2190 Back</a></p>`,
     ].join("\n")),
@@ -9882,7 +9885,7 @@ ${THEME_DARK}
   .permission-choice input { margin: .14rem 0 0; }
   .permission-choice strong, .permission-choice small { display: block; }
   .permission-choice strong { font-size: .8125rem; }
-  .permission-choice small { margin-top: .16rem; color: var(--muted-foreground); font-size: .6875rem; font-weight: 400; line-height: 1.35; }
+  .permission-choice small { margin-top: .16rem; color: var(--muted-foreground); font-size: .8125rem; font-weight: 400; line-height: 1.4; }
   .permission-note { margin: .55rem 0 0; }
   .scope-editor .permission-toggle { grid-template-columns: 1fr; }
   .scope-editor .problem { color: var(--foreground); }
@@ -10007,7 +10010,7 @@ ${THEME_DARK}
   .receipt-facts > span { min-width: 0; padding: .7rem .75rem; border: 1px solid var(--glass-border); border-radius: calc(var(--radius) - 3px); background: color-mix(in srgb, var(--glass-strong) 64%, transparent); }
   .receipt-facts strong, .receipt-facts small { display: block; overflow-wrap: anywhere; }
   .receipt-facts strong { font-size: .78rem; font-weight: 600; }
-  .receipt-facts small { margin-top: .18rem; color: var(--muted-foreground); font-size: .68rem; line-height: 1.35; }
+  .receipt-facts small { margin-top: .18rem; color: var(--muted-foreground); font-size: .75rem; line-height: 1.4; }
   /* Thumbnails, never a full-width poster: auto-fill leaves a lone
      screenshot at thumbnail size (UI polish 2026-09-13). */
   .receipt-visuals { display: grid; grid-template-columns: repeat(auto-fill, minmax(8rem, 14rem)); gap: .55rem; margin-top: .75rem; }
@@ -10073,7 +10076,7 @@ ${THEME_DARK}
   .cockpit-drift { margin: .6rem 0; font-size: .8rem; }
   .cockpit-files { margin: .4rem 0 .6rem; padding-left: 1.25rem; font-size: .78rem; }
   .cockpit-files li { margin: .2rem 0; }
-  .cockpit-files .pick-file { min-height: 1.6rem; padding: 0 .5rem; font-size: .65rem; }
+  .cockpit-files .pick-file { min-height: 1.75rem; padding: 0 .55rem; font-size: .75rem; }
   .cockpit-section .diff-review { margin-top: .6rem; }
   .cockpit-section .receipt-visuals { margin-top: .6rem; grid-template-columns: repeat(auto-fill, minmax(9rem, 14rem)); }
   .cockpit-disclosure { padding: 0; overflow: hidden; }
@@ -10667,7 +10670,7 @@ ${THEME_DARK}
   .agents-badges { display: flex; flex-wrap: wrap; gap: .3rem; }
   .agents-summary { margin: .55rem 0 0; font-size: .86rem; line-height: 1.5; overflow-wrap: anywhere; }
   .agents-availability-label { margin: .6rem 0 .15rem; }
-  .agents-availability { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: .25rem .9rem; font-size: .74rem; }
+  .agents-availability { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: .25rem .9rem; font-size: .8125rem; }
   .agents-availability li { overflow-wrap: anywhere; }
   .agents-availability-unavailable { color: var(--destructive); font-weight: 600; }
   .agents-availability-ready { color: var(--success); }
@@ -10721,7 +10724,7 @@ ${THEME_DARK}
   .approval-paths li { color: var(--muted-foreground); font-size: .8rem; overflow-wrap: anywhere; }
   .run-facts-details { margin-top: 1.25rem; }
   .run-facts-details > summary { display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
-  .run-facts-details > summary .meta { font-family: var(--font-mono); font-size: .68rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .run-facts-details > summary .meta { font-size: .75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .task-main-title, .chat-project-name strong, .proposal h3 { overflow-wrap: anywhere; }
   .planner-plan { margin-top: .75rem; padding: 1.15rem 1.2rem; overflow: hidden; background: color-mix(in srgb, var(--glass) 82%, transparent); }
   .execution-plan-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; margin-bottom: .95rem; }
@@ -10929,7 +10932,7 @@ ${THEME_DARK}
   .result-report .plan-doc { max-height: 28rem; overflow: auto; }
   .result-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: .5rem; margin: .4rem 0 0; }
   .result-facts > div { min-width: 0; padding: .6rem .7rem; border: 1px solid var(--glass-border); border-radius: calc(var(--radius) - 3px); background: color-mix(in srgb, var(--glass-strong) 64%, transparent); }
-  .result-facts dt { color: var(--muted-foreground); font: 500 .6rem/1.2 var(--font-mono); text-transform: uppercase; letter-spacing: .05em; }
+  .result-facts dt { color: var(--muted-foreground); font: 500 .75rem/1.3 var(--font-sans); }
   .result-facts dd { margin: .2rem 0 0; font-size: .78rem; line-height: 1.4; overflow-wrap: anywhere; }
   .result-facts dd p { margin: 0; }
   .result-facts dd form { margin: .35rem 0 0; }
@@ -11437,7 +11440,7 @@ ${THEME_DARK}
   /* Provider, model, and limits behind one quiet disclosure (UI polish 2026-09-13). */
   .chat-limits { margin: .5rem 0 .75rem; padding: 0 .9rem; border-color: var(--glass-border); background: color-mix(in srgb, var(--glass) 70%, transparent); }
   .chat-limits > summary { display: flex; align-items: center; justify-content: space-between; gap: .75rem; min-height: 2.5rem; padding: .45rem 0; font-size: .75rem; }
-  .chat-limits > summary .meta { font-family: var(--font-mono); font-size: .65rem; }
+  .chat-limits > summary .meta { font-size: .75rem; }
   .chat-limits[open] { padding-bottom: .6rem; }
   .chat-limits .chat-budget { margin: .2rem 0 .1rem; }
   .chat-main .chat-limits + .chat-fleet-context, .chat-main .chat-fleet-context + .chat-limits { margin-top: .5rem; }
@@ -12151,7 +12154,7 @@ button { min-height: 44px; }
 .contest-compare .card { margin: 0; }
 
 /* The per-file comment button: a small real button beside a diff row. */
-button.pick-file { min-height: 1.5rem; padding: 0 .5rem; font-size: .6875rem; }
+button.pick-file { min-height: 1.75rem; padding: 0 .55rem; font-size: .75rem; }
 
 /* Sticky ceremony actions: single-primary-action forms keep their submit
    within thumb reach on phones. Desktop: plain flow. */
@@ -12166,7 +12169,7 @@ button.pick-file { min-height: 1.5rem; padding: 0 .5rem; font-size: .6875rem; }
 `;
 
 /** Appearance: a three-way segmented switch, one tap per choice. */
-const THEME_CONTROLS_CSS = `.settings-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(8.5rem,1fr));gap:.5rem;margin:0 0 2rem}.settings-tiles a{display:flex;align-items:center;gap:.6rem;min-height:3rem;padding:.65rem .8rem;border:1px solid var(--so-line);border-radius:.625rem;background:var(--so-paper);color:var(--so-ink);text-decoration:none;font-weight:550;font-size:.875rem}.settings-tiles a:hover{border-color:var(--so-input-line);background:var(--so-raised)}.settings-tiles svg{width:1.1rem;height:1.1rem;flex-shrink:0;color:var(--so-accent-text)}details.settings-more{margin:.25rem 0 1.25rem}details.settings-more>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:550}details.settings-more>summary .meta{font-weight:400;margin-left:.35rem}.settings-changed{margin-top:-.25rem}.appearance{margin:0 0 28px}.appearance h2{margin:0 0 10px}.theme-switch{display:inline-flex;flex-wrap:nowrap;max-width:100%;gap:4px;padding:4px;margin:0;border:1px solid var(--so-line);border-radius:10px;background:var(--so-raised)}.theme-switch .theme-choice,.so-native-region .theme-switch .theme-choice{flex:1 1 0;width:auto;white-space:nowrap;min-height:40px;padding:8px 16px;border:0;border-radius:7px;background:transparent;color:var(--so-muted);font:inherit;font-weight:550;box-shadow:none;cursor:pointer}.theme-switch .theme-choice:hover{color:var(--so-ink)}.theme-switch .theme-choice[aria-pressed="true"]{background:var(--so-paper);color:var(--so-ink);box-shadow:0 1px 2px rgb(0 0 0 / .1)}.appearance .meta{margin:8px 0 0}@media(max-width:600px){.theme-switch .theme-choice{min-height:44px}}`;
+const THEME_CONTROLS_CSS = `details.result-request-form>summary{border:0;background:transparent;padding:.5rem 0;min-height:2.75rem;font-weight:600;display:list-item;list-style:revert}details.result-request-form>summary::-webkit-details-marker{display:revert}form.js-autosave button[type=submit]{display:none}.provider-row{border-bottom:1px solid var(--so-line);padding:.35rem 0}.provider-row:first-of-type{border-top:1px solid var(--so-line)}.provider-head{display:flex;align-items:center;gap:.75rem;margin:.4rem 0 0}.provider-status{display:inline-flex;align-items:center;gap:.4rem;color:var(--so-muted);font-size:.875rem}.provider-status i{width:.5rem;height:.5rem;border-radius:50%;background:var(--so-muted)}.provider-status--ok i{background:var(--so-success)}.provider-status--warn i{background:var(--so-attention)}.provider-status--off i{background:transparent;border:1.5px solid var(--so-muted)}details.provider-manage>summary{cursor:pointer;color:var(--so-accent-text);font-size:.875rem;min-height:2.5rem;display:list-item;padding-block:.5rem}.card.props .row{display:grid;gap:.1rem;margin:0 0 .75rem}.card.props .row>.meta{display:block;font-size:.75rem}.card.props .row>.meta::first-letter{text-transform:uppercase}.card.props .row>.mono{font-family:var(--font-sans);font-size:.875rem}.card.props .row>.mono .seal{font-family:var(--font-mono);font-size:.8125rem}details.evidence-files{margin:1rem 0}details.evidence-files>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:600}details.evidence-files ul{list-style:none;margin:0;padding:0}details.evidence-files li{display:flex;justify-content:space-between;gap:1rem;padding:.5rem 0;border-bottom:1px solid var(--so-line)}.result-action .result-feedback-link{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;text-decoration:none}.result-action .result-feedback-link:hover{background:var(--so-raised)}.so-sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}.verdict{margin:.5rem 0 .75rem}.verdict-chips{display:flex;flex-wrap:wrap;gap:.4rem;list-style:none;padding:0;margin:0}.verdict-chip{display:inline-flex;align-items:center;gap:.3rem;min-height:1.75rem;padding:.2rem .65rem;border-radius:999px;font-size:.8125rem;font-weight:600;background:var(--so-neutral-soft);color:var(--so-neutral-ink)}.verdict-chip svg{width:.9rem;height:.9rem}.verdict-chip--success{background:var(--so-success-soft);color:var(--so-success)}.verdict-chip--danger{background:var(--so-danger-soft);color:var(--so-danger)}.verdict-chip--warning{background:var(--so-warning-soft);color:var(--so-warning)}.verdict-chip--info{background:var(--so-info-soft);color:var(--so-info)}.verdict-by{margin:.4rem 0 0}details.result-request-open{margin:.5rem 0}details.result-request-open>summary{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;cursor:pointer;list-style:none}details.result-request-open>summary::-webkit-details-marker{display:none}details.result-request-open[open]>summary{margin-bottom:.75rem}.settings-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(8.5rem,1fr));gap:.5rem;margin:0 0 2rem}.settings-tiles a{display:flex;align-items:center;gap:.6rem;min-height:3rem;padding:.65rem .8rem;border:1px solid var(--so-line);border-radius:.625rem;background:var(--so-paper);color:var(--so-ink);text-decoration:none;font-weight:550;font-size:.875rem}.settings-tiles a:hover{border-color:var(--so-input-line);background:var(--so-raised)}.settings-tiles svg{width:1.1rem;height:1.1rem;flex-shrink:0;color:var(--so-accent-text)}details.settings-more{margin:.25rem 0 1.25rem}details.settings-more>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:550}details.settings-more>summary .meta{font-weight:400;margin-left:.35rem}.settings-changed{margin-top:-.25rem}.appearance{margin:0 0 28px}.appearance h2{margin:0 0 10px}.theme-switch{display:inline-flex;flex-wrap:nowrap;max-width:100%;gap:4px;padding:4px;margin:0;border:1px solid var(--so-line);border-radius:10px;background:var(--so-raised)}.theme-switch .theme-choice,.so-native-region .theme-switch .theme-choice{flex:1 1 0;width:auto;white-space:nowrap;min-height:40px;padding:8px 16px;border:0;border-radius:7px;background:transparent;color:var(--so-muted);font:inherit;font-weight:550;box-shadow:none;cursor:pointer}.theme-switch .theme-choice:hover{color:var(--so-ink)}.theme-switch .theme-choice[aria-pressed="true"]{background:var(--so-paper);color:var(--so-ink);box-shadow:0 1px 2px rgb(0 0 0 / .1)}.appearance .meta{margin:8px 0 0}@media(max-width:600px){.theme-switch .theme-choice{min-height:44px}}`;
 const WORKSPACE_STYLE = styleAsset(STYLE + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
 
 /** Everything the sidebar needs to draw itself for one request. */
@@ -13003,7 +13006,7 @@ function inboxPage(chrome: Chrome, data: {
         `</div>`;
 
   return screen("inbox", [
-    `<h1>inbox</h1>`,
+    `<h1>Inbox</h1>`,
     `<p class="meta">everything that waits on you \u2014 empty means the fleet is working</p>`,
     noWorker,
     wizard,
@@ -13131,7 +13134,7 @@ function systemPage(chrome: Chrome, data: {
     `</div>`;
 
   return screen("system", [
-    `<h1>system</h1>`,
+    `<h1>System</h1>`,
     `<p class="hint">builders execute tasks in isolated temporary copies of each project</p>`,
     agentsCard,
     cards.length === 0
@@ -13383,7 +13386,7 @@ function boardBody(
         `</p>`;
 
   return [
-    `<h1>board</h1>`,
+    `<h1>Board</h1>`,
     data.all ? "" : `<p class="meta board-view"><strong>state</strong> \u00b7 <a href="/board?view=order">order \u2192</a> <span class="meta">drag to reorder, or to reserve a task for one worker</span></p>`,
     deltaLine,
     toggle,
@@ -13430,7 +13433,7 @@ function donePage(
           })
           .join("\n");
   return screen("done", [
-    `<h1>done</h1>`,
+    `<h1>Done</h1>`,
     buildsViews("done"),
     `<p class="hint">completed work in order of completion \u2014 each with its final build, the agent's conclusion, usage, and its pull request; <a href="/review">review</a> opens the same saved work and its checks</p>`,
     list,
@@ -14418,7 +14421,7 @@ function chatPage(chrome: Chrome, data: {
 
 function chatAckPage(chrome: Chrome, turn: ChatTurn, nonce: string, csrf: string): Screen {
   return screen("chat", [
-    `<h1>unknown spend</h1>`,
+    `<h1>Unknown spend</h1>`,
     `<div class="card">`,
     `<p>Turn <span class="mono">#${turn.id}</span> on <span class="mono">${escape(turn.provider)} · ${escape(turn.model)}</span> ` +
       `may have started before it failed (${escape(turn.failureReason ?? "crashed")}), and its cost could not be measured.</p>`,
@@ -15014,7 +15017,7 @@ function routinesPage(
       ? `<p class="meta">No standing orders${chrome.project === null ? " — open a project to file one" : " in this project yet — file one below; nothing fires until you approve it"}.</p>`
       : tracks.map(track => trackRow(track, chrome.project === null)).join("\n");
   return screen("routines", [
-    `<h1>routines</h1>`,
+    `<h1>Routines</h1>`,
     `<p class="hint">scheduled work — anything needing a person appears in the inbox</p><p><a class="new-task" href="/recipes">Create a workflow from a recipe →</a></p>`,
     list,
     capture,
@@ -15310,7 +15313,7 @@ function homePage(chrome: Chrome, data: {
       : "";
 
   return screen("activity", [
-    `<h1>activity</h1>`,
+    `<h1>Activity</h1>`,
     buildsViews("activity"),
     data.repo === null
       ? ""
@@ -15502,7 +15505,7 @@ function tasksPage(
           )
           .join("\n");
   return screen("tasks", [
-    "<h1>tasks</h1>",
+    "<h1>Tasks</h1>",
     `<p class="meta">work you want done${repo === null ? "" : ` in <strong>${escape(projectName(repo))}</strong>`} \u2014 a task builds unattended only after its scope is approved; open one to write or approve its scope</p>`,
     repo === null ? "" : `<p class="meta path-words"><span class="mono">${escape(repo)}</span></p>`,
     problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
@@ -15532,7 +15535,7 @@ function browsePage(chrome: Chrome, data: {
       `</form>`,
     ].join("");
   return screen("projects", [
-    `<h1>choose a folder</h1>`,
+    `<h1>Choose a folder</h1>`,
     `<p class="meta">git repositories float to the top and can be opened; anything else can be entered — only folders under ${
       data.roots.length === 1 ? `<span class="mono">${escape(projectName(data.root))}</span>` : "the configured roots"
     } are visible here</p>`,
@@ -16486,9 +16489,11 @@ function projectsPage(
     `</div>`,
   ].join("\n");
 
+  // Arriving from New task with no project open: say what this step is for.
+  const choosing = returnTo.startsWith("/tasks/new");
   return screen("projects", [
-    `<h1>projects</h1>`,
-    `<p class="meta">Add a folder or GitHub repository once. Its tasks and chat stay here.</p>`,
+    choosing ? `<h1>New task</h1><p class="meta">Choose the project it belongs to.</p>` : `<h1>Projects</h1>`,
+    choosing ? "" : `<p class="meta">Add a folder or GitHub repository once. Its tasks and chat stay here.</p>`,
     problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
     recentItems.length === 0 && candidateItems.length === 0
       ? `<div class="card"><p><strong>Nothing to open yet.</strong></p><p class="meta">Add one below \u2014 opening it registers it here for next time.</p></div>`
@@ -17749,10 +17754,10 @@ function taskBody(data: {
               .join("; ")}</p>`;
           })(),
           acceptanceCeremonyHtml(scope.acceptance),
-          `<p class="meta"><span class="seal">signs ${shortDigest(scope.digest)}</span> — approval binds to this exact wording</p>`,
           approval.approved
-            ? `<p class="meta">approved by ${escape(approval.by)} at ${escape(approval.at)}</p>`
-            : `<p class="meta">not approved${approval.reason === "changed" ? " — approved once, then rewritten" : ""}</p>`,
+            ? `<p class="meta scope-seal">Approved by ${escape(approval.by)} · ${escape(when(approval.at))} · <span class="seal">signs ${shortDigest(scope.digest)}</span><span class="so-sr-only"> — approval binds to this exact wording</span></p>`
+            : `<p class="meta"><span class="seal">signs ${shortDigest(scope.digest)}</span> — approval binds to this exact wording</p>` +
+              `<p class="meta">Not approved${approval.reason === "changed" ? " — approved once, then rewritten" : ""}</p>`,
           `</div>`,
         ].join("\n");
 
@@ -18184,7 +18189,7 @@ function taskBody(data: {
         ? `unmeasured — ${tokenWords}, no dollar figure reported`
         : rows.some(one => one.id === liveRunId)
           ? "unmeasured so far — the figure lands when the attempt finishes"
-          : "unmeasured — nothing reported";
+          : "not reported";
     }
     return `$${dollars.toFixed(2)} measured across ${measured.length}/${rows.length} attempts — ${rows.length - measured.length} unmeasured · ${tokenWords}`;
   };
@@ -18199,7 +18204,7 @@ function taskBody(data: {
   const publishesAs = (() => {
     const grant = data.grant ?? null;
     if (data.repo === null) return "no project — no publication grant can apply";
-    if (grant === null) return "no publication grant — built work stays on its branch";
+    if (grant === null) return "branch only — publishing is not set up";
     return [
       grant.capabilities.includes("push-branch") ? `may push ${grant.headPrefix}* to ${grant.githubRepo}` : "cannot push",
       grant.capabilities.includes("open-pr") ? `may open a PR against ${grant.base}${grant.draft ? " (draft)" : ""}` : null,
@@ -19215,23 +19220,30 @@ function incidentWords(kind: string): string {
 }
 
 const EVIDENCE_WORDS: Record<string, string> = {
-  diff: "the diff",
-  status: "the build status",
-  "park-payload": "the parked question's record",
-  plan: "the plan",
-  "terminal-diff": "the final diff",
-  "diff-stat": "the change summary",
-  "base-tree": "the starting-point file list",
-  handoff: "the agent's conclusion",
-  "revision-brief": "the revision brief",
-  report: "the scout's report",
-  proof: "the agent's proof",
-  "check-log": "the plane's re-run check",
-  screenshot: "a screenshot",
-  "structured-output": "an agent response",
-  "plan-contract": "the planner's filed request and contract record",
-  "review-context": "the sealed inherited review context",
+  diff: "Diff",
+  status: "Build status",
+  "park-payload": "Question record",
+  plan: "Plan",
+  "terminal-diff": "Final diff",
+  "diff-stat": "Change summary",
+  "base-tree": "Starting files",
+  handoff: "Agent handoff",
+  "revision-brief": "Revision brief",
+  report: "Report",
+  proof: "Agent proof",
+  "check-log": "Check log",
+  screenshot: "Screenshot",
+  "structured-output": "Agent response",
+  "plan-contract": "Plan contract",
+  "review-context": "Review context",
 };
+
+/** Byte counts as people read them. */
+function humanBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 function evidenceWords(kind: string): string {
   return EVIDENCE_WORDS[kind] ?? "a stored record";
@@ -20454,7 +20466,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
   if (o.extraChecks !== undefined) checkParts.push(o.extraChecks);
 
   // ---- request changes: both feedback styles, one sealed road ------------
-  const requestParts: string[] = [`<h3>What should change?</h3>`];
+  const requestParts: string[] = [`<h3 class="so-sr-only">What should change?</h3>`];
   const pathWords = (path: string, line: number | null): string => {
     const shownPath = `${path}${line === null ? "" : `:${line}`}`;
     const href = detail.editor === null ? null : editorFileHref(detail.editor.worktree, path, line);
@@ -20488,6 +20500,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
     requestParts.push(`<p class="meta" data-result-feedback="unavailable">${terminal === null ? "This result has no sealed diff to attach notes to." : "The sealed diff no longer verifies, so notes cannot attach to it."} <a href="${taskChatHref(detail.rootId ?? detail.taskId)}">Discuss in chat →</a></p>`);
   } else {
     requestParts.push(
+      `<details class="result-request-open result-request-form"${detail.comments.length > 0 ? " open" : ""}><summary>What should change?</summary>` +
       `<form method="post" action="/r/${runId}/comment" class="diff-comment-form" id="comment-form">` +
         `<input type="hidden" name="csrf" value="${escape(o.csrf)}">` +
         `<input type="hidden" name="tab" value="${o.tab}">` +
@@ -20499,7 +20512,7 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
         `<details class="result-pin"><summary>Attach to a file or line</summary>` +
         `<div class="diff-comment-target"><label>file<input type="text" name="path" placeholder="src/…" aria-label="file" class="mono"></label>` +
         `<label>line<input type="text" name="line" placeholder="—" aria-label="line" inputmode="numeric"></label></div></details>` +
-        `<div class="result-feedback-actions"><button type="submit" name="intent" value="revise" data-request-changes>Request changes</button><button type="submit" name="intent" value="note" class="quiet" data-save-feedback>Save for later</button></div></form>`,
+        `<div class="result-feedback-actions"><button type="submit" name="intent" value="revise" data-request-changes>Request changes</button><button type="submit" name="intent" value="note" class="quiet" data-save-feedback>Save for later</button></div></form></details>`,
     );
   }
 
@@ -20522,7 +20535,9 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
       (detail.history ?? "") +
       `<header class="result-head"><div><h2>${escape(heading)}</h2></div>${o.headStatus === false ? "" : statusLineHtml(status.token === "verification-needed" && !directAssessment ? { ...status, label: "Verification needed" } : status)}</header>` +
       `<p class="result-summary">${escape(outcome)}</p>` +
-      (current == null || o.place === "review" && (current.state === "ready-to-check" || current.state === "complete") ? "" : `<p class="${current.receipt?.checks.status === "failed" || current.receipt?.checks.status === "unavailable" ? "problem" : "meta"}" data-current-outcome>${escape(current.detail)}</p>`) +
+      (current == null || o.place === "review" && (current.state === "ready-to-check" || current.state === "complete") ? "" :
+        `<div class="verdict" data-current-outcome>${verdictChipsHtml(current, facts)}` +
+        (current.receipt?.checks.status === "failed" || current.receipt?.checks.status === "unavailable" ? `<p class="problem">${escape(current.detail)}</p>` : "") + `</div>`) +
       action +
       (REVIEW_TOKENS.has(status.token) ? `<details class="receipt-history"><summary>Review history</summary><p class="receipt-review meta" data-receipt-review="${escape(status.token)}">${escape(status.detail)}</p></details>` : "") +
       attentionHtml +
@@ -20534,6 +20549,27 @@ function resultPanelHtml(detail: ResultDetail, o: ResultPanelOptions): string {
       (detail.skillTest ? "" : `<section class="result-request" id="request-changes">${requestParts.join("\n")}</section>`) +
     `</section>`
   );
+}
+
+/** The verdict at a glance: checks, where the work lives, and whether any
+ * saved output is partial, as chips instead of sentences. The same facts
+ * stay available in words on the Checks tab and in Build details. */
+function verdictChipsHtml(current: AssignmentSnapshot, facts: SharedResultFacts): string {
+  const chip = (tone: string, label: string, title = label): string => `<li class="verdict-chip verdict-chip--${tone}" title="${escape(title)}">${label}</li>`;
+  const chips: string[] = [];
+  const checks = current.receipt?.checks.status ?? null;
+  if (checks === "passed") chips.push(chip("success", `${strokeIcon(`<path d="M20 6 9 17l-5-5"/>`)}Checks passed`));
+  else if (checks === "failed") chips.push(chip("danger", `${strokeIcon(`<path d="M18 6 6 18M6 6l12 12"/>`)}Checks failed`));
+  else if (checks === "unavailable") chips.push(chip("warning", "Check unavailable"));
+  const publication: Record<string, [string, string]> = { none: ["neutral", "Branch only"], intended: ["info", "Publishing"], pushed: ["info", "Pushed"], opened: ["info", "Pull request open"], failed: ["danger", "Publish failed"] };
+  const [tone, label] = publication[facts.publicationState] ?? ["neutral", facts.publicationState];
+  chips.push(chip(tone, label, facts.publicationWords));
+  const health = facts.evidenceHealth;
+  if (health.damaged > 0) chips.push(chip("danger", "Damaged evidence"));
+  else if (health.missing > 0) chips.push(chip("warning", "Missing evidence"));
+  else if (health.shortened > 0) chips.push(chip("warning", "Partial output", "Some saved output was shortened when stored"));
+  const by = current.completion === null ? null : current.completion.actor.replace(/^(?:operator|coordinator|lead):/, "");
+  return `<ul class="verdict-chips" aria-label="Result at a glance">${chips.join("")}</ul>` + (by === null ? "" : `<p class="meta verdict-by">Completed by ${escape(by)}</p>`);
 }
 
 /** The outcome in one bounded sentence (repair 2026-09-14): the handoff's
@@ -20560,7 +20596,7 @@ function resultPrimaryAction(detail: ResultDetail, o: ResultPanelOptions, prUrl:
   if (detail.publication !== null && detail.publication.prNumber !== null && prUrl !== null) return wrap("open-pr", `<a class="button-link" href="${escape(prUrl)}">Open PR #${detail.publication.prNumber}</a>`);
   if (detail.assignment == null && detail.proof?.matrix.some(row => row.assessment !== undefined) && detail.proof.reasons.includes(GOAL_ASSESSMENT_PENDING)) return wrap("open-result", `<a class="button-link" href="${reviewHref(detail.taskId)}">Open result</a>`);
   if (detail.assignment == null && detail.proof?.matrix.some(row => row.assessment !== undefined && row.review?.judgement === "cannot-tell")) return wrap("review-evidence", `<a class="button-link" href="${escape(o.hrefFor("checks"))}">Review evidence</a>`);
-  if (detail.canAnnotate && o.csrf !== "") return wrap("request-changes", `<a class="result-feedback-link" href="#request-changes">Suggest changes</a>`);
+  if (detail.canAnnotate && o.csrf !== "") return wrap("request-changes", `<a class="result-feedback-link" href="#request-changes">Request changes</a>`);
   return "";
 }
 
@@ -20741,15 +20777,15 @@ function runPage(
   const evidence =
     artifacts.length === 0
       ? ""
-      : `<div class="evidence"><strong>evidence</strong>` +
+      : `<details class="evidence-files"><summary>Saved files <span class="meta">(${artifacts.length})</span></summary><ul>` +
         artifacts
           .map(
             artifact =>
-              `<a href="/r/${run.id}/evidence/${artifact.id}">${escape(evidenceWords(artifact.kind))}` +
-              `${artifact.truncated ? ` (shortened at storage: ${artifact.bytesStored} of ${artifact.bytesOriginal} bytes)` : ` · ${artifact.bytesStored} bytes`}</a>`,
+              `<li><a href="/r/${run.id}/evidence/${artifact.id}">${escape(evidenceWords(artifact.kind))}</a>` +
+              ` <span class="meta" title="${artifact.bytesStored} bytes stored${artifact.truncated ? ` of ${artifact.bytesOriginal}` : ""}">${artifact.truncated ? `${humanBytes(artifact.bytesStored)} of ${humanBytes(artifact.bytesOriginal)} · partial` : humanBytes(artifact.bytesStored)}</span></li>`,
           )
-          .join("\n") +
-        "</div>";
+          .join("") +
+        "</ul></details>";
   // Review comments on the immutable terminal diff (M6.8): listed, added,
   // and sealed into ONE unapproved revision task. The seal is deliberately
   // plain — the ceremony lives on the revision task's approval screen,
@@ -20841,13 +20877,14 @@ function runPage(
   const continueCard =
     continueOffer === null || csrf === ""
       ? ""
-      : `<form method="post" action="${taskHref(continueOffer.taskId)}/attend-preview" class="card">` +
+      : `<details class="result-request-open continue-watch"><summary>Continue while you watch</summary>` +
+        `<form method="post" action="${taskHref(continueOffer.taskId)}/attend-preview" class="card">` +
         `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
         `<input type="hidden" name="parent" value="${run.id}">` +
-        `<p><strong>Continue while you watch</strong> <span class="meta">from where this attempt stopped</span></p>` +
+        `<p class="meta">Picks up from where this attempt stopped.</p>` +
         `<label>What next<textarea name="followup" rows="2" maxlength="2000" placeholder="What should the agent do next, within the same scope…"></textarea></label>` +
         `<button type="submit">Review the terms</button>` +
-        `</form>`;
+        `</form></details>`;
 
   // Outcome first (UI polish 2026-09-13): a finished build leads with its
   // result, proof, and diff; the machine facts fold under "Build details".
@@ -20855,7 +20892,7 @@ function runPage(
   const facts =
     running
       ? `<div id="run-facts">${rows}</div><p class="meta" id="run-facts-stamp"></p>`
-      : `<details class="run-facts-details"><summary>Build details<span class="meta">${escape([run.runner, run.provider, run.outcome ?? "never finished"].join(" · "))}</span></summary><div id="run-facts">${rows}</div></details>`;
+      : `<details class="run-facts-details"><summary>Run record<span class="meta">${escape([run.runner, run.provider, run.outcome ?? "never finished"].join(" · "))}</span></summary><div id="run-facts">${rows}</div></details>`;
   // A finished result (package 3) is the ONE shared panel — Summary /
   // Changes / Checks with Request changes beside it — the same markup the
   // review cockpit and the chat's result view render. Every other run
@@ -20969,8 +21006,8 @@ function permissionModeChoices(name: string, selected: UnattendedPermissionMode)
     `<label class="permission-choice"><input type="radio" name="${escape(name)}" value="${escape(value)}"${value === selected ? " checked" : ""}>` +
     `<span><strong>${escape(title)}</strong><small>${escape(detail)}</small></span></label>`;
   return `<div class="permission-toggle" role="radiogroup" aria-label="agent permissions">` +
-    choice("auto", "Auto", "Routine work proceeds; risky permission requests may stop for you.") +
-    choice("bypassPermissions", "Full access", "Never asks. Uses the provider’s unrestricted non-interactive mode.") +
+    choice("auto", "Auto", "Asks before risky actions.") +
+    choice("bypassPermissions", "Full access", "Never asks. Trusted repositories only.") +
     `</div>`;
 }
 
@@ -20980,15 +21017,15 @@ function qualityModeChoices(name: string, selected: QualityMode): string {
     `<label class="permission-choice"><input type="radio" name="${escape(name)}" value="${escape(value)}"${value === selected ? " checked" : ""}>` +
     `<span><strong>${escape(title)}</strong><small>${escape(detail)}</small></span></label>`;
   return `<div class="permission-toggle" role="radiogroup" aria-label="quality mode">` +
-    choice("default", "Default", "Uses the everyday configured agents and repository check.") +
-    choice("strict", "Strict / release", "Uses the strongest configured agents and repository check. Release approval stays separate.") +
+    choice("default", "Default", "Everyday agents and the repository check.") +
+    choice("strict", "Strict / release", "Strongest agents. Release approval stays separate.") +
     `</div>`;
 }
 
 function capsPage(chrome: Chrome, caps: Capability[] | null, gaps: Gap[], repo: string, now?: Date): Screen {
   if (caps === null) {
     return screen("requirements", [
-      `<h1>requirements</h1>`,
+      `<h1>Requirements</h1>`,
       `<p class="meta">open a project to see its requirements — <a href="/projects">projects</a></p>`,
     ].join("\n"), { chrome });
   }
@@ -21021,7 +21058,7 @@ function capsPage(chrome: Chrome, caps: Capability[] | null, gaps: Gap[], repo: 
           )
           .join("\n");
   return screen("requirements", [
-    `<h1>requirements</h1>`,
+    `<h1>Requirements</h1>`,
     `<p class="hint">tools and credentials builds need — each is probed on the worker before any build spends money; values never leave your machine</p>`,
     list,
     `<h2>missing, ranked by what filling them frees</h2>`,
@@ -21049,10 +21086,9 @@ function settingsPage(
       : [
           "<h2>Unattended permissions</h2>",
           permissionDefault.canManage && csrf !== ""
-            ? `<form method="post" action="/settings/permission-default" class="card permission-policy">` +
+            ? `<form method="post" action="/settings/permission-default" class="card permission-policy" data-autosave>` +
               `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
               permissionModeChoices("permission-mode", permissionDefault.mode) +
-              `<p class="meta permission-note">Use Full access only for repositories you trust. Approved tasks keep their setting.</p>` +
               `<button type="submit">Save default</button></form>`
             : `<div class="card"><p><strong>${permissionDefault.mode === "bypassPermissions" ? "Full access" : "Auto"}</strong></p><p class="meta">an approver can change this default</p></div>`,
           permissionDefault.updatedAt === null
@@ -21065,10 +21101,9 @@ function settingsPage(
       : [
           "<h2>Quality mode</h2>",
           qualityDefault.canManage && csrf !== ""
-            ? `<form method="post" action="/settings/quality-default" class="card permission-policy">` +
+            ? `<form method="post" action="/settings/quality-default" class="card permission-policy" data-autosave>` +
               `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
               qualityModeChoices("quality-mode", qualityDefault.mode) +
-              `<p class="meta permission-note">Publishing and deploying still need their own approval.</p>` +
               `<button type="submit">Save default</button></form>`
             : `<div class="card"><p><strong>${escape(qualityModeTitle(qualityDefault.mode))}</strong></p><p class="meta">an approver can change this default</p></div>`,
           qualityDefault.updatedAt === null
@@ -21079,9 +21114,9 @@ function settingsPage(
     digest === null || csrf === ""
       ? ""
       : [
-          "<h2>Telegram digest</h2>",
+          "<h3>Telegram digest</h3>",
           `<p class="meta">Bundle routine updates. Anything that needs you still arrives at once.</p>`,
-          `<form method="post" action="/settings/telegram-digest" class="card">`,
+          `<form method="post" action="/settings/telegram-digest" class="card" data-autosave>`,
           `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
           `<label>Send a digest<select name="every">` +
             [
@@ -21113,42 +21148,44 @@ function settingsPage(
           '<h2 id="providers">AI providers</h2><p><a href="/control">Set up this project</a></p>',
           `<p class="meta">Keys stay on this computer and are never shown again.</p>`,
           `<details class="settings-more"><summary>How keys are used</summary><p class="meta">A key is used only when that provider’s sign-in is set to API key. With a subscription sign-in the key is kept out of the agent, so your membership never turns into API billing. Keys are private files beside the database, never stored in it.</p></details>`,
-          ...providerKeys.map(one =>
-            [
+          ...providerKeys.map(one => {
+            // One status row per provider; the controls wait behind Manage.
+            const name = ASSISTANTS[one.provider as ProviderId]?.name ?? one.provider;
+            const status = one.connection !== undefined && one.connection.state === "connected"
+              ? { tone: "ok", words: [connectionWords(one.connection), one.connection.plan].filter(Boolean).join(" · ") }
+              : one.mode === "subscription"
+                ? { tone: one.connection === undefined ? "neutral" : "warn", words: one.connection === undefined ? "Uses its own sign-in" : connectionWords(one.connection) }
+                : one.set ? { tone: "ok", words: "API key saved" } : one.ambient ? { tone: "ok", words: "Key from this computer’s environment" } : { tone: "off", words: "Not set up" };
+            return [
+              `<div class="provider-row" data-provider="${escape(one.provider)}">`,
+              `<p class="provider-head"><strong>${escape(name)}</strong> <span class="provider-status provider-status--${status.tone}"><i aria-hidden="true"></i>${status.words}</span></p>`,
+              `<details class="provider-manage"><summary>Manage</summary>`,
               `<form method="post" action="/settings/provider-key" class="card">`,
               `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
               `<input type="hidden" name="provider" value="${escape(one.provider)}">`,
               one.connection === undefined ? "" : `<p class="provider-connection"><strong>${connectionWords(one.connection)}</strong> ${[one.connection.email, one.connection.plan, one.connection.method].filter(Boolean).map(value => escape(value!)).join(" · ")} · <a href="/settings?check-connection=${encodeURIComponent(one.provider)}#providers">Check again</a></p>`,
-              `<p class="row"><strong>${escape(one.provider)}</strong> <span class="mono meta">${escape(one.envName)}</span> ` +
-                `<span class="meta">${
-                  one.mode === "subscription" ? "uses its own login · no API-key spend" : "uses the API key"
-                } \u00b7 ${
-                  one.set
-                    ? `key stored${one.updatedAt === null ? "" : ` ${escape(one.updatedAt.slice(0, 10))}`}`
-                    : one.ambient
-                      ? "key in this server's environment"
-                      : "no key stored"
-                }</span></p>`,
+              `<p class="meta">${one.mode === "subscription" ? "Uses its own sign-in, so no API-key spend" : "Uses the API key"} · <span class="mono">${escape(one.envName)}</span> · ${
+                one.set ? `key stored${one.updatedAt === null ? "" : ` ${escape(one.updatedAt.slice(0, 10))}`}` : one.ambient ? "key in this server's environment" : "no key stored"}</p>`,
               one.subscriptionCapable
                 ? `<label>Sign-in<select name="auth-mode">` +
-                  `<option value="subscription"${one.mode === "subscription" ? " selected" : ""}>${escape(one.provider)} subscription</option>` +
+                  `<option value="subscription"${one.mode === "subscription" ? " selected" : ""}>${escape(name)} subscription</option>` +
                   `<option value="api-key"${one.mode === "api-key" ? " selected" : ""}>API key</option>` +
                   `</select></label>`
                 : "",
               `<label>API key<input type="password" name="value" autocomplete="off" placeholder="${one.set ? "Paste to replace the stored key" : "Paste a key"}"></label>`,
-              `<button type="submit">Save ${escape(one.provider)}</button>`,
+              `<button type="submit">Save ${escape(name)}</button>`,
               one.set
                 ? ` <details class="confirm-remove"><summary>Remove the stored key</summary><p class="meta">Runs that use this API key stop until you add one again.</p><button type="submit" formaction="/settings/provider-key-clear" class="danger">Remove key</button></details>`
                 : "",
-              `</form>`,
-            ].join("\n"),
-          ),
+              `</form></details></div>`,
+            ].join("\n");
+          }),
         ].join("\n");
   const pushCard =
     push === null || csrf === ""
       ? ""
       : [
-          "<h2>Alerts on this device</h2>",
+          "<h3>This device</h3>",
           push.available
             ? [
                 `<p class="meta">A notification when something needs you. On iPhone, add this app to your Home Screen first.</p>`,
@@ -21202,8 +21239,10 @@ function settingsPage(
   const messagingCard =
     messaging === null || messaging.configured.length === 0
       ? ""
+      : messaging.configured.length === 1 && !messaging.implicit
+        ? `<h3>Alert service</h3><p class="provider-head"><strong>${escape(messaging.configured[0]!)}</strong> <span class="provider-status provider-status--ok"><i aria-hidden="true"></i>Receiving alerts</span></p>`
       : [
-          "<h2>Connected messaging</h2>",
+          "<h3>Alert service</h3>",
           `<p class="meta">Alerts go through one service, so you are never notified twice${
             messaging.implicit ? " · <strong>Several are connected and none was chosen. Pick one.</strong>" : ""
           }</p>`,
@@ -21234,8 +21273,9 @@ function settingsPage(
     permissionCard,
     qualityCard,
     keysCard,
-    pushCard,
+    pushCard === "" && messagingCard === "" && digestCard === "" ? "" : `<h2>Notifications</h2>`,
     messagingCard,
+    pushCard,
     digestCard,
     problem === null ? "" : `<p class="problem" role="alert">${escape(problem)}</p>`,
     `<details class="settings-more" id="telegram-token"><summary>Telegram bot token <span class="meta">${hasEnv ? "from the environment" : existing === null ? "not set" : "saved"}</span></summary>`,
@@ -21247,8 +21287,12 @@ function settingsPage(
     "</form>",
     `<p class="meta">Stored privately on this computer. Then pair your phone under <a href="/settings/telegram">Telegram</a>. In Telegram, send <code>/status</code>, <code>/task &lt;id&gt;</code> or <code>/help</code>; these use no AI model.</p>`,
     `</details>`,
-  ].join("\n"), { chrome, ...(pushScript === null ? {} : { functional: { script: pushScript, fetches: true } }) });
+  ].join("\n"), { chrome, functional: { script: SETTINGS_AUTOSAVE_SCRIPT + (pushScript ?? ""), ...(pushScript === null ? {} : { fetches: true }) } });
 }
+
+/** Choices save the moment they change; without the script the Save
+ * button stays and the form works the same. */
+const SETTINGS_AUTOSAVE_SCRIPT = `(function(){document.querySelectorAll('form[data-autosave]').forEach(function(form){form.classList.add('js-autosave');form.addEventListener('change',function(ev){var t=ev.target;if(t&&(t.type==='radio'||t.tagName==='SELECT')){if(form.requestSubmit)form.requestSubmit();else form.submit();}});});})();`;
 
 /** Settings destinations as a scannable grid: an icon and a name each. */
 function settingsTiles(): string {
@@ -21311,7 +21355,7 @@ function nextPage(chrome: Chrome, data: {
   if (item === null) {
     const held = data.skipped.length;
     return screen("next", [
-      `<h1>all clear</h1>`,
+      `<h1>All clear</h1>`,
       held > 0
         ? `<p>Nothing left except the ${held} you set aside. <a href="/next">Look at those again</a>, or come back later.</p>`
         : `<p>Nothing needs you. The machine is either working or waiting on its own clocks.</p>`,

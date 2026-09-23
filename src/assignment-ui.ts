@@ -73,7 +73,10 @@ export function assignmentSummaryHtml(assignment: AssignmentSnapshot, options: {
   return `<section class="${options.compact ? 'assignment-summary' : 'card assignment-summary'}" aria-label="assignment progress" data-assignment="${escape(assignment.rootId)}" data-work-status="${status.token}" data-tone="${status.tone}"${options.compact ? '' : ' data-task-status'}>` +
     (options.compact ? `<span class="status-line" data-work-status="${status.token}" data-tone="${status.tone}"><i class="status-dot" aria-hidden="true"></i><span class="status-label">${status.label}</span></span>` : `<h2 class="assignment-state">${status.label}</h2>`) +
     (options.hideAction || href === null ? '' : `<a class="${options.compact ? 'work-action' : 'button-link'}" href="${escape(href)}"${options.resultHref === undefined ? '' : ' data-open-result'}${options.compact ? '' : ' data-primary-action'}>${escape(assignment.primaryAction!.label)}${options.compact ? ' →' : ''}</a>`) +
-    `<p class="${checkProblem || options.problem && !ready ? 'problem' : 'meta'} assignment-detail">${escape(assignment.detail)}</p>` +
+    (!options.compact && ready && !checkProblem && assignment.receipt !== null && assignment.receipt.checks.status === 'passed'
+      // A good outcome at a glance; the same words stay in the result.
+      ? `<p class="meta assignment-detail assignment-verdict"><span class="verdict-chip verdict-chip--success">Checks passed</span>${assignment.completion === null ? '' : ` Completed by ${escape(assignment.completion.actor.replace(/^(?:operator|coordinator|lead):/, ''))}`}</p>`
+      : `<p class="${checkProblem || options.problem && !ready ? 'problem' : 'meta'} assignment-detail">${escape(assignment.detail)}</p>`) +
     attention.filter(one => savedMaterialNotice(one, assignment) === null).map(one => `<p class="problem">${escape(one)}</p>`).join('') +
     diagnostics.filter(one => savedMaterialNotice(one.detail, assignment) === null).map(one => `<p class="${one.tone === 'problem' || one.tone === 'attention' ? 'problem' : 'meta'}" data-work-diagnostic="${escape(one.token)}">${escape(one.label)} · ${escape(one.detail)}</p>`).join('') +
     (notices.length === 0 ? '' : `<details class="assignment-notices"><summary>${noticeSummary}</summary>${[...new Set(notices)].map(one => `<p class="meta">${escape(one)}</p>`).join('')}</details>`) +
