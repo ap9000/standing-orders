@@ -6525,6 +6525,20 @@ describe("the onboarding ceremony over real HTTP, and root-mode placement proofs
     expect(store.getTask("off-list")).toBeNull();
   });
 
+  test("with no project open, New task picks from known projects instead of asking for a typed path", async () => {
+    store.upsertProject(join(root, "payments-api"), "payments-api", T0);
+    store.upsertProject("/elsewhere/payments-api", "payments-api", new Date(T0.getTime() + 1_000));
+    await boot({});
+    const cookie = await login();
+    const form = await (await fetch(url("/tasks/new"), { headers: { cookie } })).text();
+    const picker = /<select name="repo" required>(.*?)<\/select>/s.exec(form)?.[1] ?? "";
+    // Most recently opened first and chosen; same names show their parent folder.
+    expect(picker).toContain(`<option value="/elsewhere/payments-api" title="/elsewhere/payments-api" selected>payments-api (elsewhere)</option>`);
+    expect(picker).toContain(`>payments-api (${root.split("/").filter(Boolean).pop()})</option>`);
+    expect(form).not.toContain('placeholder="/path/to/repository"');
+    expect(form).toContain('<a href="/projects?return=%2Ftasks%2Fnew">Add a project</a>');
+  });
+
   test("unscoped mode keeps its historic unplaced filings", async () => {
     await boot({});
     const cookie = await login();
