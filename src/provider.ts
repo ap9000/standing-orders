@@ -72,6 +72,10 @@ export type Invocation = {
   startSessionId?: string;
   /** Sealed reviewer screenshots, attached explicitly by transports without a read tool. */
   reviewImages?: readonly string[];
+  /** The project's tools for this launch (v80): the provider's own flags
+   * naming exactly those MCP servers and no others. Never rendered for a
+   * review, which keeps its own no-tools isolation. */
+  toolArgv?: readonly string[];
 };
 
 export type ProviderRunner = (
@@ -326,7 +330,7 @@ const claudeArgv = (invocation: Invocation): string[] => [
   ...(invocation.maxBudgetUsd === undefined ? [] : ["--max-budget-usd", String(invocation.maxBudgetUsd)]),
   ...(invocation.phase === "review"
     ? [...CLAUDE_REVIEW_ISOLATION_ARGV, "--json-schema", JSON.stringify(CLAUDE_REVIEW_JSON_SCHEMA)]
-    : []),
+    : invocation.toolArgv ?? []),
 ];
 
 /** A claude envelope object, whichever line carried it. */
@@ -549,6 +553,8 @@ const codexArgv = (extra: readonly string[]) => (invocation: Invocation): string
         : codexSandboxArgv("workspace-write", resuming)),
     ...(invocation.model === null ? [] : ["-m", invocation.model]),
     ...extra,
+    // After `extra`: the tools' shell_environment_policy must be the last word (it keeps OpenRouter's key out too).
+    ...(invocation.phase === "review" ? [] : invocation.toolArgv ?? []),
     ...(invocation.phase === "review" ? (invocation.reviewImages ?? []).flatMap(path => ["--image", path]) : []),
     // Review includes the sealed text itself: no shell/read tool exists in
     // this posture. stdin avoids both per-argument and Windows argv limits.
@@ -692,6 +698,7 @@ const geminiArgv = (invocation: Invocation): string[] => [
       ? ["--session-id", invocation.startSessionId]
       : []),
   ...(invocation.model === null ? [] : ["-m", invocation.model]),
+  ...(invocation.toolArgv ?? []),
 ];
 
 /** Gemini interval caps: inactivity for current profiles, wall clock for

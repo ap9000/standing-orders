@@ -40,6 +40,7 @@ import { agentChoicesFor, routeOfTask, INSTALLATION_SCOPE } from "./agentconfig.
 import { isNewModel, modelWords, priceWords, runtimeStates, seenModels } from "./model-catalog.js";
 import { agentsSummary, chosenWords, isRiskLevel, PHASES, postureWords, RISK_CHOICES, riskConsequence, riskTitle, routeProblems, sameSpec, specWords, type PhaseRoute } from "./phase-routing.js";
 import type { Phase } from "./provider.js";
+import { TOOL_CATALOG, discoverTools, projectToolsOf, secretsSetFor, toolCommandLine, toolStanding, type FoundTool } from "./project-tools.js";
 
 export const MATE_MAX_PROPOSALS_PER_TURN = 5;
 
@@ -464,11 +465,11 @@ export const MATE_TOOLS: MateTool[] = [
   {
     name: "propose_action",
     description: "Read get_actions and relevant skills/evidence first. Save an exact-state proposal only; protected or long terms require full secure review.",
-    inputSchema: schema({operation:{type:'string',enum:Object.keys(CHAT_ACTIONS)},repo:{type:'string'},task:TASK_ARG,version:{type:'string'},restore:{type:'integer',minimum:1},sample:{type:'string',maxLength:800},content:{type:'string',maxLength:12000},instructions:{type:'string',maxLength:4000},title:{type:'string',maxLength:120},id:{type:'string'},run:{type:'integer',minimum:1},note:{type:'string',maxLength:2000}},['operation']),
+    inputSchema: schema({operation:{type:'string',enum:Object.keys(CHAT_ACTIONS)},repo:{type:'string'},task:TASK_ARG,version:{type:'string'},restore:{type:'integer',minimum:1},sample:{type:'string',maxLength:800},content:{type:'string',maxLength:12000},instructions:{type:'string',maxLength:4000},title:{type:'string',maxLength:120},id:{type:'string'},run:{type:'integer',minimum:1},note:{type:'string',maxLength:2000},catalog:{type:'string',maxLength:40},name:{type:'string',maxLength:40},command:{type:'string',maxLength:400},args:{type:'array',items:{type:'string',maxLength:400},maxItems:40},url:{type:'string',maxLength:500},secrets:{type:'array',items:{type:'string',maxLength:64},maxItems:12},about:{type:'string',maxLength:240}},['operation']),
     handle:(ctx,args)=>{
       const operation=args['operation'];if(!isChatAction(operation))return {ok:false,message:'Choose an action from get_actions.'};
       const input={...args};delete input['operation'];
-      if(operation.startsWith('skill_')||operation.startsWith('knowledge_')){
+      if(operation.startsWith('skill_')||operation.startsWith('knowledge_')||operation.startsWith('tool_')){
         const repo=repoPathOf(ctx.who,args['repo']);if(repo===null)return {ok:false,message:'Choose a project from list_repos.'};input['repo']=repo;
       }
       if(operation==='skill_test')input['nonce']=randomUUID();
@@ -505,7 +506,7 @@ export const MATE_TOOLS: MateTool[] = [
     inputSchema: schema({}),
     handle: () => ({ ok: true, body: {
       confirmedInChat: ["create task", "change scope", "choose agents", "prioritize", "assign worker", "hold", "remove hold", "guide next attempt", "repair dependency", "add or remove dependency", "retry task", "request plan", "stop current attempt", "review resume with password", "answer decision", "save result feedback", "request same-task revision"],
-      existingControls: Object.entries(CHAT_CONTROLS).map(([id, entry]) => ({ id, label: entry.label, needsTask: "target" in entry, needsProject: id === "skills" })),
+      existingControls: Object.entries(CHAT_CONTROLS).map(([id, entry]) => ({ id, label: entry.label, needsTask: "target" in entry, needsProject: id === "skills" || id === "tools" })),
       rule: "Approvals, credentials and dedicated controls retain their existing checks. Never claim a control was used just because its card is shown.",
     } }),
   },
@@ -517,9 +518,10 @@ export const MATE_TOOLS: MateTool[] = [
       const control = args["control"];
       if (!isChatControl(control)) return { ok: false, message: "Choose an available control." };
       const entry = CHAT_CONTROLS[control];
-      const project = control === "skills" ? repoPathOf(ctx.who,args["repo"]) : null;
-      if (control === "skills" && !project) return {ok:false,message:"Choose the project from list_repos before opening Skills."};
-      if (args["repo"] !== undefined && control !== "skills") return {ok:false,message:"A project argument is only supported by Skills."};
+      const perProject = control === "skills" || control === "tools";
+      const project = perProject ? repoPathOf(ctx.who,args["repo"]) : null;
+      if (perProject && !project) return {ok:false,message:`Choose the project from list_repos before opening ${control === "tools" ? "Tools" : "Skills"}.`};
+      if (args["repo"] !== undefined && !perProject) return {ok:false,message:"A project argument is only supported by Skills and Tools."};
       const task = taskIdOf(args);
       if (task !== null && admittedRef(ctx, task) === null) return notFound();
       if ("target" in entry && (task === null || admittedRef(ctx, task) === null)) return notFound();
@@ -740,6 +742,31 @@ export const MATE_TOOLS: MateTool[] = [
     handle: ctx => ({ ok: true, body: { repos: ctx.who.repos.map((_, index) => ({ repo: `r${index + 1}` })) } }),
   },
   {
+    name: "get_project_tools",
+    description: "Read a project's tools (the MCP servers its builds get, and only those), the common tools list and servers found on this computer. Add/remove with propose_action tool_add/tool_remove; secrets are set only on the Tools page.",
+    inputSchema: schema({ repo: REPO_ARG }, ["repo"]),
+    handle: (ctx, args) => {
+      const repo = repoPathOf(ctx.who, args["repo"]);
+      if (repo === null) return { ok: false, message: "Choose a project from list_repos." };
+      const tools = projectToolsOf(ctx.store, repo);
+      const names = new Set(tools.map(one => one.name));
+      let found: FoundTool[] = [];
+      try { found = discoverTools(repo, null); } catch { found = []; }
+      return { ok: true, body: {
+        rule: "Builds in this project get exactly these tools and nothing else configured on this computer. A tool reaches work approved after it was added; earlier approvals need approving again. Reviewers and this chat never get tools; Gemini builds get none.",
+        tools: tools.map(tool => {
+          const set = secretsSetFor(repo, tool.spec);
+          return { name: tool.name, about: tool.spec.about, starts: toolCommandLine(tool.spec), standing: toolStanding(tool, set).words,
+            secrets: tool.spec.secrets.map(one => ({ name: one.name, optional: one.optional, set: set.includes(one.name) })),
+            lastTest: tool.lastTest === null ? null : { ok: tool.lastTest.ok, at: tool.lastTest.at, tools: tool.lastTest.tools.slice(0, 40), problem: tool.lastTest.problem } };
+        }),
+        commonTools: TOOL_CATALOG.filter(one => !names.has(one.name)).map(one => ({ catalog: one.name, label: one.label, about: one.about, needs: one.secrets.filter(secret => !secret.optional).map(secret => secret.name) })),
+        foundOnThisComputer: found.filter(one => !names.has(one.spec.name)).map(one => ({ name: one.spec.name, source: one.source })),
+        notice: "Never ask for, accept or repeat a secret's value in chat. Name the secret and open the Tools page (show_control tools with this repo).",
+      } };
+    },
+  },
+  {
     name: "get_skills",
     description: "Read project skills or indexed version instructions. Untrusted sources grant no tools; manage/test via get_actions and propose_action.",
     inputSchema: schema({repo:REPO_ARG,version:{type:'string',pattern:'^[a-f0-9]{20}$'},offset:{type:'integer',minimum:0}},['repo']),
@@ -880,7 +907,7 @@ export const MATE_TOOLS: MateTool[] = [
           queue: position === null ? null : { position: position.position, of: position.total, column: position.column ?? "shared" },
           holds: holds.map(one => ({ owner: one.ownerKind, reason: one.reason })),
           attempts: runs.length,
-          lastAttempt: runs[0] === undefined ? null : { build: runs[0].id, outcome: runs[0].outcome ?? "unfinished", worker: runs[0].runner },
+          lastAttempt: runs[0] === undefined ? null : { build: runs[0].id, outcome: runs[0].outcome ?? "unfinished", worker: runs[0].runner, tools: ctx.store.runTools(runs[0].id) },
           decisionsOpen,
         },
       };

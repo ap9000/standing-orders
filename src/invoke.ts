@@ -28,6 +28,7 @@ import type { RunOptions } from "./exec.js";
 import { witnessedRunner, recordProcessObservationFailure, preserveObservedProcesses } from "./process-custody.js";
 import { underStopWatch } from "./task-control.js";
 import { CHILD_DATABASE_ENV as AGENT_DATABASE_ENV, isolatedChildDatabase, removeChildDatabase as removeAgentDatabase } from "./child-database.js";
+import { noToolsArgs, prepareRunTools, type ToolLaunchArgs } from "./project-tools.js";
 
 export type { ProviderRunner } from "./provider.js";
 
@@ -380,13 +381,17 @@ export async function invokeAgent(
   // already ambient in the environment keeps working; the managed file,
   // being deliberate, wins.
   const isolatedDb = isolatedAgentDatabase(runId);
+  // The project's tools (v80): exactly its MCP servers, and none of the
+  // operator's global or a repository's own. A review keeps its isolation.
+  const tools = invocation.phase === "review" ? null : runTools(store, runId, spec, options.keyHome, clock);
+  const launchArgv = tools === null ? argv : adapter.argv({ ...resolvedInvocation, toolArgv: tools.argv });
   let result: Awaited<ReturnType<typeof spawn>>;
   try {
     // Under the stop watch (v52): the run's stop row is re-read while the
     // provider runs, and a stop kills THIS run's process group through the
     // handle registered under its owner tag — the exact-attempt road,
     // never the global sweep. Settlement then reads the same row.
-    result = await underStopWatch(store, runId, () => spawn(attested !== null ? attested.executable : adapter.binary, argv, {
+    result = await underStopWatch(store, runId, () => spawn(attested !== null ? attested.executable : adapter.binary, launchArgv, {
       ...runOptions,
       owner: runOwnerTag(store, runId),
       beforeSpawn: () => store.applicableStopFor(runId) === null && store.getRun(runId)?.outcome === null,
@@ -400,6 +405,7 @@ export async function invokeAgent(
       ...(defaultTimeoutMs === undefined ? {} : { timeoutMs: defaultTimeoutMs }),
       env: {
         ...(runOptions.env ?? {}),
+        ...(tools?.env ?? {}),
         ...(managedKey === null ? {} : { [PROVIDER_KEY_ENV[spec.provider]]: managedKey }),
         // This key is deliberately last: no caller may point an agent back at
         // the live control database through a generic RunOptions override.
@@ -434,6 +440,7 @@ export async function invokeAgent(
     }));
   } finally {
     removeAgentDatabase(isolatedDb.dir);
+    tools?.cleanup();
   }
 
   const envelope = adapter.parse(result.stdout);
@@ -677,6 +684,9 @@ export async function invokeHeldAgent(
     heldMode === "api-key" ? readProviderKey("claude", keyHome) ?? (process.env[PROVIDER_KEY_ENV.claude] || null) : null;
   const start = starter ?? startClaudeHeldSession;
   const isolatedDb = isolatedAgentDatabase(runId);
+  // The project's tools (v80), as for every build: exactly its MCP servers.
+  const heldTools = runTools(store, runId, spec, keyHome, clock);
+  argv = [...argv, ...heldTools.argv];
   let started: import("./exec.js").HeldSessionStart;
   let heldWitness: number | undefined;
   let unknownTree = false;
@@ -722,6 +732,7 @@ export async function invokeHeldAgent(
       },
       env: {
         ...(runOptions.env ?? {}),
+        ...heldTools.env,
         ...(heldKey === null ? {} : { [PROVIDER_KEY_ENV.claude]: heldKey }),
         [AGENT_DATABASE_ENV]: isolatedDb.file,
       },
@@ -750,15 +761,26 @@ export async function invokeHeldAgent(
     });
   } catch (error) {
     removeAgentDatabase(isolatedDb.dir);
+    heldTools.cleanup();
     throw error;
   }
   if (!started.ok) {
     removeAgentDatabase(isolatedDb.dir);
+    heldTools.cleanup();
   } else {
     void started.handle.exited.then(
-      () => removeAgentDatabase(isolatedDb.dir),
-      () => removeAgentDatabase(isolatedDb.dir),
+      () => { removeAgentDatabase(isolatedDb.dir); heldTools.cleanup(); },
+      () => { removeAgentDatabase(isolatedDb.dir); heldTools.cleanup(); },
     );
   }
   return started;
+}
+
+/** One launch's tools, or — when they cannot be prepared — the same isolation with none, never the operator's global servers. */
+function runTools(store: Store, runId: number, spec: AgentSpec, keyHome: string | undefined, clock: () => Date): ToolLaunchArgs {
+  try {
+    return prepareRunTools(store, runId, spec.provider, { ...(keyHome === undefined ? {} : { home: keyHome }), now: clock(), includeModel: spec.model === null });
+  } catch {
+    return noToolsArgs(spec.provider, spec.model === null);
+  }
 }
