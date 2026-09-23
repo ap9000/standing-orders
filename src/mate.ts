@@ -15,6 +15,7 @@
  * (finding 8); and everything the model sees passed `mateView` (finding 9).
  */
 import { Buffer } from "node:buffer";
+import { mateToolLabel, type MateProgress } from "./mate-progress.js";
 import { createHash } from "node:crypto";
 import type { ChatConfig, DirectChatProviderId, MateProposalKind, MateSession, MateThread, MateTurnEvidence, Store, SubscriptionChatProviderId } from "./store.js";
 import { RESULT_IMAGES_PER_TURN_CAP } from "./chat-evidence.js";
@@ -72,6 +73,10 @@ export type MateTurnInput = {
   fetcher?: typeof fetch;
   /** Injected by tests; production invokes the isolated local harness. */
   subscriptionRunner?: SubscriptionMateRunner;
+  /** Live progress for someone watching (chat streaming): the steps, the
+   * tools in plain words, and the reply as it is written. Display only;
+   * never called with text that looks like a secret. */
+  onProgress?: (event: MateProgress) => void;
   clock?: () => Date;
   /** Where evidence lives — get_task reads a scout's report from here. */
   evidenceRoot?: string;
@@ -283,6 +288,8 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
   const turnId = admitted.turnId;
   const started = { generation: admitted.generation };
   const turnStartedAt = now.getTime();
+  const progress = (event: MateProgress): void => { try { input.onProgress?.(event); } catch { /* a watcher never breaks the turn */ } };
+  progress({ kind: "started", turn: turnId });
 
   let proposals = 0;
   let reads = 0;
@@ -355,6 +362,7 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
     const stepStarted = store.startChatTurn(step.id, now);
     if (!stepStarted.ok) return fail("provider-error", "the step could not be dispatched", false);
     steps++;
+    progress({ kind: "step", turn: turnId, step: steps });
     const requestBytes = Buffer.byteLength(outbound, "utf8");
     let result: Awaited<ReturnType<typeof performMateRequest>>;
     if (direct) {
@@ -378,6 +386,9 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
           history,
           tools: MATE_TOOL_SCHEMAS,
           timeoutMs: remainingMs,
+          // The reply as it is written; text that looks like a secret is
+          // never shown (the finished reply is scanned again before saving).
+          ...(input.onProgress === undefined ? {} : { onText: (text: string) => { if (scanForSecrets(text).length === 0) progress({ kind: "text", turn: turnId, step: steps, text }); } }),
         });
       } catch {
         result = { ok: false, problem: "provider-error" };
@@ -452,6 +463,7 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
         const changed = guard(input.revalidate === undefined ? { ok: true } : await input.revalidate());
         if (changed !== null) return changed;
       }
+      progress({ kind: "tool", turn: turnId, step: steps, label: mateToolLabel(call.name) });
       const outcome = executeMateTool({ store, who, now: clock(), draft, selectEvidence, step: steps, readDecisions, readResults, ...(input.evidenceRoot === undefined ? {} : { evidenceRoot: input.evidenceRoot }), ...(input.mediaDelivery === undefined ? {} : { mediaDelivery: input.mediaDelivery }) }, call.name, call.args, view);
       if (READ_TOOLS.has(call.name)) reads++;
       history.push({ role: "tool", callId: call.id, name: call.name, result: capped(outcome.ok ? outcome.body : { ok: false, message: outcome.message }) });

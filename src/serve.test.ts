@@ -8983,6 +8983,32 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(choosing.view).toMatchObject({ kind: 'projects', choosing: true, returnTo: '/tasks/new' });
   });
 
+  test('chat streaming: a running turn streams its steps until done; with nothing running the stream closes at once', async () => {
+    const cookie = await login(); const csrf = await mint(cookie);
+    const idle = await fetch(url('/chat/stream'), { headers: { cookie } });
+    expect(idle.headers.get('content-type')).toBe('text/event-stream');
+    expect(idle.headers.get('cache-control')).toBe('no-store');
+    expect(await idle.text()).toBe('event: turn\ndata: {"steps":[],"done":true,"ok":false}\n\n');
+    // A turn waiting on the provider: its step shows, then done once it answers.
+    let finish!: (value: Response) => void;
+    script.push(() => new Promise<Response>(resolve => { finish = resolve; }) as unknown as Response);
+    expect((await sendJson(cookie, { csrf, task: 'a', message: 'Where is this?', request: 'c'.repeat(32), 'request-session': '1' })).status).toBe(202);
+    const live = await fetch(url('/chat/stream?task=a'), { headers: { cookie } });
+    const reader = live.body!.getReader();
+    const decoder = new TextDecoder();
+    let body = '';
+    while (!body.includes('"steps":[{')) body += decoder.decode((await reader.read()).value);
+    expect(body).toContain('"done":false');
+    finish(answer([{ type: 'text', text: 'Here.' }]));
+    for (let chunk = await reader.read(); !chunk.done; chunk = await reader.read()) body += decoder.decode(chunk.value);
+    expect(body.trimEnd().split('\n\n').at(-1)).toContain('"done":true,"ok":true');
+    await settle();
+    // Another thread has nothing running; an unknown task or a signed-out caller is refused.
+    expect(await (await fetch(url('/chat/stream'), { headers: { cookie } })).text()).toContain('"done":true');
+    expect((await fetch(url('/chat/stream?task=nope'), { headers: { cookie } })).status).toBe(404);
+    expect((await fetch(url('/chat/stream'), { redirect: 'manual' })).status).not.toBe(200);
+  });
+
   test('v77: task and project pages dock their own threads, and the chat list names them', async () => {
     const cookie = await login(); const csrf = await mint(cookie);
     type Workspace = import('./browser-workspace.js').BrowserWorkspace;

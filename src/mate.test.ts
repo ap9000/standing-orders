@@ -265,6 +265,31 @@ describe("the mate's turn", () => {
     expect(store.latchedChatTurns(credential)).toEqual([]);
     expect(store.chatTurnsToday("alex", clock())).toBe(1);
   });
+  test("a watched turn reports its steps, its tools in plain words and its reply as it is written", async () => {
+    const config: ChatConfig = { ...CONFIG, provider: "claude-subscription", model: "default", weeklyCeilingMicrousd: 0, priceInMicrousd: 0, priceOutMicrousd: 0 };
+    const live = session(0, "alex", subscriptionCredentialKey("claude-subscription"));
+    const events: import("./mate-progress.js").MateProgress[] = [];
+    let step = 0;
+    const subscriptionRunner: SubscriptionMateRunner = async request => {
+      step++;
+      if (step === 1) {
+        request.onText?.("Let me look.");
+        return { ok: true, answer: { text: "Let me look.", calls: [{ id: "r1", name: "recap", args: {} }], tokensIn: 10, tokensOut: 2, reportedCostMicrousd: null } };
+      }
+      request.onText?.("One decision");
+      request.onText?.("sk-ant-api03-" + "A".repeat(90));
+      request.onText?.("One decision needs you.");
+      return { ok: true, answer: { text: "One decision needs you.", calls: [], tokensIn: 10, tokensOut: 4, reportedCostMicrousd: null } };
+    };
+    const outcome = await runMateTurn({ store, who, session: live, thread: thread(), config, key: null, message: "what needs me?", subscriptionRunner, clock, onProgress: event => events.push(event) });
+    expect(outcome).toMatchObject({ ok: true, reply: "One decision needs you." });
+    if (!outcome.ok) throw new Error("unreachable");
+    expect(events.map(event => event.kind === "tool" ? `tool:${event.label}` : event.kind === "text" ? `text:${event.step}:${event.text}` : event.kind === "step" ? `step:${event.step}` : event.kind)).toEqual([
+      "started", "step:1", "text:1:Let me look.", "tool:Recapping", "step:2", "text:2:One decision", "text:2:One decision needs you.",
+    ]);
+    expect(events.every(event => event.turn === outcome.turn)).toBe(true);
+  });
+
   test('project knowledge reads are counted without granting a write tool',async()=>{
     const script=scripted([answer([call('get_project_knowledge',{repo:'r1'})]),text('Project knowledge is unavailable; no changes made.')]);
     const outcome=await turn('Read project knowledge',script.fetcher);

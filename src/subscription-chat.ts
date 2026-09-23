@@ -27,6 +27,7 @@ import {
   type MateToolSchema,
 } from "./converse.js";
 import { run, type ExecResult } from "./exec.js";
+import { claudeStreamReader } from "./mate-progress.js";
 import { ALL_CREDENTIAL_ENV } from "./provider.js";
 import type { SubscriptionChatProviderId } from "./store.js";
 
@@ -39,6 +40,9 @@ export type SubscriptionMateRequest = {
   history: readonly MateHistoryMessage[];
   tools: readonly MateToolSchema[];
   timeoutMs: number;
+  /** The reply as it is written, cumulative, when the harness can stream it
+   * (Claude). Display only: the finished answer is still parsed whole. */
+  onText?: (text: string) => void;
 };
 
 export type SubscriptionMateRunner = (
@@ -180,6 +184,21 @@ function claudeOutput(stdout: string): { text: string | null; tokensIn: number; 
   return { text: typeof body["result"] === "string" ? body["result"] : null, tokensIn, tokensOut };
 }
 
+/** The streamed run's closing `result` event: the same body the buffered
+ * `--output-format json` run prints. */
+function lastResultLine(stdout: string): string {
+  const lines = stdout.split("\n");
+  for (let index = lines.length - 1; index >= 0; index--) {
+    const line = lines[index]!.trim();
+    if (line === "") continue;
+    try {
+      const event = JSON.parse(line) as unknown;
+      if (typeof event === "object" && event !== null && (event as Record<string, unknown>)["type"] === "result") return line;
+    } catch { /* not an event line */ }
+  }
+  return "";
+}
+
 /** Production runner; injectable so tests never consume a subscription turn. */
 export async function performSubscriptionMateRequest(
   request: SubscriptionMateRequest,
@@ -188,6 +207,7 @@ export async function performSubscriptionMateRequest(
   const dir = mkdtempSync(join(tmpdir(), "standing-orders-mate-"));
   try {
     const prompt = composeSubscriptionMatePrompt(request);
+    const streaming = request.provider !== "codex-subscription" && request.onText !== undefined;
     const schema = outputSchema(request.tools);
     let command: string;
     let args: string[];
@@ -208,7 +228,9 @@ export async function performSubscriptionMateRequest(
     } else {
       command = "claude";
       args = [
-        "-p", "--output-format", "json", "--json-schema", JSON.stringify(schema),
+        // Streaming (someone is watching): the same answer, delivered as
+        // events whose final `result` line is the whole structured reply.
+        "-p", ...(streaming ? ["--output-format", "stream-json", "--verbose", "--include-partial-messages"] : ["--output-format", "json"]), "--json-schema", JSON.stringify(schema),
         "--safe-mode", "--no-session-persistence", "--tools", "", "--permission-mode", "dontAsk",
         "--permission-prompts", "none", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
         ...(request.model === "default" ? [] : ["--model", request.model]),
@@ -218,14 +240,16 @@ export async function performSubscriptionMateRequest(
       cwd: dir,
       stdin: prompt,
       timeoutMs: request.timeoutMs,
-      maxBuffer: RESPONSE_CAP_BYTES,
+      // Events repeat the answer (deltas, the message, the result line).
+      maxBuffer: streaming ? RESPONSE_CAP_BYTES * 16 : RESPONSE_CAP_BYTES,
       omitEnv: ALL_CREDENTIAL_ENV,
       processGroup: true,
+      ...(streaming ? { onStdout: claudeStreamReader(request.onText!) } : {}),
     });
     if (result.timedOut) return { ok: false, problem: "timeout" };
     if (result.notFound) return { ok: false, problem: "not-found" };
     if (result.code !== 0) return { ok: false, problem: `status-${result.code}` };
-    const output = request.provider === "codex-subscription" ? codexOutput(result.stdout) : claudeOutput(result.stdout);
+    const output = request.provider === "codex-subscription" ? codexOutput(result.stdout) : claudeOutput(streaming ? lastResultLine(result.stdout) : result.stdout);
     if (output.text === null) return { ok: false, problem: "malformed-reply" };
     return parseSubscriptionMateAnswer(output.text, output);
   } finally {

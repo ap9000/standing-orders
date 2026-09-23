@@ -92,6 +92,34 @@ describe("subscription chat's isolated harness adapter", () => {
     expect(existsSync(call.cwd)).toBe(false);
   });
 
+  test("Claude streams the reply while it is written; the closing result stays the answer", async () => {
+    const seen: string[] = [];
+    const stdout = [
+      { type: "system", subtype: "init" },
+      { type: "stream_event", event: { type: "content_block_start", content_block: { type: "tool_use", name: "StructuredOutput", input: {} } } },
+      ...['{"text": "Rea', 'dy \\"now\\"', '.\\nDone", "calls": []}'].map(partial => ({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "input_json_delta", partial_json: partial } } })),
+      { usage: { input_tokens: 8, output_tokens: 2 }, type: "result", subtype: "success", is_error: false, structured_output: { text: 'Ready "now".\nDone', calls: [] } },
+    ].map(line => JSON.stringify(line)).join("\n") + "\n";
+    const result = await performSubscriptionMateRequest({ ...request("claude-subscription"), onText: text => seen.push(text) }, async (_file, args, options) => {
+      expect(args).toEqual(expect.arrayContaining(["--output-format", "stream-json", "--verbose", "--include-partial-messages", "--safe-mode", "--tools", ""]));
+      for (let at = 0; at < stdout.length; at += 23) options?.onStdout?.(stdout.slice(at, at + 23));
+      return { code: 0, stdout, stderr: "", timedOut: false, notFound: false };
+    });
+    expect(seen).toEqual(["Rea", 'Ready "now"', 'Ready "now".\nDone']);
+    expect(result).toMatchObject({ ok: true, answer: { text: 'Ready "now".\nDone', tokensIn: 8, tokensOut: 2 } });
+    // Without a watcher, and for Codex, the buffered run is unchanged.
+    await performSubscriptionMateRequest(request("claude-subscription"), async (_file, args, options) => {
+      expect(args).toEqual(expect.arrayContaining(["--output-format", "json"]));
+      expect(options?.onStdout).toBeUndefined();
+      return { code: 0, stdout: "{}", stderr: "", timedOut: false, notFound: false };
+    });
+    await performSubscriptionMateRequest({ ...request("codex-subscription"), onText: () => undefined }, async (_file, args, options) => {
+      expect(args).not.toContain("stream-json");
+      expect(options?.onStdout).toBeUndefined();
+      return { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
+    });
+  });
+
   test("Claude runs in safe print mode with an empty tool and MCP surface", async () => {
     let seen: { args: readonly string[]; cwd: string } | null = null;
     const result = await performSubscriptionMateRequest(request("claude-subscription"), async (_file, args, options) => {

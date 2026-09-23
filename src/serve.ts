@@ -203,6 +203,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { loadOrCreateVapidKeys, validatePushEndpoint } from "./push.js";
 import { parseGithubRepo, previewGithubRepo, cloneGithubRepo, listGithubRepos, isLargeRepo, type ListOutcome } from "./onboard.js";
 import { verifiedAuthor, LEAD_THREAD, type MateThreadScope } from "./store.js";
+import type { MateProgress } from "./mate-progress.js";
 import { updateRepos, addRepos } from "./repos.js";
 import { run as execRun } from "./exec.js";
 
@@ -626,6 +627,8 @@ export function createDecisionServer(options: ServeOptions): Server {
   const codingProjects = (): string[] => [...new Set([...managedRepos(), ...store.listProjects().map(project => project.path)])].filter(repo => rowVisible(liveCeiling(), repo));
   function codingProjectAllowed(repo: string): boolean { return codingProjects().includes(repo); }
   const teamStreams = new Set<ServerResponse>();
+  /** Open chat streams (live replies), ended when the server closes. */
+  const chatStreams = new Set<ServerResponse>();
   const team = createTeamRuntime({ store, repos: codingProjects, evidenceRoot, clock, workspaceRevision,
     ...(options.chatFetcher ? { fetcher: options.chatFetcher } : {}),
     provider: () => { const enabled = chatEnablement(); return enabled.ok ? { config: enabled.config, key: enabled.key } : null; },
@@ -1295,7 +1298,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       url.pathname !== "/projects" &&
       url.pathname !== "/projects/browse" && url.pathname !== "/projects/github" && url.pathname !== "/workbench" &&
       url.pathname !== "/fleet" &&
-      url.pathname !== "/chat" && url.pathname !== "/chat/mate/status" && url.pathname !== "/chat/task-status" &&
+      url.pathname !== "/chat" && url.pathname !== "/chat/mate/status" && url.pathname !== "/chat/task-status" && url.pathname !== "/chat/stream" &&
       !/^\/chat\/action\/[0-9]{1,15}$/.test(url.pathname) &&
       !url.pathname.startsWith("/settings") && url.pathname !== "/logout" && url.pathname !== "/people" && url.pathname !== "/ledger" &&
       !(url.pathname === "/board" && url.searchParams.get("scope") === "all");
@@ -2637,6 +2640,53 @@ export function createDecisionServer(options: ServeOptions): Server {
       }));
     }
 
+    if (url.pathname === "/chat/stream") {
+      // The live reply (chat streaming): server-sent snapshots of the turn
+      // answering in this person's thread for the same task or project the
+      // send names. A refresh hint and a preview only — the finished
+      // message is read the usual way. No turn running: one closing event.
+      if (who.via !== "cookie" || who.role !== "approver") return respond(response, 403, "application/json", JSON.stringify({ error: "session" }));
+      const principal = matePrincipal(who);
+      if (principal === null) return respond(response, 403, "application/json", JSON.stringify({ error: "standing" }));
+      const requestedTask = url.searchParams.get("task");
+      const focusTask = requestedTask === null || requestedTask === "" ? null : taskChatFocus(requestedTask, now, who, { mintNonce: false });
+      if (requestedTask !== null && requestedTask !== "" && focusTask === null) return respond(response, 404, "application/json", JSON.stringify({ error: "task" }));
+      const chatProject = focusTask !== null ? null : chatProjectOf(url.searchParams.getAll("project").filter(one => one !== ""));
+      if (chatProject === undefined) return respond(response, 404, "application/json", JSON.stringify({ error: "project" }));
+      const thread = store.liveMateThreadFor(who.name, chatScopeOf(focusTask, chatProject));
+      const live = thread === null ? undefined : liveTurns.get(thread.id);
+      response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", "x-content-type-options": "nosniff", "x-accel-buffering": "no" });
+      const snapshot = (): string => `event: turn\ndata: ${JSON.stringify({ steps: live?.steps ?? [], done: live === undefined || live.done, ok: live?.ok ?? false })}\n\n`;
+      if (live === undefined || live.done) { response.end(snapshot()); return; }
+      chatStreams.add(response);
+      let queued: NodeJS.Timeout | null = null;
+      const heartbeat = setInterval(() => { response.write(": keep-alive\n\n"); }, 15_000);
+      heartbeat.unref();
+      const close = (): void => {
+        clearInterval(heartbeat);
+        if (queued !== null) clearTimeout(queued);
+        live.listeners.delete(listener);
+        chatStreams.delete(response);
+        if (!response.writableEnded) response.end();
+      };
+      // At most one snapshot every 80 ms; the last one always goes out.
+      const flush = (): void => {
+        queued = null;
+        if (response.writableEnded) return;
+        response.write(snapshot());
+        if (live.done) close();
+      };
+      const listener = (): void => {
+        if (live.done) { if (queued !== null) clearTimeout(queued); flush(); return; }
+        if (queued === null) queued = setTimeout(flush, 80);
+      };
+      live.listeners.add(listener);
+      response.write(snapshot());
+      request.once("close", close);
+      response.once("close", close);
+      return;
+    }
+
     if (url.pathname === "/chat/mate/status") {
       // The read-only refresh (package 2): the same JSON status as before —
       // session binding, the send receipt, the live turn — plus a version
@@ -3275,6 +3325,35 @@ export function createDecisionServer(options: ServeOptions): Server {
     const wanted = values[0] ?? "";
     return values.length === 1 && visible(wanted) && managedRepos().includes(wanted) ? wanted : undefined;
   }
+  /** Live replies (chat streaming): per thread, the turn being answered —
+   * each step's tools in plain words and its text as it is written. Memory
+   * only and display only; the saved turn stays the record. */
+  type LiveTurn = { steps: { tools: string[]; text: string }[]; done: boolean; ok: boolean; listeners: Set<() => void>; expiry?: NodeJS.Timeout };
+  const liveTurns = new Map<number, LiveTurn>();
+  function beginLiveTurn(thread: number): (event: MateProgress) => void {
+    const previous = liveTurns.get(thread);
+    if (previous?.expiry) clearTimeout(previous.expiry);
+    const live: LiveTurn = { steps: [], done: false, ok: false, listeners: previous?.listeners ?? new Set() };
+    liveTurns.set(thread, live);
+    const current = () => live.steps.at(-1) ?? (live.steps.push({ tools: [], text: "" }), live.steps.at(-1)!);
+    return event => {
+      if (live.done) return;
+      if (event.kind === "step") live.steps.push({ tools: [], text: "" });
+      else if (event.kind === "tool") current().tools.push(event.label);
+      else if (event.kind === "text") current().text = event.text;
+      for (const listener of live.listeners) listener();
+    };
+  }
+  function endLiveTurn(thread: number, ok: boolean): void {
+    const live = liveTurns.get(thread);
+    if (live === undefined || live.done) return;
+    live.done = true;
+    live.ok = ok;
+    for (const listener of live.listeners) listener();
+    live.expiry = setTimeout(() => { if (liveTurns.get(thread) === live) liveTurns.delete(thread); }, 60_000);
+    live.expiry.unref();
+  }
+
   /** The Ask panel (v77): the conversation a task, result or project page
    * docks beside itself — that page's own thread, the same session and
    * cards as /chat. Null when this person has no lead chat here. A page
@@ -6670,11 +6749,13 @@ export function createDecisionServer(options: ServeOptions): Server {
           return said(400, `a message is 1 to ${MATE_MESSAGE_MAX_CHARS} characters`, mateSession.id);
         }
         const opened = store.openMateThread(who.name, principal.ceilingDigest, now, chatScopeOf(focusTask, chatProject));
-        void runMateTurn({ store, who: principal, session: mateSession, thread: opened.thread, config: enabled.config, key: enabled.key, message, ...(requestId === null ? {} : { requestId }), ...(focusTask === null && chatProject !== null ? { context: `Current project: ${projectName(chatProject)} (${chatProject}). Keep this conversation about that project unless the operator explicitly asks to broaden it; use it as the repo for project tools.` } : {}), ...(focusTask === null ? {} : { context: `Current task: ${focusTask.id}. Read it with get_task before answering or proposing changes. Read its currentExecution next and bind new actions to that exact execution. Never replace the target of a prior proposal with a newer revision. Keep this turn about that task unless the operator explicitly asks to broaden it.${resultContext}` }), fetcher: chatFetcher, ...(options.subscriptionChatRunner === undefined ? {} : { subscriptionRunner: options.subscriptionChatRunner }), clock, evidenceRoot })
+        const onProgress = beginLiveTurn(opened.thread.id);
+        void runMateTurn({ store, who: principal, session: mateSession, thread: opened.thread, config: enabled.config, key: enabled.key, message, onProgress, ...(requestId === null ? {} : { requestId }), ...(focusTask === null && chatProject !== null ? { context: `Current project: ${projectName(chatProject)} (${chatProject}). Keep this conversation about that project unless the operator explicitly asks to broaden it; use it as the repo for project tools.` } : {}), ...(focusTask === null ? {} : { context: `Current task: ${focusTask.id}. Read it with get_task before answering or proposing changes. Read its currentExecution next and bind new actions to that exact execution. Never replace the target of a prior proposal with a newer revision. Keep this turn about that task unless the operator explicitly asks to broaden it.${resultContext}` }), fetcher: chatFetcher, ...(options.subscriptionChatRunner === undefined ? {} : { subscriptionRunner: options.subscriptionChatRunner }), clock, evidenceRoot })
           .then(outcome => {
             if (!outcome.ok) noteMate(who.session.csrf, "turn" in outcome ? outcome.turn : null, outcome.message);
+            endLiveTurn(opened.thread.id, outcome.ok);
           })
-          .catch(() => noteMate(who.session.csrf, null, "the turn failed unexpectedly"));
+          .catch(() => { noteMate(who.session.csrf, null, "the turn failed unexpectedly"); endLiveTurn(opened.thread.id, false); });
         // Accepted for the engine, not received: the receipt is written by
         // the turn's own admission, and the status poll is where the page
         // learns of it — the same road as after a native send.
@@ -8877,6 +8958,8 @@ export function createDecisionServer(options: ServeOptions): Server {
     leadClosing = true;
     for (const stream of teamStreams) stream.end();
     teamStreams.clear();
+    for (const stream of chatStreams) stream.end();
+    chatStreams.clear();
     void (async () => { await team.close(); await leadMaintenance?.stop(); await coding?.close(); })().then(() => closeServer(callback)).catch(error => {
       if (callback) callback(error instanceof Error ? error : Error('Coding session shutdown failed.'));
       else server.emit('error', error);
