@@ -16,6 +16,8 @@ const TOOL_LABELS: Record<string, string> = {
   get_actions: "Checking available actions",
   get_controls: "Checking the controls",
   get_result: "Reading the result",
+  get_diff: "Reading the changes",
+  get_check_log: "Reading the check log",
   get_acceptance_evidence: "Checking the evidence",
   get_result_images: "Looking at the screenshots",
   recap: "Recapping",

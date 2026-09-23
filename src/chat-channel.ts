@@ -696,6 +696,8 @@ export const CHAT_ACTION_PARITY: Record<
     gap: null,
   },
   get_models: { support: "direct", how: "Read during a turn: default agents with the exact model each runs, CLI versions and new models. Changes use the labelled Settings → Models page.", gap: null },
+  get_diff: { support: "direct", how: "Read during a turn: the exact result's changed files, then one file's diff, so a requested change names the right file and line.", gap: null },
+  get_check_log: { support: "direct", how: "Read during a turn: the end of the exact result's check log, a page of it, or the lines matching a search.", gap: null },
   get_task_conversation: { support: "direct", how: "Read during a turn: what the person and the lead said in one task's own chat, including what was confirmed there.", gap: null },
   search_project_memory: { support: "direct", how: "Read during a turn: one search over decisions, references, lessons and the conversations the person may read.", gap: null },
   list_tasks: { support: "direct", how: "Read during a turn.", gap: null },
