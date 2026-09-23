@@ -31,7 +31,7 @@ import {
 import { telegramProgressCard } from "./telegram-progress.js";
 import { phoneText, PHONE_HELP, phoneCommand, phoneStatus, phoneTaskView, phoneTaskChoices, phoneTaskListText, resolvePhoneTask, phoneFocusText, PHONE_NO_MATCH, PHONE_BACK_TO_LEAD } from "./telegram-status.js";
 import { applyRoomInbound, conversationRow, roomCardApprover, roomCommand, roomGrantAllowed, roomMessagesAfter, roomMessageText, teamDomain } from "./chat-rooms.js";
-import { isTelegramProgressNotification, type Store } from "./store.js";
+import { isTelegramProgressNotification, proposalTaskOf, type Store } from "./store.js";
 import type { SubscriptionMateRunner } from "./subscription-chat.js";
 export const chatObject = (v: unknown): Record<string, unknown> =>
   v !== null && typeof v === "object" && !Array.isArray(v)
@@ -179,6 +179,10 @@ export async function processChatEvent(
       return true;
     }
     const text = String(input.text ?? "");
+    // The task this message's turn is about, once chosen (kept on the event,
+    // so a reply planned after a restart names the same task).
+    let about: { task: string; run: number | null } | null =
+      typeof object(input.about).task === "string" ? { task: String(object(input.about).task), run: typeof object(input.about).run === "number" ? Number(object(input.about).run) : null } : null;
     // Read-only commands answer from the database, never from a model.
     const command = phoneCommand(text);
     if (command !== null) {
@@ -198,7 +202,8 @@ export async function processChatEvent(
         if (pick.kind === "one") {
           store.setChatFocus(surface, binding.id, pick.id, now_);
           const view = phoneTaskView(store, repos, pick.view, now_);
-          state.plan(event.id, [{ text: phoneFocusText(view.text), ...(view.link === null ? {} : { link: view.link }) }], now_);
+          // The status names its task (and result): a reply to it is about that task.
+          state.plan(event.id, [{ text: phoneFocusText(view.text), ...(view.link === null ? {} : { link: view.link }), task: pick.view, ...(view.run === null ? {} : { run: view.run }) }], now_);
         } else if (pick.kind === "many") {
           state.plan(event.id, [{ text: ["Several tasks match. Add a word from the title, or send one of these:", ...pick.choices.map(one => `• ${one.title} — /task ${one.id}`)].join("\n") }], now_);
         } else state.plan(event.id, [{ text: PHONE_NO_MATCH }], now_);
@@ -296,7 +301,13 @@ export async function processChatEvent(
           "SELECT p.payload FROM chat_part p JOIN chat_event e ON e.id=p.event WHERE e.binding=? AND e.channel=? AND (p.message=? OR e.thread=?) AND p.state='sent' ORDER BY p.id DESC LIMIT 100",
         )
         .all(binding.id, binding.channel, event.thread, event.thread)
-        .map((row) => JSON.parse(String(row.payload)) as ChatContent);
+        .map((row) => JSON.parse(String(row.payload)) as ChatContent)
+        // A card is about the task it names, or the one confirming it filed.
+        .map((c) => {
+          if (c.task || c.proposal === undefined) return c;
+          const about = proposalTaskOf(store.getMateProposal(c.proposal));
+          return about === null ? c : { ...c, task: about.task, ...(about.run === null ? {} : { run: about.run }) };
+        });
       const targets = [
         ...new Map(
           contexts
@@ -309,7 +320,7 @@ export async function processChatEvent(
           event.id,
           [
             {
-              text: "This thread contains more than one result. Reply to the result’s own progress message, or start a new message naming the task and result number.",
+              text: "This thread is about more than one task. Reply to the message about the one you mean, or send /tasks to pick one.",
             },
           ],
           nowOf(options),
@@ -320,6 +331,12 @@ export async function processChatEvent(
       const focused = targets.length === 0 ? store.chatFocus(options.label.toLowerCase(), binding.id) : null;
       const focusTask = focused !== null && taskInCeiling(store, focused, repos) ? focused : null;
       const context = targets[0] ?? (focusTask === null ? null : { text: "", task: focusTask, run: null });
+      if (context?.task) {
+        about = { task: context.task, run: context.run ?? null };
+        state
+          .prepare("UPDATE chat_event SET payload=? WHERE id=? AND state='queued'")
+          .run(JSON.stringify({ ...input, about }), event.id);
+      }
       const outcome = await runMateTurn({
         store,
         who: resolved.who,
@@ -419,8 +436,9 @@ export async function processChatEvent(
         .find(
           (message) => message.turn === turn.id && message.role === "assistant",
         )?.text ?? "The reply is no longer in the saved thread.";
+    // The lead's answer about one task names it: a reply to it stays on that task.
     const parts: ChatContent[] = splitChatText(reply, options.partSize).map(
-      (text) => ({ text }),
+      (text) => (about === null ? { text } : { text, task: about.task, ...(about.run === null ? {} : { run: about.run }) }),
     );
     for (const image of store.listMateTurnEvidence(turn.id))
       parts.push({

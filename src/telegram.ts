@@ -1250,7 +1250,7 @@ function applyConversation(context: Context, update: Update, effects: Effect[]):
     const bindings = store.telegramMessageBindings(binding, replyTo).filter(one => one.taskId !== null);
     const tasks = [...new Set(bindings.map(one => one.taskId as string))];
     if (tasks.length > 1) {
-      say(whichTaskText(tasks));
+      say(whichTaskText(tasks.map(id => store.getTask(id)?.title ?? id)));
       report.chatRefused = (report.chatRefused ?? 0) + 1;
       return;
     }
@@ -1328,6 +1328,8 @@ function applyPhoneRead(context: Context, update: Update, effects: Effect[]): bo
     let button: InlineButton[] | null = null;
     // `/tasks` and an ambiguous `/task <name>` offer tasks as buttons.
     let keyboard: InlineButton[][] | null = null;
+    // The one task (and saved result) a `/task` reply shows: a reply to it is about that task.
+    let shown: { task: string; run: number | null } | null = null;
     if (command.kind === "lead") {
       store.setChatFocus("telegram", binding.id, null, clock());
       response = PHONE_BACK_TO_LEAD;
@@ -1354,6 +1356,7 @@ function applyPhoneRead(context: Context, update: Update, effects: Effect[]): bo
           else {
             store.setChatFocus("telegram", binding.id, pick.id, clock());
             const view = phoneTaskView(store, repos, pick.view, clock());
+            shown = { task: pick.view, run: view.run };
             button = phoneLinkButton(context.conversation?.phoneOrigin?.() ?? null, view.link);
             // A destination with no trusted origin to carry it: the words say where instead.
             response = phoneFocusText(button === null && view.link !== null ? `${view.text}\n\n${PHONE_CONSOLE_FOOTER}` : view.text);
@@ -1382,6 +1385,11 @@ function applyPhoneRead(context: Context, update: Update, effects: Effect[]): bo
     });
     if (sent.ok) report.statusReplies = (report.statusReplies ?? 0) + 1;
     else report.problems.push(`phone status reply failed for update ${update.update_id}; send a new command to retry`);
+    const sentId = sent.ok ? (sent.result as { message_id?: unknown } | undefined)?.message_id : undefined;
+    if (shown !== null && typeof sentId === "number" && Number.isSafeInteger(sentId) && sentId > 0) {
+      // Best effort: without it a reply still reaches the chosen task through the focus.
+      try { store.recordTelegramTaskMessage(binding, String(sentId), shown.task, shown.run, clock()); } catch { /* the focus still holds */ }
+    }
   });
   return true;
 }
@@ -1547,6 +1555,7 @@ function applyCallback(context: Context, update: Update, effects: Effect[]): voi
     if (tapChat !== binding.chatId) { report.ignored++; return; }
     if (token === "pick:lead") {
       store.setChatFocus("telegram", binding.id, null, clock());
+      store.recordTelegramTaskMessage(binding, String(message.message_id), null, null, clock());
       ack("Back to the lead");
       editText(PHONE_BACK_TO_LEAD);
       return;
@@ -1564,7 +1573,9 @@ function applyCallback(context: Context, update: Update, effects: Effect[]): voi
     store.setChatFocus("telegram", binding.id, id, clock());
     ack(`Talking about: ${title}`.slice(0, 190));
     const current = store.taskFamilyOf(taskId, repos, false)?.current.id ?? id;
-    editText(phoneFocusText(phoneTaskView(store, repos, current, clock()).text), [[{ text: "Back to the lead", callback_data: "pick:lead" }]]);
+    const view = phoneTaskView(store, repos, current, clock());
+    store.recordTelegramTaskMessage(binding, String(message.message_id), current, view.run, clock());
+    editText(phoneFocusText(view.text), [[{ text: "Back to the lead", callback_data: "pick:lead" }]]);
     return;
   }
   const action = store.getTelegramAction(token);

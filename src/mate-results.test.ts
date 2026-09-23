@@ -99,6 +99,30 @@ describe("the lead reads diffs and check logs", () => {
     expect(read([repo], "get_diff", { task: "buttons" })).toMatchObject({ ok: false, message: "The saved changes could not be verified." });
   });
 
+  test("list_tasks search finds work by the operator's own words for it: title or goal, older work too, best match first, only in their projects", () => {
+    const make = (id: string, title: string, place: string, goal: string | null = null) => {
+      store.createTask({ id, title }, T0);
+      store.placeTask(store.refFor("built-in", id).id, place);
+      if (goal !== null) propose(store, { taskId: id, goal, touches: ["src/"], acceptance: [{ id: "c1", statement: "It holds", how: null, evidence: ["check"] }], now: T0 });
+    };
+    make("login-fix", "Fix the login page", repo);
+    make("payout", "Guard payouts", repo, "Refuse an over-limit payout on the checkout page");
+    make("login-copy", "Login button copy", repo);
+    for (let i = 0; i < 60; i++) make(`chore-${i}`, `Unrelated chore ${i}`, repo);
+    make("hidden-login", "Login page redesign", other);
+    const found = (admitted: string[], search: string) => {
+      const listed = read(admitted, "list_tasks", { search });
+      return listed.ok ? (listed.body as { tasks: { task: string }[] }).tasks.map(one => one.task) : listed;
+    };
+    // Both words beat one: the login page first, then work matching one word (a "page" in a goal counts).
+    expect(found([repo], "the login page thing")).toEqual(["login-fix", "login-copy", "payout"]);
+    expect(found([repo], "checkout payouts")).toEqual(["payout"]);
+    expect(found([repo, other], "login page")).toEqual(expect.arrayContaining(["hidden-login", "login-fix", "login-copy"]));
+    expect(found([repo], "the thing")).toMatchObject({ ok: false });
+    // Without words it still lists the newest work.
+    expect(read([repo], "list_tasks", { limit: 2 })).toMatchObject({ ok: true, body: { tasks: [expect.anything(), expect.anything()], truncated: true } });
+  });
+
   test("a check log reads from its end, in pages from the start, or as the lines around a search", () => {
     const run = finished("checks", repo);
     const lines = Array.from({ length: 4000 }, (_, index) => index === 3500 ? "FAIL src/button.test.tsx > keeps 44px targets" : `ok ${index} passing line`);

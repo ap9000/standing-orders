@@ -393,6 +393,35 @@ describe("Slack shared chat", () => {
     expect(receive("bot echo", { bot_id: "BBOT" })).toBe(false);
     expect(state.pair(ID, slackHash(code), "UOTHER", "DOTHER", now)).toBeNull();
   });
+  test("a reply in a thread about one task stays on it: the /task status and the lead's answer name that task; a new message is for the lead", async () => {
+    store.createTask({ id: "login", title: "Fix the login page" }, now);
+    store.placeTask(store.refFor("built-in", "login").id, repo);
+    const lastPart = () => JSON.parse(String(state.db.prepare("SELECT payload FROM slack_part ORDER BY id DESC LIMIT 1").get()!.payload)) as SlackContent;
+    const asked = () => {
+      const request = (runner as unknown as { mock: { calls: [{ history: { role: string; text?: string }[] }][] } }).mock.calls.at(-1)![0];
+      return String(request.history.filter((one) => one.role === "operator").at(-1)?.text);
+    };
+    const send = async (text: string, extra: Record<string, unknown>) => {
+      expect(receive(text, extra)).toBe(true);
+      await processSlackEvent(options);
+      await drain();
+    };
+    await send("/task login", { ts: "1789700001.000001" });
+    expect(lastPart()).toMatchObject({ task: "login" });
+    await send("/lead", { ts: "1789700002.000001" });
+    expect(store.chatFocus("slack", state.binding(ID.installation)!.id)).toBeNull();
+    // A reply in the status message's thread is about the login page.
+    answers.push({ text: "It waits for your approval." });
+    await send("How is it going?", { ts: "1789700003.000001", thread_ts: "1789700001.000001" });
+    expect(asked()).toContain("Current task: login.");
+    // The lead's answer names the task too, so the thread stays on it.
+    expect(lastPart()).toMatchObject({ text: "It waits for your approval.", task: "login" });
+    // A new message outside the thread is for the lead.
+    answers.push({ text: "Nothing else needs you." });
+    await send("Anything else?", { ts: "1789700004.000001" });
+    expect(asked()).not.toContain("Current task");
+    expect(lastPart().task).toBeUndefined();
+  });
   test("one request survives duplicate events and reply delivery loss without a second model turn", async () => {
     const body = message("What needs my attention?");
     answers.push({ text: "No task needs your attention." });

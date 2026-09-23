@@ -102,7 +102,7 @@ describe("read-only phone status", () => {
     expect(phoneTaskView(store, [REPO], "idle-task", NOW).link?.path.startsWith("/chat?task=idle-task")).toBe(true);
     // Foreign or unknown: no text about it, no link.
     task("foreign", FOREIGN, "hidden-title");
-    expect(phoneTaskView(store, [REPO], "foreign", NOW)).toEqual({ text: phoneTask(store, [REPO], "nope", NOW), link: null });
+    expect(phoneTaskView(store, [REPO], "foreign", NOW)).toEqual({ text: phoneTask(store, [REPO], "nope", NOW), link: null, run: null });
     expect(phoneTaskView(store, [REPO], "nope", NOW).link).toBeNull();
   });
 
@@ -182,6 +182,7 @@ describe("read-only phone status", () => {
     const edit = s.calls.filter(c => c.method === "editMessageText").at(-1)!;
     expect(String(edit.params["text"])).toContain("Checkout button spacing");
     expect(String(edit.params["text"])).toContain(PHONE_FOCUS_LINE);
+    expect(store.telegramMessageBindings(binding, "555")).toMatchObject([{ taskId: "checkout-button", run: null }]);
     // A plain message now carries the chosen task into the turn.
     s.updates.push([command(4, "Make the spacing 16px.")]);
     await passWith();
@@ -194,6 +195,8 @@ describe("read-only phone status", () => {
     await passWith();
     expect(store.chatFocus("telegram", binding.id)).toBe("mobile-nav");
     expect(s.texts().at(-1)).toContain(PHONE_FOCUS_LINE);
+    const mobileStatus = String(s.calls.indexOf(sends().at(-1)!) + 101);
+    expect(store.telegramMessageBindings(binding, mobileStatus)).toMatchObject([{ taskId: "mobile-nav" }]);
     task("checkout-total", REPO, "Checkout total rounding");
     s.updates.push([command(7, "/task checkout")]);
     await passWith();
@@ -206,6 +209,21 @@ describe("read-only phone status", () => {
     expect(s.texts().at(-1)).toBe(PHONE_BACK_TO_LEAD);
     expect(store.chatFocus("telegram", binding.id)).toBeNull();
     s.updates.push([command(9, "What needs me?")]);
+    await passWith();
+    expect(store.listTelegramConversations(BOT).at(-1)).toMatchObject({ taskId: null });
+    // A reply to a message that showed a task is about that task, whatever the chat chose since.
+    s.updates.push([command(10, "Is it done yet?", { reply_to_message: { message_id: 555 } })]);
+    await passWith();
+    expect(store.listTelegramConversations(BOT).at(-1)).toMatchObject({ taskId: "checkout-button", context: expect.stringContaining("Current task: checkout-button") });
+    s.updates.push([command(11, "Make the menu sticky.", { reply_to_message: { message_id: Number(mobileStatus) } })]);
+    await passWith();
+    expect(store.listTelegramConversations(BOT).at(-1)).toMatchObject({ taskId: "mobile-nav" });
+    expect(store.chatFocus("telegram", binding.id)).toBeNull();
+    // "Back to the lead" on that message: it no longer shows a task, so a reply to it is for the lead.
+    s.updates.push([{ update_id: 12, callback_query: { id: "cb2", from: { id: USER }, data: "pick:lead", message: { message_id: 555, chat: { id: CHAT, type: "private" } } } }]);
+    await passWith();
+    expect(store.telegramMessageBindings(binding, "555")).toEqual([]);
+    s.updates.push([command(13, "Anything else?", { reply_to_message: { message_id: 555 } })]);
     await passWith();
     expect(store.listTelegramConversations(BOT).at(-1)).toMatchObject({ taskId: null });
   });

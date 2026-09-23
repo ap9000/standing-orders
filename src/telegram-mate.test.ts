@@ -511,6 +511,53 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     else expect(script.sends()).toEqual([]);
   });
 
+  test("a reply stays on its task: to a /task status, to the lead's answer about a task, and to a card; a reply to a general answer is for the lead", async () => {
+    task("a", "Fix the login page");
+    task("b", "Payout guard");
+    const asked = () => (requests.at(-1)!.history.filter(one => one.role === "operator").at(-1) as { text: string }).text;
+    const last = () => store.listTelegramConversations(BOT).at(-1)!;
+    // A /task status, then back to the lead: the status message still names its task.
+    script.updates.push([textUpdate(2, "/task a"), textUpdate(3, "/lead")]);
+    expect(await pass()).toMatchObject({ ok: true, report: { statusReplies: 2 } });
+    const status = script.sends().find(one => String(one.params["text"]).startsWith("Fix the login page"))!.messageId!;
+    expect(store.telegramMessageBindings(binding(), String(status))).toMatchObject([{ taskId: "a", run: null }]);
+    answers.push({ text: "It is waiting for your approval." });
+    script.updates.push([textUpdate(4, "How is it going?", { reply_to_message: { message_id: status } })]);
+    expect(await pass()).toMatchObject({ ok: true, report: { chatQueued: 1, chatAnswered: 1 } });
+    expect(last()).toMatchObject({ taskId: "a" });
+    expect(asked()).toContain("Current task: a.");
+    // The lead's answer about that task names it too: a reply to the answer stays on the login page.
+    const answer = script.sends().at(-1)!;
+    expect(answer.params["text"]).toBe("It is waiting for your approval.");
+    expect(store.telegramMessageBindings(binding(), String(answer.messageId))).toMatchObject([{ taskId: "a" }]);
+    answers.push({ text: "Noted." });
+    script.updates.push([textUpdate(5, "Make the button bigger too.", { reply_to_message: { message_id: answer.messageId } })]);
+    expect(await pass()).toMatchObject({ ok: true, report: { chatQueued: 1, chatAnswered: 1 } });
+    expect(last()).toMatchObject({ taskId: "a" });
+    expect(asked()).toContain("Current task: a.");
+    // A general message about another task: its card names that task; the general answer names none.
+    answers.push(
+      { text: "Drafting.", calls: [{ id: "g1", name: "propose_steer", args: { task: "b", note: "Keep amounts in cents." } }] },
+      { text: "Confirm the card to pass that on." },
+    );
+    script.updates.push([textUpdate(6, "Tell the payout guard to keep amounts in cents.")]);
+    expect(await pass()).toMatchObject({ ok: true, report: { chatQueued: 1, chatAnswered: 1 } });
+    expect(last()).toMatchObject({ taskId: null });
+    const sentCard = script.card();
+    const general = script.sends().find(one => one.params["text"] === "Confirm the card to pass that on.")!;
+    expect(store.telegramMessageBindings(binding(), String(sentCard.messageId))).toMatchObject([{ taskId: "b", run: null }]);
+    expect(store.telegramMessageBindings(binding(), String(general.messageId))).toEqual([]);
+    answers.push({ text: "Updated." }, { text: "Here is everything." });
+    script.updates.push([
+      textUpdate(7, "Actually, use whole numbers.", { reply_to_message: { message_id: sentCard.messageId } }),
+      textUpdate(8, "What else is going on?", { reply_to_message: { message_id: general.messageId } }),
+    ]);
+    expect(await pass()).toMatchObject({ ok: true, report: { chatQueued: 2, chatAnswered: 2 } });
+    const [onCard, onGeneral] = store.listTelegramConversations(BOT).slice(-2);
+    expect(onCard).toMatchObject({ taskId: "b" });
+    expect(onGeneral).toMatchObject({ taskId: null, context: null });
+  });
+
   test("long text is refused whole with no model call; a reply to a digest naming two tasks asks which", async () => {
     const long = "x".repeat(2_001);
     script.updates.push([textUpdate(2, long)]);
@@ -530,9 +577,10 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     expect(String(digest.params["text"])).toContain("digest — 2 routine fact(s)");
     script.updates.push([textUpdate(3, "approve it", { reply_to_message: { message_id: digest.messageId } })]);
     expect(await pass()).toMatchObject({ ok: true, report: { chatRefused: 1 } });
-    expect(script.texts().at(-1)).toContain("mentions more than one task");
-    expect(script.texts().at(-1)).toContain("• a");
-    expect(script.texts().at(-1)).toContain("• b");
+    expect(script.texts().at(-1)).toContain("is about more than one task");
+    expect(script.texts().at(-1)).toContain("• work a");
+    expect(script.texts().at(-1)).toContain("• work b");
+    expect(script.texts().at(-1)).toContain("send /tasks to pick one");
     expect(store.listTelegramConversations(BOT)).toEqual([]);
     expect(requests).toEqual([]);
   });
