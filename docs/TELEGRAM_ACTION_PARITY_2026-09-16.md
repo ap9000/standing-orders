@@ -41,6 +41,7 @@ configuration and pairing. Slack transport tests also use scripted responses.
 | `list_repos` | direct | Read during a turn; projects are r1..rN in enrollment order, as on the console. | ceiling digest equality with the console/CLI (first test) | none |
 | `get_skills` | direct | Reads the same project skill library, saved selections and enabled versions as the console. Use propose_action for changes and tests. | Project skills chat index, version read and project handoff regression (`project-skills.test.ts`) | Skill import and long content require secure review. Folder and GitHub import still use the project Skills screen. |
 | `get_project_knowledge` | direct | Read during a turn. | engine read tools (`mate.test.ts`), same turn path | none |
+| `get_models` | direct | Read during a turn: default agents with the exact model each runs, CLI versions and new models. Changes use the labelled Settings → Models page. | model catalog (`model-catalog.test.ts`), same turn path | none |
 | `search_project_memory` | direct | Read during a turn: one search over decisions, references, lessons and the conversations the person may read. | project memory search (`project-memory.test.ts`), same turn path | none |
 | `list_tasks` | direct | Read during a turn. | engine read tools (`mate.test.ts`), same turn path | none |
 | `get_task` | direct | Read during a turn; a reply to a result message pins the exact execution. | reply-to-result test | none |

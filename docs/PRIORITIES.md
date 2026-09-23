@@ -11,7 +11,10 @@ changes; there is no model-review, evidence-repair or resubmission loop
 database-backed commands, rooms that follow a team conversation, and Mark
 complete behind a second tap. Teams needs an internet-reachable endpoint.
 Project memory adds decisions, one search over the memory, and a backward pass
-that proposes evidence-backed edits from sessions ([Project memory](PROJECT_MEMORY.md)). The sequence below is implementation history from the
+that proposes evidence-backed edits from sessions ([Project memory](PROJECT_MEMORY.md)).
+Settings → Models picks each role's model from live lists, shows what short
+names like `opus` run now, and updates the Claude, Codex and Gemini CLIs
+when nothing is running ([Models](MODELS.md)). The sequence below is implementation history from the
 13 September checkpoint, kept for its records, not a current plan.
 
 ### Next sequence

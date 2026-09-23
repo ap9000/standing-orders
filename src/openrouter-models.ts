@@ -7,6 +7,8 @@ export type OpenRouterModel = {
   id: string; name: string; context: number | null; tools: boolean;
   input: number | null; output: number | null; cachedInput: number | null;
   extraCharges: boolean; conditionalPricing: boolean;
+  /** Unix seconds when OpenRouter listed it — the closest thing to a release date. */
+  created: number | null;
 };
 export type OpenRouterModels =
   | { ok: true; models: OpenRouterModel[]; source: "public" | "account"; checkedAt: string }
@@ -32,6 +34,7 @@ export function parseOpenRouterModels(data: unknown): OpenRouterModel[] | null {
       input: price(pricing.prompt), output: price(pricing.completion), cachedInput: price(pricing.input_cache_read),
       extraCharges: ["request", "image", "web_search", "internal_reasoning", "input_cache_write"].some(key => (price(pricing[key], 1) ?? 0) > 0),
       conditionalPricing: Array.isArray(pricing.overrides) && pricing.overrides.length > 0,
+      created: typeof row.created === "number" && Number.isSafeInteger(row.created) && row.created > 0 ? row.created : null,
     });
   }
   return [...models.values()].sort((a, b) => a.name.localeCompare(b.name));

@@ -98,6 +98,8 @@ import { projectAuthority } from "./project-access.js";
 
 import { createConnectionChecker, type ProviderConnection } from "./provider-connection.js";
 import { openRouterModelsCache, openRouterPickerScript } from "./openrouter-models.js";
+import { checkModels, isNewModel, livePin, modelOptions, modelWords, RUNTIME_TOOLS, runtimeStates, seenModels, setWatch, updateRuntime, watchState, type CatalogSeams, type RuntimeTool, type VersionRunner } from "./model-catalog.js";
+import { MODELS_CSS, modelsHtml, modelsScript, type RoleView } from "./models-ui.js";
 import { ASSISTANTS, modelChoices, detectPreparation, previewProjectInstructions, addProjectInstructions } from "./setup-guide.js";
 import { previewSetup, approveSetup, type SetupInputs } from "./control-setup.js";
 import { controlSetupHtml, setupPreviewHtml, connectionHtml, connectionWords, hiddenFields } from "./control-ui.js";
@@ -331,6 +333,9 @@ export type ServeOptions = {
   connectionProbe?: typeof execRun;
   connectionHome?: string;
   modelCatalogFetcher?: typeof fetch;
+  /** Test seams for Settings → Models: CLI version probes and the PATH they search. */
+  modelRunner?: VersionRunner;
+  modelPath?: string;
   localRunner?: string;
   /** The checkout pool root the peek confines itself to (realpath-proved). */
   poolRoot?: string;
@@ -525,6 +530,12 @@ export function createDecisionServer(options: ServeOptions): Server {
   const providerHome = options.connectionHome ?? homedir();
   const connectionCheck = createConnectionChecker({ home: providerHome, clock, ...(options.connectionProbe === undefined ? {} : { probe: options.connectionProbe }) });
   const modelCatalog = openRouterModelsCache(options.modelCatalogFetcher);
+  const modelSeams: CatalogSeams = {
+    home: providerHome,
+    ...(options.modelCatalogFetcher === undefined ? {} : { fetcher: options.modelCatalogFetcher }),
+    ...(options.modelRunner === undefined ? {} : { runner: options.modelRunner }),
+    ...(options.modelPath === undefined ? {} : { path: options.modelPath }),
+  };
   const sessions = new Map<string, Session>();
   /** Wrong setup codes left before the first-account road closes. */
   let setupAttemptsLeft = 5;
@@ -2855,6 +2866,7 @@ export function createDecisionServer(options: ServeOptions): Server {
             };
           }),
           openrouterModels: (await chatCatalog())?.map(one => one.id) ?? null,
+          liveModels: [...modelOptions(store, "claude", now, providerHome), ...modelOptions(store, "codex", now, providerHome)],
           csrf: who.session.csrf,
           problem:
             url.searchParams.get("said") ??
@@ -2906,7 +2918,12 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       const setup = store.liveWorktreeSetup(project);
       const preparation = detectPreparation(project);
-      const models = modelChoices(asked, saved?.provider === asked ? saved.model : null, providerHome);
+      // The saved live catalog when it has models for this provider; the
+      // built-in short list otherwise.
+      const live = asked === "openrouter" ? [] : modelOptions(store, asked, clock(), providerHome).map(({ value, label }) => ({ value, label }));
+      const configured = saved?.provider === asked ? saved.model : null;
+      const models = live.length === 0 ? modelChoices(asked, configured, providerHome)
+        : configured && !live.some(one => one.value === configured) ? [{ value: configured, label: `${configured} — current choice` }, ...live] : live;
       const instructions = previewProjectInstructions(project);
       const catalog = asked === "openrouter" ? await modelCatalog(readProviderKey("openrouter", providerHome), url.searchParams.get("refresh-models") === "1") : null;
       const inputs: SetupInputs = { provider: asked, model: saved?.provider === asked ? saved.model ?? "" : models[0]?.value ?? "", command: setup?.command ?? (saved === null ? preparation?.command ?? "" : ""), seconds: String((setup?.timeoutMs ?? 300_000) / 1000) };
@@ -2943,6 +2960,17 @@ export function createDecisionServer(options: ServeOptions): Server {
         const content=`<section class="shared-action"><h1>${escape(action.title)}</h1>${evidenceLink}${terms}<form method="post" action="/chat/proposal/${id}/confirm">${hiddenFields({csrf:who.session.csrf,nonce:review.nonce,return:'/chat'})}<label class="arm"><input type="checkbox" name="confirm" value="yes" required>I confirm this exact action</label>${CHAT_ACTIONS[action.operation].password?'<label>Your password<input type="password" name="token" autocomplete="current-password" required></label>':''}<button>${escape(CHAT_ACTIONS[action.operation].label)}</button></form></section>`;
         return sendScreen(response,200,screen('Review action',content,{chrome:chromeFor(action.repo,'chat')}));
       }catch(error){return refuse(response,who,409,error instanceof Error?error.message:'This action could not be reviewed.','/chat');}
+    }
+    if (url.pathname === "/settings/models") {
+      const now = clock();
+      const watch = watchState(store);
+      // Opening the page refreshes a stale snapshot; the lists are public and
+      // the check sends nothing about the person or their projects.
+      if (who.role === "approver" && (watch.checkedAt === null || now.getTime() - Date.parse(watch.checkedAt) > 3_600_000)) {
+        await checkModels(store, now, modelSeams).catch(() => undefined);
+      }
+      const view = modelsView(who.role === "approver", who.via === "cookie" ? who.session.csrf : "", now, url.searchParams.get("said"), url.searchParams.get("problem"));
+      return sendScreen(response, 200, screen("Models", `<p><a href="/settings">Settings</a></p><h1>Models</h1>${modelsHtml(view)}`, { chrome: chromeFor(project, "settings"), functional: { script: modelsScript() } }));
     }
     if (url.pathname === "/settings/skills") {
       const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
@@ -3021,7 +3049,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
 
     if (url.pathname === "/settings" && (options.telegramTokenFile === undefined || restricted())) {
-      return sendScreen(response, 200, screen("Settings", '<h1>Settings</h1><p><a href="/settings/skills">Skills</a> · <a href="/settings/knowledge">Project knowledge</a> · <a href="/settings/telegram">Telegram</a></p><details><summary>Learning history</summary><a href="/settings/learning">Learning</a></details>', { chrome: chromeFor(project, "settings") }));
+      return sendScreen(response, 200, screen("Settings", '<h1>Settings</h1><p><a href="/settings/models">Models</a> · <a href="/settings/skills">Skills</a> · <a href="/settings/knowledge">Project knowledge</a> · <a href="/settings/telegram">Telegram</a></p><details><summary>Learning history</summary><a href="/settings/learning">Learning</a></details>', { chrome: chromeFor(project, "settings") }));
     }
 
     if (url.pathname === "/settings" && options.telegramTokenFile !== undefined) {
@@ -3313,6 +3341,37 @@ export function createDecisionServer(options: ServeOptions): Server {
    * whole catalog, not a hand-pinned shortlist). null = no key or the
    * catalog is unreachable; callers fall back to the compiled table. */
   let catalogCache: { at: number; models: import("./converse.js").CatalogModel[] } | null = null;
+  /** Settings → Models, read from the saved catalog and the installation's role rows. */
+  function modelsView(canManage: boolean, csrf: string, now: Date, said: string | null, problem: string | null) {
+    const runtimes = runtimeStates(store);
+    const installed = new Set(runtimes.map(one => one.tool));
+    const openrouter = (readProviderKey("openrouter", providerHome) ?? process.env["OPENROUTER_API_KEY"] ?? "") !== "";
+    const makers: { label: string; provider: ProviderId; on: boolean }[] = [
+      { label: "Claude", provider: "claude", on: installed.has("claude") || runtimes.length === 0 },
+      { label: "Codex", provider: "codex", on: installed.has("codex") },
+      { label: "Gemini", provider: "gemini", on: installed.has("gemini") },
+      { label: "OpenRouter", provider: "openrouter", on: openrouter },
+    ];
+    const build = store.phaseConfig(INSTALLATION_SCOPE, "build");
+    const roles: RoleView[] = (["plan", "build", "review", "repair"] as const).map(phase => {
+      const row = store.phaseConfig(INSTALLATION_SCOPE, phase);
+      const groups = makers.filter(one => one.on && !(phase === "review" && one.provider === "gemini") && !(phase === "repair" && build !== null && one.provider !== build.provider))
+        .map(one => ({ label: one.label, provider: one.provider, options: modelOptions(store, one.provider, now, providerHome) }));
+      return {
+        phase, label: ROLE_TITLES[phase], groups, ...(phase === "repair" ? { inherit: true } : {}),
+        current: row === null ? (phase === "repair" ? "inherit" : "") : `${row.provider}|${row.model ?? ""}`,
+        words: row === null ? (phase === "repair" ? "Same as the builder" : "Not set") : `${ASSISTANTS[row.provider as ProviderId]?.name ?? row.provider} · ${modelWords(store, row.provider, row.model)}`,
+      };
+    });
+    const chat = store.getChatConfig();
+    const chatName = chat === null ? "" : chat.provider === "claude-subscription" ? "Claude membership" : chat.provider === "codex-subscription" ? "Codex membership" : chat.provider === "anthropic-api" ? "Anthropic API" : "OpenRouter";
+    return {
+      runtimes, watch: watchState(store), roles, csrf, canManage, said, problem,
+      chat: chat === null ? null : { words: `Leads and chat use ${chatName} · ${modelWords(store, chat.provider, chat.model)}` },
+      fresh: (["claude", "codex", "gemini"] as const).flatMap(source => seenModels(store, source)).filter(model => isNewModel(model, now)).slice(0, 12),
+    };
+  }
+
   async function chatCatalog(): Promise<import("./converse.js").CatalogModel[] | null> {
     const key = chatKeyFor("openrouter-api")?.key;
     if (key === undefined) return null;
@@ -5020,6 +5079,52 @@ export function createDecisionServer(options: ServeOptions): Server {
         return sendScreen(response,409,screen('Skills',`<h1>Skills</h1>${content}`,{chrome:chromeFor(repo,'settings'),functional:{script:skillsScript()}}));
       }
     }
+    if (url.pathname.startsWith("/settings/models/")) {
+      if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "Sign in as an approver to change models.", "/settings/models");
+      const back = (said: string, bad = false) => redirect(response, `/settings/models?${bad ? "problem" : "said"}=${encodeURIComponent(said)}`);
+      if (url.pathname === "/settings/models/check") {
+        const checked = await checkModels(store, now, modelSeams);
+        return back(checked.ok ? `Checked. ${checked.added.filter(one => one.source !== "openrouter").length || "No"} new model${checked.added.filter(one => one.source !== "openrouter").length === 1 ? "" : "s"}.` : checked.problem ?? "The check did not finish.", !checked.ok);
+      }
+      if (url.pathname === "/settings/models/watch") {
+        const enabled = body.get("enabled") === "1";
+        setWatch(store, enabled, who.name, now);
+        return back(enabled ? "Automatic checks are on." : "Automatic checks are off.");
+      }
+      if (url.pathname === "/settings/models/update") {
+        const tool = body.get("tool") ?? "";
+        if (!(tool in RUNTIME_TOOLS)) return back("Choose Claude Code, Codex or Gemini CLI.", true);
+        const updated = await updateRuntime(store, tool as RuntimeTool, who.name, now, modelSeams);
+        return back(updated.message, !updated.ok);
+      }
+      if (url.pathname === "/settings/models/agent") {
+        const phase = body.get("phase") ?? "", agent = body.get("agent") ?? "";
+        if (!["plan", "build", "review", "repair"].includes(phase)) return back("Choose a role.", true);
+        const role = ROLE_TITLES[phase as RoleView["phase"]];
+        if (agent === "inherit") {
+          if (phase !== "repair") return back("Choose a model.", true);
+          store.clearPhaseConfig(INSTALLATION_SCOPE, "repair");
+          return back("Repairs now use the builder's agent.");
+        }
+        const split = agent.indexOf("|");
+        const provider = split < 0 ? "" : agent.slice(0, split), model = split < 0 ? "" : agent.slice(split + 1);
+        if (!isProviderId(provider) || !validModelId(model)) return back("Choose a model from the list.", true);
+        const valid = validateSpec({ provider, model });
+        if (!valid.ok) return back(valid.problem, true);
+        if (phase === "review" && provider === "gemini") return back("Gemini cannot review yet. Choose Claude or Codex.", true);
+        const build = store.phaseConfig(INSTALLATION_SCOPE, "build");
+        if (phase === "repair" && build !== null && build.provider !== provider) return back(`Repairs must use the builder's provider (${build.provider}).`, true);
+        store.setPhaseConfig(INSTALLATION_SCOPE, phase, provider, model, who.name, now);
+        const repair = store.phaseConfig(INSTALLATION_SCOPE, "repair");
+        let extra = "";
+        if (phase === "build" && repair !== null && repair.provider !== provider) {
+          store.clearPhaseConfig(INSTALLATION_SCOPE, "repair");
+          extra = " Repairs now follow the builder.";
+        }
+        return back(`${role} now uses ${modelWords(store, provider, model)} for new tasks.${extra}`);
+      }
+      return refuse(response, who, 404, "No such models action.", "/settings/models");
+    }
     if (url.pathname === "/settings/knowledge/refresh") {
       if (who.via !== 'cookie' || who.role !== 'approver') return refuse(response, who, 403, 'Sign in as an approver to refresh project context.', '/settings/knowledge');
       const repo = body.get('repo') ?? '';
@@ -6226,7 +6331,9 @@ export function createDecisionServer(options: ServeOptions): Server {
       // The pin: anthropic models come from the compiled table; openrouter
       // models come from OpenRouter's OWN catalog, priced by the authority
       // that will bill them. No price found anywhere = refused, not guessed.
-      let pin = subscription ? { inMicrousd: 0, outMicrousd: 0 } : priceOf(model);
+      // Live list prices (Settings → Models) come first; the compiled table
+      // is the fallback when the catalog has never been fetched.
+      let pin = subscription ? { inMicrousd: 0, outMicrousd: 0 } : livePin(store, provider, model) ?? priceOf(model);
       if (provider === "openrouter-api") {
         const catalog = await chatCatalog();
         const hit = catalog?.find(one => one.id === model);
@@ -12061,7 +12168,7 @@ button.pick-file { min-height: 1.5rem; padding: 0 .5rem; font-size: .6875rem; }
 }
 `;
 
-const WORKSPACE_STYLE = styleAsset(STYLE + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + KNOWLEDGE_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
+const WORKSPACE_STYLE = styleAsset(STYLE + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
@@ -12366,6 +12473,8 @@ type Screen = {
   /** Structured conversation; complex guarded forms stay native islands. */
   workspace?: Partial<Pick<BrowserWorkspace, 'conversation' | 'team' | 'focus' | 'result' | 'catchUpHtml' | 'controlsHtml' | 'notices' | 'pageHtml'>>;
 };
+
+const ROLE_TITLES: Record<"plan" | "build" | "review" | "repair", string> = { plan: "Planner", build: "Builder", review: "Reviewer", repair: "Repair" };
 
 function screen(
   title: string,
@@ -14119,6 +14228,8 @@ function chatPage(chrome: Chrome, data: {
   keyFacts: { provider: string; state: "environment" | "stored" | "none"; tail: string | null }[];
   /** OpenRouter's live catalog when the key is present and reachable. */
   openrouterModels: string[] | null;
+  /** Claude and Codex models from the saved live catalog, labelled with prices. */
+  liveModels?: { value: string; label: string }[];
   csrf: string;
   problem: string | null;
   /** The card that mints a mate session (mate arc §5), approvers only. */
@@ -14132,7 +14243,8 @@ function chatPage(chrome: Chrome, data: {
     const anthropicModels = PRICED_MODELS.filter(one => !one.includes("/"));
     const openrouterModels = data.openrouterModels ?? PRICED_MODELS.filter(one => one.includes("/"));
     const currentSubscription = current !== null && isSubscriptionChatProvider(current.provider);
-    const models = [...new Set(["default", ...anthropicModels, ...openrouterModels, ...(current === null ? [] : [current.model])])];
+    const labels = new Map((data.liveModels ?? []).map(one => [one.value, one.label]));
+    const models = [...new Set(["default", ...labels.keys(), ...anthropicModels, ...openrouterModels, ...(current === null ? [] : [current.model])])];
     return [
       `<form method="post" action="/chat/config" class="card">`,
       `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
@@ -14145,7 +14257,7 @@ function chatPage(chrome: Chrome, data: {
       `</select></label>`,
       `<label>model <span class="meta">(use default for your membership's current model; direct API models need a pinned price)</span>` +
         `<input name="model" list="chat-models" value="${escape(current?.model ?? "default")}"><datalist id="chat-models">` +
-        `${models.map(model => `<option value="${escape(model)}"></option>`).join("")}</datalist></label>`,
+        `${models.map(model => `<option value="${escape(model)}">${escape(labels.get(model) ?? "")}</option>`).join("")}</datalist></label>`,
       data.openrouterModels === null
         ? `<p class="meta">with OPENROUTER_API_KEY in the serve environment, this list becomes OpenRouter's full live catalog — each model priced by the party that bills it</p>`
         : `<p class="meta">${data.openrouterModels.length} models live from OpenRouter's catalog; saving pins today's price — re-save to re-pin</p>`,
@@ -14266,7 +14378,7 @@ function chatPage(chrome: Chrome, data: {
   }
   if (data.canManage) {
     parts.push(
-      `<details><summary class="meta">chat settings</summary>`,
+      `<details id="chat-settings"><summary class="meta">chat settings</summary>`,
       configForm(data.config),
       `<form method="post" action="/chat/config" class="inline">`,
       `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
@@ -21107,7 +21219,7 @@ function settingsPage(
         : `saved: ${escape(redactToken(existing.token))} (bot ${escape(existing.botId)})`;
   return screen("settings", [
     "<h1>settings</h1>",
-    '<p><a href="/settings/skills">Skills</a> · <a href="/settings/knowledge">Project knowledge</a> · <a href="/settings/telegram">Telegram</a> · <a href="/settings/slack">Slack</a> · <a href="/settings/discord">Discord</a> · <a href="/settings/teams">Teams</a></p><details><summary>Learning history</summary><a href="/settings/learning">Learning</a></details>',
+    '<p><a href="/settings/models">Models</a> · <a href="/settings/skills">Skills</a> · <a href="/settings/knowledge">Project knowledge</a> · <a href="/settings/telegram">Telegram</a> · <a href="/settings/slack">Slack</a> · <a href="/settings/discord">Discord</a> · <a href="/settings/teams">Teams</a></p><details><summary>Learning history</summary><a href="/settings/learning">Learning</a></details>',
     permissionCard,
     qualityCard,
     pushCard,
