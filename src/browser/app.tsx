@@ -46,7 +46,8 @@ function browserStorage(): DraftStorage {
 }
 
 function scopeOf(workspace: BrowserWorkspace): DraftScope | null {
-  return workspace.conversation ? { user: workspace.user, session: workspace.conversation.sessionId, task: workspace.conversation.taskId } : null;
+  const chat = workspace.conversation;
+  return chat ? { user: workspace.user, session: chat.sessionId, task: chat.taskId ?? (chat.project ? `project:${chat.project}` : null) } : null;
 }
 
 function canRefreshWorkspace(): boolean { return !document.hidden && navigator.onLine !== false; }
@@ -277,7 +278,16 @@ function Navigation({ workspace }: { workspace: BrowserWorkspace }) {
       return <a key={item.href} href={item.href} aria-current={item.active ? "page" : undefined}><Icon name={["chat", "tasks", "projects", "knowledge", "settings"].includes(name) ? name : "tools"} /><span>{item.label}</span>
         {item.count !== undefined && item.count > 0 && <span className="so-nav-count" aria-label={`${item.count} ${item.count === 1 ? "needs" : "need"} you`}>{item.count}</span>}</a>;
     })}</nav>
-    {currentProject && <a className="so-project-knowledge" href={currentProject.knowledgeHref}>Project knowledge</a>}
+    {currentProject && <div className="so-project-links">
+      <a className="so-project-knowledge" href={`/chat?project=${encodeURIComponent(currentProject.path)}`}>Project chat</a>
+      <a className="so-project-knowledge" href={currentProject.knowledgeHref}>Project knowledge</a>
+    </div>}
+    {(workspace.chats?.length ?? 0) > 0 && <nav aria-label="Recent chats" className="so-recent-chats">
+      <p className="so-recent-chats-label">Recent chats</p>
+      {workspace.chats!.map(chat => <a key={chat.href} href={chat.href} aria-current={chat.active ? "page" : undefined} title={chat.title}>
+        <span className="so-recent-chat-kind" aria-hidden="true">{chat.kind === "task" ? "Task" : "Project"}</span><span className="so-recent-chat-title">{chat.title}</span>
+      </a>)}
+    </nav>}
     <div className="so-navigation-bottom"><a href="/menu" aria-current={workspace.navigation.find(item => item.href === "/menu")?.active ? "page" : undefined}><Icon name="tools" />Workspace tools</a>
       <div className="so-account"><span title={workspace.user}>{workspace.user}</span><form method="post" action="/logout"><input type="hidden" name="csrf" value={workspace.csrf} /><Button variant="ghost" size="sm" type="submit">Sign out</Button></form></div>
     </div>
@@ -345,9 +355,21 @@ function PhoneNavigation({ workspace }: { workspace: BrowserWorkspace }) {
     </DialogContent></Dialog>;
 }
 
-function LeadChat({ controller }: { controller: ReturnType<typeof useWorkspace> }) {
+/** What to ask first, by the page the Ask panel sits beside. A trailing
+ * space means the words start a message for the person to finish. */
+const DOCKED_SUGGESTIONS: Record<string, { title: string; hint: string; placeholder: string; suggestions: string[] }> = {
+  task: { title: "Ask about this task", hint: "Questions, changes and next steps. Actions come back as cards you confirm.", placeholder: "Ask about this task…",
+    suggestions: ["Where does this task stand?", "What changed in the latest result?", "Request changes: "] },
+  result: { title: "Ask about this result", hint: "Ask what changed or why, or request a revision. Actions come back as cards you confirm.", placeholder: "Ask about this result…",
+    suggestions: ["Summarize what changed", "Are there any risks in this change?", "Request changes: "] },
+  tasks: { title: "Ask about this project", hint: "Plan work, file tasks and check progress. Actions come back as cards you confirm.", placeholder: "Ask about this project…",
+    suggestions: ["What needs my attention here?", "What should we build next?", "File a task: "] },
+};
+
+function LeadChat({ controller, docked = null }: { controller: ReturnType<typeof useWorkspace>; docked?: string | null }) {
   const { workspace, draft, notice, storageAvailable, sending, stale, offline } = controller;
   const chat = workspace.conversation!;
+  const dock = docked === null ? null : DOCKED_SUGGESTIONS[docked] ?? DOCKED_SUGGESTIONS.task!;
   const box = useRef<HTMLTextAreaElement>(null);
   const busy = chat.pendingTurnId !== null;
   const disabled = sending || stale || offline || busy || draft.pending !== null || !draft.text.trim();
@@ -355,8 +377,11 @@ function LeadChat({ controller }: { controller: ReturnType<typeof useWorkspace> 
   const delivery = offline ? "Offline. Your draft stays in this tab." : sending ? "Sending…" : notice;
   return <div className="so-lead-chat" data-workspace-chat>
     <Conversation className="so-conversation"><ConversationContent className="so-conversation-content">
-      {workspace.catchUpHtml && <GuardedHtml html={workspace.catchUpHtml} className="so-catch-up" />}
-      {chat.messages.length === 0 && <ConversationEmptyState title="What would you like to work on?" description="Plan the work with your lead. Your crew’s tasks and results stay beside the conversation." />}
+      {!dock && workspace.catchUpHtml && <GuardedHtml html={workspace.catchUpHtml} className="so-catch-up" />}
+      {chat.messages.length === 0 && (dock
+        ? <div className="so-docked-empty"><p className="so-docked-empty-title">{dock.title}</p><p className="so-docked-empty-hint">{dock.hint}</p>
+            <div className="so-suggestions">{dock.suggestions.map(one => <button key={one} type="button" className="so-suggestion" onClick={() => { controller.edit(one); box.current?.focus(); }}>{one.trim().replace(/:$/, "…")}</button>)}</div></div>
+        : <ConversationEmptyState title="What would you like to work on?" description="Plan the work with your lead. Your crew’s tasks and results stay beside the conversation." />)}
       <div id="chat-thread" data-chat-region="thread">{chat.messages.map(message => <Message from={message.role === "operator" ? "user" : "assistant"} key={message.id} data-message-id={message.id}>
         <div className="so-message-label">{message.role === "operator" ? "You" : "Lead"}</div>
         <MessageContent><GuardedHtml html={message.html} />{message.activity && <Disclosure summary="Activity"><p className="so-activity-copy">{message.activity}</p></Disclosure>}
@@ -371,7 +396,7 @@ function LeadChat({ controller }: { controller: ReturnType<typeof useWorkspace> 
       </div>}
       <form onSubmit={controller.send} action="/chat" method="post" data-workspace-composer aria-busy={sending}>
         <Label htmlFor="lead-message" className="so-sr-only">Message your lead</Label>
-        <Textarea ref={box} id="lead-message" name="message" rows={2} maxLength={chat.maxChars} placeholder="Message your lead…" value={draft.text}
+        <Textarea ref={box} id="lead-message" name="message" rows={2} maxLength={chat.maxChars} placeholder={dock?.placeholder ?? "Message your lead…"} value={draft.text}
           onChange={event => controller.edit(event.target.value)} onKeyDown={event => {
             if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); if (!disabled) event.currentTarget.form?.requestSubmit(); }
           }} aria-describedby="composer-hint" />
@@ -379,7 +404,7 @@ function LeadChat({ controller }: { controller: ReturnType<typeof useWorkspace> 
           <Button type="submit" disabled={disabled} aria-label="Send message"><Icon name="send" /><span>Send</span></Button>
         </div>
       </form>
-      {workspace.controlsHtml && <Disclosure summary="Conversation settings" className="so-conversation-settings"><GuardedHtml html={workspace.controlsHtml} immutable /></Disclosure>}
+      {!dock && workspace.controlsHtml && <Disclosure summary="Conversation settings" className="so-conversation-settings"><GuardedHtml html={workspace.controlsHtml} immutable /></Disclosure>}
     </div>
   </div>;
 }
@@ -393,11 +418,15 @@ export function WorkspaceApp({ initial }: { initial: BrowserWorkspace }) {
   const selectedTask = workspace.crew.find(item => item.id === workspace.focus?.id);
   const isChat = workspace.navigation.some(item => item.label === "Chat" && item.active);
   const section = workspace.navigation.find(item => item.active)?.label ?? (workspace.title.charAt(0).toUpperCase() + workspace.title.slice(1));
-  const pageOnly = !workspace.team && !workspace.conversation;
+  // The Ask panel (v77): a page with its own view and its own conversation
+  // keeps the page in the middle and the conversation beside it.
+  const docked = !workspace.team && workspace.conversation !== null && workspace.view != null;
+  const [panelTab, setPanelTab] = useState<"chat" | "crew">("chat");
+  const pageOnly = !workspace.team && (!workspace.conversation || docked);
   // The Tasks page already lists every task; the Crew panel would repeat it.
-  const hidePanel = pageOnly && !hasWork && (new URL(workspace.path, window.location.origin).pathname === "/work");
+  const hidePanel = pageOnly && !docked && !hasWork && (new URL(workspace.path, window.location.origin).pathname === "/work");
   useEffect(notifyWorkspaceRendered, []);
-  return <><Toaster /><div className={`so-workspace${hidePanel ? " so-workspace--single" : ""}`} data-workspace-shell data-workspace-phone-view={phoneView} data-workspace-has-result={workspace.result !== null}>
+  return <><Toaster /><div className={`so-workspace${hidePanel ? " so-workspace--single" : ""}${docked ? " so-workspace--docked" : ""}`} data-workspace-shell data-workspace-phone-view={phoneView} data-workspace-has-result={workspace.result !== null}>
     <a href="#workspace-main" className="so-skip-link">Skip to content</a>
     <aside className="so-sidebar"><Navigation workspace={workspace} /></aside>
     <div className={`so-main-column${isChat ? " so-main-column--chat" : ""}`}>
@@ -407,13 +436,25 @@ export function WorkspaceApp({ initial }: { initial: BrowserWorkspace }) {
         {workspace.focus && isChat && <span className="so-focus-label" title={workspace.focus.title}>{workspace.focus.title}</span>}
         <CommandMenu workspace={workspace} />
         {isChat && <Button variant="secondary" size="sm" className="so-phone-work-button" onClick={() => setPhoneView("work")}>{hasWork ? "Open work" : "Crew"}</Button>}
+        {docked && <Button variant="secondary" size="sm" className="so-phone-work-button" onClick={() => { setPanelTab("chat"); setPhoneView("work"); }}><Icon name="chat" />Ask</Button>}
       </header>
       {workspace.notices.length > 0 && <div className="so-workspace-notices">{workspace.notices.map((notice, index) => <Alert key={index}>{notice}</Alert>)}</div>}
       <main id="workspace-main" className="so-main-content" tabIndex={-1}>
-        {workspace.team ? <TeamChat initial={workspace.team} user={workspace.user} csrf={workspace.csrf} onSnapshot={setTeamSnapshot} /> : workspace.conversation ? <LeadChat controller={controller} /> : <div className="so-page-content" data-workspace-page>{workspace.view ? <ViewHost view={workspace.view} csrf={workspace.csrf} /> : <GuardedHtml html={initial.pageHtml ?? ""} immutable />}</div>}
+        {workspace.team ? <TeamChat initial={workspace.team} user={workspace.user} csrf={workspace.csrf} onSnapshot={setTeamSnapshot} /> : workspace.conversation && !docked ? <LeadChat controller={controller} /> : <div className="so-page-content" data-workspace-page>{workspace.view ? <ViewHost view={workspace.view} csrf={workspace.csrf} /> : <GuardedHtml html={initial.pageHtml ?? ""} immutable />}</div>}
       </main>
     </div>
-    {!hidePanel && <aside className={`so-supporting-panel${hasWork ? " so-supporting-panel--detail" : ""}`} data-workspace-detail>
+    {docked && <aside className="so-supporting-panel so-ask-panel" data-workspace-detail aria-label="Ask">
+      <div className="so-ask-header">
+        <Button variant="ghost" size="sm" className="so-phone-back" onClick={() => setPhoneView("chat")}><Icon name="arrow" />Back</Button>
+        <div role="tablist" aria-label="Panel" className="so-ask-tabs">
+          <button type="button" role="tab" aria-selected={panelTab === "chat"} onClick={() => setPanelTab("chat")}>Chat</button>
+          <button type="button" role="tab" aria-selected={panelTab === "crew"} onClick={() => setPanelTab("crew")}>Crew</button>
+        </div>
+      </div>
+      <div className="so-ask-body" hidden={panelTab !== "chat"}><LeadChat controller={controller} docked={workspace.view?.kind ?? "task"} /></div>
+      {panelTab === "crew" && <Crew workspace={workspace} />}
+    </aside>}
+    {!hidePanel && !docked && <aside className={`so-supporting-panel${hasWork ? " so-supporting-panel--detail" : ""}`} data-workspace-detail>
       <div className="so-work-panel-header"><Button variant="ghost" size="sm" className="so-phone-back" onClick={() => setPhoneView("chat")}><Icon name="arrow" />{isChat ? "Back to chat" : "Back"}</Button>
         {hasWork && <><h2>{workspace.result ? "Result" : "Task"}</h2>{workspace.result && selectedTask && <Badge tone={badgeTone(selectedTask.tone)} className="so-current-task-state" data-workspace-current-task-state>Task: {selectedTask.label}</Badge>}<a href={teamSnapshot?.selected ? "/chat?conversation=" + encodeURIComponent(teamSnapshot.selected.id) : "/chat"} className="so-close-work" aria-label="Close work and return to the main chat"><Icon name="close" /></a></>}
       </div>

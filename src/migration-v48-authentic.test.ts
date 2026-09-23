@@ -71,6 +71,8 @@ function withoutNew(table: string, row: Record<string, unknown>): Record<string,
   if (table === "approver" || table === "invite") delete copy["projects_json"];
   // v69's prepared candidate is a later additive column on the scope.
   if (table === "task_scope") delete copy["candidate"];
+  // v77's thread scope is a later additive column on the lead thread.
+  if (table === "mate_thread") { delete copy["scope_kind"]; delete copy["scope_key"]; }
   return copy;
 }
 

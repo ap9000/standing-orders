@@ -1,7 +1,7 @@
 import { repositoryContext, repositoryContextRead } from './repository-context.js';
 import { repositoryContextHtml } from './repository-context-ui.js';
 import { browserAssetsAvailable, browserWorkspaceDocument, serveBrowserAsset, supportsBrowserWorkspace } from './browser-shell.js';
-import { browserCrewOf, browserCrewFromIndex, browserWorkActionHref, browserProjectsOf, browserNavigationOf, type BrowserWorkspace, type BrowserTasksView, type BrowserSettingsView, type BrowserTaskView, type BrowserTaskFact, type BrowserTaskSection, type BrowserProjectsView, type BrowserProjectRow, type BrowserResultChip, type BrowserResultPanel, type BrowserResultView } from './browser-workspace.js';
+import { browserCrewOf, browserCrewFromIndex, browserWorkActionHref, browserProjectsOf, browserNavigationOf, type BrowserWorkspace, type BrowserChatLink, type BrowserTasksView, type BrowserSettingsView, type BrowserTaskView, type BrowserTaskFact, type BrowserTaskSection, type BrowserProjectsView, type BrowserProjectRow, type BrowserResultChip, type BrowserResultPanel, type BrowserResultView } from './browser-workspace.js';
 import { configureLeadFollow, leadFollowStatus, runLeadFollowPass } from './lead-follow.js';
 import { startMaintenance } from './maintenance.js';
 import { codingHandoffPreview, createCodingHandoff } from './coding-handoff.js';
@@ -202,7 +202,7 @@ import { dirname } from "node:path";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { loadOrCreateVapidKeys, validatePushEndpoint } from "./push.js";
 import { parseGithubRepo, previewGithubRepo, cloneGithubRepo, listGithubRepos, isLargeRepo, type ListOutcome } from "./onboard.js";
-import { verifiedAuthor } from "./store.js";
+import { verifiedAuthor, LEAD_THREAD, type MateThreadScope } from "./store.js";
 import { updateRepos, addRepos } from "./repos.js";
 import { run as execRun } from "./exec.js";
 
@@ -1523,18 +1523,19 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (error instanceof WorkIndexCursorError) return refuse(response, who, 400, 'This task page has expired. Open the first page.', '/work');
         throw error;
       }
-      return sendScreen(
-        response,
-        200,
-        workPage(chromeFor(project, "work", undefined, rollup ? "all" : undefined), {
-          view,
-          ...(url.searchParams.has('project') && project !== null ? { projectFilter: project } : {}),
-          work,
-          previous: url.searchParams.has('cursor'),
-          multiProject: new Set(work.items.map(task => task.repo ?? "")).size > 1,
-          now,
-        }),
-      );
+      const page = workPage(chromeFor(project, "work", undefined, rollup ? "all" : undefined), {
+        view,
+        ...(url.searchParams.has('project') && project !== null ? { projectFilter: project } : {}),
+        work,
+        previous: url.searchParams.has('cursor'),
+        multiProject: new Set(work.items.map(task => task.repo ?? "")).size > 1,
+        now,
+      });
+      // One project's Tasks dock that project's own conversation (v77).
+      const projectThread = url.searchParams.has('project') && project !== null && managedRepos().includes(project) ? project : null;
+      const docked = projectThread === null ? null : dockedConversation(who, null, projectThread, now, `/work?project=${encodeURIComponent(projectThread)}`);
+      if (docked !== null) page.workspace = { ...page.workspace, conversation: docked, pageHtml: page.body };
+      return sendScreen(response, 200, page);
     }
 
     if (url.pathname === "/next") {
@@ -1853,10 +1854,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         return sendScreen(response, 409, screen("Result changed", '<h1>Result changed</h1><p>This acceptance link no longer matches the current result. Review the current task before accepting.</p><p class="refusal-back"><a class="button-link" href="/review">Review results</a></p>', { chrome: chromeFor(project, "runs") }));
       }
       const selected = selectedRow === null ? null : reviewCockpitViewOf(selectedRow, who, now);
-      return sendScreen(
-        response,
-        200,
-        reviewCockpitPage(chromeFor(project, "runs"), {
+      const reviewPage = reviewCockpitPage(chromeFor(project, "runs"), {
           queue: ranked,
           queueCap: REVIEW_QUEUE_CAP,
           selected,
@@ -1871,8 +1869,14 @@ export function createDecisionServer(options: ServeOptions): Server {
           tab: parseResultTab(url.searchParams.get("tab")),
           user: who.name,
           now,
-        }),
-      );
+        });
+      // The result's task conversation, docked beside it (v77); messages
+      // sent here carry the result being viewed.
+      const reviewFocus = selected === null ? null : taskChatFocus(selected.taskId, now, who, { mintNonce: false });
+      const reviewDocked = reviewFocus === null || selected === null ? null
+        : dockedConversation(who, reviewFocus, null, now, reviewHref(selected.taskId), selected.run !== null && reviewFocus.family.versions.some(one => one.refId === store.getRun(selected.run!.id)?.taskRef) ? selected.run.id : null);
+      if (reviewDocked !== null) reviewPage.workspace = { ...reviewPage.workspace, conversation: reviewDocked, pageHtml: reviewPage.body };
+      return sendScreen(response, 200, reviewPage);
     }
 
     if (url.pathname === "/ledger") {
@@ -2656,7 +2660,9 @@ export function createDecisionServer(options: ServeOptions): Server {
         // draft and says so; it never falls back to the unified thread.
         return respond(response, 200, "application/json", JSON.stringify({ session: session.id, task: requestedTask, unavailable: true, received: receipt !== null }));
       }
-      const rows = mateConversationRows(who, principal, focusTask, now);
+      const chatProject = focusTask !== null ? null : chatProjectOf(url.searchParams.getAll("project").filter(one => one !== ""));
+      if (chatProject === undefined) return respond(response, 200, "application/json", JSON.stringify({ session: session.id, unavailable: true, received: receipt !== null }));
+      const rows = mateConversationRows(who, principal, focusTask, now, chatProject);
       const version = mateChatVersion({ ...rows, focusTask });
       const known = url.searchParams.get("version") ?? "";
       const csrf = who.session.csrf;
@@ -2682,7 +2688,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       // Cookie sessions only (Codex v3 review, change 7): drafts live in
       // THIS session's memory; a bearer caller has nowhere to keep them.
       if (who.via !== "cookie") return refuse(response, who, 403, "chat is a browser surface — it keeps your drafts in the session");
-      if (url.searchParams.get('private') !== '1' && !url.searchParams.has('task') && !url.searchParams.has('result')) {
+      if (url.searchParams.get('private') !== '1' && !url.searchParams.has('task') && !url.searchParams.has('result') && !url.searchParams.has('project')) {
         const reply = await team.execute({ name: who.name, generation: who.session.generation }, {
           operation: url.searchParams.has('conversation') ? 'show' : 'list',
           args: { ...(url.searchParams.has('conversation') ? { conversationId: url.searchParams.get('conversation') } : {}),
@@ -2714,6 +2720,9 @@ export function createDecisionServer(options: ServeOptions): Server {
       sweepChatDrafts(Date.now());
       const requestedTask = url.searchParams.get("task");
       const focusTask = taskChatFocus(requestedTask, now, who, { mintNonce: !requestContext.getStore()?.workspaceRead });
+      // A project's own thread (v77): /chat?project=<path>. A task lens wins.
+      const chatProject = focusTask !== null ? null : chatProjectOf(url.searchParams.getAll("project"));
+      if (chatProject === undefined) return refuse(response, who, 404, "That project is not available in this workspace.", "/chat");
       if (focusTask !== null && requestedTask !== focusTask.id) {
         url.searchParams.set("task", focusTask.id);
         return redirect(response, `/chat?${url.searchParams.toString()}`);
@@ -2837,7 +2846,8 @@ export function createDecisionServer(options: ServeOptions): Server {
             200,
             matePage(chromeFor(null, "chat", undefined, "all"), {
               session: mateSession,
-              ...mateConversationRows(who, principal, focusTask, now),
+              ...mateConversationRows(who, principal, focusTask, now, chatProject),
+              chatProject,
               latched,
               config: enabled.config,
               turnsToday: store.chatTurnsToday(who.name, now),
@@ -3233,20 +3243,59 @@ export function createDecisionServer(options: ServeOptions): Server {
    * live update can never show a card the page would not. A task lens
    * keeps only that task's coordinator cards; the mate's own thread is one
    * thread regardless of lens. */
-  function mateConversationRows(who: Who & { via: "cookie" }, principal: VerifiedApprover, focusTask: TaskChatFocus | null, now: Date): {
+  function mateConversationRows(who: Who & { via: "cookie" }, principal: VerifiedApprover, focusTask: TaskChatFocus | null, now: Date, chatProject: string | null = null): {
     messages: MateMessage[]; proposals: MateProposal[]; decisions: Map<number, Decision>; coordinatorProposals: CoordinatorProposal[]; pending: MateTurn | null; recent: MateTurn[];
   } {
     const allCoordinatorRows = store.listCoordinatorProposals({ repos: managedRepos(), states: ["pending", "confirmed", "refused"], limit: 30 });
-    const coordinatorProposals = focusTask === null ? allCoordinatorRows : allCoordinatorRows.filter(one => focusTask.family.versions.some(version => version.id === one.payload["task"]));
-    const opened = store.openMateThread(who.name, principal.ceilingDigest, now);
+    const coordinatorProposals = focusTask !== null ? allCoordinatorRows.filter(one => focusTask.family.versions.some(version => version.id === one.payload["task"]))
+      : chatProject !== null ? allCoordinatorRows.filter(one => one.repo === chatProject) : allCoordinatorRows;
+    const opened = store.openMateThread(who.name, principal.ceilingDigest, now, chatScopeOf(focusTask, chatProject));
     const proposals = store.listMateProposals(opened.thread.id);
+    // One reply runs at a time per person; this thread shows it only when
+    // the reply is its own.
+    const live = store.liveMateTurnFor(who.name);
     return {
       messages: store.listMateMessages(opened.thread.id, 40),
       proposals,
       decisions: decisionsFor(store, [...proposals, ...coordinatorProposals]),
       coordinatorProposals,
-      pending: store.liveMateTurnFor(who.name),
+      pending: live !== null && live.thread === opened.thread.id ? live : null,
       recent: store.recentMateTurns(who.name, 5),
+    };
+  }
+  /** The thread a chat surface speaks in (v77): the task's own thread, the
+   * project's, or the lead conversation across every project. */
+  function chatScopeOf(focusTask: TaskChatFocus | null, chatProject: string | null): MateThreadScope {
+    return focusTask !== null ? { kind: "task", key: focusTask.id } : chatProject !== null ? { kind: "project", key: chatProject } : LEAD_THREAD;
+  }
+  /** The project a chat request names: exactly one, visible to this person
+   * and one of this console's projects; undefined when refused. */
+  function chatProjectOf(values: string[]): string | null | undefined {
+    if (values.length === 0) return null;
+    const wanted = values[0] ?? "";
+    return values.length === 1 && visible(wanted) && managedRepos().includes(wanted) ? wanted : undefined;
+  }
+  /** The Ask panel (v77): the conversation a task, result or project page
+   * docks beside itself — that page's own thread, the same session and
+   * cards as /chat. Null when this person has no lead chat here. A page
+   * view may start a membership conversation, as /chat does. */
+  function dockedConversation(who: Who, focusTask: TaskChatFocus | null, chatProject: string | null, now: Date, back: string, resultRunId: number | null = null): import("./browser-workspace.js").BrowserConversation | null {
+    if (who.via !== "cookie" || who.role !== "approver" || (focusTask === null && chatProject === null)) return null;
+    const enabled = chatEnablement();
+    const principal = enabled.ok ? matePrincipal(who) : null;
+    if (!enabled.ok || principal === null) return null;
+    let session = store.activeMateSession(who.name);
+    if ((session === null || session.ceilingDigest !== principal.ceilingDigest) && enabled.billing === "subscription" && !requestContext.getStore()?.workspaceRead) {
+      startMateConversation(who, principal, enabled, 0, false, now);
+      session = store.activeMateSession(who.name);
+    }
+    if (session === null || session.ceilingDigest !== principal.ceilingDigest || session.approverGeneration !== principal.generation) return null;
+    const rows = mateConversationRows(who, principal, focusTask, now, chatProject);
+    return {
+      sessionId: session.id, user: session.approver, version: mateChatVersion({ ...rows, focusTask }),
+      messages: mateBrowserMessages(rows, who.session.csrf, back),
+      pendingTurnId: rows.pending?.id ?? null, requestId: randomBytes(16).toString("hex"), maxChars: MATE_MESSAGE_MAX_CHARS,
+      taskId: focusTask?.id ?? null, resultRunId, project: focusTask === null ? chatProject : null,
     };
   }
   function noteMate(csrf: string, turn: number | null, message: string): void {
@@ -3671,6 +3720,25 @@ export function createDecisionServer(options: ServeOptions): Server {
       let needsYou = 0;
       try { needsYou = (requestFacts.workCounts ?? workCountsByProject(store, clock(), workAccess())).reduce((sum, one) => sum + one.totals['needs-you'], 0); }
       catch { needsYou = 0; }
+      // The person's own project and task conversations (v77), for the
+      // sidebar's chat list; a thread whose project is out of view is left out.
+      let chats: BrowserChatLink[] = [];
+      try {
+        const actor = requestFacts.actor ?? '';
+        if (actor !== '') {
+          chats = store.listMateThreads(actor, 16).flatMap((thread): Omit<BrowserChatLink, 'active'>[] => {
+            if (thread.scope.kind === 'project') {
+              const repo = thread.scope.key;
+              return visible(repo) && managedRepos().includes(repo) ? [{ kind: 'project', title: projectName(repo), href: projectChatHref(repo), at: thread.lastMessageAt }] : [];
+            }
+            if (thread.scope.kind === 'task') {
+              const ref = store.lookupRef(thread.scope.key), task = store.getTask(thread.scope.key);
+              return ref !== null && task !== null && visible(ref.repo) ? [{ kind: 'task', title: task.title, href: taskChatHref(thread.scope.key), at: thread.lastMessageAt }] : [];
+            }
+            return [];
+          }).slice(0, 6).map(one => ({ ...one, active: one.href === currentPath }));
+        }
+      } catch { chats = []; }
       const conversation = extras.conversation ?? null;
       const request = requestFacts.workspaceRequest;
       const workspace: BrowserWorkspace = {
@@ -3683,6 +3751,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         catchUpHtml: extras.catchUpHtml ?? '', controlsHtml: extras.controlsHtml ?? '', notices, view: extras.view ?? null,
         pageHtml: extras.pageHtml === undefined ? (conversation === null ? pageHtml : null) : extras.pageHtml,
         navigation: [...browserNavigationOf(currentPath, s.chrome.project, needsYou), { label: 'Workspace tools', href: '/menu', active: path.pathname === '/menu' }],
+        chats,
       };
       if (requestFacts.workspaceRead) {
         const validator = requestFacts.workspaceValidator;
@@ -3695,7 +3764,8 @@ export function createDecisionServer(options: ServeOptions): Server {
       const nonce = randomBytes(16).toString('base64');
       // React owns the conversation and its refresh/draft lifecycle. Native
       // guarded forms keep their current behavior after React inserts them.
-      const functional = conversation === null ? (s.functional?.script ?? '') : RESULT_REVIEW_SCRIPT;
+      // A page with its own view keeps its script; the chat page runs the result script.
+      const functional = conversation === null || extras.view ? (s.functional?.script ?? '') : RESULT_REVIEW_SCRIPT;
       const document = shell(s.title, s.body, { chrome: s.chrome, sensitive });
       return page(response, status, browserWorkspaceDocument(document, workspace, nonce,
         functional + beatScript(!restricted()) + MOBILE_VIEWPORT_SCRIPT), nonce, true);
@@ -4510,16 +4580,19 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (scopeDraft !== undefined) presentedData.scopeDraft = scopeDraft;
     if (cancelDraft !== undefined) presentedData.cancelDraft = cancelDraft;
     const paneProject = restricted() ? store.lookupRef(taskId)?.repo ?? null : who.via === "cookie" ? who.session.project : null;
-    return sendScreen(
-      response,
-      status,
-      taskPage(
-        paneProject === null && !unscopedMode
-          ? chromeFor(paneProject, "tasks")
-          : chromeFor(paneProject, "tasks", taskListPane(paneProject, family?.root.id ?? taskId)),
-        presentedData,
-      ),
+    const page = taskPage(
+      paneProject === null && !unscopedMode
+        ? chromeFor(paneProject, "tasks")
+        : chromeFor(paneProject, "tasks", taskListPane(paneProject, family?.root.id ?? taskId)),
+      presentedData,
     );
+    // The task's own conversation, docked beside the page (v77).
+    const focus = taskChatFocus(family?.root.id ?? taskId, clock(), who, { mintNonce: false });
+    const docked = focus === null ? null : dockedConversation(who, focus, null, clock(), taskHref(focus.id));
+    // The panel is the Ask view here, so the page drops its own Ask tab.
+    const taskView = page.workspace?.view?.kind === "task" ? { ...page.workspace.view, tabs: [] } : page.workspace?.view;
+    if (docked !== null) page.workspace = { ...page.workspace, ...(taskView === undefined ? {} : { view: taskView }), conversation: docked, pageHtml: page.body };
+    return sendScreen(response, status, page);
   }
 
   /** The routine screen: the standing order restated, its verbs, its ledger. */
@@ -6553,6 +6626,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (who.via !== "cookie") return refuse(response, who, 403, "chat is a browser surface");
       const requestedTask = body.get("task");
       const focusTask = taskChatFocus(requestedTask, now, who);
+      const chatProject = focusTask !== null ? null : chatProjectOf(body.getAll("project"));
       // The enhanced send (package 2): the SAME endpoint, fields, request
       // receipt key, and session binding as the native form — only the
       // answer differs. A fetch that asks for JSON gets the refusal's
@@ -6564,7 +6638,12 @@ export function createDecisionServer(options: ServeOptions): Server {
           ? respond(response, 404, "application/json", JSON.stringify({ ok: false, said: "That task is not available in this workspace.", session: null }))
           : redirect(response, chatReturnWithSaid("/chat", "That task is not available in this workspace."));
       }
-      const back = focusTask === null ? "/chat" : taskChatHref(focusTask.id);
+      if (chatProject === undefined) {
+        return wantsJson
+          ? respond(response, 404, "application/json", JSON.stringify({ ok: false, said: "That project is not available in this workspace.", session: null }))
+          : redirect(response, chatReturnWithSaid("/chat", "That project is not available in this workspace."));
+      }
+      const back = focusTask !== null ? taskChatHref(focusTask.id) : chatProject !== null ? projectChatHref(chatProject) : "/chat";
       const said = (status: number, words: string, session: number | null = null): void =>
         wantsJson ? respond(response, status, "application/json", JSON.stringify({ ok: false, said: words, session })) : redirect(response, chatReturnWithSaid(back, words));
       const resultValue = body.get("result");
@@ -6590,8 +6669,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (message === "" || message.length > MATE_MESSAGE_MAX_CHARS) {
           return said(400, `a message is 1 to ${MATE_MESSAGE_MAX_CHARS} characters`, mateSession.id);
         }
-        const opened = store.openMateThread(who.name, principal.ceilingDigest, now);
-        void runMateTurn({ store, who: principal, session: mateSession, thread: opened.thread, config: enabled.config, key: enabled.key, message, ...(requestId === null ? {} : { requestId }), ...(focusTask === null ? {} : { context: `Current task: ${focusTask.id}. Read it with get_task before answering or proposing changes. Read its currentExecution next and bind new actions to that exact execution. Never replace the target of a prior proposal with a newer revision. Keep this turn about that task unless the operator explicitly asks to broaden it.${resultContext}` }), fetcher: chatFetcher, ...(options.subscriptionChatRunner === undefined ? {} : { subscriptionRunner: options.subscriptionChatRunner }), clock, evidenceRoot })
+        const opened = store.openMateThread(who.name, principal.ceilingDigest, now, chatScopeOf(focusTask, chatProject));
+        void runMateTurn({ store, who: principal, session: mateSession, thread: opened.thread, config: enabled.config, key: enabled.key, message, ...(requestId === null ? {} : { requestId }), ...(focusTask === null && chatProject !== null ? { context: `Current project: ${projectName(chatProject)} (${chatProject}). Keep this conversation about that project unless the operator explicitly asks to broaden it; use it as the repo for project tools.` } : {}), ...(focusTask === null ? {} : { context: `Current task: ${focusTask.id}. Read it with get_task before answering or proposing changes. Read its currentExecution next and bind new actions to that exact execution. Never replace the target of a prior proposal with a newer revision. Keep this turn about that task unless the operator explicitly asks to broaden it.${resultContext}` }), fetcher: chatFetcher, ...(options.subscriptionChatRunner === undefined ? {} : { subscriptionRunner: options.subscriptionChatRunner }), clock, evidenceRoot })
           .then(outcome => {
             if (!outcome.ok) noteMate(who.session.csrf, "turn" in outcome ? outcome.turn : null, outcome.message);
           })
@@ -6599,7 +6678,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         // Accepted for the engine, not received: the receipt is written by
         // the turn's own admission, and the status poll is where the page
         // learns of it — the same road as after a native send.
-        if (wantsJson) return respond(response, 202, "application/json", JSON.stringify({ ok: true, session: mateSession.id, task: focusTask?.id ?? "", request: requestId }));
+        if (wantsJson) return respond(response, 202, "application/json", JSON.stringify({ ok: true, session: mateSession.id, task: focusTask?.id ?? "", ...(chatProject === null ? {} : { project: chatProject }), request: requestId }));
         return redirect(response, chatReturnWithLatest(back));
       }
       if (wantsJson) return said(409, "This conversation ended. Reload to continue.");
@@ -13623,6 +13702,8 @@ type TaskChatFocus = {
 };
 
 const taskChatHref = (taskId: string): string => `/chat?task=${encodeURIComponent(taskId)}`;
+/** A project's own lead thread (v77). */
+const projectChatHref = (repo: string): string => `/chat?project=${encodeURIComponent(repo)}`;
 
 /** The one task-level road from a truthful dispatch diagnosis to its nearest
  * existing repair. This is navigation, never authority: every destination
@@ -14798,6 +14879,19 @@ type MateThreadRows = {
   focusTask: TaskChatFocus | null;
 };
 
+/** The thread's messages as the React conversation renders them, each
+ * with the proposal cards its turn produced; `back` is where a card's
+ * confirm or dismiss returns. */
+function mateBrowserMessages(rows: Pick<MateThreadRows, "messages" | "proposals" | "decisions" | "pending">, csrf: string, back: string | null): import("./browser-workspace.js").BrowserMessage[] {
+  return rows.messages.map(message => ({
+    id: message.id, role: message.role, text: message.text,
+    html: message.role === 'operator' ? `<p>${escape(message.text)}</p>` : renderChatText(message.text),
+    activity: message.activity, createdAt: message.createdAt,
+    cardsHtml: message.turn === null ? '' : rows.proposals.filter(one => one.turn === message.turn)
+      .map(one => mateProposalCard(one, csrf, rows.pending !== null, rows.decisions.get(typeof one.payload['decision'] === 'number' ? one.payload['decision'] : -1) ?? null, back)).join(''),
+  }));
+}
+
 /** The version of the DISPLAYED conversation (package 2): every fact a
  * thread or task fragment renders — message identities, card states and
  * outcomes, the live turn and its step count, the last turn's state, the
@@ -14895,6 +14989,8 @@ function mateAfterComposerHtml(data: { messages: MateMessage[]; pending: MateTur
 
 function matePage(chrome: Chrome, data: MateThreadRows & {
   session: MateSession;
+  /** A project's own thread (v77); null for the lead conversation or a task. */
+  chatProject?: string | null;
   follow?: { enabled: boolean; detail: string };
   resultRunId?: number | null;
   latched: ChatTurn[];
@@ -14911,7 +15007,8 @@ function matePage(chrome: Chrome, data: MateThreadRows & {
   resultPanel?: string | null;
 }): Screen {
   const subscription = isSubscriptionChatProvider(data.config.provider);
-  const returnTo = data.focusTask === null ? "/chat" : taskChatHref(data.focusTask.id);
+  const chatProject = data.focusTask === null ? data.chatProject ?? null : null;
+  const returnTo = data.focusTask !== null ? taskChatHref(data.focusTask.id) : chatProject !== null ? projectChatHref(chatProject) : "/chat";
   const controlsHtml = [
     `<details class="lead-follow"><summary>Automatic crew updates${data.follow?.enabled ? ' · On' : ''}</summary><p class="meta">${escape(data.follow?.detail ?? 'Automatic crew updates are off.')}</p><form method="post" action="/chat/mate/follow"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="return" value="${escape(returnTo)}"><input type="hidden" name="enabled" value="${data.follow?.enabled ? 'no' : 'yes'}">${data.follow?.enabled ? '' : `<p>The lead responds when results or decisions arrive. Uses this conversation’s ${subscription ? 'membership usage, with no dollar maximum' : 'remaining spend allowance'} and daily turn limit. Existing task approvals still apply.</p>`}<button type="submit" class="quiet">${data.follow?.enabled ? 'Pause updates' : 'Enable updates'}</button></form></details>`,
     `<details class="chat-limits chat-session-details"><summary>Conversation details<span class="meta">${escape(subscription ? "membership" : data.config.provider)}</span></summary>`,
@@ -14958,8 +15055,9 @@ function matePage(chrome: Chrome, data: MateThreadRows & {
     `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
     `<input type="hidden" name="request" value="${randomBytes(16).toString("hex")}"><input type="hidden" name="request-session" value="${data.session.id}">`,
     data.focusTask === null ? "" : `<input type="hidden" name="task" value="${escape(data.focusTask.id)}">`,
+    chatProject === null ? "" : `<input type="hidden" name="project" value="${escape(chatProject)}">`,
     data.resultRunId == null ? "" : `<input type="hidden" name="result" value="${data.resultRunId}">`,
-    `<label>message<textarea name="message" rows="1" maxlength="${MATE_MESSAGE_MAX_CHARS}" placeholder="${data.focusTask === null ? "Describe what you want done…" : "Ask about this task…"}"></textarea></label>`,
+    `<label>message<textarea name="message" rows="1" maxlength="${MATE_MESSAGE_MAX_CHARS}" placeholder="${data.focusTask !== null ? "Ask about this task…" : chatProject !== null ? `Ask about ${escape(projectName(chatProject))}…` : "Describe what you want done…"}"></textarea></label>`,
     `<button type="submit" aria-label="${data.pending === null ? "send message" : "wait for the current reply before sending"}"${data.pending === null ? "" : " disabled"}>send</button>`,
     `</form>`,
     // Concise pass (2026-09-13): the status line speaks only when there is
@@ -14980,15 +15078,9 @@ function matePage(chrome: Chrome, data: MateThreadRows & {
       workspace: {
         conversation: {
           sessionId: data.session.id, user: data.session.approver, version: mateChatVersion(data),
-          messages: data.messages.map(message => ({
-            id: message.id, role: message.role, text: message.text,
-            html: message.role === 'operator' ? `<p>${escape(message.text)}</p>` : renderChatText(message.text),
-            activity: message.activity, createdAt: message.createdAt,
-            cardsHtml: message.turn === null ? '' : data.proposals.filter(one => one.turn === message.turn)
-              .map(one => mateProposalCard(one, data.csrf, data.pending !== null, data.decisions.get(typeof one.payload['decision'] === 'number' ? one.payload['decision'] : -1) ?? null, data.focusTask === null ? null : returnTo)).join(''),
-          })),
+          messages: mateBrowserMessages(data, data.csrf, data.focusTask === null && chatProject === null ? null : returnTo),
           pendingTurnId: data.pending?.id ?? null, requestId: randomBytes(16).toString('hex'), maxChars: MATE_MESSAGE_MAX_CHARS,
-          taskId: data.focusTask?.id ?? null, resultRunId: data.resultRunId ?? null,
+          taskId: data.focusTask?.id ?? null, resultRunId: data.resultRunId ?? null, project: chatProject,
         },
         focus: data.focusTask === null ? null : { id: data.focusTask.id, title: data.focusTask.title,
           html: taskChatLiveRegion(data.focusTask, data.csrf, requestContext.getStore()?.workspaceRead === true, data.pending !== null) },

@@ -405,3 +405,41 @@ body:has(.so-workspace) { margin: 0; padding: 0; background: var(--so-ground); o
 .so-result-learning details.result-knowledge[open] { padding-bottom: 16px; }
 @media (max-width: 640px) { .so-result-learning details.result-knowledge > summary { padding: 14px 16px; min-height: 48px; } .so-result-learning details.result-knowledge > :not(summary) { margin-inline: 16px; } }
 .so-result-next :is(button[type="submit"], .button-link) { background: var(--so-attention); color: var(--so-on-attention); border-color: transparent; }
+
+/* Recent project and task conversations (v77). */
+.so-project-links { display: flex; flex-direction: column; }
+.so-recent-chats { display: flex; flex-direction: column; gap: 2px; margin-top: 16px; min-width: 0; }
+.so-recent-chats-label { margin: 0 0 4px; padding-inline: 12px; font-size: 12px; font-weight: 600; color: var(--so-muted); }
+.so-recent-chats a { display: flex; align-items: baseline; gap: 8px; min-width: 0; padding: 6px 12px; border-radius: 8px; color: var(--so-ink); text-decoration: none; font-size: 13px; }
+.so-recent-chats a:hover { background: var(--so-soft); }
+.so-recent-chats a[aria-current="page"] { background: var(--so-soft); font-weight: 600; }
+.so-recent-chat-kind { flex: none; font-size: 11px; color: var(--so-muted); }
+.so-recent-chat-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 760px) { .so-recent-chats a { min-height: 44px; align-items: center; } }
+
+/* The Ask panel (v77): a task, result or project page with its own
+ * conversation beside it — Chat | Crew tabs over the right column. */
+.so-workspace.so-workspace--docked { grid-template-columns: 204px minmax(0, 1fr) minmax(340px, 400px); }
+.so-ask-panel { display: flex; flex-direction: column; background: var(--so-paper); }
+.so-ask-header { display: flex; align-items: center; gap: 10px; min-height: 75px; padding: 16px 18px; border-bottom: 1px solid var(--so-line); }
+.so-ask-tabs { display: inline-flex; gap: 2px; padding: 3px; border-radius: 10px; background: var(--so-raised); }
+.so-ask-tabs button { min-height: 32px; padding: 0 14px; border: 0; border-radius: 7px; background: transparent; color: var(--so-muted); font: 600 13px/1 var(--so-font); cursor: pointer; }
+.so-ask-tabs button[aria-selected="true"] { background: var(--so-paper); color: var(--so-ink); box-shadow: 0 1px 2px rgb(0 0 0 / .08); }
+.so-ask-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.so-ask-body[hidden] { display: none; }
+.so-ask-body .so-lead-chat { flex: 1; min-height: 0; }
+.so-ask-body .so-conversation-content { padding-left: 18px; padding-right: 18px; }
+.so-ask-body .so-composer-area { padding-left: 14px; padding-right: 14px; }
+.so-docked-empty { display: flex; flex-direction: column; gap: 6px; padding: 28px 4px 8px; }
+.so-docked-empty-title { margin: 0; font-size: 16px; font-weight: 650; color: var(--so-ink); }
+.so-docked-empty-hint { margin: 0; font-size: 13px; color: var(--so-muted); }
+.so-suggestions { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-top: 10px; }
+.so-suggestion { max-width: 100%; min-height: 34px; padding: 6px 12px; border: 1px solid var(--so-line); border-radius: 999px; background: var(--so-paper); color: var(--so-ink); font: 500 13px/1.35 var(--so-font); text-align: left; cursor: pointer; }
+.so-suggestion:hover { background: var(--so-soft); }
+@media (max-width: 1150px) and (min-width: 901px) { .so-workspace.so-workspace--docked { grid-template-columns: 178px minmax(0, 1fr) minmax(300px, 340px); } }
+@media (max-width: 900px) {
+  .so-ask-header { min-height: 66px; padding: 10px 14px; padding-top: max(10px, env(safe-area-inset-top)); }
+  .so-workspace:not([data-workspace-phone-view="work"]) .so-ask-panel { display: none; }
+  .so-workspace[data-workspace-phone-view="work"] .so-ask-panel { display: flex; }
+  .so-suggestion { min-height: 44px; }
+}

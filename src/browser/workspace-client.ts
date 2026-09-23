@@ -101,7 +101,8 @@ export function rejectDraft(draft: ChatDraft, asked: string): ChatDraft {
 export function sameConversation(before: BrowserWorkspace, after: BrowserWorkspace): boolean {
   return before.user === after.user && before.conversation?.sessionId === after.conversation?.sessionId
     && before.conversation?.taskId === after.conversation?.taskId
-    && before.conversation?.resultRunId === after.conversation?.resultRunId;
+    && before.conversation?.resultRunId === after.conversation?.resultRunId
+    && (before.conversation?.project ?? null) === (after.conversation?.project ?? null);
 }
 
 export function localUrl(href: string): string {
@@ -121,6 +122,8 @@ export function isWorkspace(value: unknown): value is BrowserWorkspace {
   // A rebuilt page's view model: its kind selects the component; the server
   // shapes the rest, and an unknown kind falls back to the page HTML.
   if (value.view !== undefined && value.view !== null && !(record(value.view) && typeof value.view.kind === "string")) return false;
+  if (value.chats !== undefined && !(Array.isArray(value.chats) && value.chats.every(item => record(item) && (item.kind === "project" || item.kind === "task")
+    && typeof item.title === "string" && typeof item.href === "string" && item.href.startsWith("/") && typeof item.active === "boolean" && (item.at === null || typeof item.at === "string")))) return false;
   if (!Array.isArray(value.projects) || !value.projects.every(item => record(item) && [item.name, item.path, item.href, item.knowledgeHref].every(part => typeof part === "string"))) return false;
   if (!Array.isArray(value.crew) || !value.crew.every(item => record(item) && [item.id, item.title, item.state, item.label, item.tone, item.href].every(part => typeof part === "string")
     && (item.project === null || typeof item.project === "string") && (item.resultHref === null || typeof item.resultHref === "string")
@@ -133,6 +136,7 @@ export function isWorkspace(value: unknown): value is BrowserWorkspace {
     && typeof chat.version === "string" && typeof chat.requestId === "string" && REQUEST.test(chat.requestId)
     && typeof chat.maxChars === "number" && chat.maxChars > 0
     && (chat.taskId === null || typeof chat.taskId === "string") && (chat.resultRunId === null || typeof chat.resultRunId === "number")
+    && (chat.project === undefined || chat.project === null || typeof chat.project === "string")
     && (chat.pendingTurnId === null || typeof chat.pendingTurnId === "number")
     && Array.isArray(chat.messages) && chat.messages.every(item => record(item) && typeof item.id === "number"
       && (item.role === "operator" || item.role === "assistant") && typeof item.text === "string" && typeof item.html === "string"
@@ -173,6 +177,7 @@ export async function sendMessage(workspace: BrowserWorkspace, message: PendingM
   if (!chat) throw new WorkspaceAuthError("Reconnect to the conversation before sending.");
   const body = new URLSearchParams({ csrf: workspace.csrf, message: message.text, request: message.request, "request-session": String(chat.sessionId) });
   if (chat.taskId) body.set("task", chat.taskId);
+  else if (chat.project) body.set("project", chat.project);
   if (chat.resultRunId !== null) body.set("result", String(chat.resultRunId));
   const response = await fetcher("/chat", { method: "POST", credentials: "same-origin", body, headers: { accept: "application/json" }, signal: AbortSignal.timeout(15_000) });
   if (response.status === 401 || response.status === 403) throw new WorkspaceAuthError("Sign in again to reconnect. Your draft stays in this tab.");

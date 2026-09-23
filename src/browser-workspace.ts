@@ -14,6 +14,7 @@ import type { AssignmentCard } from './assignment-ui.js';
 export type BrowserProject = { name: string; path: string; href: string; knowledgeHref: string };
 /** count: tasks waiting on a person, shown beside Tasks when above zero. */
 export type BrowserNavigationItem = { label: string; href: string; active: boolean; count?: number };
+export type BrowserChatLink = { kind: 'project' | 'task'; title: string; href: string; at: string | null; active: boolean };
 export type BrowserCrewItem = {
   id: string; title: string; project: string | null;
   state: AssignmentSnapshot['state']; label: string; tone: StatusTone;
@@ -27,6 +28,8 @@ export type BrowserConversation = {
   sessionId: number; user: string; version: string; messages: BrowserMessage[];
   pendingTurnId: number | null; requestId: string; maxChars: number;
   taskId: string | null; resultRunId: number | null;
+  /** A project's own thread (v77); absent or null for the lead conversation or a task. */
+  project?: string | null;
 };
 /** A page rebuilt as React components (shadcn/ui). The server still renders
  * its HTML as the no-JavaScript fallback; forms post to the same routes. */
@@ -164,6 +167,8 @@ export type BrowserWorkspace = {
   result: { runId: number; html: string } | null;
   catchUpHtml: string; controlsHtml: string; notices: string[]; pageHtml: string | null;
   navigation: BrowserNavigationItem[];
+  /** This person's recent project and task conversations (v77), newest first. */
+  chats?: BrowserChatLink[];
   view?: BrowserView | null;
 };
 
