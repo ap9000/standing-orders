@@ -11182,6 +11182,23 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(picked).toContain('data-review-task="t-older"');
     expect(queueOf(picked)).toContain(`class="cockpit-row current" href="/review?result=t-older&amp;run=${olderRun}&amp;project=%2Frepo%2Fmain"`);
     expect(picked).not.toContain("is in view here");
+    // The rebuilt page reads the same result: the list with its current row,
+    // the panel's script hooks, and every tab body as the fallback's markup.
+    const read = await (await fetch(url("/review?result=t-older&format=workspace"), { headers: { cookie } })).json() as import("./browser-workspace.js").BrowserWorkspace;
+    const review = read.view as import("./browser-workspace.js").BrowserResultView;
+    expect(review.kind).toBe("result");
+    expect(review.results.map(one => one.title)).toEqual(["ours — the <b>title</b>", "older, needs eyes"]);
+    expect(review.results.find(one => one.current)?.href).toBe(`/review?result=t-older&run=${olderRun}&project=%2Frepo%2Fmain`);
+    expect(review.attention).toBe(2);
+    expect(review.selected).toMatchObject({ taskId: "t-older", build: olderRun, taskHref: "/t/t-older", status: { label: "Needs your decision" } });
+    const panel = review.selected!.panel!;
+    expect(panel.attributes).toMatchObject({ "data-result-panel": "", "data-result-place": "review", "data-result-task": "t-older", "data-result-run": String(olderRun) });
+    expect(panel.tabs.map(tab => [tab.key, tab.active])).toEqual([["summary", true], ["changes", false], ["checks", false]]);
+    for (const one of panel.views) expect(read.pageHtml).toContain(one.html);
+    expect(read.pageHtml).toContain(panel.request!);
+    const missedView = (await (await fetch(url("/review?result=nope&format=workspace"), { headers: { cookie } })).json() as import("./browser-workspace.js").BrowserWorkspace).view as import("./browser-workspace.js").BrowserResultView;
+    expect(missedView).toMatchObject({ selected: null, missing: expect.stringContaining("No completed task nope is in view here") });
+    expect(missedView.results).toHaveLength(2);
 
     // A hidden result and a nonexistent one read identically: a note, and
     // the top of the queue — never a 404 that confirms existence.

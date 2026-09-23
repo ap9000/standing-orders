@@ -390,3 +390,18 @@ body:has(.so-workspace) { margin: 0; padding: 0; background: var(--so-ground); o
 /* A fold holding a single server card shows its content, not a second card. */
 .so-task-fold > div > .card:only-child { border: 0; padding: 0; background: none; box-shadow: none; }
 .so-task-fold > div > .card:only-child::before, .so-task-fold > div > .card:only-child::after { content: none; }
+
+/* Rebuilt result page (views/result-view.tsx): the feedback form and the
+ * "Context used" record sit in component cards without a second border,
+ * and the context record opens like the other rows. */
+.so-result-request details.result-request-open { margin: 0; padding: 0; border: 0; border-radius: 0; background: none; box-shadow: none; }
+.so-result-request details.result-request-open > summary { font-size: 15px; font-weight: 600; color: var(--so-ink); }
+.so-result-learning details.result-knowledge { margin: 0; padding: 0; border: 0; border-radius: 0; background: none; box-shadow: none; }
+.so-result-learning details.result-knowledge > summary { list-style: none; display: flex; align-items: center; gap: 10px; padding: 14px 20px; font-size: 15px; font-weight: 600; color: var(--so-ink); cursor: pointer; }
+.so-result-learning details.result-knowledge > summary::-webkit-details-marker { display: none; }
+.so-result-learning details.result-knowledge > summary::before { content: ""; width: 6px; height: 6px; margin: 0 4px; border-right: 1.5px solid var(--so-muted); border-bottom: 1.5px solid var(--so-muted); transform: rotate(-45deg); transition: transform .15s; }
+.so-result-learning details.result-knowledge[open] > summary::before { transform: rotate(45deg); }
+.so-result-learning details.result-knowledge > :not(summary) { margin-inline: 20px; }
+.so-result-learning details.result-knowledge[open] { padding-bottom: 16px; }
+@media (max-width: 640px) { .so-result-learning details.result-knowledge > summary { padding: 14px 16px; min-height: 48px; } .so-result-learning details.result-knowledge > :not(summary) { margin-inline: 16px; } }
+.so-result-next :is(button[type="submit"], .button-link) { background: var(--so-attention); color: var(--so-on-attention); border-color: transparent; }
