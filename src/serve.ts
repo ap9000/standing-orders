@@ -2787,8 +2787,20 @@ export function createDecisionServer(options: ServeOptions): Server {
       // The mate (mate arc §5): while a mate session is live, /chat IS the
       // thread — the same rows the CLI reads. Without one, fleet chat as
       // before, plus the card that mints a session.
-      const mateSession = enabled.ok && who.role === "approver" ? store.activeMateSession(who.name) : null;
+      let mateSession = enabled.ok && who.role === "approver" ? store.activeMateSession(who.name) : null;
       const principal = enabled.ok && who.role === "approver" ? matePrincipal(who) : null;
+      // Chat opens ready to talk (2026-09-23): an approver in good standing
+      // needs no second password to start their own conversation. The one
+      // exception to "a GET writes nothing": the strict same-site session
+      // cookie keeps other sites out, and starting spends nothing. Actions
+      // the lead proposes still go through their own confirmation cards.
+      // Membership chat only: it spends no dollars. Direct-API chat keeps a
+      // one-tap Start with its visible spending limit (no password).
+      const settingsView = url.searchParams.get("settings") === "1";
+      if (!settingsView && enabled.ok && enabled.billing === "subscription" && principal !== null && (mateSession === null || mateSession.ceilingDigest !== principal.ceilingDigest) && !requestContext.getStore()?.workspaceRead) {
+        startMateConversation(who, principal, enabled, 0, false, now);
+        mateSession = store.activeMateSession(who.name);
+      }
       // A session under another ceiling is not continuable from here; a GET
       // writes nothing (slice-2 review, finding 7) — the mint card below
       // starts a new conversation, and minting ends the old session.
@@ -2848,6 +2860,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         response,
         200,
         chatPage(chromeFor(null, "chat", undefined, "all"), {
+          settingsOpen: settingsView,
           enabled,
           pending,
           latched,
@@ -3253,6 +3266,21 @@ export function createDecisionServer(options: ServeOptions): Server {
   }
   /** The session-layer principal (ruling 3): cookie, csrf, and role were
    * proved at the edge; the row and the generation are re-proved here. */
+  /** Start the person's lead conversation: the session every later turn
+   * debits (a membership spends nothing; direct API gets a per-conversation
+   * ceiling) and its thread. Starting ends any older session. */
+  function startMateConversation(who: Who & { via: "cookie" }, principal: VerifiedApprover, enabled: Extract<ChatEnablement, { ok: true }>, ceilingUsd: number, follow: boolean, now: Date): number {
+    const ceilingMicrousd = enabled.billing === "subscription" ? 0 : Math.round(ceilingUsd * 1_000_000);
+    const termsDigest = createHash("sha256").update(`${ceilingMicrousd}\n${principal.ceilingDigest}`).digest("hex");
+    const sessionId = store.mintMateSession(
+      { approver: who.name, approverGeneration: principal.generation, credentialKey: enabled.credentialKey, ceilingMicrousd, ceilingDigest: principal.ceilingDigest, termsDigest },
+      now,
+    );
+    const thread = store.openMateThread(who.name, principal.ceilingDigest, now).thread;
+    if (follow) configureLeadFollow(store, principal, store.getMateSession(sessionId)!, thread, true, now);
+    mateSaid.delete(who.session.csrf);
+    return sessionId;
+  }
   function matePrincipal(who: Who & { via: "cookie" }): VerifiedApprover | null {
     const verified = verifyApproverStanding(store, who.name, who.session.generation, managedRepos());
     return verified.ok ? verified.who : null;
@@ -6402,17 +6430,12 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (enabled.billing === "metered" && (!Number.isFinite(ceilingUsd) || ceilingUsd <= 0 || ceilingUsd > 1_000)) {
         return redirect(response, chatReturnWithSaid(back, "the session ceiling is a dollar amount between 0 and 1000"));
       }
-      const verified = verifyApproverByPassword(store, who.name, body.get("token") ?? "", managedRepos());
-      if (!verified.ok) return redirect(response, chatReturnWithSaid(back, "minting a session takes your password, typed again"));
-      const ceilingMicrousd = Math.round(ceilingUsd * 1_000_000);
-      const termsDigest = createHash("sha256").update(`${ceilingMicrousd}\n${verified.who.ceilingDigest}`).digest("hex");
-      const sessionId = store.mintMateSession(
-        { approver: who.name, approverGeneration: verified.who.generation, credentialKey: enabled.credentialKey, ceilingMicrousd, ceilingDigest: verified.who.ceilingDigest, termsDigest },
-        now,
-      );
-      const thread = store.openMateThread(who.name, verified.who.ceilingDigest, now).thread;
-      if (body.get("follow") === "yes") configureLeadFollow(store, verified.who, store.getMateSession(sessionId)!, thread, true, now);
-      mateSaid.delete(who.session.csrf);
+      // The signed-in session is the authority (an approver in good
+      // standing); a typed password, when sent, is still checked.
+      const token = body.get("token") ?? "";
+      const verified = token === "" ? verifyApproverStanding(store, who.name, who.session.generation, managedRepos()) : verifyApproverByPassword(store, who.name, token, managedRepos());
+      if (!verified.ok) return redirect(response, chatReturnWithSaid(back, token === "" ? "Your access changed. Sign in again to start chat." : "That password did not match."));
+      startMateConversation(who, verified.who, enabled, ceilingUsd, body.get("follow") === "yes", now);
       return redirect(response, back);
     }
     if (url.pathname === "/chat/mate/follow") {
@@ -14245,6 +14268,8 @@ function chatPage(chrome: Chrome, data: {
   coordinatorProposals?: string;
   /** The task's result detail (package 3), when the URL opened one. */
   resultPanel?: string | null;
+  /** Opened from "Chat settings": show them expanded. */
+  settingsOpen?: boolean;
 }): Screen {
   const configForm = (current: import("./store.js").ChatConfig | null): string => {
     const anthropicModels = PRICED_MODELS.filter(one => !one.includes("/"));
@@ -14385,7 +14410,7 @@ function chatPage(chrome: Chrome, data: {
   }
   if (data.canManage) {
     parts.push(
-      `<details id="chat-settings"><summary class="meta">chat settings</summary>`,
+      `<details id="chat-settings"${data.settingsOpen ? " open" : ""}><summary class="meta">Chat settings</summary>`,
       configForm(data.config),
       `<form method="post" action="/chat/config" class="inline">`,
       `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
@@ -14459,7 +14484,6 @@ function mateMintCard(
       ? `<span class="meta">Uses your ${enabled.config.provider === "codex-subscription" ? "Codex" : "Anthropic"} membership · no dollar limit · daily turn limits apply</span>`
       : `<label>Spend up to <span class="inline-field">$<input type="text" name="ceiling-usd" inputmode="decimal" value="5" style="width:5rem"></span> <span class="meta">(weekly chat ceiling ${chatMoney(enabled.config.weeklyCeilingMicrousd)} still applies)</span></label>`,
     `</div>`,
-    `<label>Your password <span class="meta">(once per conversation)</span><input type="password" name="token" autocomplete="current-password"></label>`,
     `<label class="arm"><input type="checkbox" name="follow" value="yes"> Let the lead follow crew updates</label>`,
     `<button type="submit">Start chat</button>`,
     `</form>`,
@@ -14904,7 +14928,7 @@ function matePage(chrome: Chrome, data: MateThreadRows & {
       : `<p class="meta">recent turns: ${data.recent
           .map(turn => `<span class="mono">#${turn.id}</span> ${escape(turn.state)}${turn.failureReason === null ? "" : ` · ${escape(turn.failureReason)}`} · ${subscription ? "membership" : chatMoney(turn.settledMicrousd ?? turn.reservedMicrousd)}`)
           .join(" · ")}</p>`,
-    `<p class="meta">Chat settings return to this page once the conversation ends.</p>`,
+    `<p class="meta"><a href="/chat?settings=1#chat-settings">Chat settings</a> · provider, model and limits</p>`,
     `</details>`,
   ].join("\n");
   const conversation: string[] = [
