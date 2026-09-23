@@ -82,7 +82,7 @@ export function modelsHtml(view: ModelsView): string {
     fresh +
     `<h2>Default agents</h2><p class="meta">New tasks use these. Approved tasks keep the agents they were approved with.</p>` +
     view.roles.map(role => roleForm(role, manage, view.csrf)).join("") +
-    (view.chat === null ? "" : `<h2>Chat</h2><p>${e(view.chat.words)} · <a href="/chat#chat-settings">Change in chat</a></p>`) +
+    (view.chat === null ? "" : `<h2>Chat</h2><p>${e(view.chat.words)} · <a href="/chat?settings=1#chat-settings">Change</a></p>`) +
     watch + `</section>`;
 }
 

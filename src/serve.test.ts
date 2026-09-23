@@ -9028,8 +9028,10 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(before).not.toContain('class="thread"');
     const csrf = csrfFrom(before);
     expect(before).not.toContain('name="hours"');
-    const noPassword = await post(cookie, "/chat/mate/mint", { csrf, "ceiling-usd": "5" });
-    expect(noPassword.headers.get("location") ?? "").toContain("password");
+    // The signed-in approver starts their own conversation without a second
+    // password; a wrong password, when one is sent, is still refused.
+    const wrong = await post(cookie, "/chat/mate/mint", { csrf, "ceiling-usd": "5", token: "not-the-password" });
+    expect(decodeURIComponent(wrong.headers.get("location") ?? "")).toContain("That password did not match.");
     expect(store.activeMateSession("alex")).toBeNull();
     const badTerms = await post(cookie, "/chat/mate/mint", { csrf, "ceiling-usd": "0", token: approverToken });
     expect(badTerms.headers.get("location") ?? "").toContain("dollar");
@@ -9415,7 +9417,8 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(configured.status).toBe(303);
     expect(store.getChatConfig()).toMatchObject({ provider: "codex-subscription", model: "default", dailyTurns: 25, weeklyCeilingMicrousd: 0, priceInMicrousd: 0, priceOutMicrousd: 0 });
 
-    html = await page(cookie);
+    // A membership conversation starts on its own; its settings live one tap away.
+    html = await (await fetch(url("/chat?settings=1"), { headers: { cookie } })).text();
     expect(html).toContain("Codex membership (logged-in CLI)");
     expect(html).toContain("membership login · no dollar ceiling");
     expect(html).toContain("no dollar maximum");
@@ -9654,10 +9657,30 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(css).toContain('width: 100%; min-width: 0; max-width: 100%; margin: 0; padding: 2rem 0 .75rem;');
   });
 
+  test("a membership chat opens ready to talk: no password card, a live conversation, settings one tap away", async () => {
+    store.setChatConfig({ provider: "codex-subscription", model: "default", dailyTurns: 50, weeklyCeilingMicrousd: 0, priceInMicrousd: 0, priceOutMicrousd: 0 }, "alex", T0);
+    const cookie = await login();
+    expect(store.activeMateSession("alex")).toBeNull();
+    const html = await page(cookie);
+    expect(store.activeMateSession("alex")).not.toBeNull();
+    expect(html).not.toContain('action="/chat/mate/mint"');
+    expect(html).not.toContain('autocomplete="current-password"');
+    expect(html).toContain('href="/chat?settings=1#chat-settings">Chat settings</a>');
+    // Reloading keeps the same conversation rather than starting another.
+    const first = store.activeMateSession("alex")!.id;
+    await page(cookie);
+    expect(store.activeMateSession("alex")!.id).toBe(first);
+    // The settings view starts nothing and opens the settings.
+    store.endMateSessionsFor("alex", "alex", T0);
+    const settings = await (await fetch(url("/chat?settings=1"), { headers: { cookie } })).text();
+    expect(store.activeMateSession("alex")).toBeNull();
+    expect(settings).toContain('<details id="chat-settings" open>');
+  });
+
   test("UI polish 2026-09-13: a membership never shows a dollar figure as a charge on the chat page", async () => {
     store.setChatConfig({ provider: "codex-subscription", model: "default", dailyTurns: 50, weeklyCeilingMicrousd: 0, priceInMicrousd: 0, priceOutMicrousd: 0 }, "alex", T0);
     const cookie = await login();
-    const html = await page(cookie);
+    const html = await (await fetch(url("/chat?settings=1"), { headers: { cookie } })).text();
     expect(html).toContain('<details class="chat-limits"><summary>Model &amp; limits<span class="meta">membership</span></summary>');
     expect(html).toContain("<span>membership login · no dollar ceiling</span>");
     expect(html).toContain("Uses your Codex membership · no dollar limit · daily turn limits apply");
