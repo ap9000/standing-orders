@@ -1286,6 +1286,9 @@ export function createDecisionServer(options: ServeOptions): Server {
       !(url.pathname === "/review" && url.searchParams.has("result")) &&
       url.pathname !== "/menu" &&
       url.pathname !== "/recipes" &&
+      // New work names its project in the form (a dropdown of known
+      // projects); /tasks/add still admits the posted repo on its own.
+      url.pathname !== "/tasks/new" && url.pathname !== "/tasks/add" &&
       !/^\/t\/[^/]+$/.test(url.pathname) &&
       !/^\/r\/[0-9]{1,15}(?:\/evidence\/[0-9]{1,15})?$/.test(url.pathname) &&
       !url.pathname.startsWith("/d/") && !url.pathname.startsWith("/contest/") &&
@@ -2314,7 +2317,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         .listTasksScoped(project, undefined, 100, null)
         .filter(one => one.state !== "done" && one.state !== "cancelled" && visible(one.repo))
         .map(one => ({ id: one.id, title: one.title }));
-      return sendScreen(response, 200, newTaskPage(chromeFor(project, "tasks"), project, csrf, revision, null, chainable, store.permissionDefault().mode, store.qualityDefault().mode));
+      const chrome = chromeFor(project, "tasks");
+      return sendScreen(response, 200, newTaskPage(chrome, project, csrf, revision, null, chainable, store.permissionDefault().mode, store.qualityDefault().mode, chrome.projects ?? []));
     }
 
     const task = matchTaskPath(url.pathname, "");
@@ -12169,7 +12173,7 @@ button.pick-file { min-height: 1.75rem; padding: 0 .55rem; font-size: .75rem; }
 `;
 
 /** Appearance: a three-way segmented switch, one tap per choice. */
-const THEME_CONTROLS_CSS = `details.result-request-form>summary{border:0;background:transparent;padding:.5rem 0;min-height:2.75rem;font-weight:600;display:list-item;list-style:revert}details.result-request-form>summary::-webkit-details-marker{display:revert}form.js-autosave button[type=submit]{display:none}.provider-row{border-bottom:1px solid var(--so-line);padding:.35rem 0}.provider-row:first-of-type{border-top:1px solid var(--so-line)}.provider-head{display:flex;align-items:center;gap:.75rem;margin:.4rem 0 0}.provider-status{display:inline-flex;align-items:center;gap:.4rem;color:var(--so-muted);font-size:.875rem}.provider-status i{width:.5rem;height:.5rem;border-radius:50%;background:var(--so-muted)}.provider-status--ok i{background:var(--so-success)}.provider-status--warn i{background:var(--so-attention)}.provider-status--off i{background:transparent;border:1.5px solid var(--so-muted)}details.provider-manage>summary{cursor:pointer;color:var(--so-accent-text);font-size:.875rem;min-height:2.5rem;display:list-item;padding-block:.5rem}.card.props .row{display:grid;gap:.1rem;margin:0 0 .75rem}.card.props .row>.meta{display:block;font-size:.75rem}.card.props .row>.meta::first-letter{text-transform:uppercase}.card.props .row>.mono{font-family:var(--font-sans);font-size:.875rem}.card.props .row>.mono .seal{font-family:var(--font-mono);font-size:.8125rem}details.evidence-files{margin:1rem 0}details.evidence-files>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:600}details.evidence-files ul{list-style:none;margin:0;padding:0}details.evidence-files li{display:flex;justify-content:space-between;gap:1rem;padding:.5rem 0;border-bottom:1px solid var(--so-line)}.result-action .result-feedback-link{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;text-decoration:none}.result-action .result-feedback-link:hover{background:var(--so-raised)}.so-sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}.verdict{margin:.5rem 0 .75rem}.verdict-chips{display:flex;flex-wrap:wrap;gap:.4rem;list-style:none;padding:0;margin:0}.verdict-chip{display:inline-flex;align-items:center;gap:.3rem;min-height:1.75rem;padding:.2rem .65rem;border-radius:999px;font-size:.8125rem;font-weight:600;background:var(--so-neutral-soft);color:var(--so-neutral-ink)}.verdict-chip svg{width:.9rem;height:.9rem}.verdict-chip--success{background:var(--so-success-soft);color:var(--so-success)}.verdict-chip--danger{background:var(--so-danger-soft);color:var(--so-danger)}.verdict-chip--warning{background:var(--so-warning-soft);color:var(--so-warning)}.verdict-chip--info{background:var(--so-info-soft);color:var(--so-info)}.verdict-by{margin:.4rem 0 0}details.result-request-open{margin:.5rem 0}details.result-request-open>summary{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;cursor:pointer;list-style:none}details.result-request-open>summary::-webkit-details-marker{display:none}details.result-request-open[open]>summary{margin-bottom:.75rem}.settings-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(8.5rem,1fr));gap:.5rem;margin:0 0 2rem}.settings-tiles a{display:flex;align-items:center;gap:.6rem;min-height:3rem;padding:.65rem .8rem;border:1px solid var(--so-line);border-radius:.625rem;background:var(--so-paper);color:var(--so-ink);text-decoration:none;font-weight:550;font-size:.875rem}.settings-tiles a:hover{border-color:var(--so-input-line);background:var(--so-raised)}.settings-tiles svg{width:1.1rem;height:1.1rem;flex-shrink:0;color:var(--so-accent-text)}details.settings-more{margin:.25rem 0 1.25rem}details.settings-more>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:550}details.settings-more>summary .meta{font-weight:400;margin-left:.35rem}.settings-changed{margin-top:-.25rem}.appearance{margin:0 0 28px}.appearance h2{margin:0 0 10px}.theme-switch{display:inline-flex;flex-wrap:nowrap;max-width:100%;gap:4px;padding:4px;margin:0;border:1px solid var(--so-line);border-radius:10px;background:var(--so-raised)}.theme-switch .theme-choice,.so-native-region .theme-switch .theme-choice{flex:1 1 0;width:auto;white-space:nowrap;min-height:40px;padding:8px 16px;border:0;border-radius:7px;background:transparent;color:var(--so-muted);font:inherit;font-weight:550;box-shadow:none;cursor:pointer}.theme-switch .theme-choice:hover{color:var(--so-ink)}.theme-switch .theme-choice[aria-pressed="true"]{background:var(--so-paper);color:var(--so-ink);box-shadow:0 1px 2px rgb(0 0 0 / .1)}.appearance .meta{margin:8px 0 0}@media(max-width:600px){.theme-switch .theme-choice{min-height:44px}}`;
+const THEME_CONTROLS_CSS = `.task-repo select{width:100%;min-height:2.75rem;font-size:1rem}.task-repo-add{margin:.35rem .1rem .5rem}.task-repo-add a{display:inline-flex;align-items:center;min-height:2.25rem}details.result-request-open.result-request-form>summary{border:0;background:transparent;padding:.5rem 0;min-height:2.75rem;font-weight:600;display:list-item;list-style:revert}details.result-request-open.result-request-form>summary::-webkit-details-marker{display:revert}form.js-autosave button[type=submit]{display:none}.provider-row{border-bottom:1px solid var(--so-line);padding:.35rem 0}.provider-row:first-of-type{border-top:1px solid var(--so-line)}.provider-head{display:flex;align-items:center;gap:.75rem;margin:.4rem 0 0}.provider-status{display:inline-flex;align-items:center;gap:.4rem;color:var(--so-muted);font-size:.875rem}.provider-status i{width:.5rem;height:.5rem;border-radius:50%;background:var(--so-muted)}.provider-status--ok i{background:var(--so-success)}.provider-status--warn i{background:var(--so-attention)}.provider-status--off i{background:transparent;border:1.5px solid var(--so-muted)}details.provider-manage>summary{cursor:pointer;color:var(--so-accent-text);font-size:.875rem;min-height:2.5rem;display:list-item;padding-block:.5rem}.card.props .row{display:grid;gap:.1rem;margin:0 0 .75rem}.card.props .row>.meta{display:block;font-size:.75rem}.card.props .row>.meta::first-letter{text-transform:uppercase}.card.props .row>.mono{font-family:var(--font-sans);font-size:.875rem}.card.props .row>.mono .seal{font-family:var(--font-mono);font-size:.8125rem}details.evidence-files{margin:1rem 0}details.evidence-files>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:600}details.evidence-files ul{list-style:none;margin:0;padding:0}details.evidence-files li{display:flex;justify-content:space-between;gap:1rem;padding:.5rem 0;border-bottom:1px solid var(--so-line)}.result-action .result-feedback-link{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;text-decoration:none}.result-action .result-feedback-link:hover{background:var(--so-raised)}.so-sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}.verdict{margin:.5rem 0 .75rem}.verdict-chips{display:flex;flex-wrap:wrap;gap:.4rem;list-style:none;padding:0;margin:0}.verdict-chip{display:inline-flex;align-items:center;gap:.3rem;min-height:1.75rem;padding:.2rem .65rem;border-radius:999px;font-size:.8125rem;font-weight:600;background:var(--so-neutral-soft);color:var(--so-neutral-ink)}.verdict-chip svg{width:.9rem;height:.9rem}.verdict-chip--success{background:var(--so-success-soft);color:var(--so-success)}.verdict-chip--danger{background:var(--so-danger-soft);color:var(--so-danger)}.verdict-chip--warning{background:var(--so-warning-soft);color:var(--so-warning)}.verdict-chip--info{background:var(--so-info-soft);color:var(--so-info)}.verdict-by{margin:.4rem 0 0}details.result-request-open{margin:.5rem 0}details.result-request-open>summary{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;cursor:pointer;list-style:none}details.result-request-open>summary::-webkit-details-marker{display:none}details.result-request-open[open]>summary{margin-bottom:.75rem}.settings-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(8.5rem,1fr));gap:.5rem;margin:0 0 2rem}.settings-tiles a{display:flex;align-items:center;gap:.6rem;min-height:3rem;padding:.65rem .8rem;border:1px solid var(--so-line);border-radius:.625rem;background:var(--so-paper);color:var(--so-ink);text-decoration:none;font-weight:550;font-size:.875rem}.settings-tiles a:hover{border-color:var(--so-input-line);background:var(--so-raised)}.settings-tiles svg{width:1.1rem;height:1.1rem;flex-shrink:0;color:var(--so-accent-text)}details.settings-more{margin:.25rem 0 1.25rem}details.settings-more>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:550}details.settings-more>summary .meta{font-weight:400;margin-left:.35rem}.settings-changed{margin-top:-.25rem}.appearance{margin:0 0 28px}.appearance h2{margin:0 0 10px}.theme-switch{display:inline-flex;flex-wrap:nowrap;max-width:100%;gap:4px;padding:4px;margin:0;border:1px solid var(--so-line);border-radius:10px;background:var(--so-raised)}.theme-switch .theme-choice,.so-native-region .theme-switch .theme-choice{flex:1 1 0;width:auto;white-space:nowrap;min-height:40px;padding:8px 16px;border:0;border-radius:7px;background:transparent;color:var(--so-muted);font:inherit;font-weight:550;box-shadow:none;cursor:pointer}.theme-switch .theme-choice:hover{color:var(--so-ink)}.theme-switch .theme-choice[aria-pressed="true"]{background:var(--so-paper);color:var(--so-ink);box-shadow:0 1px 2px rgb(0 0 0 / .1)}.appearance .meta{margin:8px 0 0}@media(max-width:600px){.theme-switch .theme-choice{min-height:44px}}`;
 const WORKSPACE_STYLE = styleAsset(STYLE + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
 
 /** Everything the sidebar needs to draw itself for one request. */
@@ -15337,6 +15341,27 @@ type TaskComposerPrefill = { title: string; goal: string; not: string; touches: 
 /** The one front door for new work. The common path is one prompt and one
  * button; the detailed contract remains available in-place for templates,
  * experts, and the rare task that should skip repository-aware planning. */
+/** Where new work goes when no project is open: a choice from the projects
+ * this person already has, never a typed path; a new project is one link
+ * away. Same-named checkouts show their parent folder to tell them apart. */
+function projectPickerHtml(projects: { path: string; name: string }[], chosen: string): string {
+  if (projects.length === 0) {
+    return `<label class="task-repo">Project folder <span class="meta">— no project is open, so the task must say where it belongs</span><input type="text" name="repo" value="${escape(chosen)}" required placeholder="/path/to/repository"></label>` +
+      `<p class="meta task-repo-add">No projects yet. <a href="/projects?return=%2Ftasks%2Fnew">Add a project</a> to pick it here next time.</p>`;
+  }
+  const counts = new Map<string, number>();
+  for (const one of projects) counts.set(one.name, (counts.get(one.name) ?? 0) + 1);
+  const label = (one: { path: string; name: string }): string => {
+    if ((counts.get(one.name) ?? 0) < 2) return one.name;
+    const parent = one.path.split(/[\\/]/).filter(Boolean).slice(-2, -1)[0] ?? one.path;
+    return `${one.name} (${parent})`;
+  };
+  const selected = projects.some(one => one.path === chosen) ? chosen : projects[0]!.path;
+  return `<label class="task-repo">Project<select name="repo" required>` +
+    projects.map(one => `<option value="${escape(one.path)}" title="${escape(one.path)}"${one.path === selected ? " selected" : ""}>${escape(label(one))}</option>`).join("") +
+    `</select></label><p class="meta task-repo-add"><a href="/projects?return=%2Ftasks%2Fnew">Add a project</a></p>`;
+}
+
 function taskComposerHtml(data: {
   csrf: string;
   project: string | null;
@@ -15345,12 +15370,15 @@ function taskComposerHtml(data: {
   candidates?: { id: string; title: string }[];
   permissionDefault: UnattendedPermissionMode;
   qualityDefault: QualityMode;
+  /** Projects this person may place work in, most recently opened first. */
+  projects?: { path: string; name: string }[];
 }): string {
   const prefill = data.prefill ?? null;
   const values = prefill?.values;
   const after = values?.get("after") ?? "";
   const candidates = data.candidates ?? (after === "" ? [] : [{ id: after, title: after }]);
   const projectLabel = data.project === null ? "repository required" : projectName(data.project);
+  const showPicker = data.project === null || (data.projects !== undefined && data.projects.length > 1);
   return [
     `<form method="post" action="/tasks/add" class="card task-composer">`,
     `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
@@ -15363,12 +15391,12 @@ function taskComposerHtml(data: {
       : `<p class="meta" style="margin:.35rem .75rem .15rem">pre-filled from a template. Change anything; it still waits for your approval.</p>`,
     `<label class="task-prompt"><span class="visually-hidden">What should get done?</span>` +
       `<textarea name="title" rows="4" maxlength="200" required autofocus placeholder="Describe the outcome you want. The planner will inspect the repository and work out the implementation details.">${prefill === null ? "" : escape(prefill.title)}</textarea></label>`,
-    data.project === null
-      ? `<label class="task-repo">repository <span class="meta">— required because no project is open, so the task must say where it belongs</span><input type="text" name="repo" value="${escape(values?.get("repo") ?? "")}" required placeholder="/path/to/repository"></label>`
-      : "",
+    // The project is always a visible, changeable choice when the page knows
+    // the person's projects; the open project is simply preselected.
+    showPicker ? projectPickerHtml(data.projects ?? [], values?.get("repo") ?? data.project ?? "") : "",
     `<div class="task-composer-footer">`,
     `<div class="task-context">` +
-      `<span class="task-context-chip" title="${escape(data.project ?? "Choose a repository for this task")}">${escape(projectLabel)}</span>` +
+      (showPicker || data.project === null ? "" : `<span class="task-context-chip" title="${escape(data.project)}">${escape(projectLabel)}</span>`) +
       `<span class="task-context-chip">planner inspects first</span>` +
       `</div>`,
     `<label class="task-quality"><span class="visually-hidden">quality mode</span><select name="quality-mode" aria-label="quality mode">` +
@@ -17009,12 +17037,11 @@ function newTaskPage(
   candidates: { id: string; title: string }[] = [],
   permissionDefault: UnattendedPermissionMode = "auto",
   qualityDefault: QualityMode = "default",
+  projects: { path: string; name: string }[] = [],
 ): Screen {
-  return screen("new task", [
+  return screen("New task", [
     `<section class="task-intake">`,
-    `<div class="task-intake-hero"><span class="task-intake-mark" aria-hidden="true">s·o</span>` +
-      `<h1>What should get done?</h1>` +
-      `<p>Describe the outcome in plain language. The planner will inspect the repository and turn it into a scope you can review.</p></div>`,
+    `<div class="task-intake-hero"><h1>What should get done?</h1></div>`,
     `<p class="meta">Work you do often? <a href="/recipes">Use a saved recipe</a> or <a href="/recipes/new">create one</a>.</p>`,
     problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
     taskComposerHtml({
@@ -17024,9 +17051,9 @@ function newTaskPage(
       candidates,
       permissionDefault,
       qualityDefault,
+      projects,
     }),
-    `<p class="meta task-agent-note">The agent asks only when an answer materially changes the work. Nothing builds until you approve the proposed scope. ` +
-      `<a href="/chat">Prefer a conversation? Open workspace chat.</a></p>`,
+    `<p class="meta task-agent-note">Nothing builds until you approve the plan. <a href="/chat">Or start in chat.</a></p>`,
     `</section>`,
   ].join("\n"), { chrome });
 }
