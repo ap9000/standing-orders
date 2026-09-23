@@ -8965,6 +8965,30 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect((await fetch(url('/chat?format=workspace'), { redirect: 'manual' })).status).toBe(303);
   });
 
+  test('React task page frames the same parts as the HTML fallback', async () => {
+    const cookie = await login();
+    const response = await fetch(url('/t/a?format=workspace'), { headers: { cookie } });
+    expect(response.status).toBe(200);
+    const data = await response.json() as import('./browser-workspace.js').BrowserWorkspace;
+    // The scope awaits a signature, so the page is sensitive (no chrome
+    // scripts); the rebuilt view still frames the exact ceremony.
+    expect(data.sensitive).toBe(true);
+    expect(data.view?.kind).toBe('task');
+    const task = data.view as import('./browser-workspace.js').BrowserTaskView;
+    expect(task).toMatchObject({ id: 'a', title: 'task a', tabs: [{ label: 'Overview', href: '/t/a', active: true }, { label: 'Ask', active: false }] });
+    expect(task.status).toMatchObject({ label: 'Needs your decision', tone: 'attention', action: null });
+    expect(task.approval).toContain('id="approve"');
+    expect(task.approval).toContain('type="password"');
+    expect(task.facts.find(fact => fact.label === 'Scope')?.parts).toEqual(['not approved']);
+    expect(task.sections.map(one => one.id)).toContain('scope');
+    expect(task.manage.map(one => one.id)).toContain('task-diagnostics');
+    expect(task.cancel).toMatchObject({ open: false });
+    expect(task.cancel!.html).toContain('action="/t/a/cancel"');
+    // Every fold body is the server's own markup, byte for byte.
+    for (const one of [...task.sections, ...task.manage]) expect(data.pageHtml).toContain(one.html);
+    expect(data.pageHtml).toContain(task.approval);
+  });
+
   test('React project links narrow reads without changing the selected project', async () => {
     const cookie = await login();
     const target = `/work?project=${encodeURIComponent(repoDir)}&format=workspace`;
