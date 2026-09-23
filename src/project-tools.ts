@@ -64,9 +64,15 @@ export type ResolvedTool = { spec: ToolSpec; digest: string; values: Record<stri
 const NAME = /^[a-z0-9][a-z0-9_-]{0,39}$/;
 const SECRET_NAME = /^[A-Z][A-Z0-9_]{0,63}$/;
 const HEADER_NAME = /^[A-Za-z0-9-]{1,64}$/;
-/** Env names a tool may never claim: the process's own plumbing and every provider credential. */
-const RESERVED_ENV = new Set(["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR", "TERM", "PWD", "NODE_OPTIONS", "NODE_PATH",
+/** Env names a tool may never claim: the process's own plumbing, every
+ * provider credential, and anything that changes how a program or its
+ * interpreter loads (a secret's value must stay data, never code). */
+const RESERVED_ENV_NAMES = new Set(["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR", "TERM", "PWD", "IFS", "ENV", "BASH_ENV", "PS4", "PROMPT_COMMAND",
+  "NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS", "NPM_CONFIG_PREFIX", "NPM_CONFIG_USERCONFIG", "GCONV_PATH", "SSL_CERT_FILE", "SSL_CERT_DIR",
+  "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS", "DOTNET_STARTUP_HOOKS",
   "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "MCP_TIMEOUT"]);
+const RESERVED_ENV_PREFIX = /^(LD_|DYLD_|PYTHON|PERL5|PERLLIB|RUBY|GIT_|NODE_|NPM_CONFIG_|BUN_|DENO_|UV_|PIP_|LC_|XDG_|CLAUDE_|CODEX_|ANTHROPIC_|OPENAI_)/;
+const RESERVED_ENV = { has: (name: string): boolean => RESERVED_ENV_NAMES.has(name) || RESERVED_ENV_PREFIX.test(name) };
 
 /** Common servers, pinned to exact versions: the lead suggests from here first. */
 export const TOOL_CATALOG: readonly (ToolSpec & { label: string })[] = [
