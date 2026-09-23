@@ -1,7 +1,7 @@
 import { repositoryContext, repositoryContextRead } from './repository-context.js';
 import { repositoryContextHtml } from './repository-context-ui.js';
 import { browserAssetsAvailable, browserWorkspaceDocument, serveBrowserAsset, supportsBrowserWorkspace } from './browser-shell.js';
-import { browserCrewOf, browserCrewFromIndex, browserWorkActionHref, browserProjectsOf, browserNavigationOf, type BrowserWorkspace, type BrowserTasksView, type BrowserSettingsView, type BrowserTaskView, type BrowserTaskFact, type BrowserTaskSection } from './browser-workspace.js';
+import { browserCrewOf, browserCrewFromIndex, browserWorkActionHref, browserProjectsOf, browserNavigationOf, type BrowserWorkspace, type BrowserTasksView, type BrowserSettingsView, type BrowserTaskView, type BrowserTaskFact, type BrowserTaskSection, type BrowserProjectsView, type BrowserProjectRow } from './browser-workspace.js';
 import { configureLeadFollow, leadFollowStatus, runLeadFollowPass } from './lead-follow.js';
 import { startMaintenance } from './maintenance.js';
 import { codingHandoffPreview, createCodingHandoff } from './coding-handoff.js';
@@ -16531,6 +16531,21 @@ function projectsPage(
 
   const recentItems = recent.map(one => ({ path: one.path, name: one.name, note: `last opened ${when(one.lastOpenedAt)}` }));
   const candidateItems = candidates.map(path => ({ path, name: projectName(path), note: "seen in the queue" }));
+  // The rebuilt page's rows (shadcn/ui): the same projects, peeks and roads.
+  const home = homedir();
+  const rowOf = (path: string, name: string, openedAt: string | null): BrowserProjectRow => {
+    const peek = peeks[path] ?? null;
+    return {
+      name, path, shortPath: path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path, open: open !== null && open === path, openedAt,
+      knowledgeHref: `/settings/knowledge?repo=${encodeURIComponent(path)}`,
+      peek: peek === null ? null : [
+        ...(peek.waiting > 0 ? [{ label: `${peek.waiting} waiting on you`, href: "/", tone: "attention" as const }] : []),
+        ...(peek.running > 0 ? [{ label: `${peek.running} running`, href: "/runs", tone: "info" as const }] : []),
+        ...(peek.queued > 0 ? [{ label: `${peek.queued} queued`, href: "/board?view=order", tone: "neutral" as const }] : []),
+        ...(peek.doneRecently > 0 ? [{ label: `${peek.doneRecently} built today`, href: "/done", tone: "success" as const }] : []),
+      ],
+    };
+  };
 
   // The two ways to ADD a project are the page's large, primary actions:
   // browse this machine, or choose a GitHub repository. Manual path entry
@@ -16540,6 +16555,19 @@ function projectsPage(
     `<span class="project-add-icon">${strokeIcon(paths)}</span>` +
     `<span class="project-add-copy"><strong>${escape(title)}</strong><small>${escape(detail)}</small></span>` +
     `<span class="project-add-arrow" aria-hidden="true">\u2192</span></a>`;
+  const addForms = [
+    browsable || onboard !== null && !onboard.enabled && onboard.why.includes('--project-root')
+      ? ""
+      : `<p class="meta">Choose a projects folder once with <code>standing-orders up --project-root &lt;dir&gt;</code>. Standing Orders remembers it after that.</p>`,
+    onboardCard === "" ? "" : `<div style="margin-top:.5rem">${onboardCard}</div>`,
+    `<details class="project-add-more"><summary>Enter an exact path instead</summary>`,
+    `<form method="post" action="/projects/open" class="card">`,
+    `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
+    `<input type="hidden" name="return" value="${escape(returnTo)}">`,
+    `<label>path on this server<input type="text" name="path" placeholder="/Users/you/code/your-repo"></label>`,
+    `<button type="submit">open project</button>`,
+    `</form></details>`,
+  ].join("\n");
   const addCard = [
     `<div class="card project-add-card">`,
     `<h2 class="project-add-title">add a project</h2>`,
@@ -16556,17 +16584,7 @@ function projectsPage(
           "Choose from repositories available to your GitHub login",
         ),
     `</div>`,
-    browsable || onboard !== null && !onboard.enabled && onboard.why.includes('--project-root')
-      ? ""
-      : `<p class="meta">Choose a projects folder once with <code>standing-orders up --project-root &lt;dir&gt;</code>. Standing Orders remembers it after that.</p>`,
-    onboardCard === "" ? "" : `<div style="margin-top:.5rem">${onboardCard}</div>`,
-    `<details class="project-add-more"><summary>Enter an exact path instead</summary>`,
-    `<form method="post" action="/projects/open" class="card">`,
-    `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
-    `<input type="hidden" name="return" value="${escape(returnTo)}">`,
-    `<label>path on this server<input type="text" name="path" placeholder="/Users/you/code/your-repo"></label>`,
-    `<button type="submit">open project</button>`,
-    `</form></details>`,
+    addForms,
     `</div>`,
   ].join("\n");
 
@@ -16582,7 +16600,12 @@ function projectsPage(
     recentItems.length > 0 ? `<h2>recent</h2>${cards(recentItems)}` : "",
     candidateItems.length > 0 ? `<h2>available</h2>${cards(candidateItems)}` : "",
     addCard,
-  ].join("\n"), { chrome });
+  ].join("\n"), { chrome, workspace: { view: {
+    kind: "projects", choosing, problem, returnTo,
+    recent: recent.map(one => rowOf(one.path, one.name, one.lastOpenedAt)),
+    available: candidates.map(path => rowOf(path, projectName(path), null)),
+    add: { browse: browsable ? "/projects/browse" : null, github: onboard === null ? null : "/projects/github", html: addForms },
+  } satisfies BrowserProjectsView } });
 }
 
 /**
