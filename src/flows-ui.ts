@@ -50,14 +50,23 @@ export function flowView(store: Store, flow: FlowRow, viewer: { name: string; ap
   const cards: BrowserFlowCard[] = store.flowCards(flow.id, true).filter(card => card.state === "active" || Date.now() - Date.parse(card.updatedAt) < 7 * 86_400_000).map((card: FlowCardRow) => {
     const stage = stages.find(one => one.id === card.stage);
     const task = card.task ?? card.primaryTask;
+    const discussion = store.flowComments(card.id);
+    const watchers = store.flowCardWatchers(card.id);
+    const canDecide = viewer.approver && card.state === "active" && stage?.kind === "approval" && (stage.approver === null || stage.approver === viewer.name);
+    // History reads moves and ownership together, newest first.
+    const owned = discussion.filter(one => one.kind === "owner").map(one => ({ text: one.body === "" ? `${one.author} left it without an owner` : one.body === one.author ? `${one.author} took it on` : `${one.author} made ${one.body} the owner`, at: one.at }));
+    const moves = store.flowEvents(card.id).map(event => ({ text: historyText(event, title), at: event.at }));
     return {
       id: card.id, title: card.title, description: card.description, stage: card.stage, state: card.state, waiting: card.waiting,
       task: task === null ? null : { id: task, href: `/t/${encodeURIComponent(task)}` },
       createdBy: card.createdBy, updatedAt: card.updatedAt,
-      canDecide: viewer.approver && card.state === "active" && stage?.kind === "approval" && (stage.approver === null || stage.approver === viewer.name),
+      canDecide,
       outputs: Object.entries(card.outputs).map(([id, text]) => ({ stage: id, title: title(id), text })),
-      history: store.flowEvents(card.id).map(event => ({ text: historyText(event, title), at: event.at })).reverse().slice(0, 30),
+      history: [...moves, ...owned].sort((a, b) => b.at.localeCompare(a.at)).slice(0, 30),
       source: card.source,
+      owner: card.owner, watchers, watching: watchers.includes(viewer.name),
+      mine: card.owner === viewer.name || watchers.includes(viewer.name) || canDecide,
+      comments: discussion.filter(one => one.kind === "comment").map(one => ({ id: one.id, author: one.author, body: one.body, mentions: one.mentions, at: one.at })),
     };
   });
   const triggers: BrowserFlowTrigger[] = store.flowTriggers(flow.id).map(trigger => {
@@ -82,6 +91,7 @@ export function flowView(store: Store, flow: FlowRow, viewer: { name: string; ap
       otherFlows: store.listFlows(setup.repos).filter(one => one.id !== flow.id).map(one => ({ id: one.id, name: one.name, zones: (flowDefinitionOf(one)?.stages ?? []).map(stage => ({ id: stage.id, title: stage.title })) })),
     },
     startTrigger: setup.startTrigger ?? null,
+    me: viewer.name,
     start: definition?.start ?? stages[0]?.id ?? "",
     stages,
     cards,

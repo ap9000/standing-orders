@@ -761,8 +761,8 @@ export const MATE_TOOLS: MateTool[] = [
   },
   {
     name: "get_flows",
-    description: "Read the flows in the operator's projects (each a process drawn as zones that cards move through): their steps in order and their cards — where each card is, what it waits on, whether it needs the operator, its task. flow reads one flow in full.",
-    inputSchema: schema({ repo: REPO_ARG, flow: { type: "integer", minimum: 1 } }),
+    description: "Read the flows in the operator's projects (each a process drawn as zones that cards move through): their steps in order and their cards — where each card is, what it waits on, whether it needs the operator, its task. flow reads one flow in full. Each card has its owner and latest comments; flow with card reads that card's whole discussion.",
+    inputSchema: schema({ repo: REPO_ARG, flow: { type: "integer", minimum: 1 }, card: { type: "integer", minimum: 1 } }),
     handle: (ctx, args) => {
       const reachable = (repo: string) => ctx.who.repos.includes(repo) && ctx.store.accountCanAccess(ctx.who.name, repo);
       const needsYou = (definition: FlowDefinition | null, stage: string) => {
@@ -794,7 +794,13 @@ export const MATE_TOOLS: MateTool[] = [
             waiting: card.state !== "active" || definition.stages.find(one => one.id === card.stage)?.kind !== "approval" || card.waiting === null ? card.waiting
               : needsYou(definition, card.stage) ? "Waiting for you to approve or send it back" : "Waiting for someone else to decide",
             task: card.task ?? card.primaryTask, ...(card.note === null ? {} : { lastNote: card.note.slice(0, 300) }),
-          })),
+            // Names never reach the model: people read as you or a teammate.
+            owner: card.owner === null ? null : card.owner === ctx.who.name ? "you" : "a teammate", following: ctx.store.flowCardWatchers(card.id).includes(ctx.who.name),
+            ...(() => {
+              const said = ctx.store.flowComments(card.id).filter(one => one.kind === "comment");
+              return said.length === 0 ? {} : { comments: said.length, discussion: said.slice(args["card"] === card.id ? -30 : -3).map(one => ({ by: one.author === ctx.who.name ? "you" : "a teammate", at: one.at, text: one.body.slice(0, args["card"] === card.id ? 2000 : 400) })) };
+            })(),
+          })).filter(card => args["card"] === undefined || card.card === args["card"]),
           triggers: ctx.store.flowTriggers(flow.id).map(trigger => {
             const config = triggerConfigOf(trigger);
             return { trigger: trigger.id, kind: trigger.kind, what: config === null ? "can't be read" : describeTrigger(config, ctx.store),
@@ -819,9 +825,9 @@ export const MATE_TOOLS: MateTool[] = [
   },
   {
     name: "propose_flow",
-    description: "Draft a flow change as a card the operator confirms. create: a template, or the steps in order (each leads to the next; Done is added; instructions may be left out). edit: the full step list, keeping existing steps by id — what a kept step leaves out carries over. add_card (starts in the first zone unless zone is named), move_card, approve, send_back (needs a note), cancel_card. add_trigger with settings (kind button: label, questions; schedule: schedule like 'daily 09:00 Europe/London', title; github: repo owner/name, watch issues|pulls|checks, label, branch, from team|anyone; linear: team, state, label; flow: follow (another flow's id), when (its zone)); pause_trigger, resume_trigger, remove_trigger with trigger. Read get_flows first except to create.",
+    description: "Draft a flow change as a card the operator confirms. create: a template, or the steps in order (each leads to the next; Done is added; instructions may be left out). edit: the full step list, keeping existing steps by id — what a kept step leaves out carries over. add_card (starts in the first zone unless zone is named), move_card, approve, send_back (needs a note), cancel_card, comment (note; @name pings that person), assign (owner: a name, 'me', or 'nobody'), follow, unfollow. add_trigger with settings (kind button: label, questions; schedule: schedule like 'daily 09:00 Europe/London', title; github: repo owner/name, watch issues|pulls|checks, label, branch, from team|anyone; linear: team, state, label; flow: follow (another flow's id), when (its zone)); pause_trigger, resume_trigger, remove_trigger with trigger. Read get_flows first except to create.",
     inputSchema: schema({
-      operation: { type: "string", enum: ["create", "edit", "add_card", "move_card", "approve", "send_back", "cancel_card", "add_trigger", "pause_trigger", "resume_trigger", "remove_trigger"] },
+      operation: { type: "string", enum: ["create", "edit", "add_card", "move_card", "approve", "send_back", "cancel_card", "comment", "assign", "follow", "unfollow", "add_trigger", "pause_trigger", "resume_trigger", "remove_trigger"] },
       repo: REPO_ARG, flow: { type: "integer", minimum: 1 }, card: { type: "integer", minimum: 1 },
       name: { type: "string", maxLength: 80 }, template: { type: "string", enum: FLOW_TEMPLATES.map(one => one.id) },
       steps: { type: "array", minItems: 1, maxItems: 24, items: { type: "object", additionalProperties: false, properties: {
@@ -831,7 +837,7 @@ export const MATE_TOOLS: MateTool[] = [
         next: { type: "string", maxLength: 60 }, ifFails: { type: "string", maxLength: 60 },
       } } },
       title: { type: "string", maxLength: 200 }, description: { type: "string", maxLength: 4000 }, zone: { type: "string", maxLength: 60 }, note: { type: "string", maxLength: 2000 },
-      trigger: { type: "integer", minimum: 1 },
+      trigger: { type: "integer", minimum: 1 }, owner: { type: "string", maxLength: 64 },
       settings: { type: "object", additionalProperties: false, properties: {
         kind: { type: "string", enum: FLOW_TRIGGER_KINDS.filter(one => one !== "webhook") }, zone: { type: "string", maxLength: 60 },
         label: { type: "string", maxLength: 50 }, questions: { type: "array", maxItems: 6, items: { type: "string", maxLength: 80 } },
@@ -877,6 +883,14 @@ export const MATE_TOOLS: MateTool[] = [
           case "approve": operation = "flow_card_approve"; input = pick(["card", "note"]); break;
           case "send_back": operation = "flow_card_send_back"; input = pick(["card", "note"]); break;
           case "cancel_card": operation = "flow_card_cancel"; input = pick(["card"]); break;
+          case "comment": operation = "flow_card_comment"; input = pick(["card", "note"]); break;
+          case "assign": {
+            const said = typeof args["owner"] === "string" ? args["owner"].trim() : "";
+            operation = "flow_card_assign";
+            input = { ...pick(["card"]), owner: /^(me|myself|i)$/i.test(said) ? ctx.who.name : /^(nobody|no one|none|)$/i.test(said) ? null : said };
+            break;
+          }
+          case "follow": case "unfollow": operation = "flow_card_watch"; input = { ...pick(["card"]), watching: args["operation"] === "follow" }; break;
           case "add_trigger": {
             const settings = args["settings"] !== null && typeof args["settings"] === "object" ? { ...args["settings"] as Record<string, unknown> } : {};
             // A trigger following another flow names it as "follow"; the drawing stores it as the flow it follows.
@@ -886,7 +900,7 @@ export const MATE_TOOLS: MateTool[] = [
           case "pause_trigger": operation = "flow_trigger_pause"; input = pick(["trigger"]); break;
           case "resume_trigger": operation = "flow_trigger_resume"; input = pick(["trigger"]); break;
           case "remove_trigger": operation = "flow_trigger_remove"; input = pick(["trigger"]); break;
-          default: return { ok: false, message: "Choose create, edit, add_card, move_card, approve, send_back, cancel_card, add_trigger, pause_trigger, resume_trigger or remove_trigger." };
+          default: return { ok: false, message: "Choose create, edit, add_card, move_card, approve, send_back, cancel_card, comment, assign, follow, unfollow, add_trigger, pause_trigger, resume_trigger or remove_trigger." };
         }
         const action = prepareSharedAction(ctx.store, ctx.who, operation, input, ctx.evidenceRoot, ctx.now);
         const id = ctx.draft("action", { ...action });

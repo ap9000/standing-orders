@@ -171,6 +171,17 @@ describe("the lead builds and runs a flow", () => {
     expect(lead("propose_flow", { operation: "create", repo: "r1", name: "Both", template: "coding", steps: [{ title: "A", kind: "inbox" }] })).toEqual({ ok: false, message: "Give a template or the steps, not both." });
     expect(lead("propose_action", { operation: "flow_create", repo: "r1" })).toMatchObject({ ok: false });
     expect(JSON.stringify(lead("get_actions", {}))).not.toContain("flow_");
+    // Cards have people too: the lead comments and takes a card on, each a card the operator confirms.
+    const target = store.addFlowCard({ flow, title: "Login is slow", description: null, stage: "inbox", by: "operator" }, now);
+    const comment = proposalOf(lead("propose_flow", { operation: "comment", card: target, note: "Profiling shows the session lookup." }));
+    expect(sharedActionPayload(store.getMateProposal(comment)!.payload)!.terms).toEqual(["Profiling shows the session lookup.", "Its owner and followers hear about it."]);
+    expect(confirm(comment)).toMatchObject({ ok: true, said: "Comment added.", href: `/flows/${flow}?card=${target}` });
+    const assign = proposalOf(lead("propose_flow", { operation: "assign", card: target, owner: "me" }));
+    expect(sharedActionPayload(store.getMateProposal(assign)!.payload)!.title).toBe("Make you the owner of “Login is slow”");
+    expect(confirm(assign)).toMatchObject({ ok: true, said: "You own it now." });
+    expect(store.getFlowCard(target)).toMatchObject({ owner: "operator" });
+    expect(lead("propose_flow", { operation: "assign", card: target, owner: "me" })).toEqual({ ok: false, message: "You already own it." });
+    expect(lead("get_flows", { flow, card: target })).toMatchObject({ ok: true, body: { cards: [{ card: target, owner: "you", following: true, comments: 1, discussion: [{ by: "you", text: "Profiling shows the session lookup." }] }] } });
     // A template is a card too.
     const coding = proposalOf(lead("propose_flow", { operation: "create", repo: "r1", template: "coding" }));
     expect(confirm(coding)).toMatchObject({ ok: true, href: "/flows/2" });

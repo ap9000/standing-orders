@@ -184,6 +184,12 @@ export type BrowserFlowCard = {
   canDecide: boolean; outputs: { stage: string; title: string; text: string }[]; history: { text: string; at: string }[];
   /** Where a trigger found it: a GitHub or Linear issue, another flow's card, a button, a schedule. */
   source: { kind: string; label: string; url: string | null } | null;
+  /** Who is responsible for it, who follows it, and whether the viewer does. */
+  owner: string | null; watchers: string[]; watching: boolean;
+  /** Owned by the viewer, followed by them, or waiting on their decision. */
+  mine: boolean;
+  /** What people said on it, oldest first; ownership changes read as history instead. */
+  comments: { id: number; author: string; body: string; mentions: string[]; at: string }[];
 };
 
 /** What starts cards in a flow on its own. */
@@ -210,6 +216,8 @@ export type BrowserFlowView = {
   };
   /** A button trigger to open straight away (?start=). */
   startTrigger: number | null;
+  /** Who is looking: their name, for "mine", owning and @mentions. */
+  me: string;
   start: string;
   stages: BrowserFlowStage[];
   cards: BrowserFlowCard[];

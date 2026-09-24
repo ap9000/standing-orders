@@ -40,6 +40,7 @@ import { addToolTo, catalogTool, projectToolsOf, removeToolFrom, toolCommandLine
 import { FLOW_KIND_WORDS, flowDigest, flowTerms, validateFlowDefinition, type FlowDefinition, type FlowStage } from "./flows.js";
 import { addCardToFlow, advanceFlows, cancelFlowCard, decideFlowCard, flowCardHref, flowCardText, flowDefinitionOf, moveCardInFlow } from "./flow-engine.js";
 import type { FlowCardRow, FlowRow, FlowTriggerRow } from "./store.js";
+import { assignFlowCard, commentOnFlowCard, flowPeople, mentionsIn, watchFlowCard } from "./flow-people.js";
 import { addFlowTriggerTo, describeTrigger, readLinearKey, removeFlowTrigger, takesDeliveries, triggerConfigOf, validateTriggerConfig } from "./flow-triggers.js";
 import { dirname } from "node:path";
 
@@ -96,6 +97,9 @@ export const CHAT_ACTIONS = {
   flow_card_approve: { label: "Approve", protected: false, password: false },
   flow_card_send_back: { label: "Send back", protected: false, password: false },
   flow_card_cancel: { label: "Cancel card", protected: false, password: false },
+  flow_card_comment: { label: "Comment", protected: false, password: false },
+  flow_card_assign: { label: "Set owner", protected: false, password: false },
+  flow_card_watch: { label: "Follow card", protected: false, password: false },
   flow_trigger_add: { label: "Add trigger", protected: false, password: false },
   flow_trigger_pause: { label: "Pause trigger", protected: false, password: false },
   flow_trigger_resume: { label: "Turn trigger on", protected: false, password: false },
@@ -145,6 +149,9 @@ export const CHAT_ACTION_FIELDS: Record<ChatAction, readonly string[]> = {
   flow_card_approve: ["card", "note"],
   flow_card_send_back: ["card", "note"],
   flow_card_cancel: ["card"],
+  flow_card_comment: ["card", "note"],
+  flow_card_assign: ["card", "owner"],
+  flow_card_watch: ["card", "watching"],
   flow_trigger_add: ["flow", "trigger"],
   flow_trigger_pause: ["trigger"],
   flow_trigger_resume: ["trigger"],
@@ -445,7 +452,30 @@ export function prepareSharedAction(
       if (card === null) throw Error("Choose a card from get_flows.");
       const at = definition.stages.find(one => one.id === card.stage);
       state = { card: card.id, entry: card.entry, stage: card.stage };
-      if (operation === "flow_card_move") {
+      if (operation === "flow_card_comment" || operation === "flow_card_assign" || operation === "flow_card_watch") {
+        const people = flowPeople(store, flowTarget!.flow.repo);
+        if (operation === "flow_card_comment") {
+          const note = text(input, "note", 4000).trim();
+          const mentions = mentionsIn(note, people);
+          request["note"] = note;
+          title = `Comment on ${quoted(card.title)}`;
+          terms.push(note, mentions.length === 0 ? "Its owner and followers hear about it." : `${mentions.join(" and ")} ${mentions.length === 1 ? "is" : "are"} pinged; its owner and followers hear about it too.`);
+        } else if (operation === "flow_card_assign") {
+          const said = input["owner"] === null || input["owner"] === undefined ? "" : text(input, "owner", 64).trim();
+          const owner = said === "" ? null : people.find(one => one.toLowerCase() === said.toLowerCase()) ?? null;
+          if (said !== "" && owner === null) throw Error(`No one called ${said} can work on this project.`);
+          if (owner === card.owner) throw Error(owner === null ? "It has no owner already." : `${owner === who.name ? "You already own" : `${owner} already owns`} it.`);
+          request["owner"] = owner;
+          state["owner"] = card.owner;
+          title = owner === null ? `Leave ${quoted(card.title)} without an owner` : `Make ${owner === who.name ? "you" : owner} the owner of ${quoted(card.title)}`;
+          terms.push(owner === null ? "No one owns it; its followers still hear about it." : `${owner === who.name ? "You" : owner} will hear when it needs ${owner === who.name ? "you" : "them"}, is sent back, fails or finishes.`);
+        } else {
+          const watching = input["watching"] !== false;
+          request["watching"] = watching;
+          title = `${watching ? "Follow" : "Stop following"} ${quoted(card.title)}`;
+          terms.push(watching ? "You'll hear when it moves, is commented on, or finishes." : "You won't hear about it unless someone mentions you.");
+        }
+      } else if (operation === "flow_card_move") {
         const stage = flowZoneOf(definition, input, null);
         if (stage.id === card.stage) throw Error(`It's already in ${stage.title}.`);
         request["zone"] = stage.id;
@@ -1105,6 +1135,13 @@ function runFlowAction(store: Store, payload: SharedAction, actor: string, repos
     return { said: payload.operation === "flow_trigger_remove" ? "Trigger removed." : payload.operation === "flow_trigger_pause" ? "Trigger paused." : "Trigger on again.", href: `/flows/${trigger.flow}` };
   }
   const card = store.getFlowCard(Number(req["card"]))!;
+  if (payload.operation === "flow_card_comment" || payload.operation === "flow_card_assign" || payload.operation === "flow_card_watch") {
+    const done = payload.operation === "flow_card_comment" ? commentOnFlowCard(store, card, actor, req["note"], now)
+      : payload.operation === "flow_card_assign" ? assignFlowCard(store, card, typeof req["owner"] === "string" ? req["owner"] : null, actor, now)
+      : watchFlowCard(store, card, actor, req["watching"] !== false, now);
+    if (!done.ok) throw Error(done.message);
+    return { said: done.said, href: flowCardHref(card.flow, card.id) };
+  }
   const acted = payload.operation === "flow_card_move" ? moveCardInFlow(store, card, String(req["zone"]), actor, now)
     : payload.operation === "flow_card_cancel" ? cancelFlowCard(store, card, actor, now)
     : (() => {

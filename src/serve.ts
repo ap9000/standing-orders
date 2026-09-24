@@ -20,6 +20,7 @@ import { changeSkills, githubSkill, importSkill, readSkillsSnapshot, reviseSkill
 import { skillsHtml, skillsScript, skillsSnapshotHtml, skillTestFeedbackHtml, SKILLS_CSS } from "./skills-ui.js";
 import { toolsHtml, TOOLS_CSS, type ToolsView } from "./tools-ui.js";
 import { flowFallbackHtml, flowsListHtml, flowView, FLOWS_CSS } from "./flows-ui.js";
+import { assignFlowCard, commentOnFlowCard, watchFlowCard } from "./flow-people.js";
 import { addFlowTriggerTo, checkFlowTriggerNow, HOOK_PATH, pressFlowButton, receiveFlowHook, removeFlowTrigger, renewFlowHook, removeLinearKey, saveHooksBase, saveLinearKey, saveLinearSigningSecret, type TriggerIo } from "./flow-triggers.js";
 import { addCardToFlow, advanceFlows, cancelFlowCard, decideFlowCard, FLOW_HREF, flowDefinitionOf, moveCardInFlow } from "./flow-engine.js";
 import { FLOW_TEMPLATES, validateFlowDefinition } from "./flows.js";
@@ -1242,7 +1243,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     const task = matchTaskPath(path, request.method === "GET" ? "" : "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|next|reopen|steer|accept-proof|accept-revision|reject-revision|route|retry-review|complete|stop|resume-arm|resume)$");
     const resource = request.method === "GET"
       ? /^\/(?:r|d)\/[0-9]{1,15}(?:\/evidence\/[0-9]{1,15})?$/.test(path) || /^\/routines\/[0-9]{1,15}$/.test(path) || path === "/flows" || /^\/flows\/[0-9]{1,15}$/.test(path)
-      : /^\/d\/[0-9]{1,15}\/answer$/.test(path) || /^\/routines\/[0-9]{1,15}\/(approve|refresh|pause|resume|run-now)$/.test(path) || path === "/flows/new" || /^\/flows\/[0-9]{1,15}\/(save|cards|archive)$/.test(path) || /^\/flows\/[0-9]{1,15}\/cards\/[0-9]{1,15}\/(move|decide|cancel)$/.test(path) || /^\/flows\/[0-9]{1,15}\/triggers(\/[0-9]{1,15}\/(pause|resume|remove|check|press|renew|secret))?$/.test(path) || /^\/r\/[0-9]{1,15}\/(note|comment|revise|draft-repair)$/.test(path);
+      : /^\/d\/[0-9]{1,15}\/answer$/.test(path) || /^\/routines\/[0-9]{1,15}\/(approve|refresh|pause|resume|run-now)$/.test(path) || path === "/flows/new" || /^\/flows\/[0-9]{1,15}\/(save|cards|archive)$/.test(path) || /^\/flows\/[0-9]{1,15}\/cards\/[0-9]{1,15}\/(move|decide|cancel|comment|assign|watch)$/.test(path) || /^\/flows\/[0-9]{1,15}\/triggers(\/[0-9]{1,15}\/(pause|resume|remove|check|press|renew|secret))?$/.test(path) || /^\/r\/[0-9]{1,15}\/(note|comment|revise|draft-repair)$/.test(path);
     if (!(request.method === "GET" ? read : write).has(path) && task === null && !resource) {
       refuse(response, who, 403, "This area requires instance access. Your account operates within its assigned projects.", "/projects");
       return false;
@@ -5371,7 +5372,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         return sendScreen(response,409,screen('Skills',`<h1>Skills</h1>${content}`,{chrome:chromeFor(repo,'settings'),functional:{script:skillsScript()}}));
       }
     }
-    const flowPost = /^\/flows\/([1-9][0-9]{0,9})\/(save|cards|archive|triggers|linear-key|hooks-address)$/.exec(url.pathname) ?? /^\/flows\/([1-9][0-9]{0,9})\/cards\/([1-9][0-9]{0,9})\/(move|decide|cancel)$/.exec(url.pathname);
+    const flowPost = /^\/flows\/([1-9][0-9]{0,9})\/(save|cards|archive|triggers|linear-key|hooks-address)$/.exec(url.pathname) ?? /^\/flows\/([1-9][0-9]{0,9})\/cards\/([1-9][0-9]{0,9})\/(move|decide|cancel|comment|assign|watch)$/.exec(url.pathname);
     const triggerPost = /^\/flows\/([1-9][0-9]{0,9})\/triggers\/([1-9][0-9]{0,9})\/(pause|resume|remove|check|press|renew|secret)$/.exec(url.pathname);
     if (url.pathname === "/flows/new" || flowPost !== null || triggerPost !== null) {
       const now = clock();
@@ -5470,6 +5471,15 @@ export function createDecisionServer(options: ServeOptions): Server {
         const decided = decideFlowCard(store, { card: target.id, decision, note, actor: who.name, repos: projects, evidenceRoot }, now);
         return decided.ok ? settle(decided.said) : answer(409, { ok: false, said: decided.message });
       }
+      if (verb === "comment") {
+        const commented = commentOnFlowCard(store, target, who.name, body.get("body"), now);
+        return commented.ok ? settle(commented.said) : answer(400, { ok: false, said: commented.message });
+      }
+      if (verb === "assign") {
+        const assigned = assignFlowCard(store, target, body.get("owner") || null, who.name, now);
+        return assigned.ok ? settle(assigned.said) : answer(400, { ok: false, said: assigned.message });
+      }
+      if (verb === "watch") return settle(watchFlowCard(store, target, who.name, body.get("watching") !== "no", now).ok ? body.get("watching") === "no" ? "You won't hear about this card unless someone mentions you." : "You'll hear about this card." : "Done.");
       if (verb === "cancel") {
         const cancelled = cancelFlowCard(store, target, who.name, now);
         return cancelled.ok ? settle(cancelled.said) : answer(409, { ok: false, said: cancelled.message });
