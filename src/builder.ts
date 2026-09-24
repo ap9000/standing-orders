@@ -397,11 +397,15 @@ export const SETUP_ENV_DENYLIST: readonly string[] = [TELEGRAM_TOKEN_ENV, OPENRO
  * redacting costs a secret.
  */
 export function redactSecretText(text: string): string {
+  return redactSecretAssignments(text).slice(0, 200);
+}
+
+/** The same blanking with no length cap, for a log that keeps its length (a flow script's output). */
+export function redactSecretAssignments(text: string): string {
   return text
     .replace(/([A-Za-z0-9_-]*(?:token|secret|password|passwd|apikey|api_key|authorization|bearer|credential)[A-Za-z0-9_-]*\s*[=:]\s*)\S+/gi, "$1[redacted]")
     .replace(/\/\/[^\s/@]+:[^\s/@]+@/g, "//[redacted]@")
-    .replace(/([?&](?:token|key|secret|password|access_token|auth)[^=\s]*=)[^&\s]+/gi, "$1[redacted]")
-    .slice(0, 200);
+    .replace(/([?&](?:token|key|secret|password|access_token|auth)[^=\s]*=)[^&\s]+/gi, "$1[redacted]");
 }
 
 /**

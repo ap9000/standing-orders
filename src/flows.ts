@@ -181,7 +181,9 @@ export function flowFromSteps(input: unknown, previous: FlowDefinition | null = 
     if (title === "") throw new Error(`Step ${index + 1} needs a name.`);
     const kind = step.kind ?? old?.kind;
     if (!FLOW_STAGE_KINDS.includes(kind as FlowStageKind)) throw new Error(`Step ${title}: choose what it does.`);
-    let id = old?.id ?? slugOf(title);
+    // A new step keeps an id it is given (so the other steps can point at it by that id); otherwise its name makes one.
+    const given = typeof step.id === "string" && /^[a-z0-9][a-z0-9-]{0,31}$/.test(step.id) && !used.has(step.id) ? step.id : null;
+    let id = old?.id ?? given ?? slugOf(title);
     for (let n = 2; old === null && used.has(id); n++) id = `${slugOf(title).slice(0, 25)}-${n}`;
     used.add(id);
     const same = old !== null && old.kind === kind;

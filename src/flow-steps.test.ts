@@ -93,6 +93,29 @@ describe("project scripts", () => {
     expect(seen.runs.map(one => [one.script, one.state, one.hasLog])).toEqual([["lint", "failed", true], ["has-readme", "passed", true]]);
   });
 
+  test("a long log keeps its end, where the failure is, in whole lines and with keys blanked", async () => {
+    // Found end to end: every log was cut to its first 200 characters. The key-shaped text is made when the script runs, never written here.
+    saveScript(store, repo, { name: "noisy", about: "Prints a lot, then fails", body: [
+      "seq 1 20000",
+      "printf 'pushed with ghp_%s\\n' \"$(printf 'a%.0s' $(seq 1 36))\"",
+      "echo \"DEPLOY_TOKEN=$(printf 'b%.0s' 1 2 3 4 5 6 7 8)\"",
+      "echo 'the real failure' >&2",
+      "exit 1",
+    ].join("\n") }, "alex", T0);
+    const flow = flowOf([{ title: "Inbox", kind: "inbox" }, { title: "Noisy", kind: "check", script: "noisy" }]);
+    const card = store.addFlowCard({ flow, title: "Loud", description: null, stage: "noisy", by: "alex" }, T0);
+    await runFlowSteps(store, repo, at(1), io());
+    const log = store.flowStepRun(card, 1)!.log!;
+    expect(log.length).toBeGreaterThan(60_000);
+    expect(log.length).toBeLessThanOrEqual(64_000);
+    expect(log.split("\n")[0]).toMatch(/^\d+$/);
+    expect(log).not.toContain("$ noisy");
+    expect(log.trimEnd().endsWith("the real failure")).toBe(true);
+    expect(log).toContain("[redacted: github-token detected on this line]");
+    expect(log).toContain("DEPLOY_TOKEN=[redacted]");
+    expect(log).not.toMatch(/ghp_a{36}|b{8}/);
+  });
+
   test("a build whose project checks failed takes its failure path instead of moving on", () => {
     const flow = flowOf([{ title: "Inbox", kind: "inbox" }, { title: "Build", kind: "task", ifFails: "Inbox" }, { title: "Review", kind: "approval" }]);
     const card = store.addFlowCard({ flow, title: "Fix totals", description: null, stage: "build", by: "alex" }, T0);
