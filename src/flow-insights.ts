@@ -5,6 +5,8 @@
  * model, no sampling: counts over a window, per zone and per script.
  */
 import { flowDefinitionOf } from "./flow-engine.js";
+import { parseSortDecision } from "./flow-sort.js";
+import type { FlowStage } from "./flows.js";
 import type { FlowRow, FlowStepRunRow, Store } from "./store.js";
 
 export type ZoneInsight = {
@@ -18,8 +20,23 @@ export type ZoneInsight = {
   lastProblem: { card: number; cardTitle: string; note: string | null; at: string } | null;
 };
 export type ScriptInsight = { script: string; runs: number; passed: number; failed: number; typicalSeconds: number | null; lastFailure: string | null };
+/**
+ * How a sort zone is doing, from what people did after it: a card a person
+ * moved to where a different answer leads was sorted wrong; one that moved
+ * on from where Jev sent it was sorted right; a not-sure card a person
+ * placed says what the answer should have been. Cards nobody has touched
+ * since are not counted either way.
+ */
+export type SortInsight = {
+  zone: string; title: string; sureAt: number;
+  sorted: number; alone: number; notSure: number; corrected: number;
+  /** How often Jev was right, by how sure it was: [from, to) in whole percents. */
+  bands: { from: number; to: number; right: number; of: number }[];
+  costUsd: number;
+  suggestion: string | null;
+};
 export type StepRunInsight = {
-  card: number; cardTitle: string; entry: number; zone: string; zoneTitle: string; kind: "check" | "update";
+  card: number; cardTitle: string; entry: number; zone: string; zoneTitle: string; kind: "check" | "update" | "sort";
   script: string | null; version: number | null; state: FlowStepRunRow["state"]; result: string | null; exitCode: number | null; durationMs: number | null; at: string; hasLog: boolean;
 };
 export type FlowInsights = {
@@ -29,6 +46,7 @@ export type FlowInsights = {
   /** The zones that fail or send work back most, worst first. */
   breaks: { zone: string; title: string; problems: number; of: number }[];
   scripts: ScriptInsight[];
+  sorts: SortInsight[];
   runs: StepRunInsight[];
 };
 
@@ -80,6 +98,7 @@ export function flowInsights(store: Store, flow: FlowRow, now: Date, days = 30):
     if (run.durationMs !== null) entry.durations.push(run.durationMs / 1000);
     scripts.set(run.script, entry);
   }
+  const sorts = stages.filter(one => one.kind === "sort" && one.sort !== null).map(stage => sortInsight(stage, runs, byCard));
   return {
     flow: flow.id, name: flow.name, days,
     cards: {
@@ -91,11 +110,53 @@ export function flowInsights(store: Store, flow: FlowRow, now: Date, days = 30):
     breaks: zoneList.filter(one => one.failed + one.sentBack > 0).sort((a, b) => (b.failed + b.sentBack) - (a.failed + a.sentBack)).slice(0, 3)
       .map(one => ({ zone: one.zone, title: one.title, problems: one.failed + one.sentBack, of: Math.max(one.entered, one.failed + one.sentBack) })),
     scripts: [...scripts].map(([script, one]) => ({ script, runs: one.runs, passed: one.passed, failed: one.failed, typicalSeconds: median(one.durations) === null ? null : Math.round(median(one.durations)!), lastFailure: one.lastFailure })),
+    sorts,
     runs: runs.slice(0, 40).map(run => ({
       card: run.card, cardTitle: run.cardTitle, entry: run.entry, zone: run.stage, zoneTitle: titleOf(run.stage), kind: run.kind, script: run.script, version: run.scriptVersion,
       state: run.state, result: run.result, exitCode: run.exitCode, durationMs: run.durationMs, at: run.finishedAt ?? run.startedAt, hasLog: run.log !== null && run.log !== "",
     })),
   };
+}
+
+const BANDS = [[90, 101], [80, 90], [70, 80], [50, 70]] as const;
+type Move = { card: number; fromStage: string | null; toStage: string; outcome: string; actor: string; at: string };
+
+function sortInsight(stage: FlowStage, runs: ReturnType<Store["flowStepRuns"]>, byCard: Map<number, Move[]>): SortInsight {
+  const sort = stage.sort!;
+  const targets = new Set(sort.answers.map(one => one.to));
+  const bands = BANDS.map(([from, to]) => ({ from, to: Math.min(to, 100), right: 0, of: 0 }));
+  const insight: SortInsight = { zone: stage.id, title: stage.title, sureAt: sort.sureAt, sorted: 0, alone: 0, notSure: 0, corrected: 0, bands, costUsd: 0, suggestion: null };
+  for (const run of runs) {
+    if (run.kind !== "sort" || run.stage !== stage.id || run.state !== "passed") continue;
+    const decision = parseSortDecision(run.decisionJson);
+    if (decision === null) continue;
+    insight.sorted++;
+    if (decision.confident) insight.alone++; else insight.notSure++;
+    insight.costUsd += decision.cost ?? 0;
+    // Where the sort sent the card, and what happened to it next.
+    const moves = byCard.get(run.card) ?? [];
+    const sent = moves.findIndex(one => one.fromStage === stage.id && one.actor === "flow" && one.at >= run.startedAt);
+    const after = sent === -1 ? undefined : moves[sent + 1];
+    const picked = sort.answers.find(one => one.answer === decision.answer)?.to ?? null;
+    let right: boolean | null = null;
+    if (after !== undefined && after.actor !== "flow" && after.outcome === "moved" && targets.has(after.toStage)) {
+      // A person placed it where an answer leads: that is what the answer should have been.
+      right = after.toStage === picked;
+      if (decision.confident && !right) insight.corrected++;
+    } else if (decision.confident && after !== undefined) right = true;
+    if (right === null) continue;
+    const band = bands.find(one => decision.sure * 100 >= one.from && decision.sure * 100 < (one.to === 100 ? 101 : one.to));
+    if (band !== undefined) { band.of++; if (right) band.right++; }
+  }
+  insight.costUsd = Math.round(insight.costUsd * 1_000_000) / 1_000_000;
+  // Say so only with enough cards behind it.
+  const at = Math.round(sort.sureAt * 100);
+  const below = bands.find(one => one.to <= at && one.to > at - 15 && one.of >= 5);
+  const above = bands.filter(one => one.from >= at && one.of >= 5);
+  const shaky = above.find(one => one.right / one.of < 0.8);
+  if (shaky !== undefined) insight.suggestion = `Jev was wrong on ${shaky.of - shaky.right} of ${shaky.of} cards it sent on alone at ${shaky.from}–${shaky.to}% sure. Consider asking for ${Math.min(95, shaky.to)}%.`;
+  else if (below !== undefined && below.right / below.of >= 0.9) insight.suggestion = `Cards Jev was ${below.from}–${below.to}% sure about were right ${below.right} of ${below.of} times. You could let it act alone from ${below.from}%.`;
+  return insight;
 }
 
 /** One line for a flow's list entry: where it has had the most trouble lately. */

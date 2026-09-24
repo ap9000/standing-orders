@@ -10,6 +10,9 @@
  * - update — comments on the GitHub or Linear issue the card came from, and
  *            can close it (Linear: moves it to the team's done state), with
  *            the person's own `gh` login and Linear key.
+ * - sort   — (v85) asks Jev through OpenRouter which of the zone's answers
+ *            fits the card (flow-sort.ts), and sends it where that answer
+ *            leads, or down the not-sure path.
  *
  * One run per visit to the zone (flow_step_run): two workers never run it
  * twice. Trouble reaching a service is retried three times, 5 then 15
@@ -25,6 +28,8 @@ import { flowDefinitionOf } from "./flow-engine.js";
 import { cardFollowers, notifyPeople } from "./flow-people.js";
 import { LINEAR_URL, readLinearKey } from "./flow-triggers.js";
 import { fillFlowText, type FlowDefinition, type FlowStage } from "./flows.js";
+import { askJev, readJevAnswers, sortLog, sortRequest, sortState, sortWords } from "./flow-sort.js";
+import { readProviderKey } from "./keys.js";
 import type { FlowCardRow, FlowRow, FlowScriptRow, Store } from "./store.js";
 
 export type StepIo = {
@@ -38,9 +43,13 @@ export type StepIo = {
   evidenceRoot?: string;
   /** The branch a card with no result yet is checked against. */
   base: string;
+  /** The operator's OpenRouter key, for sort steps (default: the one stored in Settings → AI providers). */
+  openRouterKey?: () => string | null;
 };
 export type StepPass = { ran: number; problems: string[] };
-type Outcome = { state: "passed" | "failed" | "retry"; said: string; log?: string; exitCode?: number | null };
+type Outcome = { state: "passed" | "failed" | "retry"; said: string; log?: string; exitCode?: number | null;
+  /** sort: where the card goes (null: it waits here), and what was decided. */
+  to?: string | null; decisionJson?: string; unsure?: boolean };
 
 const RETRY_MS = [5 * 60_000, 15 * 60_000];
 const OUTPUT_CHARS = 3000;
@@ -57,7 +66,13 @@ export async function runFlowSteps(store: Store, repo: string, now: Date, io: St
     let known = flows.get(card.flow);
     if (known === undefined) { const flow = store.getFlow(card.flow)!; known = { flow, definition: flowDefinitionOf(flow) }; flows.set(card.flow, known); }
     const stage = known.definition?.stages.find(one => one.id === card.stage);
-    if (stage === undefined || (stage.kind !== "check" && stage.kind !== "update")) continue;
+    if (stage === undefined || (stage.kind !== "check" && stage.kind !== "update" && stage.kind !== "sort")) continue;
+    const key = stage.kind === "sort" ? (io.openRouterKey ?? (() => readProviderKey("openrouter")))() : null;
+    if (stage.kind === "sort" && key === null) {
+      const waiting = "Sorting needs an OpenRouter key. Add one in Settings → AI providers.";
+      if (card.waiting !== waiting) store.updateFlowCard(card.id, { waiting }, now);
+      continue;
+    }
     const script = stage.kind === "check" && stage.script !== null ? store.flowScript(repo, stage.script) : null;
     if (stage.kind === "check" && script === null) {
       const waiting = `There's no script called ${stage.script ?? "(none)"} in this project. Make it on the flow's Scripts panel.`;
@@ -66,11 +81,13 @@ export async function runFlowSteps(store: Store, repo: string, now: Date, io: St
     }
     if (!store.claimFlowStep({ card: card.id, entry: card.entry, stage: stage.id, kind: stage.kind, script: script?.name ?? null, scriptVersion: script?.version ?? null }, now)) continue;
     pass.ran++;
-    store.updateFlowCard(card.id, { waiting: stage.kind === "check" ? "Running its check…" : "Updating the issue…" }, now);
+    store.updateFlowCard(card.id, { waiting: stage.kind === "check" ? "Running its check…" : stage.kind === "sort" ? "Sorting…" : "Updating the issue…" }, now);
     let outcome: Outcome;
     const started = Date.now();
     try {
-      outcome = stage.kind === "check" ? await runCheck(store, known.flow, script!, card, now, io) : await updateSource(stage, card, io);
+      outcome = stage.kind === "check" ? await runCheck(store, known.flow, script!, card, now, io)
+        : stage.kind === "sort" ? await sortCard(known.definition!, stage, card, key!, io)
+        : await updateSource(stage, card, io);
     } catch (error) {
       outcome = { state: "retry", said: error instanceof Error ? error.message : "It couldn't run." };
     }
@@ -83,7 +100,7 @@ export async function runFlowSteps(store: Store, repo: string, now: Date, io: St
 /** Record what a step did and move the card: on for a pass, down its failure path for a fail, or wait to try again. */
 function settle(store: Store, definition: FlowDefinition, stage: FlowStage, card: FlowCardRow, outcome: Outcome, now: Date, durationMs: number): void {
   const run = store.flowStepRun(card.id, card.entry);
-  const kept = { log: outcome.log === undefined ? null : keptLog(outcome.log), exitCode: outcome.exitCode ?? null, durationMs };
+  const kept = { log: outcome.log === undefined ? null : keptLog(outcome.log), exitCode: outcome.exitCode ?? null, durationMs, ...(outcome.decisionJson === undefined ? {} : { decisionJson: outcome.decisionJson }) };
   if (outcome.state === "retry") {
     const attempts = run?.attempts ?? 1;
     if (attempts <= RETRY_MS.length) {
@@ -97,8 +114,14 @@ function settle(store: Store, definition: FlowDefinition, stage: FlowStage, card
   store.updateFlowCard(card.id, { outputs: { ...card.outputs, [stage.id]: outcome.said }, waiting: null }, now);
   const titleOf = (id: string | null) => definition.stages.find(one => one.id === id)?.title ?? "another zone";
   if (outcome.state === "passed") {
-    if (stage.next === null) { store.updateFlowCard(card.id, { waiting: "Finished here. Move the card on when you're ready." }, now); return; }
-    store.moveFlowCard(card.id, { to: stage.next, outcome: "ok", actor: "flow", expectEntry: card.entry }, now);
+    // A sort names where the card goes; one it isn't sure about is a person's to place.
+    const to = outcome.to !== undefined ? outcome.to : stage.next;
+    if (outcome.unsure === true) {
+      const people = card.owner === null ? cardFollowers(store, card) : [card.owner];
+      notifyPeople(store, card, people, null, { key: `unsure:${card.entry}`, subject: `${stage.title} wasn't sure about “${card.title}”`, body: `${outcome.said}${to === null ? " Move it to the right zone." : ` It's in ${definition.stages.find(one => one.id === to)?.title ?? "another zone"} for a person to place.`}`, attention: true }, now);
+    }
+    if (to === null) { store.updateFlowCard(card.id, { waiting: outcome.to !== undefined ? `${outcome.said} Move it to the right zone.` : "Finished here. Move the card on when you're ready." }, now); return; }
+    store.moveFlowCard(card.id, { to, outcome: "ok", actor: "flow", expectEntry: card.entry }, now);
     return;
   }
   if (stage.onFail === null) {
@@ -120,6 +143,17 @@ function keptLog(text: string): string {
 function tail(text: string): string {
   const end = text.trim().slice(-OUTPUT_CHARS);
   return scanForSecrets(end).length > 0 ? "(Its output held something that looked like a key, so it isn't shown.)" : end;
+}
+
+/** A sort: Jev picks one of the zone's answers for the card; the answer (or the not-sure path) says where it goes. */
+async function sortCard(definition: FlowDefinition, stage: FlowStage, card: FlowCardRow, key: string, io: StepIo): Promise<Outcome> {
+  const index = definition.stages.findIndex(one => one.id === stage.id);
+  const earlier = definition.stages.filter((one, at) => at !== index && card.outputs[one.id] !== undefined).map(one => ({ id: one.id, title: one.title }));
+  const asked = await askJev(io.fetch, key, sortRequest(stage.sort!, sortState(card, earlier)));
+  if (!asked.ok) return { state: "retry", said: asked.said };
+  const decision = readJevAnswers(stage, asked.body, asked.ms);
+  if ("problem" in decision) return { state: "retry", said: decision.problem };
+  return { state: "passed", said: sortWords(decision), log: sortLog(stage, decision), to: decision.to, decisionJson: JSON.stringify(decision), unsure: !decision.confident };
 }
 
 /** A script step: a fresh detached copy at the card's latest result (or the base branch), the approved setup, then the script. */

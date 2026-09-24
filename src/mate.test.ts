@@ -125,7 +125,7 @@ describe("the mate's turn", () => {
     });
 
   test("the intake contract treats one outcome as enough and asks only material questions", () => {
-    expect(MATE_CONTRACT_VERSION).toBe(29);
+    expect(MATE_CONTRACT_VERSION).toBe(30);
     expect(MATE_CONTRACT).toContain("propose_flow create with a template or the steps in plain names");
     expect(MATE_CONTRACT).toContain("Ready is a saved result, not a reviewer stage");
     expect(MATE_CONTRACT).toContain("Historical missing assessments never require rerunning work");

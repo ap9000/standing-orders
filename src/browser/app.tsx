@@ -503,6 +503,25 @@ function LeadChat({ controller, docked = null }: { controller: ReturnType<typeof
   </div>;
 }
 
+/** The workspace scrolls inside its panes; the window never should. A #section
+ * link can still scroll the window (the browser jumps to the section before the
+ * panes exist), which left the page above the screen and blank on a phone. Put
+ * the window back, and bring the section into view inside its pane instead. */
+function useWindowStaysPut() {
+  useEffect(() => {
+    const settle = () => { if (window.scrollX !== 0 || window.scrollY !== 0) window.scrollTo(0, 0); };
+    const reveal = () => {
+      const id = decodeURIComponent(window.location.hash.slice(1));
+      if (id !== "" && id !== "workspace-main") document.getElementById(id)?.scrollIntoView({ block: "start" });
+      settle();
+    };
+    const frame = requestAnimationFrame(reveal);
+    window.addEventListener("scroll", settle, { passive: true });
+    window.addEventListener("hashchange", reveal);
+    return () => { cancelAnimationFrame(frame); window.removeEventListener("scroll", settle); window.removeEventListener("hashchange", reveal); };
+  }, []);
+}
+
 export function WorkspaceApp({ initial }: { initial: BrowserWorkspace }) {
   const controller = useWorkspace(initial);
   const [teamSnapshot, setTeamSnapshot] = useState<TeamSnapshot | undefined>(initial.team);
@@ -521,6 +540,7 @@ export function WorkspaceApp({ initial }: { initial: BrowserWorkspace }) {
   // A flow's canvas needs the whole width.
   const hidePanel = pageOnly && !docked && !hasWork && (new URL(workspace.path, window.location.origin).pathname === "/work" || workspace.view?.kind === "flow");
   useEffect(notifyWorkspaceRendered, []);
+  useWindowStaysPut();
   return <><Toaster /><div className={`so-workspace${hidePanel ? " so-workspace--single" : ""}${docked ? " so-workspace--docked" : ""}`} data-workspace-shell data-workspace-phone-view={phoneView} data-workspace-has-result={workspace.result !== null}>
     <a href="#workspace-main" className="so-skip-link">Skip to content</a>
     <aside className="so-sidebar"><Navigation workspace={workspace} /></aside>

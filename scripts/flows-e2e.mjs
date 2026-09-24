@@ -78,6 +78,8 @@ const freePort = () => new Promise(done => { const server = createServer(); serv
 
 const results = [];
 const failedPrerequisites = new Set();
+/** A check that can't run here (a missing key, say): skipped with the reason, never passed. */
+class Skip extends Error {}
 async function check(name, needs, body) {
   const at = Date.now();
   if (only !== null && !only.test(name)) { results.push({ name, state: "not selected" }); return null; }
@@ -91,6 +93,7 @@ async function check(name, needs, body) {
     return detail ?? true;
   } catch (error) {
     failedPrerequisites.add(name);
+    if (error instanceof Skip) { results.push({ name, state: "skipped", because: [error.message] }); say(`SKIP  ${name} (${error.message})`); return null; }
     const file = join(out, `${results.length + 1}-failed.png`);
     for (const page of openPages) await page.screenshot({ path: file.replace(".png", `-${openPages.indexOf(page)}.png`) }).catch(() => undefined);
     results.push({ name, state: "failed", seconds: Math.round((Date.now() - at) / 100) / 10, error: error instanceof Error ? error.message : String(error) });
@@ -221,6 +224,69 @@ await check("The lead draws a flow from plain words (real Claude turn)", ["The l
   if (script !== undefined && build !== undefined && script.onFail !== build.id) problems.push(`a failed script goes to ${script.onFail ?? "nowhere"}, not the build`);
   if (problems.length > 0) throw new Error(`${problems.join("; ")}: ${JSON.stringify(view.stages.map(one => [one.title, one.kind, one.next, one.onFail, one.script]))}`);
   return { zones: view.stages.map(one => `${one.title} (${one.kind})`) };
+});
+
+await check("The lead draws a sorting flow from plain words (real Claude turn)", ["Sign in and turn the lead chat on (first-run setup)"], async () => {
+  const { reply, text } = await askLead("Make a flow called Ticket sorter in this project: Jev sorts each new ticket into billing, technical or account questions, each going to its own team's zone, and anything it isn't sure about waits in a zone called Sort by hand. Also note how urgent each ticket is.");
+  await shot("lead-sort-card");
+  const { href } = await confirmCard(reply, "Ticket sorter");
+  const id = Number(/\/flows\/(\d+)/.exec(href ?? "")?.[1] ?? rows("SELECT id FROM flow WHERE name = 'Ticket sorter' ORDER BY id DESC LIMIT 1")[0]?.id);
+  if (!id) throw new Error(`no flow was created; the lead said: ${text.slice(0, 300)}`);
+  const view = await flowView(id);
+  const sort = view.stages.find(one => one.kind === "sort");
+  const problems = [];
+  if (sort === undefined) problems.push("there's no sort step");
+  else {
+    if (view.start !== sort.id) problems.push(`new cards start in ${view.start}, not the sort`);
+    const targets = new Set(sort.sort.answers.map(one => one.to));
+    if (sort.sort.answers.length < 3 || targets.size < 3) problems.push(`it has ${sort.sort.answers.length} answers going to ${targets.size} zones`);
+    if (!/by hand/i.test(view.stages.find(one => one.id === sort.onFail)?.title ?? "")) problems.push(`not-sure cards go to ${sort.onFail}`);
+    if (!sort.sort.notes.some(one => one.kind === "score" && /urgen/i.test(one.question))) problems.push("it doesn't note urgency");
+  }
+  if (problems.length > 0) throw new Error(`${problems.join("; ")}: ${JSON.stringify(view.stages.map(one => [one.title, one.kind, one.sort?.answers.map(a => `${a.answer}→${a.to}`), one.onFail]))}`);
+  return { answers: sort.sort.answers.map(one => `${one.answer} → ${view.stages.find(z => z.id === one.to)?.title}`), notSure: sort.onFail, sureAt: sort.sort.sureAt };
+});
+
+await check("Jev sorts real cards through OpenRouter (Exception routing template)", ["Sign in and turn the lead chat on (first-run setup)"], async () => {
+  if (!existsSync(join(homedir(), ".standing-orders", "keys", "openrouter"))) throw new Skip("needs an OpenRouter key saved in Settings → AI providers");
+  await page.goto(`${base}/flows`);
+  await page.evaluate(() => { for (const one of document.querySelectorAll("details")) one.open = true; });
+  await page.fill('form[action="/flows/new"] input[name="name"]', "Support desk");
+  await page.selectOption('form[action="/flows/new"] select[name="template"]', "exception-routing");
+  await Promise.all([page.waitForNavigation(), page.click('form[action="/flows/new"] button')]);
+  const id = Number(/\/flows\/(\d+)/.exec(page.url())[1]);
+  await page.waitForSelector("[data-zone]");
+  const tickets = [
+    { title: "Please cancel order #4471", details: "I ordered the wrong size by mistake. Can you cancel it before it ships? Thanks, Priya", expect: ["orders"] },
+    { title: "Charged twice for invoice INV-2291", details: "My card was charged twice for the same invoice this morning. I need the duplicate refunded before payroll on Friday.", expect: ["billing"] },
+    { title: "Parcel arrived crushed", details: "The box was crushed in transit and two of the glasses inside are broken.", expect: ["delivery"] },
+    { title: "Do you have a dark mode?", details: "Just wondering whether the app has a dark mode.", expect: ["by-hand"] },
+  ];
+  for (const ticket of tickets) {
+    await page.click('button:has-text("New card")');
+    await page.fill('input[aria-label="Title"]', ticket.title);
+    await page.fill('textarea[aria-label="Details"]', ticket.details);
+    await page.click('button:has-text("Add card")');
+    await until(`“${ticket.title}” on the canvas`, async () => (await flowView(id)).cards.some(one => one.title === ticket.title), { timeoutMs: 15_000, everyMs: 500 });
+  }
+  const sorted = await until("every card to be sorted", async () => { const cards = (await flowView(id)).cards; return cards.length === tickets.length && cards.every(one => one.stage !== "sort") ? cards : null; }, { timeoutMs: 90_000, everyMs: 2000 });
+  const wrong = tickets.flatMap(ticket => { const card = sorted.find(one => one.title === ticket.title); return ticket.expect.includes(card.stage) ? [] : [`${ticket.title} → ${card.stage} (${card.sorted?.chip ?? "no decision"})`]; });
+  if (wrong.length > 0) throw new Error(`sorted to the wrong zone: ${wrong.join("; ")}`);
+  const runs = rows(`SELECT r.card, r.state, r.decision_json FROM flow_step_run r JOIN flow_card c ON c.id = r.card WHERE c.flow = ${id} AND r.kind = 'sort'`);
+  const decisions = runs.map(one => JSON.parse(one.decision_json ?? "null"));
+  if (runs.length !== tickets.length || decisions.some(one => one === null)) throw new Error(`not every card kept its decision: ${JSON.stringify(runs.map(one => [one.card, one.state]))}`);
+  const invoice = decisions.find(one => one.answer === "Invoice problem");
+  if (invoice?.notes.find(one => one.id === "refund")?.answer !== "yes") throw new Error(`the invoice card's refund note says ${JSON.stringify(invoice?.notes)}`);
+  // What a person sees: the chip on the card, and the Sorting section of Insights.
+  await page.reload(); await page.waitForSelector("[data-zone]");
+  const chip = await page.locator(`[data-card="${sorted.find(one => one.title.startsWith("Charged twice")).id}"] [data-sort-chip]`).innerText();
+  if (!/Invoice problem/.test(chip)) throw new Error(`the card's chip says ${chip}`);
+  await shot("sort-canvas");
+  await page.click("[data-open-insights]");
+  const summary = await page.locator('[data-insights-sort="sort"]').innerText({ timeout: 15_000 });
+  if (!/4 sorted/.test(summary)) throw new Error(`Insights says: ${summary}`);
+  await shot("sort-insights");
+  return { zones: sorted.map(one => `${one.title} → ${one.stage} (${one.sorted?.chip})`), ms: decisions.map(one => one.ms), costUsd: decisions.reduce((sum, one) => sum + (one.cost ?? 0), 0) };
 });
 
 let buildCard = null;

@@ -12,7 +12,7 @@ export function hiddenFields(values: Record<string, string>): string {
 export function connectionWords(connection: ProviderConnection): string {
   return {
     connected: "Connected", "signed-out": "Not signed in", "not-installed": "CLI not installed",
-    unverified: "Not verified", "key-present": "API key saved · not verified", "missing-key": "API key needed",
+    unverified: "Not verified", "key-present": "API key saved · not verified", "key-works": "API key works", "key-refused": "API key refused", "missing-key": "API key needed",
   }[connection.state];
 }
 export function connectionHtml(provider: ProviderId, connection: ProviderConnection, task = ""): string {
