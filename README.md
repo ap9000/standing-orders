@@ -129,6 +129,18 @@ failed when a result is marked complete.
   Each flow's Insights show, per zone, how many cards passed, failed or were
   sent back and how long they waited, how each script does, and every run's
   log; the lead reads the same numbers to tell you where things break.
+- **Sorting with Jev.** A "Sort" zone asks [Jev](https://openrouter.ai/typesafe),
+  TypeSafe's decision model, one question about each card through your own
+  OpenRouter key: which of the zone's answers fits, how sure it is, and a few
+  scores or yes/no notes (how urgent, asking for a refund). It answers in
+  well under a second for a fraction of a cent, and can only ever pick one
+  of your answers. Cards it's sure about go where their answer leads; the
+  rest wait for a person, and every card shows what Jev decided. Insights
+  count how often people moved a sorted card elsewhere, by how sure Jev
+  was, so you can see when to trust it more. Five templates start from it:
+  issue triage, a spam filter for public forms, lead routing, effort routing
+  (small changes straight to a build, big ones through a plan) and exception
+  routing (orders, invoices, deliveries).
 - **Unified portfolio chat.** Read every project, prioritize queues, answer
   decisions, repair failed or cancelled dependencies, and confirm rich action
   cards from one conversation. The chat proposes; durable workflow state

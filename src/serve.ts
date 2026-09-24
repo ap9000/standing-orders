@@ -2662,7 +2662,8 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (flow === null || flow.state !== "active" || !visible(flow.repo)) return refuse(response, who, 404, "No such flow in your projects.", "/flows");
       const selected = Number(url.searchParams.get("card")), start = Number(url.searchParams.get("start"));
       const view = flowView(store, flow, { name: who.name, approver: who.via === "cookie" && who.role === "approver" }, Number.isSafeInteger(selected) && selected > 0 ? selected : null,
-        { dir: options.configDir ?? null, repos: [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible), startTrigger: Number.isSafeInteger(start) && start > 0 ? start : null });
+        { dir: options.configDir ?? null, repos: [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible), startTrigger: Number.isSafeInteger(start) && start > 0 ? start : null,
+          sortReady: keyStatus("openrouter", providerHome).set });
       if (url.searchParams.get("format") === "json") return respond(response, 200, "application/json; charset=utf-8", JSON.stringify(view));
       return sendScreen(response, 200, screen(flow.name, `<p><a href="/flows">Flows</a></p><h1>${escape(flow.name)}</h1>${flowFallbackHtml(view)}`, { chrome: chromeFor(flow.repo, "flows"), workspace: { view } }));
     }
@@ -5430,7 +5431,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (flow === null || flow.state !== "active" || !visible(flow.repo)) return answer(404, { ok: false, said: "No such flow in your projects." });
       const definition = flowDefinitionOf(flow);
       const dir = options.configDir ?? null;
-      const viewNow = () => flowView(store, store.getFlow(flow.id) ?? flow, { name: who.name, approver: true }, null, { dir, repos: projects });
+      const viewNow = () => flowView(store, store.getFlow(flow.id) ?? flow, { name: who.name, approver: true }, null, { dir, repos: projects, sortReady: keyStatus("openrouter", providerHome).set });
       const settle = (said: string, extra: Record<string, unknown> = {}) => {
         // Move what can move right away (a message, a decision's next zone); workers file and run the tasks.
         try { advanceFlows(store, flow.repo, now, { evidenceRoot }); } catch { /* the next worker pass retries */ }

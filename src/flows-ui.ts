@@ -5,6 +5,7 @@ import { flowDefinitionOf } from "./flow-engine.js";
 import { describeTrigger, triggerHeadline, FLOW_TRIGGER_KINDS, FLOW_TRIGGER_WORDS, githubRepoOf, HOOK_PATH, hookReady, readHooksBase, readLinearKey, takesDeliveries, triggerConfigOf } from "./flow-triggers.js";
 import { FLOW_COLORS, FLOW_KIND_WORDS, FLOW_STAGE_KINDS, FLOW_TEMPLATES } from "./flows.js";
 import { flowInsights, troubleWords } from "./flow-insights.js";
+import { parseSortDecision, sortChip } from "./flow-sort.js";
 import type { FlowCardRow, FlowRow, Store } from "./store.js";
 
 const e = (value: unknown) =>
@@ -30,7 +31,7 @@ export function flowsListHtml(store: Store, flows: readonly FlowRow[], projects:
   return `<section class="flows">${problem === null ? "" : `<p class="problem" role="alert">${e(problem)}</p>`}${intro}${rows || '<p class="meta">No flows yet.</p>'}${create}</section>`;
 }
 
-const historyText = (event: { fromStage: string | null; toStage: string; outcome: string; actor: string; note: string | null }, title: (id: string) => string): string => {
+const historyText = (event: { fromStage: string | null; toStage: string; outcome: string; actor: string; note: string | null }, title: (id: string) => string, sorts: ReadonlySet<string> = new Set()): string => {
   const who = event.actor === "flow" ? "" : ` by ${event.actor}`;
   const note = event.note === null ? "" : `: ${event.note}`;
   switch (event.outcome) {
@@ -39,16 +40,18 @@ const historyText = (event: { fromStage: string | null; toStage: string; outcome
     case "sent-back": return `Sent back to ${title(event.toStage)}${who}${note}`;
     case "fail": return `Moved to ${title(event.toStage)} after a problem${note}`;
     case "cancelled": return `Cancelled${who}`;
-    case "ok": return `Moved on to ${title(event.toStage)}`;
+    case "ok": return event.fromStage !== null && sorts.has(event.fromStage) ? `Sorted into ${title(event.toStage)}` : `Moved on to ${title(event.toStage)}`;
     default: return `Moved to ${title(event.toStage)}${who}`;
   }
 };
 
 /** One flow's canvas for one person. */
-export function flowView(store: Store, flow: FlowRow, viewer: { name: string; approver: boolean }, selectedCard: number | null, setup: { dir: string | null; repos: readonly string[]; startTrigger?: number | null } = { dir: null, repos: [] }): BrowserFlowView {
+export function flowView(store: Store, flow: FlowRow, viewer: { name: string; approver: boolean }, selectedCard: number | null, setup: { dir: string | null; repos: readonly string[]; startTrigger?: number | null; sortReady?: boolean } = { dir: null, repos: [] }): BrowserFlowView {
   const definition = flowDefinitionOf(flow);
   const stages = definition?.stages ?? [];
   const title = (id: string) => stages.find(one => one.id === id)?.title ?? id;
+  const sortZones = new Set(stages.filter(one => one.kind === "sort").map(one => one.id));
+  const decisions = sortZones.size === 0 ? new Map<number, { decisionJson: string }>() : store.flowSortDecisions(flow.id);
   const cards: BrowserFlowCard[] = store.flowCards(flow.id, true).filter(card => card.state === "active" || Date.now() - Date.parse(card.updatedAt) < 7 * 86_400_000).map((card: FlowCardRow) => {
     const stage = stages.find(one => one.id === card.stage);
     const task = card.task ?? card.primaryTask;
@@ -57,7 +60,8 @@ export function flowView(store: Store, flow: FlowRow, viewer: { name: string; ap
     const canDecide = viewer.approver && card.state === "active" && stage?.kind === "approval" && (stage.approver === null || stage.approver === viewer.name);
     // History reads moves and ownership together, newest first.
     const owned = discussion.filter(one => one.kind === "owner").map(one => ({ text: one.body === "" ? `${one.author} left it without an owner` : one.body === one.author ? `${one.author} took it on` : `${one.author} made ${one.body} the owner`, at: one.at }));
-    const moves = store.flowEvents(card.id).map(event => ({ text: historyText(event, title), at: event.at }));
+    const moves = store.flowEvents(card.id).map(event => ({ text: historyText(event, title, sortZones), at: event.at }));
+    const decision = parseSortDecision(decisions.get(card.id)?.decisionJson ?? null);
     return {
       id: card.id, title: card.title, description: card.description, stage: card.stage, state: card.state, waiting: card.waiting,
       task: task === null ? null : { id: task, href: `/t/${encodeURIComponent(task)}` },
@@ -69,6 +73,7 @@ export function flowView(store: Store, flow: FlowRow, viewer: { name: string; ap
       owner: card.owner, watchers, watching: watchers.includes(viewer.name),
       mine: card.owner === viewer.name || watchers.includes(viewer.name) || canDecide,
       comments: discussion.filter(one => one.kind === "comment").map(one => ({ id: one.id, author: one.author, body: one.body, mentions: one.mentions, at: one.at })),
+      sorted: decision === null ? null : { chip: sortChip(decision), confident: decision.confident },
     };
   });
   const triggers: BrowserFlowTrigger[] = store.flowTriggers(flow.id).map(trigger => {
@@ -95,6 +100,7 @@ export function flowView(store: Store, flow: FlowRow, viewer: { name: string; ap
     },
     startTrigger: setup.startTrigger ?? null,
     me: viewer.name,
+    sortReady: setup.sortReady ?? false,
     scripts: store.flowScripts(flow.repo).map(script => ({ name: script.name, about: script.about, body: script.body, timeoutMinutes: script.timeoutMinutes, version: script.version, savedBy: script.savedBy, savedAt: script.savedAt,
       usedHere: stages.filter(stage => stage.kind === "check" && stage.script === script.name).map(stage => stage.title) })),
     start: definition?.start ?? stages[0]?.id ?? "",

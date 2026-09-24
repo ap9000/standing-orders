@@ -7,7 +7,7 @@
  * it now stands, and the canvas refreshes every few seconds for everyone. */
 import { Background, BackgroundVariant, Controls, Handle, MarkerType, NodeResizer, Position, ReactFlow, ReactFlowProvider, applyNodeChanges, useReactFlow, type Connection, type Edge, type Node, type NodeChange, type NodeProps } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Bell, BellOff, CalendarClock, LineChart, ListChecks, MessageSquareReply, Copy, Flag, GitPullRequest, Hammer, Inbox, Megaphone, MessageSquare, MousePointerClick, Pencil, Plus, Search, SquareKanban, UserCheck, Webhook, Workflow, X, Zap } from "lucide-react";
+import { Bell, BellOff, CalendarClock, LineChart, ListChecks, MessageSquareReply, Copy, Flag, GitPullRequest, Hammer, Inbox, Megaphone, MessageSquare, MousePointerClick, Pencil, Plus, Search, Split, SquareKanban, UserCheck, Webhook, Workflow, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { BrowserFlowCard, BrowserFlowStage, BrowserFlowTrigger, BrowserFlowView } from "../../browser-workspace.js";
 import { Badge, Button, Input, Label, Textarea, cn, toast } from "../components/ui/index.js";
@@ -25,7 +25,16 @@ const KIND_ICONS: Record<BrowserFlowStage["kind"], ReactNode> = {
   inbox: <Inbox className="size-3.5" aria-hidden="true" />, task: <Hammer className="size-3.5" aria-hidden="true" />, report: <Search className="size-3.5" aria-hidden="true" />,
   approval: <UserCheck className="size-3.5" aria-hidden="true" />, notify: <Megaphone className="size-3.5" aria-hidden="true" />, done: <Flag className="size-3.5" aria-hidden="true" />,
   check: <ListChecks className="size-3.5" aria-hidden="true" />, update: <MessageSquareReply className="size-3.5" aria-hidden="true" />,
+  sort: <Split className="size-3.5" aria-hidden="true" />,
 };
+
+
+/** What Jev decided about a card: its answer and how sure. A card it wasn't sure about says so. */
+function SortChip({ sorted }: { sorted: NonNullable<BrowserFlowCard["sorted"]> }) {
+  return <span className={cn("inline-flex max-w-full items-center gap-1 rounded-full bg-muted px-1.5 py-0.5 text-[11px] font-medium", !sorted.confident && "text-attention")}
+    title={sorted.confident ? "Sorted by Jev" : "Jev wasn't sure"} data-sort-chip>
+    <Split className="size-3 shrink-0" style={{ color: sorted.confident ? COLORS["violet"] : undefined }} aria-hidden="true" /><span className="truncate">{sorted.confident ? sorted.chip : `Not sure · ${sorted.chip}`}</span></span>;
+}
 
 const TRIGGER_ICONS: Record<string, ReactNode> = {
   button: <MousePointerClick className="size-3.5" aria-hidden="true" />, schedule: <CalendarClock className="size-3.5" aria-hidden="true" />, github: <GitPullRequest className="size-3.5" aria-hidden="true" />,
@@ -90,6 +99,7 @@ function ZoneNode({ data, selected }: NodeProps<Node<ZoneData, "zone">>) {
             data.selectedCard === card.id && "border-primary ring-1 ring-primary", card.canDecide && "border-attention/60")}
           data-card={card.id}>
           <div className="line-clamp-2 text-[12.5px] font-medium leading-snug">{card.title}</div>
+          {card.sorted !== null && <div className="mt-1 flex"><SortChip sorted={card.sorted} /></div>}
           {card.waiting !== null && <div className={cn("mt-1 line-clamp-2 text-[11px] leading-snug", card.canDecide ? "font-semibold text-attention" : "text-muted-foreground")}>{card.canDecide ? "Needs your decision" : card.waiting}</div>}
           {(card.owner !== null || card.comments.length > 0) && <div className="mt-1.5 flex items-center gap-1.5">
             {card.owner !== null && <Face name={card.owner} />}
@@ -138,12 +148,15 @@ function flowOrder(stages: BrowserFlowStage[], start: string): BrowserFlowStage[
     while (id !== null && !seen.has(id)) {
       const stage = stages.find(one => one.id === id);
       if (stage === undefined) return;
-      seen.add(id); ordered.push(stage); id = stage.next;
+      seen.add(id); ordered.push(stage);
+      for (const answer of stage.sort?.answers ?? []) visit(answer.to);
+      if (stage.sort !== null && stage.onFail !== null) visit(stage.onFail);
+      id = stage.next;
     }
   };
   visit(start);
   for (const stage of stages) if (!seen.has(stage.id)) visit(stage.id);
-  return ordered;
+  return [...ordered.filter(one => one.kind !== "done"), ...ordered.filter(one => one.kind === "done")];
 }
 
 function slug(title: string, taken: Set<string>): string {
@@ -230,6 +243,7 @@ function CardPanel({ card, view, csrf, apply, onClose }: { card: BrowserFlowCard
       <div className="min-w-0 flex-1">
         <h2 className="text-[15px] font-semibold leading-snug">{card.title}</h2>
         <p className="mt-0.5 text-[12px] text-muted-foreground">{card.state === "active" ? `In ${stage?.title ?? card.stage}` : card.state === "done" ? "Done" : "Cancelled"} · added by {card.createdBy}</p>
+        {card.sorted !== null && <div className="mt-1.5 flex"><SortChip sorted={card.sorted} /></div>}
       </div>
       <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close"><X className="size-4" /></Button>
     </div>
@@ -276,6 +290,56 @@ function Field({ label, hint, children }: { label: string; hint?: string | undef
 }
 const SELECT = "h-9 w-full rounded-md border bg-transparent px-2 text-[13px]";
 
+const SURE_LEVELS = [0.95, 0.9, 0.85, 0.8, 0.7, 0.6];
+type SortSettingsValue = NonNullable<BrowserFlowStage["sort"]>;
+
+/** A sort zone: the question Jev answers, each answer and where it sends the card, how sure it must be to act alone, and anything else it notes. */
+function SortSettings({ sort, others, ready, set }: { sort: SortSettingsValue; others: BrowserFlowStage[]; ready: boolean; set: (sort: SortSettingsValue) => void }) {
+  const answer = (index: number, change: Partial<SortSettingsValue["answers"][number]>) => set({ ...sort, answers: sort.answers.map((one, at) => at === index ? { ...one, ...change } : one) });
+  const note = (index: number, change: Partial<SortSettingsValue["notes"][number]>) => set({ ...sort, notes: sort.notes.map((one, at) => at === index ? { ...one, ...change } : one) });
+  return <>
+    {!ready && <p className="rounded-md border border-attention/50 px-3 py-2 text-[12.5px]" data-sort-needs-key>Sorting needs an OpenRouter key. <a className="font-medium text-primary underline-offset-4 hover:underline" href="/settings#providers">Add it in Settings</a></p>}
+    <Field label="Question">
+      <Input value={sort.question} maxLength={300} onChange={event => set({ ...sort, question: event.target.value })} aria-label="Question" />
+    </Field>
+    <div className="grid gap-2"><span className="text-[13px] font-medium">Answers</span>
+      {sort.answers.map((one, index) => <div key={index} className="grid gap-1.5 rounded-md border p-2" data-sort-answer={index}>
+        <div className="flex items-center gap-1.5">
+          <Input value={one.answer} maxLength={40} placeholder="Answer" onChange={event => answer(index, { answer: event.target.value })} aria-label={`Answer ${index + 1}`} />
+          <Button variant="ghost" size="icon" disabled={sort.answers.length <= 2} onClick={() => set({ ...sort, answers: sort.answers.filter((_, at) => at !== index) })} aria-label={`Remove ${one.answer || `answer ${index + 1}`}`}><X className="size-4" /></Button>
+        </div>
+        <Input value={one.means} maxLength={200} placeholder="What it means, in a few words" onChange={event => answer(index, { means: event.target.value })} aria-label={`What ${one.answer || `answer ${index + 1}`} means`} />
+        <select className={SELECT} value={one.to} onChange={event => answer(index, { to: event.target.value })} aria-label={`Where ${one.answer || `answer ${index + 1}`} goes`}>
+          {one.to === "" && <option value="">Choose where it goes</option>}
+          {others.map(zone => <option key={zone.id} value={zone.id}>Goes to {zone.title}</option>)}
+        </select>
+      </div>)}
+      {sort.answers.length < 12 && <Button size="sm" variant="outline" className="self-start" onClick={() => set({ ...sort, answers: [...sort.answers, { answer: "", means: "", to: "" }] })}><Plus className="size-4" />Add an answer</Button>}
+    </div>
+    <Field label="Acts on its own when" hint="Below this, the card takes the not-sure path.">
+      <select className={SELECT} value={String(sort.sureAt)} onChange={event => set({ ...sort, sureAt: Number(event.target.value) })} aria-label="Acts on its own when">
+        {[...new Set([...SURE_LEVELS, sort.sureAt])].sort((a, b) => b - a).map(level => <option key={level} value={String(level)}>{Math.round(level * 100)}% sure or more</option>)}
+      </select>
+    </Field>
+    <details className="rounded-md border px-3 py-2" open={sort.notes.length > 0}>
+      <summary className="cursor-pointer text-[13px] font-medium">Also note on the card{sort.notes.length > 0 ? ` (${sort.notes.length})` : ""}</summary>
+      <div className="mt-2 grid gap-2">
+        {sort.notes.map((one, index) => <div key={index} className="grid gap-1.5 rounded-md border p-2" data-sort-note={index}>
+          <div className="flex items-center gap-1.5">
+            <select className={SELECT} value={one.kind} onChange={event => note(index, event.target.value === "score" ? { kind: "score", levels: one.levels ?? ["Low", "Medium", "High"] } : { kind: "yes-no", levels: null })} aria-label={`Note ${index + 1}: kind`}>
+              <option value="score">A score</option><option value="yes-no">Yes or no</option>
+            </select>
+            <Button variant="ghost" size="icon" onClick={() => set({ ...sort, notes: sort.notes.filter((_, at) => at !== index) })} aria-label={`Remove note ${index + 1}`}><X className="size-4" /></Button>
+          </div>
+          <Input value={one.question} maxLength={300} placeholder={one.kind === "score" ? "How urgent is this?" : "Is the customer asking for money back?"} onChange={event => note(index, { question: event.target.value })} aria-label={`Note ${index + 1}: question`} />
+          {one.kind === "score" && <Textarea rows={3} value={(one.levels ?? []).join("\n")} onChange={event => note(index, { levels: event.target.value.split("\n") })} placeholder={"One level per line, lowest first"} aria-label={`Note ${index + 1}: levels, lowest first`} />}
+        </div>)}
+        {sort.notes.length < 3 && <Button size="sm" variant="outline" className="self-start" onClick={() => set({ ...sort, notes: [...sort.notes, { id: "", kind: "yes-no", question: "", levels: null }] })}><Plus className="size-4" />Add a note</Button>}
+      </div>
+    </details>
+  </>;
+}
+
 function ZonePanel({ stage, stages, view, update, remove, makeStart, onClose }: { stage: BrowserFlowStage; stages: BrowserFlowStage[]; view: BrowserFlowView; update: (change: Partial<BrowserFlowStage>) => void; remove: () => void; makeStart: () => void; onClose: () => void }) {
   const others = stages.filter(one => one.id !== stage.id);
   const select = SELECT;
@@ -285,7 +349,8 @@ function ZonePanel({ stage, stages, view, update, remove, makeStart, onClose }: 
     <Field label="Name"><Input value={stage.title} maxLength={60} onChange={event => update({ title: event.target.value })} aria-label="Zone name" /></Field>
     <Field label="What happens here" {...(kind === undefined ? {} : { hint: kind.about })}>
       <select className={select} aria-label="What happens here" value={stage.kind} onChange={event => update({ kind: event.target.value as BrowserFlowStage["kind"], ...(event.target.value === "done" ? { next: null, onFail: null } : {}),
-        ...(event.target.value === "update" ? { close: stage.close ?? true, message: stage.message ?? "Done: {{card.title}}" } : {}), ...(event.target.value === "check" ? { script: stage.script ?? view.scripts[0]?.name ?? null } : {}) })}>
+        ...(event.target.value === "update" ? { close: stage.close ?? true, message: stage.message ?? "Done: {{card.title}}" } : {}), ...(event.target.value === "check" ? { script: stage.script ?? view.scripts[0]?.name ?? null } : {}),
+        ...(event.target.value === "sort" ? { next: null, sort: stage.sort ?? { question: "What kind of card is this?", answers: others.slice(0, 2).map(one => ({ answer: one.title.slice(0, 40), means: one.title, to: one.id })), sureAt: 0.8, notes: [] } } : {}) })}>
         {view.kinds.map(one => <option key={one.kind} value={one.kind}>{one.label}</option>)}
       </select>
     </Field>
@@ -314,14 +379,15 @@ function ZonePanel({ stage, stages, view, update, remove, makeStart, onClose }: 
         {stage.script !== null && !view.scripts.some(one => one.name === stage.script) && <option value={stage.script}>{stage.script} (missing)</option>}
       </select>
     </Field>}
-    {stage.kind !== "done" && <Field label="Then">
+    {stage.kind === "sort" && stage.sort !== null && <SortSettings sort={stage.sort} others={others} ready={view.sortReady} set={sort => update({ sort })} />}
+    {stage.kind !== "done" && stage.kind !== "sort" && <Field label="Then">
       <select className={select} aria-label="Then" value={stage.next ?? ""} onChange={event => update({ next: event.target.value || null })}>
         <option value="">Wait here</option>{others.map(one => <option key={one.id} value={one.id}>{one.title}</option>)}
       </select>
     </Field>}
-    {(stage.kind === "approval" || stage.kind === "task" || stage.kind === "report" || stage.kind === "check" || stage.kind === "update") && <Field label={stage.kind === "approval" ? "If sent back" : "If it fails"}>
-      <select className={select} aria-label={stage.kind === "approval" ? "If sent back" : "If it fails"} value={stage.onFail ?? ""} onChange={event => update({ onFail: event.target.value || null })}>
-        <option value="">{stage.kind === "approval" ? "Can't be sent back" : "Wait here"}</option>{others.map(one => <option key={one.id} value={one.id}>{one.title}</option>)}
+    {(stage.kind === "approval" || stage.kind === "task" || stage.kind === "report" || stage.kind === "check" || stage.kind === "update" || stage.kind === "sort") && <Field label={stage.kind === "approval" ? "If sent back" : stage.kind === "sort" ? "If it isn't sure" : "If it fails"}>
+      <select className={select} aria-label={stage.kind === "approval" ? "If sent back" : stage.kind === "sort" ? "If it isn't sure" : "If it fails"} value={stage.onFail ?? ""} onChange={event => update({ onFail: event.target.value || null })}>
+        <option value="">{stage.kind === "approval" ? "Can't be sent back" : stage.kind === "sort" ? "Wait here for a person" : "Wait here"}</option>{others.map(one => <option key={one.id} value={one.id}>{one.title}</option>)}
       </select>
     </Field>}
     <div className="grid gap-1.5"><span className="text-[13px] font-medium">Color</span>
@@ -624,6 +690,7 @@ type Insights = {
   zones: { zone: string; title: string; kind: string; entered: number; movedOn: number; failed: number; sentBack: number; here: number; typicalMinutes: number | null; lastProblem: { cardTitle: string; note: string | null; at: string } | null }[];
   breaks: { zone: string; title: string; problems: number; of: number }[];
   scripts: { script: string; runs: number; passed: number; failed: number; typicalSeconds: number | null; lastFailure: string | null }[];
+  sorts: { zone: string; title: string; sureAt: number; sorted: number; alone: number; notSure: number; corrected: number; bands: { from: number; to: number; right: number; of: number }[]; costUsd: number; suggestion: string | null }[];
   runs: { card: number; cardTitle: string; entry: number; zoneTitle: string; kind: string; script: string | null; version: number | null; state: string; result: string | null; exitCode: number | null; durationMs: number | null; at: string; hasLog: boolean }[];
 };
 const duration = (minutes: number | null) => minutes === null ? "—" : minutes < 1 ? "under a minute" : minutes < 90 ? `${Math.round(minutes)} min` : minutes < 2880 ? `${Math.round(minutes / 60)} h` : `${Math.round(minutes / 1440)} days`;
@@ -680,13 +747,22 @@ function InsightsPanel({ view, onClose }: { view: BrowserFlowView; onClose: () =
         <h3 className="text-[13px] font-semibold">Scripts</h3>
         <ul className="flex flex-col gap-1 text-[12.5px]">{data.scripts.map(one => <li key={one.script}><span className="font-mono font-semibold">{one.script}</span>: {one.passed} of {one.runs} passed{one.typicalSeconds === null ? "" : `, usually ${one.typicalSeconds < 90 ? `${one.typicalSeconds} s` : `${Math.round(one.typicalSeconds / 60)} min`}`}</li>)}</ul>
       </section>}
+      {data.sorts.length > 0 && <section className="flex flex-col gap-2" data-insights-sorts>
+        <h3 className="text-[13px] font-semibold">Sorting</h3>
+        {data.sorts.map(one => <div key={one.zone} className="rounded-lg border p-2.5 text-[12.5px]" data-insights-sort={one.zone}>
+          <p><span className="font-semibold">{one.title}</span>: {one.sorted} sorted · {one.alone} on its own · {one.notSure} for a person{one.corrected > 0 && <> · <span className="font-semibold text-attention">{one.corrected} moved elsewhere by people</span></>}</p>
+          {one.bands.some(band => band.of > 0) && <p className="mt-1 text-muted-foreground">Right when {one.bands.filter(band => band.of > 0).map(band => `${band.from}–${band.to}% sure: ${band.right} of ${band.of}`).join(" · ")}</p>}
+          {one.suggestion !== null && <p className="mt-1">{one.suggestion}</p>}
+          {one.costUsd > 0 && <p className="mt-1 text-muted-foreground">Cost: {one.costUsd < 0.01 ? "under 1¢" : `$${one.costUsd.toFixed(2)}`}</p>}
+        </div>)}
+      </section>}
       <section className="flex flex-col gap-1.5">
         <h3 className="text-[13px] font-semibold">Recent runs</h3>
-        {data.runs.length === 0 ? <p className="text-[12.5px] text-muted-foreground">No scripts or updates have run in this period.</p>
+        {data.runs.length === 0 ? <p className="text-[12.5px] text-muted-foreground">No scripts, sorts or updates have run in this period.</p>
           : <ul className="flex flex-col gap-1.5">{data.runs.map(run => { const key = `${run.card}:${run.entry}`; return <li key={key} className="rounded-md border px-2.5 py-2 text-[12.5px]" data-run={key}>
             <button type="button" className="flex w-full items-start gap-2 text-left" onClick={() => void openLog(run.card, run.entry)} aria-expanded={log?.key === key}>
               <span className={cn("mt-1 size-2 shrink-0 rounded-full", run.state === "passed" ? "bg-success" : run.state === "failed" ? "bg-destructive" : "bg-attention")} aria-hidden="true" />
-              <span className="min-w-0 flex-1"><span className="font-medium">{run.script ?? run.zoneTitle}</span> · {run.cardTitle}<span className="block text-[12px] text-muted-foreground">{run.state === "passed" ? "Passed" : run.state === "failed" ? "Failed" : run.state === "waiting" ? "Trying again" : "Running"}{run.durationMs === null ? "" : ` in ${Math.max(1, Math.round(run.durationMs / 1000))} s`} · {when(run.at)}</span></span>
+              <span className="min-w-0 flex-1"><span className="font-medium">{run.script ?? run.zoneTitle}</span> · {run.cardTitle}<span className="block text-[12px] text-muted-foreground">{run.kind === "sort" && run.state === "passed" && run.result !== null ? run.result.split(". ")[0]!.replace(/\.$/, "") : run.state === "passed" ? "Passed" : run.state === "failed" ? "Failed" : run.state === "waiting" ? "Trying again" : "Running"}{run.durationMs === null ? "" : run.kind === "sort" ? ` · ${run.durationMs < 1000 ? `${run.durationMs} ms` : `${(run.durationMs / 1000).toFixed(1)} s`}` : ` in ${Math.max(1, Math.round(run.durationMs / 1000))} s`} · {when(run.at)}</span></span>
             </button>
             {log?.key === key && <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap rounded-md bg-muted p-2 font-mono text-[11.5px]" data-run-log>{log.text}</pre>}
           </li>; })}</ul>}
@@ -799,11 +875,21 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
     return [...fromTriggers, ...stages.flatMap(stage => {
       const next = stage.next === null ? undefined : stages.find(one => one.id === stage.next);
       const fail = stage.onFail === null ? undefined : stages.find(one => one.id === stage.onFail);
+      // A sort zone: one arrow to each zone its answers lead to, named by those answers.
+      const answers = stage.kind === "sort" && stage.sort !== null ? [...new Set(stage.sort.answers.map(one => one.to))].flatMap(to => {
+        const target = stages.find(one => one.id === to);
+        if (target === undefined) return [];
+        const handles = target.zone.x > stage.zone.x + stage.zone.w ? { source: "s-Right", target: "t-Left" } : sides(stage, target, false);
+        return [{ id: `${stage.id}->answer-${to}`, source: stage.id, target: to, sourceHandle: handles.source, targetHandle: handles.target,
+          type: "smoothstep", label: stage.sort!.answers.filter(one => one.to === to).map(one => one.answer).join(", "), labelStyle: { fontSize: 11, fontWeight: 600, fill: "var(--color-foreground)" },
+          labelBgStyle: { fill: "var(--color-card)" }, markerEnd: { type: MarkerType.ArrowClosed }, style: { strokeWidth: 2 }, deletable: false }];
+      }) : [];
       return [
+        ...answers,
         ...(next === undefined ? [] : [{ id: `${stage.id}->next`, source: stage.id, target: next.id, sourceHandle: sides(stage, next, false).source, targetHandle: sides(stage, next, false).target,
           type: "smoothstep", markerEnd: { type: MarkerType.ArrowClosed }, style: { strokeWidth: 2 }, deletable: editing }]),
         ...(fail === undefined ? [] : [{ id: `${stage.id}->fail`, source: stage.id, target: fail.id, sourceHandle: sides(stage, fail, true).source, targetHandle: sides(stage, fail, true).target,
-          type: "smoothstep", pathOptions: { offset: 28, borderRadius: 10 }, label: stage.kind === "approval" ? "sent back" : "fails", labelStyle: { fontSize: 11, fill: "var(--so-attention)" },
+          type: "smoothstep", pathOptions: { offset: 28, borderRadius: 10 }, label: stage.kind === "approval" ? "sent back" : stage.kind === "sort" ? "not sure" : "fails", labelStyle: { fontSize: 11, fill: "var(--so-attention)" },
           labelBgStyle: { fill: "var(--color-card)" }, markerEnd: { type: MarkerType.ArrowClosed, color: "var(--so-attention)" },
           style: { strokeWidth: 1.5, strokeDasharray: "6 4", stroke: "var(--so-attention)" }, deletable: editing }]),
       ];
@@ -826,6 +912,14 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
 
   const onConnect = (connection: Connection) => {
     if (!editing || connection.source === connection.target) return;
+    const from = stages.find(one => one.id === connection.source);
+    if (from?.kind === "sort" && from.sort !== null && connection.sourceHandle !== "fail") {
+      // From a sort zone, a new arrow is a new answer, named after where it goes until it's renamed.
+      const target = stages.find(one => one.id === connection.target);
+      if (target !== undefined && from.sort.answers.length < 12) updateStage(from.id, { sort: { ...from.sort, answers: [...from.sort.answers, { answer: target.title.slice(0, 40), means: target.title, to: target.id }] } });
+      setSelected({ zone: from.id });
+      return;
+    }
     updateStage(connection.source, connection.sourceHandle === "fail" ? { onFail: connection.target } : { next: connection.target });
   };
 
@@ -844,7 +938,7 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
     const taken = new Set(draft.stages.map(one => one.id));
     const center = flow.screenToFlowPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
     const stage: BrowserFlowStage = { id: slug("New zone", taken), title: "New zone", kind: "inbox", zone: { x: Math.round(center.x - 140), y: Math.round(center.y - 120), w: 280, h: 300, color: "slate" },
-      instructions: null, planning: null, approver: null, message: null, close: null, script: null, next: null, onFail: null };
+      instructions: null, planning: null, approver: null, message: null, close: null, script: null, sort: null, next: null, onFail: null };
     setDraft({ ...draft, stages: [...draft.stages, stage] });
     setSelected({ zone: stage.id });
   };
@@ -943,6 +1037,7 @@ function PhoneFlow({ view: initial, csrf }: { view: BrowserFlowView; csrf: strin
         <header className="flex items-center gap-2 px-3 py-2"><span className="inline-flex size-6 items-center justify-center rounded-md text-white" style={{ background: COLORS[stage.zone.color] ?? "#64748b" }}>{KIND_ICONS[stage.kind]}</span><span className="flex-1 text-[14px] font-semibold">{stage.title}</span>{cards.length > 0 && <span className="text-[12px] text-muted-foreground">{cards.length}</span>}</header>
         {cards.length > 0 && <ul className="flex flex-col gap-2 px-3 pb-3">{cards.map(one => <li key={one.id}><button type="button" onClick={() => setOpen(one.id)} className={cn("min-h-11 w-full rounded-lg border bg-card px-3 py-2 text-left", one.canDecide && "border-attention/60")}>
           <div className="flex items-start gap-2"><div className="min-w-0 flex-1 text-[14px] font-medium">{one.title}</div>{one.owner !== null && <Face name={one.owner} />}</div>
+          {one.sorted !== null && <div className="mt-1 flex"><SortChip sorted={one.sorted} /></div>}
           {one.waiting !== null && <div className={cn("text-[12px]", one.canDecide ? "font-semibold text-attention" : "text-muted-foreground")}>{one.canDecide ? "Needs your decision" : one.waiting}</div>}
           {one.comments.length > 0 && <div className="mt-0.5 inline-flex items-center gap-1 text-[12px] text-muted-foreground"><MessageSquare className="size-3" aria-hidden="true" />{one.comments.length}</div>}
         </button></li>)}</ul>}

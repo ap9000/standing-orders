@@ -115,7 +115,8 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // v82 adds flow triggers (what starts cards: a button, a schedule, GitHub, Linear, another flow) and where each card came from.
 // v83 adds people on flow cards: an owner, watchers, comments with @mentions, and notifications for one person.
 // v84 closes the loop: project scripts (reusable steps with no AI), check and update steps with their logs, and trigger forms.
-export const SCHEMA_VERSION = 84;
+// v85 adds sort steps: Jev (through OpenRouter) picks where a card goes, and each step run keeps what it decided.
+export const SCHEMA_VERSION = 85;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -468,8 +469,10 @@ export type MateProposal = {
 };
 
 export type FlowRow = { id: number; repo: string; name: string; definitionJson: string; revision: number; state: "active" | "archived"; createdBy: string; createdAt: string; updatedBy: string; updatedAt: string };
-export type FlowStepRunRow = { card: number; entry: number; stage: string; kind: "check" | "update"; script: string | null; scriptVersion: number | null; state: "running" | "passed" | "failed" | "waiting"; attempts: number;
-  nextAt: string | null; startedAt: string; finishedAt: string | null; durationMs: number | null; exitCode: number | null; result: string | null; log: string | null };
+export type FlowStepRunRow = { card: number; entry: number; stage: string; kind: "check" | "update" | "sort"; script: string | null; scriptVersion: number | null; state: "running" | "passed" | "failed" | "waiting"; attempts: number;
+  nextAt: string | null; startedAt: string; finishedAt: string | null; durationMs: number | null; exitCode: number | null; result: string | null; log: string | null;
+  /** sort: what Jev answered, as JSON (flow-sort.ts reads it). */
+  decisionJson: string | null };
 export type FlowScriptRow = { id: number; repo: string; name: string; about: string; body: string; timeoutMinutes: number; version: number; digest: string; savedBy: string; savedAt: string };
 /** Where a card came from when a trigger made it: what to call it and where to look (a GitHub issue, a Linear issue, another flow's card). */
 export type FlowCardSource = { kind: string; label: string; url: string | null };
@@ -494,7 +497,7 @@ function readFlowStepRunRow(row: Record<string, unknown>): FlowStepRunRow {
   const number = (key: string) => row[key] === null || row[key] === undefined ? null : Number(row[key]);
   return { card: Number(row["card"]), entry: Number(row["entry"]), stage: String(row["stage"]), kind: String(row["kind"]) as FlowStepRunRow["kind"], script: optional("script"), scriptVersion: number("script_version"),
     state: String(row["state"]) as FlowStepRunRow["state"], attempts: Number(row["attempts"]), nextAt: optional("next_at"), startedAt: String(row["started_at"]), finishedAt: optional("finished_at"),
-    durationMs: number("duration_ms"), exitCode: number("exit_code"), result: optional("result"), log: optional("log") };
+    durationMs: number("duration_ms"), exitCode: number("exit_code"), result: optional("result"), log: optional("log"), decisionJson: optional("decision_json") };
 }
 
 function readFlowCardRow(row: Record<string, unknown>): FlowCardRow {
@@ -2217,7 +2220,8 @@ CREATE INDEX IF NOT EXISTS flow_comment_card ON flow_comment (card, id);
 -- zone names one. flow_step_run is one visit of a card to a script
 -- or update zone: the claim that keeps two workers from running it twice,
 -- its attempts, and what came of it — the log, exit code and time taken,
--- which the flow's insights read.
+-- which the flow's insights read. v85 adds sort zones: kind 'sort', and
+-- decision_json keeps what Jev answered (its pick, how sure, the notes).
 CREATE TABLE IF NOT EXISTS flow_script (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   repo            TEXT NOT NULL,
@@ -2236,7 +2240,7 @@ CREATE TABLE IF NOT EXISTS flow_step_run (
   card           INTEGER NOT NULL REFERENCES flow_card(id),
   entry          INTEGER NOT NULL,
   stage          TEXT NOT NULL,
-  kind           TEXT NOT NULL CHECK (kind IN ('check','update')),
+  kind           TEXT NOT NULL CHECK (kind IN ('check','update','sort')),
   script         TEXT,
   script_version INTEGER,
   state          TEXT NOT NULL CHECK (state IN ('running','passed','failed','waiting')),
@@ -2248,6 +2252,7 @@ CREATE TABLE IF NOT EXISTS flow_step_run (
   exit_code      INTEGER,
   result         TEXT,
   log            TEXT,
+  decision_json  TEXT,
   PRIMARY KEY (card, entry)
 );
 CREATE INDEX IF NOT EXISTS flow_step_run_recent ON flow_step_run (started_at);
@@ -5514,6 +5519,37 @@ function migrate(db: Database, origin: number | null): void {
   addColumn(db, "run_process", "container", "TEXT");
   addColumn(db, "run_process", "container_empty_at", "TEXT");
   addColumn(db, "run_process", "container_identity", "TEXT");
+
+  // v85 (sort steps): flow_step_run's kind CHECK admits 'sort', and a new
+  // nullable decision_json keeps what Jev answered. The same exact-
+  // recognizer copy/rename; every v84 check and update run is carried whole.
+  rebuildForV4(
+    db,
+    "flow_step_run",
+    "CHECK (kind IN ('check','update'))",
+    "'sort'",
+    `CREATE TABLE flow_step_run_next (
+       card           INTEGER NOT NULL REFERENCES flow_card(id),
+       entry          INTEGER NOT NULL,
+       stage          TEXT NOT NULL,
+       kind           TEXT NOT NULL CHECK (kind IN ('check','update','sort')),
+       script         TEXT,
+       script_version INTEGER,
+       state          TEXT NOT NULL CHECK (state IN ('running','passed','failed','waiting')),
+       attempts       INTEGER NOT NULL DEFAULT 0,
+       next_at        TEXT,
+       started_at     TEXT NOT NULL,
+       finished_at    TEXT,
+       duration_ms    INTEGER,
+       exit_code      INTEGER,
+       result         TEXT,
+       log            TEXT,
+       decision_json  TEXT,
+       PRIMARY KEY (card, entry)
+     )`,
+    ["card", "entry", "stage", "kind", "script", "script_version", "state", "attempts", "next_at", "started_at", "finished_at", "duration_ms", "exit_code", "result", "log", "decision_json"],
+  );
+  db.exec("CREATE INDEX IF NOT EXISTS flow_step_run_recent ON flow_step_run (started_at)");
 }
 
 /** The origin CHECK, verbatim from the fresh review_request DDL. */
@@ -20753,7 +20789,7 @@ export class Store {
   }
 
   /** Claim a card's visit to a step zone. False when another pass holds it or it already finished. */
-  claimFlowStep(step: { card: number; entry: number; stage: string; kind: "check" | "update"; script: string | null; scriptVersion: number | null }, now: Date): boolean {
+  claimFlowStep(step: { card: number; entry: number; stage: string; kind: "check" | "update" | "sort"; script: string | null; scriptVersion: number | null }, now: Date): boolean {
     return this.transact(() => {
       const existing = this.flowStepRun(step.card, step.entry);
       const stamp = now.toISOString();
@@ -20778,9 +20814,18 @@ export class Store {
   }
 
   /** Settle a step: passed or failed for good, or waiting to try again at `nextAt` — with what it printed, its exit code and how long it took. */
-  finishFlowStep(card: number, entry: number, outcome: { state: "passed" | "failed" | "waiting"; result: string; nextAt?: string; log?: string | null; exitCode?: number | null; durationMs?: number | null }, now: Date): void {
-    this.db.prepare("UPDATE flow_step_run SET state = ?, result = ?, next_at = ?, finished_at = ?, log = ?, exit_code = ?, duration_ms = ? WHERE card = ? AND entry = ?")
-      .run(outcome.state, outcome.result, outcome.nextAt ?? null, outcome.state === "waiting" ? null : now.toISOString(), outcome.log ?? null, outcome.exitCode ?? null, outcome.durationMs ?? null, card, entry);
+  finishFlowStep(card: number, entry: number, outcome: { state: "passed" | "failed" | "waiting"; result: string; nextAt?: string; log?: string | null; exitCode?: number | null; durationMs?: number | null; decisionJson?: string | null }, now: Date): void {
+    this.db.prepare("UPDATE flow_step_run SET state = ?, result = ?, next_at = ?, finished_at = ?, log = ?, exit_code = ?, duration_ms = ?, decision_json = ? WHERE card = ? AND entry = ?")
+      .run(outcome.state, outcome.result, outcome.nextAt ?? null, outcome.state === "waiting" ? null : now.toISOString(), outcome.log ?? null, outcome.exitCode ?? null, outcome.durationMs ?? null, outcome.decisionJson ?? null, card, entry);
+  }
+
+  /** Each card's latest sort decision in a flow: what its card shows. */
+  flowSortDecisions(flow: number): Map<number, { entry: number; stage: string; decisionJson: string }> {
+    const latest = new Map<number, { entry: number; stage: string; decisionJson: string }>();
+    for (const row of this.db.prepare("SELECT r.card, r.entry, r.stage, r.decision_json FROM flow_step_run r JOIN flow_card c ON c.id = r.card WHERE c.flow = ? AND r.kind = 'sort' AND r.decision_json IS NOT NULL ORDER BY r.card, r.entry").all(flow)) {
+      latest.set(Number(row["card"]), { entry: Number(row["entry"]), stage: String(row["stage"]), decisionJson: String(row["decision_json"]) });
+    }
+    return latest;
   }
 
   /** Steps still running long after they started: their worker stopped. */
@@ -20795,10 +20840,10 @@ export class Store {
   }
 
   /** Every move of every card in a flow since a time, oldest first: what the insights count. */
-  flowMoves(flow: number, since: Date): { card: number; fromStage: string | null; toStage: string; outcome: FlowEventOutcome; note: string | null; at: string }[] {
-    return this.db.prepare("SELECT e.card, e.from_stage, e.to_stage, e.outcome, e.note, e.at FROM flow_event e JOIN flow_card c ON c.id = e.card WHERE c.flow = ? AND e.at >= ? ORDER BY e.id")
+  flowMoves(flow: number, since: Date): { card: number; fromStage: string | null; toStage: string; outcome: FlowEventOutcome; actor: string; note: string | null; at: string }[] {
+    return this.db.prepare("SELECT e.card, e.from_stage, e.to_stage, e.outcome, e.actor, e.note, e.at FROM flow_event e JOIN flow_card c ON c.id = e.card WHERE c.flow = ? AND e.at >= ? ORDER BY e.id")
       .all(flow, since.toISOString()).map(row => ({ card: Number(row["card"]), fromStage: row["from_stage"] === null ? null : String(row["from_stage"]), toStage: String(row["to_stage"]),
-        outcome: String(row["outcome"]) as FlowEventOutcome, note: row["note"] === null ? null : String(row["note"]), at: String(row["at"]) }));
+        outcome: String(row["outcome"]) as FlowEventOutcome, actor: String(row["actor"]), note: row["note"] === null ? null : String(row["note"]), at: String(row["at"]) }));
   }
 
   // ---- people on flow cards (v83) ------------------------------------------------

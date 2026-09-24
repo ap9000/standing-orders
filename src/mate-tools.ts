@@ -788,7 +788,9 @@ export const MATE_TOOLS: MateTool[] = [
             ...(stage.message === null ? {} : { message: stage.message }),
             ...(stage.kind === "check" ? { script: stage.script, scriptExists: stage.script !== null && ctx.store.flowScript(flow.repo, stage.script) !== null } : {}),
             ...(stage.kind === "update" ? { closesIssue: stage.close === true } : {}),
-            next: titleOf(stage.next), ifFails: titleOf(stage.onFail),
+            ...(stage.kind === "sort" && stage.sort !== null ? { question: stage.sort.question, answers: stage.sort.answers.map(one => ({ answer: one.answer, means: one.means, goesTo: titleOf(one.to) })),
+              sureAt: Math.round(stage.sort.sureAt * 100), ...(stage.sort.notes.length === 0 ? {} : { alsoNote: stage.sort.notes.map(one => ({ question: one.question, kind: one.kind, ...(one.levels === null ? {} : { levels: one.levels }) })) }) } : {}),
+            next: titleOf(stage.next), ...(stage.kind === "sort" ? { ifNotSure: titleOf(stage.onFail) } : { ifFails: titleOf(stage.onFail) }),
           })),
           cards: [...active, ...finished].map(card => ({
             card: card.id, title: card.title, ...(card.description === null ? {} : { description: card.description.slice(0, 300) }),
@@ -832,7 +834,7 @@ export const MATE_TOOLS: MateTool[] = [
   },
   {
     name: "propose_flow",
-    description: "Draft a flow change as a card the operator confirms. create: a template, or the steps in order (each leads to the next; Done is added; instructions may be left out). edit: the full step list, keeping existing steps by id — what a kept step leaves out carries over. add_card (starts in the first zone unless zone is named), move_card, approve, send_back (needs a note), cancel_card, comment (note; @name pings that person), assign (owner: a name, 'me', or 'nobody'), follow, unfollow, save_script (repo, and script: name, about, body — short shell commands — and timeoutMinutes; scripts belong to the project, so no flow is needed; a 'check' step in any of its flows names it). add_trigger with settings (kind button: label, questions; schedule: schedule like 'daily 09:00 Europe/London', title; github: repo owner/name, watch issues|pulls|checks, label, branch, from team|anyone; linear: team, state, label; flow: follow (another flow's id), when (its zone)); pause_trigger, resume_trigger, remove_trigger with trigger. Read get_flows first except to create.",
+    description: "Draft a flow change as a card the operator confirms. create: a template, or the steps in order (each leads to the next; Done is added; instructions may be left out). A 'sort' step has Jev pick one of its answers; make it the first step (never a holding step before it, or new cards wait unsorted): question, answers (answer, means: a few words Jev reads, goesTo: a step), sureAt (percent, default 80), ifNotSure (a step; otherwise the card waits for a person), and up to 3 alsoNote (score with levels lowest first, or yes-no); a sort has no next, so give each branch's last step its own next. edit: the full step list, keeping existing steps by id — what a kept step leaves out carries over. add_card (starts in the first zone unless zone is named), move_card, approve, send_back (needs a note), cancel_card, comment (note; @name pings that person), assign (owner: a name, 'me', or 'nobody'), follow, unfollow, save_script (repo, and script: name, about, body — short shell commands — and timeoutMinutes; scripts belong to the project, so no flow is needed; a 'check' step in any of its flows names it). add_trigger with settings (kind button: label, questions; schedule: schedule like 'daily 09:00 Europe/London', title; github: repo owner/name, watch issues|pulls|checks, label, branch, from team|anyone; linear: team, state, label; flow: follow (another flow's id), when (its zone)); pause_trigger, resume_trigger, remove_trigger with trigger. Read get_flows first except to create.",
     inputSchema: schema({
       operation: { type: "string", enum: ["create", "edit", "add_card", "move_card", "approve", "send_back", "cancel_card", "comment", "assign", "follow", "unfollow", "save_script", "add_trigger", "pause_trigger", "resume_trigger", "remove_trigger"] },
       repo: REPO_ARG, flow: { type: "integer", minimum: 1 }, card: { type: "integer", minimum: 1 },
@@ -842,7 +844,10 @@ export const MATE_TOOLS: MateTool[] = [
         instructions: { type: "string", maxLength: 4000 }, planning: { type: "string", enum: ["auto", "required", "skip"] },
         decider: { type: "string", maxLength: 64 }, message: { type: "string", maxLength: 1000 },
         script: { type: "string", maxLength: 40 }, close: { type: "boolean" },
-        next: { type: "string", maxLength: 60 }, ifFails: { type: "string", maxLength: 60 },
+        question: { type: "string", maxLength: 300 }, sureAt: { type: "integer", minimum: 50, maximum: 99 },
+        answers: { type: "array", minItems: 2, maxItems: 12, items: { type: "object", additionalProperties: false, properties: { answer: { type: "string", maxLength: 40 }, means: { type: "string", maxLength: 200 }, goesTo: { type: "string", maxLength: 60 } } } },
+        alsoNote: { type: "array", maxItems: 3, items: { type: "object", additionalProperties: false, properties: { question: { type: "string", maxLength: 300 }, kind: { type: "string", enum: ["score", "yes-no"] }, levels: { type: "array", minItems: 2, maxItems: 10, items: { type: "string", maxLength: 120 } } } } },
+        next: { type: "string", maxLength: 60 }, ifFails: { type: "string", maxLength: 60 }, ifNotSure: { type: "string", maxLength: 60 },
       } } },
       title: { type: "string", maxLength: 200 }, description: { type: "string", maxLength: 4000 }, zone: { type: "string", maxLength: 60 }, note: { type: "string", maxLength: 2000 },
       trigger: { type: "integer", minimum: 1 }, owner: { type: "string", maxLength: 64 },

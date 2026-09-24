@@ -116,7 +116,8 @@ function advanceCard(store: Store, flow: FlowRow, definition: FlowDefinition | n
       return;
     case "check":
     case "update":
-      // Run outside a model by the worker's step pass (flow-steps.ts), which moves the card on.
+    case "sort":
+      // Run by the worker's step pass (flow-steps.ts), which moves the card on.
       return;
   }
 }

@@ -171,10 +171,12 @@ export type BrowserResultView = {
 };
 /** One zone on a flow's canvas: its step, where it leads, and where it sits. */
 export type BrowserFlowStage = {
-  id: string; title: string; kind: "inbox" | "task" | "report" | "approval" | "check" | "update" | "notify" | "done";
+  id: string; title: string; kind: "inbox" | "task" | "report" | "approval" | "check" | "update" | "notify" | "sort" | "done";
   zone: { x: number; y: number; w: number; h: number; color: string };
   instructions: string | null; planning: "auto" | "required" | "skip" | null; approver: string | null; message: string | null;
   close: boolean | null; script: string | null;
+  /** A sort zone: Jev's question, its answers and where each goes, how sure it must be to act alone, and what else it notes. */
+  sort: { question: string; answers: { answer: string; means: string; to: string }[]; sureAt: number; notes: { id: string; kind: "score" | "yes-no"; question: string; levels: string[] | null }[] } | null;
   next: string | null; onFail: string | null;
 };
 
@@ -191,6 +193,8 @@ export type BrowserFlowCard = {
   mine: boolean;
   /** What people said on it, oldest first; ownership changes read as history instead. */
   comments: { id: number; author: string; body: string; mentions: string[]; at: string }[];
+  /** The latest sort: its short chip ("Bug · 94% · Now") and whether Jev was sure enough to act alone. */
+  sorted: { chip: string; confident: boolean } | null;
 };
 
 /** What starts cards in a flow on its own. */
@@ -221,6 +225,8 @@ export type BrowserFlowView = {
   startTrigger: number | null;
   /** Who is looking: their name, for "mine", owning and @mentions. */
   me: string;
+  /** Whether sort zones can run: an OpenRouter key is saved in Settings → AI providers. */
+  sortReady: boolean;
   /** The project's scripts: reusable steps a "Run a script" zone runs with no AI. */
   scripts: { name: string; about: string; body: string; timeoutMinutes: number; version: number; savedBy: string; savedAt: string; usedHere: string[] }[];
   start: string;
