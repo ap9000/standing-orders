@@ -7,7 +7,7 @@
  * it now stands, and the canvas refreshes every few seconds for everyone. */
 import { Background, BackgroundVariant, Controls, Handle, MarkerType, NodeResizer, Position, ReactFlow, ReactFlowProvider, applyNodeChanges, useReactFlow, type Connection, type Edge, type Node, type NodeChange, type NodeProps } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Flag, Hammer, Inbox, Megaphone, Pencil, Plus, Search, UserCheck, X } from "lucide-react";
+import { Flag, Hammer, Inbox, Megaphone, MessageSquare, Pencil, Plus, Search, UserCheck, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { BrowserFlowCard, BrowserFlowStage, BrowserFlowView } from "../../browser-workspace.js";
 import { Badge, Button, Input, Label, Textarea, cn, toast } from "../components/ui/index.js";
@@ -372,6 +372,7 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
             <Button size="sm" onClick={() => void save()} disabled={!dirty || saving}>{saving ? "Saving…" : "Save flow"}</Button>
           </>
         : <>
+            {view.canEdit && <Button size="sm" variant="ghost" asChild><a href={view.chatHref}><MessageSquare className="size-4" />Change in chat</a></Button>}
             {view.canEdit && <Button size="sm" variant="outline" onClick={startEditing}><Pencil className="size-4" />Edit flow</Button>}
             {view.canEdit && <Button size="sm" onClick={() => { setSelected(null); setAdding(true); }}><Plus className="size-4" />New card</Button>}
           </>}
@@ -412,7 +413,7 @@ function PhoneFlow({ view: initial, csrf }: { view: BrowserFlowView; csrf: strin
   const card = open === null ? null : view.cards.find(one => one.id === open) ?? null;
   if (card !== null) return <div className="p-4"><CardPanel card={card} view={view} csrf={csrf} apply={apply} onClose={() => setOpen(null)} /></div>;
   return <div className="flex flex-col gap-3 p-4" data-flow={view.flow.id}>
-    <div><h1 className="text-[17px] font-semibold">{view.flow.name}</h1><p className="text-[12px] text-muted-foreground">{view.flow.project} · edit the flow on a larger screen</p></div>
+    <div><h1 className="text-[17px] font-semibold">{view.flow.name}</h1><p className="text-[12px] text-muted-foreground">{view.flow.project}{view.canEdit ? <> · <a className="underline" href={view.chatHref}>change it in chat</a>, or edit it on a larger screen</> : null}</p></div>
     {view.canEdit && <details className="rounded-lg border p-3"><summary className="cursor-pointer text-[14px] font-semibold">New card</summary><div className="pt-3"><NewCard view={view} csrf={csrf} apply={apply} /></div></details>}
     {flowOrder(view.stages, view.start).map(stage => {
       const cards = view.cards.filter(one => one.stage === stage.id && one.state === "active");

@@ -20,7 +20,7 @@ import { changeSkills, githubSkill, importSkill, readSkillsSnapshot, reviseSkill
 import { skillsHtml, skillsScript, skillsSnapshotHtml, skillTestFeedbackHtml, SKILLS_CSS } from "./skills-ui.js";
 import { toolsHtml, TOOLS_CSS, type ToolsView } from "./tools-ui.js";
 import { flowFallbackHtml, flowsListHtml, flowView, FLOWS_CSS } from "./flows-ui.js";
-import { advanceFlows, decideFlowCard, flowDefinitionOf } from "./flow-engine.js";
+import { addCardToFlow, advanceFlows, cancelFlowCard, decideFlowCard, FLOW_HREF, flowDefinitionOf, moveCardInFlow } from "./flow-engine.js";
 import { FLOW_TEMPLATES, validateFlowDefinition } from "./flows.js";
 import { TOOL_CATALOG, addToolTo, catalogTool, discoverTools, projectToolsOf, removeToolFrom, secretsSetFor, setToolSecret, splitCommandLine, testToolOf, type ToolSpec } from "./project-tools.js";
 import { changeLearning, learningView } from "./project-learning.js";
@@ -5371,25 +5371,16 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       if (definition === null) return answer(409, { ok: false, said: "This flow's drawing can't be read. Save it again from the editor." });
       if (action === "cards") {
-        const title = (body.get("title") ?? "").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 200);
-        const description = (body.get("description") ?? "").trim().slice(0, 4000) || null;
-        if (title === "") return answer(400, { ok: false, said: "Give the card a title." });
-        if (scanForSecrets(`${title}\n${description ?? ""}`).length > 0) return answer(400, { ok: false, said: "That looks like a key or password. Cards become agent instructions; keep secrets out of them." });
-        const stage = definition.stages.some(one => one.id === body.get("stage")) ? body.get("stage")! : definition.start;
-        store.addFlowCard({ flow: flow.id, title, description, stage, by: who.name }, now);
-        return settle("Card added.");
+        const added = addCardToFlow(store, flow, { title: body.get("title"), description: body.get("description"), stage: body.get("stage") }, who.name, now);
+        return added.ok ? settle("Card added.") : answer(400, { ok: false, said: added.message });
       }
       const target = store.getFlowCard(Number(flowPost![2]));
       if (target === null || target.flow !== flow.id) return answer(404, { ok: false, said: "That card isn't in this flow." });
       const verb = flowPost![3];
       if (verb === "move") {
-        const to = body.get("stage") ?? "";
-        if (!definition.stages.some(one => one.id === to)) return answer(400, { ok: false, said: "Choose a zone in this flow." });
-        if (target.state !== "active") return answer(409, { ok: false, said: "That card is finished." });
-        if (to === target.stage) return answer(200, { ok: true, said: "Already there." });
-        store.moveFlowCard(target.id, { to, outcome: "moved", actor: who.name }, now);
-        const title = definition.stages.find(one => one.id === to)!.title;
-        return settle(`Moved to ${title}${/[.?!]$/.test(title) ? "" : "."}`);
+        if (!definition.stages.some(one => one.id === body.get("stage"))) return answer(400, { ok: false, said: "Choose a zone in this flow." });
+        const moved = moveCardInFlow(store, target, body.get("stage") ?? "", who.name, now);
+        return !moved.ok ? answer(409, { ok: false, said: moved.message }) : moved.said === "Already there." ? answer(200, { ok: true, said: moved.said }) : settle(moved.said);
       }
       if (verb === "decide") {
         const decision = body.get("decision") === "approve" ? "approve" : body.get("decision") === "send-back" ? "send-back" : null;
@@ -5399,10 +5390,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         return decided.ok ? settle(decided.said) : answer(409, { ok: false, said: decided.message });
       }
       if (verb === "cancel") {
-        if (target.state !== "active") return answer(409, { ok: false, said: "That card is already finished." });
-        store.moveFlowCard(target.id, { to: target.stage, outcome: "cancelled", actor: who.name }, now);
-        store.updateFlowCard(target.id, { state: "cancelled", waiting: null }, now);
-        return settle("Card cancelled. Its tasks are unchanged.");
+        const cancelled = cancelFlowCard(store, target, who.name, now);
+        return cancelled.ok ? settle(cancelled.said) : answer(409, { ok: false, said: cancelled.message });
       }
       return answer(404, { ok: false, said: "No such flow action." });
     }
@@ -15091,8 +15080,9 @@ function proposalCardParts(view: ProposalCardView, csrf: string, inert: boolean,
   } else {
     what = `<h3>Cancel <a href="${taskHref(task)}">${escape(task)}</a></h3><p class="proposal-summary">${escape(text("reason"))}</p>` + facts(["project", `<span class="mono">${escape(repoId)}</span>`]);
   }
-  const outcome = view.outcome as { said?: unknown; taskId?: unknown } | null;
+  const outcome = view.outcome as { said?: unknown; taskId?: unknown; href?: unknown } | null;
   const said = outcome !== null && typeof outcome.said === "string" ? outcome.said : null;
+  const flowHref = view.state === "confirmed" && outcome !== null && typeof outcome.href === "string" && FLOW_HREF.test(outcome.href) ? outcome.href : null;
   const irreversible = view.kind === "answer" && payload["reversible"] === false;
   const provenance = view.by.mate ? "mate" : `${escape(view.by.name)} · ${escape(view.by.ago)}`;
   const returnField = returnTo === null ? "" : `<input type="hidden" name="return" value="${escape(returnTo)}">`;
@@ -15121,6 +15111,7 @@ function proposalCardParts(view: ProposalCardView, csrf: string, inert: boolean,
       ((view.kind === "scope" || view.kind === "agents" || (view.kind === "review" && text("operation") === "revise")) && filed !== null
         ? ` — <a href="${taskChatHref(filed)}#task-chat-action">review & start in chat</a>`
         : "") +
+      (flowHref === null ? "" : ` — <a href="${escape(flowHref)}">open the flow</a>`) +
       `</p>` +
       // The created task, by its recorded id (package 2): one clear road
       // into its lens — the same conversation, focused — and the overview.
@@ -15154,7 +15145,10 @@ function proposalCardParts(view: ProposalCardView, csrf: string, inert: boolean,
   const card: BrowserActionCard = {
     id: view.id, kind: view.kind, label: presentation.label, state: view.state as BrowserActionCard["state"], body: what,
     said: view.state === "confirmed" || view.state === "refused" ? said : null,
-    links: view.state !== "confirmed" || filedTask === null ? [] : [{ label: view.kind === "task" ? "Open the new task" : "Open the task", href: taskHref(filedTask) }],
+    links: view.state !== "confirmed" ? [] : [
+      ...(filedTask === null ? [] : [{ label: view.kind === "task" ? "Open the new task" : "Open the task", href: taskHref(filedTask) }]),
+      ...(flowHref === null ? [] : [{ label: "Open the flow", href: flowHref }]),
+    ],
     primary,
     dismissable: pending && view.kind !== "control",
     note: view.state === "pending" && inert ? "Available when the current reply finishes."

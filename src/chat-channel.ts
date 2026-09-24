@@ -1,4 +1,5 @@
 /** Shared membership-chat identity, proposal previews and result links. Transport adapters never grant authority. */
+import { FLOW_HREF } from "./flow-engine.js";
 import { createHash } from "node:crypto";
 import {
   sharedActionPayload,
@@ -341,6 +342,8 @@ export function confirmedLink(
   proposal: MateProposal,
   repos: readonly string[],
 ): PhoneLink | null {
+  // A flow change opens its canvas, the card selected.
+  if (outcome.ok && proposal.kind === "action" && typeof outcome.href === "string" && FLOW_HREF.test(outcome.href)) return { label: "Open the flow", path: outcome.href };
   if (!outcome.ok || outcome.taskId === null) return null;
   if (
     proposal.kind === "action" &&
@@ -702,6 +705,8 @@ export const CHAT_ACTION_PARITY: Record<
   get_check_log: { support: "direct", how: "Read during a turn: the end of the exact result's check log, a page of it, or the lines matching a search.", gap: null },
   get_project_tools: { support: "direct", how: "Read during a turn: a project's tools, the common tools list and servers found on the computer. Adding one is a secure-review card; secrets are set only on the console's Tools page.", gap: null },
   get_task_conversation: { support: "direct", how: "Read during a turn: what the person and the lead said in one task's own chat, including what was confirmed there.", gap: null },
+  get_flows: { support: "direct", how: "Read during a turn: a person's flows, each one's steps in order and its cards — where each card is, what it waits on and whether it needs them.", gap: null },
+  propose_flow: { support: "direct", how: "Creates or changes a flow and adds, moves, approves, sends back or cancels its cards through the shared confirm door; a long drawing opens the secure review. Work a card files is an ordinary task under the usual approvals.", gap: "The flow canvas itself is on the console; the phone confirms cards but draws nothing." },
   search_project_memory: { support: "direct", how: "Read during a turn: one search over decisions, references, lessons and the conversations the person may read.", gap: null },
   list_tasks: { support: "direct", how: "Read during a turn.", gap: null },
   get_task: {

@@ -105,7 +105,9 @@ failed when a result is marked complete.
   runs its step: build and research zones file ordinary tasks, so every
   approval, check and agent fence still applies; decision zones wait for a
   named person; a send back becomes a revision of the same work. The engine
-  is model-free and runs in the worker's pass.
+  is model-free and runs in the worker's pass. Or describe the process in
+  chat: the lead drafts the flow, and adds, moves or decides cards, as
+  cards you confirm from the console or your phone.
 - **Unified portfolio chat.** Read every project, prioritize queues, answer
   decisions, repair failed or cancelled dependencies, and confirm rich action
   cards from one conversation. The chat proposes; durable workflow state

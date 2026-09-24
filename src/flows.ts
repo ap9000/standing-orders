@@ -130,6 +130,150 @@ export function fillFlowText(template: string, card: { title: string; descriptio
   }).trim();
 }
 
+/** A step as the lead describes it, in list order. A step that keeps an
+ * existing zone (by `id`) carries over whatever it leaves out. */
+export type FlowStepInput = {
+  id?: string; title?: string; kind?: FlowStageKind;
+  instructions?: string; planning?: "auto" | "required" | "skip"; decider?: string | null; message?: string;
+  next?: string; ifFails?: string;
+};
+
+const KIND_COLORS: Record<FlowStageKind, FlowColor> = { inbox: "slate", task: "blue", report: "violet", approval: "amber", notify: "green", done: "green" };
+const slugOf = (title: string) => title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 28) || "zone";
+const overlaps = (a: FlowZone, b: FlowZone) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+
+/** What an agent is asked when the steps leave it out: the card, any send-back note, and every earlier research step's report. */
+function defaultInstructions(kind: "task" | "report", earlier: readonly FlowStage[]): string {
+  const notes = earlier.filter(one => one.kind === "report").map(one => `\n\nNotes from ${one.title}:\n{{stage.${one.id}}}`).join("");
+  return kind === "task"
+    ? `{{card.title}}\n\n{{card.description}}${notes}\n\nChanges asked for (if any): {{note}}`
+    : `Investigate this and write a short, clear report with a summary first: {{card.title}}\n\n{{card.description}}${notes}\n\nFeedback to address (if any): {{note}}`;
+}
+
+/**
+ * A flow from an ordered list of steps: ids from names, each step leading
+ * to the next, a Done zone at the end when none is listed, and a decision
+ * sending work back to the nearest earlier step that does work. New zones
+ * are laid out in rows; zones kept from `previous` keep their place.
+ */
+export function flowFromSteps(input: unknown, previous: FlowDefinition | null = null): FlowDefinition {
+  if (!Array.isArray(input) || input.length === 0) throw new Error("List the flow's steps in order.");
+  if (input.length > 24) throw new Error("A flow has 1 to 24 steps.");
+  const kept = new Map((previous?.stages ?? []).map(one => [one.id, one]));
+  const used = new Set<string>();
+  const drafts = input.map((raw, index) => {
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`Step ${index + 1} isn't a step.`);
+    const step = raw as FlowStepInput;
+    const old = typeof step.id === "string" && !used.has(step.id) ? kept.get(step.id) ?? null : null;
+    const title = typeof step.title === "string" && step.title.trim() !== "" ? step.title.trim() : old?.title ?? "";
+    if (title === "") throw new Error(`Step ${index + 1} needs a name.`);
+    const kind = step.kind ?? old?.kind;
+    if (!FLOW_STAGE_KINDS.includes(kind as FlowStageKind)) throw new Error(`Step ${title}: choose what it does.`);
+    let id = old?.id ?? slugOf(title);
+    for (let n = 2; old === null && used.has(id); n++) id = `${slugOf(title).slice(0, 25)}-${n}`;
+    used.add(id);
+    const same = old !== null && old.kind === kind;
+    return { step, old: same ? old : null, id, title, kind: kind as FlowStageKind };
+  });
+  if (!drafts.some(one => one.kind === "done")) {
+    let id = "done";
+    for (let n = 2; used.has(id); n++) id = `done-${n}`;
+    drafts.push({ step: {}, old: kept.get(id)?.kind === "done" ? kept.get(id)! : null, id, title: "Done", kind: "done" });
+  }
+  const find = (ref: string, from: string): string => {
+    const wanted = ref.trim().toLowerCase();
+    const hit = drafts.find(one => one.id === ref.trim() || one.title.toLowerCase() === wanted);
+    if (hit === undefined) throw new Error(`Step ${from}: there's no step called ${ref}.`);
+    return hit.id;
+  };
+  const stages: FlowStage[] = [];
+  drafts.forEach(({ step, old, id, title, kind }, index) => {
+    const earlier = stages.slice();
+    const following = drafts.slice(index + 1).find(() => true) ?? null;
+    const next = kind === "done" ? null
+      : typeof step.next === "string" && step.next.trim() !== "" ? find(step.next, title)
+      : following?.id ?? drafts.find(one => one.kind === "done")!.id;
+    const keptFail = old?.onFail !== null && old?.onFail !== undefined && drafts.some(one => one.id === old.onFail) ? old.onFail : null;
+    const worker = [...earlier].reverse().find(one => one.kind === "task" || one.kind === "report");
+    const onFail = kind === "done" ? null
+      : typeof step.ifFails === "string" && step.ifFails.trim() !== "" ? find(step.ifFails, title)
+      : keptFail ?? (kind === "approval" ? worker?.id ?? (drafts[0]!.id === id ? null : drafts[0]!.id) : null);
+    const approver = kind !== "approval" ? null
+      : step.decider === undefined ? old?.approver ?? null
+      : step.decider === null || /^(anyone|any approver|anybody)$/i.test(step.decider.trim()) ? null : step.decider.trim();
+    stages.push({
+      id, title, kind,
+      zone: old?.zone ?? { x: 0, y: 0, w: 260, h: kind === "done" || kind === "notify" ? 220 : 300, color: KIND_COLORS[kind] },
+      // A kept step on our default instructions gets the default again, so it reads any research step added before it.
+      instructions: kind === "task" || kind === "report"
+        ? step.instructions?.trim() || (old?.instructions && old.instructions !== defaultInstructions(kind, previous!.stages.slice(0, previous!.stages.indexOf(old))) ? old.instructions : defaultInstructions(kind, earlier))
+        : null,
+      planning: kind === "task" ? step.planning ?? old?.planning ?? "auto" : null,
+      approver,
+      message: kind === "notify" ? step.message?.trim() || old?.message || (drafts.find(one => one.id === next)?.kind === "done" ? "Finished: {{card.title}}" : "Update on {{card.title}}") : null,
+      next, onFail,
+    });
+  });
+  // Lay out the new zones: in rows of four on a new flow, beside the step before them on an edited one.
+  const placed = stages.filter(one => kept.get(one.id)?.zone === one.zone).map(one => one.zone);
+  stages.forEach((stage, index) => {
+    if (placed.includes(stage.zone)) return;
+    let at: FlowZone;
+    if (previous === null) {
+      const row = Math.floor(index / 4), column = index % 4;
+      at = { ...stage.zone, x: (row % 2 === 0 ? column : 3 - column) * 300, y: row * 380 };
+    } else {
+      const before = index > 0 ? stages[index - 1]!.zone : null;
+      at = { ...stage.zone, x: before === null ? 0 : before.x + 300, y: before === null ? Math.max(0, ...placed.map(one => one.y + one.h + 80)) : before.y };
+      for (let tries = 0; tries < 40 && placed.some(one => overlaps(one, at)); tries++) at = { ...at, y: at.y + 380 };
+    }
+    stage.zone = at;
+    placed.push(at);
+  });
+  return validateFlowDefinition({ version: 1, start: stages[0]!.id, stages });
+}
+
+/** What confirming a new or changed flow means, in the canvas's words: each step's job and path, what changed, and that the usual approvals still apply. */
+export function flowTerms(definition: FlowDefinition, previous: FlowDefinition | null): string[] {
+  const titleOf = (id: string | null) => definition.stages.find(one => one.id === id)?.title ?? "nowhere";
+  // "Then → Go ahead?" ends a sentence already.
+  const to = (id: string | null) => { const title = titleOf(id); return /[.?!]$/.test(title) ? title : `${title}.`; };
+  // Fill-ins read as what they will hold.
+  const plain = (text: string) => text.replace(/\{\{\s*(card\.title|card\.description|note|stage\.([a-z0-9-]+))\s*\}\}/g, (_match, key: string, stage: string | undefined) =>
+    key === "card.title" ? "[card title]" : key === "card.description" ? "[card details]" : key === "note" ? "[send-back note]" : `[${titleOf(stage ?? null)} report]`);
+  const same = (a: FlowStage, b: FlowStage) => JSON.stringify({ ...a, zone: null }) === JSON.stringify({ ...b, zone: null });
+  const describe = (stage: FlowStage, index: number, mark: string): string => {
+    const lines = [`${index + 1}. ${stage.title} — ${FLOW_KIND_WORDS[stage.kind].label}${mark}`];
+    if (stage.kind === "task" || stage.kind === "report") {
+      // Instructions the steps left to us are said in words; the operator's own are shown as written.
+      const earlier = definition.stages.slice(0, index);
+      const reports = earlier.filter(one => one.kind === "report").map(one => one.title);
+      const notes = reports.length === 0 ? "" : `, using the notes from ${reports.join(" and ")}`;
+      lines.push(stage.instructions !== defaultInstructions(stage.kind, earlier) ? `The agent is asked: ${plain(stage.instructions ?? "")}`
+        : stage.kind === "task" ? `The agent builds what the card asks${notes}, plus any note it was sent back with.`
+        : `The agent looks into the card and writes a short report${notes}, plus any note it was sent back with.`);
+    }
+    if (stage.kind === "task" && stage.planning !== "auto") lines.push(stage.planning === "required" ? "Plans first." : "Builds without a plan.");
+    if (stage.kind === "approval") lines.push(`Decides: ${stage.approver ?? "anyone who approves on this project"}. Approve → ${to(stage.next)} Send back → ${stage.onFail === null ? "not possible." : to(stage.onFail)}`);
+    else if (stage.kind === "notify") lines.push(`Posts: ${plain(stage.message ?? "")}`, `Then → ${to(stage.next)}`);
+    else if (stage.next !== null) lines.push(`Then → ${to(stage.next)}${stage.onFail === null ? "" : ` If it fails → ${to(stage.onFail)}`}`);
+    return lines.join("\n");
+  };
+  const terms: string[] = [];
+  if (previous === null) terms.push(...definition.stages.map((stage, index) => describe(stage, index, "")));
+  else {
+    terms.push(`Steps: ${definition.stages.map(one => one.title).join(" → ")}`);
+    definition.stages.forEach((stage, index) => {
+      const old = previous.stages.find(one => one.id === stage.id);
+      if (old === undefined || !same(old, stage)) terms.push(describe(stage, index, old === undefined ? " (new)" : " (changed)"));
+    });
+    const removed = previous.stages.filter(one => !definition.stages.some(stage => stage.id === one.id));
+    if (removed.length > 0) terms.push(`Removes ${removed.map(one => one.title).join(", ")}. Any cards there go back to ${titleOf(definition.start)}.`);
+  }
+  terms.push("Build and research steps become ordinary tasks, so your usual approvals and checks apply.");
+  return terms;
+}
+
 const zone = (x: number, y: number, color: FlowColor, h = 300): FlowZone => ({ x, y, w: 260, h, color });
 const stage = (id: string, title: string, kind: FlowStageKind, at: FlowZone, rest: Partial<FlowStage> = {}): FlowStage =>
   ({ id, title, kind, zone: at, instructions: null, planning: kind === "task" ? "auto" : null, approver: null, message: null, next: null, onFail: null, ...rest });

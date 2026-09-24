@@ -13,6 +13,7 @@ export const CHAT_CONTROLS = {
   projects: { label: "Manage projects", href: "/projects" },
   code: { label: "Open coding workspace", href: "/code" },
   routines: { label: "Manage routines", href: "/routines" },
+  flows: { label: "Open flows", href: "/flows" },
   recipes: { label: "Browse workflows", href: "/recipes" },
   workers: { label: "Manage workers", href: "/fleet" },
   slack: { label: "Manage Slack", href: "/settings/slack" },

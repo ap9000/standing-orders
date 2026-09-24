@@ -37,6 +37,9 @@ import { assignmentOf, checkAssignmentAsOperator } from "./assignment.js";
 import { getDecision, recordDecision, retireDecision } from "./project-memory.js";
 import { resumeTaskStop, taskControlOf } from "./task-control.js";
 import { addToolTo, catalogTool, projectToolsOf, removeToolFrom, toolCommandLine, validateToolSpec, type ToolSpec } from "./project-tools.js";
+import { FLOW_KIND_WORDS, flowDigest, flowTerms, validateFlowDefinition, type FlowDefinition, type FlowStage } from "./flows.js";
+import { addCardToFlow, advanceFlows, cancelFlowCard, decideFlowCard, flowCardHref, flowCardText, flowDefinitionOf, moveCardInFlow } from "./flow-engine.js";
+import type { FlowCardRow, FlowRow } from "./store.js";
 
 /** A tool from the lead's card: a common tool by its id, or the operator's own program or address. */
 function toolSpecFromRequest(input: Record<string, unknown>): ToolSpec {
@@ -83,6 +86,14 @@ export const CHAT_ACTIONS = {
   // A tool runs on this computer for every build the operator approves from now on: the password screen, like an approval.
   tool_add: { label: "Add tool", protected: true, password: true },
   tool_remove: { label: "Remove tool", protected: false, password: false },
+  // Flows: a drawing and cards on it. Any work a card files is an ordinary task under the usual approvals.
+  flow_create: { label: "Create flow", protected: false, password: false },
+  flow_edit: { label: "Save flow", protected: false, password: false },
+  flow_card_add: { label: "Add card", protected: false, password: false },
+  flow_card_move: { label: "Move card", protected: false, password: false },
+  flow_card_approve: { label: "Approve", protected: false, password: false },
+  flow_card_send_back: { label: "Send back", protected: false, password: false },
+  flow_card_cancel: { label: "Cancel card", protected: false, password: false },
   decision_record: { label: "Record decision", protected: false, password: false },
   decision_retire: { label: "Retire decision", protected: false, password: false },
   scope_approve: { label: "Approve work", protected: true, password: true },
@@ -121,6 +132,13 @@ export const CHAT_ACTION_FIELDS: Record<ChatAction, readonly string[]> = {
   knowledge_restore: ["repo", "restore"],
   tool_add: ["repo", "catalog", "name", "command", "args", "url", "secrets", "about"],
   tool_remove: ["repo", "name"],
+  flow_create: ["repo", "name", "definition"],
+  flow_edit: ["flow", "name", "definition"],
+  flow_card_add: ["flow", "title", "description", "zone"],
+  flow_card_move: ["card", "zone"],
+  flow_card_approve: ["card", "note"],
+  flow_card_send_back: ["card", "note"],
+  flow_card_cancel: ["card"],
   decision_record: ["repo", "claim", "why", "supersedes", "source"],
   decision_retire: ["repo", "decision", "reason"],
   scope_approve: ["task"],
@@ -200,6 +218,34 @@ function resultOf(store: Store, task: string, run: number, repo: string) {
     throw Error("This result changed. Review the current result.");
   return current;
 }
+/** The flow (and card) a flow action names; its project decides who may act. */
+function flowTargetOf(store: Store, input: Record<string, unknown>): { flow: FlowRow; definition: FlowDefinition; card: FlowCardRow | null } {
+  const card = input["card"] === undefined ? null : store.getFlowCard(integer(input, "card"));
+  if (input["card"] !== undefined && (card === null || card.state !== "active")) throw Error("That card isn't active in a flow any more.");
+  const flow = store.getFlow(card?.flow ?? integer(input, "flow"));
+  const definition = flow === null ? null : flowDefinitionOf(flow);
+  if (flow === null || flow.state !== "active") throw Error("That flow isn't in your projects.");
+  if (definition === null) throw Error("This flow's drawing can't be read. Save it again on its canvas.");
+  return { flow, definition, card };
+}
+/** A zone named by id or by its title. */
+function flowZoneOf(definition: FlowDefinition, input: Record<string, unknown>, fallback: string | null): FlowStage {
+  const named = input["zone"] === undefined ? fallback : text(input, "zone", 60).trim();
+  const stage = named === null ? undefined : definition.stages.find(one => one.id === named || one.title.toLowerCase() === named.toLowerCase());
+  if (stage === undefined) throw Error(`This flow has no zone called ${named}.`);
+  return stage;
+}
+/** A flow drawing from chat: whole, keyless, plain, and every named decider can decide on the project. */
+function flowDrawingOf(store: Store, input: Record<string, unknown>, repo: string): FlowDefinition {
+  const definition = validateFlowDefinition(input["definition"]);
+  const words = JSON.stringify(definition);
+  if (scanForSecrets(words).length > 0 || /[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufffd]/.test(words)) throw Error("Check the steps. Credentials cannot be included in chat actions.");
+  for (const stage of definition.stages)
+    if (stage.approver !== null && !(store.listApprovers().some(one => one.name === stage.approver) && store.accountCanAccess(stage.approver, repo)))
+      throw Error(`No one called ${stage.approver} can approve on this project. Name someone who can, or let anyone who approves decide.`);
+  return definition;
+}
+const quoted = (value: string) => `“${value}”`;
 /** No writes, including at preview. Store-derived snapshots are never accepted
  * from a model. Rebuilding the same request before execution catches changes. */
 export function prepareSharedAction(
@@ -215,11 +261,12 @@ export function prepareSharedAction(
   if (Object.keys(input).some((key) => !allowed.includes(key)))
     throw Error("This action contains an unsupported field.");
   const task =
-    operation.startsWith("skill_") || operation.startsWith("knowledge_") || operation.startsWith("decision_") || operation.startsWith("tool_")
+    operation.startsWith("skill_") || operation.startsWith("knowledge_") || operation.startsWith("decision_") || operation.startsWith("tool_") || operation.startsWith("flow_")
       ? null
       : text(input, "task", 64);
+  const flowTarget = operation.startsWith("flow_") && operation !== "flow_create" ? flowTargetOf(store, input) : null;
   const repo =
-    task === null ? text(input, "repo", 4096) : store.lookupRef(task)?.repo;
+    flowTarget !== null ? flowTarget.flow.repo : task === null ? text(input, "repo", 4096) : store.lookupRef(task)?.repo;
   if (!repo) throw Error("Choose an available project.");
   requireActor(store, who, repo);
   const request = structuredClone(input),
@@ -320,6 +367,71 @@ export function prepareSharedAction(
         throw Error(`${project} has no tool called ${name}.`);
       title = `Remove ${name} from ${project}`;
       terms.push("Builds stop using it right away. Its stored secrets are deleted.");
+    }
+  } else if (operation.startsWith("flow_")) {
+    const project = repo.split(/[\\/]/).filter(Boolean).at(-1) ?? repo;
+    if (operation === "flow_create") {
+      const name = text(input, "name", 80).trim();
+      const definition = flowDrawingOf(store, input, repo);
+      request["name"] = name;
+      request["definition"] = definition;
+      state = {};
+      title = `Create the ${name} flow in ${project}`;
+      terms.push(...flowTerms(definition, null));
+    } else if (operation === "flow_edit") {
+      const { flow, definition: before } = flowTarget!;
+      const name = input["name"] === undefined ? flow.name : text(input, "name", 80).trim();
+      const definition = input["definition"] === undefined ? before : flowDrawingOf(store, input, repo);
+      const redrawn = flowDigest(definition) !== flowDigest(before);
+      if (!redrawn && name === flow.name) throw Error("That's the flow as it is now.");
+      Object.assign(request, { name, definition });
+      state = { flow: flow.id, revision: flow.revision };
+      title = `Change the ${flow.name} flow`;
+      if (name !== flow.name) terms.push(`Renames it to ${name}.`);
+      if (redrawn) terms.push(...flowTerms(definition, before));
+    } else if (operation === "flow_card_add") {
+      const { flow, definition } = flowTarget!;
+      const words = flowCardText(input["title"], input["description"]);
+      if ("problem" in words) throw Error(words.problem);
+      const stage = flowZoneOf(definition, input, definition.start);
+      Object.assign(request, { title: words.title, zone: stage.id });
+      if (words.description === null) delete request["description"]; else request["description"] = words.description;
+      state = { flow: flow.id, revision: flow.revision };
+      title = `Add ${quoted(words.title)} to ${flow.name}`;
+      terms.push(words.description === null ? words.title : `${words.title}\n${words.description}`, `Starts in ${stage.title}: ${FLOW_KIND_WORDS[stage.kind].about}`);
+    } else {
+      const { definition, card } = flowTarget!;
+      if (card === null) throw Error("Choose a card from get_flows.");
+      const at = definition.stages.find(one => one.id === card.stage);
+      state = { card: card.id, entry: card.entry, stage: card.stage };
+      if (operation === "flow_card_move") {
+        const stage = flowZoneOf(definition, input, null);
+        if (stage.id === card.stage) throw Error(`It's already in ${stage.title}.`);
+        request["zone"] = stage.id;
+        title = `Move ${quoted(card.title)} to ${stage.title}`;
+        terms.push(`From ${at?.title ?? "its zone"} to ${stage.title}.`, `${stage.title}: ${FLOW_KIND_WORDS[stage.kind].about}`);
+      } else if (operation === "flow_card_cancel") {
+        title = `Take ${quoted(card.title)} out of the flow`;
+        terms.push("The card leaves the flow. Any tasks it filed stay as they are.");
+      } else {
+        if (at?.kind !== "approval") throw Error("That card isn't waiting for a decision.");
+        if (at.approver !== null && at.approver !== who.name) throw Error(`Only ${at.approver} decides here.`);
+        const note = input["note"] === undefined ? "" : text(input, "note", 2000).trim();
+        const titleOf = (id: string | null) => definition.stages.find(one => one.id === id)?.title ?? null;
+        if (operation === "flow_card_approve") {
+          title = `Approve ${quoted(card.title)}`;
+          terms.push(`${at.title}: approved. ${at.next === null ? "The card is done." : `It moves to ${titleOf(at.next)}.`}`);
+          if (note !== "") terms.push(`Note: ${note}`);
+        } else {
+          if (at.onFail === null) throw Error("This step has nowhere to send work back to.");
+          if (note === "") throw Error("Say what should change.");
+          const back = definition.stages.find(one => one.id === at.onFail);
+          title = `Send ${quoted(card.title)} back`;
+          terms.push(`${at.title}: sent back to ${back?.title ?? at.onFail} with this note:\n${note}`);
+          if (back?.kind === "task" && card.primaryTask !== null) terms.push("It already has a result, so the build makes a revision of that same work, with your note.");
+        }
+        if (note === "") delete request["note"]; else request["note"] = note;
+      }
     }
   } else if (operation.startsWith("decision_")) {
     // The staleness fence: the newest decision id and the active count, so a
@@ -662,7 +774,7 @@ export function executeSharedAction(
   now: Date,
   options: SharedActionOptions,
 ):
-  | { ok: true; said: string; taskId: string | null }
+  | { ok: true; said: string; taskId: string | null; href?: string }
   | { ok: false; reason: "needs-confirm" | "stale" | "refused"; said: string } {
   const refuse = (
     reason: "needs-confirm" | "stale" | "refused",
@@ -783,6 +895,10 @@ export function executeSharedAction(
           },
           now,
         );
+      else if (payload.operation.startsWith("flow_")) {
+        const done = runFlowAction(store, payload, actor, who.repos, options.root, now);
+        return { ok: true as const, taskId: null, said: done.said, href: done.href };
+      }
       else if (payload.operation === "tool_add") {
         const added = addToolTo(store, repo, toolSpecFromRequest(req), req["catalog"] === undefined ? "the lead, confirmed by you" : "the common tools list", actor, now);
         if (!added.ok) throw Error(added.message);
@@ -904,4 +1020,44 @@ export function executeSharedAction(
         : "The action could not be completed.",
     );
   }
+}
+
+/** A confirmed flow action, through the same helpers the canvas uses; then
+ * the flow moves what it can right away, as it does after a canvas change. */
+function runFlowAction(store: Store, payload: SharedAction, actor: string, repos: readonly string[], root: string | undefined, now: Date): { said: string; href: string } {
+  const req = payload.request;
+  const settle = (flow: number, said: string, card: number | null) => {
+    const repo = store.getFlow(flow)?.repo;
+    if (repo !== undefined) {
+      try { advanceFlows(store, repo, now, root === undefined ? {} : { evidenceRoot: root }); } catch { /* the next worker pass retries */ }
+    }
+    const after = card === null ? null : store.getFlowCard(card);
+    const filed = after !== null && after.task !== null && after.state === "active" ? " Its step filed a task under your usual approvals." : "";
+    return { said: `${said}${filed}`, href: card === null ? `/flows/${flow}` : flowCardHref(flow, card) };
+  };
+  if (payload.operation === "flow_create") {
+    const id = store.createFlow({ repo: payload.repo, name: String(req["name"]), definitionJson: JSON.stringify(req["definition"]), by: actor }, now);
+    return { said: "Flow created. Add cards to it here or on its canvas.", href: `/flows/${id}` };
+  }
+  if (payload.operation === "flow_edit") {
+    const flow = Number(payload.state["flow"]);
+    if (!store.saveFlow(flow, { name: String(req["name"]), definitionJson: JSON.stringify(req["definition"]), sawRevision: Number(payload.state["revision"]), by: actor }, now))
+      throw Error("Someone changed this flow. Ask for a fresh proposal.");
+    return settle(flow, "Flow saved.", null);
+  }
+  if (payload.operation === "flow_card_add") {
+    const flow = store.getFlow(Number(req["flow"]))!;
+    const added = addCardToFlow(store, flow, { title: req["title"], description: req["description"] ?? null, stage: String(req["zone"]) }, actor, now);
+    if (!added.ok) throw Error(added.message);
+    return settle(flow.id, added.said, added.card);
+  }
+  const card = store.getFlowCard(Number(req["card"]))!;
+  const acted = payload.operation === "flow_card_move" ? moveCardInFlow(store, card, String(req["zone"]), actor, now)
+    : payload.operation === "flow_card_cancel" ? cancelFlowCard(store, card, actor, now)
+    : (() => {
+        const decided = decideFlowCard(store, { card: card.id, decision: payload.operation === "flow_card_approve" ? "approve" : "send-back", note: typeof req["note"] === "string" ? req["note"] : null, actor, repos, ...(root === undefined ? {} : { evidenceRoot: root }) }, now);
+        return decided.ok ? { ok: true as const, said: decided.said, card: card.id } : { ok: false as const, message: decided.message };
+      })();
+  if (!acted.ok) throw Error(acted.message);
+  return settle(card.flow, acted.said, card.id);
 }

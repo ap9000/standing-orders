@@ -29,7 +29,7 @@ import { applyChatTaskAction } from "./chat-task-actions.js";
 export type ProposalKind = MateProposal["kind"];
 
 export type DoorOutcome =
-  | { ok: true; kind: ProposalKind; said: string; taskId: string | null }
+  | { ok: true; kind: ProposalKind; said: string; taskId: string | null; href?: string }
   | { ok: false; kind: ProposalKind | null; reason: DoorRefusal; said: string };
 
 export type DoorRefusal =
