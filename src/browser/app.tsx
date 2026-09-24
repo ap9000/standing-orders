@@ -57,9 +57,20 @@ function canRefreshWorkspace(): boolean { return !document.hidden && navigator.o
 export function useWorkspace(initial: BrowserWorkspace) {
   const [workspace, setWorkspace] = useState(initial);
   const scope = scopeOf(initial);
-  const [draft, setDraft] = useState<ChatDraft>(() => initial.conversation && scope
-    ? restoreDraft(browserStorage(), scope, initial.conversation.requestId, initial.conversation.maxChars)
-    : emptyDraft(""));
+  const [draft, setDraft] = useState<ChatDraft>(() => {
+    const restored = initial.conversation && scope
+      ? restoreDraft(browserStorage(), scope, initial.conversation.requestId, initial.conversation.maxChars)
+      : emptyDraft("");
+    // A link may start a message for the person to finish (?draft=…); a draft they already have wins.
+    const started = initial.conversation ? new URLSearchParams(window.location.search).get("draft") : null;
+    return started && restored.text === "" && restored.pending === null ? { ...restored, text: started.slice(0, initial.conversation!.maxChars) } : restored;
+  });
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has("draft")) return;
+    url.searchParams.delete("draft");
+    window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash);
+  }, []);
   const [notice, setNotice] = useState("");
   const [storageAvailable, setStorageAvailable] = useState(true);
   const [sending, setSending] = useState(false);

@@ -20,7 +20,8 @@ export function flowsListHtml(store: Store, flows: readonly FlowRow[], projects:
     return `<article class="card"><div class="flow-row"><h2><a href="/flows/${flow.id}">${e(flow.name)}</a></h2><span class="flow-counts">${e(projectName(flow.repo))} · ${cards.length} card${cards.length === 1 ? "" : "s"} in progress${waiting > 0 ? ` · ${waiting} waiting for a decision` : ""}</span></div></article>`;
   }).join("");
   const create = canCreate && projects.length > 0 ? `<details class="card"${flows.length === 0 ? " open" : ""}><summary>New flow</summary><form method="post" action="/flows/new"><input type="hidden" name="csrf" value="${e(csrf)}"><label>Name<input name="name" required maxlength="80" placeholder="for example: Bug fixes"></label><label>Project<select name="repo">${projects.map(repo => `<option value="${e(repo)}">${e(projectName(repo))}</option>`).join("")}</select></label><label>Start from<select name="template">${FLOW_TEMPLATES.map(one => `<option value="${e(one.id)}">${e(one.label)}: ${e(one.about)}</option>`).join("")}</select></label><button>Create flow</button></form></details>` : "";
-  const intro = `<p class="meta">A flow is your process drawn as zones. Cards move through them: agents do the work, people approve, and the team hears about it.</p>`;
+  const intro = `<p class="meta">A flow is your process drawn as zones. Cards move through them: agents do the work, people approve, and the team hears about it.</p>` +
+    (canCreate && projects.length > 0 ? `<p class="flow-chat">Describe how work should move and your lead drafts the flow for you to confirm, or start from a template below. <a href="/chat?draft=${encodeURIComponent("Make a flow for ")}">Describe it in chat</a></p>` : "");
   return `<section class="flows">${problem === null ? "" : `<p class="problem" role="alert">${e(problem)}</p>`}${intro}${rows || '<p class="meta">No flows yet.</p>'}${create}</section>`;
 }
 
@@ -58,6 +59,7 @@ export function flowView(store: Store, flow: FlowRow, viewer: { name: string; ap
   return {
     kind: "flow",
     flow: { id: flow.id, name: flow.name, project: projectName(flow.repo), revision: flow.revision, href: `/flows/${flow.id}` },
+    chatHref: `/chat?draft=${encodeURIComponent(`In the ${flow.name} flow, `)}`,
     start: definition?.start ?? stages[0]?.id ?? "",
     stages,
     cards,

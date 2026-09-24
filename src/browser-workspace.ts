@@ -188,6 +188,8 @@ export type BrowserFlowCard = {
 export type BrowserFlowView = {
   kind: "flow";
   flow: { id: number; name: string; project: string; revision: number; href: string };
+  /** Opens the lead's chat with a message about this flow started for the person to finish. */
+  chatHref: string;
   start: string;
   stages: BrowserFlowStage[];
   cards: BrowserFlowCard[];

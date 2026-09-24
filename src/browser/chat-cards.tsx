@@ -83,6 +83,7 @@ export function ActionCards({ cards, csrf, onChanged }: { cards: BrowserActionCa
 export const CHAT_COMMANDS: Record<string, { command: string; hint: string; text: string }[]> = {
   lead: [
     { command: "new", hint: "File a new task", text: "File a task: " },
+    { command: "flow", hint: "Make a flow for how work moves", text: "Make a flow for " },
     { command: "status", hint: "What needs you right now", text: "What needs my attention right now?" },
     { command: "next", hint: "What to work on next", text: "What should we work on next?" },
   ],
@@ -107,6 +108,7 @@ export const CHAT_COMMANDS: Record<string, { command: string; hint: string; text
   ],
   tasks: [
     { command: "new", hint: "File a new task here", text: "File a task: " },
+    { command: "flow", hint: "Make a flow for this project", text: "Make a flow for " },
     { command: "status", hint: "What needs you here", text: "What needs my attention here?" },
     { command: "next", hint: "What to build next", text: "What should we build next?" },
   ],

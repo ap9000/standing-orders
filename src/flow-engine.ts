@@ -8,10 +8,11 @@
 import { assignmentOf } from "./assignment.js";
 import { diagnoseTaskDispatch } from "./dispatch.js";
 import { fillFlowText, validateFlowDefinition, type FlowDefinition, type FlowStage } from "./flows.js";
-import { reportSummaryFor } from "./mate-tools.js";
+import { reportSummaryFor } from "./report-summary.js";
 import { fileTaskProposal } from "./proposal.js";
 import { requestResultChanges } from "./result-actions.js";
 import { revisionSourceOf } from "./result-review.js";
+import { scanForSecrets } from "./evidence.js";
 import type { FlowCardRow, FlowRow, Store } from "./store.js";
 
 export type FlowAdvance = { moved: number; filed: string[]; problems: string[] };
@@ -23,6 +24,8 @@ export function flowDefinitionOf(flow: FlowRow): FlowDefinition | null {
 
 /** Where a card's link opens: the flow's canvas with the card selected. */
 export const flowCardHref = (flow: number, card: number) => `/flows/${flow}?card=${card}`;
+/** Where a confirmed flow action may point: a flow's canvas, maybe with one card open. */
+export const FLOW_HREF = /^\/flows\/[1-9][0-9]{0,9}(\?card=[1-9][0-9]{0,9})?$/;
 
 const ACCEPTANCE = {
   report: [{ id: "c1", statement: "The report answers the request, citing where in the repository each point comes from", how: null, evidence: ["manual-review"] }],
@@ -150,6 +153,50 @@ function workStage(store: Store, flow: FlowRow, stage: FlowStage, card: FlowCard
   const diagnosis = diagnoseTaskDispatch(store, current, now);
   const waiting = diagnosis?.summary ?? "Working on it";
   if (waiting !== card.waiting) store.updateFlowCard(card.id, { waiting }, now);
+}
+
+export type FlowAct = { ok: true; said: string; card: number } | { ok: false; message: string };
+
+const zoneWords = (title: string) => `${title}${/[.?!]$/.test(title) ? "" : "."}`;
+
+/** A card's words, checked once for every door: a title, an optional description, and no keys, because cards become agent instructions. */
+export function flowCardText(title: unknown, description: unknown): { title: string; description: string | null } | { problem: string } {
+  const cleanTitle = (typeof title === "string" ? title : "").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 200);
+  const cleanDescription = (typeof description === "string" ? description : "").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").trim().slice(0, 4000) || null;
+  if (cleanTitle === "") return { problem: "Give the card a title." };
+  if (scanForSecrets(`${cleanTitle}\n${cleanDescription ?? ""}`).length > 0) return { problem: "That looks like a key or password. Cards become agent instructions; keep secrets out of them." };
+  return { title: cleanTitle, description: cleanDescription };
+}
+
+/** Add a card to a flow, in its start zone unless a zone is named. */
+export function addCardToFlow(store: Store, flow: FlowRow, input: { title: unknown; description: unknown; stage: string | null }, actor: string, now: Date): FlowAct {
+  const definition = flowDefinitionOf(flow);
+  if (definition === null || flow.state !== "active") return { ok: false, message: "This flow can't take cards right now." };
+  const text = flowCardText(input.title, input.description);
+  if ("problem" in text) return { ok: false, message: text.problem };
+  const stage = definition.stages.find(one => one.id === input.stage) ?? definition.stages.find(one => one.id === definition.start)!;
+  const card = store.addFlowCard({ flow: flow.id, title: text.title, description: text.description, stage: stage.id, by: actor }, now);
+  return { ok: true, said: `Card added to ${zoneWords(stage.title)}`, card };
+}
+
+/** Move a card to another zone of its flow by hand; the zone's step runs on the next pass. */
+export function moveCardInFlow(store: Store, card: FlowCardRow, to: string, actor: string, now: Date): FlowAct {
+  const flow = store.getFlow(card.flow);
+  const definition = flow === null ? null : flowDefinitionOf(flow);
+  const stage = definition?.stages.find(one => one.id === to);
+  if (stage === undefined) return { ok: false, message: "Choose a zone in this flow." };
+  if (card.state !== "active") return { ok: false, message: "That card is finished." };
+  if (to === card.stage) return { ok: true, said: "Already there.", card: card.id };
+  if (!store.moveFlowCard(card.id, { to, outcome: "moved", actor, expectEntry: card.entry }, now)) return { ok: false, message: "That card just moved. Look again." };
+  return { ok: true, said: `Moved to ${zoneWords(stage.title)}`, card: card.id };
+}
+
+/** Take a card out of its flow; the tasks it filed are left as they are. */
+export function cancelFlowCard(store: Store, card: FlowCardRow, actor: string, now: Date): FlowAct {
+  if (card.state !== "active") return { ok: false, message: "That card is already finished." };
+  store.moveFlowCard(card.id, { to: card.stage, outcome: "cancelled", actor }, now);
+  store.updateFlowCard(card.id, { state: "cancelled", waiting: null }, now);
+  return { ok: true, said: "Card cancelled. Its tasks are unchanged.", card: card.id };
 }
 
 export type FlowDecision = { ok: true; said: string } | { ok: false; message: string };

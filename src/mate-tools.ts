@@ -41,6 +41,9 @@ import { isNewModel, modelWords, priceWords, runtimeStates, seenModels } from ".
 import { agentsSummary, chosenWords, isRiskLevel, PHASES, postureWords, RISK_CHOICES, riskConsequence, riskTitle, routeProblems, sameSpec, specWords, type PhaseRoute } from "./phase-routing.js";
 import type { Phase } from "./provider.js";
 import { TOOL_CATALOG, discoverTools, projectToolsOf, secretsSetFor, toolCommandLine, toolStanding, type FoundTool } from "./project-tools.js";
+import { FLOW_KIND_WORDS, FLOW_STAGE_KINDS, FLOW_TEMPLATES, flowFromSteps, type FlowDefinition, type FlowStepInput } from "./flows.js";
+import { flowDefinitionOf } from "./flow-engine.js";
+import type { ChatAction } from "./chat-actions.js";
 
 export const MATE_MAX_PROPOSALS_PER_TURN = 5;
 
@@ -66,20 +69,8 @@ export type MateToolContext = {
 
 export type MateToolResult = { ok: true; body: unknown } | { ok: false; message: string };
 
-/** The report a scout delivered, for get_task: title, summary, follow-ups —
- * verified before it is read; the document itself stays on the task page. */
-export function reportSummaryFor(
-  store: Store,
-  evidenceRoot: string | undefined,
-  taskRef: number,
-): { title: string; summary: string; followUps: { title: string; goal: string }[] } | { problem: string } | null {
-  if (store.latestReportArtifact(taskRef) === null) return null;
-  if (evidenceRoot === undefined) return { problem: "a report exists, but this surface cannot read evidence" };
-  const view = readVerifiedReport(store, evidenceRoot, taskRef);
-  if (view === null) return null;
-  if (!view.ok) return { problem: view.problem };
-  return { title: view.report.title, summary: view.report.summary, followUps: view.report.followUps };
-}
+export { reportSummaryFor } from "./report-summary.js";
+import { reportSummaryFor } from "./report-summary.js";
 
 const REPO_ID = /^r[0-9]{1,3}$/;
 const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -460,14 +451,15 @@ export const MATE_TOOLS: MateTool[] = [
     name: "get_actions",
     description: "List shared actions and required inputs. All channels use the same approvals.",
     inputSchema: schema({}),
-    handle: () => ({ok:true,body:{actions:Object.entries(CHAT_ACTIONS).map(([operation,value])=>({operation,label:value.label,secureReview:value.protected,inputs:CHAT_ACTION_FIELDS[operation as keyof typeof CHAT_ACTIONS].filter(field=>field!=='nonce'&&field!=='files')})),notice:'Passwords and credentials never belong in a tool call or conversation. Secure review links complete protected actions.'}}),
+    handle: () => ({ok:true,body:{actions:Object.entries(CHAT_ACTIONS).filter(([operation])=>!operation.startsWith('flow_')).map(([operation,value])=>({operation,label:value.label,secureReview:value.protected,inputs:CHAT_ACTION_FIELDS[operation as keyof typeof CHAT_ACTIONS].filter(field=>field!=='nonce'&&field!=='files')})),notice:'Passwords and credentials never belong in a tool call or conversation. Secure review links complete protected actions.'}}),
   },
   {
     name: "propose_action",
     description: "Read get_actions and relevant skills/evidence first. Save an exact-state proposal only; protected or long terms require full secure review.",
-    inputSchema: schema({operation:{type:'string',enum:Object.keys(CHAT_ACTIONS)},repo:{type:'string'},task:TASK_ARG,version:{type:'string'},restore:{type:'integer',minimum:1},sample:{type:'string',maxLength:800},content:{type:'string',maxLength:12000},instructions:{type:'string',maxLength:4000},title:{type:'string',maxLength:120},id:{type:'string'},run:{type:'integer',minimum:1},note:{type:'string',maxLength:2000},catalog:{type:'string',maxLength:40},name:{type:'string',maxLength:40},command:{type:'string',maxLength:400},args:{type:'array',items:{type:'string',maxLength:400},maxItems:40},url:{type:'string',maxLength:500},secrets:{type:'array',items:{type:'string',maxLength:64},maxItems:12},about:{type:'string',maxLength:240}},['operation']),
+    inputSchema: schema({operation:{type:'string',enum:Object.keys(CHAT_ACTIONS).filter(one=>!one.startsWith('flow_'))},repo:{type:'string'},task:TASK_ARG,version:{type:'string'},restore:{type:'integer',minimum:1},sample:{type:'string',maxLength:800},content:{type:'string',maxLength:12000},instructions:{type:'string',maxLength:4000},title:{type:'string',maxLength:120},id:{type:'string'},run:{type:'integer',minimum:1},note:{type:'string',maxLength:2000},catalog:{type:'string',maxLength:40},name:{type:'string',maxLength:40},command:{type:'string',maxLength:400},args:{type:'array',items:{type:'string',maxLength:400},maxItems:40},url:{type:'string',maxLength:500},secrets:{type:'array',items:{type:'string',maxLength:64},maxItems:12},about:{type:'string',maxLength:240}},['operation']),
     handle:(ctx,args)=>{
       const operation=args['operation'];if(!isChatAction(operation))return {ok:false,message:'Choose an action from get_actions.'};
+      if(operation.startsWith('flow_'))return {ok:false,message:'Use propose_flow for flows.'};
       const input={...args};delete input['operation'];
       if(operation.startsWith('skill_')||operation.startsWith('knowledge_')||operation.startsWith('tool_')){
         const repo=repoPathOf(ctx.who,args['repo']);if(repo===null)return {ok:false,message:'Choose a project from list_repos.'};input['repo']=repo;
@@ -505,7 +497,7 @@ export const MATE_TOOLS: MateTool[] = [
     description: "List chat actions and UI controls; links execute nothing.",
     inputSchema: schema({}),
     handle: () => ({ ok: true, body: {
-      confirmedInChat: ["create task", "change scope", "choose agents", "prioritize", "assign worker", "hold", "remove hold", "guide next attempt", "repair dependency", "add or remove dependency", "retry task", "request plan", "stop current attempt", "review resume with password", "answer decision", "save result feedback", "request same-task revision"],
+      confirmedInChat: ["create task", "change scope", "choose agents", "prioritize", "assign worker", "hold", "remove hold", "guide next attempt", "repair dependency", "add or remove dependency", "retry task", "request plan", "stop current attempt", "review resume with password", "answer decision", "save result feedback", "request same-task revision", "create or change a flow", "add, move, approve or send back a flow card"],
       existingControls: Object.entries(CHAT_CONTROLS).map(([id, entry]) => ({ id, label: entry.label, needsTask: "target" in entry, needsProject: id === "skills" || id === "tools" })),
       rule: "Approvals, credentials and dedicated controls retain their existing checks. Never claim a control was used just because its card is shown.",
     } }),
@@ -764,6 +756,121 @@ export const MATE_TOOLS: MateTool[] = [
         foundOnThisComputer: found.filter(one => !names.has(one.spec.name)).map(one => ({ name: one.spec.name, source: one.source })),
         notice: "Never ask for, accept or repeat a secret's value in chat. Name the secret and open the Tools page (show_control tools with this repo).",
       } };
+    },
+  },
+  {
+    name: "get_flows",
+    description: "Read the flows in the operator's projects (each a process drawn as zones that cards move through): their steps in order and their cards — where each card is, what it waits on, whether it needs the operator, its task. flow reads one flow in full.",
+    inputSchema: schema({ repo: REPO_ARG, flow: { type: "integer", minimum: 1 } }),
+    handle: (ctx, args) => {
+      const reachable = (repo: string) => ctx.who.repos.includes(repo) && ctx.store.accountCanAccess(ctx.who.name, repo);
+      const needsYou = (definition: FlowDefinition | null, stage: string) => {
+        const at = definition?.stages.find(one => one.id === stage);
+        return at?.kind === "approval" && (at.approver === null || at.approver === ctx.who.name);
+      };
+      if (args["flow"] !== undefined) {
+        const flow = Number.isSafeInteger(args["flow"]) ? ctx.store.getFlow(Number(args["flow"])) : null;
+        if (flow === null || flow.state !== "active" || !reachable(flow.repo)) return { ok: false, message: "No such flow in your projects." };
+        const definition = flowDefinitionOf(flow);
+        if (definition === null) return { ok: false, message: "This flow's drawing can't be read; it needs saving again on its canvas." };
+        const titleOf = (id: string | null) => definition.stages.find(one => one.id === id)?.title ?? null;
+        const cards = ctx.store.flowCards(flow.id, true);
+        const active = cards.filter(one => one.state === "active"), finished = cards.filter(one => one.state !== "active").slice(-10);
+        return { ok: true, body: {
+          flow: flow.id, name: flow.name, project: repoIdOf(ctx.who, flow.repo),
+          steps: definition.stages.map(stage => ({
+            id: stage.id, title: stage.title, does: FLOW_KIND_WORDS[stage.kind].label, kind: stage.kind,
+            ...(stage.instructions === null ? {} : { instructions: stage.instructions.slice(0, 600) }),
+            ...(stage.kind === "task" ? { planning: stage.planning } : {}),
+            ...(stage.kind === "approval" ? { decider: stage.approver === null ? "anyone who approves" : stage.approver === ctx.who.name ? "you" : "someone else" } : {}),
+            ...(stage.message === null ? {} : { message: stage.message }),
+            next: titleOf(stage.next), ifFails: titleOf(stage.onFail),
+          })),
+          cards: [...active, ...finished].map(card => ({
+            card: card.id, title: card.title, ...(card.description === null ? {} : { description: card.description.slice(0, 300) }),
+            at: titleOf(card.stage) ?? card.stage, state: card.state, needsYou: card.state === "active" && needsYou(definition, card.stage),
+            // Names never reach the model; a decision says whose it is in its own terms.
+            waiting: card.state !== "active" || definition.stages.find(one => one.id === card.stage)?.kind !== "approval" || card.waiting === null ? card.waiting
+              : needsYou(definition, card.stage) ? "Waiting for you to approve or send it back" : "Waiting for someone else to decide",
+            task: card.task ?? card.primaryTask, ...(card.note === null ? {} : { lastNote: card.note.slice(0, 300) }),
+          })),
+          rule: "Change it with propose_flow. Build and research steps file ordinary tasks under the usual approvals.",
+        } };
+      }
+      const repo = args["repo"] === undefined ? null : repoPathOf(ctx.who, args["repo"]);
+      if (args["repo"] !== undefined && repo === null) return { ok: false, message: "Choose a project from list_repos." };
+      const flows = ctx.store.listFlows(repo === null ? ctx.who.repos : [repo]).filter(one => reachable(one.repo)).slice(0, 30);
+      return { ok: true, body: {
+        flows: flows.map(flow => {
+          const definition = flowDefinitionOf(flow);
+          const cards = ctx.store.flowCards(flow.id, false);
+          return { flow: flow.id, name: flow.name, project: repoIdOf(ctx.who, flow.repo), steps: definition === null ? "can't be read" : definition.stages.map(one => one.title).join(" → "),
+            cards: cards.length, needYou: cards.filter(card => needsYou(definition, card.stage)).length };
+        }),
+        templates: FLOW_TEMPLATES.map(one => ({ template: one.id, about: one.about })),
+      } };
+    },
+  },
+  {
+    name: "propose_flow",
+    description: "Draft a flow change as a card the operator confirms. create: a template, or the steps in order (each leads to the next; Done is added; instructions may be left out). edit: the full step list, keeping existing steps by id — what a kept step leaves out carries over. add_card (starts in the first zone unless zone is named), move_card, approve, send_back (needs a note), cancel_card. Read get_flows first except to create.",
+    inputSchema: schema({
+      operation: { type: "string", enum: ["create", "edit", "add_card", "move_card", "approve", "send_back", "cancel_card"] },
+      repo: REPO_ARG, flow: { type: "integer", minimum: 1 }, card: { type: "integer", minimum: 1 },
+      name: { type: "string", maxLength: 80 }, template: { type: "string", enum: FLOW_TEMPLATES.map(one => one.id) },
+      steps: { type: "array", minItems: 1, maxItems: 24, items: { type: "object", additionalProperties: false, properties: {
+        id: { type: "string", maxLength: 32 }, title: { type: "string", maxLength: 60 }, kind: { type: "string", enum: [...FLOW_STAGE_KINDS] },
+        instructions: { type: "string", maxLength: 4000 }, planning: { type: "string", enum: ["auto", "required", "skip"] },
+        decider: { type: "string", maxLength: 64 }, message: { type: "string", maxLength: 1000 },
+        next: { type: "string", maxLength: 60 }, ifFails: { type: "string", maxLength: 60 },
+      } } },
+      title: { type: "string", maxLength: 200 }, description: { type: "string", maxLength: 4000 }, zone: { type: "string", maxLength: 60 }, note: { type: "string", maxLength: 2000 },
+    }, ["operation"]),
+    handle: (ctx, args) => {
+      const pick = (keys: readonly string[]) => Object.fromEntries(keys.filter(key => args[key] !== undefined).map(key => [key, args[key]]));
+      // "me" in a step means the operator; the drawing stores their name.
+      const steps = (): FlowStepInput[] => (Array.isArray(args["steps"]) ? args["steps"] as FlowStepInput[] : []).map(step =>
+        typeof step?.decider === "string" && /^(me|myself|i|you|the operator)$/i.test(step.decider.trim()) ? { ...step, decider: ctx.who.name } : step);
+      const flowOf = () => {
+        const flow = Number.isSafeInteger(args["flow"]) ? ctx.store.getFlow(Number(args["flow"])) : null;
+        return flow !== null && ctx.who.repos.includes(flow.repo) ? flow : null;
+      };
+      let operation: ChatAction, input: Record<string, unknown>;
+      try {
+        switch (args["operation"]) {
+          case "create": {
+            const repo = repoPathOf(ctx.who, args["repo"]);
+            if (repo === null) return { ok: false, message: "Choose a project from list_repos." };
+            if ((args["template"] === undefined) === (args["steps"] === undefined)) return { ok: false, message: "Give a template or the steps, not both." };
+            const template = FLOW_TEMPLATES.find(one => one.id === args["template"]);
+            const name = typeof args["name"] === "string" && args["name"].trim() !== "" ? args["name"].trim() : template?.label;
+            if (name === undefined) return { ok: false, message: "Name the flow." };
+            operation = "flow_create";
+            input = { repo, name, definition: template === undefined ? flowFromSteps(steps(), null) : structuredClone(template.definition) };
+            break;
+          }
+          case "edit": {
+            const flow = flowOf();
+            const before = flow === null ? null : flowDefinitionOf(flow);
+            if (flow === null || before === null) return { ok: false, message: "Choose a flow from get_flows." };
+            if (args["steps"] === undefined && args["name"] === undefined) return { ok: false, message: "Give the new steps, a new name, or both." };
+            operation = "flow_edit";
+            input = { flow: flow.id, ...pick(["name"]), ...(args["steps"] === undefined ? {} : { definition: flowFromSteps(steps(), before) }) };
+            break;
+          }
+          case "add_card": operation = "flow_card_add"; input = pick(["flow", "title", "description", "zone"]); break;
+          case "move_card": operation = "flow_card_move"; input = pick(["card", "zone"]); break;
+          case "approve": operation = "flow_card_approve"; input = pick(["card", "note"]); break;
+          case "send_back": operation = "flow_card_send_back"; input = pick(["card", "note"]); break;
+          case "cancel_card": operation = "flow_card_cancel"; input = pick(["card"]); break;
+          default: return { ok: false, message: "Choose create, edit, add_card, move_card, approve, send_back or cancel_card." };
+        }
+        const action = prepareSharedAction(ctx.store, ctx.who, operation, input, ctx.evidenceRoot, ctx.now);
+        const id = ctx.draft("action", { ...action });
+        return id === null ? tooMany() : { ok: true, body: { proposal: id, label: action.title, awaiting: sharedActionNeedsReview(action) ? "human review in the secure confirmation screen" : "human confirmation", executed: false } };
+      } catch (error) {
+        return { ok: false, message: error instanceof Error ? error.message : "That flow change couldn't be drafted." };
+      }
     },
   },
   {
