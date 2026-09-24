@@ -1040,6 +1040,13 @@ the only module that names an agent binary, and
 `--json` output; the issue forms say what else. Every behavior lands with
 a test — the suite is the specification.
 
+`npm run e2e:flows` checks flows end to end with nothing stubbed: a throwaway
+instance (the real CLI, console and worker) on a scratch repository, driven
+through a real browser, with real Claude turns for the lead and one real
+build. It needs `claude` and `gh` logged in and Playwright's Chromium, takes
+about seven minutes, and writes `report.md`, screenshots and both logs to
+`output/e2e/`.
+
 ## Credits
 
 The workflow this formalizes comes from [Jason Ku's agentic engineering session](https://youtu.be/Ukju3maxbEQ) and his [`agents-md-snippets`](https://github.com/jasonku09/agents-md-snippets), plus Kun Chen's `treehouse`, `no-mistakes`, `gnhf`, `tasks-axi`, and `axi`. The design was reviewed adversarially by Codex; the appendix in `docs/DESIGN.md` lists every claim that review falsified, because the corrections are more useful than a clean spec would have been.

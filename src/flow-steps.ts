@@ -5,8 +5,8 @@
  *            copy of the card's latest result (or the base branch), after the
  *            project's approved setup, with the same bare environment setup
  *            and checks get, plus FLOW_* variables naming the card. Exit 0
- *            passes; anything else takes the failure path. The whole output
- *            is kept as the run's log.
+ *            passes; anything else takes the failure path. The end of its
+ *            output (64 KB, whole lines, keys blanked) is kept as the log.
  * - update — comments on the GitHub or Linear issue the card came from, and
  *            can close it (Linear: moves it to the team's done state), with
  *            the person's own `gh` login and Linear key.
@@ -18,14 +18,13 @@
 import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Runner } from "./backend.js";
-import { approvedCommandShell, SETUP_ENV_ALLOWLIST, SETUP_ENV_DENYLIST } from "./builder.js";
+import { approvedCommandShell, redactSecretAssignments, SETUP_ENV_ALLOWLIST, SETUP_ENV_DENYLIST } from "./builder.js";
 import { assignmentOf } from "./assignment.js";
-import { scanForSecrets } from "./evidence.js";
+import { redactSecretLines, scanForSecrets } from "./evidence.js";
 import { flowDefinitionOf } from "./flow-engine.js";
 import { cardFollowers, notifyPeople } from "./flow-people.js";
 import { LINEAR_URL, readLinearKey } from "./flow-triggers.js";
 import { fillFlowText, type FlowDefinition, type FlowStage } from "./flows.js";
-import { redactSecretText } from "./builder.js";
 import type { FlowCardRow, FlowRow, FlowScriptRow, Store } from "./store.js";
 
 export type StepIo = {
@@ -84,7 +83,7 @@ export async function runFlowSteps(store: Store, repo: string, now: Date, io: St
 /** Record what a step did and move the card: on for a pass, down its failure path for a fail, or wait to try again. */
 function settle(store: Store, definition: FlowDefinition, stage: FlowStage, card: FlowCardRow, outcome: Outcome, now: Date, durationMs: number): void {
   const run = store.flowStepRun(card.id, card.entry);
-  const kept = { log: outcome.log === undefined ? null : redactSecretText(outcome.log).slice(-LOG_CHARS), exitCode: outcome.exitCode ?? null, durationMs };
+  const kept = { log: outcome.log === undefined ? null : keptLog(outcome.log), exitCode: outcome.exitCode ?? null, durationMs };
   if (outcome.state === "retry") {
     const attempts = run?.attempts ?? 1;
     if (attempts <= RETRY_MS.length) {
@@ -109,6 +108,12 @@ function settle(store: Store, definition: FlowDefinition, stage: FlowStage, card
   }
   const people = card.owner === null ? cardFollowers(store, card) : [card.owner];
   notifyPeople(store, card, people, null, { key: `step-failed:${card.entry}`, subject: `${stage.title} didn't pass for “${card.title}”`, body: `${outcome.said}${stage.onFail === null ? "" : `\n\nIt's back in ${titleOf(stage.onFail)}.`}`, attention: true }, now);
+}
+
+/** A run's log: the end of its output in whole lines, where failures show, with key-shaped lines replaced and credential-looking values blanked. */
+function keptLog(text: string): string {
+  const end = text.length <= LOG_CHARS ? text : text.slice(-LOG_CHARS).replace(/^[^\n]*\n/, "");
+  return redactSecretAssignments(redactSecretLines(end, scanForSecrets(end)));
 }
 
 /** The end of a command's output, without anything that looks like a key. */

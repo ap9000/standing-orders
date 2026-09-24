@@ -40,6 +40,10 @@ describe("steps into a drawing", () => {
     expect(() => flowFromSteps([{ title: "Build", kind: "task", next: "Deploy" }], null)).toThrow("Step Build: there's no step called Deploy.");
     expect(() => flowFromSteps([{ title: "Build" }], null)).toThrow("Step Build: choose what it does.");
     expect(() => flowFromSteps([], null)).toThrow("List the flow's steps in order.");
+    // Found end to end: the lead names new steps with its own ids and points at them; those ids are kept.
+    const named = flowFromSteps([{ id: "inbox", title: "New requests", kind: "inbox" }, { id: "build", title: "Build the fix", kind: "task" },
+      { id: "tests", title: "Run unit tests", kind: "check", script: "unit-tests", ifFails: "build" }, { id: "review", title: "Review", kind: "approval", decider: "alex" }], null);
+    expect(named.stages.map(one => [one.id, one.next, one.onFail])).toEqual([["inbox", "build", null], ["build", "tests", null], ["tests", "review", "build"], ["review", "done", "build"], ["done", null, null]]);
     // The card says left-out instructions in words, and the operator's own as written.
     const terms = flowTerms(flow, null);
     expect(terms[3]).toBe("4. Build — Build\nThe agent builds what the card asks, using the notes from Look into it, plus any note it was sent back with.\nThen → Review.");
@@ -106,7 +110,8 @@ describe("the lead builds and runs a flow", () => {
   const confirm = (id: number) => confirmMateProposal(store, who, id, now, { via: "telegram", evidenceRoot: root });
 
   test("create from plain steps, add a card, move it, approve it — each a card the operator confirms — and a stale card is refused", () => {
-    expect(lead("get_flows", {})).toMatchObject({ ok: true, body: { flows: [], templates: FLOW_TEMPLATES.map(one => ({ template: one.id })) } });
+    // With no flows yet, the lead still learns that scripts are the project's and can be saved now.
+    expect(lead("get_flows", {})).toMatchObject({ ok: true, body: { flows: [], templates: FLOW_TEMPLATES.map(one => ({ template: one.id })), scripts: [{ project: "r1", scripts: [] }], rule: expect.stringContaining("even before any flow exists") } });
     // Drawn from plain steps, the operator deciding; short enough to confirm right in the chat.
     const created = proposalOf(lead("propose_flow", { operation: "create", repo: "r1", name: "Bug fixes", steps: [
       { title: "Requests", kind: "inbox" }, { title: "Look into it", kind: "report" }, { title: "Go ahead?", kind: "approval", decider: "me" }, { title: "Build", kind: "task" },

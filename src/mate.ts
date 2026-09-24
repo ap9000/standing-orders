@@ -36,7 +36,8 @@ import {
   subscriptionCredentialKey,
   type MateHistoryMessage,
 } from "./converse.js";
-import { scanForSecrets } from "./evidence.js";
+import { redactSecretLines, scanForSecrets } from "./evidence.js";
+import { redactSecretAssignments } from "./builder.js";
 import { MATE_CONTRACT } from "./mate-contract.js";
 import { MATE_MAX_PROPOSALS_PER_TURN, MATE_TOOL_SCHEMAS, executeMateTool, isMateTool, mateViewContextFor, redactForMate, toolResultBytes } from "./mate-tools.js";
 import type { ReviewSnapshot } from "./chat-review.js";
@@ -466,6 +467,11 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
       progress({ kind: "tool", turn: turnId, step: steps, label: mateToolLabel(call.name) });
       const outcome = executeMateTool({ store, who, now: clock(), draft, selectEvidence, step: steps, readDecisions, readResults, ...(input.evidenceRoot === undefined ? {} : { evidenceRoot: input.evidenceRoot }), ...(input.mediaDelivery === undefined ? {} : { mediaDelivery: input.mediaDelivery }) }, call.name, call.args, view);
       if (READ_TOOLS.has(call.name)) reads++;
+      // Opt-in, local diagnostics for end-to-end runs: what the lead asked of each tool and what came back, keys blanked.
+      if (process.env["STANDING_ORDERS_MATE_TRACE"] === "1") {
+        const blanked = (_: string, value: unknown) => typeof value === "string" ? redactSecretAssignments(redactSecretLines(value, scanForSecrets(value))) : value;
+        process.stderr.write(`mate-trace ${JSON.stringify({ turn: turnId, step: steps, tool: call.name, args: call.args, ok: outcome.ok, ...(outcome.ok ? {} : { message: outcome.message }) }, blanked).slice(0, 4000)}\n`);
+      }
       history.push({ role: "tool", callId: call.id, name: call.name, result: capped(outcome.ok ? outcome.body : { ok: false, message: outcome.message }) });
     }
   }
