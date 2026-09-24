@@ -6,6 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { createHmac } from "node:crypto";
+import { request } from "node:http";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -264,11 +265,21 @@ describe("webhooks", () => {
       const delivered = await fetch(`${base}${hook.body.reveal!.path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title: "Deploy failed on web-2" }) });
       expect(delivered.status).toBe(202);
       expect(await (await fetch(`${base}/hooks/flow/${"x".repeat(32)}`, { method: "POST", body: "{}" })).json()).toEqual({ said: "No such address." });
+      // Through a public relay: its own host name reaches the hooks, and nothing else.
+      const relayed = (path: string, body: string) => new Promise<{ status: number; body: string }>((resolve, reject) => {
+        const sent = request({ host: "127.0.0.1", port: address.port, path, method: "POST", headers: { host: "server.example.ts.net", "content-type": "application/json" } }, answer => {
+          let text = ""; answer.setEncoding("utf8"); answer.on("data", chunk => { text += chunk; }); answer.on("end", () => resolve({ status: answer.statusCode ?? 0, body: text }));
+        });
+        sent.on("error", reject); sent.end(body);
+      });
+      expect(await relayed(hook.body.reveal!.path, JSON.stringify({ title: "Relayed alert" }))).toEqual({ status: 202, body: JSON.stringify({ said: "Added 1 card." }) });
+      expect(await relayed("/hooks/other", "{}")).toEqual({ status: 404, body: JSON.stringify({ said: "No such address." }) });
+      expect((await relayed("/flows/new", "{}")).status).toBe(421);
       const button = await post(`/flows/${flow}/triggers`, { trigger: JSON.stringify({ kind: "button", label: "Report a bug", questions: ["What happened?"] }) });
       const id = button.body.view!.triggers.find(one => one.words.startsWith("The “Report a bug”"))!.id;
       expect(await post(`/flows/${flow}/triggers/${id}/press`, { answers: JSON.stringify(["Search is slow"]) })).toMatchObject({ status: 200, body: { said: "Card added." } });
       expect(await post(`/flows/${flow}/linear-key`, { key: ["lin", "api", "k".repeat(40)].join("_"), password: "wrong" })).toMatchObject({ status: 403 });
-      expect(cards(flow).map(one => one.title)).toEqual(["Deploy failed on web-2", "Search is slow"]);
+      expect(cards(flow).map(one => one.title)).toEqual(["Deploy failed on web-2", "Relayed alert", "Search is slow"]);
       expect(await (await fetch(`${base}/flows`, { headers: { cookie } })).text()).toContain(`href="/flows/${flow}?start=${id}">Report a bug</a>`);
     } finally {
       await new Promise<void>(resolve => server.close(() => resolve()));

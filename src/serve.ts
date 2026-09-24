@@ -837,9 +837,12 @@ export function createDecisionServer(options: ServeOptions): Server {
     return canonical;
   }
 
+  /** Flow webhooks (v82): the one road a public relay may expose. The secret
+   * address proves nothing about the sender on its own for GitHub and Linear:
+   * their signatures are checked too. Nothing runs here; cards wait for a pass. */
   async function flowHook(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
     const reply = (status: number, said: string) => { response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" }); response.end(JSON.stringify({ said })); request.resume(); };
-    if (options.configDir === undefined) return reply(404, "No such address.");
+    if (options.configDir === undefined || !url.pathname.startsWith(HOOK_PATH)) return reply(404, "No such address.");
     if (request.method !== "POST") return reply(405, "Send a POST.");
     if (Number(request.headers["content-length"] ?? 0) > 1_000_000) return reply(413, "Too large.");
     const chunks: Buffer[] = [];
@@ -858,6 +861,12 @@ export function createDecisionServer(options: ServeOptions): Server {
   }
 
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    // Webhooks come through a public relay (Tailscale Funnel, a reverse
+    // proxy) that forwards its own host name. The host check guards pages a
+    // signed-in browser reads; a delivery carries no session and its answer
+    // reveals nothing, so /hooks/ is answered before it, and only there.
+    const hook = new URL(request.url ?? "/", "http://placeholder");
+    if (hook.pathname.startsWith("/hooks/")) return flowHook(request, response, hook);
     if (!allowedHost(request.headers.host)) {
       return respond(response, 421, "text/plain; charset=utf-8", "wrong host");
     }
@@ -873,10 +882,6 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (await sessionEndpoint(request, response)) return;
     if (await teamEndpoint(request, response)) return;
     if (options.configDir !== undefined && await handleTeamsHttp(request, response, { store, dir: options.configDir, ...(options.teamsFetcher ? { fetcher: options.teamsFetcher } : {}), clock })) return;
-    // Flow webhooks (v82): the one road a reverse proxy may expose. The secret
-    // address proves nothing about the sender on its own for GitHub and Linear:
-    // their signatures are checked too. Nothing runs here; cards wait for a pass.
-    if (url.pathname.startsWith(HOOK_PATH)) return flowHook(request, response, url);
     if (serveBrowserAsset(request, response, url.pathname)) return;
     // Exact, content-addressed application CSS only. Session-bearing
     // pages and fragments still use no-store and are never compressed.
