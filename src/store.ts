@@ -7313,6 +7313,13 @@ export class Store {
     return this.db;
   }
 
+  /** The database's own file (null in memory): where the agent fence begins. */
+  databaseFile(): string | null {
+    const main = this.db.prepare("PRAGMA database_list").all().find(row => row["name"] === "main");
+    const file = main === undefined ? "" : String(main["file"] ?? "");
+    return file === "" ? null : file;
+  }
+
   close(): void {
     this.db.close();
   }
@@ -20463,7 +20470,20 @@ export class Store {
 
   /** What one attempt launched with (first launch of the run wins its record; a resumed turn updates it). */
   recordRunTools(run: number, toolsJson: string, now: Date): void {
-    this.db.prepare("INSERT INTO run_tool (run, tools_json, created_at) VALUES (?, ?, ?) ON CONFLICT (run) DO UPDATE SET tools_json = excluded.tools_json").run(run, toolsJson, now.toISOString());
+    this.db.prepare(`INSERT INTO run_tool (run, tools_json, created_at) VALUES (?, ?, ?) ON CONFLICT (run) DO UPDATE SET tools_json =
+      CASE WHEN json_extract(tools_json, '$.fence') IS NULL THEN excluded.tools_json ELSE json_set(excluded.tools_json, '$.fence', json(json_extract(tools_json, '$.fence'))) END`).run(run, toolsJson, now.toISOString());
+  }
+
+  /** How one attempt was kept away from Standing Orders' own secrets (the agent fence), kept beside its tools. */
+  recordRunFence(run: number, fence: { method: string; paths: number }, now: Date): void {
+    this.db.prepare(`INSERT INTO run_tool (run, tools_json, created_at) VALUES (?, json_object('fence', json(?)), ?)
+      ON CONFLICT (run) DO UPDATE SET tools_json = json_set(tools_json, '$.fence', json(?))`).run(run, JSON.stringify(fence), now.toISOString(), JSON.stringify(fence));
+  }
+
+  runFence(run: number): { method: string; paths: number } | null {
+    const row = this.db.prepare("SELECT json_extract(tools_json, '$.fence') AS fence FROM run_tool WHERE run = ?").get(run);
+    if (row === undefined || row["fence"] === null) return null;
+    try { return JSON.parse(String(row["fence"])) as { method: string; paths: number }; } catch { return null; }
   }
 
   runTools(run: number): { tools: { name: string; digest: string }[]; skipped: { name: string; reason: string }[] } | null {

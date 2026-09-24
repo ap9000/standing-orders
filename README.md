@@ -295,9 +295,9 @@ do not loosen when you leave the room:
 | An agent here can never | Enforced by |
 |---|---|
 | touch a default branch | builds land on `standing-orders/<task>` in a leased worktree; push + PR happen only under a publication grant naming the exact repo, branch prefix, and base |
-| approve its own work | approval nonces are minted only on screens that restate the digest-bound terms, and require your approver token typed again — **no LLM sits in any approval path** |
+| approve its own work | approval nonces are minted only on screens that restate the digest-bound terms, and require your approver token typed again — **no LLM sits in any approval path** — and the [agent fence](#what-an-agent-can-reach) keeps your remembered login, runner tokens and the database out of the agent's reach |
 | act on an irreversible option | `reversible` is a schema field; irreversible choices never auto-apply, and answering one from a phone takes a second minted confirmation tap |
-| see your credentials | bot tokens and API keys are stripped from every agent's environment; secrets live in 0600 files, never in the database, URLs, or logs |
+| see Standing Orders' secrets | the [agent fence](#what-an-agent-can-reach) blocks your login, runner and bot tokens, stored provider keys and project tool secrets at the operating system; other providers' keys are stripped from each agent's environment; secrets live in 0600 files, never in the database, URLs, or logs |
 | spend while idle | **an LLM never polls** — the daemon does every no-judgement chore at zero token cost and wakes an agent only on a real event |
 | spend without being counted | every provider spawn is stamped *before* it spends, so cost is measured, never asserted |
 | guess at a judgement call | it parks a typed decision — recap, options with reversibility, recommendation, evidence — and the other eleven tasks keep going |
@@ -444,10 +444,32 @@ The console's **Settings → unattended permissions** control chooses the
 starting policy for new tasks. **Auto** lets routine repository commands and
 edits proceed while the provider may stop on a risky permission request.
 **Full access** runs Claude with `--dangerously-skip-permissions`, Codex (and
-its OpenRouter transport) with `--dangerously-bypass-approvals-and-sandbox`,
-and Gemini with `--approval-mode yolo`, so permission prompts cannot pause work
-while you are away. Use Full access only for repositories and setup commands
-you trust.
+its OpenRouter transport) in its own sandbox widened to write anywhere with
+network on, and Gemini with `--approval-mode yolo`, so permission prompts
+cannot pause work while you are away. A Full access agent can change files
+anywhere on your computer outside the [agent fence](#what-an-agent-can-reach).
+Use Full access only for repositories and setup commands you trust.
+
+### What an agent can reach
+
+Agents run as your own user, so Standing Orders fences its own secrets off
+from them at the operating system, in every permission mode. The fence covers
+the state folder beside the database (your remembered login `up-login.txt`,
+runner and coordinator tokens, chat bot tokens, the database and its backups,
+other runs' evidence) — everything there except the build's own worktree —
+and `~/.standing-orders` (stored provider keys and project tool secrets).
+
+| | Auto | Full access |
+|---|---|---|
+| **Codex / OpenRouter** (any OS) | Codex's workspace sandbox (workspace writes, no network) with the fence | Codex's sandbox widened to write anywhere with network, with the fence |
+| **Claude** | macOS: the agent runs inside a sandbox that denies the fence. Linux/Windows: Claude's own file tools refuse the fence, but its shell is not fenced yet | same |
+| **Gemini** | macOS: fenced like Claude. Linux/Windows: not fenced yet | same |
+
+Each attempt records how it was fenced. Two limits to know: in **API-key
+mode** an agent's own provider key is in its environment, so its shell can
+read it (subscription mode, the default, puts no key there); and a project's
+own tool secrets reach that project's tools. Reviews and the lead chat run
+with no tools and are confined to their own files. See [SECURITY.md](SECURITY.md).
 
 Every new-task and task-scope form has the same two-choice control. A task's
 choice is durable through planning rewrites and is sealed into the approved

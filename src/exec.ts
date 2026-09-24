@@ -7,6 +7,7 @@
  * walks repos it has never seen, and one broken repo must not end the scan.
  */
 
+import { macosFenceAvailable, macosFenced } from "./agent-fence.js";
 import { execFile, spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -43,6 +44,10 @@ export const CONTAINMENT_REFUSED_CODE = 126;
 
 export type RunOptions = ProcessTreeObserver & {
   cwd?: string;
+  /** The agent fence (agent-fence.ts): on macOS the spawned process tree runs
+   * inside a sandbox that denies these paths. Applied here, at the one spawn
+   * road, so an injected test runner still sees the provider's own argv. */
+  fence?: readonly string[];
   /** UTF-8 input for JSONL or buffered process-group transports; closed after delivery. */
   stdin?: string;
   /**
@@ -203,9 +208,11 @@ function spawnContained(
   args: readonly string[],
   spawnOptions: { cwd?: string | undefined; env?: Record<string, string | undefined> | undefined; stdio: ("pipe" | "ignore")[]; detached: boolean },
   label: string,
-  bag: { beforeSpawn?: (() => boolean) | undefined; onSpawn?: ((pid: number) => void) | undefined; onContainer?: RunOptions["onContainer"]; onContainerEmpty?: RunOptions["onContainerEmpty"]; onUnknown?: RunOptions["onUnknown"] },
+  bag: { beforeSpawn?: (() => boolean) | undefined; onSpawn?: ((pid: number) => void) | undefined; onContainer?: RunOptions["onContainer"]; onContainerEmpty?: RunOptions["onContainerEmpty"]; onUnknown?: RunOptions["onUnknown"]; fence?: readonly string[] | undefined },
   contain = true,
 ): ContainedSpawn {
+  // The agent fence wraps the target itself (sandbox-exec then execs it, same pid).
+  if (bag.fence !== undefined && bag.fence.length > 0 && macosFenceAvailable()) ({ file, args } = macosFenced(file, args, bag.fence));
   // The policy refusal comes first: nothing is reserved, recorded or
   // spawned for a spawn that cannot be contained as required.
   const effective = contain ? currentContainment() : null;
@@ -304,7 +311,7 @@ function spawnStream(
     args,
     { cwd: options.cwd, env: childEnv, stdio, detached: options.processGroup === true && process.platform !== "win32" },
     options.owner ?? "stream",
-    { beforeSpawn: options.beforeSpawn, onSpawn: options.onSpawn, onContainer: options.onContainer, onContainerEmpty: options.onContainerEmpty, onUnknown: options.onUnknown },
+    { beforeSpawn: options.beforeSpawn, onSpawn: options.onSpawn, onContainer: options.onContainer, onContainerEmpty: options.onContainerEmpty, onUnknown: options.onUnknown, fence: options.fence },
     options.processGroup === true,
   );
 }
@@ -619,6 +626,7 @@ export function run(file: string, args: readonly string[], options: RunOptions =
         ...(options.owner === undefined ? {} : { owner: options.owner }),
         ...(options.beforeSpawn === undefined ? {} : { beforeSpawn: options.beforeSpawn }),
         ...(options.onStdout === undefined ? {} : { onStdout: options.onStdout }),
+        ...(options.fence === undefined ? {} : { fence: options.fence }),
         ...(options.onDescendant === undefined ? {} : { onDescendant: options.onDescendant }),
         ...(options.onDescendantWriteFailure === undefined ? {} : { onDescendantWriteFailure: options.onDescendantWriteFailure }),
         ...(options.onDescendantExit === undefined ? {} : { onDescendantExit: options.onDescendantExit }),
@@ -669,7 +677,7 @@ export function run(file: string, args: readonly string[], options: RunOptions =
 function runBufferedGroup(
   file: string,
   args: readonly string[],
-  bag: ProcessTreeObserver & { cwd?: string; stdin?: string; timeoutMs: number; maxBuffer: number; childEnv?: Record<string, string | undefined>; onSpawn?: (pid: number) => void; owner?: string; beforeSpawn?: () => boolean; onContainer?: RunOptions["onContainer"]; onContainerEmpty?: RunOptions["onContainerEmpty"]; onStdout?: (chunk: string) => void },
+  bag: ProcessTreeObserver & { cwd?: string; stdin?: string; timeoutMs: number; maxBuffer: number; childEnv?: Record<string, string | undefined>; onSpawn?: (pid: number) => void; owner?: string; beforeSpawn?: () => boolean; onContainer?: RunOptions["onContainer"]; onContainerEmpty?: RunOptions["onContainerEmpty"]; onStdout?: (chunk: string) => void; fence?: readonly string[] },
 ): Promise<SpawnAttempt> {
   return new Promise(resolve => {
     let child!: ReturnType<typeof spawn>;
@@ -681,7 +689,7 @@ function runBufferedGroup(
         args,
         { cwd: bag.cwd, env: bag.childEnv, stdio: [bag.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"], detached: process.platform !== "win32" },
         bag.owner ?? "buffered",
-        { beforeSpawn: bag.beforeSpawn, onSpawn: bag.onSpawn, onContainer: bag.onContainer, onContainerEmpty: bag.onContainerEmpty, onUnknown: bag.onUnknown },
+        { beforeSpawn: bag.beforeSpawn, onSpawn: bag.onSpawn, onContainer: bag.onContainer, onContainerEmpty: bag.onContainerEmpty, onUnknown: bag.onUnknown, fence: bag.fence },
       );
       child = spawned.child;
       container = spawned.container;
@@ -1757,6 +1765,7 @@ export function startClaudeHeldSession(
           onContainer: options.onContainer,
           onContainerEmpty: options.onContainerEmpty,
           onUnknown: options.onUnknown,
+          fence: options.fence,
         },
       );
       supervisor = spawned.child;

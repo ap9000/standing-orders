@@ -907,7 +907,7 @@ export const MATE_TOOLS: MateTool[] = [
           queue: position === null ? null : { position: position.position, of: position.total, column: position.column ?? "shared" },
           holds: holds.map(one => ({ owner: one.ownerKind, reason: one.reason })),
           attempts: runs.length,
-          lastAttempt: runs[0] === undefined ? null : { build: runs[0].id, outcome: runs[0].outcome ?? "unfinished", worker: runs[0].runner, tools: ctx.store.runTools(runs[0].id) },
+          lastAttempt: runs[0] === undefined ? null : { build: runs[0].id, outcome: runs[0].outcome ?? "unfinished", worker: runs[0].runner, tools: ctx.store.runTools(runs[0].id), secretsFenced: ctx.store.runFence(runs[0].id)?.method ?? null },
           decisionsOpen,
         },
       };

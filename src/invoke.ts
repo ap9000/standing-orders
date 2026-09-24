@@ -29,6 +29,8 @@ import { witnessedRunner, recordProcessObservationFailure, preserveObservedProce
 import { underStopWatch } from "./task-control.js";
 import { CHILD_DATABASE_ENV as AGENT_DATABASE_ENV, isolatedChildDatabase, removeChildDatabase as removeAgentDatabase } from "./child-database.js";
 import { noToolsArgs, prepareRunTools, type ToolLaunchArgs } from "./project-tools.js";
+import { realpathSync } from "node:fs";
+import { agentFence, claudeFenceSettings, macosFenceAvailable, type FenceMethod } from "./agent-fence.js";
 
 export type { ProviderRunner } from "./provider.js";
 
@@ -384,7 +386,15 @@ export async function invokeAgent(
   // The project's tools (v80): exactly its MCP servers, and none of the
   // operator's global or a repository's own. A review keeps its isolation.
   const tools = invocation.phase === "review" ? null : runTools(store, runId, spec, options.keyHome, clock);
-  const launchArgv = tools === null ? argv : adapter.argv({ ...resolvedInvocation, toolArgv: tools.argv });
+  // The agent fence: Standing Orders' own secrets, database and other runs'
+  // evidence stay out of reach, whatever the permission mode. A review is
+  // already confined to its sealed files.
+  const baseFence = invocation.phase === "review" ? [] : runFence(store, runId, options.keyHome);
+  const toolsDir = (spec.provider === "codex" || spec.provider === "openrouter") && baseFence.length > 0 ? tools?.privateDir : undefined;
+  const fence = toolsDir === undefined ? baseFence : [...baseFence, realpathSync(toolsDir)];
+  const launchArgv = tools === null ? argv : adapter.argv({ ...resolvedInvocation, toolArgv: tools.argv, fence });
+  const fenced = fenceLaunch(spec.provider, fence);
+  if (invocation.phase !== "review") store.recordRunFence(runId, { method: fenced.method, paths: fence.length }, clock());
   let result: Awaited<ReturnType<typeof spawn>>;
   try {
     // Under the stop watch (v52): the run's stop row is re-read while the
@@ -392,6 +402,7 @@ export async function invokeAgent(
     // handle registered under its owner tag — the exact-attempt road,
     // never the global sweep. Settlement then reads the same row.
     result = await underStopWatch(store, runId, () => spawn(attested !== null ? attested.executable : adapter.binary, launchArgv, {
+      ...(fenced.wrap.length === 0 ? {} : { fence: fenced.wrap }),
       ...runOptions,
       owner: runOwnerTag(store, runId),
       beforeSpawn: () => store.applicableStopFor(runId) === null && store.getRun(runId)?.outcome === null,
@@ -684,15 +695,20 @@ export async function invokeHeldAgent(
     heldMode === "api-key" ? readProviderKey("claude", keyHome) ?? (process.env[PROVIDER_KEY_ENV.claude] || null) : null;
   const start = starter ?? startClaudeHeldSession;
   const isolatedDb = isolatedAgentDatabase(runId);
-  // The project's tools (v80), as for every build: exactly its MCP servers.
+  // The project's tools (v80), as for every build: exactly its MCP servers;
+  // and the agent fence around Standing Orders' own secrets.
   const heldTools = runTools(store, runId, spec, keyHome, clock);
-  argv = [...argv, ...heldTools.argv];
+  const heldFence = runFence(store, runId, keyHome);
+  argv = [...argv, ...heldTools.argv, ...(heldFence.length > 0 ? ["--settings", claudeFenceSettings(heldFence)] : [])];
+  const heldLaunch = fenceLaunch("claude", heldFence);
+  store.recordRunFence(runId, { method: heldLaunch.method, paths: heldFence.length }, clock());
   let started: import("./exec.js").HeldSessionStart;
   let heldWitness: number | undefined;
   let unknownTree = false;
   let nativeHeld = false;
   try {
     started = await start(adapter.binary, argv, {
+      ...(heldLaunch.wrap.length === 0 ? {} : { fence: heldLaunch.wrap }),
       ...runOptions,
       beforeSpawn: () => {
         if (store.applicableStopFor(runId) !== null) return false;
@@ -774,6 +790,29 @@ export async function invokeHeldAgent(
     );
   }
   return started;
+}
+
+/** The paths this run's agent may not reach: the state folder around the live database (but not its own worktree) and ~/.standing-orders. */
+function runFence(store: Store, runId: number, keyHome: string | undefined): string[] {
+  try {
+    // A plane always has a database file; an in-memory store (a test) has nothing to fence.
+    const databaseFile = store.databaseFile();
+    if (databaseFile === null) return [];
+    return agentFence({ databaseFile, worktree: store.getRun(runId)?.worktree ?? null, ...(keyHome === undefined ? {} : { home: keyHome }) });
+  } catch {
+    return [];
+  }
+}
+
+/** How the fence reaches a provider: Codex through its own sandbox profile
+ * (already in its argv; wrapping it would nest sandboxes), Claude and
+ * Gemini inside the macOS sandbox the spawn road applies (`wrap`), Claude
+ * elsewhere through its own file-tool rules only. */
+function fenceLaunch(provider: AgentSpec["provider"], fence: readonly string[]): { wrap: readonly string[]; method: FenceMethod } {
+  if (fence.length === 0) return { wrap: [], method: "none" };
+  if (provider === "codex" || provider === "openrouter") return { wrap: [], method: "codex-profile" };
+  if (macosFenceAvailable()) return { wrap: fence, method: "macos-sandbox" };
+  return { wrap: [], method: provider === "claude" ? "claude-rules" : "none" };
 }
 
 /** One launch's tools, or — when they cannot be prepared — the same isolation with none, never the operator's global servers. */
