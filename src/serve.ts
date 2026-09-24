@@ -21613,7 +21613,7 @@ function permissionModeChoices(name: string, selected: UnattendedPermissionMode)
     `<span><strong>${escape(title)}</strong><small>${escape(detail)}</small></span></label>`;
   return `<div class="permission-toggle" role="radiogroup" aria-label="agent permissions">` +
     choice("auto", "Auto", "Asks before risky actions.") +
-    choice("bypassPermissions", "Full access", "Never asks. Trusted repositories only.") +
+    choice("bypassPermissions", "Full access", "Never asks and can change files anywhere on this computer. Trusted repositories only.") +
     `</div>`;
 }
 

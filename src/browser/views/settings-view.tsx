@@ -175,7 +175,7 @@ export function SettingsView({ view, csrf }: { view: BrowserSettingsView; csrf: 
     <Section title="Appearance"><Themes view={view} csrf={csrf} /></Section>
     {view.permission && <DefaultChoice title="Unattended permissions" description="The starting choice for new tasks. Approved tasks keep their setting." action="/settings/permission-default" field="permission-mode"
       value={view.permission.mode} canManage={view.permission.canManage} changed={view.permission.changed} csrf={csrf}
-      options={[{ value: "auto", title: "Auto", description: "Asks before risky actions." }, { value: "bypassPermissions", title: "Full access", description: "Never asks. Trusted repositories only." }]} />}
+      options={[{ value: "auto", title: "Auto", description: "Asks before risky actions." }, { value: "bypassPermissions", title: "Full access", description: "Never asks and can change files anywhere on this computer. Trusted repositories only." }]} />}
     {view.quality && <DefaultChoice title="Quality mode" description="Publishing and deploying still need their own approval." action="/settings/quality-default" field="quality-mode"
       value={view.quality.mode} canManage={view.quality.canManage} changed={view.quality.changed} csrf={csrf}
       options={[{ value: "default", title: "Default", description: "Everyday agents and the repository check." }, { value: "strict", title: "Strict / release", description: "Strongest agents. Release approval stays separate." }]} />}

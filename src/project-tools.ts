@@ -451,8 +451,11 @@ function safeLine(text: string): string {
 /** The exact servers one launch gets, and those left out with why. */
 export type ToolLaunch = { tools: ResolvedTool[]; skipped: { name: string; reason: string }[] };
 
-/** Everything a provider spawn needs to use exactly these tools, and the cleanup. */
-export type ToolLaunchArgs = { argv: string[]; env: Record<string, string>; omitEnv: string[]; cleanup: () => void };
+/** Everything a provider spawn needs to use exactly these tools, and the
+ * cleanup. `privateDir` holds the run's secret launch files: Codex starts
+ * tool servers outside its command sandbox, so its agent can be fenced out
+ * of that folder while the tools still read it. */
+export type ToolLaunchArgs = { argv: string[]; env: Record<string, string>; omitEnv: string[]; cleanup: () => void; privateDir?: string };
 
 const toml = (value: string) => `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 const tomlList = (values: readonly string[]): string => `[${values.map(toml).join(",")}]`;
@@ -533,7 +536,7 @@ export function codexToolArgs(launch: ToolLaunch, options: { includeModel: boole
       "-c", `${key}.default_tools_approval_mode="approve"`,
     );
   }
-  return { argv, env: {}, omitEnv: [], cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  return { argv, env: {}, omitEnv: [], cleanup: () => rmSync(dir, { recursive: true, force: true }), privateDir: dir };
 }
 
 /** Gemini: no way yet to hand it exactly these servers, so it gets none. */

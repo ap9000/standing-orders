@@ -19,6 +19,7 @@
  * shell the model itself launches (Codex provider review, Q5).
  */
 
+import { claudeFenceSettings, codexFenceArgv } from "./agent-fence.js";
 import { type ExecResult, type RunOptions } from "./exec.js";
 import { runStreamJsonl, runClaudeStreamJsonl, runGeminiStreamJsonl } from "./exec.js";
 import { scanForSecrets } from "./evidence.js";
@@ -76,6 +77,10 @@ export type Invocation = {
    * naming exactly those MCP servers and no others. Never rendered for a
    * review, which keeps its own no-tools isolation. */
   toolArgv?: readonly string[];
+  /** The agent fence (agent-fence.ts): paths no agent may read or write.
+   * Codex renders it as its own sandbox profile; Claude as deny rules for
+   * its file tools (its shell is fenced by the macOS sandbox around it). */
+  fence?: readonly string[];
 };
 
 export type ProviderRunner = (
@@ -146,7 +151,9 @@ type Adapter = {
   parse(stdout: string): ParsedEnvelope;
   /** The production transport when no runner was injected. */
   defaultRunner: ProviderRunner;
-  /** Secrets the model's OWN shells must never inherit (spawn env is separate). */
+  /** Other providers' keys, stripped from this provider's environment. Its
+   * own key (API-key mode only) stays: the provider needs it, and its
+   * agent's shell inherits the environment. */
   extraOmitEnv: readonly string[];
   /** Normalize the phase's bounded interval. For ordinary current profiles
    * this is the no-progress watchdog; for repair and legacy profiles it is
@@ -330,7 +337,7 @@ const claudeArgv = (invocation: Invocation): string[] => [
   ...(invocation.maxBudgetUsd === undefined ? [] : ["--max-budget-usd", String(invocation.maxBudgetUsd)]),
   ...(invocation.phase === "review"
     ? [...CLAUDE_REVIEW_ISOLATION_ARGV, "--json-schema", JSON.stringify(CLAUDE_REVIEW_JSON_SCHEMA)]
-    : invocation.toolArgv ?? []),
+    : [...(invocation.toolArgv ?? []), ...(invocation.fence !== undefined && invocation.fence.length > 0 ? ["--settings", claudeFenceSettings(invocation.fence)] : [])]),
 ];
 
 /** A claude envelope object, whichever line carried it. */
@@ -548,9 +555,14 @@ const codexArgv = (extra: readonly string[]) => (invocation: Invocation): string
     "--skip-git-repo-check",
     ...(invocation.phase === "review"
       ? CODEX_REVIEW_ISOLATION_ARGV(resuming)
-      : invocation.skipPermissions
-        ? ["--dangerously-bypass-approvals-and-sandbox"]
-        : codexSandboxArgv("workspace-write", resuming)),
+      // The agent fence: Codex's own sandbox with Standing Orders' secrets
+      // denied. Full access becomes that sandbox widened to write anywhere
+      // with network, instead of no sandbox (which fenced nothing).
+      : invocation.fence !== undefined && invocation.fence.length > 0
+        ? codexFenceArgv(invocation.fence, invocation.skipPermissions)
+        : invocation.skipPermissions
+          ? ["--dangerously-bypass-approvals-and-sandbox"]
+          : codexSandboxArgv("workspace-write", resuming)),
     ...(invocation.model === null ? [] : ["-m", invocation.model]),
     ...extra,
     // After `extra`: the tools' shell_environment_policy must be the last word (it keeps OpenRouter's key out too).
@@ -873,8 +885,11 @@ const ADAPTERS: Record<ProviderId, Adapter> = {
       `model_providers.${OPENROUTER_PROVIDER_KEY}.base_url=${toml(OPENROUTER_BASE_URL)}`,
       "-c",
       `model_providers.${OPENROUTER_PROVIDER_KEY}.env_key=${toml(OPENROUTER_ENV_KEY)}`,
-      // The key rides to the trusted transport and NOWHERE the model can
-      // reach: shells, hooks, and tools the agent launches never inherit it.
+      // Asks Codex to keep the key out of the agent's shells. codex-cli
+      // 0.156 ignores shell_environment_policy, so the key IS readable from
+      // the agent's shell in practice; kept for Codex builds that honour it.
+      // What does hold is the agent fence: nothing else of Standing Orders'
+      // (other keys, logins, tokens, the database) is reachable.
       "-c",
       `shell_environment_policy.exclude=[${toml(OPENROUTER_ENV_KEY)}]`,
     ]),
