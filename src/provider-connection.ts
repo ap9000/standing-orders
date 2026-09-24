@@ -2,10 +2,12 @@
 import { homedir } from "node:os";
 import { run, type ExecResult } from "./exec.js";
 import { ALL_CREDENTIAL_ENV, inspectionOf, type ProviderId } from "./provider.js";
-import { keyStatus, PROVIDER_KEY_ENV, readAuthMode, type AuthMode } from "./keys.js";
+import { keyStatus, PROVIDER_KEY_ENV, readAuthMode, readProviderKey, verifyProviderKey, type AuthMode, type KeyVerdict } from "./keys.js";
 
 export type ProviderConnection = {
-  state: "connected" | "signed-out" | "not-installed" | "unverified" | "key-present" | "missing-key";
+  state: "connected" | "signed-out" | "not-installed" | "unverified" | "key-present" | "key-works" | "key-refused" | "missing-key";
+  /** A saved key that was just tested: what the provider said. */
+  verdict?: KeyVerdict;
   mode: AuthMode;
   email?: string;
   plan?: string;
@@ -40,8 +42,9 @@ export function signInFacts(provider: ProviderId, result: ExecResult, now = new 
   return { ...base, state: "unverified" };
 }
 
-export function createConnectionChecker(options: { probe?: typeof run; home?: string; clock?: () => Date; env?: NodeJS.ProcessEnv } = {}): ConnectionChecker {
+export function createConnectionChecker(options: { probe?: typeof run; home?: string; clock?: () => Date; env?: NodeJS.ProcessEnv; verify?: (provider: ProviderId, key: string) => Promise<KeyVerdict> } = {}): ConnectionChecker {
   const probe = options.probe ?? run;
+  const verify = options.verify ?? ((provider: ProviderId, key: string) => verifyProviderKey(provider, key));
   const home = options.home ?? homedir();
   const clock = options.clock ?? (() => new Date());
   const cache = new Map<ProviderId, { key: string; until: number; value: ProviderConnection }>();
@@ -56,7 +59,13 @@ export function createConnectionChecker(options: { probe?: typeof run; home?: st
     if (!fresh && existing?.key === key && existing.until > now.getTime()) return existing.value;
     const inFlight = pending.get(key); if (inFlight) return inFlight;
     const check = (async (): Promise<ProviderConnection> => {
-      if (mode === "api-key") return { state: keyFacts.set || ambient ? "key-present" : "missing-key", mode, checkedAt: now.toISOString() };
+      if (mode === "api-key") {
+        // A saved key is tested only when asked (Check again, or just after it is saved): one small request to the provider, never a model.
+        const stored = fresh && keyFacts.set ? readProviderKey(provider, home) : null;
+        if (stored === null) return { state: keyFacts.set || ambient ? "key-present" : "missing-key", mode, checkedAt: now.toISOString() };
+        const verdict = await verify(provider, stored);
+        return { state: verdict.ok ? "key-works" : verdict.reason === "rejected" ? "key-refused" : "key-present", mode, checkedAt: clock().toISOString(), verdict };
+      }
       const facts = inspectionOf(provider);
       const identityProbe = provider === "claude" ? ["auth", "status", "--json"] : facts.identityProbe;
       if (identityProbe === null) return { state: "unverified", mode, checkedAt: now.toISOString() };
@@ -74,7 +83,7 @@ export function createConnectionChecker(options: { probe?: typeof run; home?: st
       // A slow subscription probe must not overwrite a newer API-key result.
       const currentKeyFacts = keyStatus(provider, home);
       const currentKey = JSON.stringify([provider, readAuthMode(provider, home), currentKeyFacts.set, currentKeyFacts.updatedAt, !!(options.env ?? process.env)[PROVIDER_KEY_ENV[provider]]]);
-      if (currentKey === key) cache.set(provider, { key, until: clock().getTime() + 30_000, value });
+      if (currentKey === key) cache.set(provider, { key, until: value.verdict !== undefined ? Number.POSITIVE_INFINITY : clock().getTime() + 30_000, value });
       return value;
     }
     finally { pending.delete(key); }

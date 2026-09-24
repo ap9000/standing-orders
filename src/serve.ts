@@ -5987,7 +5987,9 @@ export function createDecisionServer(options: ServeOptions): Server {
       saveProviderKey(provider, value, providerHome); // known plausible
       // Verify right now, so a paste gets an immediate yes/no instead of a
       // failed build later. A stored-but-unreachable key still says so.
-      const verdict = await verifyProviderKey(provider, value);
+      // In API-key mode the account check tests the stored key, and remembers the answer until the key changes.
+      const checked = readAuthMode(provider, providerHome) === "api-key" ? await connectionCheck(provider, true) : null;
+      const verdict = checked?.verdict ?? await verifyProviderKey(provider, value);
       const stored = `the ${provider} key is stored`;
       return redirect(response, `/settings?said=${encodeURIComponent((verdict.ok ? `${stored} and verified — it works` : `${stored}. ${verdictWords(provider, verdict)}`) + modeNote)}`);
     }
@@ -21989,6 +21991,7 @@ function settingsPage(
               ? { tone: "ok", words: [connectionWords(one.connection), one.connection.plan].filter(Boolean).join(" · ") }
               : one.mode === "subscription"
                 ? { tone: one.connection === undefined ? "neutral" : "warn", words: one.connection === undefined ? "Uses its own sign-in" : connectionWords(one.connection) }
+                : one.connection?.state === "key-works" ? { tone: "ok", words: "API key works" } : one.connection?.state === "key-refused" ? { tone: "warn", words: "API key refused" }
                 : one.set ? { tone: "ok", words: "API key saved" } : one.ambient ? { tone: "ok", words: "Key from this computer’s environment" } : { tone: "off", words: "Not set up" };
             return [
               `<div class="provider-row" data-provider="${escape(one.provider)}">`,
@@ -22114,6 +22117,7 @@ function settingsPage(
         ? { tone: "ok" as const, words: [connectionWords(one.connection), one.connection.plan].filter(Boolean).join(" · ") }
         : one.mode === "subscription"
           ? { tone: one.connection === undefined ? "neutral" as const : "warn" as const, words: one.connection === undefined ? "Uses its own sign-in" : connectionWords(one.connection) }
+          : one.connection?.state === "key-works" ? { tone: "ok" as const, words: "API key works" } : one.connection?.state === "key-refused" ? { tone: "warn" as const, words: "API key refused" }
           : one.set ? { tone: "ok" as const, words: "API key saved" } : one.ambient ? { tone: "ok" as const, words: "Key from this computer’s environment" } : { tone: "off" as const, words: "Not set up" };
       return {
         provider: one.provider, name, tone: status.tone, words: status.words,

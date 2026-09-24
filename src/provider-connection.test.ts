@@ -1,11 +1,11 @@
 import { test, expect } from "vitest";
-import { mkdtempSync, rmSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { Window } from "happy-dom";
 import { createConnectionChecker, signInFacts } from "./provider-connection.js";
-import { setAuthMode, saveProviderKey } from "./keys.js";
+import { setAuthMode, saveProviderKey, type KeyVerdict } from "./keys.js";
 import { ALL_CREDENTIAL_ENV } from "./provider.js";
 import { openStore } from "./store.js";
 import { addApprover } from "./scope.js";
@@ -54,6 +54,26 @@ test("checks use only identity commands, strip keys, coalesce, refresh, and resp
     setAuthMode("claude", "subscription", home);
     expect((await check("claude")).state).toBe("signed-out"); expect(count).toBe(4);
     expect((await createConnectionChecker({ home, env: {}, probe: async () => { throw Error("private stderr"); } })("claude")).state).toBe("unverified");
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test("Check again tests a saved API key with one request, and the answer holds until the key changes", async () => {
+  const home = mkdtempSync(join(tmpdir(), "so-connection-key-")); let calls = 0; let answer: KeyVerdict = { ok: true };
+  const check = createConnectionChecker({ home, env: {}, verify: async (provider, key) => { calls++; expect([provider, key]).toEqual(["openrouter", "test-key-value"]); return answer; } });
+  try {
+    expect((await check("openrouter")).state).toBe("missing-key");
+    saveProviderKey("openrouter", "test-key-value", home);
+    // Only when asked: an ordinary page load never calls the provider.
+    expect((await check("openrouter")).state).toBe("key-present"); expect(calls).toBe(0);
+    expect(await check("openrouter", true)).toMatchObject({ state: "key-works", verdict: { ok: true } }); expect(calls).toBe(1);
+    expect((await check("openrouter")).state).toBe("key-works"); expect(calls).toBe(1);
+    // A replaced key is untested again until someone checks it.
+    answer = { ok: false, reason: "rejected", status: 401 };
+    utimesSync(join(home, ".standing-orders", "keys", "openrouter"), new Date(), new Date(Date.now() + 5000));
+    expect((await check("openrouter")).state).toBe("key-present");
+    expect((await check("openrouter", true)).state).toBe("key-refused"); expect(calls).toBe(2);
+    answer = { ok: false, reason: "unreachable" };
+    expect((await check("openrouter", true)).state).toBe("key-present");
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
