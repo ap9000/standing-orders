@@ -7,10 +7,18 @@
  * it now stands, and the canvas refreshes every few seconds for everyone. */
 import { Background, BackgroundVariant, Controls, Handle, MarkerType, NodeResizer, Position, ReactFlow, ReactFlowProvider, applyNodeChanges, useReactFlow, type Connection, type Edge, type Node, type NodeChange, type NodeProps } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { CalendarClock, Copy, Flag, GitPullRequest, Hammer, Inbox, Megaphone, MessageSquare, MousePointerClick, Pencil, Plus, Search, SquareKanban, UserCheck, Webhook, Workflow, X, Zap } from "lucide-react";
+import { Bell, BellOff, CalendarClock, Copy, Flag, GitPullRequest, Hammer, Inbox, Megaphone, MessageSquare, MousePointerClick, Pencil, Plus, Search, SquareKanban, UserCheck, Webhook, Workflow, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { BrowserFlowCard, BrowserFlowStage, BrowserFlowTrigger, BrowserFlowView } from "../../browser-workspace.js";
 import { Badge, Button, Input, Label, Textarea, cn, toast } from "../components/ui/index.js";
+
+/** A person's initials in a small circle, the same colour for the same name everywhere. */
+function Face({ name, size = "sm" }: { name: string; size?: "sm" | "md" }) {
+  const hue = [...name].reduce((sum, char) => (sum * 31 + char.charCodeAt(0)) % 360, 7);
+  const initials = name.split(/[\s._-]+/).filter(Boolean).map(part => part[0]!.toUpperCase()).slice(0, 2).join("") || name.slice(0, 2).toUpperCase();
+  return <span title={name} aria-label={name} className={cn("inline-flex shrink-0 items-center justify-center rounded-full font-semibold text-white", size === "sm" ? "size-5 text-[9px]" : "size-7 text-[11px]")}
+    style={{ background: `hsl(${hue} 45% 45%)` }}>{initials}</span>;
+}
 
 const COLORS: Record<string, string> = { slate: "#64748b", blue: "#3b82f6", violet: "#8b5cf6", amber: "#d97706", green: "#059669", rose: "#e11d48" };
 const KIND_ICONS: Record<BrowserFlowStage["kind"], ReactNode> = {
@@ -39,7 +47,7 @@ async function send(path: string, fields: Record<string, string>, csrf: string):
 
 type ZoneData = {
   stage: BrowserFlowStage; kindLabel: string; cards: BrowserFlowCard[]; editing: boolean; canMove: boolean; start: boolean;
-  selectedCard: number | null; onCard: (id: number) => void; onDrop: (card: number, stage: string) => void;
+  selectedCard: number | null; onCard: (id: number) => void; onDrop: (card: number, stage: string) => void; hidden: number;
   onResize: (stage: string, box: { x: number; y: number; width: number; height: number }) => void;
 };
 
@@ -82,9 +90,15 @@ function ZoneNode({ data, selected }: NodeProps<Node<ZoneData, "zone">>) {
           data-card={card.id}>
           <div className="line-clamp-2 text-[12.5px] font-medium leading-snug">{card.title}</div>
           {card.waiting !== null && <div className={cn("mt-1 line-clamp-2 text-[11px] leading-snug", card.canDecide ? "font-semibold text-attention" : "text-muted-foreground")}>{card.canDecide ? "Needs your decision" : card.waiting}</div>}
+          {(card.owner !== null || card.comments.length > 0) && <div className="mt-1.5 flex items-center gap-1.5">
+            {card.owner !== null && <Face name={card.owner} />}
+            <span className="flex-1" />
+            {card.comments.length > 0 && <span className="inline-flex items-center gap-0.5 text-[11px] text-muted-foreground"><MessageSquare className="size-3" aria-hidden="true" />{card.comments.length}</span>}
+          </div>}
         </button>
       </li>)}
-      {cards.length === 0 && <li className="px-1 py-2 text-[11px] text-muted-foreground">{editing ? stage.kind === "done" ? "" : "Drag the dots to connect zones." : "No cards here."}</li>}
+      {cards.length === 0 && <li className="px-1 py-2 text-[11px] text-muted-foreground">{editing ? stage.kind === "done" ? "" : "Drag the dots to connect zones." : data.hidden > 0 ? "" : "No cards here."}</li>}
+      {data.hidden > 0 && <li className="px-1 py-1 text-[11px] text-muted-foreground">{data.hidden} other card{data.hidden === 1 ? "" : "s"}</li>}
     </ul>
   </div>;
 }
@@ -138,6 +152,66 @@ function slug(title: string, taken: Set<string>): string {
   return id;
 }
 
+const when = (at: string) => new Date(at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+
+/** A comment's text with the people it pinged picked out. */
+function Mentioned({ body, mentions }: { body: string; mentions: string[] }) {
+  if (mentions.length === 0) return <>{body}</>;
+  const pattern = new RegExp(`(@(?:${mentions.map(one => one.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")}))(?![A-Za-z0-9_])`, "gi");
+  return <>{body.split(pattern).map((part, index) => index % 2 === 1 ? <span key={index} className="font-semibold text-primary">{part}</span> : part)}</>;
+}
+
+/** What people said on a card, and a box to add to it. "@" suggests the people on this project. */
+function Discussion({ card, view, csrf, apply }: { card: BrowserFlowCard; view: BrowserFlowView; csrf: string; apply: (result: Said) => void }) {
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const partial = /(?:^|\s)@([A-Za-z0-9_.-]*)$/.exec(text)?.[1];
+  const suggestions = partial === undefined ? [] : view.approvers.filter(name => name !== view.me && name.toLowerCase().startsWith(partial.toLowerCase())).slice(0, 6);
+  return <div className="flex flex-col gap-2" data-flow-discussion>
+    <h3 className="text-[13px] font-semibold">Discussion</h3>
+    {card.comments.length === 0 ? <p className="text-[12px] text-muted-foreground">No comments yet.</p>
+      : <ol className="flex flex-col gap-3">{card.comments.map(comment => <li key={comment.id} className="flex gap-2" data-comment={comment.id}>
+        <Face name={comment.author} size="md" />
+        <div className="min-w-0 flex-1">
+          <p className="text-[12px] text-muted-foreground"><span className="font-semibold text-foreground">{comment.author}</span> · {when(comment.at)}</p>
+          <p className="whitespace-pre-wrap break-words text-[13px]"><Mentioned body={comment.body} mentions={comment.mentions} /></p>
+        </div>
+      </li>)}</ol>}
+    {view.canEdit && <form className="flex flex-col gap-2" onSubmit={async event => {
+      event.preventDefault(); setBusy(true);
+      const result = await send(`${view.flow.href}/cards/${card.id}/comment`, { body: text }, csrf);
+      setBusy(false); apply(result); if (result.ok) setText("");
+    }}>
+      <Textarea value={text} onChange={event => setText(event.target.value)} rows={3} maxLength={4000} placeholder="Add a comment. Type @ and a name to ping someone." aria-label="Comment" />
+      {suggestions.length > 0 && <div className="flex flex-wrap gap-1.5" aria-label="People to mention">{suggestions.map(name => <button key={name} type="button"
+        className="inline-flex min-h-8 items-center gap-1.5 rounded-full border px-2 text-[12px] hover:border-primary/60" onClick={() => setText(current => current.replace(/@([A-Za-z0-9_.-]*)$/, `@${name} `))}>
+        <Face name={name} />{name}</button>)}</div>}
+      <Button type="submit" size="sm" className="self-start" disabled={busy || text.trim() === ""}>Comment</Button>
+    </form>}
+  </div>;
+}
+
+/** Who owns a card and who follows it, with the viewer's own switch. */
+function CardPeople({ card, view, csrf, apply }: { card: BrowserFlowCard; view: BrowserFlowView; csrf: string; apply: (result: Said) => void }) {
+  const [busy, setBusy] = useState(false);
+  const act = async (path: string, fields: Record<string, string>) => { setBusy(true); apply(await send(`${view.flow.href}/cards/${card.id}/${path}`, fields, csrf)); setBusy(false); };
+  const others = card.watchers.filter(name => name !== card.owner);
+  return <div className="flex flex-col gap-2" data-flow-card-people>
+    {view.canEdit && card.state === "active" ? <label className="grid gap-1.5"><span className="text-[13px] font-medium">Owner</span>
+      <select className={SELECT} value={card.owner ?? ""} disabled={busy} onChange={event => void act("assign", { owner: event.target.value })} aria-label="Owner">
+        <option value="">No owner</option>
+        {view.approvers.map(name => <option key={name} value={name}>{name === view.me ? `${name} (you)` : name}</option>)}
+      </select></label>
+      : card.owner !== null && <p className="flex items-center gap-2 text-[13px]"><Face name={card.owner} /> Owned by {card.owner}</p>}
+    <div className="flex flex-wrap items-center gap-2">
+      {view.canEdit && card.state === "active" && card.owner === null && <Button size="sm" variant="outline" disabled={busy} onClick={() => void act("assign", { owner: view.me })}>Take it</Button>}
+      {others.length > 0 && <span className="flex items-center gap-1 text-[12px] text-muted-foreground">{others.slice(0, 5).map(name => <Face key={name} name={name} />)}{others.length === 1 ? " follows it" : " follow it"}</span>}
+      {view.canEdit && card.owner !== view.me && <Button size="sm" variant="ghost" disabled={busy} onClick={() => void act("watch", { watching: card.watching ? "no" : "yes" })} aria-pressed={card.watching}>
+        {card.watching ? <><BellOff className="size-4" />Stop following</> : <><Bell className="size-4" />Follow</>}</Button>}
+    </div>
+  </div>;
+}
+
 function CardPanel({ card, view, csrf, apply, onClose }: { card: BrowserFlowCard; view: BrowserFlowView; csrf: string; apply: (result: Said) => void; onClose: () => void }) {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
@@ -162,6 +236,7 @@ function CardPanel({ card, view, csrf, apply, onClose }: { card: BrowserFlowCard
       : <a className="font-medium text-primary underline-offset-4 hover:underline" href={card.source.url} {...(card.source.url.startsWith("/") ? {} : { target: "_blank", rel: "noreferrer" })}>{card.source.label}</a>}</p>}
     {card.description !== null && <p className="whitespace-pre-wrap text-[13px]">{card.description}</p>}
     {card.waiting !== null && <p className="rounded-md bg-muted px-3 py-2 text-[13px]">{card.waiting}</p>}
+    <CardPeople card={card} view={view} csrf={csrf} apply={apply} />
     {card.task !== null && <a className="text-[13px] font-medium text-primary underline-offset-4 hover:underline" href={card.task.href}>Open its task</a>}
     {card.canDecide && <div className="flex flex-col gap-2 rounded-lg border border-attention/50 p-3">
       <Label htmlFor="flow-note" className="text-[13px]">{stage?.title ?? "Decision"}: approve, or send it back</Label>
@@ -185,6 +260,7 @@ function CardPanel({ card, view, csrf, apply, onClose }: { card: BrowserFlowCard
         <p className="mt-2 whitespace-pre-wrap text-[12.5px] text-muted-foreground">{output.text}</p>
       </details>)}
     </div>}
+    <Discussion card={card} view={view} csrf={csrf} apply={apply} />
     <div className="flex flex-col gap-1.5">
       <h3 className="text-[13px] font-semibold">History</h3>
       <ol className="flex flex-col gap-1.5">{card.history.map((line, index) => <li key={index} className="text-[12px]"><span className="text-muted-foreground">{new Date(line.at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</span> · {line.text}</li>)}</ol>
@@ -492,6 +568,8 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
     initial.selectedCard !== null ? { card: initial.selectedCard } : initial.startTrigger !== null && initial.triggers.some(one => one.id === initial.startTrigger && one.button !== null) ? { press: initial.startTrigger } : null);
   const [saving, setSaving] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [mineOnly, setMineOnly] = useState(() => { try { return window.localStorage.getItem("so-flows-mine") === "1"; } catch { return false; } });
+  useEffect(() => { try { window.localStorage.setItem("so-flows-mine", mineOnly ? "1" : "0"); } catch { /* a private window keeps it for this visit */ } }, [mineOnly]);
   const flow = useReactFlow();
   const stages = draft?.stages ?? view.stages;
   const start = draft?.start ?? view.start;
@@ -525,13 +603,15 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
     id: stage.id, type: "zone" as const, position: { x: stage.zone.x, y: stage.zone.y }, width: stage.zone.w, height: stage.zone.h,
     style: { width: stage.zone.w, height: stage.zone.h }, draggable: editing, selectable: editing,
     data: {
-      stage, kindLabel: view.kinds.find(one => one.kind === stage.kind)?.label ?? stage.kind, cards: view.cards.filter(card => card.stage === stage.id && card.state === "active"),
+      stage, kindLabel: view.kinds.find(one => one.kind === stage.kind)?.label ?? stage.kind,
+      cards: view.cards.filter(card => card.stage === stage.id && card.state === "active" && (!mineOnly || card.mine)),
+      hidden: mineOnly ? view.cards.filter(card => card.stage === stage.id && card.state === "active" && !card.mine).length : 0,
       editing, canMove: view.canEdit, start: stage.id === start, selectedCard: selected !== null && "card" in selected ? selected.card : null,
       onCard: (id: number) => { setAdding(false); setSelected({ card: id }); }, onDrop: (card: number, to: string) => void move(card, to),
       onResize: (id: string, box: { x: number; y: number; width: number; height: number }) => setDraft(current => current === null ? current : { ...current, stages: current.stages.map(one => one.id === id
         ? { ...one, zone: { ...one.zone, x: Math.round(box.x), y: Math.round(box.y), w: Math.round(box.width), h: Math.round(box.height) } } : one) }),
     },
-  })), [stages, view, editing, selected, start, move]);
+  })), [stages, view, editing, selected, start, move, mineOnly]);
   // Triggers sit to the left of the zone they start cards in, stacked when several share one.
   const liveTriggers = useMemo(() => view.triggers.filter(one => one.state !== "removed"), [view.triggers]);
   const triggerNodes: Node<TriggerData, "trigger">[] = useMemo(() => {
@@ -647,6 +727,10 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
         : <h1 className="text-[15px] font-semibold">{view.flow.name}</h1>}
       <span className="text-[12px] text-muted-foreground">{view.flow.project}</span>
       {waitingOnYou > 0 && !editing && <Badge tone="attention">{waitingOnYou} waiting for you</Badge>}
+      {!editing && <div className="ml-1 inline-flex rounded-md border p-0.5" role="group" aria-label="Which cards">
+        {([["All cards", false], ["Mine", true]] as const).map(([label, value]) => <button key={label} type="button" aria-pressed={mineOnly === value} onClick={() => setMineOnly(value)}
+          className={cn("rounded px-2 py-1 text-[12px] font-medium", mineOnly === value ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground")}>{label}</button>)}
+      </div>}
       <span className="flex-1" />
       {editing
         ? <>
@@ -714,7 +798,9 @@ function PhoneFlow({ view: initial, csrf }: { view: BrowserFlowView; csrf: strin
       return <section key={stage.id} className="rounded-lg border" style={{ borderColor: `${COLORS[stage.zone.color] ?? "#64748b"}55` }}>
         <header className="flex items-center gap-2 px-3 py-2"><span className="inline-flex size-6 items-center justify-center rounded-md text-white" style={{ background: COLORS[stage.zone.color] ?? "#64748b" }}>{KIND_ICONS[stage.kind]}</span><span className="flex-1 text-[14px] font-semibold">{stage.title}</span>{cards.length > 0 && <span className="text-[12px] text-muted-foreground">{cards.length}</span>}</header>
         {cards.length > 0 && <ul className="flex flex-col gap-2 px-3 pb-3">{cards.map(one => <li key={one.id}><button type="button" onClick={() => setOpen(one.id)} className={cn("min-h-11 w-full rounded-lg border bg-card px-3 py-2 text-left", one.canDecide && "border-attention/60")}>
-          <div className="text-[14px] font-medium">{one.title}</div>{one.waiting !== null && <div className={cn("text-[12px]", one.canDecide ? "font-semibold text-attention" : "text-muted-foreground")}>{one.canDecide ? "Needs your decision" : one.waiting}</div>}
+          <div className="flex items-start gap-2"><div className="min-w-0 flex-1 text-[14px] font-medium">{one.title}</div>{one.owner !== null && <Face name={one.owner} />}</div>
+          {one.waiting !== null && <div className={cn("text-[12px]", one.canDecide ? "font-semibold text-attention" : "text-muted-foreground")}>{one.canDecide ? "Needs your decision" : one.waiting}</div>}
+          {one.comments.length > 0 && <div className="mt-0.5 inline-flex items-center gap-1 text-[12px] text-muted-foreground"><MessageSquare className="size-3" aria-hidden="true" />{one.comments.length}</div>}
         </button></li>)}</ul>}
       </section>;
     })}

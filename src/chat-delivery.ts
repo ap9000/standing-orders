@@ -701,10 +701,12 @@ export async function planChatNotifications(
     for (const binding of bindings) {
     const repos = channelRepos(store, binding.approver, registry);
     store.transact(() => {
+      // One person's notification (v83) goes to that person alone, task or not.
+      const personal = notification.recipient !== null;
       if (
         notification.createdAt >= binding.created &&
         notification.resolvedAt === null &&
-        notification.taskId &&
+        (personal ? notification.recipient === binding.approver : notification.taskId) &&
         notification.project &&
         repos.includes(notification.project)
       ) {
@@ -713,7 +715,7 @@ export async function planChatNotifications(
             `${options.state.channel}:notice:${binding.id}:${notification.id}`,
           ),
           now = nowOf(options);
-        if (run && isTelegramProgressNotification(notification)) {
+        if (run && notification.taskId && isTelegramProgressNotification(notification)) {
           const card = telegramProgressCard(
             store,
             store.getRun(run.id)!,
@@ -772,7 +774,7 @@ export async function planChatNotifications(
               .prepare("INSERT INTO chat_progress VALUES(?,?,?,?)")
               .run(binding.id, run.id, Number(part.id), digest);
           }
-        } else if (notification.pushClass !== null) {
+        } else if (notification.pushClass !== null || personal) {
           state.enqueue({
             id,
             installation: identity.installation,
@@ -793,10 +795,10 @@ export async function planChatNotifications(
                   `${notification.subject}\n\n${notification.body}`,
                   2500,
                 ),
-                task: notification.taskId,
+                ...(notification.taskId ? { task: notification.taskId } : {}),
                 ...(run ? { run: run.id } : {}),
                 ...(notification.link
-                  ? { link: { label: "Review", path: notification.link } }
+                  ? { link: { label: personal ? "Open" : "Review", path: notification.link } }
                   : {}),
               },
             ],

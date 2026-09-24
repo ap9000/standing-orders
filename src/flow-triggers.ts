@@ -362,6 +362,7 @@ export function pressFlowButton(store: Store, trigger: FlowTriggerRow, answers: 
   const details = config.questions.slice(1).map((question, index) => said[index + 1] === "" ? null : `${question}\n${said[index + 1]}`).filter(one => one !== null).join("\n\n");
   const result = makeCard(store, trigger, config, { key: `press:${now.toISOString()}:${randomUUID().slice(0, 8)}`, title: said[0]!, description: details === "" ? null : details, source: { kind: "button", label: config.label, url: null } }, actor, now);
   if (result.made !== "added") return { ok: false, message: result.note ?? "That didn't make a card." };
+  store.setFlowCardWatcher(result.card!, actor, true, now);
   store.updateFlowTrigger(trigger.id, { lastAt: now.toISOString(), lastOutcome: `Pressed by ${actor}.` }, now);
   return { ok: true, said: "Card added.", card: result.card! };
 }

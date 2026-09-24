@@ -13,6 +13,7 @@ import { fileTaskProposal } from "./proposal.js";
 import { requestResultChanges } from "./result-actions.js";
 import { revisionSourceOf } from "./result-review.js";
 import { scanForSecrets } from "./evidence.js";
+import { cardFollowers, notifyPeople } from "./flow-people.js";
 import type { FlowCardRow, FlowRow, Store } from "./store.js";
 
 export type FlowAdvance = { moved: number; filed: string[]; problems: string[] };
@@ -35,6 +36,8 @@ const ACCEPTANCE = {
 function fill(template: string, card: FlowCardRow): string {
   return fillFlowText(template, { title: card.title, description: card.description, note: card.note, outputs: card.outputs });
 }
+
+const titleIn = (definition: FlowDefinition, id: string) => definition.stages.find(one => one.id === id)?.title ?? id;
 
 /** Advance every active card in one project's flows. */
 export function advanceFlows(store: Store, repo: string, now: Date, options: { evidenceRoot?: string } = {}): FlowAdvance {
@@ -71,7 +74,10 @@ function advanceCard(store: Store, flow: FlowRow, definition: FlowDefinition | n
       if (result === "ok" && stage.next === null) store.updateFlowCard(card.id, { waiting: "Finished here. Move the card on when you're ready." }, now);
       return;
     }
-    if (store.moveFlowCard(card.id, { to, outcome: result, actor: "flow", ...(note === undefined ? {} : { note }), ...(task === undefined ? {} : { task }), expectEntry: card.entry }, now)) outcome.moved++;
+    if (store.moveFlowCard(card.id, { to, outcome: result, actor: "flow", ...(note === undefined ? {} : { note }), ...(task === undefined ? {} : { task }), expectEntry: card.entry }, now)) {
+      outcome.moved++;
+      if (result === "fail" && card.owner !== null) notifyPeople(store, card, [card.owner], null, { key: `failed:${card.entry}`, subject: `“${card.title}” went back to ${titleIn(definition, to)}`, body: `${note ?? "Its step didn't finish."} It's in ${titleIn(definition, to)} now.`, attention: true }, now);
+    }
   };
   switch (stage.kind) {
     case "inbox":
@@ -79,6 +85,7 @@ function advanceCard(store: Store, flow: FlowRow, definition: FlowDefinition | n
       return;
     case "done":
       store.updateFlowCard(card.id, { state: "done", waiting: null }, now);
+      notifyPeople(store, card, cardFollowers(store, card), null, { key: `done:${card.entry}`, subject: `Done: “${card.title}”`, body: `“${card.title}” reached ${stage.title} in ${flow.name}.` }, now);
       return;
     case "notify": {
       const message = fill(stage.message ?? card.title, card);
@@ -93,8 +100,9 @@ function advanceCard(store: Store, flow: FlowRow, definition: FlowDefinition | n
     case "approval": {
       const who = stage.approver ?? "an approver";
       if (card.waiting === null) {
+        // A named decider hears it alone; "anyone who approves" pages everyone who can.
         store.enqueueNotification({
-          dedupeKey: `flow-decide:${card.id}:${card.entry}`, kind: "flow-decision", pushClass: "attention",
+          dedupeKey: `flow-decide:${card.id}:${card.entry}`, kind: "flow-decision", pushClass: "attention", ...(stage.approver === null ? {} : { recipient: stage.approver }),
           subject: `${flow.name}: ${card.title} needs ${stage.approver === null ? "a decision" : `${stage.approver}'s decision`}`.slice(0, 200),
           body: `${stage.title}: approve it, or send it back with a note.`, link: flowCardHref(flow.id, card.id), source: { project: flow.repo },
         }, now);
@@ -147,7 +155,11 @@ function workStage(store: Store, flow: FlowRow, stage: FlowStage, card: FlowCard
   }
   if (task.state === "failed" || task.state === "cancelled") {
     if (stage.onFail !== null) onward("fail", `The ${stage.kind === "report" ? "research" : "build"} ${task.state === "failed" ? "failed" : "was cancelled"}.`);
-    else store.updateFlowCard(card.id, { waiting: `The task ${task.state === "failed" ? "failed" : "was cancelled"}. Retry it, or move the card.` }, now);
+    else {
+      const waiting = `The task ${task.state === "failed" ? "failed" : "was cancelled"}. Retry it, or move the card.`;
+      if (card.waiting !== waiting && card.owner !== null) notifyPeople(store, card, [card.owner], null, { key: `stuck:${card.entry}`, subject: `“${card.title}” is stuck in ${stage.title}`, body: waiting, attention: true }, now);
+      store.updateFlowCard(card.id, { waiting }, now);
+    }
     return;
   }
   const diagnosis = diagnoseTaskDispatch(store, current, now);
@@ -176,6 +188,8 @@ export function addCardToFlow(store: Store, flow: FlowRow, input: { title: unkno
   if ("problem" in text) return { ok: false, message: text.problem };
   const stage = definition.stages.find(one => one.id === input.stage) ?? definition.stages.find(one => one.id === definition.start)!;
   const card = store.addFlowCard({ flow: flow.id, title: text.title, description: text.description, stage: stage.id, by: actor }, now);
+  // Whoever adds a card follows it; owning it is a separate, deliberate step.
+  store.setFlowCardWatcher(card, actor, true, now);
   return { ok: true, said: `Card added to ${zoneWords(stage.title)}`, card };
 }
 
@@ -188,6 +202,7 @@ export function moveCardInFlow(store: Store, card: FlowCardRow, to: string, acto
   if (card.state !== "active") return { ok: false, message: "That card is finished." };
   if (to === card.stage) return { ok: true, said: "Already there.", card: card.id };
   if (!store.moveFlowCard(card.id, { to, outcome: "moved", actor, expectEntry: card.entry }, now)) return { ok: false, message: "That card just moved. Look again." };
+  if (card.owner !== null) notifyPeople(store, card, [card.owner], actor, { key: `moved:${card.entry}`, subject: `${actor} moved “${card.title}” to ${stage.title}`, body: `It was in ${definition!.stages.find(one => one.id === card.stage)?.title ?? "another zone"}.` }, now);
   return { ok: true, said: `Moved to ${zoneWords(stage.title)}`, card: card.id };
 }
 
@@ -217,6 +232,7 @@ export function decideFlowCard(store: Store, input: { card: number; decision: "a
     }
     store.moveFlowCard(card.id, { to: stage.next, outcome: "approved", actor: input.actor, note: input.note, expectEntry: card.entry }, now);
     const title = definition.stages.find(one => one.id === stage.next)?.title ?? stage.next;
+    if (card.owner !== null) notifyPeople(store, card, [card.owner], input.actor, { key: `approved:${card.entry}`, subject: `${input.actor} approved “${card.title}”`, body: `${stage.title}: approved. It moves to ${title}.${input.note === null || input.note.trim() === "" ? "" : `\n\n${input.note.trim()}`}` }, now);
     return { ok: true, said: `Approved. Moved to ${title}${/[.?!]$/.test(title) ? "" : "."}` };
   }
   if (stage.onFail === null) return { ok: false, message: "This zone has nowhere to send work back to." };
@@ -237,5 +253,6 @@ export function decideFlowCard(store: Store, input: { card: number; decision: "a
     }
   }
   store.moveFlowCard(card.id, { to: stage.onFail, outcome: "sent-back", actor: input.actor, note: input.note.trim(), ...(revision === null ? {} : { task: revision }), expectEntry: card.entry }, now);
+  if (card.owner !== null) notifyPeople(store, card, [card.owner], input.actor, { key: `sent-back:${card.entry}`, subject: `${input.actor} sent “${card.title}” back`, body: `Sent back to ${target?.title ?? stage.onFail}:\n\n${input.note.trim()}`, attention: true }, now);
   return { ok: true, said: revision === null ? `Sent back to ${target?.title ?? stage.onFail} with your note.` : `Sent back to ${target?.title ?? stage.onFail}: a revision was made with your note.` };
 }

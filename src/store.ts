@@ -113,7 +113,8 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // v80 adds project tools: the MCP servers a project's builds get, the list sealed at each approval, and what each run launched with.
 // v81 adds flows: a canvas of zones that cards (pieces of work) move through, and each card's history.
 // v82 adds flow triggers (what starts cards: a button, a schedule, GitHub, Linear, another flow) and where each card came from.
-export const SCHEMA_VERSION = 82;
+// v83 adds people on flow cards: an owner, watchers, comments with @mentions, and notifications for one person.
+export const SCHEMA_VERSION = 83;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -468,7 +469,9 @@ export type MateProposal = {
 export type FlowRow = { id: number; repo: string; name: string; definitionJson: string; revision: number; state: "active" | "archived"; createdBy: string; createdAt: string; updatedBy: string; updatedAt: string };
 /** Where a card came from when a trigger made it: what to call it and where to look (a GitHub issue, a Linear issue, another flow's card). */
 export type FlowCardSource = { kind: string; label: string; url: string | null };
-export type FlowCardRow = { id: number; flow: number; title: string; description: string | null; stage: string; entry: number; state: "active" | "done" | "cancelled"; task: string | null; primaryTask: string | null; note: string | null; waiting: string | null; outputs: Record<string, string>; createdBy: string; createdAt: string; updatedAt: string; source: FlowCardSource | null };
+export type FlowCardRow = { id: number; flow: number; title: string; description: string | null; stage: string; entry: number; state: "active" | "done" | "cancelled"; task: string | null; primaryTask: string | null; note: string | null; waiting: string | null; outputs: Record<string, string>; createdBy: string; createdAt: string; updatedAt: string; source: FlowCardSource | null; owner: string | null };
+/** One line of a card's discussion: a comment (and whom it @mentioned), or who became its owner. */
+export type FlowCommentRow = { id: number; card: number; kind: "comment" | "owner"; author: string; body: string; mentions: string[]; at: string };
 export type FlowTriggerRow = { id: number; flow: number; kind: string; configJson: string; state: "active" | "paused" | "removed"; hookHash: string | null; cursor: string | null; nextAt: string | null; lastAt: string | null; lastOutcome: string | null; failures: number; createdBy: string; createdAt: string; updatedAt: string };
 export type FlowEventOutcome = "created" | "ok" | "fail" | "moved" | "approved" | "sent-back" | "cancelled";
 
@@ -483,7 +486,7 @@ function readFlowCardRow(row: Record<string, unknown>): FlowCardRow {
   const optional = (key: string) => row[key] === null || row[key] === undefined ? null : String(row[key]);
   return { id: Number(row["id"]), flow: Number(row["flow"]), title: String(row["title"]), description: optional("description"), stage: String(row["stage"]), entry: Number(row["entry"]),
     state: String(row["state"]) as FlowCardRow["state"], task: optional("task"), primaryTask: optional("primary_task"), note: optional("note"), waiting: optional("waiting"), outputs,
-    createdBy: String(row["created_by"]), createdAt: String(row["created_at"]), updatedAt: String(row["updated_at"]), source: readFlowCardSource(row["source_json"]) };
+    createdBy: String(row["created_by"]), createdAt: String(row["created_at"]), updatedAt: String(row["updated_at"]), source: readFlowCardSource(row["source_json"]), owner: optional("owner") };
 }
 
 function readFlowCardSource(value: unknown): FlowCardSource | null {
@@ -652,7 +655,9 @@ export function parseCapabilityKey(
 
 /** Supplied by the producer, never inferred from display text or links. */
 export type NotificationSource = { run: number } | { taskRef: number } | { project: string } | { installation: true };
-type NotificationInput = { dedupeKey: string; kind: string; subject: string; body: string; pushClass?: "decision" | "pick" | "merge" | "attention"; link?: string; source?: NotificationSource };
+type NotificationInput = { dedupeKey: string; kind: string; subject: string; body: string; pushClass?: "decision" | "pick" | "merge" | "attention"; link?: string; source?: NotificationSource;
+  /** v83: one person's notification — only their own phone, chats and browsers get it; no channel-wide webhook does. */
+  recipient?: string };
 
 /**
  * Task lifecycle updates (Telegram task updates, 2026-09-16): the CLOSED
@@ -758,6 +763,8 @@ const LIFECYCLE_HOLD_WORDS: Record<HoldOwner, string> = {
 /** A fact that wants a person, durably. */
 export type Notification = {
   id: number;
+  /** v83: the one person this is for, or null for everyone it concerns. */
+  recipient: string | null;
   dedupeKey: string;
   kind: string;
   subject: string;
@@ -2125,7 +2132,8 @@ CREATE TABLE IF NOT EXISTS flow_card (
   created_by   TEXT NOT NULL,
   created_at   TEXT NOT NULL,
   updated_at   TEXT NOT NULL,
-  source_json  TEXT
+  source_json  TEXT,
+  owner        TEXT
 );
 CREATE INDEX IF NOT EXISTS flow_card_live ON flow_card (flow, state);
 CREATE TABLE IF NOT EXISTS flow_event (
@@ -2164,6 +2172,27 @@ CREATE TABLE IF NOT EXISTS flow_trigger (
   updated_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS flow_trigger_live ON flow_trigger (flow, state);
+
+-- v83: people on flow cards. A card's owner is on flow_card; watchers
+-- follow a card; flow_comment is what people said on it (kind 'comment',
+-- with the accounts it @mentioned) and who became its owner (kind 'owner',
+-- body the new owner or empty). Card history reads both.
+CREATE TABLE IF NOT EXISTS flow_card_watcher (
+  card     INTEGER NOT NULL REFERENCES flow_card(id),
+  name     TEXT NOT NULL,
+  added_at TEXT NOT NULL,
+  PRIMARY KEY (card, name)
+);
+CREATE TABLE IF NOT EXISTS flow_comment (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  card          INTEGER NOT NULL REFERENCES flow_card(id),
+  kind          TEXT NOT NULL CHECK (kind IN ('comment','owner')),
+  author        TEXT NOT NULL,
+  body          TEXT NOT NULL,
+  mentions_json TEXT NOT NULL DEFAULT '[]',
+  at            TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS flow_comment_card ON flow_comment (card, id);
 CREATE TABLE IF NOT EXISTS flow_trigger_event (
   trigger    INTEGER NOT NULL REFERENCES flow_trigger(id),
   key        TEXT NOT NULL,
@@ -4254,6 +4283,8 @@ function initializeStore(db: Database, file: string): Store {
   db.exec(TEAM_SCHEMA);
   migrate(db, preflight === null ? null : Math.abs(preflight));
   addColumn(db, "flow_card", "source_json", "TEXT");
+  addColumn(db, "flow_card", "owner", "TEXT");
+  addColumn(db, "notification", "recipient", "TEXT");
   addColumn(db, "approver", "projects_json", "TEXT");
   addColumn(db, "invite", "projects_json", "TEXT");
   db.exec(LEDGER_SCHEMA);
@@ -16309,8 +16340,8 @@ export class Store {
     const project = scope === "task" ? String(ref!["repo"]) : scope === "project" && source !== undefined && "project" in source ? source.project : null;
     const { changes } = this.db
       .prepare(
-        `INSERT OR IGNORE INTO notification (dedupe_key, kind, subject, body, created_at, push_class, link, provenance_scope, project, task_ref, task_id, source_run)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT OR IGNORE INTO notification (dedupe_key, kind, subject, body, created_at, push_class, link, provenance_scope, project, task_ref, task_id, source_run, recipient)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         notification.dedupeKey,
@@ -16321,6 +16352,7 @@ export class Store {
         notification.pushClass ?? null,
         notification.link ?? null,
         scope, project, ref === undefined ? null : taskRef, ref === undefined ? null : String(ref["external_id"]), run?.id ?? null,
+        notification.recipient ?? null,
       );
     return Number(changes) > 0;
   }
@@ -20633,6 +20665,46 @@ export class Store {
     return Number(this.db.prepare("SELECT COALESCE(MAX(id), 0) AS id FROM flow_event").get()?.["id"] ?? 0);
   }
 
+  // ---- people on flow cards (v83) ------------------------------------------------
+
+  /** Make someone (or no one) a card's owner, with the line its history shows. */
+  setFlowCardOwner(card: number, owner: string | null, actor: string, now: Date): void {
+    this.transact(() => {
+      const stamp = now.toISOString();
+      this.db.prepare("UPDATE flow_card SET owner = ?, updated_at = ? WHERE id = ?").run(owner, stamp, card);
+      this.db.prepare("INSERT INTO flow_comment (card, kind, author, body, mentions_json, at) VALUES (?, 'owner', ?, ?, '[]', ?)").run(card, actor, owner ?? "", stamp);
+    });
+  }
+
+  /** Follow or stop following a card. True when it changed. */
+  setFlowCardWatcher(card: number, name: string, watching: boolean, now: Date): boolean {
+    const { changes } = watching
+      ? this.db.prepare("INSERT OR IGNORE INTO flow_card_watcher (card, name, added_at) VALUES (?, ?, ?)").run(card, name, now.toISOString())
+      : this.db.prepare("DELETE FROM flow_card_watcher WHERE card = ? AND name = ?").run(card, name);
+    return Number(changes) === 1;
+  }
+
+  flowCardWatchers(card: number): string[] {
+    return this.db.prepare("SELECT name FROM flow_card_watcher WHERE card = ? ORDER BY added_at, name").all(card).map(row => String(row["name"]));
+  }
+
+  addFlowComment(comment: { card: number; author: string; body: string; mentions: readonly string[] }, now: Date): number {
+    const stamp = now.toISOString();
+    const id = Number(this.db.prepare("INSERT INTO flow_comment (card, kind, author, body, mentions_json, at) VALUES (?, 'comment', ?, ?, ?, ?)")
+      .run(comment.card, comment.author, comment.body, JSON.stringify(comment.mentions), stamp).lastInsertRowid);
+    this.db.prepare("UPDATE flow_card SET updated_at = ? WHERE id = ?").run(stamp, comment.card);
+    return id;
+  }
+
+  /** A card's discussion, oldest first. */
+  flowComments(card: number): FlowCommentRow[] {
+    return this.db.prepare("SELECT * FROM flow_comment WHERE card = ? ORDER BY id").all(card).map(row => {
+      let mentions: string[] = [];
+      try { const parsed = JSON.parse(String(row["mentions_json"])) as unknown; if (Array.isArray(parsed)) mentions = parsed.filter((one): one is string => typeof one === "string"); } catch { mentions = []; }
+      return { id: Number(row["id"]), card: Number(row["card"]), kind: String(row["kind"]) as FlowCommentRow["kind"], author: String(row["author"]), body: String(row["body"]), mentions, at: String(row["at"]) };
+    });
+  }
+
   // ---- flow triggers (v82) -----------------------------------------------------
 
   addFlowTrigger(trigger: { flow: number; kind: string; configJson: string; hookHash: string | null; cursor: string | null; nextAt: string | null; by: string }, now: Date): number {
@@ -23240,6 +23312,11 @@ export class Store {
       const destination = this.telegramDestination(binding);
       this.db.prepare(`INSERT OR IGNORE INTO notification_delivery (notification, destination)
         SELECT id, ? FROM notification WHERE resolved_at IS NULL`).run(destination);
+      // Someone else's notification is settled here as skipped, never sent —
+      // and never left unsettled, where it would fence that task's later rows.
+      this.db.prepare(`UPDATE notification_delivery SET receipt = '${TELEGRAM_SKIPPED_ELSEWHERE}'
+        WHERE destination = ? AND delivered_at IS NULL AND receipt IS NULL
+          AND notification IN (SELECT id FROM notification WHERE recipient IS NOT NULL AND recipient <> ?)`).run(destination, binding.approver);
       if (this.telegramRetryAt(binding.botId) > now.toISOString()) return [];
       const rows = this.db.prepare(`SELECT n.*, d.claim_generation FROM notification n
         JOIN notification_delivery d ON d.notification = n.id AND d.destination = ?
@@ -23359,7 +23436,7 @@ export class Store {
       const rows = this.db
         .prepare(
           `SELECT id FROM notification
-            WHERE delivered_at IS NULL AND resolved_at IS NULL
+            WHERE delivered_at IS NULL AND resolved_at IS NULL AND recipient IS NULL
               AND (claim_owner IS NULL OR claim_expires_at <= ?)
               AND (? = 'all' OR dedupe_key LIKE 'decision:%' OR COALESCE(push_class, '') = 'attention')
             ORDER BY id`,
@@ -23455,7 +23532,7 @@ export class Store {
     const row = this.db
       .prepare(
         `SELECT COUNT(*) AS n FROM notification
-          WHERE resolved_at IS NULL
+          WHERE resolved_at IS NULL AND recipient IS NULL
             AND NOT EXISTS (SELECT 1 FROM notification_delivery d
               JOIN telegram_binding b ON d.destination = 'telegram:' || b.bot_id || ':' || b.chat_id || ':' || b.id || ':' || b.approver_generation
               JOIN approver a ON a.name = b.approver AND a.generation = b.approver_generation
@@ -23498,7 +23575,7 @@ export class Store {
          )
          SELECT n.* FROM notification n
           WHERE n.resolved_at IS NULL
-            AND ((n.delivered_at IS NULL AND substr(n.dedupe_key, 1, ${LIFECYCLE_KEY_PREFIX.length}) <> '${LIFECYCLE_KEY_PREFIX}')
+            AND ((n.delivered_at IS NULL AND n.recipient IS NULL AND substr(n.dedupe_key, 1, ${LIFECYCLE_KEY_PREFIX.length}) <> '${LIFECYCLE_KEY_PREFIX}')
               OR n.id IN (SELECT id FROM troubled))
           ORDER BY n.id`,
       )
@@ -23627,6 +23704,7 @@ export class Store {
            FROM notification, push_subscription
           WHERE notification.push_class IS NOT NULL
             AND notification.resolved_at IS NULL
+            AND (notification.recipient IS NULL OR notification.recipient = push_subscription.approver)
             AND push_subscription.retired_at IS NULL
             AND notification.id > push_subscription.starts_after_notification`,
       )
@@ -24002,6 +24080,8 @@ function readHold(row: Record<string, unknown>): Hold {
  * explicit skip, with no delivered timestamp and no attempt, so suppressed
  * history is never reported as a send that happened. */
 export const TELEGRAM_SKIPPED_RECEIPT = "skipped:before-pairing";
+/** v83: a notification for another person, settled for this destination without sending. */
+export const TELEGRAM_SKIPPED_ELSEWHERE = "skipped:for-another-person";
 
 /** A destination receipt (`d` = notification_delivery) that still owes a
  * send: not delivered, and not explicitly skipped as pre-pairing history.
@@ -24034,6 +24114,7 @@ export const TELEGRAM_HOLD_REASONS = Object.freeze({
 function readNotification(row: Record<string, unknown>): Notification {
   return {
     id: Number(row["id"]),
+    recipient: row["recipient"] == null ? null : String(row["recipient"]),
     dedupeKey: String(row["dedupe_key"]),
     scope: row["provenance_scope"] as Notification["scope"],
     project: row["project"] == null ? null : String(row["project"]),
