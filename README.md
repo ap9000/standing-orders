@@ -100,6 +100,12 @@ failed when a result is marked complete.
   for the parts that change, such as a module or feature. Save the recipe,
   then use a short answer form to kick off another run. Saved recipes are
   searchable, show recently used work first, and can be shared with teammates.
+- **Flows: your process on a canvas.** Draw zones (triage, a person's
+  go-ahead, build, review, tell the team) and drop cards into them. Each zone
+  runs its step: build and research zones file ordinary tasks, so every
+  approval, check and agent fence still applies; decision zones wait for a
+  named person; a send back becomes a revision of the same work. The engine
+  is model-free and runs in the worker's pass.
 - **Unified portfolio chat.** Read every project, prioritize queues, answer
   decisions, repair failed or cancelled dependencies, and confirm rich action
   cards from one conversation. The chat proposes; durable workflow state

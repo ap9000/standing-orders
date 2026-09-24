@@ -23,11 +23,12 @@ import "./workspace.css";
 
 export { GuardedHtml, regionIsEditing };
 
-function Icon({ name }: { name: "menu" | "chat" | "tasks" | "projects" | "knowledge" | "settings" | "arrow" | "close" | "send" | "tools" | "plus" }) {
+function Icon({ name }: { name: "menu" | "chat" | "tasks" | "flows" | "projects" | "knowledge" | "settings" | "arrow" | "close" | "send" | "tools" | "plus" }) {
   const paths: Record<typeof name, ReactNode> = {
     menu: <path d="M4 6h16M4 12h16M4 18h16" />,
     chat: <path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6 3V6a2 2 0 0 1 2-2Z" />,
     tasks: <><path d="m3 6 2 2 4-4m-6 9 2 2 4-4m-6 9 2 2 4-4M13 6h8M13 13h8M13 20h8" /></>,
+    flows: <><rect width="8" height="8" x="3" y="3" rx="2" /><path d="M7 11v4a2 2 0 0 0 2 2h4" /><rect width="8" height="8" x="13" y="13" rx="2" /></>,
     projects: <path d="M3 7V5a2 2 0 0 1 2-2h5l3 4h6a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" />,
     knowledge: <path d="M12 5c-3-2-7-2-10-1v15c3-1 7-1 10 1 3-2 7-2 10-1V4c-3-1-7-1-10 1Zm0 0v15" />,
     settings: <><path d="M4 6h16M4 12h16M4 18h16" /><path d="M8 3v6M16 9v6M10 15v6" /></>,
@@ -275,8 +276,8 @@ function Navigation({ workspace }: { workspace: BrowserWorkspace }) {
       </select>
     </div>}
     <nav aria-label="Workspace" className="so-primary-navigation">{workspace.navigation.filter(item => item.href !== "/menu").map(item => {
-      const name = item.label.toLowerCase() as "chat" | "tasks" | "projects" | "knowledge" | "settings";
-      return <a key={item.href} href={item.href} aria-current={item.active ? "page" : undefined}><Icon name={["chat", "tasks", "projects", "knowledge", "settings"].includes(name) ? name : "tools"} /><span>{item.label}</span>
+      const name = item.label.toLowerCase() as "chat" | "tasks" | "flows" | "projects" | "knowledge" | "settings";
+      return <a key={item.href} href={item.href} aria-current={item.active ? "page" : undefined}><Icon name={["chat", "tasks", "flows", "projects", "knowledge", "settings"].includes(name) ? name : "tools"} /><span>{item.label}</span>
         {item.count !== undefined && item.count > 0 && <span className="so-nav-count" aria-label={`${item.count} ${item.count === 1 ? "needs" : "need"} you`}>{item.count}</span>}</a>;
     })}</nav>
     {currentProject && <div className="so-project-links">
@@ -506,7 +507,8 @@ export function WorkspaceApp({ initial }: { initial: BrowserWorkspace }) {
   const [panelTab, setPanelTab] = useState<"chat" | "crew">("chat");
   const pageOnly = !workspace.team && (!workspace.conversation || docked);
   // The Tasks page already lists every task; the Crew panel would repeat it.
-  const hidePanel = pageOnly && !docked && !hasWork && (new URL(workspace.path, window.location.origin).pathname === "/work");
+  // A flow's canvas needs the whole width.
+  const hidePanel = pageOnly && !docked && !hasWork && (new URL(workspace.path, window.location.origin).pathname === "/work" || workspace.view?.kind === "flow");
   useEffect(notifyWorkspaceRendered, []);
   return <><Toaster /><div className={`so-workspace${hidePanel ? " so-workspace--single" : ""}${docked ? " so-workspace--docked" : ""}`} data-workspace-shell data-workspace-phone-view={phoneView} data-workspace-has-result={workspace.result !== null}>
     <a href="#workspace-main" className="so-skip-link">Skip to content</a>

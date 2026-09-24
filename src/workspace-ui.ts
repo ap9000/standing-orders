@@ -504,7 +504,7 @@ export function compareWorkRows(a: { rank: number; updatedAt: string }, b: { ran
 /** The shell's three primary destinations, from the page's own active
  * key: every old page keeps its key and lights the destination it now
  * lives under. */
-export type PrimaryDestination = "chat" | "work" | "projects" | "settings" | null;
+export type PrimaryDestination = "chat" | "work" | "projects" | "flows" | "settings" | null;
 
 const WORK_KEYS = new Set(["inbox", "board", "queue", "work", "done", "activity", "review", "tasks", "runs", "workbench", "routines", "recipes", "ledger"]);
 const SETTINGS_KEYS = new Set(["fleet", "caps", "people", "mode", "system", "settings"]);
@@ -512,6 +512,7 @@ const SETTINGS_KEYS = new Set(["fleet", "caps", "people", "mode", "system", "set
 export function primaryDestinationOf(active: string): PrimaryDestination {
   if (active === "chat") return "chat";
   if (active === "projects") return "projects";
+  if (active === "flows") return "flows";
   if (WORK_KEYS.has(active)) return "work";
   if (SETTINGS_KEYS.has(active)) return "settings";
   return null;

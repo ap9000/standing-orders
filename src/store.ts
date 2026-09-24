@@ -111,7 +111,8 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // v78 remembers the task a paired chat (Telegram, Slack, Discord, Teams) chose to talk about.
 // v79 remembers which Telegram status message showed which task, so a reply to it is about that task.
 // v80 adds project tools: the MCP servers a project's builds get, the list sealed at each approval, and what each run launched with.
-export const SCHEMA_VERSION = 80;
+// v81 adds flows: a canvas of zones that cards (pieces of work) move through, and each card's history.
+export const SCHEMA_VERSION = 81;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -462,6 +463,24 @@ export type MateProposal = {
   resolvedBy: string | null;
   outcome: Record<string, unknown> | null;
 };
+
+export type FlowRow = { id: number; repo: string; name: string; definitionJson: string; revision: number; state: "active" | "archived"; createdBy: string; createdAt: string; updatedBy: string; updatedAt: string };
+export type FlowCardRow = { id: number; flow: number; title: string; description: string | null; stage: string; entry: number; state: "active" | "done" | "cancelled"; task: string | null; primaryTask: string | null; note: string | null; waiting: string | null; outputs: Record<string, string>; createdBy: string; createdAt: string; updatedAt: string };
+export type FlowEventOutcome = "created" | "ok" | "fail" | "moved" | "approved" | "sent-back" | "cancelled";
+
+function readFlowRow(row: Record<string, unknown>): FlowRow {
+  return { id: Number(row["id"]), repo: String(row["repo"]), name: String(row["name"]), definitionJson: String(row["definition_json"]), revision: Number(row["revision"]),
+    state: String(row["state"]) as FlowRow["state"], createdBy: String(row["created_by"]), createdAt: String(row["created_at"]), updatedBy: String(row["updated_by"]), updatedAt: String(row["updated_at"]) };
+}
+
+function readFlowCardRow(row: Record<string, unknown>): FlowCardRow {
+  let outputs: Record<string, string> = {};
+  try { const parsed = JSON.parse(String(row["outputs_json"] ?? "{}")) as unknown; if (parsed !== null && typeof parsed === "object") outputs = Object.fromEntries(Object.entries(parsed as Record<string, unknown>).filter((entry): entry is [string, string] => typeof entry[1] === "string")); } catch { outputs = {}; }
+  const optional = (key: string) => row[key] === null || row[key] === undefined ? null : String(row[key]);
+  return { id: Number(row["id"]), flow: Number(row["flow"]), title: String(row["title"]), description: optional("description"), stage: String(row["stage"]), entry: Number(row["entry"]),
+    state: String(row["state"]) as FlowCardRow["state"], task: optional("task"), primaryTask: optional("primary_task"), note: optional("note"), waiting: optional("waiting"), outputs,
+    createdBy: String(row["created_by"]), createdAt: String(row["created_at"]), updatedAt: String(row["updated_at"]) };
+}
 
 /** The one task a card is about: a task its confirmation created (a new
  * task, a revision), else the task it names (and, for feedback on a result,
@@ -2055,6 +2074,51 @@ CREATE TABLE IF NOT EXISTS chat_focus (
   updated_at TEXT NOT NULL,
   PRIMARY KEY (surface, binding)
 );
+
+-- v81: flows. A flow is a canvas of zones (the definition JSON: each zone's
+-- step and where it leads); a card is one piece of work moving through it,
+-- pointing at the task its current zone filed; flow_event is its history.
+CREATE TABLE IF NOT EXISTS flow (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo            TEXT NOT NULL,
+  name            TEXT NOT NULL,
+  definition_json TEXT NOT NULL,
+  revision        INTEGER NOT NULL DEFAULT 1,
+  state           TEXT NOT NULL CHECK (state IN ('active','archived')),
+  created_by      TEXT NOT NULL,
+  created_at      TEXT NOT NULL,
+  updated_by      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS flow_card (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  flow         INTEGER NOT NULL REFERENCES flow(id),
+  title        TEXT NOT NULL,
+  description  TEXT,
+  stage        TEXT NOT NULL,
+  entry        INTEGER NOT NULL DEFAULT 1,
+  state        TEXT NOT NULL CHECK (state IN ('active','done','cancelled')),
+  task         TEXT,
+  primary_task TEXT,
+  note         TEXT,
+  waiting      TEXT,
+  outputs_json TEXT NOT NULL DEFAULT '{}',
+  created_by   TEXT NOT NULL,
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS flow_card_live ON flow_card (flow, state);
+CREATE TABLE IF NOT EXISTS flow_event (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  card       INTEGER NOT NULL REFERENCES flow_card(id),
+  from_stage TEXT,
+  to_stage   TEXT NOT NULL,
+  outcome    TEXT NOT NULL CHECK (outcome IN ('created','ok','fail','moved','approved','sent-back','cancelled')),
+  actor      TEXT NOT NULL,
+  note       TEXT,
+  at         TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS flow_event_card ON flow_event (card, id);
 
 -- v80: project tools. The MCP servers one project's builds may use (the
 -- list replaces every other MCP source a build could load); secret values
@@ -20414,6 +20478,94 @@ export class Store {
   setChatFocus(surface: string, binding: number, task: string | null, now: Date): void {
     if (task === null) this.db.prepare("DELETE FROM chat_focus WHERE surface = ? AND binding = ?").run(surface, binding);
     else this.db.prepare("INSERT INTO chat_focus (surface, binding, task, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT (surface, binding) DO UPDATE SET task = excluded.task, updated_at = excluded.updated_at").run(surface, binding, task, now.toISOString());
+  }
+
+  // ---- flows (v81) -------------------------------------------------------------
+
+  createFlow(flow: { repo: string; name: string; definitionJson: string; by: string }, now: Date): number {
+    const stamp = now.toISOString();
+    return Number(this.db.prepare("INSERT INTO flow (repo, name, definition_json, revision, state, created_by, created_at, updated_by, updated_at) VALUES (?, ?, ?, 1, 'active', ?, ?, ?, ?)")
+      .run(flow.repo, flow.name, flow.definitionJson, flow.by, stamp, flow.by, stamp).lastInsertRowid);
+  }
+
+  getFlow(id: number): FlowRow | null {
+    const row = this.db.prepare("SELECT * FROM flow WHERE id = ?").get(id);
+    return row === undefined ? null : readFlowRow(row);
+  }
+
+  listFlows(repos: readonly string[]): FlowRow[] {
+    if (repos.length === 0) return [];
+    return this.db.prepare(`SELECT * FROM flow WHERE state = 'active' AND repo IN (${repos.map(() => "?").join(",")}) ORDER BY updated_at DESC, id DESC`).all(...repos).map(readFlowRow);
+  }
+
+  /** Save a new drawing of the flow only over the revision the editor saw (two editors never overwrite each other silently). */
+  saveFlow(id: number, change: { name: string; definitionJson: string; sawRevision: number; by: string }, now: Date): boolean {
+    const { changes } = this.db.prepare("UPDATE flow SET name = ?, definition_json = ?, revision = revision + 1, updated_by = ?, updated_at = ? WHERE id = ? AND revision = ? AND state = 'active'")
+      .run(change.name, change.definitionJson, change.by, now.toISOString(), id, change.sawRevision);
+    return Number(changes) === 1;
+  }
+
+  archiveFlow(id: number, by: string, now: Date): boolean {
+    const { changes } = this.db.prepare("UPDATE flow SET state = 'archived', updated_by = ?, updated_at = ? WHERE id = ? AND state = 'active'").run(by, now.toISOString(), id);
+    return Number(changes) === 1;
+  }
+
+  addFlowCard(card: { flow: number; title: string; description: string | null; stage: string; by: string }, now: Date): number {
+    return this.transact(() => {
+      const stamp = now.toISOString();
+      const id = Number(this.db.prepare("INSERT INTO flow_card (flow, title, description, stage, state, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, 'active', ?, ?, ?)")
+        .run(card.flow, card.title, card.description, card.stage, card.by, stamp, stamp).lastInsertRowid);
+      this.db.prepare("INSERT INTO flow_event (card, from_stage, to_stage, outcome, actor, note, at) VALUES (?, NULL, ?, 'created', ?, NULL, ?)").run(id, card.stage, card.by, stamp);
+      return id;
+    });
+  }
+
+  getFlowCard(id: number): FlowCardRow | null {
+    const row = this.db.prepare("SELECT * FROM flow_card WHERE id = ?").get(id);
+    return row === undefined ? null : readFlowCardRow(row);
+  }
+
+  flowCards(flow: number, includeFinished: boolean): FlowCardRow[] {
+    return this.db.prepare(`SELECT * FROM flow_card WHERE flow = ? ${includeFinished ? "" : "AND state = 'active'"} ORDER BY updated_at DESC, id DESC LIMIT 500`).all(flow).map(readFlowCardRow);
+  }
+
+  /** Every active card of every active flow in one project: what a worker's pass advances. */
+  activeFlowCards(repo: string): FlowCardRow[] {
+    return this.db.prepare("SELECT c.* FROM flow_card c JOIN flow f ON f.id = c.flow WHERE f.repo = ? AND f.state = 'active' AND c.state = 'active' ORDER BY c.id").all(repo).map(readFlowCardRow);
+  }
+
+  /** Move a card to a zone (a fresh entry: its step runs again), with the history line. `expectEntry` makes a stale move a no-op. */
+  moveFlowCard(id: number, move: { to: string; outcome: FlowEventOutcome; actor: string; note?: string | null; task?: string | null; expectEntry?: number }, now: Date): boolean {
+    return this.transact(() => {
+      const card = this.getFlowCard(id);
+      if (card === null || card.state !== "active" || (move.expectEntry !== undefined && card.entry !== move.expectEntry)) return false;
+      const stamp = now.toISOString();
+      this.db.prepare("UPDATE flow_card SET stage = ?, entry = entry + 1, task = ?, waiting = NULL, note = COALESCE(?, note), updated_at = ? WHERE id = ?")
+        .run(move.to, move.task ?? null, move.note ?? null, stamp, id);
+      this.db.prepare("INSERT INTO flow_event (card, from_stage, to_stage, outcome, actor, note, at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(id, card.stage, move.to, move.outcome, move.actor, move.note ?? null, stamp);
+      return true;
+    });
+  }
+
+  /** What a card's current zone is doing: its task, the card's main work, what it waits on, what zones reported. */
+  updateFlowCard(id: number, change: { task?: string | null; primaryTask?: string; waiting?: string | null; outputs?: Record<string, string>; state?: "done" | "cancelled" }, now: Date): void {
+    const card = this.getFlowCard(id);
+    if (card === null) return;
+    this.db.prepare("UPDATE flow_card SET task = ?, primary_task = ?, waiting = ?, outputs_json = ?, state = ?, updated_at = ? WHERE id = ?").run(
+      change.task === undefined ? card.task : change.task,
+      change.primaryTask ?? card.primaryTask,
+      change.waiting === undefined ? card.waiting : change.waiting,
+      JSON.stringify(change.outputs ?? card.outputs),
+      change.state ?? card.state,
+      now.toISOString(), id,
+    );
+  }
+
+  flowEvents(card: number): { fromStage: string | null; toStage: string; outcome: FlowEventOutcome; actor: string; note: string | null; at: string }[] {
+    return this.db.prepare("SELECT * FROM flow_event WHERE card = ? ORDER BY id").all(card).map(row => ({
+      fromStage: row["from_stage"] === null ? null : String(row["from_stage"]), toStage: String(row["to_stage"]), outcome: String(row["outcome"]) as FlowEventOutcome,
+      actor: String(row["actor"]), note: row["note"] === null ? null : String(row["note"]), at: String(row["at"]),
+    }));
   }
 
   // ---- project tools (v80) -------------------------------------------------

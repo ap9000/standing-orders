@@ -169,7 +169,36 @@ export type BrowserResultView = {
     notes: { author: string; at: string; note: string }[];
   } | null;
 };
-export type BrowserView = BrowserTasksView | BrowserSettingsView | BrowserTaskView | BrowserProjectsView | BrowserResultView;
+/** One zone on a flow's canvas: its step, where it leads, and where it sits. */
+export type BrowserFlowStage = {
+  id: string; title: string; kind: "inbox" | "task" | "report" | "approval" | "notify" | "done";
+  zone: { x: number; y: number; w: number; h: number; color: string };
+  instructions: string | null; planning: "auto" | "required" | "skip" | null; approver: string | null; message: string | null;
+  next: string | null; onFail: string | null;
+};
+
+/** One card: a piece of work, where it is, what it waits on, what zones said. */
+export type BrowserFlowCard = {
+  id: number; title: string; description: string | null; stage: string; state: "active" | "done" | "cancelled";
+  waiting: string | null; task: { id: string; href: string } | null; createdBy: string; updatedAt: string;
+  canDecide: boolean; outputs: { stage: string; title: string; text: string }[]; history: { text: string; at: string }[];
+};
+
+/** A flow's canvas: zones, cards, and what this person may change. */
+export type BrowserFlowView = {
+  kind: "flow";
+  flow: { id: number; name: string; project: string; revision: number; href: string };
+  start: string;
+  stages: BrowserFlowStage[];
+  cards: BrowserFlowCard[];
+  selectedCard: number | null;
+  canEdit: boolean;
+  approvers: string[];
+  kinds: { kind: BrowserFlowStage["kind"]; label: string; about: string }[];
+  colors: string[];
+};
+
+export type BrowserView = BrowserTasksView | BrowserSettingsView | BrowserTaskView | BrowserProjectsView | BrowserResultView | BrowserFlowView;
 
 export type BrowserWorkspace = {
   version: 1; path: string; title: string; user: string; csrf: string; sensitive: boolean;
@@ -229,6 +258,7 @@ export function browserNavigationOf(path: string, project: string | null = null,
     { label: 'Tasks', href: `/work${project === null ? '' : `?project=${encodeURIComponent(project)}`}`,
       active: pathname === '/work' || pathname === '/tasks' || pathname.startsWith('/t/') || pathname.startsWith('/r/'),
       ...(needsYou > 0 ? { count: needsYou } : {}) },
+    { label: 'Flows', href: '/flows', active: pathname === '/flows' || pathname.startsWith('/flows/') },
     { label: 'Projects', href: '/projects', active: pathname === '/projects' },
     { label: 'Knowledge', href: `/settings/knowledge${project === null ? '' : `?repo=${encodeURIComponent(project)}`}`, active: knowledge },
     { label: 'Settings', href: '/settings', active: !knowledge && (pathname === '/settings' || pathname.startsWith('/settings/')) },
