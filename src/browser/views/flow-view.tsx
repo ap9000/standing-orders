@@ -7,9 +7,9 @@
  * it now stands, and the canvas refreshes every few seconds for everyone. */
 import { Background, BackgroundVariant, Controls, Handle, MarkerType, NodeResizer, Position, ReactFlow, ReactFlowProvider, applyNodeChanges, useReactFlow, type Connection, type Edge, type Node, type NodeChange, type NodeProps } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Flag, Hammer, Inbox, Megaphone, MessageSquare, Pencil, Plus, Search, UserCheck, X } from "lucide-react";
+import { CalendarClock, Copy, Flag, GitPullRequest, Hammer, Inbox, Megaphone, MessageSquare, MousePointerClick, Pencil, Plus, Search, SquareKanban, UserCheck, Webhook, Workflow, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { BrowserFlowCard, BrowserFlowStage, BrowserFlowView } from "../../browser-workspace.js";
+import type { BrowserFlowCard, BrowserFlowStage, BrowserFlowTrigger, BrowserFlowView } from "../../browser-workspace.js";
 import { Badge, Button, Input, Label, Textarea, cn, toast } from "../components/ui/index.js";
 
 const COLORS: Record<string, string> = { slate: "#64748b", blue: "#3b82f6", violet: "#8b5cf6", amber: "#d97706", green: "#059669", rose: "#e11d48" };
@@ -18,14 +18,20 @@ const KIND_ICONS: Record<BrowserFlowStage["kind"], ReactNode> = {
   approval: <UserCheck className="size-3.5" aria-hidden="true" />, notify: <Megaphone className="size-3.5" aria-hidden="true" />, done: <Flag className="size-3.5" aria-hidden="true" />,
 };
 
-type Said = { ok: boolean; said: string; view?: BrowserFlowView };
+const TRIGGER_ICONS: Record<string, ReactNode> = {
+  button: <MousePointerClick className="size-3.5" aria-hidden="true" />, schedule: <CalendarClock className="size-3.5" aria-hidden="true" />, github: <GitPullRequest className="size-3.5" aria-hidden="true" />,
+  linear: <SquareKanban className="size-3.5" aria-hidden="true" />, flow: <Workflow className="size-3.5" aria-hidden="true" />, webhook: <Webhook className="size-3.5" aria-hidden="true" />,
+};
+
+type Reveal = { path: string; address: string | null; secret: string | null };
+type Said = { ok: boolean; said: string; view?: BrowserFlowView; reveal?: Reveal };
 
 async function send(path: string, fields: Record<string, string>, csrf: string): Promise<Said> {
   const body = new URLSearchParams({ csrf, ...fields });
   try {
     const response = await fetch(path, { method: "POST", body, credentials: "same-origin", headers: { accept: "application/json" }, signal: AbortSignal.timeout(20_000) });
     const data = await response.json() as Said;
-    return { ok: data.ok === true, said: typeof data.said === "string" ? data.said : response.ok ? "Done." : "That didn't go through.", ...(data.view === undefined ? {} : { view: data.view }) };
+    return { ok: data.ok === true, said: typeof data.said === "string" ? data.said : response.ok ? "Done." : "That didn't go through.", ...(data.view === undefined ? {} : { view: data.view }), ...(data.reveal === undefined ? {} : { reveal: data.reveal }) };
   } catch {
     return { ok: false, said: "That didn't go through. Check your connection and try again." };
   }
@@ -37,7 +43,7 @@ type ZoneData = {
   onResize: (stage: string, box: { x: number; y: number; width: number; height: number }) => void;
 };
 
-function ZoneNode({ data, selected }: NodeProps<Node<ZoneData>>) {
+function ZoneNode({ data, selected }: NodeProps<Node<ZoneData, "zone">>) {
   const { stage, cards, editing, canMove } = data;
   const color = COLORS[stage.zone.color] ?? COLORS["slate"]!;
   const [over, setOver] = useState(false);
@@ -83,7 +89,31 @@ function ZoneNode({ data, selected }: NodeProps<Node<ZoneData>>) {
   </div>;
 }
 
-const NODE_TYPES = { zone: ZoneNode };
+type TriggerData = { triggers: BrowserFlowTrigger[]; onOpen: (id: number) => void; onPress: (id: number) => void };
+const TRIGGER_ROW = 44, TRIGGER_HEAD = 30;
+
+/** What starts cards in one zone, beside it: each trigger in a line, whether it is well, and Start for a button. One arrow into the zone. */
+function TriggerNode({ data }: NodeProps<Node<TriggerData, "trigger">>) {
+  return <div className="flex h-full flex-col overflow-hidden rounded-lg border bg-card shadow-sm" data-trigger-group>
+    <Handle type="source" position={Position.Right} id="out" className="!opacity-0 !pointer-events-none" isConnectable={false} />
+    <div className="flex items-center gap-1.5 px-2.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground" style={{ height: TRIGGER_HEAD }}><Zap className="size-3" aria-hidden="true" />Starts cards</div>
+    {data.triggers.map(trigger => {
+      const attention = trigger.failing || (trigger.hook !== null && !trigger.hook.ready);
+      const line = trigger.state === "paused" ? "Paused" : trigger.failing ? "Needs attention" : trigger.hook !== null && !trigger.hook.ready ? "Needs its secret" : trigger.detail;
+      return <div key={trigger.id} className={cn("flex items-center gap-2 border-t px-2.5", trigger.state === "paused" && "opacity-60")} style={{ height: TRIGGER_ROW }} data-trigger={trigger.id}>
+        <span className="inline-flex size-6 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">{TRIGGER_ICONS[trigger.kind] ?? <Zap className="size-3.5" aria-hidden="true" />}</span>
+        <button type="button" className="nodrag nopan min-w-0 flex-1 cursor-pointer text-left" onClick={() => data.onOpen(trigger.id)} aria-label={`Trigger: ${trigger.words}`}>
+          <div className="truncate text-[12px] font-semibold">{trigger.name}</div>
+          <div className={cn("truncate text-[11px]", attention ? "text-attention" : "text-muted-foreground")}>{line}</div>
+        </button>
+        {trigger.button !== null && trigger.state === "active" && <Button size="sm" className="nodrag nopan h-7 px-2.5" onClick={() => data.onPress(trigger.id)}>Start</Button>}
+      </div>;
+    })}
+  </div>;
+}
+
+const NODE_TYPES = { zone: ZoneNode, trigger: TriggerNode };
+type FlowNode = Node<ZoneData, "zone"> | Node<TriggerData, "trigger">;
 
 /** Zones in the order work usually meets them: from the start, following each zone's next. */
 function flowOrder(stages: BrowserFlowStage[], start: string): BrowserFlowStage[] {
@@ -128,6 +158,8 @@ function CardPanel({ card, view, csrf, apply, onClose }: { card: BrowserFlowCard
       </div>
       <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close"><X className="size-4" /></Button>
     </div>
+    {card.source !== null && <p className="text-[12px] text-muted-foreground">From {card.source.url === null ? card.source.label
+      : <a className="font-medium text-primary underline-offset-4 hover:underline" href={card.source.url} {...(card.source.url.startsWith("/") ? {} : { target: "_blank", rel: "noreferrer" })}>{card.source.label}</a>}</p>}
     {card.description !== null && <p className="whitespace-pre-wrap text-[13px]">{card.description}</p>}
     {card.waiting !== null && <p className="rounded-md bg-muted px-3 py-2 text-[13px]">{card.waiting}</p>}
     {card.task !== null && <a className="text-[13px] font-medium text-primary underline-offset-4 hover:underline" href={card.task.href}>Open its task</a>}
@@ -161,11 +193,15 @@ function CardPanel({ card, view, csrf, apply, onClose }: { card: BrowserFlowCard
   </div>;
 }
 
+/** One labelled setting: defined once at the top level, so typing in it never remounts the input. */
+function Field({ label, hint, children }: { label: string; hint?: string | undefined; children: ReactNode }) {
+  return <label className="grid gap-1.5"><span className="text-[13px] font-medium">{label}</span>{children}{hint !== undefined && <span className="text-[12px] text-muted-foreground">{hint}</span>}</label>;
+}
+const SELECT = "h-9 w-full rounded-md border bg-transparent px-2 text-[13px]";
+
 function ZonePanel({ stage, stages, view, update, remove, makeStart, onClose }: { stage: BrowserFlowStage; stages: BrowserFlowStage[]; view: BrowserFlowView; update: (change: Partial<BrowserFlowStage>) => void; remove: () => void; makeStart: () => void; onClose: () => void }) {
   const others = stages.filter(one => one.id !== stage.id);
-  const select = "h-9 w-full rounded-md border bg-transparent px-2 text-[13px]";
-  const Field = ({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) =>
-    <div className="grid gap-1.5"><span className="text-[13px] font-medium">{label}</span>{children}{hint !== undefined && <span className="text-[12px] text-muted-foreground">{hint}</span>}</div>;
+  const select = SELECT;
   const kind = view.kinds.find(one => one.kind === stage.kind);
   return <div className="flex flex-col gap-3" data-flow-zone-panel={stage.id}>
     <div className="flex items-center gap-2"><h2 className="flex-1 text-[15px] font-semibold">Edit zone</h2><Button variant="ghost" size="icon" onClick={onClose} aria-label="Close"><X className="size-4" /></Button></div>
@@ -199,11 +235,11 @@ function ZonePanel({ stage, stages, view, update, remove, makeStart, onClose }: 
         <option value="">{stage.kind === "approval" ? "Can't be sent back" : "Wait here"}</option>{others.map(one => <option key={one.id} value={one.id}>{one.title}</option>)}
       </select>
     </Field>}
-    <Field label="Color">
+    <div className="grid gap-1.5"><span className="text-[13px] font-medium">Color</span>
       <div className="flex gap-2">{view.colors.map(color => <button key={color} type="button" aria-label={color} aria-pressed={stage.zone.color === color}
         className={cn("size-7 rounded-full border-2", stage.zone.color === color ? "border-foreground" : "border-transparent")} style={{ background: COLORS[color] }}
         onClick={() => update({ zone: { ...stage.zone, color } })} />)}</div>
-    </Field>
+    </div>
     <div className="flex flex-wrap gap-2 pt-1">
       {view.start !== stage.id && <Button variant="outline" size="sm" onClick={makeStart}>New cards start here</Button>}
       <Button variant="ghost" size="sm" className="text-destructive" onClick={remove} disabled={stages.length <= 1}>Delete zone</Button>
@@ -232,11 +268,228 @@ function NewCard({ view, csrf, apply, onClose }: { view: BrowserFlowView; csrf: 
   </form>;
 }
 
+const ago = (at: string | null): string => {
+  if (at === null) return "";
+  const minutes = Math.round((Date.now() - Date.parse(at)) / 60_000);
+  return minutes < 1 ? "Just now" : minutes < 60 ? `${minutes} min ago` : minutes < 1440 ? `${Math.round(minutes / 60)} h ago` : new Date(at).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+};
+
+function CopyLine({ label, value }: { label: string; value: string }) {
+  const copy = () => { void navigator.clipboard?.writeText(value).then(() => toast.success(`${label} copied.`), () => toast.error("Select it and copy it by hand.")); };
+  return <div className="grid gap-1"><span className="text-[12px] font-medium">{label}</span>
+    <div className="flex gap-2"><Input readOnly value={value} className="h-8 font-mono text-[12px]" onFocus={event => event.target.select()} aria-label={label} />
+      <Button type="button" size="sm" variant="outline" onClick={copy} aria-label={`Copy ${label.toLowerCase()}`}><Copy className="size-3.5" /></Button></div></div>;
+}
+
+/** A new webhook address (and GitHub's secret), shown once. */
+function RevealBox({ kind, reveal, onDone }: { kind: string; reveal: Reveal; onDone: () => void }) {
+  return <div className="flex flex-col gap-2 rounded-lg border border-primary/40 bg-primary/5 p-3" data-trigger-reveal>
+    <p className="text-[13px] font-semibold">Copy these now. They aren't shown again.</p>
+    {reveal.address === null
+      ? <p className="text-[12px]">Save your public webhook address below first, then choose New address. <span className="break-all font-mono">{reveal.path}</span></p>
+      : <CopyLine label="Address" value={reveal.address} />}
+    {reveal.secret !== null && <CopyLine label="Secret" value={reveal.secret} />}
+    <p className="text-[12px] text-muted-foreground">{kind === "github" ? "In GitHub: Settings → Webhooks → Add webhook. Paste the address and the secret, choose application/json, and pick the events this trigger watches (Issues, Pull requests or Workflow runs)."
+      : kind === "linear" ? "In Linear: Settings → API → Webhooks → New webhook. Paste the address and choose Issues. Then paste Linear's signing secret on this trigger."
+      : "Post JSON to the address. A title field becomes the card's title; description, its details."}</p>
+    <Button type="button" size="sm" variant="outline" className="self-start" onClick={onDone}>Done</Button>
+  </div>;
+}
+
+const TRIGGER_KEYS: Record<string, string[]> = {
+  button: ["label", "questions"], schedule: ["schedule", "title", "description"], github: ["repo", "watch", "label", "branch", "from", "delivery"],
+  linear: ["team", "state", "label", "delivery"], flow: ["flow", "when"], webhook: ["title", "titleField", "bodyField"],
+};
+
+function AddTrigger({ view, csrf, open, onResult }: { view: BrowserFlowView; csrf: string; open: boolean; onResult: (result: Said, kind: string) => void }) {
+  const setup = view.triggerSetup;
+  const [kind, setKind] = useState("button");
+  const [fields, setFields] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const defaults: Record<string, Record<string, string>> = {
+    schedule: { schedule: `daily 09:00 ${timezone}` }, github: { repo: setup.githubRepo ?? "", watch: "issues", from: "team", delivery: "poll", branch: "main" },
+    linear: { delivery: "poll" }, flow: { flow: String(setup.otherFlows[0]?.id ?? "") }, webhook: { title: "Webhook" },
+  };
+  const v = (key: string) => fields[key] ?? defaults[kind]?.[key] ?? "";
+  const set = (key: string) => (event: { target: { value: string } }) => setFields(current => ({ ...current, [key]: event.target.value }));
+  const source = setup.otherFlows.find(one => String(one.id) === v("flow"));
+  const submit = async (event: { preventDefault: () => void }) => {
+    event.preventDefault();
+    const trigger: Record<string, unknown> = { kind, zone: v("zone") || null };
+    for (const key of TRIGGER_KEYS[kind] ?? []) trigger[key] = key === "questions" ? v(key).split("\n") : key === "flow" ? Number(v(key)) : v(key) || null;
+    setBusy(true);
+    const result = await send(`${view.flow.href}/triggers`, { trigger: JSON.stringify(trigger) }, csrf);
+    setBusy(false);
+    onResult(result, kind);
+    if (result.ok) setFields({});
+  };
+  return <details className="rounded-lg border px-3 py-2" open={open}>
+    <summary className="cursor-pointer text-[13px] font-semibold">Add a trigger</summary>
+    <form className="flex flex-col gap-3 pt-3" onSubmit={event => void submit(event)} data-add-trigger>
+      <Field label="What starts cards">
+        <select className={SELECT} value={kind} onChange={event => { setKind(event.target.value); setFields({}); }}>
+          {setup.kinds.map(one => <option key={one.kind} value={one.kind}>{one.label}</option>)}
+        </select>
+      </Field>
+      {kind === "button" && <>
+        <Field label="Button name"><Input value={v("label")} onChange={set("label")} placeholder="Report a bug" maxLength={40} required /></Field>
+        <Field label="Questions it asks" hint="One per line. The first answer becomes the card's title.">
+          <Textarea rows={3} value={v("questions")} onChange={set("questions")} placeholder={"What happened?\nSteps to reproduce\nHow bad is it?"} /></Field>
+      </>}
+      {kind === "schedule" && <>
+        <Field label="When" hint="For example: daily 09:00 Europe/London, monday 09:00, every 4 hours."><Input value={v("schedule")} onChange={set("schedule")} required /></Field>
+        <Field label="Card title" hint="Each card's date is added to it."><Input value={v("title")} onChange={set("title")} placeholder="Dependency check" maxLength={200} required /></Field>
+        <Field label="Details (optional)"><Textarea rows={3} value={v("description")} onChange={set("description")} /></Field>
+      </>}
+      {kind === "github" && <>
+        <Field label="Repository"><Input value={v("repo")} onChange={set("repo")} placeholder="owner/name" required /></Field>
+        <Field label="Watch"><select className={SELECT} value={v("watch")} onChange={set("watch")}>
+          <option value="issues">New issues</option><option value="pulls">New pull requests</option><option value="checks">Failed checks</option></select></Field>
+        {v("watch") !== "checks" && <Field label="Label (optional)" hint={v("watch") === "issues" ? "With a label, an issue joins the moment it gets the label." : "Only pull requests with this label."}>
+          <Input value={v("label")} onChange={set("label")} placeholder="bug" maxLength={50} /></Field>}
+        {v("watch") === "checks" && <Field label="Branch"><Input value={v("branch")} onChange={set("branch")} maxLength={100} /></Field>}
+        {v("watch") !== "checks" && <Field label="From" hint={v("from") === "anyone" ? "Anyone who can open one there can write what the agent reads. The work still waits for your approval." : undefined}>
+          <select className={SELECT} value={v("from")} onChange={set("from")}><option value="team">People with write access</option><option value="anyone">Anyone</option></select></Field>}
+      </>}
+      {kind === "linear" && <>
+        <Field label="Team key" hint="Like ENG. Name a team, a label, or both."><Input value={v("team")} onChange={set("team")} placeholder="ENG" maxLength={12} /></Field>
+        <Field label="When it moves to (optional)"><Input value={v("state")} onChange={set("state")} placeholder="Todo" maxLength={40} /></Field>
+        <Field label="Label (optional)"><Input value={v("label")} onChange={set("label")} placeholder="bug" maxLength={50} /></Field>
+      </>}
+      {(kind === "github" || kind === "linear") && <Field label="How it arrives"
+        hint={v("delivery") === "webhook" ? setup.hooksBase === null ? "Needs your public webhook address: set it under Settings below." : "You'll get an address to paste into " + (kind === "github" ? "GitHub." : "Linear.")
+          : kind === "linear" && !setup.linearKey ? "Save your Linear key under Settings below first." : undefined}>
+        <select className={SELECT} value={v("delivery")} onChange={set("delivery")}><option value="poll">Checked every 2 minutes</option><option value="webhook">Sent to a webhook address</option></select></Field>}
+      {kind === "flow" && (setup.otherFlows.length === 0 ? <p className="text-[13px] text-muted-foreground">There are no other flows to follow yet.</p> : <>
+        <Field label="Flow"><select className={SELECT} value={v("flow")} onChange={event => setFields(current => ({ ...current, flow: event.target.value, when: "" }))}>
+          {setup.otherFlows.map(one => <option key={one.id} value={one.id}>{one.name}</option>)}</select></Field>
+        <Field label="When a card reaches"><select className={SELECT} value={v("when")} onChange={set("when")}>
+          <option value="">The end</option>{source?.zones.map(one => <option key={one.id} value={one.id}>{one.title}</option>)}</select></Field>
+      </>)}
+      {kind === "webhook" && <>
+        <Field label="Title field" hint="Where to find the card's title in the posted JSON, like title or data.issue.title."><Input value={v("titleField")} onChange={set("titleField")} placeholder="title" maxLength={80} /></Field>
+        <Field label="Details field"><Input value={v("bodyField")} onChange={set("bodyField")} placeholder="description" maxLength={80} /></Field>
+        <Field label="Title when there is none"><Input value={v("title")} onChange={set("title")} maxLength={120} /></Field>
+      </>}
+      <Field label="Cards start in"><select className={SELECT} value={v("zone")} onChange={set("zone")}>
+        <option value="">{view.stages.find(one => one.id === view.start)?.title ?? "The first zone"}</option>
+        {view.stages.filter(one => one.id !== view.start).map(one => <option key={one.id} value={one.id}>{one.title}</option>)}</select></Field>
+      <Button type="submit" size="sm" className="self-start" disabled={busy || (kind === "flow" && setup.otherFlows.length === 0)}><Plus className="size-4" />Add trigger</Button>
+    </form>
+  </details>;
+}
+
+/** Installation settings a trigger may need: the Linear key (behind the password) and the public webhook address. */
+function TriggerSettings({ view, csrf, apply }: { view: BrowserFlowView; csrf: string; apply: (result: Said) => void }) {
+  const setup = view.triggerSetup;
+  const [key, setKey] = useState("");
+  const [password, setPassword] = useState("");
+  const [address, setAddress] = useState(setup.hooksBase ?? "");
+  const [busy, setBusy] = useState(false);
+  const act = async (path: string, fields: Record<string, string>) => { setBusy(true); const result = await send(path, fields, csrf); setBusy(false); apply(result); if (result.ok) { setKey(""); setPassword(""); } };
+  return <details className="rounded-lg border px-3 py-2">
+    <summary className="cursor-pointer text-[13px] font-semibold">Settings</summary>
+    <div className="flex flex-col gap-4 pt-3">
+      {setup.linearKey
+        ? <div className="grid gap-1.5"><span className="text-[13px] font-medium">Linear key</span><p className="text-[12px] text-muted-foreground">Saved on this computer.</p>
+            <Button type="button" size="sm" variant="ghost" className="self-start text-destructive" disabled={busy} onClick={() => void act(`${view.flow.href}/linear-key`, { remove: "yes" })}>Remove key</Button></div>
+        : <form className="flex flex-col gap-2" onSubmit={event => { event.preventDefault(); void act(`${view.flow.href}/linear-key`, { key, password }); }}>
+            <Field label="Linear key" hint="From Linear → Settings → Security & access → Personal API keys. Kept on this computer only.">
+              <Input type="password" autoComplete="off" value={key} onChange={event => setKey(event.target.value)} placeholder="lin_api_…" /></Field>
+            <Field label="Your Standing Orders password"><Input type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} /></Field>
+            <Button type="submit" size="sm" className="self-start" disabled={busy || key.trim() === "" || password === ""}>Save key</Button>
+          </form>}
+      <form className="flex flex-col gap-2" onSubmit={event => { event.preventDefault(); void act(`${view.flow.href}/hooks-address`, { address }); }}>
+        <Field label="Public webhook address" hint="The https site your reverse proxy (Caddy, for example) serves. Have it pass only paths starting /hooks/ to this console.">
+          <Input value={address} onChange={event => setAddress(event.target.value)} placeholder="https://hooks.example.com" /></Field>
+        <Button type="submit" size="sm" variant="outline" className="self-start" disabled={busy}>Save address</Button>
+      </form>
+    </div>
+  </details>;
+}
+
+function LinearSecret({ trigger, view, csrf, apply }: { trigger: BrowserFlowTrigger; view: BrowserFlowView; csrf: string; apply: (result: Said) => void }) {
+  const [secret, setSecret] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  return <form className="mt-2 flex flex-col gap-2 rounded-md border border-attention/50 p-2" onSubmit={async event => {
+    event.preventDefault(); setBusy(true);
+    const result = await send(`${view.flow.href}/triggers/${trigger.id}/secret`, { secret, password }, csrf);
+    setBusy(false); apply(result); if (result.ok) { setSecret(""); setPassword(""); }
+  }}>
+    <Field label="Linear's signing secret" hint="Linear shows it when you create the webhook."><Input type="password" autoComplete="off" value={secret} onChange={event => setSecret(event.target.value)} /></Field>
+    <Field label="Your Standing Orders password"><Input type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} /></Field>
+    <Button type="submit" size="sm" className="self-start" disabled={busy || secret.trim() === "" || password === ""}>Save secret</Button>
+  </form>;
+}
+
+function TriggersPanel({ view, csrf, apply, focus, onPress, onClose }: { view: BrowserFlowView; csrf: string; apply: (result: Said) => void; focus: number | null; onPress: (id: number) => void; onClose: () => void }) {
+  const [reveal, setReveal] = useState<{ kind: string; reveal: Reveal } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const base = `${view.flow.href}/triggers`;
+  const act = async (path: string, kind: string) => {
+    setBusy(true);
+    const result = await send(path, {}, csrf);
+    setBusy(false);
+    apply(result);
+    if (result.reveal !== undefined) setReveal({ kind, reveal: result.reveal });
+  };
+  const live = view.triggers.filter(one => one.state !== "removed");
+  useEffect(() => { if (focus !== null) document.querySelector(`[data-trigger-row="${focus}"]`)?.scrollIntoView({ block: "nearest" }); }, [focus]);
+  return <div className="flex flex-col gap-4" data-flow-triggers>
+    <div className="flex items-center gap-2"><h2 className="flex-1 text-[15px] font-semibold">Triggers</h2><Button variant="ghost" size="icon" onClick={onClose} aria-label="Close"><X className="size-4" /></Button></div>
+    <p className="text-[13px] text-muted-foreground">Triggers add cards to this flow on their own. The work they start still waits for your usual approvals.</p>
+    {reveal !== null && <RevealBox kind={reveal.kind} reveal={reveal.reveal} onDone={() => setReveal(null)} />}
+    {live.length > 0 && <ul className="flex flex-col gap-3">{live.map(trigger => <li key={trigger.id} className={cn("rounded-lg border p-3", focus === trigger.id && "ring-2 ring-primary/50")} data-trigger-row={trigger.id}>
+      <div className="flex items-start gap-2">
+        <span className="mt-0.5 inline-flex size-6 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">{TRIGGER_ICONS[trigger.kind] ?? <Zap className="size-3.5" aria-hidden="true" />}</span>
+        <div className="min-w-0 flex-1">
+          <p className="text-[13px] font-medium leading-snug">{trigger.words}</p>
+          <p className="text-[12px] text-muted-foreground">Starts in {trigger.zone}{trigger.state === "paused" ? " · Paused" : ""}</p>
+          {trigger.status !== null && <p className={cn("text-[12px]", trigger.failing ? "text-attention" : "text-muted-foreground")}>{ago(trigger.statusAt)}: {trigger.status}</p>}
+        </div>
+      </div>
+      {trigger.hook?.needsSecret === true && !trigger.hook.ready && <LinearSecret trigger={trigger} view={view} csrf={csrf} apply={apply} />}
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        {trigger.button !== null && trigger.state === "active" && <Button size="sm" onClick={() => onPress(trigger.id)}>Start</Button>}
+        {trigger.checkable && trigger.state === "active" && <Button size="sm" variant="outline" disabled={busy} onClick={() => void act(`${base}/${trigger.id}/check`, trigger.kind)}>Check now</Button>}
+        {trigger.hook !== null && <Button size="sm" variant="outline" disabled={busy} onClick={() => void act(`${base}/${trigger.id}/renew`, trigger.kind)}>New address</Button>}
+        <Button size="sm" variant="ghost" disabled={busy} onClick={() => void act(`${base}/${trigger.id}/${trigger.state === "paused" ? "resume" : "pause"}`, trigger.kind)}>{trigger.state === "paused" ? "Turn on" : "Pause"}</Button>
+        <Button size="sm" variant="ghost" className="text-destructive" disabled={busy} onClick={() => void act(`${base}/${trigger.id}/remove`, trigger.kind)}>Remove</Button>
+      </div>
+    </li>)}</ul>}
+    <AddTrigger view={view} csrf={csrf} open={live.length === 0} onResult={(result, kind) => { apply(result); if (result.reveal !== undefined) setReveal({ kind, reveal: result.reveal }); }} />
+    <TriggerSettings view={view} csrf={csrf} apply={apply} />
+  </div>;
+}
+
+/** Pressing a button trigger: its questions, the first answer as the card's title. */
+function PressPanel({ trigger, view, csrf, apply, onClose }: { trigger: BrowserFlowTrigger; view: BrowserFlowView; csrf: string; apply: (result: Said) => void; onClose: () => void }) {
+  const questions = trigger.button?.questions ?? [];
+  const [answers, setAnswers] = useState<string[]>(questions.map(() => ""));
+  const [busy, setBusy] = useState(false);
+  const answer = (index: number) => (event: { target: { value: string } }) => setAnswers(current => current.map((one, at) => at === index ? event.target.value : one));
+  return <form className="flex flex-col gap-3" data-flow-press={trigger.id} onSubmit={async event => {
+    event.preventDefault(); setBusy(true);
+    const result = await send(`${view.flow.href}/triggers/${trigger.id}/press`, { answers: JSON.stringify(answers) }, csrf);
+    setBusy(false); apply(result); if (result.ok) onClose();
+  }}>
+    <div className="flex items-center gap-2"><h2 className="flex-1 text-[15px] font-semibold">{trigger.button?.label}</h2><Button type="button" variant="ghost" size="icon" onClick={onClose} aria-label="Close"><X className="size-4" /></Button></div>
+    <p className="text-[12px] text-muted-foreground">The card starts in {trigger.zone}.</p>
+    {questions.map((question, index) => <Field key={index} label={question}>
+      {index === 0 ? <Input value={answers[index] ?? ""} onChange={answer(index)} maxLength={200} required autoFocus /> : <Textarea rows={3} value={answers[index] ?? ""} onChange={answer(index)} />}
+    </Field>)}
+    <Button type="submit" size="sm" className="self-start" disabled={busy || (answers[0] ?? "").trim() === ""}><Plus className="size-4" />Add card</Button>
+  </form>;
+}
+
 function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }) {
   const [view, setView] = useState(initial);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<{ name: string; start: string; stages: BrowserFlowStage[] } | null>(null);
-  const [selected, setSelected] = useState<{ card: number } | { zone: string } | null>(initial.selectedCard === null ? null : { card: initial.selectedCard });
+  const [selected, setSelected] = useState<{ card: number } | { zone: string } | { triggers: number | null } | { press: number } | null>(
+    initial.selectedCard !== null ? { card: initial.selectedCard } : initial.startTrigger !== null && initial.triggers.some(one => one.id === initial.startTrigger && one.button !== null) ? { press: initial.startTrigger } : null);
   const [saving, setSaving] = useState(false);
   const [adding, setAdding] = useState(false);
   const flow = useReactFlow();
@@ -268,8 +521,8 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
     apply(await send(`${view.flow.href}/cards/${card}/move`, { stage }, csrf));
   }, [view, csrf, apply]);
 
-  const computed: Node<ZoneData>[] = useMemo(() => stages.map(stage => ({
-    id: stage.id, type: "zone", position: { x: stage.zone.x, y: stage.zone.y }, width: stage.zone.w, height: stage.zone.h,
+  const zoneNodes: Node<ZoneData, "zone">[] = useMemo(() => stages.map(stage => ({
+    id: stage.id, type: "zone" as const, position: { x: stage.zone.x, y: stage.zone.y }, width: stage.zone.w, height: stage.zone.h,
     style: { width: stage.zone.w, height: stage.zone.h }, draggable: editing, selectable: editing,
     data: {
       stage, kindLabel: view.kinds.find(one => one.kind === stage.kind)?.label ?? stage.kind, cards: view.cards.filter(card => card.stage === stage.id && card.state === "active"),
@@ -279,10 +532,36 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
         ? { ...one, zone: { ...one.zone, x: Math.round(box.x), y: Math.round(box.y), w: Math.round(box.width), h: Math.round(box.height) } } : one) }),
     },
   })), [stages, view, editing, selected, start, move]);
+  // Triggers sit to the left of the zone they start cards in, stacked when several share one.
+  const liveTriggers = useMemo(() => view.triggers.filter(one => one.state !== "removed"), [view.triggers]);
+  const triggerNodes: Node<TriggerData, "trigger">[] = useMemo(() => {
+    const byZone = new Map<string, BrowserFlowTrigger[]>();
+    for (const trigger of liveTriggers) {
+      const zone = stages.some(one => one.id === trigger.zoneId) ? trigger.zoneId : start;
+      byZone.set(zone, [...byZone.get(zone) ?? [], trigger]);
+    }
+    return [...byZone].flatMap(([zoneId, triggers]) => {
+      const zone = stages.find(one => one.id === zoneId);
+      if (zone === undefined) return [];
+      const height = TRIGGER_HEAD + triggers.length * TRIGGER_ROW;
+      return [{ id: `trigger-${zoneId}`, type: "trigger" as const, position: { x: zone.zone.x - 272, y: zone.zone.y + Math.max(0, (zone.zone.h - height) / 2) }, width: 236, height, style: { width: 236, height },
+        draggable: false, selectable: false, data: { triggers, onOpen: (id: number) => setSelected({ triggers: id }), onPress: (id: number) => setSelected({ press: id }) } }];
+    });
+  }, [liveTriggers, stages, start]);
+  // New or removed triggers change what the canvas holds: fit it again so nothing sits off the edge.
+  const triggerKey = liveTriggers.map(one => `${one.id}:${one.zoneId}`).join(",");
+  const fitted = useRef(triggerKey);
+  useEffect(() => {
+    if (fitted.current === triggerKey) return;
+    fitted.current = triggerKey;
+    const frame = requestAnimationFrame(() => { void flow.fitView({ padding: 0.12, minZoom: 0.55, maxZoom: 1, duration: 250 }); });
+    return () => cancelAnimationFrame(frame);
+  }, [triggerKey, flow]);
+  const computed: FlowNode[] = useMemo(() => [...zoneNodes, ...triggerNodes], [zoneNodes, triggerNodes]);
   // React Flow keeps its own node state (measurements, selection, a drag in
   // progress); ours changes only when a drag or resize ends, so the two never
   // chase each other.
-  const [nodes, setNodes] = useState<Node<ZoneData>[]>(computed);
+  const [nodes, setNodes] = useState<FlowNode[]>(computed);
   useEffect(() => {
     setNodes(previous => computed.map(node => {
       const old = previous.find(one => one.id === node.id);
@@ -300,7 +579,9 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
       if (horizontal) return dx >= 0 ? { source: "s-Right", target: "t-Left" } : { source: "s-Left", target: "t-Right" };
       return dy >= 0 ? { source: "s-Bottom", target: "t-Top" } : { source: "s-Top", target: "t-Bottom" };
     };
-    return stages.flatMap(stage => {
+    const fromTriggers: Edge[] = triggerNodes.map(node => ({ id: `${node.id}->zone`, source: node.id, sourceHandle: "out", target: node.id.slice("trigger-".length), targetHandle: "t-Left",
+      type: "smoothstep", animated: node.data.triggers.some(one => one.state === "active"), deletable: false, markerEnd: { type: MarkerType.ArrowClosed }, style: { strokeWidth: 1.5 } }));
+    return [...fromTriggers, ...stages.flatMap(stage => {
       const next = stage.next === null ? undefined : stages.find(one => one.id === stage.next);
       const fail = stage.onFail === null ? undefined : stages.find(one => one.id === stage.onFail);
       return [
@@ -311,19 +592,19 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
           labelBgStyle: { fill: "var(--color-card)" }, markerEnd: { type: MarkerType.ArrowClosed, color: "var(--so-attention)" },
           style: { strokeWidth: 1.5, strokeDasharray: "6 4", stroke: "var(--so-attention)" }, deletable: editing }]),
       ];
-    });
-  }, [stages, editing]);
+    })];
+  }, [stages, editing, triggerNodes, start]);
 
   const updateStage = (id: string, change: Partial<BrowserFlowStage>) =>
     setDraft(current => current === null ? current : { ...current, stages: current.stages.map(one => one.id === id ? { ...one, ...change } : one) });
 
-  const onNodesChange = (changes: NodeChange<Node<ZoneData>>[]) => {
+  const onNodesChange = (changes: NodeChange<FlowNode>[]) => {
     setNodes(current => applyNodeChanges(changes, current));
     if (!editing) return;
-    for (const change of changes) if (change.type === "select" && change.selected) setSelected({ zone: change.id });
+    for (const change of changes) if (change.type === "select" && change.selected && !change.id.startsWith("trigger-")) setSelected({ zone: change.id });
   };
-  const onNodeDragStop = (_event: unknown, node: Node<ZoneData>) => {
-    if (!editing) return;
+  const onNodeDragStop = (_event: unknown, node: FlowNode) => {
+    if (!editing || node.type !== "zone") return;
     setDraft(current => current === null ? current : { ...current, stages: current.stages.map(one => one.id === node.id
       ? { ...one, zone: { ...one.zone, x: Math.round(node.position.x), y: Math.round(node.position.y) } } : one) });
   };
@@ -354,6 +635,8 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
   };
 
   const selectedCard = selected !== null && "card" in selected ? view.cards.find(one => one.id === selected.card) ?? null : null;
+  const pressing = selected !== null && "press" in selected ? view.triggers.find(one => one.id === selected.press && one.button !== null) ?? null : null;
+  const triggersOpen = selected !== null && "triggers" in selected && !editing;
   const selectedZone = selected !== null && "zone" in selected ? stages.find(one => one.id === selected.zone) ?? null : null;
   const waitingOnYou = view.cards.filter(card => card.canDecide).length;
 
@@ -372,6 +655,7 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
             <Button size="sm" onClick={() => void save()} disabled={!dirty || saving}>{saving ? "Saving…" : "Save flow"}</Button>
           </>
         : <>
+            {view.canEdit && <Button size="sm" variant="ghost" onClick={() => { setAdding(false); setSelected({ triggers: null }); }} data-open-triggers><Zap className="size-4" />Triggers{liveTriggers.length > 0 ? ` · ${liveTriggers.length}` : ""}</Button>}
             {view.canEdit && <Button size="sm" variant="ghost" asChild><a href={view.chatHref}><MessageSquare className="size-4" />Change in chat</a></Button>}
             {view.canEdit && <Button size="sm" variant="outline" onClick={startEditing}><Pencil className="size-4" />Edit flow</Button>}
             {view.canEdit && <Button size="sm" onClick={() => { setSelected(null); setAdding(true); }}><Plus className="size-4" />New card</Button>}
@@ -391,12 +675,16 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
         </ReactFlow>
         {editing && <p className="pointer-events-none absolute bottom-3 left-14 max-w-md rounded-lg bg-foreground/85 px-3 py-1.5 text-[12px] text-background">Drag zones to arrange them. Drag from a zone's right dot to say where work goes next, from its bottom dot for where it goes if sent back.</p>}
       </div>
-      {(selectedZone !== null && editing) || selectedCard !== null || (adding && !editing) ? <aside className="absolute inset-y-0 right-0 z-10 w-[360px] max-w-full overflow-y-auto border-l bg-card p-4 shadow-xl" data-flow-drawer>
+      {(selectedZone !== null && editing) || selectedCard !== null || (adding && !editing) || triggersOpen || pressing !== null ? <aside className="absolute inset-y-0 right-0 z-10 w-[360px] max-w-full overflow-y-auto border-l bg-card p-4 shadow-xl" data-flow-drawer>
         {selectedZone !== null && editing
           ? <ZonePanel stage={selectedZone} stages={stages} view={view} update={change => updateStage(selectedZone.id, change)}
               remove={() => { setDraft(current => current === null ? current : { ...current, start: current.start === selectedZone.id ? current.stages.find(one => one.id !== selectedZone.id)!.id : current.start,
                 stages: current.stages.filter(one => one.id !== selectedZone.id).map(one => ({ ...one, next: one.next === selectedZone.id ? null : one.next, onFail: one.onFail === selectedZone.id ? null : one.onFail })) }); setSelected(null); }}
               makeStart={() => setDraft(current => current === null ? current : { ...current, start: selectedZone.id })} onClose={() => setSelected(null)} />
+          : pressing !== null
+            ? <PressPanel key={pressing.id} trigger={pressing} view={view} csrf={csrf} apply={apply} onClose={() => setSelected(null)} />
+          : triggersOpen
+            ? <TriggersPanel view={view} csrf={csrf} apply={apply} focus={selected !== null && "triggers" in selected ? selected.triggers : null} onPress={id => setSelected({ press: id })} onClose={() => setSelected(null)} />
           : selectedCard !== null
             ? <CardPanel card={selectedCard} view={view} csrf={csrf} apply={apply} onClose={() => setSelected(null)} />
             : <NewCard view={view} csrf={csrf} apply={result => { apply(result); if (result.ok) setAdding(false); }} onClose={() => setAdding(false)} />}
@@ -409,11 +697,17 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
 function PhoneFlow({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }) {
   const [view, setView] = useState(initial);
   const [open, setOpen] = useState<number | null>(initial.selectedCard);
+  const [pressing, setPressing] = useState<number | null>(initial.startTrigger);
   const apply = (result: Said) => { (result.ok ? toast.success : toast.error)(result.said); if (result.view !== undefined) setView(result.view); };
   const card = open === null ? null : view.cards.find(one => one.id === open) ?? null;
+  const button = pressing === null ? null : view.triggers.find(one => one.id === pressing && one.button !== null && one.state === "active") ?? null;
+  const live = view.triggers.filter(one => one.state !== "removed");
+  if (button !== null) return <div className="p-4"><PressPanel trigger={button} view={view} csrf={csrf} apply={apply} onClose={() => setPressing(null)} /></div>;
   if (card !== null) return <div className="p-4"><CardPanel card={card} view={view} csrf={csrf} apply={apply} onClose={() => setOpen(null)} /></div>;
   return <div className="flex flex-col gap-3 p-4" data-flow={view.flow.id}>
     <div><h1 className="text-[17px] font-semibold">{view.flow.name}</h1><p className="text-[12px] text-muted-foreground">{view.flow.project}{view.canEdit ? <> · <a className="underline" href={view.chatHref}>change it in chat</a>, or edit it on a larger screen</> : null}</p></div>
+    {view.canEdit && live.some(one => one.button !== null && one.state === "active") && <div className="flex flex-wrap gap-2">
+      {live.filter(one => one.button !== null && one.state === "active").map(one => <Button key={one.id} size="sm" onClick={() => setPressing(one.id)}><MousePointerClick className="size-4" />{one.button!.label}</Button>)}</div>}
     {view.canEdit && <details className="rounded-lg border p-3"><summary className="cursor-pointer text-[14px] font-semibold">New card</summary><div className="pt-3"><NewCard view={view} csrf={csrf} apply={apply} /></div></details>}
     {flowOrder(view.stages, view.start).map(stage => {
       const cards = view.cards.filter(one => one.stage === stage.id && one.state === "active");
@@ -424,6 +718,11 @@ function PhoneFlow({ view: initial, csrf }: { view: BrowserFlowView; csrf: strin
         </button></li>)}</ul>}
       </section>;
     })}
+    {live.length > 0 && <section className="rounded-lg border p-3" data-flow-triggers>
+      <h2 className="text-[14px] font-semibold">Triggers</h2>
+      <ul className="mt-2 flex flex-col gap-2">{live.map(one => <li key={one.id} className="text-[13px]"><span className="font-medium">{one.name}</span> · {one.detail}
+        <div className={cn("text-[12px]", one.failing ? "text-attention" : "text-muted-foreground")}>{one.state === "paused" ? "Paused" : one.status === null ? `Starts in ${one.zone}` : `${ago(one.statusAt)}: ${one.status}`}</div></li>)}</ul>
+    </section>}
   </div>;
 }
 

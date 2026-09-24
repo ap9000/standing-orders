@@ -43,6 +43,7 @@ import type { Phase } from "./provider.js";
 import { TOOL_CATALOG, discoverTools, projectToolsOf, secretsSetFor, toolCommandLine, toolStanding, type FoundTool } from "./project-tools.js";
 import { FLOW_KIND_WORDS, FLOW_STAGE_KINDS, FLOW_TEMPLATES, flowFromSteps, type FlowDefinition, type FlowStepInput } from "./flows.js";
 import { flowDefinitionOf } from "./flow-engine.js";
+import { describeTrigger, FLOW_TRIGGER_KINDS, triggerConfigOf } from "./flow-triggers.js";
 import type { ChatAction } from "./chat-actions.js";
 
 export const MATE_MAX_PROPOSALS_PER_TURN = 5;
@@ -794,6 +795,11 @@ export const MATE_TOOLS: MateTool[] = [
               : needsYou(definition, card.stage) ? "Waiting for you to approve or send it back" : "Waiting for someone else to decide",
             task: card.task ?? card.primaryTask, ...(card.note === null ? {} : { lastNote: card.note.slice(0, 300) }),
           })),
+          triggers: ctx.store.flowTriggers(flow.id).map(trigger => {
+            const config = triggerConfigOf(trigger);
+            return { trigger: trigger.id, kind: trigger.kind, what: config === null ? "can't be read" : describeTrigger(config, ctx.store),
+              startsIn: titleOf(config?.zone ?? definition.start), state: trigger.state, lastCheck: trigger.lastOutcome };
+          }),
           rule: "Change it with propose_flow. Build and research steps file ordinary tasks under the usual approvals.",
         } };
       }
@@ -805,7 +811,7 @@ export const MATE_TOOLS: MateTool[] = [
           const definition = flowDefinitionOf(flow);
           const cards = ctx.store.flowCards(flow.id, false);
           return { flow: flow.id, name: flow.name, project: repoIdOf(ctx.who, flow.repo), steps: definition === null ? "can't be read" : definition.stages.map(one => one.title).join(" → "),
-            cards: cards.length, needYou: cards.filter(card => needsYou(definition, card.stage)).length };
+            cards: cards.length, needYou: cards.filter(card => needsYou(definition, card.stage)).length, triggers: ctx.store.flowTriggers(flow.id).length };
         }),
         templates: FLOW_TEMPLATES.map(one => ({ template: one.id, about: one.about })),
       } };
@@ -813,9 +819,9 @@ export const MATE_TOOLS: MateTool[] = [
   },
   {
     name: "propose_flow",
-    description: "Draft a flow change as a card the operator confirms. create: a template, or the steps in order (each leads to the next; Done is added; instructions may be left out). edit: the full step list, keeping existing steps by id — what a kept step leaves out carries over. add_card (starts in the first zone unless zone is named), move_card, approve, send_back (needs a note), cancel_card. Read get_flows first except to create.",
+    description: "Draft a flow change as a card the operator confirms. create: a template, or the steps in order (each leads to the next; Done is added; instructions may be left out). edit: the full step list, keeping existing steps by id — what a kept step leaves out carries over. add_card (starts in the first zone unless zone is named), move_card, approve, send_back (needs a note), cancel_card. add_trigger with settings (kind button: label, questions; schedule: schedule like 'daily 09:00 Europe/London', title; github: repo owner/name, watch issues|pulls|checks, label, branch, from team|anyone; linear: team, state, label; flow: follow (another flow's id), when (its zone)); pause_trigger, resume_trigger, remove_trigger with trigger. Read get_flows first except to create.",
     inputSchema: schema({
-      operation: { type: "string", enum: ["create", "edit", "add_card", "move_card", "approve", "send_back", "cancel_card"] },
+      operation: { type: "string", enum: ["create", "edit", "add_card", "move_card", "approve", "send_back", "cancel_card", "add_trigger", "pause_trigger", "resume_trigger", "remove_trigger"] },
       repo: REPO_ARG, flow: { type: "integer", minimum: 1 }, card: { type: "integer", minimum: 1 },
       name: { type: "string", maxLength: 80 }, template: { type: "string", enum: FLOW_TEMPLATES.map(one => one.id) },
       steps: { type: "array", minItems: 1, maxItems: 24, items: { type: "object", additionalProperties: false, properties: {
@@ -825,6 +831,14 @@ export const MATE_TOOLS: MateTool[] = [
         next: { type: "string", maxLength: 60 }, ifFails: { type: "string", maxLength: 60 },
       } } },
       title: { type: "string", maxLength: 200 }, description: { type: "string", maxLength: 4000 }, zone: { type: "string", maxLength: 60 }, note: { type: "string", maxLength: 2000 },
+      trigger: { type: "integer", minimum: 1 },
+      settings: { type: "object", additionalProperties: false, properties: {
+        kind: { type: "string", enum: FLOW_TRIGGER_KINDS.filter(one => one !== "webhook") }, zone: { type: "string", maxLength: 60 },
+        label: { type: "string", maxLength: 50 }, questions: { type: "array", maxItems: 6, items: { type: "string", maxLength: 80 } },
+        schedule: { type: "string", maxLength: 80 }, title: { type: "string", maxLength: 200 }, description: { type: "string", maxLength: 2000 },
+        repo: { type: "string", maxLength: 140 }, watch: { type: "string", enum: ["issues", "pulls", "checks"] }, branch: { type: "string", maxLength: 100 }, from: { type: "string", enum: ["team", "anyone"] },
+        team: { type: "string", maxLength: 12 }, state: { type: "string", maxLength: 40 }, follow: { type: "integer", minimum: 1 }, when: { type: "string", maxLength: 60 },
+      } },
     }, ["operation"]),
     handle: (ctx, args) => {
       const pick = (keys: readonly string[]) => Object.fromEntries(keys.filter(key => args[key] !== undefined).map(key => [key, args[key]]));
@@ -863,7 +877,16 @@ export const MATE_TOOLS: MateTool[] = [
           case "approve": operation = "flow_card_approve"; input = pick(["card", "note"]); break;
           case "send_back": operation = "flow_card_send_back"; input = pick(["card", "note"]); break;
           case "cancel_card": operation = "flow_card_cancel"; input = pick(["card"]); break;
-          default: return { ok: false, message: "Choose create, edit, add_card, move_card, approve, send_back or cancel_card." };
+          case "add_trigger": {
+            const settings = args["settings"] !== null && typeof args["settings"] === "object" ? { ...args["settings"] as Record<string, unknown> } : {};
+            // A trigger following another flow names it as "follow"; the drawing stores it as the flow it follows.
+            if (settings["follow"] !== undefined) { settings["flow"] = settings["follow"]; delete settings["follow"]; }
+            operation = "flow_trigger_add"; input = { ...pick(["flow"]), trigger: settings }; break;
+          }
+          case "pause_trigger": operation = "flow_trigger_pause"; input = pick(["trigger"]); break;
+          case "resume_trigger": operation = "flow_trigger_resume"; input = pick(["trigger"]); break;
+          case "remove_trigger": operation = "flow_trigger_remove"; input = pick(["trigger"]); break;
+          default: return { ok: false, message: "Choose create, edit, add_card, move_card, approve, send_back, cancel_card, add_trigger, pause_trigger, resume_trigger or remove_trigger." };
         }
         const action = prepareSharedAction(ctx.store, ctx.who, operation, input, ctx.evidenceRoot, ctx.now);
         const id = ctx.draft("action", { ...action });

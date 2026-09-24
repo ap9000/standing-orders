@@ -182,6 +182,18 @@ export type BrowserFlowCard = {
   id: number; title: string; description: string | null; stage: string; state: "active" | "done" | "cancelled";
   waiting: string | null; task: { id: string; href: string } | null; createdBy: string; updatedAt: string;
   canDecide: boolean; outputs: { stage: string; title: string; text: string }[]; history: { text: string; at: string }[];
+  /** Where a trigger found it: a GitHub or Linear issue, another flow's card, a button, a schedule. */
+  source: { kind: string; label: string; url: string | null } | null;
+};
+
+/** What starts cards in a flow on its own. */
+export type BrowserFlowTrigger = {
+  id: number; kind: string; words: string; name: string; detail: string; zone: string; zoneId: string; state: "active" | "paused" | "removed";
+  status: string | null; statusAt: string | null; failing: boolean;
+  button: { label: string; questions: string[] } | null;
+  /** A webhook trigger: whether it can prove deliveries yet (Linear needs its signing secret pasted). */
+  hook: { ready: boolean; needsSecret: boolean } | null;
+  checkable: boolean;
 };
 
 /** A flow's canvas: zones, cards, and what this person may change. */
@@ -190,6 +202,14 @@ export type BrowserFlowView = {
   flow: { id: number; name: string; project: string; revision: number; href: string };
   /** Opens the lead's chat with a message about this flow started for the person to finish. */
   chatHref: string;
+  triggers: BrowserFlowTrigger[];
+  /** What adding a trigger needs to know: this project's GitHub repository, whether a Linear key is saved, the public webhook address, other flows to follow. */
+  triggerSetup: {
+    kinds: { kind: string; label: string }[]; githubRepo: string | null; linearKey: boolean; hooksBase: string | null; hooksPath: string;
+    otherFlows: { id: number; name: string; zones: { id: string; title: string }[] }[];
+  };
+  /** A button trigger to open straight away (?start=). */
+  startTrigger: number | null;
   start: string;
   stages: BrowserFlowStage[];
   cards: BrowserFlowCard[];
