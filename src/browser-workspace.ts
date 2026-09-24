@@ -171,9 +171,10 @@ export type BrowserResultView = {
 };
 /** One zone on a flow's canvas: its step, where it leads, and where it sits. */
 export type BrowserFlowStage = {
-  id: string; title: string; kind: "inbox" | "task" | "report" | "approval" | "notify" | "done";
+  id: string; title: string; kind: "inbox" | "task" | "report" | "approval" | "check" | "update" | "notify" | "done";
   zone: { x: number; y: number; w: number; h: number; color: string };
   instructions: string | null; planning: "auto" | "required" | "skip" | null; approver: string | null; message: string | null;
+  close: boolean | null; script: string | null;
   next: string | null; onFail: string | null;
 };
 
@@ -200,6 +201,8 @@ export type BrowserFlowTrigger = {
   /** A webhook trigger: whether it can prove deliveries yet (Linear needs its signing secret pasted). */
   hook: { ready: boolean; needsSecret: boolean } | null;
   checkable: boolean;
+  /** A button shared as a public form (its link works). */
+  shared: boolean;
 };
 
 /** A flow's canvas: zones, cards, and what this person may change. */
@@ -218,6 +221,8 @@ export type BrowserFlowView = {
   startTrigger: number | null;
   /** Who is looking: their name, for "mine", owning and @mentions. */
   me: string;
+  /** The project's scripts: reusable steps a "Run a script" zone runs with no AI. */
+  scripts: { name: string; about: string; body: string; timeoutMinutes: number; version: number; savedBy: string; savedAt: string; usedHere: string[] }[];
   start: string;
   stages: BrowserFlowStage[];
   cards: BrowserFlowCard[];

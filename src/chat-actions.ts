@@ -38,6 +38,7 @@ import { getDecision, recordDecision, retireDecision } from "./project-memory.js
 import { resumeTaskStop, taskControlOf } from "./task-control.js";
 import { addToolTo, catalogTool, projectToolsOf, removeToolFrom, toolCommandLine, validateToolSpec, type ToolSpec } from "./project-tools.js";
 import { FLOW_KIND_WORDS, flowDigest, flowTerms, validateFlowDefinition, type FlowDefinition, type FlowStage } from "./flows.js";
+import { saveScript, scriptDigest, validateScript } from "./flow-scripts.js";
 import { addCardToFlow, advanceFlows, cancelFlowCard, decideFlowCard, flowCardHref, flowCardText, flowDefinitionOf, moveCardInFlow } from "./flow-engine.js";
 import type { FlowCardRow, FlowRow, FlowTriggerRow } from "./store.js";
 import { assignFlowCard, commentOnFlowCard, flowPeople, mentionsIn, watchFlowCard } from "./flow-people.js";
@@ -100,6 +101,7 @@ export const CHAT_ACTIONS = {
   flow_card_comment: { label: "Comment", protected: false, password: false },
   flow_card_assign: { label: "Set owner", protected: false, password: false },
   flow_card_watch: { label: "Follow card", protected: false, password: false },
+  flow_script_save: { label: "Save script", protected: false, password: false },
   flow_trigger_add: { label: "Add trigger", protected: false, password: false },
   flow_trigger_pause: { label: "Pause trigger", protected: false, password: false },
   flow_trigger_resume: { label: "Turn trigger on", protected: false, password: false },
@@ -152,6 +154,7 @@ export const CHAT_ACTION_FIELDS: Record<ChatAction, readonly string[]> = {
   flow_card_comment: ["card", "note"],
   flow_card_assign: ["card", "owner"],
   flow_card_watch: ["card", "watching"],
+  flow_script_save: ["repo", "script"],
   flow_trigger_add: ["flow", "trigger"],
   flow_trigger_pause: ["trigger"],
   flow_trigger_resume: ["trigger"],
@@ -288,7 +291,7 @@ export function prepareSharedAction(
     operation.startsWith("skill_") || operation.startsWith("knowledge_") || operation.startsWith("decision_") || operation.startsWith("tool_") || operation.startsWith("flow_")
       ? null
       : text(input, "task", 64);
-  const flowTarget = operation.startsWith("flow_") && operation !== "flow_create" ? flowTargetOf(store, input) : null;
+  const flowTarget = operation.startsWith("flow_") && operation !== "flow_create" && operation !== "flow_script_save" ? flowTargetOf(store, input) : null;
   const repo =
     flowTarget !== null ? flowTarget.flow.repo : task === null ? text(input, "repo", 4096) : store.lookupRef(task)?.repo;
   if (!repo) throw Error("Choose an available project.");
@@ -423,6 +426,15 @@ export function prepareSharedAction(
       state = { flow: flow.id, revision: flow.revision };
       title = `Add ${quoted(words.title)} to ${flow.name}`;
       terms.push(words.description === null ? words.title : `${words.title}\n${words.description}`, `Starts in ${stage.title}: ${FLOW_KIND_WORDS[stage.kind].about}`);
+    } else if (operation === "flow_script_save") {
+      const draft = validateScript((input["script"] ?? {}) as Record<string, unknown>);
+      const current = store.flowScript(repo, draft.name);
+      if (current !== null && current.digest === scriptDigest(draft) && current.about === draft.about) throw Error(`${draft.name} is already saved exactly like that.`);
+      request["script"] = draft;
+      state = { current: current?.digest ?? null, version: current?.version ?? 0 };
+      title = `${current === null ? "Save" : "Update"} the ${draft.name} script in ${project}`;
+      terms.push(`${draft.name}: ${draft.about}`, draft.body,
+        `Runs with no AI in a fresh copy of a card's work, for up to ${draft.timeoutMinutes} minutes, whenever a card reaches a zone that runs it.${current === null ? "" : ` Replaces version ${current.version} everywhere it's used.`}`);
     } else if (operation === "flow_trigger_add") {
       const { flow, definition } = flowTarget!;
       const config = validateTriggerConfig(input["trigger"], { store, flow, definition, actor: who.name });
@@ -1121,6 +1133,12 @@ function runFlowAction(store: Store, payload: SharedAction, actor: string, repos
     const added = addCardToFlow(store, flow, { title: req["title"], description: req["description"] ?? null, stage: String(req["zone"]) }, actor, now);
     if (!added.ok) throw Error(added.message);
     return settle(flow.id, added.said, added.card);
+  }
+  if (payload.operation === "flow_script_save") {
+    const saved = saveScript(store, payload.repo, req["script"] as Record<string, unknown>, actor, now);
+    if (!saved.ok) throw Error(saved.message);
+    const first = store.listFlows([payload.repo])[0];
+    return { said: saved.said, href: first === undefined ? "/flows" : `/flows/${first.id}` };
   }
   if (payload.operation === "flow_trigger_add") {
     const flow = store.getFlow(Number(req["flow"]))!;

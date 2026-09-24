@@ -7,7 +7,7 @@
  * it now stands, and the canvas refreshes every few seconds for everyone. */
 import { Background, BackgroundVariant, Controls, Handle, MarkerType, NodeResizer, Position, ReactFlow, ReactFlowProvider, applyNodeChanges, useReactFlow, type Connection, type Edge, type Node, type NodeChange, type NodeProps } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Bell, BellOff, CalendarClock, Copy, Flag, GitPullRequest, Hammer, Inbox, Megaphone, MessageSquare, MousePointerClick, Pencil, Plus, Search, SquareKanban, UserCheck, Webhook, Workflow, X, Zap } from "lucide-react";
+import { Bell, BellOff, CalendarClock, LineChart, ListChecks, MessageSquareReply, Copy, Flag, GitPullRequest, Hammer, Inbox, Megaphone, MessageSquare, MousePointerClick, Pencil, Plus, Search, SquareKanban, UserCheck, Webhook, Workflow, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { BrowserFlowCard, BrowserFlowStage, BrowserFlowTrigger, BrowserFlowView } from "../../browser-workspace.js";
 import { Badge, Button, Input, Label, Textarea, cn, toast } from "../components/ui/index.js";
@@ -24,6 +24,7 @@ const COLORS: Record<string, string> = { slate: "#64748b", blue: "#3b82f6", viol
 const KIND_ICONS: Record<BrowserFlowStage["kind"], ReactNode> = {
   inbox: <Inbox className="size-3.5" aria-hidden="true" />, task: <Hammer className="size-3.5" aria-hidden="true" />, report: <Search className="size-3.5" aria-hidden="true" />,
   approval: <UserCheck className="size-3.5" aria-hidden="true" />, notify: <Megaphone className="size-3.5" aria-hidden="true" />, done: <Flag className="size-3.5" aria-hidden="true" />,
+  check: <ListChecks className="size-3.5" aria-hidden="true" />, update: <MessageSquareReply className="size-3.5" aria-hidden="true" />,
 };
 
 const TRIGGER_ICONS: Record<string, ReactNode> = {
@@ -283,7 +284,8 @@ function ZonePanel({ stage, stages, view, update, remove, makeStart, onClose }: 
     <div className="flex items-center gap-2"><h2 className="flex-1 text-[15px] font-semibold">Edit zone</h2><Button variant="ghost" size="icon" onClick={onClose} aria-label="Close"><X className="size-4" /></Button></div>
     <Field label="Name"><Input value={stage.title} maxLength={60} onChange={event => update({ title: event.target.value })} aria-label="Zone name" /></Field>
     <Field label="What happens here" {...(kind === undefined ? {} : { hint: kind.about })}>
-      <select className={select} aria-label="What happens here" value={stage.kind} onChange={event => update({ kind: event.target.value as BrowserFlowStage["kind"], ...(event.target.value === "done" ? { next: null, onFail: null } : {}) })}>
+      <select className={select} aria-label="What happens here" value={stage.kind} onChange={event => update({ kind: event.target.value as BrowserFlowStage["kind"], ...(event.target.value === "done" ? { next: null, onFail: null } : {}),
+        ...(event.target.value === "update" ? { close: stage.close ?? true, message: stage.message ?? "Done: {{card.title}}" } : {}), ...(event.target.value === "check" ? { script: stage.script ?? view.scripts[0]?.name ?? null } : {}) })}>
         {view.kinds.map(one => <option key={one.kind} value={one.kind}>{one.label}</option>)}
       </select>
     </Field>
@@ -301,12 +303,23 @@ function ZonePanel({ stage, stages, view, update, remove, makeStart, onClose }: 
       </select>
     </Field>}
     {stage.kind === "notify" && <Field label="Message"><Input value={stage.message ?? ""} maxLength={1000} onChange={event => update({ message: event.target.value })} aria-label="Message" /></Field>}
+    {stage.kind === "update" && <>
+      <Field label="Comment on the issue" hint={"Fill-ins: {{card.title}}, {{note}}, {{stage.<zone id>}}."}><Textarea rows={3} value={stage.message ?? ""} maxLength={1000} onChange={event => update({ message: event.target.value })} aria-label="Comment on the issue" /></Field>
+      <label className="flex items-center gap-2 text-[13px]"><input type="checkbox" className="size-4 accent-[var(--so-accent)]" checked={stage.close !== false} onChange={event => update({ close: event.target.checked })} />Close the issue too (Linear: move it to done)</label>
+    </>}
+    {stage.kind === "check" && <Field label="Script" hint={view.scripts.length === 0 ? "This project has no scripts yet: make one with Scripts in the toolbar, or ask your lead in chat." : "Runs in a fresh copy of the card's work (or the main branch), with no AI. It passes when the script exits 0."}>
+      <select className={select} aria-label="Script" value={stage.script ?? ""} onChange={event => update({ script: event.target.value || null })}>
+        <option value="">Choose a script</option>
+        {view.scripts.map(one => <option key={one.name} value={one.name}>{one.name} — {one.about}</option>)}
+        {stage.script !== null && !view.scripts.some(one => one.name === stage.script) && <option value={stage.script}>{stage.script} (missing)</option>}
+      </select>
+    </Field>}
     {stage.kind !== "done" && <Field label="Then">
       <select className={select} aria-label="Then" value={stage.next ?? ""} onChange={event => update({ next: event.target.value || null })}>
         <option value="">Wait here</option>{others.map(one => <option key={one.id} value={one.id}>{one.title}</option>)}
       </select>
     </Field>}
-    {(stage.kind === "approval" || stage.kind === "task" || stage.kind === "report") && <Field label={stage.kind === "approval" ? "If sent back" : "If it fails"}>
+    {(stage.kind === "approval" || stage.kind === "task" || stage.kind === "report" || stage.kind === "check" || stage.kind === "update") && <Field label={stage.kind === "approval" ? "If sent back" : "If it fails"}>
       <select className={select} aria-label={stage.kind === "approval" ? "If sent back" : "If it fails"} value={stage.onFail ?? ""} onChange={event => update({ onFail: event.target.value || null })}>
         <option value="">{stage.kind === "approval" ? "Can't be sent back" : "Wait here"}</option>{others.map(one => <option key={one.id} value={one.id}>{one.title}</option>)}
       </select>
@@ -367,6 +380,7 @@ function RevealBox({ kind, reveal, onDone }: { kind: string; reveal: Reveal; onD
     {reveal.secret !== null && <CopyLine label="Secret" value={reveal.secret} />}
     <p className="text-[12px] text-muted-foreground">{kind === "github" ? "In GitHub: Settings → Webhooks → Add webhook. Paste the address and the secret, choose application/json, and pick the events this trigger watches (Issues, Pull requests or Workflow runs)."
       : kind === "linear" ? "In Linear: Settings → API → Webhooks → New webhook. Paste the address and choose Issues. Then paste Linear's signing secret on this trigger."
+      : kind === "form" ? "Share this link. Anyone who has it can add a card without signing in; the work it starts still waits for your approval."
       : "Post JSON to the address. A title field becomes the card's title; description, its details."}</p>
     <Button type="button" size="sm" variant="outline" className="self-start" onClick={onDone}>Done</Button>
   </div>;
@@ -522,13 +536,15 @@ function TriggersPanel({ view, csrf, apply, focus, onPress, onClose }: { view: B
         <span className="mt-0.5 inline-flex size-6 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">{TRIGGER_ICONS[trigger.kind] ?? <Zap className="size-3.5" aria-hidden="true" />}</span>
         <div className="min-w-0 flex-1">
           <p className="text-[13px] font-medium leading-snug">{trigger.words}</p>
-          <p className="text-[12px] text-muted-foreground">Starts in {trigger.zone}{trigger.state === "paused" ? " · Paused" : ""}</p>
+          <p className="text-[12px] text-muted-foreground">Starts in {trigger.zone}{trigger.state === "paused" ? " · Paused" : ""}{trigger.shared ? " · Shared as a form" : ""}</p>
           {trigger.status !== null && <p className={cn("text-[12px]", trigger.failing ? "text-attention" : "text-muted-foreground")}>{ago(trigger.statusAt)}: {trigger.status}</p>}
         </div>
       </div>
       {trigger.hook?.needsSecret === true && !trigger.hook.ready && <LinearSecret trigger={trigger} view={view} csrf={csrf} apply={apply} />}
       <div className="mt-2 flex flex-wrap gap-1.5">
         {trigger.button !== null && trigger.state === "active" && <Button size="sm" onClick={() => onPress(trigger.id)}>Start</Button>}
+        {trigger.button !== null && <Button size="sm" variant="outline" disabled={busy} onClick={() => void act(`${base}/${trigger.id}/share`, "form")}>{trigger.shared ? "New form link" : "Share as a form"}</Button>}
+        {trigger.shared && <Button size="sm" variant="ghost" disabled={busy} onClick={() => void act(`${base}/${trigger.id}/unshare`, "form")}>Stop sharing</Button>}
         {trigger.checkable && trigger.state === "active" && <Button size="sm" variant="outline" disabled={busy} onClick={() => void act(`${base}/${trigger.id}/check`, trigger.kind)}>Check now</Button>}
         {trigger.hook !== null && <Button size="sm" variant="outline" disabled={busy} onClick={() => void act(`${base}/${trigger.id}/renew`, trigger.kind)}>New address</Button>}
         <Button size="sm" variant="ghost" disabled={busy} onClick={() => void act(`${base}/${trigger.id}/${trigger.state === "paused" ? "resume" : "pause"}`, trigger.kind)}>{trigger.state === "paused" ? "Turn on" : "Pause"}</Button>
@@ -560,11 +576,130 @@ function PressPanel({ trigger, view, csrf, apply, onClose }: { trigger: BrowserF
   </form>;
 }
 
+/** The project's script library: reusable steps with no AI that any of its flows can run. */
+function ScriptsPanel({ view, csrf, apply, onClose }: { view: BrowserFlowView; csrf: string; apply: (result: Said) => void; onClose: () => void }) {
+  const blank = { name: "", about: "", body: "", timeoutMinutes: "15" };
+  const [draft, setDraft] = useState<typeof blank | null>(view.scripts.length === 0 ? blank : null);
+  const [busy, setBusy] = useState(false);
+  const save = async () => {
+    if (draft === null) return;
+    setBusy(true);
+    const result = await send(`${view.flow.href}/scripts`, draft, csrf);
+    setBusy(false); apply(result); if (result.ok) setDraft(null);
+  };
+  const set = (key: keyof typeof blank) => (event: { target: { value: string } }) => setDraft(current => current === null ? current : { ...current, [key]: event.target.value });
+  return <div className="flex flex-col gap-4" data-flow-scripts>
+    <div className="flex items-center gap-2"><h2 className="flex-1 text-[15px] font-semibold">Scripts</h2><Button variant="ghost" size="icon" onClick={onClose} aria-label="Close"><X className="size-4" /></Button></div>
+    <p className="text-[13px] text-muted-foreground">Reusable steps with no AI. A “Run a script” zone runs one in a fresh copy of the card's work; any flow in {view.flow.project} can use them.</p>
+    {view.scripts.length > 0 && <ul className="flex flex-col gap-2">{view.scripts.map(script => <li key={script.name} className="rounded-lg border p-3" data-script={script.name}>
+      <div className="flex items-start gap-2">
+        <span className="mt-0.5 inline-flex size-6 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground"><ListChecks className="size-3.5" aria-hidden="true" /></span>
+        <div className="min-w-0 flex-1">
+          <p className="font-mono text-[13px] font-semibold">{script.name}</p>
+          <p className="text-[12.5px]">{script.about}</p>
+          <p className="text-[12px] text-muted-foreground">Version {script.version} · {script.savedBy} · up to {script.timeoutMinutes} min{script.usedHere.length > 0 ? ` · runs in ${script.usedHere.join(", ")}` : " · not used in this flow"}</p>
+        </div>
+      </div>
+      <details className="mt-2"><summary className="cursor-pointer text-[12px] text-muted-foreground">Show the script</summary><pre className="mt-2 max-h-56 overflow-auto rounded-md bg-muted p-2 font-mono text-[12px]">{script.body}</pre></details>
+      {view.canEdit && <div className="mt-2 flex gap-1.5">
+        <Button size="sm" variant="outline" onClick={() => setDraft({ name: script.name, about: script.about, body: script.body, timeoutMinutes: String(script.timeoutMinutes) })}>Edit</Button>
+        <Button size="sm" variant="ghost" className="text-destructive" disabled={busy} onClick={async () => { setBusy(true); apply(await send(`${view.flow.href}/scripts`, { remove: "yes", name: script.name }, csrf)); setBusy(false); }}>Remove</Button>
+      </div>}
+    </li>)}</ul>}
+    {view.canEdit && (draft === null
+      ? <Button size="sm" variant="outline" className="self-start" onClick={() => setDraft(blank)}><Plus className="size-4" />New script</Button>
+      : <form className="flex flex-col gap-3 rounded-lg border p-3" onSubmit={event => { event.preventDefault(); void save(); }} data-script-form>
+        <Field label="Name" hint="Lowercase and dashes, like run-tests. Saving under an existing name makes a new version."><Input value={draft.name} onChange={set("name")} maxLength={40} className="font-mono" required /></Field>
+        <Field label="What it checks or does"><Input value={draft.about} onChange={set("about")} maxLength={160} placeholder="Runs the unit tests" required /></Field>
+        <Field label="Script" hint="Shell commands, run with sh from the top of the project. Exit 0 passes. FLOW_CARD_TITLE, FLOW_COMMIT and FLOW_NAME say what it's checking.">
+          <Textarea value={draft.body} onChange={set("body")} rows={8} className="font-mono text-[12.5px]" placeholder={"npm ci\nnpm test"} required /></Field>
+        <Field label="Stop it after (minutes)"><Input type="number" min={1} max={60} value={draft.timeoutMinutes} onChange={set("timeoutMinutes")} className="w-28" /></Field>
+        <div className="flex gap-2"><Button type="submit" size="sm" disabled={busy}>Save script</Button><Button type="button" size="sm" variant="ghost" onClick={() => setDraft(null)}>Cancel</Button></div>
+      </form>)}
+  </div>;
+}
+
+type Insights = {
+  days: number; cards: { started: number; finished: number; active: number };
+  zones: { zone: string; title: string; kind: string; entered: number; movedOn: number; failed: number; sentBack: number; here: number; typicalMinutes: number | null; lastProblem: { cardTitle: string; note: string | null; at: string } | null }[];
+  breaks: { zone: string; title: string; problems: number; of: number }[];
+  scripts: { script: string; runs: number; passed: number; failed: number; typicalSeconds: number | null; lastFailure: string | null }[];
+  runs: { card: number; cardTitle: string; entry: number; zoneTitle: string; kind: string; script: string | null; version: number | null; state: string; result: string | null; exitCode: number | null; durationMs: number | null; at: string; hasLog: boolean }[];
+};
+const duration = (minutes: number | null) => minutes === null ? "—" : minutes < 1 ? "under a minute" : minutes < 90 ? `${Math.round(minutes)} min` : minutes < 2880 ? `${Math.round(minutes / 60)} h` : `${Math.round(minutes / 1440)} days`;
+
+/** How work moves through this flow and where it breaks, and every script and update run with its log. */
+function InsightsPanel({ view, onClose }: { view: BrowserFlowView; onClose: () => void }) {
+  const [days, setDays] = useState(30);
+  const [data, setData] = useState<Insights | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
+  const [log, setLog] = useState<{ key: string; text: string } | null>(null);
+  useEffect(() => {
+    let live = true;
+    setData(null); setProblem(null);
+    fetch(`${view.flow.href}/insights?days=${days}`, { credentials: "same-origin", headers: { accept: "application/json" } })
+      .then(async response => { if (!live) return; if (!response.ok) throw new Error("load"); setData(await response.json() as Insights); })
+      .catch(() => { if (live) setProblem("The insights couldn't load. Try again."); });
+    return () => { live = false; };
+  }, [days, view.flow.href, view.flow.revision]);
+  const openLog = async (card: number, entry: number) => {
+    const key = `${card}:${entry}`;
+    if (log?.key === key) { setLog(null); return; }
+    try {
+      const response = await fetch(`${view.flow.href}/runs/${card}/${entry}`, { credentials: "same-origin", headers: { accept: "application/json" } });
+      const body = await response.json() as { log?: string };
+      setLog({ key, text: body.log === undefined || body.log === "" ? "This run left no output." : body.log });
+    } catch { setLog({ key, text: "The log couldn't load." }); }
+  };
+  return <div className="flex flex-col gap-4" data-flow-insights>
+    <div className="flex items-center gap-2"><h2 className="flex-1 text-[15px] font-semibold">Insights</h2>
+      <select className="h-8 rounded-md border bg-transparent px-2 text-[12px]" value={days} onChange={event => setDays(Number(event.target.value))} aria-label="Period">
+        <option value={7}>Last 7 days</option><option value={30}>Last 30 days</option><option value={90}>Last 90 days</option></select>
+      <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close"><X className="size-4" /></Button></div>
+    {problem !== null && <p className="text-[13px] text-destructive">{problem}</p>}
+    {data === null && problem === null && <p className="text-[13px] text-muted-foreground">Loading…</p>}
+    {data !== null && <>
+      <p className="text-[13px]">{data.cards.started} card{data.cards.started === 1 ? "" : "s"} started, {data.cards.finished} finished, {data.cards.active} in progress.</p>
+      <section className="flex flex-col gap-2">
+        <h3 className="text-[13px] font-semibold">Where it breaks</h3>
+        {data.breaks.length === 0 ? <p className="text-[12.5px] text-muted-foreground">Nothing failed or was sent back in this period.</p>
+          : <ul className="flex flex-col gap-2">{data.breaks.map(one => { const zone = data.zones.find(z => z.zone === one.zone); return <li key={one.zone} className="rounded-lg border border-attention/50 p-2.5 text-[13px]">
+            <p><span className="font-semibold">{one.title}</span>: {one.problems} of {one.of} card{one.of === 1 ? "" : "s"} failed or were sent back</p>
+            {zone?.lastProblem && <p className="mt-0.5 text-[12px] text-muted-foreground">Latest: {zone.lastProblem.cardTitle}{zone.lastProblem.note === null ? "" : ` — ${zone.lastProblem.note.split("\n")[0]}`}</p>}
+          </li>; })}</ul>}
+      </section>
+      <section className="flex flex-col gap-1.5">
+        <h3 className="text-[13px] font-semibold">Zones</h3>
+        <table className="w-full text-left text-[12px]"><thead className="text-muted-foreground"><tr><th className="py-1 font-medium">Zone</th><th className="font-medium">In</th><th className="font-medium">On</th><th className="font-medium">Failed</th><th className="font-medium">Back</th><th className="font-medium">Typical stay</th></tr></thead>
+          <tbody>{data.zones.map(zone => <tr key={zone.zone} className="border-t">
+            <td className="py-1.5 pr-2 font-medium">{zone.title}{zone.here > 0 ? <span className="text-muted-foreground"> · {zone.here} here</span> : null}</td>
+            <td>{zone.entered}</td><td>{zone.movedOn}</td><td className={zone.failed > 0 ? "font-semibold text-attention" : ""}>{zone.failed}</td><td className={zone.sentBack > 0 ? "font-semibold text-attention" : ""}>{zone.sentBack}</td><td>{duration(zone.typicalMinutes)}</td>
+          </tr>)}</tbody></table>
+      </section>
+      {data.scripts.length > 0 && <section className="flex flex-col gap-1.5">
+        <h3 className="text-[13px] font-semibold">Scripts</h3>
+        <ul className="flex flex-col gap-1 text-[12.5px]">{data.scripts.map(one => <li key={one.script}><span className="font-mono font-semibold">{one.script}</span>: {one.passed} of {one.runs} passed{one.typicalSeconds === null ? "" : `, usually ${one.typicalSeconds < 90 ? `${one.typicalSeconds} s` : `${Math.round(one.typicalSeconds / 60)} min`}`}</li>)}</ul>
+      </section>}
+      <section className="flex flex-col gap-1.5">
+        <h3 className="text-[13px] font-semibold">Recent runs</h3>
+        {data.runs.length === 0 ? <p className="text-[12.5px] text-muted-foreground">No scripts or updates have run in this period.</p>
+          : <ul className="flex flex-col gap-1.5">{data.runs.map(run => { const key = `${run.card}:${run.entry}`; return <li key={key} className="rounded-md border px-2.5 py-2 text-[12.5px]" data-run={key}>
+            <button type="button" className="flex w-full items-start gap-2 text-left" onClick={() => void openLog(run.card, run.entry)} aria-expanded={log?.key === key}>
+              <span className={cn("mt-1 size-2 shrink-0 rounded-full", run.state === "passed" ? "bg-success" : run.state === "failed" ? "bg-destructive" : "bg-attention")} aria-hidden="true" />
+              <span className="min-w-0 flex-1"><span className="font-medium">{run.script ?? run.zoneTitle}</span> · {run.cardTitle}<span className="block text-[12px] text-muted-foreground">{run.state === "passed" ? "Passed" : run.state === "failed" ? "Failed" : run.state === "waiting" ? "Trying again" : "Running"}{run.durationMs === null ? "" : ` in ${Math.max(1, Math.round(run.durationMs / 1000))} s`} · {when(run.at)}</span></span>
+            </button>
+            {log?.key === key && <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap rounded-md bg-muted p-2 font-mono text-[11.5px]" data-run-log>{log.text}</pre>}
+          </li>; })}</ul>}
+      </section>
+    </>}
+  </div>;
+}
+
 function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }) {
   const [view, setView] = useState(initial);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<{ name: string; start: string; stages: BrowserFlowStage[] } | null>(null);
-  const [selected, setSelected] = useState<{ card: number } | { zone: string } | { triggers: number | null } | { press: number } | null>(
+  const [selected, setSelected] = useState<{ card: number } | { zone: string } | { triggers: number | null } | { press: number } | { scripts: true } | { insights: true } | null>(
     initial.selectedCard !== null ? { card: initial.selectedCard } : initial.startTrigger !== null && initial.triggers.some(one => one.id === initial.startTrigger && one.button !== null) ? { press: initial.startTrigger } : null);
   const [saving, setSaving] = useState(false);
   const [adding, setAdding] = useState(false);
@@ -709,7 +844,7 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
     const taken = new Set(draft.stages.map(one => one.id));
     const center = flow.screenToFlowPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
     const stage: BrowserFlowStage = { id: slug("New zone", taken), title: "New zone", kind: "inbox", zone: { x: Math.round(center.x - 140), y: Math.round(center.y - 120), w: 280, h: 300, color: "slate" },
-      instructions: null, planning: null, approver: null, message: null, next: null, onFail: null };
+      instructions: null, planning: null, approver: null, message: null, close: null, script: null, next: null, onFail: null };
     setDraft({ ...draft, stages: [...draft.stages, stage] });
     setSelected({ zone: stage.id });
   };
@@ -717,6 +852,8 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
   const selectedCard = selected !== null && "card" in selected ? view.cards.find(one => one.id === selected.card) ?? null : null;
   const pressing = selected !== null && "press" in selected ? view.triggers.find(one => one.id === selected.press && one.button !== null) ?? null : null;
   const triggersOpen = selected !== null && "triggers" in selected && !editing;
+  const scriptsOpen = selected !== null && "scripts" in selected;
+  const insightsOpen = selected !== null && "insights" in selected && !editing;
   const selectedZone = selected !== null && "zone" in selected ? stages.find(one => one.id === selected.zone) ?? null : null;
   const waitingOnYou = view.cards.filter(card => card.canDecide).length;
 
@@ -734,11 +871,14 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
       <span className="flex-1" />
       {editing
         ? <>
+            <Button size="sm" variant="ghost" onClick={() => setSelected({ scripts: true })}><ListChecks className="size-4" />Scripts</Button>
             <Button size="sm" variant="outline" onClick={addZone}><Plus className="size-4" />Add zone</Button>
             <Button size="sm" variant="ghost" onClick={stopEditing}>Discard</Button>
             <Button size="sm" onClick={() => void save()} disabled={!dirty || saving}>{saving ? "Saving…" : "Save flow"}</Button>
           </>
         : <>
+            <Button size="sm" variant="ghost" onClick={() => { setAdding(false); setSelected({ insights: true }); }} data-open-insights><LineChart className="size-4" />Insights</Button>
+            <Button size="sm" variant="ghost" onClick={() => { setAdding(false); setSelected({ scripts: true }); }} data-open-scripts><ListChecks className="size-4" />Scripts</Button>
             {view.canEdit && <Button size="sm" variant="ghost" onClick={() => { setAdding(false); setSelected({ triggers: null }); }} data-open-triggers><Zap className="size-4" />Triggers{liveTriggers.length > 0 ? ` · ${liveTriggers.length}` : ""}</Button>}
             {view.canEdit && <Button size="sm" variant="ghost" asChild><a href={view.chatHref}><MessageSquare className="size-4" />Change in chat</a></Button>}
             {view.canEdit && <Button size="sm" variant="outline" onClick={startEditing}><Pencil className="size-4" />Edit flow</Button>}
@@ -759,12 +899,16 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
         </ReactFlow>
         {editing && <p className="pointer-events-none absolute bottom-3 left-14 max-w-md rounded-lg bg-foreground/85 px-3 py-1.5 text-[12px] text-background">Drag zones to arrange them. Drag from a zone's right dot to say where work goes next, from its bottom dot for where it goes if sent back.</p>}
       </div>
-      {(selectedZone !== null && editing) || selectedCard !== null || (adding && !editing) || triggersOpen || pressing !== null ? <aside className="absolute inset-y-0 right-0 z-10 w-[360px] max-w-full overflow-y-auto border-l bg-card p-4 shadow-xl" data-flow-drawer>
+      {(selectedZone !== null && editing) || selectedCard !== null || (adding && !editing) || triggersOpen || pressing !== null || scriptsOpen || insightsOpen ? <aside className="absolute inset-y-0 right-0 z-10 w-[360px] max-w-full overflow-y-auto border-l bg-card p-4 shadow-xl" data-flow-drawer>
         {selectedZone !== null && editing
           ? <ZonePanel stage={selectedZone} stages={stages} view={view} update={change => updateStage(selectedZone.id, change)}
               remove={() => { setDraft(current => current === null ? current : { ...current, start: current.start === selectedZone.id ? current.stages.find(one => one.id !== selectedZone.id)!.id : current.start,
                 stages: current.stages.filter(one => one.id !== selectedZone.id).map(one => ({ ...one, next: one.next === selectedZone.id ? null : one.next, onFail: one.onFail === selectedZone.id ? null : one.onFail })) }); setSelected(null); }}
               makeStart={() => setDraft(current => current === null ? current : { ...current, start: selectedZone.id })} onClose={() => setSelected(null)} />
+          : scriptsOpen
+            ? <ScriptsPanel view={view} csrf={csrf} apply={apply} onClose={() => setSelected(null)} />
+          : insightsOpen
+            ? <InsightsPanel view={view} onClose={() => setSelected(null)} />
           : pressing !== null
             ? <PressPanel key={pressing.id} trigger={pressing} view={view} csrf={csrf} apply={apply} onClose={() => setSelected(null)} />
           : triggersOpen

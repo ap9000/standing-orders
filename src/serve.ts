@@ -21,6 +21,9 @@ import { skillsHtml, skillsScript, skillsSnapshotHtml, skillTestFeedbackHtml, SK
 import { toolsHtml, TOOLS_CSS, type ToolsView } from "./tools-ui.js";
 import { flowFallbackHtml, flowsListHtml, flowView, FLOWS_CSS } from "./flows-ui.js";
 import { assignFlowCard, commentOnFlowCard, watchFlowCard } from "./flow-people.js";
+import { saveScript } from "./flow-scripts.js";
+import { flowInsights } from "./flow-insights.js";
+import { FORM_PATH, flowFormPage, receiveFlowForm, shareFlowButton, stopSharingFlowButton } from "./flow-triggers.js";
 import { addFlowTriggerTo, checkFlowTriggerNow, HOOK_PATH, pressFlowButton, receiveFlowHook, removeFlowTrigger, renewFlowHook, removeLinearKey, saveHooksBase, saveLinearKey, saveLinearSigningSecret, type TriggerIo } from "./flow-triggers.js";
 import { addCardToFlow, advanceFlows, cancelFlowCard, decideFlowCard, FLOW_HREF, flowDefinitionOf, moveCardInFlow } from "./flow-engine.js";
 import { FLOW_TEMPLATES, validateFlowDefinition } from "./flows.js";
@@ -843,6 +846,7 @@ export function createDecisionServer(options: ServeOptions): Server {
    * their signatures are checked too. Nothing runs here; cards wait for a pass. */
   async function flowHook(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
     const reply = (status: number, said: string) => { response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" }); response.end(JSON.stringify({ said })); request.resume(); };
+    if (url.pathname.startsWith(FORM_PATH)) return flowForm(request, response, url);
     if (options.configDir === undefined || !url.pathname.startsWith(HOOK_PATH)) return reply(404, "No such address.");
     if (request.method !== "POST") return reply(405, "Send a POST.");
     if (Number(request.headers["content-length"] ?? 0) > 1_000_000) return reply(413, "Too large.");
@@ -859,6 +863,31 @@ export function createDecisionServer(options: ServeOptions): Server {
       const answer = receiveFlowHook(store, url.pathname.slice(HOOK_PATH.length), { headers: request.headers, body: Buffer.concat(chunks) }, options.configDir, clock());
       return reply(answer.status, answer.said);
     } catch { return reply(500, "Not saved."); }
+  }
+
+  /** A shared button as a public form (v84): its questions, and one card per submission. No sign-in, no session, nothing about the flow shown. */
+  async function flowForm(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
+    const page = (answer: { status: number; html: string }) => {
+      response.writeHead(answer.status, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer", "x-content-type-options": "nosniff",
+        "x-frame-options": "DENY", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'" });
+      response.end(request.method === "HEAD" ? undefined : answer.html);
+      request.resume();
+    };
+    const token = url.pathname.slice(FORM_PATH.length);
+    if (request.method === "GET" || request.method === "HEAD") return page(flowFormPage(store, token, clock()));
+    if (request.method !== "POST") return page({ status: 405, html: "" });
+    if (Number(request.headers["content-length"] ?? 0) > 65_536) return page({ status: 413, html: "" });
+    let raw = "";
+    try {
+      await new Promise<void>((resolve, reject) => {
+        request.setEncoding("utf8");
+        request.on("data", (chunk: string) => { raw += chunk; if (raw.length > 65_536) reject(new Error("too-large")); });
+        request.on("end", resolve);
+        request.on("error", reject);
+      });
+    } catch { return page({ status: 413, html: "" }); }
+    try { return page(receiveFlowForm(store, token, new URLSearchParams(raw), clock())); }
+    catch { return page({ status: 500, html: "" }); }
   }
 
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -1242,8 +1271,8 @@ export function createDecisionServer(options: ServeOptions): Server {
     const write = new Set(["/settings/skills/import", "/settings/skills/change", "/settings/skills/revise", "/settings/knowledge/change", "/settings/knowledge/refresh", "/settings/learning/change", "/recipes/prepare", "/recipes/preview", "/recipes/import", "/recipes/save", "/recipes/launch", "/projects/select", "/tasks/add", "/routines/add"]);
     const task = matchTaskPath(path, request.method === "GET" ? "" : "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|next|reopen|steer|accept-proof|accept-revision|reject-revision|route|retry-review|complete|stop|resume-arm|resume)$");
     const resource = request.method === "GET"
-      ? /^\/(?:r|d)\/[0-9]{1,15}(?:\/evidence\/[0-9]{1,15})?$/.test(path) || /^\/routines\/[0-9]{1,15}$/.test(path) || path === "/flows" || /^\/flows\/[0-9]{1,15}$/.test(path)
-      : /^\/d\/[0-9]{1,15}\/answer$/.test(path) || /^\/routines\/[0-9]{1,15}\/(approve|refresh|pause|resume|run-now)$/.test(path) || path === "/flows/new" || /^\/flows\/[0-9]{1,15}\/(save|cards|archive)$/.test(path) || /^\/flows\/[0-9]{1,15}\/cards\/[0-9]{1,15}\/(move|decide|cancel|comment|assign|watch)$/.test(path) || /^\/flows\/[0-9]{1,15}\/triggers(\/[0-9]{1,15}\/(pause|resume|remove|check|press|renew|secret))?$/.test(path) || /^\/r\/[0-9]{1,15}\/(note|comment|revise|draft-repair)$/.test(path);
+      ? /^\/(?:r|d)\/[0-9]{1,15}(?:\/evidence\/[0-9]{1,15})?$/.test(path) || /^\/routines\/[0-9]{1,15}$/.test(path) || path === "/flows" || /^\/flows\/[0-9]{1,15}(\/insights|\/runs\/[0-9]{1,15}\/[0-9]{1,15})?$/.test(path)
+      : /^\/d\/[0-9]{1,15}\/answer$/.test(path) || /^\/routines\/[0-9]{1,15}\/(approve|refresh|pause|resume|run-now)$/.test(path) || path === "/flows/new" || /^\/flows\/[0-9]{1,15}\/(save|cards|archive|scripts)$/.test(path) || /^\/flows\/[0-9]{1,15}\/cards\/[0-9]{1,15}\/(move|decide|cancel|comment|assign|watch)$/.test(path) || /^\/flows\/[0-9]{1,15}\/triggers(\/[0-9]{1,15}\/(pause|resume|remove|check|press|renew|secret|share|unshare))?$/.test(path) || /^\/r\/[0-9]{1,15}\/(note|comment|revise|draft-repair)$/.test(path);
     if (!(request.method === "GET" ? read : write).has(path) && task === null && !resource) {
       refuse(response, who, 403, "This area requires instance access. Your account operates within its assigned projects.", "/projects");
       return false;
@@ -1357,7 +1386,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       url.pathname !== "/menu" &&
       url.pathname !== "/recipes" &&
       // A flow names its own project; the list spans every project.
-      url.pathname !== "/flows" && !/^\/flows\/[0-9]{1,15}$/.test(url.pathname) &&
+      url.pathname !== "/flows" && !/^\/flows\/[0-9]{1,15}(\/insights|\/runs\/[0-9]{1,15}\/[0-9]{1,15})?$/.test(url.pathname) &&
       // New work names its project in the form (a dropdown of known
       // projects); /tasks/add still admits the posted repo on its own.
       url.pathname !== "/tasks/new" && url.pathname !== "/tasks/add" &&
@@ -2615,6 +2644,17 @@ export function createDecisionServer(options: ServeOptions): Server {
       const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
       const flows = store.listFlows(projects);
       return sendScreen(response, 200, screen("Flows", `<h1>Flows</h1>${flowsListHtml(store, flows, projects, who.via === "cookie" ? who.session.csrf : "", who.via === "cookie" && who.role === "approver", url.searchParams.get("problem"))}`, { chrome: chromeFor(project, "flows") }));
+    }
+    const flowRead = /^\/flows\/([1-9][0-9]{0,9})\/(insights|runs\/([1-9][0-9]{0,9})\/([1-9][0-9]{0,9}))$/.exec(url.pathname);
+    if (flowRead !== null) {
+      const flow = store.getFlow(Number(flowRead[1]));
+      const json = (status: number, payload: unknown) => respond(response, status, "application/json; charset=utf-8", JSON.stringify(payload));
+      if (flow === null || flow.state !== "active" || !visible(flow.repo)) return json(404, { said: "No such flow in your projects." });
+      if (flowRead[2] === "insights") return json(200, flowInsights(store, flow, clock(), Math.min(90, Math.max(1, Number(url.searchParams.get("days")) || 30))));
+      const card = store.getFlowCard(Number(flowRead[3]));
+      const run = card === null || card.flow !== flow.id ? null : store.flowStepRun(card.id, Number(flowRead[4]));
+      if (run === null) return json(404, { said: "No such run." });
+      return json(200, { card: run.card, entry: run.entry, script: run.script, version: run.scriptVersion, state: run.state, result: run.result, exitCode: run.exitCode, durationMs: run.durationMs, at: run.finishedAt ?? run.startedAt, log: run.log ?? "" });
     }
     const flowPage = /^\/flows\/([1-9][0-9]{0,9})$/.exec(url.pathname);
     if (flowPage !== null) {
@@ -5372,8 +5412,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         return sendScreen(response,409,screen('Skills',`<h1>Skills</h1>${content}`,{chrome:chromeFor(repo,'settings'),functional:{script:skillsScript()}}));
       }
     }
-    const flowPost = /^\/flows\/([1-9][0-9]{0,9})\/(save|cards|archive|triggers|linear-key|hooks-address)$/.exec(url.pathname) ?? /^\/flows\/([1-9][0-9]{0,9})\/cards\/([1-9][0-9]{0,9})\/(move|decide|cancel|comment|assign|watch)$/.exec(url.pathname);
-    const triggerPost = /^\/flows\/([1-9][0-9]{0,9})\/triggers\/([1-9][0-9]{0,9})\/(pause|resume|remove|check|press|renew|secret)$/.exec(url.pathname);
+    const flowPost = /^\/flows\/([1-9][0-9]{0,9})\/(save|cards|archive|triggers|linear-key|hooks-address|scripts)$/.exec(url.pathname) ?? /^\/flows\/([1-9][0-9]{0,9})\/cards\/([1-9][0-9]{0,9})\/(move|decide|cancel|comment|assign|watch)$/.exec(url.pathname);
+    const triggerPost = /^\/flows\/([1-9][0-9]{0,9})\/triggers\/([1-9][0-9]{0,9})\/(pause|resume|remove|check|press|renew|secret|share|unshare)$/.exec(url.pathname);
     if (url.pathname === "/flows/new" || flowPost !== null || triggerPost !== null) {
       const now = clock();
       const answer = (status: number, payload: Record<string, unknown>) => respond(response, status, "application/json; charset=utf-8", JSON.stringify(payload));
@@ -5402,6 +5442,11 @@ export function createDecisionServer(options: ServeOptions): Server {
         const verb = triggerPost[3];
         if (verb === "pause" || verb === "resume") { store.updateFlowTrigger(trigger.id, { state: verb === "pause" ? "paused" : "active" }, now); return settle(verb === "pause" ? "Trigger paused." : "Trigger on again."); }
         if (verb === "remove") { removeFlowTrigger(store, trigger, now, dir); return settle("Trigger removed."); }
+        if (verb === "share") {
+          const shared = shareFlowButton(store, trigger, now, dir);
+          return shared.ok ? settle(shared.said, { reveal: shared.reveal }) : answer(409, { ok: false, said: shared.message });
+        }
+        if (verb === "unshare") { stopSharingFlowButton(store, trigger, now); return settle("The form link no longer works."); }
         if (verb === "press") {
           let answers: unknown;
           try { answers = JSON.parse(body.get("answers") ?? "[]"); } catch { answers = []; }
@@ -5429,6 +5474,12 @@ export function createDecisionServer(options: ServeOptions): Server {
         try { raw = JSON.parse(body.get("trigger") ?? "null"); } catch { return answer(400, { ok: false, said: "That trigger couldn't be read." }); }
         const made = addFlowTriggerTo(store, flow, raw, who.name, now, dir);
         return made.ok ? settle(made.said, made.reveal === null ? {} : { reveal: made.reveal }) : answer(400, { ok: false, said: made.message });
+      }
+      if (action === "scripts") {
+        // The project's script library, reached from any of its flows.
+        if (body.get("remove") === "yes") return store.removeFlowScript(flow.repo, body.get("name") ?? "") ? settle("Script removed. Zones that ran it wait until it's back.") : answer(404, { ok: false, said: "There's no script by that name." });
+        const saved = saveScript(store, flow.repo, { name: body.get("name"), about: body.get("about"), body: body.get("body"), timeoutMinutes: body.get("timeoutMinutes") }, who.name, now);
+        return saved.ok ? settle(saved.said) : answer(400, { ok: false, said: saved.message });
       }
       if (action === "linear-key" || action === "hooks-address") {
         // Installation settings, set from the flow they are needed on.

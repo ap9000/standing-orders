@@ -43,6 +43,7 @@ import type { Phase } from "./provider.js";
 import { TOOL_CATALOG, discoverTools, projectToolsOf, secretsSetFor, toolCommandLine, toolStanding, type FoundTool } from "./project-tools.js";
 import { FLOW_KIND_WORDS, FLOW_STAGE_KINDS, FLOW_TEMPLATES, flowFromSteps, type FlowDefinition, type FlowStepInput } from "./flows.js";
 import { flowDefinitionOf } from "./flow-engine.js";
+import { flowInsights } from "./flow-insights.js";
 import { describeTrigger, FLOW_TRIGGER_KINDS, triggerConfigOf } from "./flow-triggers.js";
 import type { ChatAction } from "./chat-actions.js";
 
@@ -785,6 +786,8 @@ export const MATE_TOOLS: MateTool[] = [
             ...(stage.kind === "task" ? { planning: stage.planning } : {}),
             ...(stage.kind === "approval" ? { decider: stage.approver === null ? "anyone who approves" : stage.approver === ctx.who.name ? "you" : "someone else" } : {}),
             ...(stage.message === null ? {} : { message: stage.message }),
+            ...(stage.kind === "check" ? { script: stage.script, scriptExists: stage.script !== null && ctx.store.flowScript(flow.repo, stage.script) !== null } : {}),
+            ...(stage.kind === "update" ? { closesIssue: stage.close === true } : {}),
             next: titleOf(stage.next), ifFails: titleOf(stage.onFail),
           })),
           cards: [...active, ...finished].map(card => ({
@@ -801,6 +804,7 @@ export const MATE_TOOLS: MateTool[] = [
               return said.length === 0 ? {} : { comments: said.length, discussion: said.slice(args["card"] === card.id ? -30 : -3).map(one => ({ by: one.author === ctx.who.name ? "you" : "a teammate", at: one.at, text: one.body.slice(0, args["card"] === card.id ? 2000 : 400) })) };
             })(),
           })).filter(card => args["card"] === undefined || card.card === args["card"]),
+          scripts: ctx.store.flowScripts(flow.repo).map(script => ({ name: script.name, about: script.about, version: script.version, timeoutMinutes: script.timeoutMinutes, body: script.body.slice(0, 1500) })),
           triggers: ctx.store.flowTriggers(flow.id).map(trigger => {
             const config = triggerConfigOf(trigger);
             return { trigger: trigger.id, kind: trigger.kind, what: config === null ? "can't be read" : describeTrigger(config, ctx.store),
@@ -825,19 +829,21 @@ export const MATE_TOOLS: MateTool[] = [
   },
   {
     name: "propose_flow",
-    description: "Draft a flow change as a card the operator confirms. create: a template, or the steps in order (each leads to the next; Done is added; instructions may be left out). edit: the full step list, keeping existing steps by id — what a kept step leaves out carries over. add_card (starts in the first zone unless zone is named), move_card, approve, send_back (needs a note), cancel_card, comment (note; @name pings that person), assign (owner: a name, 'me', or 'nobody'), follow, unfollow. add_trigger with settings (kind button: label, questions; schedule: schedule like 'daily 09:00 Europe/London', title; github: repo owner/name, watch issues|pulls|checks, label, branch, from team|anyone; linear: team, state, label; flow: follow (another flow's id), when (its zone)); pause_trigger, resume_trigger, remove_trigger with trigger. Read get_flows first except to create.",
+    description: "Draft a flow change as a card the operator confirms. create: a template, or the steps in order (each leads to the next; Done is added; instructions may be left out). edit: the full step list, keeping existing steps by id — what a kept step leaves out carries over. add_card (starts in the first zone unless zone is named), move_card, approve, send_back (needs a note), cancel_card, comment (note; @name pings that person), assign (owner: a name, 'me', or 'nobody'), follow, unfollow, save_script (script: name, about, body — short shell commands — and timeoutMinutes; a 'check' step names it). add_trigger with settings (kind button: label, questions; schedule: schedule like 'daily 09:00 Europe/London', title; github: repo owner/name, watch issues|pulls|checks, label, branch, from team|anyone; linear: team, state, label; flow: follow (another flow's id), when (its zone)); pause_trigger, resume_trigger, remove_trigger with trigger. Read get_flows first except to create.",
     inputSchema: schema({
-      operation: { type: "string", enum: ["create", "edit", "add_card", "move_card", "approve", "send_back", "cancel_card", "comment", "assign", "follow", "unfollow", "add_trigger", "pause_trigger", "resume_trigger", "remove_trigger"] },
+      operation: { type: "string", enum: ["create", "edit", "add_card", "move_card", "approve", "send_back", "cancel_card", "comment", "assign", "follow", "unfollow", "save_script", "add_trigger", "pause_trigger", "resume_trigger", "remove_trigger"] },
       repo: REPO_ARG, flow: { type: "integer", minimum: 1 }, card: { type: "integer", minimum: 1 },
       name: { type: "string", maxLength: 80 }, template: { type: "string", enum: FLOW_TEMPLATES.map(one => one.id) },
       steps: { type: "array", minItems: 1, maxItems: 24, items: { type: "object", additionalProperties: false, properties: {
         id: { type: "string", maxLength: 32 }, title: { type: "string", maxLength: 60 }, kind: { type: "string", enum: [...FLOW_STAGE_KINDS] },
         instructions: { type: "string", maxLength: 4000 }, planning: { type: "string", enum: ["auto", "required", "skip"] },
         decider: { type: "string", maxLength: 64 }, message: { type: "string", maxLength: 1000 },
+        script: { type: "string", maxLength: 40 }, close: { type: "boolean" },
         next: { type: "string", maxLength: 60 }, ifFails: { type: "string", maxLength: 60 },
       } } },
       title: { type: "string", maxLength: 200 }, description: { type: "string", maxLength: 4000 }, zone: { type: "string", maxLength: 60 }, note: { type: "string", maxLength: 2000 },
       trigger: { type: "integer", minimum: 1 }, owner: { type: "string", maxLength: 64 },
+      script: { type: "object", additionalProperties: false, properties: { name: { type: "string", maxLength: 40 }, about: { type: "string", maxLength: 160 }, body: { type: "string", maxLength: 1600 }, timeoutMinutes: { type: "integer", minimum: 1, maximum: 60 } } },
       settings: { type: "object", additionalProperties: false, properties: {
         kind: { type: "string", enum: FLOW_TRIGGER_KINDS.filter(one => one !== "webhook") }, zone: { type: "string", maxLength: 60 },
         label: { type: "string", maxLength: 50 }, questions: { type: "array", maxItems: 6, items: { type: "string", maxLength: 80 } },
@@ -891,6 +897,11 @@ export const MATE_TOOLS: MateTool[] = [
             break;
           }
           case "follow": case "unfollow": operation = "flow_card_watch"; input = { ...pick(["card"]), watching: args["operation"] === "follow" }; break;
+          case "save_script": {
+            const repo = repoPathOf(ctx.who, args["repo"]) ?? (Number.isSafeInteger(args["flow"]) ? ctx.store.getFlow(Number(args["flow"]))?.repo ?? null : null);
+            if (repo === null || !ctx.who.repos.includes(repo)) return { ok: false, message: "Name the project (repo from list_repos) or a flow in it." };
+            operation = "flow_script_save"; input = { repo, script: args["script"] ?? {} }; break;
+          }
           case "add_trigger": {
             const settings = args["settings"] !== null && typeof args["settings"] === "object" ? { ...args["settings"] as Record<string, unknown> } : {};
             // A trigger following another flow names it as "follow"; the drawing stores it as the flow it follows.
@@ -908,6 +919,30 @@ export const MATE_TOOLS: MateTool[] = [
       } catch (error) {
         return { ok: false, message: error instanceof Error ? error.message : "That flow change couldn't be drafted." };
       }
+    },
+  },
+  {
+    name: "get_flow_insights",
+    description: "Where work breaks in the operator's flows, from what they recorded: per zone how many cards arrived, moved on, failed or were sent back and how long they stayed; the zones with the most trouble; how each script did; and the recent script and update runs. run (card and entry from a run) reads that run's log. Without flow, a one-line summary for every flow.",
+    inputSchema: schema({ repo: REPO_ARG, flow: { type: "integer", minimum: 1 }, days: { type: "integer", minimum: 1, maximum: 90 }, card: { type: "integer", minimum: 1 }, entry: { type: "integer", minimum: 1 } }),
+    handle: (ctx, args) => {
+      const reachable = (repo: string) => ctx.who.repos.includes(repo) && ctx.store.accountCanAccess(ctx.who.name, repo);
+      const days = Number.isSafeInteger(args["days"]) ? Number(args["days"]) : 30;
+      if (args["flow"] === undefined) {
+        const repo = args["repo"] === undefined ? null : repoPathOf(ctx.who, args["repo"]);
+        const flows = ctx.store.listFlows(repo === null ? ctx.who.repos : [repo]).filter(one => reachable(one.repo)).slice(0, 20);
+        return { ok: true, body: { days, flows: flows.map(flow => { const seen = flowInsights(ctx.store, flow, ctx.now, days); return { flow: flow.id, name: flow.name, project: repoIdOf(ctx.who, flow.repo), cards: seen.cards, breaks: seen.breaks, scripts: seen.scripts }; }) } };
+      }
+      const flow = Number.isSafeInteger(args["flow"]) ? ctx.store.getFlow(Number(args["flow"])) : null;
+      if (flow === null || flow.state !== "active" || !reachable(flow.repo)) return { ok: false, message: "No such flow in your projects." };
+      if (args["card"] !== undefined) {
+        const card = ctx.store.getFlowCard(Number(args["card"]));
+        const run = card === null || card.flow !== flow.id ? null : ctx.store.flowStepRun(card.id, Number(args["entry"] ?? card.entry));
+        if (run === null) return { ok: false, message: "No such run on that card." };
+        return { ok: true, body: { card: run.card, entry: run.entry, script: run.script, version: run.scriptVersion, state: run.state, result: run.result, exitCode: run.exitCode, durationMs: run.durationMs, log: (run.log ?? "").slice(-6000) } };
+      }
+      const seen = flowInsights(ctx.store, flow, ctx.now, days);
+      return { ok: true, body: { ...seen, runs: seen.runs.slice(0, 15), rule: "Read a run's log with card and entry before explaining why it failed." } };
     },
   },
   {

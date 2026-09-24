@@ -4,6 +4,7 @@ import type { BrowserFlowCard, BrowserFlowTrigger, BrowserFlowView } from "./bro
 import { flowDefinitionOf } from "./flow-engine.js";
 import { describeTrigger, triggerHeadline, FLOW_TRIGGER_KINDS, FLOW_TRIGGER_WORDS, githubRepoOf, HOOK_PATH, hookReady, readHooksBase, readLinearKey, takesDeliveries, triggerConfigOf } from "./flow-triggers.js";
 import { FLOW_COLORS, FLOW_KIND_WORDS, FLOW_STAGE_KINDS, FLOW_TEMPLATES } from "./flows.js";
+import { flowInsights, troubleWords } from "./flow-insights.js";
 import type { FlowCardRow, FlowRow, Store } from "./store.js";
 
 const e = (value: unknown) =>
@@ -19,7 +20,8 @@ export function flowsListHtml(store: Store, flows: readonly FlowRow[], projects:
     const definition = flowDefinitionOf(flow);
     const waiting = cards.filter(card => definition?.stages.find(one => one.id === card.stage)?.kind === "approval").length;
     const buttons = store.flowTriggers(flow.id).filter(one => one.state === "active").flatMap(one => { const config = triggerConfigOf(one); return config?.kind === "button" ? [{ id: one.id, label: config.label }] : []; });
-    return `<article class="card"><div class="flow-row"><h2><a href="/flows/${flow.id}">${e(flow.name)}</a></h2><span class="flow-counts">${e(projectName(flow.repo))} · ${cards.length} card${cards.length === 1 ? "" : "s"} in progress${waiting > 0 ? ` · ${waiting} waiting for a decision` : ""}</span></div>` +
+    const trouble = troubleWords(flowInsights(store, flow, new Date(), 7));
+    return `<article class="card"><div class="flow-row"><h2><a href="/flows/${flow.id}">${e(flow.name)}</a></h2><span class="flow-counts">${e(projectName(flow.repo))} · ${cards.length} card${cards.length === 1 ? "" : "s"} in progress${waiting > 0 ? ` · ${waiting} waiting for a decision` : ""}${trouble === null ? "" : ` · ${e(trouble)}`}</span></div>` +
       (buttons.length === 0 ? "" : `<p class="flow-buttons">${buttons.map(one => `<a class="button-link" href="/flows/${flow.id}?start=${one.id}">${e(one.label)}</a>`).join(" ")}</p>`) + `</article>`;
   }).join("");
   const create = canCreate && projects.length > 0 ? `<details class="card"${flows.length === 0 ? " open" : ""}><summary>New flow</summary><form method="post" action="/flows/new"><input type="hidden" name="csrf" value="${e(csrf)}"><label>Name<input name="name" required maxlength="80" placeholder="for example: Bug fixes"></label><label>Project<select name="repo">${projects.map(repo => `<option value="${e(repo)}">${e(projectName(repo))}</option>`).join("")}</select></label><label>Start from<select name="template">${FLOW_TEMPLATES.map(one => `<option value="${e(one.id)}">${e(one.label)}: ${e(one.about)}</option>`).join("")}</select></label><button>Create flow</button></form></details>` : "";
@@ -78,6 +80,7 @@ export function flowView(store: Store, flow: FlowRow, viewer: { name: string; ap
       button: config?.kind === "button" ? { label: config.label, questions: config.questions } : null,
       hook: config !== null && takesDeliveries(config) ? { ready: hookReady(trigger, setup.dir), needsSecret: config.kind === "linear" } : null,
       checkable: (config?.kind === "github" || config?.kind === "linear") && config.delivery === "poll",
+      shared: config?.kind === "button" && trigger.hookHash !== null,
     };
   });
   return {
@@ -92,6 +95,8 @@ export function flowView(store: Store, flow: FlowRow, viewer: { name: string; ap
     },
     startTrigger: setup.startTrigger ?? null,
     me: viewer.name,
+    scripts: store.flowScripts(flow.repo).map(script => ({ name: script.name, about: script.about, body: script.body, timeoutMinutes: script.timeoutMinutes, version: script.version, savedBy: script.savedBy, savedAt: script.savedAt,
+      usedHere: stages.filter(stage => stage.kind === "check" && stage.script === script.name).map(stage => stage.title) })),
     start: definition?.start ?? stages[0]?.id ?? "",
     stages,
     cards,

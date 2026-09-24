@@ -21,7 +21,7 @@
  */
 import { createHash } from "node:crypto";
 
-export const FLOW_STAGE_KINDS = ["inbox", "task", "report", "approval", "notify", "done"] as const;
+export const FLOW_STAGE_KINDS = ["inbox", "task", "report", "approval", "check", "update", "notify", "done"] as const;
 export type FlowStageKind = (typeof FLOW_STAGE_KINDS)[number];
 export const FLOW_COLORS = ["slate", "blue", "violet", "amber", "green", "rose"] as const;
 export type FlowColor = (typeof FLOW_COLORS)[number];
@@ -41,8 +41,12 @@ export type FlowStage = {
   planning: "auto" | "required" | "skip" | null;
   /** approval: the one person who decides, or null for any approver on the project. */
   approver: string | null;
-  /** notify: the message, with the same fill-ins. */
+  /** notify: the message; update: the comment left on the issue. Same fill-ins. */
   message: string | null;
+  /** update: also close the issue (Linear: move it to the team's done state). */
+  close: boolean | null;
+  /** check: the project script (by name) run on the card's work, with no AI. */
+  script: string | null;
   /** Where a card goes when this zone's step succeeds, and when it fails or is sent back. */
   next: string | null;
   onFail: string | null;
@@ -56,11 +60,15 @@ export const FLOW_KIND_WORDS: Record<FlowStageKind, { label: string; about: stri
   task: { label: "Build", about: "An agent does the work as a task, with the usual approvals and checks." },
   report: { label: "Research", about: "An agent investigates and writes a report. No code changes." },
   approval: { label: "Person decides", about: "Someone approves, or sends it back with a note." },
+  check: { label: "Run a script", about: "Runs one of the project's scripts on the card's work, with no AI. If it fails, the card takes its failure path." },
+  update: { label: "Update the issue", about: "Comments on the GitHub or Linear issue the card came from, and can close it. Other cards pass straight through." },
   notify: { label: "Message", about: "Posts a message to the project's chat, then moves on." },
   done: { label: "Done", about: "The end of the flow." },
 };
 
 const ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
+/** A project script's name: short, lowercase, dashes — how zones and chat refer to it. */
+export const SCRIPT_NAME = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const text = (value: unknown, cap: number): string | null => {
   if (value === null || value === undefined) return null;
   if (typeof value !== "string") throw new Error("Zone text must be plain text.");
@@ -95,6 +103,8 @@ export function validateFlowDefinition(input: unknown): FlowDefinition {
       planning: kind === "task" ? planning ?? "auto" : null,
       approver: kind === "approval" ? text(stage["approver"], 64) : null,
       message: text(stage["message"], 1000),
+      close: kind === "update" ? stage["close"] !== false : null,
+      script: kind === "check" ? text(stage["script"], 40) : null,
       next: text(stage["next"], 32),
       onFail: text(stage["onFail"], 32),
     };
@@ -108,6 +118,7 @@ export function validateFlowDefinition(input: unknown): FlowDefinition {
     for (const target of [stage.next, stage.onFail]) if (target !== null && !ids.has(target)) throw new Error(`Zone ${stage.title} points at a zone that no longer exists.`);
     if ((stage.kind === "task" || stage.kind === "report") && stage.instructions === null) throw new Error(`Zone ${stage.title}: say what the agent should do.`);
     if (stage.kind === "notify" && stage.message === null) throw new Error(`Zone ${stage.title}: write the message to post.`);
+    if (stage.kind === "check" && (stage.script === null || !SCRIPT_NAME.test(stage.script))) throw new Error(`Zone ${stage.title}: choose which script it runs.`);
     if (stage.kind === "done" && (stage.next !== null || stage.onFail !== null)) throw new Error(`Zone ${stage.title} is the end; it can't lead anywhere.`);
   }
   const start = typeof raw.start === "string" && ids.has(raw.start) ? raw.start : stages[0]!.id;
@@ -135,10 +146,11 @@ export function fillFlowText(template: string, card: { title: string; descriptio
 export type FlowStepInput = {
   id?: string; title?: string; kind?: FlowStageKind;
   instructions?: string; planning?: "auto" | "required" | "skip"; decider?: string | null; message?: string;
+  script?: string; close?: boolean;
   next?: string; ifFails?: string;
 };
 
-const KIND_COLORS: Record<FlowStageKind, FlowColor> = { inbox: "slate", task: "blue", report: "violet", approval: "amber", notify: "green", done: "green" };
+const KIND_COLORS: Record<FlowStageKind, FlowColor> = { inbox: "slate", task: "blue", report: "violet", approval: "amber", check: "blue", update: "green", notify: "green", done: "green" };
 const slugOf = (title: string) => title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 28) || "zone";
 const overlaps = (a: FlowZone, b: FlowZone) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
 
@@ -210,7 +222,10 @@ export function flowFromSteps(input: unknown, previous: FlowDefinition | null = 
         : null,
       planning: kind === "task" ? step.planning ?? old?.planning ?? "auto" : null,
       approver,
-      message: kind === "notify" ? step.message?.trim() || old?.message || (drafts.find(one => one.id === next)?.kind === "done" ? "Finished: {{card.title}}" : "Update on {{card.title}}") : null,
+      message: kind === "notify" ? step.message?.trim() || old?.message || (drafts.find(one => one.id === next)?.kind === "done" ? "Finished: {{card.title}}" : "Update on {{card.title}}")
+        : kind === "update" ? step.message?.trim() || old?.message || "Done: {{card.title}}" : null,
+      close: kind === "update" ? step.close ?? old?.close ?? true : null,
+      script: kind === "check" ? step.script?.trim() || old?.script || null : null,
       next, onFail,
     });
   });
@@ -256,6 +271,8 @@ export function flowTerms(definition: FlowDefinition, previous: FlowDefinition |
     if (stage.kind === "task" && stage.planning !== "auto") lines.push(stage.planning === "required" ? "Plans first." : "Builds without a plan.");
     if (stage.kind === "approval") lines.push(`Decides: ${stage.approver ?? "anyone who approves on this project"}. Approve → ${to(stage.next)} Send back → ${stage.onFail === null ? "not possible." : to(stage.onFail)}`);
     else if (stage.kind === "notify") lines.push(`Posts: ${plain(stage.message ?? "")}`, `Then → ${to(stage.next)}`);
+    else if (stage.kind === "update") lines.push(`Comments on the issue the card came from: ${plain(stage.message ?? "")}${stage.close === true ? " Then closes it (Linear: moves it to done)." : ""}`, `Then → ${to(stage.next)}${stage.onFail === null ? "" : ` If it can't → ${to(stage.onFail)}`}`);
+    else if (stage.kind === "check") lines.push(`Runs the project's script “${stage.script}” with no AI.`, `Passes → ${to(stage.next)}${stage.onFail === null ? " Fails → waits there." : ` Fails → ${to(stage.onFail)}`}`);
     else if (stage.next !== null) lines.push(`Then → ${to(stage.next)}${stage.onFail === null ? "" : ` If it fails → ${to(stage.onFail)}`}`);
     return lines.join("\n");
   };
@@ -276,7 +293,7 @@ export function flowTerms(definition: FlowDefinition, previous: FlowDefinition |
 
 const zone = (x: number, y: number, color: FlowColor, h = 300): FlowZone => ({ x, y, w: 260, h, color });
 const stage = (id: string, title: string, kind: FlowStageKind, at: FlowZone, rest: Partial<FlowStage> = {}): FlowStage =>
-  ({ id, title, kind, zone: at, instructions: null, planning: kind === "task" ? "auto" : null, approver: null, message: null, next: null, onFail: null, ...rest });
+  ({ id, title, kind, zone: at, instructions: null, planning: kind === "task" ? "auto" : null, approver: null, message: null, close: kind === "update" ? true : null, script: null, next: null, onFail: null, ...rest });
 
 /** Ready-made flows: the coding flow is the whole business process around a change. */
 export const FLOW_TEMPLATES: readonly { id: string; label: string; about: string; definition: FlowDefinition }[] = [
@@ -330,3 +347,4 @@ export const FLOW_TEMPLATES: readonly { id: string; label: string; about: string
     definition: { version: 1, start: "inbox", stages: [stage("inbox", "Inbox", "inbox", zone(0, 0, "slate"), { next: "done" }), stage("done", "Done", "done", zone(300, 0, "green"))] },
   },
 ];
+

@@ -116,7 +116,19 @@ failed when a result is marked complete.
   issue or run makes at most one card; text from outside the repository's
   team is left out unless you say anyone. With a public address, GitHub,
   Linear or any service can post to a trigger's secret webhook instead
-  (see [Webhooks](#webhooks-through-a-reverse-proxy)).
+  (see [Webhooks](#webhooks-through-a-reverse-proxy)). A button can also be
+  shared as a secret form link, so someone without an account can report
+  something straight into a flow.
+- **Steps with no AI, and where flows break.** A project keeps a library of
+  scripts — `run-tests`, `lint`, `smoke-staging` — written on a flow's
+  Scripts panel or drafted by the lead in chat, and any flow runs one from a
+  "Run a script" zone in a fresh copy of the card's work: exit 0 passes,
+  anything else takes the failure path with the log kept. A Build whose
+  project checks fail takes its failure path too, and an "Update the issue"
+  zone comments on and closes the GitHub or Linear issue a card came from.
+  Each flow's Insights show, per zone, how many cards passed, failed or were
+  sent back and how long they waited, how each script does, and every run's
+  log; the lead reads the same numbers to tell you where things break.
 - **Unified portfolio chat.** Read every project, prioritize queues, answer
   decisions, repair failed or cancelled dependencies, and confirm rich action
   cards from one conversation. The chat proposes; durable workflow state
