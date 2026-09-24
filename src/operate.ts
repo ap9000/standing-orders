@@ -1,6 +1,7 @@
 import { maybeTriggerRepair } from "./dispose.js";
 import { advanceFlows } from "./flow-engine.js";
 import { runFlowTriggers, type TriggerIo } from "./flow-triggers.js";
+import { runFlowSteps, type StepIo } from "./flow-steps.js";
 import {followDiscord} from "./discord.js";
 import { followTeams } from "./teams.js";
 import {loadDiscordCredentials} from "./discord-api.js";
@@ -296,6 +297,8 @@ export type OperateOptions = {
   dispatchAdapter?: DispatchAdapter;
   /** Injected by tests: how flow triggers reach GitHub (gh) and Linear (fetch), and where their secrets live. */
   flowTriggerIo?: Partial<TriggerIo>;
+  /** Injected by tests: how flow check and update steps run commands and reach GitHub and Linear. */
+  flowStepIo?: Partial<StepIo>;
   /** Injected by tests: the mate's provider fetch, key environment, and stdin lines. */
   mateSeams?: MateCliSeams;
   /** Injected by tests: a held-session coordinator, so a `tick` exercises
@@ -797,6 +800,7 @@ export async function runOperate(
       ...(options.publishExec === undefined ? {} : { publishExec: options.publishExec }),
       ...(options.dispatchAdapter === undefined ? {} : { dispatchAdapter: options.dispatchAdapter }),
       ...(options.flowTriggerIo === undefined ? {} : { flowTriggerIo: options.flowTriggerIo }),
+      ...(options.flowStepIo === undefined ? {} : { flowStepIo: options.flowStepIo }),
       ...(options.shouldStop === undefined ? {} : { shouldStop: options.shouldStop }),
       ...(options.mateSeams === undefined ? {} : { mateSeams: options.mateSeams }),
       ...(options.heldCoordinator === undefined ? {} : { heldCoordinator: options.heldCoordinator }),
@@ -835,6 +839,8 @@ type Context = {
   dispatchAdapter?: DispatchAdapter;
   /** Injected by tests: how flow triggers reach GitHub (gh) and Linear (fetch), and where their secrets live. */
   flowTriggerIo?: Partial<TriggerIo>;
+  /** Injected by tests: how flow check and update steps run commands and reach GitHub and Linear. */
+  flowStepIo?: Partial<StepIo>;
   /**
    * The stop fence (Codex M5-M8 audit, IV-1): set by the watch when a
    * signal lands. A pass that sees true admits NOTHING more — no routine
@@ -2168,8 +2174,17 @@ async function tickCommand(
   // `gh` or one HTTPS request, never a model, and only when it is due.
   const triggerPass = context.shouldStop?.() === true || context.shouldPauseAdmission?.() === true ? { added: 0, checked: 0, problems: [] }
     : await runFlowTriggers(store, repo, clock(), { gh: context.flowTriggerIo?.gh ?? run, fetch: context.flowTriggerIo?.fetch ?? fetch, dir: context.flowTriggerIo?.dir ?? dirname(context.databaseFile) });
+  // Check and update steps run outside a model: an approved command in a
+  // fresh copy of the card's work, or a comment on the issue it came from.
+  const stepPass = context.shouldStop?.() === true || context.shouldPauseAdmission?.() === true ? { ran: 0, problems: [] }
+    : await runFlowSteps(store, repo, clock(), {
+      gh: context.flowStepIo?.gh ?? run, git: context.flowStepIo?.git ?? git, shell: context.flowStepIo?.shell ?? run, fetch: context.flowStepIo?.fetch ?? fetch,
+      dir: context.flowStepIo?.dir ?? dirname(context.databaseFile), scratch: context.flowStepIo?.scratch ?? join(pool, "flow-checks"), base,
+      ...(context.evidenceRoot === undefined ? {} : { evidenceRoot: context.evidenceRoot }),
+    });
   const flowPass = advanceFlows(store, repo, clock(), context.evidenceRoot === undefined ? {} : { evidenceRoot: context.evidenceRoot });
-  const flows = flowPass.moved + flowPass.filed.length + flowPass.problems.length + triggerPass.added + triggerPass.problems.length === 0 ? {} : { flows: { ...flowPass, ...(triggerPass.added + triggerPass.problems.length === 0 ? {} : { triggers: triggerPass }) } };
+  const flows = flowPass.moved + flowPass.filed.length + flowPass.problems.length + triggerPass.added + triggerPass.problems.length + stepPass.ran + stepPass.problems.length === 0 ? {} : { flows: { ...flowPass,
+    ...(triggerPass.added + triggerPass.problems.length === 0 ? {} : { triggers: triggerPass }), ...(stepPass.ran + stepPass.problems.length === 0 ? {} : { steps: stepPass }) } };
 
   // Tournament housekeeping before the ordinary pass (stage 4): interrupted
   // races recover by CAS, and an ANSWERED question re-admits its parked

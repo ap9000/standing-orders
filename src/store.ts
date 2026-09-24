@@ -114,7 +114,8 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // v81 adds flows: a canvas of zones that cards (pieces of work) move through, and each card's history.
 // v82 adds flow triggers (what starts cards: a button, a schedule, GitHub, Linear, another flow) and where each card came from.
 // v83 adds people on flow cards: an owner, watchers, comments with @mentions, and notifications for one person.
-export const SCHEMA_VERSION = 83;
+// v84 closes the loop: project scripts (reusable steps with no AI), check and update steps with their logs, and trigger forms.
+export const SCHEMA_VERSION = 84;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -467,6 +468,9 @@ export type MateProposal = {
 };
 
 export type FlowRow = { id: number; repo: string; name: string; definitionJson: string; revision: number; state: "active" | "archived"; createdBy: string; createdAt: string; updatedBy: string; updatedAt: string };
+export type FlowStepRunRow = { card: number; entry: number; stage: string; kind: "check" | "update"; script: string | null; scriptVersion: number | null; state: "running" | "passed" | "failed" | "waiting"; attempts: number;
+  nextAt: string | null; startedAt: string; finishedAt: string | null; durationMs: number | null; exitCode: number | null; result: string | null; log: string | null };
+export type FlowScriptRow = { id: number; repo: string; name: string; about: string; body: string; timeoutMinutes: number; version: number; digest: string; savedBy: string; savedAt: string };
 /** Where a card came from when a trigger made it: what to call it and where to look (a GitHub issue, a Linear issue, another flow's card). */
 export type FlowCardSource = { kind: string; label: string; url: string | null };
 export type FlowCardRow = { id: number; flow: number; title: string; description: string | null; stage: string; entry: number; state: "active" | "done" | "cancelled"; task: string | null; primaryTask: string | null; note: string | null; waiting: string | null; outputs: Record<string, string>; createdBy: string; createdAt: string; updatedAt: string; source: FlowCardSource | null; owner: string | null };
@@ -478,6 +482,19 @@ export type FlowEventOutcome = "created" | "ok" | "fail" | "moved" | "approved" 
 function readFlowRow(row: Record<string, unknown>): FlowRow {
   return { id: Number(row["id"]), repo: String(row["repo"]), name: String(row["name"]), definitionJson: String(row["definition_json"]), revision: Number(row["revision"]),
     state: String(row["state"]) as FlowRow["state"], createdBy: String(row["created_by"]), createdAt: String(row["created_at"]), updatedBy: String(row["updated_by"]), updatedAt: String(row["updated_at"]) };
+}
+
+function readFlowScriptRow(row: Record<string, unknown>): FlowScriptRow {
+  return { id: Number(row["id"]), repo: String(row["repo"]), name: String(row["name"]), about: String(row["about"]), body: String(row["body"]), timeoutMinutes: Number(row["timeout_minutes"]),
+    version: Number(row["version"]), digest: String(row["digest"]), savedBy: String(row["saved_by"]), savedAt: String(row["saved_at"]) };
+}
+
+function readFlowStepRunRow(row: Record<string, unknown>): FlowStepRunRow {
+  const optional = (key: string) => row[key] === null || row[key] === undefined ? null : String(row[key]);
+  const number = (key: string) => row[key] === null || row[key] === undefined ? null : Number(row[key]);
+  return { card: Number(row["card"]), entry: Number(row["entry"]), stage: String(row["stage"]), kind: String(row["kind"]) as FlowStepRunRow["kind"], script: optional("script"), scriptVersion: number("script_version"),
+    state: String(row["state"]) as FlowStepRunRow["state"], attempts: Number(row["attempts"]), nextAt: optional("next_at"), startedAt: String(row["started_at"]), finishedAt: optional("finished_at"),
+    durationMs: number("duration_ms"), exitCode: number("exit_code"), result: optional("result"), log: optional("log") };
 }
 
 function readFlowCardRow(row: Record<string, unknown>): FlowCardRow {
@@ -2193,6 +2210,47 @@ CREATE TABLE IF NOT EXISTS flow_comment (
   at            TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS flow_comment_card ON flow_comment (card, id);
+
+-- v84: steps that run outside a model. flow_script is a project's library
+-- of reusable scripts (each save is a new version; who saved it and when is
+-- kept, and the digest names the exact body that ran). A "Run a script"
+-- zone names one. flow_step_run is one visit of a card to a script
+-- or update zone: the claim that keeps two workers from running it twice,
+-- its attempts, and what came of it — the log, exit code and time taken,
+-- which the flow's insights read.
+CREATE TABLE IF NOT EXISTS flow_script (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo            TEXT NOT NULL,
+  name            TEXT NOT NULL,
+  about           TEXT NOT NULL,
+  body            TEXT NOT NULL,
+  timeout_minutes INTEGER NOT NULL,
+  version         INTEGER NOT NULL,
+  digest          TEXT NOT NULL,
+  saved_by        TEXT NOT NULL,
+  saved_at        TEXT NOT NULL,
+  state           TEXT NOT NULL CHECK (state IN ('active','removed'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS flow_script_live ON flow_script (repo, name) WHERE state = 'active';
+CREATE TABLE IF NOT EXISTS flow_step_run (
+  card           INTEGER NOT NULL REFERENCES flow_card(id),
+  entry          INTEGER NOT NULL,
+  stage          TEXT NOT NULL,
+  kind           TEXT NOT NULL CHECK (kind IN ('check','update')),
+  script         TEXT,
+  script_version INTEGER,
+  state          TEXT NOT NULL CHECK (state IN ('running','passed','failed','waiting')),
+  attempts       INTEGER NOT NULL DEFAULT 0,
+  next_at        TEXT,
+  started_at     TEXT NOT NULL,
+  finished_at    TEXT,
+  duration_ms    INTEGER,
+  exit_code      INTEGER,
+  result         TEXT,
+  log            TEXT,
+  PRIMARY KEY (card, entry)
+);
+CREATE INDEX IF NOT EXISTS flow_step_run_recent ON flow_step_run (started_at);
 CREATE TABLE IF NOT EXISTS flow_trigger_event (
   trigger    INTEGER NOT NULL REFERENCES flow_trigger(id),
   key        TEXT NOT NULL,
@@ -20663,6 +20721,84 @@ export class Store {
   /** The newest history line anywhere: a new trigger on another flow starts after it, never replaying the past. */
   latestFlowEvent(): number {
     return Number(this.db.prepare("SELECT COALESCE(MAX(id), 0) AS id FROM flow_event").get()?.["id"] ?? 0);
+  }
+
+  // ---- scripts and steps outside a model (v84) ------------------------------------
+
+  /** A project's live scripts, by name. */
+  flowScripts(repo: string): FlowScriptRow[] {
+    return this.db.prepare("SELECT * FROM flow_script WHERE repo = ? AND state = 'active' ORDER BY name").all(repo).map(readFlowScriptRow);
+  }
+
+  flowScript(repo: string, name: string): FlowScriptRow | null {
+    const row = this.db.prepare("SELECT * FROM flow_script WHERE repo = ? AND name = ? AND state = 'active'").get(repo, name);
+    return row === undefined ? null : readFlowScriptRow(row);
+  }
+
+  /** Save a script's next version; the previous one stays in history. Returns the version. */
+  saveFlowScript(script: { repo: string; name: string; about: string; body: string; timeoutMinutes: number; digest: string; by: string }, now: Date): number {
+    return this.transact(() => {
+      const current = this.flowScript(script.repo, script.name);
+      const version = (current?.version ?? Number(this.db.prepare("SELECT COALESCE(MAX(version), 0) AS v FROM flow_script WHERE repo = ? AND name = ?").get(script.repo, script.name)?.["v"] ?? 0)) + 1;
+      if (current !== null) this.db.prepare("UPDATE flow_script SET state = 'removed' WHERE id = ?").run(current.id);
+      this.db.prepare(`INSERT INTO flow_script (repo, name, about, body, timeout_minutes, version, digest, saved_by, saved_at, state)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')`).run(script.repo, script.name, script.about, script.body, script.timeoutMinutes, version, script.digest, script.by, now.toISOString());
+      return version;
+    });
+  }
+
+  removeFlowScript(repo: string, name: string): boolean {
+    const { changes } = this.db.prepare("UPDATE flow_script SET state = 'removed' WHERE repo = ? AND name = ? AND state = 'active'").run(repo, name);
+    return Number(changes) === 1;
+  }
+
+  /** Claim a card's visit to a step zone. False when another pass holds it or it already finished. */
+  claimFlowStep(step: { card: number; entry: number; stage: string; kind: "check" | "update"; script: string | null; scriptVersion: number | null }, now: Date): boolean {
+    return this.transact(() => {
+      const existing = this.flowStepRun(step.card, step.entry);
+      const stamp = now.toISOString();
+      if (existing === null) {
+        this.db.prepare("INSERT INTO flow_step_run (card, entry, stage, kind, script, script_version, state, attempts, started_at) VALUES (?, ?, ?, ?, ?, ?, 'running', 1, ?)")
+          .run(step.card, step.entry, step.stage, step.kind, step.script, step.scriptVersion, stamp);
+        return true;
+      }
+      // A step waiting to try again is due once its time comes.
+      if (existing.state === "waiting" && (existing.nextAt === null || existing.nextAt <= stamp)) {
+        this.db.prepare("UPDATE flow_step_run SET state = 'running', attempts = attempts + 1, started_at = ?, next_at = NULL, script = ?, script_version = ? WHERE card = ? AND entry = ?")
+          .run(stamp, step.script, step.scriptVersion, step.card, step.entry);
+        return true;
+      }
+      return false;
+    });
+  }
+
+  flowStepRun(card: number, entry: number): FlowStepRunRow | null {
+    const row = this.db.prepare("SELECT * FROM flow_step_run WHERE card = ? AND entry = ?").get(card, entry);
+    return row === undefined ? null : readFlowStepRunRow(row);
+  }
+
+  /** Settle a step: passed or failed for good, or waiting to try again at `nextAt` — with what it printed, its exit code and how long it took. */
+  finishFlowStep(card: number, entry: number, outcome: { state: "passed" | "failed" | "waiting"; result: string; nextAt?: string; log?: string | null; exitCode?: number | null; durationMs?: number | null }, now: Date): void {
+    this.db.prepare("UPDATE flow_step_run SET state = ?, result = ?, next_at = ?, finished_at = ?, log = ?, exit_code = ?, duration_ms = ? WHERE card = ? AND entry = ?")
+      .run(outcome.state, outcome.result, outcome.nextAt ?? null, outcome.state === "waiting" ? null : now.toISOString(), outcome.log ?? null, outcome.exitCode ?? null, outcome.durationMs ?? null, card, entry);
+  }
+
+  /** Steps still running long after they started: their worker stopped. */
+  staleFlowSteps(before: Date): FlowStepRunRow[] {
+    return this.db.prepare("SELECT * FROM flow_step_run WHERE state = 'running' AND started_at < ?").all(before.toISOString()).map(readFlowStepRunRow);
+  }
+
+  /** A flow's step runs, newest first: what the insights and the run log read. */
+  flowStepRuns(flow: number, since: Date, limit: number): (FlowStepRunRow & { cardTitle: string })[] {
+    return this.db.prepare("SELECT r.*, c.title AS card_title FROM flow_step_run r JOIN flow_card c ON c.id = r.card WHERE c.flow = ? AND r.started_at >= ? ORDER BY r.started_at DESC LIMIT ?")
+      .all(flow, since.toISOString(), limit).map(row => ({ ...readFlowStepRunRow(row), cardTitle: String(row["card_title"]) }));
+  }
+
+  /** Every move of every card in a flow since a time, oldest first: what the insights count. */
+  flowMoves(flow: number, since: Date): { card: number; fromStage: string | null; toStage: string; outcome: FlowEventOutcome; note: string | null; at: string }[] {
+    return this.db.prepare("SELECT e.card, e.from_stage, e.to_stage, e.outcome, e.note, e.at FROM flow_event e JOIN flow_card c ON c.id = e.card WHERE c.flow = ? AND e.at >= ? ORDER BY e.id")
+      .all(flow, since.toISOString()).map(row => ({ card: Number(row["card"]), fromStage: row["from_stage"] === null ? null : String(row["from_stage"]), toStage: String(row["to_stage"]),
+        outcome: String(row["outcome"]) as FlowEventOutcome, note: row["note"] === null ? null : String(row["note"]), at: String(row["at"]) }));
   }
 
   // ---- people on flow cards (v83) ------------------------------------------------

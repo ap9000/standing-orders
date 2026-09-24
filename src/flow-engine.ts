@@ -114,6 +114,10 @@ function advanceCard(store: Store, flow: FlowRow, definition: FlowDefinition | n
     case "report":
       workStage(store, flow, stage, card, now, options, outcome, onward);
       return;
+    case "check":
+    case "update":
+      // Run outside a model by the worker's step pass (flow-steps.ts), which moves the card on.
+      return;
   }
 }
 
@@ -141,6 +145,17 @@ function workStage(store: Store, flow: FlowRow, stage: FlowStage, card: FlowCard
   const task = store.getTask(current);
   if (task === null) { store.updateFlowCard(card.id, { waiting: "Its task is gone. Move the card to try again." }, now); return; }
   if (task.state === "done") {
+    // A build whose project checks failed is done but not good: it takes the failure path, like a failed build.
+    if (stage.kind === "task") {
+      const checks = assignmentOf(store, current, now, { principal: "operator", repos: [flow.repo] }, options.evidenceRoot)?.receipt?.checks ?? null;
+      if (checks?.status === "failed") {
+        const said = `The checks failed on its result: ${checks.detail}`;
+        store.updateFlowCard(card.id, { outputs: { ...card.outputs, [stage.id]: `${said} (task ${current})` }, primaryTask: current }, now);
+        if (stage.onFail !== null) onward("fail", said);
+        else if (card.waiting !== `${said} Look at the result, then move the card on or back.`) store.updateFlowCard(card.id, { waiting: `${said} Look at the result, then move the card on or back.` }, now);
+        return;
+      }
+    }
     const outputs = { ...card.outputs };
     if (stage.kind === "report") {
       const ref = store.lookupRef(current);

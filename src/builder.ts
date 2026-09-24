@@ -378,7 +378,7 @@ const AGENT_ENV_DENYLIST: readonly string[] = [TELEGRAM_TOKEN_ENV];
  * needs more exports it inside its own approved command text — visibly,
  * on the approval screen.
  */
-const SETUP_ENV_ALLOWLIST: readonly string[] = [
+export const SETUP_ENV_ALLOWLIST: readonly string[] = [
   "PATH", "HOME", "USER", "LOGNAME", "SHELL",
   "TMPDIR", "TMP", "TEMP",
   "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TERM",
@@ -387,7 +387,7 @@ const SETUP_ENV_ALLOWLIST: readonly string[] = [
 ];
 
 /** Belt over the allowlist's suspenders: even if these ever appear in `env`, they die here. */
-const SETUP_ENV_DENYLIST: readonly string[] = [TELEGRAM_TOKEN_ENV, OPENROUTER_ENV_KEY];
+export const SETUP_ENV_DENYLIST: readonly string[] = [TELEGRAM_TOKEN_ENV, OPENROUTER_ENV_KEY];
 
 /**
  * A bounded, redacted diagnostic from untrusted tool output (audit IV-5):

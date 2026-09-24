@@ -182,6 +182,16 @@ describe("the lead builds and runs a flow", () => {
     expect(store.getFlowCard(target)).toMatchObject({ owner: "operator" });
     expect(lead("propose_flow", { operation: "assign", card: target, owner: "me" })).toEqual({ ok: false, message: "You already own it." });
     expect(lead("get_flows", { flow, card: target })).toMatchObject({ ok: true, body: { cards: [{ card: target, owner: "you", following: true, comments: 1, discussion: [{ by: "you", text: "Profiling shows the session lookup." }] }] } });
+    // Scripts: the lead drafts one as a card; confirming saves it for every flow in the project. Insights read back.
+    const script = proposalOf(lead("propose_flow", { operation: "save_script", repo: "r1", script: { name: "run-tests", about: "Runs the unit tests", body: "npm ci\nnpm test", timeoutMinutes: 10 } }));
+    const scriptCard = sharedActionPayload(store.getMateProposal(script)!.payload)!;
+    expect(scriptCard.title).toBe("Save the run-tests script in shop");
+    expect(scriptCard.terms).toEqual(["run-tests: Runs the unit tests", "npm ci\nnpm test", "Runs with no AI in a fresh copy of a card's work, for up to 10 minutes, whenever a card reaches a zone that runs it."]);
+    expect(sharedActionNeedsReview(scriptCard)).toBe(false);
+    expect(confirm(script)).toMatchObject({ ok: true, said: "Saved the run-tests script. Any flow in this project can run it." });
+    expect(store.flowScript(repo, "run-tests")).toMatchObject({ version: 1, savedBy: "operator" });
+    expect(lead("get_flow_insights", {})).toMatchObject({ ok: true, body: { days: 30, flows: [{ flow, name: "Bugs", breaks: [] }] } });
+    expect(lead("get_flow_insights", { flow })).toMatchObject({ ok: true, body: { name: "Bugs", cards: { active: 1 } } });
     // A template is a card too.
     const coding = proposalOf(lead("propose_flow", { operation: "create", repo: "r1", template: "coding" }));
     expect(confirm(coding)).toMatchObject({ ok: true, href: "/flows/2" });
