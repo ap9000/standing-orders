@@ -1,4 +1,5 @@
 import { maybeTriggerRepair } from "./dispose.js";
+import { advanceFlows } from "./flow-engine.js";
 import {followDiscord} from "./discord.js";
 import { followTeams } from "./teams.js";
 import {loadDiscordCredentials} from "./discord-api.js";
@@ -2153,6 +2154,12 @@ async function tickCommand(
     );
   }
 
+  // Flows move before the ready set is read, like routines: a card entering
+  // a build or research zone files its task now, and that task joins THIS
+  // pass. The engine is model-free; approvals the task needs still apply.
+  const flowPass = advanceFlows(store, repo, clock(), context.evidenceRoot === undefined ? {} : { evidenceRoot: context.evidenceRoot });
+  const flows = flowPass.moved + flowPass.filed.length + flowPass.problems.length === 0 ? {} : { flows: flowPass };
+
   // Tournament housekeeping before the ordinary pass (stage 4): interrupted
   // races recover by CAS, and an ANSWERED question re-admits its parked
   // agent — fresh claim, fresh slot, remaining budget only, the SAME
@@ -4242,13 +4249,14 @@ async function tickCommand(
     });
   }
   if (built > 0 || parked > 0 || dispatched.some(one => one.outcome === "planned" || one.outcome === "reported" || one.outcome === "held")) {
-    return succeed(write, json, "tick", { considered, dispatched, routines }, summary);
+    return succeed(write, json, "tick", { considered, dispatched, routines, ...flows }, summary);
   }
   if (considered === 0) {
     return fail(write, json, "tick", "empty", "nothing is ready", EXIT.refused, {
       considered,
       dispatched,
       routines,
+      ...flows,
     });
   }
   return fail(
@@ -4258,7 +4266,7 @@ async function tickCommand(
     "nothing-dispatched",
     "everything ready is waiting on a person or held by somebody else",
     EXIT.refused,
-    { considered, dispatched, routines },
+    { considered, dispatched, routines, ...flows },
   );
 }
 

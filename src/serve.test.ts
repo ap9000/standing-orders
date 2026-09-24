@@ -10800,7 +10800,7 @@ describe("the reduction pass (Laws of UX): five always-visible rows and two acco
     rmSync(evidenceRoot, { recursive: true, force: true });
   });
 
-  test("the rail is Chat · Tasks · Projects and two collapsed accordion groups (work tools, settings); the tab bar carries the same three; the queue and the switch link are gone from chrome", async () => {
+  test("the rail is Chat · Tasks · Flows · Projects and two collapsed accordion groups (work tools, settings); the tab bar carries the same three; the queue and the switch link are gone from chrome", async () => {
     parkOne();
     const cookie = await login();
     const home = await (await fetch(url("/inbox"), { headers: { cookie } })).text();
@@ -10809,12 +10809,12 @@ describe("the reduction pass (Laws of UX): five always-visible rows and two acco
     expect(side).toContain('class="side-toggle" aria-label="collapse sidebar" aria-expanded="true"');
     expect(home).toContain("standing-orders:sidebar-collapsed");
     expect(await stylesOf(home, base)).toContain(".app.sidebar-collapsed { grid-template-columns: 64px minmax(0, 1fr); }");
-    // Workspace package 1: three primary destinations, nothing else.
-    expect([...primary.matchAll(/<a href="([^"]+)"/g)].map(m => m[1])).toEqual(["/chat", "/work", "/projects"]);
+    // Workspace package 1 (plus Flows): four primary destinations, nothing else.
+    expect([...primary.matchAll(/<a href="([^"]+)"/g)].map(m => m[1])).toEqual(["/chat", "/work", "/flows", "/projects"]);
     // The count rides the Work row (the inbox lives under it); every
     // primary row wears an icon; the inbox page lights Work.
     expect(primary).toMatch(/<a href="\/work" aria-label="Tasks" title="Tasks" class="active" aria-current="page" data-waiting="1"><span class="glyph"><svg.*?<span class="count badge badge-open">1<\/span><\/a>/s);
-    expect((primary.match(/<span class="glyph">/g) ?? []).length).toBe(3);
+    expect((primary.match(/<span class="glyph">/g) ?? []).length).toBe(4);
 
     // Both groups collapsed by default: neither carries the inbox's group open.
     const tools = /<details class="nav-group" data-group="tools"([^>]*)>(.*?)<\/details>/s.exec(side);
@@ -10856,7 +10856,7 @@ describe("the reduction pass (Laws of UX): five always-visible rows and two acco
     expect(home).toContain('document.querySelectorAll(".nav-group")');
 
     const tabbar = /<nav class="tabbar">(.*?)<\/nav>/s.exec(home)?.[1] ?? "";
-    expect([...tabbar.matchAll(/<a href="([^"]+)"/g)].map(m => m[1])).toEqual(["/chat", "/work", "/projects"]);
+    expect([...tabbar.matchAll(/<a href="([^"]+)"/g)].map(m => m[1])).toEqual(["/chat", "/work", "/flows", "/projects"]);
     // A phone tab says THAT something waits — a dot, never a number.
     expect(tabbar).toContain('<span class="dot-badge" role="img" aria-label="1 waiting"></span>');
     expect(tabbar).not.toContain("badge-open");
@@ -13544,7 +13544,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     } finally { await window.happyDOM.close(); }
   });
 
-  test("Chat, Tasks, and Projects are the only primary destinations on desktop and phone; every old page lights Work; tools and settings stay reachable and role-bounded", async () => {
+  test("Chat, Tasks, Flows, and Projects are the only primary destinations on desktop and phone; every old page lights Work; tools and settings stay reachable and role-bounded", async () => {
     seedTask("t-a", "alpha work", alpha);
     const cookie = await login();
     await openProject(cookie, alpha);
@@ -13561,8 +13561,8 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
       const response = await fetch(url(path), { headers: { cookie } });
       expect(response.status, path).toBe(200);
       const html = await response.text();
-      expect(primaryOf(html), path).toEqual(["/chat", "/work", "/projects"]);
-      expect(tabsOf(html), path).toEqual(["/chat", "/work", "/projects"]);
+      expect(primaryOf(html), path).toEqual(["/chat", "/work", "/flows", "/projects"]);
+      expect(tabsOf(html), path).toEqual(["/chat", "/work", "/flows", "/projects"]);
       expect(activeOf(html), path).toBe(expected);
       expect(html, path).toContain('<a class="mobile-more" href="/menu" aria-label="tools and settings"');
       for (const gone of [">inbox</a>", ">builds</a>", ">board</a>"]) expect(/<nav>(.*?)<\/nav>/s.exec(html)?.[1] ?? "", path).not.toContain(gone);
@@ -13590,8 +13590,8 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const memberWork = await page(member, "/work");
     expect(memberWork).toContain('class="brand" href="/work"');
     expect(memberWork).toContain('class="brand-mini" href="/work"');
-    expect(primaryOf(memberWork)).toEqual(["/work", "/projects"]);
-    expect(tabsOf(memberWork)).toEqual(["/work", "/projects"]);
+    expect(primaryOf(memberWork)).toEqual(["/work", "/flows", "/projects"]);
+    expect(tabsOf(memberWork)).toEqual(["/work", "/flows", "/projects"]);
     const memberMenu = await page(member, "/menu");
     expect([...memberMenu.matchAll(/<a class="menu-row" href="([^"]+)">/g)].map(m => m[1])).toEqual(["/inbox", "/board", "/tasks", "/recipes", "/routines", "/ledger", "/settings", "/people"]);
     expect(memberMenu).toContain("/settings");

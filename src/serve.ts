@@ -19,6 +19,9 @@ import { CHAT_ACTIONS, sharedActionPayload, sharedActionNeedsReview, sharedActio
 import { changeSkills, githubSkill, importSkill, readSkillsSnapshot, reviseSkillTest, skillTestResult, skillsView, testSkill, type SkillFile } from "./project-skills.js";
 import { skillsHtml, skillsScript, skillsSnapshotHtml, skillTestFeedbackHtml, SKILLS_CSS } from "./skills-ui.js";
 import { toolsHtml, TOOLS_CSS, type ToolsView } from "./tools-ui.js";
+import { flowFallbackHtml, flowsListHtml, flowView, FLOWS_CSS } from "./flows-ui.js";
+import { advanceFlows, decideFlowCard, flowDefinitionOf } from "./flow-engine.js";
+import { FLOW_TEMPLATES, validateFlowDefinition } from "./flows.js";
 import { TOOL_CATALOG, addToolTo, catalogTool, discoverTools, projectToolsOf, removeToolFrom, secretsSetFor, setToolSecret, splitCommandLine, testToolOf, type ToolSpec } from "./project-tools.js";
 import { changeLearning, learningView } from "./project-learning.js";
 import { changeKnowledge, knowledgeView, knowledgeVersion, readKnowledgeSnapshot, type KnowledgeDraft } from "./project-knowledge.js";
@@ -1206,8 +1209,8 @@ export function createDecisionServer(options: ServeOptions): Server {
     const write = new Set(["/settings/skills/import", "/settings/skills/change", "/settings/skills/revise", "/settings/knowledge/change", "/settings/knowledge/refresh", "/settings/learning/change", "/recipes/prepare", "/recipes/preview", "/recipes/import", "/recipes/save", "/recipes/launch", "/projects/select", "/tasks/add", "/routines/add"]);
     const task = matchTaskPath(path, request.method === "GET" ? "" : "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|next|reopen|steer|accept-proof|accept-revision|reject-revision|route|retry-review|complete|stop|resume-arm|resume)$");
     const resource = request.method === "GET"
-      ? /^\/(?:r|d)\/[0-9]{1,15}(?:\/evidence\/[0-9]{1,15})?$/.test(path) || /^\/routines\/[0-9]{1,15}$/.test(path)
-      : /^\/d\/[0-9]{1,15}\/answer$/.test(path) || /^\/routines\/[0-9]{1,15}\/(approve|refresh|pause|resume|run-now)$/.test(path) || /^\/r\/[0-9]{1,15}\/(note|comment|revise|draft-repair)$/.test(path);
+      ? /^\/(?:r|d)\/[0-9]{1,15}(?:\/evidence\/[0-9]{1,15})?$/.test(path) || /^\/routines\/[0-9]{1,15}$/.test(path) || path === "/flows" || /^\/flows\/[0-9]{1,15}$/.test(path)
+      : /^\/d\/[0-9]{1,15}\/answer$/.test(path) || /^\/routines\/[0-9]{1,15}\/(approve|refresh|pause|resume|run-now)$/.test(path) || path === "/flows/new" || /^\/flows\/[0-9]{1,15}\/(save|cards|archive)$/.test(path) || /^\/flows\/[0-9]{1,15}\/cards\/[0-9]{1,15}\/(move|decide|cancel)$/.test(path) || /^\/r\/[0-9]{1,15}\/(note|comment|revise|draft-repair)$/.test(path);
     if (!(request.method === "GET" ? read : write).has(path) && task === null && !resource) {
       refuse(response, who, 403, "This area requires instance access. Your account operates within its assigned projects.", "/projects");
       return false;
@@ -1320,6 +1323,8 @@ export function createDecisionServer(options: ServeOptions): Server {
       !(url.pathname === "/review" && url.searchParams.has("result")) &&
       url.pathname !== "/menu" &&
       url.pathname !== "/recipes" &&
+      // A flow names its own project; the list spans every project.
+      url.pathname !== "/flows" && !/^\/flows\/[0-9]{1,15}$/.test(url.pathname) &&
       // New work names its project in the form (a dropdown of known
       // projects); /tasks/add still admits the posted repo on its own.
       url.pathname !== "/tasks/new" && url.pathname !== "/tasks/add" &&
@@ -2573,6 +2578,20 @@ export function createDecisionServer(options: ServeOptions): Server {
       );
     }
 
+    if (url.pathname === "/flows") {
+      const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
+      const flows = store.listFlows(projects);
+      return sendScreen(response, 200, screen("Flows", `<h1>Flows</h1>${flowsListHtml(store, flows, projects, who.via === "cookie" ? who.session.csrf : "", who.via === "cookie" && who.role === "approver", url.searchParams.get("problem"))}`, { chrome: chromeFor(project, "flows") }));
+    }
+    const flowPage = /^\/flows\/([1-9][0-9]{0,9})$/.exec(url.pathname);
+    if (flowPage !== null) {
+      const flow = store.getFlow(Number(flowPage[1]));
+      if (flow === null || flow.state !== "active" || !visible(flow.repo)) return refuse(response, who, 404, "No such flow in your projects.", "/flows");
+      const selected = Number(url.searchParams.get("card"));
+      const view = flowView(store, flow, { name: who.name, approver: who.via === "cookie" && who.role === "approver" }, Number.isSafeInteger(selected) && selected > 0 ? selected : null);
+      if (url.searchParams.get("format") === "json") return respond(response, 200, "application/json; charset=utf-8", JSON.stringify(view));
+      return sendScreen(response, 200, screen(flow.name, `<p><a href="/flows">Flows</a></p><h1>${escape(flow.name)}</h1>${flowFallbackHtml(view)}`, { chrome: chromeFor(flow.repo, "flows"), workspace: { view } }));
+    }
     if (url.pathname === "/recipes" || url.pathname.startsWith("/recipes/")) {
       try {
         const csrf = who.via === "cookie" ? who.session.csrf : "";
@@ -5318,6 +5337,74 @@ export function createDecisionServer(options: ServeOptions): Server {
         try {content=skillsHtml(skillsView(store,repo,who.name),who.session.csrf,true,{error:message,draft:Object.fromEntries(['method','content','url','sample','sha'].map(k=>[k,body.get(k)??'']))});}catch{/* Do not display unverified packages. */}
         return sendScreen(response,409,screen('Skills',`<h1>Skills</h1>${content}`,{chrome:chromeFor(repo,'settings'),functional:{script:skillsScript()}}));
       }
+    }
+    const flowPost = /^\/flows\/([1-9][0-9]{0,9})\/(save|cards|archive)$/.exec(url.pathname) ?? /^\/flows\/([1-9][0-9]{0,9})\/cards\/([1-9][0-9]{0,9})\/(move|decide|cancel)$/.exec(url.pathname);
+    if (url.pathname === "/flows/new" || flowPost !== null) {
+      const now = clock();
+      const answer = (status: number, payload: Record<string, unknown>) => respond(response, status, "application/json; charset=utf-8", JSON.stringify(payload));
+      const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
+      if (who.via !== "cookie" || who.role !== "approver") return url.pathname === "/flows/new" ? refuse(response, who, 403, "Sign in as an approver to create flows.", "/flows") : answer(403, { ok: false, said: "Sign in as an approver to change flows." });
+      if (url.pathname === "/flows/new") {
+        const repo = body.get("repo") ?? "";
+        if (!projects.includes(repo)) return redirect(response, `/flows?problem=${encodeURIComponent("Choose one of your projects.")}`);
+        const template = FLOW_TEMPLATES.find(one => one.id === body.get("template")) ?? FLOW_TEMPLATES[0]!;
+        const name = (body.get("name") ?? "").replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 80) || template.label;
+        return redirect(response, `/flows/${store.createFlow({ repo, name, definitionJson: JSON.stringify(template.definition), by: who.name }, now)}`);
+      }
+      const flow = store.getFlow(Number(flowPost![1]));
+      if (flow === null || flow.state !== "active" || !visible(flow.repo)) return answer(404, { ok: false, said: "No such flow in your projects." });
+      const definition = flowDefinitionOf(flow);
+      const settle = (said: string) => {
+        // Move what can move right away (a message, a decision's next zone); workers file and run the tasks.
+        try { advanceFlows(store, flow.repo, now, { evidenceRoot }); } catch { /* the next worker pass retries */ }
+        return answer(200, { ok: true, said, view: flowView(store, store.getFlow(flow.id) ?? flow, { name: who.name, approver: true }, null) });
+      };
+      const action = flowPost![2]!;
+      if (action === "archive") { store.archiveFlow(flow.id, who.name, now); return redirect(response, "/flows"); }
+      if (action === "save") {
+        let saved;
+        try { saved = validateFlowDefinition(JSON.parse(body.get("definition") ?? "null")); }
+        catch (error) { return answer(400, { ok: false, said: error instanceof SyntaxError ? "That flow couldn't be read." : error instanceof Error ? error.message : "That flow isn't valid." }); }
+        const name = (body.get("name") ?? flow.name).replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 80) || flow.name;
+        if (!store.saveFlow(flow.id, { name, definitionJson: JSON.stringify(saved), sawRevision: Number(body.get("revision")), by: who.name }, now)) return answer(409, { ok: false, said: "Someone else changed this flow. Reload to see their changes, then make yours again." });
+        return settle("Saved.");
+      }
+      if (definition === null) return answer(409, { ok: false, said: "This flow's drawing can't be read. Save it again from the editor." });
+      if (action === "cards") {
+        const title = (body.get("title") ?? "").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 200);
+        const description = (body.get("description") ?? "").trim().slice(0, 4000) || null;
+        if (title === "") return answer(400, { ok: false, said: "Give the card a title." });
+        if (scanForSecrets(`${title}\n${description ?? ""}`).length > 0) return answer(400, { ok: false, said: "That looks like a key or password. Cards become agent instructions; keep secrets out of them." });
+        const stage = definition.stages.some(one => one.id === body.get("stage")) ? body.get("stage")! : definition.start;
+        store.addFlowCard({ flow: flow.id, title, description, stage, by: who.name }, now);
+        return settle("Card added.");
+      }
+      const target = store.getFlowCard(Number(flowPost![2]));
+      if (target === null || target.flow !== flow.id) return answer(404, { ok: false, said: "That card isn't in this flow." });
+      const verb = flowPost![3];
+      if (verb === "move") {
+        const to = body.get("stage") ?? "";
+        if (!definition.stages.some(one => one.id === to)) return answer(400, { ok: false, said: "Choose a zone in this flow." });
+        if (target.state !== "active") return answer(409, { ok: false, said: "That card is finished." });
+        if (to === target.stage) return answer(200, { ok: true, said: "Already there." });
+        store.moveFlowCard(target.id, { to, outcome: "moved", actor: who.name }, now);
+        const title = definition.stages.find(one => one.id === to)!.title;
+        return settle(`Moved to ${title}${/[.?!]$/.test(title) ? "" : "."}`);
+      }
+      if (verb === "decide") {
+        const decision = body.get("decision") === "approve" ? "approve" : body.get("decision") === "send-back" ? "send-back" : null;
+        if (decision === null) return answer(400, { ok: false, said: "Approve it or send it back." });
+        const note = (body.get("note") ?? "").trim().slice(0, 2000) || null;
+        const decided = decideFlowCard(store, { card: target.id, decision, note, actor: who.name, repos: projects, evidenceRoot }, now);
+        return decided.ok ? settle(decided.said) : answer(409, { ok: false, said: decided.message });
+      }
+      if (verb === "cancel") {
+        if (target.state !== "active") return answer(409, { ok: false, said: "That card is already finished." });
+        store.moveFlowCard(target.id, { to: target.stage, outcome: "cancelled", actor: who.name }, now);
+        store.updateFlowCard(target.id, { state: "cancelled", waiting: null }, now);
+        return settle("Card cancelled. Its tasks are unchanged.");
+      }
+      return answer(404, { ok: false, said: "No such flow action." });
     }
     if (url.pathname === "/settings/tools/change") {
       if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "Sign in as an approver to manage tools.", "/settings/tools");
@@ -12484,12 +12571,12 @@ button.pick-file { min-height: 1.75rem; padding: 0 .55rem; font-size: .75rem; }
 
 /** Appearance: a three-way segmented switch, one tap per choice. */
 const THEME_CONTROLS_CSS = `.task-repo select{width:100%;min-height:2.75rem;font-size:1rem}.task-repo-add{margin:.35rem .1rem .5rem}.task-repo-add a{display:inline-flex;align-items:center;min-height:2.25rem}details.result-request-open.result-request-form>summary{border:0;background:transparent;padding:.5rem 0;min-height:2.75rem;font-weight:600;display:list-item;list-style:revert}details.result-request-open.result-request-form>summary::-webkit-details-marker{display:revert}form.js-autosave button[type=submit]{display:none}.provider-row{border-bottom:1px solid var(--so-line);padding:.35rem 0}.provider-row:first-of-type{border-top:1px solid var(--so-line)}.provider-head{display:flex;align-items:center;gap:.75rem;margin:.4rem 0 0}.provider-status{display:inline-flex;align-items:center;gap:.4rem;color:var(--so-muted);font-size:.875rem}.provider-status i{width:.5rem;height:.5rem;border-radius:50%;background:var(--so-muted)}.provider-status--ok i{background:var(--so-success)}.provider-status--warn i{background:var(--so-attention)}.provider-status--off i{background:transparent;border:1.5px solid var(--so-muted)}details.provider-manage>summary{cursor:pointer;color:var(--so-accent-text);font-size:.875rem;min-height:2.5rem;display:list-item;padding-block:.5rem}.card.props .row{display:grid;gap:.1rem;margin:0 0 .75rem}.card.props .row>.meta{display:block;font-size:.75rem}.card.props .row>.meta::first-letter{text-transform:uppercase}.card.props .row>.mono{font-family:var(--font-sans);font-size:.875rem}.card.props .row>.mono .seal{font-family:var(--font-mono);font-size:.8125rem}details.evidence-files{margin:1rem 0}details.evidence-files>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:600}details.evidence-files ul{list-style:none;margin:0;padding:0}details.evidence-files li{display:flex;justify-content:space-between;gap:1rem;padding:.5rem 0;border-bottom:1px solid var(--so-line)}.result-action .result-feedback-link{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;text-decoration:none}.result-action .result-feedback-link:hover{background:var(--so-raised)}.so-sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}.verdict{margin:.5rem 0 .75rem}.verdict-chips{display:flex;flex-wrap:wrap;gap:.4rem;list-style:none;padding:0;margin:0}.verdict-chip{display:inline-flex;align-items:center;gap:.3rem;min-height:1.75rem;padding:.2rem .65rem;border-radius:999px;font-size:.8125rem;font-weight:600;background:var(--so-neutral-soft);color:var(--so-neutral-ink)}.verdict-chip svg{width:.9rem;height:.9rem}.verdict-chip--success{background:var(--so-success-soft);color:var(--so-success)}.verdict-chip--danger{background:var(--so-danger-soft);color:var(--so-danger)}.verdict-chip--warning{background:var(--so-warning-soft);color:var(--so-warning)}.verdict-chip--info{background:var(--so-info-soft);color:var(--so-info)}.verdict-by{margin:.4rem 0 0}details.result-request-open{margin:.5rem 0}details.result-request-open>summary{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;cursor:pointer;list-style:none}details.result-request-open>summary::-webkit-details-marker{display:none}details.result-request-open[open]>summary{margin-bottom:.75rem}.settings-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(8.5rem,1fr));gap:.5rem;margin:0 0 2rem}.settings-tiles a{display:flex;align-items:center;gap:.6rem;min-height:3rem;padding:.65rem .8rem;border:1px solid var(--so-line);border-radius:.625rem;background:var(--so-paper);color:var(--so-ink);text-decoration:none;font-weight:550;font-size:.875rem}.settings-tiles a:hover{border-color:var(--so-input-line);background:var(--so-raised)}.settings-tiles svg{width:1.1rem;height:1.1rem;flex-shrink:0;color:var(--so-accent-text)}details.settings-more{margin:.25rem 0 1.25rem}details.settings-more>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:550}details.settings-more>summary .meta{font-weight:400;margin-left:.35rem}.settings-changed{margin-top:-.25rem}.appearance{margin:0 0 28px}.appearance h2{margin:0 0 10px}.theme-switch{display:inline-flex;flex-wrap:nowrap;max-width:100%;gap:4px;padding:4px;margin:0;border:1px solid var(--so-line);border-radius:10px;background:var(--so-raised)}.theme-switch .theme-choice,.so-native-region .theme-switch .theme-choice{flex:1 1 0;width:auto;white-space:nowrap;min-height:40px;padding:8px 16px;border:0;border-radius:7px;background:transparent;color:var(--so-muted);font:inherit;font-weight:550;box-shadow:none;cursor:pointer}.theme-switch .theme-choice:hover{color:var(--so-ink)}.theme-switch .theme-choice[aria-pressed="true"]{background:var(--so-paper);color:var(--so-ink);box-shadow:0 1px 2px rgb(0 0 0 / .1)}.appearance .meta{margin:8px 0 0}@media(max-width:600px){.theme-switch .theme-choice{min-height:44px}}`;
-const WORKSPACE_STYLE = styleAsset(STYLE + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
+const WORKSPACE_STYLE = styleAsset(STYLE + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
   projectScoped?: boolean;
-  active: "code" | "inbox" | "board" | "queue" | "fleet" | "workbench" | "work" | "done" | "activity" | "review" | "system" | "tasks" | "runs" | "caps" | "routines" | "recipes" | "projects" | "settings" | "chat" | "people" | "ledger" | "mode" | "menu" | "none";
+  active: "code" | "inbox" | "board" | "queue" | "fleet" | "workbench" | "work" | "done" | "activity" | "review" | "system" | "tasks" | "runs" | "caps" | "routines" | "recipes" | "projects" | "flows" | "settings" | "chat" | "people" | "ledger" | "mode" | "menu" | "none";
   project: string | null;
   /** The surface's scope for the scope bar — which rows this screen can
    * show. Derived from the ROUTE, not the session: portfolio and fleet are
@@ -12967,7 +13054,7 @@ function shell(
   // destination it now lives under. The count rides Work: it is the
   // saturated needs-you count, exactly as the inbox row wore it.
   const primary = chrome.active === "code" ? "work" : primaryDestinationOf(chrome.active);
-  const primaryItem = (key: "code" | "chat" | "work" | "projects", href: string, label: string, count?: number): string =>
+  const primaryItem = (key: "code" | "chat" | "work" | "projects" | "flows", href: string, label: string, count?: number): string =>
     `<a href="${href}" aria-label="${escape(label)}" title="${escape(label)}"${primary === key ? ' class="active" aria-current="page"' : ""}${key === "work" && count !== undefined ? ` data-waiting="${count}"` : ""}>` +
     `<span class="glyph">${NAV_ICONS[key] ?? ""}</span>${label}` +
     `${count !== undefined && count > 0 ? ` <span class="count badge badge-open">${count}${chrome.inboxSaturated ? "+" : ""}</span>` : ""}</a>`;
@@ -12984,6 +13071,7 @@ function shell(
     // text row inside one of the two accordion groups below.
     ...(chrome.chat ? [primaryItem("chat", "/chat", "Chat")] : []),
     primaryItem("work", "/work", "Tasks", chrome.inboxCount),
+    primaryItem("flows", "/flows", "Flows"),
     primaryItem("projects", "/projects", "Projects"),
     `</nav>`,
     ...(chrome.active === "code" ? [] : [`<a class="new-task" href="/tasks/new" aria-label="new task">+ new task</a>`]),
@@ -13049,6 +13137,7 @@ function shell(
     chat: icon(CHAT_PATHS),
     work: icon(WORK_PATHS),
     projects: icon(FOLDER_PATHS),
+    flows: icon(`<rect width="8" height="8" x="3" y="3" rx="2"/><path d="M7 11v4a2 2 0 0 0 2 2h4"/><rect width="8" height="8" x="13" y="13" rx="2"/>`),
   } as const;
   const tab = (key: keyof typeof TAB_ICONS, href: string, label: string, count?: number): string =>
     // A phone tab says THAT something waits, with a dot; the number is on
@@ -13061,6 +13150,7 @@ function shell(
     `<nav class="tabbar">`,
     ...(chrome.chat ? [tab("chat", "/chat", "Chat")] : []),
     tab("work", "/work", "Tasks", chrome.inboxCount),
+    tab("flows", "/flows", "Flows"),
     tab("projects", "/projects", "Projects"),
     `</nav>`,
   ].join("");
@@ -17076,6 +17166,7 @@ const NAV_ICONS: Partial<Record<Chrome["active"], string>> = {
   chat: strokeIcon(CHAT_PATHS),
   work: strokeIcon(WORK_PATHS),
   projects: strokeIcon(FOLDER_PATHS),
+  flows: strokeIcon(`<rect width="8" height="8" x="3" y="3" rx="2"/><path d="M7 11v4a2 2 0 0 0 2 2h4"/><rect width="8" height="8" x="13" y="13" rx="2"/>`),
 };
 
 /** One grouped destination inside an accordion group or the /menu overflow. */
