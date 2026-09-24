@@ -112,7 +112,8 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // v79 remembers which Telegram status message showed which task, so a reply to it is about that task.
 // v80 adds project tools: the MCP servers a project's builds get, the list sealed at each approval, and what each run launched with.
 // v81 adds flows: a canvas of zones that cards (pieces of work) move through, and each card's history.
-export const SCHEMA_VERSION = 81;
+// v82 adds flow triggers (what starts cards: a button, a schedule, GitHub, Linear, another flow) and where each card came from.
+export const SCHEMA_VERSION = 82;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -465,7 +466,10 @@ export type MateProposal = {
 };
 
 export type FlowRow = { id: number; repo: string; name: string; definitionJson: string; revision: number; state: "active" | "archived"; createdBy: string; createdAt: string; updatedBy: string; updatedAt: string };
-export type FlowCardRow = { id: number; flow: number; title: string; description: string | null; stage: string; entry: number; state: "active" | "done" | "cancelled"; task: string | null; primaryTask: string | null; note: string | null; waiting: string | null; outputs: Record<string, string>; createdBy: string; createdAt: string; updatedAt: string };
+/** Where a card came from when a trigger made it: what to call it and where to look (a GitHub issue, a Linear issue, another flow's card). */
+export type FlowCardSource = { kind: string; label: string; url: string | null };
+export type FlowCardRow = { id: number; flow: number; title: string; description: string | null; stage: string; entry: number; state: "active" | "done" | "cancelled"; task: string | null; primaryTask: string | null; note: string | null; waiting: string | null; outputs: Record<string, string>; createdBy: string; createdAt: string; updatedAt: string; source: FlowCardSource | null };
+export type FlowTriggerRow = { id: number; flow: number; kind: string; configJson: string; state: "active" | "paused" | "removed"; hookHash: string | null; cursor: string | null; nextAt: string | null; lastAt: string | null; lastOutcome: string | null; failures: number; createdBy: string; createdAt: string; updatedAt: string };
 export type FlowEventOutcome = "created" | "ok" | "fail" | "moved" | "approved" | "sent-back" | "cancelled";
 
 function readFlowRow(row: Record<string, unknown>): FlowRow {
@@ -479,7 +483,22 @@ function readFlowCardRow(row: Record<string, unknown>): FlowCardRow {
   const optional = (key: string) => row[key] === null || row[key] === undefined ? null : String(row[key]);
   return { id: Number(row["id"]), flow: Number(row["flow"]), title: String(row["title"]), description: optional("description"), stage: String(row["stage"]), entry: Number(row["entry"]),
     state: String(row["state"]) as FlowCardRow["state"], task: optional("task"), primaryTask: optional("primary_task"), note: optional("note"), waiting: optional("waiting"), outputs,
-    createdBy: String(row["created_by"]), createdAt: String(row["created_at"]), updatedAt: String(row["updated_at"]) };
+    createdBy: String(row["created_by"]), createdAt: String(row["created_at"]), updatedAt: String(row["updated_at"]), source: readFlowCardSource(row["source_json"]) };
+}
+
+function readFlowCardSource(value: unknown): FlowCardSource | null {
+  if (typeof value !== "string") return null;
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    return typeof parsed["label"] === "string" ? { kind: String(parsed["kind"] ?? ""), label: parsed["label"], url: typeof parsed["url"] === "string" ? parsed["url"] : null } : null;
+  } catch { return null; }
+}
+
+function readFlowTriggerRow(row: Record<string, unknown>): FlowTriggerRow {
+  const optional = (key: string) => row[key] === null || row[key] === undefined ? null : String(row[key]);
+  return { id: Number(row["id"]), flow: Number(row["flow"]), kind: String(row["kind"]), configJson: String(row["config_json"]), state: String(row["state"]) as FlowTriggerRow["state"],
+    hookHash: optional("hook_hash"), cursor: optional("cursor"), nextAt: optional("next_at"), lastAt: optional("last_at"), lastOutcome: optional("last_outcome"),
+    failures: Number(row["failures"] ?? 0), createdBy: String(row["created_by"]), createdAt: String(row["created_at"]), updatedAt: String(row["updated_at"]) };
 }
 
 /** The one task a card is about: a task its confirmation created (a new
@@ -2105,7 +2124,8 @@ CREATE TABLE IF NOT EXISTS flow_card (
   outputs_json TEXT NOT NULL DEFAULT '{}',
   created_by   TEXT NOT NULL,
   created_at   TEXT NOT NULL,
-  updated_at   TEXT NOT NULL
+  updated_at   TEXT NOT NULL,
+  source_json  TEXT
 );
 CREATE INDEX IF NOT EXISTS flow_card_live ON flow_card (flow, state);
 CREATE TABLE IF NOT EXISTS flow_event (
@@ -2119,6 +2139,39 @@ CREATE TABLE IF NOT EXISTS flow_event (
   at         TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS flow_event_card ON flow_event (card, id);
+
+-- v82: flow triggers. What starts cards in a flow without someone adding
+-- them: a button with questions, a schedule, GitHub or Linear (checked by
+-- the worker, or pushed to a secret webhook address), or another flow's
+-- cards reaching a zone. config_json is the trigger's terms; secrets (a
+-- Linear key, a webhook's signing secret) live in 0600 files, and only a
+-- hash of a webhook's address is kept here. flow_trigger_event is every
+-- outside thing a trigger has seen, so one issue never makes two cards.
+CREATE TABLE IF NOT EXISTS flow_trigger (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  flow         INTEGER NOT NULL REFERENCES flow(id),
+  kind         TEXT NOT NULL CHECK (kind IN ('button','schedule','github','linear','flow','webhook')),
+  config_json  TEXT NOT NULL,
+  state        TEXT NOT NULL CHECK (state IN ('active','paused','removed')),
+  hook_hash    TEXT UNIQUE,
+  cursor       TEXT,
+  next_at      TEXT,
+  last_at      TEXT,
+  last_outcome TEXT,
+  failures     INTEGER NOT NULL DEFAULT 0,
+  created_by   TEXT NOT NULL,
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS flow_trigger_live ON flow_trigger (flow, state);
+CREATE TABLE IF NOT EXISTS flow_trigger_event (
+  trigger    INTEGER NOT NULL REFERENCES flow_trigger(id),
+  key        TEXT NOT NULL,
+  card       INTEGER REFERENCES flow_card(id),
+  note       TEXT,
+  at         TEXT NOT NULL,
+  PRIMARY KEY (trigger, key)
+);
 
 -- v80: project tools. The MCP servers one project's builds may use (the
 -- list replaces every other MCP source a build could load); secret values
@@ -4200,6 +4253,7 @@ function initializeStore(db: Database, file: string): Store {
   db.exec(chatSchema("teams"));
   db.exec(TEAM_SCHEMA);
   migrate(db, preflight === null ? null : Math.abs(preflight));
+  addColumn(db, "flow_card", "source_json", "TEXT");
   addColumn(db, "approver", "projects_json", "TEXT");
   addColumn(db, "invite", "projects_json", "TEXT");
   db.exec(LEDGER_SCHEMA);
@@ -20510,11 +20564,11 @@ export class Store {
     return Number(changes) === 1;
   }
 
-  addFlowCard(card: { flow: number; title: string; description: string | null; stage: string; by: string }, now: Date): number {
+  addFlowCard(card: { flow: number; title: string; description: string | null; stage: string; by: string; source?: FlowCardSource }, now: Date): number {
     return this.transact(() => {
       const stamp = now.toISOString();
-      const id = Number(this.db.prepare("INSERT INTO flow_card (flow, title, description, stage, state, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, 'active', ?, ?, ?)")
-        .run(card.flow, card.title, card.description, card.stage, card.by, stamp, stamp).lastInsertRowid);
+      const id = Number(this.db.prepare("INSERT INTO flow_card (flow, title, description, stage, state, created_by, created_at, updated_at, source_json) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)")
+        .run(card.flow, card.title, card.description, card.stage, card.by, stamp, stamp, card.source === undefined ? null : JSON.stringify(card.source)).lastInsertRowid);
       this.db.prepare("INSERT INTO flow_event (card, from_stage, to_stage, outcome, actor, note, at) VALUES (?, NULL, ?, 'created', ?, NULL, ?)").run(id, card.stage, card.by, stamp);
       return id;
     });
@@ -20566,6 +20620,78 @@ export class Store {
       fromStage: row["from_stage"] === null ? null : String(row["from_stage"]), toStage: String(row["to_stage"]), outcome: String(row["outcome"]) as FlowEventOutcome,
       actor: String(row["actor"]), note: row["note"] === null ? null : String(row["note"]), at: String(row["at"]),
     }));
+  }
+
+  /** Cards arriving in one zone of a flow after a history line: what a trigger on another flow follows. */
+  flowArrivals(flow: number, stage: string, afterEvent: number, limit: number): { event: number; card: FlowCardRow }[] {
+    return this.db.prepare("SELECT e.id AS event_id, c.* FROM flow_event e JOIN flow_card c ON c.id = e.card WHERE c.flow = ? AND e.to_stage = ? AND e.id > ? AND e.outcome <> 'cancelled' ORDER BY e.id LIMIT ?")
+      .all(flow, stage, afterEvent, limit).map(row => ({ event: Number(row["event_id"]), card: readFlowCardRow(row) }));
+  }
+
+  /** The newest history line anywhere: a new trigger on another flow starts after it, never replaying the past. */
+  latestFlowEvent(): number {
+    return Number(this.db.prepare("SELECT COALESCE(MAX(id), 0) AS id FROM flow_event").get()?.["id"] ?? 0);
+  }
+
+  // ---- flow triggers (v82) -----------------------------------------------------
+
+  addFlowTrigger(trigger: { flow: number; kind: string; configJson: string; hookHash: string | null; cursor: string | null; nextAt: string | null; by: string }, now: Date): number {
+    const stamp = now.toISOString();
+    return Number(this.db.prepare("INSERT INTO flow_trigger (flow, kind, config_json, state, hook_hash, cursor, next_at, created_by, created_at, updated_at) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)")
+      .run(trigger.flow, trigger.kind, trigger.configJson, trigger.hookHash, trigger.cursor, trigger.nextAt, trigger.by, stamp, stamp).lastInsertRowid);
+  }
+
+  getFlowTrigger(id: number): FlowTriggerRow | null {
+    const row = this.db.prepare("SELECT * FROM flow_trigger WHERE id = ?").get(id);
+    return row === undefined ? null : readFlowTriggerRow(row);
+  }
+
+  /** A flow's triggers that are not removed, oldest first. */
+  flowTriggers(flow: number): FlowTriggerRow[] {
+    return this.db.prepare("SELECT * FROM flow_trigger WHERE flow = ? AND state <> 'removed' ORDER BY id").all(flow).map(readFlowTriggerRow);
+  }
+
+  /** Active triggers of active flows in one project: what a worker's pass checks. */
+  activeFlowTriggers(repo: string): FlowTriggerRow[] {
+    return this.db.prepare("SELECT t.* FROM flow_trigger t JOIN flow f ON f.id = t.flow WHERE f.repo = ? AND f.state = 'active' AND t.state = 'active' ORDER BY t.id").all(repo).map(readFlowTriggerRow);
+  }
+
+  /** The trigger a webhook address belongs to (by the address's hash), when it and its flow are active. */
+  flowTriggerByHook(hash: string): FlowTriggerRow | null {
+    const row = this.db.prepare("SELECT t.* FROM flow_trigger t JOIN flow f ON f.id = t.flow WHERE t.hook_hash = ? AND t.state = 'active' AND f.state = 'active'").get(hash);
+    return row === undefined ? null : readFlowTriggerRow(row);
+  }
+
+  updateFlowTrigger(id: number, change: { state?: "active" | "paused" | "removed"; cursor?: string | null; nextAt?: string | null; lastAt?: string; lastOutcome?: string; failures?: number; hookHash?: string | null }, now: Date): void {
+    const trigger = this.getFlowTrigger(id);
+    if (trigger === null) return;
+    this.db.prepare("UPDATE flow_trigger SET state = ?, cursor = ?, next_at = ?, last_at = ?, last_outcome = ?, failures = ?, hook_hash = ?, updated_at = ? WHERE id = ?").run(
+      change.state ?? trigger.state,
+      change.cursor === undefined ? trigger.cursor : change.cursor,
+      change.nextAt === undefined ? trigger.nextAt : change.nextAt,
+      change.lastAt ?? trigger.lastAt,
+      change.lastOutcome ?? trigger.lastOutcome,
+      change.failures ?? trigger.failures,
+      change.hookHash === undefined ? trigger.hookHash : change.hookHash,
+      now.toISOString(), id,
+    );
+  }
+
+  /** Whether a trigger already handled this outside thing (an issue, a run, a schedule slot). */
+  flowTriggerSaw(trigger: number, key: string): boolean {
+    return this.db.prepare("SELECT 1 FROM flow_trigger_event WHERE trigger = ? AND key = ?").get(trigger, key) !== undefined;
+  }
+
+  /** Record what a trigger did with one outside thing: the card it made, or why it made none. False when it was already recorded. */
+  recordFlowTriggerEvent(trigger: number, key: string, card: number | null, note: string | null, now: Date): boolean {
+    const { changes } = this.db.prepare("INSERT OR IGNORE INTO flow_trigger_event (trigger, key, card, note, at) VALUES (?, ?, ?, ?, ?)").run(trigger, key, card, note, now.toISOString());
+    return Number(changes) === 1;
+  }
+
+  /** The last card a trigger made, if any. */
+  lastFlowTriggerCard(trigger: number): number | null {
+    const row = this.db.prepare("SELECT card FROM flow_trigger_event WHERE trigger = ? AND card IS NOT NULL ORDER BY rowid DESC LIMIT 1").get(trigger);
+    return row === undefined ? null : Number(row["card"]);
   }
 
   // ---- project tools (v80) -------------------------------------------------

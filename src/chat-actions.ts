@@ -39,7 +39,9 @@ import { resumeTaskStop, taskControlOf } from "./task-control.js";
 import { addToolTo, catalogTool, projectToolsOf, removeToolFrom, toolCommandLine, validateToolSpec, type ToolSpec } from "./project-tools.js";
 import { FLOW_KIND_WORDS, flowDigest, flowTerms, validateFlowDefinition, type FlowDefinition, type FlowStage } from "./flows.js";
 import { addCardToFlow, advanceFlows, cancelFlowCard, decideFlowCard, flowCardHref, flowCardText, flowDefinitionOf, moveCardInFlow } from "./flow-engine.js";
-import type { FlowCardRow, FlowRow } from "./store.js";
+import type { FlowCardRow, FlowRow, FlowTriggerRow } from "./store.js";
+import { addFlowTriggerTo, describeTrigger, readLinearKey, removeFlowTrigger, takesDeliveries, triggerConfigOf, validateTriggerConfig } from "./flow-triggers.js";
+import { dirname } from "node:path";
 
 /** A tool from the lead's card: a common tool by its id, or the operator's own program or address. */
 function toolSpecFromRequest(input: Record<string, unknown>): ToolSpec {
@@ -94,6 +96,10 @@ export const CHAT_ACTIONS = {
   flow_card_approve: { label: "Approve", protected: false, password: false },
   flow_card_send_back: { label: "Send back", protected: false, password: false },
   flow_card_cancel: { label: "Cancel card", protected: false, password: false },
+  flow_trigger_add: { label: "Add trigger", protected: false, password: false },
+  flow_trigger_pause: { label: "Pause trigger", protected: false, password: false },
+  flow_trigger_resume: { label: "Turn trigger on", protected: false, password: false },
+  flow_trigger_remove: { label: "Remove trigger", protected: false, password: false },
   decision_record: { label: "Record decision", protected: false, password: false },
   decision_retire: { label: "Retire decision", protected: false, password: false },
   scope_approve: { label: "Approve work", protected: true, password: true },
@@ -139,6 +145,10 @@ export const CHAT_ACTION_FIELDS: Record<ChatAction, readonly string[]> = {
   flow_card_approve: ["card", "note"],
   flow_card_send_back: ["card", "note"],
   flow_card_cancel: ["card"],
+  flow_trigger_add: ["flow", "trigger"],
+  flow_trigger_pause: ["trigger"],
+  flow_trigger_resume: ["trigger"],
+  flow_trigger_remove: ["trigger"],
   decision_record: ["repo", "claim", "why", "supersedes", "source"],
   decision_retire: ["repo", "decision", "reason"],
   scope_approve: ["task"],
@@ -219,14 +229,21 @@ function resultOf(store: Store, task: string, run: number, repo: string) {
   return current;
 }
 /** The flow (and card) a flow action names; its project decides who may act. */
-function flowTargetOf(store: Store, input: Record<string, unknown>): { flow: FlowRow; definition: FlowDefinition; card: FlowCardRow | null } {
+function flowTargetOf(store: Store, input: Record<string, unknown>): { flow: FlowRow; definition: FlowDefinition; card: FlowCardRow | null; trigger: FlowTriggerRow | null } {
   const card = input["card"] === undefined ? null : store.getFlowCard(integer(input, "card"));
   if (input["card"] !== undefined && (card === null || card.state !== "active")) throw Error("That card isn't active in a flow any more.");
-  const flow = store.getFlow(card?.flow ?? integer(input, "flow"));
+  const trigger = typeof input["trigger"] === "number" ? store.getFlowTrigger(integer(input, "trigger")) : null;
+  if (typeof input["trigger"] === "number" && (trigger === null || trigger.state === "removed")) throw Error("That trigger was removed.");
+  const flow = store.getFlow(card?.flow ?? trigger?.flow ?? integer(input, "flow"));
   const definition = flow === null ? null : flowDefinitionOf(flow);
   if (flow === null || flow.state !== "active") throw Error("That flow isn't in your projects.");
   if (definition === null) throw Error("This flow's drawing can't be read. Save it again on its canvas.");
-  return { flow, definition, card };
+  return { flow, definition, card, trigger };
+}
+/** Where this installation keeps its files: beside the database. */
+function configDirOf(store: Store): string | null {
+  const file = store.databaseFile();
+  return file === null ? null : dirname(file);
 }
 /** A zone named by id or by its title. */
 function flowZoneOf(definition: FlowDefinition, input: Record<string, unknown>, fallback: string | null): FlowStage {
@@ -399,6 +416,30 @@ export function prepareSharedAction(
       state = { flow: flow.id, revision: flow.revision };
       title = `Add ${quoted(words.title)} to ${flow.name}`;
       terms.push(words.description === null ? words.title : `${words.title}\n${words.description}`, `Starts in ${stage.title}: ${FLOW_KIND_WORDS[stage.kind].about}`);
+    } else if (operation === "flow_trigger_add") {
+      const { flow, definition } = flowTarget!;
+      const config = validateTriggerConfig(input["trigger"], { store, flow, definition, actor: who.name });
+      // A webhook address is a secret: it is made and shown on the flow's own Triggers panel, never through chat.
+      if (takesDeliveries(config)) throw Error("Webhook addresses are secrets, so they are set up on the flow's Triggers panel. From chat, use a trigger that is checked every 2 minutes.");
+      request["trigger"] = config;
+      state = { flow: flow.id, revision: flow.revision };
+      title = `Add a trigger to ${flow.name}`;
+      const zone = definition.stages.find(one => one.id === (config.zone ?? definition.start))?.title ?? "the first zone";
+      terms.push(describeTrigger(config, store), `Cards start in ${zone}.`);
+      if (config.kind === "github" && config.from === "anyone") terms.push("Anyone who can open one there can write what the agent reads.");
+      if (config.kind === "linear" && readLinearKey(configDirOf(store)) === null) terms.push("It needs a Linear API key, saved on the flow's Triggers panel (never in chat).");
+      if (config.kind === "github" || config.kind === "linear") terms.push("Only what happens from now on counts; nothing already there is added.");
+      terms.push("Work a card starts still waits for your usual approvals.");
+    } else if (operation === "flow_trigger_pause" || operation === "flow_trigger_resume" || operation === "flow_trigger_remove") {
+      const { flow, trigger } = flowTarget!;
+      const config = trigger === null ? null : triggerConfigOf(trigger);
+      if (trigger === null || config === null) throw Error("Choose a trigger from get_flows.");
+      if (operation === "flow_trigger_pause" && trigger.state === "paused") throw Error("That trigger is already paused.");
+      if (operation === "flow_trigger_resume" && trigger.state === "active") throw Error("That trigger is already on.");
+      state = { trigger: trigger.id, state: trigger.state, updatedAt: trigger.updatedAt };
+      const what = describeTrigger(config, store);
+      title = `${operation === "flow_trigger_pause" ? "Pause" : operation === "flow_trigger_resume" ? "Turn on" : "Remove"} a trigger on ${flow.name}`;
+      terms.push(what, operation === "flow_trigger_pause" ? "It stops adding cards until it's turned on again. Cards it already added stay." : operation === "flow_trigger_resume" ? "It adds cards again, starting from now." : `It stops adding cards for good${takesDeliveries(config) ? ", and its webhook address stops working" : ""}. Cards it already added stay.`);
     } else {
       const { definition, card } = flowTarget!;
       if (card === null) throw Error("Choose a card from get_flows.");
@@ -1050,6 +1091,18 @@ function runFlowAction(store: Store, payload: SharedAction, actor: string, repos
     const added = addCardToFlow(store, flow, { title: req["title"], description: req["description"] ?? null, stage: String(req["zone"]) }, actor, now);
     if (!added.ok) throw Error(added.message);
     return settle(flow.id, added.said, added.card);
+  }
+  if (payload.operation === "flow_trigger_add") {
+    const flow = store.getFlow(Number(req["flow"]))!;
+    const made = addFlowTriggerTo(store, flow, req["trigger"], actor, now, null);
+    if (!made.ok) throw Error(made.message);
+    return { said: "Trigger added.", href: `/flows/${flow.id}` };
+  }
+  if (payload.operation.startsWith("flow_trigger_")) {
+    const trigger = store.getFlowTrigger(Number(req["trigger"]))!;
+    if (payload.operation === "flow_trigger_remove") removeFlowTrigger(store, trigger, now, configDirOf(store));
+    else store.updateFlowTrigger(trigger.id, { state: payload.operation === "flow_trigger_pause" ? "paused" : "active" }, now);
+    return { said: payload.operation === "flow_trigger_remove" ? "Trigger removed." : payload.operation === "flow_trigger_pause" ? "Trigger paused." : "Trigger on again.", href: `/flows/${trigger.flow}` };
   }
   const card = store.getFlowCard(Number(req["card"]))!;
   const acted = payload.operation === "flow_card_move" ? moveCardInFlow(store, card, String(req["zone"]), actor, now)

@@ -1,7 +1,8 @@
 /** Flows in the console: the list of a person's flows, and one flow's canvas
  * (the React view's data, plus a plain fallback page the view replaces). */
-import type { BrowserFlowCard, BrowserFlowView } from "./browser-workspace.js";
+import type { BrowserFlowCard, BrowserFlowTrigger, BrowserFlowView } from "./browser-workspace.js";
 import { flowDefinitionOf } from "./flow-engine.js";
+import { describeTrigger, triggerHeadline, FLOW_TRIGGER_KINDS, FLOW_TRIGGER_WORDS, githubRepoOf, HOOK_PATH, hookReady, readHooksBase, readLinearKey, takesDeliveries, triggerConfigOf } from "./flow-triggers.js";
 import { FLOW_COLORS, FLOW_KIND_WORDS, FLOW_STAGE_KINDS, FLOW_TEMPLATES } from "./flows.js";
 import type { FlowCardRow, FlowRow, Store } from "./store.js";
 
@@ -9,7 +10,7 @@ const e = (value: unknown) =>
   String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 const projectName = (repo: string) => repo.split(/[\\/]/).filter(Boolean).pop() ?? repo;
 
-export const FLOWS_CSS = `.flows{max-width:880px;min-width:0}.flows .card{padding:16px 18px;margin:12px 0}.flows .flow-row{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap}.flows .flow-row h2{font-size:1.05rem;margin:0}.flows .flow-counts{font-size:.85rem;color:var(--so-muted)}.flows form{display:grid;gap:10px;margin:0}.flows label{display:grid;gap:6px}.flows input,.flows select{box-sizing:border-box;width:100%;max-width:100%}.flows button{justify-self:start;min-height:44px}.flows .flow-fallback ol{padding-left:20px}.flows summary{cursor:pointer;min-height:44px;display:flex;align-items:center;font-weight:600}@media(max-width:600px){.flows input,.flows select{font-size:16px}}`;
+export const FLOWS_CSS = `.flows{max-width:880px;min-width:0}.flows .card{padding:16px 18px;margin:12px 0}.flows .flow-row{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap}.flows .flow-row h2{font-size:1.05rem;margin:0}.flows .flow-counts{font-size:.85rem;color:var(--so-muted)}.flows form{display:grid;gap:10px;margin:0}.flows label{display:grid;gap:6px}.flows input,.flows select{box-sizing:border-box;width:100%;max-width:100%}.flows button{justify-self:start;min-height:44px}.flows .flow-fallback ol{padding-left:20px}.flows summary{cursor:pointer;min-height:44px;display:flex;align-items:center;font-weight:600}.flows .flow-buttons{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 0}@media(max-width:600px){.flows input,.flows select{font-size:16px}}`;
 
 /** The flows a person can open, with how many cards wait in each, and the new-flow form. */
 export function flowsListHtml(store: Store, flows: readonly FlowRow[], projects: readonly string[], csrf: string, canCreate: boolean, problem: string | null): string {
@@ -17,7 +18,9 @@ export function flowsListHtml(store: Store, flows: readonly FlowRow[], projects:
     const cards = store.flowCards(flow.id, false);
     const definition = flowDefinitionOf(flow);
     const waiting = cards.filter(card => definition?.stages.find(one => one.id === card.stage)?.kind === "approval").length;
-    return `<article class="card"><div class="flow-row"><h2><a href="/flows/${flow.id}">${e(flow.name)}</a></h2><span class="flow-counts">${e(projectName(flow.repo))} · ${cards.length} card${cards.length === 1 ? "" : "s"} in progress${waiting > 0 ? ` · ${waiting} waiting for a decision` : ""}</span></div></article>`;
+    const buttons = store.flowTriggers(flow.id).filter(one => one.state === "active").flatMap(one => { const config = triggerConfigOf(one); return config?.kind === "button" ? [{ id: one.id, label: config.label }] : []; });
+    return `<article class="card"><div class="flow-row"><h2><a href="/flows/${flow.id}">${e(flow.name)}</a></h2><span class="flow-counts">${e(projectName(flow.repo))} · ${cards.length} card${cards.length === 1 ? "" : "s"} in progress${waiting > 0 ? ` · ${waiting} waiting for a decision` : ""}</span></div>` +
+      (buttons.length === 0 ? "" : `<p class="flow-buttons">${buttons.map(one => `<a class="button-link" href="/flows/${flow.id}?start=${one.id}">${e(one.label)}</a>`).join(" ")}</p>`) + `</article>`;
   }).join("");
   const create = canCreate && projects.length > 0 ? `<details class="card"${flows.length === 0 ? " open" : ""}><summary>New flow</summary><form method="post" action="/flows/new"><input type="hidden" name="csrf" value="${e(csrf)}"><label>Name<input name="name" required maxlength="80" placeholder="for example: Bug fixes"></label><label>Project<select name="repo">${projects.map(repo => `<option value="${e(repo)}">${e(projectName(repo))}</option>`).join("")}</select></label><label>Start from<select name="template">${FLOW_TEMPLATES.map(one => `<option value="${e(one.id)}">${e(one.label)}: ${e(one.about)}</option>`).join("")}</select></label><button>Create flow</button></form></details>` : "";
   const intro = `<p class="meta">A flow is your process drawn as zones. Cards move through them: agents do the work, people approve, and the team hears about it.</p>` +
@@ -40,7 +43,7 @@ const historyText = (event: { fromStage: string | null; toStage: string; outcome
 };
 
 /** One flow's canvas for one person. */
-export function flowView(store: Store, flow: FlowRow, viewer: { name: string; approver: boolean }, selectedCard: number | null): BrowserFlowView {
+export function flowView(store: Store, flow: FlowRow, viewer: { name: string; approver: boolean }, selectedCard: number | null, setup: { dir: string | null; repos: readonly string[]; startTrigger?: number | null } = { dir: null, repos: [] }): BrowserFlowView {
   const definition = flowDefinitionOf(flow);
   const stages = definition?.stages ?? [];
   const title = (id: string) => stages.find(one => one.id === id)?.title ?? id;
@@ -54,12 +57,31 @@ export function flowView(store: Store, flow: FlowRow, viewer: { name: string; ap
       canDecide: viewer.approver && card.state === "active" && stage?.kind === "approval" && (stage.approver === null || stage.approver === viewer.name),
       outputs: Object.entries(card.outputs).map(([id, text]) => ({ stage: id, title: title(id), text })),
       history: store.flowEvents(card.id).map(event => ({ text: historyText(event, title), at: event.at })).reverse().slice(0, 30),
+      source: card.source,
+    };
+  });
+  const triggers: BrowserFlowTrigger[] = store.flowTriggers(flow.id).map(trigger => {
+    const config = triggerConfigOf(trigger);
+    return {
+      id: trigger.id, kind: trigger.kind, words: config === null ? "This trigger can't be read." : describeTrigger(config, store),
+      ...(config === null ? { name: "Trigger", detail: "Can't be read" } : triggerHeadline(config, store)),
+      zone: title(config?.zone ?? definition?.start ?? ""), zoneId: config?.zone ?? definition?.start ?? "", state: trigger.state, status: trigger.lastOutcome, statusAt: trigger.lastAt, failing: trigger.failures > 0,
+      button: config?.kind === "button" ? { label: config.label, questions: config.questions } : null,
+      hook: config !== null && takesDeliveries(config) ? { ready: hookReady(trigger, setup.dir), needsSecret: config.kind === "linear" } : null,
+      checkable: (config?.kind === "github" || config?.kind === "linear") && config.delivery === "poll",
     };
   });
   return {
     kind: "flow",
     flow: { id: flow.id, name: flow.name, project: projectName(flow.repo), revision: flow.revision, href: `/flows/${flow.id}` },
     chatHref: `/chat?draft=${encodeURIComponent(`In the ${flow.name} flow, `)}`,
+    triggers,
+    triggerSetup: {
+      kinds: FLOW_TRIGGER_KINDS.map(kind => ({ kind, label: FLOW_TRIGGER_WORDS[kind] })),
+      githubRepo: githubRepoOf(flow.repo), linearKey: readLinearKey(setup.dir) !== null, hooksBase: readHooksBase(setup.dir), hooksPath: HOOK_PATH,
+      otherFlows: store.listFlows(setup.repos).filter(one => one.id !== flow.id).map(one => ({ id: one.id, name: one.name, zones: (flowDefinitionOf(one)?.stages ?? []).map(stage => ({ id: stage.id, title: stage.title })) })),
+    },
+    startTrigger: setup.startTrigger ?? null,
     start: definition?.start ?? stages[0]?.id ?? "",
     stages,
     cards,

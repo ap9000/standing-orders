@@ -1,5 +1,6 @@
 import { maybeTriggerRepair } from "./dispose.js";
 import { advanceFlows } from "./flow-engine.js";
+import { runFlowTriggers, type TriggerIo } from "./flow-triggers.js";
 import {followDiscord} from "./discord.js";
 import { followTeams } from "./teams.js";
 import {loadDiscordCredentials} from "./discord-api.js";
@@ -293,6 +294,8 @@ export type OperateOptions = {
   shouldStop?: () => boolean;
   /** Injected by tests: the external-dispatch gh surface. */
   dispatchAdapter?: DispatchAdapter;
+  /** Injected by tests: how flow triggers reach GitHub (gh) and Linear (fetch), and where their secrets live. */
+  flowTriggerIo?: Partial<TriggerIo>;
   /** Injected by tests: the mate's provider fetch, key environment, and stdin lines. */
   mateSeams?: MateCliSeams;
   /** Injected by tests: a held-session coordinator, so a `tick` exercises
@@ -793,6 +796,7 @@ export async function runOperate(
       ...(options.telegramTransport === undefined ? {} : { telegramTransport: options.telegramTransport }),
       ...(options.publishExec === undefined ? {} : { publishExec: options.publishExec }),
       ...(options.dispatchAdapter === undefined ? {} : { dispatchAdapter: options.dispatchAdapter }),
+      ...(options.flowTriggerIo === undefined ? {} : { flowTriggerIo: options.flowTriggerIo }),
       ...(options.shouldStop === undefined ? {} : { shouldStop: options.shouldStop }),
       ...(options.mateSeams === undefined ? {} : { mateSeams: options.mateSeams }),
       ...(options.heldCoordinator === undefined ? {} : { heldCoordinator: options.heldCoordinator }),
@@ -829,6 +833,8 @@ type Context = {
   mateSeams?: MateCliSeams;
   /** Injected by tests: the external-dispatch gh surface. */
   dispatchAdapter?: DispatchAdapter;
+  /** Injected by tests: how flow triggers reach GitHub (gh) and Linear (fetch), and where their secrets live. */
+  flowTriggerIo?: Partial<TriggerIo>;
   /**
    * The stop fence (Codex M5-M8 audit, IV-1): set by the watch when a
    * signal lands. A pass that sees true admits NOTHING more — no routine
@@ -2157,8 +2163,13 @@ async function tickCommand(
   // Flows move before the ready set is read, like routines: a card entering
   // a build or research zone files its task now, and that task joins THIS
   // pass. The engine is model-free; approvals the task needs still apply.
+  // Triggers first: a schedule, GitHub, Linear or another flow may start
+  // cards, which then move in the same pass. Checking an outside service is
+  // `gh` or one HTTPS request, never a model, and only when it is due.
+  const triggerPass = context.shouldStop?.() === true || context.shouldPauseAdmission?.() === true ? { added: 0, checked: 0, problems: [] }
+    : await runFlowTriggers(store, repo, clock(), { gh: context.flowTriggerIo?.gh ?? run, fetch: context.flowTriggerIo?.fetch ?? fetch, dir: context.flowTriggerIo?.dir ?? dirname(context.databaseFile) });
   const flowPass = advanceFlows(store, repo, clock(), context.evidenceRoot === undefined ? {} : { evidenceRoot: context.evidenceRoot });
-  const flows = flowPass.moved + flowPass.filed.length + flowPass.problems.length === 0 ? {} : { flows: flowPass };
+  const flows = flowPass.moved + flowPass.filed.length + flowPass.problems.length + triggerPass.added + triggerPass.problems.length === 0 ? {} : { flows: { ...flowPass, ...(triggerPass.added + triggerPass.problems.length === 0 ? {} : { triggers: triggerPass }) } };
 
   // Tournament housekeeping before the ordinary pass (stage 4): interrupted
   // races recover by CAS, and an ANSWERED question re-admits its parked

@@ -108,6 +108,15 @@ failed when a result is marked complete.
   is model-free and runs in the worker's pass. Or describe the process in
   chat: the lead drafts the flow, and adds, moves or decides cards, as
   cards you confirm from the console or your phone.
+- **Triggers start cards on their own.** A button with a few questions, a
+  schedule, GitHub (new issues, a label being added, new pull requests,
+  failed checks), Linear (a team, a state, a label), or another flow's cards
+  reaching a zone. GitHub is checked through your `gh` login and Linear
+  with an API key kept on this computer; neither spends model tokens. Each
+  issue or run makes at most one card; text from outside the repository's
+  team is left out unless you say anyone. With a public address, GitHub,
+  Linear or any service can post to a trigger's secret webhook instead
+  (see [Webhooks](#webhooks-through-a-reverse-proxy)).
 - **Unified portfolio chat.** Read every project, prioritize queues, answer
   decisions, repair failed or cancelled dependencies, and confirm rich action
   cards from one conversation. The chat proposes; durable workflow state
@@ -809,6 +818,29 @@ logged-in session alone can read everything and approve nothing.
 
 Plain HTTP, so keep it on localhost or a tailnet and put TLS in front for
 anything else.
+
+### Webhooks through a reverse proxy
+
+Flow triggers can take webhooks from GitHub, Linear or any service at a
+secret address under `/hooks/`. Keep the console itself private (on your
+tailnet or localhost) and expose only that path. With Caddy:
+
+```caddy
+hooks.example.com {
+	handle /hooks/* {
+		reverse_proxy 127.0.0.1:4180 {
+			header_up Host {upstream_hostport}
+		}
+	}
+	respond 404
+}
+```
+
+Then save `https://hooks.example.com` as the public webhook address on a
+flow's Triggers panel. GitHub deliveries are proved with the secret the
+panel shows once; Linear deliveries with Linear's own signing secret, pasted
+on the panel behind your password. Addresses are never stored readable: a
+lost one is replaced with **New address**, which retires the old.
 
 ## Steering a fleet, not just a task
 

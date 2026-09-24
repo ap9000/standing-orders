@@ -20,6 +20,7 @@ import { changeSkills, githubSkill, importSkill, readSkillsSnapshot, reviseSkill
 import { skillsHtml, skillsScript, skillsSnapshotHtml, skillTestFeedbackHtml, SKILLS_CSS } from "./skills-ui.js";
 import { toolsHtml, TOOLS_CSS, type ToolsView } from "./tools-ui.js";
 import { flowFallbackHtml, flowsListHtml, flowView, FLOWS_CSS } from "./flows-ui.js";
+import { addFlowTriggerTo, checkFlowTriggerNow, HOOK_PATH, pressFlowButton, receiveFlowHook, removeFlowTrigger, renewFlowHook, removeLinearKey, saveHooksBase, saveLinearKey, saveLinearSigningSecret, type TriggerIo } from "./flow-triggers.js";
 import { addCardToFlow, advanceFlows, cancelFlowCard, decideFlowCard, FLOW_HREF, flowDefinitionOf, moveCardInFlow } from "./flow-engine.js";
 import { FLOW_TEMPLATES, validateFlowDefinition } from "./flows.js";
 import { TOOL_CATALOG, addToolTo, catalogTool, discoverTools, projectToolsOf, removeToolFrom, secretsSetFor, setToolSecret, splitCommandLine, testToolOf, type ToolSpec } from "./project-tools.js";
@@ -301,6 +302,8 @@ export type ServeOptions = {
   discordFetcher?: typeof fetch;
   /** Injected by tests: Microsoft sign-in, key metadata and Teams conversation calls. */
   teamsFetcher?: typeof fetch;
+  /** Injected by tests: how "Check now" reaches GitHub (gh) and Linear (fetch). */
+  flowTriggerIo?: Partial<TriggerIo>;
   /**
    * The repo this console serves. Scopes run evidence to that repo's tasks
    * (and unplaced ones) and turns on the gaps and capabilities views —
@@ -834,6 +837,26 @@ export function createDecisionServer(options: ServeOptions): Server {
     return canonical;
   }
 
+  async function flowHook(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
+    const reply = (status: number, said: string) => { response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" }); response.end(JSON.stringify({ said })); request.resume(); };
+    if (options.configDir === undefined) return reply(404, "No such address.");
+    if (request.method !== "POST") return reply(405, "Send a POST.");
+    if (Number(request.headers["content-length"] ?? 0) > 1_000_000) return reply(413, "Too large.");
+    const chunks: Buffer[] = [];
+    try {
+      await new Promise<void>((resolve, reject) => {
+        let size = 0;
+        request.on("data", (chunk: Buffer) => { size += chunk.length; if (size > 1_000_000) reject(new Error("too-large")); else chunks.push(chunk); });
+        request.on("end", resolve);
+        request.on("error", reject);
+      });
+    } catch (error) { return reply(error instanceof Error && error.message === "too-large" ? 413 : 400, "Couldn't read that."); }
+    try {
+      const answer = receiveFlowHook(store, url.pathname.slice(HOOK_PATH.length), { headers: request.headers, body: Buffer.concat(chunks) }, options.configDir, clock());
+      return reply(answer.status, answer.said);
+    } catch { return reply(500, "Not saved."); }
+  }
+
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     if (!allowedHost(request.headers.host)) {
       return respond(response, 421, "text/plain; charset=utf-8", "wrong host");
@@ -850,6 +873,10 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (await sessionEndpoint(request, response)) return;
     if (await teamEndpoint(request, response)) return;
     if (options.configDir !== undefined && await handleTeamsHttp(request, response, { store, dir: options.configDir, ...(options.teamsFetcher ? { fetcher: options.teamsFetcher } : {}), clock })) return;
+    // Flow webhooks (v82): the one road a reverse proxy may expose. The secret
+    // address proves nothing about the sender on its own for GitHub and Linear:
+    // their signatures are checked too. Nothing runs here; cards wait for a pass.
+    if (url.pathname.startsWith(HOOK_PATH)) return flowHook(request, response, url);
     if (serveBrowserAsset(request, response, url.pathname)) return;
     // Exact, content-addressed application CSS only. Session-bearing
     // pages and fragments still use no-store and are never compressed.
@@ -1210,7 +1237,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     const task = matchTaskPath(path, request.method === "GET" ? "" : "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|next|reopen|steer|accept-proof|accept-revision|reject-revision|route|retry-review|complete|stop|resume-arm|resume)$");
     const resource = request.method === "GET"
       ? /^\/(?:r|d)\/[0-9]{1,15}(?:\/evidence\/[0-9]{1,15})?$/.test(path) || /^\/routines\/[0-9]{1,15}$/.test(path) || path === "/flows" || /^\/flows\/[0-9]{1,15}$/.test(path)
-      : /^\/d\/[0-9]{1,15}\/answer$/.test(path) || /^\/routines\/[0-9]{1,15}\/(approve|refresh|pause|resume|run-now)$/.test(path) || path === "/flows/new" || /^\/flows\/[0-9]{1,15}\/(save|cards|archive)$/.test(path) || /^\/flows\/[0-9]{1,15}\/cards\/[0-9]{1,15}\/(move|decide|cancel)$/.test(path) || /^\/r\/[0-9]{1,15}\/(note|comment|revise|draft-repair)$/.test(path);
+      : /^\/d\/[0-9]{1,15}\/answer$/.test(path) || /^\/routines\/[0-9]{1,15}\/(approve|refresh|pause|resume|run-now)$/.test(path) || path === "/flows/new" || /^\/flows\/[0-9]{1,15}\/(save|cards|archive)$/.test(path) || /^\/flows\/[0-9]{1,15}\/cards\/[0-9]{1,15}\/(move|decide|cancel)$/.test(path) || /^\/flows\/[0-9]{1,15}\/triggers(\/[0-9]{1,15}\/(pause|resume|remove|check|press|renew|secret))?$/.test(path) || /^\/r\/[0-9]{1,15}\/(note|comment|revise|draft-repair)$/.test(path);
     if (!(request.method === "GET" ? read : write).has(path) && task === null && !resource) {
       refuse(response, who, 403, "This area requires instance access. Your account operates within its assigned projects.", "/projects");
       return false;
@@ -2587,8 +2614,9 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (flowPage !== null) {
       const flow = store.getFlow(Number(flowPage[1]));
       if (flow === null || flow.state !== "active" || !visible(flow.repo)) return refuse(response, who, 404, "No such flow in your projects.", "/flows");
-      const selected = Number(url.searchParams.get("card"));
-      const view = flowView(store, flow, { name: who.name, approver: who.via === "cookie" && who.role === "approver" }, Number.isSafeInteger(selected) && selected > 0 ? selected : null);
+      const selected = Number(url.searchParams.get("card")), start = Number(url.searchParams.get("start"));
+      const view = flowView(store, flow, { name: who.name, approver: who.via === "cookie" && who.role === "approver" }, Number.isSafeInteger(selected) && selected > 0 ? selected : null,
+        { dir: options.configDir ?? null, repos: [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible), startTrigger: Number.isSafeInteger(start) && start > 0 ? start : null });
       if (url.searchParams.get("format") === "json") return respond(response, 200, "application/json; charset=utf-8", JSON.stringify(view));
       return sendScreen(response, 200, screen(flow.name, `<p><a href="/flows">Flows</a></p><h1>${escape(flow.name)}</h1>${flowFallbackHtml(view)}`, { chrome: chromeFor(flow.repo, "flows"), workspace: { view } }));
     }
@@ -5338,8 +5366,9 @@ export function createDecisionServer(options: ServeOptions): Server {
         return sendScreen(response,409,screen('Skills',`<h1>Skills</h1>${content}`,{chrome:chromeFor(repo,'settings'),functional:{script:skillsScript()}}));
       }
     }
-    const flowPost = /^\/flows\/([1-9][0-9]{0,9})\/(save|cards|archive)$/.exec(url.pathname) ?? /^\/flows\/([1-9][0-9]{0,9})\/cards\/([1-9][0-9]{0,9})\/(move|decide|cancel)$/.exec(url.pathname);
-    if (url.pathname === "/flows/new" || flowPost !== null) {
+    const flowPost = /^\/flows\/([1-9][0-9]{0,9})\/(save|cards|archive|triggers|linear-key|hooks-address)$/.exec(url.pathname) ?? /^\/flows\/([1-9][0-9]{0,9})\/cards\/([1-9][0-9]{0,9})\/(move|decide|cancel)$/.exec(url.pathname);
+    const triggerPost = /^\/flows\/([1-9][0-9]{0,9})\/triggers\/([1-9][0-9]{0,9})\/(pause|resume|remove|check|press|renew|secret)$/.exec(url.pathname);
+    if (url.pathname === "/flows/new" || flowPost !== null || triggerPost !== null) {
       const now = clock();
       const answer = (status: number, payload: Record<string, unknown>) => respond(response, status, "application/json; charset=utf-8", JSON.stringify(payload));
       const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
@@ -5351,15 +5380,62 @@ export function createDecisionServer(options: ServeOptions): Server {
         const name = (body.get("name") ?? "").replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 80) || template.label;
         return redirect(response, `/flows/${store.createFlow({ repo, name, definitionJson: JSON.stringify(template.definition), by: who.name }, now)}`);
       }
-      const flow = store.getFlow(Number(flowPost![1]));
+      const flow = store.getFlow(Number((flowPost ?? triggerPost)![1]));
       if (flow === null || flow.state !== "active" || !visible(flow.repo)) return answer(404, { ok: false, said: "No such flow in your projects." });
       const definition = flowDefinitionOf(flow);
-      const settle = (said: string) => {
+      const dir = options.configDir ?? null;
+      const viewNow = () => flowView(store, store.getFlow(flow.id) ?? flow, { name: who.name, approver: true }, null, { dir, repos: projects });
+      const settle = (said: string, extra: Record<string, unknown> = {}) => {
         // Move what can move right away (a message, a decision's next zone); workers file and run the tasks.
         try { advanceFlows(store, flow.repo, now, { evidenceRoot }); } catch { /* the next worker pass retries */ }
-        return answer(200, { ok: true, said, view: flowView(store, store.getFlow(flow.id) ?? flow, { name: who.name, approver: true }, null) });
+        return answer(200, { ok: true, said, view: viewNow(), ...extra });
       };
+      if (triggerPost !== null) {
+        const trigger = store.getFlowTrigger(Number(triggerPost[2]));
+        if (trigger === null || trigger.flow !== flow.id || trigger.state === "removed") return answer(404, { ok: false, said: "That trigger isn't on this flow." });
+        const verb = triggerPost[3];
+        if (verb === "pause" || verb === "resume") { store.updateFlowTrigger(trigger.id, { state: verb === "pause" ? "paused" : "active" }, now); return settle(verb === "pause" ? "Trigger paused." : "Trigger on again."); }
+        if (verb === "remove") { removeFlowTrigger(store, trigger, now, dir); return settle("Trigger removed."); }
+        if (verb === "press") {
+          let answers: unknown;
+          try { answers = JSON.parse(body.get("answers") ?? "[]"); } catch { answers = []; }
+          const pressed = pressFlowButton(store, trigger, Array.isArray(answers) ? answers : [], who.name, now);
+          return pressed.ok ? settle(pressed.said) : answer(400, { ok: false, said: pressed.message });
+        }
+        if (verb === "check") {
+          const checked = await checkFlowTriggerNow(store, trigger, now, { gh: options.flowTriggerIo?.gh ?? execRun, fetch: options.flowTriggerIo?.fetch ?? fetch, dir });
+          try { advanceFlows(store, flow.repo, now, { evidenceRoot }); } catch { /* the next worker pass retries */ }
+          return answer(checked.ok ? 200 : 409, { ok: checked.ok, said: checked.said, view: viewNow() });
+        }
+        if (dir === null) return answer(409, { ok: false, said: "Webhook secrets are kept on the console's computer." });
+        if (verb === "renew") {
+          const renewed = renewFlowHook(store, trigger, now, dir);
+          return renewed.ok ? settle(renewed.said, { reveal: renewed.reveal }) : answer(409, { ok: false, said: renewed.message });
+        }
+        // Linear's signing secret, pasted on this secure panel behind the password — never in chat.
+        if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return answer(403, { ok: false, said: "Enter your Standing Orders password to save a secret." });
+        const saved = saveLinearSigningSecret(trigger, body.get("secret") ?? "", dir);
+        return saved.ok ? settle("Signing secret saved. Linear's deliveries can be proved now.") : answer(400, { ok: false, said: saved.message });
+      }
       const action = flowPost![2]!;
+      if (action === "triggers") {
+        let raw: unknown;
+        try { raw = JSON.parse(body.get("trigger") ?? "null"); } catch { return answer(400, { ok: false, said: "That trigger couldn't be read." }); }
+        const made = addFlowTriggerTo(store, flow, raw, who.name, now, dir);
+        return made.ok ? settle(made.said, made.reveal === null ? {} : { reveal: made.reveal }) : answer(400, { ok: false, said: made.message });
+      }
+      if (action === "linear-key" || action === "hooks-address") {
+        // Installation settings, set from the flow they are needed on.
+        if (dir === null) return answer(409, { ok: false, said: "These settings are kept on the console's computer." });
+        if (action === "hooks-address") {
+          const saved = saveHooksBase(dir, body.get("address") ?? "");
+          return saved.ok ? settle(saved.base === null ? "Public address cleared." : "Public address saved.") : answer(400, { ok: false, said: saved.message });
+        }
+        if (body.get("remove") === "yes") { removeLinearKey(dir); return settle("Linear key removed."); }
+        if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return answer(403, { ok: false, said: "Enter your Standing Orders password to save a key." });
+        const saved = saveLinearKey(dir, body.get("key") ?? "");
+        return saved.ok ? settle("Linear key saved on this computer.") : answer(400, { ok: false, said: saved.message });
+      }
       if (action === "archive") { store.archiveFlow(flow.id, who.name, now); return redirect(response, "/flows"); }
       if (action === "save") {
         let saved;
