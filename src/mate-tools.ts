@@ -29,7 +29,7 @@ import { CHAT_TASK_ACTIONS, chatTaskRun, chatTaskStamp, isChatTaskAction } from 
  * projects after scrubbing; full paths and arbitrary text remain redacted.
  */
 import { Buffer } from "node:buffer";
-import type { Store, MateProposalKind, MateTurnEvidence } from "./store.js";
+import type { FlowRow, Store, MateProposalKind, MateTurnEvidence } from "./store.js";
 import type { VerifiedApprover } from "./principal.js";
 import type { MateToolSchema } from "./converse.js";
 import { hasDisguisedText, hasForbiddenControls } from "./decision.js";
@@ -41,7 +41,7 @@ import { isNewModel, modelWords, priceWords, runtimeStates, seenModels } from ".
 import { agentsSummary, chosenWords, isRiskLevel, PHASES, postureWords, RISK_CHOICES, riskConsequence, riskTitle, routeProblems, sameSpec, specWords, type PhaseRoute } from "./phase-routing.js";
 import type { Phase } from "./provider.js";
 import { TOOL_CATALOG, discoverTools, projectToolsOf, secretsSetFor, toolCommandLine, toolStanding, type FoundTool } from "./project-tools.js";
-import { FLOW_KIND_WORDS, FLOW_STAGE_KINDS, FLOW_TEMPLATES, flowFromSteps, type FlowDefinition, type FlowStepInput } from "./flows.js";
+import { deciderOf, FLOW_KIND_WORDS, FLOW_STAGE_KINDS, FLOW_TEMPLATES, flowFromSteps, type FlowDefinition, type FlowStepInput } from "./flows.js";
 import { flowDefinitionOf } from "./flow-engine.js";
 import { flowInsights } from "./flow-insights.js";
 import { describeTrigger, FLOW_TRIGGER_KINDS, triggerConfigOf } from "./flow-triggers.js";
@@ -766,9 +766,11 @@ export const MATE_TOOLS: MateTool[] = [
     inputSchema: schema({ repo: REPO_ARG, flow: { type: "integer", minimum: 1 }, card: { type: "integer", minimum: 1 } }),
     handle: (ctx, args) => {
       const reachable = (repo: string) => ctx.who.repos.includes(repo) && ctx.store.accountCanAccess(ctx.who.name, repo);
-      const needsYou = (definition: FlowDefinition | null, stage: string) => {
+      const needsYou = (flow: FlowRow, definition: FlowDefinition | null, stage: string) => {
         const at = definition?.stages.find(one => one.id === stage);
-        return at?.kind === "approval" && (at.approver === null || at.approver === ctx.who.name);
+        if (at?.kind !== "approval") return false;
+        const decider = deciderOf(at, flow);
+        return decider === null || decider === ctx.who.name;
       };
       if (args["flow"] !== undefined) {
         const flow = Number.isSafeInteger(args["flow"]) ? ctx.store.getFlow(Number(args["flow"])) : null;
@@ -784,7 +786,7 @@ export const MATE_TOOLS: MateTool[] = [
             id: stage.id, title: stage.title, does: FLOW_KIND_WORDS[stage.kind].label, kind: stage.kind,
             ...(stage.instructions === null ? {} : { instructions: stage.instructions.slice(0, 600) }),
             ...(stage.kind === "task" ? { planning: stage.planning } : {}),
-            ...(stage.kind === "approval" ? { decider: stage.approver === null ? "anyone who approves" : stage.approver === ctx.who.name ? "you" : "someone else" } : {}),
+            ...(stage.kind === "approval" ? { decider: stage.toOwner === true ? `the flow's owner (${flow.owner === ctx.who.name ? "you" : "someone else"})` : stage.approver === null ? "anyone who approves" : stage.approver === ctx.who.name ? "you" : "someone else" } : {}),
             ...(stage.message === null ? {} : { message: stage.message }),
             ...(stage.kind === "check" ? { script: stage.script, scriptExists: stage.script !== null && ctx.store.flowScript(flow.repo, stage.script) !== null } : {}),
             ...(stage.kind === "update" ? { closesIssue: stage.close === true } : {}),
@@ -794,10 +796,10 @@ export const MATE_TOOLS: MateTool[] = [
           })),
           cards: [...active, ...finished].map(card => ({
             card: card.id, title: card.title, ...(card.description === null ? {} : { description: card.description.slice(0, 300) }),
-            at: titleOf(card.stage) ?? card.stage, state: card.state, needsYou: card.state === "active" && needsYou(definition, card.stage),
+            at: titleOf(card.stage) ?? card.stage, state: card.state, needsYou: card.state === "active" && needsYou(flow, definition, card.stage),
             // Names never reach the model; a decision says whose it is in its own terms.
             waiting: card.state !== "active" || definition.stages.find(one => one.id === card.stage)?.kind !== "approval" || card.waiting === null ? card.waiting
-              : needsYou(definition, card.stage) ? "Waiting for you to approve or send it back" : "Waiting for someone else to decide",
+              : needsYou(flow, definition, card.stage) ? "Waiting for you to approve or send it back" : "Waiting for someone else to decide",
             task: card.task ?? card.primaryTask, ...(card.note === null ? {} : { lastNote: card.note.slice(0, 300) }),
             // Names never reach the model: people read as you or a teammate.
             owner: card.owner === null ? null : card.owner === ctx.who.name ? "you" : "a teammate", following: ctx.store.flowCardWatchers(card.id).includes(ctx.who.name),
@@ -823,7 +825,7 @@ export const MATE_TOOLS: MateTool[] = [
           const definition = flowDefinitionOf(flow);
           const cards = ctx.store.flowCards(flow.id, false);
           return { flow: flow.id, name: flow.name, project: repoIdOf(ctx.who, flow.repo), steps: definition === null ? "can't be read" : definition.stages.map(one => one.title).join(" → "),
-            cards: cards.length, needYou: cards.filter(card => needsYou(definition, card.stage)).length, triggers: ctx.store.flowTriggers(flow.id).length };
+            cards: cards.length, needYou: cards.filter(card => needsYou(flow, definition, card.stage)).length, triggers: ctx.store.flowTriggers(flow.id).length };
         }),
         templates: FLOW_TEMPLATES.map(one => ({ template: one.id, about: one.about })),
         // Scripts belong to a project, not a flow: they exist (and can be saved) before any flow does.
@@ -834,7 +836,7 @@ export const MATE_TOOLS: MateTool[] = [
   },
   {
     name: "propose_flow",
-    description: "Draft a flow change as a card the operator confirms. create: a template, or the steps in order (each leads to the next; Done is added; instructions may be left out). A 'sort' step has Jev pick one of its answers; make it the first step (never a holding step before it, or new cards wait unsorted): question, answers (answer, means: a few words Jev reads, goesTo: a step), sureAt (percent, default 80), ifNotSure (a step; otherwise the card waits for a person), and up to 3 alsoNote (score with levels lowest first, or yes-no); a sort has no next, so give each branch's last step its own next. edit: the full step list, keeping existing steps by id — what a kept step leaves out carries over. add_card (starts in the first zone unless zone is named), move_card, approve, send_back (needs a note), cancel_card, comment (note; @name pings that person), assign (owner: a name, 'me', or 'nobody'), follow, unfollow, save_script (repo, and script: name, about, body — short shell commands — and timeoutMinutes; scripts belong to the project, so no flow is needed; a 'check' step in any of its flows names it). add_trigger with settings (kind button: label, questions; schedule: schedule like 'daily 09:00 Europe/London', title; github: repo owner/name, watch issues|pulls|checks, label, branch, from team|anyone; linear: team, state, label; flow: follow (another flow's id), when (its zone)); pause_trigger, resume_trigger, remove_trigger with trigger. Read get_flows first except to create.",
+    description: "Draft a flow change as a card the operator confirms. create: a template, or the steps in order (each leads to the next; Done is added; instructions may be left out). A 'draft' step has Claude write something from the card (instructions: what to write); follow it with an approval step (decider 'owner' asks the flow's owner in their chat app, where they can approve, edit or send it back), then an 'update' or 'notify' step whose message is '{{stage.<draft id>}}'. A 'sort' step has Jev pick one of its answers; make it the first step (never a holding step before it, or new cards wait unsorted): question, answers (answer, means: a few words Jev reads, goesTo: a step), sureAt (percent, default 80), ifNotSure (a step; otherwise the card waits for a person), and up to 3 alsoNote (score with levels lowest first, or yes-no); a sort has no next, so give each branch's last step its own next. edit: the full step list, keeping existing steps by id — what a kept step leaves out carries over. add_card (starts in the first zone unless zone is named), move_card, approve, send_back (needs a note), cancel_card, comment (note; @name pings that person), assign (owner: a name, 'me', or 'nobody'), follow, unfollow, save_script (repo, and script: name, about, body — short shell commands — and timeoutMinutes; scripts belong to the project, so no flow is needed; a 'check' step in any of its flows names it). add_trigger with settings (kind button: label, questions; schedule: schedule like 'daily 09:00 Europe/London', title; github: repo owner/name, watch issues|pulls|checks, label, branch, from team|anyone; linear: team, state, label; flow: follow (another flow's id), when (its zone)); pause_trigger, resume_trigger, remove_trigger with trigger. Read get_flows first except to create.",
     inputSchema: schema({
       operation: { type: "string", enum: ["create", "edit", "add_card", "move_card", "approve", "send_back", "cancel_card", "comment", "assign", "follow", "unfollow", "save_script", "add_trigger", "pause_trigger", "resume_trigger", "remove_trigger"] },
       repo: REPO_ARG, flow: { type: "integer", minimum: 1 }, card: { type: "integer", minimum: 1 },

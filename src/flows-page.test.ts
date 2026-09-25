@@ -59,7 +59,7 @@ test("create a flow, add a card, move it, decide it, and a stale save is refused
     // Moved to the go-ahead: the approver sees the decision on the card and decides it here.
     const moved = await post(`${href}/cards/${card.id}/move`, { stage: "go-ahead" });
     expect(moved.body).toMatchObject({ ok: true, said: "Moved to Go ahead?" });
-    expect(moved.body.view!.cards[0]).toMatchObject({ stage: "go-ahead", canDecide: true, waiting: "Waiting for an approver to approve or send it back" });
+    expect(moved.body.view!.cards[0]).toMatchObject({ stage: "go-ahead", canDecide: true, waiting: "Waiting for alex to approve or send it back" });
     expect(await post(`${href}/cards/${card.id}/decide`, { decision: "send-back", note: "" })).toMatchObject({ status: 409, body: { said: "Say what should change." } });
     const decided = await post(`${href}/cards/${card.id}/decide`, { decision: "approve" });
     expect(decided.body).toMatchObject({ ok: true, said: "Approved. Moved to Build." });

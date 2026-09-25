@@ -28,6 +28,7 @@ import { validateNote } from "./decision.js";
 import { isLifecycleNotification, isTelegramProgressNotification, TELEGRAM_HOLD_REASONS, type Store, type Decision, type Notification, type TelegramBinding, type TelegramDelivery } from "./store.js";
 import { telegramProgressCard, type ProgressEntity } from "./telegram-progress.js";
 import { applyTeamInbound, deliverTeamChats, teamCommand } from "./telegram-team.js";
+import { applyFlowReply, applyFlowTap, FLOW_DECIDE_KEY, flowButtons, flowDecisionAt } from "./telegram-flow.js";
 import { focusContextFor, taskInCeiling } from "./chat-channel.js";
 import { phoneCommand, phoneStatus, phoneTaskView, PHONE_CONSOLE_FOOTER, PHONE_HELP, notificationIdentity, phoneTaskChoices, resolvePhoneTask, phoneFocusText, phoneTaskListText, phoneText, PHONE_NO_MATCH, PHONE_BACK_TO_LEAD, type PhoneTaskChoice } from "./telegram-status.js";
 import { MATE_MESSAGE_MAX_CHARS } from "./mate.js";
@@ -804,12 +805,19 @@ async function deliverOne(
       try { button = phoneLinkButton(phoneOrigin?.() ?? null, { label: factLinkLabel(notification.link), path: notification.link }); }
       catch { button = null; }
     }
+    // A flow card waiting on a decision (v86): Approve, Edit, Send back on the last part, for this visit only.
+    const visit = FLOW_DECIDE_KEY.exec(notification.dedupeKey);
+    const waiting = visit === null ? null : flowDecisionAt(store, Number(visit[1]), Number(visit[2]));
+    const flowKeys = waiting === null ? null : flowButtons(store, binding, waiting, clock());
     let last: string | null = null;
     for (const [index, part] of parts.entries()) {
-      const sent = await sender(part, index === parts.length - 1 && button !== null ? [button] : undefined);
+      const final = index === parts.length - 1;
+      const keyboard = !final ? undefined : flowKeys !== null ? [...flowKeys.keyboard, ...(button === null ? [] : [button])] : button !== null ? [button] : undefined;
+      const sent = await sender(part, keyboard);
       if (!sent.ok) return { ok: false, error: sent.error };
       last = sent.messageId;
     }
+    if (flowKeys !== null && last !== null) store.placeTelegramFlowActions(flowKeys.tokens, last);
     return { ok: true, receipt: receiptFor(botId, binding.chatId, last) };
   }
 
@@ -971,7 +979,7 @@ type Update = {
     id: string;
     data?: string;
     from?: { id: number };
-    message?: { message_id: number; chat?: { id: number } };
+    message?: { message_id: number; chat?: { id: number }; text?: string };
   };
 };
 
@@ -1071,13 +1079,15 @@ async function enrolledForMessage(context: Context, update: Update): Promise<rea
 
 async function projectsForTap(context: Context, update: Update): Promise<readonly string[] | null> {
   const callback = update.callback_query;
-  if (callback === undefined || context.conversation === undefined || context.readProjects === undefined) return null;
+  // Flow decision buttons (v86) work with or without the lead's conversation on this phone.
+  const flowTap = callback !== undefined && context.store.getTelegramFlowAction(callback.data ?? "") !== null;
+  if (callback === undefined || context.readProjects === undefined || (context.conversation === undefined && !flowTap)) return null;
   const binding = callback.from === undefined ? null : context.store.liveTelegramBindingFor(context.botId, String(callback.from.id));
   if (
     binding === null || callback.from === undefined ||
     callback.message?.chat === undefined ||
     // Proposal cards and task picks read the chat's project ceiling.
-    (context.store.getTelegramProposalAction(callback.data ?? "") === null && !(callback.data ?? "").startsWith("pick:"))
+    (context.store.getTelegramProposalAction(callback.data ?? "") === null && context.store.getTelegramFlowAction(callback.data ?? "") === null && !(callback.data ?? "").startsWith("pick:"))
   ) return null;
   const chat = callback.message.chat;
   const chatId = String(chat.id);
@@ -1145,6 +1155,20 @@ function applyMessage(context: Context, update: Update, effects: Effect[]): void
     // before. Everything else that is ordinary text talks to the shared
     // assistant when a conversation is configured; otherwise silence.
     const binding = store.liveTelegramBindingFor(botId, String(from.id));
+    // A reply to an Edit or Send back prompt (v86): the new draft, or the note it goes back with.
+    const flowPrompt = binding !== null && message.reply_to_message !== undefined && String(chat.id) === binding.chatId
+      ? store.telegramFlowPrompt(binding.chatId, String(message.reply_to_message.message_id), clock()) : null;
+    if (binding !== null && flowPrompt !== null) {
+      const repos = context.projects === null ? null : telegramConversationRepos(store, binding.approver, context.projects);
+      for (const effect of applyFlowReply(store, binding, flowPrompt, message.text ?? "", repos, clock())) {
+        if (effect.kind === "say") effects.push(async () => { await transport("sendMessage", { chat_id: binding.chatId, text: effect.text, link_preview_options: { is_disabled: true }, reply_parameters: { message_id: message.message_id } }); });
+        else effects.push(async () => {
+          const sent = await send(transport, binding.chatId, effect.text, effect.keyboard);
+          if (sent.ok && sent.messageId !== null) store.placeTelegramFlowActions(effect.tokens, sent.messageId);
+        });
+      }
+      return;
+    }
     const repliedDecision = binding !== null && message.reply_to_message !== undefined
       ? store.decisionForTelegramMessage(binding.id, binding.chatId, String(message.reply_to_message.message_id))
       : null;
@@ -1576,6 +1600,24 @@ function applyCallback(context: Context, update: Update, effects: Effect[]): voi
     const view = phoneTaskView(store, repos, current, clock());
     store.recordTelegramTaskMessage(binding, String(message.message_id), current, view.run, clock());
     editText(phoneFocusText(view.text), [[{ text: "Back to the lead", callback_data: "pick:lead" }]]);
+    return;
+  }
+  const flowAction = store.getTelegramFlowAction(token);
+  if (flowAction !== null) {
+    if (flowAction.binding !== binding.id || flowAction.chatId !== tapChat || (flowAction.messageId !== null && flowAction.messageId !== String(message.message_id))) { report.ignored++; return; }
+    const repos = context.projects === null ? null : telegramConversationRepos(store, binding.approver, context.projects);
+    const tapped = applyFlowTap(store, binding, flowAction, { chatId: binding.chatId, messageId: String(message.message_id), text: message.text ?? "" }, repos, clock());
+    for (const effect of tapped) {
+      if (effect.kind === "ack") ack(effect.text);
+      else if (effect.kind === "edit") editText(effect.text);
+      else effects.push(async () => {
+        // A reply box: whatever they send back as a reply to this prompt is the new draft, or the note.
+        const answer = await transport("sendMessage", { chat_id: binding.chatId, text: effect.text, link_preview_options: { is_disabled: true },
+          reply_parameters: { message_id: message.message_id }, reply_markup: { force_reply: true, input_field_placeholder: effect.placeholder } });
+        const id = (answer.result as { message_id?: number } | undefined)?.message_id;
+        if (answer.ok && Number.isSafeInteger(id)) store.recordTelegramFlowPrompt({ ...effect.prompt, messageId: String(id) }, clock());
+      });
+    }
     return;
   }
   const action = store.getTelegramAction(token);

@@ -14,6 +14,10 @@
  *               note) takes the failure path, and a send back to a build
  *               zone becomes a revision of the card's work.
  * - notify    — posts a message to the project's chat and moves on.
+ * - draft     — (v86) Claude writes something from the card (a reply, a
+ *               summary, a note) in seconds, with no repository and no
+ *               tools. Nothing is sent: a later zone shows it to a person
+ *               and a later step posts it ({{stage.<id>}}).
  * - sort      — (v85) Jev, a decision model reached through OpenRouter,
  *               reads the card and picks one of the zone's answers; the
  *               card goes where that answer leads, or down the not-sure
@@ -26,7 +30,7 @@
  */
 import { createHash } from "node:crypto";
 
-export const FLOW_STAGE_KINDS = ["inbox", "task", "report", "approval", "check", "update", "notify", "sort", "done"] as const;
+export const FLOW_STAGE_KINDS = ["inbox", "task", "report", "approval", "check", "update", "notify", "sort", "draft", "done"] as const;
 export type FlowStageKind = (typeof FLOW_STAGE_KINDS)[number];
 export const FLOW_COLORS = ["slate", "blue", "violet", "amber", "green", "rose"] as const;
 export type FlowColor = (typeof FLOW_COLORS)[number];
@@ -53,6 +57,8 @@ export type FlowStage = {
   planning: "auto" | "required" | "skip" | null;
   /** approval: the one person who decides, or null for any approver on the project. */
   approver: string | null;
+  /** approval: the flow's owner decides (v86), whoever that is when the card arrives; `approver` is then unused. */
+  toOwner?: boolean;
   /** notify: the message; update: the comment left on the issue. Same fill-ins. */
   message: string | null;
   /** update: also close the issue (Linear: move it to the team's done state). */
@@ -77,6 +83,7 @@ export const FLOW_KIND_WORDS: Record<FlowStageKind, { label: string; about: stri
   check: { label: "Run a script", about: "Runs one of the project's scripts on the card's work, with no AI. If it fails, the card takes its failure path." },
   update: { label: "Update the issue", about: "Comments on the GitHub or Linear issue the card came from, and can close it. Other cards pass straight through." },
   notify: { label: "Message", about: "Posts a message to the project's chat, then moves on." },
+  draft: { label: "Draft", about: "Claude writes a reply, summary or note from the card in seconds. Nothing is sent until a later step sends it." },
   sort: { label: "Sort", about: "Jev reads the card in under a second and sends it where its answer leads. Cards it isn't sure about take the not-sure path." },
   done: { label: "Done", about: "The end of the flow." },
 };
@@ -139,6 +146,11 @@ function validateSort(input: unknown, title: string): FlowSort {
   return { question, answers: checked, sureAt, notes: checkedNotes };
 }
 
+/** Who decides at an approval zone: its named person, the flow's owner, or null for anyone who approves on the project. */
+export function deciderOf(stage: Pick<FlowStage, "approver" | "toOwner">, flow: { owner: string }): string | null {
+  return stage.toOwner === true ? flow.owner : stage.approver;
+}
+
 /** A flow as drawn on the canvas, checked whole. Throws in plain words. */
 export function validateFlowDefinition(input: unknown): FlowDefinition {
   const raw = input as { version?: unknown; start?: unknown; stages?: unknown } | null;
@@ -160,7 +172,8 @@ export function validateFlowDefinition(input: unknown): FlowDefinition {
       zone: { x: coordinate(zone["x"], -20000, 20000, index * 320), y: coordinate(zone["y"], -20000, 20000, 0), w: coordinate(zone["w"], 220, 1200, 280), h: coordinate(zone["h"], 160, 1600, 360), color },
       instructions: text(stage["instructions"], 4000),
       planning: kind === "task" ? planning ?? "auto" : null,
-      approver: kind === "approval" ? text(stage["approver"], 64) : null,
+      approver: kind === "approval" && stage["toOwner"] !== true ? text(stage["approver"], 64) : null,
+      ...(kind === "approval" && stage["toOwner"] === true ? { toOwner: true } : {}),
       message: text(stage["message"], 1000),
       close: kind === "update" ? stage["close"] !== false : null,
       script: kind === "check" ? text(stage["script"], 40) : null,
@@ -178,6 +191,7 @@ export function validateFlowDefinition(input: unknown): FlowDefinition {
     for (const target of [stage.next, stage.onFail, ...(stage.sort?.answers.map(one => one.to) ?? [])]) if (target !== null && !ids.has(target)) throw new Error(`Zone ${stage.title} points at a zone that no longer exists.`);
     if (stage.sort !== null && stage.sort.answers.some(one => one.to === stage.id)) throw new Error(`Zone ${stage.title}: an answer can't send cards back into the same zone.`);
     if ((stage.kind === "task" || stage.kind === "report") && stage.instructions === null) throw new Error(`Zone ${stage.title}: say what the agent should do.`);
+    if (stage.kind === "draft" && stage.instructions === null) throw new Error(`Zone ${stage.title}: say what Claude should write.`);
     if (stage.kind === "notify" && stage.message === null) throw new Error(`Zone ${stage.title}: write the message to post.`);
     if (stage.kind === "check" && (stage.script === null || !SCRIPT_NAME.test(stage.script))) throw new Error(`Zone ${stage.title}: choose which script it runs.`);
     if (stage.kind === "done" && (stage.next !== null || stage.onFail !== null)) throw new Error(`Zone ${stage.title} is the end; it can't lead anywhere.`);
@@ -214,11 +228,14 @@ export type FlowStepInput = {
   next?: string; ifFails?: string; ifNotSure?: string;
 };
 
-const KIND_COLORS: Record<FlowStageKind, FlowColor> = { inbox: "slate", task: "blue", report: "violet", approval: "amber", check: "blue", update: "green", notify: "green", sort: "violet", done: "green" };
+const KIND_COLORS: Record<FlowStageKind, FlowColor> = { inbox: "slate", task: "blue", report: "violet", approval: "amber", check: "blue", update: "green", notify: "green", sort: "violet", draft: "violet", done: "green" };
 /** A step id as the lead may write it (sort_by_hand, Sort-By-Hand) in the one form zones use. */
 const idOf = (value: string) => value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32);
 const slugOf = (title: string) => title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 28) || "zone";
 const overlaps = (a: FlowZone, b: FlowZone) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+
+/** What a draft zone asks for when the steps leave it out. */
+export const DRAFT_DEFAULT = "Write a short, friendly reply to the person who sent this card, in plain words.";
 
 /** What an agent is asked when the steps leave it out: the card, any send-back note, and every earlier research step's report. */
 function defaultInstructions(kind: "task" | "report", earlier: readonly FlowStage[]): string {
@@ -280,18 +297,22 @@ export function flowFromSteps(input: unknown, previous: FlowDefinition | null = 
     const onFail = kind === "done" ? null
       : typeof notSure === "string" && notSure.trim() !== "" ? find(notSure, title)
       : keptFail ?? (kind === "approval" ? worker?.id ?? (drafts[0]!.id === id ? null : drafts[0]!.id) : null);
-    const approver = kind !== "approval" ? null
+    // "owner": whoever owns the flow when the card arrives.
+    const toOwner = kind === "approval" && (step.decider === undefined ? old?.toOwner === true : typeof step.decider === "string" && /^(owner|the owner|flow owner|the flow owner|the flow's owner)$/i.test(step.decider.trim()));
+    const approver = kind !== "approval" || toOwner ? null
       : step.decider === undefined ? old?.approver ?? null
       : step.decider === null || /^(anyone|any approver|anybody)$/i.test(step.decider.trim()) ? null : step.decider.trim();
     stages.push({
       id, title, kind,
       zone: old?.zone ?? { x: 0, y: 0, w: 260, h: kind === "done" || kind === "notify" ? 220 : 300, color: KIND_COLORS[kind] },
       // A kept step on our default instructions gets the default again, so it reads any research step added before it.
-      instructions: kind === "task" || kind === "report"
+      instructions: kind === "draft" ? step.instructions?.trim() || old?.instructions || DRAFT_DEFAULT
+        : kind === "task" || kind === "report"
         ? step.instructions?.trim() || (old?.instructions && old.instructions !== defaultInstructions(kind, previous!.stages.slice(0, previous!.stages.indexOf(old))) ? old.instructions : defaultInstructions(kind, earlier))
         : null,
       planning: kind === "task" ? step.planning ?? old?.planning ?? "auto" : null,
       approver,
+      ...(toOwner ? { toOwner: true } : {}),
       message: kind === "notify" ? step.message?.trim() || old?.message || (drafts.find(one => one.id === next)?.kind === "done" ? "Finished: {{card.title}}" : "Update on {{card.title}}")
         : kind === "update" ? step.message?.trim() || old?.message || "Done: {{card.title}}" : null,
       close: kind === "update" ? step.close ?? old?.close ?? true : null,
@@ -352,7 +373,8 @@ export function flowTerms(definition: FlowDefinition, previous: FlowDefinition |
         : `The agent looks into the card and writes a short report${notes}, plus any note it was sent back with.`);
     }
     if (stage.kind === "task" && stage.planning !== "auto") lines.push(stage.planning === "required" ? "Plans first." : "Builds without a plan.");
-    if (stage.kind === "approval") lines.push(`Decides: ${stage.approver ?? "anyone who approves on this project"}. Approve → ${to(stage.next)} Send back → ${stage.onFail === null ? "not possible." : to(stage.onFail)}`);
+    if (stage.kind === "draft") lines.push(`Claude writes: ${plain(stage.instructions ?? "")}`, `Then → ${to(stage.next)}`);
+    else if (stage.kind === "approval") lines.push(`Decides: ${stage.toOwner === true ? "the flow's owner, in their chat app" : stage.approver ?? "anyone who approves on this project"}. Approve → ${to(stage.next)} Send back → ${stage.onFail === null ? "not possible." : to(stage.onFail)}`);
     else if (stage.kind === "notify") lines.push(`Posts: ${plain(stage.message ?? "")}`, `Then → ${to(stage.next)}`);
     else if (stage.kind === "update") lines.push(`Comments on the issue the card came from: ${plain(stage.message ?? "")}${stage.close === true ? " Then closes it (Linear: moves it to done)." : ""}`, `Then → ${to(stage.next)}${stage.onFail === null ? "" : ` If it can't → ${to(stage.onFail)}`}`);
     else if (stage.kind === "sort" && stage.sort !== null) {
@@ -382,6 +404,7 @@ export function flowTerms(definition: FlowDefinition, previous: FlowDefinition |
   if (first?.kind === "inbox" && sorter !== undefined) terms.push(`New cards wait in ${first.title}, so ${sorter.title} only sorts the cards someone moves there.`);
   terms.push("Build and research steps become ordinary tasks, so your usual approvals and checks apply.");
   if (definition.stages.some(one => one.kind === "sort")) terms.push("Sort steps send each card's title, details and earlier notes to Jev through your OpenRouter account.");
+  if (definition.stages.some(one => one.kind === "draft")) terms.push("Draft steps send each card's text to Claude through the lead chat's sign-in. Nothing a draft writes is sent until a later step sends it.");
   return terms;
 }
 
@@ -404,12 +427,12 @@ export const FLOW_TEMPLATES: readonly { id: string; label: string; about: string
           instructions: "Investigate this request in the repository and write a short triage: what is being asked, where in the code it lands, the risks, and a rough size.\n\nRequest: {{card.title}}\n{{card.description}}",
           next: "go-ahead",
         }),
-        stage("go-ahead", "Go ahead?", "approval", zone(600, 0, "amber"), { next: "build", onFail: "inbox" }),
+        stage("go-ahead", "Go ahead?", "approval", zone(600, 0, "amber"), { toOwner: true, next: "build", onFail: "inbox" }),
         stage("build", "Build", "task", zone(900, 0, "blue"), {
           instructions: "{{card.title}}\n\n{{card.description}}\n\nTriage notes:\n{{stage.triage}}\n\nRequested changes (if any): {{note}}",
           next: "review",
         }),
-        stage("review", "Review", "approval", zone(900, 380, "amber"), { next: "announce", onFail: "build" }),
+        stage("review", "Review", "approval", zone(900, 380, "amber"), { toOwner: true, next: "announce", onFail: "build" }),
         stage("announce", "Tell the team", "notify", zone(600, 380, "green", 220), { message: "Shipped: {{card.title}}", next: "done" }),
         stage("done", "Done", "done", zone(300, 380, "green", 220)),
       ],
@@ -428,7 +451,7 @@ export const FLOW_TEMPLATES: readonly { id: string; label: string; about: string
           instructions: "Research this and write a clear, sourced answer with a short summary first.\n\nQuestion: {{card.title}}\n{{card.description}}\n\nFeedback to address (if any): {{note}}",
           next: "check",
         }),
-        stage("check", "Check", "approval", zone(600, 0, "amber"), { next: "share", onFail: "research" }),
+        stage("check", "Check", "approval", zone(600, 0, "amber"), { toOwner: true, next: "share", onFail: "research" }),
         stage("share", "Share", "notify", zone(900, 0, "green", 220), { message: "Answered: {{card.title}}", next: "done" }),
         stage("done", "Done", "done", zone(900, 250, "green", 220)),
       ],
@@ -437,7 +460,7 @@ export const FLOW_TEMPLATES: readonly { id: string; label: string; about: string
   {
     id: "triage",
     label: "Issue triage",
-    about: "Jev sorts new issues into bugs, feature ideas and questions, and says how urgent each is. Bugs get fixed, questions get answered, and a person checks both.",
+    about: "Jev sorts new issues into bugs, feature ideas and questions, and says how urgent each is. Bugs get fixed; questions get researched and a reply drafted. The flow's owner approves both in their chat app.",
     definition: {
       version: 1,
       start: "sort",
@@ -457,17 +480,21 @@ export const FLOW_TEMPLATES: readonly { id: string; label: string; about: string
           onFail: "by-hand",
         }),
         stage("fix", "Fix it", "task", zone(420, 0, "blue"), { instructions: "{{card.title}}\n\n{{card.description}}\n\nChanges asked for (if any): {{note}}", next: "review" }),
-        stage("review", "Review the fix", "approval", zone(840, 0, "amber"), { next: "close", onFail: "fix" }),
+        stage("review", "Review the fix", "approval", zone(840, 0, "amber"), { toOwner: true, next: "close", onFail: "fix" }),
         stage("close", "Close the issue", "update", zone(1260, 0, "green", 220), { message: "Fixed: {{card.title}}. Thanks for the report!", next: "done" }),
         stage("by-hand", "Sort by hand", "inbox", zone(0, 400, "slate")),
         stage("answer", "Answer it", "report", zone(420, 340, "violet"), {
           instructions: "Answer this question for the person who asked: clearly, briefly and in plain words, using what is in the repository.\n\nQuestion: {{card.title}}\n{{card.description}}\n\nFeedback to address (if any): {{note}}",
+          next: "write-reply",
+        }),
+        stage("write-reply", "Write the reply", "draft", zone(840, 340, "violet"), {
+          instructions: "Write a short, friendly reply to the person who asked, answering their question from the research notes. Plain words; say what to do next if anything.",
           next: "check-answer",
         }),
-        stage("check-answer", "Check the answer", "approval", zone(840, 340, "amber"), { next: "reply", onFail: "answer" }),
-        stage("reply", "Reply on the issue", "update", zone(1260, 340, "green", 220), { message: "{{stage.answer}}", next: "done" }),
+        stage("check-answer", "Check the reply", "approval", zone(1260, 340, "amber"), { toOwner: true, next: "reply", onFail: "write-reply" }),
+        stage("reply", "Reply on the issue", "update", zone(1680, 340, "green", 220), { message: "{{stage.write-reply}}", next: "done" }),
         stage("ideas", "Feature ideas", "inbox", zone(420, 680, "slate")),
-        stage("done", "Done", "done", zone(1680, 0, "green", 220)),
+        stage("done", "Done", "done", zone(2100, 170, "green", 220)),
       ],
     },
   },
@@ -553,14 +580,14 @@ export const FLOW_TEMPLATES: readonly { id: string; label: string; about: string
           onFail: "plan",
         }),
         stage("quick", "Build it", "task", zone(420, 0, "blue"), { planning: "skip", instructions: "{{card.title}}\n\n{{card.description}}\n\nChanges asked for (if any): {{note}}", next: "check-quick" }),
-        stage("check-quick", "Review", "approval", zone(840, 0, "amber"), { next: "done", onFail: "quick" }),
+        stage("check-quick", "Review", "approval", zone(840, 0, "amber"), { toOwner: true, next: "done", onFail: "quick" }),
         stage("plan", "Plan it", "report", zone(420, 340, "violet"), {
           instructions: "Investigate this change and write a short plan: what is asked, which files it touches, the risks, the open questions and a rough size.\n\nRequest: {{card.title}}\n{{card.description}}\n\nFeedback to address (if any): {{note}}",
           next: "go-ahead",
         }),
-        stage("go-ahead", "Go ahead?", "approval", zone(840, 340, "amber"), { next: "build", onFail: "plan" }),
+        stage("go-ahead", "Go ahead?", "approval", zone(840, 340, "amber"), { toOwner: true, next: "build", onFail: "plan" }),
         stage("build", "Build it carefully", "task", zone(1260, 340, "blue"), { planning: "required", instructions: "{{card.title}}\n\n{{card.description}}\n\nThe agreed plan:\n{{stage.plan}}\n\nChanges asked for (if any): {{note}}", next: "review" }),
-        stage("review", "Review", "approval", zone(1680, 340, "amber"), { next: "done", onFail: "build" }),
+        stage("review", "Review", "approval", zone(1680, 340, "amber"), { toOwner: true, next: "done", onFail: "build" }),
         stage("done", "Done", "done", zone(1680, 0, "green", 220)),
       ],
     },

@@ -7,7 +7,7 @@
  * it now stands, and the canvas refreshes every few seconds for everyone. */
 import { Background, BackgroundVariant, Controls, Handle, MarkerType, NodeResizer, Position, ReactFlow, ReactFlowProvider, applyNodeChanges, useReactFlow, type Connection, type Edge, type Node, type NodeChange, type NodeProps } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Bell, BellOff, CalendarClock, LineChart, ListChecks, MessageSquareReply, Copy, Flag, GitPullRequest, Hammer, Inbox, Megaphone, MessageSquare, MousePointerClick, Pencil, Plus, Search, Split, SquareKanban, UserCheck, Webhook, Workflow, X, Zap } from "lucide-react";
+import { Bell, BellOff, CalendarClock, LineChart, ListChecks, MessageSquareReply, Copy, Flag, GitPullRequest, Hammer, Inbox, Megaphone, MessageSquare, MousePointerClick, Pencil, PenLine, Plus, Search, Split, SquareKanban, UserCheck, Webhook, Workflow, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { BrowserFlowCard, BrowserFlowStage, BrowserFlowTrigger, BrowserFlowView } from "../../browser-workspace.js";
 import { Badge, Button, Input, Label, Textarea, cn, toast } from "../components/ui/index.js";
@@ -25,7 +25,7 @@ const KIND_ICONS: Record<BrowserFlowStage["kind"], ReactNode> = {
   inbox: <Inbox className="size-3.5" aria-hidden="true" />, task: <Hammer className="size-3.5" aria-hidden="true" />, report: <Search className="size-3.5" aria-hidden="true" />,
   approval: <UserCheck className="size-3.5" aria-hidden="true" />, notify: <Megaphone className="size-3.5" aria-hidden="true" />, done: <Flag className="size-3.5" aria-hidden="true" />,
   check: <ListChecks className="size-3.5" aria-hidden="true" />, update: <MessageSquareReply className="size-3.5" aria-hidden="true" />,
-  sort: <Split className="size-3.5" aria-hidden="true" />,
+  sort: <Split className="size-3.5" aria-hidden="true" />, draft: <PenLine className="size-3.5" aria-hidden="true" />,
 };
 
 
@@ -56,7 +56,7 @@ async function send(path: string, fields: Record<string, string>, csrf: string):
 }
 
 type ZoneData = {
-  stage: BrowserFlowStage; kindLabel: string; cards: BrowserFlowCard[]; editing: boolean; canMove: boolean; start: boolean;
+  stage: BrowserFlowStage; kindLabel: string; owner: string; cards: BrowserFlowCard[]; editing: boolean; canMove: boolean; start: boolean;
   selectedCard: number | null; onCard: (id: number) => void; onDrop: (card: number, stage: string) => void; hidden: number;
   onResize: (stage: string, box: { x: number; y: number; width: number; height: number }) => void;
 };
@@ -86,7 +86,7 @@ function ZoneNode({ data, selected }: NodeProps<Node<ZoneData, "zone">>) {
       <span className="inline-flex size-6 items-center justify-center rounded-md text-white" style={{ background: color }}>{KIND_ICONS[stage.kind]}</span>
       <div className="min-w-0 flex-1">
         <div className="truncate text-[13px] font-semibold">{stage.title}</div>
-        <div className="truncate text-[11px] text-muted-foreground">{data.kindLabel}{data.start ? " · new cards start here" : ""}{stage.approver ? ` · ${stage.approver}` : ""}</div>
+        <div className="truncate text-[11px] text-muted-foreground">{data.kindLabel}{data.start ? " · new cards start here" : ""}{stage.toOwner === true ? ` · ${data.owner}` : stage.approver ? ` · ${stage.approver}` : ""}</div>
       </div>
       {cards.length > 0 && <span className="rounded-full bg-muted px-1.5 text-[11px] font-semibold text-muted-foreground">{cards.length}</span>}
     </header>
@@ -228,6 +228,8 @@ function CardPeople({ card, view, csrf, apply }: { card: BrowserFlowCard; view: 
 
 function CardPanel({ card, view, csrf, apply, onClose }: { card: BrowserFlowCard; view: BrowserFlowView; csrf: string; apply: (result: Said) => void; onClose: () => void }) {
   const [note, setNote] = useState("");
+  const [draftText, setDraftText] = useState(card.draft?.text ?? "");
+  useEffect(() => { setDraftText(card.draft?.text ?? ""); }, [card.id, card.draft?.text]);
   const [busy, setBusy] = useState(false);
   const stage = view.stages.find(one => one.id === card.stage);
   const act = async (path: string, fields: Record<string, string>) => {
@@ -253,11 +255,20 @@ function CardPanel({ card, view, csrf, apply, onClose }: { card: BrowserFlowCard
     {card.waiting !== null && <p className="rounded-md bg-muted px-3 py-2 text-[13px]">{card.waiting}</p>}
     <CardPeople card={card} view={view} csrf={csrf} apply={apply} />
     {card.task !== null && <a className="text-[13px] font-medium text-primary underline-offset-4 hover:underline" href={card.task.href}>Open its task</a>}
+    {card.draft !== null && !card.canDecide && <details className="rounded-md border px-3 py-2" open data-flow-draft>
+      <summary className="cursor-pointer text-[13px] font-medium">Draft from {card.draft.title}</summary>
+      <p className="mt-2 whitespace-pre-wrap text-[12.5px]">{card.draft.text}</p>
+    </details>}
     {card.canDecide && <div className="flex flex-col gap-2 rounded-lg border border-attention/50 p-3">
+      {card.draft !== null && <>
+        <Label htmlFor="flow-draft" className="text-[13px]">Draft from {card.draft.title}</Label>
+        <Textarea id="flow-draft" value={draftText} onChange={event => setDraftText(event.target.value)} rows={8} maxLength={4000} data-flow-draft-edit />
+        {draftText.trim() !== card.draft.text.trim() && <p className="text-[12px] text-muted-foreground">Approving sends your edited version on.</p>}
+      </>}
       <Label htmlFor="flow-note" className="text-[13px]">{stage?.title ?? "Decision"}: approve, or send it back</Label>
       <Textarea id="flow-note" value={note} onChange={event => setNote(event.target.value)} placeholder="What should change? (needed to send it back)" rows={3} />
       <div className="flex flex-wrap gap-2">
-        <Button size="sm" disabled={busy} onClick={() => void act(`${base}/decide`, { decision: "approve", note })}>Approve</Button>
+        <Button size="sm" disabled={busy || (card.draft !== null && draftText.trim() === "")} onClick={() => void act(`${base}/decide`, { decision: "approve", note, ...(card.draft === null ? {} : { draft: draftText }) })}>Approve</Button>
         {stage?.onFail !== null && stage?.onFail !== undefined && <Button size="sm" variant="outline" disabled={busy || note.trim() === ""} onClick={() => void act(`${base}/decide`, { decision: "send-back", note })}>Send back</Button>}
       </div>
     </div>}
@@ -350,10 +361,15 @@ function ZonePanel({ stage, stages, view, update, remove, makeStart, onClose }: 
     <Field label="What happens here" {...(kind === undefined ? {} : { hint: kind.about })}>
       <select className={select} aria-label="What happens here" value={stage.kind} onChange={event => update({ kind: event.target.value as BrowserFlowStage["kind"], ...(event.target.value === "done" ? { next: null, onFail: null } : {}),
         ...(event.target.value === "update" ? { close: stage.close ?? true, message: stage.message ?? "Done: {{card.title}}" } : {}), ...(event.target.value === "check" ? { script: stage.script ?? view.scripts[0]?.name ?? null } : {}),
+        ...(event.target.value === "draft" ? { instructions: stage.instructions ?? "Write a short, friendly reply to the person who sent this card, in plain words." } : {}),
+        ...(event.target.value === "approval" ? { toOwner: stage.toOwner ?? true } : {}),
         ...(event.target.value === "sort" ? { next: null, sort: stage.sort ?? { question: "What kind of card is this?", answers: others.slice(0, 2).map(one => ({ answer: one.title.slice(0, 40), means: one.title, to: one.id })), sureAt: 0.8, notes: [] } } : {}) })}>
         {view.kinds.map(one => <option key={one.kind} value={one.kind}>{one.label}</option>)}
       </select>
     </Field>
+    {stage.kind === "draft" && <Field label="What Claude should write" hint="Claude reads the card and what earlier zones said. Put a “Person decides” zone next to read and edit it first.">
+      <Textarea rows={5} value={stage.instructions ?? ""} maxLength={4000} onChange={event => update({ instructions: event.target.value })} aria-label="What Claude should write" />
+    </Field>}
     {(stage.kind === "task" || stage.kind === "report") && <Field label="What the agent should do" hint={"Fill-ins: {{card.title}}, {{card.description}}, {{note}} (the latest send-back note), {{stage.<zone id>}} (an earlier zone's report)."}>
       <Textarea rows={7} value={stage.instructions ?? ""} onChange={event => update({ instructions: event.target.value })} aria-label="What the agent should do" />
     </Field>}
@@ -363,7 +379,9 @@ function ZonePanel({ stage, stages, view, update, remove, makeStart, onClose }: 
       </select>
     </Field>}
     {stage.kind === "approval" && <Field label="Who decides">
-      <select className={select} aria-label="Who decides" value={stage.approver ?? ""} onChange={event => update({ approver: event.target.value === "" ? null : event.target.value })}>
+      <select className={select} aria-label="Who decides" value={stage.toOwner === true ? "__owner__" : stage.approver ?? ""}
+        onChange={event => update(event.target.value === "__owner__" ? { toOwner: true, approver: null } : { toOwner: false, approver: event.target.value === "" ? null : event.target.value })}>
+        <option value="__owner__">The flow's owner ({view.flow.owner}), in their chat app</option>
         <option value="">Anyone who can approve</option>{view.approvers.map(name => <option key={name} value={name}>{name}</option>)}
       </select>
     </Field>}
@@ -774,7 +792,7 @@ function InsightsPanel({ view, onClose }: { view: BrowserFlowView; onClose: () =
 function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }) {
   const [view, setView] = useState(initial);
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState<{ name: string; start: string; stages: BrowserFlowStage[] } | null>(null);
+  const [draft, setDraft] = useState<{ name: string; start: string; stages: BrowserFlowStage[]; owner: string } | null>(null);
   const [selected, setSelected] = useState<{ card: number } | { zone: string } | { triggers: number | null } | { press: number } | { scripts: true } | { insights: true } | null>(
     initial.selectedCard !== null ? { card: initial.selectedCard } : initial.startTrigger !== null && initial.triggers.some(one => one.id === initial.startTrigger && one.button !== null) ? { press: initial.startTrigger } : null);
   const [saving, setSaving] = useState(false);
@@ -784,7 +802,7 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
   const flow = useReactFlow();
   const stages = draft?.stages ?? view.stages;
   const start = draft?.start ?? view.start;
-  const dirty = draft !== null && JSON.stringify({ name: draft.name, start: draft.start, stages: draft.stages }) !== JSON.stringify({ name: view.flow.name, start: view.start, stages: view.stages });
+  const dirty = draft !== null && JSON.stringify({ name: draft.name, start: draft.start, stages: draft.stages, owner: draft.owner }) !== JSON.stringify({ name: view.flow.name, start: view.start, stages: view.stages, owner: view.flow.owner });
 
   const apply = useCallback((result: Said) => {
     (result.ok ? toast.success : toast.error)(result.said);
@@ -814,7 +832,7 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
     id: stage.id, type: "zone" as const, position: { x: stage.zone.x, y: stage.zone.y }, width: stage.zone.w, height: stage.zone.h,
     style: { width: stage.zone.w, height: stage.zone.h }, draggable: editing, selectable: editing,
     data: {
-      stage, kindLabel: view.kinds.find(one => one.kind === stage.kind)?.label ?? stage.kind,
+      stage, kindLabel: view.kinds.find(one => one.kind === stage.kind)?.label ?? stage.kind, owner: draft?.owner ?? view.flow.owner,
       cards: view.cards.filter(card => card.stage === stage.id && card.state === "active" && (!mineOnly || card.mine)),
       hidden: mineOnly ? view.cards.filter(card => card.stage === stage.id && card.state === "active" && !card.mine).length : 0,
       editing, canMove: view.canEdit, start: stage.id === start, selectedCard: selected !== null && "card" in selected ? selected.card : null,
@@ -923,12 +941,12 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
     updateStage(connection.source, connection.sourceHandle === "fail" ? { onFail: connection.target } : { next: connection.target });
   };
 
-  const startEditing = () => { setDraft({ name: view.flow.name, start: view.start, stages: view.stages }); setEditing(true); setSelected(null); };
+  const startEditing = () => { setDraft({ name: view.flow.name, start: view.start, stages: view.stages, owner: view.flow.owner }); setEditing(true); setSelected(null); };
   const stopEditing = () => { setDraft(null); setEditing(false); setSelected(null); };
   const save = async () => {
     if (draft === null) return;
     setSaving(true);
-    const result = await send(`${view.flow.href}/save`, { name: draft.name, revision: String(view.flow.revision), definition: JSON.stringify({ version: 1, start: draft.start, stages: draft.stages }) }, csrf);
+    const result = await send(`${view.flow.href}/save`, { name: draft.name, owner: draft.owner, revision: String(view.flow.revision), definition: JSON.stringify({ version: 1, start: draft.start, stages: draft.stages }) }, csrf);
     setSaving(false);
     apply(result);
     if (result.ok) { setDraft(null); setEditing(false); setSelected(null); }
@@ -957,6 +975,10 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
         ? <Input value={draft.name} onChange={event => setDraft({ ...draft, name: event.target.value })} maxLength={80} className="h-8 max-w-64 font-semibold" aria-label="Flow name" />
         : <h1 className="text-[15px] font-semibold">{view.flow.name}</h1>}
       <span className="text-[12px] text-muted-foreground">{view.flow.project}</span>
+      {editing && draft !== null && <label className="inline-flex items-center gap-1.5 text-[12px] text-muted-foreground">Owner
+        <select className="h-8 rounded-md border bg-transparent px-2 text-[12px] text-foreground" value={draft.owner} onChange={event => setDraft({ ...draft, owner: event.target.value })} aria-label="Flow owner">
+          {[...new Set([draft.owner, ...view.approvers])].map(name => <option key={name} value={name}>{name === view.me ? `${name} (you)` : name}</option>)}
+        </select></label>}
       {waitingOnYou > 0 && !editing && <Badge tone="attention">{waitingOnYou} waiting for you</Badge>}
       {!editing && <div className="ml-1 inline-flex rounded-md border p-0.5" role="group" aria-label="Which cards">
         {([["All cards", false], ["Mine", true]] as const).map(([label, value]) => <button key={label} type="button" aria-pressed={mineOnly === value} onClick={() => setMineOnly(value)}

@@ -7,13 +7,14 @@
  */
 import { assignmentOf } from "./assignment.js";
 import { diagnoseTaskDispatch } from "./dispatch.js";
-import { fillFlowText, validateFlowDefinition, type FlowDefinition, type FlowStage } from "./flows.js";
+import { deciderOf, fillFlowText, validateFlowDefinition, type FlowDefinition, type FlowStage } from "./flows.js";
 import { reportSummaryFor } from "./report-summary.js";
 import { fileTaskProposal } from "./proposal.js";
 import { requestResultChanges } from "./result-actions.js";
 import { revisionSourceOf } from "./result-review.js";
 import { scanForSecrets } from "./evidence.js";
 import { cardFollowers, notifyPeople } from "./flow-people.js";
+import { keptDraft } from "./flow-draft.js";
 import type { FlowCardRow, FlowRow, Store } from "./store.js";
 
 export type FlowAdvance = { moved: number; filed: string[]; problems: string[] };
@@ -98,13 +99,19 @@ function advanceCard(store: Store, flow: FlowRow, definition: FlowDefinition | n
       return;
     }
     case "approval": {
-      const who = stage.approver ?? "an approver";
+      const decider = deciderOf(stage, flow);
+      const who = decider ?? "an approver";
       if (card.waiting === null) {
         // A named decider hears it alone; "anyone who approves" pages everyone who can.
+        // With a draft in front of it, the decision carries the draft itself: it can be read (and answered) where it arrives.
+        const draft = draftFor(definition, stage);
+        const text = draft === null ? undefined : card.outputs[draft.id];
         store.enqueueNotification({
-          dedupeKey: `flow-decide:${card.id}:${card.entry}`, kind: "flow-decision", pushClass: "attention", ...(stage.approver === null ? {} : { recipient: stage.approver }),
-          subject: `${flow.name}: ${card.title} needs ${stage.approver === null ? "a decision" : `${stage.approver}'s decision`}`.slice(0, 200),
-          body: `${stage.title}: approve it, or send it back with a note.`, link: flowCardHref(flow.id, card.id), source: { project: flow.repo },
+          dedupeKey: `flow-decide:${card.id}:${card.entry}`, kind: "flow-decision", pushClass: "attention", ...(decider === null ? {} : { recipient: decider }),
+          subject: `${flow.name}: ${card.title} needs ${decider === null ? "a decision" : `${decider}'s decision`}`.slice(0, 200),
+          body: text === undefined ? `${stage.title}: approve it, or send it back with a note.`
+            : `${stage.title}: approve this draft to send it as written, edit it, or send it back with a note.\n\n${text}`.slice(0, 4000),
+          link: flowCardHref(flow.id, card.id), source: { project: flow.repo },
         }, now);
         store.updateFlowCard(card.id, { waiting: `Waiting for ${who} to approve or send it back` }, now);
       }
@@ -117,6 +124,7 @@ function advanceCard(store: Store, flow: FlowRow, definition: FlowDefinition | n
     case "check":
     case "update":
     case "sort":
+    case "draft":
       // Run by the worker's step pass (flow-steps.ts), which moves the card on.
       return;
   }
@@ -233,15 +241,31 @@ export function cancelFlowCard(store: Store, card: FlowCardRow, actor: string, n
 export type FlowDecision = { ok: true; said: string } | { ok: false; message: string };
 
 /** A person's decision on a card waiting in an approval zone. A send back to a build zone whose work has a result becomes a revision of that work. */
-export function decideFlowCard(store: Store, input: { card: number; decision: "approve" | "send-back"; note: string | null; actor: string; repos: readonly string[]; evidenceRoot?: string }, now: Date): FlowDecision {
+/** The draft a decision is about: the draft zone that sends its cards to this one. */
+export function draftFor(definition: FlowDefinition, stage: FlowStage): FlowStage | null {
+  return definition.stages.find(one => one.kind === "draft" && one.next === stage.id) ?? null;
+}
+
+export function decideFlowCard(store: Store, input: { card: number; decision: "approve" | "send-back"; note: string | null; actor: string; repos: readonly string[]; evidenceRoot?: string;
+  /** The draft as the person left it: approving sends this version on. */
+  draft?: string | null;
+  /** The visit the person saw (a chat button's): a card that moved on since is refused. */
+  entry?: number }, now: Date): FlowDecision {
   const card = store.getFlowCard(input.card);
   const flow = card === null ? null : store.getFlow(card.flow);
   const definition = flow === null ? null : flowDefinitionOf(flow);
   if (card === null || flow === null || definition === null || card.state !== "active" || !input.repos.includes(flow.repo)) return { ok: false, message: "That card is no longer waiting." };
   const stage = definition.stages.find(one => one.id === card.stage);
-  if (stage === undefined || stage.kind !== "approval") return { ok: false, message: "That card isn't waiting for a decision." };
-  if (stage.approver !== null && stage.approver !== input.actor) return { ok: false, message: `Only ${stage.approver} decides here.` };
+  if (stage === undefined || stage.kind !== "approval" || (input.entry !== undefined && input.entry !== card.entry)) return { ok: false, message: "That card has moved on since; nothing was changed." };
+  const decider = deciderOf(stage, flow);
+  if (decider !== null && decider !== input.actor) return { ok: false, message: `Only ${decider} decides here.` };
   if (input.decision === "approve") {
+    // An edited draft replaces the one Claude wrote, so the steps after this send what the person approved.
+    const draft = draftFor(definition, stage);
+    if (draft !== null && typeof input.draft === "string" && input.draft.trim() !== "" && input.draft.trim() !== card.outputs[draft.id]?.trim()) {
+      store.updateFlowCard(card.id, { outputs: { ...card.outputs, [draft.id]: keptDraft(input.draft) } }, now);
+      store.addFlowComment({ card: card.id, author: input.actor, body: "Edited the draft before approving it.", mentions: [] }, now);
+    }
     if (stage.next === null) {
       store.updateFlowCard(card.id, { state: "done", waiting: null }, now);
       return { ok: true, said: "Approved. The card is done." };

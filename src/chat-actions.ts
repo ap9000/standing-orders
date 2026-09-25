@@ -37,7 +37,7 @@ import { assignmentOf, checkAssignmentAsOperator } from "./assignment.js";
 import { getDecision, recordDecision, retireDecision } from "./project-memory.js";
 import { resumeTaskStop, taskControlOf } from "./task-control.js";
 import { addToolTo, catalogTool, projectToolsOf, removeToolFrom, toolCommandLine, validateToolSpec, type ToolSpec } from "./project-tools.js";
-import { FLOW_KIND_WORDS, flowDigest, flowTerms, validateFlowDefinition, type FlowDefinition, type FlowStage } from "./flows.js";
+import { deciderOf, FLOW_KIND_WORDS, flowDigest, flowTerms, validateFlowDefinition, type FlowDefinition, type FlowStage } from "./flows.js";
 import { saveScript, scriptDigest, validateScript } from "./flow-scripts.js";
 import { addCardToFlow, advanceFlows, cancelFlowCard, decideFlowCard, flowCardHref, flowCardText, flowDefinitionOf, moveCardInFlow } from "./flow-engine.js";
 import type { FlowCardRow, FlowRow, FlowTriggerRow } from "./store.js";
@@ -498,7 +498,8 @@ export function prepareSharedAction(
         terms.push("The card leaves the flow. Any tasks it filed stay as they are.");
       } else {
         if (at?.kind !== "approval") throw Error("That card isn't waiting for a decision.");
-        if (at.approver !== null && at.approver !== who.name) throw Error(`Only ${at.approver} decides here.`);
+        const decider = deciderOf(at, flowTarget!.flow);
+        if (decider !== null && decider !== who.name) throw Error(`Only ${decider} decides here.`);
         const note = input["note"] === undefined ? "" : text(input, "note", 2000).trim();
         const titleOf = (id: string | null) => definition.stages.find(one => one.id === id)?.title ?? null;
         if (operation === "flow_card_approve") {
