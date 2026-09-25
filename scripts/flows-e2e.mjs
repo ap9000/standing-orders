@@ -289,6 +289,75 @@ await check("Jev sorts real cards through OpenRouter (Exception routing template
   return { zones: sorted.map(one => `${one.title} → ${one.stage} (${one.sorted?.chip})`), ms: decisions.map(one => one.ms), costUsd: decisions.reduce((sum, one) => sum + (one.cost ?? 0), 0) };
 });
 
+await check("A Draft step writes a real reply with Claude, and the owner edits and approves it", ["Sign in and turn the lead chat on (first-run setup)"], async () => {
+  await page.goto(`${base}/flows`);
+  const csrf = await page.locator('input[name="csrf"]').first().inputValue();
+  await page.evaluate(() => { for (const one of document.querySelectorAll("details")) one.open = true; });
+  await page.fill('form[action="/flows/new"] input[name="name"]', "Replies");
+  await page.selectOption('form[action="/flows/new"] select[name="template"]', "blank");
+  await Promise.all([page.waitForNavigation(), page.click('form[action="/flows/new"] button')]);
+  const id = Number(/\/flows\/(\d+)/.exec(page.url())[1]);
+  const view = await flowView(id);
+  if (view.flow.owner !== "alex") throw new Error(`the flow's owner is ${view.flow.owner}, not whoever made it`);
+  const zone = (x, color) => ({ x, y: 0, w: 260, h: 300, color });
+  const base0 = { instructions: null, planning: null, approver: null, message: null, close: null, script: null, sort: null };
+  const drawing = { version: 1, start: "inbox", stages: [
+    { ...view.stages.find(one => one.id === "inbox"), next: "reply" },
+    { ...base0, id: "reply", title: "Write the reply", kind: "draft", zone: zone(300, "violet"), instructions: "Write a short, friendly reply to the customer. Confirm the refund and say it takes up to 5 days.", next: "check", onFail: null },
+    { ...base0, id: "check", title: "Check the reply", kind: "approval", toOwner: true, zone: zone(600, "amber"), next: "post", onFail: "reply" },
+    { ...base0, id: "post", title: "Post it", kind: "notify", zone: zone(900, "green"), message: "{{stage.reply}}", next: "done", onFail: null },
+    { ...view.stages.find(one => one.id === "done"), zone: zone(1200, "green") },
+  ] };
+  const saved = await page.request.post(`${base}/flows/${id}/save`, { form: { csrf, name: "Replies", owner: "alex", revision: String(view.flow.revision), definition: JSON.stringify(drawing) }, headers: { accept: "application/json", origin: base } });
+  if (!saved.ok()) throw new Error(`the drawing wasn't saved: ${await saved.text()}`);
+  await page.reload(); await page.waitForSelector("[data-zone]");
+  await page.click('button:has-text("New card")');
+  await page.fill('input[aria-label="Title"]', "Refund for order 42?");
+  await page.fill('textarea[aria-label="Details"]', "Hi, I was charged twice for order 42 yesterday. Can I get one of the charges refunded? Thanks, Priya");
+  await page.click('button:has-text("Add card")');
+  const card = await until("the card", async () => (await flowView(id)).cards.find(one => one.title === "Refund for order 42?"));
+  await page.locator(`[data-card="${card.id}"]`).click();
+  await page.selectOption("#flow-move", "reply");
+  // Claude writes it (the lead's sign-in, no tools); the card waits for the owner with the draft.
+  const waiting = await until("Claude's draft", async () => { const one = (await flowView(id)).cards.find(c => c.id === card.id); return one?.stage === "check" && one.draft !== null ? one : null; }, { timeoutMs: 240_000, everyMs: 3000 });
+  const draft = waiting.draft.text;
+  if (draft.length < 40 || !/refund/i.test(draft)) throw new Error(`the draft doesn't read like a refund reply: ${draft.slice(0, 300)}`);
+  const decision = rows(`SELECT recipient, body FROM notification WHERE kind = 'flow-decision' ORDER BY id DESC LIMIT 1`)[0];
+  if (decision?.recipient !== "alex" || !decision.body.includes(draft.slice(0, 60))) throw new Error(`the decision didn't go to the owner with the draft: ${JSON.stringify(decision)}`);
+  // The owner edits it in the card's panel and approves: their version is what gets posted.
+  await page.reload(); await page.waitForSelector("[data-zone]");
+  await page.locator(`[data-card="${card.id}"]`).click();
+  const box = page.locator("[data-flow-draft-edit]");
+  await box.waitFor();
+  if ((await box.inputValue()).trim() !== draft.trim()) throw new Error("the panel doesn't show Claude's draft to edit");
+  const edited = `${draft.trim()}\n\n— Alex`;
+  await box.fill(edited);
+  await shot("draft-review");
+  await page.click('[data-flow-card-panel] button:has-text("Approve")');
+  await until("the card to be done", async () => (await flowView(id)).cards.find(one => one.id === card.id)?.state === "done");
+  const posted = rows(`SELECT body FROM notification WHERE kind = 'flow-message' ORDER BY id DESC LIMIT 1`)[0]?.body ?? "";
+  if (!posted.startsWith(edited)) throw new Error(`what was posted isn't the owner's version: ${posted.slice(0, 200)}`);
+  const run = rows(`SELECT kind, state, result, duration_ms FROM flow_step_run WHERE card = ${card.id} AND kind = 'draft'`)[0];
+  return { draft: draft.slice(0, 200), seconds: Math.round(run.duration_ms / 100) / 10, result: run.result };
+});
+
+await check("The lead drafts a reply-and-approve flow from plain words (real Claude turn)", ["Sign in and turn the lead chat on (first-run setup)"], async () => {
+  const { reply, text } = await askLead("Make a flow called Customer replies in this project: Claude drafts a reply to each new question, I approve or edit it in my chat app, then it's posted to the team chat.");
+  const { href } = await confirmCard(reply, "Customer replies");
+  const id = Number(/\/flows\/(\d+)/.exec(href ?? "")?.[1] ?? rows("SELECT id FROM flow WHERE name = 'Customer replies' ORDER BY id DESC LIMIT 1")[0]?.id);
+  if (!id) throw new Error(`no flow was created; the lead said: ${text.slice(0, 300)}`);
+  const view = await flowView(id);
+  const draft = view.stages.find(one => one.kind === "draft");
+  const decide = draft === undefined ? undefined : view.stages.find(one => one.id === draft.next);
+  const sends = decide === undefined ? undefined : view.stages.find(one => one.id === decide.next);
+  const problems = [];
+  if (draft === undefined) problems.push("there's no draft step");
+  if (decide?.kind !== "approval" || !(decide.toOwner === true || decide.approver === "alex")) problems.push(`after the draft comes ${decide?.kind ?? "nothing"}${decide?.kind === "approval" ? " decided by someone other than the person who asked" : ""}`);
+  if (sends === undefined || !/\{\{\s*stage\.[a-z0-9-]+\s*\}\}/.test(sends.message ?? "")) problems.push(`the step after the decision doesn't send the draft: ${JSON.stringify(sends?.message)}`);
+  if (problems.length > 0) throw new Error(`${problems.join("; ")}: ${JSON.stringify(view.stages.map(one => [one.title, one.kind, one.next, one.toOwner ?? one.approver, one.message]))}`);
+  return { steps: view.stages.map(one => `${one.title} (${one.kind})`) };
+});
+
 let buildCard = null;
 if (!skipBuild) await check("A card goes all the way through with a real build, a real script and a person's decision", ["The lead draws a flow from plain words (real Claude turn)"], async () => {
   await page.goto(`${base}/flows/${flowId}`);

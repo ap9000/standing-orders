@@ -5500,7 +5500,11 @@ export function createDecisionServer(options: ServeOptions): Server {
         try { saved = validateFlowDefinition(JSON.parse(body.get("definition") ?? "null")); }
         catch (error) { return answer(400, { ok: false, said: error instanceof SyntaxError ? "That flow couldn't be read." : error instanceof Error ? error.message : "That flow isn't valid." }); }
         const name = (body.get("name") ?? flow.name).replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 80) || flow.name;
+        // The owner (v86) is whom "the owner decides" zones ask: someone who can approve on this project.
+        const owner = (body.get("owner") ?? "").trim();
+        if (owner !== "" && owner !== flow.owner && !(store.listApprovers().some(one => one.name === owner) && store.accountCanAccess(owner, flow.repo))) return answer(400, { ok: false, said: `${owner} can't approve on this project, so they can't own this flow.` });
         if (!store.saveFlow(flow.id, { name, definitionJson: JSON.stringify(saved), sawRevision: Number(body.get("revision")), by: who.name }, now)) return answer(409, { ok: false, said: "Someone else changed this flow. Reload to see their changes, then make yours again." });
+        if (owner !== "" && owner !== flow.owner) store.setFlowOwner(flow.id, owner, now);
         return settle("Saved.");
       }
       if (definition === null) return answer(409, { ok: false, said: "This flow's drawing can't be read. Save it again from the editor." });
@@ -5520,7 +5524,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         const decision = body.get("decision") === "approve" ? "approve" : body.get("decision") === "send-back" ? "send-back" : null;
         if (decision === null) return answer(400, { ok: false, said: "Approve it or send it back." });
         const note = (body.get("note") ?? "").trim().slice(0, 2000) || null;
-        const decided = decideFlowCard(store, { card: target.id, decision, note, actor: who.name, repos: projects, evidenceRoot }, now);
+        const decided = decideFlowCard(store, { card: target.id, decision, note, actor: who.name, repos: projects, evidenceRoot, draft: body.get("draft") }, now);
         return decided.ok ? settle(decided.said) : answer(409, { ok: false, said: decided.message });
       }
       if (verb === "comment") {

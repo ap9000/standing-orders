@@ -76,8 +76,9 @@ describe("the flow engine", () => {
     expect(advanceFlows(store, repo, T0).moved).toBe(1);
     expect(card(id)).toMatchObject({ stage: "go-ahead", task: null, outputs: { triage: "The report is ready on its task." } });
     advanceFlows(store, repo, T0);
-    expect(card(id).waiting).toBe("Waiting for an approver to approve or send it back");
-    expect(store.listNotifications("pending").filter(one => one.kind === "flow-decision").map(one => one.subject)).toEqual(["Bug fixes: Dark mode toggle needs a decision"]);
+    // The template's decisions go to the flow's owner: whoever made it.
+    expect(card(id).waiting).toBe("Waiting for alex to approve or send it back");
+    expect(store.listNotifications("pending").filter(one => one.kind === "flow-decision").map(one => [one.subject, one.recipient])).toEqual([["Bug fixes: Dark mode toggle needs alex's decision", "alex"]]);
     // A decision from outside the project is refused; the approver's moves it on.
     expect(decideFlowCard(store, { card: id, decision: "approve", note: null, actor: "alex", repos: [] }, T0)).toEqual({ ok: false, message: "That card is no longer waiting." });
     expect(decideFlowCard(store, { card: id, decision: "approve", note: null, actor: "alex", repos: [repo] }, T0)).toEqual({ ok: true, said: "Approved. Moved to Build." });
@@ -112,7 +113,9 @@ describe("the flow engine", () => {
 
   test("a named decider, a failed task with and without a failure path, and a card in a removed zone", () => {
     const definition = coding();
-    definition.stages.find(one => one.id === "go-ahead")!.approver = "sam";
+    const ahead = definition.stages.find(one => one.id === "go-ahead")!;
+    ahead.approver = "sam";
+    ahead.toOwner = false;
     definition.stages.find(one => one.id === "build")!.onFail = "inbox";
     const flow = flowWith(definition);
     const id = store.addFlowCard({ flow, title: "Fix login", description: null, stage: "go-ahead", by: "alex" }, T0);

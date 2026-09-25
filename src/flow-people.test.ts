@@ -84,7 +84,7 @@ describe("owners, followers and comments", () => {
   });
 
   test("the flow tells the right person: a named decider alone, the owner when it's sent back, moved, stuck or approved, and followers when it's done", () => {
-    const flow = flowWith(definition => { definition.stages.find(one => one.id === "go-ahead")!.approver = "sam"; });
+    const flow = flowWith(definition => { const ahead = definition.stages.find(one => one.id === "go-ahead")!; ahead.approver = "sam"; ahead.toOwner = false; });
     const id = newCard(flow);
     assignFlowCard(store, card(id), "alex", "alex", T0);
     // sam moves alex's card: alex hears.
@@ -107,7 +107,7 @@ describe("owners, followers and comments", () => {
     advanceFlows(store, REPO, at(9));
     expect(pings().filter(one => String(one[1]).includes("Done:")).sort()).toEqual([["alex", "Bug fixes: Done: “Checkout rounding”"], ["sam", "Bug fixes: Done: “Checkout rounding”"]]);
     // A card with no owner and anyone deciding: the decision pages everyone, as before.
-    const open = flowWith();
+    const open = flowWith(definition => { definition.stages.find(one => one.id === "go-ahead")!.toOwner = false; });
     const other = newCard(open, "Open question");
     store.moveFlowCard(other, { to: "go-ahead", outcome: "moved", actor: "alex" }, at(10));
     advanceFlows(store, REPO, at(11));

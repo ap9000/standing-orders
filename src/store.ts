@@ -116,7 +116,8 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // v83 adds people on flow cards: an owner, watchers, comments with @mentions, and notifications for one person.
 // v84 closes the loop: project scripts (reusable steps with no AI), check and update steps with their logs, and trigger forms.
 // v85 adds sort steps: Jev (through OpenRouter) picks where a card goes, and each step run keeps what it decided.
-export const SCHEMA_VERSION = 85;
+// v86 adds draft steps (Claude writes from a card) and a flow's owner, whom its "the owner decides" zones ask in their chat app.
+export const SCHEMA_VERSION = 86;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -468,8 +469,9 @@ export type MateProposal = {
   outcome: Record<string, unknown> | null;
 };
 
-export type FlowRow = { id: number; repo: string; name: string; definitionJson: string; revision: number; state: "active" | "archived"; createdBy: string; createdAt: string; updatedBy: string; updatedAt: string };
-export type FlowStepRunRow = { card: number; entry: number; stage: string; kind: "check" | "update" | "sort"; script: string | null; scriptVersion: number | null; state: "running" | "passed" | "failed" | "waiting"; attempts: number;
+/** A flow; `owner` is who its "the owner decides" zones ask (v86): whoever made it, unless it was handed to someone else. */
+export type FlowRow = { id: number; repo: string; name: string; definitionJson: string; revision: number; state: "active" | "archived"; createdBy: string; createdAt: string; updatedBy: string; updatedAt: string; owner: string };
+export type FlowStepRunRow = { card: number; entry: number; stage: string; kind: "check" | "update" | "sort" | "draft"; script: string | null; scriptVersion: number | null; state: "running" | "passed" | "failed" | "waiting"; attempts: number;
   nextAt: string | null; startedAt: string; finishedAt: string | null; durationMs: number | null; exitCode: number | null; result: string | null; log: string | null;
   /** sort: what Jev answered, as JSON (flow-sort.ts reads it). */
   decisionJson: string | null };
@@ -484,7 +486,8 @@ export type FlowEventOutcome = "created" | "ok" | "fail" | "moved" | "approved" 
 
 function readFlowRow(row: Record<string, unknown>): FlowRow {
   return { id: Number(row["id"]), repo: String(row["repo"]), name: String(row["name"]), definitionJson: String(row["definition_json"]), revision: Number(row["revision"]),
-    state: String(row["state"]) as FlowRow["state"], createdBy: String(row["created_by"]), createdAt: String(row["created_at"]), updatedBy: String(row["updated_by"]), updatedAt: String(row["updated_at"]) };
+    state: String(row["state"]) as FlowRow["state"], createdBy: String(row["created_by"]), createdAt: String(row["created_at"]), updatedBy: String(row["updated_by"]), updatedAt: String(row["updated_at"]),
+    owner: row["owner"] === null || row["owner"] === undefined ? String(row["created_by"]) : String(row["owner"]) };
 }
 
 function readFlowScriptRow(row: Record<string, unknown>): FlowScriptRow {
@@ -1276,6 +1279,11 @@ export type TelegramTeamChat = {
   boundAt: string;
   cursor: number;
 };
+
+/** A Telegram button on a flow decision (v86): one action, for one visit of one card. */
+export type TelegramFlowAction = { token: string; binding: number; card: number; entry: number; action: "approve" | "edit" | "send-back"; chatId: string; messageId: string | null; expiresAt: string; consumedAt: string | null };
+/** A prompt the bot sent after Edit or Send back: a reply to it is the new draft, or the note. */
+export type TelegramFlowPrompt = { chatId: string; messageId: string; binding: number; card: number; entry: number; mode: "edit" | "send-back" };
 
 export type TelegramBinding = {
   id: number;
@@ -2134,7 +2142,8 @@ CREATE TABLE IF NOT EXISTS flow (
   created_by      TEXT NOT NULL,
   created_at      TEXT NOT NULL,
   updated_by      TEXT NOT NULL,
-  updated_at      TEXT NOT NULL
+  updated_at      TEXT NOT NULL,
+  owner           TEXT
 );
 CREATE TABLE IF NOT EXISTS flow_card (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2240,7 +2249,7 @@ CREATE TABLE IF NOT EXISTS flow_step_run (
   card           INTEGER NOT NULL REFERENCES flow_card(id),
   entry          INTEGER NOT NULL,
   stage          TEXT NOT NULL,
-  kind           TEXT NOT NULL CHECK (kind IN ('check','update','sort')),
+  kind           TEXT NOT NULL CHECK (kind IN ('check','update','sort','draft')),
   script         TEXT,
   script_version INTEGER,
   state          TEXT NOT NULL CHECK (state IN ('running','passed','failed','waiting')),
@@ -3101,6 +3110,38 @@ CREATE TABLE IF NOT EXISTS telegram_action (
   consumed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS telegram_action_by_decision ON telegram_action (decision);
+
+-- v86: a flow card waiting at a "Person decides" zone reaches the decider on
+-- Telegram with Approve / Edit / Send back. Each button is one opaque token
+-- for one visit of one card (card, entry), placed on the message it rides so
+-- a tap on any other message proves itself stale. Edit and Send back ask
+-- for a reply to a prompt: telegram_flow_prompt names which prompt means
+-- what, so the reply becomes the new draft or the note.
+CREATE TABLE IF NOT EXISTS telegram_flow_action (
+  token       TEXT PRIMARY KEY,
+  binding     INTEGER NOT NULL REFERENCES telegram_binding(id) ON DELETE RESTRICT,
+  card        INTEGER NOT NULL REFERENCES flow_card(id),
+  entry       INTEGER NOT NULL,
+  action      TEXT NOT NULL CHECK (action IN ('approve','edit','send-back')),
+  chat_id     TEXT NOT NULL,
+  message_id  TEXT,
+  created_at  TEXT NOT NULL,
+  expires_at  TEXT NOT NULL,
+  consumed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS telegram_flow_action_visit ON telegram_flow_action (card, entry);
+CREATE TABLE IF NOT EXISTS telegram_flow_prompt (
+  chat_id     TEXT NOT NULL,
+  message_id  TEXT NOT NULL,
+  binding     INTEGER NOT NULL REFERENCES telegram_binding(id) ON DELETE RESTRICT,
+  card        INTEGER NOT NULL REFERENCES flow_card(id),
+  entry       INTEGER NOT NULL,
+  mode        TEXT NOT NULL CHECK (mode IN ('edit','send-back')),
+  created_at  TEXT NOT NULL,
+  expires_at  TEXT NOT NULL,
+  consumed_at TEXT,
+  PRIMARY KEY (chat_id, message_id)
+);
 
 -- Which outbound Telegram message carries which decision (v10). A free-text
 -- reply is routed through the EXACT message it replies to — never "the
@@ -4347,6 +4388,7 @@ function initializeStore(db: Database, file: string): Store {
   migrate(db, preflight === null ? null : Math.abs(preflight));
   addColumn(db, "flow_card", "source_json", "TEXT");
   addColumn(db, "flow_card", "owner", "TEXT");
+  addColumn(db, "flow", "owner", "TEXT");
   addColumn(db, "notification", "recipient", "TEXT");
   addColumn(db, "approver", "projects_json", "TEXT");
   addColumn(db, "invite", "projects_json", "TEXT");
@@ -5533,6 +5575,36 @@ function migrate(db: Database, origin: number | null): void {
        entry          INTEGER NOT NULL,
        stage          TEXT NOT NULL,
        kind           TEXT NOT NULL CHECK (kind IN ('check','update','sort')),
+       script         TEXT,
+       script_version INTEGER,
+       state          TEXT NOT NULL CHECK (state IN ('running','passed','failed','waiting')),
+       attempts       INTEGER NOT NULL DEFAULT 0,
+       next_at        TEXT,
+       started_at     TEXT NOT NULL,
+       finished_at    TEXT,
+       duration_ms    INTEGER,
+       exit_code      INTEGER,
+       result         TEXT,
+       log            TEXT,
+       decision_json  TEXT,
+       PRIMARY KEY (card, entry)
+     )`,
+    ["card", "entry", "stage", "kind", "script", "script_version", "state", "attempts", "next_at", "started_at", "finished_at", "duration_ms", "exit_code", "result", "log", "decision_json"],
+  );
+  db.exec("CREATE INDEX IF NOT EXISTS flow_step_run_recent ON flow_step_run (started_at)");
+
+  // v86 (draft steps): kind admits 'draft' through the same copy/rename,
+  // carrying every v85 run whole.
+  rebuildForV4(
+    db,
+    "flow_step_run",
+    "CHECK (kind IN ('check','update','sort'))",
+    "'draft'",
+    `CREATE TABLE flow_step_run_next (
+       card           INTEGER NOT NULL REFERENCES flow_card(id),
+       entry          INTEGER NOT NULL,
+       stage          TEXT NOT NULL,
+       kind           TEXT NOT NULL CHECK (kind IN ('check','update','sort','draft')),
        script         TEXT,
        script_version INTEGER,
        state          TEXT NOT NULL CHECK (state IN ('running','passed','failed','waiting')),
@@ -19848,6 +19920,46 @@ export class Store {
     this.db.prepare("UPDATE telegram_note_draft SET state = ? WHERE id = ?").run(state, id);
   }
 
+  // ---- flow decisions on Telegram (v86) ------------------------------------------
+
+  createTelegramFlowActions(at: { binding: number; chatId: string; card: number; entry: number }, actions: readonly { token: string; action: TelegramFlowAction["action"] }[], now: Date, days = 7): void {
+    const stamp = now.toISOString(), expires = new Date(now.getTime() + days * 86_400_000).toISOString();
+    const insert = this.db.prepare("INSERT INTO telegram_flow_action (token, binding, card, entry, action, chat_id, message_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)");
+    for (const one of actions) insert.run(one.token, at.binding, at.card, at.entry, one.action, at.chatId, stamp, expires);
+  }
+
+  getTelegramFlowAction(token: string): TelegramFlowAction | null {
+    if (!/^[0-9a-f]{32}$/.test(token)) return null;
+    const row = this.db.prepare("SELECT * FROM telegram_flow_action WHERE token = ?").get(token);
+    if (row === undefined) return null;
+    return { token: String(row["token"]), binding: Number(row["binding"]), card: Number(row["card"]), entry: Number(row["entry"]), action: String(row["action"]) as TelegramFlowAction["action"],
+      chatId: String(row["chat_id"]), messageId: row["message_id"] === null ? null : String(row["message_id"]), expiresAt: String(row["expires_at"]), consumedAt: row["consumed_at"] === null ? null : String(row["consumed_at"]) };
+  }
+
+  placeTelegramFlowActions(tokens: readonly string[], messageId: string): void {
+    const place = this.db.prepare("UPDATE telegram_flow_action SET message_id = ? WHERE token = ?");
+    for (const token of tokens) place.run(messageId, token);
+  }
+
+  /** Retire every button (and prompt) for one visit of a card: it was decided, or its draft replaced. */
+  retireTelegramFlowVisit(card: number, entry: number, now: Date): void {
+    const stamp = now.toISOString();
+    this.db.prepare("UPDATE telegram_flow_action SET consumed_at = ? WHERE card = ? AND entry = ? AND consumed_at IS NULL").run(stamp, card, entry);
+    this.db.prepare("UPDATE telegram_flow_prompt SET consumed_at = ? WHERE card = ? AND entry = ? AND consumed_at IS NULL").run(stamp, card, entry);
+  }
+
+  recordTelegramFlowPrompt(prompt: TelegramFlowPrompt, now: Date, hours = 24): void {
+    this.db.prepare("INSERT OR REPLACE INTO telegram_flow_prompt (chat_id, message_id, binding, card, entry, mode, created_at, expires_at, consumed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)")
+      .run(prompt.chatId, prompt.messageId, prompt.binding, prompt.card, prompt.entry, prompt.mode, now.toISOString(), new Date(now.getTime() + hours * 3_600_000).toISOString());
+  }
+
+  /** The live prompt a message replies to, if any. */
+  telegramFlowPrompt(chatId: string, messageId: string, now: Date): TelegramFlowPrompt | null {
+    const row = this.db.prepare("SELECT * FROM telegram_flow_prompt WHERE chat_id = ? AND message_id = ? AND consumed_at IS NULL AND expires_at > ?").get(chatId, messageId, now.toISOString());
+    if (row === undefined) return null;
+    return { chatId: String(row["chat_id"]), messageId: String(row["message_id"]), binding: Number(row["binding"]), card: Number(row["card"]), entry: Number(row["entry"]), mode: String(row["mode"]) as TelegramFlowPrompt["mode"] };
+  }
+
   getTelegramAction(token: string): TelegramAction | null {
     const row = this.db.prepare("SELECT * FROM telegram_action WHERE token = ?").get(token);
     return row === undefined ? null : readTelegramAction(row);
@@ -20668,6 +20780,11 @@ export class Store {
       .run(flow.repo, flow.name, flow.definitionJson, flow.by, stamp, flow.by, stamp).lastInsertRowid);
   }
 
+  /** Hand a flow to another person: its "the owner decides" zones ask them from now on. */
+  setFlowOwner(id: number, owner: string, now: Date): void {
+    this.db.prepare("UPDATE flow SET owner = ?, updated_at = ? WHERE id = ?").run(owner, now.toISOString(), id);
+  }
+
   getFlow(id: number): FlowRow | null {
     const row = this.db.prepare("SELECT * FROM flow WHERE id = ?").get(id);
     return row === undefined ? null : readFlowRow(row);
@@ -20789,7 +20906,7 @@ export class Store {
   }
 
   /** Claim a card's visit to a step zone. False when another pass holds it or it already finished. */
-  claimFlowStep(step: { card: number; entry: number; stage: string; kind: "check" | "update" | "sort"; script: string | null; scriptVersion: number | null }, now: Date): boolean {
+  claimFlowStep(step: { card: number; entry: number; stage: string; kind: "check" | "update" | "sort" | "draft"; script: string | null; scriptVersion: number | null }, now: Date): boolean {
     return this.transact(() => {
       const existing = this.flowStepRun(step.card, step.entry);
       const stamp = now.toISOString();

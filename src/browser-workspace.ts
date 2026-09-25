@@ -171,9 +171,11 @@ export type BrowserResultView = {
 };
 /** One zone on a flow's canvas: its step, where it leads, and where it sits. */
 export type BrowserFlowStage = {
-  id: string; title: string; kind: "inbox" | "task" | "report" | "approval" | "check" | "update" | "notify" | "sort" | "done";
+  id: string; title: string; kind: "inbox" | "task" | "report" | "approval" | "check" | "update" | "notify" | "sort" | "draft" | "done";
   zone: { x: number; y: number; w: number; h: number; color: string };
   instructions: string | null; planning: "auto" | "required" | "skip" | null; approver: string | null; message: string | null;
+  /** An approval zone the flow's owner decides. */
+  toOwner?: boolean;
   close: boolean | null; script: string | null;
   /** A sort zone: Jev's question, its answers and where each goes, how sure it must be to act alone, and what else it notes. */
   sort: { question: string; answers: { answer: string; means: string; to: string }[]; sureAt: number; notes: { id: string; kind: "score" | "yes-no"; question: string; levels: string[] | null }[] } | null;
@@ -195,6 +197,8 @@ export type BrowserFlowCard = {
   comments: { id: number; author: string; body: string; mentions: string[]; at: string }[];
   /** The latest sort: its short chip ("Bug · 94% · Now") and whether Jev was sure enough to act alone. */
   sorted: { chip: string; confident: boolean } | null;
+  /** Waiting at a decision after a draft: the draft, which the person can edit before approving. */
+  draft: { zone: string; title: string; text: string } | null;
 };
 
 /** What starts cards in a flow on its own. */
@@ -212,7 +216,7 @@ export type BrowserFlowTrigger = {
 /** A flow's canvas: zones, cards, and what this person may change. */
 export type BrowserFlowView = {
   kind: "flow";
-  flow: { id: number; name: string; project: string; revision: number; href: string };
+  flow: { id: number; name: string; project: string; revision: number; href: string; owner: string };
   /** Opens the lead's chat with a message about this flow started for the person to finish. */
   chatHref: string;
   triggers: BrowserFlowTrigger[];

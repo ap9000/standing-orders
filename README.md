@@ -141,6 +141,16 @@ failed when a result is marked complete.
   issue triage, a spam filter for public forms, lead routing, effort routing
   (small changes straight to a build, big ones through a plan) and exception
   routing (orders, invoices, deliveries).
+- **Drafts, approved from your phone.** A "Draft" zone has Claude write a
+  reply, summary or note from the card in a few seconds, with no repository
+  and no tools, through the lead chat's sign-in. Nothing is sent by itself: the
+  next "Person decides" zone puts the draft in front of the flow's owner (or
+  whoever it names) in their chat app. On Telegram the message carries
+  Approve, Edit and Send back: Edit takes your own version as a reply and
+  brings it back to approve, and Send back takes a note and has Claude try
+  again. In the console the same draft is an editable box on the card. Each
+  flow has an owner (whoever made it, until handed on) whom these decisions
+  go to.
 - **Unified portfolio chat.** Read every project, prioritize queues, answer
   decisions, repair failed or cancelled dependencies, and confirm rich action
   cards from one conversation. The chat proposes; durable workflow state

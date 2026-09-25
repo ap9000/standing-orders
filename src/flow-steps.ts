@@ -10,6 +10,8 @@
  * - update — comments on the GitHub or Linear issue the card came from, and
  *            can close it (Linear: moves it to the team's done state), with
  *            the person's own `gh` login and Linear key.
+ * - draft  — (v86) Claude writes from the card (flow-draft.ts); the draft
+ *            is kept on the card for a person and later steps.
  * - sort   — (v85) asks Jev through OpenRouter which of the zone's answers
  *            fits the card (flow-sort.ts), and sends it where that answer
  *            leads, or down the not-sure path.
@@ -29,6 +31,7 @@ import { cardFollowers, notifyPeople } from "./flow-people.js";
 import { LINEAR_URL, readLinearKey } from "./flow-triggers.js";
 import { fillFlowText, type FlowDefinition, type FlowStage } from "./flows.js";
 import { askJev, readJevAnswers, sortLog, sortRequest, sortState, sortWords } from "./flow-sort.js";
+import { claudeDraftRunner, DRAFT_TIMEOUT, draftPrompt, keptDraft, type DraftRunner } from "./flow-draft.js";
 import { readProviderKey } from "./keys.js";
 import type { FlowCardRow, FlowRow, FlowScriptRow, Store } from "./store.js";
 
@@ -45,11 +48,15 @@ export type StepIo = {
   base: string;
   /** The operator's OpenRouter key, for sort steps (default: the one stored in Settings → AI providers). */
   openRouterKey?: () => string | null;
+  /** Writes a draft (default: Claude through this computer's sign-in, no tools). */
+  draft?: DraftRunner;
 };
 export type StepPass = { ran: number; problems: string[] };
 type Outcome = { state: "passed" | "failed" | "retry"; said: string; log?: string; exitCode?: number | null;
   /** sort: where the card goes (null: it waits here), and what was decided. */
-  to?: string | null; decisionJson?: string; unsure?: boolean };
+  to?: string | null; decisionJson?: string; unsure?: boolean;
+  /** What the card keeps from this step, when it isn't `said` (a draft's text). */
+  output?: string };
 
 const RETRY_MS = [5 * 60_000, 15 * 60_000];
 const OUTPUT_CHARS = 3000;
@@ -66,7 +73,7 @@ export async function runFlowSteps(store: Store, repo: string, now: Date, io: St
     let known = flows.get(card.flow);
     if (known === undefined) { const flow = store.getFlow(card.flow)!; known = { flow, definition: flowDefinitionOf(flow) }; flows.set(card.flow, known); }
     const stage = known.definition?.stages.find(one => one.id === card.stage);
-    if (stage === undefined || (stage.kind !== "check" && stage.kind !== "update" && stage.kind !== "sort")) continue;
+    if (stage === undefined || (stage.kind !== "check" && stage.kind !== "update" && stage.kind !== "sort" && stage.kind !== "draft")) continue;
     const key = stage.kind === "sort" ? (io.openRouterKey ?? (() => readProviderKey("openrouter")))() : null;
     if (stage.kind === "sort" && key === null) {
       const waiting = "Sorting needs an OpenRouter key. Add one in Settings → AI providers.";
@@ -81,12 +88,13 @@ export async function runFlowSteps(store: Store, repo: string, now: Date, io: St
     }
     if (!store.claimFlowStep({ card: card.id, entry: card.entry, stage: stage.id, kind: stage.kind, script: script?.name ?? null, scriptVersion: script?.version ?? null }, now)) continue;
     pass.ran++;
-    store.updateFlowCard(card.id, { waiting: stage.kind === "check" ? "Running its check…" : stage.kind === "sort" ? "Sorting…" : "Updating the issue…" }, now);
+    store.updateFlowCard(card.id, { waiting: stage.kind === "check" ? "Running its check…" : stage.kind === "sort" ? "Sorting…" : stage.kind === "draft" ? "Writing the draft…" : "Updating the issue…" }, now);
     let outcome: Outcome;
     const started = Date.now();
     try {
       outcome = stage.kind === "check" ? await runCheck(store, known.flow, script!, card, now, io)
         : stage.kind === "sort" ? await sortCard(known.definition!, stage, card, key!, io)
+        : stage.kind === "draft" ? await draftCard(store, known.definition!, stage, card, io)
         : await updateSource(stage, card, io);
     } catch (error) {
       outcome = { state: "retry", said: error instanceof Error ? error.message : "It couldn't run." };
@@ -111,7 +119,7 @@ function settle(store: Store, definition: FlowDefinition, stage: FlowStage, card
     outcome = { state: "failed", said: `${outcome.said} It didn't work after three tries.` };
   }
   store.finishFlowStep(card.id, card.entry, { state: outcome.state === "passed" ? "passed" : "failed", result: outcome.said, ...kept }, now);
-  store.updateFlowCard(card.id, { outputs: { ...card.outputs, [stage.id]: outcome.said }, waiting: null }, now);
+  store.updateFlowCard(card.id, { outputs: { ...card.outputs, [stage.id]: outcome.output ?? outcome.said }, waiting: null }, now);
   const titleOf = (id: string | null) => definition.stages.find(one => one.id === id)?.title ?? "another zone";
   if (outcome.state === "passed") {
     // A sort names where the card goes; one it isn't sure about is a person's to place.
@@ -143,6 +151,18 @@ function keptLog(text: string): string {
 function tail(text: string): string {
   const end = text.trim().slice(-OUTPUT_CHARS);
   return scanForSecrets(end).length > 0 ? "(Its output held something that looked like a key, so it isn't shown.)" : end;
+}
+
+/** A draft: Claude writes what the zone asks, from the card, with the lead chat's Claude model; the text stays on the card. */
+async function draftCard(store: Store, definition: FlowDefinition, stage: FlowStage, card: FlowCardRow, io: StepIo): Promise<Outcome> {
+  const config = store.getChatConfig();
+  const model = config?.provider === "claude-subscription" ? config.model : "default";
+  const answer = await (io.draft ?? claudeDraftRunner())({ model, prompt: draftPrompt(stage, card, definition), timeoutMs: DRAFT_TIMEOUT });
+  if (!answer.ok) return { state: "retry", said: answer.said };
+  const text = keptDraft(answer.text);
+  if (text === "") return { state: "retry", said: "Claude's draft came back empty." };
+  const words = text.split(/\s+/).filter(Boolean).length;
+  return { state: "passed", said: `Drafted ${words} word${words === 1 ? "" : "s"}.`, output: text, log: `Claude (${model}) · ${(answer.ms / 1000).toFixed(1)} s\n\n${text}` };
 }
 
 /** A sort: Jev picks one of the zone's answers for the card; the answer (or the not-sure path) says where it goes. */

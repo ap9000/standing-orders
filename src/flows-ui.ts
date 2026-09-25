@@ -1,9 +1,9 @@
 /** Flows in the console: the list of a person's flows, and one flow's canvas
  * (the React view's data, plus a plain fallback page the view replaces). */
 import type { BrowserFlowCard, BrowserFlowTrigger, BrowserFlowView } from "./browser-workspace.js";
-import { flowDefinitionOf } from "./flow-engine.js";
+import { draftFor, flowDefinitionOf } from "./flow-engine.js";
 import { describeTrigger, triggerHeadline, FLOW_TRIGGER_KINDS, FLOW_TRIGGER_WORDS, githubRepoOf, HOOK_PATH, hookReady, readHooksBase, readLinearKey, takesDeliveries, triggerConfigOf } from "./flow-triggers.js";
-import { FLOW_COLORS, FLOW_KIND_WORDS, FLOW_STAGE_KINDS, FLOW_TEMPLATES } from "./flows.js";
+import { deciderOf, FLOW_COLORS, FLOW_KIND_WORDS, FLOW_STAGE_KINDS, FLOW_TEMPLATES } from "./flows.js";
 import { flowInsights, troubleWords } from "./flow-insights.js";
 import { parseSortDecision, sortChip } from "./flow-sort.js";
 import type { FlowCardRow, FlowRow, Store } from "./store.js";
@@ -57,11 +57,13 @@ export function flowView(store: Store, flow: FlowRow, viewer: { name: string; ap
     const task = card.task ?? card.primaryTask;
     const discussion = store.flowComments(card.id);
     const watchers = store.flowCardWatchers(card.id);
-    const canDecide = viewer.approver && card.state === "active" && stage?.kind === "approval" && (stage.approver === null || stage.approver === viewer.name);
+    const decider = stage?.kind === "approval" ? deciderOf(stage, flow) : null;
+    const canDecide = viewer.approver && card.state === "active" && stage?.kind === "approval" && (decider === null || decider === viewer.name);
     // History reads moves and ownership together, newest first.
     const owned = discussion.filter(one => one.kind === "owner").map(one => ({ text: one.body === "" ? `${one.author} left it without an owner` : one.body === one.author ? `${one.author} took it on` : `${one.author} made ${one.body} the owner`, at: one.at }));
     const moves = store.flowEvents(card.id).map(event => ({ text: historyText(event, title, sortZones), at: event.at }));
     const decision = parseSortDecision(decisions.get(card.id)?.decisionJson ?? null);
+    const shown = stage?.kind === "approval" && definition !== null ? draftFor(definition, stage) : null;
     return {
       id: card.id, title: card.title, description: card.description, stage: card.stage, state: card.state, waiting: card.waiting,
       task: task === null ? null : { id: task, href: `/t/${encodeURIComponent(task)}` },
@@ -74,6 +76,7 @@ export function flowView(store: Store, flow: FlowRow, viewer: { name: string; ap
       mine: card.owner === viewer.name || watchers.includes(viewer.name) || canDecide,
       comments: discussion.filter(one => one.kind === "comment").map(one => ({ id: one.id, author: one.author, body: one.body, mentions: one.mentions, at: one.at })),
       sorted: decision === null ? null : { chip: sortChip(decision), confident: decision.confident },
+      draft: shown === null || card.state !== "active" || card.outputs[shown.id] === undefined ? null : { zone: shown.id, title: shown.title, text: card.outputs[shown.id]! },
     };
   });
   const triggers: BrowserFlowTrigger[] = store.flowTriggers(flow.id).map(trigger => {
@@ -90,7 +93,7 @@ export function flowView(store: Store, flow: FlowRow, viewer: { name: string; ap
   });
   return {
     kind: "flow",
-    flow: { id: flow.id, name: flow.name, project: projectName(flow.repo), revision: flow.revision, href: `/flows/${flow.id}` },
+    flow: { id: flow.id, name: flow.name, project: projectName(flow.repo), revision: flow.revision, href: `/flows/${flow.id}`, owner: flow.owner },
     chatHref: `/chat?draft=${encodeURIComponent(`In the ${flow.name} flow, `)}`,
     triggers,
     triggerSetup: {
