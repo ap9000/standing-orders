@@ -135,8 +135,8 @@ function ZoneNode({ data, selected }: NodeProps<Node<ZoneData, "zone">>) {
   const [over, setOver] = useState(false);
   const handle = cn("!size-2.5 !border-2 !border-card", !editing && "!opacity-0");
   return <div
-    className={cn("flex h-full flex-col overflow-hidden rounded-xl border shadow-sm", selected && editing ? "ring-2 ring-primary" : "", over && "ring-2 ring-primary/60")}
-    style={{ borderColor: `color-mix(in srgb, ${color} 35%, transparent)`, background: `color-mix(in srgb, ${color} 7%, var(--color-card))` }}
+    // Zones are plain surfaces in both themes; a zone's colour is said once, on its icon (a tint that reads as pastel on white turns muddy on dark).
+    className={cn("flex h-full flex-col overflow-hidden rounded-xl border bg-muted/40 shadow-sm", selected && editing ? "ring-2 ring-primary" : "", over && "ring-2 ring-primary/60")}
     onDragOver={event => { if (!canMove || editing) return; event.preventDefault(); setOver(true); }}
     onDragLeave={() => setOver(false)}
     onDrop={event => { setOver(false); const id = Number(event.dataTransfer.getData("text/so-card")); if (id > 0) data.onDrop(id, stage.id); }}
@@ -150,7 +150,7 @@ function ZoneNode({ data, selected }: NodeProps<Node<ZoneData, "zone">>) {
     {/* Routing handles: arrows leave from whichever side faces their target. Never drawn from. */}
     {(["Left", "Right", "Top", "Bottom"] as const).map(side => <Handle key={`s-${side}`} type="source" position={Position[side]} id={`s-${side}`} className="!opacity-0 !pointer-events-none" isConnectable={false}
 />)}
-    <header className="flex items-center gap-2 border-b px-3 py-2" style={{ borderColor: `${color}33` }}>
+    <header className="flex items-center gap-2 border-b px-3 py-2">
       <span className="inline-flex size-6 items-center justify-center rounded-md text-white" style={{ background: color }}>{KIND_ICONS[stage.kind]}</span>
       <div className="min-w-0 flex-1">
         <div className="truncate text-[13px] font-semibold">{stage.title}</div>
@@ -1210,7 +1210,7 @@ function PhoneFlow({ view: initial, csrf }: { view: BrowserFlowView; csrf: strin
     {view.canEdit && <details className="rounded-lg border p-3"><summary className="cursor-pointer text-[14px] font-semibold">New card</summary><div className="pt-3"><NewCard view={view} csrf={csrf} apply={apply} /></div></details>}
     {flowOrder(view.stages, view.start).map(stage => {
       const cards = view.cards.filter(one => one.stage === stage.id && one.state === "active");
-      return <section key={stage.id} className="rounded-lg border" style={{ borderColor: `${COLORS[stage.zone.color] ?? "#64748b"}55` }}>
+      return <section key={stage.id} className="rounded-lg border bg-muted/40">
         <header className="flex items-center gap-2 px-3 py-2"><span className="inline-flex size-6 items-center justify-center rounded-md text-white" style={{ background: COLORS[stage.zone.color] ?? "#64748b" }}>{KIND_ICONS[stage.kind]}</span><span className="flex-1 text-[14px] font-semibold">{stage.title}</span>{cards.length > 0 && <span className="text-[12px] text-muted-foreground">{cards.length}</span>}</header>
         {cards.length > 0 && <ul className="flex flex-col gap-2 px-3 pb-3">{cards.map(one => <li key={one.id}><button type="button" onClick={() => setOpen(one.id)} className={cn("min-h-11 w-full rounded-lg border bg-card px-3 py-2 text-left", one.canDecide && "border-attention/60")}>
           <div className="flex items-start gap-2"><div className="min-w-0 flex-1 text-[14px] font-medium">{one.title}</div>{one.owner !== null && <Face name={one.owner} />}</div>
