@@ -183,7 +183,7 @@ await check("Claude builds it, the project's checks pass, and the result shows w
   return { run: run.id, checks };
 });
 
-/** On a result page, send the work back with a note; returns the new revision's id once its scope is drafted. */
+/** On a result page, send the work back with a note; returns the new revision's id once the planner has updated its plan. */
 async function sendBack(id, note) {
   const run = latestBuild(id);
   await page.goto(`${base}/review?result=${encodeURIComponent(id)}&run=${run.id}&project=${encodeURIComponent(repo)}`);
@@ -194,7 +194,9 @@ async function sendBack(id, note) {
   await Promise.all([page.waitForNavigation(), page.locator("button[data-request-changes]").click()]);
   const child = new URL(page.url()).searchParams.get("version") ?? rows(`SELECT t.external_id AS id FROM task_ref t WHERE t.revision_of IS NOT NULL ORDER BY t.id DESC LIMIT 1`)[0]?.id;
   if (!child || child === id) throw new Error(`no revision was made: ${page.url()}`);
-  await until("the revision's scope", async () => rows(`SELECT 1 FROM task_scope WHERE task_id = '${child}'`).length > 0, { timeoutMs: 300_000, everyMs: 5000 });
+  if (refOf(child)?.plan !== "requested" && refOf(child)?.plan !== "drafted") throw new Error(`the revision wasn't sent to the planner: plan ${refOf(child)?.plan}`);
+  if (!/Updating the plan/.test(await page.locator("body").innerText())) throw new Error("the task page doesn't say the plan is being updated");
+  await until("the planner's updated plan", async () => refOf(child)?.plan === "drafted", { timeoutMs: 420_000, everyMs: 5000 });
   return child;
 }
 const branchFile = (runId, file) => execFileSync("git", ["-C", repo, "show", `refs/heads/${rows(`SELECT branch FROM run WHERE id = ${runId}`)[0].branch}:${file}`], { encoding: "utf8" });
@@ -206,6 +208,36 @@ await check("Send it back with a note: the revision is approved again and rebuil
   const test = branchFile(built.id, "test/math.test.js");
   if (!/-3/.test(test)) throw new Error(`the revision's test doesn't check -3: ${test.slice(0, 400)}`);
   return { revision, run: built.id };
+});
+
+await check("Send it back asking for more than the plan allows: the planner adds it, you approve the change, and it's built", ["Send it back with a note: the revision is approved again and rebuilt with the fix"], async () => {
+  const done = rows(`SELECT t.external_id AS id FROM task_ref t WHERE t.revision_of = '${firstTask}' ORDER BY t.id DESC LIMIT 1`)[0]?.id;
+  const child = await sendBack(done, "Also add multiply(a, b), with its own test.");
+  const scope = rows(`SELECT goal, acceptance_json FROM task_scope WHERE task_id = '${child}'`)[0];
+  if (!/multiply/i.test(`${scope.goal}\n${scope.acceptance_json}`)) throw new Error(`the updated plan leaves multiply out: ${scope.goal.slice(0, 300)}`);
+  // What a person reviews: the change to the plan and why, on desktop and on a phone.
+  await page.goto(`${base}/t/${child}`);
+  const review = page.locator("summary", { hasText: /Review plan|Updated approval terms/ }).first();
+  if (await review.count() > 0) await review.click();
+  const amended = page.locator("#contract-amendment");
+  await amended.waitFor({ timeout: 15_000 });
+  const reason = await amended.innerText();
+  await amended.scrollIntoViewIfNeeded();
+  await shot("plan-amended");
+  const phone = await signIn("alex", { width: 390, height: 844 }, "dark");
+  await phone.goto(`${base}/t/${child}`);
+  const phoneReview = phone.locator("summary", { hasText: /Review plan|Updated approval terms/ }).first();
+  if (await phoneReview.count() > 0) await phoneReview.click();
+  await phone.locator("#contract-amendment").scrollIntoViewIfNeeded();
+  await phone.screenshot({ path: join(w.out, "plan-amended-phone.png") });
+  const wide = await phone.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
+  await phone.context().close();
+  if (wide) throw new Error("the phone page scrolls sideways");
+  await approveOnPage(child);
+  const built = await builtAndChecked(child);
+  const source = branchFile(built.id, "src/math.js");
+  if (!/multiply/.test(source) || !/subtract/.test(source)) throw new Error(`the build doesn't keep subtract and add multiply: ${source.slice(0, 300)}`);
+  return { revision: child, change: reason.replace(/\s+/g, " ").slice(0, 240), run: built.id };
 });
 
 await check("A build stops to ask a question the plan leaves open; you answer on the decision page and it carries on", [], async () => {

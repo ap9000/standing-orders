@@ -71,7 +71,8 @@ export async function runTaskOutcomeCommand(action: 'complete' | 'revise', posit
     if (!revised.ok) return fail(revised.status === 400 ? 'usage' : 'stale-result', revised.message);
     const scope = store.getScope(revised.id);
     const approved = scope?.approvedDigest != null && scope.approvedDigest === scope.digest;
-    return emit({ ok: true, result: { id: revised.id, rootId: current.rootId, sourceRun: run.id, source, key, approved } },
-      [`${current.rootId} · Revision created`, `Execution: ${revised.id}`, approved ? 'Covered by your existing operating mode.' : 'The revision is waiting for approval.']);
+    const planning = store.lookupRef(revised.id)?.plan === 'requested';
+    return emit({ ok: true, result: { id: revised.id, rootId: current.rootId, sourceRun: run.id, source, key, approved, planning } },
+      [`${current.rootId} · Revision created`, `Execution: ${revised.id}`, approved ? 'Covered by your existing operating mode.' : planning ? 'Updating the plan with your notes; approve it when it is ready.' : 'The revision is waiting for approval.']);
   });
 }

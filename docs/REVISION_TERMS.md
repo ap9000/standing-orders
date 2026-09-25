@@ -66,7 +66,7 @@ covers them:
 - publication and merge grants (per repository, proven at publication time,
   never stamped on a task);
 - the plan document and its revision ledger (a revision may be planned afresh;
-  the brief plus the source scope are its contract);
+  the brief plus the source scope are its contract — see below);
 - strikes, holds, and the source's runs.
 
 **Fresh from a live mode, only when the caller re-proved coverage inside the
@@ -82,6 +82,26 @@ the source had no scope.
 A new revision build starts from the exact source head recorded in its
 verified brief. An explicit base or existing revision branch must contain that
 head. Missing or stale source identity refuses before a lease or provider spend.
+
+## Planning a send-back
+
+A revision a person sends back with notes (the result page, chat, or a flow's
+"send it back") is filed with planning requested. The planner works on the
+revised build's head and reads the copied terms and the notes. A note that
+fits the copied terms leaves them as they are. A note that asks for more
+than they allow ("also add multiply", when the copy rules other functions
+out) becomes an amendment: the other terms and criteria stay, a criterion
+for the new work is added, and the change and its reason are shown at
+approval. Nothing builds until a person approves the updated terms.
+
+The widening happens only here, before approval. At build time the brief is
+still quoted data, and a note that seems to widen the approved scope still
+parks the build. Repair drafts (CI and criterion repairs) are not planned
+this way: their brief cannot widen the contract.
+
+Under a live mode that covers the sender, a send-back is approved at filing,
+as before, and is not planned: revisions never inherit a mode's planner
+authority (docs/AUTO_APPROVAL.md).
 
 ## Approval semantics
 

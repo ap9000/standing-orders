@@ -229,12 +229,12 @@ export function taskInCeiling(
 function approvalState(
   store: Store,
   taskId: string,
-): "none" | "waiting" | "approved" {
+): "none" | "planning" | "waiting" | "approved" {
   const scope = store.getScope(taskId);
   if (scope === null) return "none";
-  return scope.approvedDigest != null && scope.approvedDigest === scope.digest
-    ? "approved"
-    : "waiting";
+  if (scope.approvedDigest != null && scope.approvedDigest === scope.digest) return "approved";
+  // Nothing to approve while the planner is still writing the plan.
+  return store.lookupRef(taskId)?.plan === "requested" ? "planning" : "waiting";
 }
 
 function controlLink(

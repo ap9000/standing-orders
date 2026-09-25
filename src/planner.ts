@@ -540,16 +540,18 @@ function plannerRepairBrief(
     "criteria, remove criteria, or invent missing facts.",
     ...(authorityLocked
       ? [
-          "The original goal, outOfScope, touches, and acceptance values are",
-          "frozen. Reproduce those values exactly; only the non-authority plan",
-          "document, the `amendment` note, or transport shape may be corrected.",
+          "The goal, outOfScope, touches, and acceptance values are frozen as",
+          "YOUR previous output wrote them. Reproduce those values exactly; only",
+          "the non-authority plan document, the `amendment` note, or transport",
+          "shape may be corrected.",
         ]
       : []),
     ...(problems.some(problem => problem.reason === "silent-amendment")
       ? [
-          "Your plan changed the FILED contract without saying so. State why",
-          "in `amendment` (a short string) — the operator will see every",
-          "addition, change, and removal at approval and decide.",
+          "Your plan changed the FILED contract without saying so. Keep your",
+          "changes exactly as you wrote them. State why in `amendment` (a short",
+          "string) — the operator will see every addition, change, and removal",
+          "at approval and decide.",
         ]
       : []),
     "Return valid JSON through the chosen nonce-bound file only.",
@@ -569,6 +571,7 @@ function enforceRepairAuthority(
   payload: PlannerPayload,
   expectedKind: "decision" | "plan" | null,
   authorityAnchor: string | null,
+  source: PlannerSource,
 ): PlannerPayload {
   if (payload.state === "missing" || payload.state === "malformed") return payload;
   if (expectedKind !== null && payload.kind !== expectedKind) {
@@ -589,7 +592,9 @@ function enforceRepairAuthority(
       repairable: true,
     };
   }
-  if (authorityAnchor !== null) {
+  // A repair that goes back to exactly the FILED terms adds no authority: it is what the operator filed.
+  const filed = payload.state === "plan" && source.contract.scope !== null && contractChangesOf(source.contract.scope, payload.plan).length === 0;
+  if (authorityAnchor !== null && !filed) {
     if (payload.state !== "plan" || payload.authorityAnchor !== authorityAnchor) {
       return {
         state: "malformed",
@@ -1097,7 +1102,7 @@ export async function plan(store: Store, request: PlanRequest): Promise<PlanOutc
           repairable: false,
         };
       } else {
-        corrected = enforceRepairAuthority(observed, expectedKind, initialAuthority) as Exclude<
+        corrected = enforceRepairAuthority(observed, expectedKind, initialAuthority, request.source) as Exclude<
           PlannerPayload,
           { state: "missing" }
         >;

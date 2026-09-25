@@ -913,6 +913,21 @@ function telegramConversation(context: Context, options: { serverOrigin?: string
 }
 
 
+/** A revision's verified start: its source build's sealed head, while the revision brief still binds that head and scope. */
+function revisionSourceHead(store: Store, evidenceRoot: string, taskRef: number, revisionOf: string): { ok: true; head: string } | { ok: false; problem: string } {
+  const source = store.revisionSourceOf(taskRef);
+  const sourceRun = source === null ? null : store.getRun(source.sourceRun);
+  if (source === null || sourceRun === null || store.externalIdFor(sourceRun.taskRef) !== revisionOf || sourceRun.headRevision === null) return { ok: false, problem: "the revision source has no matching sealed head" };
+  try {
+    const verified = readVerifiedArtifact(evidenceRoot, source.briefArtifact);
+    const brief = verified.ok ? JSON.parse(verified.content.toString("utf8")) as { head?: unknown; sourceScopeDigest?: unknown } : null;
+    if (brief === null || brief.head !== sourceRun.headRevision || brief.sourceScopeDigest !== sourceRun.scopeDigest) return { ok: false, problem: "the revision brief no longer binds the source head and scope" };
+    return { ok: true, head: sourceRun.headRevision };
+  } catch {
+    return { ok: false, problem: "the revision source brief cannot be verified" };
+  }
+}
+
 async function dispatch(
   command: string,
   positional: readonly string[],
@@ -3180,13 +3195,20 @@ async function tickCommand(
       // with nothing a planning session could have left as an ancestor
       // (Codex planning review, finding 1).
       const planBranch = `standing-orders-plan/${id}`;
+      // A revision is planned on the work it revises: the verified head its build will start from.
+      const revised = ref.revisionOf === null ? null : revisionSourceHead(store, context.evidenceRoot, ref.id, ref.revisionOf);
+      if (revised !== null && !revised.ok) {
+        release(store, lease, clock());
+        dispatched.push({ id, outcome: "skipped", reason: "revision-brief", detail: revised.problem });
+        continue;
+      }
       const planLeased = await worktrees.lease({
         repo,
         branch: planBranch,
         runner,
         taskRef: ref.id,
         now: clock(),
-        base,
+        base: revised?.head ?? base,
         reclaim: { evidenceRoot: context.evidenceRoot },
       });
       if (!planLeased.ok) {
@@ -3498,22 +3520,15 @@ async function tickCommand(
 
     let buildBase = base;
     if (ref.revisionOf !== null) {
-      const source = store.revisionSourceOf(ref.id);
-      const sourceRun = source === null ? null : store.getRun(source.sourceRun);
-      let problem: string | null = null;
-      if (source === null || sourceRun === null || store.externalIdFor(sourceRun.taskRef) !== ref.revisionOf || sourceRun.headRevision === null) problem = "the revision source has no matching sealed head";
-      else {
-        try {
-          const verified = readVerifiedArtifact(context.evidenceRoot, source.briefArtifact);
-          const brief = verified.ok ? JSON.parse(verified.content.toString("utf8")) as { head?: unknown; sourceScopeDigest?: unknown } : null;
-          if (brief === null || brief.head !== sourceRun.headRevision || brief.sourceScopeDigest !== sourceRun.scopeDigest) problem = "the revision brief no longer binds the source head and scope";
-          else if (exists.code !== 0 && text(flags, "base") === undefined) buildBase = sourceRun.headRevision;
-          else {
-            const descendant = exists.code === 0 ? branch : base;
-            const ancestry = await git("git", ["--no-lazy-fetch", "--no-replace-objects", "merge-base", "--is-ancestor", sourceRun.headRevision, descendant], { cwd: repo });
-            if (ancestry.code !== 0) problem = "the requested revision base does not contain its source head";
-          }
-        } catch { problem = "the revision source brief cannot be verified"; }
+      const source = revisionSourceHead(store, context.evidenceRoot, ref.id, ref.revisionOf);
+      let problem: string | null = source.ok ? null : source.problem;
+      if (source.ok) {
+        if (exists.code !== 0 && text(flags, "base") === undefined) buildBase = source.head;
+        else {
+          const descendant = exists.code === 0 ? branch : base;
+          const ancestry = await git("git", ["--no-lazy-fetch", "--no-replace-objects", "merge-base", "--is-ancestor", source.head, descendant], { cwd: repo });
+          if (ancestry.code !== 0) problem = "the requested revision base does not contain its source head";
+        }
       }
       if (problem !== null) {
         release(store, lease, clock());
