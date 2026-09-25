@@ -32,7 +32,7 @@ import { LINEAR_URL, readLinearKey } from "./flow-triggers.js";
 import { fillFlowText, type FlowDefinition, type FlowStage } from "./flows.js";
 import { askJev, readJevAnswers, sortLog, sortRequest, sortState, sortWords } from "./flow-sort.js";
 import { claudeDraftRunner, DRAFT_TIMEOUT, draftPrompt, keptDraft, type DraftRunner } from "./flow-draft.js";
-import { readEmailSettings, runRequest, sendEmail, toolWaiting, useTool, type MailSender, type ToolCaller } from "./flow-actions.js";
+import { sendingReady, runRequest, sendEmail, toolWaiting, useTool, type MailSender, type ToolCaller } from "./flow-actions.js";
 import { readProviderKey } from "./keys.js";
 import type { FlowCardRow, FlowRow, FlowScriptRow, FlowStepKind, Store } from "./store.js";
 
@@ -82,7 +82,7 @@ export async function runFlowSteps(store: Store, repo: string, now: Date, io: St
     const stage = known.definition?.stages.find(one => one.id === card.stage);
     if (stage === undefined || !(["check", "update", "sort", "draft", "request", "email", "tool"] as const).includes(stage.kind as "check")) continue;
     // Email and tools wait, saying why, until what they need is set up.
-    const setup = stage.kind === "email" && readEmailSettings(io.dir) === null ? "Email isn't set up yet. Add your mail server in Settings → Email."
+    const setup = stage.kind === "email" && !sendingReady(io.dir) ? "Email isn't set up yet. Add your mail server or a Google account in Settings → Email."
       : stage.kind === "tool" ? toolWaiting(store, stage, repo) : null;
     if (setup !== null) {
       if (card.waiting !== setup) store.updateFlowCard(card.id, { waiting: setup }, now);

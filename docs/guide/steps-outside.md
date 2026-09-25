@@ -40,14 +40,27 @@ A 4xx answer takes the failure path; a 5xx or no answer is tried again
 
 ## Send email
 
-Sends from your own mail server: Settings → Email (for Gmail:
-smtp.gmail.com, port 587, your address and an app password; Outlook,
-Fastmail, Resend, SES and any SMTP server work the same way). **Send a test
-email** checks it. The password stays in a private file on this computer.
+Sends from your own email account, set up in Settings → Email. Either:
+
+- **A mail server.** For Gmail: smtp.gmail.com, port 587, your address and
+  an app password. Outlook, Fastmail, Resend, SES and any SMTP server work
+  the same way. To let Email inbox triggers read it too, add its IMAP
+  address (for Gmail, imap.gmail.com, port 993).
+- **A Google account**, signed in with Google instead of an app password.
+  Make an OAuth client of type *Web application* in Google Cloud Console,
+  set its consent screen to *In production* (in Testing, Google ends the
+  connection after 7 days), add the redirect address Settings shows, and
+  paste the client ID and secret. Google warns that it hasn't verified the
+  app; it's your own, so continue.
+
+**Send a test email** and **Check the inbox** try it. Passwords, the client
+secret and Google's sign-in stay in private files on this computer.
 
 `{{card.email}}` is the first email address the card mentions, so a form
-that asks for an email address can be answered by email. A card with no
-address, or an address the server refuses, takes the failure path.
+that asks for an email address can be answered by email. When a card came
+from an email and the step writes back to its sender, the reply goes in the
+same thread. A card with no address, or an address the server refuses,
+takes the failure path.
 
 ## Use a tool
 

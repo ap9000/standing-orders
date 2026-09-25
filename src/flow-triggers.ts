@@ -8,6 +8,8 @@
  * - linear   — Linear issues in a team, moving into a state, and/or with a label.
  * - flow     — another flow's cards reaching one of its zones.
  * - webhook  — anything that can post JSON to the trigger's secret address.
+ * - email    — mail arriving in a folder of the account set up in Settings → Email (v89),
+ *              read-only over IMAP; optionally only from some senders or with words in the subject.
  *
  * GitHub and Linear are checked by the worker's pass — `gh` and one HTTPS
  * request, never a model — or pushed to a secret webhook address when the
@@ -24,9 +26,10 @@ import { scanForSecrets } from "./evidence.js";
 import { flowCardText, flowDefinitionOf, type FlowAct } from "./flow-engine.js";
 import type { FlowDefinition } from "./flows.js";
 import { describeSchedule, firstFireAt, nextFireAt, parseSchedule, WEEKDAYS } from "./routine.js";
+import { mailboxAccess, mailCursorOf, mailCursorText, readThroughImap, type MailReader } from "./mailbox.js";
 import type { FlowCardSource, FlowRow, FlowTriggerRow, Store } from "./store.js";
 
-export const FLOW_TRIGGER_KINDS = ["button", "schedule", "github", "linear", "flow", "webhook"] as const;
+export const FLOW_TRIGGER_KINDS = ["button", "schedule", "github", "linear", "flow", "webhook", "email"] as const;
 export type FlowTriggerKind = (typeof FLOW_TRIGGER_KINDS)[number];
 
 export type TriggerConfig =
@@ -35,11 +38,13 @@ export type TriggerConfig =
   | { kind: "github"; repo: string; watch: "issues" | "pulls" | "checks"; label: string | null; branch: string | null; from: "team" | "anyone"; delivery: "poll" | "webhook"; zone: string | null }
   | { kind: "linear"; team: string | null; state: string | null; label: string | null; delivery: "poll" | "webhook"; zone: string | null }
   | { kind: "flow"; flow: number; when: string; zone: string | null }
-  | { kind: "webhook"; title: string; titleField: string | null; bodyField: string | null; zone: string | null };
+  | { kind: "webhook"; title: string; titleField: string | null; bodyField: string | null; zone: string | null }
+  /** `sender`: addresses or domains, comma-separated; `subject`: words the subject must contain. */
+  | { kind: "email"; folder: string; sender: string | null; subject: string | null; zone: string | null };
 
 /** What each kind is called on the canvas. */
 export const FLOW_TRIGGER_WORDS: Record<FlowTriggerKind, string> = {
-  button: "Button", schedule: "Schedule", github: "GitHub", linear: "Linear", flow: "Another flow", webhook: "Webhook",
+  button: "Button", schedule: "Schedule", github: "GitHub", linear: "Linear", flow: "Another flow", webhook: "Webhook", email: "Email inbox",
 };
 
 /** How often the worker checks GitHub and Linear, and how it backs off when they don't answer. */
@@ -109,7 +114,7 @@ export function validateTriggerConfig(raw: unknown, context: { store: Store; flo
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Choose what starts cards.");
   const input = raw as Record<string, unknown>;
   const kind = input["kind"];
-  if (!FLOW_TRIGGER_KINDS.includes(kind as FlowTriggerKind)) throw new Error("Choose what starts cards: a button, a schedule, GitHub, Linear, another flow or a webhook.");
+  if (!FLOW_TRIGGER_KINDS.includes(kind as FlowTriggerKind)) throw new Error("Choose what starts cards: a button, a schedule, GitHub, Linear, another flow, a webhook or an email inbox.");
   const named = words(input, "zone", 60, false);
   const zoneStage = named === null ? null : context.definition.stages.find(one => one.id === named || one.title.toLowerCase() === named.toLowerCase());
   if (named !== null && zoneStage === undefined) throw new Error(`This flow has no zone called ${named}.`);
@@ -164,7 +169,26 @@ export function validateTriggerConfig(raw: unknown, context: { store: Store; flo
     }
     case "webhook":
       return { kind: "webhook", title: words(input, "title", 120, false) ?? "Webhook", titleField: words(input, "titleField", 80, false), bodyField: words(input, "bodyField", 80, false), zone };
+    case "email": {
+      const folder = words(input, "folder", 100, false) ?? "INBOX";
+      const sender = words(input, "sender", 300, false);
+      if (sender !== null && sendersOf(sender).length === 0) throw new Error("Say whom mail comes from as addresses or domains, like priya@example.com or example.com.");
+      return { kind: "email", folder: /^inbox$/i.test(folder) ? "INBOX" : folder, sender: sender === null ? null : sendersOf(sender).join(", "), subject: words(input, "subject", 100, false), zone };
+    }
   }
+}
+
+/** Addresses and domains from "priya@example.com, @shop.com, example.org". */
+function sendersOf(text: string): string[] {
+  return [...new Set(text.split(/[\s,;]+/).map(one => one.trim().toLowerCase().replace(/^@/, "")).filter(one => /^([a-z0-9._%+-]+@)?[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}$/.test(one)))].slice(0, 20);
+}
+
+/** Whether an email is one this trigger takes: from a named sender (or domain), with the words in its subject. */
+export function mailMatches(config: Extract<TriggerConfig, { kind: "email" }>, mail: { from: string; subject: string }): boolean {
+  const from = mail.from.toLowerCase();
+  const senders = config.sender === null ? [] : sendersOf(config.sender);
+  if (senders.length > 0 && !senders.some(one => one.includes("@") ? from === one : from.endsWith(`@${one}`) || from.endsWith(`.${one}`))) return false;
+  return config.subject === null || mail.subject.toLowerCase().includes(config.subject.toLowerCase());
 }
 
 /** The trigger in the words the canvas and its cards use. */
@@ -189,6 +213,7 @@ export function describeTrigger(config: TriggerConfig, store: Store): string {
       return `Cards reaching ${zone ?? "the end"} in ${flow?.name ?? "another flow"}`;
     }
     case "webhook": return "Anything posted to its webhook address";
+    case "email": return `Email arriving in ${config.folder === "INBOX" ? "the inbox" : config.folder}${config.sender === null ? "" : ` from ${config.sender}`}${config.subject === null ? "" : ` with “${config.subject}” in the subject`} (checked every 2 minutes)`;
   }
 }
 
@@ -208,6 +233,7 @@ export function triggerHeadline(config: TriggerConfig, store: Store): { name: st
       return { name: `From ${flow?.name ?? "another flow"}`, detail: `When a card reaches ${flow === null ? "the end" : flowDefinitionOf(flow)?.stages.find(one => one.id === config.when)?.title ?? "the end"}` };
     }
     case "webhook": return { name: "Webhook", detail: "Anything posted to its address" };
+    case "email": return { name: config.folder === "INBOX" ? "New email" : `New email in ${config.folder}`, detail: config.sender !== null ? `From ${config.sender}` : config.subject !== null ? `Subject has “${config.subject}”` : "Email inbox" };
   }
 }
 
@@ -289,7 +315,8 @@ export function addFlowTriggerTo(store: Store, flow: FlowRow, raw: unknown, acto
     flow: flow.id, kind: config.kind, configJson: JSON.stringify(config), hookHash: token === null ? null : hookHash(token),
     // Only what happens from now on: never the backlog of issues, runs or finished cards.
     cursor: config.kind === "flow" ? String(store.latestFlowEvent()) : config.kind === "github" || config.kind === "linear" ? now.toISOString() : null,
-    nextAt: schedule !== null ? firstFireAt(schedule, now) : (config.kind === "github" || config.kind === "linear") && config.delivery === "poll" ? now.toISOString() : null,
+    // Email: the first check notes where the mailbox stands (no cursor yet), so only mail after this becomes cards.
+    nextAt: schedule !== null ? firstFireAt(schedule, now) : polled(config) ? now.toISOString() : null,
     by: actor,
   }, now);
   let secret: string | null = null;
@@ -313,6 +340,11 @@ export function renewFlowHook(store: Store, trigger: FlowTriggerRow, now: Date, 
 export function removeFlowTrigger(store: Store, trigger: FlowTriggerRow, now: Date, dir: string | null): void {
   store.updateFlowTrigger(trigger.id, { state: "removed", hookHash: null }, now);
   if (dir !== null) dropHookSecret(dir, trigger.id);
+}
+
+/** Checked by the worker's pass (rather than pushed, fired on a schedule or followed). */
+function polled(config: TriggerConfig): config is Extract<TriggerConfig, { kind: "github" | "linear" | "email" }> {
+  return config.kind === "email" || ((config.kind === "github" || config.kind === "linear") && config.delivery === "poll");
 }
 
 // ---------------------------------------------------------- making cards
@@ -369,10 +401,12 @@ export function pressFlowButton(store: Store, trigger: FlowTriggerRow, answers: 
 
 // -------------------------------------------------- the worker's pass
 
-export type TriggerIo = { gh: Runner; fetch: typeof fetch; dir: string | null };
+export type TriggerIo = { gh: Runner; fetch: typeof fetch; dir: string | null;
+  /** How mail is read (default: IMAP; tests pass a scripted mailbox). */
+  mail?: MailReader };
 export type TriggerPass = { added: number; checked: number; problems: string[] };
 
-/** Every trigger in one project that is due: schedules and other flows here, GitHub and Linear by asking them. */
+/** Every trigger in one project that is due: schedules and other flows here, GitHub, Linear and email by asking them. */
 export async function runFlowTriggers(store: Store, repo: string, now: Date, io: TriggerIo): Promise<TriggerPass> {
   const pass: TriggerPass = { added: 0, checked: 0, problems: [] };
   for (const trigger of store.activeFlowTriggers(repo)) {
@@ -381,7 +415,7 @@ export async function runFlowTriggers(store: Store, repo: string, now: Date, io:
     try {
       if (config.kind === "schedule" && trigger.nextAt !== null && Date.parse(trigger.nextAt) <= now.getTime()) pass.added += fireSchedule(store, trigger, config, now);
       else if (config.kind === "flow") pass.added += followFlow(store, trigger, config, now);
-      else if ((config.kind === "github" || config.kind === "linear") && config.delivery === "poll" && (trigger.nextAt === null || Date.parse(trigger.nextAt) <= now.getTime())) {
+      else if (polled(config) && (trigger.nextAt === null || Date.parse(trigger.nextAt) <= now.getTime())) {
         pass.checked++;
         const checked = await checkTrigger(store, trigger, config, now, io);
         pass.added += checked.added;
@@ -397,7 +431,7 @@ export async function runFlowTriggers(store: Store, repo: string, now: Date, io:
 /** "Check now" on the canvas: one trigger, right away, in words. */
 export async function checkFlowTriggerNow(store: Store, trigger: FlowTriggerRow, now: Date, io: TriggerIo): Promise<{ ok: boolean; said: string }> {
   const config = triggerConfigOf(trigger);
-  if (config === null || (config.kind !== "github" && config.kind !== "linear") || config.delivery !== "poll") return { ok: false, said: "Only GitHub and Linear triggers that are checked can be checked now." };
+  if (config === null || !polled(config)) return { ok: false, said: "Only GitHub, Linear and email triggers that are checked can be checked now." };
   const checked = await checkTrigger(store, trigger, config, now, io);
   return { ok: checked.ok, said: checked.said };
 }
@@ -440,28 +474,53 @@ function followFlow(store: Store, trigger: FlowTriggerRow, config: Extract<Trigg
 
 type Checked = { ok: boolean; said: string; added: number };
 
-async function checkTrigger(store: Store, trigger: FlowTriggerRow, config: Extract<TriggerConfig, { kind: "github" | "linear" }>, now: Date, io: TriggerIo): Promise<Checked> {
-  const fetched = config.kind === "github" ? await fetchGitHub(config, trigger, io.gh) : await fetchLinear(config, trigger, io);
+async function checkTrigger(store: Store, trigger: FlowTriggerRow, config: Extract<TriggerConfig, { kind: "github" | "linear" | "email" }>, now: Date, io: TriggerIo): Promise<Checked> {
+  const fetched = config.kind === "github" ? await fetchGitHub(config, trigger, io.gh) : config.kind === "linear" ? await fetchLinear(config, trigger, io) : await fetchMail(config, trigger, io);
   if (!fetched.ok) {
     const failures = trigger.failures + 1;
     store.updateFlowTrigger(trigger.id, { failures, lastAt: now.toISOString(), lastOutcome: fetched.problem, nextAt: new Date(now.getTime() + BACKOFF_MS[Math.min(failures, BACKOFF_MS.length) - 1]!).toISOString() }, now);
     return { ok: false, said: fetched.problem, added: 0 };
   }
-  const by = config.kind === "github" ? "GitHub" : "Linear";
+  const by = config.kind === "github" ? "GitHub" : config.kind === "linear" ? "Linear" : "Email";
   const due = fetched.items.slice(0, CARDS_PER_CHECK);
   const results = due.map(item => "skip" in item
     ? (store.recordFlowTriggerEvent(trigger.id, item.key, null, item.skip, now) ? { made: "skipped" as Made, note: `${item.label}: ${item.skip}`, card: null } : { made: "seen" as Made, note: null, card: null })
     : makeCard(store, trigger, config, item, by, now));
-  const more = fetched.items.length > CARDS_PER_CHECK;
+  // A mailbox says itself whether more is waiting; its cursor is already just past what it read.
+  const more = fetched.more ?? fetched.items.length > CARDS_PER_CHECK;
   // The cursor moves past what was handled, never past what is still waiting.
-  const cursor = more ? due.at(-1)?.at ?? trigger.cursor : fetched.cursor ?? trigger.cursor;
-  const said = outcomeWords(results, more);
+  const cursor = fetched.more !== undefined ? fetched.cursor ?? trigger.cursor : more ? due.at(-1)?.at ?? trigger.cursor : fetched.cursor ?? trigger.cursor;
+  const said = results.length === 0 && fetched.said !== undefined ? fetched.said : outcomeWords(results, more);
   store.updateFlowTrigger(trigger.id, { failures: 0, cursor, lastAt: now.toISOString(), lastOutcome: said, nextAt: new Date(now.getTime() + POLL_EVERY_MS).toISOString() }, now);
   return { ok: true, said, added: results.filter(one => one.made === "added").length };
 }
 
 type Found = (Incoming & { at: string | null }) | { key: string; skip: string; label: string; at: string | null };
-type Fetched = { ok: true; items: Found[]; cursor: string | null } | { ok: false; problem: string };
+type Fetched = { ok: true; items: Found[]; cursor: string | null; more?: boolean; said?: string } | { ok: false; problem: string };
+
+/** New mail in the folder since the last check, each message a card (or why it was left out). */
+async function fetchMail(config: Extract<TriggerConfig, { kind: "email" }>, trigger: FlowTriggerRow, io: TriggerIo): Promise<Fetched> {
+  const signed = await mailboxAccess(io.dir, io.fetch);
+  if (!signed.ok) return { ok: false, problem: signed.said };
+  const after = mailCursorOf(trigger.cursor);
+  const read = await (io.mail ?? readThroughImap)(signed.access, config.folder, after, CARDS_PER_CHECK);
+  if (!read.ok) return { ok: false, problem: read.said };
+  const own = signed.address.toLowerCase();
+  const items: Found[] = read.mails.filter(mail => mailMatches(config, mail)).map(mail => {
+    const key = `mail:${read.at.validity}:${mail.uid}`, at = mailCursorText({ validity: read.at.validity, uid: mail.uid });
+    const label = `Email from ${mail.from || "an unknown sender"}`.slice(0, 120);
+    // Machines and this account itself never start cards: a flow that answers mail mustn't answer them.
+    if (mail.automatic) return { key, skip: "an automatic reply", label, at };
+    if (mail.from === own) return { key, skip: "sent from this account", label, at };
+    if (mail.from === "") return { key, skip: "it had no sender", label, at };
+    const who = mail.fromName === null ? mail.from : `${mail.fromName} <${mail.from}>`;
+    return { key, at, title: mail.subject || `Email from ${mail.fromName ?? mail.from}`, description: `From: ${who}${mail.text === "" ? "" : `\n\n${mail.text}`}`,
+      source: { kind: "email", label, url: null, mail: { id: mail.messageId, references: mail.references, subject: mail.subject, from: mail.from } } };
+  });
+  const said = after === null ? `Watching ${config.folder === "INBOX" ? "the inbox" : config.folder} of ${signed.address}: new email from now on becomes cards.`
+    : read.renumbered ? "The mail server renumbered this folder; watching it from now." : undefined;
+  return { ok: true, items, cursor: mailCursorText(read.at), more: read.more, ...(said === undefined ? {} : { said }) };
+}
 
 const text = (value: unknown) => typeof value === "string" ? value : "";
 const record = (value: unknown) => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};

@@ -119,7 +119,8 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // v86 adds draft steps (Claude writes from a card) and a flow's owner, whom its "the owner decides" zones ask in their chat app.
 // v87 adds steps that reach outside: a web request, an email, and a project tool (MCP) call.
 // v88 brings flow decisions to Slack, Discord and Teams: Approve / Edit / Send back on the notice, and the prompt the next message answers.
-export const SCHEMA_VERSION = 88;
+// v89 adds inbox triggers: mail arriving in a mailbox (IMAP, or a connected Google account) and messages in a chat channel start cards.
+export const SCHEMA_VERSION = 89;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -481,7 +482,8 @@ export type FlowStepRunRow = { card: number; entry: number; stage: string; kind:
   decisionJson: string | null };
 export type FlowScriptRow = { id: number; repo: string; name: string; about: string; body: string; timeoutMinutes: number; version: number; digest: string; savedBy: string; savedAt: string };
 /** Where a card came from when a trigger made it: what to call it and where to look (a GitHub issue, a Linear issue, another flow's card). */
-export type FlowCardSource = { kind: string; label: string; url: string | null };
+/** Where a card came from. `mail` (v89): the email it came from, so a reply to its sender stays in the thread. */
+export type FlowCardSource = { kind: string; label: string; url: string | null; mail?: { id: string | null; references: string[]; subject: string; from: string } };
 export type FlowCardRow = { id: number; flow: number; title: string; description: string | null; stage: string; entry: number; state: "active" | "done" | "cancelled"; task: string | null; primaryTask: string | null; note: string | null; waiting: string | null; outputs: Record<string, string>; createdBy: string; createdAt: string; updatedAt: string; source: FlowCardSource | null; owner: string | null };
 /** One line of a card's discussion: a comment (and whom it @mentioned), or who became its owner. */
 export type FlowCommentRow = { id: number; card: number; kind: "comment" | "owner"; author: string; body: string; mentions: string[]; at: string };
@@ -520,7 +522,11 @@ function readFlowCardSource(value: unknown): FlowCardSource | null {
   if (typeof value !== "string") return null;
   try {
     const parsed = JSON.parse(value) as Record<string, unknown>;
-    return typeof parsed["label"] === "string" ? { kind: String(parsed["kind"] ?? ""), label: parsed["label"], url: typeof parsed["url"] === "string" ? parsed["url"] : null } : null;
+    if (typeof parsed["label"] !== "string") return null;
+    const mail = parsed["mail"] !== null && typeof parsed["mail"] === "object" ? parsed["mail"] as Record<string, unknown> : null;
+    return { kind: String(parsed["kind"] ?? ""), label: parsed["label"], url: typeof parsed["url"] === "string" ? parsed["url"] : null,
+      ...(mail === null || typeof mail["from"] !== "string" ? {} : { mail: { id: typeof mail["id"] === "string" ? mail["id"] : null, references: Array.isArray(mail["references"]) ? mail["references"].filter((one): one is string => typeof one === "string") : [],
+        subject: typeof mail["subject"] === "string" ? mail["subject"] : "", from: mail["from"] } }) };
   } catch { return null; }
 }
 
@@ -2191,7 +2197,7 @@ CREATE INDEX IF NOT EXISTS flow_event_card ON flow_event (card, id);
 CREATE TABLE IF NOT EXISTS flow_trigger (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   flow         INTEGER NOT NULL REFERENCES flow(id),
-  kind         TEXT NOT NULL CHECK (kind IN ('button','schedule','github','linear','flow','webhook')),
+  kind         TEXT NOT NULL CHECK (kind IN ('button','schedule','github','linear','flow','webhook','email','chat')),
   config_json  TEXT NOT NULL,
   state        TEXT NOT NULL CHECK (state IN ('active','paused','removed')),
   hook_hash    TEXT UNIQUE,
@@ -5656,6 +5662,33 @@ function migrate(db: Database, origin: number | null): void {
     ["card", "entry", "stage", "kind", "script", "script_version", "state", "attempts", "next_at", "started_at", "finished_at", "duration_ms", "exit_code", "result", "log", "decision_json"],
   );
   db.exec("CREATE INDEX IF NOT EXISTS flow_step_run_recent ON flow_step_run (started_at)");
+
+  // v89 (inbox triggers): kind admits 'email' and 'chat', carrying every
+  // trigger whole (its id, so flow_trigger_event keeps pointing at it).
+  rebuildForV4(
+    db,
+    "flow_trigger",
+    "CHECK (kind IN ('button','schedule','github','linear','flow','webhook'))",
+    "'email'",
+    `CREATE TABLE flow_trigger_next (
+       id           INTEGER PRIMARY KEY AUTOINCREMENT,
+       flow         INTEGER NOT NULL REFERENCES flow(id),
+       kind         TEXT NOT NULL CHECK (kind IN ('button','schedule','github','linear','flow','webhook','email','chat')),
+       config_json  TEXT NOT NULL,
+       state        TEXT NOT NULL CHECK (state IN ('active','paused','removed')),
+       hook_hash    TEXT UNIQUE,
+       cursor       TEXT,
+       next_at      TEXT,
+       last_at      TEXT,
+       last_outcome TEXT,
+       failures     INTEGER NOT NULL DEFAULT 0,
+       created_by   TEXT NOT NULL,
+       created_at   TEXT NOT NULL,
+       updated_at   TEXT NOT NULL
+     )`,
+    ["id", "flow", "kind", "config_json", "state", "hook_hash", "cursor", "next_at", "last_at", "last_outcome", "failures", "created_by", "created_at", "updated_at"],
+  );
+  db.exec("CREATE INDEX IF NOT EXISTS flow_trigger_live ON flow_trigger (flow, state)");
 }
 
 /** The origin CHECK, verbatim from the fresh review_request DDL. */

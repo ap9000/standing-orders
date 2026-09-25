@@ -60,7 +60,7 @@ describe("setting up", () => {
     expect(githubRepoOf(repo)).toBe("acme/shop");
     const flow = coding();
     const refused = (settings: Record<string, unknown>) => { const made = addFlowTriggerTo(store, store.getFlow(flow)!, settings, "alex", T0, dir); return made.ok ? "added" : made.message; };
-    expect(refused({ kind: "sometimes" })).toBe("Choose what starts cards: a button, a schedule, GitHub, Linear, another flow or a webhook.");
+    expect(refused({ kind: "sometimes" })).toBe("Choose what starts cards: a button, a schedule, GitHub, Linear, another flow, a webhook or an email inbox.");
     expect(refused({ kind: "schedule", schedule: "now and then", title: "Check" })).toBe("Say the schedule like “every 2 hours”, “daily 09:00 Europe/London” or “monday 09:00”.");
     expect(refused({ kind: "linear" })).toBe("Name a Linear team or a label, so the trigger doesn't take every issue in the workspace.");
     expect(refused({ kind: "button", label: "Report", zone: "Nowhere" })).toBe("This flow has no zone called Nowhere.");
