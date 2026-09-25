@@ -92,16 +92,20 @@ export async function runCode(run: CodeRun): Promise<CodeResult> {
       scriptFile = own;
     }
     const runtime = runtimeOf(language, scriptFile);
-    const ran = await run.shell(runtime.file, runtime.args, {
+    // The card goes in on stdin from its file (never a pipe): a script that doesn't read it can finish
+    // first without breaking anything. Only our own paths are in the command; the card is only data.
+    const ran = await run.shell("/bin/sh", ["-c", 'exec "$@" < "$FLOW_INPUT"', "flow-script", runtime.file, ...runtime.args], {
       cwd: run.cwd, timeoutMs: script.timeoutMinutes * 60_000, envAllowlist: SETUP_ENV_ALLOWLIST, omitEnv: SETUP_ENV_DENYLIST, processGroup: true,
-      env: { ...run.env, ...run.secrets, FLOW_INPUT: inputFile }, stdin: JSON.stringify(run.input), fence: run.fence,
+      env: { ...run.env, ...run.secrets, FLOW_INPUT: inputFile }, fence: run.fence,
     });
     const printed = codeOutput(ran.stdout, run.secrets);
     const all = scrubSecrets(ran.stdout.slice(0, 1_000_000), run.secrets);
     const both = scrubSecrets(`${ran.stdout}${ran.stderr === "" ? "" : `\n${ran.stderr}`}`, run.secrets);
     const log = `$ ${script.name} (${LANGUAGE_WORDS[language]}, version ${script.version}${script.file === null ? "" : `, ${script.file}`})\n${both.length <= LOG_CHARS ? both : both.slice(-LOG_CHARS)}`;
     if (ran.timedOut) return { state: "failed", exitCode: null, output: printed.output, printed: all, goTo: null, log, said: `${script.name} ran out of time after ${script.timeoutMinutes} minute${script.timeoutMinutes === 1 ? "" : "s"}.` };
-    if (ran.notFound) return { state: "failed", exitCode: null, output: "", printed: all, goTo: null, log, said: language === "python" ? "Python 3 isn't installed on this computer, so the script couldn't run." : `${script.name} couldn't start.` };
+    if (ran.notFound) return { state: "failed", exitCode: null, output: "", printed: all, goTo: null, log, said: `${script.name} couldn't start: no shell was found.` };
+    // 127: the shell couldn't find the language's program.
+    if (ran.code === 127 && language === "python" && /python3/.test(ran.stderr)) return { state: "failed", exitCode: 127, output: "", printed: all, goTo: null, log, said: "Python 3 isn't installed on this computer, so the script couldn't run." };
     if (ran.code !== 0) {
       const end = scrubSecrets([ran.stdout.trim(), ran.stderr.trim()].filter(one => one !== "").join("\n"), run.secrets).slice(-600);
       return { state: "failed", exitCode: ran.code, output: printed.output, printed: all, goTo: null, log,
