@@ -120,7 +120,8 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // v87 adds steps that reach outside: a web request, an email, and a project tool (MCP) call.
 // v88 brings flow decisions to Slack, Discord and Teams: Approve / Edit / Send back on the notice, and the prompt the next message answers.
 // v89 adds inbox triggers: mail arriving in a mailbox (IMAP, or a connected Google account) and messages in a chat channel start cards.
-export const SCHEMA_VERSION = 89;
+// v90 adds code steps: project scripts in Python and Node (or a file in the project), given the card and passing on what they print.
+export const SCHEMA_VERSION = 90;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -480,7 +481,9 @@ export type FlowStepRunRow = { card: number; entry: number; stage: string; kind:
   nextAt: string | null; startedAt: string; finishedAt: string | null; durationMs: number | null; exitCode: number | null; result: string | null; log: string | null;
   /** sort: what Jev answered, as JSON (flow-sort.ts reads it). */
   decisionJson: string | null };
-export type FlowScriptRow = { id: number; repo: string; name: string; about: string; body: string; timeoutMinutes: number; version: number; digest: string; savedBy: string; savedAt: string };
+/** A project script (v84). v90: in shell, Python or Node; `file` (a path in the project) runs instead of the body. */
+export type FlowScriptRow = { id: number; repo: string; name: string; about: string; body: string; timeoutMinutes: number; version: number; digest: string; savedBy: string; savedAt: string;
+  language: "shell" | "python" | "node"; file: string | null };
 /** Where a card came from when a trigger made it: what to call it and where to look (a GitHub issue, a Linear issue, another flow's card). */
 /** Where a card came from. `mail` (v89): the email it came from, so a reply to its sender stays in the thread.
  * `chat` (v89): the chat message it came from — the app, the channel, the conversation to answer in, the
@@ -501,7 +504,8 @@ function readFlowRow(row: Record<string, unknown>): FlowRow {
 
 function readFlowScriptRow(row: Record<string, unknown>): FlowScriptRow {
   return { id: Number(row["id"]), repo: String(row["repo"]), name: String(row["name"]), about: String(row["about"]), body: String(row["body"]), timeoutMinutes: Number(row["timeout_minutes"]),
-    version: Number(row["version"]), digest: String(row["digest"]), savedBy: String(row["saved_by"]), savedAt: String(row["saved_at"]) };
+    version: Number(row["version"]), digest: String(row["digest"]), savedBy: String(row["saved_by"]), savedAt: String(row["saved_at"]),
+    language: row["language"] === "python" || row["language"] === "node" ? row["language"] : "shell", file: row["file"] === null || row["file"] === undefined ? null : String(row["file"]) };
 }
 
 function readFlowStepRunRow(row: Record<string, unknown>): FlowStepRunRow {
@@ -2258,7 +2262,9 @@ CREATE TABLE IF NOT EXISTS flow_script (
   digest          TEXT NOT NULL,
   saved_by        TEXT NOT NULL,
   saved_at        TEXT NOT NULL,
-  state           TEXT NOT NULL CHECK (state IN ('active','removed'))
+  state           TEXT NOT NULL CHECK (state IN ('active','removed')),
+  language        TEXT NOT NULL DEFAULT 'shell',
+  file            TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS flow_script_live ON flow_script (repo, name) WHERE state = 'active';
 CREATE TABLE IF NOT EXISTS flow_step_run (
@@ -4405,6 +4411,9 @@ function initializeStore(db: Database, file: string): Store {
   addColumn(db, "flow_card", "source_json", "TEXT");
   addColumn(db, "flow_card", "owner", "TEXT");
   addColumn(db, "flow", "owner", "TEXT");
+  // v90: scripts in Python and Node, and scripts that run a file in the project.
+  addColumn(db, "flow_script", "language", "TEXT NOT NULL DEFAULT 'shell'");
+  addColumn(db, "flow_script", "file", "TEXT");
   addColumn(db, "notification", "recipient", "TEXT");
   addColumn(db, "approver", "projects_json", "TEXT");
   addColumn(db, "invite", "projects_json", "TEXT");
@@ -20962,13 +20971,13 @@ export class Store {
   }
 
   /** Save a script's next version; the previous one stays in history. Returns the version. */
-  saveFlowScript(script: { repo: string; name: string; about: string; body: string; timeoutMinutes: number; digest: string; by: string }, now: Date): number {
+  saveFlowScript(script: { repo: string; name: string; about: string; body: string; timeoutMinutes: number; digest: string; by: string; language?: "shell" | "python" | "node"; file?: string | null }, now: Date): number {
     return this.transact(() => {
       const current = this.flowScript(script.repo, script.name);
       const version = (current?.version ?? Number(this.db.prepare("SELECT COALESCE(MAX(version), 0) AS v FROM flow_script WHERE repo = ? AND name = ?").get(script.repo, script.name)?.["v"] ?? 0)) + 1;
       if (current !== null) this.db.prepare("UPDATE flow_script SET state = 'removed' WHERE id = ?").run(current.id);
-      this.db.prepare(`INSERT INTO flow_script (repo, name, about, body, timeout_minutes, version, digest, saved_by, saved_at, state)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')`).run(script.repo, script.name, script.about, script.body, script.timeoutMinutes, version, script.digest, script.by, now.toISOString());
+      this.db.prepare(`INSERT INTO flow_script (repo, name, about, body, timeout_minutes, version, digest, saved_by, saved_at, state, language, file)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`).run(script.repo, script.name, script.about, script.body, script.timeoutMinutes, version, script.digest, script.by, now.toISOString(), script.language ?? "shell", script.file ?? null);
       return version;
     });
   }

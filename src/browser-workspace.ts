@@ -185,6 +185,8 @@ export type BrowserFlowStage = {
   email?: { to: string; subject: string; body: string };
   tool?: { server: string; name: string; args: string };
   close: boolean | null; script: string | null;
+  /** v90: a script zone runs in an empty folder or a copy of the card's work; the answers its "goto:" line picks; the saved secrets it gets. */
+  runIn?: "folder" | "copy"; routes?: { answer: string; to: string }[]; secrets?: string[];
   /** A sort zone: Jev's question, its answers and where each goes, how sure it must be to act alone, and what else it notes. */
   sort: { question: string; answers: { answer: string; means: string; to: string }[]; sureAt: number; notes: { id: string; kind: "score" | "yes-no"; question: string; levels: string[] | null }[] } | null;
   next: string | null; onFail: string | null;
@@ -246,7 +248,8 @@ export type BrowserFlowView = {
   requestSecrets: string[];
   tools: { name: string; about: string; functions: string[]; ready: boolean }[];
   /** The project's scripts: reusable steps a "Run a script" zone runs with no AI. */
-  scripts: { name: string; about: string; body: string; timeoutMinutes: number; version: number; savedBy: string; savedAt: string; usedHere: string[] }[];
+  /** v90: each script's language, and the project file it runs instead of a body. */
+  scripts: { name: string; about: string; body: string; timeoutMinutes: number; version: number; savedBy: string; savedAt: string; usedHere: string[]; language: "shell" | "python" | "node"; file: string | null }[];
   start: string;
   stages: BrowserFlowStage[];
   cards: BrowserFlowCard[];

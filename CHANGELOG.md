@@ -22,6 +22,10 @@ the work and people deciding.
 - **Email in.** An Email inbox trigger turns new mail into cards (IMAP, or
   a Google account signed in with Google), and replies to the sender stay
   in the thread. Automatic replies and your own mail never become cards.
+- **Code in flows.** Scripts in Python, Node or shell (or a file in the
+  project) get the card as data; what they print is passed on, a `goto:` line
+  picks the next zone, saved secrets arrive as variables, and a schedule can
+  run a script to make a card of each item it prints.
 - **Chat in.** A Slack, Discord or Teams channel, or a Telegram group, feeds
   a flow after `flow 12` in it: each message is a card, replies in its thread
   join the discussion, and an Update zone answers in that thread.
@@ -37,4 +41,4 @@ the work and people deciding.
 - **Settings.** An Email section, and "Check again" that really tests an
   API key.
 
-Schema 89: the database upgrades itself on first start.
+Schema 90: the database upgrades itself on first start.

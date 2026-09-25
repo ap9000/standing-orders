@@ -29,10 +29,12 @@ import { redactSecretLines, scanForSecrets } from "./evidence.js";
 import { flowDefinitionOf } from "./flow-engine.js";
 import { cardFollowers, notifyPeople } from "./flow-people.js";
 import { LINEAR_URL, readLinearKey } from "./flow-triggers.js";
-import { fillFlowText, type FlowDefinition, type FlowStage } from "./flows.js";
+import { cardEmailOf, fillFlowText, type FlowDefinition, type FlowStage } from "./flows.js";
 import { askJev, readJevAnswers, sortLog, sortRequest, sortState, sortWords } from "./flow-sort.js";
 import { claudeDraftRunner, DRAFT_TIMEOUT, draftPrompt, keptDraft, type DraftRunner } from "./flow-draft.js";
-import { sendingReady, runRequest, sendEmail, toolWaiting, useTool, type MailSender, type ToolCaller } from "./flow-actions.js";
+import { readFlowSecrets, sendingReady, runRequest, sendEmail, toolWaiting, useTool, type MailSender, type ToolCaller } from "./flow-actions.js";
+import { cleanFolder, runCode } from "./flow-code.js";
+import { agentFence } from "./agent-fence.js";
 import { readProviderKey } from "./keys.js";
 import type { FlowCardRow, FlowRow, FlowScriptRow, FlowStepKind, Store } from "./store.js";
 import { replyInChannel } from "./chat-inbox.js";
@@ -101,13 +103,20 @@ export async function runFlowSteps(store: Store, repo: string, now: Date, io: St
       if (card.waiting !== waiting) store.updateFlowCard(card.id, { waiting }, now);
       continue;
     }
+    // A script waits for the secrets it names (v90), and runs on its own once they're saved.
+    const missing = stage.kind === "check" ? (stage.secrets ?? []).filter(name => readFlowSecrets(io.dir, repo)[name] === undefined) : [];
+    if (missing.length > 0) {
+      const waiting = `${stage.script} needs the secret${missing.length === 1 ? "" : "s"} ${missing.join(", ")}. Save ${missing.length === 1 ? "it" : "them"} on the zone.`;
+      if (card.waiting !== waiting) store.updateFlowCard(card.id, { waiting }, now);
+      continue;
+    }
     if (!store.claimFlowStep({ card: card.id, entry: card.entry, stage: stage.id, kind: stage.kind as FlowStepKind, script: script?.name ?? null, scriptVersion: script?.version ?? null }, now)) continue;
     pass.ran++;
     store.updateFlowCard(card.id, { waiting: { check: "Running its check…", sort: "Sorting…", draft: "Writing the draft…", request: "Calling the address…", email: "Sending the email…", tool: "Using the tool…" }[stage.kind as string] ?? "Updating the issue…" }, now);
     let outcome: Outcome;
     const started = Date.now();
     try {
-      outcome = stage.kind === "check" ? await runCheck(store, known.flow, script!, card, now, io)
+      outcome = stage.kind === "check" ? await runCheck(store, known.flow, stage, script!, card, now, io)
         : stage.kind === "sort" ? await sortCard(known.definition!, stage, card, key!, io)
         : stage.kind === "draft" ? await draftCard(store, known.definition!, stage, card, io)
         : stage.kind === "request" ? await runRequest(stage, card, repo, io)
@@ -195,42 +204,62 @@ async function sortCard(definition: FlowDefinition, stage: FlowStage, card: Flow
 }
 
 /** A script step: a fresh detached copy at the card's latest result (or the base branch), the approved setup, then the script. */
-async function runCheck(store: Store, flow: FlowRow, script: FlowScriptRow, card: FlowCardRow, now: Date, io: StepIo): Promise<Outcome> {
+/**
+ * A script zone (v90: code steps): the script runs with the card as its input, in a clean folder or in
+ * a copy of the card's work (after the project's setup), inside the agents' fence. What it prints is
+ * the step's result; a last "goto:" line picks one of the zone's answers.
+ */
+async function runCheck(store: Store, flow: FlowRow, stage: FlowStage, script: FlowScriptRow, card: FlowCardRow, now: Date, io: StepIo): Promise<Outcome> {
   const task = card.primaryTask ?? card.task;
-  const receipt = task === null ? null : assignmentOf(store, task, now, { principal: "operator", repos: [flow.repo] }, io.evidenceRoot)?.receipt ?? null;
+  const copy = (stage.runIn ?? "copy") === "copy";
+  const receipt = !copy || task === null ? null : assignmentOf(store, task, now, { principal: "operator", repos: [flow.repo] }, io.evidenceRoot)?.receipt ?? null;
   const commit = receipt?.head ?? null;
-  const where = commit === null ? io.base : `commit ${commit.slice(0, 7)}`;
-  const path = join(io.scratch, `flow-check-${card.id}-${card.entry}`);
-  const file = join(io.scratch, `flow-check-${card.id}-${card.entry}.sh`);
+  const where = !copy ? "" : commit === null ? ` on ${io.base}` : ` on commit ${commit.slice(0, 7)}`;
+  // The secrets it names, from the flow's saved ones: a missing one is said, never run without.
+  const saved = readFlowSecrets(io.dir, flow.repo);
+  const missing = (stage.secrets ?? []).filter(name => saved[name] === undefined);
+  if (missing.length > 0) return { state: "failed", said: `${script.name} needs the secret${missing.length === 1 ? "" : "s"} ${missing.join(", ")}. Save ${missing.length === 1 ? "it" : "them"} on the zone, then move the card back to try again.` };
+  const secrets = Object.fromEntries((stage.secrets ?? []).map(name => [name, saved[name]!]));
   mkdirSync(io.scratch, { recursive: true });
-  rmSync(path, { recursive: true, force: true });
-  const added = await io.git("git", ["-C", flow.repo, "worktree", "add", "--detach", path, commit ?? io.base], { timeoutMs: 120_000 });
-  if (added.code !== 0) return { state: "retry", said: `Couldn't make a copy of ${where}: ${added.stderr.trim().split("\n")[0]?.slice(0, 160) ?? "git refused"}.` };
+  const path = copy ? join(io.scratch, `flow-check-${card.id}-${card.entry}`) : cleanFolder(io.scratch, `flow-run-${card.id}-${card.entry}`);
+  if (copy) {
+    rmSync(path, { recursive: true, force: true });
+    const added = await io.git("git", ["-C", flow.repo, "worktree", "add", "--detach", path, commit ?? io.base], { timeoutMs: 120_000 });
+    if (added.code !== 0) return { state: "retry", said: `Couldn't make a copy of${where}: ${added.stderr.trim().split("\n")[0]?.slice(0, 160) ?? "git refused"}.` };
+  }
   try {
-    const bare = { envAllowlist: SETUP_ENV_ALLOWLIST, omitEnv: SETUP_ENV_DENYLIST, processGroup: true } as const;
-    const setup = store.liveWorktreeSetup(flow.repo);
+    const fence = agentFence({ databaseFile: store.databaseFile(), worktree: path });
     let log = "";
+    const setup = copy ? store.liveWorktreeSetup(flow.repo) : null;
     if (setup !== null) {
       const shell = approvedCommandShell(setup.command);
-      const prepared = await io.shell(shell.file, shell.args, { cwd: path, timeoutMs: setup.timeoutMs, ...bare });
+      const prepared = await io.shell(shell.file, shell.args, { cwd: path, timeoutMs: setup.timeoutMs, envAllowlist: SETUP_ENV_ALLOWLIST, omitEnv: SETUP_ENV_DENYLIST, processGroup: true, fence });
       log += `$ ${setup.command}\n${prepared.stdout}${prepared.stderr}\n`;
       if (prepared.code !== 0) return { state: "failed", said: `The project's setup failed before ${script.name} ran (exit ${prepared.code}).\n${tail(`${prepared.stdout}\n${prepared.stderr}`)}`, log, exitCode: prepared.code };
     }
-    writeFileSync(file, `${script.body}\n`, { mode: 0o700 });
-    chmodSync(file, 0o700);
-    // The script knows which card and which work it is checking.
-    const env = { FLOW_NAME: flow.name, FLOW_CARD_ID: String(card.id), FLOW_CARD_TITLE: card.title, FLOW_COMMIT: commit ?? "", FLOW_SCRIPT: script.name };
-    const ran = await io.shell("/bin/sh", [file], { cwd: path, timeoutMs: script.timeoutMinutes * 60_000, ...bare, env });
-    log += `$ ${script.name} (version ${script.version})\n${ran.stdout}${ran.stderr}`;
-    if (ran.timedOut) return { state: "failed", said: `${script.name} ran out of time after ${script.timeoutMinutes} minutes on ${where}.`, log, exitCode: null };
-    if (ran.notFound) return { state: "failed", said: `${script.name} couldn't start: no shell was found.`, log, exitCode: null };
-    return ran.code === 0
-      ? { state: "passed", said: `${script.name} passed on ${where}.`, log, exitCode: 0 }
-      : { state: "failed", said: `${script.name} failed (exit ${ran.code}) on ${where}.\n${tail(`${ran.stdout}\n${ran.stderr}`)}`, log, exitCode: ran.code };
+    const definition = flowDefinitionOf(flow);
+    const titleOf = (id: string) => definition?.stages.find(one => one.id === id)?.title ?? id;
+    // The card as data: never part of a command.
+    const input = {
+      card: { id: card.id, title: card.title, description: card.description, email: cardEmailOf(card) || null, note: card.note, owner: card.owner, source: card.source === null ? null : { kind: card.source.kind, label: card.source.label, url: card.source.url } },
+      outputs: Object.fromEntries(Object.entries(card.outputs).map(([id, text]) => [id, { zone: titleOf(id), text }])),
+      flow: { id: flow.id, name: flow.name }, zone: { id: stage.id, title: stage.title }, visit: card.entry, commit,
+      answers: (stage.routes ?? []).map(one => one.answer),
+    };
+    const env = { FLOW_NAME: flow.name, FLOW_CARD_ID: String(card.id), FLOW_CARD_TITLE: card.title, FLOW_COMMIT: commit ?? "", FLOW_SCRIPT: script.name, FLOW_PROJECT: flow.repo };
+    const ran = await runCode({ script, cwd: path, root: copy ? path : flow.repo, input, env, secrets, scratch: io.scratch, shell: io.shell, fence });
+    log += ran.log;
+    const output = ran.output === "" ? undefined : ran.output;
+    // Where it ran goes at the end of the first line: "run-tests failed (exit 1) on main."
+    const placed = (said: string) => { const [first = "", ...rest] = said.split("\n"); return [first.replace(/\.$/, `${where}.`), ...rest].join("\n"); };
+    if (ran.state === "failed") return { state: "failed", said: placed(ran.said), log, exitCode: ran.exitCode, ...(output === undefined ? {} : { output }) };
+    if (ran.goTo === null) return { state: "passed", said: copy ? `${script.name} passed${where}.` : `${script.name} ran.`, log, exitCode: 0, ...(output === undefined ? {} : { output }) };
+    const route = (stage.routes ?? []).find(one => one.answer.toLowerCase() === ran.goTo!.toLowerCase());
+    if (route === undefined) return { state: "failed", said: `${script.name} picked “${ran.goTo}”, but this zone has no answer called that${(stage.routes ?? []).length === 0 ? "" : ` (it has ${(stage.routes ?? []).map(one => one.answer).join(", ")})`}.`, log, exitCode: 0, ...(output === undefined ? {} : { output }) };
+    return { state: "passed", said: `${script.name} ran${where} and picked ${route.answer}.`, log, exitCode: 0, to: route.to, ...(output === undefined ? {} : { output }) };
   } finally {
-    await io.git("git", ["-C", flow.repo, "worktree", "remove", "--force", path], { timeoutMs: 60_000 }).catch(() => undefined);
+    if (copy) await io.git("git", ["-C", flow.repo, "worktree", "remove", "--force", path], { timeoutMs: 60_000 }).catch(() => undefined);
     rmSync(path, { recursive: true, force: true });
-    rmSync(file, { force: true });
   }
 }
 

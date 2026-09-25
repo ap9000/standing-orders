@@ -11,7 +11,7 @@ work moving through them. Open **Flows**, then **Edit flow** to draw.
 | Build | An agent does the work as an ordinary task, with its approvals and checks. |
 | Research | An agent investigates and writes a report; no code changes. |
 | Person decides | Someone approves, or sends the card back with a note. |
-| Run a script | One of the project's scripts runs on the card's work, with no AI. |
+| Run a script | One of the project's scripts (Python, Node or shell) runs with the card, with no AI. What it prints is passed on, and it can pick where the card goes. See [Code in flows](code.md). |
 | Sort | Jev picks where the card goes, in under a second. |
 | Draft | Claude writes a reply, summary or note from the card. |
 | Web request | Calls an API with the card's details. |

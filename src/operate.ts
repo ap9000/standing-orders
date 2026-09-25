@@ -2173,7 +2173,10 @@ async function tickCommand(
   // cards, which then move in the same pass. Checking an outside service is
   // `gh` or one HTTPS request, never a model, and only when it is due.
   const triggerPass = context.shouldStop?.() === true || context.shouldPauseAdmission?.() === true ? { added: 0, checked: 0, problems: [] }
-    : await runFlowTriggers(store, repo, clock(), { gh: context.flowTriggerIo?.gh ?? run, fetch: context.flowTriggerIo?.fetch ?? fetch, dir: context.flowTriggerIo?.dir ?? dirname(context.databaseFile) });
+    : await runFlowTriggers(store, repo, clock(), { gh: context.flowTriggerIo?.gh ?? run, fetch: context.flowTriggerIo?.fetch ?? fetch, dir: context.flowTriggerIo?.dir ?? dirname(context.databaseFile),
+      // A schedule's script (v90) runs like a code step: the same runner, in a clean folder beside the step copies.
+      shell: context.flowTriggerIo?.shell ?? context.flowStepIo?.shell ?? run, scratch: context.flowTriggerIo?.scratch ?? context.flowStepIo?.scratch ?? join(pool, "flow-checks"),
+      ...(context.flowTriggerIo?.mail === undefined ? {} : { mail: context.flowTriggerIo.mail }) });
   // Check and update steps run outside a model: an approved command in a
   // fresh copy of the card's work, or a comment on the issue it came from.
   const stepPass = context.shouldStop?.() === true || context.shouldPauseAdmission?.() === true ? { ran: 0, problems: [] }

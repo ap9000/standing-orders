@@ -127,7 +127,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { UPDATE_PAUSED, updateAdmissionPaused } from "./desktop-update-gate.js";
 import { createHash, createHmac, randomBytes, timingSafeEqual, randomUUID } from "node:crypto";
 import { chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync, openSync, opendirSync, readFileSync, readSync, readdirSync, realpathSync, rmSync as rmFileSync, writeFileSync as writeFsFileSync } from "node:fs";
-import { homedir, hostname } from "node:os";
+import { homedir, hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { TEMPLATES, templateByName } from "./templates.js";
 import { starterRecipes, savedRecipes, findRecipe, importRecipe, exportRecipe, createWorkflowPreview, workflowPreview, launchWorkflow, saveWorkflowRecipe, RecipeError, prepareRecipeRun } from "./recipes.js";
@@ -5526,7 +5526,9 @@ export function createDecisionServer(options: ServeOptions): Server {
           return pressed.ok ? settle(pressed.said) : answer(400, { ok: false, said: pressed.message });
         }
         if (verb === "check") {
-          const checked = await checkFlowTriggerNow(store, trigger, now, { gh: options.flowTriggerIo?.gh ?? execRun, fetch: options.flowTriggerIo?.fetch ?? fetch, dir, ...(options.flowTriggerIo?.mail === undefined ? {} : { mail: options.flowTriggerIo.mail }) });
+          const checked = await checkFlowTriggerNow(store, trigger, now, { gh: options.flowTriggerIo?.gh ?? execRun, fetch: options.flowTriggerIo?.fetch ?? fetch, dir, ...(options.flowTriggerIo?.mail === undefined ? {} : { mail: options.flowTriggerIo.mail }),
+            // A schedule's script, run now (v90): in a clean folder beside the database, inside the agents' fence.
+            shell: options.flowTriggerIo?.shell ?? execRun, scratch: options.flowTriggerIo?.scratch ?? join(dir ?? tmpdir(), "flow-scratch") });
           try { advanceFlows(store, flow.repo, now, { evidenceRoot }); } catch { /* the next worker pass retries */ }
           return answer(checked.ok ? 200 : 409, { ok: checked.ok, said: checked.said, view: viewNow() });
         }
@@ -5550,7 +5552,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (action === "scripts") {
         // The project's script library, reached from any of its flows.
         if (body.get("remove") === "yes") return store.removeFlowScript(flow.repo, body.get("name") ?? "") ? settle("Script removed. Zones that ran it wait until it's back.") : answer(404, { ok: false, said: "There's no script by that name." });
-        const saved = saveScript(store, flow.repo, { name: body.get("name"), about: body.get("about"), body: body.get("body"), timeoutMinutes: body.get("timeoutMinutes") }, who.name, now);
+        const saved = saveScript(store, flow.repo, { name: body.get("name"), about: body.get("about"), body: body.get("body"), timeoutMinutes: body.get("timeoutMinutes"), language: body.get("language"), file: body.get("file") }, who.name, now);
         return saved.ok ? settle(saved.said) : answer(400, { ok: false, said: saved.message });
       }
       if (action === "linear-key" || action === "hooks-address") {

@@ -96,7 +96,7 @@ export function flowView(store: Store, flow: FlowRow, viewer: { name: string; ap
       zone: title(config?.zone ?? definition?.start ?? ""), zoneId: config?.zone ?? definition?.start ?? "", state: trigger.state, status: trigger.lastOutcome, statusAt: trigger.lastAt, failing: trigger.failures > 0,
       button: config?.kind === "button" ? { label: config.label, questions: config.questions } : null,
       hook: config !== null && takesDeliveries(config) ? { ready: hookReady(trigger, setup.dir), needsSecret: config.kind === "linear" } : null,
-      checkable: ((config?.kind === "github" || config?.kind === "linear") && config.delivery === "poll") || config?.kind === "email",
+      checkable: ((config?.kind === "github" || config?.kind === "linear") && config.delivery === "poll") || config?.kind === "email" || (config?.kind === "schedule" && config.script !== undefined),
       shared: config?.kind === "button" && trigger.hookHash !== null,
     };
   });
@@ -119,6 +119,7 @@ export function flowView(store: Store, flow: FlowRow, viewer: { name: string; ap
     tools: projectToolsOf(store, flow.repo).map(tool => ({ name: tool.name, about: tool.spec.about, functions: tool.lastTest?.ok === true ? tool.lastTest.tools : [],
       ready: toolStanding(tool, secretsSetFor(flow.repo, tool.spec, setup.toolHome)).ready })),
     scripts: store.flowScripts(flow.repo).map(script => ({ name: script.name, about: script.about, body: script.body, timeoutMinutes: script.timeoutMinutes, version: script.version, savedBy: script.savedBy, savedAt: script.savedAt,
+      language: script.language, file: script.file,
       usedHere: stages.filter(stage => stage.kind === "check" && stage.script === script.name).map(stage => stage.title) })),
     start: definition?.start ?? stages[0]?.id ?? "",
     stages,

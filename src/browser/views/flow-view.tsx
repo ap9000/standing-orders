@@ -430,8 +430,6 @@ type RequestValue = NonNullable<BrowserFlowStage["request"]>;
 /** A web request: the address, how it's called, headers (secrets go here), and what it sends. */
 function RequestSettings({ request, view, csrf, apply, set }: { request: RequestValue; view: BrowserFlowView; csrf: string; apply: (result: Said) => void; set: (request: RequestValue) => void }) {
   const headers = Object.entries(request.headers);
-  const [secret, setSecret] = useState({ name: "", value: "" });
-  const [busy, setBusy] = useState(false);
   const header = (index: number, name: string, value: string) => set({ ...request, headers: Object.fromEntries(headers.map((one, at) => at === index ? [name, value] : one).filter(([key]) => key !== "")) });
   return <>
     <Field label="Address" hint={`The host is written out; fill-ins can go after it. ${FILL_INS}`}>
@@ -453,20 +451,76 @@ function RequestSettings({ request, view, csrf, apply, set }: { request: Request
     {request.method !== "GET" && request.method !== "DELETE" && <Field label="What it sends" hint="JSON is sent as JSON, with fill-ins inside its strings; anything else as plain text.">
       <Textarea rows={5} value={request.body ?? ""} maxLength={8000} onChange={event => set({ ...request, body: event.target.value })} className="font-mono text-[12px]" aria-label="What it sends" />
     </Field>}
-    <details className="rounded-md border px-3 py-2" data-request-secrets>
-      <summary className="cursor-pointer text-[13px] font-medium">Secrets{view.requestSecrets.length > 0 ? ` (${view.requestSecrets.length})` : ""}</summary>
-      <div className="mt-2 grid gap-2">
-        <p className="text-[12px] text-muted-foreground">Kept on this computer, never shown again. Use one in a header as {"{{secret.NAME}}"}.</p>
-        {view.requestSecrets.length > 0 && <p className="flex flex-wrap gap-1.5">{view.requestSecrets.map(name => <Badge key={name} tone="neutral" className="font-mono">{name}</Badge>)}</p>}
-        <div className="flex gap-1.5">
-          <Input value={secret.name} onChange={event => setSecret({ ...secret, name: event.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, "_") })} className="w-32 shrink-0 font-mono text-[12px]" placeholder="API_TOKEN" aria-label="Secret name" />
-          <Input type="password" autoComplete="off" value={secret.value} onChange={event => setSecret({ ...secret, value: event.target.value })} placeholder="Its value (empty removes it)" aria-label="Secret value" />
-        </div>
-        <Button size="sm" variant="outline" className="self-start" disabled={busy || secret.name === ""} onClick={async () => { setBusy(true); const result = await send(`${view.flow.href}/secrets`, secret, csrf); setBusy(false); apply(result); if (result.ok) setSecret({ name: "", value: "" }); }}>Save secret</Button>
-      </div>
-    </details>
+    <SecretsBox view={view} csrf={csrf} apply={apply} words={<>Kept on this computer, never shown again. Use one in a header as {"{{secret.NAME}}"}.</>} />
   </>;
 }
+
+/** The project's flow secrets: their names, a way to save one, and (for a script zone) which ones it gets. Values are never shown. */
+function SecretsBox({ view, csrf, apply, words, chosen, choose }: { view: BrowserFlowView; csrf: string; apply: (result: Said) => void; words: ReactNode; chosen?: string[]; choose?: (names: string[]) => void }) {
+  const [secret, setSecret] = useState({ name: "", value: "" });
+  const [busy, setBusy] = useState(false);
+  const picked = chosen ?? [];
+  return <details className="rounded-md border px-3 py-2" data-request-secrets open={picked.length > 0 ? true : undefined}>
+    <summary className="cursor-pointer text-[13px] font-medium">Secrets{choose !== undefined ? picked.length > 0 ? ` (${picked.length} used)` : "" : view.requestSecrets.length > 0 ? ` (${view.requestSecrets.length})` : ""}</summary>
+    <div className="mt-2 grid gap-2">
+      <p className="text-[12px] text-muted-foreground">{words}</p>
+      {view.requestSecrets.length > 0 && (choose === undefined
+        ? <p className="flex flex-wrap gap-1.5">{view.requestSecrets.map(name => <Badge key={name} tone="neutral" className="font-mono">{name}</Badge>)}</p>
+        : <div className="flex flex-wrap gap-x-3 gap-y-1.5">{view.requestSecrets.map(name => <label key={name} className="inline-flex items-center gap-1.5 font-mono text-[12px]">
+            <input type="checkbox" className="size-4 accent-[var(--so-accent)]" checked={picked.includes(name)} onChange={event => choose(event.target.checked ? [...picked, name] : picked.filter(one => one !== name))} />{name}</label>)}</div>)}
+      {picked.filter(name => !view.requestSecrets.includes(name)).map(name => <p key={name} className="text-[12px] text-attention">{name} isn't saved yet: save it below.</p>)}
+      <div className="flex gap-1.5">
+        <Input value={secret.name} onChange={event => setSecret({ ...secret, name: event.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, "_") })} className="w-32 shrink-0 font-mono text-[12px]" placeholder="API_TOKEN" aria-label="Secret name" />
+        <Input type="password" autoComplete="off" value={secret.value} onChange={event => setSecret({ ...secret, value: event.target.value })} placeholder="Its value (empty removes it)" aria-label="Secret value" />
+      </div>
+      <Button size="sm" variant="outline" className="self-start" disabled={busy || secret.name === ""} onClick={async () => {
+        setBusy(true); const result = await send(`${view.flow.href}/secrets`, secret, csrf); setBusy(false); apply(result);
+        if (result.ok) { if (choose !== undefined && secret.value.trim() !== "" && !picked.includes(secret.name)) choose([...picked, secret.name]); setSecret({ name: "", value: "" }); }
+      }}>Save secret</Button>
+    </div>
+  </details>;
+}
+
+/** A script zone (v90): which script, where it runs, the answers its "goto:" line picks, and the secrets it gets. */
+function CodeSettings({ stage, others, view, csrf, apply, update }: { stage: BrowserFlowStage; others: BrowserFlowStage[]; view: BrowserFlowView; csrf: string; apply: (result: Said) => void; update: (change: Partial<BrowserFlowStage>) => void }) {
+  const routes = stage.routes ?? [];
+  const script = view.scripts.find(one => one.name === stage.script);
+  const setRoutes = (next: { answer: string; to: string }[]) => update({ routes: next });
+  return <>
+    <Field label="Script" hint={view.scripts.length === 0 ? "This project has no scripts yet: make one with Scripts in the toolbar, or ask your lead in chat." : script !== undefined ? `${LANGUAGE_NAMES[script.language]}${script.file === null ? "" : `, runs ${script.file}`}. It gets the card as JSON on stdin; what it prints is this step's result.` : undefined}>
+      <select className={SELECT} aria-label="Script" value={stage.script ?? ""} onChange={event => update({ script: event.target.value || null })}>
+        <option value="">Choose a script</option>
+        {view.scripts.map(one => <option key={one.name} value={one.name}>{one.name} — {one.about}</option>)}
+        {stage.script !== null && !view.scripts.some(one => one.name === stage.script) && <option value={stage.script}>{stage.script} (missing)</option>}
+      </select>
+    </Field>
+    <Field label="Runs in" hint={(stage.runIn ?? "copy") === "folder" ? "Fast. The project's folder is at $FLOW_PROJECT." : "The project's setup runs first. Use this to test or check code."}>
+      <select className={SELECT} aria-label="Runs in" value={stage.runIn ?? "copy"} onChange={event => update({ runIn: event.target.value as "folder" | "copy" })}>
+        <option value="folder">An empty folder</option><option value="copy">A copy of the project, at the card's work</option>
+      </select>
+    </Field>
+    <div className="grid gap-1.5" data-code-routes><span className="text-[13px] font-medium">Answers (optional)</span>
+      <p className="text-[12px] text-muted-foreground">If its last line is “goto: <em>answer</em>”, the card goes where that answer leads.</p>
+      {routes.map((route, index) => <div key={index} className="flex gap-1.5">
+        <Input value={route.answer} maxLength={40} onChange={event => setRoutes(routes.map((one, at) => at === index ? { ...one, answer: event.target.value } : one))} className="w-32 shrink-0" placeholder="Urgent" aria-label={`Answer ${index + 1}`} />
+        <select className={SELECT} value={route.to} onChange={event => setRoutes(routes.map((one, at) => at === index ? { ...one, to: event.target.value } : one))} aria-label={`Where ${route.answer || `answer ${index + 1}`} leads`}>
+          {others.map(one => <option key={one.id} value={one.id}>{one.title}</option>)}</select>
+        <Button variant="ghost" size="icon" onClick={() => setRoutes(routes.filter((_, at) => at !== index))} aria-label={`Remove ${route.answer || `answer ${index + 1}`}`}><X className="size-4" /></Button>
+      </div>)}
+      {routes.length < 12 && others.length > 0 && <Button size="sm" variant="outline" className="self-start" onClick={() => setRoutes([...routes, { answer: "", to: others[0]!.id }])}><Plus className="size-4" />Add an answer</Button>}
+    </div>
+    <SecretsBox view={view} csrf={csrf} apply={apply} chosen={stage.secrets ?? []} choose={names => update({ secrets: names })}
+      words="Kept on this computer, never shown again. The script gets each one it's given as a variable of the same name." />
+  </>;
+}
+
+const LANGUAGE_NAMES: Record<string, string> = { shell: "Shell", python: "Python", node: "Node" };
+/** What a new script looks like in each language: read the card, print a result. */
+const SCRIPT_EXAMPLES: Record<string, string> = {
+  python: "import json, sys\ncard = json.load(sys.stdin)[\"card\"]\nprint(f\"Looked at {card['title']}\")",
+  node: "import { readFileSync } from \"node:fs\";\nconst { card } = JSON.parse(readFileSync(0, \"utf8\"));\nconsole.log(`Looked at ${card.title}`);",
+  shell: "npm ci\nnpm test",
+};
 
 /** An email: who it goes to, the subject and the words. */
 function EmailSettings({ email, view, set }: { email: NonNullable<BrowserFlowStage["email"]>; view: BrowserFlowView; set: (email: NonNullable<BrowserFlowStage["email"]>) => void }) {
@@ -512,7 +566,7 @@ function ZonePanel({ stage, stages, view, csrf, apply, update, remove, makeStart
     <Field label="Name"><Input value={stage.title} maxLength={60} onChange={event => update({ title: event.target.value })} aria-label="Zone name" /></Field>
     <Field label="What happens here" {...(kind === undefined ? {} : { hint: kind.about })}>
       <select className={select} aria-label="What happens here" value={stage.kind} onChange={event => update({ kind: event.target.value as BrowserFlowStage["kind"], ...(event.target.value === "done" ? { next: null, onFail: null } : {}),
-        ...(event.target.value === "update" ? { close: stage.close ?? true, message: stage.message ?? "Done: {{card.title}}" } : {}), ...(event.target.value === "check" ? { script: stage.script ?? view.scripts[0]?.name ?? null } : {}),
+        ...(event.target.value === "update" ? { close: stage.close ?? true, message: stage.message ?? "Done: {{card.title}}" } : {}), ...(event.target.value === "check" ? { script: stage.script ?? view.scripts[0]?.name ?? null, runIn: stage.runIn ?? "folder" } : {}),
         ...(event.target.value === "request" ? { request: stage.request ?? { method: "POST", url: "https://", headers: {}, body: '{"title": "{{card.title}}", "details": "{{card.description}}"}' } } : {}),
         ...(event.target.value === "email" ? { email: stage.email ?? { to: "{{card.email}}", subject: "Re: {{card.title}}", body: stages.find(one => one.kind === "draft") ? `{{stage.${stages.find(one => one.kind === "draft")!.id}}}` : "" } } : {}),
         ...(event.target.value === "tool" ? { tool: stage.tool ?? { server: view.tools[0]?.name ?? "", name: view.tools[0]?.functions[0] ?? "", args: '{"text": "{{card.title}}"}' } } : {}),
@@ -545,13 +599,7 @@ function ZonePanel({ stage, stages, view, csrf, apply, update, remove, makeStart
       <Field label="Comment on the issue" hint={"Fill-ins: {{card.title}}, {{note}}, {{stage.<zone id>}}."}><Textarea rows={3} value={stage.message ?? ""} maxLength={1000} onChange={event => update({ message: event.target.value })} aria-label="Comment on the issue" /></Field>
       <label className="flex items-center gap-2 text-[13px]"><input type="checkbox" className="size-4 accent-[var(--so-accent)]" checked={stage.close !== false} onChange={event => update({ close: event.target.checked })} />Close the issue too (Linear: move it to done)</label>
     </>}
-    {stage.kind === "check" && <Field label="Script" hint={view.scripts.length === 0 ? "This project has no scripts yet: make one with Scripts in the toolbar, or ask your lead in chat." : "Runs in a fresh copy of the card's work (or the main branch), with no AI. It passes when the script exits 0."}>
-      <select className={select} aria-label="Script" value={stage.script ?? ""} onChange={event => update({ script: event.target.value || null })}>
-        <option value="">Choose a script</option>
-        {view.scripts.map(one => <option key={one.name} value={one.name}>{one.name} — {one.about}</option>)}
-        {stage.script !== null && !view.scripts.some(one => one.name === stage.script) && <option value={stage.script}>{stage.script} (missing)</option>}
-      </select>
-    </Field>}
+    {stage.kind === "check" && <CodeSettings stage={stage} others={others} view={view} csrf={csrf} apply={apply} update={update} />}
     {stage.kind === "request" && stage.request !== undefined && <RequestSettings request={stage.request} view={view} csrf={csrf} apply={apply} set={request => update({ request })} />}
     {stage.kind === "email" && stage.email !== undefined && <EmailSettings email={stage.email} view={view} set={email => update({ email })} />}
     {stage.kind === "tool" && stage.tool !== undefined && <ToolSettings tool={stage.tool} view={view} set={tool => update({ tool })} />}
@@ -629,7 +677,7 @@ function RevealBox({ kind, reveal, onDone }: { kind: string; reveal: Reveal; onD
 }
 
 const TRIGGER_KEYS: Record<string, string[]> = {
-  button: ["label", "questions"], schedule: ["schedule", "title", "description"], github: ["repo", "watch", "label", "branch", "from", "delivery"],
+  button: ["label", "questions"], schedule: ["schedule", "title", "description", "script", "secrets"], github: ["repo", "watch", "label", "branch", "from", "delivery"],
   linear: ["team", "state", "label", "delivery"], flow: ["flow", "when"], webhook: ["title", "titleField", "bodyField"], email: ["folder", "sender", "subject"],
 };
 
@@ -637,6 +685,7 @@ function AddTrigger({ view, csrf, open, onResult }: { view: BrowserFlowView; csr
   const setup = view.triggerSetup;
   const [kind, setKind] = useState("button");
   const [fields, setFields] = useState<Record<string, string>>({});
+  const [scripted, setScripted] = useState(false);
   const [busy, setBusy] = useState(false);
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const defaults: Record<string, Record<string, string>> = {
@@ -671,8 +720,19 @@ function AddTrigger({ view, csrf, open, onResult }: { view: BrowserFlowView; csr
       </>}
       {kind === "schedule" && <>
         <Field label="When" hint="For example: daily 09:00 Europe/London, monday 09:00, every 4 hours."><Input value={v("schedule")} onChange={set("schedule")} required /></Field>
-        <Field label="Card title" hint="Each card's date is added to it."><Input value={v("title")} onChange={set("title")} placeholder="Dependency check" maxLength={200} required /></Field>
-        <Field label="Details (optional)"><Textarea rows={3} value={v("description")} onChange={set("description")} /></Field>
+        <Field label="Makes">
+          <select className={SELECT} value={v("script") === "" && !scripted ? "card" : "script"} aria-label="Makes" onChange={event => { setScripted(event.target.value === "script"); setFields(current => ({ ...current, script: event.target.value === "script" ? view.scripts[0]?.name ?? "" : "" })); }}>
+            <option value="card">One card each time</option><option value="script">A card for each item a script prints</option></select></Field>
+        {v("script") !== "" || scripted
+          ? view.scripts.length === 0 ? <p className="text-[13px] text-muted-foreground">This project has no scripts yet: make one with Scripts in the toolbar.</p> : <>
+            <Field label="Script" hint="It prints one item per line (a title, or JSON like {&quot;title&quot;: &quot;…&quot;, &quot;key&quot;: 42}). The same item never makes two cards.">
+              <select className={SELECT} value={v("script")} onChange={set("script")} aria-label="Script">{view.scripts.map(one => <option key={one.name} value={one.name}>{one.name} — {one.about}</option>)}</select></Field>
+            <Field label="Secrets it gets (optional)" hint="Names of saved secrets, like CRM_KEY. Save them on a script zone's Secrets."><Input value={v("secrets")} onChange={set("secrets")} className="font-mono" placeholder="CRM_KEY" maxLength={400} /></Field>
+          </>
+          : <>
+            <Field label="Card title" hint="Each card's date is added to it."><Input value={v("title")} onChange={set("title")} placeholder="Dependency check" maxLength={200} required /></Field>
+            <Field label="Details (optional)"><Textarea rows={3} value={v("description")} onChange={set("description")} /></Field>
+          </>}
       </>}
       {kind === "github" && <>
         <Field label="Repository"><Input value={v("repo")} onChange={set("repo")} placeholder="owner/name" required /></Field>
@@ -800,7 +860,7 @@ function TriggersPanel({ view, csrf, apply, focus, onPress, onClose }: { view: B
         {trigger.button !== null && trigger.state === "active" && <Button size="sm" onClick={() => onPress(trigger.id)}>Start</Button>}
         {trigger.button !== null && <Button size="sm" variant="outline" disabled={busy} onClick={() => void act(`${base}/${trigger.id}/share`, "form")}>{trigger.shared ? "New form link" : "Share as a form"}</Button>}
         {trigger.shared && <Button size="sm" variant="ghost" disabled={busy} onClick={() => void act(`${base}/${trigger.id}/unshare`, "form")}>Stop sharing</Button>}
-        {trigger.checkable && trigger.state === "active" && <Button size="sm" variant="outline" disabled={busy} onClick={() => void act(`${base}/${trigger.id}/check`, trigger.kind)}>Check now</Button>}
+        {trigger.checkable && trigger.state === "active" && <Button size="sm" variant="outline" disabled={busy} onClick={() => void act(`${base}/${trigger.id}/check`, trigger.kind)}>{trigger.kind === "schedule" ? "Run now" : "Check now"}</Button>}
         {trigger.hook !== null && <Button size="sm" variant="outline" disabled={busy} onClick={() => void act(`${base}/${trigger.id}/renew`, trigger.kind)}>New address</Button>}
         <Button size="sm" variant="ghost" disabled={busy} onClick={() => void act(`${base}/${trigger.id}/${trigger.state === "paused" ? "resume" : "pause"}`, trigger.kind)}>{trigger.state === "paused" ? "Turn on" : "Pause"}</Button>
         <Button size="sm" variant="ghost" className="text-destructive" disabled={busy} onClick={() => void act(`${base}/${trigger.id}/remove`, trigger.kind)}>Remove</Button>
@@ -833,7 +893,7 @@ function PressPanel({ trigger, view, csrf, apply, onClose }: { trigger: BrowserF
 
 /** The project's script library: reusable steps with no AI that any of its flows can run. */
 function ScriptsPanel({ view, csrf, apply, onClose }: { view: BrowserFlowView; csrf: string; apply: (result: Said) => void; onClose: () => void }) {
-  const blank = { name: "", about: "", body: "", timeoutMinutes: "15" };
+  const blank = { name: "", about: "", body: "", timeoutMinutes: "15", language: "python", file: "" };
   const [draft, setDraft] = useState<typeof blank | null>(view.scripts.length === 0 ? blank : null);
   const [busy, setBusy] = useState(false);
   const save = async () => {
@@ -843,21 +903,22 @@ function ScriptsPanel({ view, csrf, apply, onClose }: { view: BrowserFlowView; c
     setBusy(false); apply(result); if (result.ok) setDraft(null);
   };
   const set = (key: keyof typeof blank) => (event: { target: { value: string } }) => setDraft(current => current === null ? current : { ...current, [key]: event.target.value });
+  const [runsFile, setRunsFile] = useState(false);
   return <div className="flex flex-col gap-4" data-flow-scripts>
     <div className="flex items-center gap-2"><h2 className="flex-1 text-[15px] font-semibold">Scripts</h2><Button variant="ghost" size="icon" onClick={onClose} aria-label="Close"><X className="size-4" /></Button></div>
-    <p className="text-[13px] text-muted-foreground">Reusable steps with no AI. A “Run a script” zone runs one in a fresh copy of the card's work; any flow in {view.flow.project} can use them.</p>
+    <p className="text-[13px] text-muted-foreground">Reusable steps with no AI, in shell, Python or Node. A “Run a script” zone runs one with the card, and a schedule can run one to make cards. Any flow in {view.flow.project} can use them.</p>
     {view.scripts.length > 0 && <ul className="flex flex-col gap-2">{view.scripts.map(script => <li key={script.name} className="rounded-lg border p-3" data-script={script.name}>
       <div className="flex items-start gap-2">
         <span className="mt-0.5 inline-flex size-6 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground"><ListChecks className="size-3.5" aria-hidden="true" /></span>
         <div className="min-w-0 flex-1">
           <p className="font-mono text-[13px] font-semibold">{script.name}</p>
           <p className="text-[12.5px]">{script.about}</p>
-          <p className="text-[12px] text-muted-foreground">Version {script.version} · {script.savedBy} · up to {script.timeoutMinutes} min{script.usedHere.length > 0 ? ` · runs in ${script.usedHere.join(", ")}` : " · not used in this flow"}</p>
+          <p className="text-[12px] text-muted-foreground">{LANGUAGE_NAMES[script.language]}{script.file === null ? "" : ` · runs ${script.file}`} · version {script.version} · {script.savedBy} · up to {script.timeoutMinutes} min{script.usedHere.length > 0 ? ` · runs in ${script.usedHere.join(", ")}` : " · not used in this flow"}</p>
         </div>
       </div>
-      <details className="mt-2"><summary className="cursor-pointer text-[12px] text-muted-foreground">Show the script</summary><pre className="mt-2 max-h-56 overflow-auto rounded-md bg-muted p-2 font-mono text-[12px]">{script.body}</pre></details>
+      {script.file === null && <details className="mt-2"><summary className="cursor-pointer text-[12px] text-muted-foreground">Show the script</summary><pre className="mt-2 max-h-56 overflow-auto rounded-md bg-muted p-2 font-mono text-[12px]">{script.body}</pre></details>}
       {view.canEdit && <div className="mt-2 flex gap-1.5">
-        <Button size="sm" variant="outline" onClick={() => setDraft({ name: script.name, about: script.about, body: script.body, timeoutMinutes: String(script.timeoutMinutes) })}>Edit</Button>
+        <Button size="sm" variant="outline" onClick={() => setDraft({ name: script.name, about: script.about, body: script.body, timeoutMinutes: String(script.timeoutMinutes), language: script.language, file: script.file ?? "" })}>Edit</Button>
         <Button size="sm" variant="ghost" className="text-destructive" disabled={busy} onClick={async () => { setBusy(true); apply(await send(`${view.flow.href}/scripts`, { remove: "yes", name: script.name }, csrf)); setBusy(false); }}>Remove</Button>
       </div>}
     </li>)}</ul>}
@@ -865,9 +926,16 @@ function ScriptsPanel({ view, csrf, apply, onClose }: { view: BrowserFlowView; c
       ? <Button size="sm" variant="outline" className="self-start" onClick={() => setDraft(blank)}><Plus className="size-4" />New script</Button>
       : <form className="flex flex-col gap-3 rounded-lg border p-3" onSubmit={event => { event.preventDefault(); void save(); }} data-script-form>
         <Field label="Name" hint="Lowercase and dashes, like run-tests. Saving under an existing name makes a new version."><Input value={draft.name} onChange={set("name")} maxLength={40} className="font-mono" required /></Field>
-        <Field label="What it checks or does"><Input value={draft.about} onChange={set("about")} maxLength={160} placeholder="Runs the unit tests" required /></Field>
-        <Field label="Script" hint="Shell commands, run with sh from the top of the project. Exit 0 passes. FLOW_CARD_TITLE, FLOW_COMMIT and FLOW_NAME say what it's checking.">
-          <Textarea value={draft.body} onChange={set("body")} rows={8} className="font-mono text-[12.5px]" placeholder={"npm ci\nnpm test"} required /></Field>
+        <Field label="What it checks or does"><Input value={draft.about} onChange={set("about")} maxLength={160} placeholder="Looks the company up in our CRM" required /></Field>
+        <div className="flex gap-2">
+          <Field label="Language"><select className={SELECT} value={draft.language} onChange={set("language")} aria-label="Language"><option value="python">Python</option><option value="node">Node</option><option value="shell">Shell</option></select></Field>
+          <Field label="Runs"><select className={SELECT} value={draft.file === "" && !runsFile ? "here" : "file"} onChange={event => { setRunsFile(event.target.value === "file"); setDraft(current => current === null ? current : { ...current, file: event.target.value === "file" ? current.file : "" }); }} aria-label="Runs">
+            <option value="here">What's written here</option><option value="file">A file in the project</option></select></Field>
+        </div>
+        {runsFile || draft.file !== ""
+          ? <Field label="File" hint="A path from the top of the project. It gets the card as JSON on stdin (and in $FLOW_INPUT); what it prints is the step's result."><Input value={draft.file} onChange={set("file")} maxLength={200} className="font-mono" placeholder="scripts/enrich.py" required /></Field>
+          : <Field label="Script" hint={"It gets the card as JSON on stdin (and in $FLOW_INPUT). What it prints is the step's result; a last line “goto: <answer>” picks the next zone. Exit 0 passes."}>
+            <Textarea value={draft.body} onChange={set("body")} rows={8} className="font-mono text-[12.5px]" placeholder={SCRIPT_EXAMPLES[draft.language] ?? ""} required /></Field>}
         <Field label="Stop it after (minutes)"><Input type="number" min={1} max={60} value={draft.timeoutMinutes} onChange={set("timeoutMinutes")} className="w-28" /></Field>
         <div className="flex gap-2"><Button type="submit" size="sm" disabled={busy}>Save script</Button><Button type="button" size="sm" variant="ghost" onClick={() => setDraft(null)}>Cancel</Button></div>
       </form>)}
@@ -1059,13 +1127,14 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
     return [...fromTriggers, ...stages.flatMap(stage => {
       const next = stage.next === null ? undefined : stages.find(one => one.id === stage.next);
       const fail = stage.onFail === null ? undefined : stages.find(one => one.id === stage.onFail);
-      // A sort zone: one arrow to each zone its answers lead to, named by those answers.
-      const answers = stage.kind === "sort" && stage.sort !== null ? [...new Set(stage.sort.answers.map(one => one.to))].flatMap(to => {
+      // A sort zone (or a script zone's answers, v90): one arrow to each zone its answers lead to, named by those answers.
+      const picks = stage.kind === "sort" && stage.sort !== null ? stage.sort.answers : stage.kind === "check" ? stage.routes ?? [] : [];
+      const answers = picks.length > 0 ? [...new Set(picks.map(one => one.to))].flatMap(to => {
         const target = stages.find(one => one.id === to);
         if (target === undefined) return [];
         const handles = target.zone.x > stage.zone.x + stage.zone.w ? { source: "s-Right", target: "t-Left" } : sides(stage, target, false);
         return [{ id: `${stage.id}->answer-${to}`, source: stage.id, target: to, sourceHandle: handles.source, targetHandle: handles.target,
-          type: "smoothstep", label: stage.sort!.answers.filter(one => one.to === to).map(one => one.answer).join(", "), labelStyle: { fontSize: 11, fontWeight: 600, fill: "var(--color-foreground)" },
+          type: "smoothstep", label: picks.filter(one => one.to === to).map(one => one.answer).join(", "), labelStyle: { fontSize: 11, fontWeight: 600, fill: "var(--color-foreground)" },
           labelBgStyle: { fill: "var(--color-card)" }, markerEnd: { type: MarkerType.ArrowClosed }, style: { strokeWidth: 2 }, deletable: false }];
       }) : [];
       return [

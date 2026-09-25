@@ -433,8 +433,9 @@ export function prepareSharedAction(
       request["script"] = draft;
       state = { current: current?.digest ?? null, version: current?.version ?? 0 };
       title = `${current === null ? "Save" : "Update"} the ${draft.name} script in ${project}`;
-      terms.push(`${draft.name}: ${draft.about}`, draft.body,
-        `Runs with no AI in a fresh copy of a card's work, for up to ${draft.timeoutMinutes} minutes, whenever a card reaches a zone that runs it.${current === null ? "" : ` Replaces version ${current.version} everywhere it's used.`}`);
+      const language = draft.language === "python" ? "Python" : draft.language === "node" ? "Node" : "Shell";
+      terms.push(`${draft.name}: ${draft.about}`, draft.file === null ? draft.body : `Runs the project's file ${draft.file}`,
+        `${language}, with no AI, for up to ${draft.timeoutMinutes} minutes, whenever a card reaches a zone that runs it (or a schedule does). It gets the card as data; what it prints is passed on.${current === null ? "" : ` Replaces version ${current.version} everywhere it's used.`}`);
     } else if (operation === "flow_trigger_add") {
       const { flow, definition } = flowTarget!;
       const config = validateTriggerConfig(input["trigger"], { store, flow, definition, actor: who.name });

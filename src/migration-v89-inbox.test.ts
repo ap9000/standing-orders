@@ -46,8 +46,8 @@ test.each([88, -88])("v%s: flow_trigger admits email and chat, keeping every tri
   const before = db.prepare("SELECT * FROM flow_trigger").all();
   db.close();
   store = openStore(file);
-  expect(SCHEMA_VERSION).toBe(89);
-  expect(store.handle.prepare("SELECT version FROM schema_version").get()?.version).toBe(89);
+  expect(SCHEMA_VERSION).toBe(90);
+  expect(store.handle.prepare("SELECT version FROM schema_version").get()?.version).toBe(SCHEMA_VERSION);
   expect(store.handle.prepare("SELECT * FROM flow_trigger").all()).toEqual(before);
   expect(store.flowTriggerSaw(7, "delivery:1")).toBe(true);
   // The new kinds go in; ids carry on after the kept one; nothing points nowhere.

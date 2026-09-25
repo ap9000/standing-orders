@@ -45,8 +45,12 @@ export function serveBrowserAsset(request: IncomingMessage, response: ServerResp
  * The data script is escaped for HTML parsing, not merely valid JSON. */
 export function browserWorkspaceDocument(html: string, workspace: BrowserWorkspace, nonce: string, functionalScript: string): string {
   const initialize = `window.addEventListener('standing-orders:workspace-rendered',function initializeWorkspace(){window.removeEventListener('standing-orders:workspace-rendered',initializeWorkspace);${functionalScript}});`;
+  // A cross-page fade the browser gives up on rejects its promises; settle them from the head, before the
+  // first frame (the app's own listener arrives too late when a page is revealed before the bundle runs).
+  const settleFades = `(function(){function s(e){var f=e.viewTransition;if(f)[f.finished,f.ready,f.updateCallbackDone].forEach(function(p){if(p)p.catch(function(){})})}addEventListener('pageswap',s);addEventListener('pagereveal',s)})();`;
   return html
-    .replace('</head>', '<link rel="stylesheet" href="/assets/workspace.css"></head>')
+    // A page showing a password keeps to its one script (the sensitivity contract), so it goes without.
+    .replace('</head>', `<link rel="stylesheet" href="/assets/workspace.css">${workspace.sensitive ? "" : `<script nonce="${nonce}">${settleFades}</script>`}</head>`)
     .replace('<body>', '<body><div id="standing-orders-workspace">')
     .replace('</body>', `</div><script type="application/json" id="standing-orders-workspace-data" nonce="${nonce}">${serializeBrowserWorkspace(workspace)}</script><script nonce="${nonce}">${initialize}</script><script type="module" src="/assets/workspace.js" nonce="${nonce}"></script></body>`);
 }

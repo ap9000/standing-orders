@@ -76,8 +76,13 @@ export type FlowStage = {
   message: string | null;
   /** update: also close the issue (Linear: move it to the team's done state). */
   close: boolean | null;
-  /** check: the project script (by name) run on the card's work, with no AI. */
+  /** check: the project script (by name) run with no AI. */
   script: string | null;
+  /** check (v90): where it runs — a clean folder, or a copy of the card's work (the default for zones made before v90);
+   * the answers a script's "goto:" line may pick, each with the zone it leads to; and the flow secrets it gets as variables. */
+  runIn?: "folder" | "copy";
+  routes?: { answer: string; to: string }[];
+  secrets?: string[];
   /** sort: what Jev is asked and where each answer leads. Its onFail is where a card goes when Jev isn't sure. */
   sort: FlowSort | null;
   /** request, email, tool (v87): what the step sends, and to where. */
@@ -97,7 +102,7 @@ export const FLOW_KIND_WORDS: Record<FlowStageKind, { label: string; about: stri
   task: { label: "Build", about: "An agent does the work as a task, with the usual approvals and checks." },
   report: { label: "Research", about: "An agent investigates and writes a report. No code changes." },
   approval: { label: "Person decides", about: "Someone approves, or sends it back with a note." },
-  check: { label: "Run a script", about: "Runs one of the project's scripts on the card's work, with no AI. If it fails, the card takes its failure path." },
+  check: { label: "Run a script", about: "Runs one of the project's scripts (shell, Python or Node) with no AI. It gets the card; what it prints is passed on, and it can pick where the card goes next. If it fails, the card takes its failure path." },
   update: { label: "Update where it came from", about: "Comments on the GitHub or Linear issue the card came from (and can close it), or answers in the chat thread it came from. Other cards pass straight through." },
   notify: { label: "Message", about: "Posts a message to the project's chat, then moves on." },
   request: { label: "Web request", about: "Calls an address on the web, like an API, with the card's details, and keeps what it answers. If it fails, the card takes its failure path." },
@@ -111,6 +116,10 @@ export const FLOW_KIND_WORDS: Record<FlowStageKind, { label: string; about: stri
 const ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
 /** A project script's name: short, lowercase, dashes — how zones and chat refer to it. */
 export const SCRIPT_NAME = /^[a-z0-9][a-z0-9-]{0,39}$/;
+/** The languages a project script is written in (v90). */
+export const SCRIPT_LANGUAGES = ["shell", "python", "node"] as const;
+export type ScriptLanguage = (typeof SCRIPT_LANGUAGES)[number];
+export const LANGUAGE_WORDS: Record<ScriptLanguage, string> = { shell: "Shell", python: "Python", node: "Node" };
 const text = (value: unknown, cap: number): string | null => {
   if (value === null || value === undefined) return null;
   if (typeof value !== "string") throw new Error("Zone text must be plain text.");
@@ -241,6 +250,7 @@ export function validateFlowDefinition(input: unknown): FlowDefinition {
       message: text(stage["message"], 1000),
       close: kind === "update" ? stage["close"] !== false : null,
       script: kind === "check" ? text(stage["script"], 40) : null,
+      ...(kind === "check" ? validateCode(stage, title) : {}),
       sort: kind === "sort" ? validateSort(stage["sort"], title) : null,
       ...(kind === "request" ? { request: validateRequest(stage["request"], title) } : {}),
       ...(kind === "email" ? { email: validateEmail(stage["email"], title) } : {}),
@@ -255,7 +265,8 @@ export function validateFlowDefinition(input: unknown): FlowDefinition {
     ids.add(stage.id);
   }
   for (const stage of stages) {
-    for (const target of [stage.next, stage.onFail, ...(stage.sort?.answers.map(one => one.to) ?? [])]) if (target !== null && !ids.has(target)) throw new Error(`Zone ${stage.title} points at a zone that no longer exists.`);
+    for (const target of [stage.next, stage.onFail, ...(stage.sort?.answers.map(one => one.to) ?? []), ...(stage.routes?.map(one => one.to) ?? [])]) if (target !== null && !ids.has(target)) throw new Error(`Zone ${stage.title} points at a zone that no longer exists.`);
+    if (stage.routes?.some(one => one.to === stage.id)) throw new Error(`Zone ${stage.title}: an answer can't send cards back into the same zone.`);
     if (stage.sort !== null && stage.sort.answers.some(one => one.to === stage.id)) throw new Error(`Zone ${stage.title}: an answer can't send cards back into the same zone.`);
     if ((stage.kind === "task" || stage.kind === "report") && stage.instructions === null) throw new Error(`Zone ${stage.title}: say what the agent should do.`);
     if (stage.kind === "draft" && stage.instructions === null) throw new Error(`Zone ${stage.title}: say what Claude should write.`);
@@ -265,6 +276,28 @@ export function validateFlowDefinition(input: unknown): FlowDefinition {
   }
   const start = typeof raw.start === "string" && ids.has(raw.start) ? raw.start : stages[0]!.id;
   return { version: 1, start, stages };
+}
+
+/** A code zone's settings (v90): where it runs, its answers, and its secrets. Throws in plain words. */
+function validateCode(stage: Record<string, unknown>, title: string): Pick<FlowStage, "runIn" | "routes" | "secrets"> {
+  // Left out, it runs where every script ran before v90: in a copy of the card's work (and the zone's digest stays the same).
+  const runIn = stage["runIn"] === "folder" || stage["runIn"] === "copy" ? stage["runIn"] : stage["runIn"] === undefined || stage["runIn"] === null ? undefined : null;
+  if (runIn === null) throw new Error(`Zone ${title}: choose where the script runs: a clean folder or a copy of the card's work.`);
+  const rawRoutes = stage["routes"] === undefined || stage["routes"] === null ? [] : stage["routes"];
+  if (!Array.isArray(rawRoutes) || rawRoutes.length > 12) throw new Error(`Zone ${title}: a script picks from up to 12 answers.`);
+  const seen = new Set<string>();
+  const routes = rawRoutes.map(one => {
+    const row = (one ?? {}) as Record<string, unknown>;
+    const answer = typeof row["answer"] === "string" ? row["answer"].trim() : "";
+    const to = typeof row["to"] === "string" ? row["to"].trim() : "";
+    if (!/^[^\n]{1,40}$/.test(answer) || to === "") throw new Error(`Zone ${title}: each answer needs a short name and the zone it leads to.`);
+    if (seen.has(answer.toLowerCase())) throw new Error(`Zone ${title}: two answers are called ${answer}.`);
+    seen.add(answer.toLowerCase());
+    return { answer, to };
+  });
+  const rawSecrets = stage["secrets"] === undefined || stage["secrets"] === null ? [] : stage["secrets"];
+  if (!Array.isArray(rawSecrets) || rawSecrets.length > 10 || rawSecrets.some(one => typeof one !== "string" || !/^[A-Z][A-Z0-9_]{0,39}$/.test(one))) throw new Error(`Zone ${title}: name up to 10 saved secrets in capitals, like API_TOKEN.`);
+  return { ...(runIn === undefined ? {} : { runIn }), ...(routes.length === 0 ? {} : { routes }), ...(rawSecrets.length === 0 ? {} : { secrets: [...new Set(rawSecrets as string[])] }) };
 }
 
 /** What a card's work is held to: the zones' steps and paths, never where they sit on the canvas. */
@@ -299,6 +332,8 @@ export type FlowStepInput = {
   id?: string; title?: string; kind?: FlowStageKind;
   instructions?: string; planning?: "auto" | "required" | "skip"; decider?: string | null; message?: string;
   script?: string; close?: boolean;
+  /** check (v90): "folder" (a clean folder) or "copy" (a copy of the card's work); the answers a "goto:" line picks, each with the step it goes to; saved secrets it gets. */
+  runIn?: "folder" | "copy"; routes?: { answer?: string; goesTo?: string }[]; secrets?: string[];
   /** sort: the question, each answer with what it means and the step it goes to, how sure Jev must be (a percentage), and up to 3 other things to note. */
   question?: string; answers?: { answer?: string; means?: string; goesTo?: string }[]; sureAt?: number;
   alsoNote?: { question?: string; kind?: "score" | "yes-no"; levels?: string[] }[];
@@ -398,6 +433,12 @@ export function flowFromSteps(input: unknown, previous: FlowDefinition | null = 
         : kind === "update" ? step.message?.trim() || old?.message || "Done: {{card.title}}" : null,
       close: kind === "update" ? step.close ?? old?.close ?? true : null,
       script: kind === "check" ? step.script?.trim() || old?.script || null : null,
+      // Left out, a code step runs in a copy of the project (the card's work, or the main branch), as scripts always have.
+      ...(kind === "check" ? {
+        ...(step.runIn !== undefined ? { runIn: step.runIn } : old?.runIn === undefined ? {} : { runIn: old.runIn }),
+        ...(step.routes !== undefined ? step.routes.length === 0 ? {} : { routes: step.routes.map(one => ({ answer: String(one.answer ?? "").trim(), to: find(String(one.goesTo ?? ""), title) })) } : old?.routes === undefined ? {} : { routes: old.routes }),
+        ...(step.secrets !== undefined ? step.secrets.length === 0 ? {} : { secrets: step.secrets } : old?.secrets === undefined ? {} : { secrets: old.secrets }),
+      } : {}),
       sort: kind === "sort" ? sortFromStep(step, old?.sort ?? null, ref => find(ref, title)) : null,
       ...(kind === "request" ? { request: { method: step.method ?? old?.request?.method ?? "POST", url: step.url ?? old?.request?.url ?? "", headers: step.headers ?? old?.request?.headers ?? {}, body: step.body ?? old?.request?.body ?? null } } : {}),
       ...(kind === "email" ? { email: { to: step.to ?? old?.email?.to ?? "{{card.email}}", subject: step.subject ?? old?.email?.subject ?? "Re: {{card.title}}", body: step.body ?? old?.email?.body ?? "" } } : {}),
@@ -405,12 +446,47 @@ export function flowFromSteps(input: unknown, previous: FlowDefinition | null = 
       next, onFail,
     });
   });
+  // {{stage.<ref>}} in a step's words names a step as the lead wrote it (draftReply, Draft reply):
+  // it is rewritten to that step's id, the same way the steps themselves are named.
+  const refs = (text: string) => text.replace(/\{\{\s*stage\.([A-Za-z0-9_ -]{1,60}?)\s*\}\}/g, (whole, ref: string) => {
+    const hit = drafts.find(one => one.id === ref) ?? drafts.find(one => one.id === idOf(ref) || one.id.replace(/-/g, "") === idOf(ref).replace(/-/g, "") || one.title.toLowerCase() === ref.trim().toLowerCase());
+    return hit === undefined ? whole : `{{stage.${hit.id}}}`;
+  });
+  for (const stage of stages) {
+    if (stage.instructions !== null) stage.instructions = refs(stage.instructions);
+    if (stage.message !== null) stage.message = refs(stage.message);
+    if (stage.email !== undefined) stage.email = { to: refs(stage.email.to), subject: refs(stage.email.subject), body: refs(stage.email.body) };
+    if (stage.request !== undefined) stage.request = { ...stage.request, url: refs(stage.request.url), headers: Object.fromEntries(Object.entries(stage.request.headers).map(([key, value]) => [key, refs(value)])), body: stage.request.body === null ? null : refs(stage.request.body) };
+    if (stage.tool !== undefined) stage.tool = { ...stage.tool, args: refs(stage.tool.args) };
+  }
   // Lay out the new zones: in rows of four on a new flow, beside the step before them on an edited one.
+  // A new flow that branches (a sort, or a script's answers) is laid out in columns by step instead,
+  // each branch below the one before, so no arrow crosses a zone.
   const placed = stages.filter(one => kept.get(one.id)?.zone === one.zone).map(one => one.zone);
+  const branches = previous === null && stages.some(one => (one.sort?.answers.length ?? 0) > 0 || (one.routes?.length ?? 0) > 0);
+  const columns = new Map<string, number>();
+  if (branches) {
+    const queue = [stages[0]!.id];
+    columns.set(stages[0]!.id, 0);
+    while (queue.length > 0) {
+      const id = queue.shift()!, stage = stages.find(one => one.id === id)!;
+      for (const to of [...(stage.sort?.answers.map(one => one.to) ?? []), ...(stage.routes?.map(one => one.to) ?? []), stage.next, stage.onFail]) {
+        if (to === null || to === "" || columns.has(to)) continue;
+        columns.set(to, columns.get(id)! + 1);
+        queue.push(to);
+      }
+    }
+    for (const stage of stages) if (!columns.has(stage.id)) columns.set(stage.id, Math.max(0, ...columns.values()) + 1);
+  }
+  const rows = new Map<number, number>();
   stages.forEach((stage, index) => {
     if (placed.includes(stage.zone)) return;
     let at: FlowZone;
-    if (previous === null) {
+    if (branches) {
+      const column = columns.get(stage.id)!, row = rows.get(column) ?? 0;
+      rows.set(column, row + 1);
+      at = { ...stage.zone, x: column * 360, y: row * 380 };
+    } else if (previous === null) {
       const row = Math.floor(index / 4), column = index % 4;
       at = { ...stage.zone, x: (row % 2 === 0 ? column : 3 - column) * 300, y: row * 380 };
     } else {

@@ -81,7 +81,7 @@ describe("a web request", () => {
   afterEach(() => new Promise<void>(resolve => server.close(() => resolve())));
 
   test("it sends the card's details with the secret in its header, keeps the answer, and an echoed secret is blanked", async () => {
-    expect(setFlowSecret(dir, repo, "CRM_TOKEN", "tok-live-9f8e7d6c")).toEqual({ ok: true, said: "Saved CRM_TOKEN. It's used only in the headers of this project's web requests." });
+    expect(setFlowSecret(dir, repo, "CRM_TOKEN", "tok-live-9f8e7d6c")).toEqual({ ok: true, said: "Saved CRM_TOKEN. Only this project's web requests and scripts that name it get it." });
     expect(flowSecretNames(dir, repo)).toEqual(["CRM_TOKEN"]);
     expect(statSync(join(dir, "flow-secrets")).mode & 0o777).toBe(0o700);
     const flow = flowOf([{ id: "call", title: "Tell the CRM", kind: "request", url: `${base}/leads/{{card.title}}?who={{card.email}}`, headers: { Authorization: "Bearer {{secret.CRM_TOKEN}}" }, body: '{"name": "{{card.title}}", "note": "{{card.description}}"}' }]);
