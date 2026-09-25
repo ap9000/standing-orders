@@ -13,17 +13,21 @@
  *   which used to mean no sandbox at all), and denies every fenced path.
  * - Claude and Gemini on macOS: the whole agent process runs inside a
  *   Seatbelt profile that allows everything except the fenced paths.
+ * - Claude and Gemini on Linux (v88): the agent runs under bubblewrap, in its
+ *   own mount namespace where every fenced folder is an empty one and every
+ *   fenced file is /dev/null. Used when `bwrap` is installed and works here.
  * - Claude everywhere also gets Read/Edit deny rules for its own file tools.
  *
  * Checked against codex-cli 0.156 and Claude Code 2.1.281 with a canary
  * file read by an obfuscated script: "Operation not permitted".
  */
-import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 /** How a launch was fenced, as recorded on the run and said on the task. */
-export type FenceMethod = "codex-profile" | "macos-sandbox" | "claude-rules" | "none";
+export type FenceMethod = "codex-profile" | "macos-sandbox" | "linux-bubblewrap" | "claude-rules" | "none";
 
 /** Names that are secrets wherever the database lives (used when its folder is shared with other things). */
 const SENSITIVE_NAME = /(^up-login\.txt$|token|secret|login|password|credential|vapid|keys?\b|\.pem$|\.key$|^backups$|^evidence$|^remote$)/i;
@@ -136,4 +140,22 @@ export function macosFenceAvailable(platform: NodeJS.Platform = process.platform
 /** The spawn that runs `file args` inside the macOS fence (same process: sandbox-exec replaces itself with the agent). */
 export function macosFenced(file: string, args: readonly string[], fence: readonly string[]): { file: string; args: string[] } {
   return { file: SANDBOX_EXEC, args: ["-p", macosFenceProfile(fence), file, ...args] };
+}
+
+/** Whether bubblewrap runs here (checked once): installed, and allowed to make its namespace. */
+let bubblewrapWorks: boolean | null = null;
+export function linuxFenceAvailable(platform: NodeJS.Platform = process.platform, probe: () => boolean = () => spawnSync("bwrap", ["--dev-bind", "/", "/", "--", "true"], { timeout: 5_000, stdio: "ignore" }).status === 0): boolean {
+  if (platform !== "linux") return false;
+  if (bubblewrapWorks === null) { try { bubblewrapWorks = probe(); } catch { bubblewrapWorks = false; } }
+  return bubblewrapWorks;
+}
+
+/** The spawn that runs `file args` inside the Linux fence: the whole filesystem as it is, except each fenced path masked. */
+export function linuxFenced(file: string, args: readonly string[], fence: readonly string[]): { file: string; args: string[] } {
+  const masks = fence.flatMap(path => {
+    let folder = true;
+    try { folder = statSync(path).isDirectory(); } catch { folder = true; }
+    return folder ? ["--tmpfs", path] : ["--ro-bind", "/dev/null", path];
+  });
+  return { file: "bwrap", args: ["--dev-bind", "/", "/", ...masks, "--die-with-parent", "--", file, ...args] };
 }

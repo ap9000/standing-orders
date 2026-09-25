@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, statSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, readFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openStore, type Store } from "./store.js";
@@ -9,6 +9,8 @@ import { classify } from "./board.js";
 import { readVerifiedArtifact } from "./evidence.js";
 import { requestResultChanges } from './result-actions.js';
 import { revisionSourceOf } from './result-review.js';
+import { flowView } from "./flows-ui.js";
+import { flowInsights } from "./flow-insights.js";
 
 const T0 = new Date("2026-08-14T12:00:00.000Z");
 
@@ -102,6 +104,24 @@ describe("the demo sandbox", () => {
       expect(lanes.has("building")).toBe(true);
       // Completed work rides the snapshot's own done list, not the lanes.
       expect(snapshot.done.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      store.close();
+      rmSync(sandbox, { recursive: true, force: true });
+    }
+  });
+
+  test("two flows are mid-flight: sorted support cards and a drafted reply waiting on the demo person", () => {
+    const { sandbox, store, seed } = createDemoSandbox(T0);
+    try {
+      const flows = store.listFlows(seed.repos.map(one => realpathSync(one)));
+      expect(flows.map(one => one.name).sort()).toEqual(["Customer replies", "Support desk"]);
+      const desk = flows.find(one => one.name === "Support desk")!, replies = flows.find(one => one.name === "Customer replies")!;
+      const view = (flow: typeof desk) => flowView(store, flow, { name: "demo", approver: true }, null);
+      expect(view(desk).cards.map(one => [one.stage, one.sorted?.chip]).sort()).toEqual([["billing", "Invoice problem · 94% · Now"], ["by-hand", "Delivery problem · 58% · Soon"], ["delivery", "Delivery problem · 91% · Soon"], ["orders", "Order change · 97% · Soon"]]);
+      const waiting = view(replies).cards.find(one => one.canDecide)!;
+      expect(waiting).toMatchObject({ title: "Refund for order 42?", stage: "check", draft: { title: "Write the reply" } });
+      expect(store.flowCards(replies.id, true).filter(one => one.state === "done").map(one => [one.title, one.outputs["send"]])).toEqual([["Do you ship to Canada?", "Sent to sam@example.com: “Re: Do you ship to Canada?”"]]);
+      expect(flowInsights(store, desk, new Date(T0.getTime() + 60_000), 30).sorts[0]).toMatchObject({ sorted: 4, alone: 3, notSure: 1 });
     } finally {
       store.close();
       rmSync(sandbox, { recursive: true, force: true });

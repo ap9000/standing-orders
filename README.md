@@ -11,16 +11,26 @@ interrupted only for decisions that genuinely need a human.**
 [![CI](https://github.com/ap9000/standing-orders/actions/workflows/ci.yml/badge.svg)](https://github.com/ap9000/standing-orders/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/standing-orders)](https://www.npmjs.com/package/standing-orders)
 ![node](https://img.shields.io/badge/node-%E2%89%A5%2022.13-brightgreen)
-![runtime deps](https://img.shields.io/badge/runtime%20deps-0-blue)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-[Design](docs/DESIGN.md) · [Never Stuck contract](docs/NEVER_STUCK.md) · [Priorities](docs/PRIORITIES.md) · [Ledger](docs/PROGRESS.md) · [Contributing](CONTRIBUTING.md) · [Issues](https://github.com/ap9000/standing-orders/issues) · [npm](https://www.npmjs.com/package/standing-orders)
+[Guides](docs/guide/README.md) · [Design](docs/DESIGN.md) · [Never Stuck contract](docs/NEVER_STUCK.md) · [Priorities](docs/PRIORITIES.md) · [Ledger](docs/PROGRESS.md) · [Contributing](CONTRIBUTING.md) · [Issues](https://github.com/ap9000/standing-orders/issues) · [npm](https://www.npmjs.com/package/standing-orders)
 
 <img src="https://raw.githubusercontent.com/ap9000/standing-orders/main/docs/media/ui/unified-chat.png" alt="Standing Orders unified chat showing a live portfolio overview across projects, active builds, decisions, and proposed next actions." width="920">
 
 <sub>One conversation across every project, backed by durable tasks—not a chat-only copy of the work.</sub>
 
 </div>
+
+## Quick start
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ap9000/standing-orders/main/install.sh | sh
+```
+
+macOS or Linux, with Node.js 22.13+ and git. It installs the command and opens
+the console; `npx standing-orders demo` shows a seeded sandbox first. Then read
+[Getting started](docs/guide/getting-started.md), [Flows](docs/guide/flows.md)
+and [Security](docs/guide/security.md).
 
 ## One command center, the whole loop
 

@@ -5422,11 +5422,20 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
     const flowPost = /^\/flows\/([1-9][0-9]{0,9})\/(save|cards|archive|triggers|linear-key|hooks-address|scripts|secrets)$/.exec(url.pathname) ?? /^\/flows\/([1-9][0-9]{0,9})\/cards\/([1-9][0-9]{0,9})\/(move|decide|cancel|comment|assign|watch)$/.exec(url.pathname);
     const triggerPost = /^\/flows\/([1-9][0-9]{0,9})\/triggers\/([1-9][0-9]{0,9})\/(pause|resume|remove|check|press|renew|secret|share|unshare)$/.exec(url.pathname);
-    if (url.pathname === "/flows/new" || flowPost !== null || triggerPost !== null) {
+    if (url.pathname === "/flows/new" || url.pathname === "/flows/example" || flowPost !== null || triggerPost !== null) {
       const now = clock();
       const answer = (status: number, payload: Record<string, unknown>) => respond(response, status, "application/json; charset=utf-8", JSON.stringify(payload));
       const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
-      if (who.via !== "cookie" || who.role !== "approver") return url.pathname === "/flows/new" ? refuse(response, who, 403, "Sign in as an approver to create flows.", "/flows") : answer(403, { ok: false, said: "Sign in as an approver to change flows." });
+      if (who.via !== "cookie" || who.role !== "approver") return url.pathname === "/flows/new" || url.pathname === "/flows/example" ? refuse(response, who, 403, "Sign in as an approver to create flows.", "/flows") : answer(403, { ok: false, said: "Sign in as an approver to change flows." });
+      if (url.pathname === "/flows/example") {
+        // A first look (v88): the Email replies template with one sample question, which Claude drafts a reply to straight away.
+        const repo = body.get("repo") ?? "";
+        if (!projects.includes(repo)) return redirect(response, `/flows?problem=${encodeURIComponent("Choose one of your projects.")}`);
+        const template = FLOW_TEMPLATES.find(one => one.id === "email-replies")!;
+        const id = store.createFlow({ repo, name: "Customer replies (example)", definitionJson: JSON.stringify(template.definition), by: who.name }, now);
+        addCardToFlow(store, store.getFlow(id)!, { title: "Do you ship to Canada?", description: "Hi! I'm thinking of ordering but I live in Toronto. Do you ship there, and how long does it take? — sam@example.com", stage: null }, who.name, now);
+        return redirect(response, `/flows/${id}`);
+      }
       if (url.pathname === "/flows/new") {
         const repo = body.get("repo") ?? "";
         if (!projects.includes(repo)) return redirect(response, `/flows?problem=${encodeURIComponent("Choose one of your projects.")}`);

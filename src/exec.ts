@@ -7,7 +7,7 @@
  * walks repos it has never seen, and one broken repo must not end the scan.
  */
 
-import { macosFenceAvailable, macosFenced } from "./agent-fence.js";
+import { linuxFenceAvailable, linuxFenced, macosFenceAvailable, macosFenced } from "./agent-fence.js";
 import { execFile, spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -213,6 +213,7 @@ function spawnContained(
 ): ContainedSpawn {
   // The agent fence wraps the target itself (sandbox-exec then execs it, same pid).
   if (bag.fence !== undefined && bag.fence.length > 0 && macosFenceAvailable()) ({ file, args } = macosFenced(file, args, bag.fence));
+  else if (bag.fence !== undefined && bag.fence.length > 0 && linuxFenceAvailable()) ({ file, args } = linuxFenced(file, args, bag.fence));
   // The policy refusal comes first: nothing is reserved, recorded or
   // spawned for a spawn that cannot be contained as required.
   const effective = contain ? currentContainment() : null;

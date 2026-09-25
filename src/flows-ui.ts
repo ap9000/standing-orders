@@ -28,9 +28,13 @@ export function flowsListHtml(store: Store, flows: readonly FlowRow[], projects:
       (buttons.length === 0 ? "" : `<p class="flow-buttons">${buttons.map(one => `<a class="button-link" href="/flows/${flow.id}?start=${one.id}">${e(one.label)}</a>`).join(" ")}</p>`) + `</article>`;
   }).join("");
   const create = canCreate && projects.length > 0 ? `<details class="card"${flows.length === 0 ? " open" : ""}><summary>New flow</summary><form method="post" action="/flows/new"><input type="hidden" name="csrf" value="${e(csrf)}"><label>Name<input name="name" required maxlength="80" placeholder="for example: Bug fixes"></label><label>Project<select name="repo">${projects.map(repo => `<option value="${e(repo)}">${e(projectName(repo))}</option>`).join("")}</select></label><label>Start from<select name="template">${FLOW_TEMPLATES.map(one => `<option value="${e(one.id)}">${e(one.label)}: ${e(one.about)}</option>`).join("")}</select></label><button>Create flow</button></form></details>` : "";
+  // No flows yet: one click makes a working example with a sample question in it.
+  const example = flows.length === 0 && canCreate && projects.length > 0
+    ? `<form method="post" action="/flows/example" class="card flow-example"><input type="hidden" name="csrf" value="${e(csrf)}"><h2>See a flow work</h2><p class="meta">Claude drafts a reply to a sample customer question; you approve it here or in your chat app.</p>${projects.length === 1 ? `<input type="hidden" name="repo" value="${e(projects[0]!)}">` : `<label>Project<select name="repo">${projects.map(repo => `<option value="${e(repo)}">${e(projectName(repo))}</option>`).join("")}</select></label>`}<button>Try an example</button></form>`
+    : "";
   const intro = `<p class="meta">A flow is your process drawn as zones. Cards move through them: agents do the work, people approve, and the team hears about it.</p>` +
     (canCreate && projects.length > 0 ? `<p class="flow-chat">Describe how work should move and your lead drafts the flow for you to confirm, or start from a template below. <a href="/chat?draft=${encodeURIComponent("Make a flow for ")}">Describe it in chat</a></p>` : "");
-  return `<section class="flows">${problem === null ? "" : `<p class="problem" role="alert">${e(problem)}</p>`}${intro}${rows || '<p class="meta">No flows yet.</p>'}${create}</section>`;
+  return `<section class="flows">${problem === null ? "" : `<p class="problem" role="alert">${e(problem)}</p>`}${intro}${rows || example || '<p class="meta">No flows yet.</p>'}${create}</section>`;
 }
 
 const historyText = (event: { fromStage: string | null; toStage: string; outcome: string; actor: string; note: string | null }, title: (id: string) => string, sorts: ReadonlySet<string> = new Set()): string => {

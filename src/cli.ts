@@ -1264,6 +1264,11 @@ async function runDemoCommand(argv: readonly string[], write: Write): Promise<nu
   const portGiven = portIndex === -1 ? "0" : (argv[portIndex + 1] ?? "");
   const port = Number(portGiven);
   const DEMO_USAGE = "`standing-orders demo [--port <n>] [--host <addr>] [--allow-host name:port,…] [--keep]` — the port is a number under 65536; absent, a free one is picked";
+  // Asking how it works never starts a sandbox.
+  if (argv.includes("--help") || argv.includes("-h")) {
+    write(json ? envelopeJson({ ok: true, command: "demo", usage: DEMO_USAGE }) : `${DEMO_USAGE}\n\nA throwaway sandbox with a seeded fleet and flows mid-flight. It never spends and never reaches outside; Ctrl-C removes it unless --keep.`);
+    return 0;
+  }
   if (!Number.isInteger(port) || port < 0 || port > 65_535) {
     write(json ? envelopeJson({ ok: false, command: "demo", reason: "usage", message: DEMO_USAGE }) : DEMO_USAGE);
     return 2;
