@@ -9014,6 +9014,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         changes: record.changes,
         changeWords: describeContractChanges(record.changes),
         current: scope !== null && contractChangesOf(record.proposed, scope).length === 0,
+        revision: store.revisionSourceOf(taskRef) !== null,
       };
     } catch {
       return { run: artifact.run, problem: "the contract record could not be read" };
@@ -9766,6 +9767,8 @@ type PlanContractView =
       changeWords: string[];
       /** The proposed terms are still exactly the scope row. */
       current: boolean;
+      /** A revision: the terms before planning were copied from the previous version, not filed by a person. */
+      revision?: boolean;
     };
 
 function contractChangeHtml(change: ContractChange): string {
@@ -9810,6 +9813,20 @@ function planContractHtml(view: PlanContractView | null, mode: "full" | "ceremon
     return mode === "full"
       ? `<div class="contract-panel contract-drafted"><p class="approval-label">filed contract</p><p class="meta">no scope was filed before planning — the planner drafted this contract from the title and the repository; review every term as new</p>${stale}</div>`
       : `<p class="meta contract-note">no scope was filed before planning — every term above is the planner's proposal</p>`;
+  }
+  if (view.revision === true) {
+    // A send-back: the terms were copied from the previous version, and the planner updated them with the notes.
+    if (view.changes.length === 0) {
+      return `<div class="contract-panel contract-preserved"><p class="approval-label">updated plan</p><p><strong>Same terms as before</strong> <span class="meta">your notes fit the previous plan · <a href="/r/${view.run}">run ${view.run}</a></span></p>${stale}</div>`;
+    }
+    return (
+      `<div class="contract-panel contract-amended"${mode === "full" ? ` id="contract-amendment"` : ""}><p class="approval-label">updated plan</p>` +
+      `<p><strong>${view.changes.length} change${view.changes.length === 1 ? "" : "s"} from your notes</strong> <span class="meta">— approving accepts the updated terms ${mode === "full" ? "in the scope" : "above"} · <a href="/r/${view.run}">run ${view.run}</a></span></p>` +
+      (view.amendment === null ? "" : `<p class="recap contract-reason"><strong>why:</strong> ${escape(view.amendment)}</p>`) +
+      `<ul class="recap contract-changes">${view.changes.map(contractChangeHtml).join("")}</ul>` +
+      stale +
+      `</div>`
+    );
   }
   if (view.changes.length === 0) {
     return `<div class="contract-panel contract-preserved"><p class="approval-label">filed contract</p><p><strong>preserved exactly</strong> <span class="meta">the plan reproduces the filed goal, exclusions, touches, and acceptance criteria — approving binds the terms you filed · <a href="/r/${view.run}">run ${view.run}</a></span></p>${stale}</div>`;
@@ -18608,8 +18625,11 @@ function taskBodyParts(data: {
   const planCard =
     data.planDocument === null
       ? data.plan === "requested"
-        ? `<div class="card planner-status"><span class="planner-orb" aria-hidden="true"></span><p><strong>planning requested</strong>` +
-          `<span class="meta">${data.planAuto ? "Automatic approval is enabled for a verified plan that preserves your filed contract. Amendments and unanswered questions still pause." : "The agent is inspecting the repository and drafting the goal, acceptance criteria, and approach. It will ask only if a missing answer changes the work."}</span></p></div>`
+        ? data.revision != null && !("problem" in data.revision)
+          ? `<div class="card planner-status"><span class="planner-orb" aria-hidden="true"></span><p><strong>Updating the plan</strong>` +
+            `<span class="meta">Adding your notes to the plan. You approve any change before it builds.</span></p></div>`
+          : `<div class="card planner-status"><span class="planner-orb" aria-hidden="true"></span><p><strong>planning requested</strong>` +
+            `<span class="meta">${data.planAuto ? "Automatic approval is enabled for a verified plan that preserves your filed contract. Amendments and unanswered questions still pause." : "The agent is inspecting the repository and drafting the goal, acceptance criteria, and approach. It will ask only if a missing answer changes the work."}</span></p></div>`
         : ""
       : `${approval.approved ? `<details class="card planner-plan planner-plan-collapsed"><summary class="execution-plan-head">` : `<section class="card planner-plan"><div class="execution-plan-head">`}` +
         `<div><span class="eyebrow">execution plan</span><h2>${approval.approved ? `${planMilestoneCount ?? "Full"} step${planMilestoneCount === 1 ? "" : "s"} · open to review` : "How the agent will tackle this"}</h2>` +

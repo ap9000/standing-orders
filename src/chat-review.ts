@@ -77,8 +77,9 @@ export function applyChatReview(store: Store, who: VerifiedApprover, evidenceRoo
       if (!result.ok) return fail(result.message);
       const scope = store.getScope(result.id);
       const approved = scope?.approvedDigest != null && scope.approvedDigest === scope.digest;
+      const planning = store.lookupRef(result.id)?.plan === "requested";
       return { ok: true as const, taskId: result.id, run: live.run,
-        said: approved ? "Revision created under your automatic approval settings." : "Revision created. Review and approve it to start." };
+        said: approved ? "Revision created under your automatic approval settings." : planning ? "Revision created. Updating the plan with your notes; you'll approve it next." : "Revision created. Review and approve it to start." };
     }));
   } catch (error) {
     if (error instanceof ReviewRefusal) return { ok: false, message: error.message };

@@ -1294,6 +1294,26 @@ describe("the filed contract reaches planning and survives it", () => {
     withStore(store => expect(store.getScope("dark")).toMatchObject({ approvedDigest: filedDigest, digest: filedDigest, acceptance: rubric }));
   });
 
+  test("a correction that goes back to exactly the filed terms is accepted, not refused as changed authority (a planner stuck on its own silent rewording, found in the real e2e)", async () => {
+    const { runnerToken } = await setup();
+    const filedDigest = withStore(store => store.getScope("dark")!.digest);
+    const reworded = { ...preservingPlan(), goal: "Add a dark-mode toggle to the settings page, persisted per account, and check a reload" };
+    const planned = await tick(
+      runnerToken,
+      replying([
+        () => ({ file: "plan", body: reworded }),
+        prompt => {
+          expect(prompt).toContain('"reason": "silent-amendment"');
+          expect(prompt).toContain("frozen as\nYOUR previous output wrote them");
+          return { file: "plan", body: preservingPlan() };
+        },
+      ]),
+    );
+    expect(planned).toBe(EXIT.ok);
+    expect(payload().dispatched).toContainEqual({ id: "dark", outcome: "planned" });
+    withStore(store => expect(store.getScope("dark")).toMatchObject({ digest: filedDigest, goal: filed.goal }));
+  });
+
   test("c2: a plan that silently drops a criterion and rewords the goal is malformed; the same-session correction states the amendment, the approval shows every addition, change, and removal beside the reason, and the yes binds the amended terms", async () => {
     const { runnerToken, approverToken } = await setup();
     const filedDigest = withStore(store => store.getScope("dark")!.digest);

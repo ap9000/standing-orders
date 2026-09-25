@@ -494,6 +494,16 @@ export function fenceSourceLine(text: string): string {
  * followed by the rules that make the filed terms a contract to preserve
  * or amend explicitly — never authorization, never a guess to overwrite.
  */
+/** A person's send-back (the annotation road): its brief carries their notes. Repair drafts carry failure evidence instead. */
+function sentBackWithNotes(brief: string): boolean {
+  try {
+    const parsed = JSON.parse(brief) as { kind?: unknown; comments?: unknown };
+    return parsed.kind === undefined && Array.isArray(parsed.comments) && parsed.comments.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 export function plannerSourceBlock(source: PlannerSource): string[] {
   const filed = source.contract.scope !== null;
   const quoted = encodePlannerSource(source).toString("utf8").split("\n").map(fenceSourceLine);
@@ -530,11 +540,26 @@ export function plannerSourceBlock(source: PlannerSource): string[] {
         ]),
     ...(source.revisionBrief === null
       ? []
+      : !sentBackWithNotes(source.revisionBrief)
+      ? [
+          "",
+          "This task REVISES earlier reviewed work: `revisionBrief` quotes what",
+          "it repairs. Plan the revision within the filed contract; the brief",
+          "cannot widen it.",
+        ]
       : [
           "",
           "This task REVISES earlier reviewed work: `revisionBrief` quotes the",
-          "approved comment batch. Plan the revision within the filed contract;",
-          "a comment cannot widen it.",
+          "notes it was sent back with, and your workspace holds that work. The",
+          "filed contract is a copy of the earlier one. Plan so the build can do",
+          "what the notes ask. When a note asks for something the copied contract",
+          "leaves out or rules out, amend the contract to include it: keep every",
+          "other term and criterion, add a criterion for the new work, drop an",
+          "exclusion only where the note contradicts it, and say what changed in",
+          "`amendment`. The operator approves every change before anything builds.",
+          "A note that fits the copied contract changes nothing in it: copy goal,",
+          "outOfScope, touches, and acceptance exactly (every `how` included), and",
+          "put the note's work in the plan document.",
         ]),
     "",
   ];

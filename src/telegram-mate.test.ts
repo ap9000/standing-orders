@@ -365,18 +365,20 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     expect(store.getTask(child)?.title).toBe("Guard the payout path (payout) — revision");
     expect(store.revisionSourceOf(store.lookupRef(child)!.id)).toMatchObject({ sourceRun: run, sourceTask: "payout" });
     expect(store.allDiffComments(run).map(one => [one.author, one.note, one.consumedBy])).toEqual([["alex", "Rename the guard and add a test for the over-limit case.", child]]);
-    // A manual approval: the door's one sentence, and ONE button to the exact revision's approval control — no second instruction.
-    expect(script.edits().at(-1)).toBe("✓ Revision created. Review and approve it to start.");
-    expect(urlButtons(lastEdit())).toEqual([["Review & start", `https://console.example/chat?task=${encodeURIComponent(child)}#task-chat-action`]]);
+    // Planned first: the door's one sentence says so, and ONE button opens the revision — nothing to approve yet.
+    expect(script.edits().at(-1)).toBe("✓ Revision created. Updating the plan with your notes; you'll approve it next.");
+    expect(urlButtons(lastEdit()).map(button => button[0])).toEqual(["Open task"]);
     // The task keeps the exchange in its own chat too: the phone's words,
     // the lead's reply and what was confirmed, each labelled Telegram.
     const taskChat = store.liveMateThreadFor("alex", { kind: "task", key: "payout" })!;
     expect(store.listMateMessages(taskChat.id, 10).map(one => [one.role, one.text])).toEqual([
       ["operator", "From Telegram: Rename the guard and add a test for the over-limit case."],
       ["assistant", "I proposed a revision of payout with your feedback. Confirm it to create the revision."],
-      ["assistant", "From Telegram — Changes to make: Revision created. Review and approve it to start."],
+      ["assistant", "From Telegram — Changes to make: Revision created. Updating the plan with your notes; you'll approve it next."],
     ]);
     expect(store.getScope(child)?.approvedDigest ?? null).toBeNull();
+    // The planner keeps the terms (its real turn is covered end to end): now it waits for approval.
+    store.setPlanState(store.lookupRef(child)!.id, "drafted");
     // The revision's own status reads from the phone, on the same records, with the same precise button.
     script.updates.push([textUpdate(nextUpdate++, `/task ${child}`)]);
     expect(await pass()).toMatchObject({ ok: true, report: { statusReplies: 1 } });
@@ -1420,7 +1422,8 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       expect(store.revisionSourceOf(store.lookupRef(child)!.id)).toMatchObject({ sourceRun: run, sourceTask: "payout" });
       expect(store.allDiffComments(run).map(one => [one.author, one.note, one.consumedBy])).toEqual([["alex", "Fix the spacing on the form.", child]]);
       expect(store.getScope(child)?.approvedDigest ?? null).toBeNull();
-      expect(urlButtons(lastEdit())).toEqual([["Review & start", `https://console.example/chat?task=${encodeURIComponent(child)}#task-chat-action`]]);
+      // Planned first: the card opens the revision; there is nothing to approve until the plan is updated.
+      expect(urlButtons(lastEdit())).toEqual([["Open task", `https://console.example/chat?task=${encodeURIComponent(child)}`]]);
       // The image message keeps its identity after the revision. Asked again with no run, the newer revision is said and nothing is switched; nothing is sent.
       askForImages(undefined, "A newer revision of payout is current. Which result do you want: this version or the newer one?", { reply_to_message: { message_id: imageMessage } });
       expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1, problems: [] } });

@@ -76,6 +76,15 @@ function revisionIdOf(location: string | null): string {
   return url.searchParams.get("revision") ?? url.searchParams.get("version") ?? decodeURIComponent(url.pathname.slice(3));
 }
 
+/** A sent-back revision is planned first. Fixtures that go on to its approval
+ * stand in for the planner's turn with the copied terms kept as they are
+ * (the planner's real turn is covered end to end, scripts/app-e2e.mjs). */
+function plannerKeptTerms(store: Store, taskId: string): void {
+  const ref = store.lookupRef(taskId);
+  expect(ref?.plan).toBe("requested");
+  store.setPlanState(ref!.id, "drafted");
+}
+
 function revisionFormOf(html: string): { batch: string; source: string } {
   const form = /<form method="post" action="\/r\/[0-9]+\/revise"[\s\S]*?<\/form>/.exec(html)?.[0] ?? /<form method="post" action="\/r\/[0-9]+\/comment"[\s\S]*?<\/form>/.exec(html)?.[0] ?? "";
   return {
@@ -994,6 +1003,10 @@ describe("the operations console", () => {
     const page1 = await (await fetch(url(target), { headers: { cookie } })).text();
     expect(page1).toContain("authentication");
     expect(page1).not.toContain("<em>no exclusions</em>");
+    // Sent back with a note, it is planned afresh before anyone approves it.
+    expect(page1).toContain("Updating the plan");
+    expect(page1).not.toContain('id="approve"');
+    plannerKeptTerms(store, newTaskId);
 
     // IV-3: corrupt the brief on disk — the approval surface closes.
     const newRef = store.lookupRef(newTaskId);
@@ -1061,6 +1074,7 @@ describe("the operations console", () => {
     expect(child?.acceptance.map(one => one.id)).toEqual(["c1", "c2"]);
     expect(child?.profile).toMatchObject({ provider: "claude", permissionArgv: "auto" });
     expect(store.lookupRef(childId)).toMatchObject({ revisionOf: "t-strict", riskLevel: "high", qualityMode: "strict", permissionMode: "auto" });
+    plannerKeptTerms(store, childId);
 
     // The task page: the approval card restates the terms, and the lineage
     // says where they came from and what did not come along.
@@ -12294,6 +12308,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
       expect(sealed.headers.get("location")).toBe(`/chat?task=${root}&revision=${child}`);
       expect(store.revisionLineageOf(child, T0)).toMatchObject({ root, sourceTask: source, sourceRun: run });
       expect((await post(cookie, `/r/${run}/revise`, body)).headers.get("location")).toBe(sealed.headers.get("location"));
+      plannerKeptTerms(store, child);
       const chat = await read(`/chat?task=${root}`);
       expect(chat).toContain(`data-task="${root}" data-execution="${child}"`);
       expect(chat).toContain(`data-execution="${child}"`);
@@ -12420,6 +12435,8 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(store.revisionLineageOf(child, now)).toMatchObject({ root, sourceTask: root, sourceRun: run });
     expect(store.liveDiffComments(run).map(one => one.note)).toEqual(["A later note, not in this revision."]);
     expect(approvalOf(store.getScope(child)).approved).toBe(false);
+    expect(await read(`/chat?task=${root}`)).not.toContain(`action="/t/${child}/approve"`);
+    plannerKeptTerms(store, child);
     expect(await read(`/chat?task=${root}`)).toContain(`action="/t/${child}/approve"`);
     expect(await read("/work")).toContain(`data-task="${root}"`);
     await post(cookie, `/chat/proposal/${revise.id}/confirm`, { csrf });
@@ -12584,6 +12601,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(after).toContain('<div class="diff-review" data-review-diff>');
     expect(after).toContain(`<img src="/r/${run}/evidence/`);
     expect(after).not.toContain(`action="/r/${run}/revise"`);
+    plannerKeptTerms(store, revisionId);
     const revisionTask = await read(`/t/${revisionId}`);
     expect(revisionTask).toContain(`href="/r/${run}">build #${run}</a>`);
     expect(revisionTask).toContain(feedbackNote);
@@ -12977,6 +12995,9 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     const line = async () => /<p class="result-revision" data-result-revision="[^"]+" data-result-revision-approved="([01])" data-tone="([a-z]+)"><strong>Revision<\/strong> <a href="[^"]+">[^<]*<\/a> <span class="meta">· ([^<]*)<\/span><\/p>/.exec(await read(`/r/${run}`));
     // The Work row names the assignment; the selected result still names the exact revision state.
     const rowWords = async () => /<span class="status-label">([^<]*)<\/span>/.exec((await read("/work?view=all")).split(`data-task="t-standing"`)[1] ?? "")?.[1] ?? null;
+    // Planned first: nothing to approve until the plan is updated (this fixture's worker is stale, and it says so).
+    expect((await line())?.[3]).toBe("Builder disconnected");
+    plannerKeptTerms(store, child);
     // Unapproved: the exact revision names approval; the root names the decision.
     const unapproved = await line();
     expect(unapproved?.[1]).toBe("0");

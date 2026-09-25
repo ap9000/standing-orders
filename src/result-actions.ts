@@ -210,6 +210,14 @@ export function createResultRevision(store: Store, evidenceRoot: string, input: 
         // atomically with its seal; retries returned earlier, untouched.
         store.raw().prepare("UPDATE task SET title = ? WHERE id = ?").run(title, result.id);
       }
+      // Planned afresh: the planner reads the copied terms and these notes, and a note asking for
+      // more than the old plan allows becomes an amendment the person approves before anything
+      // builds. Under a live mode the filing is approved at once instead, as every signer filing
+      // is; revisions never inherit the mode's planner authority (docs/AUTO_APPROVAL.md).
+      if (result.ok && coverage === null) {
+        const ref = store.lookupRef(result.id);
+        if (ref !== null) store.requestPlan(ref.id, now);
+      }
       if (result.ok && coverage !== null) {
         // A scope whose profile could not resolve is unapprovable by the
         // human road (approve() refuses) — the mode road refuses too.
