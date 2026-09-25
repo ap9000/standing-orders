@@ -36,6 +36,15 @@ test("create a flow, add a card, move it, decide it, and a stale save is refused
     expect(html).toContain("A flow is your process drawn as zones.");
     expect(html).toContain("Coding flow: Triage, plan, build, review by a person, then tell the team.");
     const csrf = /name="csrf" value="([^"]+)"/.exec(html)![1]!;
+    // No flows yet: one click makes a working example with a sample question in it.
+    expect(html).toContain('action="/flows/example"');
+    expect(html).toContain("Try an example");
+    const example = await fetch(`${base}/flows/example`, { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf, repo }), redirect: "manual" });
+    expect(example.status).toBe(303);
+    const exampleView = await (await fetch(`${base}${example.headers.get("location")}?format=json`, { headers: { cookie } })).json() as BrowserFlowView;
+    expect(exampleView).toMatchObject({ flow: { name: "Customer replies (example)", owner: "alex" }, start: "write" });
+    expect(exampleView.cards.map(one => [one.title, one.stage])).toEqual([["Do you ship to Canada?", "write"]]);
+    expect(await (await fetch(`${base}/flows`, { headers: { cookie } })).text()).not.toContain("Try an example");
     const created = await fetch(`${base}/flows/new`, { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf, name: "Bug fixes", repo, template: "coding" }), redirect: "manual" });
     expect(created.status).toBe(303);
     const href = created.headers.get("location")!;

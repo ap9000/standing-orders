@@ -25,7 +25,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -41,6 +41,7 @@ import { parseProof, adjudicate } from "./proof.js";
 import { parseExecutionPlanDocument, milestonesOf } from "./plan.js";
 import { maybeTriggerRepair } from "./dispose.js";
 import { deflateSync } from "node:zlib";
+import { FLOW_TEMPLATES } from "./flows.js";
 
 // The demo demonstrates a CONFIGURED install: routing is named once, the
 // way `config set build` would, so approvals bind it like production.
@@ -1140,6 +1141,7 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
   store.markPublicationOpened(pub, 47, "https://github.com/acme/payments-api/pull/47", hoursAgo(8.1));
   store.recordPublicationCheckState(pub, "passing", hoursAgo(1.5));
 
+  seedDemoFlows(store, repos.web, now);
   return { login: { name: "demo", password }, repos: [repos.api, repos.web] };
 }
 
@@ -1177,6 +1179,56 @@ export function makeDemoRepos(root: string): { api: string; web: string } {
 }
 
 /** The sandbox: one directory holding everything, stamped before seeding. */
+/**
+ * Two flows mid-flight (v88), so the canvas has something to show on a first
+ * look: a support desk Jev has sorted, and customer replies Claude drafted —
+ * one waiting for the demo person's decision. Every decision and draft is
+ * written as the real steps write them; nothing runs, and nothing spends.
+ */
+function seedDemoFlows(store: Store, folder: string, now: Date): void {
+  // Projects are known by their real path (macOS's /var is /private/var): the Flows page matches on it.
+  const repo = realpathSync(folder);
+  const at = (minutes: number) => new Date(now.getTime() - minutes * 60_000);
+  const template = (id: string) => JSON.stringify(FLOW_TEMPLATES.find(one => one.id === id)!.definition);
+  // Cards arrive where their flow starts; a step's run is recorded, then the card moves where it said.
+  const step = (card: number, stage: string, kind: "sort" | "draft" | "email", when: Date, result: string, output: string, extra: { decisionJson?: string; log?: string } = {}) => {
+    store.claimFlowStep({ card, entry: store.getFlowCard(card)!.entry, stage, kind, script: null, scriptVersion: null }, when);
+    store.finishFlowStep(card, store.getFlowCard(card)!.entry, { state: "passed", result, durationMs: kind === "sort" ? 180 : 4200, ...extra }, when);
+    store.updateFlowCard(card, { outputs: { ...store.getFlowCard(card)!.outputs, [stage]: output } }, when);
+  };
+  const move = (card: number, to: string, when: Date, actor = "flow") => store.moveFlowCard(card, { to, outcome: actor === "flow" ? "ok" : "moved", actor }, when);
+  const sorted = (answer: string, sure: number, to: string | null, urgency: string, refund: boolean) => JSON.stringify({
+    model: "typesafe/jev-1.13", answer, sure, sureAt: 0.8, confident: sure >= 0.8, to, chances: { [answer]: sure }, ms: 170, cost: 0.000017,
+    notes: [{ id: "urgency", question: "How urgent is it?", kind: "score", answer: urgency, sure: 0.8 }, { id: "refund", question: "Is the customer asking for money back?", kind: "yes-no", answer: refund ? "yes" : "no", sure: 0.9 }],
+  });
+  const desk = store.createFlow({ repo, name: "Support desk", definitionJson: template("exception-routing"), by: "demo" }, at(300));
+  for (const [title, description, answer, sure, to, urgency, refund, minutes] of [
+    ["Please cancel order #4471", "I ordered the wrong size. Can you cancel it before it ships? — Priya", "Order change", 0.97, "orders", "Soon: the customer is waiting on it", false, 240],
+    ["Charged twice for invoice INV-2291", "My card was charged twice this morning. I need the duplicate back before Friday's payroll.", "Invoice problem", 0.94, "billing", "Now: money is at stake or a deadline is named", true, 180],
+    ["Parcel arrived crushed", "The box was crushed and two glasses inside are broken.", "Delivery problem", 0.91, "delivery", "Soon: the customer is waiting on it", true, 120],
+    ["Where is my order and why was I billed?", "It hasn't arrived and there's a charge I don't recognise.", "Delivery problem", 0.58, "by-hand", "Soon: the customer is waiting on it", false, 45],
+  ] as const) {
+    const card = store.addFlowCard({ flow: desk, title, description, stage: "sort", by: "Support form" }, at(minutes));
+    const confident = sure >= 0.8;
+    step(card, "sort", "sort", at(minutes - 1), confident ? `${answer}, ${Math.round(sure * 100)}% sure.` : `Not sure: ${Math.round(sure * 100)}% ${answer}.`, `${confident ? `${answer}, ${Math.round(sure * 100)}% sure.` : `Not sure: ${Math.round(sure * 100)}% ${answer}.`} How urgent is it? ${urgency.split(":")[0]}.`, { decisionJson: sorted(answer, sure, to, urgency, refund) });
+    move(card, to, at(minutes - 1));
+  }
+  const replies = store.createFlow({ repo, name: "Customer replies", definitionJson: template("email-replies"), by: "demo" }, at(200));
+  const drafted = (title: string, description: string, draft: string, minutes: number) => {
+    const card = store.addFlowCard({ flow: replies, title, description, stage: "write", by: "Contact form" }, at(minutes));
+    step(card, "write", "draft", at(minutes - 1), `Drafted ${draft.split(/\s+/).length} words.`, draft, { log: `Claude (sonnet) · 4.2 s\n\n${draft}` });
+    move(card, "check", at(minutes - 1));
+    return card;
+  };
+  const sent = drafted("Do you ship to Canada?", "Thinking of ordering but I'm in Toronto. — sam@example.com", "Hi Sam,\n\nYes, we ship to Canada, including Toronto. Delivery usually takes 5–8 business days, and you'll get a tracking link as soon as it leaves us.\n\nThe team", 150);
+  store.moveFlowCard(sent, { to: "send", outcome: "approved", actor: "demo" }, at(140));
+  step(sent, "send", "email", at(139), "Emailed sam@example.com.", "Sent to sam@example.com: “Re: Do you ship to Canada?”");
+  move(sent, "done", at(139));
+  store.updateFlowCard(sent, { state: "done" }, at(139));
+  drafted("Refund for order 42?", "I was charged twice for order 42. Can I get one refunded? — priya@example.com", "Hi Priya,\n\nSorry about that! We've refunded the duplicate charge for order 42; it should be back on your card within 5 days.\n\nThe team", 20);
+  store.updateFlowCard(store.flowCards(replies, false).find(one => one.title === "Refund for order 42?")!.id, { waiting: "Waiting for demo to approve or send it back" }, at(19));
+}
+
 export function createDemoSandbox(now: Date): {
   sandbox: string;
   store: Store;

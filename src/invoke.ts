@@ -30,7 +30,7 @@ import { underStopWatch } from "./task-control.js";
 import { CHILD_DATABASE_ENV as AGENT_DATABASE_ENV, isolatedChildDatabase, removeChildDatabase as removeAgentDatabase } from "./child-database.js";
 import { noToolsArgs, prepareRunTools, type ToolLaunchArgs } from "./project-tools.js";
 import { realpathSync } from "node:fs";
-import { agentFence, claudeFenceSettings, macosFenceAvailable, type FenceMethod } from "./agent-fence.js";
+import { agentFence, claudeFenceSettings, linuxFenceAvailable, macosFenceAvailable, type FenceMethod } from "./agent-fence.js";
 
 export type { ProviderRunner } from "./provider.js";
 
@@ -812,6 +812,7 @@ function fenceLaunch(provider: AgentSpec["provider"], fence: readonly string[]):
   if (fence.length === 0) return { wrap: [], method: "none" };
   if (provider === "codex" || provider === "openrouter") return { wrap: [], method: "codex-profile" };
   if (macosFenceAvailable()) return { wrap: fence, method: "macos-sandbox" };
+  if (linuxFenceAvailable()) return { wrap: fence, method: "linux-bubblewrap" };
   return { wrap: [], method: provider === "claude" ? "claude-rules" : "none" };
 }
 

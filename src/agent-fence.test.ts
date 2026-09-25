@@ -9,7 +9,7 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { agentFence, claudeFenceSettings, codexFenceArgv, macosFenceAvailable, macosFenced, macosFenceProfile } from "./agent-fence.js";
+import { agentFence, claudeFenceSettings, codexFenceArgv, linuxFenceAvailable, linuxFenced, macosFenceAvailable, macosFenced, macosFenceProfile } from "./agent-fence.js";
 import { adapterFor } from "./provider.js";
 import { openStore, type Store } from "./store.js";
 import { register } from "./runner.js";
@@ -142,5 +142,22 @@ describe("the agent fence", () => {
         expect(store.runFence(claudeRun)).toEqual({ method: "claude-rules", paths: expect.any(Number) });
       }
     });
+  });
+});
+
+describe("the Linux fence (v88)", () => {
+  test("bubblewrap masks each fenced folder with an empty one and each fenced file with /dev/null, around the agent itself", () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "so-linux-fence-")));
+    try {
+      const folder = join(root, "keys"), file = join(root, "up-login.txt");
+      mkdirSync(folder);
+      writeFileSync(file, "alex secret");
+      expect(linuxFenced("claude", ["-p", "hi"], [folder, file])).toEqual({ file: "bwrap", args: ["--dev-bind", "/", "/", "--tmpfs", folder, "--ro-bind", "/dev/null", file, "--die-with-parent", "--", "claude", "-p", "hi"] });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("it is used only on Linux, and only where bubblewrap actually runs", () => {
+    expect(linuxFenceAvailable("darwin", () => true)).toBe(false);
+    expect(linuxFenceAvailable("win32", () => true)).toBe(false);
   });
 });
