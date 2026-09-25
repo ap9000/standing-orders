@@ -68,9 +68,10 @@ describe("project scripts", () => {
     const card = store.addFlowCard({ flow, title: "Tidy the docs", description: null, stage: "readme", by: "alex" }, T0);
     store.setFlowCardOwner(card, "alex", "alex", T0);
     expect(await runFlowSteps(store, repo, at(1), io())).toEqual({ ran: 1, problems: [] });
-    expect(store.getFlowCard(card)).toMatchObject({ stage: "lint", outputs: { readme: "has-readme passed on main." } });
+    // What the script printed is the step's result (v90); the run says what happened.
+    expect(store.getFlowCard(card)).toMatchObject({ stage: "lint", outputs: { readme: "found it for Tidy the docs" } });
     const passed = store.flowStepRun(card, 1)!;
-    expect(passed).toMatchObject({ kind: "check", script: "has-readme", scriptVersion: 1, state: "passed", exitCode: 0 });
+    expect(passed).toMatchObject({ kind: "check", script: "has-readme", scriptVersion: 1, state: "passed", exitCode: 0, result: "has-readme passed on main." });
     expect(passed.log).toContain("found it for Tidy the docs");
     expect(passed.durationMs).toBeGreaterThanOrEqual(0);
     // The failing script: back to the inbox, with the end of its output, its owner told.

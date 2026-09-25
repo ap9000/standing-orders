@@ -191,7 +191,7 @@ describe("the lead builds and runs a flow", () => {
     const script = proposalOf(lead("propose_flow", { operation: "save_script", repo: "r1", script: { name: "run-tests", about: "Runs the unit tests", body: "npm ci\nnpm test", timeoutMinutes: 10 } }));
     const scriptCard = sharedActionPayload(store.getMateProposal(script)!.payload)!;
     expect(scriptCard.title).toBe("Save the run-tests script in shop");
-    expect(scriptCard.terms).toEqual(["run-tests: Runs the unit tests", "npm ci\nnpm test", "Runs with no AI in a fresh copy of a card's work, for up to 10 minutes, whenever a card reaches a zone that runs it."]);
+    expect(scriptCard.terms).toEqual(["run-tests: Runs the unit tests", "npm ci\nnpm test", "Shell, with no AI, for up to 10 minutes, whenever a card reaches a zone that runs it (or a schedule does). It gets the card as data; what it prints is passed on."]);
     expect(sharedActionNeedsReview(scriptCard)).toBe(false);
     expect(confirm(script)).toMatchObject({ ok: true, said: "Saved the run-tests script. Any flow in this project can run it." });
     expect(store.flowScript(repo, "run-tests")).toMatchObject({ version: 1, savedBy: "operator" });

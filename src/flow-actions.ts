@@ -27,6 +27,7 @@ import { redactSecretLines, scanForSecrets } from "./evidence.js";
 import { fillFlowText, type FlowStage } from "./flows.js";
 import { googleAccessToken, googleConnected } from "./google-mail.js";
 import { ADDRESS, readEmailSettings, type EmailSettings } from "./email-settings.js";
+import { readFlowSecrets, scrubSecrets } from "./flow-secrets.js";
 
 export { readEmailSettings, saveEmailSettings, type EmailSettings } from "./email-settings.js";
 import { callProjectTool, projectToolsOf, readToolSecrets, type ToolCall, type ToolSpec } from "./project-tools.js";
@@ -38,8 +39,7 @@ const OUTPUT_CHARS = 8000;
 const clip = (text: string, cap: number) => text.length <= cap ? text : `${text.slice(0, cap - 1)}…`;
 const blank = (text: string) => redactSecretAssignments(redactSecretLines(text, scanForSecrets(text)));
 
-/** Blank any of these secret values wherever an answer echoes them back. */
-const scrub = (text: string, secrets: Record<string, string>) => Object.values(secrets).filter(value => value.length >= 6).reduce((out, value) => out.split(value).join("[secret]"), text);
+const scrub = scrubSecrets;
 
 /** Fill every string inside a JSON value, leaving its shape alone: a card's text can never break out of a string. */
 function fillJson(value: unknown, fill: (text: string) => string): unknown {
@@ -49,33 +49,9 @@ function fillJson(value: unknown, fill: (text: string) => string): unknown {
   return value;
 }
 
-// ---- secrets for web requests ---------------------------------------------------
+// ---- secrets for web requests and scripts: flow-secrets.ts (a leaf module) ----------
+export { flowSecretNames, readFlowSecrets, scrubSecrets, SECRET_NAME, setFlowSecret } from "./flow-secrets.js";
 
-const SECRET_NAME = /^[A-Z][A-Z0-9_]{0,39}$/;
-const secretsFile = (dir: string, repo: string) => join(dir, "flow-secrets", `${createHash("sha256").update(repo).digest("hex").slice(0, 24)}.json`);
-
-export function readFlowSecrets(dir: string | null, repo: string): Record<string, string> {
-  if (dir === null) return {};
-  try { return JSON.parse(readFileSync(secretsFile(dir, repo), "utf8")) as Record<string, string>; } catch { return {}; }
-}
-
-export function flowSecretNames(dir: string | null, repo: string): string[] {
-  return Object.keys(readFlowSecrets(dir, repo)).sort();
-}
-
-/** Set (or, with an empty value, remove) one of a project's request secrets. Names are CAPITALS_AND_UNDERSCORES. */
-export function setFlowSecret(dir: string, repo: string, name: string, value: string): { ok: true; said: string } | { ok: false; message: string } {
-  if (!SECRET_NAME.test(name)) return { ok: false, message: "Name the secret in capitals, like API_TOKEN." };
-  const secrets = readFlowSecrets(dir, repo);
-  const trimmed = value.trim();
-  if (trimmed === "") delete secrets[name];
-  else if (trimmed.length > 4000 || /[\r\n]/.test(trimmed)) return { ok: false, message: "That doesn't look like a secret: keep it to one line." };
-  else secrets[name] = trimmed;
-  mkdirSync(join(dir, "flow-secrets"), { recursive: true, mode: 0o700 });
-  writeFileSync(secretsFile(dir, repo), JSON.stringify(secrets), { mode: 0o600 });
-  chmodSync(secretsFile(dir, repo), 0o600);
-  return { ok: true, said: trimmed === "" ? `Removed ${name}.` : `Saved ${name}. It's used only in the headers of this project's web requests.` };
-}
 
 // ---- web requests ---------------------------------------------------------------
 

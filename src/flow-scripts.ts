@@ -1,36 +1,45 @@
 /**
  * Project scripts (v84): a library of reusable steps that run with no AI.
- * A script is a named shell script — "run-tests", "lint", "smoke-staging" —
- * made on a flow's Scripts panel or drafted by the lead in chat. Any flow in
- * the project uses it by name from a "Run a script" zone, so one script can
- * be improved once for every flow, and the insights show how each script
- * does across them. Each save is a new version; runs record which ran.
+ * A script is named — "run-tests", "enrich-lead", "export-orders" — and
+ * made on a flow's Scripts panel or drafted by the lead in chat. v90: it is
+ * written in shell, Python or Node, or runs a file already in the project.
+ * Any flow in the project uses it by name from a "Run a script" zone (and a
+ * schedule can run one to make cards), so one script can be improved once
+ * for every flow, and the insights show how each script does across them.
+ * Each save is a new version; runs record which ran.
  */
 import { createHash } from "node:crypto";
 import { scanForSecrets } from "./evidence.js";
 import { flowDefinitionOf } from "./flow-engine.js";
-import { SCRIPT_NAME } from "./flows.js";
+import { SCRIPT_LANGUAGES, SCRIPT_NAME, type ScriptLanguage } from "./flows.js";
 import type { FlowScriptRow, Store } from "./store.js";
 
-export type ScriptDraft = { name: string; about: string; body: string; timeoutMinutes: number };
+export type ScriptDraft = { name: string; about: string; body: string; timeoutMinutes: number; language: ScriptLanguage; file: string | null };
 
 /** A script as it would be saved, checked in plain words. Throws. */
-export function validateScript(input: { name?: unknown; about?: unknown; body?: unknown; timeoutMinutes?: unknown }): ScriptDraft {
+export function validateScript(input: { name?: unknown; about?: unknown; body?: unknown; timeoutMinutes?: unknown; language?: unknown; file?: unknown }): ScriptDraft {
   const name = typeof input.name === "string" ? input.name.trim().toLowerCase() : "";
   if (!SCRIPT_NAME.test(name)) throw new Error("Name the script in lowercase letters, numbers and dashes, like run-tests.");
   const about = typeof input.about === "string" ? input.about.replace(/\s+/g, " ").trim() : "";
   if (about === "" || about.length > 160) throw new Error("Say in one line what the script checks or does.");
+  const language = input.language === undefined || input.language === null || input.language === "" ? "shell" : input.language;
+  if (!SCRIPT_LANGUAGES.includes(language as ScriptLanguage)) throw new Error("Choose the script's language: shell, Python or Node.");
+  const file = typeof input.file === "string" && input.file.trim() !== "" ? input.file.trim().replace(/^\.\//, "") : null;
+  if (file !== null && (file.length > 200 || file.startsWith("/") || file.split(/[\\/]/).includes("..") || !/^[A-Za-z0-9._/@+-]+$/.test(file))) throw new Error("Give the file as a path inside the project, like scripts/enrich.py.");
   const body = typeof input.body === "string" ? input.body.replace(/\r\n/g, "\n").trim() : "";
-  if (body === "") throw new Error("Write the script: the shell commands it runs.");
+  if (body === "" && file === null) throw new Error("Write the script, or name a file in the project for it to run.");
+  if (body !== "" && file !== null) throw new Error("A script either is written here or runs a file in the project, not both.");
   if (body.length > 20_000) throw new Error("Keep a script under 20,000 characters.");
   if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(body)) throw new Error("The script has hidden characters in it.");
   if (scanForSecrets(`${about}\n${body}`).length > 0) throw new Error("That looks like a key or password. Keep secrets out of scripts; read them from the environment on this computer.");
   const minutes = typeof input.timeoutMinutes === "number" && Number.isFinite(input.timeoutMinutes) ? Math.round(input.timeoutMinutes) : typeof input.timeoutMinutes === "string" && input.timeoutMinutes.trim() !== "" ? Number(input.timeoutMinutes) : 15;
   if (!Number.isInteger(minutes) || minutes < 1 || minutes > 60) throw new Error("A script may run for 1 to 60 minutes.");
-  return { name, about, body, timeoutMinutes: minutes };
+  return { name, about, body, timeoutMinutes: minutes, language: language as ScriptLanguage, file };
 }
 
-export const scriptDigest = (draft: Pick<ScriptDraft, "body" | "timeoutMinutes">) => createHash("sha256").update(`${draft.body}\0${draft.timeoutMinutes}`).digest("hex").slice(0, 32);
+/** What a run is held to. A shell script written here keeps its v84 digest. */
+export const scriptDigest = (draft: Pick<ScriptDraft, "body" | "timeoutMinutes"> & Partial<Pick<ScriptDraft, "language" | "file">>) =>
+  createHash("sha256").update((draft.language ?? "shell") === "shell" && (draft.file ?? null) === null ? `${draft.body}\0${draft.timeoutMinutes}` : `${draft.body}\0${draft.timeoutMinutes}\0${draft.language}\0${draft.file ?? ""}`).digest("hex").slice(0, 32);
 
 export type ScriptSaved = { ok: true; said: string; version: number } | { ok: false; message: string };
 

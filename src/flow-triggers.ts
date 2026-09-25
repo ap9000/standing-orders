@@ -3,7 +3,8 @@
  * them by hand.
  *
  * - button   — a named button with questions; pressing it makes a card from the answers.
- * - schedule — a card on a schedule (the routines' schedule rules: every N minutes, daily, weekly).
+ * - schedule — a card on a schedule (the routines' schedule rules: every N minutes, daily, weekly);
+ *              v90: or a project script run on the schedule, each item it prints a card.
  * - github   — new issues (optionally with a label), new pull requests, or failed checks on a branch.
  * - linear   — Linear issues in a team, moving into a state, and/or with a label.
  * - flow     — another flow's cards reaching one of its zones.
@@ -29,6 +30,9 @@ import { flowCardText, flowDefinitionOf, type FlowAct } from "./flow-engine.js";
 import type { FlowDefinition } from "./flows.js";
 import { describeSchedule, firstFireAt, nextFireAt, parseSchedule, WEEKDAYS } from "./routine.js";
 import { mailboxAccess, mailCursorOf, mailCursorText, readThroughImap, type MailReader } from "./mailbox.js";
+import type { CodeResult } from "./flow-code.js";
+import { readFlowSecrets } from "./flow-secrets.js";
+import { tmpdir } from "node:os";
 import type { FlowCardSource, FlowRow, FlowTriggerRow, Store } from "./store.js";
 
 export const FLOW_TRIGGER_KINDS = ["button", "schedule", "github", "linear", "flow", "webhook", "email", "chat"] as const;
@@ -36,7 +40,8 @@ export type FlowTriggerKind = (typeof FLOW_TRIGGER_KINDS)[number];
 
 export type TriggerConfig =
   | { kind: "button"; label: string; questions: string[]; zone: string | null }
-  | { kind: "schedule"; schedule: string; title: string; description: string | null; zone: string | null }
+  /** `script` (v90): run this project script on the schedule and make a card of each item it prints, instead of one card titled `title`. */
+  | { kind: "schedule"; schedule: string; title: string; description: string | null; zone: string | null; script?: string; secrets?: string[] }
   | { kind: "github"; repo: string; watch: "issues" | "pulls" | "checks"; label: string | null; branch: string | null; from: "team" | "anyone"; delivery: "poll" | "webhook"; zone: string | null }
   | { kind: "linear"; team: string | null; state: string | null; label: string | null; delivery: "poll" | "webhook"; zone: string | null }
   | { kind: "flow"; flow: number; when: string; zone: string | null }
@@ -146,6 +151,15 @@ export function validateTriggerConfig(raw: unknown, context: { store: Store; flo
       const said = words(input, "schedule", 80, true)!;
       const schedule = scheduleFromWords(said);
       if (schedule === null) throw new Error("Say the schedule like “every 2 hours”, “daily 09:00 Europe/London” or “monday 09:00”.");
+      // A script on a schedule (v90): each item it prints becomes a card.
+      const script = words(input, "script", 40, false);
+      if (script !== null) {
+        if (context.store.flowScript(context.flow.repo, script) === null) throw new Error(`There's no script called ${script} in this project. Make it on the flow's Scripts panel first.`);
+        const asked = input["secrets"];
+        const secrets = asked === undefined || asked === null ? [] : Array.isArray(asked) ? asked : typeof asked === "string" ? asked.split(/[\s,]+/).filter(one => one !== "") : null;
+        if (secrets === null || secrets.length > 10 || secrets.some(one => typeof one !== "string" || !/^[A-Z][A-Z0-9_]{0,39}$/.test(one))) throw new Error("Name up to 10 saved secrets in capitals, like API_TOKEN.");
+        return { kind: "schedule", schedule, title: `Items from ${script}`, description: null, zone, script, ...(secrets.length === 0 ? {} : { secrets: [...new Set(secrets as string[])] }) };
+      }
       return { kind: "schedule", schedule, title: words(input, "title", 200, true)!, description: words(input, "description", 2000, false), zone };
     }
     case "github": {
@@ -210,7 +224,7 @@ export function describeTrigger(config: TriggerConfig, store: Store): string {
     case "schedule": {
       const schedule = parseSchedule(config.schedule);
       const when = schedule === null ? config.schedule : describeSchedule(schedule);
-      return `${when.charAt(0).toUpperCase()}${when.slice(1)}: “${config.title}”`;
+      return config.script !== undefined ? `${when.charAt(0).toUpperCase()}${when.slice(1)}: runs the ${config.script} script, and each item it prints becomes a card` : `${when.charAt(0).toUpperCase()}${when.slice(1)}: “${config.title}”`;
     }
     case "github":
       return config.watch === "checks" ? `Failed checks on ${config.branch} in ${config.repo}${way(config.delivery)}`
@@ -235,7 +249,7 @@ export function triggerHeadline(config: TriggerConfig, store: Store): { name: st
     case "schedule": {
       const schedule = parseSchedule(config.schedule);
       const when = schedule === null ? config.schedule : schedule.kind === "every" ? describeSchedule(schedule) : `${schedule.kind === "daily" ? "daily" : `${WEEKDAYS[schedule.day]}s`} at ${schedule.hhmm}`;
-      return { name: `${when.charAt(0).toUpperCase()}${when.slice(1)}`, detail: `“${config.title}”` };
+      return { name: `${when.charAt(0).toUpperCase()}${when.slice(1)}`, detail: config.script !== undefined ? `Runs ${config.script}` : `“${config.title}”` };
     }
     case "github": return { name: config.watch === "checks" ? `Failed checks on ${config.branch}` : config.watch === "pulls" ? `New pull requests${config.label === null ? "" : ` labeled ${config.label}`}` : config.label === null ? "New issues" : `Issues labeled ${config.label}`, detail: `GitHub · ${config.repo}` };
     case "linear": return { name: `Linear${config.team === null ? "" : ` ${config.team}`}${config.state === null ? "" : ` → ${config.state}`}`, detail: config.label === null ? "Linear issues" : `Labeled ${config.label}` };
@@ -422,7 +436,9 @@ export function pressFlowButton(store: Store, trigger: FlowTriggerRow, answers: 
 
 export type TriggerIo = { gh: Runner; fetch: typeof fetch; dir: string | null;
   /** How mail is read (default: IMAP; tests pass a scripted mailbox). */
-  mail?: MailReader };
+  mail?: MailReader;
+  /** v90: how a schedule's script runs (default: the same runner as gh) and where (default: beside the database). */
+  shell?: Runner; scratch?: string };
 export type TriggerPass = { added: number; checked: number; problems: string[] };
 
 /** Every trigger in one project that is due: schedules and other flows here, GitHub, Linear and email by asking them. */
@@ -432,7 +448,12 @@ export async function runFlowTriggers(store: Store, repo: string, now: Date, io:
     const config = triggerConfigOf(trigger);
     if (config === null) continue;
     try {
-      if (config.kind === "schedule" && trigger.nextAt !== null && Date.parse(trigger.nextAt) <= now.getTime()) pass.added += fireSchedule(store, trigger, config, now);
+      if (config.kind === "schedule" && config.script !== undefined && trigger.nextAt !== null && Date.parse(trigger.nextAt) <= now.getTime()) {
+        const fired = await fireScript(store, trigger, config, now, io, true);
+        pass.added += fired.added;
+        if (!fired.ok) pass.problems.push(`trigger ${trigger.id}: ${fired.said}`);
+      }
+      else if (config.kind === "schedule" && trigger.nextAt !== null && Date.parse(trigger.nextAt) <= now.getTime()) pass.added += fireSchedule(store, trigger, config, now);
       else if (config.kind === "flow") pass.added += followFlow(store, trigger, config, now);
       else if (polled(config) && (trigger.nextAt === null || Date.parse(trigger.nextAt) <= now.getTime())) {
         pass.checked++;
@@ -450,7 +471,9 @@ export async function runFlowTriggers(store: Store, repo: string, now: Date, io:
 /** "Check now" on the canvas: one trigger, right away, in words. */
 export async function checkFlowTriggerNow(store: Store, trigger: FlowTriggerRow, now: Date, io: TriggerIo): Promise<{ ok: boolean; said: string }> {
   const config = triggerConfigOf(trigger);
-  if (config === null || !polled(config)) return { ok: false, said: "Only GitHub, Linear and email triggers that are checked can be checked now." };
+  // A schedule's script runs now, once; its schedule stays as it is.
+  if (config?.kind === "schedule" && config.script !== undefined) { const fired = await fireScript(store, trigger, config, now, io, false); return { ok: fired.ok, said: fired.said }; }
+  if (config === null || !polled(config)) return { ok: false, said: "Only GitHub, Linear and email triggers that are checked, and schedules that run a script, can be run now." };
   const checked = await checkTrigger(store, trigger, config, now, io);
   return { ok: checked.ok, said: checked.said };
 }
@@ -476,6 +499,40 @@ function fireSchedule(store: Store, trigger: FlowTriggerRow, config: Extract<Tri
   const made = makeCard(store, trigger, config, { key: `slot:${slot}`, title, description: config.description === null ? null : fill(config.description), source: { kind: "schedule", label: "Schedule", url: null } }, "Schedule", now);
   store.updateFlowTrigger(trigger.id, { nextAt: next, lastAt: now.toISOString(), lastOutcome: made.made === "added" ? "Added a card." : made.note ?? "Nothing new." }, now);
   return made.made === "added" ? 1 : 0;
+}
+
+/** A schedule's script (v90): it runs in a clean folder inside the agents' fence; each item it prints is a card, once. */
+async function fireScript(store: Store, trigger: FlowTriggerRow, config: Extract<TriggerConfig, { kind: "schedule" }>, now: Date, io: TriggerIo, scheduled: boolean): Promise<{ ok: boolean; said: string; added: number }> {
+  const schedule = parseSchedule(config.schedule);
+  const next = scheduled && schedule !== null && trigger.nextAt !== null ? nextFireAt(schedule, trigger.nextAt, now) : trigger.nextAt;
+  const flow = store.getFlow(trigger.flow);
+  const done = (ok: boolean, said: string, added = 0) => {
+    store.updateFlowTrigger(trigger.id, { nextAt: next, lastAt: now.toISOString(), lastOutcome: said, failures: ok ? 0 : trigger.failures + 1 }, now);
+    return { ok, said, added };
+  };
+  const script = flow === null ? null : store.flowScript(flow.repo, config.script!);
+  if (flow === null || script === null) return done(false, `There's no script called ${config.script} in this project any more.`);
+  const saved = readFlowSecrets(io.dir, flow.repo);
+  const missing = (config.secrets ?? []).filter(name => saved[name] === undefined);
+  if (missing.length > 0) return done(false, `${script.name} needs the secret${missing.length === 1 ? "" : "s"} ${missing.join(", ")}. Save ${missing.length === 1 ? "it" : "them"} on the flow first.`);
+  // Loaded when a script first runs: the runner reaches the builder's modules, which reach back to these triggers.
+  const { cardsFromOutput, cleanFolder, runCode } = await import("./flow-code.js");
+  const { agentFence } = await import("./agent-fence.js");
+  const scratch = io.scratch ?? join(io.dir ?? tmpdir(), "flow-scratch");
+  const folder = cleanFolder(scratch, `flow-trigger-${trigger.id}`);
+  let ran: CodeResult;
+  try {
+    ran = await runCode({ script, cwd: folder, root: flow.repo, scratch, shell: io.shell ?? io.gh,
+      input: { flow: { id: flow.id, name: flow.name }, trigger: trigger.id, lastRun: trigger.lastAt }, secrets: Object.fromEntries((config.secrets ?? []).map(name => [name, saved[name]!])),
+      env: { FLOW_NAME: flow.name, FLOW_TRIGGER_ID: String(trigger.id), FLOW_PROJECT: flow.repo, FLOW_LAST_RUN: trigger.lastAt ?? "" },
+      fence: agentFence({ databaseFile: store.databaseFile(), worktree: folder }) });
+  } finally { rmSync(folder, { recursive: true, force: true }); }
+  if (ran.state === "failed") return done(false, ran.said.split("\n")[0]!);
+  const items = cardsFromOutput(ran.printed);
+  const results = items.slice(0, CARDS_PER_CHECK).map(item => makeCard(store, trigger, config, {
+    key: `script:${item.key}`, title: item.title, description: item.description, source: { kind: "script", label: `The ${script.name} script`, url: null },
+  }, `The ${script.name} script`, now));
+  return done(true, items.length === 0 ? `${script.name} ran and printed nothing to add.` : outcomeWords(results, items.length > CARDS_PER_CHECK), results.filter(one => one.made === "added").length);
 }
 
 function followFlow(store: Store, trigger: FlowTriggerRow, config: Extract<TriggerConfig, { kind: "flow" }>, now: Date): number {

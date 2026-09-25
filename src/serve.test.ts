@@ -9712,7 +9712,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     const window = new Window({ width: 390, height: 844 });
     try {
       window.document.body.innerHTML = before;
-      const script = window.document.querySelector('script[nonce]:not([type])')?.textContent ?? "";
+      const script = [...window.document.querySelectorAll('script[nonce]:not([type])')].map(one => one.textContent ?? "").find(text => text.includes('(function(){var workspace=')) ?? "";
       const start = script.indexOf('(function(){var workspace=');
       expect(start).toBeGreaterThanOrEqual(0);
       const end = script.indexOf('})();', start);
@@ -13779,7 +13779,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const window = new Window();
     try {
       window.document.body.innerHTML = html;
-      const source = window.document.querySelector('script[nonce]:not([type])')!.textContent!;
+      const source = [...window.document.querySelectorAll('script[nonce]:not([type])')].map(one => one.textContent ?? "").find(text => text.includes('var taskLive=')) ?? "";
       const start = source.indexOf('var taskLive=');
       const end = source.indexOf('var box=', start);
       expect(start).toBeGreaterThan(0);
