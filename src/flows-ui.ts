@@ -6,6 +6,8 @@ import { describeTrigger, triggerHeadline, FLOW_TRIGGER_KINDS, FLOW_TRIGGER_WORD
 import { deciderOf, FLOW_COLORS, FLOW_KIND_WORDS, FLOW_STAGE_KINDS, FLOW_TEMPLATES } from "./flows.js";
 import { flowInsights, troubleWords } from "./flow-insights.js";
 import { parseSortDecision, sortChip } from "./flow-sort.js";
+import { flowSecretNames, readEmailSettings } from "./flow-actions.js";
+import { projectToolsOf, secretsSetFor, toolStanding } from "./project-tools.js";
 import type { FlowCardRow, FlowRow, Store } from "./store.js";
 
 const e = (value: unknown) =>
@@ -46,7 +48,7 @@ const historyText = (event: { fromStage: string | null; toStage: string; outcome
 };
 
 /** One flow's canvas for one person. */
-export function flowView(store: Store, flow: FlowRow, viewer: { name: string; approver: boolean }, selectedCard: number | null, setup: { dir: string | null; repos: readonly string[]; startTrigger?: number | null; sortReady?: boolean } = { dir: null, repos: [] }): BrowserFlowView {
+export function flowView(store: Store, flow: FlowRow, viewer: { name: string; approver: boolean }, selectedCard: number | null, setup: { dir: string | null; repos: readonly string[]; startTrigger?: number | null; sortReady?: boolean; toolHome?: string } = { dir: null, repos: [] }): BrowserFlowView {
   const definition = flowDefinitionOf(flow);
   const stages = definition?.stages ?? [];
   const title = (id: string) => stages.find(one => one.id === id)?.title ?? id;
@@ -104,6 +106,10 @@ export function flowView(store: Store, flow: FlowRow, viewer: { name: string; ap
     startTrigger: setup.startTrigger ?? null,
     me: viewer.name,
     sortReady: setup.sortReady ?? false,
+    emailReady: readEmailSettings(setup.dir) !== null,
+    requestSecrets: flowSecretNames(setup.dir, flow.repo),
+    tools: projectToolsOf(store, flow.repo).map(tool => ({ name: tool.name, about: tool.spec.about, functions: tool.lastTest?.ok === true ? tool.lastTest.tools : [],
+      ready: toolStanding(tool, secretsSetFor(flow.repo, tool.spec, setup.toolHome)).ready })),
     scripts: store.flowScripts(flow.repo).map(script => ({ name: script.name, about: script.about, body: script.body, timeoutMinutes: script.timeoutMinutes, version: script.version, savedBy: script.savedBy, savedAt: script.savedAt,
       usedHere: stages.filter(stage => stage.kind === "check" && stage.script === script.name).map(stage => stage.title) })),
     start: definition?.start ?? stages[0]?.id ?? "",

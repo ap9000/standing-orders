@@ -77,6 +77,8 @@ export type BrowserSettingsView = {
   push: { available: boolean; devices: { id: number; words: string; state: string; removable: boolean }[] } | null;
   digest: { every: string; held: string | null } | null;
   telegram: { state: string; current: string };
+  /** v87: the mail server Send email steps use (approvers only); the password is never shown back. */
+  email?: { set: boolean; host: string; port: number; secure: boolean; user: string; from: string } | null;
 };
 /** A fold on the task page. Its HTML is the server's own section body, so
  * forms, ids and page scripts are unchanged. */
@@ -171,11 +173,15 @@ export type BrowserResultView = {
 };
 /** One zone on a flow's canvas: its step, where it leads, and where it sits. */
 export type BrowserFlowStage = {
-  id: string; title: string; kind: "inbox" | "task" | "report" | "approval" | "check" | "update" | "notify" | "sort" | "draft" | "done";
+  id: string; title: string; kind: "inbox" | "task" | "report" | "approval" | "check" | "update" | "notify" | "sort" | "draft" | "request" | "email" | "tool" | "done";
   zone: { x: number; y: number; w: number; h: number; color: string };
   instructions: string | null; planning: "auto" | "required" | "skip" | null; approver: string | null; message: string | null;
   /** An approval zone the flow's owner decides. */
   toOwner?: boolean;
+  /** v87: a web request, an email, a project tool call. */
+  request?: { method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; url: string; headers: Record<string, string>; body: string | null };
+  email?: { to: string; subject: string; body: string };
+  tool?: { server: string; name: string; args: string };
   close: boolean | null; script: string | null;
   /** A sort zone: Jev's question, its answers and where each goes, how sure it must be to act alone, and what else it notes. */
   sort: { question: string; answers: { answer: string; means: string; to: string }[]; sureAt: number; notes: { id: string; kind: "score" | "yes-no"; question: string; levels: string[] | null }[] } | null;
@@ -231,6 +237,10 @@ export type BrowserFlowView = {
   me: string;
   /** Whether sort zones can run: an OpenRouter key is saved in Settings → AI providers. */
   sortReady: boolean;
+  /** v87: whether email is set up (Settings → Email), the names of this project's request secrets, and its tools with what each can do. */
+  emailReady: boolean;
+  requestSecrets: string[];
+  tools: { name: string; about: string; functions: string[]; ready: boolean }[];
   /** The project's scripts: reusable steps a "Run a script" zone runs with no AI. */
   scripts: { name: string; about: string; body: string; timeoutMinutes: number; version: number; savedBy: string; savedAt: string; usedHere: string[] }[];
   start: string;

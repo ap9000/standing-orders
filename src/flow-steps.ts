@@ -32,8 +32,9 @@ import { LINEAR_URL, readLinearKey } from "./flow-triggers.js";
 import { fillFlowText, type FlowDefinition, type FlowStage } from "./flows.js";
 import { askJev, readJevAnswers, sortLog, sortRequest, sortState, sortWords } from "./flow-sort.js";
 import { claudeDraftRunner, DRAFT_TIMEOUT, draftPrompt, keptDraft, type DraftRunner } from "./flow-draft.js";
+import { readEmailSettings, runRequest, sendEmail, toolWaiting, useTool, type MailSender, type ToolCaller } from "./flow-actions.js";
 import { readProviderKey } from "./keys.js";
-import type { FlowCardRow, FlowRow, FlowScriptRow, Store } from "./store.js";
+import type { FlowCardRow, FlowRow, FlowScriptRow, FlowStepKind, Store } from "./store.js";
 
 export type StepIo = {
   /** `gh` for GitHub; git and the check's shell, both without a model. */
@@ -50,6 +51,12 @@ export type StepIo = {
   openRouterKey?: () => string | null;
   /** Writes a draft (default: Claude through this computer's sign-in, no tools). */
   draft?: DraftRunner;
+  /** Sends an email (default: the mail server in Settings → Email). */
+  mail?: MailSender;
+  /** Calls a project tool (default: starts its MCP server, like its Test button). */
+  callTool?: ToolCaller;
+  /** Where the project tools' secrets live (default: this computer's home). */
+  toolHome?: string;
 };
 export type StepPass = { ran: number; problems: string[] };
 type Outcome = { state: "passed" | "failed" | "retry"; said: string; log?: string; exitCode?: number | null;
@@ -73,7 +80,14 @@ export async function runFlowSteps(store: Store, repo: string, now: Date, io: St
     let known = flows.get(card.flow);
     if (known === undefined) { const flow = store.getFlow(card.flow)!; known = { flow, definition: flowDefinitionOf(flow) }; flows.set(card.flow, known); }
     const stage = known.definition?.stages.find(one => one.id === card.stage);
-    if (stage === undefined || (stage.kind !== "check" && stage.kind !== "update" && stage.kind !== "sort" && stage.kind !== "draft")) continue;
+    if (stage === undefined || !(["check", "update", "sort", "draft", "request", "email", "tool"] as const).includes(stage.kind as "check")) continue;
+    // Email and tools wait, saying why, until what they need is set up.
+    const setup = stage.kind === "email" && readEmailSettings(io.dir) === null ? "Email isn't set up yet. Add your mail server in Settings → Email."
+      : stage.kind === "tool" ? toolWaiting(store, stage, repo) : null;
+    if (setup !== null) {
+      if (card.waiting !== setup) store.updateFlowCard(card.id, { waiting: setup }, now);
+      continue;
+    }
     const key = stage.kind === "sort" ? (io.openRouterKey ?? (() => readProviderKey("openrouter")))() : null;
     if (stage.kind === "sort" && key === null) {
       const waiting = "Sorting needs an OpenRouter key. Add one in Settings → AI providers.";
@@ -86,15 +100,18 @@ export async function runFlowSteps(store: Store, repo: string, now: Date, io: St
       if (card.waiting !== waiting) store.updateFlowCard(card.id, { waiting }, now);
       continue;
     }
-    if (!store.claimFlowStep({ card: card.id, entry: card.entry, stage: stage.id, kind: stage.kind, script: script?.name ?? null, scriptVersion: script?.version ?? null }, now)) continue;
+    if (!store.claimFlowStep({ card: card.id, entry: card.entry, stage: stage.id, kind: stage.kind as FlowStepKind, script: script?.name ?? null, scriptVersion: script?.version ?? null }, now)) continue;
     pass.ran++;
-    store.updateFlowCard(card.id, { waiting: stage.kind === "check" ? "Running its check…" : stage.kind === "sort" ? "Sorting…" : stage.kind === "draft" ? "Writing the draft…" : "Updating the issue…" }, now);
+    store.updateFlowCard(card.id, { waiting: { check: "Running its check…", sort: "Sorting…", draft: "Writing the draft…", request: "Calling the address…", email: "Sending the email…", tool: "Using the tool…" }[stage.kind as string] ?? "Updating the issue…" }, now);
     let outcome: Outcome;
     const started = Date.now();
     try {
       outcome = stage.kind === "check" ? await runCheck(store, known.flow, script!, card, now, io)
         : stage.kind === "sort" ? await sortCard(known.definition!, stage, card, key!, io)
         : stage.kind === "draft" ? await draftCard(store, known.definition!, stage, card, io)
+        : stage.kind === "request" ? await runRequest(stage, card, repo, io)
+        : stage.kind === "email" ? await sendEmail(stage, card, io)
+        : stage.kind === "tool" ? await useTool(store, stage, card, repo, io)
         : await updateSource(stage, card, io);
     } catch (error) {
       outcome = { state: "retry", said: error instanceof Error ? error.message : "It couldn't run." };

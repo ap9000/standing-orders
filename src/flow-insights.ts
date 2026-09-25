@@ -36,7 +36,7 @@ export type SortInsight = {
   suggestion: string | null;
 };
 export type StepRunInsight = {
-  card: number; cardTitle: string; entry: number; zone: string; zoneTitle: string; kind: "check" | "update" | "sort" | "draft";
+  card: number; cardTitle: string; entry: number; zone: string; zoneTitle: string; kind: "check" | "update" | "sort" | "draft" | "request" | "email" | "tool";
   script: string | null; version: number | null; state: FlowStepRunRow["state"]; result: string | null; exitCode: number | null; durationMs: number | null; at: string; hasLog: boolean;
 };
 export type FlowInsights = {

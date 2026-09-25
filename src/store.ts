@@ -117,7 +117,8 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // v84 closes the loop: project scripts (reusable steps with no AI), check and update steps with their logs, and trigger forms.
 // v85 adds sort steps: Jev (through OpenRouter) picks where a card goes, and each step run keeps what it decided.
 // v86 adds draft steps (Claude writes from a card) and a flow's owner, whom its "the owner decides" zones ask in their chat app.
-export const SCHEMA_VERSION = 86;
+// v87 adds steps that reach outside: a web request, an email, and a project tool (MCP) call.
+export const SCHEMA_VERSION = 87;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -469,9 +470,11 @@ export type MateProposal = {
   outcome: Record<string, unknown> | null;
 };
 
+/** The zones a worker's step pass runs, one run per visit. */
+export type FlowStepKind = "check" | "update" | "sort" | "draft" | "request" | "email" | "tool";
 /** A flow; `owner` is who its "the owner decides" zones ask (v86): whoever made it, unless it was handed to someone else. */
 export type FlowRow = { id: number; repo: string; name: string; definitionJson: string; revision: number; state: "active" | "archived"; createdBy: string; createdAt: string; updatedBy: string; updatedAt: string; owner: string };
-export type FlowStepRunRow = { card: number; entry: number; stage: string; kind: "check" | "update" | "sort" | "draft"; script: string | null; scriptVersion: number | null; state: "running" | "passed" | "failed" | "waiting"; attempts: number;
+export type FlowStepRunRow = { card: number; entry: number; stage: string; kind: FlowStepKind; script: string | null; scriptVersion: number | null; state: "running" | "passed" | "failed" | "waiting"; attempts: number;
   nextAt: string | null; startedAt: string; finishedAt: string | null; durationMs: number | null; exitCode: number | null; result: string | null; log: string | null;
   /** sort: what Jev answered, as JSON (flow-sort.ts reads it). */
   decisionJson: string | null };
@@ -2249,7 +2252,7 @@ CREATE TABLE IF NOT EXISTS flow_step_run (
   card           INTEGER NOT NULL REFERENCES flow_card(id),
   entry          INTEGER NOT NULL,
   stage          TEXT NOT NULL,
-  kind           TEXT NOT NULL CHECK (kind IN ('check','update','sort','draft')),
+  kind           TEXT NOT NULL CHECK (kind IN ('check','update','sort','draft','request','email','tool')),
   script         TEXT,
   script_version INTEGER,
   state          TEXT NOT NULL CHECK (state IN ('running','passed','failed','waiting')),
@@ -5605,6 +5608,36 @@ function migrate(db: Database, origin: number | null): void {
        entry          INTEGER NOT NULL,
        stage          TEXT NOT NULL,
        kind           TEXT NOT NULL CHECK (kind IN ('check','update','sort','draft')),
+       script         TEXT,
+       script_version INTEGER,
+       state          TEXT NOT NULL CHECK (state IN ('running','passed','failed','waiting')),
+       attempts       INTEGER NOT NULL DEFAULT 0,
+       next_at        TEXT,
+       started_at     TEXT NOT NULL,
+       finished_at    TEXT,
+       duration_ms    INTEGER,
+       exit_code      INTEGER,
+       result         TEXT,
+       log            TEXT,
+       decision_json  TEXT,
+       PRIMARY KEY (card, entry)
+     )`,
+    ["card", "entry", "stage", "kind", "script", "script_version", "state", "attempts", "next_at", "started_at", "finished_at", "duration_ms", "exit_code", "result", "log", "decision_json"],
+  );
+  db.exec("CREATE INDEX IF NOT EXISTS flow_step_run_recent ON flow_step_run (started_at)");
+
+  // v87 (steps that reach outside): kind admits 'request', 'email' and
+  // 'tool', carrying every v86 run whole.
+  rebuildForV4(
+    db,
+    "flow_step_run",
+    "CHECK (kind IN ('check','update','sort','draft'))",
+    "'request'",
+    `CREATE TABLE flow_step_run_next (
+       card           INTEGER NOT NULL REFERENCES flow_card(id),
+       entry          INTEGER NOT NULL,
+       stage          TEXT NOT NULL,
+       kind           TEXT NOT NULL CHECK (kind IN ('check','update','sort','draft','request','email','tool')),
        script         TEXT,
        script_version INTEGER,
        state          TEXT NOT NULL CHECK (state IN ('running','passed','failed','waiting')),
@@ -20906,7 +20939,7 @@ export class Store {
   }
 
   /** Claim a card's visit to a step zone. False when another pass holds it or it already finished. */
-  claimFlowStep(step: { card: number; entry: number; stage: string; kind: "check" | "update" | "sort" | "draft"; script: string | null; scriptVersion: number | null }, now: Date): boolean {
+  claimFlowStep(step: { card: number; entry: number; stage: string; kind: FlowStepKind; script: string | null; scriptVersion: number | null }, now: Date): boolean {
     return this.transact(() => {
       const existing = this.flowStepRun(step.card, step.entry);
       const stamp = now.toISOString();

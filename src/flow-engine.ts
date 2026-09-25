@@ -125,6 +125,9 @@ function advanceCard(store: Store, flow: FlowRow, definition: FlowDefinition | n
     case "update":
     case "sort":
     case "draft":
+    case "request":
+    case "email":
+    case "tool":
       // Run by the worker's step pass (flow-steps.ts), which moves the card on.
       return;
   }
