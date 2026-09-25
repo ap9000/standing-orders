@@ -13215,14 +13215,12 @@ function shell(
     // Live status with zero JavaScript: the page asks the browser to fetch
     // it again. Only ever on read-only briefing pages — a refresh on a page
     // with a form would eat what somebody was typing.
-    // A page that reloads itself on a timer must not cross-fade every
-    // beat — the navigation transition is for navigation someone chose.
+    // A refresh is a reload, and reloads never cross-fade. No page opts
+    // out of the fade either: opening one from a page that fades makes
+    // the browser report the aborted fade as an error.
     ...(options.refreshSeconds === undefined
       ? []
-      : [
-          `<meta http-equiv="refresh" content="${Math.max(5, Math.floor(options.refreshSeconds))}">`,
-          `<style>@view-transition { navigation: none; }</style>`,
-        ]),
+      : [`<meta http-equiv="refresh" content="${Math.max(5, Math.floor(options.refreshSeconds))}">`]),
     // With the in-place swapper, the whole-page refresh survives only as
     // the no-JavaScript fallback — and CSS view transitions run without
     // JavaScript, so the fallback carries its own opt-out.

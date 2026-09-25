@@ -900,7 +900,7 @@ function ScriptsPanel({ view, csrf, apply, onClose }: { view: BrowserFlowView; c
     if (draft === null) return;
     setBusy(true);
     const result = await send(`${view.flow.href}/scripts`, draft, csrf);
-    setBusy(false); apply(result); if (result.ok) setDraft(null);
+    setBusy(false); apply(result); if (result.ok) { setDraft(null); setRunsFile(false); }
   };
   const set = (key: keyof typeof blank) => (event: { target: { value: string } }) => setDraft(current => current === null ? current : { ...current, [key]: event.target.value });
   const [runsFile, setRunsFile] = useState(false);
@@ -918,12 +918,12 @@ function ScriptsPanel({ view, csrf, apply, onClose }: { view: BrowserFlowView; c
       </div>
       {script.file === null && <details className="mt-2"><summary className="cursor-pointer text-[12px] text-muted-foreground">Show the script</summary><pre className="mt-2 max-h-56 overflow-auto rounded-md bg-muted p-2 font-mono text-[12px]">{script.body}</pre></details>}
       {view.canEdit && <div className="mt-2 flex gap-1.5">
-        <Button size="sm" variant="outline" onClick={() => setDraft({ name: script.name, about: script.about, body: script.body, timeoutMinutes: String(script.timeoutMinutes), language: script.language, file: script.file ?? "" })}>Edit</Button>
+        <Button size="sm" variant="outline" onClick={() => { setRunsFile(script.file !== null); setDraft({ name: script.name, about: script.about, body: script.body, timeoutMinutes: String(script.timeoutMinutes), language: script.language, file: script.file ?? "" }); }}>Edit</Button>
         <Button size="sm" variant="ghost" className="text-destructive" disabled={busy} onClick={async () => { setBusy(true); apply(await send(`${view.flow.href}/scripts`, { remove: "yes", name: script.name }, csrf)); setBusy(false); }}>Remove</Button>
       </div>}
     </li>)}</ul>}
     {view.canEdit && (draft === null
-      ? <Button size="sm" variant="outline" className="self-start" onClick={() => setDraft(blank)}><Plus className="size-4" />New script</Button>
+      ? <Button size="sm" variant="outline" className="self-start" onClick={() => { setRunsFile(false); setDraft(blank); }}><Plus className="size-4" />New script</Button>
       : <form className="flex flex-col gap-3 rounded-lg border p-3" onSubmit={event => { event.preventDefault(); void save(); }} data-script-form>
         <Field label="Name" hint="Lowercase and dashes, like run-tests. Saving under an existing name makes a new version."><Input value={draft.name} onChange={set("name")} maxLength={40} className="font-mono" required /></Field>
         <Field label="What it checks or does"><Input value={draft.about} onChange={set("about")} maxLength={160} placeholder="Looks the company up in our CRM" required /></Field>
