@@ -151,6 +151,15 @@ failed when a result is marked complete.
   again. In the console the same draft is an editable box on the card. Each
   flow has an owner (whoever made it, until handed on) whom these decisions
   go to.
+- **Steps that reach outside.** A "Web request" zone calls an API with the
+  card's details (its host is written out, so a card can't redirect it;
+  secrets you save on the step go only into its headers). A "Send email" zone
+  mails through your own mail server (Settings → Email: Gmail, Outlook,
+  Fastmail, Resend, SES or any SMTP), and {{card.email}} is the address a card
+  mentions. A "Use a tool" zone calls one of the project's MCP servers from
+  the Tools page, like posting to Slack or adding a page to Notion. The Email
+  replies template puts it together: Claude drafts, the flow's owner approves
+  from their phone, and the reply is emailed.
 - **Unified portfolio chat.** Read every project, prioritize queues, answer
   decisions, repair failed or cancelled dependencies, and confirm rich action
   cards from one conversation. The chat proposes; durable workflow state

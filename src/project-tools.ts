@@ -357,15 +357,40 @@ function toolNames(result: unknown): string[] {
   return Array.isArray(tools) ? tools.map(one => (one as { name?: unknown }).name).filter((name): name is string => typeof name === "string").slice(0, 200) : [];
 }
 
+type McpRequest = { method: string; params: unknown; doing: string };
+type McpAnswer = { ok: true; result: unknown } | { ok: false; problem: string };
+
 /** Start the server once, ask for its tools, and stop it: the proof a build can use it. */
 export async function testTool(spec: ToolSpec, values: Record<string, string>, options: { timeoutMs?: number; env?: NodeJS.ProcessEnv; omitEnv?: readonly string[] } = {}): Promise<{ ok: true; tools: string[] } | { ok: false; problem: string }> {
-  const missing = missingSecrets(spec, values);
-  if (missing.length > 0) return { ok: false, problem: `Set ${missing.join(", ")} first.` };
-  const timeoutMs = options.timeoutMs ?? 60_000;
-  return spec.transport === "http" ? testHttp(spec, values, timeoutMs) : testStdio(spec, values, timeoutMs, options.env ?? process.env, options.omitEnv ?? []);
+  const answer = await exchange(spec, values, { method: "tools/list", params: {}, doing: "listing its tools" }, options);
+  return answer.ok ? { ok: true, tools: toolNames(answer.result) } : answer;
 }
 
-function testStdio(spec: ToolSpec, values: Record<string, string>, timeoutMs: number, base: NodeJS.ProcessEnv, omit: readonly string[]): Promise<{ ok: true; tools: string[] } | { ok: false; problem: string }> {
+export type ToolCall = { ok: true; text: string; isError: boolean } | { ok: false; problem: string };
+
+/**
+ * Start the server once, call one of its tools, and stop it (v87): a flow's
+ * "Use a tool" step. The answer's text parts are kept; a tool that says it
+ * failed (isError) is an answer, not trouble reaching it.
+ */
+export async function callProjectTool(spec: ToolSpec, values: Record<string, string>, name: string, args: Record<string, unknown>, options: { timeoutMs?: number; env?: NodeJS.ProcessEnv; omitEnv?: readonly string[] } = {}): Promise<ToolCall> {
+  const answer = await exchange(spec, values, { method: "tools/call", params: { name, arguments: args }, doing: `using ${name}` }, options);
+  if (!answer.ok) return answer;
+  const result = (answer.result ?? {}) as { content?: unknown; isError?: unknown; structuredContent?: unknown };
+  const parts = Array.isArray(result.content) ? result.content : [];
+  const text = parts.map(part => (part as { type?: unknown; text?: unknown }).type === "text" && typeof (part as { text?: unknown }).text === "string" ? String((part as { text: string }).text) : "").filter(Boolean).join("\n")
+    || (result.structuredContent === undefined ? "" : JSON.stringify(result.structuredContent));
+  return { ok: true, text, isError: result.isError === true };
+}
+
+function exchange(spec: ToolSpec, values: Record<string, string>, request: McpRequest, options: { timeoutMs?: number; env?: NodeJS.ProcessEnv; omitEnv?: readonly string[] }): Promise<McpAnswer> {
+  const missing = missingSecrets(spec, values);
+  if (missing.length > 0) return Promise.resolve({ ok: false, problem: `Set ${missing.join(", ")} first.` });
+  const timeoutMs = options.timeoutMs ?? 60_000;
+  return spec.transport === "http" ? exchangeHttp(spec, values, timeoutMs, request) : exchangeStdio(spec, values, timeoutMs, options.env ?? process.env, options.omitEnv ?? [], request);
+}
+
+function exchangeStdio(spec: ToolSpec, values: Record<string, string>, timeoutMs: number, base: NodeJS.ProcessEnv, omit: readonly string[], request: McpRequest): Promise<McpAnswer> {
   return new Promise(resolve => {
     const env: NodeJS.ProcessEnv = { ...base };
     for (const name of omit) delete env[name];
@@ -378,7 +403,7 @@ function testStdio(spec: ToolSpec, values: Record<string, string>, timeoutMs: nu
       return;
     }
     let settled = false, buffer = "", stderr = "";
-    const finish = (outcome: { ok: true; tools: string[] } | { ok: false; problem: string }) => {
+    const finish = (outcome: McpAnswer) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -388,7 +413,7 @@ function testStdio(spec: ToolSpec, values: Record<string, string>, timeoutMs: nu
     const timer = setTimeout(() => finish({ ok: false, problem: `It did not answer within ${Math.round(timeoutMs / 1000)} seconds.` }), timeoutMs);
     const send = (message: unknown) => { try { child.stdin?.write(`${JSON.stringify(message)}\n`); } catch { /* the exit handler reports */ } };
     child.on("error", error => finish({ ok: false, problem: `It could not start: ${error.message}.` }));
-    child.on("exit", code => finish({ ok: false, problem: `It stopped before listing its tools (exit ${code ?? "signal"})${stderr.trim() === "" ? "" : `: ${safeLine(stderr)}`}.` }));
+    child.on("exit", code => finish({ ok: false, problem: `It stopped before ${request.doing} (exit ${code ?? "signal"})${stderr.trim() === "" ? "" : `: ${safeLine(stderr)}`}.` }));
     child.stderr?.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString("utf8")).slice(-2_000); });
     child.stdout?.on("data", (chunk: Buffer) => {
       buffer += chunk.toString("utf8");
@@ -400,10 +425,10 @@ function testStdio(spec: ToolSpec, values: Record<string, string>, timeoutMs: nu
         if (message.id === 1) {
           if (message.error !== undefined) { finish({ ok: false, problem: `It refused to start a session: ${safeLine(String(message.error.message ?? "error"))}.` }); return; }
           send({ jsonrpc: "2.0", method: "notifications/initialized" });
-          send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
+          send({ jsonrpc: "2.0", id: 2, method: request.method, params: request.params });
         } else if (message.id === 2) {
-          if (message.error !== undefined) finish({ ok: false, problem: `It would not list its tools: ${safeLine(String(message.error.message ?? "error"))}.` });
-          else finish({ ok: true, tools: toolNames(message.result) });
+          if (message.error !== undefined) finish({ ok: false, problem: `It refused ${request.doing}: ${safeLine(String(message.error.message ?? "error"))}.` });
+          else finish({ ok: true, result: message.result });
         }
       }
     });
@@ -411,7 +436,7 @@ function testStdio(spec: ToolSpec, values: Record<string, string>, timeoutMs: nu
   });
 }
 
-async function testHttp(spec: ToolSpec, values: Record<string, string>, timeoutMs: number): Promise<{ ok: true; tools: string[] } | { ok: false; problem: string }> {
+async function exchangeHttp(spec: ToolSpec, values: Record<string, string>, timeoutMs: number, request: McpRequest): Promise<McpAnswer> {
   const headers: Record<string, string> = { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": PROTOCOL };
   if (spec.bearer !== null && values[spec.bearer]) headers["authorization"] = `Bearer ${values[spec.bearer]}`;
   for (const [header, secret] of Object.entries(spec.headerSecrets)) if (values[secret]) headers[header] = values[secret]!;
@@ -432,9 +457,10 @@ async function testHttp(spec: ToolSpec, values: Record<string, string>, timeoutM
     if (opened.status >= 400 || opened.message === null) return { ok: false, problem: `It did not start a session (HTTP ${opened.status}).` };
     if (opened.message.error !== undefined) return { ok: false, problem: `It refused to start a session: ${safeLine(String(opened.message.error.message ?? "error"))}.` };
     await fetch(spec.url!, { method: "POST", headers: { ...headers, ...(opened.session === null ? {} : { "mcp-session-id": opened.session }) }, body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }), signal }).then(r => r.body?.cancel()).catch(() => undefined);
-    const listed = await call({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, opened.session);
-    if (listed.message === null || listed.message.error !== undefined) return { ok: false, problem: `It would not list its tools (HTTP ${listed.status}).` };
-    return { ok: true, tools: toolNames(listed.message.result) };
+    const answered = await call({ jsonrpc: "2.0", id: 2, method: request.method, params: request.params }, opened.session);
+    if (answered.message === null) return { ok: false, problem: `It did not answer ${request.doing} (HTTP ${answered.status}).` };
+    if (answered.message.error !== undefined) return { ok: false, problem: `It refused ${request.doing}: ${safeLine(String(answered.message.error.message ?? "error"))}.` };
+    return { ok: true, result: answered.message.result };
   } catch (error) {
     return { ok: false, problem: error instanceof Error && error.name === "TimeoutError" ? `It did not answer within ${Math.round(timeoutMs / 1000)} seconds.` : "It could not be reached." };
   }

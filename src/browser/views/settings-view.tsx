@@ -65,6 +65,36 @@ function DefaultChoice({ title, description, action, field, value, canManage, ch
   </Section>;
 }
 
+/** The mail server flows' Send email steps use. The password is written here and never shown again. */
+function Email({ email, csrf }: { email: NonNullable<BrowserSettingsView["email"]>; csrf: string }) {
+  return <Section id="email" title="Email" description="Send email steps in your flows send from this address.">
+    <Collapsible defaultOpen={!email.set}>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <span className="inline-flex items-center gap-2 text-sm"><StatusDot tone={email.set ? "ok" : "off"} />{email.set ? `From ${email.from} through ${email.host}` : "Not set up"}</span>
+        <CollapsibleTrigger asChild><Button variant="ghost" size="sm" className="ml-auto group">{email.set ? "Change" : "Set up"}<ChevronDown className="transition-transform group-data-[state=open]:rotate-180" /></Button></CollapsibleTrigger>
+      </div>
+      <CollapsibleContent>
+        <form method="post" action="/settings/email" className="mt-3 grid gap-3 rounded-lg bg-muted p-4" data-email-settings>
+          <Csrf csrf={csrf} />
+          <p className="text-[13px] text-muted-foreground">For Gmail: smtp.gmail.com, port 587, your address, and an app password.</p>
+          <div className="grid gap-3 sm:grid-cols-[1fr_7rem]">
+            <div className="grid gap-2"><Label htmlFor="email-host">Mail server</Label><Input id="email-host" name="host" defaultValue={email.host} placeholder="smtp.gmail.com" required /></div>
+            <div className="grid gap-2"><Label htmlFor="email-port">Port</Label><Input id="email-port" name="port" type="number" min={1} max={65535} defaultValue={String(email.port)} required /></div>
+          </div>
+          <div className="grid gap-2"><Label htmlFor="email-from">Send from</Label><Input id="email-from" name="from" type="email" defaultValue={email.from} placeholder="you@example.com" required /></div>
+          <div className="grid gap-2"><Label htmlFor="email-user">Username</Label><Input id="email-user" name="user" autoComplete="username" defaultValue={email.user} placeholder="Usually the same address" /></div>
+          <div className="grid gap-2"><Label htmlFor="email-password">Password</Label><Input id="email-password" name="password" type="password" autoComplete="off" placeholder={email.set ? "Leave empty to keep the saved one" : "An app password"} /></div>
+          <label className="flex items-center gap-2 text-[13px]"><input type="checkbox" name="secure" className="size-4 accent-[var(--so-accent)]" defaultChecked={email.secure} />Use SSL from the start (port 465)</label>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button type="submit">Save email</Button>
+            {email.set && <Button type="submit" variant="outline" formAction="/settings/email-test" formNoValidate>Send a test email</Button>}
+          </div>
+        </form>
+      </CollapsibleContent>
+    </Collapsible>
+  </Section>;
+}
+
 function Providers({ providers, csrf }: { providers: NonNullable<BrowserSettingsView["providers"]>; csrf: string }) {
   return <Section id="providers" title="AI providers" description="Keys stay on this computer and are never shown again.">
     <ul className="-my-1 divide-y divide-border">
@@ -180,6 +210,7 @@ export function SettingsView({ view, csrf }: { view: BrowserSettingsView; csrf: 
       value={view.quality.mode} canManage={view.quality.canManage} changed={view.quality.changed} csrf={csrf}
       options={[{ value: "default", title: "Default", description: "Everyday agents and the repository check." }, { value: "strict", title: "Strict / release", description: "Strongest agents. Release approval stays separate." }]} />}
     {view.providers && <Providers providers={view.providers} csrf={csrf} />}
+    {view.email && csrf && <Email email={view.email} csrf={csrf} />}
     <Notifications view={view} csrf={csrf} />
     {csrf && <TelegramToken view={view} csrf={csrf} />}
   </div>;

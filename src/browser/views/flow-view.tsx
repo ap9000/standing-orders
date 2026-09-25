@@ -7,7 +7,7 @@
  * it now stands, and the canvas refreshes every few seconds for everyone. */
 import { Background, BackgroundVariant, Controls, Handle, MarkerType, NodeResizer, Position, ReactFlow, ReactFlowProvider, applyNodeChanges, useReactFlow, type Connection, type Edge, type Node, type NodeChange, type NodeProps } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Bell, BellOff, CalendarClock, LineChart, ListChecks, MessageSquareReply, Copy, Flag, GitPullRequest, Hammer, Inbox, Megaphone, MessageSquare, MousePointerClick, Pencil, PenLine, Plus, Search, Split, SquareKanban, UserCheck, Webhook, Workflow, X, Zap } from "lucide-react";
+import { Bell, BellOff, CalendarClock, LineChart, ListChecks, MessageSquareReply, Copy, Flag, GitPullRequest, Hammer, Inbox, Megaphone, MessageSquare, MousePointerClick, Pencil, PenLine, Plus, Search, Split, Globe, Mail, Wrench, SquareKanban, UserCheck, Webhook, Workflow, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { BrowserFlowCard, BrowserFlowStage, BrowserFlowTrigger, BrowserFlowView } from "../../browser-workspace.js";
 import { Badge, Button, Input, Label, Textarea, cn, toast } from "../components/ui/index.js";
@@ -26,6 +26,7 @@ const KIND_ICONS: Record<BrowserFlowStage["kind"], ReactNode> = {
   approval: <UserCheck className="size-3.5" aria-hidden="true" />, notify: <Megaphone className="size-3.5" aria-hidden="true" />, done: <Flag className="size-3.5" aria-hidden="true" />,
   check: <ListChecks className="size-3.5" aria-hidden="true" />, update: <MessageSquareReply className="size-3.5" aria-hidden="true" />,
   sort: <Split className="size-3.5" aria-hidden="true" />, draft: <PenLine className="size-3.5" aria-hidden="true" />,
+  request: <Globe className="size-3.5" aria-hidden="true" />, email: <Mail className="size-3.5" aria-hidden="true" />, tool: <Wrench className="size-3.5" aria-hidden="true" />,
 };
 
 
@@ -351,7 +352,86 @@ function SortSettings({ sort, others, ready, set }: { sort: SortSettingsValue; o
   </>;
 }
 
-function ZonePanel({ stage, stages, view, update, remove, makeStart, onClose }: { stage: BrowserFlowStage; stages: BrowserFlowStage[]; view: BrowserFlowView; update: (change: Partial<BrowserFlowStage>) => void; remove: () => void; makeStart: () => void; onClose: () => void }) {
+const FILL_INS = "Fill-ins: {{card.title}}, {{card.description}}, {{card.email}}, {{stage.<zone id>}}.";
+type RequestValue = NonNullable<BrowserFlowStage["request"]>;
+
+/** A web request: the address, how it's called, headers (secrets go here), and what it sends. */
+function RequestSettings({ request, view, csrf, apply, set }: { request: RequestValue; view: BrowserFlowView; csrf: string; apply: (result: Said) => void; set: (request: RequestValue) => void }) {
+  const headers = Object.entries(request.headers);
+  const [secret, setSecret] = useState({ name: "", value: "" });
+  const [busy, setBusy] = useState(false);
+  const header = (index: number, name: string, value: string) => set({ ...request, headers: Object.fromEntries(headers.map((one, at) => at === index ? [name, value] : one).filter(([key]) => key !== "")) });
+  return <>
+    <Field label="Address" hint={`The host is written out; fill-ins can go after it. ${FILL_INS}`}>
+      <div className="flex gap-1.5">
+        <select className={cn(SELECT, "w-24 shrink-0")} value={request.method} onChange={event => set({ ...request, method: event.target.value as RequestValue["method"] })} aria-label="Method">
+          {(["GET", "POST", "PUT", "PATCH", "DELETE"] as const).map(one => <option key={one} value={one}>{one}</option>)}
+        </select>
+        <Input value={request.url} maxLength={2000} onChange={event => set({ ...request, url: event.target.value })} className="font-mono text-[12.5px]" placeholder="https://api.example.com/items" aria-label="Address" />
+      </div>
+    </Field>
+    <div className="grid gap-1.5"><span className="text-[13px] font-medium">Headers</span>
+      {headers.map(([name, value], index) => <div key={index} className="flex gap-1.5" data-request-header={index}>
+        <Input value={name} maxLength={64} onChange={event => header(index, event.target.value, value)} className="w-32 shrink-0 font-mono text-[12px]" placeholder="Authorization" aria-label={`Header ${index + 1} name`} />
+        <Input value={value} maxLength={500} onChange={event => header(index, name, event.target.value)} className="font-mono text-[12px]" placeholder="Bearer {{secret.API_TOKEN}}" aria-label={`Header ${index + 1} value`} />
+        <Button variant="ghost" size="icon" onClick={() => set({ ...request, headers: Object.fromEntries(headers.filter((_, at) => at !== index)) })} aria-label={`Remove header ${name || index + 1}`}><X className="size-4" /></Button>
+      </div>)}
+      {headers.length < 10 && <Button size="sm" variant="outline" className="self-start" onClick={() => set({ ...request, headers: { ...request.headers, [`X-Header-${headers.length + 1}`]: "" } })}><Plus className="size-4" />Add a header</Button>}
+    </div>
+    {request.method !== "GET" && request.method !== "DELETE" && <Field label="What it sends" hint="JSON is sent as JSON, with fill-ins inside its strings; anything else as plain text.">
+      <Textarea rows={5} value={request.body ?? ""} maxLength={8000} onChange={event => set({ ...request, body: event.target.value })} className="font-mono text-[12px]" aria-label="What it sends" />
+    </Field>}
+    <details className="rounded-md border px-3 py-2" data-request-secrets>
+      <summary className="cursor-pointer text-[13px] font-medium">Secrets{view.requestSecrets.length > 0 ? ` (${view.requestSecrets.length})` : ""}</summary>
+      <div className="mt-2 grid gap-2">
+        <p className="text-[12px] text-muted-foreground">Kept on this computer, never shown again. Use one in a header as {"{{secret.NAME}}"}.</p>
+        {view.requestSecrets.length > 0 && <p className="flex flex-wrap gap-1.5">{view.requestSecrets.map(name => <Badge key={name} tone="neutral" className="font-mono">{name}</Badge>)}</p>}
+        <div className="flex gap-1.5">
+          <Input value={secret.name} onChange={event => setSecret({ ...secret, name: event.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, "_") })} className="w-32 shrink-0 font-mono text-[12px]" placeholder="API_TOKEN" aria-label="Secret name" />
+          <Input type="password" autoComplete="off" value={secret.value} onChange={event => setSecret({ ...secret, value: event.target.value })} placeholder="Its value (empty removes it)" aria-label="Secret value" />
+        </div>
+        <Button size="sm" variant="outline" className="self-start" disabled={busy || secret.name === ""} onClick={async () => { setBusy(true); const result = await send(`${view.flow.href}/secrets`, secret, csrf); setBusy(false); apply(result); if (result.ok) setSecret({ name: "", value: "" }); }}>Save secret</Button>
+      </div>
+    </details>
+  </>;
+}
+
+/** An email: who it goes to, the subject and the words. */
+function EmailSettings({ email, view, set }: { email: NonNullable<BrowserFlowStage["email"]>; view: BrowserFlowView; set: (email: NonNullable<BrowserFlowStage["email"]>) => void }) {
+  return <>
+    {!view.emailReady && <p className="rounded-md border border-attention/50 px-3 py-2 text-[12.5px]" data-email-needs-setup>Email isn't set up yet. <a className="font-medium text-primary underline-offset-4 hover:underline" href="/settings#email">Add your mail server in Settings</a></p>}
+    <Field label="To"><Input value={email.to} maxLength={500} onChange={event => set({ ...email, to: event.target.value })} aria-label="To" /></Field>
+    <Field label="Subject"><Input value={email.subject} maxLength={200} onChange={event => set({ ...email, subject: event.target.value })} aria-label="Subject" /></Field>
+    <Field label="Email" hint={FILL_INS}><Textarea rows={6} value={email.body} maxLength={8000} onChange={event => set({ ...email, body: event.target.value })} aria-label="Email" /></Field>
+  </>;
+}
+
+/** A project tool: which one, which of its functions, and the arguments. */
+function ToolSettings({ tool, view, set }: { tool: NonNullable<BrowserFlowStage["tool"]>; view: BrowserFlowView; set: (tool: NonNullable<BrowserFlowStage["tool"]>) => void }) {
+  const chosen = view.tools.find(one => one.name === tool.server);
+  return <>
+    {view.tools.length === 0 ? <p className="rounded-md border border-attention/50 px-3 py-2 text-[12.5px]" data-tool-needs-setup>This project has no tools yet. <a className="font-medium text-primary underline-offset-4 hover:underline" href="/settings/tools">Add one on the Tools page</a></p>
+      : <Field label="Tool" {...(chosen !== undefined && !chosen.ready ? { hint: "It needs its secrets set on the Tools page first." } : chosen !== undefined ? { hint: chosen.about } : {})}>
+        <select className={SELECT} value={tool.server} onChange={event => set({ ...tool, server: event.target.value, name: view.tools.find(one => one.name === event.target.value)?.functions[0] ?? "" })} aria-label="Tool">
+          {chosen === undefined && <option value={tool.server}>{tool.server === "" ? "Choose a tool" : `${tool.server} (missing)`}</option>}
+          {view.tools.map(one => <option key={one.name} value={one.name}>{one.name}</option>)}
+        </select>
+      </Field>}
+    <Field label="What it does" hint={chosen !== undefined && chosen.functions.length === 0 ? "Test the tool on the Tools page to list what it can do." : undefined}>
+      {chosen !== undefined && chosen.functions.length > 0
+        ? <select className={SELECT} value={tool.name} onChange={event => set({ ...tool, name: event.target.value })} aria-label="What it does">
+          {!chosen.functions.includes(tool.name) && <option value={tool.name}>{tool.name || "Choose"}</option>}
+          {chosen.functions.map(one => <option key={one} value={one}>{one}</option>)}
+        </select>
+        : <Input value={tool.name} maxLength={100} onChange={event => set({ ...tool, name: event.target.value })} className="font-mono" aria-label="What it does" />}
+    </Field>
+    <Field label="Arguments" hint={`JSON, with fill-ins inside its strings. ${FILL_INS}`}>
+      <Textarea rows={5} value={tool.args} maxLength={4000} onChange={event => set({ ...tool, args: event.target.value })} className="font-mono text-[12px]" aria-label="Arguments" />
+    </Field>
+  </>;
+}
+
+function ZonePanel({ stage, stages, view, csrf, apply, update, remove, makeStart, onClose }: { stage: BrowserFlowStage; stages: BrowserFlowStage[]; view: BrowserFlowView; csrf: string; apply: (result: Said) => void; update: (change: Partial<BrowserFlowStage>) => void; remove: () => void; makeStart: () => void; onClose: () => void }) {
   const others = stages.filter(one => one.id !== stage.id);
   const select = SELECT;
   const kind = view.kinds.find(one => one.kind === stage.kind);
@@ -361,6 +441,9 @@ function ZonePanel({ stage, stages, view, update, remove, makeStart, onClose }: 
     <Field label="What happens here" {...(kind === undefined ? {} : { hint: kind.about })}>
       <select className={select} aria-label="What happens here" value={stage.kind} onChange={event => update({ kind: event.target.value as BrowserFlowStage["kind"], ...(event.target.value === "done" ? { next: null, onFail: null } : {}),
         ...(event.target.value === "update" ? { close: stage.close ?? true, message: stage.message ?? "Done: {{card.title}}" } : {}), ...(event.target.value === "check" ? { script: stage.script ?? view.scripts[0]?.name ?? null } : {}),
+        ...(event.target.value === "request" ? { request: stage.request ?? { method: "POST", url: "https://", headers: {}, body: '{"title": "{{card.title}}", "details": "{{card.description}}"}' } } : {}),
+        ...(event.target.value === "email" ? { email: stage.email ?? { to: "{{card.email}}", subject: "Re: {{card.title}}", body: stages.find(one => one.kind === "draft") ? `{{stage.${stages.find(one => one.kind === "draft")!.id}}}` : "" } } : {}),
+        ...(event.target.value === "tool" ? { tool: stage.tool ?? { server: view.tools[0]?.name ?? "", name: view.tools[0]?.functions[0] ?? "", args: '{"text": "{{card.title}}"}' } } : {}),
         ...(event.target.value === "draft" ? { instructions: stage.instructions ?? "Write a short, friendly reply to the person who sent this card, in plain words." } : {}),
         ...(event.target.value === "approval" ? { toOwner: stage.toOwner ?? true } : {}),
         ...(event.target.value === "sort" ? { next: null, sort: stage.sort ?? { question: "What kind of card is this?", answers: others.slice(0, 2).map(one => ({ answer: one.title.slice(0, 40), means: one.title, to: one.id })), sureAt: 0.8, notes: [] } } : {}) })}>
@@ -397,13 +480,16 @@ function ZonePanel({ stage, stages, view, update, remove, makeStart, onClose }: 
         {stage.script !== null && !view.scripts.some(one => one.name === stage.script) && <option value={stage.script}>{stage.script} (missing)</option>}
       </select>
     </Field>}
+    {stage.kind === "request" && stage.request !== undefined && <RequestSettings request={stage.request} view={view} csrf={csrf} apply={apply} set={request => update({ request })} />}
+    {stage.kind === "email" && stage.email !== undefined && <EmailSettings email={stage.email} view={view} set={email => update({ email })} />}
+    {stage.kind === "tool" && stage.tool !== undefined && <ToolSettings tool={stage.tool} view={view} set={tool => update({ tool })} />}
     {stage.kind === "sort" && stage.sort !== null && <SortSettings sort={stage.sort} others={others} ready={view.sortReady} set={sort => update({ sort })} />}
     {stage.kind !== "done" && stage.kind !== "sort" && <Field label="Then">
       <select className={select} aria-label="Then" value={stage.next ?? ""} onChange={event => update({ next: event.target.value || null })}>
         <option value="">Wait here</option>{others.map(one => <option key={one.id} value={one.id}>{one.title}</option>)}
       </select>
     </Field>}
-    {(stage.kind === "approval" || stage.kind === "task" || stage.kind === "report" || stage.kind === "check" || stage.kind === "update" || stage.kind === "sort") && <Field label={stage.kind === "approval" ? "If sent back" : stage.kind === "sort" ? "If it isn't sure" : "If it fails"}>
+    {(stage.kind === "approval" || stage.kind === "task" || stage.kind === "report" || stage.kind === "check" || stage.kind === "update" || stage.kind === "sort" || stage.kind === "request" || stage.kind === "email" || stage.kind === "tool") && <Field label={stage.kind === "approval" ? "If sent back" : stage.kind === "sort" ? "If it isn't sure" : "If it fails"}>
       <select className={select} aria-label={stage.kind === "approval" ? "If sent back" : stage.kind === "sort" ? "If it isn't sure" : "If it fails"} value={stage.onFail ?? ""} onChange={event => update({ onFail: event.target.value || null })}>
         <option value="">{stage.kind === "approval" ? "Can't be sent back" : stage.kind === "sort" ? "Wait here for a person" : "Wait here"}</option>{others.map(one => <option key={one.id} value={one.id}>{one.title}</option>)}
       </select>
@@ -1017,7 +1103,7 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
       </div>
       {(selectedZone !== null && editing) || selectedCard !== null || (adding && !editing) || triggersOpen || pressing !== null || scriptsOpen || insightsOpen ? <aside className="absolute inset-y-0 right-0 z-10 w-[360px] max-w-full overflow-y-auto border-l bg-card p-4 shadow-xl" data-flow-drawer>
         {selectedZone !== null && editing
-          ? <ZonePanel stage={selectedZone} stages={stages} view={view} update={change => updateStage(selectedZone.id, change)}
+          ? <ZonePanel stage={selectedZone} stages={stages} view={view} csrf={csrf} apply={apply} update={change => updateStage(selectedZone.id, change)}
               remove={() => { setDraft(current => current === null ? current : { ...current, start: current.start === selectedZone.id ? current.stages.find(one => one.id !== selectedZone.id)!.id : current.start,
                 stages: current.stages.filter(one => one.id !== selectedZone.id).map(one => ({ ...one, next: one.next === selectedZone.id ? null : one.next, onFail: one.onFail === selectedZone.id ? null : one.onFail })) }); setSelected(null); }}
               makeStart={() => setDraft(current => current === null ? current : { ...current, start: selectedZone.id })} onClose={() => setSelected(null)} />

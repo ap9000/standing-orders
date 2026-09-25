@@ -23,6 +23,13 @@
  *               card goes where that answer leads, or down the not-sure
  *               path when Jev is less sure than the zone asks. It can also
  *               note a few scores or yes/no answers on the card.
+ * - request   — (v87) calls an address on the web (an API) with the card's
+ *               details, and keeps what it answers; a refusal takes the
+ *               failure path. Secrets ride headers only ({{secret.NAME}}).
+ * - email     — (v87) sends an email from the address in Settings → Email;
+ *               {{card.email}} is the first address the card mentions.
+ * - tool      — (v87) calls one tool of one of the project's MCP servers
+ *               (Settings → Tools), with arguments filled from the card.
  * - done      — the end.
  *
  * The engine is deterministic and model-free: it runs in the worker's pass
@@ -30,7 +37,7 @@
  */
 import { createHash } from "node:crypto";
 
-export const FLOW_STAGE_KINDS = ["inbox", "task", "report", "approval", "check", "update", "notify", "sort", "draft", "done"] as const;
+export const FLOW_STAGE_KINDS = ["inbox", "task", "report", "approval", "check", "update", "notify", "sort", "draft", "request", "email", "tool", "done"] as const;
 export type FlowStageKind = (typeof FLOW_STAGE_KINDS)[number];
 export const FLOW_COLORS = ["slate", "blue", "violet", "amber", "green", "rose"] as const;
 export type FlowColor = (typeof FLOW_COLORS)[number];
@@ -43,6 +50,12 @@ export type FlowSortAnswer = { answer: string; means: string; to: string };
 export type FlowSortNote = { id: string; kind: "score" | "yes-no"; question: string; levels: string[] | null };
 /** sort: the question, its answers, how sure Jev must be to act alone (0.5–0.99), and what else it notes. */
 export type FlowSort = { question: string; answers: FlowSortAnswer[]; sureAt: number; notes: FlowSortNote[] };
+/** request: what is called. The address's scheme and host are fixed; fill-ins go in its path and query (encoded), headers and body. */
+export type FlowRequest = { method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; url: string; headers: Record<string, string>; body: string | null };
+/** email: who it goes to, the subject and the text — all with fill-ins. */
+export type FlowEmail = { to: string; subject: string; body: string };
+/** tool: which of the project's tools (MCP servers), which of its functions, and the arguments as JSON with fill-ins. */
+export type FlowTool = { server: string; name: string; args: string };
 
 export type FlowStage = {
   id: string;
@@ -67,6 +80,10 @@ export type FlowStage = {
   script: string | null;
   /** sort: what Jev is asked and where each answer leads. Its onFail is where a card goes when Jev isn't sure. */
   sort: FlowSort | null;
+  /** request, email, tool (v87): what the step sends, and to where. */
+  request?: FlowRequest;
+  email?: FlowEmail;
+  tool?: FlowTool;
   /** Where a card goes when this zone's step succeeds, and when it fails or is sent back (sort: when it isn't sure). */
   next: string | null;
   onFail: string | null;
@@ -83,6 +100,9 @@ export const FLOW_KIND_WORDS: Record<FlowStageKind, { label: string; about: stri
   check: { label: "Run a script", about: "Runs one of the project's scripts on the card's work, with no AI. If it fails, the card takes its failure path." },
   update: { label: "Update the issue", about: "Comments on the GitHub or Linear issue the card came from, and can close it. Other cards pass straight through." },
   notify: { label: "Message", about: "Posts a message to the project's chat, then moves on." },
+  request: { label: "Web request", about: "Calls an address on the web, like an API, with the card's details, and keeps what it answers. If it fails, the card takes its failure path." },
+  email: { label: "Send email", about: "Sends an email from your address in Settings → Email. {{card.email}} is the first email address the card mentions." },
+  tool: { label: "Use a tool", about: "Calls one of the project's tools (its connected MCP servers), like posting to Slack or adding a page to Notion." },
   draft: { label: "Draft", about: "Claude writes a reply, summary or note from the card in seconds. Nothing is sent until a later step sends it." },
   sort: { label: "Sort", about: "Jev reads the card in under a second and sends it where its answer leads. Cards it isn't sure about take the not-sure path." },
   done: { label: "Done", about: "The end of the flow." },
@@ -106,6 +126,50 @@ const coordinate = (value: unknown, min: number, max: number, fallback: number):
 export const sortKeyOf = (answer: string) => answer.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "answer";
 /** The default for "sure enough to act alone". */
 export const SORT_SURE_AT = 0.8;
+
+const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
+const HEADER = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
+
+/** A web request's settings, checked: an http(s) address whose scheme and host are written out, not filled in. */
+function validateRequest(input: unknown, title: string): FlowRequest {
+  const raw = (input ?? {}) as Record<string, unknown>;
+  const method = METHODS.includes(raw["method"] as typeof METHODS[number]) ? raw["method"] as FlowRequest["method"] : "POST";
+  const url = text(raw["url"], 2000);
+  if (url === null) throw new Error(`Zone ${title}: give the address it calls.`);
+  const origin = /^(https?):\/\/([^/?#]*)/i.exec(url);
+  if (origin === null) throw new Error(`Zone ${title}: the address must start with https:// or http://.`);
+  if (origin[2]!.includes("{{") || origin[2]!.includes("@") || origin[2] === "") throw new Error(`Zone ${title}: write the address's host out in full; fill-ins go after it.`);
+  const headers: Record<string, string> = {};
+  for (const [name, value] of Object.entries((raw["headers"] ?? {}) as Record<string, unknown>)) {
+    if (!HEADER.test(name)) throw new Error(`Zone ${title}: “${name}” isn't a header name.`);
+    const said = text(value, 500);
+    if (said !== null) headers[name] = said;
+  }
+  if (Object.keys(headers).length > 10) throw new Error(`Zone ${title}: up to 10 headers.`);
+  return { method, url, headers, body: method === "GET" || method === "DELETE" ? null : text(raw["body"], 8000) };
+}
+
+/** An email's settings, checked. */
+function validateEmail(input: unknown, title: string): FlowEmail {
+  const raw = (input ?? {}) as Record<string, unknown>;
+  const to = text(raw["to"], 500), subject = text(raw["subject"], 200), body = text(raw["body"], 8000);
+  if (to === null) throw new Error(`Zone ${title}: say who it goes to, for example {{card.email}}.`);
+  if (subject === null) throw new Error(`Zone ${title}: give the email a subject.`);
+  if (body === null) throw new Error(`Zone ${title}: write what the email says.`);
+  return { to, subject, body };
+}
+
+/** A tool call's settings, checked: the arguments are a JSON object. */
+function validateTool(input: unknown, title: string): FlowTool {
+  const raw = (input ?? {}) as Record<string, unknown>;
+  const server = text(raw["server"], 64), name = text(raw["name"], 100);
+  if (server === null || name === null) throw new Error(`Zone ${title}: choose the tool it uses.`);
+  const args = text(raw["args"], 4000) ?? "{}";
+  let parsed: unknown;
+  try { parsed = JSON.parse(args); } catch { throw new Error(`Zone ${title}: the arguments aren't valid JSON.`); }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(`Zone ${title}: the arguments are a JSON object, like {"text": "{{stage.draft}}"}.`);
+  return { server, name, args };
+}
 
 /** A sort zone's settings, checked. Answers name zones by id; `ids` says which exist. */
 function validateSort(input: unknown, title: string): FlowSort {
@@ -178,6 +242,9 @@ export function validateFlowDefinition(input: unknown): FlowDefinition {
       close: kind === "update" ? stage["close"] !== false : null,
       script: kind === "check" ? text(stage["script"], 40) : null,
       sort: kind === "sort" ? validateSort(stage["sort"], title) : null,
+      ...(kind === "request" ? { request: validateRequest(stage["request"], title) } : {}),
+      ...(kind === "email" ? { email: validateEmail(stage["email"], title) } : {}),
+      ...(kind === "tool" ? { tool: validateTool(stage["tool"], title) } : {}),
       next: kind === "sort" ? null : text(stage["next"], 32),
       onFail: text(stage["onFail"], 32),
     };
@@ -207,13 +274,23 @@ export function flowDigest(definition: FlowDefinition): string {
 }
 
 /** Fill a zone's text from the card: title, description, the latest note and earlier zones' reports. */
-export function fillFlowText(template: string, card: { title: string; description: string | null; note: string | null; outputs: Record<string, string> }): string {
-  return template.replace(/\{\{\s*(card\.title|card\.description|note|stage\.([a-z0-9-]+))\s*\}\}/g, (_match, key: string, stage: string | undefined) => {
+export function fillFlowText(template: string, card: { title: string; description: string | null; note: string | null; outputs: Record<string, string> }, encode: (value: string) => string = value => value): string {
+  return template.replace(/\{\{\s*(card\.title|card\.description|card\.email|note|stage\.([a-z0-9-]+))\s*\}\}/g, (_match, key: string, stage: string | undefined) => encode(fillOne(key, stage, card))).trim();
+}
+
+/** The first email address a card mentions, or "" — what {{card.email}} holds. */
+export function cardEmailOf(card: { title: string; description: string | null }): string {
+  return /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/.exec(`${card.title}\n${card.description ?? ""}`)?.[0] ?? "";
+}
+
+function fillOne(key: string, stage: string | undefined, card: { title: string; description: string | null; note: string | null; outputs: Record<string, string> }): string {
+  {
     if (key === "card.title") return card.title;
     if (key === "card.description") return card.description ?? "";
+    if (key === "card.email") return cardEmailOf(card);
     if (key === "note") return card.note ?? "";
     return stage === undefined ? "" : card.outputs[stage] ?? "";
-  }).trim();
+  }
 }
 
 /** A step as the lead describes it, in list order. A step that keeps an
@@ -225,10 +302,14 @@ export type FlowStepInput = {
   /** sort: the question, each answer with what it means and the step it goes to, how sure Jev must be (a percentage), and up to 3 other things to note. */
   question?: string; answers?: { answer?: string; means?: string; goesTo?: string }[]; sureAt?: number;
   alsoNote?: { question?: string; kind?: "score" | "yes-no"; levels?: string[] }[];
+  /** request: method, address, headers and body; email: to, subject, body; tool: the tool (server), its function (tool) and arguments. */
+  method?: FlowRequest["method"]; url?: string; headers?: Record<string, string>; body?: string;
+  to?: string; subject?: string;
+  server?: string; tool?: string; args?: Record<string, unknown> | string;
   next?: string; ifFails?: string; ifNotSure?: string;
 };
 
-const KIND_COLORS: Record<FlowStageKind, FlowColor> = { inbox: "slate", task: "blue", report: "violet", approval: "amber", check: "blue", update: "green", notify: "green", sort: "violet", draft: "violet", done: "green" };
+const KIND_COLORS: Record<FlowStageKind, FlowColor> = { inbox: "slate", task: "blue", report: "violet", approval: "amber", check: "blue", update: "green", notify: "green", sort: "violet", draft: "violet", request: "blue", email: "green", tool: "blue", done: "green" };
 /** A step id as the lead may write it (sort_by_hand, Sort-By-Hand) in the one form zones use. */
 const idOf = (value: string) => value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32);
 const slugOf = (title: string) => title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 28) || "zone";
@@ -318,6 +399,9 @@ export function flowFromSteps(input: unknown, previous: FlowDefinition | null = 
       close: kind === "update" ? step.close ?? old?.close ?? true : null,
       script: kind === "check" ? step.script?.trim() || old?.script || null : null,
       sort: kind === "sort" ? sortFromStep(step, old?.sort ?? null, ref => find(ref, title)) : null,
+      ...(kind === "request" ? { request: { method: step.method ?? old?.request?.method ?? "POST", url: step.url ?? old?.request?.url ?? "", headers: step.headers ?? old?.request?.headers ?? {}, body: step.body ?? old?.request?.body ?? null } } : {}),
+      ...(kind === "email" ? { email: { to: step.to ?? old?.email?.to ?? "{{card.email}}", subject: step.subject ?? old?.email?.subject ?? "Re: {{card.title}}", body: step.body ?? old?.email?.body ?? "" } } : {}),
+      ...(kind === "tool" ? { tool: { server: step.server ?? old?.tool?.server ?? "", name: step.tool ?? old?.tool?.name ?? "", args: typeof step.args === "string" ? step.args : step.args !== undefined ? JSON.stringify(step.args) : old?.tool?.args ?? "{}" } } : {}),
       next, onFail,
     });
   });
@@ -358,8 +442,8 @@ export function flowTerms(definition: FlowDefinition, previous: FlowDefinition |
   // "Then → Go ahead?" ends a sentence already.
   const to = (id: string | null) => { const title = titleOf(id); return /[.?!]$/.test(title) ? title : `${title}.`; };
   // Fill-ins read as what they will hold.
-  const plain = (text: string) => text.replace(/\{\{\s*(card\.title|card\.description|note|stage\.([a-z0-9-]+))\s*\}\}/g, (_match, key: string, stage: string | undefined) =>
-    key === "card.title" ? "[card title]" : key === "card.description" ? "[card details]" : key === "note" ? "[send-back note]" : `[${titleOf(stage ?? null)} report]`);
+  const plain = (text: string) => text.replace(/\{\{\s*(card\.title|card\.description|card\.email|note|stage\.([a-z0-9-]+))\s*\}\}/g, (_match, key: string, stage: string | undefined) =>
+    key === "card.title" ? "[card title]" : key === "card.description" ? "[card details]" : key === "card.email" ? "[the card's email address]" : key === "note" ? "[send-back note]" : `[${titleOf(stage ?? null)} report]`);
   const same = (a: FlowStage, b: FlowStage) => JSON.stringify({ ...a, zone: null }) === JSON.stringify({ ...b, zone: null });
   const describe = (stage: FlowStage, index: number, mark: string): string => {
     const lines = [`${index + 1}. ${stage.title} — ${FLOW_KIND_WORDS[stage.kind].label}${mark}`];
@@ -374,6 +458,15 @@ export function flowTerms(definition: FlowDefinition, previous: FlowDefinition |
     }
     if (stage.kind === "task" && stage.planning !== "auto") lines.push(stage.planning === "required" ? "Plans first." : "Builds without a plan.");
     if (stage.kind === "draft") lines.push(`Claude writes: ${plain(stage.instructions ?? "")}`, `Then → ${to(stage.next)}`);
+    else if (stage.kind === "request" && stage.request !== undefined) {
+      const headers = Object.keys(stage.request.headers);
+      lines.push(`Calls ${stage.request.method} ${plain(stage.request.url)}${headers.length === 0 ? "" : ` with the ${headers.join(", ")} header${headers.length === 1 ? "" : "s"}`}${stage.request.body === null ? "" : `, sending: ${plain(stage.request.body).slice(0, 300)}`}`,
+        `Then → ${to(stage.next)}${stage.onFail === null ? " If it fails → waits there." : ` If it fails → ${to(stage.onFail)}`}`);
+    }
+    else if (stage.kind === "email" && stage.email !== undefined) lines.push(`Emails ${plain(stage.email.to)}: “${plain(stage.email.subject)}”`, plain(stage.email.body).slice(0, 400),
+      `Then → ${to(stage.next)}${stage.onFail === null ? " If it can't be sent → waits there." : ` If it can't be sent → ${to(stage.onFail)}`}`);
+    else if (stage.kind === "tool" && stage.tool !== undefined) lines.push(`Uses ${stage.tool.server} → ${stage.tool.name} with ${plain(stage.tool.args).slice(0, 400)}`,
+      `Then → ${to(stage.next)}${stage.onFail === null ? " If it fails → waits there." : ` If it fails → ${to(stage.onFail)}`}`);
     else if (stage.kind === "approval") lines.push(`Decides: ${stage.toOwner === true ? "the flow's owner, in their chat app" : stage.approver ?? "anyone who approves on this project"}. Approve → ${to(stage.next)} Send back → ${stage.onFail === null ? "not possible." : to(stage.onFail)}`);
     else if (stage.kind === "notify") lines.push(`Posts: ${plain(stage.message ?? "")}`, `Then → ${to(stage.next)}`);
     else if (stage.kind === "update") lines.push(`Comments on the issue the card came from: ${plain(stage.message ?? "")}${stage.close === true ? " Then closes it (Linear: moves it to done)." : ""}`, `Then → ${to(stage.next)}${stage.onFail === null ? "" : ` If it can't → ${to(stage.onFail)}`}`);
@@ -404,6 +497,7 @@ export function flowTerms(definition: FlowDefinition, previous: FlowDefinition |
   if (first?.kind === "inbox" && sorter !== undefined) terms.push(`New cards wait in ${first.title}, so ${sorter.title} only sorts the cards someone moves there.`);
   terms.push("Build and research steps become ordinary tasks, so your usual approvals and checks apply.");
   if (definition.stages.some(one => one.kind === "sort")) terms.push("Sort steps send each card's title, details and earlier notes to Jev through your OpenRouter account.");
+  if (definition.stages.some(one => one.kind === "request" || one.kind === "email" || one.kind === "tool")) terms.push("Web request, email and tool steps send what they're given outside this computer, with no one checking unless a decision comes before them.");
   if (definition.stages.some(one => one.kind === "draft")) terms.push("Draft steps send each card's text to Claude through the lead chat's sign-in. Nothing a draft writes is sent until a later step sends it.");
   return terms;
 }
@@ -622,6 +716,25 @@ export const FLOW_TEMPLATES: readonly { id: string; label: string; about: string
         stage("delivery", "Delivery team", "inbox", zone(420, 680, "green"), { next: "done" }),
         stage("by-hand", "Sort by hand", "inbox", zone(0, 400, "slate")),
         stage("done", "Done", "done", zone(840, 340, "green", 220)),
+      ],
+    },
+  },
+  {
+    id: "email-replies",
+    label: "Email replies",
+    about: "Claude drafts a reply to each question, the flow's owner approves or edits it in their chat app, and it's emailed to whoever asked. Share its button as a form that asks for an email address.",
+    definition: {
+      version: 1,
+      start: "write",
+      stages: [
+        stage("write", "Write the reply", "draft", zone(0, 0, "violet"), {
+          instructions: "Write a short, friendly reply to the person who asked, answering their question in plain words. Sign off as the team.",
+          next: "check",
+        }),
+        stage("check", "Check the reply", "approval", zone(420, 0, "amber"), { toOwner: true, next: "send", onFail: "write" }),
+        stage("send", "Email it", "email", zone(840, 0, "green"), { email: { to: "{{card.email}}", subject: "Re: {{card.title}}", body: "{{stage.write}}" }, next: "done", onFail: "no-address" }),
+        stage("no-address", "No email address", "inbox", zone(840, 380, "amber")),
+        stage("done", "Done", "done", zone(1260, 0, "green", 220)),
       ],
     },
   },

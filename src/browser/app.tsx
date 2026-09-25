@@ -583,6 +583,17 @@ export function WorkspaceApp({ initial }: { initial: BrowserWorkspace }) {
   </div></>;
 }
 
+// The cross-fade between pages is a nicety: when the browser skips it (the next
+// page opts out, or the tab is hidden) its promises reject, and nothing waits on
+// them. Settle them so a skipped fade never reads as a page error.
+type Fade = { finished?: Promise<unknown>; ready?: Promise<unknown>; updateCallbackDone?: Promise<unknown> };
+const settleFade = (event: Event) => {
+  const fade = (event as Event & { viewTransition?: Fade | null }).viewTransition;
+  for (const one of [fade?.finished, fade?.ready, fade?.updateCallbackDone]) one?.catch(() => undefined);
+};
+window.addEventListener("pageswap", settleFade);
+window.addEventListener("pagereveal", settleFade);
+
 const mount = document.getElementById("standing-orders-workspace");
 const data = document.getElementById("standing-orders-workspace-data");
 if (mount && data) {

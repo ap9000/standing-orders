@@ -20,6 +20,7 @@ import { changeSkills, githubSkill, importSkill, readSkillsSnapshot, reviseSkill
 import { skillsHtml, skillsScript, skillsSnapshotHtml, skillTestFeedbackHtml, SKILLS_CSS } from "./skills-ui.js";
 import { toolsHtml, TOOLS_CSS, type ToolsView } from "./tools-ui.js";
 import { flowFallbackHtml, flowsListHtml, flowView, FLOWS_CSS } from "./flows-ui.js";
+import { readEmailSettings, saveEmailSettings, sendThroughServer, setFlowSecret, type MailSender } from "./flow-actions.js";
 import { assignFlowCard, commentOnFlowCard, watchFlowCard } from "./flow-people.js";
 import { saveScript } from "./flow-scripts.js";
 import { flowInsights } from "./flow-insights.js";
@@ -337,6 +338,8 @@ export type ServeOptions = {
   codexToolList?: (cwd: string) => Promise<string | null>;
   /** Tests: the home whose ~/.standing-orders/tool-secrets and ~/.claude.json the Tools page uses. */
   toolHome?: string;
+  /** v87: sends Send email steps' mail and the settings test (tests inject one). */
+  mailSender?: MailSender;
   chatEnv?: Record<string, string | undefined>;
   /**
    * The live peek's locality ASSERTION (live-peek v3 §3): the administrator
@@ -2663,7 +2666,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const selected = Number(url.searchParams.get("card")), start = Number(url.searchParams.get("start"));
       const view = flowView(store, flow, { name: who.name, approver: who.via === "cookie" && who.role === "approver" }, Number.isSafeInteger(selected) && selected > 0 ? selected : null,
         { dir: options.configDir ?? null, repos: [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible), startTrigger: Number.isSafeInteger(start) && start > 0 ? start : null,
-          sortReady: keyStatus("openrouter", providerHome).set });
+          sortReady: keyStatus("openrouter", providerHome).set, toolHome });
       if (url.searchParams.get("format") === "json") return respond(response, 200, "application/json; charset=utf-8", JSON.stringify(view));
       return sendScreen(response, 200, screen(flow.name, `<p><a href="/flows">Flows</a></p><h1>${escape(flow.name)}</h1>${flowFallbackHtml(view)}`, { chrome: chromeFor(flow.repo, "flows"), workspace: { view } }));
     }
@@ -3313,7 +3316,11 @@ export function createDecisionServer(options: ServeOptions): Server {
         }, {
           ...store.qualityDefault(),
           canManage: who.role === "approver",
-        }),
+        }, who.role === "approver" && csrf !== "" ? (() => {
+          // v87: the mail server flows send email through; the password is never shown back.
+          const email = readEmailSettings(options.configDir ?? null);
+          return email === null ? { set: false, host: "", port: 587, secure: false, user: "", from: "" } : { set: true, host: email.host, port: email.port, secure: email.secure, user: email.user, from: email.from };
+        })() : null),
       );
     }
 
@@ -5413,7 +5420,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         return sendScreen(response,409,screen('Skills',`<h1>Skills</h1>${content}`,{chrome:chromeFor(repo,'settings'),functional:{script:skillsScript()}}));
       }
     }
-    const flowPost = /^\/flows\/([1-9][0-9]{0,9})\/(save|cards|archive|triggers|linear-key|hooks-address|scripts)$/.exec(url.pathname) ?? /^\/flows\/([1-9][0-9]{0,9})\/cards\/([1-9][0-9]{0,9})\/(move|decide|cancel|comment|assign|watch)$/.exec(url.pathname);
+    const flowPost = /^\/flows\/([1-9][0-9]{0,9})\/(save|cards|archive|triggers|linear-key|hooks-address|scripts|secrets)$/.exec(url.pathname) ?? /^\/flows\/([1-9][0-9]{0,9})\/cards\/([1-9][0-9]{0,9})\/(move|decide|cancel|comment|assign|watch)$/.exec(url.pathname);
     const triggerPost = /^\/flows\/([1-9][0-9]{0,9})\/triggers\/([1-9][0-9]{0,9})\/(pause|resume|remove|check|press|renew|secret|share|unshare)$/.exec(url.pathname);
     if (url.pathname === "/flows/new" || flowPost !== null || triggerPost !== null) {
       const now = clock();
@@ -5431,7 +5438,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (flow === null || flow.state !== "active" || !visible(flow.repo)) return answer(404, { ok: false, said: "No such flow in your projects." });
       const definition = flowDefinitionOf(flow);
       const dir = options.configDir ?? null;
-      const viewNow = () => flowView(store, store.getFlow(flow.id) ?? flow, { name: who.name, approver: true }, null, { dir, repos: projects, sortReady: keyStatus("openrouter", providerHome).set });
+      const viewNow = () => flowView(store, store.getFlow(flow.id) ?? flow, { name: who.name, approver: true }, null, { dir, repos: projects, sortReady: keyStatus("openrouter", providerHome).set, toolHome });
       const settle = (said: string, extra: Record<string, unknown> = {}) => {
         // Move what can move right away (a message, a decision's next zone); workers file and run the tasks.
         try { advanceFlows(store, flow.repo, now, { evidenceRoot }); } catch { /* the next worker pass retries */ }
@@ -5506,6 +5513,12 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (!store.saveFlow(flow.id, { name, definitionJson: JSON.stringify(saved), sawRevision: Number(body.get("revision")), by: who.name }, now)) return answer(409, { ok: false, said: "Someone else changed this flow. Reload to see their changes, then make yours again." });
         if (owner !== "" && owner !== flow.owner) store.setFlowOwner(flow.id, owner, now);
         return settle("Saved.");
+      }
+      if (action === "secrets") {
+        // A web request's secret: written here, used only in its headers, never shown back.
+        if (dir === null) return answer(409, { ok: false, said: "Secrets are kept on the console's computer." });
+        const saved = setFlowSecret(dir, flow.repo, (body.get("name") ?? "").trim(), body.get("value") ?? "");
+        return saved.ok ? settle(saved.said) : answer(400, { ok: false, said: saved.message });
       }
       if (definition === null) return answer(409, { ok: false, said: "This flow's drawing can't be read. Save it again from the editor." });
       if (action === "cards") {
@@ -6011,6 +6024,18 @@ export function createDecisionServer(options: ServeOptions): Server {
         }));
       }
       return redirect(response, "/settings");
+    }
+
+    // v87: the mail server Send email steps use, and a test email to its own address.
+    if ((url.pathname === "/settings/email" || url.pathname === "/settings/email-test") && who.role === "approver" && options.configDir !== undefined) {
+      if (url.pathname === "/settings/email") {
+        const saved = saveEmailSettings(options.configDir, { host: body.get("host"), port: body.get("port"), secure: body.get("secure"), user: body.get("user"), from: body.get("from"), password: body.get("password") });
+        return redirect(response, `/settings?said=${encodeURIComponent(saved.ok ? saved.said : saved.message)}#email`);
+      }
+      const settings = readEmailSettings(options.configDir);
+      if (settings === null) return redirect(response, `/settings?said=${encodeURIComponent("Set up email first.")}#email`);
+      const sent = await (options.mailSender ?? sendThroughServer)(settings, { from: settings.from, to: [settings.from], subject: "Standing Orders: test email", text: "This is a test from Standing Orders. Send email steps in your flows will come from this address." });
+      return redirect(response, `/settings?said=${encodeURIComponent(sent.ok ? `Sent a test email to ${settings.from}.` : sent.said)}#email`);
     }
 
     if (url.pathname === "/projects/select") {
@@ -21919,6 +21944,7 @@ function settingsPage(
   digest: { everyMs: number | null; lastSentAt: string | null; held: number } | null = null,
   permissionDefault: { mode: UnattendedPermissionMode; updatedAt: string | null; updatedBy: string | null; canManage: boolean } | null = null,
   qualityDefault: { mode: QualityMode; updatedAt: string | null; updatedBy: string | null; canManage: boolean } | null = null,
+  email: NonNullable<BrowserSettingsView["email"]> | null = null,
 ): Screen {
   const permissionCard =
     permissionDefault === null
@@ -22134,6 +22160,7 @@ function settingsPage(
     push: push === null || csrf === "" ? null : { available: push.available, devices: push.devices.filter(one => one.retiredAt === null || one.retiredReason === "gone").map(one => ({ id: one.id, words: `${one.uaWords} · since ${when(one.createdAt)}`, state: one.retiredAt !== null ? "expired" : one.consecutiveFailures >= 20 ? "failing" : "ok", removable: one.retiredAt === null })) },
     digest: digest === null || csrf === "" ? null : { every: digest.everyMs === null ? "off" : String(Math.round(digest.everyMs / 60_000)), held: digest.everyMs === null ? null : `${digest.held} routine fact(s) held` },
     telegram: { state: hasEnv ? "from the environment" : existing === null ? "not set" : "saved", current },
+    email,
   };
   return screen("Settings", [
     "<h1>Settings</h1>",

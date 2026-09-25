@@ -16,6 +16,7 @@
 import { spawn, execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync, createWriteStream } from "node:fs";
 import { createServer } from "node:net";
+import { createServer as createHttpServer } from "node:http";
 import { tmpdir, homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -356,6 +357,111 @@ await check("The lead drafts a reply-and-approve flow from plain words (real Cla
   if (sends === undefined || !/\{\{\s*stage\.[a-z0-9-]+\s*\}\}/.test(sends.message ?? "")) problems.push(`the step after the decision doesn't send the draft: ${JSON.stringify(sends?.message)}`);
   if (problems.length > 0) throw new Error(`${problems.join("; ")}: ${JSON.stringify(view.stages.map(one => [one.title, one.kind, one.next, one.toOwner ?? one.approver, one.message]))}`);
   return { steps: view.stages.map(one => `${one.title} (${one.kind})`) };
+});
+
+/** A mail server on this computer that takes anything: just enough SMTP for nodemailer. */
+function mailSink() {
+  const received = [];
+  const server = createServer(socket => {
+    let buffer = "", reading = false, current = { to: [], data: "" };
+    socket.write("220 e2e ESMTP\r\n");
+    socket.on("data", chunk => {
+      buffer += chunk.toString("utf8");
+      for (;;) {
+        if (reading) {
+          const end = buffer.indexOf("\r\n.\r\n");
+          if (end < 0) return;
+          current.data = buffer.slice(0, end); buffer = buffer.slice(end + 5); reading = false;
+          received.push(current); current = { to: [], data: "" }; socket.write("250 queued\r\n"); continue;
+        }
+        const newline = buffer.indexOf("\r\n");
+        if (newline < 0) return;
+        const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 2);
+        if (/^EHLO/i.test(line)) socket.write("250-e2e\r\n250 SIZE 10000000\r\n");
+        else if (/^RCPT TO:/i.test(line)) { current.to.push(line.slice(8)); socket.write("250 ok\r\n"); }
+        else if (/^DATA/i.test(line)) { reading = true; socket.write("354 go\r\n"); }
+        else if (/^QUIT/i.test(line)) { socket.write("221 bye\r\n"); socket.end(); }
+        else socket.write("250 ok\r\n");
+      }
+    });
+  });
+  return new Promise(done => server.listen(0, "127.0.0.1", () => done({ server, port: server.address().port, received })));
+}
+
+await check("Web request, email and tool steps reach outside for real: a web server, a mail server and an MCP tool", ["Sign in and turn the lead chat on (first-run setup)"], async () => {
+  const calls = [];
+  const web = createHttpServer((request, response) => { let body = ""; request.on("data", chunk => { body += chunk; }); request.on("end", () => { calls.push({ url: request.url, auth: request.headers["authorization"], body }); response.writeHead(201, { "content-type": "application/json" }); response.end('{"ticket": "T-1042"}'); }); });
+  await new Promise(done => web.listen(0, "127.0.0.1", done));
+  const mail = await mailSink();
+  const echo = join(root, "echo-mcp.mjs");
+  writeFileSync(echo, `import { createInterface } from "node:readline";
+const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\\n");
+createInterface({ input: process.stdin }).on("line", line => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") reply(message.id, { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "chat", version: "1" } });
+  else if (message.method === "tools/list") reply(message.id, { tools: [{ name: "post_message", inputSchema: { type: "object" } }] });
+  else if (message.method === "tools/call") reply(message.id, { content: [{ type: "text", text: "posted to " + message.params.arguments.channel + ": " + message.params.arguments.text }] });
+});
+`);
+  try {
+    // Settings → Email, through the page, and its test email.
+    await page.goto(`${base}/settings#email`);
+    await page.waitForSelector("[data-email-settings]");
+    await page.fill("#email-host", "127.0.0.1"); await page.fill("#email-port", String(mail.port)); await page.fill("#email-from", "team@shop.example");
+    await Promise.all([page.waitForNavigation(), page.click('[data-email-settings] button:has-text("Save email")')]);
+    await page.click('#email button:has-text("Change")');
+    await Promise.all([page.waitForNavigation(), page.click('[data-email-settings] button:has-text("Send a test email")')]);
+    await until("the test email", async () => mail.received.length === 1, { timeoutMs: 15_000, everyMs: 500 });
+    await shot("settings-email");
+    // A project tool, added the way the Tools page adds one, and tested.
+    const csrf = await page.locator('input[name="csrf"]').first().inputValue();
+    for (const form of [{ action: "add-custom", name: "chat", transport: "stdio", target: `${process.execPath} ${echo}`, password: alexPassword }, { action: "test", name: "chat" }]) {
+      const answered = await page.request.post(`${base}/settings/tools/change`, { form: { csrf, repo, ...form }, headers: { origin: base }, maxRedirects: 0 });
+      if (answered.status() >= 400) throw new Error(`the Tools page refused ${form.action}: ${answered.status()}`);
+    }
+    // The flow: call the web server, post to the tool, email whoever asked.
+    await page.goto(`${base}/flows`);
+    await page.evaluate(() => { for (const one of document.querySelectorAll("details")) one.open = true; });
+    await page.fill('form[action="/flows/new"] input[name="name"]', "Intake");
+    await page.selectOption('form[action="/flows/new"] select[name="template"]', "blank");
+    await Promise.all([page.waitForNavigation(), page.click('form[action="/flows/new"] button')]);
+    const id = Number(/\/flows\/(\d+)/.exec(page.url())[1]);
+    const view = await flowView(id);
+    const zone = x => ({ x, y: 0, w: 260, h: 300, color: "blue" });
+    const none = { instructions: null, planning: null, approver: null, message: null, close: null, script: null, sort: null };
+    const drawing = { version: 1, start: "call", stages: [
+      { ...none, id: "call", title: "Log it", kind: "request", zone: zone(0), request: { method: "POST", url: `http://127.0.0.1:${web.address().port}/tickets`, headers: { Authorization: "Bearer {{secret.DESK_TOKEN}}" }, body: '{"subject": "{{card.title}}", "from": "{{card.email}}"}' }, next: "post", onFail: "inbox" },
+      { ...none, id: "post", title: "Tell the team", kind: "tool", zone: zone(300), tool: { server: "chat", name: "post_message", args: '{"channel": "#support", "text": "{{card.title}} ({{stage.call}})"}' }, next: "mail", onFail: "inbox" },
+      { ...none, id: "mail", title: "Email them", kind: "email", zone: zone(600), email: { to: "{{card.email}}", subject: "We got it: {{card.title}}", body: "Thanks! Your ticket: {{stage.call}}" }, next: "done", onFail: "inbox" },
+      { ...view.stages.find(one => one.id === "inbox"), next: null, zone: { x: 300, y: 380, w: 260, h: 300, color: "slate" } },
+      { ...view.stages.find(one => one.id === "done"), zone: zone(900) },
+    ] };
+    const saved = await page.request.post(`${base}/flows/${id}/save`, { form: { csrf, name: "Intake", owner: "alex", revision: String(view.flow.revision), definition: JSON.stringify(drawing) }, headers: { accept: "application/json", origin: base } });
+    if (!saved.ok()) throw new Error(`the drawing wasn't saved: ${await saved.text()}`);
+    const secret = `desk-${randomBytes(6).toString("hex")}`;
+    const kept = await page.request.post(`${base}/flows/${id}/secrets`, { form: { csrf, name: "DESK_TOKEN", value: secret }, headers: { accept: "application/json", origin: base } });
+    if (!kept.ok()) throw new Error(`the secret wasn't saved: ${await kept.text()}`);
+    await page.reload(); await page.waitForSelector("[data-zone]");
+    await page.click('button:has-text("New card")');
+    await page.fill('input[aria-label="Title"]', "Printer on fire");
+    await page.fill('textarea[aria-label="Details"]', "It's smoking. Reach me at priya@example.com");
+    await page.click('button:has-text("Add card")');
+    const card = await until("the card to be done", async () => (await flowView(id)).cards.find(one => one.title === "Printer on fire" && one.state === "done"), { timeoutMs: 90_000, everyMs: 2000 });
+    const problems = [];
+    if (calls[0]?.auth !== `Bearer ${secret}` || !calls[0]?.body.includes('"from":"priya@example.com"')) problems.push(`the web server got ${JSON.stringify(calls[0])}`);
+    const posted = card.outputs.find(one => one.stage === "post")?.text ?? "";
+    if (posted !== 'posted to #support: Printer on fire ({"ticket": "T-1042"})') problems.push(`the tool answered ${posted}`);
+    const email = mail.received[1];
+    if (email?.to[0] !== "<priya@example.com>" || !email.data.includes('Thanks! Your ticket: {"ticket": "T-1042"}')) problems.push(`the email was ${JSON.stringify(email)}`);
+    const logs = rows(`SELECT log FROM flow_step_run r JOIN flow_card c ON c.id = r.card WHERE c.flow = ${id}`).map(one => one.log ?? "").join("\n");
+    if (logs.includes(secret)) problems.push("the secret reached a run log");
+    if (problems.length > 0) throw new Error(problems.join("; "));
+    await page.reload(); await page.waitForSelector("[data-zone]");
+    await shot("outside-steps");
+    return { request: calls[0].url, tool: posted, emails: mail.received.length };
+  } finally {
+    web.close(); mail.server.close();
+  }
 });
 
 let buildCard = null;
