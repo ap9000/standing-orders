@@ -9,6 +9,7 @@ import { parseSortDecision, sortChip } from "./flow-sort.js";
 import { flowSecretNames, readEmailSettings } from "./flow-actions.js";
 import { projectToolsOf, secretsSetFor, toolStanding } from "./project-tools.js";
 import type { FlowCardRow, FlowRow, Store } from "./store.js";
+import { flowFingerprint } from "./flow-live.js";
 
 const e = (value: unknown) =>
   String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
@@ -120,6 +121,7 @@ export function flowView(store: Store, flow: FlowRow, viewer: { name: string; ap
     stages,
     cards,
     selectedCard,
+    live: flowFingerprint(store, flow.id),
     canEdit: viewer.approver,
     approvers: store.listApprovers().map(one => one.name).filter(name => store.accountCanAccess(name, flow.repo)),
     kinds: FLOW_STAGE_KINDS.map(kind => ({ kind, label: FLOW_KIND_WORDS[kind].label, about: FLOW_KIND_WORDS[kind].about })),

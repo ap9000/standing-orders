@@ -1,4 +1,5 @@
 /** Discord messages and buttons transport the shared assistant's saved actions. */
+import { chatFlowButtons } from "./chat-flow.js";
 import { roomCommand } from "./chat-rooms.js";
 import {
   ChatState,
@@ -363,7 +364,19 @@ export async function deliverDiscordPart(
             text += " Open Standing Orders on your computer.";
         }
       }
-    } else if (!content.image) buttons = link(options.origin(), content.link);
+    } else if (!content.image)
+      buttons = [
+        // A flow decision (v88): Approve / Edit / Send back, then the link.
+        ...(content.flow
+          ? chatFlowButtons(state, row.id, now).map((one) => ({
+              type: 2,
+              style: one.action === "approve" ? 3 : 2,
+              label: one.label,
+              custom_id: `so_${one.token}`,
+            }))
+          : []),
+        ...link(options.origin(), content.link),
+      ];
     let target = content.edit ?? row.message;
     if (target && content.image && row.uploaded) {
       if (!file)

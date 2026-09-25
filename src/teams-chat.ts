@@ -5,6 +5,7 @@ import { channelAccess, chatObject as object, planChatNotifications, planRoomMes
 import { roomCommand } from "./chat-rooms.js";
 import { MATE_MESSAGE_MAX_CHARS } from "./mate.js";
 import { armedCardText, armedYesLabel, proposalLink, proposalOutcomeText, proposalPreview } from "./chat-channel.js";
+import { chatFlowButtons } from "./chat-flow.js";
 import { chatResultHref } from "./chat-controls.js";
 import { TeamsError, type TeamsApi } from "./teams-api.js";
 
@@ -161,7 +162,11 @@ export async function deliverTeamsPart(options: TeamsChatOptions): Promise<boole
           text = "Review the full action in Standing Orders before confirming.";
         }
       }
-    } else if (!content.image) actions = openUrlAction(options.origin(), content.link);
+    } else if (!content.image) {
+      // A flow decision (v88): Approve / Edit / Send back, then the link.
+      const flow = content.flow ? chatFlowButtons(state, row.id, now).map(one => ({ type: "Action.Submit", title: one.label, data: { so: one.token }, ...(one.action === "approve" ? { style: "positive" } : {}) })) : [];
+      actions = [...flow, ...openUrlAction(options.origin(), content.link)];
+    }
     const target = content.edit ?? row.message;
     const body = actions.length || content.proposal ? teamsCard(text, actions) : { type: "message", text, textFormat: "plain" };
     const answer = await options.api(target ? "PUT" : "POST", serviceUrl, `/v3/conversations/${encodeURIComponent(destination)}/activities${target ? `/${encodeURIComponent(target)}` : ""}`, body);

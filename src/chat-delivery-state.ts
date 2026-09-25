@@ -61,6 +61,24 @@ CREATE TABLE IF NOT EXISTS chat_meta (
  PRIMARY KEY(installation, key)
 );
 `;
+/** v88: flow decisions in the chat app, as on Telegram (telegram-flow.ts).
+ * A button is one opaque token for one visit (card, entry) of one card, on
+ * the part it rides; Edit and Send back open a prompt the person's next
+ * message in their DM answers. */
+const CHAT_FLOW_SCHEMA = `
+CREATE TABLE IF NOT EXISTS chat_flow_action (
+ token TEXT PRIMARY KEY, part INTEGER NOT NULL REFERENCES chat_part(id),
+ card INTEGER NOT NULL REFERENCES flow_card(id), entry INTEGER NOT NULL,
+ action TEXT NOT NULL CHECK(action IN ('approve','edit','send-back')), expires TEXT NOT NULL, consumed TEXT
+);
+CREATE INDEX IF NOT EXISTS chat_flow_action_visit ON chat_flow_action(card, entry);
+CREATE TABLE IF NOT EXISTS chat_flow_prompt (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, binding INTEGER NOT NULL REFERENCES chat_binding(id),
+ card INTEGER NOT NULL REFERENCES flow_card(id), entry INTEGER NOT NULL,
+ mode TEXT NOT NULL CHECK(mode IN ('edit','send-back')), created TEXT NOT NULL, expires TEXT NOT NULL, consumed TEXT
+);
+CREATE INDEX IF NOT EXISTS chat_flow_prompt_open ON chat_flow_prompt(binding, consumed);
+`;
 const CHAT_TABLES = [
   "chat_binding",
   "chat_pair",
@@ -130,6 +148,8 @@ export type ChatContent = {
   edit?: string;
   phase?: "armed";
   link?: { label: string; path: string };
+  /** A flow decision's buttons ride this part (v88): minted when it is planned. */
+  flow?: { card: number; entry: number; actions: Array<"approve" | "edit" | "send-back"> };
 };
 export const chatHash = (text: string): string =>
   createHash("sha256").update(text).digest("hex");
@@ -142,7 +162,7 @@ export class ChatState {
   prepare(sql: string) {
     return this.db.prepare(
       sql.replace(
-        /\bchat_(binding|pair|event|part|action|progress|runtime|room|meta)\b/g,
+        /\bchat_(binding|pair|event|part|action|progress|runtime|room|meta|flow_action|flow_prompt)\b/g,
         `${this.channel}_$1`,
       ),
     );
@@ -403,6 +423,11 @@ export class ChatState {
             ["confirm", "dismiss"],
             now,
           );
+        if (Number(inserted.changes) && part.flow)
+          for (const action of part.flow.actions)
+            this.prepare("INSERT INTO chat_flow_action(token,part,card,entry,action,expires) VALUES(?,?,?,?,?,?)").run(
+              randomBytes(16).toString("hex"), Number(inserted.lastInsertRowid), part.flow.card, part.flow.entry, action,
+              new Date(now.getTime() + 7 * 86_400_000).toISOString());
       }
       this.finish(event);
     });
@@ -454,7 +479,7 @@ export class ChatState {
 }
 
 export const chatSchema = (channel: "slack" | "discord" | "teams"): string =>
-  (CHAT_SCHEMA + CHAT_ROOM_SCHEMA).replaceAll("chat_", `${channel}_`);
+  (CHAT_SCHEMA + CHAT_ROOM_SCHEMA + CHAT_FLOW_SCHEMA).replaceAll("chat_", `${channel}_`);
 export const chatTables = (channel: "slack" | "discord" | "teams"): string[] =>
   CHAT_TABLES.map((name) => name.replace("chat_", `${channel}_`));
 export class ChatDeliveryError extends Error {

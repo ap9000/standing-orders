@@ -48,6 +48,8 @@ import { ceilingDigestOf } from "./principal.js";
 import { discordSettingsHtml } from "./discord-settings.js";
 import { effectivePrimary, savePrimary } from "./webhooks.js";
 import { createDecisionServer } from "./serve.js";
+import { flowFromSteps } from "./flows.js";
+import { advanceFlows } from "./flow-engine.js";
 const BOT = "100000000000000001",
   MEMBER = "100000000000000002",
   CHANNEL = "100000000000000003";
@@ -1025,4 +1027,47 @@ test("a Discord guild channel follows a team conversation: a manager binds it wi
   expect(inRoom("team off")).toBe(true);
   await processDiscordEvent(options); await drain();
   expect(state.room(ID.installation, ROOM)).toBeNull();
+});
+
+test("a flow decision in Discord: the draft with Approve / Edit / Send back, Edit by the next message, Approve on the fresh card (v88)", async () => {
+  now = new Date(now.getTime() + 30_000);
+  const flow = store.createFlow({ repo, name: "Support", by: "alex", definitionJson: JSON.stringify(flowFromSteps([
+    { title: "Inbox", kind: "inbox" },
+    { id: "draft", title: "Write the reply", kind: "draft", instructions: "Reply to {{card.title}}" },
+    { id: "check", title: "Check the reply", kind: "approval", decider: "owner", ifFails: "Write the reply" },
+    { id: "post", title: "Post it", kind: "notify", message: "{{stage.draft}}" },
+  ], null)) }, now);
+  const card = store.addFlowCard({ flow, title: "Refund for order 42?", description: null, stage: "check", by: "alex" }, now);
+  store.updateFlowCard(card, { outputs: { draft: "Hi Priya,\nwe refunded it." } }, now);
+  advanceFlows(store, repo, now);
+  await planDiscordNotifications(options);
+  await drain();
+  type Button = { label: string; custom_id?: string; style: number };
+  const buttonsOf = (call: { body: Record<string, unknown> }) => ((call.body.components as Array<{ components: Button[] }>)[0]?.components ?? []);
+  const flowPart = () => state.prepare("SELECT message FROM chat_part WHERE json_extract(payload,'$.flow') IS NOT NULL ORDER BY id DESC LIMIT 1").get()!;
+  const notice = sends().at(-1)!;
+  expect(sentText()).toContain("Hi Priya,\\nwe refunded it.");
+  const first = buttonsOf(notice);
+  expect(first.map(one => one.label)).toEqual(["Approve", "Edit", "Send back", "Open"]);
+  const token = (buttons: Button[], label: string) => buttons.find(one => one.label === label)!.custom_id!.slice(3);
+  const noticeId = String(flowPart().message);
+  await tap(token(first, "Edit"), noticeId);
+  expect(sentText()).toContain("as your next message here");
+  receive("Hi Priya, refunded today.");
+  await processDiscordEvent(options);
+  await drain();
+  expect(store.getFlowCard(card)!.outputs["draft"]).toBe("Hi Priya, refunded today.");
+  const fresh = buttonsOf(sends().at(-1)!);
+  const freshId = String(flowPart().message);
+  // A tap on the old card, or with the new token on the old card, changes nothing.
+  await tap(token(first, "Approve"), noticeId);
+  await tap(token(fresh, "Approve"), noticeId);
+  expect(store.getFlowCard(card)!.stage).toBe("check");
+  await tap(token(fresh, "Approve"), freshId);
+  expect(store.getFlowCard(card)!.stage).toBe("post");
+  const repainted = sends().at(-1)!;
+  expect(repainted.method).toBe("PATCH");
+  expect(repainted.path.endsWith(`/messages/${freshId}`)).toBe(true);
+  expect(sentText()).toContain("You approved it. Approved. Moved to Post it.");
+  expect(buttonsOf(repainted).map(one => one.label)).toEqual(["Open"]);
 });

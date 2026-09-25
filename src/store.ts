@@ -118,7 +118,8 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // v85 adds sort steps: Jev (through OpenRouter) picks where a card goes, and each step run keeps what it decided.
 // v86 adds draft steps (Claude writes from a card) and a flow's owner, whom its "the owner decides" zones ask in their chat app.
 // v87 adds steps that reach outside: a web request, an email, and a project tool (MCP) call.
-export const SCHEMA_VERSION = 87;
+// v88 brings flow decisions to Slack, Discord and Teams: Approve / Edit / Send back on the notice, and the prompt the next message answers.
+export const SCHEMA_VERSION = 88;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and

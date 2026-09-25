@@ -4,7 +4,8 @@
  * back. "Edit flow" lets you move, resize, add and connect zones: the solid
  * arrow is where work goes next, the dashed one where it goes if it's sent
  * back or fails. Every change is the server's: it answers with the flow as
- * it now stands, and the canvas refreshes every few seconds for everyone. */
+ * it now stands, and every open page hears the moment it changes (v88),
+ * with the faces of whoever else has it open. */
 import { Background, BackgroundVariant, Controls, Handle, MarkerType, NodeResizer, Position, ReactFlow, ReactFlowProvider, applyNodeChanges, useReactFlow, type Connection, type Edge, type Node, type NodeChange, type NodeProps } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { Bell, BellOff, CalendarClock, LineChart, ListChecks, MessageSquareReply, Copy, Flag, GitPullRequest, Hammer, Inbox, Megaphone, MessageSquare, MousePointerClick, Pencil, PenLine, Plus, Search, Split, Globe, Mail, Wrench, SquareKanban, UserCheck, Webhook, Workflow, X, Zap } from "lucide-react";
@@ -56,9 +57,75 @@ async function send(path: string, fields: Record<string, string>, csrf: string):
   }
 }
 
+type Here = { name: string; cards: number[]; editing: boolean };
+
+/** The flow as it stands, for everyone: the server says the moment it changes, and who else has it open.
+ * Without a stream (no EventSource, or it can't reconnect) the page reads every few seconds instead. */
+function useLiveFlow(view: BrowserFlowView, setView: (view: BrowserFlowView) => void, me: { card: number | null; editing: boolean }): Here[] {
+  const [others, setOthers] = useState<Here[]>([]);
+  const seen = useRef(view.live);
+  seen.current = view.live;
+  // While someone changes the flow, their draft is what they see; saving checks the revision.
+  const paused = useRef(me.editing);
+  paused.current = me.editing;
+  const reading = useRef(false);
+  const href = view.flow.href;
+  const read = useCallback(async () => {
+    if (reading.current || paused.current) return;
+    reading.current = true;
+    try {
+      const response = await fetch(`${href}?format=json`, { credentials: "same-origin", headers: { accept: "application/json" } });
+      if (response.ok) { const next = await response.json() as BrowserFlowView; seen.current = next.live; setView(next); }
+    } catch { /* the next nudge or tick reads again */ }
+    finally { reading.current = false; }
+  }, [href, setView]);
+  useEffect(() => {
+    let source: EventSource | null = null;
+    let fallback: number | undefined;
+    const query = new URLSearchParams({ ...(me.card === null ? {} : { card: String(me.card) }), ...(me.editing ? { editing: "1" } : {}) }).toString();
+    const poll = () => { window.clearInterval(fallback); fallback = window.setInterval(() => { if (document.visibilityState === "visible") void read(); }, 5000); };
+    const open = () => {
+      if (typeof EventSource === "undefined") { poll(); return; }
+      const stream = new EventSource(`${href}/live${query === "" ? "" : `?${query}`}`);
+      source = stream;
+      stream.addEventListener("change", event => { try { const at = (JSON.parse((event as MessageEvent<string>).data) as { at: string | null }).at; if (at === null || at !== seen.current) void read(); } catch { void read(); } });
+      stream.addEventListener("here", event => { try { setOthers((JSON.parse((event as MessageEvent<string>).data) as { people: Here[] }).people); } catch { /* keep the last list */ } });
+      stream.addEventListener("gone", () => { stream.close(); if (source === stream) source = null; setOthers([]); });
+      stream.addEventListener("open", () => window.clearInterval(fallback));
+      // The browser retries a dropped stream on its own; if it gives up, read on a timer.
+      stream.addEventListener("error", () => { if (stream.readyState === EventSource.CLOSED) { if (source === stream) source = null; setOthers([]); poll(); } });
+    };
+    const close = () => { source?.close(); source = null; window.clearInterval(fallback); setOthers([]); };
+    // A hidden tab isn't "here", and doesn't hold one of the browser's few connections.
+    const visible = () => { if (document.hidden) close(); else if (source === null) { open(); void read(); } };
+    if (!document.hidden) open();
+    document.addEventListener("visibilitychange", visible);
+    return () => { document.removeEventListener("visibilitychange", visible); close(); };
+  }, [href, me.card, me.editing, read]);
+  return others;
+}
+
+/** Who else has this flow open: faces, and in words on hover and for screen readers. */
+function AlsoHere({ others, cards }: { others: Here[]; cards: BrowserFlowCard[] }) {
+  if (others.length === 0) return null;
+  const doing = (one: Here) => {
+    if (one.editing) return "changing this flow";
+    const titles = one.cards.map(id => cards.find(card => card.id === id)?.title).filter((title): title is string => title !== undefined);
+    return titles.length === 0 ? "looking at the flow" : `looking at ${titles.map(title => `“${title}”`).join(", ")}`;
+  };
+  const words = others.map(one => `${one.name} is ${doing(one)}`).join(". ");
+  const editor = others.find(one => one.editing);
+  return <div className="inline-flex min-w-0 items-center gap-1.5" data-also-here role="status" aria-label={`Also here: ${words}`} title={words}>
+    <span className="flex -space-x-1.5">{others.slice(0, 4).map(one => <span key={one.name} className="rounded-full ring-2 ring-card"><Face name={one.name} /></span>)}</span>
+    <span className="truncate text-[12px] text-muted-foreground">{editor !== undefined ? `${editor.name} is changing this flow` : others.length === 1 ? `${others[0]!.name} is here` : `${others.length} others here`}</span>
+  </div>;
+}
+
 type ZoneData = {
   stage: BrowserFlowStage; kindLabel: string; owner: string; cards: BrowserFlowCard[]; editing: boolean; canMove: boolean; start: boolean;
   selectedCard: number | null; onCard: (id: number) => void; onDrop: (card: number, stage: string) => void; hidden: number;
+  /** Who else has each card open right now. */
+  lookers: Record<number, string[]>;
   onResize: (stage: string, box: { x: number; y: number; width: number; height: number }) => void;
 };
 
@@ -68,8 +135,8 @@ function ZoneNode({ data, selected }: NodeProps<Node<ZoneData, "zone">>) {
   const [over, setOver] = useState(false);
   const handle = cn("!size-2.5 !border-2 !border-card", !editing && "!opacity-0");
   return <div
-    className={cn("flex h-full flex-col overflow-hidden rounded-xl border shadow-sm", selected && editing ? "ring-2 ring-primary" : "", over && "ring-2 ring-primary/60")}
-    style={{ borderColor: `color-mix(in srgb, ${color} 35%, transparent)`, background: `color-mix(in srgb, ${color} 7%, var(--color-card))` }}
+    // Zones are plain surfaces in both themes; a zone's colour is said once, on its icon (a tint that reads as pastel on white turns muddy on dark).
+    className={cn("flex h-full flex-col overflow-hidden rounded-xl border bg-muted/40 shadow-sm", selected && editing ? "ring-2 ring-primary" : "", over && "ring-2 ring-primary/60")}
     onDragOver={event => { if (!canMove || editing) return; event.preventDefault(); setOver(true); }}
     onDragLeave={() => setOver(false)}
     onDrop={event => { setOver(false); const id = Number(event.dataTransfer.getData("text/so-card")); if (id > 0) data.onDrop(id, stage.id); }}
@@ -83,7 +150,7 @@ function ZoneNode({ data, selected }: NodeProps<Node<ZoneData, "zone">>) {
     {/* Routing handles: arrows leave from whichever side faces their target. Never drawn from. */}
     {(["Left", "Right", "Top", "Bottom"] as const).map(side => <Handle key={`s-${side}`} type="source" position={Position[side]} id={`s-${side}`} className="!opacity-0 !pointer-events-none" isConnectable={false}
 />)}
-    <header className="flex items-center gap-2 border-b px-3 py-2" style={{ borderColor: `${color}33` }}>
+    <header className="flex items-center gap-2 border-b px-3 py-2">
       <span className="inline-flex size-6 items-center justify-center rounded-md text-white" style={{ background: color }}>{KIND_ICONS[stage.kind]}</span>
       <div className="min-w-0 flex-1">
         <div className="truncate text-[13px] font-semibold">{stage.title}</div>
@@ -99,7 +166,11 @@ function ZoneNode({ data, selected }: NodeProps<Node<ZoneData, "zone">>) {
           className={cn("nodrag nopan w-full cursor-pointer rounded-lg border bg-card px-2.5 py-2 text-left shadow-xs transition-colors hover:border-primary/50",
             data.selectedCard === card.id && "border-primary ring-1 ring-primary", card.canDecide && "border-attention/60")}
           data-card={card.id}>
-          <div className="line-clamp-2 text-[12.5px] font-medium leading-snug">{card.title}</div>
+          <div className="flex items-start gap-1.5">
+            <div className="line-clamp-2 min-w-0 flex-1 text-[12.5px] font-medium leading-snug">{card.title}</div>
+            {(data.lookers[card.id]?.length ?? 0) > 0 && <span className="flex shrink-0 -space-x-1" data-card-lookers title={`${data.lookers[card.id]!.join(" and ")} ${data.lookers[card.id]!.length === 1 ? "is" : "are"} looking at this`}>
+              {data.lookers[card.id]!.slice(0, 2).map(name => <span key={name} className="rounded-full ring-2 ring-primary/70"><Face name={name} /></span>)}</span>}
+          </div>
           {card.sorted !== null && <div className="mt-1 flex"><SortChip sorted={card.sorted} /></div>}
           {card.waiting !== null && <div className={cn("mt-1 line-clamp-2 text-[11px] leading-snug", card.canDecide ? "font-semibold text-attention" : "text-muted-foreground")}>{card.canDecide ? "Needs your decision" : card.waiting}</div>}
           {(card.owner !== null || card.comments.length > 0) && <div className="mt-1.5 flex items-center gap-1.5">
@@ -895,18 +966,13 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
     if (result.view !== undefined) setView(result.view);
   }, []);
 
-  // Everyone sees everyone's moves: refresh while not editing.
-  useEffect(() => {
-    if (editing) return;
-    const tick = window.setInterval(async () => {
-      if (document.visibilityState !== "visible") return;
-      try {
-        const response = await fetch(`${view.flow.href}?format=json`, { credentials: "same-origin", headers: { accept: "application/json" } });
-        if (response.ok) setView(await response.json() as BrowserFlowView);
-      } catch { /* the next tick retries */ }
-    }, 5000);
-    return () => window.clearInterval(tick);
-  }, [editing, view.flow.href]);
+  // Everyone sees everyone's moves the moment they happen, and who else is here.
+  const others = useLiveFlow(view, setView, { card: selected !== null && "card" in selected ? selected.card : null, editing });
+  const lookers = useMemo(() => {
+    const byCard: Record<number, string[]> = {};
+    for (const one of others) if (!one.editing) for (const card of one.cards) (byCard[card] ??= []).push(one.name);
+    return byCard;
+  }, [others]);
 
   const move = useCallback(async (card: number, stage: string) => {
     const current = view.cards.find(one => one.id === card);
@@ -920,13 +986,13 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
     data: {
       stage, kindLabel: view.kinds.find(one => one.kind === stage.kind)?.label ?? stage.kind, owner: draft?.owner ?? view.flow.owner,
       cards: view.cards.filter(card => card.stage === stage.id && card.state === "active" && (!mineOnly || card.mine)),
-      hidden: mineOnly ? view.cards.filter(card => card.stage === stage.id && card.state === "active" && !card.mine).length : 0,
+      hidden: mineOnly ? view.cards.filter(card => card.stage === stage.id && card.state === "active" && !card.mine).length : 0, lookers,
       editing, canMove: view.canEdit, start: stage.id === start, selectedCard: selected !== null && "card" in selected ? selected.card : null,
       onCard: (id: number) => { setAdding(false); setSelected({ card: id }); }, onDrop: (card: number, to: string) => void move(card, to),
       onResize: (id: string, box: { x: number; y: number; width: number; height: number }) => setDraft(current => current === null ? current : { ...current, stages: current.stages.map(one => one.id === id
         ? { ...one, zone: { ...one.zone, x: Math.round(box.x), y: Math.round(box.y), w: Math.round(box.width), h: Math.round(box.height) } } : one) }),
     },
-  })), [stages, view, editing, selected, start, move, mineOnly]);
+  })), [stages, view, editing, selected, start, move, mineOnly, lookers]);
   // Triggers sit to the left of the zone they start cards in, stacked when several share one.
   const liveTriggers = useMemo(() => view.triggers.filter(one => one.state !== "removed"), [view.triggers]);
   const triggerNodes: Node<TriggerData, "trigger">[] = useMemo(() => {
@@ -1061,6 +1127,7 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
         ? <Input value={draft.name} onChange={event => setDraft({ ...draft, name: event.target.value })} maxLength={80} className="h-8 max-w-64 font-semibold" aria-label="Flow name" />
         : <h1 className="text-[15px] font-semibold">{view.flow.name}</h1>}
       <span className="text-[12px] text-muted-foreground">{view.flow.project}</span>
+      <AlsoHere others={others} cards={view.cards} />
       {editing && draft !== null && <label className="inline-flex items-center gap-1.5 text-[12px] text-muted-foreground">Owner
         <select className="h-8 rounded-md border bg-transparent px-2 text-[12px] text-foreground" value={draft.owner} onChange={event => setDraft({ ...draft, owner: event.target.value })} aria-label="Flow owner">
           {[...new Set([draft.owner, ...view.approvers])].map(name => <option key={name} value={name}>{name === view.me ? `${name} (you)` : name}</option>)}
@@ -1129,19 +1196,21 @@ function PhoneFlow({ view: initial, csrf }: { view: BrowserFlowView; csrf: strin
   const [open, setOpen] = useState<number | null>(initial.selectedCard);
   const [pressing, setPressing] = useState<number | null>(initial.startTrigger);
   const apply = (result: Said) => { (result.ok ? toast.success : toast.error)(result.said); if (result.view !== undefined) setView(result.view); };
+  const others = useLiveFlow(view, setView, { card: open, editing: false });
   const card = open === null ? null : view.cards.find(one => one.id === open) ?? null;
   const button = pressing === null ? null : view.triggers.find(one => one.id === pressing && one.button !== null && one.state === "active") ?? null;
   const live = view.triggers.filter(one => one.state !== "removed");
   if (button !== null) return <div className="p-4"><PressPanel trigger={button} view={view} csrf={csrf} apply={apply} onClose={() => setPressing(null)} /></div>;
   if (card !== null) return <div className="p-4"><CardPanel card={card} view={view} csrf={csrf} apply={apply} onClose={() => setOpen(null)} /></div>;
   return <div className="flex flex-col gap-3 p-4" data-flow={view.flow.id}>
-    <div><h1 className="text-[17px] font-semibold">{view.flow.name}</h1><p className="text-[12px] text-muted-foreground">{view.flow.project}{view.canEdit ? <> · <a className="underline" href={view.chatHref}>change it in chat</a>, or edit it on a larger screen</> : null}</p></div>
+    <div><h1 className="text-[17px] font-semibold">{view.flow.name}</h1><p className="text-[12px] text-muted-foreground">{view.flow.project}{view.canEdit ? <> · <a className="underline" href={view.chatHref}>change it in chat</a>, or edit it on a larger screen</> : null}</p>
+      {others.length > 0 && <div className="mt-1.5"><AlsoHere others={others} cards={view.cards} /></div>}</div>
     {view.canEdit && live.some(one => one.button !== null && one.state === "active") && <div className="flex flex-wrap gap-2">
       {live.filter(one => one.button !== null && one.state === "active").map(one => <Button key={one.id} size="sm" onClick={() => setPressing(one.id)}><MousePointerClick className="size-4" />{one.button!.label}</Button>)}</div>}
     {view.canEdit && <details className="rounded-lg border p-3"><summary className="cursor-pointer text-[14px] font-semibold">New card</summary><div className="pt-3"><NewCard view={view} csrf={csrf} apply={apply} /></div></details>}
     {flowOrder(view.stages, view.start).map(stage => {
       const cards = view.cards.filter(one => one.stage === stage.id && one.state === "active");
-      return <section key={stage.id} className="rounded-lg border" style={{ borderColor: `${COLORS[stage.zone.color] ?? "#64748b"}55` }}>
+      return <section key={stage.id} className="rounded-lg border bg-muted/40">
         <header className="flex items-center gap-2 px-3 py-2"><span className="inline-flex size-6 items-center justify-center rounded-md text-white" style={{ background: COLORS[stage.zone.color] ?? "#64748b" }}>{KIND_ICONS[stage.kind]}</span><span className="flex-1 text-[14px] font-semibold">{stage.title}</span>{cards.length > 0 && <span className="text-[12px] text-muted-foreground">{cards.length}</span>}</header>
         {cards.length > 0 && <ul className="flex flex-col gap-2 px-3 pb-3">{cards.map(one => <li key={one.id}><button type="button" onClick={() => setOpen(one.id)} className={cn("min-h-11 w-full rounded-lg border bg-card px-3 py-2 text-left", one.canDecide && "border-attention/60")}>
           <div className="flex items-start gap-2"><div className="min-w-0 flex-1 text-[14px] font-medium">{one.title}</div>{one.owner !== null && <Face name={one.owner} />}</div>

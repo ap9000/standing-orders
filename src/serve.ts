@@ -20,6 +20,7 @@ import { changeSkills, githubSkill, importSkill, readSkillsSnapshot, reviseSkill
 import { skillsHtml, skillsScript, skillsSnapshotHtml, skillTestFeedbackHtml, SKILLS_CSS } from "./skills-ui.js";
 import { toolsHtml, TOOLS_CSS, type ToolsView } from "./tools-ui.js";
 import { flowFallbackHtml, flowsListHtml, flowView, FLOWS_CSS } from "./flows-ui.js";
+import { createFlowRooms, flowFingerprint } from "./flow-live.js";
 import { readEmailSettings, saveEmailSettings, sendThroughServer, setFlowSecret, type MailSender } from "./flow-actions.js";
 import { assignFlowCard, commentOnFlowCard, watchFlowCard } from "./flow-people.js";
 import { saveScript } from "./flow-scripts.js";
@@ -673,6 +674,8 @@ export function createDecisionServer(options: ServeOptions): Server {
   const teamStreams = new Set<ServerResponse>();
   /** Open chat streams (live replies), ended when the server closes. */
   const chatStreams = new Set<ServerResponse>();
+  /** Flows open in a browser (v88): who's here, and a nudge when one changes. */
+  const flowRooms = createFlowRooms(flow => flowFingerprint(store, flow));
   const team = createTeamRuntime({ store, repos: codingProjects, evidenceRoot, clock, workspaceRevision,
     ...(options.chatFetcher ? { fetcher: options.chatFetcher } : {}),
     provider: () => { const enabled = chatEnablement(); return enabled.ok ? { config: enabled.config, key: enabled.key } : null; },
@@ -2658,6 +2661,24 @@ export function createDecisionServer(options: ServeOptions): Server {
       const run = card === null || card.flow !== flow.id ? null : store.flowStepRun(card.id, Number(flowRead[4]));
       if (run === null) return json(404, { said: "No such run." });
       return json(200, { card: run.card, entry: run.entry, script: run.script, version: run.scriptVersion, state: run.state, result: run.result, exitCode: run.exitCode, durationMs: run.durationMs, at: run.finishedAt ?? run.startedAt, log: run.log ?? "" });
+    }
+    const flowLive = /^\/flows\/([1-9][0-9]{0,9})\/live$/.exec(url.pathname);
+    if (flowLive !== null) {
+      // The live canvas (v88): a nudge the moment the flow changes, and who
+      // else has it open. Hints only — the page reads the flow the usual way.
+      if (who.via !== "cookie") return respond(response, 403, "application/json", JSON.stringify({ error: "session" }));
+      const flow = store.getFlow(Number(flowLive[1]));
+      if (flow === null || flow.state !== "active" || !visible(flow.repo)) return respond(response, 404, "application/json", JSON.stringify({ error: "flow" }));
+      const card = Number(url.searchParams.get("card"));
+      response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", "x-content-type-options": "nosniff", "x-accel-buffering": "no" });
+      const name = who.name, repo = flow.repo;
+      flowRooms.join(flow.id, {
+        name, card: Number.isSafeInteger(card) && card > 0 ? card : null, editing: url.searchParams.get("editing") === "1", response,
+        // Rechecked while open, from the cookie and the account (never a request's context): a sign-out or a narrowed account stops it.
+        valid: () => { const again = identify(request, false); return again !== null && again.name === name && rowVisible(liveCeiling(), repo) && store.accountCanAccess(name, repo); },
+      });
+      request.once("close", () => { if (!response.writableEnded) response.end(); });
+      return;
     }
     const flowPage = /^\/flows\/([1-9][0-9]{0,9})$/.exec(url.pathname);
     if (flowPage !== null) {
@@ -9344,6 +9365,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     teamStreams.clear();
     for (const stream of chatStreams) stream.end();
     chatStreams.clear();
+    flowRooms.close();
     void (async () => { await team.close(); await leadMaintenance?.stop(); await coding?.close(); })().then(() => closeServer(callback)).catch(error => {
       if (callback) callback(error instanceof Error ? error : Error('Coding session shutdown failed.'));
       else server.emit('error', error);

@@ -22,9 +22,14 @@ Settings → Telegram: paste a bot token from @BotFather, then send the bot the
 ## Slack, Discord and Teams
 
 Each can be connected under Settings and used to talk to the lead and
-confirm its cards. Flow decisions arrive there with the draft and a link to
-decide in the console. Only one app sends alerts: the one you choose as
-primary (Settings → Notifications).
+confirm its cards. Only one app sends alerts: the one you choose as primary
+(Settings → Notifications).
+
+A flow decision arrives there with the draft and **Approve**, **Edit** and
+**Send back**, as on Telegram. Edit and Send back ask for your next message
+in that chat: it becomes the new draft (which comes back to approve) or the
+note the card goes back with. Send "cancel" to leave it; the question
+lapses after 30 minutes.
 
 ## The phone itself
 
