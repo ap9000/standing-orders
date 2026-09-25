@@ -10,6 +10,8 @@
  * - webhook  — anything that can post JSON to the trigger's secret address.
  * - email    — mail arriving in a folder of the account set up in Settings → Email (v89),
  *              read-only over IMAP; optionally only from some senders or with words in the subject.
+ * - chat     — messages in a Slack, Discord or Teams channel (v89), connected from the
+ *              channel itself (chat-inbox.ts), never from here.
  *
  * GitHub and Linear are checked by the worker's pass — `gh` and one HTTPS
  * request, never a model — or pushed to a secret webhook address when the
@@ -29,7 +31,7 @@ import { describeSchedule, firstFireAt, nextFireAt, parseSchedule, WEEKDAYS } fr
 import { mailboxAccess, mailCursorOf, mailCursorText, readThroughImap, type MailReader } from "./mailbox.js";
 import type { FlowCardSource, FlowRow, FlowTriggerRow, Store } from "./store.js";
 
-export const FLOW_TRIGGER_KINDS = ["button", "schedule", "github", "linear", "flow", "webhook", "email"] as const;
+export const FLOW_TRIGGER_KINDS = ["button", "schedule", "github", "linear", "flow", "webhook", "email", "chat"] as const;
 export type FlowTriggerKind = (typeof FLOW_TRIGGER_KINDS)[number];
 
 export type TriggerConfig =
@@ -40,11 +42,16 @@ export type TriggerConfig =
   | { kind: "flow"; flow: number; when: string; zone: string | null }
   | { kind: "webhook"; title: string; titleField: string | null; bodyField: string | null; zone: string | null }
   /** `sender`: addresses or domains, comma-separated; `subject`: words the subject must contain. */
-  | { kind: "email"; folder: string; sender: string | null; subject: string | null; zone: string | null };
+  | { kind: "email"; folder: string; sender: string | null; subject: string | null; zone: string | null }
+  /** A channel in a chat app; `binding` is the pairing of the person who connected it (whose chat answers there). */
+  | { kind: "chat"; app: ChatApp; installation: string; chat: string; binding: number; zone: string | null };
+
+export type ChatApp = "slack" | "discord" | "teams" | "telegram";
+export const CHAT_APP_NAMES: Record<ChatApp, string> = { slack: "Slack", discord: "Discord", teams: "Teams", telegram: "Telegram" };
 
 /** What each kind is called on the canvas. */
 export const FLOW_TRIGGER_WORDS: Record<FlowTriggerKind, string> = {
-  button: "Button", schedule: "Schedule", github: "GitHub", linear: "Linear", flow: "Another flow", webhook: "Webhook", email: "Email inbox",
+  button: "Button", schedule: "Schedule", github: "GitHub", linear: "Linear", flow: "Another flow", webhook: "Webhook", email: "Email inbox", chat: "Chat channel",
 };
 
 /** How often the worker checks GitHub and Linear, and how it backs off when they don't answer. */
@@ -114,7 +121,7 @@ export function validateTriggerConfig(raw: unknown, context: { store: Store; flo
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Choose what starts cards.");
   const input = raw as Record<string, unknown>;
   const kind = input["kind"];
-  if (!FLOW_TRIGGER_KINDS.includes(kind as FlowTriggerKind)) throw new Error("Choose what starts cards: a button, a schedule, GitHub, Linear, another flow, a webhook or an email inbox.");
+  if (!FLOW_TRIGGER_KINDS.includes(kind as FlowTriggerKind)) throw new Error("Choose what starts cards: a button, a schedule, GitHub, Linear, another flow, a webhook, an email inbox or a chat channel.");
   const named = words(input, "zone", 60, false);
   const zoneStage = named === null ? null : context.definition.stages.find(one => one.id === named || one.title.toLowerCase() === named.toLowerCase());
   if (named !== null && zoneStage === undefined) throw new Error(`This flow has no zone called ${named}.`);
@@ -169,6 +176,9 @@ export function validateTriggerConfig(raw: unknown, context: { store: Store; flo
     }
     case "webhook":
       return { kind: "webhook", title: words(input, "title", 120, false) ?? "Webhook", titleField: words(input, "titleField", 80, false), bodyField: words(input, "bodyField", 80, false), zone };
+    case "chat":
+      // Connecting a channel proves it's one the person is in: it happens in the channel, not here.
+      throw new Error(`Connect a chat channel from the channel itself: where Standing Orders is in Slack, Discord, Teams or a Telegram group, send “flow ${context.flow.id}”.`);
     case "email": {
       const folder = words(input, "folder", 100, false) ?? "INBOX";
       const sender = words(input, "sender", 300, false);
@@ -213,6 +223,7 @@ export function describeTrigger(config: TriggerConfig, store: Store): string {
       return `Cards reaching ${zone ?? "the end"} in ${flow?.name ?? "another flow"}`;
     }
     case "webhook": return "Anything posted to its webhook address";
+    case "chat": return `Every new message in a ${CHAT_APP_NAMES[config.app]} channel; replies in a card's thread join its discussion`;
     case "email": return `Email arriving in ${config.folder === "INBOX" ? "the inbox" : config.folder}${config.sender === null ? "" : ` from ${config.sender}`}${config.subject === null ? "" : ` with “${config.subject}” in the subject`} (checked every 2 minutes)`;
   }
 }
@@ -233,6 +244,7 @@ export function triggerHeadline(config: TriggerConfig, store: Store): { name: st
       return { name: `From ${flow?.name ?? "another flow"}`, detail: `When a card reaches ${flow === null ? "the end" : flowDefinitionOf(flow)?.stages.find(one => one.id === config.when)?.title ?? "the end"}` };
     }
     case "webhook": return { name: "Webhook", detail: "Anything posted to its address" };
+    case "chat": return { name: `${CHAT_APP_NAMES[config.app]} channel`, detail: "Each message is a card" };
     case "email": return { name: config.folder === "INBOX" ? "New email" : `New email in ${config.folder}`, detail: config.sender !== null ? `From ${config.sender}` : config.subject !== null ? `Subject has “${config.subject}”` : "Email inbox" };
   }
 }
@@ -349,7 +361,7 @@ function polled(config: TriggerConfig): config is Extract<TriggerConfig, { kind:
 
 // ---------------------------------------------------------- making cards
 
-type Incoming = { key: string; title: string; description: string | null; source: FlowCardSource };
+export type Incoming = { key: string; title: string; description: string | null; source: FlowCardSource };
 type Made = "added" | "seen" | "skipped";
 
 function startZone(config: TriggerConfig, definition: FlowDefinition): string {
@@ -383,6 +395,13 @@ function outcomeWords(results: { made: Made; note: string | null }[], more: bool
   if (skipped.length > 0) parts.push(`Left out ${plural(skipped.length, "item")}: ${skipped[0]!.note}${skipped.length > 1 ? ", and others" : ""}.`);
   if (more) parts.push("More on the next check.");
   return parts.join(" ");
+}
+
+/** One outside thing into one card through a trigger (a chat channel's message, v89): at most once per key. */
+export function addTriggerCard(store: Store, trigger: FlowTriggerRow, item: Incoming, by: string, now: Date): { made: Made; note: string | null; card: number | null } {
+  const config = triggerConfigOf(trigger);
+  if (config === null || trigger.state !== "active") return { made: "skipped", note: "the trigger isn't active", card: null };
+  return makeCard(store, trigger, config, item, by, now);
 }
 
 /** Press a button trigger: the first answer is the card's title, the rest its details. */

@@ -47,6 +47,8 @@ import { createDecisionServer } from "./serve.js";
 import { StandingOrdersSlackSocket } from "./slack.js";
 import { flowFromSteps } from "./flows.js";
 import { advanceFlows } from "./flow-engine.js";
+import { runFlowSteps } from "./flow-steps.js";
+import { run as exec } from "./exec.js";
 
 // Synthetic credentials for the scripted wire, assembled so evidence scans do not flag a real token.
 const FIXTURE_BOT_TOKEN = ["xoxb", "fixture", "private", "token"].join("-");
@@ -1076,6 +1078,51 @@ describe("Slack shared chat", () => {
     expect(String(repainted.args.text)).toContain("✅ You approved it. Approved. Moved to Post it.");
     expect(buttonsOf(repainted).map(one => one.text.text)).toEqual(["Open"]);
     expect(store.flowComments(card).map(one => one.body)).toEqual(["Edited the draft in Slack."]);
+  });
+
+  test("a Slack channel feeds a flow: 'flow N' from a paired approver connects it, anyone's message is a card, a thread reply joins it, and an Update zone answers in the thread (v89)", async () => {
+    now = new Date(now.getTime() + 30_000);
+    const flow = store.createFlow({ repo, name: "Requests", by: "alex", definitionJson: JSON.stringify(flowFromSteps([
+      { title: "Inbox", kind: "inbox" },
+      { id: "answer", title: "Answer", kind: "update", message: "Thanks, we're on it: {{card.title}}" },
+    ], null)) }, now);
+    const ROOM = "CREQ", MSG = "1789700100.000001";
+    const inRoom = (text: string, user = MEMBER, ts = TS, extra: Record<string, unknown> = {}) => receive(text, { channel_type: "channel", channel: ROOM, user, ts, ...extra });
+    // Not connected: nothing in the channel is saved; only a paired approver's words connect it.
+    expect(inRoom("Need a new laptop", "UOTHER", MSG)).toBe(false);
+    expect(inRoom(`flow ${flow}`, "UOTHER")).toBe(false);
+    expect(inRoom(`<@UBOT> flow ${flow}`)).toBe(true);
+    await processSlackEvent(options); await drain();
+    expect(sends().at(-1)!.args).toMatchObject({ channel: ROOM });
+    expect(String(sends().at(-1)!.args.text)).toContain("This channel now feeds Requests");
+    expect(store.flowTriggers(flow).map(one => [one.kind, one.state])).toEqual([["chat", "active"]]);
+    // Anyone's message there is a card; the bot says so in the message's thread, with a link to it.
+    expect(inRoom("Need a new laptop\nMine died this morning.", "UOTHER", MSG)).toBe(true);
+    await processSlackEvent(options); await drain();
+    const card = store.flowCards(flow, true)[0]!;
+    expect(card).toMatchObject({ title: "Need a new laptop", description: "Need a new laptop\nMine died this morning.", stage: "inbox", createdBy: "Slack",
+      source: { kind: "chat", label: "Slack message", chat: { app: "slack", chat: ROOM, conversation: ROOM, thread: MSG } } });
+    expect(sends().at(-1)!.args).toMatchObject({ channel: ROOM, thread_ts: MSG });
+    expect(String(sends().at(-1)!.args.text)).toContain("Added to Requests as a card.");
+    expect(JSON.stringify(sends().at(-1)!.args.blocks)).toContain(`https://console.example/flows/${flow}?card=${card.id}`);
+    // A reply in that thread joins the card's discussion, and the bot stays quiet.
+    const before = sends().length;
+    expect(inRoom("It's the Dell from 2023.", "UOTHER", "1789700100.000002", { thread_ts: MSG })).toBe(true);
+    await processSlackEvent(options); await drain();
+    expect(store.flowComments(card.id).map(one => [one.author, one.body])).toEqual([["someone (Slack)", "It's the Dell from 2023."]]);
+    expect(sends().length).toBe(before);
+    // An Update zone answers in the thread the card came from.
+    store.moveFlowCard(card.id, { to: "answer", outcome: "moved", actor: "alex" }, now);
+    const pass = await runFlowSteps(store, repo, now, { gh: exec, git: exec, shell: exec, fetch, dir, scratch: join(dir, "scratch"), base: "main" });
+    expect(pass).toEqual({ ran: 1, problems: [] });
+    await drain();
+    expect(sends().at(-1)!).toMatchObject({ method: "chat.postMessage", args: { channel: ROOM, thread_ts: MSG, text: "Thanks, we're on it: Need a new laptop" } });
+    expect(store.getFlowCard(card.id)!.outputs["answer"]).toBe("Answered in the Slack thread.");
+    // "flow off" stops it; after that the channel is quiet again.
+    expect(inRoom("flow off")).toBe(true);
+    await processSlackEvent(options); await drain();
+    expect(String(sends().at(-1)!.args.text)).toBe("This channel no longer feeds Requests.");
+    expect(inRoom("Another request", "UOTHER", "1789700100.000003")).toBe(false);
   });
 
   test("Send back takes the next message as the note, and cancel leaves the card where it is (v88)", async () => {

@@ -41,7 +41,7 @@ function SortChip({ sorted }: { sorted: NonNullable<BrowserFlowCard["sorted"]> }
 const TRIGGER_ICONS: Record<string, ReactNode> = {
   button: <MousePointerClick className="size-3.5" aria-hidden="true" />, schedule: <CalendarClock className="size-3.5" aria-hidden="true" />, github: <GitPullRequest className="size-3.5" aria-hidden="true" />,
   linear: <SquareKanban className="size-3.5" aria-hidden="true" />, flow: <Workflow className="size-3.5" aria-hidden="true" />, webhook: <Webhook className="size-3.5" aria-hidden="true" />,
-  email: <Mail className="size-3.5" aria-hidden="true" />,
+  email: <Mail className="size-3.5" aria-hidden="true" />, chat: <MessageSquare className="size-3.5" aria-hidden="true" />,
 };
 
 type Reveal = { path: string; address: string | null; secret: string | null };
@@ -699,6 +699,11 @@ function AddTrigger({ view, csrf, open, onResult }: { view: BrowserFlowView; csr
         <Field label="When a card reaches"><select className={SELECT} value={v("when")} onChange={set("when")}>
           <option value="">The end</option>{source?.zones.map(one => <option key={one.id} value={one.id}>{one.title}</option>)}</select></Field>
       </>)}
+      {kind === "chat" && <div className="flex flex-col gap-2 rounded-md bg-muted px-2.5 py-2 text-[12.5px]" data-chat-connect>
+        <p>Connect a Slack, Discord or Teams channel, or a Telegram group, from the channel itself. Where Standing Orders is, send:</p>
+        <p><code className="rounded bg-background px-1.5 py-0.5 font-semibold">flow {view.flow.id}</code></p>
+        <p className="text-muted-foreground">Each new message there becomes a card here, and replies in its thread join the card's discussion. “flow off” stops it. In Teams, mention Standing Orders in each message. In Telegram, send /flow {view.flow.id}, and turn the bot's privacy mode off in BotFather so it sees every message.</p>
+      </div>}
       {kind === "email" && <>
         {setup.mailbox === null
           ? <p className="rounded-md bg-muted px-2.5 py-2 text-[12.5px]" data-mailbox-missing>Reading mail isn't set up yet. Add your mail server's IMAP address, or sign in with Google, in <a className="underline" href="/settings#email">Settings → Email</a>.</p>
@@ -712,10 +717,10 @@ function AddTrigger({ view, csrf, open, onResult }: { view: BrowserFlowView; csr
         <Field label="Details field"><Input value={v("bodyField")} onChange={set("bodyField")} placeholder="description" maxLength={80} /></Field>
         <Field label="Title when there is none"><Input value={v("title")} onChange={set("title")} maxLength={120} /></Field>
       </>}
-      <Field label="Cards start in"><select className={SELECT} value={v("zone")} onChange={set("zone")}>
+      {kind !== "chat" && <Field label="Cards start in"><select className={SELECT} value={v("zone")} onChange={set("zone")}>
         <option value="">{view.stages.find(one => one.id === view.start)?.title ?? "The first zone"}</option>
-        {view.stages.filter(one => one.id !== view.start).map(one => <option key={one.id} value={one.id}>{one.title}</option>)}</select></Field>
-      <Button type="submit" size="sm" className="self-start" disabled={busy || (kind === "flow" && setup.otherFlows.length === 0)}><Plus className="size-4" />Add trigger</Button>
+        {view.stages.filter(one => one.id !== view.start).map(one => <option key={one.id} value={one.id}>{one.title}</option>)}</select></Field>}
+      {kind !== "chat" && <Button type="submit" size="sm" className="self-start" disabled={busy || (kind === "flow" && setup.otherFlows.length === 0)}><Plus className="size-4" />Add trigger</Button>}
     </form>
   </details>;
 }

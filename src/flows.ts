@@ -98,7 +98,7 @@ export const FLOW_KIND_WORDS: Record<FlowStageKind, { label: string; about: stri
   report: { label: "Research", about: "An agent investigates and writes a report. No code changes." },
   approval: { label: "Person decides", about: "Someone approves, or sends it back with a note." },
   check: { label: "Run a script", about: "Runs one of the project's scripts on the card's work, with no AI. If it fails, the card takes its failure path." },
-  update: { label: "Update the issue", about: "Comments on the GitHub or Linear issue the card came from, and can close it. Other cards pass straight through." },
+  update: { label: "Update where it came from", about: "Comments on the GitHub or Linear issue the card came from (and can close it), or answers in the chat thread it came from. Other cards pass straight through." },
   notify: { label: "Message", about: "Posts a message to the project's chat, then moves on." },
   request: { label: "Web request", about: "Calls an address on the web, like an API, with the card's details, and keeps what it answers. If it fails, the card takes its failure path." },
   email: { label: "Send email", about: "Sends an email from your address in Settings → Email. {{card.email}} is the first email address the card mentions." },

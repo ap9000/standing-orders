@@ -29,6 +29,8 @@ import {
   type ChatIdentity,
 } from "./chat-delivery-state.js";
 import { answerChatFlowPrompt, applyChatFlowTap, flowDecisionParts } from "./chat-flow.js";
+import { connectChannel, FLOW_WORDS, takeChannelMessage, watchedChannel } from "./chat-inbox.js";
+import { triggerConfigOf } from "./flow-triggers.js";
 import { telegramProgressCard } from "./telegram-progress.js";
 import { phoneText, PHONE_HELP, phoneCommand, phoneStatus, phoneTaskView, phoneTaskChoices, phoneTaskListText, resolvePhoneTask, phoneFocusText, PHONE_NO_MATCH, PHONE_BACK_TO_LEAD } from "./telegram-status.js";
 import { applyRoomInbound, conversationRow, roomCardApprover, roomCommand, roomGrantAllowed, roomMessagesAfter, roomMessageText, teamDomain } from "./chat-rooms.js";
@@ -164,6 +166,8 @@ export async function processChatEvent(
       );
       return true;
     }
+    // A channel as a flow's inbox (v89): "flow 12" connects it, and after that its messages are cards.
+    if (event.kind === "message" && await channelInboxEvent(options, event)) return true;
     const binding = event.binding === null ? null : state.bindingById(event.binding);
     if (!binding) {
       state.finish(event.id, true);
@@ -486,6 +490,40 @@ export async function processChatEvent(
         );
     return true;
   }
+}
+
+/**
+ * A message in a channel (never a DM) that connects the channel to a flow,
+ * or that the channel's flow takes as a card. False: not for an inbox.
+ */
+async function channelInboxEvent(options: ChatDeliveryOptions, event: ChatEvent): Promise<boolean> {
+  const { store, identity } = options, state = options.state, app = state.channel;
+  const binding = event.binding === null ? null : state.bindingById(event.binding);
+  if (binding !== null && event.channel === binding.channel) return false;
+  const input = object(JSON.parse(event.payload));
+  const text = String(input.text ?? "");
+  if (FLOW_WORDS.test(text.trim())) {
+    // Only a paired approver connects a channel, and only to a flow in their projects.
+    if (binding === null || !state.live(binding)) { state.finish(event.id, true); return true; }
+    const repos = await channelAccess(options, binding);
+    const said = connectChannel(store, { app, installation: identity.installation, conversation: event.channel, binding, text, repos,
+      followsConversation: state.room(identity.installation, event.channel) !== null }, nowOf(options));
+    state.plan(event.id, [{ text: said, channel: event.channel }], nowOf(options));
+    return true;
+  }
+  const trigger = watchedChannel(store, app, identity.installation, event.channel);
+  const config = trigger === null ? null : triggerConfigOf(trigger);
+  if (trigger === null || config?.kind !== "chat") return false;
+  // What the bot says goes through the chat of whoever connected the channel; if they're gone, nothing is taken.
+  const grant = state.bindingById(config.binding);
+  if (grant === null || !state.live(grant)) { state.finish(event.id, true); return true; }
+  // Teams names a thread by its first message on the conversation; Slack and Discord on the event.
+  const root = app === "teams" ? /;messageid=([0-9]+)$/.exec(event.channel)?.[1] ?? event.ts : event.thread;
+  const taken = takeChannelMessage(store, trigger, { app, conversation: event.channel, ts: event.ts, thread: root, text, who: binding?.approver ?? "someone" }, nowOf(options));
+  if (taken.said === null) { state.finish(event.id); return true; }
+  state.prepare("UPDATE chat_event SET binding=? WHERE id=?").run(grant.id, event.id);
+  state.plan(event.id, [{ text: taken.said, channel: event.channel, ...(taken.link === undefined ? {} : { link: taken.link }) }], nowOf(options));
+  return true;
 }
 
 /** Bound to the paired member, exact channel/message, pending proposal and current ceiling. */

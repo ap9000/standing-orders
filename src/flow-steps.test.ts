@@ -188,7 +188,7 @@ describe("updating the issue a card came from", () => {
 
     const plain = store.addFlowCard({ flow, title: "Typed by hand", description: null, stage: "close-it", by: "alex" }, at(4));
     await runFlowSteps(store, repo, at(5), io());
-    expect(store.getFlowCard(plain)).toMatchObject({ stage: "done", outputs: { "close-it": "Nothing to update: this card didn't come from a GitHub or Linear issue." } });
+    expect(store.getFlowCard(plain)).toMatchObject({ stage: "done", outputs: { "close-it": "Nothing to update: this card didn't come from a GitHub or Linear issue or a chat channel." } });
 
     // GitHub down: retried 5 and 15 minutes later, then the card says so.
     const flaky = store.addFlowCard({ flow, title: "Flaky", description: null, stage: "close-it", by: "GitHub", source: { kind: "github", label: "GitHub issue #13", url: "https://github.com/acme/shop/issues/13" } }, at(6));

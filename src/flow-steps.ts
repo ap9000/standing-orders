@@ -35,6 +35,7 @@ import { claudeDraftRunner, DRAFT_TIMEOUT, draftPrompt, keptDraft, type DraftRun
 import { sendingReady, runRequest, sendEmail, toolWaiting, useTool, type MailSender, type ToolCaller } from "./flow-actions.js";
 import { readProviderKey } from "./keys.js";
 import type { FlowCardRow, FlowRow, FlowScriptRow, FlowStepKind, Store } from "./store.js";
+import { replyInChannel } from "./chat-inbox.js";
 
 export type StepIo = {
   /** `gh` for GitHub; git and the check's shell, both without a model. */
@@ -112,7 +113,7 @@ export async function runFlowSteps(store: Store, repo: string, now: Date, io: St
         : stage.kind === "request" ? await runRequest(stage, card, repo, io)
         : stage.kind === "email" ? await sendEmail(stage, card, io)
         : stage.kind === "tool" ? await useTool(store, stage, card, repo, io)
-        : await updateSource(stage, card, io);
+        : await updateSource(store, stage, card, io, now);
     } catch (error) {
       outcome = { state: "retry", said: error instanceof Error ? error.message : "It couldn't run." };
     }
@@ -234,10 +235,15 @@ async function runCheck(store: Store, flow: FlowRow, script: FlowScriptRow, card
 }
 
 /** An update: a comment on the issue the card came from, and closing it if the zone says so. */
-async function updateSource(stage: FlowStage, card: FlowCardRow, io: StepIo): Promise<Outcome> {
+async function updateSource(store: Store, stage: FlowStage, card: FlowCardRow, io: StepIo, now: Date): Promise<Outcome> {
   const source = card.source;
   const text = fillFlowText(stage.message ?? "Done: {{card.title}}", { title: card.title, description: card.description, note: card.note, outputs: card.outputs });
   if (scanForSecrets(text).length > 0) return { state: "failed", said: "The comment looked like it held a key or password, so nothing was posted." };
+  // A card from a chat channel (v89): the answer goes in the thread it came from.
+  if (source?.chat !== undefined) {
+    const replied = replyInChannel(store, source.chat, { card: card.id, entry: card.entry }, text, now);
+    return replied.ok ? { state: "passed", said: `Answered in the ${source.label.replace(/ message$/, "")} thread.` } : { state: "failed", said: replied.said };
+  }
   const github = source?.kind === "github" && source.url !== null ? /^https:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/(issues|pull)\/(\d+)$/.exec(source.url) : null;
   if (github !== null) {
     const [, repo, what, number] = github;
@@ -276,5 +282,5 @@ async function updateSource(stage: FlowStage, card: FlowCardRow, io: StepIo): Pr
       return { state: "retry", said: error instanceof Error ? error.message : "Couldn't reach Linear." };
     }
   }
-  return { state: "passed", said: "Nothing to update: this card didn't come from a GitHub or Linear issue." };
+  return { state: "passed", said: "Nothing to update: this card didn't come from a GitHub or Linear issue or a chat channel." };
 }
