@@ -214,6 +214,29 @@ describe("Teams shared chat", () => {
     expect(state.room(credentials.installation, CHANNEL)).toBeNull();
   });
 
+  test("a Teams channel feeds a flow: a mention with 'flow N' connects it, a mention in the channel is a card, and the bot answers in that thread (v89)", async () => {
+    expect(pairAs("alex", ALEX, DM_ALEX)).not.toBeNull();
+    now = new Date(now.getTime() + 30_000);
+    const flow = store.createFlow({ repo, name: "Requests", by: "alex", definitionJson: JSON.stringify(flowFromSteps([{ title: "Inbox", kind: "inbox" }], null)) }, now);
+    const OTHER = "29:1other-user-id-zzzzzzzzzzzzzz";
+    const post = (id: string) => `${CHANNEL};messageid=${id}`;
+    expect(receive({ ...activity(post("1001"), OTHER, "<at>Standing Orders</at> Need a new laptop"), id: "1001", conversation: { id: post("1001"), conversationType: "channel", tenantId: TENANT } })).toBe(false);
+    expect(receive({ ...activity(post("1002"), ALEX, `<at>Standing Orders</at> flow ${flow}`), id: "1002", conversation: { id: post("1002"), conversationType: "channel", tenantId: TENANT } })).toBe(true);
+    await processTeamsEvent(options); await drain();
+    expect(lastText()).toContain("This channel now feeds Requests");
+    expect(receive({ ...activity(post("1003"), OTHER, "<at>Standing Orders</at> Need a new laptop"), id: "1003", conversation: { id: post("1003"), conversationType: "channel", tenantId: TENANT } })).toBe(true);
+    await processTeamsEvent(options); await drain();
+    const card = store.flowCards(flow, true)[0]!;
+    expect(card).toMatchObject({ title: "Need a new laptop", createdBy: "Teams", source: { chat: { app: "teams", chat: CHANNEL, conversation: post("1003"), thread: "1003" } } });
+    // The answer goes in that post's thread.
+    expect(sends().at(-1)!.path).toBe(`/v3/conversations/${encodeURIComponent(post("1003"))}/activities`);
+    expect(lastText()).toContain("Added to Requests as a card.");
+    // A reply in the thread (a mention on the same post) joins the card's discussion.
+    expect(receive({ ...activity(post("1003"), OTHER, "<at>Standing Orders</at> It's the Dell."), id: "1004", conversation: { id: post("1003"), conversationType: "channel", tenantId: TENANT } })).toBe(true);
+    await processTeamsEvent(options); await drain();
+    expect(store.flowComments(card.id).map(one => one.body)).toEqual(["It's the Dell."]);
+  });
+
   test("a flow decision in Teams: Approve / Edit / Send back on the card, and Send back takes the next message as the note (v88)", async () => {
     expect(pairAs("alex", ALEX, DM_ALEX)).not.toBeNull();
     now = new Date(now.getTime() + 30_000);

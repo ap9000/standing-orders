@@ -17,7 +17,7 @@ work moving through them. Open **Flows**, then **Edit flow** to draw.
 | Web request | Calls an API with the card's details. |
 | Send email | Emails from your own address. |
 | Use a tool | Calls one of the project's tools (MCP servers). |
-| Update the issue | Comments on, and can close, the GitHub or Linear issue the card came from. |
+| Update where it came from | Comments on (and can close) the GitHub or Linear issue the card came from, or answers in the chat thread it came from. |
 | Message | Posts to the project's chat. |
 | Done | The end. |
 
@@ -37,8 +37,8 @@ a report, a draft, a sort, an API's answer).
 
 **Triggers** add cards on their own: a button (which can also be shared as a
 public form), a schedule, GitHub (new issues, a label, new pull requests,
-failed checks), Linear, another flow's cards reaching a zone, a webhook, or
-an **email inbox**.
+failed checks), Linear, another flow's cards reaching a zone, a webhook, an
+**email inbox**, or a **chat channel**.
 
 An email inbox trigger turns each new message in your mailbox into a card:
 the subject is its title, and the sender and the new part of the message
@@ -47,6 +47,14 @@ some senders or domains, or to subjects with a word in them. It reads the
 account set up in Settings → Email, only reads (nothing is marked or moved),
 and starts from the moment it's added. Out-of-office replies, bounces and
 your own messages never become cards.
+
+A **chat channel** in Slack, Discord, Teams or a Telegram group feeds a flow
+once you connect it from the channel itself: where Standing Orders is, send
+`flow 12` (the flow's number, from its address). Each new message there
+becomes a card, the bot says so in the message's thread, and replies in that
+thread join the card's discussion. `flow off` stops it. In Teams, mention
+Standing Orders in each message; in a Telegram group, turn the bot's privacy
+mode off in BotFather so it sees every message, not just commands.
 
 ## People
 

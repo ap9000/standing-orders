@@ -6,6 +6,7 @@ import { roomCommand } from "./chat-rooms.js";
 import { MATE_MESSAGE_MAX_CHARS } from "./mate.js";
 import { armedCardText, armedYesLabel, proposalLink, proposalOutcomeText, proposalPreview } from "./chat-channel.js";
 import { chatFlowButtons } from "./chat-flow.js";
+import { channelInbox } from "./chat-inbox.js";
 import { chatResultHref } from "./chat-controls.js";
 import { TeamsError, type TeamsApi } from "./teams-api.js";
 
@@ -13,7 +14,8 @@ export type TeamsChatOptions = Omit<ChatDeliveryOptions, "state" | "label" | "me
 
 const serviceKey = (conversation: string) => `serviceUrl:${conversation}`;
 export const teamsUserId = (v: unknown): v is string => typeof v === "string" && /^29:[A-Za-z0-9_=-]{10,200}$/.test(v);
-export const teamsConversationId = (v: unknown): v is string => typeof v === "string" && /^[A-Za-z0-9:@._%-]{8,300}$/.test(v);
+/** A conversation id; a channel post's carries its thread as ";messageid=<first message>" (v89). */
+export const teamsConversationId = (v: unknown): v is string => typeof v === "string" && /^[A-Za-z0-9:@._%-]{8,300}(;messageid=[0-9]{1,20})?$/.test(v);
 const validServiceUrl = (v: unknown): v is string => {
   if (typeof v !== "string") return false;
   try { const url = new URL(v); return url.protocol === "https:" && !url.username && !url.password && !url.search && !url.hash; } catch { return false; }
@@ -84,14 +86,17 @@ export function receiveTeams(state: ChatState, identity: ChatIdentity, raw: unkn
       ...(Array.isArray(activity.attachments) && activity.attachments.length > 0 ? { unsupported: "Incoming files are not supported yet. Describe the request in a message; saved result screenshots open from their links." } : {}) };
     eventId = chatHash(`${identity.installation}:message:${id}`);
   }
-  const roomish = isRoom && (state.room(identity.installation, channel) !== null || (kind === "message" && roomCommand(String(payload.text ?? "")) !== null));
+  // v89: a channel that feeds a flow takes anyone's message (as a card, with no say over anything); "flow 12" connects one.
+  const inbox = isRoom && kind === "message" ? channelInbox(state.store, "teams", identity.installation, channel, String(payload.text ?? "")) : { watched: false, command: false };
+  const roomish = isRoom && (state.room(identity.installation, channel) !== null || (kind === "message" && roomCommand(String(payload.text ?? "")) !== null) || inbox.watched || inbox.command);
   if (isRoom && !roomish) return false;
   const binding = state.bindingFor(identity.installation, member);
-  if (kind === "pair" ? !!binding || isRoom : !binding || !state.live(binding) || (binding.channel !== channel && !roomish)) return false;
+  const open = inbox.watched && !inbox.command;
+  if (kind === "pair" ? !!binding || isRoom : !open && (!binding || !state.live(binding) || (binding.channel !== channel && !roomish))) return false;
   return state.store.transact(() => {
     state.setMeta(identity.installation, serviceKey(channel), activity.serviceUrl as string, now);
     return state.enqueue({
-      id: eventId, installation: identity.installation, binding: kind === "pair" ? null : binding!.id, kind, channel, member,
+      id: eventId, installation: identity.installation, binding: kind === "pair" || binding === null ? null : binding.id, kind, channel, member,
       ts: submitted !== null ? String(activity.replyToId ?? id) : id, thread: submitted !== null ? String(activity.replyToId ?? id) : id,
       payload: JSON.stringify(payload), created: now.toISOString(),
     });

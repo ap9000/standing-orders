@@ -862,7 +862,7 @@ export const MATE_TOOLS: MateTool[] = [
       trigger: { type: "integer", minimum: 1 }, owner: { type: "string", maxLength: 64 },
       script: { type: "object", additionalProperties: false, properties: { name: { type: "string", maxLength: 40 }, about: { type: "string", maxLength: 160 }, body: { type: "string", maxLength: 1600 }, timeoutMinutes: { type: "integer", minimum: 1, maximum: 60 } } },
       settings: { type: "object", additionalProperties: false, properties: {
-        kind: { type: "string", enum: FLOW_TRIGGER_KINDS.filter(one => one !== "webhook") }, zone: { type: "string", maxLength: 60 },
+        kind: { type: "string", enum: FLOW_TRIGGER_KINDS.filter(one => one !== "webhook" && one !== "chat") }, zone: { type: "string", maxLength: 60 },
         label: { type: "string", maxLength: 50 }, questions: { type: "array", maxItems: 6, items: { type: "string", maxLength: 80 } },
         schedule: { type: "string", maxLength: 80 }, title: { type: "string", maxLength: 200 }, description: { type: "string", maxLength: 2000 },
         repo: { type: "string", maxLength: 140 }, watch: { type: "string", enum: ["issues", "pulls", "checks"] }, branch: { type: "string", maxLength: 100 }, from: { type: "string", enum: ["team", "anyone"] },

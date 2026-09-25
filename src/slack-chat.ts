@@ -1,4 +1,5 @@
 import { chatFlowButtons } from "./chat-flow.js";
+import { channelInbox } from "./chat-inbox.js";
 import { roomCommand } from "./chat-rooms.js";
 import {
   processChatEvent,
@@ -166,11 +167,14 @@ export function receiveSlack(
   // A channel or private group is a room: accepted only while it follows a
   // conversation, or for the `/team` words that make it follow one.
   const isRoom = !slackId(channel, "D");
-  const roomish = isRoom && (state.room(identity.installation, String(channel)) !== null || (kind === "message" && roomCommand(String(payload.text ?? "")) !== null));
+  // v89: a channel that feeds a flow takes anyone's message (as a card, with no say over anything); "flow 12" connects one.
+  const inbox = isRoom && kind === "message" ? channelInbox(state.store, "slack", identity.installation, String(channel), String(payload.text ?? "")) : { watched: false, command: false };
+  const roomish = isRoom && (state.room(identity.installation, String(channel)) !== null || (kind === "message" && roomCommand(String(payload.text ?? "")) !== null) || inbox.watched || inbox.command);
   if (isRoom && !roomish) return false;
   const binding = state.bindingFor(identity.installation, member);
+  const open = inbox.watched && !inbox.command;
   if (
-    kind !== "pair" &&
+    kind !== "pair" && !open &&
     (!binding ||
       !state.live(binding) ||
       (binding.channel !== channel && !roomish))
@@ -180,7 +184,7 @@ export function receiveSlack(
   return state.enqueue({
     id,
     installation: identity.installation,
-    binding: kind === "pair" ? null : binding!.id,
+    binding: kind === "pair" || binding === null ? null : binding.id,
     kind,
     channel,
     member,

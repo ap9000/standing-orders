@@ -1071,3 +1071,26 @@ test("a flow decision in Discord: the draft with Approve / Edit / Send back, Edi
   expect(sentText()).toContain("You approved it. Approved. Moved to Post it.");
   expect(buttonsOf(repainted).map(one => one.label)).toEqual(["Open"]);
 });
+
+test("a Discord channel feeds a flow: 'flow N' connects it, anyone's message is a card answered in reply, and a reply to it joins the card (v89)", async () => {
+  now = new Date(now.getTime() + 30_000);
+  const flow = store.createFlow({ repo, name: "Requests", by: "alex", definitionJson: JSON.stringify(flowFromSteps([{ title: "Inbox", kind: "inbox" }], null)) }, now);
+  const GUILD = snow(), ROOM = snow(), OTHER = snow();
+  const inRoom = (text: string, user = MEMBER, extra: Record<string, unknown> = {}) => receive(text, { guild_id: GUILD, channel_id: ROOM, author: { id: user }, ...extra });
+  expect(inRoom("Need a new laptop", OTHER)).toBe(false);
+  expect(inRoom(`flow ${flow}`)).toBe(true);
+  await processDiscordEvent(options); await drain();
+  expect(sentText()).toContain("This channel now feeds Requests");
+  const message = inRoom("Need a new laptop", OTHER);
+  expect(message).toBe(true);
+  await processDiscordEvent(options); await drain();
+  const card = store.flowCards(flow, true)[0]!;
+  expect(card).toMatchObject({ title: "Need a new laptop", createdBy: "Discord", source: { kind: "chat", chat: { app: "discord", chat: ROOM } } });
+  const said = sends().at(-1)!;
+  expect(said.path).toBe(`/channels/${ROOM}/messages`);
+  expect(said.body.message_reference).toMatchObject({ message_id: card.source!.chat!.thread });
+  expect(sentText()).toContain("Added to Requests as a card.");
+  expect(inRoom("It's the Dell.", OTHER, { type: 19, message_reference: { message_id: card.source!.chat!.thread, channel_id: ROOM, guild_id: GUILD } })).toBe(true);
+  await processDiscordEvent(options); await drain();
+  expect(store.flowComments(card.id).map(one => one.body)).toEqual(["It's the Dell."]);
+});

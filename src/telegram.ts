@@ -29,6 +29,7 @@ import { isLifecycleNotification, isTelegramProgressNotification, TELEGRAM_HOLD_
 import { telegramProgressCard, type ProgressEntity } from "./telegram-progress.js";
 import { applyTeamInbound, deliverTeamChats, teamCommand } from "./telegram-team.js";
 import { applyFlowReply, applyFlowTap, FLOW_DECIDE_KEY, flowButtons, flowDecisionAt } from "./telegram-flow.js";
+import { connectChannel, FLOW_WORDS, takeChannelMessage, watchedChannel } from "./chat-inbox.js";
 import { focusContextFor, taskInCeiling } from "./chat-channel.js";
 import { phoneCommand, phoneStatus, phoneTaskView, PHONE_CONSOLE_FOOTER, PHONE_HELP, notificationIdentity, phoneTaskChoices, resolvePhoneTask, phoneFocusText, phoneTaskListText, phoneText, PHONE_NO_MATCH, PHONE_BACK_TO_LEAD, type PhoneTaskChoice } from "./telegram-status.js";
 import { MATE_MESSAGE_MAX_CHARS } from "./mate.js";
@@ -1071,7 +1072,7 @@ async function enrolledForMessage(context: Context, update: Update): Promise<rea
   const chatId = String(message.chat.id);
   const isGroup = message.chat.type === "group" || message.chat.type === "supergroup";
   const trusted = isGroup
-    ? context.store.telegramTeamChat(context.botId, chatId)?.kind === "group" || teamCommand(message.text) !== null
+    ? context.store.telegramTeamChat(context.botId, chatId)?.kind === "group" || teamCommand(message.text) !== null || FLOW_WORDS.test(message.text.trim())
     : message.chat.type === "private" && chatId === binding.chatId;
   if (!trusted) return null;
   try { return await context.readProjects(); } catch { return null; }
@@ -1127,12 +1128,44 @@ function applyUpdate(context: Context, update: Update): Effect[] {
   return effects;
 }
 
+/** A group message that connects the group to a flow, or that the group's flow takes as a card. False: not for an inbox. */
+function applyGroupInbox(context: Context, message: NonNullable<Update["message"]>, effects: Effect[]): boolean {
+  const { store, botId, transport, clock } = context;
+  const chatId = String(message.chat!.id), text = message.text ?? "";
+  const reply = (said: string, link?: { label: string; path: string }) => effects.push(async () => {
+    let button: InlineButton[] | null = null;
+    if (link !== undefined) { try { button = phoneLinkButton(context.conversation?.phoneOrigin?.() ?? null, link); } catch { button = null; } }
+    await transport("sendMessage", { chat_id: chatId, text: said, link_preview_options: { is_disabled: true }, reply_parameters: { message_id: message.message_id },
+      ...(button === null ? {} : { reply_markup: { inline_keyboard: [button] } }) });
+  });
+  if (FLOW_WORDS.test(text.trim())) {
+    const binding = store.liveTelegramBindingFor(botId, String(message.from!.id));
+    if (binding === null) { context.report.ignored++; return true; }
+    const repos = context.projects === null ? [] : telegramConversationRepos(store, binding.approver, context.projects);
+    reply(connectChannel(store, { app: "telegram", installation: botId, conversation: chatId, binding, text, repos, followsConversation: store.telegramTeamChat(botId, chatId) !== null }, clock()));
+    return true;
+  }
+  const trigger = watchedChannel(store, "telegram", botId, chatId);
+  if (trigger === null) return false;
+  // Forwards, other bots and channel posts don't become cards: only people writing in the group.
+  if (message.forward_origin !== undefined || message.forward_date !== undefined || message.via_bot !== undefined || message.sender_chat !== undefined) { context.report.ignored++; return true; }
+  const ts = String(message.message_id), thread = message.reply_to_message === undefined ? ts : String(message.reply_to_message.message_id);
+  const sender = message.from as { id: number; username?: string; first_name?: string };
+  const who = typeof sender.username === "string" ? `@${sender.username}` : typeof sender.first_name === "string" ? sender.first_name : "someone";
+  const taken = takeChannelMessage(store, trigger, { app: "telegram", conversation: chatId, ts, thread, text, who }, clock());
+  if (taken.said !== null) reply(taken.said, taken.link);
+  return true;
+}
+
 function applyMessage(context: Context, update: Update, effects: Effect[]): void {
   const { store, botId, transport, clock, report } = context;
   const message = update.message as NonNullable<Update["message"]>;
   const chat = message.chat;
   const from = message.from;
   const pair = /^\/pair\s+([0-9a-f]{32})\s*$/.exec(message.text ?? "");
+
+  // A group as a flow's inbox (v89): "/flow 12" from a paired approver connects it; after that its messages are cards.
+  if (pair === null && chat !== undefined && from !== undefined && (chat.type === "group" || chat.type === "supergroup") && typeof message.text === "string" && applyGroupInbox(context, message, effects)) return;
 
   if (pair === null && chat !== undefined && from !== undefined) {
     // The team layer first: `/team` anywhere, everything in a followed

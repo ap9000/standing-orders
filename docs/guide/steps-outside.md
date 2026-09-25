@@ -70,7 +70,9 @@ what it does, and its arguments as JSON with fill-ins. **Test** on the Tools
 page lists what a tool can do. A tool that says it failed takes the failure
 path.
 
-## Update the issue
+## Update where it came from
 
 For cards that came from GitHub or Linear: comments on the issue, and can
 close it (Linear: moves it to done), with your own `gh` login and Linear key.
+For cards that came from a Slack, Discord or Teams channel: answers in the
+message's thread, through the chat of whoever connected the channel.

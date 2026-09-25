@@ -482,8 +482,11 @@ export type FlowStepRunRow = { card: number; entry: number; stage: string; kind:
   decisionJson: string | null };
 export type FlowScriptRow = { id: number; repo: string; name: string; about: string; body: string; timeoutMinutes: number; version: number; digest: string; savedBy: string; savedAt: string };
 /** Where a card came from when a trigger made it: what to call it and where to look (a GitHub issue, a Linear issue, another flow's card). */
-/** Where a card came from. `mail` (v89): the email it came from, so a reply to its sender stays in the thread. */
-export type FlowCardSource = { kind: string; label: string; url: string | null; mail?: { id: string | null; references: string[]; subject: string; from: string } };
+/** Where a card came from. `mail` (v89): the email it came from, so a reply to its sender stays in the thread.
+ * `chat` (v89): the chat message it came from — the app, the channel, the conversation to answer in, the
+ * message's thread, and the pairing that connected the channel (whose chat answers there). */
+export type FlowCardSource = { kind: string; label: string; url: string | null; mail?: { id: string | null; references: string[]; subject: string; from: string };
+  chat?: { app: string; installation: string; chat: string; conversation: string; thread: string; binding: number } };
 export type FlowCardRow = { id: number; flow: number; title: string; description: string | null; stage: string; entry: number; state: "active" | "done" | "cancelled"; task: string | null; primaryTask: string | null; note: string | null; waiting: string | null; outputs: Record<string, string>; createdBy: string; createdAt: string; updatedAt: string; source: FlowCardSource | null; owner: string | null };
 /** One line of a card's discussion: a comment (and whom it @mentioned), or who became its owner. */
 export type FlowCommentRow = { id: number; card: number; kind: "comment" | "owner"; author: string; body: string; mentions: string[]; at: string };
@@ -524,9 +527,12 @@ function readFlowCardSource(value: unknown): FlowCardSource | null {
     const parsed = JSON.parse(value) as Record<string, unknown>;
     if (typeof parsed["label"] !== "string") return null;
     const mail = parsed["mail"] !== null && typeof parsed["mail"] === "object" ? parsed["mail"] as Record<string, unknown> : null;
+    const chat = parsed["chat"] !== null && typeof parsed["chat"] === "object" ? parsed["chat"] as Record<string, unknown> : null;
     return { kind: String(parsed["kind"] ?? ""), label: parsed["label"], url: typeof parsed["url"] === "string" ? parsed["url"] : null,
       ...(mail === null || typeof mail["from"] !== "string" ? {} : { mail: { id: typeof mail["id"] === "string" ? mail["id"] : null, references: Array.isArray(mail["references"]) ? mail["references"].filter((one): one is string => typeof one === "string") : [],
-        subject: typeof mail["subject"] === "string" ? mail["subject"] : "", from: mail["from"] } }) };
+        subject: typeof mail["subject"] === "string" ? mail["subject"] : "", from: mail["from"] } }),
+      ...(chat === null || typeof chat["app"] !== "string" || typeof chat["chat"] !== "string" || typeof chat["thread"] !== "string" || typeof chat["binding"] !== "number" ? {} : { chat: {
+        app: chat["app"], installation: String(chat["installation"] ?? ""), chat: chat["chat"], conversation: typeof chat["conversation"] === "string" ? chat["conversation"] : chat["chat"], thread: chat["thread"], binding: chat["binding"] } }) };
   } catch { return null; }
 }
 
@@ -21117,6 +21123,19 @@ export class Store {
   /** Whether a trigger already handled this outside thing (an issue, a run, a schedule slot). */
   flowTriggerSaw(trigger: number, key: string): boolean {
     return this.db.prepare("SELECT 1 FROM flow_trigger_event WHERE trigger = ? AND key = ?").get(trigger, key) !== undefined;
+  }
+
+  /** The card one outside thing made (v89: a chat message, so replies in its thread find it). */
+  flowTriggerCard(trigger: number, key: string): number | null {
+    const row = this.db.prepare("SELECT card FROM flow_trigger_event WHERE trigger = ? AND key = ?").get(trigger, key);
+    return row === undefined || row["card"] === null ? null : Number(row["card"]);
+  }
+
+  /** The active chat trigger a channel feeds (v89), if any: one per channel. */
+  chatTriggerFor(app: string, installation: string, chat: string): FlowTriggerRow | null {
+    const row = this.db.prepare(`SELECT * FROM flow_trigger WHERE kind = 'chat' AND state = 'active'
+      AND json_extract(config_json, '$.app') = ? AND json_extract(config_json, '$.installation') = ? AND json_extract(config_json, '$.chat') = ? ORDER BY id DESC LIMIT 1`).get(app, installation, chat);
+    return row === undefined ? null : readFlowTriggerRow(row as Record<string, unknown>);
   }
 
   /** Record what a trigger did with one outside thing: the card it made, or why it made none. False when it was already recorded. */

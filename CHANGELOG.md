@@ -22,6 +22,9 @@ the work and people deciding.
 - **Email in.** An Email inbox trigger turns new mail into cards (IMAP, or
   a Google account signed in with Google), and replies to the sender stay
   in the thread. Automatic replies and your own mail never become cards.
+- **Chat in.** A Slack, Discord or Teams channel, or a Telegram group, feeds
+  a flow after `flow 12` in it: each message is a card, replies in its thread
+  join the discussion, and an Update zone answers in that thread.
 - **Live canvas.** A flow open in several browsers changes in all of them
   the moment a card moves, and shows who else has it open and which card
   they're looking at.
