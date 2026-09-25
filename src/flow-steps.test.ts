@@ -117,6 +117,13 @@ describe("project scripts", () => {
     expect(log).not.toMatch(/ghp_a{36}|b{8}/);
   });
 
+  test("a work zone whose words only point at the card still gives the agent the card", () => {
+    const flow = flowOf([{ title: "Inbox", kind: "inbox" }, { title: "Build", kind: "task", instructions: "Build a fix for the bug described on the card." }]);
+    const card = store.addFlowCard({ flow, title: "Add a greet function", description: "Add src/greet.js exporting greet(name).", stage: "build", by: "alex" }, T0);
+    advanceFlows(store, repo, T0, { evidenceRoot: dir });
+    expect(store.getScope(store.getFlowCard(card)!.task!)!.goal).toBe("Build a fix for the bug described on the card.\n\nThe card: Add a greet function\n\nAdd src/greet.js exporting greet(name).");
+  });
+
   test("a build whose project checks failed takes its failure path instead of moving on", () => {
     const flow = flowOf([{ title: "Inbox", kind: "inbox" }, { title: "Build", kind: "task", ifFails: "Inbox" }, { title: "Review", kind: "approval" }]);
     const card = store.addFlowCard({ flow, title: "Fix totals", description: null, stage: "build", by: "alex" }, T0);

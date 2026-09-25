@@ -23,7 +23,9 @@
     "certify:launchd": "npm run build && node scripts/launchd-certification.mjs",
     "test:native-containment": "vitest run src/containment-native.test.ts src/containment.test.ts",
     "build:browser": "node scripts/browser-build.mjs",
-    "e2e:flows": "npm run build && node scripts/flows-e2e.mjs"
+    "e2e:flows": "npm run build && node scripts/flows-e2e.mjs",
+    "e2e:app": "npm run build && node scripts/app-e2e.mjs",
+    "e2e": "npm run build && node scripts/flows-e2e.mjs && node scripts/app-e2e.mjs"
   },
   "repository": {
     "type": "git",

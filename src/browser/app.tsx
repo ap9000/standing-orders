@@ -313,10 +313,12 @@ export function workspaceCommands(workspace: BrowserWorkspace, query = "") {
     ...workspace.projects.map(item => ({ label: item.name, detail: "Project", href: item.href })),
     ...workspace.crew.map(item => ({ label: item.title, detail: item.label, href: item.resultHref ?? item.href })),
   ];
+  // The same place under two names (a single project's page is also where Tasks leads) stays findable by both.
   const seen = new Set<string>();
   return entries.filter(item => {
-    if (seen.has(item.href)) return false;
-    seen.add(item.href);
+    const key = `${item.label}\n${item.href}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
     return `${item.label} ${item.detail}`.toLowerCase().includes(query.trim().toLowerCase());
   });
 }

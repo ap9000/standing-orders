@@ -38,6 +38,18 @@ function fill(template: string, card: FlowCardRow): string {
   return fillFlowText(template, { title: card.title, description: card.description, note: card.note, outputs: card.outputs });
 }
 
+/** A work zone's goal: its words filled from the card, plus the card and any send-back note when the words leave
+ * them out. "Fix the bug on the card" says nothing on its own (found in the real e2e: the builder saw only the branch name). */
+function workGoal(instructions: string, card: FlowCardRow): string {
+  const names = (key: string) => new RegExp(`\\{\\{\\s*${key.replace(".", "\\.")}\\s*\\}\\}`).test(instructions);
+  const extra = [
+    ...(names("card.title") || names("card.description") ? [] : [`The card: {{card.title}}${card.description ? "\n\n{{card.description}}" : ""}`]),
+    ...(names("card.title") && !names("card.description") && card.description ? ["Details on the card:\n{{card.description}}"] : []),
+    ...(names("note") || !card.note ? [] : ["Changes asked for: {{note}}"]),
+  ];
+  return fill([instructions, ...extra].join("\n\n"), card);
+}
+
 const titleIn = (definition: FlowDefinition, id: string) => definition.stages.find(one => one.id === id)?.title ?? id;
 
 /** Advance every active card in one project's flows. */
@@ -139,7 +151,7 @@ function workStage(store: Store, flow: FlowRow, stage: FlowStage, card: FlowCard
     const filed = fileTaskProposal(store, {
       title: (report ? `${stage.title}: ${card.title}` : card.title).slice(0, 200),
       repo: flow.repo,
-      goal: fill(stage.instructions ?? card.title, card).slice(0, 8000),
+      goal: workGoal(stage.instructions ?? card.title, card).slice(0, 8000),
       filedVia: `flow:${flow.id}`,
       deliverable: report ? "report" : "branch",
       planning: report ? "skip" : stage.planning ?? "auto",
