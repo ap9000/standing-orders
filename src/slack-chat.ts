@@ -1,3 +1,4 @@
+import { chatFlowButtons } from "./chat-flow.js";
 import { roomCommand } from "./chat-rooms.js";
 import {
   processChatEvent,
@@ -135,7 +136,7 @@ export function receiveSlack(
     const action = object(actions[0]),
       container = object(body.container);
     if (
-      !/^standing_orders_(confirm|dismiss|yes|cancel)$/.test(
+      !/^standing_orders_(confirm|dismiss|yes|cancel|flow_approve|flow_edit|flow_send_back)$/.test(
         String(action.action_id),
       ) ||
       typeof action.value !== "string" ||
@@ -492,7 +493,20 @@ export async function deliverSlackPart(
               "Review the full action in Standing Orders before confirming.";
         }
       }
-    } else buttons = linkButton(options.origin(), content.link);
+    } else
+      buttons = [
+        // A flow decision (v88): Approve / Edit / Send back, then the link.
+        ...(content.flow
+          ? chatFlowButtons(state, row.id, now).map((one) => ({
+              type: "button",
+              text: { type: "plain_text", text: one.label },
+              action_id: `standing_orders_flow_${one.action.replace("-", "_")}`,
+              value: one.token,
+              ...(one.action === "approve" ? { style: "primary" } : {}),
+            }))
+          : []),
+        ...linkButton(options.origin(), content.link),
+      ];
     const target = content.edit ?? row.message;
     const args = {
       channel: destination,

@@ -247,6 +247,8 @@ export type BrowserFlowView = {
   stages: BrowserFlowStage[];
   cards: BrowserFlowCard[];
   selectedCard: number | null;
+  /** Where the flow stands (v88): the live stream's nudge names it, and a page that already shows it doesn't read again. */
+  live: string | null;
   canEdit: boolean;
   approvers: string[];
   kinds: { kind: BrowserFlowStage["kind"]; label: string; about: string }[];

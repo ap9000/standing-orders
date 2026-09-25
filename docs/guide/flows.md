@@ -46,6 +46,10 @@ A Person decides zone can ask the owner, a named person, or anyone who
 approves. The decision reaches them in their chat app with the draft in front
 of them. Cards have owners, followers and a discussion with @mentions.
 
+The canvas is live: when a card moves, or someone comments or decides,
+everyone with the flow open sees it at once. Faces at the top show who else
+is here, and a face on a card shows who has that card open.
+
 ## Templates
 
 Coding, Research, Issue triage, Spam filter, Lead routing, Effort routing,

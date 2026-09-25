@@ -17,8 +17,11 @@ the work and people deciding.
   with Claude; web requests with secrets kept to headers; email through your
   own mail server; any of a project's MCP tools; updates to the GitHub or
   Linear issue a card came from.
-- **Decisions from your phone.** Telegram messages carry the draft with
-  Approve, Edit and Send back.
+- **Decisions from your phone.** Telegram, Slack, Discord and Teams
+  messages carry the draft with Approve, Edit and Send back.
+- **Live canvas.** A flow open in several browsers changes in all of them
+  the moment a card moves, and shows who else has it open and which card
+  they're looking at.
 - **Insights.** Where each flow breaks, how scripts do, how well sorting
   sorts, and every step's log.
 - **Linux.** A one-command installer, and Claude and Gemini agents fenced
@@ -28,4 +31,4 @@ the work and people deciding.
 - **Settings.** An Email section, and "Check again" that really tests an
   API key.
 
-Schema 87: the database upgrades itself on first start.
+Schema 88: the database upgrades itself on first start.

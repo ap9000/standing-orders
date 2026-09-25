@@ -13,7 +13,9 @@ import { addApprover, approve, propose } from "./scope.js";
 import { ChatState, chatHash } from "./chat-delivery-state.js";
 import { createDecisionServer } from "./serve.js";
 import { checkTeamsCredentials, forgetTeamsKeys, forgetTeamsToken, saveTeamsCredentials, teamsIdentity, verifyTeamsToken, type TeamsApi, type TeamsCredentials } from "./teams-api.js";
-import { deliverTeamsPart, planTeamsRooms, processTeamsEvent, receiveTeams, type TeamsChatOptions } from "./teams-chat.js";
+import { deliverTeamsPart, planTeamsNotifications, planTeamsRooms, processTeamsEvent, receiveTeams, type TeamsChatOptions } from "./teams-chat.js";
+import { flowFromSteps } from "./flows.js";
+import { advanceFlows } from "./flow-engine.js";
 import { prepareSharedAction } from "./chat-actions.js";
 import { resolveChannelMate } from "./chat-channel.js";
 import { verifyApproverStanding, ceilingDigestOf } from "./principal.js";
@@ -210,5 +212,32 @@ describe("Teams shared chat", () => {
     expect(receive(activity(CHANNEL, ALEX, "<at>Standing Orders</at> team off"))).toBe(true);
     await processTeamsEvent(options); await drain();
     expect(state.room(credentials.installation, CHANNEL)).toBeNull();
+  });
+
+  test("a flow decision in Teams: Approve / Edit / Send back on the card, and Send back takes the next message as the note (v88)", async () => {
+    expect(pairAs("alex", ALEX, DM_ALEX)).not.toBeNull();
+    now = new Date(now.getTime() + 30_000);
+    const flow = store.createFlow({ repo, name: "Support", by: "alex", definitionJson: JSON.stringify(flowFromSteps([
+      { title: "Inbox", kind: "inbox" },
+      { id: "draft", title: "Write the reply", kind: "draft", instructions: "Reply to {{card.title}}" },
+      { id: "check", title: "Check the reply", kind: "approval", decider: "owner", ifFails: "Write the reply" },
+      { id: "post", title: "Post it", kind: "notify", message: "{{stage.draft}}" },
+    ], null)) }, now);
+    const card = store.addFlowCard({ flow, title: "Refund for order 42?", description: null, stage: "check", by: "alex" }, now);
+    store.updateFlowCard(card, { outputs: { draft: "We refunded it." } }, now);
+    advanceFlows(store, repo, now);
+    await planTeamsNotifications(options);
+    await drain();
+    expect(lastText()).toContain("We refunded it.");
+    expect(lastActions().map(action => action["title"])).toEqual(["Approve", "Edit", "Send back", "Open"]);
+    const back = lastActions().find(action => action["title"] === "Send back") as { data: Record<string, unknown> };
+    const cardId = String(state.prepare("SELECT message FROM chat_part WHERE json_extract(payload,'$.flow') IS NOT NULL").get()?.message);
+    expect(receive({ type: "message", id: `tap-${++ids}`, serviceUrl: SERVICE, from: { id: ALEX }, recipient: { id: `28:${APP}` }, conversation: { id: DM_ALEX, conversationType: "personal", tenantId: TENANT }, replyToId: cardId, value: back.data })).toBe(true);
+    await processTeamsEvent(options); await drain();
+    expect(lastText()).toContain("Your next message here is the note");
+    expect(receive(activity(DM_ALEX, ALEX, "Mention the 5-day wait."))).toBe(true);
+    await processTeamsEvent(options); await drain();
+    expect(store.getFlowCard(card)).toMatchObject({ stage: "draft", note: "Mention the 5-day wait." });
+    expect(lastText()).toBe("↩️ Sent back to Write the reply with your note.");
   });
 });

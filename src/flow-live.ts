@@ -1,0 +1,131 @@
+/**
+ * The live canvas (v88): a flow open in several browsers stays the same in
+ * all of them, and each shows who else has it open.
+ *
+ * - A change nudge. While anyone has a flow open, one cheap query a second
+ *   reads the flow's fingerprint (its revision, cards, moves, comments,
+ *   watchers, step runs and triggers); when it changes, every open page
+ *   hears "change" and reads the flow again the usual way. The nudge
+ *   carries no card data: what a page shows is always what its own read
+ *   returned, under its own checks.
+ * - Who's here. Each open page says which card it has open and whether it
+ *   is changing the flow; everyone else on the flow hears the list, by
+ *   name. It lives in memory only and goes when the page closes or hides.
+ *
+ * Streams are refresh hints only: nothing here writes, and a page that
+ * can't keep one open falls back to reading every few seconds.
+ */
+import { createHash } from "node:crypto";
+import type { ServerResponse } from "node:http";
+import type { Store } from "./store.js";
+
+export type FlowPresence = { name: string; cards: number[]; editing: boolean };
+export type FlowViewer = { name: string; card: number | null; editing: boolean; response: ServerResponse; valid: () => boolean };
+
+const TICK_MS = 1_000;
+const CHECK_EVERY = 15;
+const HEARTBEAT_EVERY = 15;
+const PRESENCE_SETTLE_MS = 150;
+
+/** What changes when anything on the canvas changes: one row, one read, kept short and opaque. */
+export function flowFingerprint(store: Store, flow: number): string | null {
+  const row = store.handle.prepare(`SELECT f.state || '|' || f.revision || '|' || f.updated_at || '|' || coalesce(f.owner, '') AS head,
+    (SELECT count(*) || ':' || coalesce(max(updated_at), '') FROM flow_card WHERE flow = f.id) AS cards,
+    (SELECT coalesce(max(e.id), 0) FROM flow_event e JOIN flow_card c ON c.id = e.card WHERE c.flow = f.id) AS moves,
+    (SELECT coalesce(max(m.id), 0) FROM flow_comment m JOIN flow_card c ON c.id = m.card WHERE c.flow = f.id) AS comments,
+    (SELECT count(*) || ':' || coalesce(max(w.added_at), '') FROM flow_card_watcher w JOIN flow_card c ON c.id = w.card WHERE c.flow = f.id) AS watchers,
+    (SELECT count(*) || ':' || coalesce(sum(r.attempts), 0) || ':' || coalesce(max(coalesce(r.finished_at, r.started_at)), '') || ':' || coalesce(sum(r.state = 'running'), 0)
+       FROM flow_step_run r JOIN flow_card c ON c.id = r.card WHERE c.flow = f.id) AS runs,
+    (SELECT count(*) || ':' || coalesce(max(updated_at), '') || ':' || coalesce(max(last_at), '') || ':' || coalesce(sum(failures), 0) FROM flow_trigger WHERE flow = f.id) AS triggers
+    FROM flow f WHERE f.id = ?`).get(flow) as Record<string, unknown> | undefined;
+  return row === undefined ? null : createHash("sha256").update(Object.values(row).map(String).join("|")).digest("hex").slice(0, 16);
+}
+
+type Room = { viewers: Set<FlowViewer>; last: string | null; timer: NodeJS.Timeout | null; ticks: number; settling: NodeJS.Timeout | null };
+
+export type FlowRooms = {
+  /** Keep this page's stream on the flow until it closes; the first event says where the flow stands. */
+  join: (flow: number, viewer: FlowViewer) => void;
+  /** Every stream, ended (the server is closing). */
+  close: () => void;
+  size: () => number;
+};
+
+export function createFlowRooms(fingerprint: (flow: number) => string | null, tickMs = TICK_MS): FlowRooms {
+  const rooms = new Map<number, Room>();
+  const write = (viewer: FlowViewer, event: string, data: unknown): void => {
+    if (viewer.response.writableEnded || viewer.response.destroyed) return;
+    viewer.response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+  /** Everyone on the flow but you, one line per person however many pages they have open. */
+  const others = (room: Room, me: string): FlowPresence[] => {
+    const people = new Map<string, FlowPresence>();
+    for (const one of room.viewers) {
+      if (one.name === me) continue;
+      const seen = people.get(one.name) ?? { name: one.name, cards: [], editing: false };
+      if (one.card !== null && !seen.cards.includes(one.card)) seen.cards.push(one.card);
+      seen.editing ||= one.editing;
+      people.set(one.name, seen);
+    }
+    return [...people.values()].sort((a, b) => a.name.localeCompare(b.name));
+  };
+  const announce = (room: Room): void => {
+    // A page that moves from one card to the next leaves and joins at once: say it once, after it settles.
+    if (room.settling !== null) clearTimeout(room.settling);
+    room.settling = setTimeout(() => {
+      room.settling = null;
+      for (const viewer of room.viewers) write(viewer, "here", { people: others(room, viewer.name) });
+    }, PRESENCE_SETTLE_MS);
+    room.settling.unref();
+  };
+  const leave = (flow: number, viewer: FlowViewer): void => {
+    const room = rooms.get(flow);
+    if (room === undefined || !room.viewers.delete(viewer)) return;
+    if (!viewer.response.writableEnded) viewer.response.end();
+    if (room.viewers.size > 0) { announce(room); return; }
+    if (room.timer !== null) clearInterval(room.timer);
+    if (room.settling !== null) clearTimeout(room.settling);
+    rooms.delete(flow);
+  };
+  const tick = (flow: number, room: Room): void => {
+    room.ticks += 1;
+    if (room.ticks % CHECK_EVERY === 0) {
+      // A signed-out or narrowed account stops hearing about the flow.
+      for (const viewer of [...room.viewers]) if (!viewer.valid()) { write(viewer, "gone", {}); leave(flow, viewer); }
+      if (!rooms.has(flow)) return;
+    }
+    let now: string | null;
+    try { now = fingerprint(flow); } catch { return; /* a busy database: the next tick reads again */ }
+    if (now === null) { for (const viewer of [...room.viewers]) { write(viewer, "gone", {}); leave(flow, viewer); } return; }
+    if (now !== room.last) {
+      room.last = now;
+      for (const viewer of room.viewers) write(viewer, "change", { at: now });
+    } else if (room.ticks % HEARTBEAT_EVERY === 0) {
+      for (const viewer of room.viewers) if (!viewer.response.writableEnded) viewer.response.write(": keep-alive\n\n");
+    }
+  };
+  return {
+    join(flow, viewer) {
+      let room = rooms.get(flow);
+      if (room === undefined) {
+        let last: string | null = null;
+        try { last = fingerprint(flow); } catch { /* the first tick reads it */ }
+        room = { viewers: new Set(), last, timer: null, ticks: 0, settling: null };
+        const created = room;
+        room.timer = setInterval(() => tick(flow, created), tickMs);
+        room.timer.unref();
+        rooms.set(flow, room);
+      }
+      room.viewers.add(viewer);
+      write(viewer, "change", { at: room.last });
+      write(viewer, "here", { people: others(room, viewer.name) });
+      announce(room);
+      const gone = () => leave(flow, viewer);
+      viewer.response.once("close", gone);
+    },
+    close() {
+      for (const [flow, room] of [...rooms]) for (const viewer of [...room.viewers]) leave(flow, viewer);
+    },
+    size: () => [...rooms.values()].reduce((sum, room) => sum + room.viewers.size, 0),
+  };
+}

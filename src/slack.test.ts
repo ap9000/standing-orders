@@ -45,6 +45,8 @@ import { slackSettingsHtml } from "./slack-settings.js";
 import { effectivePrimary, savePrimary } from "./webhooks.js";
 import { createDecisionServer } from "./serve.js";
 import { StandingOrdersSlackSocket } from "./slack.js";
+import { flowFromSteps } from "./flows.js";
+import { advanceFlows } from "./flow-engine.js";
 
 // Synthetic credentials for the scripted wire, assembled so evidence scans do not flag a real token.
 const FIXTURE_BOT_TOKEN = ["xoxb", "fixture", "private", "token"].join("-");
@@ -1016,6 +1018,99 @@ describe("Slack shared chat", () => {
     expect(inRoom("team off")).toBe(true);
     await processSlackEvent(options); await drain();
     expect(state.room(ID.installation, ROOM)).toBeNull();
+  });
+
+  test("a flow decision arrives with its draft and Approve / Edit / Send back; Edit takes the next message, and Approve decides it (v88)", async () => {
+    now = new Date(now.getTime() + 30_000);
+    const flow = store.createFlow({ repo, name: "Support", by: "alex", definitionJson: JSON.stringify(flowFromSteps([
+      { title: "Inbox", kind: "inbox" },
+      { id: "draft", title: "Write the reply", kind: "draft", instructions: "Reply to {{card.title}}" },
+      { id: "check", title: "Check the reply", kind: "approval", decider: "owner", ifFails: "Write the reply" },
+      { id: "post", title: "Post it", kind: "notify", message: "{{stage.draft}}" },
+    ], null)) }, now);
+    const card = store.addFlowCard({ flow, title: "Refund for order 42?", description: "Charged twice", stage: "check", by: "alex" }, now);
+    store.updateFlowCard(card, { outputs: { draft: "Hi Priya,\nwe refunded it." } }, now);
+    advanceFlows(store, repo, now);
+    await planSlackNotifications(options);
+    await drain();
+    const flowPart = () => state.db.prepare("SELECT id, message FROM slack_part WHERE json_extract(payload,'$.flow') IS NOT NULL ORDER BY id DESC LIMIT 1").get()!;
+    const buttonsOf = (call: { args: Record<string, unknown> }) =>
+      ((call.args.blocks as Array<{ type: string; elements?: Array<{ text: { text: string }; value?: string; action_id: string }> }>).find(block => block.type === "actions")?.elements ?? []);
+    const notice = sends().at(-1)!;
+    // The draft as written, line break and all, with the three buttons and the link.
+    expect(notice.method).toBe("chat.postMessage");
+    expect(notice.args.thread_ts).toBeUndefined();
+    expect(JSON.stringify(notice.args.blocks)).toContain("Hi Priya,\\nwe refunded it.");
+    const first = buttonsOf(notice);
+    expect(first.map(one => one.text.text)).toEqual(["Approve", "Edit", "Send back", "Open"]);
+    const tokenOf = (buttons: typeof first, label: string) => buttons.find(one => one.text.text === label)!.value!;
+    const press = async (id: string, token: string, ts: string) => {
+      receiveSlack(state, ID, "interactive", { ...action(token, ts), message: {}, actions: [{ action_id: id, value: token, action_ts: `1789700001.${String(++serial).padStart(6, "0")}` }] }, now);
+      await processSlackEvent(options);
+      await drain();
+    };
+    const noticeTs = String(flowPart().message);
+    // Edit: the next message is the draft; it comes back with fresh buttons.
+    await press("standing_orders_flow_edit", tokenOf(first, "Edit"), noticeTs);
+    expect(String(sends().at(-1)!.args.text)).toContain("as your next message here");
+    expect(sends().at(-1)!.args.thread_ts).toBe(noticeTs);
+    receive("Hi Priya, refunded today. Sorry!");
+    await processSlackEvent(options);
+    await drain();
+    expect(store.getFlowCard(card)!.outputs["draft"]).toBe("Hi Priya, refunded today. Sorry!");
+    const again = sends().at(-1)!;
+    expect(JSON.stringify(again.args.blocks)).toContain("your version of the draft");
+    // The first notice's buttons are spent; the new Approve decides it and the notice says so, without buttons.
+    await press("standing_orders_flow_approve", tokenOf(first, "Approve"), noticeTs);
+    expect(String(sends().at(-1)!.args.text)).toContain("already decided");
+    expect(store.getFlowCard(card)!.stage).toBe("check");
+    const fresh = buttonsOf(again);
+    const againTs = String(flowPart().message);
+    // Someone pressing on another message changes nothing.
+    await press("standing_orders_flow_approve", tokenOf(fresh, "Approve"), noticeTs);
+    expect(store.getFlowCard(card)!.stage).toBe("check");
+    await press("standing_orders_flow_approve", tokenOf(fresh, "Approve"), againTs);
+    expect(store.getFlowCard(card)!.stage).toBe("post");
+    const repainted = sends().at(-1)!;
+    expect(repainted).toMatchObject({ method: "chat.update", args: { ts: againTs } });
+    expect(String(repainted.args.text)).toContain("✅ You approved it. Approved. Moved to Post it.");
+    expect(buttonsOf(repainted).map(one => one.text.text)).toEqual(["Open"]);
+    expect(store.flowComments(card).map(one => one.body)).toEqual(["Edited the draft in Slack."]);
+  });
+
+  test("Send back takes the next message as the note, and cancel leaves the card where it is (v88)", async () => {
+    now = new Date(now.getTime() + 30_000);
+    const flow = store.createFlow({ repo, name: "Support", by: "alex", definitionJson: JSON.stringify(flowFromSteps([
+      { title: "Inbox", kind: "inbox" },
+      { id: "draft", title: "Write the reply", kind: "draft", instructions: "Reply to {{card.title}}" },
+      { id: "check", title: "Check the reply", kind: "approval", decider: "owner", ifFails: "Write the reply" },
+      { id: "post", title: "Post it", kind: "notify", message: "{{stage.draft}}" },
+    ], null)) }, now);
+    const card = store.addFlowCard({ flow, title: "Refund for order 42?", description: null, stage: "check", by: "alex" }, now);
+    store.updateFlowCard(card, { outputs: { draft: "We refunded it." } }, now);
+    advanceFlows(store, repo, now);
+    await planSlackNotifications(options);
+    await drain();
+    const ts = String(state.db.prepare("SELECT message FROM slack_part WHERE json_extract(payload,'$.flow') IS NOT NULL").get()!.message);
+    const token = String(state.db.prepare("SELECT token FROM slack_flow_action WHERE action='send-back'").get()!.token);
+    const press = async () => {
+      receiveSlack(state, ID, "interactive", { ...action(token, ts), message: {}, actions: [{ action_id: "standing_orders_flow_send_back", value: token, action_ts: `1789700001.${String(++serial).padStart(6, "0")}` }] }, now);
+      await processSlackEvent(options);
+      await drain();
+    };
+    await press();
+    expect(String(sends().at(-1)!.args.text)).toContain("goes back to Write the reply");
+    receive("cancel");
+    await processSlackEvent(options);
+    await drain();
+    expect(String(sends().at(-1)!.args.text)).toContain("Left it where it is");
+    expect(store.getFlowCard(card)!.stage).toBe("check");
+    await press();
+    receive("Mention the 5-day wait.");
+    await processSlackEvent(options);
+    await drain();
+    expect(store.getFlowCard(card)).toMatchObject({ stage: "draft", note: "Mention the 5-day wait." });
+    expect(String(sends().at(-1)!.args.text)).toBe("↩️ Sent back to Write the reply with your note.");
   });
 
 });

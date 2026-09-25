@@ -28,6 +28,7 @@ import {
   type ChatEvent,
   type ChatIdentity,
 } from "./chat-delivery-state.js";
+import { answerChatFlowPrompt, applyChatFlowTap, flowDecisionParts } from "./chat-flow.js";
 import { telegramProgressCard } from "./telegram-progress.js";
 import { phoneText, PHONE_HELP, phoneCommand, phoneStatus, phoneTaskView, phoneTaskChoices, phoneTaskListText, resolvePhoneTask, phoneFocusText, PHONE_NO_MATCH, PHONE_BACK_TO_LEAD } from "./telegram-status.js";
 import { applyRoomInbound, conversationRow, roomCardApprover, roomCommand, roomGrantAllowed, roomMessagesAfter, roomMessageText, teamDomain } from "./chat-rooms.js";
@@ -179,6 +180,9 @@ export async function processChatEvent(
       return true;
     }
     const text = String(input.text ?? "");
+    // A flow decision asked for this person's next message (Edit, Send back): it is the draft or the note.
+    if (answerChatFlowPrompt({ store, state, label: options.label }, event, binding,
+      { text, ...(typeof input.originalLength === "number" ? { originalLength: input.originalLength } : {}) }, repos, nowOf(options))) return true;
     // The task this message's turn is about, once chosen (kept on the event,
     // so a reply planned after a restart names the same task).
     let about: { task: string; run: number | null } | null =
@@ -505,6 +509,8 @@ export function applyChatAction(
     )
       return;
     const token = String(object(JSON.parse(event.payload)).token);
+    // A flow decision's button (v88) is answered by the flow's own door.
+    if (applyChatFlowTap({ store, state, label: options.label }, event, binding, token, repos, now)) return;
     const action = state
       .prepare(
         "SELECT a.*,p.message,e.binding,e.channel,e.thread FROM chat_action a JOIN chat_part p ON p.id=a.part JOIN chat_event e ON e.id=p.event WHERE token=?",
@@ -706,7 +712,8 @@ export async function planChatNotifications(
       if (
         notification.createdAt >= binding.created &&
         notification.resolvedAt === null &&
-        (personal ? notification.recipient === binding.approver : notification.taskId) &&
+        // A flow decision for "anyone who approves" reaches every approver who can see the project.
+        (personal ? notification.recipient === binding.approver : notification.taskId || notification.kind === "flow-decision") &&
         notification.project &&
         repos.includes(notification.project)
       ) {
@@ -773,6 +780,14 @@ export async function planChatNotifications(
             state
               .prepare("INSERT INTO chat_progress VALUES(?,?,?,?)")
               .run(binding.id, run.id, Number(part.id), digest);
+          }
+        } else if (notification.kind === "flow-decision") {
+          // The draft as written, and Approve / Edit / Send back on its last part; a card that moved on is not news.
+          const parts = flowDecisionParts(store, notification);
+          if (parts !== null) {
+            state.enqueue({ id, installation: identity.installation, binding: binding.id, kind: "notice", channel: binding.channel, member: binding.member,
+              ts: "", thread: "", payload: "{}", created: now.toISOString() });
+            state.plan(id, parts, now);
           }
         } else if (notification.pushClass !== null || personal) {
           state.enqueue({
