@@ -65,31 +65,67 @@ function DefaultChoice({ title, description, action, field, value, canManage, ch
   </Section>;
 }
 
-/** The mail server flows' Send email steps use. The password is written here and never shown again. */
+/** The email account: Send email steps send from it and Email inbox triggers read it — a mail server, or a
+ * Google account instead. Passwords and the Google client secret are written here and never shown again. */
 function Email({ email, csrf }: { email: NonNullable<BrowserSettingsView["email"]>; csrf: string }) {
-  return <Section id="email" title="Email" description="Send email steps in your flows send from this address.">
-    <Collapsible defaultOpen={!email.set}>
+  const google = email.google.connected;
+  const status = google !== null ? `${google}, through Google` : email.set ? `From ${email.from} through ${email.host}${email.imapHost === "" ? "" : ` · reads ${email.imapHost}`}` : "Not set up";
+  return <Section id="email" title="Email" description="Send email steps send from this account, and Email inbox triggers read it.">
+    <Collapsible defaultOpen={!email.set && google === null}>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <span className="inline-flex items-center gap-2 text-sm"><StatusDot tone={email.set ? "ok" : "off"} />{email.set ? `From ${email.from} through ${email.host}` : "Not set up"}</span>
-        <CollapsibleTrigger asChild><Button variant="ghost" size="sm" className="ml-auto group">{email.set ? "Change" : "Set up"}<ChevronDown className="transition-transform group-data-[state=open]:rotate-180" /></Button></CollapsibleTrigger>
+        <span className="inline-flex items-center gap-2 text-sm"><StatusDot tone={email.set || google !== null ? "ok" : "off"} />{status}</span>
+        <CollapsibleTrigger asChild><Button variant="ghost" size="sm" className="ml-auto group">{email.set || google !== null ? "Change" : "Set up"}<ChevronDown className="transition-transform group-data-[state=open]:rotate-180" /></Button></CollapsibleTrigger>
       </div>
       <CollapsibleContent>
-        <form method="post" action="/settings/email" className="mt-3 grid gap-3 rounded-lg bg-muted p-4" data-email-settings>
-          <Csrf csrf={csrf} />
-          <p className="text-[13px] text-muted-foreground">For Gmail: smtp.gmail.com, port 587, your address, and an app password.</p>
-          <div className="grid gap-3 sm:grid-cols-[1fr_7rem]">
-            <div className="grid gap-2"><Label htmlFor="email-host">Mail server</Label><Input id="email-host" name="host" defaultValue={email.host} placeholder="smtp.gmail.com" required /></div>
-            <div className="grid gap-2"><Label htmlFor="email-port">Port</Label><Input id="email-port" name="port" type="number" min={1} max={65535} defaultValue={String(email.port)} required /></div>
-          </div>
-          <div className="grid gap-2"><Label htmlFor="email-from">Send from</Label><Input id="email-from" name="from" type="email" defaultValue={email.from} placeholder="you@example.com" required /></div>
-          <div className="grid gap-2"><Label htmlFor="email-user">Username</Label><Input id="email-user" name="user" autoComplete="username" defaultValue={email.user} placeholder="Usually the same address" /></div>
-          <div className="grid gap-2"><Label htmlFor="email-password">Password</Label><Input id="email-password" name="password" type="password" autoComplete="off" placeholder={email.set ? "Leave empty to keep the saved one" : "An app password"} /></div>
-          <label className="flex items-center gap-2 text-[13px]"><input type="checkbox" name="secure" className="size-4 accent-[var(--so-accent)]" defaultChecked={email.secure} />Use SSL from the start (port 465)</label>
-          <div className="flex flex-wrap items-center gap-2">
-            <Button type="submit">Save email</Button>
-            {email.set && <Button type="submit" variant="outline" formAction="/settings/email-test" formNoValidate>Send a test email</Button>}
-          </div>
-        </form>
+        {google !== null
+          ? <form method="post" action="/settings/google/disconnect" className="mt-3 grid gap-3 rounded-lg bg-muted p-4" data-google-connected>
+              <Csrf csrf={csrf} />
+              <p className="text-[13px]">Signed in with Google as <strong>{google}</strong>. Mail is sent and read through it.</p>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button type="submit" variant="outline" formAction="/settings/email-test">Send a test email</Button>
+                <Button type="submit" variant="outline" formAction="/settings/email-read-test">Check the inbox</Button>
+                <Button type="submit" variant="ghost">Disconnect Google</Button>
+              </div>
+            </form>
+          : <>
+            <form method="post" action="/settings/email" className="mt-3 grid gap-3 rounded-lg bg-muted p-4" data-email-settings>
+              <Csrf csrf={csrf} />
+              <p className="text-[13px] text-muted-foreground">For Gmail: smtp.gmail.com, port 587, your address, and an app password. To read mail too, add imap.gmail.com.</p>
+              <div className="grid gap-3 sm:grid-cols-[1fr_7rem]">
+                <div className="grid gap-2"><Label htmlFor="email-host">Mail server</Label><Input id="email-host" name="host" defaultValue={email.host} placeholder="smtp.gmail.com" required /></div>
+                <div className="grid gap-2"><Label htmlFor="email-port">Port</Label><Input id="email-port" name="port" type="number" min={1} max={65535} defaultValue={String(email.port)} required /></div>
+              </div>
+              <div className="grid gap-2"><Label htmlFor="email-from">Send from</Label><Input id="email-from" name="from" type="email" defaultValue={email.from} placeholder="you@example.com" required /></div>
+              <div className="grid gap-2"><Label htmlFor="email-user">Username</Label><Input id="email-user" name="user" autoComplete="username" defaultValue={email.user} placeholder="Usually the same address" /></div>
+              <div className="grid gap-2"><Label htmlFor="email-password">Password</Label><Input id="email-password" name="password" type="password" autoComplete="off" placeholder={email.set ? "Leave empty to keep the saved one" : "An app password"} /></div>
+              <label className="flex items-center gap-2 text-[13px]"><input type="checkbox" name="secure" className="size-4 accent-[var(--so-accent)]" defaultChecked={email.secure} />Use SSL from the start (port 465)</label>
+              <div className="grid gap-3 sm:grid-cols-[1fr_7rem]">
+                <div className="grid gap-2"><Label htmlFor="email-imap">Read mail from (optional)</Label><Input id="email-imap" name="imapHost" defaultValue={email.imapHost} placeholder="imap.gmail.com" /></div>
+                <div className="grid gap-2"><Label htmlFor="email-imap-port">Port</Label><Input id="email-imap-port" name="imapPort" type="number" min={1} max={65535} defaultValue={String(email.imapPort)} /></div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button type="submit">Save email</Button>
+                {email.set && <Button type="submit" variant="outline" formAction="/settings/email-test" formNoValidate>Send a test email</Button>}
+                {email.set && email.imapHost !== "" && <Button type="submit" variant="outline" formAction="/settings/email-read-test" formNoValidate>Check the inbox</Button>}
+              </div>
+            </form>
+            <details className="mt-3 rounded-lg border px-4 py-3" open={email.google.clientId !== "" && !email.set} data-google-setup>
+              <summary className="cursor-pointer text-[13px] font-semibold">Or sign in with a Google account</summary>
+              <form method="post" action="/settings/google" className="mt-3 grid gap-3">
+                <Csrf csrf={csrf} />
+                <ol className="list-decimal space-y-1 pl-5 text-[13px] text-muted-foreground">
+                  <li>In Google Cloud Console, make an OAuth client of type <em>Web application</em>, and set the consent screen to <em>In production</em> (while it's in Testing, Google ends the connection after 7 days).</li>
+                  {email.google.redirect === null
+                    ? <li>Open these settings on this computer (localhost) or at your https address to see the redirect address to add.</li>
+                    : <li>Add this as an authorized redirect address: <code className="break-all rounded bg-muted px-1 py-0.5 text-foreground" data-google-redirect>{email.google.redirect}</code></li>}
+                  <li>Paste the client ID and secret here, then connect. Google warns that it hasn't verified the app: it's your own, so continue.</li>
+                </ol>
+                <div className="grid gap-2"><Label htmlFor="google-id">Client ID</Label><Input id="google-id" name="clientId" defaultValue={email.google.clientId} placeholder="….apps.googleusercontent.com" required /></div>
+                <div className="grid gap-2"><Label htmlFor="google-secret">Client secret</Label><Input id="google-secret" name="clientSecret" type="password" autoComplete="off" placeholder={email.google.clientId !== "" ? "Leave empty to keep the saved one" : ""} /></div>
+                <Button type="submit" className="justify-self-start" disabled={email.google.redirect === null}>Connect Google</Button>
+              </form>
+            </details>
+          </>}
       </CollapsibleContent>
     </Collapsible>
   </Section>;

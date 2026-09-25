@@ -25,6 +25,10 @@ import nodemailer from "nodemailer";
 import { redactSecretAssignments } from "./builder.js";
 import { redactSecretLines, scanForSecrets } from "./evidence.js";
 import { fillFlowText, type FlowStage } from "./flows.js";
+import { googleAccessToken, googleConnected } from "./google-mail.js";
+import { ADDRESS, readEmailSettings, type EmailSettings } from "./email-settings.js";
+
+export { readEmailSettings, saveEmailSettings, type EmailSettings } from "./email-settings.js";
 import { callProjectTool, projectToolsOf, readToolSecrets, type ToolCall, type ToolSpec } from "./project-tools.js";
 import { ALL_CREDENTIAL_ENV } from "./provider.js";
 import type { FlowCardRow, Store } from "./store.js";
@@ -123,47 +127,37 @@ export async function runRequest(stage: FlowStage, card: FlowCardRow, repo: stri
 // ---- email ----------------------------------------------------------------------
 
 /** The operator's mail server: everything but the password is shown back. */
-export type EmailSettings = { host: string; port: number; secure: boolean; user: string; from: string };
-const EMAIL_FILE = "email.json";
-const ADDRESS = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$/;
-
-export function readEmailSettings(dir: string | null): (EmailSettings & { password: string }) | null {
-  if (dir === null || !existsSync(join(dir, EMAIL_FILE))) return null;
-  try {
-    const raw = JSON.parse(readFileSync(join(dir, EMAIL_FILE), "utf8")) as Record<string, unknown>;
-    if (typeof raw["host"] !== "string" || typeof raw["from"] !== "string") return null;
-    return { host: raw["host"], port: Number(raw["port"]) || 587, secure: raw["secure"] === true, user: typeof raw["user"] === "string" ? raw["user"] : "", from: raw["from"], password: typeof raw["password"] === "string" ? raw["password"] : "" };
-  } catch { return null; }
+/** Whether Send email steps can send: a connected Google account or a mail server. */
+export function sendingReady(dir: string | null): boolean {
+  return googleConnected(dir) !== null || readEmailSettings(dir) !== null;
 }
 
-/** Save the mail server from Settings; an empty password keeps the saved one. */
-export function saveEmailSettings(dir: string, input: { host: unknown; port: unknown; secure: unknown; user: unknown; from: unknown; password: unknown }): { ok: true; said: string } | { ok: false; message: string } {
-  const host = typeof input.host === "string" ? input.host.trim() : "";
-  if (!/^[A-Za-z0-9.-]{1,253}$/.test(host)) return { ok: false, message: "Give the mail server's name, like smtp.gmail.com." };
-  const port = Number(input.port);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) return { ok: false, message: "The port is a number, usually 587 or 465." };
-  const from = typeof input.from === "string" ? input.from.trim() : "";
-  if (!ADDRESS.test(from)) return { ok: false, message: "Give the address emails come from." };
-  const user = typeof input.user === "string" ? input.user.trim().slice(0, 254) : "";
-  const password = typeof input.password === "string" && input.password !== "" ? input.password : readEmailSettings(dir)?.password ?? "";
-  writeFileSync(join(dir, EMAIL_FILE), JSON.stringify({ host, port, secure: input.secure === true || input.secure === "on" || input.secure === "true" || port === 465, user, from, password }), { mode: 0o600 });
-  chmodSync(join(dir, EMAIL_FILE), 0o600);
-  return { ok: true, said: `Email is set up: it comes from ${from}.` };
+/** The account Send email steps send from, signed in: Google when connected, else the mail server. */
+export async function sendingAccount(dir: string | null, fetcher: typeof fetch): Promise<{ ok: true; settings: EmailSettings & { password: string; accessToken?: string } } | { ok: false; said: string; permanent: boolean }> {
+  if (googleConnected(dir) !== null) {
+    const token = await googleAccessToken(dir, fetcher);
+    if (!token.ok) return token;
+    return { ok: true, settings: { host: "smtp.gmail.com", port: 465, secure: true, user: token.address, from: token.address, password: "", accessToken: token.token, imap: null } };
+  }
+  const server = readEmailSettings(dir);
+  return server === null ? { ok: false, said: "Email isn't set up yet. Add your mail server in Settings → Email.", permanent: false } : { ok: true, settings: server };
 }
 
-export type Mail = { from: string; to: string[]; subject: string; text: string };
-export type MailSender = (settings: EmailSettings & { password: string }, mail: Mail) => Promise<{ ok: true; id: string } | { ok: false; said: string; permanent: boolean }>;
+/** `inReplyTo` and `references` keep a reply in the thread of the email a card came from. */
+export type Mail = { from: string; to: string[]; subject: string; text: string; inReplyTo?: string; references?: string[] };
+export type MailSender = (settings: EmailSettings & { password: string; accessToken?: string }, mail: Mail) => Promise<{ ok: true; id: string } | { ok: false; said: string; permanent: boolean }>;
 
 /** The production sender: the operator's mail server through nodemailer. */
 export const sendThroughServer: MailSender = async (settings, mail) => {
   const transport = nodemailer.createTransport({
     // A password never travels unencrypted: with a sign-in, the connection must be (or become) TLS.
     host: settings.host, port: settings.port, secure: settings.secure, requireTLS: !settings.secure && settings.user !== "",
-    ...(settings.user === "" ? {} : { auth: { user: settings.user, pass: settings.password } }),
+    ...(settings.accessToken !== undefined ? { auth: { type: "OAuth2" as const, user: settings.user, accessToken: settings.accessToken } } : settings.user === "" ? {} : { auth: { user: settings.user, pass: settings.password } }),
     connectionTimeout: 15_000, greetingTimeout: 15_000, socketTimeout: 30_000,
   });
   try {
-    const sent = await transport.sendMail({ from: mail.from, to: mail.to, subject: mail.subject, text: mail.text });
+    const sent = await transport.sendMail({ from: mail.from, to: mail.to, subject: mail.subject, text: mail.text,
+      ...(mail.inReplyTo === undefined ? {} : { inReplyTo: mail.inReplyTo, references: mail.references ?? [mail.inReplyTo] }) });
     return { ok: true, id: String(sent.messageId ?? "") };
   } catch (error) {
     const code = (error as { responseCode?: unknown }).responseCode;
@@ -176,9 +170,10 @@ export const sendThroughServer: MailSender = async (settings, mail) => {
   }
 };
 
-export async function sendEmail(stage: FlowStage, card: FlowCardRow, io: { dir: string | null; mail?: MailSender }): Promise<ActionOutcome> {
-  const settings = readEmailSettings(io.dir);
-  if (settings === null) return { state: "retry", said: "Email isn't set up yet. Add your mail server in Settings → Email." };
+export async function sendEmail(stage: FlowStage, card: FlowCardRow, io: { dir: string | null; mail?: MailSender; fetch?: typeof fetch }): Promise<ActionOutcome> {
+  const account = await sendingAccount(io.dir, io.fetch ?? fetch);
+  if (!account.ok) return { state: account.permanent ? "failed" : "retry", said: account.said };
+  const settings = account.settings;
   const text = { title: card.title, description: card.description, note: card.note, outputs: card.outputs };
   const email = stage.email!;
   const to = [...new Set(fillFlowText(email.to, text).split(/[\s,;]+/).map(one => one.trim()).filter(one => ADDRESS.test(one)))].slice(0, 10);
@@ -186,7 +181,10 @@ export async function sendEmail(stage: FlowStage, card: FlowCardRow, io: { dir: 
   const subject = clip(fillFlowText(email.subject, text).replace(/[\r\n]+/g, " "), 200);
   const body = clip(fillFlowText(email.body, text), 20_000);
   if (body.trim() === "") return { state: "failed", said: "The email would be empty." };
-  const sent = await (io.mail ?? sendThroughServer)(settings, { from: settings.from, to, subject, text: body });
+  // A card that came from an email, answered to its sender: the reply stays in that thread.
+  const thread = card.source?.mail;
+  const threaded = thread?.id != null && to.some(one => one.toLowerCase() === thread.from) ? { inReplyTo: thread.id, references: [...thread.references, thread.id].slice(-20) } : {};
+  const sent = await (io.mail ?? sendThroughServer)(settings, { from: settings.from, to, subject, text: body, ...threaded });
   const log = `From ${settings.from} to ${to.join(", ")}\nSubject: ${subject}\n\n${blank(body)}`;
   if (!sent.ok) return { state: sent.permanent ? "failed" : "retry", said: sent.said, log };
   return { state: "passed", said: `Emailed ${to.join(", ")}.`, log, output: `Sent to ${to.join(", ")}: “${subject}”` };

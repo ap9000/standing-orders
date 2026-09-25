@@ -78,7 +78,9 @@ export type BrowserSettingsView = {
   digest: { every: string; held: string | null } | null;
   telegram: { state: string; current: string };
   /** v87: the mail server Send email steps use (approvers only); the password is never shown back. */
-  email?: { set: boolean; host: string; port: number; secure: boolean; user: string; from: string } | null;
+  email?: { set: boolean; host: string; port: number; secure: boolean; user: string; from: string;
+    /** v89: where Email inbox triggers read (IMAP), and a Google account connected instead of a mail server (`redirect`: the address to register with Google, when this page's address can take one). */
+    imapHost: string; imapPort: number; google: { connected: string | null; clientId: string; redirect: string | null } } | null;
 };
 /** A fold on the task page. Its HTML is the server's own section body, so
  * forms, ids and page scripts are unchanged. */
@@ -229,6 +231,8 @@ export type BrowserFlowView = {
   /** What adding a trigger needs to know: this project's GitHub repository, whether a Linear key is saved, the public webhook address, other flows to follow. */
   triggerSetup: {
     kinds: { kind: string; label: string }[]; githubRepo: string | null; linearKey: boolean; hooksBase: string | null; hooksPath: string;
+    /** v89: whether Email inbox triggers can read mail (Settings → Email), and whose mailbox it is. */
+    mailbox: string | null;
     otherFlows: { id: number; name: string; zones: { id: string; title: string }[] }[];
   };
   /** A button trigger to open straight away (?start=). */

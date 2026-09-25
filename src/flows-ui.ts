@@ -6,10 +6,12 @@ import { describeTrigger, triggerHeadline, FLOW_TRIGGER_KINDS, FLOW_TRIGGER_WORD
 import { deciderOf, FLOW_COLORS, FLOW_KIND_WORDS, FLOW_STAGE_KINDS, FLOW_TEMPLATES } from "./flows.js";
 import { flowInsights, troubleWords } from "./flow-insights.js";
 import { parseSortDecision, sortChip } from "./flow-sort.js";
-import { flowSecretNames, readEmailSettings } from "./flow-actions.js";
+import { flowSecretNames, readEmailSettings, sendingReady } from "./flow-actions.js";
 import { projectToolsOf, secretsSetFor, toolStanding } from "./project-tools.js";
 import type { FlowCardRow, FlowRow, Store } from "./store.js";
 import { flowFingerprint } from "./flow-live.js";
+import { googleConnected } from "./google-mail.js";
+import { mailboxReady } from "./mailbox.js";
 
 const e = (value: unknown) =>
   String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
@@ -94,7 +96,7 @@ export function flowView(store: Store, flow: FlowRow, viewer: { name: string; ap
       zone: title(config?.zone ?? definition?.start ?? ""), zoneId: config?.zone ?? definition?.start ?? "", state: trigger.state, status: trigger.lastOutcome, statusAt: trigger.lastAt, failing: trigger.failures > 0,
       button: config?.kind === "button" ? { label: config.label, questions: config.questions } : null,
       hook: config !== null && takesDeliveries(config) ? { ready: hookReady(trigger, setup.dir), needsSecret: config.kind === "linear" } : null,
-      checkable: (config?.kind === "github" || config?.kind === "linear") && config.delivery === "poll",
+      checkable: ((config?.kind === "github" || config?.kind === "linear") && config.delivery === "poll") || config?.kind === "email",
       shared: config?.kind === "button" && trigger.hookHash !== null,
     };
   });
@@ -106,12 +108,13 @@ export function flowView(store: Store, flow: FlowRow, viewer: { name: string; ap
     triggerSetup: {
       kinds: FLOW_TRIGGER_KINDS.map(kind => ({ kind, label: FLOW_TRIGGER_WORDS[kind] })),
       githubRepo: githubRepoOf(flow.repo), linearKey: readLinearKey(setup.dir) !== null, hooksBase: readHooksBase(setup.dir), hooksPath: HOOK_PATH,
+      mailbox: mailboxReady(setup.dir) ? googleConnected(setup.dir)?.address ?? readEmailSettings(setup.dir)?.from ?? null : null,
       otherFlows: store.listFlows(setup.repos).filter(one => one.id !== flow.id).map(one => ({ id: one.id, name: one.name, zones: (flowDefinitionOf(one)?.stages ?? []).map(stage => ({ id: stage.id, title: stage.title })) })),
     },
     startTrigger: setup.startTrigger ?? null,
     me: viewer.name,
     sortReady: setup.sortReady ?? false,
-    emailReady: readEmailSettings(setup.dir) !== null,
+    emailReady: sendingReady(setup.dir),
     requestSecrets: flowSecretNames(setup.dir, flow.repo),
     tools: projectToolsOf(store, flow.repo).map(tool => ({ name: tool.name, about: tool.spec.about, functions: tool.lastTest?.ok === true ? tool.lastTest.tools : [],
       ready: toolStanding(tool, secretsSetFor(flow.repo, tool.spec, setup.toolHome)).ready })),

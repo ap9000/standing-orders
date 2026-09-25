@@ -37,7 +37,16 @@ a report, a draft, a sort, an API's answer).
 
 **Triggers** add cards on their own: a button (which can also be shared as a
 public form), a schedule, GitHub (new issues, a label, new pull requests,
-failed checks), Linear, another flow's cards reaching a zone, or a webhook.
+failed checks), Linear, another flow's cards reaching a zone, a webhook, or
+an **email inbox**.
+
+An email inbox trigger turns each new message in your mailbox into a card:
+the subject is its title, and the sender and the new part of the message
+(without quoted history or signature) are its details. You can limit it to
+some senders or domains, or to subjects with a word in them. It reads the
+account set up in Settings → Email, only reads (nothing is marked or moved),
+and starts from the moment it's added. Out-of-office replies, bounces and
+your own messages never become cards.
 
 ## People
 

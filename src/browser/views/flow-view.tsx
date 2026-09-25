@@ -41,6 +41,7 @@ function SortChip({ sorted }: { sorted: NonNullable<BrowserFlowCard["sorted"]> }
 const TRIGGER_ICONS: Record<string, ReactNode> = {
   button: <MousePointerClick className="size-3.5" aria-hidden="true" />, schedule: <CalendarClock className="size-3.5" aria-hidden="true" />, github: <GitPullRequest className="size-3.5" aria-hidden="true" />,
   linear: <SquareKanban className="size-3.5" aria-hidden="true" />, flow: <Workflow className="size-3.5" aria-hidden="true" />, webhook: <Webhook className="size-3.5" aria-hidden="true" />,
+  email: <Mail className="size-3.5" aria-hidden="true" />,
 };
 
 type Reveal = { path: string; address: string | null; secret: string | null };
@@ -629,7 +630,7 @@ function RevealBox({ kind, reveal, onDone }: { kind: string; reveal: Reveal; onD
 
 const TRIGGER_KEYS: Record<string, string[]> = {
   button: ["label", "questions"], schedule: ["schedule", "title", "description"], github: ["repo", "watch", "label", "branch", "from", "delivery"],
-  linear: ["team", "state", "label", "delivery"], flow: ["flow", "when"], webhook: ["title", "titleField", "bodyField"],
+  linear: ["team", "state", "label", "delivery"], flow: ["flow", "when"], webhook: ["title", "titleField", "bodyField"], email: ["folder", "sender", "subject"],
 };
 
 function AddTrigger({ view, csrf, open, onResult }: { view: BrowserFlowView; csrf: string; open: boolean; onResult: (result: Said, kind: string) => void }) {
@@ -640,7 +641,7 @@ function AddTrigger({ view, csrf, open, onResult }: { view: BrowserFlowView; csr
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const defaults: Record<string, Record<string, string>> = {
     schedule: { schedule: `daily 09:00 ${timezone}` }, github: { repo: setup.githubRepo ?? "", watch: "issues", from: "team", delivery: "poll", branch: "main" },
-    linear: { delivery: "poll" }, flow: { flow: String(setup.otherFlows[0]?.id ?? "") }, webhook: { title: "Webhook" },
+    linear: { delivery: "poll" }, flow: { flow: String(setup.otherFlows[0]?.id ?? "") }, webhook: { title: "Webhook" }, email: { folder: "INBOX" },
   };
   const v = (key: string) => fields[key] ?? defaults[kind]?.[key] ?? "";
   const set = (key: string) => (event: { target: { value: string } }) => setFields(current => ({ ...current, [key]: event.target.value }));
@@ -698,6 +699,14 @@ function AddTrigger({ view, csrf, open, onResult }: { view: BrowserFlowView; csr
         <Field label="When a card reaches"><select className={SELECT} value={v("when")} onChange={set("when")}>
           <option value="">The end</option>{source?.zones.map(one => <option key={one.id} value={one.id}>{one.title}</option>)}</select></Field>
       </>)}
+      {kind === "email" && <>
+        {setup.mailbox === null
+          ? <p className="rounded-md bg-muted px-2.5 py-2 text-[12.5px]" data-mailbox-missing>Reading mail isn't set up yet. Add your mail server's IMAP address, or sign in with Google, in <a className="underline" href="/settings#email">Settings → Email</a>.</p>
+          : <p className="text-[12.5px] text-muted-foreground">New mail in {setup.mailbox} becomes cards, from now on. The mailbox is only read: nothing is marked or moved.</p>}
+        <Field label="Folder"><Input value={v("folder")} onChange={set("folder")} placeholder="INBOX" maxLength={100} /></Field>
+        <Field label="Only from (optional)" hint="Addresses or domains, like priya@example.com, example.com."><Input value={v("sender")} onChange={set("sender")} maxLength={300} /></Field>
+        <Field label="Subject has (optional)"><Input value={v("subject")} onChange={set("subject")} placeholder="Order" maxLength={100} /></Field>
+      </>}
       {kind === "webhook" && <>
         <Field label="Title field" hint="Where to find the card's title in the posted JSON, like title or data.issue.title."><Input value={v("titleField")} onChange={set("titleField")} placeholder="title" maxLength={80} /></Field>
         <Field label="Details field"><Input value={v("bodyField")} onChange={set("bodyField")} placeholder="description" maxLength={80} /></Field>

@@ -21,7 +21,9 @@ import { skillsHtml, skillsScript, skillsSnapshotHtml, skillTestFeedbackHtml, SK
 import { toolsHtml, TOOLS_CSS, type ToolsView } from "./tools-ui.js";
 import { flowFallbackHtml, flowsListHtml, flowView, FLOWS_CSS } from "./flows-ui.js";
 import { createFlowRooms, flowFingerprint } from "./flow-live.js";
-import { readEmailSettings, saveEmailSettings, sendThroughServer, setFlowSecret, type MailSender } from "./flow-actions.js";
+import { disconnectGoogle, finishGoogleConsent, GOOGLE_CALLBACK, googleConnected, googleConsent, readGoogleMail, saveGoogleClient, type GoogleVisit } from "./google-mail.js";
+import { mailboxAccess, readThroughImap } from "./mailbox.js";
+import { readEmailSettings, saveEmailSettings, sendingAccount, sendThroughServer, setFlowSecret, type MailSender } from "./flow-actions.js";
 import { assignFlowCard, commentOnFlowCard, watchFlowCard } from "./flow-people.js";
 import { saveScript } from "./flow-scripts.js";
 import { flowInsights } from "./flow-insights.js";
@@ -341,6 +343,8 @@ export type ServeOptions = {
   toolHome?: string;
   /** v87: sends Send email steps' mail and the settings test (tests inject one). */
   mailSender?: MailSender;
+  /** v89: Google's token endpoint (tests inject a scripted one). */
+  googleFetch?: typeof fetch;
   chatEnv?: Record<string, string | undefined>;
   /**
    * The live peek's locality ASSERTION (live-peek v3 §3): the administrator
@@ -674,6 +678,8 @@ export function createDecisionServer(options: ServeOptions): Server {
   const teamStreams = new Set<ServerResponse>();
   /** Open chat streams (live replies), ended when the server closes. */
   const chatStreams = new Set<ServerResponse>();
+  /** Google sign-ins in progress (v89): each consent visit's state, for 10 minutes. */
+  const googleVisits = new Map<string, GoogleVisit>();
   /** Flows open in a browser (v88): who's here, and a nudge when one changes. */
   const flowRooms = createFlowRooms(flow => flowFingerprint(store, flow));
   const team = createTeamRuntime({ store, repos: codingProjects, evidenceRoot, clock, workspaceRevision,
@@ -748,6 +754,9 @@ export function createDecisionServer(options: ServeOptions): Server {
     return parsed;
   })();
   const cookieSecure = publicOrigin === null ? "" : "; Secure";
+  /** Where Google may send someone back to (v89): the public https address, or this computer's own. */
+  const consoleOrigin = (host: string | undefined): string | null =>
+    host === undefined ? null : publicOrigin !== null && host === publicOrigin.host ? publicOrigin.origin : /^(localhost|127\.0\.0\.1|\[::1\]):[0-9]{1,5}$/.test(host) ? `http://${host}` : null;
 
   /** The names this server answers as. Anything else is a rebind, refused. */
   const allowedHost = (host: string | undefined): boolean => {
@@ -896,6 +905,25 @@ export function createDecisionServer(options: ServeOptions): Server {
     catch { return page({ status: 500, html: "" }); }
   }
 
+  /** Google's redirect back: the code becomes a saved refresh token, and a page sends the person back to Settings. */
+  async function googleCallback(response: ServerResponse, url: URL): Promise<void> {
+    const done = (said: string) => {
+      const back = `/settings?said=${encodeURIComponent(said)}#email`;
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer", "x-content-type-options": "nosniff", "x-frame-options": "DENY",
+        "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'" });
+      response.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="0;url=${escape(back)}"><title>Standing Orders</title><p style="font:15px system-ui;margin:2rem">${escape(said)} <a href="${escape(back)}">Back to Settings</a></p>`);
+    };
+    const state = url.searchParams.get("state") ?? "";
+    const visit = googleVisits.get(state);
+    googleVisits.delete(state);
+    if (options.configDir === undefined || visit === undefined || visit.expires < Date.now() || store.accountOf(visit.by)?.role !== "approver") return done("That Google sign-in expired. Connect again from Settings.");
+    if (url.searchParams.has("error")) return done(url.searchParams.get("error") === "access_denied" ? "Google wasn't connected: access was declined." : "Google wasn't connected.");
+    const code = url.searchParams.get("code") ?? "";
+    if (!/^[A-Za-z0-9/_.~-]{10,1024}$/.test(code)) return done("Google didn't send a sign-in code. Connect again.");
+    const finished = await finishGoogleConsent(options.configDir, visit, code, options.googleFetch ?? fetch);
+    return done(finished.ok ? `Connected ${finished.address}. Send email steps and Email inbox triggers use it now.` : finished.message);
+  }
+
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     // Webhooks come through a public relay (Tailscale Funnel, a reverse
     // proxy) that forwards its own host name. The host check guards pages a
@@ -913,6 +941,9 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (url.searchParams.has("token")) {
       return respond(response, 400, "text/plain; charset=utf-8", "credentials never travel in URLs");
     }
+    // Back from Google's consent screen (v89). The session cookie is SameSite=Strict and stays behind on
+    // a return from another site: the visit's one-time state (made by a signed-in approver) is the proof.
+    if (url.pathname === GOOGLE_CALLBACK && request.method === "GET") return googleCallback(response, url);
 
     const method = request.method ?? "GET";
     if (await sessionEndpoint(request, response)) return;
@@ -3339,8 +3370,11 @@ export function createDecisionServer(options: ServeOptions): Server {
           canManage: who.role === "approver",
         }, who.role === "approver" && csrf !== "" ? (() => {
           // v87: the mail server flows send email through; the password is never shown back.
-          const email = readEmailSettings(options.configDir ?? null);
-          return email === null ? { set: false, host: "", port: 587, secure: false, user: "", from: "" } : { set: true, host: email.host, port: email.port, secure: email.secure, user: email.user, from: email.from };
+          // v89: where Inbox triggers read it, and a connected Google account (its client secret is never shown back either).
+          const email = readEmailSettings(options.configDir ?? null), google = readGoogleMail(options.configDir ?? null), origin = consoleOrigin(request.headers.host);
+          const googleView = { connected: googleConnected(options.configDir ?? null)?.address ?? null, clientId: google?.clientId ?? "", redirect: origin === null ? null : `${origin}${GOOGLE_CALLBACK}` };
+          return email === null ? { set: false, host: "", port: 587, secure: false, user: "", from: "", imapHost: "", imapPort: 993, google: googleView }
+            : { set: true, host: email.host, port: email.port, secure: email.secure, user: email.user, from: email.from, imapHost: email.imap?.host ?? "", imapPort: email.imap?.port ?? 993, google: googleView };
         })() : null),
       );
     }
@@ -5492,7 +5526,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           return pressed.ok ? settle(pressed.said) : answer(400, { ok: false, said: pressed.message });
         }
         if (verb === "check") {
-          const checked = await checkFlowTriggerNow(store, trigger, now, { gh: options.flowTriggerIo?.gh ?? execRun, fetch: options.flowTriggerIo?.fetch ?? fetch, dir });
+          const checked = await checkFlowTriggerNow(store, trigger, now, { gh: options.flowTriggerIo?.gh ?? execRun, fetch: options.flowTriggerIo?.fetch ?? fetch, dir, ...(options.flowTriggerIo?.mail === undefined ? {} : { mail: options.flowTriggerIo.mail }) });
           try { advanceFlows(store, flow.repo, now, { evidenceRoot }); } catch { /* the next worker pass retries */ }
           return answer(checked.ok ? 200 : 409, { ok: checked.ok, said: checked.said, view: viewNow() });
         }
@@ -6057,15 +6091,43 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
 
     // v87: the mail server Send email steps use, and a test email to its own address.
-    if ((url.pathname === "/settings/email" || url.pathname === "/settings/email-test") && who.role === "approver" && options.configDir !== undefined) {
+    if ((url.pathname === "/settings/email" || url.pathname === "/settings/email-test" || url.pathname === "/settings/email-read-test") && who.role === "approver" && options.configDir !== undefined) {
+      const said = (words: string) => redirect(response, `/settings?said=${encodeURIComponent(words)}#email`);
       if (url.pathname === "/settings/email") {
-        const saved = saveEmailSettings(options.configDir, { host: body.get("host"), port: body.get("port"), secure: body.get("secure"), user: body.get("user"), from: body.get("from"), password: body.get("password") });
-        return redirect(response, `/settings?said=${encodeURIComponent(saved.ok ? saved.said : saved.message)}#email`);
+        const saved = saveEmailSettings(options.configDir, { host: body.get("host"), port: body.get("port"), secure: body.get("secure"), user: body.get("user"), from: body.get("from"), password: body.get("password"), imapHost: body.get("imapHost"), imapPort: body.get("imapPort") });
+        return said(saved.ok ? saved.said : saved.message);
       }
-      const settings = readEmailSettings(options.configDir);
-      if (settings === null) return redirect(response, `/settings?said=${encodeURIComponent("Set up email first.")}#email`);
+      if (url.pathname === "/settings/email-read-test") {
+        // Sign in and open the inbox read-only, as an Inbox trigger's first check does: nothing is read or changed.
+        const signed = await mailboxAccess(options.configDir, options.googleFetch ?? fetch);
+        if (!signed.ok) return said(signed.said);
+        const opened = await (options.flowTriggerIo?.mail ?? readThroughImap)(signed.access, "INBOX", null, 1);
+        return said(opened.ok ? `Reading works: signed in to the inbox of ${signed.address}.` : opened.said);
+      }
+      const account = await sendingAccount(options.configDir, options.googleFetch ?? fetch);
+      if (!account.ok) return said(account.said === "Email isn't set up yet. Add your mail server in Settings → Email." ? "Set up email first." : account.said);
+      const settings = account.settings;
       const sent = await (options.mailSender ?? sendThroughServer)(settings, { from: settings.from, to: [settings.from], subject: "Standing Orders: test email", text: "This is a test from Standing Orders. Send email steps in your flows will come from this address." });
-      return redirect(response, `/settings?said=${encodeURIComponent(sent.ok ? `Sent a test email to ${settings.from}.` : sent.said)}#email`);
+      return said(sent.ok ? `Sent a test email to ${settings.from}.` : sent.said);
+    }
+
+    // v89: a Google account for email: save the OAuth client and go to Google's consent screen, or disconnect.
+    if ((url.pathname === "/settings/google" || url.pathname === "/settings/google/disconnect") && who.role === "approver" && options.configDir !== undefined) {
+      const said = (words: string) => redirect(response, `/settings?said=${encodeURIComponent(words)}#email`);
+      if (url.pathname === "/settings/google/disconnect") {
+        await disconnectGoogle(options.configDir, options.googleFetch ?? fetch);
+        return said("Google disconnected. Email goes through the mail server again, if one is set up.");
+      }
+      const saved = saveGoogleClient(options.configDir, { clientId: body.get("clientId"), clientSecret: body.get("clientSecret") });
+      if (!saved.ok) return said(saved.message);
+      const origin = consoleOrigin(request.headers.host);
+      if (origin === null) return said("Connect Google from this computer (localhost) or from your https address.");
+      const consent = googleConsent(readGoogleMail(options.configDir)!, `${origin}${GOOGLE_CALLBACK}`, who.name);
+      for (const [key, visit] of googleVisits) if (visit.expires < Date.now()) googleVisits.delete(key);
+      googleVisits.set(consent.visit.state, consent.visit);
+      response.writeHead(303, { Location: consent.url, "cache-control": "no-store", "referrer-policy": "no-referrer" });
+      response.end();
+      return;
     }
 
     if (url.pathname === "/projects/select") {

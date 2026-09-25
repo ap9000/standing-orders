@@ -157,7 +157,7 @@ describe("an email", () => {
     const card = cardIn(flow, "send");
     store.updateFlowCard(card, { outputs: { draft: "Hi Priya, refunded today." } }, T0);
     await runFlowSteps(store, repo, at(1), io());
-    expect(store.getFlowCard(card)).toMatchObject({ stage: "send", waiting: "Email isn't set up yet. Add your mail server in Settings → Email." });
+    expect(store.getFlowCard(card)).toMatchObject({ stage: "send", waiting: "Email isn't set up yet. Add your mail server or a Google account in Settings → Email." });
     const mail = await mailServer();
     try {
       expect(saveEmailSettings(dir, { host: "127.0.0.1", port: String(mail.port), secure: undefined, user: "", from: "team@shop.example", password: "" })).toEqual({ ok: true, said: "Email is set up: it comes from team@shop.example." });
