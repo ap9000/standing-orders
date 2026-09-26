@@ -45,7 +45,8 @@ import { assignFlowCard, commentOnFlowCard, flowPeople, mentionsIn, watchFlowCar
 import { addFlowTriggerTo, describeTrigger, readLinearKey, removeFlowTrigger, takesDeliveries, triggerConfigOf, validateTriggerConfig } from "./flow-triggers.js";
 import { dirname } from "node:path";
 import { handleOf, parseSoul, SOUL_CHARS, TEAMMATE_TEMPLATES, teammateLabel } from "./teammates.js";
-import { createTeammateFrom, labelOf, leaveNote, nameOf, renamedSoul, saveSoul, setTeammateState } from "./teammate-admin.js";
+import { createTeammateFrom, labelOf, nameOf, renamedSoul, saveSoul, setTeammateState } from "./teammate-admin.js";
+import { cleanMemory, editMemory, forgetMemory, tellTeammate } from "./teammate-memory.js";
 import { answerTeammateQuestion } from "./teammate-work.js";
 import { checkRule, defaultRule, grantListed, revokeTool, ruleWords, setToolRules } from "./teammate-tools.js";
 
@@ -116,6 +117,7 @@ export const CHAT_ACTIONS = {
   teammate_note: { label: "Tell teammate", protected: false, password: false },
   teammate_answer: { label: "Answer teammate", protected: false, password: false },
   teammate_tools: { label: "Change teammate's tools", protected: false, password: false },
+  teammate_memory: { label: "Change teammate's memory", protected: false, password: false },
   decision_record: { label: "Record decision", protected: false, password: false },
   decision_retire: { label: "Retire decision", protected: false, password: false },
   scope_approve: { label: "Approve work", protected: true, password: true },
@@ -175,6 +177,7 @@ export const CHAT_ACTION_FIELDS: Record<ChatAction, readonly string[]> = {
   teammate_note: ["teammate", "note"],
   teammate_answer: ["question", "choice", "text"],
   teammate_tools: ["teammate", "tool", "change", "action", "use", "limitField", "limitOver"],
+  teammate_memory: ["teammate", "memory", "change", "text"],
   decision_record: ["repo", "claim", "why", "supersedes", "source"],
   decision_retire: ["repo", "decision", "reason"],
   scope_approve: ["task"],
@@ -482,13 +485,28 @@ export function prepareSharedAction(
         title = `${name}: ${action} — ${ruleWords(checked.rule)}`;
         terms.push(`${tool} → ${action}: ${ruleWords(checked.rule)}.`, `Was: ${ruleWords(grant.rules[action] ?? { use: "ask" })}.`);
       } else throw Error("Choose grant, revoke or rule.");
+    } else if (operation === "teammate_memory") {
+      // v95: edit or forget one thing it remembers.
+      const memory = store.teammateMemory(integer(input, "memory"));
+      if (memory === null || memory.teammate !== mate!.id) throw Error(`${nameOf(mate!)} doesn't remember that any more.`);
+      if (input["change"] === "forget") {
+        title = `${nameOf(mate!)} forgets: ${memory.text.slice(0, 60)}`;
+        terms.push(memory.text);
+      } else if (input["change"] === "edit") {
+        const clean = cleanMemory(text(input, "text", 400));
+        if (!clean.ok) throw Error(clean.said);
+        request["text"] = clean.text;
+        title = `Change what ${nameOf(mate!)} remembers`;
+        terms.push(`Was: ${memory.text}`, `Now: ${clean.text}`);
+      } else throw Error("Choose edit or forget.");
+      state = { text: memory.text };
     } else if (operation === "teammate_note") {
-      const note = text(input, "note", 1000).trim();
-      if (note === "") throw Error("Say what it should know.");
-      request["note"] = note;
+      const note = cleanMemory(text(input, "note", 1000));
+      if (!note.ok) throw Error(note.said);
+      request["note"] = note.text;
       state = { teammate: mate!.id };
       title = `Tell ${nameOf(mate!)}`;
-      terms.push(note, "Every turn reads its latest ten notes.");
+      terms.push(note.text, "It keeps this in its memory: every turn reads the latest ten things people told it.");
     } else {
       const question = questionTarget!;
       if (question.state !== "open") throw Error("That question was already answered.");
@@ -1234,6 +1252,13 @@ function runTeammateAction(store: Store, payload: SharedAction, actor: string, n
   }
   const mate = store.getTeammate(Number(req["teammate"]));
   if (mate === null || mate.state === "removed") throw Error("That teammate is off the team.");
+  if (payload.operation === "teammate_memory") {
+    const memory = store.teammateMemory(Number(req["memory"]));
+    if (memory === null || memory.text !== payload.state["text"]) throw Error("That memory changed since. Ask for a fresh proposal.");
+    const done = req["change"] === "forget" ? forgetMemory(store, mate, memory.id, actor, now) : editMemory(store, mate, memory.id, String(req["text"]), actor, now);
+    if (!done.ok) throw Error(done.said);
+    return { said: done.said, href: `/teammates/${mate.id}#memory` };
+  }
   if (payload.operation === "teammate_tools") {
     const tool = String(req["tool"]);
     const grant = store.teammateGrant(mate.id, tool);
@@ -1248,7 +1273,7 @@ function runTeammateAction(store: Store, payload: SharedAction, actor: string, n
   if (payload.operation === "teammate_soul" && mate.version !== payload.state["version"]) throw Error("Someone changed its soul file since. Ask for a fresh proposal.");
   const done = payload.operation === "teammate_soul" ? saveSoul(store, mate, String(req["soul"]), actor, now)
     : payload.operation === "teammate_state" ? setTeammateState(store, mate, req["state"] as "active" | "paused" | "removed", actor, now)
-    : leaveNote(store, mate, String(req["note"]), actor, now);
+    : tellTeammate(store, mate, String(req["note"]), actor, now);
   if (!done.ok) throw Error(done.said);
   return { said: done.said, href: payload.operation === "teammate_state" && req["state"] === "removed" ? "/teammates" : `/teammates/${mate.id}` };
 }

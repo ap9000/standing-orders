@@ -125,7 +125,8 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // v92 adds AI teammates: soul files, what each decided and why, and the questions they put to people; a teammate's turn is a flow step.
 // v93 lets people answer a teammate's question in their chat app: a tap on an option, or a reply in their words.
 // v94 lets teammates use project tools within per-action rules: each call is a receipt, and an ask-first call waits for a person's approval.
-export const SCHEMA_VERSION = 94;
+// v95 gives each teammate a memory (what it kept, and what its people told it) and lets it suggest its own rule changes from what people approved.
+export const SCHEMA_VERSION = 95;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -487,7 +488,26 @@ export type TeammateEventRow = { id: number; teammate: number; card: number | nu
 export type TeammateQuestionRow = { id: number; teammate: number; card: number; entry: number; question: string; options: { id: string; label: string }[]; askedOf: string;
   state: "open" | "answered" | "dropped"; choice: string | null; answer: string | null; answeredBy: string | null; answeredVia: string | null; answeredAt: string | null; createdAt: string;
   /** v94: the ask-first tool call this question approves (null: a question of the teammate's own). */
-  toolCall: number | null };
+  toolCall: number | null;
+  /** v95: the rule change this question offers its manager (null: not one). */
+  suggestion: number | null };
+/** v95: one thing a teammate remembers: kept by it on a turn, or told it by a person. */
+export type TeammateMemoryRow = { id: number; teammate: number; text: string; source: "teammate" | "person"; card: number | null; createdBy: string; createdAt: string; updatedBy: string; updatedAt: string; usedAt: string | null };
+/** v95: a rule change a teammate suggests from what its people approved. */
+export type TeammateSuggestionRow = { id: number; teammate: number; tool: string; action: string; rule: ToolRule; was: ToolRule; evidence: number[]; said: string;
+  state: "open" | "accepted" | "dismissed" | "stale"; decidedBy: string | null; decidedAt: string | null; createdAt: string };
+
+function readTeammateMemory(row: Record<string, unknown>): TeammateMemoryRow {
+  return { id: Number(row["id"]), teammate: Number(row["teammate"]), text: String(row["text"]), source: String(row["source"]) as TeammateMemoryRow["source"], card: row["card"] === null ? null : Number(row["card"]),
+    createdBy: String(row["created_by"]), createdAt: String(row["created_at"]), updatedBy: String(row["updated_by"]), updatedAt: String(row["updated_at"]), usedAt: row["used_at"] === null ? null : String(row["used_at"]) };
+}
+
+function readTeammateSuggestion(row: Record<string, unknown>): TeammateSuggestionRow {
+  const parsed = <T>(key: string, fallback: T): T => { try { return JSON.parse(String(row[key])) as T; } catch { return fallback; } };
+  return { id: Number(row["id"]), teammate: Number(row["teammate"]), tool: String(row["tool"]), action: String(row["action"]), rule: parsed<ToolRule>("rule_json", { use: "ask" }), was: parsed<ToolRule>("was_json", { use: "ask" }),
+    evidence: parsed<number[]>("evidence_json", []), said: String(row["said"]), state: String(row["state"]) as TeammateSuggestionRow["state"],
+    decidedBy: row["decided_by"] === null ? null : String(row["decided_by"]), decidedAt: row["decided_at"] === null ? null : String(row["decided_at"]), createdAt: String(row["created_at"]) };
+}
 /** v94: one action a project tool offers, as it described itself when listed. */
 export type ToolActionInfo = { name: string; about: string; input: Record<string, unknown> | null; readOnly: boolean };
 /** v94: a teammate's rule for one action: do it, ask first, or never; "free" may ask first above a number in its input. */
@@ -523,7 +543,8 @@ function readTeammateQuestion(row: Record<string, unknown>): TeammateQuestionRow
   return { id: Number(row["id"]), teammate: Number(row["teammate"]), card: Number(row["card"]), entry: Number(row["entry"]), question: String(row["question"]),
     options: JSON.parse(String(row["options_json"])) as { id: string; label: string }[], askedOf: String(row["asked_of"]), state: String(row["state"]) as TeammateQuestionRow["state"],
     choice: text("choice"), answer: text("answer"), answeredBy: text("answered_by"), answeredVia: text("answered_via"), answeredAt: text("answered_at"), createdAt: String(row["created_at"]),
-    toolCall: row["tool_call"] === null || row["tool_call"] === undefined ? null : Number(row["tool_call"]) };
+    toolCall: row["tool_call"] === null || row["tool_call"] === undefined ? null : Number(row["tool_call"]),
+    suggestion: row["suggestion"] === null || row["suggestion"] === undefined ? null : Number(row["suggestion"]) };
 }
 /** A flow; `owner` is who its "the owner decides" zones ask (v86): whoever made it, unless it was handed to someone else. */
 export type FlowRow = { id: number; repo: string; name: string; definitionJson: string; revision: number; state: "active" | "archived"; createdBy: string; createdAt: string; updatedBy: string; updatedAt: string; owner: string };
@@ -2415,7 +2436,8 @@ CREATE TABLE IF NOT EXISTS teammate_question (
   answered_via  TEXT,
   answered_at   TEXT,
   created_at    TEXT NOT NULL,
-  tool_call     INTEGER REFERENCES teammate_call(id)
+  tool_call     INTEGER REFERENCES teammate_call(id),
+  suggestion    INTEGER REFERENCES teammate_suggestion(id)
 );
 -- v94: the project tools a teammate may use, and its rule for each of their
 -- actions: do it, ask first (a person approves the exact call), or never.
@@ -2452,6 +2474,42 @@ CREATE TABLE IF NOT EXISTS teammate_call (
 );
 CREATE INDEX IF NOT EXISTS teammate_call_card ON teammate_call (card, entry, id);
 CREATE INDEX IF NOT EXISTS teammate_call_recent ON teammate_call (teammate, id);
+-- v95: what a teammate remembers: facts it kept from its own turns, and
+-- what its people told it (replacing v92's notes). Searchable, editable, and
+-- forgotten on request; each turn reads what its people said and what fits
+-- the card.
+CREATE TABLE IF NOT EXISTS teammate_memory (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  teammate    INTEGER NOT NULL REFERENCES teammate(id),
+  text        TEXT NOT NULL,
+  source      TEXT NOT NULL CHECK (source IN ('teammate','person')),
+  card        INTEGER REFERENCES flow_card(id),
+  state       TEXT NOT NULL CHECK (state IN ('active','forgotten')),
+  created_by  TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  updated_by  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL,
+  used_at     TEXT
+);
+CREATE INDEX IF NOT EXISTS teammate_memory_live ON teammate_memory (teammate, state, id);
+-- v95: a rule change a teammate suggests from what its people approved (five
+-- approvals in a row of one action, say). Its manager accepts it or not; a
+-- suggestion made when the rule was different goes stale.
+CREATE TABLE IF NOT EXISTS teammate_suggestion (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  teammate      INTEGER NOT NULL REFERENCES teammate(id),
+  tool          TEXT NOT NULL,
+  action        TEXT NOT NULL,
+  rule_json     TEXT NOT NULL,
+  was_json      TEXT NOT NULL,
+  evidence_json TEXT NOT NULL,
+  said          TEXT NOT NULL,
+  state         TEXT NOT NULL CHECK (state IN ('open','accepted','dismissed','stale')),
+  decided_by    TEXT,
+  decided_at    TEXT,
+  created_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS teammate_suggestion_action ON teammate_suggestion (teammate, tool, action, id);
 -- v91: where the reply watcher stands in the mailbox. One row.
 CREATE TABLE IF NOT EXISTS flow_mail_watch (
   id           INTEGER PRIMARY KEY CHECK (id = 1),
@@ -5891,11 +5949,24 @@ function migrate(db: Database, origin: number | null): void {
        answered_via  TEXT,
        answered_at   TEXT,
        created_at    TEXT NOT NULL,
-       tool_call     INTEGER REFERENCES teammate_call(id)
+       tool_call     INTEGER REFERENCES teammate_call(id),
+       suggestion    INTEGER REFERENCES teammate_suggestion(id)
      )`,
-    ["id", "teammate", "card", "entry", "question", "options_json", "asked_of", "state", "choice", "answer", "answered_by", "answered_via", "answered_at", "created_at", "tool_call"],
+    ["id", "teammate", "card", "entry", "question", "options_json", "asked_of", "state", "choice", "answer", "answered_by", "answered_via", "answered_at", "created_at", "tool_call", "suggestion"],
   );
-  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS teammate_question_visit ON teammate_question (card, entry) WHERE tool_call IS NULL");
+  // v95: a rule-change suggestion is a question too (to the manager, about the card that prompted it), never the visit's own question.
+  addColumn(db, "teammate_question", "suggestion", "INTEGER REFERENCES teammate_suggestion(id)");
+  if (/WHERE tool_call IS NULL\s*$/.test(String(db.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'teammate_question_visit'").get()?.["sql"] ?? ""))) db.exec("DROP INDEX teammate_question_visit");
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS teammate_question_visit ON teammate_question (card, entry) WHERE tool_call IS NULL AND suggestion IS NULL");
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS teammate_question_suggestion ON teammate_question (suggestion) WHERE suggestion IS NOT NULL");
+  // v95: what people told a teammate (v92 notes) becomes its memory, once: the join line stays in its log.
+  // (Only when there are notes: even an INSERT that copies nothing starts the table's sqlite_sequence row, and a reopen must change nothing.)
+  if (Number(db.prepare("SELECT COUNT(*) AS n FROM teammate_memory").get()?.["n"] ?? 0) === 0
+    && db.prepare("SELECT 1 AS hit FROM teammate_event WHERE kind = 'note' AND said NOT LIKE '% onto the team.' LIMIT 1").get() !== undefined) {
+    db.exec(`INSERT INTO teammate_memory (teammate, text, source, card, state, created_by, created_at, updated_by, updated_at)
+      SELECT teammate, said, 'person', NULL, 'active', COALESCE(by, 'someone'), at, COALESCE(by, 'someone'), at FROM teammate_event
+      WHERE kind = 'note' AND said NOT LIKE '% onto the team.' ORDER BY id`);
+  }
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS teammate_question_call ON teammate_question (tool_call) WHERE tool_call IS NOT NULL");
   db.exec("CREATE INDEX IF NOT EXISTS teammate_question_open ON teammate_question (card, entry, state)");
 
@@ -21353,21 +21424,84 @@ export class Store {
   }
 
   /** Ask a person about one visit of a card (v94: or to approve one tool call); null when that visit, or that call, already has its question. */
-  openTeammateQuestion(question: { teammate: number; card: number; entry: number; question: string; options: { id: string; label: string }[]; askedOf: string; toolCall?: number }, now: Date): number | null {
-    const { changes, lastInsertRowid } = this.db.prepare("INSERT OR IGNORE INTO teammate_question (teammate, card, entry, question, options_json, asked_of, state, created_at, tool_call) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)")
-      .run(question.teammate, question.card, question.entry, question.question, JSON.stringify(question.options), question.askedOf, now.toISOString(), question.toolCall ?? null);
+  openTeammateQuestion(question: { teammate: number; card: number; entry: number; question: string; options: { id: string; label: string }[]; askedOf: string; toolCall?: number; suggestion?: number }, now: Date): number | null {
+    const { changes, lastInsertRowid } = this.db.prepare("INSERT OR IGNORE INTO teammate_question (teammate, card, entry, question, options_json, asked_of, state, created_at, tool_call, suggestion) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)")
+      .run(question.teammate, question.card, question.entry, question.question, JSON.stringify(question.options), question.askedOf, now.toISOString(), question.toolCall ?? null, question.suggestion ?? null);
     return Number(changes) === 1 ? Number(lastInsertRowid) : null;
   }
 
   /** v94: the first question still open on one visit of a card: its own, or a tool call's approval. */
   openTeammateQuestionOn(card: number, entry: number): TeammateQuestionRow | null {
-    const row = this.db.prepare("SELECT * FROM teammate_question WHERE card = ? AND entry = ? AND state = 'open' ORDER BY id LIMIT 1").get(card, entry);
+    const row = this.db.prepare("SELECT * FROM teammate_question WHERE card = ? AND entry = ? AND state = 'open' AND suggestion IS NULL ORDER BY id LIMIT 1").get(card, entry);
     return row === undefined ? null : readTeammateQuestion(row);
   }
 
   /** v94: the approval question of one tool call. */
   teammateQuestionForCall(call: number): TeammateQuestionRow | null {
     const row = this.db.prepare("SELECT * FROM teammate_question WHERE tool_call = ?").get(call);
+    return row === undefined ? null : readTeammateQuestion(row);
+  }
+
+  // ---- v95: what a teammate remembers, and the rule changes it suggests ----------------
+
+  addTeammateMemory(memory: { teammate: number; text: string; source: TeammateMemoryRow["source"]; card?: number | null; by: string }, now: Date): number {
+    const stamp = now.toISOString();
+    return Number(this.db.prepare("INSERT INTO teammate_memory (teammate, text, source, card, state, created_by, created_at, updated_by, updated_at) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)")
+      .run(memory.teammate, memory.text, memory.source, memory.card ?? null, memory.by, stamp, memory.by, stamp).lastInsertRowid);
+  }
+
+  teammateMemory(id: number): TeammateMemoryRow | null {
+    const row = this.db.prepare("SELECT * FROM teammate_memory WHERE id = ? AND state = 'active'").get(id);
+    return row === undefined ? null : readTeammateMemory(row);
+  }
+
+  /** What a teammate remembers now, newest first: one source, and every word of `words` (any case), when given. */
+  teammateMemories(teammate: number, options: { source?: TeammateMemoryRow["source"]; words?: readonly string[]; limit?: number } = {}): TeammateMemoryRow[] {
+    const words = (options.words ?? []).filter(one => one !== "").slice(0, 8);
+    return this.db.prepare(`SELECT * FROM teammate_memory WHERE teammate = ? AND state = 'active' ${options.source === undefined ? "" : "AND source = ?"} ${words.map(() => "AND instr(lower(text), ?) > 0").join(" ")} ORDER BY id DESC LIMIT ?`)
+      .all(teammate, ...(options.source === undefined ? [] : [options.source]), ...words.map(one => one.toLowerCase()), options.limit ?? 500).map(readTeammateMemory);
+  }
+
+  editTeammateMemory(id: number, text: string, by: string, now: Date): boolean {
+    return Number(this.db.prepare("UPDATE teammate_memory SET text = ?, updated_by = ?, updated_at = ? WHERE id = ? AND state = 'active'").run(text, by, now.toISOString(), id).changes) === 1;
+  }
+
+  forgetTeammateMemory(id: number, by: string, now: Date): boolean {
+    return Number(this.db.prepare("UPDATE teammate_memory SET state = 'forgotten', updated_by = ?, updated_at = ? WHERE id = ? AND state = 'active'").run(by, now.toISOString(), id).changes) === 1;
+  }
+
+  markTeammateMemoriesUsed(ids: readonly number[], now: Date): void {
+    if (ids.length === 0) return;
+    this.db.prepare(`UPDATE teammate_memory SET used_at = ? WHERE id IN (${ids.map(() => "?").join(", ")})`).run(now.toISOString(), ...ids);
+  }
+
+  addTeammateSuggestion(suggestion: { teammate: number; tool: string; action: string; rule: ToolRule; was: ToolRule; evidence: number[]; said: string }, now: Date): number {
+    return Number(this.db.prepare("INSERT INTO teammate_suggestion (teammate, tool, action, rule_json, was_json, evidence_json, said, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?)")
+      .run(suggestion.teammate, suggestion.tool, suggestion.action, JSON.stringify(suggestion.rule), JSON.stringify(suggestion.was), JSON.stringify(suggestion.evidence), suggestion.said, now.toISOString()).lastInsertRowid);
+  }
+
+  teammateSuggestion(id: number): TeammateSuggestionRow | null {
+    const row = this.db.prepare("SELECT * FROM teammate_suggestion WHERE id = ?").get(id);
+    return row === undefined ? null : readTeammateSuggestion(row);
+  }
+
+  /** A teammate's suggestions about one action, newest first. */
+  teammateSuggestionsFor(teammate: number, tool: string, action: string): TeammateSuggestionRow[] {
+    return this.db.prepare("SELECT * FROM teammate_suggestion WHERE teammate = ? AND tool = ? AND action = ? ORDER BY id DESC LIMIT 20").all(teammate, tool, action).map(readTeammateSuggestion);
+  }
+
+  teammateSuggestions(teammate: number, limit = 20): TeammateSuggestionRow[] {
+    return this.db.prepare("SELECT * FROM teammate_suggestion WHERE teammate = ? ORDER BY id DESC LIMIT ?").all(teammate, limit).map(readTeammateSuggestion);
+  }
+
+  /** Decide a suggestion, once: false when it was already decided. */
+  decideTeammateSuggestion(id: number, state: "accepted" | "dismissed" | "stale", by: string | null, now: Date): boolean {
+    return Number(this.db.prepare("UPDATE teammate_suggestion SET state = ?, decided_by = ?, decided_at = ? WHERE id = ? AND state = 'open'").run(state, by, now.toISOString(), id).changes) === 1;
+  }
+
+  /** v95: the question that offers a suggestion to its manager. */
+  teammateQuestionForSuggestion(suggestion: number): TeammateQuestionRow | null {
+    const row = this.db.prepare("SELECT * FROM teammate_question WHERE suggestion = ?").get(suggestion);
     return row === undefined ? null : readTeammateQuestion(row);
   }
 
@@ -21430,7 +21564,7 @@ export class Store {
 
   /** The question a teammate asked of its own on one visit (never a tool call's approval). */
   teammateQuestionFor(card: number, entry: number): TeammateQuestionRow | null {
-    const row = this.db.prepare("SELECT * FROM teammate_question WHERE card = ? AND entry = ? AND tool_call IS NULL").get(card, entry);
+    const row = this.db.prepare("SELECT * FROM teammate_question WHERE card = ? AND entry = ? AND tool_call IS NULL AND suggestion IS NULL").get(card, entry);
     return row === undefined ? null : readTeammateQuestion(row);
   }
 
