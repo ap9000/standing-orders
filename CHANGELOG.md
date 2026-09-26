@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Telegram pushes your messages.** With a public hooks address, Telegram
+  delivers each message and tap to Standing Orders the moment you send it,
+  signed with a secret, instead of Standing Orders asking for them. No other
+  program can take your bot's messages meanwhile, and "Conflict" no longer
+  fills the log when one tries.
 - **A weekly report per teammate, and undo.** Every Monday its manager gets the
   week: what it did, its tool calls, what its turns cost, and what you
   overrode, each linked. Name an action's opposite (remove_label for

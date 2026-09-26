@@ -1,6 +1,6 @@
 import { maybeTriggerRepair } from "./dispose.js";
 import { advanceFlows } from "./flow-engine.js";
-import { runFlowTriggers, type TriggerIo } from "./flow-triggers.js";
+import { readHooksBase, runFlowTriggers, type TriggerIo } from "./flow-triggers.js";
 import { watchFlowReplies } from "./flow-replies.js";
 import { sendTeammateSummaries } from "./teammate-admin.js";
 import { runRequestedUndos, sendTeammateWeeklies } from "./teammate-week.js";
@@ -134,6 +134,8 @@ import {
   saveBotToken,
   PAIRING_TTL_MS,
   TOKEN_ENV,
+  telegramHookSecret,
+  telegramPushUrl,
   type FollowReport,
   type TelegramTransport,
 } from "./telegram.js";
@@ -7624,7 +7626,10 @@ async function runWatchLoop(args: {
   if (followSource !== null) {
     const transport = context.telegramTransport ?? createTransport(followSource.token);
     const publicUrl = text(flags, "public-url");
+    // v98: with a public hooks address (Tailscale Funnel covers /hooks), Telegram pushes updates to it instead.
+    const pushUrl = telegramPushUrl(readHooksBase(dirname(context.databaseFile)));
     follower = followBridge(store, {
+      push: pushUrl === null ? null : { url: pushUrl, secret: telegramHookSecret(dirname(context.databaseFile), true)! },
       readProjects: telegramReadProjects(context),
       canDeliver: telegramCanDeliver(context, followSource.token),
       conversation: telegramConversation(context, publicUrl === undefined ? {} : { serverOrigin: publicUrl }),

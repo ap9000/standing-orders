@@ -23,6 +23,10 @@ import {
   MAX_POLL_SECONDS,
   PAIRING_TTL_MS,
   TOKEN_ENV,
+  keepPushedUpdate,
+  pushedByTelegram,
+  telegramHookSecret,
+  telegramPushUrl,
   type TelegramTransport,
 } from "./telegram.js";
 
@@ -1038,6 +1042,134 @@ describe("the follower — on the wire until told to stop", () => {
     // pass's earlier getUpdates used 0 — that is the cron shape).
     const polls = script.calls.filter(call => call.method === "getUpdates");
     expect(polls.some(call => call.params["timeout"] === MAX_POLL_SECONDS)).toBe(true);
+  });
+
+  test("with a public address, Telegram pushes: the address is set with its secret, a pushed tap applies through the same door, and nobody asks for updates (v98)", async () => {
+    const script = scriptedTransport();
+    await pairDirectly(script);
+    const decision = parkedDecision();
+    const asksBefore = script.calls.filter(call => call.method === "getUpdates").length;
+    let hookUrl = "";
+    const transport: TelegramTransport = async (method, params, signal, upload) => {
+      if (method === "getWebhookInfo") return { ok: true, result: { url: hookUrl, pending_update_count: 0 } };
+      if (method === "setWebhook") { hookUrl = String(params["url"]); script.calls.push({ method, params }); return { ok: true, result: true }; }
+      return script.transport(method, params, signal, upload);
+    };
+    const push = { url: "https://example.ts.net/hooks/telegram", secret: "s".repeat(43) };
+    const controller = new AbortController();
+    let pushedTap: unknown = null;
+    const report = await followBridge(store, {
+      readProjects, botId: BOT, transport, signal: controller.signal, clock: () => later(5_000), sleep: () => Promise.resolve(), push,
+      onCycle: cycle => {
+        if (cycle.sent > 0) {
+          // The keyboard went out; the tap comes back as a push, kept by the console.
+          const token = keyboardTokensOf(script)[0] ?? "";
+          pushedTap = tap(10, token, Number(store.getTelegramAction(token)?.messageId ?? 0));
+          expect(keepPushedUpdate(store, BOT, Buffer.from(JSON.stringify(pushedTap)), later(5_000))).toEqual({ ok: true, kept: true });
+        }
+        if (cycle.answered > 0) controller.abort();
+      },
+    });
+    expect(report.answered).toBe(1);
+    expect(store.getDecision(decision)?.state).toBe("answered");
+    expect(script.calls.find(call => call.method === "setWebhook")?.params).toMatchObject({ url: push.url, secret_token: push.secret, allowed_updates: ["message", "callback_query"] });
+    expect(script.calls.filter(call => call.method === "getUpdates")).toHaveLength(asksBefore);
+    expect(store.telegramPush(BOT)).toMatchObject({ url: push.url, problem: null });
+    // Telegram sending the same update again changes nothing.
+    expect(keepPushedUpdate(store, BOT, Buffer.from(JSON.stringify(pushedTap)), later(6_000))).toEqual({ ok: true, kept: false });
+    expect(store.telegramInbox(BOT, 10)).toEqual([]);
+    expect(keepPushedUpdate(store, BOT, Buffer.from("not json"), later(6_000))).toEqual({ ok: false });
+    expect(keepPushedUpdate(store, BOT, Buffer.from('{"update_id": -1}'), later(6_000))).toEqual({ ok: false });
+  });
+
+  test("another program asking for the bot's updates is no problem to report: nothing is logged, and the next ask gets the tap (v98)", async () => {
+    const script = scriptedTransport();
+    await pairDirectly(script);
+    const decision = parkedDecision();
+    let conflicts = 0;
+    const transport: TelegramTransport = async (method, params, signal, upload) => {
+      if (method === "getUpdates" && conflicts < 2) { conflicts++; return { ok: false, description: "Conflict: terminated by other getUpdates request; make sure that only one bot instance is running" }; }
+      return script.transport(method, params, signal, upload);
+    };
+    const controller = new AbortController();
+    const logged: string[] = [];
+    const report = await followBridge(store, {
+      readProjects, botId: BOT, transport, signal: controller.signal, clock: () => later(5_000), sleep: () => Promise.resolve(),
+      onCycle: cycle => {
+        logged.push(...cycle.problems);
+        if (cycle.sent > 0) {
+          const token = keyboardTokensOf(script)[0] ?? "";
+          script.updates.push([tap(10, token, Number(store.getTelegramAction(token)?.messageId ?? 0))]);
+        }
+        if (cycle.answered > 0) controller.abort();
+      },
+    });
+    expect(conflicts).toBe(2);
+    expect(logged).toEqual([]);
+    expect(report.problems).toEqual([]);
+    expect(store.getDecision(decision)?.state).toBe("answered");
+  });
+
+  test("pushes that keep failing: it asks for updates itself, then tries pushes again; an address someone took down is set again (v98)", async () => {
+    const script = scriptedTransport();
+    await pairDirectly(script);
+    let hookUrl = "", now = later(0).getTime(), failing = true, sets = 0, deletes = 0;
+    const transport: TelegramTransport = async (method, params, signal, upload) => {
+      if (method === "getWebhookInfo") return { ok: true, result: failing && hookUrl !== "" ? { url: hookUrl, pending_update_count: 3, last_error_date: Math.floor(now / 1000) - 5, last_error_message: "Connection refused" } : { url: hookUrl, pending_update_count: 0 } };
+      if (method === "setWebhook") { sets++; hookUrl = String(params["url"]); return { ok: true, result: true }; }
+      if (method === "deleteWebhook") { deletes++; hookUrl = ""; return { ok: true, result: true }; }
+      return script.transport(method, params, signal, upload);
+    };
+    const push = { url: "https://example.ts.net/hooks/telegram", secret: "s".repeat(43) };
+    const controller = new AbortController();
+    const logged: string[] = [];
+    let asked = 0;
+    await followBridge(store, {
+      readProjects, botId: BOT, transport: async (method, params, signal, upload) => { if (method === "getUpdates") asked++; return transport(method, params, signal, upload); },
+      signal: controller.signal, clock: () => new Date(now), sleep: async ms => { now += Math.max(ms, 60_000); if (asked >= 2) controller.abort(); }, push, pushCheckMs: 0,
+      onCycle: cycle => logged.push(...cycle.problems),
+    });
+    expect(sets).toBe(1);
+    expect(deletes).toBe(1);
+    expect(asked).toBeGreaterThanOrEqual(2);
+    expect(logged).toContain("Telegram couldn't reach https://example.ts.net/hooks/telegram (Connection refused). Asking Telegram for updates directly for now.");
+    expect(store.telegramPush(BOT)).toMatchObject({ url: null, problem: "Telegram couldn't reach https://example.ts.net/hooks/telegram (Connection refused)" });
+
+    // Later, pushes work again; then something else takes the address down, and it's set again.
+    failing = false;
+    const again = new AbortController();
+    let checks = 0;
+    const logged2: string[] = [];
+    await followBridge(store, {
+      readProjects, botId: BOT, signal: again.signal, clock: () => new Date(now), push, pushCheckMs: 0,
+      transport: async (method, params, signal, upload) => {
+        if (method === "getWebhookInfo" && ++checks === 3) hookUrl = "";
+        if (checks >= 4) again.abort();
+        return transport(method, params, signal, upload);
+      },
+      sleep: async () => { now += 1_000; }, onCycle: cycle => logged2.push(...cycle.problems),
+    });
+    expect(sets).toBe(3);
+    expect(logged2).toContain("Telegram stopped pushing to https://example.ts.net/hooks/telegram (something switched this bot back to being asked for updates); set it again");
+    expect(store.telegramPush(BOT)).toMatchObject({ url: push.url, problem: null });
+  });
+
+  test("the address: https only, beside the hooks; and only a push with our secret is Telegram's (v98)", () => {
+    expect(telegramPushUrl("https://server.example.ts.net")).toBe("https://server.example.ts.net/hooks/telegram");
+    expect(telegramPushUrl("https://proxy.example.com/so/")).toBe("https://proxy.example.com/so/hooks/telegram");
+    expect(telegramPushUrl("http://server.example.ts.net")).toBeNull();
+    expect(telegramPushUrl(null)).toBeNull();
+    const home = mkdtempSync(join(tmpdir(), "so-telegram-hook-"));
+    expect(telegramHookSecret(home)).toBeNull();
+    const secret = telegramHookSecret(home, true)!;
+    expect(secret).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(telegramHookSecret(home)).toBe(secret);
+    expect(statSync(join(home, "telegram-hook-secret")).mode & 0o777).toBe(0o600);
+    rmSync(home, { recursive: true, force: true });
+    expect(pushedByTelegram(secret, secret)).toBe(true);
+    expect(pushedByTelegram(`${secret}x`, secret)).toBe(false);
+    expect(pushedByTelegram(undefined, secret)).toBe(false);
+    expect(pushedByTelegram(secret, null)).toBe(false);
   });
 
   test("a held poll lease is waited out, never raced", async () => {

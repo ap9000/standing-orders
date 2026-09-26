@@ -128,7 +128,8 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // v95 gives each teammate a memory (what it kept, and what its people told it) and lets it suggest its own rule changes from what people approved.
 // v96 gives each teammate a desk: its own flow, where messages to it by name and its routines land as cards.
 // v97 keeps what each teammate turn cost, lets a person undo a teammate's tool call where the tool can, and sends a weekly report.
-export const SCHEMA_VERSION = 97;
+// v98 lets Telegram push a bot's updates to Standing Orders (a webhook) instead of being polled for them.
+export const SCHEMA_VERSION = 98;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -3611,7 +3612,18 @@ CREATE TABLE IF NOT EXISTS bridge_lease (
   generation   INTEGER NOT NULL,
   cursor       INTEGER NOT NULL DEFAULT 0,
   expires_at   TEXT NOT NULL,
-  heartbeat_at TEXT NOT NULL
+  heartbeat_at TEXT NOT NULL,
+  push_url     TEXT,
+  push_at      TEXT,
+  push_problem TEXT
+);
+-- v98: updates Telegram pushed to /hooks/telegram, kept until the bridge
+-- applies them (in update order, through the same door as polled ones).
+CREATE TABLE IF NOT EXISTS telegram_inbox (
+  update_id    INTEGER PRIMARY KEY,
+  bot_id       TEXT NOT NULL,
+  payload      TEXT NOT NULL,
+  received_at  TEXT NOT NULL
 );
 
 -- Provider quota, keyed to what actually exhausts: one runner's credential
@@ -5988,6 +6000,10 @@ function migrate(db: Database, origin: number | null): void {
      )`,
     ["id", "teammate", "card", "entry", "question", "options_json", "asked_of", "state", "choice", "answer", "answered_by", "answered_via", "answered_at", "created_at", "tool_call", "suggestion"],
   );
+  // v98: where Telegram pushes this bot's updates, as the bridge last found it.
+  addColumn(db, "bridge_lease", "push_url", "TEXT");
+  addColumn(db, "bridge_lease", "push_at", "TEXT");
+  addColumn(db, "bridge_lease", "push_problem", "TEXT");
   // v96: a teammate's desk flow.
   addColumn(db, "teammate", "desk_flow", "INTEGER REFERENCES flow(id)");
   // v97: its weekly report, and undoing its tool calls.
@@ -24042,6 +24058,32 @@ export class Store {
   }
 
   /** Forward only, and only under the live generation. A stale poller moves nothing. */
+  /** v98: an update Telegram pushed, kept until the bridge applies it; false when it's already kept or applied. */
+  queueTelegramUpdate(botId: string, updateId: number, payload: string, now: Date): boolean {
+    if (this.db.prepare("SELECT 1 AS hit FROM telegram_update WHERE update_id = ?").get(updateId) !== undefined) return false;
+    return Number(this.db.prepare("INSERT OR IGNORE INTO telegram_inbox (update_id, bot_id, payload, received_at) VALUES (?, ?, ?, ?)").run(updateId, botId, payload, now.toISOString()).changes) === 1;
+  }
+
+  /** v98: pushed updates waiting for the bridge, oldest first. */
+  telegramInbox(botId: string, limit: number): { updateId: number; payload: string }[] {
+    return this.db.prepare("SELECT update_id, payload FROM telegram_inbox WHERE bot_id = ? ORDER BY update_id LIMIT ?").all(botId, limit)
+      .map(row => ({ updateId: Number(row["update_id"]), payload: String(row["payload"]) }));
+  }
+
+  dropTelegramInbox(updateId: number): void {
+    this.db.prepare("DELETE FROM telegram_inbox WHERE update_id = ?").run(updateId);
+  }
+
+  /** v98: where Telegram pushes this bot's updates (null: the bridge asks for them), and what's wrong, if anything. */
+  setTelegramPush(botId: string, state: { url: string | null; problem: string | null }, now: Date): void {
+    this.db.prepare("UPDATE bridge_lease SET push_url = ?, push_problem = ?, push_at = ? WHERE bot_id = ?").run(state.url, state.problem, now.toISOString(), botId);
+  }
+
+  telegramPush(botId: string): { url: string | null; problem: string | null; at: string | null } | null {
+    const row = this.db.prepare("SELECT push_url, push_problem, push_at FROM bridge_lease WHERE bot_id = ?").get(botId);
+    return row === undefined ? null : { url: row["push_url"] === null ? null : String(row["push_url"]), problem: row["push_problem"] === null ? null : String(row["push_problem"]), at: row["push_at"] === null ? null : String(row["push_at"]) };
+  }
+
   advanceBridgeCursor(
     botId: string,
     owner: string,
