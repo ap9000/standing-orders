@@ -1,6 +1,7 @@
 /** Scripted Slack API and membership runner. No live Slack acceptance is claimed. */
 import { notifyPeople } from "./flow-people.js";
 import { TEAMMATE_TEMPLATES } from "./teammates.js";
+import { addressedTo as messageTeammateWords, replyToAsker } from "./teammate-desk.js";
 import { beforeEach, afterEach, describe, expect, test, vi } from "vitest";
 import {
   mkdtempSync,
@@ -1132,6 +1133,27 @@ describe("Slack shared chat", () => {
     await drain();
     expect(store.teammateQuestion(second)).toMatchObject({ state: "answered", choice: null, answer: "Refund $50 and send a coupon for the rest.", answeredVia: "slack" });
     expect(String(sends().at(-1)!.args.text)).toContain("It picks the card up again now.");
+  });
+
+  test("a message to a teammate by name lands on its desk instead of the lead, and its answer comes back in Slack (v96)", async () => {
+    now = new Date(now.getTime() + 30_000);
+    store.createTeammate({ repo, handle: "maya", soul: TEAMMATE_TEMPLATES[0]!.soul, model: null, manager: "alex", by: "alex" }, now);
+    const turnsBefore = Number(store.handle.prepare("SELECT COUNT(*) AS n FROM mate_turn").get()!.n);
+    receive("@maya where's order 2201?");
+    await processSlackEvent(options);
+    await drain();
+    expect(String(sends().at(-1)!.args.text)).toContain("Maya has it. The answer comes here when it's done.");
+    const desk = store.listFlows([repo]).find(one => one.name === "Maya's desk")!;
+    const [card] = store.flowCards(desk.id, false);
+    expect(card).toMatchObject({ title: "where's order 2201?", createdBy: "alex", source: { kind: "message", label: "Slack message" } });
+    expect(Number(store.handle.prepare("SELECT COUNT(*) AS n FROM mate_turn").get()!.n)).toBe(turnsBefore);
+    replyToAsker(store, desk, card!, store.teammateByHandle(repo, "maya")!, "Order 2201 shipped yesterday.", now);
+    await planSlackNotifications(options);
+    await drain();
+    expect(String(sends().at(-1)!.args.text)).toContain("Maya · Support: where's order 2201?");
+    expect(String(sends().at(-1)!.args.text)).toContain("Order 2201 shipped yesterday.");
+    // Not addressed to a teammate ("Maya can …"), it still goes to the lead.
+    expect(messageTeammateWords("Maya can refund up to $100 now")).toBeNull();
   });
 
   test("a Slack channel feeds a flow: 'flow N' from a paired approver connects it, anyone's message is a card, a thread reply joins it, and an Update zone answers in the thread (v89)", async () => {

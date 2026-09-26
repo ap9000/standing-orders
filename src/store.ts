@@ -126,7 +126,8 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // v93 lets people answer a teammate's question in their chat app: a tap on an option, or a reply in their words.
 // v94 lets teammates use project tools within per-action rules: each call is a receipt, and an ask-first call waits for a person's approval.
 // v95 gives each teammate a memory (what it kept, and what its people told it) and lets it suggest its own rule changes from what people approved.
-export const SCHEMA_VERSION = 95;
+// v96 gives each teammate a desk: its own flow, where messages to it by name and its routines land as cards.
+export const SCHEMA_VERSION = 96;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -482,7 +483,9 @@ export type MateProposal = {
 export type FlowStepKind = "check" | "update" | "sort" | "draft" | "request" | "email" | "tool" | "teammate";
 /** An AI teammate (v92): who it is lives in its soul file; `handle` is how zones and chat name it. */
 export type TeammateRow = { id: number; repo: string; handle: string; state: "active" | "paused" | "removed"; version: number; soul: string; model: string | null; dailyTurns: number;
-  manager: string; createdBy: string; createdAt: string; updatedBy: string; updatedAt: string; summaryAt: string | null };
+  manager: string; createdBy: string; createdAt: string; updatedBy: string; updatedAt: string; summaryAt: string | null;
+  /** v96: its desk, the flow where what's asked of it directly lands (null until it's first needed). */
+  deskFlow: number | null };
 export type TeammateEventKind = "decided" | "handled" | "handed" | "asked" | "answered" | "note" | "paused" | "resumed" | "summary" | "failed";
 export type TeammateEventRow = { id: number; teammate: number; card: number | null; entry: number | null; kind: TeammateEventKind; said: string; detail: Record<string, unknown> | null; by: string | null; at: string };
 export type TeammateQuestionRow = { id: number; teammate: number; card: number; entry: number; question: string; options: { id: string; label: string }[]; askedOf: string;
@@ -536,7 +539,8 @@ function readTeammateGrant(row: Record<string, unknown>): TeammateGrantRow {
 function readTeammateRow(row: Record<string, unknown>): TeammateRow {
   return { id: Number(row["id"]), repo: String(row["repo"]), handle: String(row["handle"]), state: String(row["state"]) as TeammateRow["state"], version: Number(row["version"]), soul: String(row["soul"]),
     model: row["model"] === null ? null : String(row["model"]), dailyTurns: Number(row["daily_turns"]), manager: String(row["manager"]), createdBy: String(row["created_by"]), createdAt: String(row["created_at"]),
-    updatedBy: String(row["updated_by"]), updatedAt: String(row["updated_at"]), summaryAt: row["summary_at"] === null ? null : String(row["summary_at"]) };
+    updatedBy: String(row["updated_by"]), updatedAt: String(row["updated_at"]), summaryAt: row["summary_at"] === null ? null : String(row["summary_at"]),
+    deskFlow: row["desk_flow"] === null || row["desk_flow"] === undefined ? null : Number(row["desk_flow"]) };
 }
 function readTeammateQuestion(row: Record<string, unknown>): TeammateQuestionRow {
   const text = (key: string) => row[key] === null || row[key] === undefined ? null : String(row[key]);
@@ -2396,7 +2400,8 @@ CREATE TABLE IF NOT EXISTS teammate (
   created_at   TEXT NOT NULL,
   updated_by   TEXT NOT NULL,
   updated_at   TEXT NOT NULL,
-  summary_at   TEXT
+  summary_at   TEXT,
+  desk_flow    INTEGER REFERENCES flow(id)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS teammate_live ON teammate (repo, handle) WHERE state <> 'removed';
 CREATE TABLE IF NOT EXISTS teammate_version (
@@ -5954,6 +5959,8 @@ function migrate(db: Database, origin: number | null): void {
      )`,
     ["id", "teammate", "card", "entry", "question", "options_json", "asked_of", "state", "choice", "answer", "answered_by", "answered_via", "answered_at", "created_at", "tool_call", "suggestion"],
   );
+  // v96: a teammate's desk flow.
+  addColumn(db, "teammate", "desk_flow", "INTEGER REFERENCES flow(id)");
   // v95: a rule-change suggestion is a question too (to the manager, about the card that prompted it), never the visit's own question.
   addColumn(db, "teammate_question", "suggestion", "INTEGER REFERENCES teammate_suggestion(id)");
   if (/WHERE tool_call IS NULL\s*$/.test(String(db.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'teammate_question_visit'").get()?.["sql"] ?? ""))) db.exec("DROP INDEX teammate_question_visit");
@@ -21440,6 +21447,11 @@ export class Store {
   teammateQuestionForCall(call: number): TeammateQuestionRow | null {
     const row = this.db.prepare("SELECT * FROM teammate_question WHERE tool_call = ?").get(call);
     return row === undefined ? null : readTeammateQuestion(row);
+  }
+
+  /** v96: the flow a teammate's desk is. */
+  setTeammateDesk(id: number, flow: number): void {
+    this.db.prepare("UPDATE teammate SET desk_flow = ? WHERE id = ?").run(flow, id);
   }
 
   // ---- v95: what a teammate remembers, and the rule changes it suggests ----------------

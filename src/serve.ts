@@ -24,6 +24,7 @@ import { BLANK_SOUL, TEAMMATE_CSS, teammatePageHtml, teammatesListHtml } from ".
 import { grantTool, revokeTool, rulesFromForm, setToolRules } from "./teammate-tools.js";
 import { createTeammateFrom, labelOf, nameOf, saveSoul, setTeammateState, teammateSettings, sendTeammateSummaries } from "./teammate-admin.js";
 import { editMemory, forgetMemory, tellTeammate } from "./teammate-memory.js";
+import { addRoutine, removeRoutine, runRoutine } from "./teammate-desk.js";
 import { answerTeammateQuestion } from "./teammate-work.js";
 import { createFlowRooms, flowFingerprint } from "./flow-live.js";
 import { disconnectGoogle, finishGoogleConsent, GOOGLE_CALLBACK, googleConnected, googleConsent, readGoogleMail, saveGoogleClient, type GoogleVisit } from "./google-mail.js";
@@ -5501,7 +5502,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
     }
     // v92: looking after teammates, and answering their questions.
-    const teammatePost = url.pathname === "/teammates/new" ? ["", "0", "new"] as const : /^\/teammates\/([1-9][0-9]{0,9})\/(soul|state|note|settings|summary|tools|memory)$/.exec(url.pathname);
+    const teammatePost = url.pathname === "/teammates/new" ? ["", "0", "new"] as const : /^\/teammates\/([1-9][0-9]{0,9})\/(soul|state|note|settings|summary|tools|memory|routines)$/.exec(url.pathname);
     const questionPost = /^\/teammates\/questions\/([1-9][0-9]{0,9})\/answer$/.exec(url.pathname);
     if (teammatePost !== null || questionPost !== null) {
       const now = clock();
@@ -5538,6 +5539,16 @@ export function createDecisionServer(options: ServeOptions): Server {
           return sendScreen(response, 400, screen(labelOf(mate), `<h1>${escape(labelOf(mate))}</h1>${teammatePageHtml(store, mate, who.name, projectName, who.session.csrf, true, approvers, { problem: saved.said, soulDraft: soul })}`, { chrome: chromeFor(mate.repo, "flows") }));
         }
         return redirect(response, `${back}?said=${encodeURIComponent(saved.said)}`);
+      }
+      if (action === "routines") {
+        // v96: its routines: add one, try one now, or remove one.
+        const op = body.get("op"), routine = Number(body.get("id"));
+        const hooks = options.configDir ?? null;
+        const changed = op === "add" ? addRoutine(store, mate, body.get("schedule") ?? "", body.get("text") ?? "", who.name, now, hooks)
+          : op === "run" ? runRoutine(store, mate, routine, who.name, now)
+          : removeRoutine(store, mate, routine, now, hooks);
+        if (changed.ok && op === "run") { try { advanceFlows(store, mate.repo, now, { evidenceRoot }); } catch { /* the worker's next pass moves it */ } }
+        return redirect(response, `${back}?${changed.ok ? "said" : "problem"}=${encodeURIComponent(changed.said)}#desk`);
       }
       if (action === "memory") {
         // v95: edit or forget one thing it remembers.

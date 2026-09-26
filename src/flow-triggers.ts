@@ -102,6 +102,11 @@ export function scheduleFromWords(text: string): string | null {
     const text = `daily:${pad(match[1]!)}:${match[2]}${zone(match[3])}`;
     return parseSchedule(text) === null ? null : text;
   }
+  match = /^(?:every )?(?:weekdays?|weekday mornings?)(?: at)? (\d{1,2}):(\d{2})(?: (\S+))?$/i.exec(raw);
+  if (match !== null) {
+    const text = `weekdays:${pad(match[1]!)}:${match[2]}${zone(match[3])}`;
+    return parseSchedule(text) === null ? null : text;
+  }
   match = /^(?:every |weekly on |weekly |on )?(sunday|monday|tuesday|wednesday|thursday|friday|saturday)s?(?: at)? (\d{1,2}):(\d{2})(?: (\S+))?$/i.exec(raw);
   if (match !== null) {
     const day = WEEKDAYS.findIndex(one => one.toLowerCase() === match![1]!.toLowerCase());
@@ -151,7 +156,7 @@ export function validateTriggerConfig(raw: unknown, context: { store: Store; flo
     case "schedule": {
       const said = words(input, "schedule", 80, true)!;
       const schedule = scheduleFromWords(said);
-      if (schedule === null) throw new Error("Say the schedule like “every 2 hours”, “daily 09:00 Europe/London” or “monday 09:00”.");
+      if (schedule === null) throw new Error("Say the schedule like “every 2 hours”, “daily 09:00 Europe/London”, “weekdays 09:00” or “monday 09:00”.");
       // A script on a schedule (v90): each item it prints becomes a card.
       const script = words(input, "script", 40, false);
       if (script !== null) {
@@ -249,7 +254,7 @@ export function triggerHeadline(config: TriggerConfig, store: Store): { name: st
     case "button": return { name: config.label, detail: `Asks ${config.questions.length} question${config.questions.length === 1 ? "" : "s"}` };
     case "schedule": {
       const schedule = parseSchedule(config.schedule);
-      const when = schedule === null ? config.schedule : schedule.kind === "every" ? describeSchedule(schedule) : `${schedule.kind === "daily" ? "daily" : `${WEEKDAYS[schedule.day]}s`} at ${schedule.hhmm}`;
+      const when = schedule === null ? config.schedule : schedule.kind === "every" ? describeSchedule(schedule) : `${schedule.kind === "daily" ? "daily" : schedule.kind === "weekdays" ? "weekdays" : `${WEEKDAYS[schedule.day]}s`} at ${schedule.hhmm}`;
       return { name: `${when.charAt(0).toUpperCase()}${when.slice(1)}`, detail: config.script !== undefined ? `Runs ${config.script}` : `“${config.title}”` };
     }
     case "github": return { name: config.watch === "checks" ? `Failed checks on ${config.branch}` : config.watch === "pulls" ? `New pull requests${config.label === null ? "" : ` labeled ${config.label}`}` : config.label === null ? "New issues" : `Issues labeled ${config.label}`, detail: `GitHub · ${config.repo}` };
@@ -500,6 +505,17 @@ function fireSchedule(store: Store, trigger: FlowTriggerRow, config: Extract<Tri
   const made = makeCard(store, trigger, config, { key: `slot:${slot}`, title, description: config.description === null ? null : fill(config.description), source: { kind: "schedule", label: "Schedule", url: null } }, "Schedule", now);
   store.updateFlowTrigger(trigger.id, { nextAt: next, lastAt: now.toISOString(), lastOutcome: made.made === "added" ? "Added a card." : made.note ?? "Nothing new." }, now);
   return made.made === "added" ? 1 : 0;
+}
+
+/** v96: a schedule (a teammate's routine) makes its card now, once per press, and keeps its own times. */
+export function runScheduleNow(store: Store, trigger: FlowTriggerRow, actor: string, now: Date): { ok: true; card: number } | { ok: false; said: string } {
+  const config = triggerConfigOf(trigger);
+  if (config?.kind !== "schedule" || config.script !== undefined) return { ok: false, said: "Only a schedule without a script runs this way." };
+  if (trigger.state !== "active") return { ok: false, said: "It's paused." };
+  const made = makeCard(store, trigger, config, { key: `now:${now.toISOString()}`, title: config.title.replace(/\{\{\s*date\s*\}\}/g, "today"), description: config.description, source: { kind: "schedule", label: `Run now by ${actor}`, url: null } }, "Schedule", now);
+  if (made.made !== "added" || made.card === null) return { ok: false, said: made.note ?? "Nothing was added." };
+  store.updateFlowTrigger(trigger.id, { lastAt: now.toISOString(), lastOutcome: "Added a card (run now)." }, now);
+  return { ok: true, card: made.card };
 }
 
 /** A schedule's script (v90): it runs in a clean folder inside the agents' fence; each item it prints is a card, once. */

@@ -981,6 +981,35 @@ await check("Teammates remember and learn: Rosa keeps a customer's preference fo
   return { memory: kept.text, suggestion: suggestion.said, rule };
 });
 
+await check("A teammate's routine: added on its page for weekdays, run now, it looks the order up with its tool and its answer reaches its manager (real Claude turn)", [TOOL_CHECK], async () => {
+  const mate = rows("SELECT id FROM teammate WHERE handle = 'rosa' AND state = 'active'")[0]?.id;
+  if (!mate) throw new Error("Rosa is missing");
+  await page.goto(`${base}/teammates/${mate}#desk`);
+  const form = page.locator("form.routine-add");
+  await form.locator('input[name="schedule"]').fill("weekdays 09:00");
+  await form.locator('input[name="text"]').fill("Look up order 2201 in the store and tell me its status in one sentence.");
+  await Promise.all([page.waitForNavigation(), form.locator("button").click()]);
+  const routine = page.locator("[data-routine]").first();
+  if (!/weekdays at 09:00/.test(await routine.innerText())) throw new Error(`the routine reads: ${await routine.innerText()}`);
+  const desk = rows(`SELECT desk_flow FROM teammate WHERE id = ${mate}`)[0]?.desk_flow;
+  if (!desk) throw new Error("Rosa has no desk");
+  await Promise.all([page.waitForNavigation(), routine.locator('button:has-text("Run now")').click()]);
+  const answer = await until("Rosa's answer to reach her manager", async () => rows("SELECT subject, body FROM notification WHERE kind = 'teammate-reply' AND recipient = 'alex'")[0] ?? null, { timeoutMs: 300_000, everyMs: 3000 });
+  if (!/^Rosa · Support: Look up order 2201/.test(answer.subject) || !/2201|lamp|refund/i.test(answer.body)) throw new Error(`the answer: ${answer.subject} — ${answer.body}`);
+  const card = (await flowView(desk)).cards[0];
+  if (card?.stage !== "done") throw new Error(`the routine's card is in ${card?.stage}`);
+  await page.goto(`${base}/teammates/${mate}#desk`); await sleep(400);
+  await page.locator("#desk").scrollIntoViewIfNeeded();
+  await shot("teammate-desk");
+  const phone = await signIn("alex", { width: 390, height: 844 }, "light");
+  await phone.goto(`${base}/teammates/${mate}#desk`); await phone.waitForLoadState("load"); await sleep(600);
+  await phone.screenshot({ path: join(w.out, "teammate-desk-phone.png") });
+  const wide = await phone.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
+  await phone.context().close();
+  if (wide) throw new Error("the teammate page scrolls sideways on a phone");
+  return { answer: answer.body.slice(0, 160) };
+});
+
 await check("Live canvas: a teammate sees who's here and a card move without reloading", ["Code steps: a Python file and a Node script get the card, pass on what they print, pick the next zone, and get a secret"], async () => {
   const sam = await signIn("sam");
   try {

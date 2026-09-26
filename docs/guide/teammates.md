@@ -109,6 +109,31 @@ that rule (and only if it's still what it was); **Not now** leaves it, and any
 words you add are kept in its memory. It asks again only after five more
 approvals.
 
+## Its desk: message it by name, give it routines
+
+Each teammate has a desk: its own flow, made the first time it's needed.
+
+- **Message it by name** in your chat with Standing Orders on Telegram, Slack,
+  Discord or Teams: start with `@maya` or `Maya,` ("@maya where's order
+  2201?"). It lands on Maya's desk as a card. Maya works it within its rules
+  and tools, and its answer comes back to you there. A message that only
+  starts with the name ("Maya can refund up to $100 now") still goes to the
+  lead.
+- **Routines**, on its page under **Desk and routines**: "weekdays 09:00 —
+  Look up yesterday's refunds and tell me the total". Each time, a card lands
+  on its desk, and the answer goes to its manager. **Run now** tries one at
+  once. Schedules read like "weekdays 09:00", "daily 17:00 Europe/London",
+  "monday 09:00" or "every 2 hours".
+- **Code changes.** When what you ask for is a change to the project's code,
+  it sends the card to its desk's **Build it** zone. That files an ordinary
+  task, which is planned and waits for your approval as always.
+- The desk is an ordinary flow you can redraw. For example, add a GitHub
+  trigger so labelled issues land on Maya's desk, and an Update zone so its
+  answer is posted on the issue.
+
+Any "Teammate handles it" zone can also **Answer whoever asked**: what the
+teammate writes goes back to the person who added the card.
+
 ## Talking to your teammates
 
 - Its questions and hand-offs reach you in your chat app, under its name
