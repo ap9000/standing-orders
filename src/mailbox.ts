@@ -21,7 +21,7 @@ import { googleAccessToken, googleConnected } from "./google-mail.js";
 import { readEmailSettings } from "./email-settings.js";
 
 export type MailboxAccess = { host: string; port: number; secure: boolean; user: string; password?: string; accessToken?: string };
-export type InboundMail = { uid: number; messageId: string | null; references: string[]; from: string; fromName: string | null; subject: string; text: string; automatic: boolean };
+export type InboundMail = { uid: number; messageId: string | null; inReplyTo: string | null; references: string[]; from: string; fromName: string | null; subject: string; text: string; automatic: boolean };
 /** Where a folder stands: its UIDVALIDITY and the last UID seen. */
 export type MailCursor = { validity: string; uid: number };
 /** `at` is where the next read starts; `more` says mail is still waiting past it. */
@@ -92,8 +92,9 @@ export async function readMail(uid: number, source: Buffer | string): Promise<In
   const automatic = (auto !== "" && auto !== "no") || headers.has("x-autoreply") || headers.has("x-autorespond") || precedence === "auto_reply"
     || /^(mailer-daemon|postmaster)@/.test(from) || /multipart\/report/i.test(header(headers, "content-type"));
   const references = (Array.isArray(parsed.references) ? parsed.references : typeof parsed.references === "string" ? parsed.references.split(/\s+/) : []).filter(one => /^<[^<>\s]{3,250}>$/.test(one)).slice(-20);
+  const replyTo = typeof parsed.inReplyTo === "string" ? /<[^<>\s]{3,250}>/.exec(parsed.inReplyTo)?.[0] ?? null : null;
   return {
-    uid, messageId: typeof parsed.messageId === "string" && /^<[^<>\s]{3,250}>$/.test(parsed.messageId) ? parsed.messageId : null, references, from,
+    uid, messageId: typeof parsed.messageId === "string" && /^<[^<>\s]{3,250}>$/.test(parsed.messageId) ? parsed.messageId : null, inReplyTo: replyTo, references, from,
     fromName: sender?.name && sender.name !== sender.address ? sender.name.slice(0, 120) : null,
     subject: (parsed.subject ?? "").replace(/\s+/g, " ").trim().slice(0, 200), text: freshText(parsed.text ?? ""), automatic,
   };

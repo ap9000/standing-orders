@@ -29,6 +29,7 @@ import { scanForSecrets } from "./evidence.js";
 import { flowCardText, flowDefinitionOf, type FlowAct } from "./flow-engine.js";
 import type { FlowDefinition } from "./flows.js";
 import { describeSchedule, firstFireAt, nextFireAt, parseSchedule, WEEKDAYS } from "./routine.js";
+import { takeReply } from "./flow-replies.js";
 import { mailboxAccess, mailCursorOf, mailCursorText, readThroughImap, type MailReader } from "./mailbox.js";
 import type { CodeResult } from "./flow-code.js";
 import { readFlowSecrets } from "./flow-secrets.js";
@@ -551,7 +552,7 @@ function followFlow(store: Store, trigger: FlowTriggerRow, config: Extract<Trigg
 type Checked = { ok: boolean; said: string; added: number };
 
 async function checkTrigger(store: Store, trigger: FlowTriggerRow, config: Extract<TriggerConfig, { kind: "github" | "linear" | "email" }>, now: Date, io: TriggerIo): Promise<Checked> {
-  const fetched = config.kind === "github" ? await fetchGitHub(config, trigger, io.gh) : config.kind === "linear" ? await fetchLinear(config, trigger, io) : await fetchMail(config, trigger, io);
+  const fetched = config.kind === "github" ? await fetchGitHub(config, trigger, io.gh) : config.kind === "linear" ? await fetchLinear(config, trigger, io) : await fetchMail(store, config, trigger, io, now);
   if (!fetched.ok) {
     const failures = trigger.failures + 1;
     store.updateFlowTrigger(trigger.id, { failures, lastAt: now.toISOString(), lastOutcome: fetched.problem, nextAt: new Date(now.getTime() + BACKOFF_MS[Math.min(failures, BACKOFF_MS.length) - 1]!).toISOString() }, now);
@@ -575,7 +576,7 @@ type Found = (Incoming & { at: string | null }) | { key: string; skip: string; l
 type Fetched = { ok: true; items: Found[]; cursor: string | null; more?: boolean; said?: string } | { ok: false; problem: string };
 
 /** New mail in the folder since the last check, each message a card (or why it was left out). */
-async function fetchMail(config: Extract<TriggerConfig, { kind: "email" }>, trigger: FlowTriggerRow, io: TriggerIo): Promise<Fetched> {
+async function fetchMail(store: Store, config: Extract<TriggerConfig, { kind: "email" }>, trigger: FlowTriggerRow, io: TriggerIo, now: Date): Promise<Fetched> {
   const signed = await mailboxAccess(io.dir, io.fetch);
   if (!signed.ok) return { ok: false, problem: signed.said };
   const after = mailCursorOf(trigger.cursor);
@@ -589,6 +590,9 @@ async function fetchMail(config: Extract<TriggerConfig, { kind: "email" }>, trig
     if (mail.automatic) return { key, skip: "an automatic reply", label, at };
     if (mail.from === own) return { key, skip: "sent from this account", label, at };
     if (mail.from === "") return { key, skip: "it had no sender", label, at };
+    // A reply to a card's email (v91) joins that card instead of starting another.
+    const reply = takeReply(store, mail, own, now);
+    if (reply !== null) return { key, skip: `a reply to “${reply.card.title}”`, label, at };
     const who = mail.fromName === null ? mail.from : `${mail.fromName} <${mail.from}>`;
     return { key, at, title: mail.subject || `Email from ${mail.fromName ?? mail.from}`, description: `From: ${who}${mail.text === "" ? "" : `\n\n${mail.text}`}`,
       source: { kind: "email", label, url: null, mail: { id: mail.messageId, references: mail.references, subject: mail.subject, from: mail.from } } };

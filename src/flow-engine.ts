@@ -7,7 +7,7 @@
  */
 import { assignmentOf } from "./assignment.js";
 import { diagnoseTaskDispatch } from "./dispatch.js";
-import { deciderOf, fillFlowText, validateFlowDefinition, type FlowDefinition, type FlowStage } from "./flows.js";
+import { deciderOf, durationWords, fillFlowText, validateFlowDefinition, type FlowDefinition, type FlowStage } from "./flows.js";
 import { reportSummaryFor } from "./report-summary.js";
 import { fileTaskProposal } from "./proposal.js";
 import { requestResultChanges } from "./result-actions.js";
@@ -92,10 +92,51 @@ function advanceCard(store: Store, flow: FlowRow, definition: FlowDefinition | n
       if (result === "fail" && card.owner !== null) notifyPeople(store, card, [card.owner], null, { key: `failed:${card.entry}`, subject: `“${card.title}” went back to ${titleIn(definition, to)}`, body: `${note ?? "Its step didn't finish."} It's in ${titleIn(definition, to)} now.`, attention: true }, now);
     }
   };
+  // A time limit (v91): once a card has sat here that long, the person it waits on hears about it, once,
+  // and a Holding or "Person decides" zone can move it on.
+  if (stage.limit !== undefined && stage.kind !== "wait" && stage.kind !== "done") {
+    const entered = Date.parse(store.flowCardEnteredAt(card.id) ?? card.updatedAt);
+    if (now.getTime() >= entered + stage.limit.minutes * 60_000) {
+      const decider = stage.kind === "approval" ? deciderOf(stage, flow) : null;
+      const to = stage.limit.to;
+      notifyPeople(store, card, [decider ?? card.owner ?? flow.owner], null, { key: `limit:${card.entry}`, attention: true,
+        subject: `“${card.title}” has waited ${durationWords(stage.limit.minutes)} in ${stage.title}`,
+        body: to === null ? `It's still in ${stage.title}.` : `It's moving to ${titleIn(definition, to)}.` }, now);
+      if (to !== null && store.moveFlowCard(card.id, { to, outcome: "moved", actor: "flow", historyNote: `Waited more than ${durationWords(stage.limit.minutes)} in ${stage.title}`, expectEntry: card.entry }, now)) {
+        outcome.moved++;
+        return;
+      }
+    }
+  }
   switch (stage.kind) {
     case "inbox":
       if (card.waiting !== null) store.updateFlowCard(card.id, { waiting: null }, now);
       return;
+    case "wait": {
+      const wait = stage.wait ?? { for: "reply" as const, minutes: 24 * 60 };
+      const entered = Date.parse(store.flowCardEnteredAt(card.id) ?? card.updatedAt);
+      const words = durationWords(wait.minutes);
+      if (now.getTime() < entered + wait.minutes * 60_000) {
+        // Replies are taken as they're read (flow-replies.ts), which moves the card on; until then it says what it waits for.
+        const watch = wait.for === "reply" ? store.flowMailWatch() : null;
+        const trouble = watch !== null && watch.failures > 0 && watch.lastOutcome !== null ? ` ${watch.lastOutcome}` : "";
+        // How long is on the card itself (when it moves on, in the viewer's own time); this says what for.
+        const waiting = wait.for === "time" ? "Waiting before moving on." : `Waiting for a reply.${trouble}`;
+        if (card.waiting !== waiting) store.updateFlowCard(card.id, { waiting }, now);
+        return;
+      }
+      if (wait.for === "time") { onward("ok"); return; }
+      if (stage.onFail !== null) {
+        if (store.moveFlowCard(card.id, { to: stage.onFail, outcome: "moved", actor: "flow", historyNote: `No reply after ${words}`, expectEntry: card.entry }, now)) outcome.moved++;
+        return;
+      }
+      const waiting = `No reply after ${words}. Move the card on when you're ready.`;
+      if (card.waiting !== waiting) {
+        store.updateFlowCard(card.id, { waiting }, now);
+        notifyPeople(store, card, [card.owner ?? flow.owner], null, { key: `no-reply:${card.entry}`, subject: `No reply to “${card.title}” after ${words}`, body: `It's waiting in ${stage.title}.`, attention: true }, now);
+      }
+      return;
+    }
     case "done":
       store.updateFlowCard(card.id, { state: "done", waiting: null }, now);
       notifyPeople(store, card, cardFollowers(store, card), null, { key: `done:${card.entry}`, subject: `Done: “${card.title}”`, body: `“${card.title}” reached ${stage.title} in ${flow.name}.` }, now);

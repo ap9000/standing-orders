@@ -19,12 +19,38 @@ work moving through them. Open **Flows**, then **Edit flow** to draw.
 | Use a tool | Calls one of the project's tools (MCP servers). |
 | Update where it came from | Comments on (and can close) the GitHub or Linear issue the card came from, or answers in the chat thread it came from. |
 | Message | Posts to the project's chat. |
+| Wait | Waits for a reply to the card's email, or for a set time. |
 | Done | The end. |
 
 Each zone has a **Then** (where cards go next) and, where it can fail, an
 **If it fails** path. A Sort zone has one arrow per answer instead, plus
 **If it isn't sure**. See [Steps that reach outside](steps-outside.md) for
 Sort, Draft, Web request, Send email and Use a tool.
+
+## Waiting for replies and time limits
+
+Put a **Wait** zone after a Send email zone to wait for the person to answer.
+When they reply, the card moves on (**When they reply**), with their reply in
+its discussion and in `{{stage.<wait zone>}}` for the zones after it. If no
+reply comes within the time you set (up to 30 days), the card takes **If no
+reply**: a follow-up email, say, or a person's decision. A follow-up stays in
+the same email thread. A Wait zone can also just wait a set time, then move
+on.
+
+Only a reply from someone the card emailed counts, and out-of-office answers
+never do. Replies are read from the inbox in Settings → Email, about once a
+minute, while any card is waiting on one. An email inbox trigger on the same
+mailbox hands replies to their card instead of starting a new one. A reply
+that arrives when the card isn't waiting still joins its discussion, and its
+owner hears about it.
+
+Any other zone can have a **Time limit**: after that long, whoever the card
+waits on is reminded once (the decider for a Person decides zone; otherwise
+the card's owner, or the flow's). A Holding or Person decides zone can also
+move the card on then, for example to a decision anyone can make.
+
+Each waiting card shows when its wait or time limit runs out, in your own
+time.
 
 ## Fill-ins
 
@@ -70,7 +96,9 @@ is here, and a face on a card shows who has that card open.
 ## Templates
 
 Coding, Research, Issue triage, Spam filter, Lead routing, Effort routing,
-Exception routing, Email replies, and Blank.
+Exception routing, Email replies, Reply and follow up (a nudge in the same
+thread after 3 days without an answer), Decisions that don't stall (a
+reminder, then anyone can decide), and Blank.
 
 ## Insights
 

@@ -37,7 +37,7 @@
  */
 import { createHash } from "node:crypto";
 
-export const FLOW_STAGE_KINDS = ["inbox", "task", "report", "approval", "check", "update", "notify", "sort", "draft", "request", "email", "tool", "done"] as const;
+export const FLOW_STAGE_KINDS = ["inbox", "task", "report", "approval", "check", "update", "notify", "sort", "draft", "request", "email", "tool", "wait", "done"] as const;
 export type FlowStageKind = (typeof FLOW_STAGE_KINDS)[number];
 export const FLOW_COLORS = ["slate", "blue", "violet", "amber", "green", "rose"] as const;
 export type FlowColor = (typeof FLOW_COLORS)[number];
@@ -56,6 +56,11 @@ export type FlowRequest = { method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 export type FlowEmail = { to: string; subject: string; body: string };
 /** tool: which of the project's tools (MCP servers), which of its functions, and the arguments as JSON with fill-ins. */
 export type FlowTool = { server: string; name: string; args: string };
+/** wait (v91): for a reply to the card's email (next: replied, onFail: no reply in time), or for a set time (then next). */
+export type FlowWait = { for: "reply" | "time"; minutes: number };
+/** A time limit on a zone (v91): after this long, the person it waits on is reminded, and a Holding or
+ * "Person decides" zone can move the card on (`to`). */
+export type FlowLimit = { minutes: number; to: string | null };
 
 export type FlowStage = {
   id: string;
@@ -89,6 +94,10 @@ export type FlowStage = {
   request?: FlowRequest;
   email?: FlowEmail;
   tool?: FlowTool;
+  /** wait (v91): what it waits for, and how long. */
+  wait?: FlowWait;
+  /** Any zone but Wait and Done (v91): how long a card may sit here before someone is reminded. */
+  limit?: FlowLimit;
   /** Where a card goes when this zone's step succeeds, and when it fails or is sent back (sort: when it isn't sure). */
   next: string | null;
   onFail: string | null;
@@ -110,6 +119,7 @@ export const FLOW_KIND_WORDS: Record<FlowStageKind, { label: string; about: stri
   tool: { label: "Use a tool", about: "Calls one of the project's tools (its connected MCP servers), like posting to Slack or adding a page to Notion." },
   draft: { label: "Draft", about: "Claude writes a reply, summary or note from the card in seconds. Nothing is sent until a later step sends it." },
   sort: { label: "Sort", about: "Jev reads the card in under a second and sends it where its answer leads. Cards it isn't sure about take the not-sure path." },
+  wait: { label: "Wait", about: "Waits for a reply to the card's email, or for a set time. A reply moves the card on; if none comes in time, it takes the no-reply path." },
   done: { label: "Done", about: "The end of the flow." },
 };
 
@@ -219,6 +229,47 @@ function validateSort(input: unknown, title: string): FlowSort {
   return { question, answers: checked, sureAt, notes: checkedNotes };
 }
 
+/** The longest a zone waits or a limit runs: 30 days. */
+export const LONGEST_WAIT_MINUTES = 30 * 24 * 60;
+const UNITS: readonly [RegExp, number][] = [[/^(m|min|mins|minute|minutes)$/, 1], [/^(h|hr|hrs|hour|hours)$/, 60], [/^(d|day|days)$/, 24 * 60], [/^(w|wk|wks|week|weeks)$/, 7 * 24 * 60]];
+/** "3 days", "4 hours", "90 minutes", "1 week" (or a number of minutes) as minutes; null when it isn't one. */
+export function durationMinutes(value: unknown): number | null {
+  if (typeof value === "number") return Number.isInteger(value) && value >= 1 && value <= LONGEST_WAIT_MINUTES ? value : null;
+  if (typeof value !== "string") return null;
+  const match = /^\s*([0-9]{1,5}(?:\.[0-9]+)?)\s*([a-z]+)\s*$/i.exec(value);
+  const unit = match === null ? undefined : UNITS.find(([words]) => words.test(match[2]!.toLowerCase()));
+  if (match === null || unit === undefined) return null;
+  const minutes = Math.round(Number(match[1]) * unit[1]);
+  return minutes >= 1 && minutes <= LONGEST_WAIT_MINUTES ? minutes : null;
+}
+/** Minutes in the words people use: "3 days", "1 day 4 hours", "45 minutes". */
+export function durationWords(minutes: number): string {
+  const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  if (minutes % (7 * 24 * 60) === 0) return plural(minutes / (7 * 24 * 60), "week");
+  const days = Math.floor(minutes / (24 * 60)), hours = Math.floor((minutes % (24 * 60)) / 60), rest = minutes % 60;
+  return [days > 0 ? plural(days, "day") : "", hours > 0 ? plural(hours, "hour") : "", rest > 0 ? plural(rest, "minute") : ""].filter(one => one !== "").join(" ");
+}
+
+/** A Wait zone's settings, checked. */
+function validateWait(input: unknown, title: string): FlowWait {
+  const raw = (input ?? {}) as Record<string, unknown>;
+  const minutes = durationMinutes(raw["minutes"]);
+  if (minutes === null) throw new Error(`Zone ${title}: say how long it waits, from 1 minute to 30 days.`);
+  return { for: raw["for"] === "time" ? "time" : "reply", minutes };
+}
+
+/** A zone's time limit, checked; null when it has none. Only Holding and "Person decides" zones move a card on. */
+function validateLimit(input: unknown, kind: FlowStageKind, title: string): FlowLimit | null {
+  if (input === undefined || input === null) return null;
+  const raw = input as Record<string, unknown>;
+  if (kind === "wait" || kind === "done") throw new Error(`Zone ${title}: ${kind === "wait" ? "a Wait zone has its own time" : "the end has no time limit"}.`);
+  const minutes = durationMinutes(raw["minutes"]);
+  if (minutes === null) throw new Error(`Zone ${title}: say how long a card may wait, from 1 minute to 30 days.`);
+  const to = text(raw["to"], 32);
+  if (to !== null && kind !== "inbox" && kind !== "approval") throw new Error(`Zone ${title}: only Holding and "Person decides" zones move a card on when it waits too long; other zones remind.`);
+  return { minutes, to };
+}
+
 /** Who decides at an approval zone: its named person, the flow's owner, or null for anyone who approves on the project. */
 export function deciderOf(stage: Pick<FlowStage, "approver" | "toOwner">, flow: { owner: string }): string | null {
   return stage.toOwner === true ? flow.owner : stage.approver;
@@ -255,6 +306,8 @@ export function validateFlowDefinition(input: unknown): FlowDefinition {
       ...(kind === "request" ? { request: validateRequest(stage["request"], title) } : {}),
       ...(kind === "email" ? { email: validateEmail(stage["email"], title) } : {}),
       ...(kind === "tool" ? { tool: validateTool(stage["tool"], title) } : {}),
+      ...(kind === "wait" ? { wait: validateWait(stage["wait"], title) } : {}),
+      ...(() => { const limit = validateLimit(stage["limit"], kind as FlowStageKind, title); return limit === null ? {} : { limit }; })(),
       next: kind === "sort" ? null : text(stage["next"], 32),
       onFail: text(stage["onFail"], 32),
     };
@@ -265,7 +318,8 @@ export function validateFlowDefinition(input: unknown): FlowDefinition {
     ids.add(stage.id);
   }
   for (const stage of stages) {
-    for (const target of [stage.next, stage.onFail, ...(stage.sort?.answers.map(one => one.to) ?? []), ...(stage.routes?.map(one => one.to) ?? [])]) if (target !== null && !ids.has(target)) throw new Error(`Zone ${stage.title} points at a zone that no longer exists.`);
+    for (const target of [stage.next, stage.onFail, stage.limit?.to ?? null, ...(stage.sort?.answers.map(one => one.to) ?? []), ...(stage.routes?.map(one => one.to) ?? [])]) if (target !== null && !ids.has(target)) throw new Error(`Zone ${stage.title} points at a zone that no longer exists.`);
+    if (stage.limit?.to === stage.id) throw new Error(`Zone ${stage.title}: a card that waits too long can't move back into the same zone.`);
     if (stage.routes?.some(one => one.to === stage.id)) throw new Error(`Zone ${stage.title}: an answer can't send cards back into the same zone.`);
     if (stage.sort !== null && stage.sort.answers.some(one => one.to === stage.id)) throw new Error(`Zone ${stage.title}: an answer can't send cards back into the same zone.`);
     if ((stage.kind === "task" || stage.kind === "report") && stage.instructions === null) throw new Error(`Zone ${stage.title}: say what the agent should do.`);
@@ -341,14 +395,34 @@ export type FlowStepInput = {
   method?: FlowRequest["method"]; url?: string; headers?: Record<string, string>; body?: string;
   to?: string; subject?: string;
   server?: string; tool?: string; args?: Record<string, unknown> | string;
+  /** wait (v91): for a reply (the default) or a set time, and how long ("3 days"); where a card goes when no reply comes. */
+  waitFor?: "reply" | "time"; wait?: string | number; ifNoReply?: string;
+  /** Any step but wait and done (v91): remind after this long ("2 days"; "none" removes it), and on holding and approval steps, move the card to this step then. */
+  remindAfter?: string | number; thenMoveTo?: string;
   next?: string; ifFails?: string; ifNotSure?: string;
 };
 
-const KIND_COLORS: Record<FlowStageKind, FlowColor> = { inbox: "slate", task: "blue", report: "violet", approval: "amber", check: "blue", update: "green", notify: "green", sort: "violet", draft: "violet", request: "blue", email: "green", tool: "blue", done: "green" };
+const KIND_COLORS: Record<FlowStageKind, FlowColor> = { inbox: "slate", task: "blue", report: "violet", approval: "amber", check: "blue", update: "green", notify: "green", sort: "violet", draft: "violet", request: "blue", email: "green", tool: "blue", wait: "slate", done: "green" };
 /** A step id as the lead may write it (sort_by_hand, Sort-By-Hand) in the one form zones use. */
 const idOf = (value: string) => value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32);
 const slugOf = (title: string) => title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 28) || "zone";
 const overlaps = (a: FlowZone, b: FlowZone) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+
+/** A wait step's settings: what it waits for and how long (3 days when neither the step nor the zone it keeps says). */
+function waitFromStep(step: FlowStepInput, old: FlowWait | null, title: string): FlowWait {
+  const minutes = step.wait === undefined ? old?.minutes ?? 3 * 24 * 60 : durationMinutes(step.wait);
+  if (minutes === null) throw new Error(`Step ${title}: say how long it waits, like "3 days" or "4 hours" (up to 30 days).`);
+  return { for: step.waitFor ?? old?.for ?? "reply", minutes };
+}
+
+/** A step's time limit: the one it gives, the one its zone had, or none ("none" removes one). */
+function limitFromStep(step: FlowStepInput, old: FlowLimit | null, title: string, find: (ref: string) => string): FlowLimit | null {
+  if (step.remindAfter === undefined) return old === null ? null : { ...old, ...(step.thenMoveTo === undefined ? {} : { to: step.thenMoveTo.trim() === "" ? null : find(step.thenMoveTo) }) };
+  if (typeof step.remindAfter === "string" && /^\s*(none|never|no|off)?\s*$/i.test(step.remindAfter)) return null;
+  const minutes = durationMinutes(step.remindAfter);
+  if (minutes === null) throw new Error(`Step ${title}: say when to remind, like "2 days" (up to 30 days).`);
+  return { minutes, to: typeof step.thenMoveTo === "string" && step.thenMoveTo.trim() !== "" ? find(step.thenMoveTo) : step.thenMoveTo === undefined ? old?.to ?? null : null };
+}
 
 /** What a draft zone asks for when the steps leave it out. */
 export const DRAFT_DEFAULT = "Write a short, friendly reply to the person who sent this card, in plain words.";
@@ -409,7 +483,8 @@ export function flowFromSteps(input: unknown, previous: FlowDefinition | null = 
       : following?.id ?? drafts.find(one => one.kind === "done")!.id;
     const keptFail = old?.onFail !== null && old?.onFail !== undefined && drafts.some(one => one.id === old.onFail) ? old.onFail : null;
     const worker = [...earlier].reverse().find(one => one.kind === "task" || one.kind === "report");
-    const notSure = kind === "sort" && typeof step.ifNotSure === "string" && step.ifNotSure.trim() !== "" ? step.ifNotSure : step.ifFails;
+    const notSure = kind === "sort" && typeof step.ifNotSure === "string" && step.ifNotSure.trim() !== "" ? step.ifNotSure
+      : kind === "wait" && typeof step.ifNoReply === "string" && step.ifNoReply.trim() !== "" ? step.ifNoReply : step.ifFails;
     const onFail = kind === "done" ? null
       : typeof notSure === "string" && notSure.trim() !== "" ? find(notSure, title)
       : keptFail ?? (kind === "approval" ? worker?.id ?? (drafts[0]!.id === id ? null : drafts[0]!.id) : null);
@@ -443,6 +518,8 @@ export function flowFromSteps(input: unknown, previous: FlowDefinition | null = 
       ...(kind === "request" ? { request: { method: step.method ?? old?.request?.method ?? "POST", url: step.url ?? old?.request?.url ?? "", headers: step.headers ?? old?.request?.headers ?? {}, body: step.body ?? old?.request?.body ?? null } } : {}),
       ...(kind === "email" ? { email: { to: step.to ?? old?.email?.to ?? "{{card.email}}", subject: step.subject ?? old?.email?.subject ?? "Re: {{card.title}}", body: step.body ?? old?.email?.body ?? "" } } : {}),
       ...(kind === "tool" ? { tool: { server: step.server ?? old?.tool?.server ?? "", name: step.tool ?? old?.tool?.name ?? "", args: typeof step.args === "string" ? step.args : step.args !== undefined ? JSON.stringify(step.args) : old?.tool?.args ?? "{}" } } : {}),
+      ...(kind === "wait" ? { wait: waitFromStep(step, old?.wait ?? null, title) } : {}),
+      ...(() => { const limit = kind === "wait" || kind === "done" ? null : limitFromStep(step, old?.limit ?? null, title, ref => find(ref, title)); return limit === null ? {} : { limit }; })(),
       next, onFail,
     });
   });
@@ -553,7 +630,10 @@ export function flowTerms(definition: FlowDefinition, previous: FlowDefinition |
       if (stage.sort.notes.length > 0) lines.push(`Also notes: ${stage.sort.notes.map(one => one.kind === "score" ? `${one.question} (${one.levels?.join(" / ")})` : `${one.question} (yes or no)`).join("; ")}`);
     }
     else if (stage.kind === "check") lines.push(`Runs the project's script “${stage.script}” with no AI.`, `Passes → ${to(stage.next)}${stage.onFail === null ? " Fails → waits there." : ` Fails → ${to(stage.onFail)}`}`);
+    else if (stage.kind === "wait" && stage.wait !== undefined) lines.push(stage.wait.for === "time" ? `Waits ${durationWords(stage.wait.minutes)}. Then → ${to(stage.next)}`
+      : `Waits up to ${durationWords(stage.wait.minutes)} for a reply to the card's email, from someone it was sent to. Reply → ${to(stage.next)} No reply → ${stage.onFail === null ? "stays there for a person." : to(stage.onFail)}`);
     else if (stage.next !== null) lines.push(`Then → ${to(stage.next)}${stage.onFail === null ? "" : ` If it fails → ${to(stage.onFail)}`}`);
+    if (stage.limit !== undefined) lines.push(`After ${durationWords(stage.limit.minutes)} there: reminds ${stage.kind === "approval" ? "whoever decides" : "the card's owner"}${stage.limit.to === null ? "." : `, and moves it to ${to(stage.limit.to)}`}`);
     return lines.join("\n");
   };
   const terms: string[] = [];
@@ -811,6 +891,49 @@ export const FLOW_TEMPLATES: readonly { id: string; label: string; about: string
         stage("send", "Email it", "email", zone(840, 0, "green"), { email: { to: "{{card.email}}", subject: "Re: {{card.title}}", body: "{{stage.write}}" }, next: "done", onFail: "no-address" }),
         stage("no-address", "No email address", "inbox", zone(840, 380, "amber")),
         stage("done", "Done", "done", zone(1260, 0, "green", 220)),
+      ],
+    },
+  },
+  {
+    id: "follow-up",
+    label: "Reply and follow up",
+    about: "Claude drafts a reply, the owner approves it, and it's emailed. If they don't answer in 3 days, a short nudge goes out in the same thread; replies land in “They replied”. Needs the inbox in Settings → Email.",
+    definition: {
+      version: 1,
+      start: "write",
+      stages: [
+        stage("write", "Write the reply", "draft", zone(0, 0, "violet"), {
+          instructions: "Write a short, friendly reply to the person who wrote in, answering in plain words. Sign off as the team.",
+          next: "check",
+        }),
+        stage("check", "Check the reply", "approval", zone(420, 0, "amber"), { toOwner: true, next: "send", onFail: "write" }),
+        stage("send", "Email it", "email", zone(840, 0, "green"), { email: { to: "{{card.email}}", subject: "Re: {{card.title}}", body: "{{stage.write}}" }, next: "wait", onFail: "not-sent" }),
+        stage("not-sent", "Couldn't email", "inbox", zone(840, 420, "amber")),
+        stage("wait", "Wait for an answer", "wait", zone(1260, 0, "slate"), { wait: { for: "reply", minutes: 3 * 24 * 60 }, next: "replied", onFail: "nudge" }),
+        stage("replied", "They replied", "inbox", zone(1680, 0, "slate"), { limit: { minutes: 24 * 60, to: null } }),
+        stage("nudge", "Nudge", "email", zone(1260, 420, "green"), {
+          email: { to: "{{card.email}}", subject: "Re: {{card.title}}", body: "Hi, just checking you saw our reply about “{{card.title}}”. Happy to help if anything's unclear." },
+          next: "wait-again", onFail: "not-sent",
+        }),
+        stage("wait-again", "Wait again", "wait", zone(1680, 420, "slate"), { wait: { for: "reply", minutes: 4 * 24 * 60 }, next: "replied", onFail: "no-answer" }),
+        stage("no-answer", "No answer", "done", zone(2100, 420, "green", 220)),
+      ],
+    },
+  },
+  {
+    id: "stalled-decisions",
+    label: "Decisions that don't stall",
+    about: "The owner decides each request. If they haven't in a day they're reminded and it goes to anyone who can approve; that decision gets a reminder after 2 days.",
+    definition: {
+      version: 1,
+      start: "requests",
+      stages: [
+        stage("requests", "Requests", "inbox", zone(0, 0, "slate"), { next: "decide" }),
+        stage("decide", "Owner decides", "approval", zone(420, 0, "amber"), { toOwner: true, next: "approved", onFail: "declined", limit: { minutes: 24 * 60, to: "anyone" } }),
+        stage("anyone", "Anyone decides", "approval", zone(420, 420, "amber"), { next: "approved", onFail: "declined", limit: { minutes: 2 * 24 * 60, to: null } }),
+        stage("approved", "Tell the team", "notify", zone(840, 0, "green", 220), { message: "Approved: {{card.title}}", next: "done" }),
+        stage("done", "Done", "done", zone(1260, 0, "green", 220)),
+        stage("declined", "Declined", "done", zone(840, 420, "green", 220)),
       ],
     },
   },

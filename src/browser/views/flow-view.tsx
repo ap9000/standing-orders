@@ -8,7 +8,7 @@
  * with the faces of whoever else has it open. */
 import { Background, BackgroundVariant, Controls, Handle, MarkerType, NodeResizer, Position, ReactFlow, ReactFlowProvider, applyNodeChanges, useReactFlow, type Connection, type Edge, type Node, type NodeChange, type NodeProps } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Bell, BellOff, CalendarClock, LineChart, ListChecks, MessageSquareReply, Copy, Flag, GitPullRequest, Hammer, Inbox, Megaphone, MessageSquare, MousePointerClick, Pencil, PenLine, Plus, Search, Split, Globe, Mail, Wrench, SquareKanban, UserCheck, Webhook, Workflow, X, Zap } from "lucide-react";
+import { Bell, BellOff, CalendarClock, Hourglass, LineChart, ListChecks, MessageSquareReply, Copy, Flag, GitPullRequest, Hammer, Inbox, Megaphone, MessageSquare, MousePointerClick, Pencil, PenLine, Plus, Search, Split, Globe, Mail, Wrench, SquareKanban, UserCheck, Webhook, Workflow, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { BrowserFlowCard, BrowserFlowStage, BrowserFlowTrigger, BrowserFlowView } from "../../browser-workspace.js";
 import { Badge, Button, Input, Label, Textarea, cn, toast } from "../components/ui/index.js";
@@ -27,7 +27,7 @@ const KIND_ICONS: Record<BrowserFlowStage["kind"], ReactNode> = {
   approval: <UserCheck className="size-3.5" aria-hidden="true" />, notify: <Megaphone className="size-3.5" aria-hidden="true" />, done: <Flag className="size-3.5" aria-hidden="true" />,
   check: <ListChecks className="size-3.5" aria-hidden="true" />, update: <MessageSquareReply className="size-3.5" aria-hidden="true" />,
   sort: <Split className="size-3.5" aria-hidden="true" />, draft: <PenLine className="size-3.5" aria-hidden="true" />,
-  request: <Globe className="size-3.5" aria-hidden="true" />, email: <Mail className="size-3.5" aria-hidden="true" />, tool: <Wrench className="size-3.5" aria-hidden="true" />,
+  request: <Globe className="size-3.5" aria-hidden="true" />, email: <Mail className="size-3.5" aria-hidden="true" />, tool: <Wrench className="size-3.5" aria-hidden="true" />, wait: <Hourglass className="size-3.5" aria-hidden="true" />,
 };
 
 
@@ -174,6 +174,7 @@ function ZoneNode({ data, selected }: NodeProps<Node<ZoneData, "zone">>) {
           </div>
           {card.sorted !== null && <div className="mt-1 flex"><SortChip sorted={card.sorted} /></div>}
           {card.waiting !== null && <div className={cn("mt-1 line-clamp-2 text-[11px] leading-snug", card.canDecide ? "font-semibold text-attention" : "text-muted-foreground")}>{card.canDecide ? "Needs your decision" : card.waiting}</div>}
+          {card.deadline != null && <div className="mt-0.5 text-[11px] text-muted-foreground" data-card-deadline>{deadlineWords(card.deadline)}</div>}
           {(card.owner !== null || card.comments.length > 0) && <div className="mt-1.5 flex items-center gap-1.5">
             {card.owner !== null && <Face name={card.owner} />}
             <span className="flex-1" />
@@ -240,6 +241,15 @@ function slug(title: string, taken: Set<string>): string {
 }
 
 const when = (at: string) => new Date(at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+/** A card's deadline in the viewer's own clock: "No reply by 4:30 PM" today, "No reply by Tue 4:30 PM" this week, "Moves on Oct 2" further out. */
+const deadlineWords = (deadline: { at: string; label: string }) => {
+  const then = new Date(deadline.at), now = new Date();
+  if (then.toDateString() === now.toDateString()) return `${deadline.label} ${then.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`;
+  if (then.getTime() - now.getTime() < 6 * 86_400_000) return `${deadline.label} ${then.toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" })}`;
+  return `${deadline.label.replace(/ at$/, "")} ${then.toLocaleDateString(undefined, { month: "short", day: "numeric" })}`;
+};
+/** Minutes as people say them: "45 min", "4 h", "3 days". */
+const minutesWords = (minutes: number) => minutes % 1440 === 0 ? `${minutes / 1440} day${minutes === 1440 ? "" : "s"}` : minutes % 60 === 0 ? `${minutes / 60} h` : `${minutes} min`;
 
 /** A comment's text with the people it pinged picked out. */
 function Mentioned({ body, mentions }: { body: string; mentions: string[] }) {
@@ -325,7 +335,7 @@ function CardPanel({ card, view, csrf, apply, onClose }: { card: BrowserFlowCard
     {card.source !== null && <p className="text-[12px] text-muted-foreground">From {card.source.url === null ? card.source.label
       : <a className="font-medium text-primary underline-offset-4 hover:underline" href={card.source.url} {...(card.source.url.startsWith("/") ? {} : { target: "_blank", rel: "noreferrer" })}>{card.source.label}</a>}</p>}
     {card.description !== null && <p className="whitespace-pre-wrap text-[13px]">{card.description}</p>}
-    {card.waiting !== null && <p className="rounded-md bg-muted px-3 py-2 text-[13px]">{card.waiting}</p>}
+    {card.waiting !== null && <p className="rounded-md bg-muted px-3 py-2 text-[13px]">{card.waiting}{card.deadline != null && <span className="block text-muted-foreground">{deadlineWords(card.deadline)}</span>}</p>}
     <CardPeople card={card} view={view} csrf={csrf} apply={apply} />
     {card.task !== null && <a className="text-[13px] font-medium text-primary underline-offset-4 hover:underline" href={card.task.href}>Open its task</a>}
     {card.draft !== null && !card.canDecide && <details className="rounded-md border px-3 py-2" open data-flow-draft>
@@ -572,6 +582,8 @@ function ZonePanel({ stage, stages, view, csrf, apply, update, remove, makeStart
         ...(event.target.value === "tool" ? { tool: stage.tool ?? { server: view.tools[0]?.name ?? "", name: view.tools[0]?.functions[0] ?? "", args: '{"text": "{{card.title}}"}' } } : {}),
         ...(event.target.value === "draft" ? { instructions: stage.instructions ?? "Write a short, friendly reply to the person who sent this card, in plain words." } : {}),
         ...(event.target.value === "approval" ? { toOwner: stage.toOwner ?? true } : {}),
+        ...(event.target.value === "wait" ? { wait: stage.wait ?? { for: "reply", minutes: 3 * 24 * 60 } } : {}),
+        ...(event.target.value === "wait" || event.target.value === "done" ? { limit: undefined } : event.target.value !== "inbox" && event.target.value !== "approval" && stage.limit !== undefined ? { limit: { ...stage.limit, to: null } } : {}),
         ...(event.target.value === "sort" ? { next: null, sort: stage.sort ?? { question: "What kind of card is this?", answers: others.slice(0, 2).map(one => ({ answer: one.title.slice(0, 40), means: one.title, to: one.id })), sureAt: 0.8, notes: [] } } : {}) })}>
         {view.kinds.map(one => <option key={one.kind} value={one.kind}>{one.label}</option>)}
       </select>
@@ -604,9 +616,22 @@ function ZonePanel({ stage, stages, view, csrf, apply, update, remove, makeStart
     {stage.kind === "email" && stage.email !== undefined && <EmailSettings email={stage.email} view={view} set={email => update({ email })} />}
     {stage.kind === "tool" && stage.tool !== undefined && <ToolSettings tool={stage.tool} view={view} set={tool => update({ tool })} />}
     {stage.kind === "sort" && stage.sort !== null && <SortSettings sort={stage.sort} others={others} ready={view.sortReady} set={sort => update({ sort })} />}
-    {stage.kind !== "done" && stage.kind !== "sort" && <Field label="Then">
-      <select className={select} aria-label="Then" value={stage.next ?? ""} onChange={event => update({ next: event.target.value || null })}>
+    {stage.kind === "wait" && stage.wait !== undefined && <>
+      <Field label="Wait for" hint={stage.wait.for === "reply" ? "Only a reply from someone it emailed counts. Needs the inbox in Settings → Email." : undefined}>
+        <select className={select} aria-label="Wait for" value={stage.wait.for} onChange={event => update({ wait: { ...stage.wait!, for: event.target.value as "reply" | "time" } })}>
+          <option value="reply">A reply to the card's email</option><option value="time">A set time</option>
+        </select>
+      </Field>
+      <Field label={stage.wait.for === "reply" ? "For up to" : "How long"}><Duration minutes={stage.wait.minutes} label={stage.wait.for === "reply" ? "For up to" : "How long"} set={minutes => update({ wait: { ...stage.wait!, minutes } })} /></Field>
+    </>}
+    {stage.kind !== "done" && stage.kind !== "sort" && <Field label={stage.kind === "wait" && stage.wait?.for === "reply" ? "When they reply" : "Then"}>
+      <select className={select} aria-label={stage.kind === "wait" && stage.wait?.for === "reply" ? "When they reply" : "Then"} value={stage.next ?? ""} onChange={event => update({ next: event.target.value || null })}>
         <option value="">Wait here</option>{others.map(one => <option key={one.id} value={one.id}>{one.title}</option>)}
+      </select>
+    </Field>}
+    {stage.kind === "wait" && stage.wait?.for === "reply" && <Field label="If no reply">
+      <select className={select} aria-label="If no reply" value={stage.onFail ?? ""} onChange={event => update({ onFail: event.target.value || null })}>
+        <option value="">Stay here for a person</option>{others.map(one => <option key={one.id} value={one.id}>{one.title}</option>)}
       </select>
     </Field>}
     {(stage.kind === "approval" || stage.kind === "task" || stage.kind === "report" || stage.kind === "check" || stage.kind === "update" || stage.kind === "sort" || stage.kind === "request" || stage.kind === "email" || stage.kind === "tool") && <Field label={stage.kind === "approval" ? "If sent back" : stage.kind === "sort" ? "If it isn't sure" : "If it fails"}>
@@ -614,6 +639,7 @@ function ZonePanel({ stage, stages, view, csrf, apply, update, remove, makeStart
         <option value="">{stage.kind === "approval" ? "Can't be sent back" : stage.kind === "sort" ? "Wait here for a person" : "Wait here"}</option>{others.map(one => <option key={one.id} value={one.id}>{one.title}</option>)}
       </select>
     </Field>}
+    {stage.kind !== "wait" && stage.kind !== "done" && <TimeLimit stage={stage} others={others} update={update} />}
     <div className="grid gap-1.5"><span className="text-[13px] font-medium">Color</span>
       <div className="flex gap-2">{view.colors.map(color => <button key={color} type="button" aria-label={color} aria-pressed={stage.zone.color === color}
         className={cn("size-7 rounded-full border-2", stage.zone.color === color ? "border-foreground" : "border-transparent")} style={{ background: COLORS[color] }}
@@ -623,6 +649,37 @@ function ZonePanel({ stage, stages, view, csrf, apply, update, remove, makeStart
       {view.start !== stage.id && <Button variant="outline" size="sm" onClick={makeStart}>New cards start here</Button>}
       <Button variant="ghost" size="sm" className="text-destructive" onClick={remove} disabled={stages.length <= 1}>Delete zone</Button>
     </div>
+  </div>;
+}
+
+/** A length of time as a number and a unit: minutes, hours or days. */
+function Duration({ minutes, label, set }: { minutes: number; label: string; set: (minutes: number) => void }) {
+  const unit = minutes % 1440 === 0 ? 1440 : minutes % 60 === 0 ? 60 : 1;
+  return <div className="flex gap-2">
+    <Input type="number" min={1} max={Math.floor(43200 / unit)} value={minutes / unit} className="w-24" aria-label={`${label} (number)`}
+      onChange={event => { const n = Math.round(Number(event.target.value)); if (Number.isFinite(n) && n >= 1) set(Math.min(43200, n * unit)); }} />
+    <select className={SELECT} aria-label={`${label} (unit)`} value={unit} onChange={event => set(Math.min(43200, Math.max(1, (minutes / unit) * Number(event.target.value))))}>
+      <option value={1}>minutes</option><option value={60}>hours</option><option value={1440}>days</option>
+    </select>
+  </div>;
+}
+
+/** v91: how long a card may sit in a zone before the person it waits on is reminded (and, for Holding and decisions, where it goes then). */
+function TimeLimit({ stage, others, update }: { stage: BrowserFlowStage; others: BrowserFlowStage[]; update: (change: Partial<BrowserFlowStage>) => void }) {
+  const moves = stage.kind === "inbox" || stage.kind === "approval";
+  return <div className="grid gap-2" data-time-limit>
+    <label className="flex items-center gap-2 text-[13px] font-medium"><input type="checkbox" className="size-4 accent-[var(--so-accent)]" checked={stage.limit !== undefined}
+      onChange={event => update({ limit: event.target.checked ? { minutes: 24 * 60, to: null } : undefined })} />Time limit</label>
+    {stage.limit !== undefined && <>
+      <Field label="Remind after" hint={stage.kind === "approval" ? "Whoever decides hears about it once." : "The card's owner (or the flow's) hears about it once."}>
+        <Duration minutes={stage.limit.minutes} label="Remind after" set={minutes => update({ limit: { ...stage.limit!, minutes } })} />
+      </Field>
+      {moves && <Field label="Then">
+        <select className={SELECT} aria-label="After the time limit" value={stage.limit.to ?? ""} onChange={event => update({ limit: { ...stage.limit!, to: event.target.value || null } })}>
+          <option value="">Keep it here</option>{others.map(one => <option key={one.id} value={one.id}>Move it to {one.title}</option>)}
+        </select>
+      </Field>}
+    </>}
   </div>;
 }
 
@@ -1127,6 +1184,7 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
     return [...fromTriggers, ...stages.flatMap(stage => {
       const next = stage.next === null ? undefined : stages.find(one => one.id === stage.next);
       const fail = stage.onFail === null ? undefined : stages.find(one => one.id === stage.onFail);
+      const limitTo = stage.limit?.to == null ? undefined : stages.find(one => one.id === stage.limit!.to);
       // A sort zone (or a script zone's answers, v90): one arrow to each zone its answers lead to, named by those answers.
       const picks = stage.kind === "sort" && stage.sort !== null ? stage.sort.answers : stage.kind === "check" ? stage.routes ?? [] : [];
       const answers = picks.length > 0 ? [...new Set(picks.map(one => one.to))].flatMap(to => {
@@ -1140,11 +1198,17 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
       return [
         ...answers,
         ...(next === undefined ? [] : [{ id: `${stage.id}->next`, source: stage.id, target: next.id, sourceHandle: sides(stage, next, false).source, targetHandle: sides(stage, next, false).target,
-          type: "smoothstep", markerEnd: { type: MarkerType.ArrowClosed }, style: { strokeWidth: 2 }, deletable: editing }]),
+          type: "smoothstep", markerEnd: { type: MarkerType.ArrowClosed }, style: { strokeWidth: 2 }, deletable: editing,
+          ...(stage.kind === "wait" && stage.wait?.for === "reply" ? { label: "replied", labelStyle: { fontSize: 11, fontWeight: 600, fill: "var(--color-foreground)" }, labelBgStyle: { fill: "var(--color-card)" } } : {}) }]),
         ...(fail === undefined ? [] : [{ id: `${stage.id}->fail`, source: stage.id, target: fail.id, sourceHandle: sides(stage, fail, true).source, targetHandle: sides(stage, fail, true).target,
-          type: "smoothstep", pathOptions: { offset: 28, borderRadius: 10 }, label: stage.kind === "approval" ? "sent back" : stage.kind === "sort" ? "not sure" : "fails", labelStyle: { fontSize: 11, fill: "var(--so-attention)" },
-          labelBgStyle: { fill: "var(--color-card)" }, markerEnd: { type: MarkerType.ArrowClosed, color: "var(--so-attention)" },
-          style: { strokeWidth: 1.5, strokeDasharray: "6 4", stroke: "var(--so-attention)" }, deletable: editing }]),
+          type: "smoothstep", pathOptions: { offset: 28, borderRadius: 10 }, label: stage.kind === "approval" ? "sent back" : stage.kind === "sort" ? "not sure" : stage.kind === "wait" ? "no reply" : "fails", labelStyle: { fontSize: 11, fill: stage.kind === "wait" ? "var(--color-muted-foreground)" : "var(--so-attention)" },
+          labelBgStyle: { fill: "var(--color-card)" }, markerEnd: { type: MarkerType.ArrowClosed, color: stage.kind === "wait" ? "var(--color-muted-foreground)" : "var(--so-attention)" },
+          style: { strokeWidth: 1.5, strokeDasharray: "6 4", stroke: stage.kind === "wait" ? "var(--color-muted-foreground)" : "var(--so-attention)" }, deletable: editing }]),
+        // A time limit that moves the card on (v91): a dashed arrow named by the time.
+        ...(limitTo === undefined || stage.limit === undefined ? [] : [{ id: `${stage.id}->limit`, source: stage.id, target: limitTo.id, sourceHandle: sides(stage, limitTo, true).source, targetHandle: sides(stage, limitTo, true).target,
+          type: "smoothstep", pathOptions: { offset: 36, borderRadius: 10 }, label: `after ${minutesWords(stage.limit.minutes)}`, labelStyle: { fontSize: 11, fill: "var(--color-muted-foreground)" },
+          labelBgStyle: { fill: "var(--color-card)" }, markerEnd: { type: MarkerType.ArrowClosed, color: "var(--color-muted-foreground)" },
+          style: { strokeWidth: 1.5, strokeDasharray: "2 4", stroke: "var(--color-muted-foreground)" }, deletable: editing }]),
       ];
     })];
   }, [stages, editing, triggerNodes, start]);
@@ -1240,7 +1304,7 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
     <div className="relative flex min-h-0 flex-1">
       <div className="relative min-w-0 flex-1" data-flow-canvas>
         <ReactFlow nodes={nodes} edges={edges} nodeTypes={NODE_TYPES} onNodesChange={onNodesChange} onNodeDragStop={onNodeDragStop} onConnect={onConnect}
-          onEdgesDelete={deleted => { for (const edge of deleted) updateStage(edge.source, edge.id.endsWith("->fail") ? { onFail: null } : { next: null }); }}
+          onEdgesDelete={deleted => { for (const edge of deleted) updateStage(edge.source, edge.id.endsWith("->fail") ? { onFail: null } : edge.id.endsWith("->limit") ? { limit: { ...(draft?.stages.find(one => one.id === edge.source)?.limit ?? { minutes: 1440 }), to: null } } : { next: null }); }}
           onPaneClick={() => { if (editing) setSelected(null); }}
           // A node with a click handler keeps its pointer events outside edit mode: cards are clicked and dragged.
           onNodeClick={() => undefined}
