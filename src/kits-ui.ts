@@ -1,5 +1,5 @@
 /**
- * Starter kits pages (v99): the gallery — each kit's promise, what it sets
+ * Starter kits pages: the gallery — each kit's promise, what it sets
  * up, one button — and a kit's own page: its checklist, with the next step on
  * each line (connect email, connect a tool, try a sample card).
  */

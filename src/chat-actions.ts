@@ -431,7 +431,7 @@ export function prepareSharedAction(
       terms.push("Builds stop using it right away. Its stored secrets are deleted.");
     }
   } else if (operation === "kit_setup") {
-    // v99: a starter kit — its teammate, its flow and its buttons.
+    // a starter kit — its teammate, its flow and its buttons.
     const project = repo.split(/[\\/]/).filter(Boolean).at(-1) ?? repo;
     const kit = kitOf(String(input["kit"] ?? ""));
     if (kit === null) throw Error(`Choose a kit: ${KITS.map(one => one.id).join(", ")}.`);

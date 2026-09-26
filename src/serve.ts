@@ -22,7 +22,8 @@ import { toolsHtml, TOOLS_CSS, type ToolsView } from "./tools-ui.js";
 import { flowFallbackHtml, flowsListHtml, flowView, FLOWS_CSS } from "./flows-ui.js";
 import { BLANK_SOUL, TEAMMATE_CSS, teammatePageHtml, teammatesListHtml } from "./teammates-ui.js";
 import { grantTool, revokeTool, rulesFromForm, setToolRules } from "./teammate-tools.js";
-import { addKitGithubTrigger, addKitSample, kitOf, setUpKit } from "./kits.js";
+import { addKitGithubTrigger, addKitSample, kitInstalled, kitOf, setUpKit } from "./kits.js";
+import { CONNECT_CALLBACK, connectionsOf, finishConnect, oneClickOf, startConnect, type ConnectVisit } from "./mcp-connect.js";
 import { KITS_CSS, kitPageHtml, kitsGalleryHtml } from "./kits-ui.js";
 import { createTeammateFrom, labelOf, nameOf, saveSoul, setTeammateState, teammateSettings, sendTeammateSummaries } from "./teammate-admin.js";
 import { editMemory, forgetMemory, tellTeammate } from "./teammate-memory.js";
@@ -354,6 +355,8 @@ export type ServeOptions = {
   mailSender?: MailSender;
   /** v89: Google's token endpoint (tests inject a scripted one). */
   googleFetch?: typeof fetch;
+  /** Tests: every request a one-click connection makes (discovery, registration, tokens). */
+  connectFetch?: typeof fetch;
   chatEnv?: Record<string, string | undefined>;
   /**
    * The live peek's locality ASSERTION (live-peek v3 §3): the administrator
@@ -672,13 +675,15 @@ export function createDecisionServer(options: ServeOptions): Server {
   };
   /** One project's Tools page: its tools with which secrets are set (never values), the common tools not yet added, and what this computer already has. */
   const toolHome = options.toolHome ?? homedir();
-  const toolsViewOf = (repo: string, codex: unknown[] | null): ToolsView => {
+  const toolsViewOf = (repo: string, codex: unknown[] | null, kit: string | null = null, wanted: string | null = null): ToolsView => {
     const tools = projectToolsOf(store, repo);
     const names = new Set(tools.map(one => one.name));
     return {
       repo, project: repo.split(/[\\/]/).filter(Boolean).at(-1) ?? repo,
       tools: tools.map(tool => ({ tool, secretsSet: secretsSetFor(repo, tool.spec, toolHome) })),
-      catalog: TOOL_CATALOG.filter(one => !names.has(one.name)),
+      // A service that connects by signing in is offered only that way.
+      catalog: TOOL_CATALOG.filter(one => !names.has(one.name) && oneClickOf(one.name) === null),
+      connections: connectionsOf(store, repo), kit, wanted,
       found: discoverTools(repo, codex, toolHome).filter(one => !names.has(one.spec.name)),
     };
   };
@@ -689,6 +694,8 @@ export function createDecisionServer(options: ServeOptions): Server {
   const chatStreams = new Set<ServerResponse>();
   /** Google sign-ins in progress (v89): each consent visit's state, for 10 minutes. */
   const googleVisits = new Map<string, GoogleVisit>();
+  /** One-click connections on their way: the service's sign-in page and back, 15 minutes at most. */
+  const connectVisits = new Map<string, ConnectVisit>();
   /** Flows open in a browser (v88): who's here, and a nudge when one changes. */
   const flowRooms = createFlowRooms(flow => flowFingerprint(store, flow));
   const team = createTeamRuntime({ store, repos: codingProjects, evidenceRoot, clock, workspaceRevision,
@@ -960,6 +967,40 @@ export function createDecisionServer(options: ServeOptions): Server {
     return done(finished.ok ? `Connected ${finished.address}. Send email steps and Email inbox triggers use it now.` : finished.message);
   }
 
+  /**
+   * Back from a service's sign-in: the code becomes the tool's tokens,
+   * kept in its secrets file, and a page sends the person back to Tools (or
+   * to the kit the Connect came from, whose teammate may then use the tool).
+   */
+  async function connectCallback(response: ServerResponse, url: URL): Promise<void> {
+    const done = (back: string, key: "said" | "problem", words: string) => {
+      const to = `${back}${back.includes("?") ? "&" : "?"}${key}=${encodeURIComponent(words)}`;
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer", "x-content-type-options": "nosniff", "x-frame-options": "DENY",
+        "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'" });
+      response.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="0;url=${escape(to)}"><title>Standing Orders</title><p style="font:15px system-ui;margin:2rem">${escape(words)} <a href="${escape(to)}">Back to Standing Orders</a></p>`);
+    };
+    const state = url.searchParams.get("state") ?? "";
+    const visit = connectVisits.get(state);
+    connectVisits.delete(state);
+    if (visit === undefined || visit.expires < Date.now() || store.accountOf(visit.by)?.role !== "approver") return done("/settings/tools", "problem", "That sign-in expired. Connect again.");
+    const service = oneClickOf(visit.service)!;
+    const kit = visit.kit === null ? null : kitOf(visit.kit);
+    const back = kit === null ? `/settings/tools?repo=${encodeURIComponent(visit.repo)}` : `/kits/${kit.id}?repo=${encodeURIComponent(visit.repo)}`;
+    if (url.searchParams.has("error")) return done(back, "problem", url.searchParams.get("error") === "access_denied" ? `${service.label} wasn't connected: access was declined.` : `${service.label} wasn't connected.`);
+    const code = url.searchParams.get("code") ?? "";
+    if (!/^[\x21-\x7e]{4,2048}$/.test(code)) return done(back, "problem", `${service.label} didn't send a sign-in code. Connect again.`);
+    const now = clock();
+    const finished = await finishConnect(store, visit, code, now, { fetcher: options.connectFetch ?? fetch, home: toolHome, omitEnv: ALL_CREDENTIAL_ENV });
+    if (!finished.ok) return done(back, "problem", finished.said);
+    // From a kit: its teammate may use the tool now (reading freely, the rest after a person approves each call).
+    const set = kit === null || !kit.tools.some(one => one.tool === service.id) ? null : kitInstalled(store, kit, visit.repo);
+    if (set !== null && store.teammateGrant(set.mate.id, service.id) === null) {
+      const granted = await grantTool(store, set.mate, service.id, visit.by, now, { toolHome });
+      if (granted.ok) return done(back, "said", `${service.label} is connected, and ${nameOf(set.mate)} can use it: reading freely, the rest after you approve each call.`);
+    }
+    return done(back, "said", finished.said);
+  }
+
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     // Webhooks come through a public relay (Tailscale Funnel, a reverse
     // proxy) that forwards its own host name. The host check guards pages a
@@ -981,6 +1022,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     // Back from Google's consent screen (v89). The session cookie is SameSite=Strict and stays behind on
     // a return from another site: the visit's one-time state (made by a signed-in approver) is the proof.
     if (url.pathname === GOOGLE_CALLBACK && request.method === "GET") return googleCallback(response, url);
+    if (url.pathname === CONNECT_CALLBACK && request.method === "GET") return connectCallback(response, url);
 
     const method = request.method ?? "GET";
     if (await sessionEndpoint(request, response)) return;
@@ -2721,7 +2763,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const flows = store.listFlows(projects);
       return sendScreen(response, 200, screen("Flows", `<h1>Flows</h1>${flowsListHtml(store, flows, projects, who.via === "cookie" ? who.session.csrf : "", who.via === "cookie" && who.role === "approver", url.searchParams.get("problem"))}`, { chrome: chromeFor(project, "flows") }));
     }
-    // v99: starter kits — the gallery, and each kit's checklist in a project.
+    // starter kits — the gallery, and each kit's checklist in a project.
     if (url.pathname === "/kits" || /^\/kits\/[a-z-]{1,40}$/.test(url.pathname)) {
       const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
       const csrf = who.via === "cookie" ? who.session.csrf : "", canSetUp = who.via === "cookie" && who.role === "approver";
@@ -3319,7 +3361,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (chosen) {
         try {
           const approver = who.role === "approver" && who.via === "cookie";
-          content = toolsHtml(toolsViewOf(chosen, approver ? await codexServers(chosen) : null), who.via === "cookie" ? who.session.csrf : "", approver,
+          content = toolsHtml(toolsViewOf(chosen, approver ? await codexServers(chosen) : null, kitOf(url.searchParams.get("kit") ?? "")?.id ?? null, oneClickOf(url.searchParams.get("connect") ?? "")?.id ?? null), who.via === "cookie" ? who.session.csrf : "", approver,
             { said: url.searchParams.get("said"), problem: url.searchParams.get("problem") });
         } catch { content = '<p class="problem" role="alert">Tools are unavailable. Reload to retry.</p>'; }
       }
@@ -5544,7 +5586,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         return sendScreen(response,409,screen('Skills',`<h1>Skills</h1>${content}`,{chrome:chromeFor(repo,'settings'),functional:{script:skillsScript()}}));
       }
     }
-    // v99: setting a starter kit up, trying its sample card, and bringing GitHub issues in.
+    // setting a starter kit up, trying its sample card, and bringing GitHub issues in.
     const kitPost = /^\/kits\/([a-z-]{1,40})\/(setup|sample|github)$/.exec(url.pathname);
     if (kitPost !== null) {
       const now = clock();
@@ -5791,6 +5833,23 @@ export function createDecisionServer(options: ServeOptions): Server {
         return cancelled.ok ? settle(cancelled.said) : answer(409, { ok: false, said: cancelled.message });
       }
       return answer(404, { ok: false, said: "No such flow action." });
+    }
+    if (url.pathname === "/settings/tools/connect") {
+      if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "Sign in as an approver to connect tools.", "/settings/tools");
+      const repo = body.get("repo") ?? "";
+      if (!visible(repo) || ![...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()].includes(repo)) return refuse(response, who, 403, "That project is outside your access.", "/projects");
+      const service = oneClickOf(body.get("service") ?? "");
+      const kit = kitOf(body.get("kit") ?? "")?.id ?? null;
+      const back = (words: string) => redirect(response, `/settings/tools?repo=${encodeURIComponent(repo)}${kit === null ? "" : `&kit=${kit}`}${service === null ? "" : `&connect=${service.id}`}&problem=${encodeURIComponent(words)}#connect`);
+      if (service === null) return back("Choose a service to connect.");
+      if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return back("Enter your Standing Orders password to connect a tool.");
+      const origin = consoleOrigin(request.headers.host);
+      if (origin === null) return back("Connect tools from this computer (localhost) or from your https address.");
+      const started = await startConnect({ service: service.id, repo, by: who.name, origin, kit }, options.connectFetch ?? fetch);
+      if (!started.ok) return back(started.said);
+      for (const [key, visit] of connectVisits) if (visit.expires < Date.now()) connectVisits.delete(key);
+      connectVisits.set(started.state, started.visit);
+      return goOutside(response, started.go, `Going to ${service.label} to sign in…`);
     }
     if (url.pathname === "/settings/tools/change") {
       if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "Sign in as an approver to manage tools.", "/settings/tools");
@@ -6298,9 +6357,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const consent = googleConsent(readGoogleMail(options.configDir)!, `${origin}${GOOGLE_CALLBACK}`, who.name);
       for (const [key, visit] of googleVisits) if (visit.expires < Date.now()) googleVisits.delete(key);
       googleVisits.set(consent.visit.state, consent.visit);
-      response.writeHead(303, { Location: consent.url, "cache-control": "no-store", "referrer-policy": "no-referrer" });
-      response.end();
-      return;
+      return goOutside(response, consent.url, "Going to Google to sign in…");
     }
 
     if (url.pathname === "/projects/select") {
@@ -9704,6 +9761,18 @@ function page(response: ServerResponse, status: number, html: string, nonce?: st
     "Content-Type": "text/html; charset=utf-8",
   });
   response.end(html);
+}
+
+/**
+ * Off to another site's sign-in (Google, a service's one-click connection):
+ * a page that moves on by itself. Not a redirect: every page's form-action
+ * 'self' also covers where a form's answer redirects, so a browser stops a
+ * form that is answered with another site's address.
+ */
+function goOutside(response: ServerResponse, to: string, words: string): void {
+  response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer", "x-content-type-options": "nosniff", "x-frame-options": "DENY",
+    "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'" });
+  response.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="0;url=${escape(to)}"><title>Standing Orders</title><p style="font:15px system-ui;margin:2rem">${escape(words)} <a href="${escape(to)}">Continue</a></p>`);
 }
 
 function redirect(response: ServerResponse, to: string): void {

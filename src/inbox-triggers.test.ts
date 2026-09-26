@@ -198,8 +198,12 @@ describe("a Google account", () => {
       // The address to register with Google is this page's own.
       expect((await view()).google).toEqual({ connected: null, clientId: "", redirect: `${base}/settings/google/callback` });
       const connect = await fetch(`${base}/settings/google`, { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf, clientId: CLIENT, clientSecret: secret() }), redirect: "manual" });
-      expect(connect.status).toBe(303);
-      const google = new URL(connect.headers.get("location")!);
+      // A page that moves on to Google by itself: a form answered with another site's address is stopped by form-action 'self'.
+      expect(connect.status).toBe(200);
+      const going = await connect.text();
+      expect(going).toContain("Going to Google to sign in");
+      const google = new URL(/content="0;url=([^"]+)"/.exec(going)![1]!.replace(/&amp;/g, "&"));
+      expect(google.origin).toBe("https://accounts.google.com");
       expect(google.searchParams.get("redirect_uri")).toBe(`${base}/settings/google/callback`);
       // A made-up state is refused; the real one works once, without the session cookie (it stays behind on a return from Google).
       expect(await (await fetch(`${base}/settings/google/callback?state=made-up&code=4%2Fcode-from-google`)).text()).toContain("That Google sign-in expired.");

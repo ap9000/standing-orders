@@ -29,6 +29,11 @@ in chat. They live in private files (`0600`) on this computer, never in the
 database, a log, a card or a message. Key-shaped text is blanked from logs,
 drafts and anything a step keeps.
 
+A service you connect with one click is signed in on its own page. Standing
+Orders registers itself with that service, and the code that comes back only
+works with a one-time proof it kept (PKCE). The token it gets is kept like
+any key.
+
 ## Outside steps are pinned
 
 A web request's host is fixed in the zone, and card text is encoded in its

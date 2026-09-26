@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Connect a service with one click.** Stripe, Notion, Linear, Sentry, Jira,
+  Intercom, Attio and ten more connect by signing in on the service's own
+  page: no key to copy. The sign-in stays in the tool's secrets file and is
+  renewed before it runs out. A starter kit's Connect also lets its teammate
+  use the tool. The lead points you to the right tile instead of asking for a
+  key.
 - **Starter kits.** Support desk, Bug triage, Sales follow-up and Ops
   requests each set up a teammate, the flow it works and its buttons in one
   click. The kit's page lists what's left (email, the tools it uses) and
