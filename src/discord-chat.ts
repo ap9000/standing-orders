@@ -1,4 +1,5 @@
 /** Discord messages and buttons transport the shared assistant's saved actions. */
+import { chatQuestionButtons } from "./teammate-question.js";
 import { chatFlowButtons } from "./chat-flow.js";
 import { channelInbox } from "./chat-inbox.js";
 import { roomCommand } from "./chat-rooms.js";
@@ -227,7 +228,8 @@ export function discordCard(
         color: 0x297b70,
       },
     ],
-    components: buttons.length ? [{ type: 1, components: buttons }] : [],
+    // A row holds at most 5 buttons (a question's 4 options and "Answer in words", then the link, need two).
+    components: Array.from({ length: Math.min(5, Math.ceil(buttons.length / 5)) }, (_, row) => ({ type: 1, components: buttons.slice(row * 5, row * 5 + 5) })),
     allowed_mentions: { parse: [], replied_user: false },
   };
 }
@@ -376,6 +378,15 @@ export async function deliverDiscordPart(
               type: 2,
               style: one.action === "approve" ? 3 : 2,
               label: one.label,
+              custom_id: `so_${one.token}`,
+            }))
+          : []),
+        // A teammate's question (v93): its options, then "Answer in words".
+        ...(content.question
+          ? chatQuestionButtons(state, row.id, now).map((one) => ({
+              type: 2,
+              style: one.words ? 1 : 2,
+              label: one.label.slice(0, 80),
               custom_id: `so_${one.token}`,
             }))
           : []),

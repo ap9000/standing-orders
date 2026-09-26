@@ -49,8 +49,11 @@ that looks like it holds a key is refused.
 - **On its own zone:** add a **Teammate handles it** zone. Say what to do there
   and list the answers it can pick, each leading to a zone. It picks one and
   writes what the next zones send (the email body is then
-  `{{stage.<zone id>}}`). When its rules say to ask, it asks you a question;
-  open the card (or its message in your chat app) to answer, and it carries on.
+  `{{stage.<zone id>}}`). When its rules say to ask, it asks you a question
+  and the card waits. Answer with a tap in your chat app (one button per
+  option, plus **Answer in words**: reply to the prompt on Telegram, or send
+  your next message in Slack, Discord or Teams), on the card, or through the
+  lead. It carries on with your answer.
 
 Every decision is written down with its reason: in the card's history ("Approved
 by Maya (AI): within my $50 limit") and on the teammate's page.

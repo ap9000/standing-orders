@@ -79,6 +79,22 @@ CREATE TABLE IF NOT EXISTS chat_flow_prompt (
 );
 CREATE INDEX IF NOT EXISTS chat_flow_prompt_open ON chat_flow_prompt(binding, consumed);
 `;
+/** v93: a teammate's question in the chat app. One button per option (choice)
+ * and one to answer in words (choice NULL); that one opens a prompt the
+ * person's next message in their DM answers. Never in CHAT_TABLES: an older
+ * database has no such tables until this schema creates them. */
+const CHAT_QUESTION_SCHEMA = `
+CREATE TABLE IF NOT EXISTS chat_question_action (
+ token TEXT PRIMARY KEY, part INTEGER NOT NULL REFERENCES chat_part(id),
+ question INTEGER NOT NULL REFERENCES teammate_question(id), choice TEXT, expires TEXT NOT NULL, consumed TEXT
+);
+CREATE INDEX IF NOT EXISTS chat_question_action_question ON chat_question_action(question);
+CREATE TABLE IF NOT EXISTS chat_question_prompt (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, binding INTEGER NOT NULL REFERENCES chat_binding(id),
+ question INTEGER NOT NULL REFERENCES teammate_question(id), created TEXT NOT NULL, expires TEXT NOT NULL, consumed TEXT
+);
+CREATE INDEX IF NOT EXISTS chat_question_prompt_open ON chat_question_prompt(binding, consumed);
+`;
 const CHAT_TABLES = [
   "chat_binding",
   "chat_pair",
@@ -150,6 +166,8 @@ export type ChatContent = {
   link?: { label: string; path: string };
   /** A flow decision's buttons ride this part (v88): minted when it is planned. */
   flow?: { card: number; entry: number; actions: Array<"approve" | "edit" | "send-back"> };
+  /** A teammate's question's buttons ride this part (v93): each option, then one to answer in words (choice null). */
+  question?: { id: number; choices: Array<{ choice: string | null; label: string }> };
 };
 export const chatHash = (text: string): string =>
   createHash("sha256").update(text).digest("hex");
@@ -162,7 +180,7 @@ export class ChatState {
   prepare(sql: string) {
     return this.db.prepare(
       sql.replace(
-        /\bchat_(binding|pair|event|part|action|progress|runtime|room|meta|flow_action|flow_prompt)\b/g,
+        /\bchat_(binding|pair|event|part|action|progress|runtime|room|meta|flow_action|flow_prompt|question_action|question_prompt)\b/g,
         `${this.channel}_$1`,
       ),
     );
@@ -423,6 +441,11 @@ export class ChatState {
             ["confirm", "dismiss"],
             now,
           );
+        if (Number(inserted.changes) && part.question)
+          for (const one of part.question.choices)
+            this.prepare("INSERT INTO chat_question_action(token,part,question,choice,expires) VALUES(?,?,?,?,?)").run(
+              randomBytes(16).toString("hex"), Number(inserted.lastInsertRowid), part.question.id, one.choice,
+              new Date(now.getTime() + 7 * 86_400_000).toISOString());
         if (Number(inserted.changes) && part.flow)
           for (const action of part.flow.actions)
             this.prepare("INSERT INTO chat_flow_action(token,part,card,entry,action,expires) VALUES(?,?,?,?,?,?)").run(
@@ -479,7 +502,7 @@ export class ChatState {
 }
 
 export const chatSchema = (channel: "slack" | "discord" | "teams"): string =>
-  (CHAT_SCHEMA + CHAT_ROOM_SCHEMA + CHAT_FLOW_SCHEMA).replaceAll("chat_", `${channel}_`);
+  (CHAT_SCHEMA + CHAT_ROOM_SCHEMA + CHAT_FLOW_SCHEMA + CHAT_QUESTION_SCHEMA).replaceAll("chat_", `${channel}_`);
 export const chatTables = (channel: "slack" | "discord" | "teams"): string[] =>
   CHAT_TABLES.map((name) => name.replace("chat_", `${channel}_`));
 export class ChatDeliveryError extends Error {

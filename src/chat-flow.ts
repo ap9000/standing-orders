@@ -131,6 +131,7 @@ export function applyChatFlowTap(options: { store: Store; state: ChatState; labe
   }
   // One open prompt per person: the newest question is the one the next message answers.
   state.prepare("UPDATE chat_flow_prompt SET consumed=? WHERE binding=? AND consumed IS NULL").run(now.toISOString(), binding.id);
+  state.prepare("UPDATE chat_question_prompt SET consumed=? WHERE binding=? AND consumed IS NULL").run(now.toISOString(), binding.id);
   state.prepare("INSERT INTO chat_flow_prompt(binding,card,entry,mode,created,expires) VALUES(?,?,?,?,?,?)")
     .run(binding.id, card, entry, kind, now.toISOString(), new Date(now.getTime() + PROMPT_MS).toISOString());
   const back = waiting.stage.onFail === null ? "the zone before" : flowDefinitionOf(waiting.flow)?.stages.find(one => one.id === waiting.stage.onFail)?.title ?? waiting.stage.onFail;

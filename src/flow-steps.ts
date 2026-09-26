@@ -76,6 +76,8 @@ type Outcome = { state: "passed" | "failed" | "retry"; said: string; log?: strin
   mail?: { id: string; to: string[] } };
 
 const RETRY_MS = [5 * 60_000, 15 * 60_000];
+/** A teammate's turn tries again sooner: a card waiting on a person's colleague shouldn't wait long for a hiccup. */
+const TEAMMATE_RETRY_MS = [60_000, 5 * 60_000];
 const OUTPUT_CHARS = 3000;
 /** How much of a step's output its run keeps as the log. */
 const LOG_CHARS = 64_000;
@@ -173,9 +175,9 @@ async function teammateStep(store: Store, flow: FlowRow, definition: FlowDefinit
   const kept = { log: outcome.log === undefined ? null : keptLog(outcome.log), durationMs: Date.now() - started, ...(outcome.decisionJson === undefined ? {} : { decisionJson: outcome.decisionJson }) };
   if (outcome.state === "retry") {
     const attempts = run?.attempts ?? 1;
-    if (attempts <= RETRY_MS.length) {
-      store.finishFlowStep(card.id, card.entry, { state: "waiting", result: outcome.said, nextAt: new Date(now.getTime() + RETRY_MS[attempts - 1]!).toISOString(), ...kept }, now);
-      if (stage.kind !== "approval") store.updateFlowCard(card.id, { waiting: `${outcome.said} Trying again in ${attempts === 1 ? 5 : 15} minutes.` }, now);
+    if (attempts <= TEAMMATE_RETRY_MS.length) {
+      store.finishFlowStep(card.id, card.entry, { state: "waiting", result: outcome.said, nextAt: new Date(now.getTime() + TEAMMATE_RETRY_MS[attempts - 1]!).toISOString(), ...kept }, now);
+      if (stage.kind !== "approval") store.updateFlowCard(card.id, { waiting: `${outcome.said} Trying again in ${attempts === 1 ? "a minute" : "5 minutes"}.` }, now);
       pass.problems.push(`flow card ${card.id}: ${outcome.said}`);
       return true;
     }

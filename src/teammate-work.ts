@@ -113,7 +113,7 @@ function carryOut(store: Store, flow: FlowRow, definition: FlowDefinition, stage
     if (opened === null) return { state: "failed", said: "It asked twice about the same visit.", log, decisionJson };
     event("asked", `Asked ${context.person} about “${card.title}”: ${answer.question}`);
     notifyPeople(store, card, [context.person], null, { key: `teammate-q:${opened}`, attention: true, subject: `${label} asks about “${card.title}”`,
-      body: `${answer.question}${options.length === 0 ? "" : `\n\n${options.map(one => `• ${one.label}`).join("\n")}`}${answer.reason === "" ? "" : `\n\n(${answer.reason})`}\n\nOpen the card to answer, or tell your lead in chat.`,
+      body: `${answer.question}${options.length === 0 ? "" : `\n\n${options.map(one => `• ${one.label}`).join("\n")}`}${answer.reason === "" ? "" : `\n\n(${answer.reason})`}\n\nAnswer with the buttons in your chat app, or on the card.`,
     }, now);
     store.updateFlowCard(card.id, { waiting: `${context.name} asked ${context.person}: ${answer.question}`.slice(0, 300) }, now);
     return { state: "waiting", said: `Asked ${context.person}`, log, decisionJson, nextAt: ASKED };

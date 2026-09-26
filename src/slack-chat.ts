@@ -1,4 +1,5 @@
 import { chatFlowButtons } from "./chat-flow.js";
+import { chatQuestionButtons } from "./teammate-question.js";
 import { channelInbox } from "./chat-inbox.js";
 import { roomCommand } from "./chat-rooms.js";
 import {
@@ -137,7 +138,7 @@ export function receiveSlack(
     const action = object(actions[0]),
       container = object(body.container);
     if (
-      !/^standing_orders_(confirm|dismiss|yes|cancel|flow_approve|flow_edit|flow_send_back)$/.test(
+      !/^standing_orders_(confirm|dismiss|yes|cancel|flow_approve|flow_edit|flow_send_back|question_choice|question_words)$/.test(
         String(action.action_id),
       ) ||
       typeof action.value !== "string" ||
@@ -507,6 +508,15 @@ export async function deliverSlackPart(
               action_id: `standing_orders_flow_${one.action.replace("-", "_")}`,
               value: one.token,
               ...(one.action === "approve" ? { style: "primary" } : {}),
+            }))
+          : []),
+        // A teammate's question (v93): its options, then "Answer in words".
+        ...(content.question
+          ? chatQuestionButtons(state, row.id, now).map((one) => ({
+              type: "button",
+              text: { type: "plain_text", text: one.label },
+              action_id: one.words ? "standing_orders_question_words" : "standing_orders_question_choice",
+              value: one.token,
             }))
           : []),
         ...linkButton(options.origin(), content.link),

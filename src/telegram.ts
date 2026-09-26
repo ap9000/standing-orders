@@ -19,6 +19,7 @@
  * are one command.
  */
 
+import { applyTelegramQuestionReply, applyTelegramQuestionTap, openQuestionOf, telegramQuestionButtons } from "./teammate-question.js";
 import { acceptanceEvidenceText } from "./chat-acceptance.js";
 import { verifyApproverStanding } from "./principal.js";
 import { resultImageFileName, resultTaskLabel, verifyResultImage } from "./chat-evidence.js";
@@ -810,15 +811,20 @@ async function deliverOne(
     const visit = FLOW_DECIDE_KEY.exec(notification.dedupeKey);
     const waiting = visit === null ? null : flowDecisionAt(store, Number(visit[1]), Number(visit[2]));
     const flowKeys = waiting === null ? null : flowButtons(store, binding, waiting, clock());
+    // A teammate's question (v93): its options and "Answer in words", for the person it asks.
+    const asked = flowKeys === null ? openQuestionOf(store, notification.dedupeKey) : null;
+    const questionKeys = asked === null ? null : telegramQuestionButtons(store, binding, asked, clock());
+    const keys = flowKeys ?? questionKeys;
     let last: string | null = null;
     for (const [index, part] of parts.entries()) {
       const final = index === parts.length - 1;
-      const keyboard = !final ? undefined : flowKeys !== null ? [...flowKeys.keyboard, ...(button === null ? [] : [button])] : button !== null ? [button] : undefined;
+      const keyboard = !final ? undefined : keys !== null ? [...keys.keyboard, ...(button === null ? [] : [button])] : button !== null ? [button] : undefined;
       const sent = await sender(part, keyboard);
       if (!sent.ok) return { ok: false, error: sent.error };
       last = sent.messageId;
     }
     if (flowKeys !== null && last !== null) store.placeTelegramFlowActions(flowKeys.tokens, last);
+    if (questionKeys !== null && last !== null) store.placeTelegramQuestionActions(questionKeys.tokens, last);
     return { ok: true, receipt: receiptFor(botId, binding.chatId, last) };
   }
 
@@ -1189,6 +1195,14 @@ function applyMessage(context: Context, update: Update, effects: Effect[]): void
     // assistant when a conversation is configured; otherwise silence.
     const binding = store.liveTelegramBindingFor(botId, String(from.id));
     // A reply to an Edit or Send back prompt (v86): the new draft, or the note it goes back with.
+    // A reply to a teammate's "Answer in words" prompt (v93): the answer.
+    const questionPrompt = binding !== null && message.reply_to_message !== undefined && String(chat.id) === binding.chatId
+      ? store.telegramQuestionPrompt(binding.chatId, String(message.reply_to_message.message_id), clock()) : null;
+    if (binding !== null && questionPrompt !== null) {
+      const said = applyTelegramQuestionReply(store, binding, questionPrompt, message.text ?? "", clock());
+      if (said !== null) effects.push(async () => { await transport("sendMessage", { chat_id: binding.chatId, text: said, link_preview_options: { is_disabled: true }, reply_parameters: { message_id: message.message_id } }); });
+      return;
+    }
     const flowPrompt = binding !== null && message.reply_to_message !== undefined && String(chat.id) === binding.chatId
       ? store.telegramFlowPrompt(binding.chatId, String(message.reply_to_message.message_id), clock()) : null;
     if (binding !== null && flowPrompt !== null) {
@@ -1633,6 +1647,22 @@ function applyCallback(context: Context, update: Update, effects: Effect[]): voi
     const view = phoneTaskView(store, repos, current, clock());
     store.recordTelegramTaskMessage(binding, String(message.message_id), current, view.run, clock());
     editText(phoneFocusText(view.text), [[{ text: "Back to the lead", callback_data: "pick:lead" }]]);
+    return;
+  }
+  // A teammate's question (v93): an option answers it; "Answer in words" asks for a reply.
+  const questionAction = store.getTelegramQuestionAction(token);
+  if (questionAction !== null) {
+    if (questionAction.binding !== binding.id || questionAction.chatId !== tapChat || (questionAction.messageId !== null && questionAction.messageId !== String(message.message_id))) { report.ignored++; return; }
+    for (const effect of applyTelegramQuestionTap(store, binding, questionAction, { text: message.text ?? "" }, clock())) {
+      if (effect.kind === "ack") ack(effect.text);
+      else if (effect.kind === "edit") editText(effect.text);
+      else effects.push(async () => {
+        const answer = await transport("sendMessage", { chat_id: binding.chatId, text: effect.text, link_preview_options: { is_disabled: true },
+          reply_parameters: { message_id: message.message_id }, reply_markup: { force_reply: true, input_field_placeholder: effect.placeholder } });
+        const id = (answer.result as { message_id?: number } | undefined)?.message_id;
+        if (answer.ok && Number.isSafeInteger(id)) store.recordTelegramQuestionPrompt({ chatId: binding.chatId, messageId: String(id), binding: binding.id, question: effect.question }, clock());
+      });
+    }
     return;
   }
   const flowAction = store.getTelegramFlowAction(token);

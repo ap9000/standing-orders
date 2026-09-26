@@ -9,6 +9,8 @@
  *
  * Fixture transport, not a phone: nothing here is a live Telegram proof.
  */
+import { notifyPeople } from "./flow-people.js";
+import { TEAMMATE_TEMPLATES } from "./teammates.js";
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -328,6 +330,43 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     expect(script.sends()).toHaveLength(sendsBefore);
     expect(store.handle.prepare("SELECT COUNT(*) AS n FROM task").get()?.["n"]).toBe(tasksBefore);
     expect(store.listTelegramConversations(BOT)).toHaveLength(1);
+  });
+
+  test("a teammate's question arrives with its options and Answer in words; a tap answers it once, a stale tap changes nothing, and a reply answers in words (v93)", async () => {
+    const flow = store.createFlow({ repo, name: "Support", by: "alex", definitionJson: JSON.stringify({ version: 1, start: "inbox", stages: [{ id: "inbox", title: "Inbox", kind: "inbox", zone: {}, next: null, onFail: null }] }) }, now);
+    const mate = store.createTeammate({ repo, handle: "maya", soul: TEAMMATE_TEMPLATES[0]!.soul, model: null, manager: "alex", by: "alex" }, now);
+    const ask = (title: string) => {
+      const card = store.addFlowCard({ flow, title, description: null, stage: "inbox", by: "alex" }, now);
+      const id = store.openTeammateQuestion({ teammate: mate, card, entry: 1, question: `Refund all of ${title}?`, options: [{ id: "o1", label: "Yes" }, { id: "o2", label: "Half" }], askedOf: "alex" }, now)!;
+      notifyPeople(store, store.getFlowCard(card)!, ["alex"], null, { key: `teammate-q:${id}`, attention: true, subject: `Maya · Support asks about “${title}”`, body: "Over my $50 limit." }, now);
+      return id;
+    };
+    const first = ask("order 42");
+    expect(await pass({ deliver: true })).toMatchObject({ ok: true, report: { sent: 1 } });
+    const notice = script.card();
+    expect(notice.text).toContain("Maya · Support asks about “order 42”");
+    expect(notice.rows.flat().map(one => one.text)).toEqual(["Yes", "Half", "✏️ Answer in words"]);
+    // A tap on another message changes nothing; on the notice it answers, once.
+    await tapPass(notice.button(/Half/), notice.messageId + 99);
+    expect(store.teammateQuestion(first)!.state).toBe("open");
+    await tapPass(notice.button(/Half/), notice.messageId);
+    expect(store.teammateQuestion(first)).toMatchObject({ state: "answered", choice: "o2", answeredBy: "alex", answeredVia: "telegram" });
+    expect(script.edits().at(-1)).toContain("✅ You answered: Half.");
+    await tapPass(notice.button(/Yes/), notice.messageId);
+    expect(script.acks().at(-1)).toContain("already answered");
+    expect(store.teammateQuestion(first)!.choice).toBe("o2");
+    // In words: a reply to the prompt is the answer.
+    const second = ask("order 43");
+    expect(await pass({ deliver: true })).toMatchObject({ ok: true, report: { sent: 1 } });
+    const again = script.card();
+    await tapPass(again.button(/Answer in words/), again.messageId);
+    const prompt = script.sends().at(-1)!;
+    expect(prompt.params["reply_markup"]).toMatchObject({ force_reply: true });
+    expect(String(prompt.params["text"])).toContain("Refund all of order 43?");
+    script.updates.push([textUpdate(nextUpdate++, "Refund $50 and send a coupon.", { reply_to_message: { message_id: prompt.messageId } })]);
+    await pass();
+    expect(store.teammateQuestion(second)).toMatchObject({ state: "answered", choice: null, answer: "Refund $50 and send a coupon.", answeredVia: "telegram" });
+    expect(script.texts().at(-1)).toContain("It picks the card up again now.");
   });
 
   test("a reply to a result message binds that exact run; confirming creates the same-family revision, audited as telegram", async () => {
