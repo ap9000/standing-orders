@@ -194,6 +194,8 @@ export type BrowserFlowStage = {
   limit?: { minutes: number; to: string | null } | undefined;
   /** v92: the AI teammate who decides (an approval zone) or handles (a teammate zone) it. */
   teammate?: string | undefined;
+  /** v96: a teammate zone sends what the teammate writes back to whoever asked. */
+  reply?: boolean | undefined;
   next: string | null; onFail: string | null;
 };
 

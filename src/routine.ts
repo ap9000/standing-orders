@@ -29,6 +29,8 @@ import { resolveRoutineAuthority } from "./agentconfig.js";
 export type Schedule =
   | { kind: "every"; minutes: number }
   | { kind: "daily"; hhmm: string; timezone?: string }
+  /** v96: Monday to Friday. */
+  | { kind: "weekdays"; hhmm: string; timezone?: string }
   | { kind: "weekly"; day: number; hhmm: string; timezone?: string };
 
 export const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"] as const;
@@ -58,23 +60,23 @@ export function parseSchedule(text: string): Schedule | null {
     if (minutes < MIN_EVERY_MINUTES || minutes > MAX_EVERY_MINUTES) return null;
     return { kind: "every", minutes };
   }
-  const calendar = /^(daily|weekly:[0-6]):([01][0-9]|2[0-3]):([0-5][0-9])(?:@([A-Za-z0-9_+/-]{1,80}))?$/.exec(text);
+  const calendar = /^(daily|weekdays|weekly:[0-6]):([01][0-9]|2[0-3]):([0-5][0-9])(?:@([A-Za-z0-9_+/-]{1,80}))?$/.exec(text);
   if (calendar !== null) {
     const timezone = calendar[4];
     if (timezone !== undefined && !validTimezone(timezone)) return null;
     const time = { hhmm: `${calendar[2]}:${calendar[3]}`, ...(timezone === undefined ? {} : { timezone }) };
-    return calendar[1] === "daily" ? { kind: "daily", ...time } : { kind: "weekly", day: Number(calendar[1]!.slice(-1)), ...time };
+    return calendar[1] === "daily" ? { kind: "daily", ...time } : calendar[1] === "weekdays" ? { kind: "weekdays", ...time } : { kind: "weekly", day: Number(calendar[1]!.slice(-1)), ...time };
   }
   return null;
 }
 
 export function scheduleText(schedule: Schedule): string {
-  return schedule.kind === "every" ? `every:${schedule.minutes}` : `${schedule.kind === "weekly" ? `weekly:${schedule.day}` : "daily"}:${schedule.hhmm}${schedule.timezone === undefined ? "" : `@${schedule.timezone}`}`;
+  return schedule.kind === "every" ? `every:${schedule.minutes}` : `${schedule.kind === "weekly" ? `weekly:${schedule.day}` : schedule.kind}:${schedule.hhmm}${schedule.timezone === undefined ? "" : `@${schedule.timezone}`}`;
 }
 
 /** The schedule, in words an operator agrees to. */
 export function describeSchedule(schedule: Schedule): string {
-  if (schedule.kind !== "every") return `${schedule.kind === "daily" ? "daily" : `every ${WEEKDAYS[schedule.day]}`} at ${schedule.hhmm} ${schedule.timezone ?? "UTC"}`;
+  if (schedule.kind !== "every") return `${schedule.kind === "daily" ? "daily" : schedule.kind === "weekdays" ? "weekdays" : `every ${WEEKDAYS[schedule.day]}`} at ${schedule.hhmm} ${schedule.timezone ?? "UTC"}`;
   const { minutes } = schedule;
   if (minutes % (24 * 60) === 0) return `every ${minutes / (24 * 60)} day(s)`;
   if (minutes % 60 === 0) return `every ${minutes / 60} hour(s)`;
@@ -122,6 +124,7 @@ function nextCalendar(schedule: Exclude<Schedule, { kind: "every" }>, now: Date)
   for (let days = 0; days <= 15; days++) {
     const target = today + days * 86_400_000;
     if (schedule.kind === "weekly" && new Date(target).getUTCDay() !== schedule.day) continue;
+    if (schedule.kind === "weekdays" && (new Date(target).getUTCDay() === 0 || new Date(target).getUTCDay() === 6)) continue;
     // Nearby dates expose both offsets around a daylight-saving transition.
     // A missing clock time skips its slot. An ambiguous time uses the first
     // occurrence only, even if the scheduler advances during the repeated hour.

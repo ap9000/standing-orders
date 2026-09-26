@@ -33,6 +33,7 @@ import { acquire, finalizeInterruptedFenced } from "./claim.js";
 import { approve } from "./scope.js";
 import { storeEvidence } from "./evidence.js";
 import { assignmentOf } from "./assignment.js";
+import { routinesOf } from "./teammate-desk.js";
 const bareLegacy = (
   phase: "build",
   provider: string,
@@ -258,6 +259,17 @@ describe("shared chat action lifecycle", () => {
     expect(confirm(forget)).toMatchObject({ ok: false });
     expect(confirm(proposal("teammate_memory", { teammate: mate, memory: told!.id, change: "forget" }))).toMatchObject({ ok: true });
     expect(store.teammateMemories(mate)).toEqual([]);
+  });
+  test("the lead gives a teammate a routine and stops it, each as a card (v96)", () => {
+    const mate = store.createTeammate({ repo, handle: "maya", soul: "---\nname: Maya\nrole: Support\n---\n## Who you are\nHelpful.\n", model: null, manager: who.name, by: who.name }, now);
+    expect(() => prepareSharedAction(store, who, "teammate_routine", { teammate: mate, change: "add", schedule: "now and then", text: "Count refunds" }, root, now)).toThrow("Say the schedule like");
+    const add = proposal("teammate_routine", { teammate: mate, change: "add", schedule: "weekdays 09:00", text: "Count yesterday's refunds" });
+    expect(store.getMateProposal(add)!.payload).toMatchObject({ title: "Maya: Count yesterday's refunds", terms: expect.arrayContaining(["When: weekdays at 09:00 UTC", "What: Count yesterday's refunds"]) });
+    expect(confirm(add)).toMatchObject({ ok: true });
+    const [routine] = routinesOf(store, store.getTeammate(mate)!);
+    expect(routine).toMatchObject({ schedule: "weekdays:09:00", text: "Count yesterday's refunds" });
+    expect(confirm(proposal("teammate_routine", { teammate: mate, change: "remove", routine: routine!.id }))).toMatchObject({ ok: true });
+    expect(routinesOf(store, store.getTeammate(mate)!)).toEqual([]);
   });
   function skill() {
     return importSkill(

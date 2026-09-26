@@ -76,6 +76,7 @@ import { reportSummaryFor } from "./report-summary.js";
 import { labelOf, nameOf, summaryOf, zonesOf } from "./teammate-admin.js";
 import { TEAMMATE_TEMPLATES, withSection } from "./teammates.js";
 import { callOutcome, callWords, defaultRule, ruleWords } from "./teammate-tools.js";
+import { deskOf, routinesOf } from "./teammate-desk.js";
 
 const REPO_ID = /^r[0-9]{1,3}$/;
 const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -971,6 +972,9 @@ export const MATE_TOOLS: MateTool[] = [
           worksOn: zonesOf(ctx.store, mate).map(one => ({ flow: one.flow, flowName: one.flowName, zone: one.title, how: one.kind })),
           today: summaryOf(ctx.store, mate, today.toISOString()).said,
           questions: ctx.store.openTeammateQuestions([mate.id]).map(one => ({ question: one.id, card: one.card, asks: one.question, options: one.options.map(option => option.label), askedOf: whoIs(one.askedOf), ...(one.toolCall === null ? {} : { approvesToolCall: true }), ...(one.suggestion === null ? {} : { suggestsRuleChange: true }) })),
+          // v96: where messages to it by name and its routines land, and its routines.
+          desk: deskOf(ctx.store, mate)?.id ?? null,
+          routines: routinesOf(ctx.store, mate).map(one => ({ routine: one.id, schedule: one.schedule, text: one.text, working: one.state === "active", last: one.lastOutcome })),
           // v95: what it remembers (what people told it, and what it kept), newest first.
           memory: ctx.store.teammateMemories(mate.id, { limit: args["teammate"] === undefined ? 5 : 40 }).map(one => ({ memory: one.id, text: one.text, from: one.source === "person" ? whoIs(one.createdBy) : "itself" })),
           // v94: the tools it may use, and its rule for each action.
@@ -987,9 +991,10 @@ export const MATE_TOOLS: MateTool[] = [
   },
   {
     name: "propose_teammate",
-    description: "Draft a teammate change as a card the operator confirms. create: a teammate in a project (repo) from a template (support, sales, ops, triage; name renames it) or a whole soul file (markdown: front matter with name and role, then sections like ## Who you are, ## How you write, ## What you know, ## Decide on your own, ## Ask first, ## Never). edit_section: replace one section of its soul file (section: its title, like 'Decide on your own'; text: the new section, as lines; a new title adds the section) — use this for changing its rules; edit_soul: the whole new soul file, when it's short (keep its name). pause, resume, remove. note: something for it to remember (note, one line); forget and edit_memory change what it remembers (memory: its id from get_teammates, text for the new words). answer: answer its open question (question, and choice: one of its options, or text); a tool call waiting for approval is a question too (choice approve or deny, or text to say what to do instead). Tools (get_teammates lists each teammate's tools and their actions; get_project_tools the project's): use_tool lets it use one of the project's tools (tool: the tool's name, like shop) — actions that only read start as do-it and the rest ask first; stop_tool; tool_rule sets one action's rule (tool: the tool's name, like shop; action: one of its actions, like refund_order; use: free, ask or never; with free, limitField and limitOver make it ask first above that number, like limitField amount and limitOver 100). Put a teammate to work with propose_flow (an approval step's teammate, or a 'teammate' step).",
+    description: "Draft a teammate change as a card the operator confirms. create: a teammate in a project (repo) from a template (support, sales, ops, triage; name renames it) or a whole soul file (markdown: front matter with name and role, then sections like ## Who you are, ## How you write, ## What you know, ## Decide on your own, ## Ask first, ## Never). edit_section: replace one section of its soul file (section: its title, like 'Decide on your own'; text: the new section, as lines; a new title adds the section) — use this for changing its rules; edit_soul: the whole new soul file, when it's short (keep its name). pause, resume, remove. note: something for it to remember (note, one line); forget and edit_memory change what it remembers (memory: its id from get_teammates, text for the new words). add_routine gives it a routine (schedule like 'weekdays 09:00', 'daily 17:00 Europe/London', 'monday 09:00' or 'every 2 hours'; text: what to do each time, one line) — a card on its desk each time, its answer to its manager; stop_routine (routine: its id). answer: answer its open question (question, and choice: one of its options, or text); a tool call waiting for approval is a question too (choice approve or deny, or text to say what to do instead). Tools (get_teammates lists each teammate's tools and their actions; get_project_tools the project's): use_tool lets it use one of the project's tools (tool: the tool's name, like shop) — actions that only read start as do-it and the rest ask first; stop_tool; tool_rule sets one action's rule (tool: the tool's name, like shop; action: one of its actions, like refund_order; use: free, ask or never; with free, limitField and limitOver make it ask first above that number, like limitField amount and limitOver 100). Put a teammate to work with propose_flow (an approval step's teammate, or a 'teammate' step).",
     inputSchema: schema({
-      operation: { type: "string", enum: ["create", "edit_section", "edit_soul", "pause", "resume", "remove", "note", "answer", "use_tool", "stop_tool", "tool_rule", "forget", "edit_memory"] }, section: { type: "string", maxLength: 60 },
+      operation: { type: "string", enum: ["create", "edit_section", "edit_soul", "pause", "resume", "remove", "note", "answer", "use_tool", "stop_tool", "tool_rule", "forget", "edit_memory", "add_routine", "stop_routine"] }, section: { type: "string", maxLength: 60 },
+      schedule: { type: "string", maxLength: 80 }, routine: { type: "integer", minimum: 1 },
       memory: { type: "integer", minimum: 1 },
       tool: { type: "string", maxLength: 40 }, action: { type: "string", maxLength: 64 }, use: { type: "string", enum: ["free", "ask", "never"] }, limitField: { type: "string", maxLength: 64 }, limitOver: { type: "number", minimum: 0 },
       repo: REPO_ARG, teammate: { type: "integer", minimum: 1 }, template: { type: "string", enum: TEAMMATE_TEMPLATES.map(one => one.id) },
@@ -1033,7 +1038,8 @@ export const MATE_TOOLS: MateTool[] = [
             input = { ...pick(["teammate", "use", "limitField", "limitOver"]), tool, ...(action === "" ? {} : { action }), change: args["operation"] === "use_tool" ? "grant" : args["operation"] === "stop_tool" ? "revoke" : "rule" }; break;
           }
           case "forget": case "edit_memory": operation = "teammate_memory"; input = { ...pick(["teammate", "memory", "text"]), change: args["operation"] === "forget" ? "forget" : "edit" }; break;
-          default: return { ok: false, message: "Choose create, edit_section, edit_soul, pause, resume, remove, note, answer, use_tool, stop_tool, tool_rule, forget or edit_memory." };
+          case "add_routine": case "stop_routine": operation = "teammate_routine"; input = { ...pick(["teammate", "schedule", "text", "routine"]), change: args["operation"] === "add_routine" ? "add" : "remove" }; break;
+          default: return { ok: false, message: "Choose create, edit_section, edit_soul, pause, resume, remove, note, answer, use_tool, stop_tool, tool_rule, forget, edit_memory, add_routine or stop_routine." };
         }
         const action = prepareSharedAction(ctx.store, ctx.who, operation, input, ctx.evidenceRoot, ctx.now);
         const id = ctx.draft("action", { ...action });

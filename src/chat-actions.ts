@@ -42,11 +42,13 @@ import { saveScript, scriptDigest, validateScript } from "./flow-scripts.js";
 import { addCardToFlow, advanceFlows, cancelFlowCard, decideFlowCard, flowCardHref, flowCardText, flowDefinitionOf, moveCardInFlow } from "./flow-engine.js";
 import type { FlowCardRow, FlowRow, FlowTriggerRow } from "./store.js";
 import { assignFlowCard, commentOnFlowCard, flowPeople, mentionsIn, watchFlowCard } from "./flow-people.js";
-import { addFlowTriggerTo, describeTrigger, readLinearKey, removeFlowTrigger, takesDeliveries, triggerConfigOf, validateTriggerConfig } from "./flow-triggers.js";
+import { addFlowTriggerTo, describeTrigger, readLinearKey, removeFlowTrigger, scheduleFromWords, takesDeliveries, triggerConfigOf, validateTriggerConfig } from "./flow-triggers.js";
+import { describeSchedule, parseSchedule } from "./routine.js";
 import { dirname } from "node:path";
 import { handleOf, parseSoul, SOUL_CHARS, TEAMMATE_TEMPLATES, teammateLabel } from "./teammates.js";
 import { createTeammateFrom, labelOf, nameOf, renamedSoul, saveSoul, setTeammateState } from "./teammate-admin.js";
 import { cleanMemory, editMemory, forgetMemory, tellTeammate } from "./teammate-memory.js";
+import { addRoutine, removeRoutine, routinesOf } from "./teammate-desk.js";
 import { answerTeammateQuestion } from "./teammate-work.js";
 import { checkRule, defaultRule, grantListed, revokeTool, ruleWords, setToolRules } from "./teammate-tools.js";
 
@@ -118,6 +120,7 @@ export const CHAT_ACTIONS = {
   teammate_answer: { label: "Answer teammate", protected: false, password: false },
   teammate_tools: { label: "Change teammate's tools", protected: false, password: false },
   teammate_memory: { label: "Change teammate's memory", protected: false, password: false },
+  teammate_routine: { label: "Change teammate's routines", protected: false, password: false },
   decision_record: { label: "Record decision", protected: false, password: false },
   decision_retire: { label: "Retire decision", protected: false, password: false },
   scope_approve: { label: "Approve work", protected: true, password: true },
@@ -178,6 +181,7 @@ export const CHAT_ACTION_FIELDS: Record<ChatAction, readonly string[]> = {
   teammate_answer: ["question", "choice", "text"],
   teammate_tools: ["teammate", "tool", "change", "action", "use", "limitField", "limitOver"],
   teammate_memory: ["teammate", "memory", "change", "text"],
+  teammate_routine: ["teammate", "change", "routine", "schedule", "text"],
   decision_record: ["repo", "claim", "why", "supersedes", "source"],
   decision_retire: ["repo", "decision", "reason"],
   scope_approve: ["task"],
@@ -485,6 +489,25 @@ export function prepareSharedAction(
         title = `${name}: ${action} — ${ruleWords(checked.rule)}`;
         terms.push(`${tool} → ${action}: ${ruleWords(checked.rule)}.`, `Was: ${ruleWords(grant.rules[action] ?? { use: "ask" })}.`);
       } else throw Error("Choose grant, revoke or rule.");
+    } else if (operation === "teammate_routine") {
+      // v96: a routine: on a schedule, a card on its desk saying what to do; its answer goes to its manager.
+      const name = nameOf(mate!);
+      if (input["change"] === "add") {
+        const schedule = scheduleFromWords(text(input, "schedule", 80));
+        if (schedule === null) throw Error("Say the schedule like “weekdays 09:00”, “daily 17:00 Europe/London”, “monday 09:00” or “every 2 hours”.");
+        const what = text(input, "text", 200).replace(/\s+/g, " ").trim();
+        if (what === "") throw Error("Say what it should do each time.");
+        Object.assign(request, { schedule, text: what });
+        title = `${name}: ${what}`.slice(0, 120);
+        terms.push(`When: ${describeSchedule(parseSchedule(schedule)!)}`, `What: ${what}`, `Each time, a card lands on ${name}'s desk; ${name} works it within its rules and tools, and the answer goes to ${mate!.manager}.`);
+        state = { routines: routinesOf(store, mate!).length };
+      } else if (input["change"] === "remove") {
+        const routine = routinesOf(store, mate!).find(one => one.id === integer(input, "routine"));
+        if (routine === undefined) throw Error("That routine is already gone.");
+        title = `Stop ${name}'s routine`;
+        terms.push(`${describeSchedule(parseSchedule(routine.schedule) ?? { kind: "every", minutes: 60 })}: ${routine.text}`);
+        state = { routine: routine.id };
+      } else throw Error("Choose add or remove.");
     } else if (operation === "teammate_memory") {
       // v95: edit or forget one thing it remembers.
       const memory = store.teammateMemory(integer(input, "memory"));
@@ -1252,6 +1275,12 @@ function runTeammateAction(store: Store, payload: SharedAction, actor: string, n
   }
   const mate = store.getTeammate(Number(req["teammate"]));
   if (mate === null || mate.state === "removed") throw Error("That teammate is off the team.");
+  if (payload.operation === "teammate_routine") {
+    const done = req["change"] === "add" ? addRoutine(store, mate, String(req["schedule"]), String(req["text"]), actor, now, null)
+      : removeRoutine(store, mate, Number(req["routine"]), now, null);
+    if (!done.ok) throw Error(done.said);
+    return { said: done.said, href: `/teammates/${mate.id}#desk` };
+  }
   if (payload.operation === "teammate_memory") {
     const memory = store.teammateMemory(Number(req["memory"]));
     if (memory === null || memory.text !== payload.state["text"]) throw Error("That memory changed since. Ask for a fresh proposal.");

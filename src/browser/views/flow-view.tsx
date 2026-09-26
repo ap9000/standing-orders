@@ -548,6 +548,8 @@ function TeammateSettings({ stage, others, view, update }: { stage: BrowserFlowS
     </Field>
     <Field label="What to do here"><Textarea rows={4} value={stage.instructions ?? ""} maxLength={4000} onChange={event => update({ instructions: event.target.value })} aria-label="What to do here" placeholder="Read the customer's reply and decide what happens next." /></Field>
     <Answers routes={stage.routes ?? []} others={others} set={routes => update({ routes })} hint="It picks one, and writes what the next zones send. With none, it moves the card on to “Then”." />
+    <label className="flex items-start gap-2 text-[13px]"><input type="checkbox" className="mt-0.5 size-4" checked={stage.reply === true} onChange={event => update({ reply: event.target.checked ? true : undefined })} data-teammate-reply />
+      <span>Answer whoever asked<span className="block text-[12px] text-muted-foreground">What it writes goes back to the person who added the card, in their chat app.</span></span></label>
   </>;
 }
 

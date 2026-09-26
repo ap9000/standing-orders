@@ -26,6 +26,7 @@ import { notifyPeople } from "./flow-people.js";
 import { claudeTurnRunner, parseSoul, readTurn, teammateActor, teammateLabel, TURN_TIMEOUT_MS, turnPrompt, type TurnAnswer, type TurnContext, type TurnRunner } from "./teammates.js";
 import { callName, callOutcome, callWords, inputProblem, makeCall, offeredTools, refreshGrants, ruleFor, type OfferedTool, type ToolIo } from "./teammate-tools.js";
 import { answerSuggestion, considerSuggestion, memoriesFor, remember } from "./teammate-memory.js";
+import { replyToAsker } from "./teammate-desk.js";
 
 /** A question waits for its answer this long before the step is due again on its own: never, in practice. */
 export const ASKED = "9999-12-31T00:00:00.000Z";
@@ -216,6 +217,8 @@ function carryOut(store: Store, flow: FlowRow, definition: FlowDefinition, stage
   if (answer.text !== "") store.updateFlowCard(card.id, { outputs: { ...card.outputs, [stage.id]: keptDraft(answer.text) } }, now);
   const said = `Sent “${card.title}” to ${titleOf(picked.to)}${picked.answer === CARRY_ON ? "" : ` (${picked.answer})`}${answer.reason === "" ? "" : `: ${answer.reason}`}`;
   event("handled", said);
+  // v96: a zone that answers whoever asked sends what it wrote back to them, under its name.
+  if (stage.reply === true && answer.text !== "") replyToAsker(store, flow, card, mate, answer.text, now);
   if (picked.to === null) store.updateFlowCard(card.id, { waiting: "Finished here. Move the card on when you're ready." }, now);
   else store.moveFlowCard(card.id, { to: picked.to, outcome: "ok", actor, historyNote: `${actor}: ${picked.answer === CARRY_ON ? "" : `${picked.answer}. `}${answer.reason}`.trim(), expectEntry: card.entry }, now);
   return { state: "passed", said, log, decisionJson };

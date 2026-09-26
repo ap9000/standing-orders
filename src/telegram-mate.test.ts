@@ -11,6 +11,7 @@
  */
 import { notifyPeople } from "./flow-people.js";
 import { TEAMMATE_TEMPLATES } from "./teammates.js";
+import { replyToAsker } from "./teammate-desk.js";
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -367,6 +368,21 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     await pass();
     expect(store.teammateQuestion(second)).toMatchObject({ state: "answered", choice: null, answer: "Refund $50 and send a coupon.", answeredVia: "telegram" });
     expect(script.texts().at(-1)).toContain("It picks the card up again now.");
+  });
+
+  test("a message to a teammate by name lands on its desk instead of the lead, and its answer comes back in Telegram (v96)", async () => {
+    store.createTeammate({ repo, handle: "maya", soul: TEAMMATE_TEMPLATES[0]!.soul, model: null, manager: "alex", by: "alex" }, now);
+    script.updates.push([textUpdate(nextUpdate++, "Maya: where's order 2201?")]);
+    await pass();
+    expect(script.texts().at(-1)).toContain("Maya has it. The answer comes here when it's done.");
+    const desk = store.listFlows([repo]).find(one => one.name === "Maya's desk")!;
+    const [card] = store.flowCards(desk.id, false);
+    expect(card).toMatchObject({ title: "where's order 2201?", createdBy: "alex", source: { kind: "message", label: "Telegram message" } });
+    expect(Number(store.handle.prepare("SELECT COUNT(*) AS n FROM mate_turn").get()!.n)).toBe(0);
+    replyToAsker(store, desk, card!, store.teammateByHandle(repo, "maya")!, "Order 2201 shipped yesterday.", now);
+    expect(await pass({ deliver: true })).toMatchObject({ ok: true, report: { sent: 1 } });
+    expect(script.texts().at(-1)).toContain("Maya · Support: where's order 2201?");
+    expect(script.texts().at(-1)).toContain("Order 2201 shipped yesterday.");
   });
 
   test("a reply to a result message binds that exact run; confirming creates the same-family revision, audited as telegram", async () => {

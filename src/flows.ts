@@ -100,6 +100,8 @@ export type FlowStage = {
   limit?: FlowLimit;
   /** v92: the AI teammate (by handle) who decides a "Person decides" zone (handing hard ones to its person), or handles a "Teammate handles it" zone. */
   teammate?: string;
+  /** v96: a "Teammate handles it" zone sends what the teammate writes back to whoever asked (the person who added the card, its chat thread, or the teammate's manager). */
+  reply?: boolean;
   /** Where a card goes when this zone's step succeeds, and when it fails or is sent back (sort: when it isn't sure). */
   next: string | null;
   onFail: string | null;
@@ -312,6 +314,7 @@ export function validateFlowDefinition(input: unknown): FlowDefinition {
       ...(kind === "wait" ? { wait: validateWait(stage["wait"], title) } : {}),
       ...((kind === "approval" || kind === "teammate") && stage["teammate"] !== undefined && stage["teammate"] !== null && stage["teammate"] !== "" ? { teammate: validateTeammate(stage["teammate"], title) } : {}),
       ...(kind === "teammate" ? validateRoutes(stage, title) : {}),
+      ...(kind === "teammate" && stage["reply"] === true ? { reply: true } : {}),
       ...(() => { const limit = validateLimit(stage["limit"], kind as FlowStageKind, title); return limit === null ? {} : { limit }; })(),
       next: kind === "sort" ? null : text(stage["next"], 32),
       onFail: text(stage["onFail"], 32),
@@ -430,6 +433,8 @@ export type FlowStepInput = {
   remindAfter?: string | number; thenMoveTo?: string;
   /** v92: the AI teammate (by name) who decides an approval step (handing hard ones to its decider) or handles a teammate step. */
   teammate?: string;
+  /** v96: a teammate step sends what it writes back to whoever asked. */
+  reply?: boolean;
   next?: string; ifFails?: string; ifNotSure?: string;
 };
 
@@ -554,6 +559,7 @@ export function flowFromSteps(input: unknown, previous: FlowDefinition | null = 
       // v92: "nobody" (or "none") takes a teammate off an approval step.
       ...((kind === "approval" || kind === "teammate") && (step.teammate === undefined ? old?.teammate !== undefined : !/^(nobody|none|no one)$/i.test(step.teammate.trim())) ? { teammate: idOf(step.teammate ?? old!.teammate!) } : {}),
       ...(kind === "teammate" ? step.routes !== undefined ? step.routes.length === 0 ? {} : { routes: step.routes.map(one => ({ answer: String(one.answer ?? "").trim(), to: find(String(one.goesTo ?? ""), title) })) } : old?.routes === undefined ? {} : { routes: old.routes } : {}),
+      ...(kind === "teammate" && (step.reply ?? old?.reply) === true ? { reply: true } : {}),
       ...(() => { const limit = kind === "wait" || kind === "done" ? null : limitFromStep(step, old?.limit ?? null, title, ref => find(ref, title)); return limit === null ? {} : { limit }; })(),
       next, onFail,
     });
@@ -658,7 +664,7 @@ export function flowTerms(definition: FlowDefinition, previous: FlowDefinition |
     else if (stage.kind === "approval") lines.push(`Decides: ${stage.teammate !== undefined ? `the AI teammate ${stage.teammate}, within its rules, handing hard ones to ${stage.toOwner === true ? "the flow's owner" : stage.approver ?? "anyone who approves"}` : stage.toOwner === true ? "the flow's owner, in their chat app" : stage.approver ?? "anyone who approves on this project"}. Approve → ${to(stage.next)} Send back → ${stage.onFail === null ? "not possible." : to(stage.onFail)}`);
     else if (stage.kind === "teammate") lines.push(`The AI teammate ${stage.teammate ?? "(none)"} handles it${stage.instructions === null ? "" : `: ${plain(stage.instructions)}`}`,
       ...(stage.routes === undefined || stage.routes.length === 0 ? [`Then → ${to(stage.next)}`] : stage.routes.map(one => `${one.answer} → ${to(one.to)}`)),
-      `It asks the flow's owner when its rules say to.${stage.onFail === null ? "" : ` If it can't → ${to(stage.onFail)}`}`);
+      `It asks the flow's owner when its rules say to.${stage.reply === true ? " It sends what it writes back to whoever asked." : ""}${stage.onFail === null ? "" : ` If it can't → ${to(stage.onFail)}`}`);
     else if (stage.kind === "notify") lines.push(`Posts: ${plain(stage.message ?? "")}`, `Then → ${to(stage.next)}`);
     else if (stage.kind === "update") lines.push(`Comments on the issue the card came from: ${plain(stage.message ?? "")}${stage.close === true ? " Then closes it (Linear: moves it to done)." : ""}`, `Then → ${to(stage.next)}${stage.onFail === null ? "" : ` If it can't → ${to(stage.onFail)}`}`);
     else if (stage.kind === "sort" && stage.sort !== null) {

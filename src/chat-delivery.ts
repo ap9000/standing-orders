@@ -36,6 +36,8 @@ import { telegramProgressCard } from "./telegram-progress.js";
 import { phoneText, PHONE_HELP, phoneCommand, phoneStatus, phoneTaskView, phoneTaskChoices, phoneTaskListText, resolvePhoneTask, phoneFocusText, PHONE_NO_MATCH, PHONE_BACK_TO_LEAD } from "./telegram-status.js";
 import { applyRoomInbound, conversationRow, roomCardApprover, roomCommand, roomGrantAllowed, roomMessagesAfter, roomMessageText, teamDomain } from "./chat-rooms.js";
 import { isTelegramProgressNotification, proposalTaskOf, type Store } from "./store.js";
+import { messageTeammate } from "./teammate-desk.js";
+import { CHAT_APP_NAMES } from "./flow-triggers.js";
 import type { SubscriptionMateRunner } from "./subscription-chat.js";
 export const chatObject = (v: unknown): Record<string, unknown> =>
   v !== null && typeof v === "object" && !Array.isArray(v)
@@ -191,6 +193,14 @@ export async function processChatEvent(
     // A flow decision asked for this person's next message (Edit, Send back): it is the draft or the note.
     if (answerChatFlowPrompt({ store, state, label: options.label }, event, binding,
       { text, ...(typeof input.originalLength === "number" ? { originalLength: input.originalLength } : {}) }, repos, nowOf(options))) return true;
+    // A message to a teammate by name (v96), in someone's own chat with Standing Orders: a card on its desk.
+    if (event.channel === binding.channel) {
+      const handed = messageTeammate(store, { who: binding.approver, repos, via: CHAT_APP_NAMES[state.channel] ?? "Chat" }, text, nowOf(options));
+      if (handed !== null) {
+        state.plan(event.id, [{ text: handed.said, ...(handed.link === undefined ? {} : { link: handed.link }) }], nowOf(options));
+        return true;
+      }
+    }
     // The task this message's turn is about, once chosen (kept on the event,
     // so a reply planned after a restart names the same task).
     let about: { task: string; run: number | null } | null =

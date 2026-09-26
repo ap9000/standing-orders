@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Message a teammate by name, and give it routines.** "@maya where's order
+  2201?" in Telegram, Slack, Discord or Teams lands on Maya's desk, and the
+  answer comes back to you there. Routines ("weekdays 09:00: look up
+  yesterday's refunds") put a card on its desk on a schedule and report to
+  its manager. A code change it's asked for is filed as an ordinary task
+  under your approvals.
 - **Teammates remember, and learn from you.** Each teammate keeps a memory:
   what you tell it, and short facts it keeps from the cards it works, read
   back when a later card is about the same thing. Search, edit or forget any

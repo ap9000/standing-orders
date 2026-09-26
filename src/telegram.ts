@@ -20,6 +20,7 @@
  */
 
 import { applyTelegramQuestionReply, applyTelegramQuestionTap, openQuestionOf, telegramQuestionButtons } from "./teammate-question.js";
+import { messageTeammate } from "./teammate-desk.js";
 import { acceptanceEvidenceText } from "./chat-acceptance.js";
 import { verifyApproverStanding } from "./principal.js";
 import { resultImageFileName, resultTaskLabel, verifyResultImage } from "./chat-evidence.js";
@@ -1215,6 +1216,20 @@ function applyMessage(context: Context, update: Update, effects: Effect[]): void
         });
       }
       return;
+    }
+    // A message to a teammate by name (v96), in the person's own chat: a card on its desk, and the answer comes back here.
+    if (binding !== null && message.reply_to_message === undefined && message.chat?.type === "private" && String(chat.id) === binding.chatId && store.accountOf(binding.approver)?.role === "approver") {
+      const repos = context.projects === null ? store.knownRepos().filter(repo => store.accountCanAccess(binding.approver, repo)) : telegramConversationRepos(store, binding.approver, context.projects);
+      const handed = messageTeammate(store, { who: binding.approver, repos, via: "Telegram" }, message.text ?? "", clock());
+      if (handed !== null) {
+        effects.push(async () => {
+          let button: InlineButton[] | null = null;
+          if (handed.link !== undefined) { try { button = phoneLinkButton(context.conversation?.phoneOrigin?.() ?? null, handed.link); } catch { button = null; } }
+          await transport("sendMessage", { chat_id: binding.chatId, text: handed.said, link_preview_options: { is_disabled: true }, reply_parameters: { message_id: message.message_id },
+            ...(button === null ? {} : { reply_markup: { inline_keyboard: [button] } }) });
+        });
+        return;
+      }
     }
     const repliedDecision = binding !== null && message.reply_to_message !== undefined
       ? store.decisionForTelegramMessage(binding.id, binding.chatId, String(message.reply_to_message.message_id))
