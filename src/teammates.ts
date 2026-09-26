@@ -120,18 +120,15 @@ export const TEAMMATE_TEMPLATES: readonly { id: string; label: string; about: st
 /** What a teammate may do on one turn. A decision zone: approve, send back, or hand it to a person. A work zone: pick where it goes, ask its person, or say it can't. */
 export type TurnAction = "approve" | "send_back" | "hand_off" | "route" | "ask" | "cant";
 export type TurnAnswer = { action: TurnAction; answer: string; text: string; note: string; question: string; options: string[]; reason: string };
-/** The shape Claude answers in: one flat object (a root union is refused). */
+/** The shape Claude answers in: one flat object (a root union is refused). No length limits here: an answer
+ * a few characters over one is refused whole by the CLI, so readTurn trims to size instead. */
 export const TURN_SCHEMA = {
   type: "object", additionalProperties: false,
   required: ["action", "answer", "text", "note", "question", "options", "reason"],
   properties: {
     action: { type: "string", enum: ["approve", "send_back", "hand_off", "route", "ask", "cant"] },
-    answer: { type: "string", maxLength: 60 },
-    text: { type: "string", maxLength: 6000 },
-    note: { type: "string", maxLength: 1500 },
-    question: { type: "string", maxLength: 600 },
-    options: { type: "array", maxItems: 4, items: { type: "string", maxLength: 60 } },
-    reason: { type: "string", maxLength: 400 },
+    answer: { type: "string" }, text: { type: "string" }, note: { type: "string" }, question: { type: "string" },
+    options: { type: "array", items: { type: "string" } }, reason: { type: "string" },
   },
 } as const;
 
@@ -235,7 +232,8 @@ export function claudeTurnRunner(runner: CommandRunner = run): TurnRunner {
       const parsed = strictJsonParse(Buffer.from(result.stdout, "utf8"), 512 * 1024, 12);
       const body = parsed.ok && typeof parsed.value === "object" && parsed.value !== null && !Array.isArray(parsed.value) ? parsed.value as Record<string, unknown> : null;
       if (result.code !== 0 || body === null || body["is_error"] === true || body["subtype"] !== "success") {
-        return { ok: false, said: /not logged in|login|authenticat/i.test(`${result.stdout}${result.stderr}`) ? "Claude isn't signed in on this computer." : "Claude couldn't decide." };
+        const why = typeof body?.["subtype"] === "string" && body["subtype"] !== "success" ? ` (${String(body["subtype"]).replace(/_/g, " ").slice(0, 60)})` : result.code !== 0 ? ` (exit ${result.code})` : "";
+        return { ok: false, said: /not logged in|login|authenticat/i.test(`${result.stdout}${result.stderr}`) ? "Claude isn't signed in on this computer." : `Claude couldn't decide${why}.` };
       }
       if (body["structured_output"] !== undefined && body["structured_output"] !== null) return { ok: true, value: body["structured_output"], ms: Date.now() - started };
       const text = typeof body["result"] === "string" ? body["result"].trim().replace(/^```(?:json)?\n?|\n?```$/g, "") : "";

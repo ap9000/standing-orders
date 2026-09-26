@@ -726,13 +726,13 @@ await check("AI teammates: Maya (a support rep) answers a question card, approve
   await addCard("Charged twice for order #1202", "I was charged $30 twice for the same order. Can I get the extra $30 back? — Sam");
   await addCard("Broken TV, order #1203", "My $400 TV arrived with a cracked screen. I want my money back. — Lee");
   const cardOf = async title => (await flowView(id)).cards.find(one => one.title.startsWith(title));
-  const question = await until("Maya to answer the question card", async () => { const one = await cardOf("Where is my order"); return one?.stage === "answered" ? one : null; }, { timeoutMs: 300_000, everyMs: 3000 });
+  const question = await until("Maya to answer the question card", async () => { const one = await cardOf("Where is my order"); return one?.stage === "answered" ? one : null; }, { timeoutMs: 420_000, everyMs: 3000 });
   const reply = question.outputs.find(one => one.stage === "read")?.text ?? "";
   if (reply.length < 20) throw new Error(`her reply: ${reply}`);
-  const small = await until("Maya to approve the $30 refund on her own", async () => { const one = await cardOf("Charged twice"); return one?.stage === "refunded" ? one : null; }, { timeoutMs: 300_000, everyMs: 3000 });
+  const small = await until("Maya to approve the $30 refund on her own", async () => { const one = await cardOf("Charged twice"); return one?.stage === "refunded" ? one : null; }, { timeoutMs: 420_000, everyMs: 3000 });
   if (!small.history.some(one => /Approved by Maya \(AI\)/.test(one.text))) throw new Error(`its history: ${small.history.map(one => one.text).join(" | ")}`);
   // The $400 one is over her limit: she brings it to the flow's owner (a decision, or a question first).
-  const brought = await until("Maya to bring the $400 refund to you", async () => { const one = await cardOf("Broken TV"); return one?.canDecide || one?.question?.mine ? one : null; }, { timeoutMs: 300_000, everyMs: 3000 });
+  const brought = await until("Maya to bring the $400 refund to you", async () => { const one = await cardOf("Broken TV"); return one?.canDecide || one?.question?.mine ? one : null; }, { timeoutMs: 420_000, everyMs: 3000 });
   await page.reload(); await page.waitForSelector("[data-zone]");
   await page.locator(`[data-card="${brought.id}"]`).click();
   await page.waitForSelector(`[data-flow-card-panel="${brought.id}"]`);
@@ -741,7 +741,7 @@ await check("AI teammates: Maya (a support rep) answers a question card, approve
     await page.locator(`[data-teammate-question] textarea`).fill("Yes, it's a refund request. Go ahead and send it to the refund decision.");
     await page.locator(`[data-teammate-question] button:has-text("Answer")`).click();
   }
-  const handed = await until("the decision to be yours", async () => { const one = await cardOf("Broken TV"); return one?.canDecide ? one : one?.stage === "refunded" ? one : null; }, { timeoutMs: 300_000, everyMs: 3000 });
+  const handed = await until("the decision to be yours", async () => { const one = await cardOf("Broken TV"); return one?.canDecide ? one : one?.stage === "refunded" ? one : null; }, { timeoutMs: 420_000, everyMs: 3000 });
   if (handed.stage !== "refunded") {
     await page.reload(); await page.waitForSelector("[data-zone]");
     await page.locator(`[data-card="${handed.id}"]`).click();
