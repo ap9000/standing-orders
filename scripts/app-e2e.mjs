@@ -1050,6 +1050,47 @@ await check("A teammate's week and undo: its page shows the week with what its t
   return { report: report.body.slice(0, 300) };
 });
 
+await check("Starter kits: the Support desk kit sets up Maya and its flow in one click, its checklist says what's left, and Try it has Maya draft a reply for you to check (real Claude turn)", [], async () => {
+  await page.goto(`${base}/kits`);
+  await page.waitForSelector('[data-kit="support-desk"]');
+  if ((await page.locator("[data-kit]").count()) !== 4) throw new Error("the gallery doesn't show the four kits");
+  await shot("kits-gallery");
+  const phone = await signIn("alex", { width: 390, height: 844 }, "dark");
+  await phone.goto(`${base}/kits`); await phone.waitForSelector("[data-kit]"); await sleep(400);
+  await phone.screenshot({ path: join(w.out, "kits-gallery-phone.png") });
+  const wide = await phone.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
+  await phone.context().close();
+  if (wide) throw new Error("the kits gallery scrolls sideways on a phone");
+  // One click sets it up; its page is the checklist.
+  await Promise.all([page.waitForNavigation(), page.locator('[data-kit="support-desk"] button:has-text("Set it up")').click()]);
+  if (!/\/kits\/support-desk/.test(page.url())) throw new Error(`setting it up went to ${page.url()}`);
+  const done = async id => (await page.locator(`[data-step="${id}"]`).getAttribute("data-done")) === "true";
+  if (!(await done("teammate")) || !(await done("flow")) || await done("sample")) throw new Error("the checklist doesn't read teammate and flow done, sample to try");
+  if ((await page.locator('[data-step="tool-stripe"] a:has-text("Connect")').count()) !== 1) throw new Error("the checklist doesn't offer to connect Stripe");
+  await shot("kit-checklist");
+  const flow = rows("SELECT id FROM flow WHERE name = 'Support desk' AND state = 'active'")[0]?.id;
+  if (!flow || rows("SELECT 1 FROM teammate WHERE handle = 'maya' AND state = 'active'").length !== 1) throw new Error("the kit didn't make Maya and the Support desk flow");
+  // Try it: a sample customer email, and Maya drafts the reply you check.
+  await Promise.all([page.waitForNavigation(), page.locator('[data-step="sample"] button:has-text("Try it")').click()]);
+  if (!new RegExp(`/flows/${flow}`).test(page.url())) throw new Error(`Try it went to ${page.url()}`);
+  const worked = await until("Maya to draft a reply to the sample", async () => {
+    const card = (await flowView(flow)).cards.find(one => one.title.startsWith("Where's my order"));
+    return card !== undefined && card.stage !== "answer" ? card : null;
+  }, { timeoutMs: 300_000, everyMs: 3000 });
+  const draft = worked.outputs.find(one => one.stage === "answer")?.text ?? "";
+  if (draft.length < 20) throw new Error(`Maya's draft: ${draft}`);
+  // The sample carries the order's status, so Maya can answer it without a tool connected.
+  if (worked.stage !== "check") throw new Error(`Maya sent the sample to "${worked.stage}" instead of a reply to check: ${draft.slice(0, 200)}`);
+  if (worked.draft?.text !== draft || !worked.canDecide) throw new Error("the reply isn't in front of you to check");
+  await page.reload(); await page.waitForSelector("[data-zone]");
+  await page.locator(`[data-card="${worked.id}"]`).click();
+  await page.waitForSelector("[data-flow-draft-edit]");
+  await shot("kit-sample-draft");
+  await page.goto(`${base}/kits/support-desk?repo=${encodeURIComponent(repo)}`);
+  if (!(await done("sample"))) throw new Error("the checklist doesn't mark the sample tried");
+  return { stage: worked.stage, draft: draft.slice(0, 160) };
+});
+
 await check("Live canvas: a teammate sees who's here and a card move without reloading", ["Code steps: a Python file and a Node script get the card, pass on what they print, pick the next zone, and get a secret"], async () => {
   const sam = await signIn("sam");
   try {

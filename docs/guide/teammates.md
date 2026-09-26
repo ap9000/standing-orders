@@ -3,7 +3,9 @@
 An AI teammate works your flows' cards the way an employee would, within
 rules you write for it. It reads each card, decides, writes replies and moves
 cards on, and it comes to you when its rules say to ask first. Open
-**Teammates** (from the Flows page) to add one.
+**Teammates** (from the Flows page) to add one, or start from a
+[starter kit](getting-started.md#start-from-a-kit), which adds a teammate
+together with the flow it works.
 
 ## Who a teammate is: its soul file
 

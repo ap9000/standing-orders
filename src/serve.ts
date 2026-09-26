@@ -22,6 +22,8 @@ import { toolsHtml, TOOLS_CSS, type ToolsView } from "./tools-ui.js";
 import { flowFallbackHtml, flowsListHtml, flowView, FLOWS_CSS } from "./flows-ui.js";
 import { BLANK_SOUL, TEAMMATE_CSS, teammatePageHtml, teammatesListHtml } from "./teammates-ui.js";
 import { grantTool, revokeTool, rulesFromForm, setToolRules } from "./teammate-tools.js";
+import { addKitGithubTrigger, addKitSample, kitOf, setUpKit } from "./kits.js";
+import { KITS_CSS, kitPageHtml, kitsGalleryHtml } from "./kits-ui.js";
 import { createTeammateFrom, labelOf, nameOf, saveSoul, setTeammateState, teammateSettings, sendTeammateSummaries } from "./teammate-admin.js";
 import { editMemory, forgetMemory, tellTeammate } from "./teammate-memory.js";
 import { addRoutine, removeRoutine, runRoutine } from "./teammate-desk.js";
@@ -2718,6 +2720,18 @@ export function createDecisionServer(options: ServeOptions): Server {
       const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
       const flows = store.listFlows(projects);
       return sendScreen(response, 200, screen("Flows", `<h1>Flows</h1>${flowsListHtml(store, flows, projects, who.via === "cookie" ? who.session.csrf : "", who.via === "cookie" && who.role === "approver", url.searchParams.get("problem"))}`, { chrome: chromeFor(project, "flows") }));
+    }
+    // v99: starter kits — the gallery, and each kit's checklist in a project.
+    if (url.pathname === "/kits" || /^\/kits\/[a-z-]{1,40}$/.test(url.pathname)) {
+      const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
+      const csrf = who.via === "cookie" ? who.session.csrf : "", canSetUp = who.via === "cookie" && who.role === "approver";
+      if (url.pathname === "/kits") {
+        return sendScreen(response, 200, screen("Starter kits", `<h1>Starter kits</h1>${kitsGalleryHtml(store, projects, projectName, csrf, canSetUp, { problem: url.searchParams.get("problem") })}`, { chrome: chromeFor(project, "flows") }));
+      }
+      const kit = kitOf(url.pathname.slice("/kits/".length));
+      const repo = url.searchParams.get("repo") ?? (projects.length === 1 ? projects[0]! : "");
+      if (kit === null || !projects.includes(repo)) return redirect(response, "/kits");
+      return sendScreen(response, 200, screen(kit.name, `<h1>${escape(kit.name)}</h1>${kitPageHtml(store, kit, repo, options.configDir ?? null, csrf, canSetUp, { said: url.searchParams.get("said"), problem: url.searchParams.get("problem") })}`, { chrome: chromeFor(repo, "flows") }));
     }
     // v92: AI teammates — the team, and one page per teammate.
     if (url.pathname === "/teammates") {
@@ -5529,6 +5543,30 @@ export function createDecisionServer(options: ServeOptions): Server {
         try {content=skillsHtml(skillsView(store,repo,who.name),who.session.csrf,true,{error:message,draft:Object.fromEntries(['method','content','url','sample','sha'].map(k=>[k,body.get(k)??'']))});}catch{/* Do not display unverified packages. */}
         return sendScreen(response,409,screen('Skills',`<h1>Skills</h1>${content}`,{chrome:chromeFor(repo,'settings'),functional:{script:skillsScript()}}));
       }
+    }
+    // v99: setting a starter kit up, trying its sample card, and bringing GitHub issues in.
+    const kitPost = /^\/kits\/([a-z-]{1,40})\/(setup|sample|github)$/.exec(url.pathname);
+    if (kitPost !== null) {
+      const now = clock();
+      if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "Sign in as an approver to set kits up.", "/kits");
+      const kit = kitOf(kitPost[1]!);
+      const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
+      const repo = body.get("repo") ?? "";
+      if (kit === null || !projects.includes(repo) || !store.accountCanAccess(who.name, repo)) return redirect(response, `/kits?problem=${encodeURIComponent("Choose one of your projects.")}`);
+      const page = (key: "said" | "problem", words: string) => redirect(response, `/kits/${kit.id}?repo=${encodeURIComponent(repo)}&${key}=${encodeURIComponent(words)}`);
+      if (kitPost[2] === "setup") {
+        const made = await setUpKit(store, kit, repo, who.name, now, options.configDir ?? null, { toolHome });
+        return page(made.ok ? "said" : "problem", made.said);
+      }
+      if (kitPost[2] === "github") {
+        const made = addKitGithubTrigger(store, kit, repo, who.name, now, options.configDir ?? null);
+        return page(made.ok ? "said" : "problem", made.said);
+      }
+      const tried = addKitSample(store, kit, repo, who.name, now);
+      if (!tried.ok) return page("problem", tried.said);
+      // The teammate picks it up on the worker's next pass (a few seconds); its flow opens on the card.
+      try { advanceFlows(store, repo, now, { evidenceRoot }); } catch { /* the worker's next pass moves it */ }
+      return redirect(response, tried.href);
     }
     // v92: looking after teammates, and answering their questions.
     const teammatePost = url.pathname === "/teammates/new" ? ["", "0", "new"] as const : /^\/teammates\/([1-9][0-9]{0,9})\/(soul|state|note|settings|summary|tools|memory|routines|week)$/.exec(url.pathname);
@@ -12893,9 +12931,19 @@ button { min-height: 44px; }
    signal. Everything dies under prefers-reduced-motion; auto-refresh pages
    opt out of the navigation cross-fade separately (see shell()). */
 @view-transition { navigation: auto; }
-::view-transition-old(root), ::view-transition-new(root) {
-  animation-duration: 140ms; animation-timing-function: ease-out;
-}
+/* A page change fades THROUGH, not across: the old page leaves before the new
+   one arrives, so two pages' text is never on screen at once. The sidebar,
+   the same on both, swaps in place instead of fading (each shell names its
+   own, so a page can never carry the name twice). */
+::view-transition-old(root) { animation: so-page-leave 80ms ease-in both; }
+::view-transition-new(root) { animation: so-page-arrive 140ms ease-out 60ms both; }
+@keyframes so-page-leave { to { opacity: 0; } }
+@keyframes so-page-arrive { from { opacity: 0; } }
+.side { view-transition-name: so-nav-page; }
+.so-sidebar { view-transition-name: so-nav-app; }
+::view-transition-group(so-nav-page), ::view-transition-group(so-nav-app),
+::view-transition-old(so-nav-page), ::view-transition-new(so-nav-page),
+::view-transition-old(so-nav-app), ::view-transition-new(so-nav-app) { animation: none; }
 /* UI polish 2026-09-13 — the motion contract. Feedback transitions run
    140–200 ms on color, border, shadow, opacity, and transform only; an
    overlay's entrance is at most 220 ms of opacity + transform. Nothing
@@ -12979,7 +13027,7 @@ button.pick-file { min-height: 1.75rem; padding: 0 .55rem; font-size: .75rem; }
 
 /** Appearance: a three-way segmented switch, one tap per choice. */
 const THEME_CONTROLS_CSS = `.task-repo select{width:100%;min-height:2.75rem;font-size:1rem}.task-repo-add{margin:.35rem .1rem .5rem}.task-repo-add a{display:inline-flex;align-items:center;min-height:2.25rem}details.result-request-open.result-request-form>summary{border:0;background:transparent;padding:.5rem 0;min-height:2.75rem;font-weight:600;display:list-item;list-style:revert}details.result-request-open.result-request-form>summary::-webkit-details-marker{display:revert}form.js-autosave button[type=submit]{display:none}.provider-row{border-bottom:1px solid var(--so-line);padding:.35rem 0}.provider-row:first-of-type{border-top:1px solid var(--so-line)}.provider-head{display:flex;align-items:center;gap:.75rem;margin:.4rem 0 0}.provider-status{display:inline-flex;align-items:center;gap:.4rem;color:var(--so-muted);font-size:.875rem}.provider-status i{width:.5rem;height:.5rem;border-radius:50%;background:var(--so-muted)}.provider-status--ok i{background:var(--so-success)}.provider-status--warn i{background:var(--so-attention)}.provider-status--off i{background:transparent;border:1.5px solid var(--so-muted)}details.provider-manage>summary{cursor:pointer;color:var(--so-accent-text);font-size:.875rem;min-height:2.5rem;display:list-item;padding-block:.5rem}.card.props .row{display:grid;gap:.1rem;margin:0 0 .75rem}.card.props .row>.meta{display:block;font-size:.75rem}.card.props .row>.meta::first-letter{text-transform:uppercase}.card.props .row>.mono{font-family:var(--font-sans);font-size:.875rem}.card.props .row>.mono .seal{font-family:var(--font-mono);font-size:.8125rem}details.evidence-files{margin:1rem 0}details.evidence-files>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:600}details.evidence-files ul{list-style:none;margin:0;padding:0}details.evidence-files li{display:flex;justify-content:space-between;gap:1rem;padding:.5rem 0;border-bottom:1px solid var(--so-line)}.result-action .result-feedback-link{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;text-decoration:none}.result-action .result-feedback-link:hover{background:var(--so-raised)}.so-sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}.verdict{margin:.5rem 0 .75rem}.verdict-chips{display:flex;flex-wrap:wrap;gap:.4rem;list-style:none;padding:0;margin:0}.verdict-chip{display:inline-flex;align-items:center;gap:.3rem;min-height:1.75rem;padding:.2rem .65rem;border-radius:999px;font-size:.8125rem;font-weight:600;background:var(--so-neutral-soft);color:var(--so-neutral-ink)}.verdict-chip svg{width:.9rem;height:.9rem}.verdict-chip--success{background:var(--so-success-soft);color:var(--so-success)}.verdict-chip--danger{background:var(--so-danger-soft);color:var(--so-danger)}.verdict-chip--warning{background:var(--so-warning-soft);color:var(--so-warning)}.verdict-chip--info{background:var(--so-info-soft);color:var(--so-info)}.verdict-by{margin:.4rem 0 0}details.result-request-open{margin:.5rem 0}details.result-request-open>summary{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;cursor:pointer;list-style:none}details.result-request-open>summary::-webkit-details-marker{display:none}details.result-request-open[open]>summary{margin-bottom:.75rem}.settings-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(8.5rem,1fr));gap:.5rem;margin:0 0 2rem}.settings-tiles a{display:flex;align-items:center;gap:.6rem;min-height:3rem;padding:.65rem .8rem;border:1px solid var(--so-line);border-radius:.625rem;background:var(--so-paper);color:var(--so-ink);text-decoration:none;font-weight:550;font-size:.875rem}.settings-tiles a:hover{border-color:var(--so-input-line);background:var(--so-raised)}.settings-tiles svg{width:1.1rem;height:1.1rem;flex-shrink:0;color:var(--so-accent-text)}details.settings-more{margin:.25rem 0 1.25rem}details.settings-more>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:550}details.settings-more>summary .meta{font-weight:400;margin-left:.35rem}.settings-changed{margin-top:-.25rem}.appearance{margin:0 0 28px}.appearance h2{margin:0 0 10px}.theme-switch{display:inline-flex;flex-wrap:nowrap;max-width:100%;gap:4px;padding:4px;margin:0;border:1px solid var(--so-line);border-radius:10px;background:var(--so-raised)}.theme-switch .theme-choice,.so-native-region .theme-switch .theme-choice{flex:1 1 0;width:auto;white-space:nowrap;min-height:40px;padding:8px 16px;border:0;border-radius:7px;background:transparent;color:var(--so-muted);font:inherit;font-weight:550;box-shadow:none;cursor:pointer}.theme-switch .theme-choice:hover{color:var(--so-ink)}.theme-switch .theme-choice[aria-pressed="true"]{background:var(--so-paper);color:var(--so-ink);box-shadow:0 1px 2px rgb(0 0 0 / .1)}.appearance .meta{margin:8px 0 0}@media(max-width:600px){.theme-switch .theme-choice{min-height:44px}}`;
-const WORKSPACE_STYLE = styleAsset(STYLE + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
+const WORKSPACE_STYLE = styleAsset(STYLE + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KITS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
