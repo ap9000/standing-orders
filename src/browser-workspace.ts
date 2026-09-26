@@ -225,7 +225,9 @@ export type BrowserFlowCard = {
   /** v92: what the teammate said when it handed this decision to a person. */
   handoff?: { from: string; note: string } | null;
   /** v94: every tool call teammates made or asked to make on this card, oldest first: the receipts. */
-  calls?: { id: number; who: string; words: string; state: string; outcome: string; why: string; result: string | null; at: string }[];
+  calls?: { id: number; who: string; words: string; state: string; outcome: string; why: string; result: string | null; at: string;
+    /** v97: the teammate's id and the action that undoes this call, when a person can press Undo. */
+    teammate?: number; undo?: string | null }[];
 };
 
 /** What starts cards in a flow on its own. */

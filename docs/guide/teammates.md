@@ -134,6 +134,25 @@ Each teammate has a desk: its own flow, made the first time it's needed.
 Any "Teammate handles it" zone can also **Answer whoever asked**: what the
 teammate writes goes back to the person who added the card.
 
+## Its week, and undo
+
+**This week**, on its page, and each Monday from 9:00 in its manager's chat app:
+
+- **What it did:** decided, handled, handed to people, and asked.
+- **Its tool calls:** made, approved first, turned down, and undone.
+- **Its turns:** how long it spent thinking, and what the turns cost, as the
+  Claude CLI reports them at API prices. A Claude plan covers turns on its
+  sign-in.
+- **What you overrode:** calls you turned down, and cards someone moved by
+  hand right after it moved them. Each links to its card.
+
+**Undo.** Under Tools, open **Undo** and name an action's opposite, like
+remove_label for add_label. From then on, its receipts show **Undo with
+remove_label**, on the card and in This week. Undo calls the opposite with the
+same input, as you, and both calls keep their receipts. If the tool says the
+undo failed, the original call stands. From chat, the lead can ask to undo a
+call; it's made on the worker's next pass.
+
 ## Talking to your teammates
 
 - Its questions and hand-offs reach you in your chat app, under its name

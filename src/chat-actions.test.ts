@@ -260,10 +260,24 @@ describe("shared chat action lifecycle", () => {
     expect(confirm(proposal("teammate_memory", { teammate: mate, memory: told!.id, change: "forget" }))).toMatchObject({ ok: true });
     expect(store.teammateMemories(mate)).toEqual([]);
   });
+  test("the lead asks to undo a teammate's call only where its action has an undo; the worker makes it (v97)", () => {
+    const mate = store.createTeammate({ repo, handle: "maya", soul: "---\nname: Maya\nrole: Support\n---\n## Who you are\nHelpful.\n", model: null, manager: who.name, by: who.name }, now);
+    const flow = store.createFlow({ repo, name: "Support", definitionJson: JSON.stringify({ version: 1, start: "inbox", stages: [{ id: "inbox", title: "Inbox", kind: "inbox", zone: {}, next: null, onFail: null }] }), by: who.name }, now);
+    const card = store.addFlowCard({ flow, title: "Label it", description: null, stage: "inbox", by: who.name }, now);
+    const call = store.addTeammateCall({ teammate: mate, card, entry: 1, tool: "desk", action: "add_label", input: { ticket: "T-1", label: "urgent" }, rule: "free", why: "Urgent.", state: "done", result: "added" }, now);
+    expect(() => prepareSharedAction(store, who, "teammate_undo", { teammate: mate, call }, root, now)).toThrow("its action has no undo set");
+    store.saveTeammateGrant({ teammate: mate, tool: "desk", actions: [{ name: "add_label", about: "", input: null, readOnly: false }, { name: "remove_label", about: "", input: null, readOnly: false }],
+      rules: { add_label: { use: "free", undo: "remove_label" }, remove_label: { use: "never" } } }, who.name, now);
+    const undo = proposal("teammate_undo", { teammate: mate, call });
+    expect(store.getMateProposal(undo)!.payload).toMatchObject({ title: "Undo Maya's add_label", terms: expect.arrayContaining(["By calling: desk → remove_label · ticket T-1 · label urgent"]) });
+    expect(confirm(undo)).toMatchObject({ ok: true });
+    expect(store.pendingTeammateUndos().map(one => [one.action, one.undoOf, one.decidedBy])).toEqual([["remove_label", call, who.name]]);
+    expect(store.teammateCall(call)?.undoneBy).toBe(who.name);
+  });
   test("the lead gives a teammate a routine and stops it, each as a card (v96)", () => {
     const mate = store.createTeammate({ repo, handle: "maya", soul: "---\nname: Maya\nrole: Support\n---\n## Who you are\nHelpful.\n", model: null, manager: who.name, by: who.name }, now);
     expect(() => prepareSharedAction(store, who, "teammate_routine", { teammate: mate, change: "add", schedule: "now and then", text: "Count refunds" }, root, now)).toThrow("Say the schedule like");
-    const add = proposal("teammate_routine", { teammate: mate, change: "add", schedule: "weekdays 09:00", text: "Count yesterday's refunds" });
+    const add = proposal("teammate_routine", { teammate: mate, change: "add", schedule: "weekdays 09:00 UTC", text: "Count yesterday's refunds" });
     expect(store.getMateProposal(add)!.payload).toMatchObject({ title: "Maya: Count yesterday's refunds", terms: expect.arrayContaining(["When: weekdays at 09:00 UTC", "What: Count yesterday's refunds"]) });
     expect(confirm(add)).toMatchObject({ ok: true });
     const [routine] = routinesOf(store, store.getTeammate(mate)!);

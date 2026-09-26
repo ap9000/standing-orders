@@ -373,6 +373,8 @@ function CardPanel({ card, view, csrf, apply, onClose }: { card: BrowserFlowCard
         <span className="break-words"><span className="font-medium">{call.who}</span> · {call.words}</span>
         <span className="text-muted-foreground">{call.outcome}{call.why !== "" && call.state !== "refused" ? ` · ${call.why}` : ""}</span>
         {call.result !== null && call.result !== "" && (call.state === "done" || call.state === "failed") && <span className="mt-0.5 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-muted px-2 py-1 text-[12px]">{call.result}</span>}
+        {call.undo != null && call.teammate !== undefined && <Button size="sm" variant="outline" className="mt-1 self-start" disabled={busy} data-teammate-undo={call.id}
+          onClick={() => void act(`/teammates/${call.teammate}/week`, { op: "undo", id: String(call.id) })}>Undo with {call.undo}</Button>}
       </li>)}</ol>
     </details>}
     {card.outputs.length > 0 && <div className="flex flex-col gap-2">

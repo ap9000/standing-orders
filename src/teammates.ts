@@ -235,7 +235,9 @@ export function readTurn(value: unknown, context: Pick<TurnContext, "kind" | "ca
 }
 
 export type TurnRequest = { model: string; prompt: string; timeoutMs: number };
-export type TurnReply = { ok: true; value: unknown; ms: number } | { ok: false; said: string };
+/** v97: what the turn cost, as the CLI estimates it (a Claude plan covers it; the figure is at API prices), and its tokens. */
+export type TurnCost = { costUsd?: number; tokensIn?: number; tokensOut?: number };
+export type TurnReply = ({ ok: true; value: unknown; ms: number } & TurnCost) | ({ ok: false; said: string } & TurnCost);
 /** Runs one turn; injectable so tests never spend a subscription turn. */
 export type TurnRunner = (request: TurnRequest) => Promise<TurnReply>;
 export const TURN_TIMEOUT_MS = 180_000;
@@ -261,14 +263,24 @@ export function claudeTurnRunner(runner: CommandRunner = run): TurnRunner {
         const why = typeof body?.["subtype"] === "string" && body["subtype"] !== "success" ? ` (${String(body["subtype"]).replace(/_/g, " ").slice(0, 60)})` : result.code !== 0 ? ` (exit ${result.code})` : "";
         return { ok: false, said: /not logged in|login|authenticat/i.test(`${result.stdout}${result.stderr}`) ? "Claude isn't signed in on this computer." : `Claude couldn't decide${why}.` };
       }
-      if (body["structured_output"] !== undefined && body["structured_output"] !== null) return { ok: true, value: body["structured_output"], ms: Date.now() - started };
+      const cost = costOf(body);
+      if (body["structured_output"] !== undefined && body["structured_output"] !== null) return { ok: true, value: body["structured_output"], ms: Date.now() - started, ...cost };
       const text = typeof body["result"] === "string" ? body["result"].trim().replace(/^```(?:json)?\n?|\n?```$/g, "") : "";
       const inner = strictJsonParse(Buffer.from(text, "utf8"), 64 * 1024, 8);
-      return inner.ok ? { ok: true, value: inner.value, ms: Date.now() - started } : { ok: false, said: "Claude's answer wasn't a decision." };
+      return inner.ok ? { ok: true, value: inner.value, ms: Date.now() - started, ...cost } : { ok: false, said: "Claude's answer wasn't a decision.", ...cost };
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   };
+}
+
+/** What the CLI says a turn cost, and its tokens (cache reads and writes count as input). */
+function costOf(body: Record<string, unknown>): TurnCost {
+  const usage = (body["usage"] ?? {}) as Record<string, unknown>;
+  const count = (key: string) => typeof usage[key] === "number" && Number.isFinite(usage[key]) ? usage[key] as number : 0;
+  const cost = typeof body["total_cost_usd"] === "number" && Number.isFinite(body["total_cost_usd"]) && body["total_cost_usd"] >= 0 ? body["total_cost_usd"] as number : undefined;
+  const tokensIn = count("input_tokens") + count("cache_creation_input_tokens") + count("cache_read_input_tokens"), tokensOut = count("output_tokens");
+  return { ...(cost === undefined ? {} : { costUsd: cost }), ...(tokensIn > 0 ? { tokensIn } : {}), ...(tokensOut > 0 ? { tokensOut } : {}) };
 }
 
 /** How a teammate is named to people: "Maya · Support". */

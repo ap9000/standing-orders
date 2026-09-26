@@ -101,7 +101,7 @@ export async function teammateTurn(store: Store, flow: FlowRow, definition: Flow
   if (store.teammateGrants(mate.id).length > 0) {
     try { await refreshGrants(store, mate, now, io); } catch { /* the last listing stands */ }
     // Calls a person approved since the last turn are made first, exactly as they approved them.
-    for (const call of store.teammateCallsOn(card.id, card.entry).filter(one => one.state === "approved")) await makeCall(store, call, flow.repo, io, now);
+    for (const call of store.teammateCallsOn(card.id, card.entry).filter(one => one.state === "approved" && one.undoOf === null)) await makeCall(store, call, flow.repo, io, now);
   }
   const log: string[] = [];
   for (let turn = 1; ; turn++) {
@@ -109,7 +109,10 @@ export async function teammateTurn(store: Store, flow: FlowRow, definition: Flow
     const spent = made >= CALLS_PER_VISIT || turn > TURNS_PER_RUN;
     const tools = spent ? [] : offeredTools(store, mate);
     const context = contextOf(store, flow, definition, stage, card, mate, tools, spent && made > 0);
+    const asked = Date.now();
     const reply = await (io.turn ?? claudeTurnRunner())({ model, prompt: turnPrompt(context), timeoutMs: TURN_TIMEOUT_MS });
+    // v97: every turn is kept with what it cost, for its weekly report.
+    store.addTeammateTurn({ teammate: mate.id, card: card.id, model, ok: reply.ok, ms: reply.ok ? reply.ms : Date.now() - asked, costUsd: reply.costUsd ?? null, tokensIn: reply.tokensIn ?? null, tokensOut: reply.tokensOut ?? null }, now);
     if (!reply.ok) return { state: "retry", said: reply.said, ...(log.length === 0 ? {} : { log: log.join("\n\n") }) };
     const answer = readTurn(reply.value, context);
     if (answer === null) return { state: "retry", said: `${context.name}'s answer wasn't one this zone allows.`, log: [...log, JSON.stringify(reply.value).slice(0, 4000)].join("\n\n") };

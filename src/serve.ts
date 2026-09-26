@@ -25,6 +25,7 @@ import { grantTool, revokeTool, rulesFromForm, setToolRules } from "./teammate-t
 import { createTeammateFrom, labelOf, nameOf, saveSoul, setTeammateState, teammateSettings, sendTeammateSummaries } from "./teammate-admin.js";
 import { editMemory, forgetMemory, tellTeammate } from "./teammate-memory.js";
 import { addRoutine, removeRoutine, runRoutine } from "./teammate-desk.js";
+import { sendTeammateWeeklies, undoCall } from "./teammate-week.js";
 import { answerTeammateQuestion } from "./teammate-work.js";
 import { createFlowRooms, flowFingerprint } from "./flow-live.js";
 import { disconnectGoogle, finishGoogleConsent, GOOGLE_CALLBACK, googleConnected, googleConsent, readGoogleMail, saveGoogleClient, type GoogleVisit } from "./google-mail.js";
@@ -5502,7 +5503,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
     }
     // v92: looking after teammates, and answering their questions.
-    const teammatePost = url.pathname === "/teammates/new" ? ["", "0", "new"] as const : /^\/teammates\/([1-9][0-9]{0,9})\/(soul|state|note|settings|summary|tools|memory|routines)$/.exec(url.pathname);
+    const teammatePost = url.pathname === "/teammates/new" ? ["", "0", "new"] as const : /^\/teammates\/([1-9][0-9]{0,9})\/(soul|state|note|settings|summary|tools|memory|routines|week)$/.exec(url.pathname);
     const questionPost = /^\/teammates\/questions\/([1-9][0-9]{0,9})\/answer$/.exec(url.pathname);
     if (teammatePost !== null || questionPost !== null) {
       const now = clock();
@@ -5539,6 +5540,13 @@ export function createDecisionServer(options: ServeOptions): Server {
           return sendScreen(response, 400, screen(labelOf(mate), `<h1>${escape(labelOf(mate))}</h1>${teammatePageHtml(store, mate, who.name, projectName, who.session.csrf, true, approvers, { problem: saved.said, soulDraft: soul })}`, { chrome: chromeFor(mate.repo, "flows") }));
         }
         return redirect(response, `${back}?said=${encodeURIComponent(saved.said)}`);
+      }
+      if (action === "week") {
+        // v97: undo one of its tool calls, or send the week's report now.
+        const done = body.get("op") === "undo" ? await undoCall(store, mate, Number(body.get("id")), who.name, { toolHome }, now)
+          : sendTeammateWeeklies(store, mate.repo, now, mate.id) > 0 ? { ok: true as const, said: `Sent the week's report to ${mate.manager}.` } : { ok: false as const, said: "The report couldn't be sent." };
+        if (wantsJson) return respond(response, done.ok ? 200 : 409, "application/json; charset=utf-8", JSON.stringify(done));
+        return redirect(response, `${back}?${done.ok ? "said" : "problem"}=${encodeURIComponent(done.said)}#week`);
       }
       if (action === "routines") {
         // v96: its routines: add one, try one now, or remove one.

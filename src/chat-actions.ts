@@ -48,9 +48,10 @@ import { dirname } from "node:path";
 import { handleOf, parseSoul, SOUL_CHARS, TEAMMATE_TEMPLATES, teammateLabel } from "./teammates.js";
 import { createTeammateFrom, labelOf, nameOf, renamedSoul, saveSoul, setTeammateState } from "./teammate-admin.js";
 import { cleanMemory, editMemory, forgetMemory, tellTeammate } from "./teammate-memory.js";
-import { addRoutine, removeRoutine, routinesOf } from "./teammate-desk.js";
+import { addRoutine, removeRoutine, routineSchedule, routinesOf } from "./teammate-desk.js";
+import { requestUndo, undoFor } from "./teammate-week.js";
 import { answerTeammateQuestion } from "./teammate-work.js";
-import { checkRule, defaultRule, grantListed, revokeTool, ruleWords, setToolRules } from "./teammate-tools.js";
+import { callWords, checkRule, defaultRule, grantListed, revokeTool, ruleWords, setToolRules } from "./teammate-tools.js";
 
 /** A tool from the lead's card: a common tool by its id, or the operator's own program or address. */
 function toolSpecFromRequest(input: Record<string, unknown>): ToolSpec {
@@ -121,6 +122,7 @@ export const CHAT_ACTIONS = {
   teammate_tools: { label: "Change teammate's tools", protected: false, password: false },
   teammate_memory: { label: "Change teammate's memory", protected: false, password: false },
   teammate_routine: { label: "Change teammate's routines", protected: false, password: false },
+  teammate_undo: { label: "Undo teammate's call", protected: false, password: false },
   decision_record: { label: "Record decision", protected: false, password: false },
   decision_retire: { label: "Retire decision", protected: false, password: false },
   scope_approve: { label: "Approve work", protected: true, password: true },
@@ -179,9 +181,10 @@ export const CHAT_ACTION_FIELDS: Record<ChatAction, readonly string[]> = {
   teammate_state: ["teammate", "state"],
   teammate_note: ["teammate", "note"],
   teammate_answer: ["question", "choice", "text"],
-  teammate_tools: ["teammate", "tool", "change", "action", "use", "limitField", "limitOver"],
+  teammate_tools: ["teammate", "tool", "change", "action", "use", "limitField", "limitOver", "undoWith"],
   teammate_memory: ["teammate", "memory", "change", "text"],
   teammate_routine: ["teammate", "change", "routine", "schedule", "text"],
+  teammate_undo: ["teammate", "call"],
   decision_record: ["repo", "claim", "why", "supersedes", "source"],
   decision_retire: ["repo", "decision", "reason"],
   scope_approve: ["task"],
@@ -483,17 +486,26 @@ export function prepareSharedAction(
         if (grant === null) throw Error(`${name} doesn't use a tool called ${tool}.${uses}`);
         const action = text(input, "action", 64);
         const limit = input["limitField"] === undefined || input["limitField"] === null || input["limitField"] === "" ? null : { field: input["limitField"], over: input["limitOver"] };
-        const checked = checkRule(grant, action, { use: input["use"], limit });
+        const checked = checkRule(grant, action, { use: input["use"], limit, undo: input["undoWith"] ?? grant.rules[action]?.undo ?? "" });
         if (!checked.ok) throw Error(checked.said);
         state = { rules: JSON.stringify(grant.rules) };
         title = `${name}: ${action} — ${ruleWords(checked.rule)}`;
-        terms.push(`${tool} → ${action}: ${ruleWords(checked.rule)}.`, `Was: ${ruleWords(grant.rules[action] ?? { use: "ask" })}.`);
+        terms.push(`${tool} → ${action}: ${ruleWords(checked.rule)}.`, `Was: ${ruleWords(grant.rules[action] ?? { use: "ask" })}.`,
+          ...(checked.rule.undo === undefined ? [] : [`A person can undo it with ${checked.rule.undo}, called with the same input.`]));
       } else throw Error("Choose grant, revoke or rule.");
+    } else if (operation === "teammate_undo") {
+      // v97: undo one of its tool calls with the action its manager named for that.
+      const call = store.teammateCall(integer(input, "call"));
+      const undo = call === null || call.teammate !== mate!.id ? null : undoFor(store, call);
+      if (call === null || undo === null) throw Error(call?.undoneBy ? `${call.undoneBy} already undid it.` : "That call can't be undone: its action has no undo set on the teammate's Tools.");
+      title = `Undo ${nameOf(mate!)}'s ${call.action}`;
+      terms.push(`Undoes: ${callWords(call.tool, call.action, call.input, 300)}`, `By calling: ${callWords(call.tool, undo, call.input, 300)}`, "It's made as you, with the same input, and both calls keep their receipts.");
+      state = { call: call.id };
     } else if (operation === "teammate_routine") {
       // v96: a routine: on a schedule, a card on its desk saying what to do; its answer goes to its manager.
       const name = nameOf(mate!);
       if (input["change"] === "add") {
-        const schedule = scheduleFromWords(text(input, "schedule", 80));
+        const schedule = routineSchedule(text(input, "schedule", 80));
         if (schedule === null) throw Error("Say the schedule like “weekdays 09:00”, “daily 17:00 Europe/London”, “monday 09:00” or “every 2 hours”.");
         const what = text(input, "text", 200).replace(/\s+/g, " ").trim();
         if (what === "") throw Error("Say what it should do each time.");
@@ -1275,6 +1287,11 @@ function runTeammateAction(store: Store, payload: SharedAction, actor: string, n
   }
   const mate = store.getTeammate(Number(req["teammate"]));
   if (mate === null || mate.state === "removed") throw Error("That teammate is off the team.");
+  if (payload.operation === "teammate_undo") {
+    const asked = requestUndo(store, mate, Number(req["call"]), actor, now);
+    if (!asked.ok) throw Error(asked.said);
+    return { said: `${asked.said} The receipt on the card shows how it went.`, href: `/teammates/${mate.id}#week` };
+  }
   if (payload.operation === "teammate_routine") {
     const done = req["change"] === "add" ? addRoutine(store, mate, String(req["schedule"]), String(req["text"]), actor, now, null)
       : removeRoutine(store, mate, Number(req["routine"]), now, null);
@@ -1295,7 +1312,8 @@ function runTeammateAction(store: Store, payload: SharedAction, actor: string, n
     const found = projectToolsOf(store, mate.repo).find(one => one.name === tool);
     const done = req["change"] === "grant" ? found === undefined ? { ok: false as const, said: `There's no tool called ${tool} any more.` } : grantListed(store, mate, found, null, actor, now)
       : req["change"] === "revoke" ? revokeTool(store, mate, tool)
-      : setToolRules(store, mate, tool, { [String(req["action"])]: { use: req["use"], limit: req["limitField"] === undefined || req["limitField"] === null || req["limitField"] === "" ? null : { field: req["limitField"], over: req["limitOver"] } } }, actor, now);
+      : setToolRules(store, mate, tool, { [String(req["action"])]: { use: req["use"], limit: req["limitField"] === undefined || req["limitField"] === null || req["limitField"] === "" ? null : { field: req["limitField"], over: req["limitOver"] },
+        undo: req["undoWith"] ?? grant?.rules[String(req["action"])]?.undo ?? "" } }, actor, now);
     if (!done.ok) throw Error(done.said);
     return { said: done.said, href: `/teammates/${mate.id}#tools` };
   }

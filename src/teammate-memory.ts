@@ -174,11 +174,12 @@ export function answerSuggestion(store: Store, mate: TeammateRow, suggestion: nu
   if (answer.choice === ACCEPT) {
     const grant = store.teammateGrant(mate.id, offered.tool);
     const current = grant === null ? null : grant.rules[offered.action] ?? null;
-    if (current === null || JSON.stringify(current) !== JSON.stringify(offered.was)) {
+    const { undo: _undo, ...compared } = current ?? { use: "never" as const };
+    if (current === null || JSON.stringify(compared) !== JSON.stringify((({ undo: _was, ...rest }) => rest)(offered.was))) {
       store.decideTeammateSuggestion(offered.id, "stale", null, now);
       return { ok: false, said: "Its rules changed since it suggested this, so nothing was changed." };
     }
-    const changed = setToolRules(store, mate, offered.tool, { [offered.action]: { use: offered.rule.use, limit: offered.rule.limit ?? null } }, answer.by, now);
+    const changed = setToolRules(store, mate, offered.tool, { [offered.action]: { use: offered.rule.use, limit: offered.rule.limit ?? null, undo: current.undo ?? "" } }, answer.by, now);
     if (!changed.ok) return changed;
     store.decideTeammateSuggestion(offered.id, "accepted", answer.by, now);
     return { ok: true, said: `Changed. ${nameOf(mate)} makes ${offered.action} calls on its own ${offered.rule.limit === undefined ? "from now on" : `up to ${offered.rule.limit.field} ${offered.rule.limit.over}`}.` };

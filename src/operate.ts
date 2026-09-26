@@ -3,6 +3,7 @@ import { advanceFlows } from "./flow-engine.js";
 import { runFlowTriggers, type TriggerIo } from "./flow-triggers.js";
 import { watchFlowReplies } from "./flow-replies.js";
 import { sendTeammateSummaries } from "./teammate-admin.js";
+import { runRequestedUndos, sendTeammateWeeklies } from "./teammate-week.js";
 import { runFlowSteps, type StepIo } from "./flow-steps.js";
 import {followDiscord} from "./discord.js";
 import { followTeams } from "./teams.js";
@@ -2209,8 +2210,13 @@ async function tickCommand(
       ...(context.evidenceRoot === undefined ? {} : { evidenceRoot: context.evidenceRoot }),
     });
   const flowPass = advanceFlows(store, repo, clock(), context.evidenceRoot === undefined ? {} : { evidenceRoot: context.evidenceRoot });
-  // Each AI teammate's daily summary to its manager (v92), once, after 5 pm.
-  try { sendTeammateSummaries(store, repo, clock()); } catch (error) { flowPass.problems.push(`teammate summaries: ${error instanceof Error ? error.message : "could not send"}`); }
+  // Each AI teammate's daily summary to its manager (v92), once, after 5 pm; its weekly report (v97), Monday mornings.
+  try { sendTeammateSummaries(store, repo, clock()); sendTeammateWeeklies(store, repo, clock()); } catch (error) { flowPass.problems.push(`teammate summaries: ${error instanceof Error ? error.message : "could not send"}`); }
+  // Undoing a teammate's tool call asked for in chat (v97): made here, as the person who asked.
+  if (context.shouldStop?.() !== true) {
+    try { await runRequestedUndos(store, {}, clock()); }
+    catch (error) { flowPass.problems.push(`teammate undo: ${error instanceof Error ? error.message : "could not run"}`); }
+  }
   const replied = replyPass.taken > 0 || replyPass.problem !== null;
   const flows = flowPass.moved + flowPass.filed.length + flowPass.problems.length + triggerPass.added + triggerPass.problems.length + stepPass.ran + stepPass.problems.length === 0 && !replied ? {} : { flows: { ...flowPass,
     ...(triggerPass.added + triggerPass.problems.length === 0 ? {} : { triggers: triggerPass }), ...(stepPass.ran + stepPass.problems.length === 0 ? {} : { steps: stepPass }), ...(replied ? { replies: replyPass } : {}) } };
