@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **AI teammates.** Agents with a soul file you write (who they are, how they
+  write, what they decide alone, what they ask first, what they never do)
+  decide "Person decides" zones and handle their own zones, write replies,
+  move cards on, and bring you what their rules say to ask about, in your chat
+  app under their own name. A note for this week, a daily summary, a pause
+  button, and templates for support, sales, ops and triage.
 - **Wait for replies.** A Wait zone after a Send email zone waits for the
   person to answer. Their reply moves the card on and joins its discussion;
   with none in time, the card takes its no-reply path, like a nudge that stays

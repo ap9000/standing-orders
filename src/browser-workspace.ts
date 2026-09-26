@@ -175,7 +175,7 @@ export type BrowserResultView = {
 };
 /** One zone on a flow's canvas: its step, where it leads, and where it sits. */
 export type BrowserFlowStage = {
-  id: string; title: string; kind: "inbox" | "task" | "report" | "approval" | "check" | "update" | "notify" | "sort" | "draft" | "request" | "email" | "tool" | "wait" | "done";
+  id: string; title: string; kind: "inbox" | "task" | "report" | "approval" | "check" | "update" | "notify" | "sort" | "draft" | "request" | "email" | "tool" | "wait" | "teammate" | "done";
   zone: { x: number; y: number; w: number; h: number; color: string };
   instructions: string | null; planning: "auto" | "required" | "skip" | null; approver: string | null; message: string | null;
   /** An approval zone the flow's owner decides. */
@@ -192,6 +192,8 @@ export type BrowserFlowStage = {
   /** v91: a Wait zone waits for a reply to the card's email (onFail: no reply in time) or a set time; any other zone may have a time limit. */
   wait?: { for: "reply" | "time"; minutes: number };
   limit?: { minutes: number; to: string | null } | undefined;
+  /** v92: the AI teammate who decides (an approval zone) or handles (a teammate zone) it. */
+  teammate?: string | undefined;
   next: string | null; onFail: string | null;
 };
 
@@ -214,6 +216,10 @@ export type BrowserFlowCard = {
   draft: { zone: string; title: string; text: string } | null;
   /** v91: when its Wait zone gives up or moves on, or its zone's time limit comes (shown in the viewer's own time). */
   deadline?: { at: string; label: string } | null;
+  /** v92: a teammate's open question about this visit, and whether the viewer is the one asked. */
+  question?: { id: number; from: string; question: string; options: { id: string; label: string }[]; askedOf: string; mine: boolean } | null;
+  /** v92: what the teammate said when it handed this decision to a person. */
+  handoff?: { from: string; note: string } | null;
 };
 
 /** What starts cards in a flow on its own. */
@@ -248,6 +254,8 @@ export type BrowserFlowView = {
   me: string;
   /** Whether sort zones can run: an OpenRouter key is saved in Settings → AI providers. */
   sortReady: boolean;
+  /** v92: the project's AI teammates, to staff zones with. */
+  teammates?: { handle: string; label: string; name: string; working: boolean; href: string }[];
   /** v87: whether email is set up (Settings → Email), the names of this project's request secrets, and its tools with what each can do. */
   emailReady: boolean;
   requestSecrets: string[];

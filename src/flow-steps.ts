@@ -39,6 +39,8 @@ import { readProviderKey } from "./keys.js";
 import type { FlowCardRow, FlowRow, FlowScriptRow, FlowStepKind, Store } from "./store.js";
 import { replyInChannel } from "./chat-inbox.js";
 import { recordSent, threadOf } from "./flow-replies.js";
+import { ASKED, teammateReady, teammateTurn, type TeammateOutcome } from "./teammate-work.js";
+import type { TurnRunner } from "./teammates.js";
 
 export type StepIo = {
   /** `gh` for GitHub; git and the check's shell, both without a model. */
@@ -61,6 +63,8 @@ export type StepIo = {
   callTool?: ToolCaller;
   /** Where the project tools' secrets live (default: this computer's home). */
   toolHome?: string;
+  /** Takes a teammate's turn (default: Claude through this computer's sign-in, answering in its fixed shape). */
+  teammate?: TurnRunner;
 };
 export type StepPass = { ran: number; problems: string[] };
 type Outcome = { state: "passed" | "failed" | "retry"; said: string; log?: string; exitCode?: number | null;
@@ -86,7 +90,13 @@ export async function runFlowSteps(store: Store, repo: string, now: Date, io: St
     let known = flows.get(card.flow);
     if (known === undefined) { const flow = store.getFlow(card.flow)!; known = { flow, definition: flowDefinitionOf(flow) }; flows.set(card.flow, known); }
     const stage = known.definition?.stages.find(one => one.id === card.stage);
-    if (stage === undefined || !(["check", "update", "sort", "draft", "request", "email", "tool"] as const).includes(stage.kind as "check")) continue;
+    if (stage === undefined) continue;
+    // v92: a teammate's turn — a zone it handles, or a decision it staffs (a person decides when it's paused or gone).
+    if (stage.kind === "teammate" || (stage.kind === "approval" && stage.teammate !== undefined)) {
+      await teammateStep(store, known.flow, known.definition!, stage, card, now, io, pass);
+      continue;
+    }
+    if (!(["check", "update", "sort", "draft", "request", "email", "tool"] as const).includes(stage.kind as "check")) continue;
     // Email and tools wait, saying why, until what they need is set up.
     const setup = stage.kind === "email" && !sendingReady(io.dir) ? "Email isn't set up yet. Add your mail server or a Google account in Settings → Email."
       : stage.kind === "tool" ? toolWaiting(store, stage, repo) : null;
@@ -135,6 +145,47 @@ export async function runFlowSteps(store: Store, repo: string, now: Date, io: St
     if (outcome.state === "retry") pass.problems.push(`flow card ${card.id}: ${outcome.said}`);
   }
   return pass;
+}
+
+/** One teammate turn, when one is due for this card: claimed like any step, retried on failure, and waiting while its question is open. */
+async function teammateStep(store: Store, flow: FlowRow, definition: FlowDefinition, stage: FlowStage, card: FlowCardRow, now: Date, io: StepIo, pass: StepPass): Promise<boolean> {
+  const mate = stage.teammate === undefined ? null : store.teammateByHandle(flow.repo, stage.teammate);
+  const ready = teammateReady(store, mate, now);
+  if (!ready.ok) {
+    // A decision goes to its person (the engine asks them). A zone only it handles waits, saying why.
+    if (stage.kind === "approval") return true;
+    const waiting = ready.why === "gone" ? `There's no teammate called ${stage.teammate ?? "(none)"} in this project.` : `${mate!.handle} is ${ready.why === "paused" ? "paused" : `waiting: ${ready.why}`}.`;
+    if (card.waiting !== waiting) store.updateFlowCard(card.id, { waiting }, now);
+    return true;
+  }
+  const question = store.teammateQuestionFor(card.id, card.entry);
+  if (question?.state === "open") return true;
+  if (!store.claimFlowStep({ card: card.id, entry: card.entry, stage: stage.id, kind: "teammate", script: null, scriptVersion: null }, now)) return true;
+  pass.ran++;
+  const started = Date.now();
+  let outcome: TeammateOutcome;
+  try {
+    outcome = await teammateTurn(store, flow, definition, stage, card, mate!, now, { ...(io.teammate === undefined ? {} : { turn: io.teammate }), ...(io.evidenceRoot === undefined ? {} : { evidenceRoot: io.evidenceRoot }) });
+  } catch (error) {
+    outcome = { state: "retry", said: error instanceof Error ? error.message : "It couldn't take its turn." };
+  }
+  const run = store.flowStepRun(card.id, card.entry);
+  const kept = { log: outcome.log === undefined ? null : keptLog(outcome.log), durationMs: Date.now() - started, ...(outcome.decisionJson === undefined ? {} : { decisionJson: outcome.decisionJson }) };
+  if (outcome.state === "retry") {
+    const attempts = run?.attempts ?? 1;
+    if (attempts <= RETRY_MS.length) {
+      store.finishFlowStep(card.id, card.entry, { state: "waiting", result: outcome.said, nextAt: new Date(now.getTime() + RETRY_MS[attempts - 1]!).toISOString(), ...kept }, now);
+      if (stage.kind !== "approval") store.updateFlowCard(card.id, { waiting: `${outcome.said} Trying again in ${attempts === 1 ? 5 : 15} minutes.` }, now);
+      pass.problems.push(`flow card ${card.id}: ${outcome.said}`);
+      return true;
+    }
+    outcome = { state: "failed", said: `${outcome.said} It didn't work after three tries.` };
+    store.addTeammateEvent({ teammate: mate!.id, card: card.id, entry: card.entry, kind: "failed", said: `Couldn't take its turn on “${card.title}”: ${outcome.said}` }, now);
+    if (stage.kind !== "approval") store.updateFlowCard(card.id, { waiting: outcome.said }, now);
+  }
+  store.finishFlowStep(card.id, card.entry, outcome.state === "waiting" ? { state: "waiting", result: outcome.said, nextAt: outcome.nextAt ?? ASKED, ...kept }
+    : { state: outcome.state === "passed" ? "passed" : "failed", result: outcome.said, ...kept }, now);
+  return true;
 }
 
 /** Record what a step did and move the card: on for a pass, down its failure path for a fail, or wait to try again. */

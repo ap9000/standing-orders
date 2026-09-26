@@ -37,7 +37,7 @@
  */
 import { createHash } from "node:crypto";
 
-export const FLOW_STAGE_KINDS = ["inbox", "task", "report", "approval", "check", "update", "notify", "sort", "draft", "request", "email", "tool", "wait", "done"] as const;
+export const FLOW_STAGE_KINDS = ["inbox", "task", "report", "approval", "check", "update", "notify", "sort", "draft", "request", "email", "tool", "wait", "teammate", "done"] as const;
 export type FlowStageKind = (typeof FLOW_STAGE_KINDS)[number];
 export const FLOW_COLORS = ["slate", "blue", "violet", "amber", "green", "rose"] as const;
 export type FlowColor = (typeof FLOW_COLORS)[number];
@@ -98,6 +98,8 @@ export type FlowStage = {
   wait?: FlowWait;
   /** Any zone but Wait and Done (v91): how long a card may sit here before someone is reminded. */
   limit?: FlowLimit;
+  /** v92: the AI teammate (by handle) who decides a "Person decides" zone (handing hard ones to its person), or handles a "Teammate handles it" zone. */
+  teammate?: string;
   /** Where a card goes when this zone's step succeeds, and when it fails or is sent back (sort: when it isn't sure). */
   next: string | null;
   onFail: string | null;
@@ -120,6 +122,7 @@ export const FLOW_KIND_WORDS: Record<FlowStageKind, { label: string; about: stri
   draft: { label: "Draft", about: "Claude writes a reply, summary or note from the card in seconds. Nothing is sent until a later step sends it." },
   sort: { label: "Sort", about: "Jev reads the card in under a second and sends it where its answer leads. Cards it isn't sure about take the not-sure path." },
   wait: { label: "Wait", about: "Waits for a reply to the card's email, or for a set time. A reply moves the card on; if none comes in time, it takes the no-reply path." },
+  teammate: { label: "Teammate handles it", about: "An AI teammate reads the card, decides where it goes within its rules, and writes what the next zones send. When its rules say to ask, it asks you first." },
   done: { label: "Done", about: "The end of the flow." },
 };
 
@@ -307,6 +310,8 @@ export function validateFlowDefinition(input: unknown): FlowDefinition {
       ...(kind === "email" ? { email: validateEmail(stage["email"], title) } : {}),
       ...(kind === "tool" ? { tool: validateTool(stage["tool"], title) } : {}),
       ...(kind === "wait" ? { wait: validateWait(stage["wait"], title) } : {}),
+      ...((kind === "approval" || kind === "teammate") && stage["teammate"] !== undefined && stage["teammate"] !== null && stage["teammate"] !== "" ? { teammate: validateTeammate(stage["teammate"], title) } : {}),
+      ...(kind === "teammate" ? validateRoutes(stage, title) : {}),
       ...(() => { const limit = validateLimit(stage["limit"], kind as FlowStageKind, title); return limit === null ? {} : { limit }; })(),
       next: kind === "sort" ? null : text(stage["next"], 32),
       onFail: text(stage["onFail"], 32),
@@ -327,9 +332,33 @@ export function validateFlowDefinition(input: unknown): FlowDefinition {
     if (stage.kind === "notify" && stage.message === null) throw new Error(`Zone ${stage.title}: write the message to post.`);
     if (stage.kind === "check" && (stage.script === null || !SCRIPT_NAME.test(stage.script))) throw new Error(`Zone ${stage.title}: choose which script it runs.`);
     if (stage.kind === "done" && (stage.next !== null || stage.onFail !== null)) throw new Error(`Zone ${stage.title} is the end; it can't lead anywhere.`);
+    if (stage.kind === "teammate" && stage.teammate === undefined) throw new Error(`Zone ${stage.title}: choose which teammate handles it.`);
   }
   const start = typeof raw.start === "string" && ids.has(raw.start) ? raw.start : stages[0]!.id;
   return { version: 1, start, stages };
+}
+
+/** A teammate's handle on a zone (v92): which teammate works it. Whether it exists is the project's to say, when a card arrives. */
+function validateTeammate(value: unknown, title: string): string {
+  if (typeof value !== "string" || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(value)) throw new Error(`Zone ${title}: choose a teammate by its short name, like maya.`);
+  return value;
+}
+
+/** The answers a zone may pick, each with the zone it leads to (a script's "goto:" line, or a teammate's choice). */
+function validateRoutes(stage: Record<string, unknown>, title: string): Pick<FlowStage, "routes"> {
+  const rawRoutes = stage["routes"] === undefined || stage["routes"] === null ? [] : stage["routes"];
+  if (!Array.isArray(rawRoutes) || rawRoutes.length > 12) throw new Error(`Zone ${title}: pick from up to 12 answers.`);
+  const seen = new Set<string>();
+  const routes = rawRoutes.map(one => {
+    const row = (one ?? {}) as Record<string, unknown>;
+    const answer = typeof row["answer"] === "string" ? row["answer"].trim() : "";
+    const to = typeof row["to"] === "string" ? row["to"].trim() : "";
+    if (!/^[^\n]{1,40}$/.test(answer) || to === "") throw new Error(`Zone ${title}: each answer needs a short name and the zone it leads to.`);
+    if (seen.has(answer.toLowerCase())) throw new Error(`Zone ${title}: two answers are called ${answer}.`);
+    seen.add(answer.toLowerCase());
+    return { answer, to };
+  });
+  return routes.length === 0 ? {} : { routes };
 }
 
 /** A code zone's settings (v90): where it runs, its answers, and its secrets. Throws in plain words. */
@@ -399,10 +428,12 @@ export type FlowStepInput = {
   waitFor?: "reply" | "time"; wait?: string | number; ifNoReply?: string;
   /** Any step but wait and done (v91): remind after this long ("2 days"; "none" removes it), and on holding and approval steps, move the card to this step then. */
   remindAfter?: string | number; thenMoveTo?: string;
+  /** v92: the AI teammate (by name) who decides an approval step (handing hard ones to its decider) or handles a teammate step. */
+  teammate?: string;
   next?: string; ifFails?: string; ifNotSure?: string;
 };
 
-const KIND_COLORS: Record<FlowStageKind, FlowColor> = { inbox: "slate", task: "blue", report: "violet", approval: "amber", check: "blue", update: "green", notify: "green", sort: "violet", draft: "violet", request: "blue", email: "green", tool: "blue", wait: "slate", done: "green" };
+const KIND_COLORS: Record<FlowStageKind, FlowColor> = { inbox: "slate", task: "blue", report: "violet", approval: "amber", check: "blue", update: "green", notify: "green", sort: "violet", draft: "violet", request: "blue", email: "green", tool: "blue", wait: "slate", teammate: "violet", done: "green" };
 /** A step id as the lead may write it (sort_by_hand, Sort-By-Hand) in the one form zones use. */
 const idOf = (value: string) => value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32);
 const slugOf = (title: string) => title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 28) || "zone";
@@ -497,7 +528,8 @@ export function flowFromSteps(input: unknown, previous: FlowDefinition | null = 
       id, title, kind,
       zone: old?.zone ?? { x: 0, y: 0, w: 260, h: kind === "done" || kind === "notify" ? 220 : 300, color: KIND_COLORS[kind] },
       // A kept step on our default instructions gets the default again, so it reads any research step added before it.
-      instructions: kind === "draft" ? step.instructions?.trim() || old?.instructions || DRAFT_DEFAULT
+      instructions: kind === "teammate" ? step.instructions?.trim() || old?.instructions || "Read the card and decide what happens next."
+        : kind === "draft" ? step.instructions?.trim() || old?.instructions || DRAFT_DEFAULT
         : kind === "task" || kind === "report"
         ? step.instructions?.trim() || (old?.instructions && old.instructions !== defaultInstructions(kind, previous!.stages.slice(0, previous!.stages.indexOf(old))) ? old.instructions : defaultInstructions(kind, earlier))
         : null,
@@ -519,6 +551,9 @@ export function flowFromSteps(input: unknown, previous: FlowDefinition | null = 
       ...(kind === "email" ? { email: { to: step.to ?? old?.email?.to ?? "{{card.email}}", subject: step.subject ?? old?.email?.subject ?? "Re: {{card.title}}", body: step.body ?? old?.email?.body ?? "" } } : {}),
       ...(kind === "tool" ? { tool: { server: step.server ?? old?.tool?.server ?? "", name: step.tool ?? old?.tool?.name ?? "", args: typeof step.args === "string" ? step.args : step.args !== undefined ? JSON.stringify(step.args) : old?.tool?.args ?? "{}" } } : {}),
       ...(kind === "wait" ? { wait: waitFromStep(step, old?.wait ?? null, title) } : {}),
+      // v92: "nobody" (or "none") takes a teammate off an approval step.
+      ...((kind === "approval" || kind === "teammate") && (step.teammate === undefined ? old?.teammate !== undefined : !/^(nobody|none|no one)$/i.test(step.teammate.trim())) ? { teammate: idOf(step.teammate ?? old!.teammate!) } : {}),
+      ...(kind === "teammate" ? step.routes !== undefined ? step.routes.length === 0 ? {} : { routes: step.routes.map(one => ({ answer: String(one.answer ?? "").trim(), to: find(String(one.goesTo ?? ""), title) })) } : old?.routes === undefined ? {} : { routes: old.routes } : {}),
       ...(() => { const limit = kind === "wait" || kind === "done" ? null : limitFromStep(step, old?.limit ?? null, title, ref => find(ref, title)); return limit === null ? {} : { limit }; })(),
       next, onFail,
     });
@@ -620,7 +655,10 @@ export function flowTerms(definition: FlowDefinition, previous: FlowDefinition |
       `Then → ${to(stage.next)}${stage.onFail === null ? " If it can't be sent → waits there." : ` If it can't be sent → ${to(stage.onFail)}`}`);
     else if (stage.kind === "tool" && stage.tool !== undefined) lines.push(`Uses ${stage.tool.server} → ${stage.tool.name} with ${plain(stage.tool.args).slice(0, 400)}`,
       `Then → ${to(stage.next)}${stage.onFail === null ? " If it fails → waits there." : ` If it fails → ${to(stage.onFail)}`}`);
-    else if (stage.kind === "approval") lines.push(`Decides: ${stage.toOwner === true ? "the flow's owner, in their chat app" : stage.approver ?? "anyone who approves on this project"}. Approve → ${to(stage.next)} Send back → ${stage.onFail === null ? "not possible." : to(stage.onFail)}`);
+    else if (stage.kind === "approval") lines.push(`Decides: ${stage.teammate !== undefined ? `the AI teammate ${stage.teammate}, within its rules, handing hard ones to ${stage.toOwner === true ? "the flow's owner" : stage.approver ?? "anyone who approves"}` : stage.toOwner === true ? "the flow's owner, in their chat app" : stage.approver ?? "anyone who approves on this project"}. Approve → ${to(stage.next)} Send back → ${stage.onFail === null ? "not possible." : to(stage.onFail)}`);
+    else if (stage.kind === "teammate") lines.push(`The AI teammate ${stage.teammate ?? "(none)"} handles it${stage.instructions === null ? "" : `: ${plain(stage.instructions)}`}`,
+      ...(stage.routes === undefined || stage.routes.length === 0 ? [`Then → ${to(stage.next)}`] : stage.routes.map(one => `${one.answer} → ${to(one.to)}`)),
+      `It asks the flow's owner when its rules say to.${stage.onFail === null ? "" : ` If it can't → ${to(stage.onFail)}`}`);
     else if (stage.kind === "notify") lines.push(`Posts: ${plain(stage.message ?? "")}`, `Then → ${to(stage.next)}`);
     else if (stage.kind === "update") lines.push(`Comments on the issue the card came from: ${plain(stage.message ?? "")}${stage.close === true ? " Then closes it (Linear: moves it to done)." : ""}`, `Then → ${to(stage.next)}${stage.onFail === null ? "" : ` If it can't → ${to(stage.onFail)}`}`);
     else if (stage.kind === "sort" && stage.sort !== null) {
@@ -655,6 +693,7 @@ export function flowTerms(definition: FlowDefinition, previous: FlowDefinition |
   if (definition.stages.some(one => one.kind === "sort")) terms.push("Sort steps send each card's title, details and earlier notes to Jev through your OpenRouter account.");
   if (definition.stages.some(one => one.kind === "request" || one.kind === "email" || one.kind === "tool")) terms.push("Web request, email and tool steps send what they're given outside this computer, with no one checking unless a decision comes before them.");
   if (definition.stages.some(one => one.kind === "draft")) terms.push("Draft steps send each card's text to Claude through the lead chat's sign-in. Nothing a draft writes is sent until a later step sends it.");
+  if (definition.stages.some(one => one.teammate !== undefined)) terms.push("AI teammates decide and act within their soul files' rules, reading each card through Claude on this computer's sign-in; they never approve code tasks or merges.");
   return terms;
 }
 

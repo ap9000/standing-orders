@@ -15,7 +15,8 @@ import { revisionSourceOf } from "./result-review.js";
 import { scanForSecrets } from "./evidence.js";
 import { cardFollowers, notifyPeople } from "./flow-people.js";
 import { keptDraft } from "./flow-draft.js";
-import type { FlowCardRow, FlowRow, Store } from "./store.js";
+import { parseSoul, teammateLabel } from "./teammates.js";
+import type { FlowCardRow, FlowRow, Store, TeammateRow } from "./store.js";
 
 export type FlowAdvance = { moved: number; filed: string[]; problems: string[] };
 
@@ -51,6 +52,21 @@ function workGoal(instructions: string, card: FlowCardRow): string {
 }
 
 const titleIn = (definition: FlowDefinition, id: string) => definition.stages.find(one => one.id === id)?.title ?? id;
+
+/** A teammate's name as its soul file gives it (its handle when the file can't be read). */
+function teammateName(mate: TeammateRow): string {
+  const read = parseSoul(mate.soul);
+  return read.ok ? read.soul.name : mate.handle;
+}
+
+/** What a teammate said when it handed a card to its person, or why it couldn't decide. */
+function handoffWords(mate: TeammateRow, turn: { state: string; result: string | null; decisionJson: string | null }): { label: string; said: string } {
+  const read = parseSoul(mate.soul);
+  const label = read.ok ? teammateLabel(read.soul) : mate.handle;
+  let note = "";
+  try { const decided = JSON.parse(turn.decisionJson ?? "{}") as { note?: unknown }; note = typeof decided.note === "string" ? decided.note : ""; } catch { note = ""; }
+  return { label, said: turn.state === "failed" ? `${label} couldn't decide this one (${turn.result ?? "it didn't finish"}), so it's yours.` : `${label}: ${note || "Over to you on this one."}` };
+}
 
 /** Advance every active card in one project's flows. */
 export function advanceFlows(store: Store, repo: string, now: Date, options: { evidenceRoot?: string } = {}): FlowAdvance {
@@ -154,16 +170,27 @@ function advanceCard(store: Store, flow: FlowRow, definition: FlowDefinition | n
     case "approval": {
       const decider = deciderOf(stage, flow);
       const who = decider ?? "an approver";
-      if (card.waiting === null) {
+      // v92: a zone an active teammate staffs is its to decide first (the step pass runs it). A person hears
+      // about the card only when the teammate hands it over, can't decide, or is paused or gone.
+      const mate = stage.teammate === undefined ? null : store.teammateByHandle(flow.repo, stage.teammate);
+      const turn = mate === null ? null : store.flowStepRun(card.id, card.entry);
+      const handed = turn !== null && turn.kind === "teammate" && (turn.state === "failed" || turn.state === "passed");
+      if (mate !== null && mate.state === "active" && !handed) {
+        const name = teammateName(mate);
+        if (card.waiting !== `${name} is deciding`) store.updateFlowCard(card.id, { waiting: `${name} is deciding` }, now);
+        return;
+      }
+      const handoff = handed && mate !== null ? handoffWords(mate, turn!) : null;
+      if (card.waiting === null || (mate !== null && card.waiting === `${teammateName(mate)} is deciding`)) {
         // A named decider hears it alone; "anyone who approves" pages everyone who can.
         // With a draft in front of it, the decision carries the draft itself: it can be read (and answered) where it arrives.
         const draft = draftFor(definition, stage);
         const text = draft === null ? undefined : card.outputs[draft.id];
         store.enqueueNotification({
           dedupeKey: `flow-decide:${card.id}:${card.entry}`, kind: "flow-decision", pushClass: "attention", ...(decider === null ? {} : { recipient: decider }),
-          subject: `${flow.name}: ${card.title} needs ${decider === null ? "a decision" : `${decider}'s decision`}`.slice(0, 200),
-          body: text === undefined ? `${stage.title}: approve it, or send it back with a note.`
-            : `${stage.title}: approve this draft to send it as written, edit it, or send it back with a note.\n\n${text}`.slice(0, 4000),
+          subject: (handoff !== null ? `${handoff.label}: ${card.title} needs ${decider === null ? "a decision" : `${decider}'s decision`}` : `${flow.name}: ${card.title} needs ${decider === null ? "a decision" : `${decider}'s decision`}`).slice(0, 200),
+          body: `${handoff === null ? "" : `${handoff.said}\n\n`}${text === undefined ? `${stage.title}: approve it, or send it back with a note.`
+            : `${stage.title}: approve this draft to send it as written, edit it, or send it back with a note.\n\n${text}`}`.slice(0, 4000),
           link: flowCardHref(flow.id, card.id), source: { project: flow.repo },
         }, now);
         store.updateFlowCard(card.id, { waiting: `Waiting for ${who} to approve or send it back` }, now);
@@ -306,15 +333,18 @@ export function decideFlowCard(store: Store, input: { card: number; decision: "a
   /** The draft as the person left it: approving sends this version on. */
   draft?: string | null;
   /** The visit the person saw (a chat button's): a card that moved on since is refused. */
-  entry?: number }, now: Date): FlowDecision {
+  entry?: number;
+  /** v92: the AI teammate (by handle) deciding a zone it staffs; `actor` is then how it reads in history. */
+  teammate?: string }, now: Date): FlowDecision {
   const card = store.getFlowCard(input.card);
   const flow = card === null ? null : store.getFlow(card.flow);
   const definition = flow === null ? null : flowDefinitionOf(flow);
   if (card === null || flow === null || definition === null || card.state !== "active" || !input.repos.includes(flow.repo)) return { ok: false, message: "That card is no longer waiting." };
   const stage = definition.stages.find(one => one.id === card.stage);
   if (stage === undefined || stage.kind !== "approval" || (input.entry !== undefined && input.entry !== card.entry)) return { ok: false, message: "That card has moved on since; nothing was changed." };
+  // A teammate decides only a zone it staffs; its person (and only them) can always decide instead.
   const decider = deciderOf(stage, flow);
-  if (decider !== null && decider !== input.actor) return { ok: false, message: `Only ${decider} decides here.` };
+  if (input.teammate !== undefined ? stage.teammate !== input.teammate : decider !== null && decider !== input.actor) return { ok: false, message: `Only ${decider ?? "an approver"} decides here.` };
   if (input.decision === "approve") {
     // An edited draft replaces the one Claude wrote, so the steps after this send what the person approved.
     const draft = draftFor(definition, stage);
