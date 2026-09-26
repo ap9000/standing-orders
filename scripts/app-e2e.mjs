@@ -792,6 +792,133 @@ await check("The lead adds a teammate and changes one's rules from plain words, 
   return { maya: soul.split("## Decide on your own")[1]?.split("##")[0]?.trim().slice(0, 200) };
 });
 
+const TOOL_CHECK = "Teammates that act: Rosa uses a real store tool under her rules — looks orders up and refunds $30 on her own, asks you before $400, and your Approve makes exactly that call (real Claude turns)";
+await check(TOOL_CHECK, [], async () => {
+  // A real MCP server over stdio (named store: the lead never sees this project's folder name, shop): it looks orders up and refunds them, and writes down every call it gets.
+  const shop = join(w.root, "shop-mcp.mjs"), log = join(w.root, "shop-calls.log");
+  writeFileSync(shop, `import { createInterface } from "node:readline";
+import { appendFileSync } from "node:fs";
+const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\\n");
+const orders = { "2201": "Order 2201: a desk lamp, $30. The card was charged twice: two $30 payments; one is a duplicate.", "2202": "Order 2202: a TV, $400. Delivered with a cracked screen; photo on file." };
+createInterface({ input: process.stdin }).on("line", line => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") reply(message.id, { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "store", version: "1" } });
+  else if (message.method === "tools/list") reply(message.id, { tools: [
+    { name: "lookup_order", description: "Look an order up by its number", inputSchema: { type: "object", properties: { order: { type: "string" } }, required: ["order"] }, annotations: { readOnlyHint: true } },
+    { name: "refund_order", description: "Refund money on an order to the original payment method", inputSchema: { type: "object", properties: { order: { type: "string" }, amount: { type: "number", description: "dollars" } }, required: ["order", "amount"] } },
+    { name: "delete_customer", description: "Delete a customer and their history", inputSchema: { type: "object", properties: { email: { type: "string" } }, required: ["email"] } },
+  ] });
+  else if (message.method === "tools/call") {
+    appendFileSync(${JSON.stringify(log)}, JSON.stringify(message.params) + "\\n");
+    const args = message.params.arguments ?? {};
+    const order = String(args.order ?? "").replace(/^#/, "");
+    reply(message.id, { content: [{ type: "text", text: message.params.name === "lookup_order" ? orders[order] ?? "No order " + order : message.params.name === "refund_order" ? "Refunded $" + args.amount + " on order " + order + " (refund R-" + order + ")." : "Deleted." }] });
+  }
+});
+`);
+  const calls = () => existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line)) : [];
+  const refunds = order => calls().filter(one => one.name === "refund_order" && String(one.arguments?.order ?? "").replace(/^#/, "") === order);
+  // The project tool, the way the Tools page adds one (with your password), and tested.
+  await page.goto(`${base}/settings/tools?repo=${encodeURIComponent(repo)}`);
+  for (const form of [{ action: "add-custom", name: "store", transport: "stdio", target: `${process.execPath} ${shop}`, password: w.passwords.alex }, { action: "test", name: "store" }]) {
+    const answered = await page.request.post(`${base}/settings/tools/change`, { form: { csrf: await csrfOf(page), repo, ...form }, headers: { origin: base }, maxRedirects: 0 });
+    if (answered.status() >= 400) throw new Error(`the Tools page refused ${form.action}: ${answered.status()}`);
+  }
+  // Rosa, from the Support rep template; on her page she's let use the store.
+  await page.goto(`${base}/teammates`);
+  await page.evaluate(() => { for (const one of document.querySelectorAll("details")) one.open = true; });
+  await page.selectOption('form[data-new-teammate] select[name="template"]', "support");
+  await page.fill('form[data-new-teammate] input[name="name"]', "Rosa");
+  await Promise.all([page.waitForNavigation(), page.click('form[data-new-teammate] button')]);
+  const mateId = Number(/\/teammates\/(\d+)/.exec(page.url())?.[1]);
+  await page.selectOption('form.tool-add select[name="tool"]', "store");
+  await Promise.all([page.waitForNavigation(), page.click('form.tool-add button')]);
+  const shopRules = page.locator('[data-tool-grant="store"]');
+  const ruleOf = action => shopRules.locator(`select[name="use.${action}"]`).inputValue();
+  if (await ruleOf("lookup_order") !== "free" || await ruleOf("refund_order") !== "ask") throw new Error(`the starting rules: lookup ${await ruleOf("lookup_order")}, refund ${await ruleOf("refund_order")}`);
+  // Refunds up to $50 on her own, and never deleting customers.
+  await shopRules.locator('select[name="use.refund_order"]').selectOption("limit");
+  await shopRules.locator('select[name="field.refund_order"]').selectOption("amount");
+  await shopRules.locator('input[name="over.refund_order"]').fill("50");
+  await shopRules.locator('select[name="use.delete_customer"]').selectOption("never");
+  await Promise.all([page.waitForNavigation(), shopRules.locator('button:has-text("Save rules")').click()]);
+  const rules = JSON.parse(rows(`SELECT rules_json FROM teammate_tool WHERE teammate = ${mateId} AND tool = 'store'`)[0]?.rules_json ?? "{}");
+  if (rules.refund_order?.limit?.over !== 50 || rules.delete_customer?.use !== "never") throw new Error(`the saved rules: ${JSON.stringify(rules)}`);
+  await page.locator("#tools").scrollIntoViewIfNeeded(); await sleep(300);
+  await shot("teammate-tools");
+  // A flow Rosa handles: she reads the refund request, uses the store, and says where it goes.
+  const at = (id, title, kind, x, y, rest) => ({ id, title, kind, zone: zone(x, y), ...none, next: null, onFail: null, ...rest });
+  const id = await newFlow("Refund desk", [
+    at("rosa", "Rosa handles it", "teammate", 0, 0, { teammate: "rosa", instructions: "Look the order up in the store, then refund what the customer is owed with the store's refund. Write the short reply we'd send them.",
+      routes: [{ answer: "Refunded", to: "refunded" }, { answer: "Nothing to refund", to: "answered" }], onFail: "stuck" }),
+    at("refunded", "Refunded", "inbox", 360, 0, {}), at("answered", "Answered", "inbox", 360, 380, {}), at("stuck", "For a person", "inbox", 0, 380, {}),
+  ], "rosa");
+  await addCard("Charged twice for order 2201", "I was charged $30 twice for order 2201. Please refund the extra $30. — Sam");
+  await addCard("Broken TV, order 2202", "My TV from order 2202 arrived with a cracked screen. Please refund the $400. — Lee");
+  const cardOf = async title => (await flowView(id)).cards.find(one => one.title.startsWith(title));
+  // $30: within her limit, so the store refunds it without asking anyone.
+  const small = await until("Rosa to refund $30 on her own", async () => { const one = await cardOf("Charged twice"); return one !== undefined && one.stage !== "rosa" ? one : null; }, { timeoutMs: 420_000, everyMs: 3000 });
+  if (small.stage !== "refunded" || refunds("2201").length !== 1 || Number(refunds("2201")[0].arguments.amount) !== 30) throw new Error(`the $30 card went to ${small.stage}; refund calls: ${JSON.stringify(refunds("2201"))}`);
+  if (!small.calls.some(one => /refund_order/.test(one.words) && one.state === "done" && one.outcome === "Done")) throw new Error(`its receipts: ${JSON.stringify(small.calls)}`);
+  // $400: over her limit. The call waits for you (she may ask a plain question first); nothing is refunded yet.
+  const asking = await until("Rosa to ask you before refunding $400", async () => {
+    const one = await cardOf("Broken TV");
+    if (one?.question?.mine && one.question.call == null) {
+      await post(`/teammates/questions/${one.question.id}/answer`, { text: "Yes, refund the full $400." });
+      return null;
+    }
+    return one?.question?.mine && one.question.call != null ? one : one !== undefined && one.stage !== "rosa" ? one : null;
+  }, { timeoutMs: 420_000, everyMs: 3000 });
+  if (asking.question?.call == null) throw new Error(`the $400 card went to ${asking.stage} without asking: ${JSON.stringify(asking.calls)}`);
+  if (refunds("2202").length !== 0) throw new Error("the $400 refund was made before anyone approved it");
+  if (!/refund_order/.test(asking.question.question) || !/400/.test(asking.question.question)) throw new Error(`what you're asked: ${asking.question.question}`);
+  if (rows(`SELECT 1 FROM notification WHERE recipient = 'alex' AND subject LIKE '%Rosa · Support asks to use refund_order%'`).length === 0) throw new Error("you weren't told in your chat app");
+  await page.reload(); await page.waitForSelector("[data-zone]");
+  await page.locator(`[data-card="${asking.id}"]`).click();
+  await page.waitForSelector(`[data-teammate-question="${asking.question.id}"]`);
+  await shot("teammate-asks-to-call");
+  await page.locator(`[data-teammate-question="${asking.question.id}"] button:has-text("Approve")`).click();
+  const approved = await until("the approved $400 refund to be made and Rosa to finish", async () => { const one = await cardOf("Broken TV"); return refunds("2202").length > 0 && one?.stage !== "rosa" ? one : null; }, { timeoutMs: 420_000, everyMs: 3000 });
+  const made = refunds("2202");
+  if (made.length !== 1 || Number(made[0].arguments.amount) !== 400) throw new Error(`the approved call: ${JSON.stringify(made)}`);
+  if (!approved.calls.some(one => /refund_order/.test(one.words) && one.words.includes("amount 400") && one.outcome === "alex approved · done")) throw new Error(`its receipts: ${JSON.stringify(approved.calls)}`);
+  if (calls().some(one => one.name === "delete_customer")) throw new Error("a never-allowed action was called");
+  await page.reload(); await page.waitForSelector("[data-zone]");
+  await page.locator(`[data-card="${approved.id}"]`).click();
+  await page.waitForSelector("[data-teammate-calls]");
+  await page.evaluate(() => { const one = document.querySelector("[data-teammate-calls]"); if (one) { one.open = true; one.scrollIntoView({ block: "center" }); } });
+  await sleep(400);
+  await shot("teammate-receipts");
+  // Her page lists the calls with what came of them; on a phone it fits.
+  await page.goto(`${base}/teammates/${mateId}`);
+  await page.evaluate(() => { for (const one of document.querySelectorAll("details")) one.open = true; });
+  if (!/Used store → refund_order/.test(await page.locator(".teammate-activity").innerText())) throw new Error("her page doesn't list her tool calls");
+  const phone = await signIn("alex", { width: 390, height: 844 }, "light");
+  await phone.goto(`${base}/teammates/${mateId}#tools`); await phone.waitForLoadState("load"); await sleep(700);
+  await phone.screenshot({ path: join(w.out, "teammate-tools-phone.png") });
+  const wide = await phone.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
+  await phone.context().close();
+  if (wide) throw new Error("the teammate page scrolls sideways on a phone");
+  return { small: small.outputs.find(one => one.stage === "rosa")?.text?.slice(0, 120), big: approved.outputs.find(one => one.stage === "rosa")?.text?.slice(0, 120), calls: calls().map(one => `${one.name} ${JSON.stringify(one.arguments)}`) };
+});
+
+await check("The lead changes a teammate's tool rule from plain words, as a card you confirm (real Claude turn)", ["Turn the lead chat on (first-run setup, with your password)", TOOL_CHECK], async () => {
+  const { reply } = await askLead("Rosa can refund orders up to $100 in the store without asking me now. Just draft it.");
+  const pending = reply.locator('[data-view="chat-card"][data-card-state="pending"]:has([data-card-confirm])');
+  await pending.first().waitFor({ timeout: 30_000 });
+  // The lead may draft her soul file's words too: confirm each card it drafted; the rule itself is what's checked.
+  for (let left = 3; left > 0 && await pending.count() > 0; left--) {
+    await pending.first().locator("[data-card-confirm]").click();
+    await sleep(2000);
+  }
+  const rules = await until("Rosa's refund rule to change", async () => {
+    const saved = JSON.parse(rows("SELECT t.rules_json FROM teammate_tool t JOIN teammate m ON m.id = t.teammate WHERE m.handle = 'rosa' AND t.tool = 'store'")[0]?.rules_json ?? "{}");
+    return saved.refund_order?.limit?.over === 100 ? saved : null;
+  }, { timeoutMs: 30_000, everyMs: 1000 });
+  if (rules.refund_order.use !== "free") throw new Error(`Rosa's refund rule: ${JSON.stringify(rules.refund_order)}`);
+  return { rule: rules.refund_order };
+});
+
 await check("Live canvas: a teammate sees who's here and a card move without reloading", ["Code steps: a Python file and a Node script get the card, pass on what they print, pick the next zone, and get a secret"], async () => {
   const sam = await signIn("sam");
   try {

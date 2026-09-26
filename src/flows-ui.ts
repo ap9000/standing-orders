@@ -13,6 +13,7 @@ import { flowFingerprint } from "./flow-live.js";
 import { googleConnected } from "./google-mail.js";
 import { mailboxReady } from "./mailbox.js";
 import { labelOf, nameOf } from "./teammate-admin.js";
+import { callWords, receiptWords } from "./teammate-tools.js";
 
 const e = (value: unknown) =>
   String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
@@ -63,6 +64,7 @@ export function flowView(store: Store, flow: FlowRow, viewer: { name: string; ap
   const title = (id: string) => stages.find(one => one.id === id)?.title ?? id;
   const sortZones = new Set(stages.filter(one => one.kind === "sort").map(one => one.id));
   const decisions = sortZones.size === 0 ? new Map<number, { decisionJson: string }>() : store.flowSortDecisions(flow.id);
+  const mates = new Map(store.teammates([flow.repo]).map(one => [one.id, one] as const));
   const cards: BrowserFlowCard[] = store.flowCards(flow.id, true).filter(card => card.state === "active" || Date.now() - Date.parse(card.updatedAt) < 7 * 86_400_000).map((card: FlowCardRow) => {
     const stage = stages.find(one => one.id === card.stage);
     const task = card.task ?? card.primaryTask;
@@ -84,7 +86,9 @@ export function flowView(store: Store, flow: FlowRow, viewer: { name: string; ap
       at: until.toISOString(),
       label: stage!.wait !== undefined ? (stage!.wait.for === "reply" ? "No reply by" : "Moves on at") : stage!.limit!.to !== null ? `Moves to ${title(stage!.limit!.to)} at` : "Reminder at",
     };
-    const asked = card.state === "active" ? store.teammateQuestionFor(card.id, card.entry) : null;
+    // Its open question: one of its own, or (v94) a tool call waiting for approval.
+    const asked = card.state === "active" ? store.openTeammateQuestionOn(card.id, card.entry) : null;
+    const pending = asked?.toolCall == null ? null : store.teammateCall(asked.toolCall);
     // A decision its teammate handed over carries what the teammate said (v92).
     const turn = card.state === "active" && stage?.kind === "approval" && stage.teammate !== undefined ? store.flowStepRun(card.id, card.entry) : null;
     let handoff: { from: string; note: string } | null = null;
@@ -112,7 +116,13 @@ export function flowView(store: Store, flow: FlowRow, viewer: { name: string; ap
       deadline,
       handoff,
       question: asked === null || asked.state !== "open" || asker === null ? null
-        : { id: asked.id, from: labelOf(asker), question: asked.question, options: asked.options, askedOf: asked.askedOf, mine: asked.askedOf === viewer.name },
+        : { id: asked.id, from: labelOf(asker), question: asked.question, options: asked.options, askedOf: asked.askedOf, mine: asked.askedOf === viewer.name,
+          call: pending === null ? null : { why: pending.why, rule: pending.result ?? "" } },
+      calls: store.teammateCallsOn(card.id).slice(-30).map(call => {
+        const mate = mates.get(call.teammate) ?? null;
+        return { id: call.id, who: mate === null ? "A teammate" : nameOf(mate), words: callWords(call.tool, call.action, call.input, 400), state: call.state, outcome: receiptWords(store, call),
+          why: call.why, result: call.state === "asked" ? null : call.result, at: call.createdAt };
+      }),
     };
   });
   const triggers: BrowserFlowTrigger[] = store.flowTriggers(flow.id).map(trigger => {

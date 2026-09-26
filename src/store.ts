@@ -124,7 +124,8 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // v91 adds waiting for replies: each card's email conversation (what was sent, what came back) and where the reply watcher stands.
 // v92 adds AI teammates: soul files, what each decided and why, and the questions they put to people; a teammate's turn is a flow step.
 // v93 lets people answer a teammate's question in their chat app: a tap on an option, or a reply in their words.
-export const SCHEMA_VERSION = 93;
+// v94 lets teammates use project tools within per-action rules: each call is a receipt, and an ask-first call waits for a person's approval.
+export const SCHEMA_VERSION = 94;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -484,7 +485,33 @@ export type TeammateRow = { id: number; repo: string; handle: string; state: "ac
 export type TeammateEventKind = "decided" | "handled" | "handed" | "asked" | "answered" | "note" | "paused" | "resumed" | "summary" | "failed";
 export type TeammateEventRow = { id: number; teammate: number; card: number | null; entry: number | null; kind: TeammateEventKind; said: string; detail: Record<string, unknown> | null; by: string | null; at: string };
 export type TeammateQuestionRow = { id: number; teammate: number; card: number; entry: number; question: string; options: { id: string; label: string }[]; askedOf: string;
-  state: "open" | "answered" | "dropped"; choice: string | null; answer: string | null; answeredBy: string | null; answeredVia: string | null; answeredAt: string | null; createdAt: string };
+  state: "open" | "answered" | "dropped"; choice: string | null; answer: string | null; answeredBy: string | null; answeredVia: string | null; answeredAt: string | null; createdAt: string;
+  /** v94: the ask-first tool call this question approves (null: a question of the teammate's own). */
+  toolCall: number | null };
+/** v94: one action a project tool offers, as it described itself when listed. */
+export type ToolActionInfo = { name: string; about: string; input: Record<string, unknown> | null; readOnly: boolean };
+/** v94: a teammate's rule for one action: do it, ask first, or never; "free" may ask first above a number in its input. */
+export type ToolRule = { use: "free" | "ask" | "never"; limit?: { field: string; over: number } };
+export type TeammateGrantRow = { teammate: number; tool: string; actions: ToolActionInfo[]; rules: Record<string, ToolRule>; listedAt: string | null; updatedBy: string; updatedAt: string };
+export type TeammateCallState = "asked" | "approved" | "denied" | "refused" | "running" | "done" | "failed";
+/** v94: a tool call a teammate made, or asked to make, on one visit of a card: the receipt. */
+export type TeammateCallRow = { id: number; teammate: number; card: number; entry: number; tool: string; action: string; input: Record<string, unknown>; rule: ToolRule["use"]; why: string;
+  state: TeammateCallState; result: string | null; decidedBy: string | null; decidedAt: string | null; createdAt: string; doneAt: string | null };
+
+function readTeammateCall(row: Record<string, unknown>): TeammateCallRow {
+  const text = (key: string) => row[key] === null || row[key] === undefined ? null : String(row[key]);
+  let input: Record<string, unknown> = {};
+  try { input = JSON.parse(String(row["input_json"])) as Record<string, unknown>; } catch { input = {}; }
+  return { id: Number(row["id"]), teammate: Number(row["teammate"]), card: Number(row["card"]), entry: Number(row["entry"]), tool: String(row["tool"]), action: String(row["action"]), input,
+    rule: String(row["rule"]) as ToolRule["use"], why: String(row["why"]), state: String(row["state"]) as TeammateCallState, result: text("result"), decidedBy: text("decided_by"), decidedAt: text("decided_at"),
+    createdAt: String(row["created_at"]), doneAt: text("done_at") };
+}
+
+function readTeammateGrant(row: Record<string, unknown>): TeammateGrantRow {
+  const parsed = <T>(key: string, fallback: T): T => { try { return JSON.parse(String(row[key])) as T; } catch { return fallback; } };
+  return { teammate: Number(row["teammate"]), tool: String(row["tool"]), actions: parsed<ToolActionInfo[]>("actions_json", []), rules: parsed<Record<string, ToolRule>>("rules_json", {}),
+    listedAt: row["listed_at"] === null ? null : String(row["listed_at"]), updatedBy: String(row["updated_by"]), updatedAt: String(row["updated_at"]) };
+}
 
 function readTeammateRow(row: Record<string, unknown>): TeammateRow {
   return { id: Number(row["id"]), repo: String(row["repo"]), handle: String(row["handle"]), state: String(row["state"]) as TeammateRow["state"], version: Number(row["version"]), soul: String(row["soul"]),
@@ -495,7 +522,8 @@ function readTeammateQuestion(row: Record<string, unknown>): TeammateQuestionRow
   const text = (key: string) => row[key] === null || row[key] === undefined ? null : String(row[key]);
   return { id: Number(row["id"]), teammate: Number(row["teammate"]), card: Number(row["card"]), entry: Number(row["entry"]), question: String(row["question"]),
     options: JSON.parse(String(row["options_json"])) as { id: string; label: string }[], askedOf: String(row["asked_of"]), state: String(row["state"]) as TeammateQuestionRow["state"],
-    choice: text("choice"), answer: text("answer"), answeredBy: text("answered_by"), answeredVia: text("answered_via"), answeredAt: text("answered_at"), createdAt: String(row["created_at"]) };
+    choice: text("choice"), answer: text("answer"), answeredBy: text("answered_by"), answeredVia: text("answered_via"), answeredAt: text("answered_at"), createdAt: String(row["created_at"]),
+    toolCall: row["tool_call"] === null || row["tool_call"] === undefined ? null : Number(row["tool_call"]) };
 }
 /** A flow; `owner` is who its "the owner decides" zones ask (v86): whoever made it, unless it was handed to someone else. */
 export type FlowRow = { id: number; repo: string; name: string; definitionJson: string; revision: number; state: "active" | "archived"; createdBy: string; createdAt: string; updatedBy: string; updatedAt: string; owner: string };
@@ -2387,8 +2415,43 @@ CREATE TABLE IF NOT EXISTS teammate_question (
   answered_via  TEXT,
   answered_at   TEXT,
   created_at    TEXT NOT NULL,
-  UNIQUE (card, entry)
+  tool_call     INTEGER REFERENCES teammate_call(id)
 );
+-- v94: the project tools a teammate may use, and its rule for each of their
+-- actions: do it, ask first (a person approves the exact call), or never.
+-- actions_json is what the tool offered when it was last listed.
+CREATE TABLE IF NOT EXISTS teammate_tool (
+  teammate     INTEGER NOT NULL REFERENCES teammate(id),
+  tool         TEXT NOT NULL,
+  actions_json TEXT NOT NULL,
+  rules_json   TEXT NOT NULL,
+  listed_at    TEXT,
+  updated_by   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL,
+  PRIMARY KEY (teammate, tool)
+);
+-- v94: every tool call a teammate made or asked to make on a card: the
+-- receipt. An ask-first call waits (asked) until its person approves or
+-- denies it; what the tool answered is kept, secrets scrubbed.
+CREATE TABLE IF NOT EXISTS teammate_call (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  teammate    INTEGER NOT NULL REFERENCES teammate(id),
+  card        INTEGER NOT NULL REFERENCES flow_card(id),
+  entry       INTEGER NOT NULL,
+  tool        TEXT NOT NULL,
+  action      TEXT NOT NULL,
+  input_json  TEXT NOT NULL,
+  rule        TEXT NOT NULL CHECK (rule IN ('free','ask','never')),
+  why         TEXT NOT NULL,
+  state       TEXT NOT NULL CHECK (state IN ('asked','approved','denied','refused','running','done','failed')),
+  result      TEXT,
+  decided_by  TEXT,
+  decided_at  TEXT,
+  created_at  TEXT NOT NULL,
+  done_at     TEXT
+);
+CREATE INDEX IF NOT EXISTS teammate_call_card ON teammate_call (card, entry, id);
+CREATE INDEX IF NOT EXISTS teammate_call_recent ON teammate_call (teammate, id);
 -- v91: where the reply watcher stands in the mailbox. One row.
 CREATE TABLE IF NOT EXISTS flow_mail_watch (
   id           INTEGER PRIMARY KEY CHECK (id = 1),
@@ -5804,6 +5867,37 @@ function migrate(db: Database, origin: number | null): void {
     ["card", "entry", "stage", "kind", "script", "script_version", "state", "attempts", "next_at", "started_at", "finished_at", "duration_ms", "exit_code", "result", "log", "decision_json"],
   );
   db.exec("CREATE INDEX IF NOT EXISTS flow_step_run_recent ON flow_step_run (started_at)");
+
+  // v94 (teammate tools): a visit may hold several questions — one of its own,
+  // and one per ask-first tool call — so the (card, entry) uniqueness moves to
+  // partial indexes. Every question is carried whole, with its id.
+  rebuildForV4(
+    db,
+    "teammate_question",
+    "UNIQUE (card, entry)",
+    "tool_call     INTEGER",
+    `CREATE TABLE teammate_question_next (
+       id            INTEGER PRIMARY KEY AUTOINCREMENT,
+       teammate      INTEGER NOT NULL REFERENCES teammate(id),
+       card          INTEGER NOT NULL REFERENCES flow_card(id),
+       entry         INTEGER NOT NULL,
+       question      TEXT NOT NULL,
+       options_json  TEXT NOT NULL,
+       asked_of      TEXT NOT NULL,
+       state         TEXT NOT NULL CHECK (state IN ('open','answered','dropped')),
+       choice        TEXT,
+       answer        TEXT,
+       answered_by   TEXT,
+       answered_via  TEXT,
+       answered_at   TEXT,
+       created_at    TEXT NOT NULL,
+       tool_call     INTEGER REFERENCES teammate_call(id)
+     )`,
+    ["id", "teammate", "card", "entry", "question", "options_json", "asked_of", "state", "choice", "answer", "answered_by", "answered_via", "answered_at", "created_at", "tool_call"],
+  );
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS teammate_question_visit ON teammate_question (card, entry) WHERE tool_call IS NULL");
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS teammate_question_call ON teammate_question (tool_call) WHERE tool_call IS NOT NULL");
+  db.exec("CREATE INDEX IF NOT EXISTS teammate_question_open ON teammate_question (card, entry, state)");
 
   // v92 (teammates): kind admits 'teammate', carrying every v87 run whole.
   rebuildForV4(
@@ -21252,16 +21346,81 @@ export class Store {
       by: row["by"] === null ? null : String(row["by"]), at: String(row["at"]) }));
   }
 
-  /** How many turns (decisions, handled cards, hand-offs, questions, failures) a teammate took since a time: its daily limit. */
+  /** How many turns (decisions, handled cards, hand-offs, questions, failures, and v94 tool calls) a teammate took since a time: its daily limit. */
   teammateTurnsSince(teammate: number, since: string): number {
-    return Number(this.db.prepare("SELECT COUNT(*) AS n FROM teammate_event WHERE teammate = ? AND at >= ? AND kind IN ('decided','handled','handed','asked','failed')").get(teammate, since)?.["n"] ?? 0);
+    return Number(this.db.prepare("SELECT COUNT(*) AS n FROM teammate_event WHERE teammate = ? AND at >= ? AND kind IN ('decided','handled','handed','asked','failed')").get(teammate, since)?.["n"] ?? 0)
+      + Number(this.db.prepare("SELECT COUNT(*) AS n FROM teammate_call WHERE teammate = ? AND created_at >= ?").get(teammate, since)?.["n"] ?? 0);
   }
 
-  /** Ask a person about one visit of a card; false when that visit already has a question. */
-  openTeammateQuestion(question: { teammate: number; card: number; entry: number; question: string; options: { id: string; label: string }[]; askedOf: string }, now: Date): number | null {
-    const { changes, lastInsertRowid } = this.db.prepare("INSERT OR IGNORE INTO teammate_question (teammate, card, entry, question, options_json, asked_of, state, created_at) VALUES (?, ?, ?, ?, ?, ?, 'open', ?)")
-      .run(question.teammate, question.card, question.entry, question.question, JSON.stringify(question.options), question.askedOf, now.toISOString());
+  /** Ask a person about one visit of a card (v94: or to approve one tool call); null when that visit, or that call, already has its question. */
+  openTeammateQuestion(question: { teammate: number; card: number; entry: number; question: string; options: { id: string; label: string }[]; askedOf: string; toolCall?: number }, now: Date): number | null {
+    const { changes, lastInsertRowid } = this.db.prepare("INSERT OR IGNORE INTO teammate_question (teammate, card, entry, question, options_json, asked_of, state, created_at, tool_call) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)")
+      .run(question.teammate, question.card, question.entry, question.question, JSON.stringify(question.options), question.askedOf, now.toISOString(), question.toolCall ?? null);
     return Number(changes) === 1 ? Number(lastInsertRowid) : null;
+  }
+
+  /** v94: the first question still open on one visit of a card: its own, or a tool call's approval. */
+  openTeammateQuestionOn(card: number, entry: number): TeammateQuestionRow | null {
+    const row = this.db.prepare("SELECT * FROM teammate_question WHERE card = ? AND entry = ? AND state = 'open' ORDER BY id LIMIT 1").get(card, entry);
+    return row === undefined ? null : readTeammateQuestion(row);
+  }
+
+  /** v94: the approval question of one tool call. */
+  teammateQuestionForCall(call: number): TeammateQuestionRow | null {
+    const row = this.db.prepare("SELECT * FROM teammate_question WHERE tool_call = ?").get(call);
+    return row === undefined ? null : readTeammateQuestion(row);
+  }
+
+  // ---- v94: the tools a teammate may use, and its receipts ------------------------------
+
+  teammateGrants(teammate: number): TeammateGrantRow[] {
+    return this.db.prepare("SELECT * FROM teammate_tool WHERE teammate = ? ORDER BY tool").all(teammate).map(readTeammateGrant);
+  }
+
+  teammateGrant(teammate: number, tool: string): TeammateGrantRow | null {
+    const row = this.db.prepare("SELECT * FROM teammate_tool WHERE teammate = ? AND tool = ?").get(teammate, tool);
+    return row === undefined ? null : readTeammateGrant(row);
+  }
+
+  /** Grant a tool, or change what it offers and the rules: the whole row is written. `listedAt` undefined keeps it. */
+  saveTeammateGrant(grant: { teammate: number; tool: string; actions: ToolActionInfo[]; rules: Record<string, ToolRule>; listedAt?: string | null }, by: string, now: Date): void {
+    this.db.prepare(`INSERT INTO teammate_tool (teammate, tool, actions_json, rules_json, listed_at, updated_by, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(teammate, tool) DO UPDATE SET actions_json = excluded.actions_json, rules_json = excluded.rules_json, listed_at = ${grant.listedAt === undefined ? "teammate_tool.listed_at" : "excluded.listed_at"}, updated_by = excluded.updated_by, updated_at = excluded.updated_at`)
+      .run(grant.teammate, grant.tool, JSON.stringify(grant.actions), JSON.stringify(grant.rules), grant.listedAt ?? null, by, now.toISOString());
+  }
+
+  dropTeammateGrant(teammate: number, tool: string): boolean {
+    return Number(this.db.prepare("DELETE FROM teammate_tool WHERE teammate = ? AND tool = ?").run(teammate, tool).changes) === 1;
+  }
+
+  addTeammateCall(call: { teammate: number; card: number; entry: number; tool: string; action: string; input: Record<string, unknown>; rule: ToolRule["use"]; why: string; state: TeammateCallState; result?: string | null }, now: Date): number {
+    return Number(this.db.prepare("INSERT INTO teammate_call (teammate, card, entry, tool, action, input_json, rule, why, state, result, created_at, done_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(call.teammate, call.card, call.entry, call.tool, call.action, JSON.stringify(call.input), call.rule, call.why, call.state, call.result ?? null, now.toISOString(),
+        call.state === "refused" ? now.toISOString() : null).lastInsertRowid);
+  }
+
+  teammateCall(id: number): TeammateCallRow | null {
+    const row = this.db.prepare("SELECT * FROM teammate_call WHERE id = ?").get(id);
+    return row === undefined ? null : readTeammateCall(row);
+  }
+
+  /** Move a call on, only from the state it is known to be in: false when someone else moved it first. */
+  moveTeammateCall(id: number, from: readonly TeammateCallState[], change: { state: TeammateCallState; result?: string | null; decidedBy?: string }, now: Date): boolean {
+    const stamp = now.toISOString();
+    const done = ["denied", "refused", "done", "failed"].includes(change.state);
+    return Number(this.db.prepare(`UPDATE teammate_call SET state = ?, result = COALESCE(?, result), decided_by = COALESCE(?, decided_by), decided_at = CASE WHEN ? IS NULL THEN decided_at ELSE ? END,
+      done_at = CASE WHEN ? THEN ? ELSE done_at END WHERE id = ? AND state IN (${from.map(() => "?").join(", ")})`)
+      .run(change.state, change.result ?? null, change.decidedBy ?? null, change.decidedBy ?? null, stamp, done ? 1 : 0, stamp, id, ...from).changes) === 1;
+  }
+
+  /** A card's receipts, oldest first: one visit (`entry`), or every visit. */
+  teammateCallsOn(card: number, entry: number | null = null): TeammateCallRow[] {
+    return (entry === null ? this.db.prepare("SELECT * FROM teammate_call WHERE card = ? ORDER BY id").all(card) : this.db.prepare("SELECT * FROM teammate_call WHERE card = ? AND entry = ? ORDER BY id").all(card, entry)).map(readTeammateCall);
+  }
+
+  /** A teammate's receipts, newest first; `since` bounds them (a day's summary). */
+  teammateCallsOf(teammate: number, limit: number, since: string | null = null): TeammateCallRow[] {
+    return this.db.prepare(`SELECT * FROM teammate_call WHERE teammate = ? ${since === null ? "" : "AND created_at >= ?"} ORDER BY id DESC LIMIT ?`).all(...(since === null ? [teammate, limit] : [teammate, since, limit])).map(readTeammateCall);
   }
 
   teammateQuestion(id: number): TeammateQuestionRow | null {
@@ -21269,8 +21428,9 @@ export class Store {
     return row === undefined ? null : readTeammateQuestion(row);
   }
 
+  /** The question a teammate asked of its own on one visit (never a tool call's approval). */
   teammateQuestionFor(card: number, entry: number): TeammateQuestionRow | null {
-    const row = this.db.prepare("SELECT * FROM teammate_question WHERE card = ? AND entry = ?").get(card, entry);
+    const row = this.db.prepare("SELECT * FROM teammate_question WHERE card = ? AND entry = ? AND tool_call IS NULL").get(card, entry);
     return row === undefined ? null : readTeammateQuestion(row);
   }
 

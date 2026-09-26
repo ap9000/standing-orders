@@ -217,6 +217,33 @@ describe("shared chat action lifecycle", () => {
     expect(confirm(remove)).toMatchObject({ ok: true, said: "Tool removed from every build." });
     expect(projectToolsOf(store, repo)).toEqual([]);
   });
+  test("the lead lets a teammate use a tool and sets one action's rule, each as a card; a card drafted before a change is refused (v94)", () => {
+    const mate = store.createTeammate({ repo, handle: "maya", soul: "---\nname: Maya\nrole: Support\n---\n## Who you are\nHelpful.\n", model: null, manager: who.name, by: who.name }, now);
+    expect(confirm(proposal("tool_add", { repo, catalog: "github" }), true)).toMatchObject({ ok: true });
+    expect(() => prepareSharedAction(store, who, "teammate_tools", { teammate: mate, tool: "github", change: "grant" }, root, now)).toThrow("github hasn't said what it can do yet. Test it on the Tools page first.");
+    store.recordProjectToolTest(repo, "github", JSON.stringify({ at: now.toISOString(), ok: true, tools: ["list_issues", "create_issue"], problem: null }));
+    const grant = proposal("teammate_tools", { teammate: mate, tool: "github", change: "grant" });
+    expect(store.getMateProposal(grant)!.payload).toMatchObject({ title: "Let Maya use github", terms: expect.arrayContaining(["list_issues: does it", "create_issue: asks you first"]) });
+    const stale = proposal("teammate_tools", { teammate: mate, tool: "github", change: "grant" });
+    expect(confirm(grant)).toMatchObject({ ok: true });
+    expect(store.teammateGrant(mate, "github")?.rules).toEqual({ list_issues: { use: "free" }, create_issue: { use: "ask" } });
+    expect(confirm(stale)).toMatchObject({ ok: false });
+    expect(() => prepareSharedAction(store, who, "teammate_tools", { teammate: mate, tool: "github", change: "rule", action: "delete_repo", use: "free" }, root, now)).toThrow("github has no action called delete_repo. Its actions: list_issues, create_issue.");
+    const rule = proposal("teammate_tools", { teammate: mate, tool: "github", change: "rule", action: "create_issue", use: "never" });
+    expect(store.getMateProposal(rule)!.payload).toMatchObject({ title: "Maya: create_issue — never" });
+    expect(confirm(rule)).toMatchObject({ ok: true });
+    expect(store.teammateGrant(mate, "github")?.rules["create_issue"]).toEqual({ use: "never" });
+    // The lead names the action where the tool goes, or both at once: either is read as github's create_issue.
+    const drafted: Record<string, unknown>[] = [];
+    const ctx = { store, who, now, step: 1, readDecisions: new Map<number, number>(), evidenceRoot: root, draft: (_kind: unknown, payload: Record<string, unknown>) => { drafted.push(payload); return drafted.length; } };
+    for (const named of [{ tool: "create_issue" }, { tool: "github.create_issue" }, { tool: "github", action: "github.create_issue" }]) {
+      expect(executeMateTool(ctx, "propose_teammate", { operation: "tool_rule", teammate: mate, ...named, use: "ask" })).toMatchObject({ ok: true });
+      expect(drafted.at(-1)).toMatchObject({ title: "Maya: create_issue — a person approves each call first" });
+    }
+    expect(executeMateTool(ctx, "propose_teammate", { operation: "tool_rule", teammate: mate, tool: "jira", action: "create_issue", use: "ask" })).toMatchObject({ ok: false, message: "Maya doesn't use a tool called jira. Maya uses github (actions: list_issues, create_issue)." });
+    expect(confirm(proposal("teammate_tools", { teammate: mate, tool: "github", change: "revoke" }))).toMatchObject({ ok: true });
+    expect(store.teammateGrants(mate)).toEqual([]);
+  });
   function skill() {
     return importSkill(
       store,

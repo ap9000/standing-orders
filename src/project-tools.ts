@@ -21,7 +21,7 @@ import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { scanForSecrets } from "./evidence.js";
-import type { Store } from "./store.js";
+import type { Store, ToolActionInfo } from "./store.js";
 
 /** One secret a tool needs: an env name for a local server, or the value behind an http header. */
 export type ToolSecret = { name: string; optional: boolean };
@@ -364,6 +364,27 @@ type McpAnswer = { ok: true; result: unknown } | { ok: false; problem: string };
 export async function testTool(spec: ToolSpec, values: Record<string, string>, options: { timeoutMs?: number; env?: NodeJS.ProcessEnv; omitEnv?: readonly string[] } = {}): Promise<{ ok: true; tools: string[] } | { ok: false; problem: string }> {
   const answer = await exchange(spec, values, { method: "tools/list", params: {}, doing: "listing its tools" }, options);
   return answer.ok ? { ok: true, tools: toolNames(answer.result) } : answer;
+}
+
+/**
+ * Start the server once and read what each of its tools does (v94): the name,
+ * its description, what input it takes, and whether it says it only reads.
+ * A teammate is offered these, each under its own rule.
+ */
+export async function listProjectToolActions(spec: ToolSpec, values: Record<string, string>, options: { timeoutMs?: number; env?: NodeJS.ProcessEnv; omitEnv?: readonly string[] } = {}): Promise<{ ok: true; actions: ToolActionInfo[] } | { ok: false; problem: string }> {
+  const answer = await exchange(spec, values, { method: "tools/list", params: {}, doing: "listing its tools" }, options);
+  return answer.ok ? { ok: true, actions: toolActions(answer.result) } : answer;
+}
+
+export function toolActions(result: unknown): ToolActionInfo[] {
+  const tools = (result as { tools?: unknown } | null)?.tools;
+  if (!Array.isArray(tools)) return [];
+  return tools.flatMap(raw => {
+    const one = raw as { name?: unknown; description?: unknown; inputSchema?: unknown; annotations?: { readOnlyHint?: unknown } };
+    if (typeof one.name !== "string" || !/^[A-Za-z0-9_.-]{1,64}$/.test(one.name)) return [];
+    const input = one.inputSchema !== null && typeof one.inputSchema === "object" && !Array.isArray(one.inputSchema) && JSON.stringify(one.inputSchema).length <= 8000 ? one.inputSchema as Record<string, unknown> : null;
+    return [{ name: one.name, about: typeof one.description === "string" ? safeLine(one.description).slice(0, 300) : "", input, readOnly: one.annotations?.readOnlyHint === true }];
+  }).slice(0, 100);
 }
 
 export type ToolCall = { ok: true; text: string; isError: boolean } | { ok: false; problem: string };

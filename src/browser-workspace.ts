@@ -217,9 +217,13 @@ export type BrowserFlowCard = {
   /** v91: when its Wait zone gives up or moves on, or its zone's time limit comes (shown in the viewer's own time). */
   deadline?: { at: string; label: string } | null;
   /** v92: a teammate's open question about this visit, and whether the viewer is the one asked. */
-  question?: { id: number; from: string; question: string; options: { id: string; label: string }[]; askedOf: string; mine: boolean } | null;
+  question?: { id: number; from: string; question: string; options: { id: string; label: string }[]; askedOf: string; mine: boolean;
+    /** v94: a tool call waiting for approval — why the teammate wants it, and why it needs approval. */
+    call?: { why: string; rule: string } | null } | null;
   /** v92: what the teammate said when it handed this decision to a person. */
   handoff?: { from: string; note: string } | null;
+  /** v94: every tool call teammates made or asked to make on this card, oldest first: the receipts. */
+  calls?: { id: number; who: string; words: string; state: string; outcome: string; why: string; result: string | null; at: string }[];
 };
 
 /** What starts cards in a flow on its own. */

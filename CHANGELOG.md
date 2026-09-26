@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Teammates that act.** Let a teammate use your project's tools (a shop, a
+  CRM, a mailbox) with a rule for each action: do it, do it up to a limit,
+  ask first, or never. An ask-first call reaches you on the card and in your
+  chat app exactly as it would be made; Approve makes that call, Deny doesn't.
+  Every call is a receipt on the card and the teammate's page, and the lead
+  can change a rule from plain words.
 - **AI teammates.** Agents with a soul file you write (who they are, how they
   write, what they decide alone, what they ask first, what they never do)
   decide "Person decides" zones and handle their own zones, write replies,

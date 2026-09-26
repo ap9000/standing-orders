@@ -6,6 +6,46 @@
 import type { Store, TeammateRow } from "./store.js";
 import { labelOf, nameOf, summaryOf, TEAMMATE_MODELS, zonesOf } from "./teammate-admin.js";
 import { TEAMMATE_TEMPLATES } from "./teammates.js";
+import { projectToolsOf } from "./project-tools.js";
+import { callWords, defaultRule, numberFields, receiptWords } from "./teammate-tools.js";
+
+/** v94: the Tools section's rule rows; a limit's fields show only while "Up to a limit" is chosen. */
+export const TEAMMATE_CSS = `.teammate-tools .tool-grant{border-top:1px solid var(--so-border,#e5e7eb);padding-top:12px;margin-top:12px}.teammate-tools .tool-grant:first-of-type{border-top:0;margin-top:0;padding-top:0}.teammate-tools h3{font-size:1rem;margin:0 0 4px}.teammate-tools .tool-rule{display:grid;gap:6px;padding:10px 0;border-bottom:1px solid var(--so-border,#e5e7eb)}.teammate-tools .tool-rule:last-of-type{border-bottom:0}.teammate-tools .tool-rule .meta{display:block}.teammate-tools select,.teammate-tools input{max-width:100%;box-sizing:border-box}.teammate-tools .tool-limit{display:none;flex-wrap:wrap;align-items:center;gap:6px}.teammate-tools .tool-rule:has(option[value="limit"]:checked) .tool-limit{display:flex}.teammate-tools .tool-rule>select{width:auto;min-width:16em}.teammate-tools .tool-limit select{width:auto}.teammate-tools .tool-limit input{width:7em}.teammate-tools .tool-buttons{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.teammate-tools button{min-height:44px}.teammate-activity li{overflow-wrap:anywhere}@media(max-width:600px){.teammate-tools select,.teammate-tools input{font-size:16px}}`;
+
+const USES = [["free", "Do it"], ["limit", "Do it, up to a limit"], ["ask", "Ask first"], ["never", "Never"]] as const;
+
+/** v94: which project tools it may use, and its rule for each action. */
+function toolsSection(store: Store, mate: TeammateRow, csrf: string, canManage: boolean): string {
+  const name = nameOf(mate);
+  const tools = projectToolsOf(store, mate.repo);
+  const grants = store.teammateGrants(mate.id);
+  const toolsPage = `/settings/tools?repo=${encodeURIComponent(mate.repo)}`;
+  const granted = grants.map(grant => {
+    const gone = !tools.some(one => one.name === grant.tool);
+    const rows = grant.actions.map(action => {
+      const rule = grant.rules[action.name] ?? defaultRule(action);
+      const use = rule.use === "free" && rule.limit !== undefined ? "limit" : rule.use;
+      const numbers = numberFields(action);
+      const words = rule.use === "never" ? "Never" : rule.use === "ask" ? "Ask first" : rule.limit === undefined ? "Do it" : `Do it up to ${rule.limit.field} ${rule.limit.over}, ask first above`;
+      if (!canManage) return `<li class="tool-rule"><span><strong>${e(action.name)}</strong> · ${e(words)}</span>${action.about === "" ? "" : `<span class="meta">${e(action.about)}</span>`}</li>`;
+      const field = `${grant.tool}-${action.name}`.replace(/[^A-Za-z0-9_-]/g, "-");
+      return `<div class="tool-rule" data-tool-action="${e(action.name)}"><label for="use-${e(field)}"><strong>${e(action.name)}</strong>${action.about === "" ? "" : `<span class="meta">${e(action.about)}</span>`}</label>` +
+        `<select id="use-${e(field)}" name="use.${e(action.name)}">${USES.filter(([value]) => value !== "limit" || numbers.length > 0).map(([value, label]) => `<option value="${value}"${value === use ? " selected" : ""}>${label}</option>`).join("")}</select>` +
+        (numbers.length === 0 ? "" : `<span class="tool-limit">Ask first when <select name="field.${e(action.name)}" aria-label="The number the limit is on">${numbers.map(one => `<option value="${e(one)}"${rule.limit?.field === one ? " selected" : ""}>${e(one)}</option>`).join("")}</select> is over <input type="number" name="over.${e(action.name)}" min="0" step="any" value="${rule.limit === undefined ? "" : rule.limit.over}" aria-label="The limit"></span>`) +
+        `</div>`;
+    }).join("");
+    const head = `<h3>${e(grant.tool)}</h3>${gone ? `<p class="problem">This project doesn't have ${e(grant.tool)} any more, so ${e(name)} can't use it.</p>` : ""}`;
+    return canManage
+      ? `<div class="tool-grant" data-tool-grant="${e(grant.tool)}">${head}<form method="post" action="/teammates/${mate.id}/tools">${hidden(csrf)}<input type="hidden" name="tool" value="${e(grant.tool)}">${rows}` +
+        `<div class="tool-buttons"><button name="op" value="rules">Save rules</button><button name="op" value="revoke" class="secondary">Stop using ${e(grant.tool)}</button></div></form></div>`
+      : `<div class="tool-grant" data-tool-grant="${e(grant.tool)}">${head}<ul>${rows}</ul></div>`;
+  }).join("");
+  const open = tools.filter(one => !grants.some(grant => grant.tool === one.name));
+  const add = !canManage ? "" : tools.length === 0 ? `<p class="meta">This project has no tools yet. <a href="${e(toolsPage)}">Add one</a>, then let ${e(name)} use it here.</p>`
+    : open.length === 0 ? "" : `<form method="post" action="/teammates/${mate.id}/tools" class="tool-add">${hidden(csrf)}<input type="hidden" name="op" value="grant"><label>Let ${e(name)} use<select name="tool">${open.map(one => `<option value="${e(one.name)}">${e(one.name)}${one.spec.about === "" ? "" : ` — ${e(one.spec.about.slice(0, 80))}`}</option>`).join("")}</select></label><button>Add tool</button></form>`;
+  if (grants.length === 0 && add === "") return "";
+  return `<section class="card teammate-tools" id="tools"><h2>Tools</h2>${grants.length === 0 ? `<p class="meta">${e(name)} doesn't use any tools yet. Reading starts as “Do it”; everything else asks you first.</p>` : ""}${granted}${add}</section>`;
+}
 
 const e = (text: string) => text.replace(/[&<>"']/g, one => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[one]!);
 const when = (at: string) => new Date(at).toLocaleString("en", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
@@ -49,7 +89,11 @@ export function teammatePageHtml(store: Store, mate: TeammateRow, viewer: string
   const where = zones.length === 0
     ? `<p class="meta">Not on any zone yet. In a flow, choose ${e(name)} under “Who decides” on a “Person decides” zone, or add a “Teammate handles it” zone.</p>`
     : `<ul>${zones.map(one => `<li><a href="/flows/${one.flow}">${e(one.flowName)}</a> · ${one.kind === "decides" ? "decides" : "handles"} ${e(one.title)}</li>`).join("")}</ul>`;
-  const events = store.teammateEvents(mate.id, 40).filter(one => one.kind !== "note");
+  // What it did and why, with every tool call it made or asked to make (v94), newest first.
+  const events = [
+    ...store.teammateEvents(mate.id, 40).filter(one => one.kind !== "note").map(one => ({ kind: one.kind as string, said: one.said, card: one.card, at: one.at })),
+    ...store.teammateCallsOf(mate.id, 40).map(one => ({ kind: "call", said: `Used ${callWords(one.tool, one.action, one.input, 200)} · ${receiptWords(store, one)}`, card: one.card as number | null, at: one.createdAt })),
+  ].sort((a, b) => b.at.localeCompare(a.at)).slice(0, 40);
   const activity = events.length === 0 ? `<p class="meta">Nothing yet.</p>` : `<ul class="teammate-activity">${events.map(one => {
     const card = one.card === null ? null : store.getFlowCard(one.card);
     return `<li data-event="${one.kind}">${e(one.said)}${card === null ? "" : ` · <a href="/flows/${card.flow}?card=${card.id}">open</a>`} <span class="meta">${when(one.at)}</span></li>`;
@@ -68,6 +112,7 @@ export function teammatePageHtml(store: Store, mate: TeammateRow, viewer: string
     questions.length === 0 ? "" : `<section><h2>Questions</h2>${asked}</section>`,
     `<section class="card"><h2>Today</h2><p class="teammate-summary">${e(summaryOf(store, mate, startOfDay()).said).replace(/\n/g, "<br>")}</p></section>`,
     `<section class="card"><h2>Works on</h2>${where}</section>`,
+    toolsSection(store, mate, csrf, canManage),
     canManage ? `<section class="card"><h2>Tell ${e(name)} something</h2><form method="post" action="/teammates/${mate.id}/note">${hidden(csrf)}<label class="sr-only" for="teammate-note">Note</label><textarea id="teammate-note" name="note" rows="2" maxlength="1000" placeholder="For example: this week, offer free shipping instead of a refund when you can."></textarea><button>Tell ${e(name)}</button></form>` +
       (notes.length === 0 ? "" : `<ul class="teammate-notes">${notes.map(one => `<li>${e(one.said)} <span class="meta">${e(one.by ?? "")} · ${when(one.at)}</span></li>`).join("")}</ul>`) + `</section>` : "",
     `<details class="card"${canManage ? " open" : ""}><summary>Soul file</summary><p class="meta">Who ${e(name)} is and its rules, read every turn. Version ${mate.version}${latest === undefined ? "" : ` · saved by ${e(latest.savedBy)}, ${when(latest.savedAt)}`} · <a href="/teammates/${mate.id}/soul.md" download>Download</a></p>` +

@@ -58,6 +58,31 @@ that looks like it holds a key is refused.
 Every decision is written down with its reason: in the card's history ("Approved
 by Maya (AI): within my $50 limit") and on the teammate's page.
 
+## Letting a teammate use tools
+
+A teammate can use your project's tools (the MCP servers on the **Tools** page:
+a shop, a CRM, a mailbox, an issue tracker) under a rule you set for each
+action. On its page, under **Tools**, pick a tool and **Add tool**. Each of its
+actions then has one rule:
+
+- **Do it:** it uses the action on its own.
+- **Do it, up to a limit:** on its own up to a number in the call (like
+  `amount` 50); above that it asks first. The limit is enforced by Standing
+  Orders, not only written in its soul file.
+- **Ask first:** each call waits for you. You see exactly the call (“Use shop →
+  refund_order · order 2202 · amount 400?”) with its reason, on the card and in
+  your chat app. **Approve** makes exactly that call; **Deny** doesn't; or
+  answer in words to tell it what to do instead.
+- **Never:** it isn't offered the action at all.
+
+Actions that only read start as **Do it**; everything else starts as **Ask
+first**. The teammate never calls a tool itself: it asks for a call on its
+turn, Standing Orders checks the rule and makes it (or asks you), and the
+teammate reads the answer before it decides. Every call, made or not, is a
+receipt: under **Tool calls** on the card, and in **What it did** on its page.
+A visit to a card allows up to 12 calls; after that it decides with what it
+has.
+
 ## Talking to your teammates
 
 - Its questions and hand-offs reach you in your chat app, under its name
@@ -66,10 +91,13 @@ by Maya (AI): within my $50 limit") and on the teammate's page.
   week, offer free shipping instead of a refund"). Lasting rules belong in the
   soul file.
 - The lead chat can add teammates, change one section of a soul file ("Maya can
-  approve refunds up to $100 now"), pause or resume one, pass on a note, or
-  answer its question for you. Each is a card you confirm.
+  approve refunds up to $100 now"), let one use a tool or stop, change an
+  action's rule ("Maya can refund up to $100 in the shop without asking"),
+  pause or resume one, pass on a note, or answer its question for you. Each is
+  a card you confirm.
 - Each teammate sends its manager a summary after 5 pm: what it decided,
-  handled and handed over. **Send today's summary** sends one now.
+  handled and handed over, and the tool calls it made. **Send today's
+  summary** sends one now.
 
 ## Limits
 
@@ -80,6 +108,8 @@ by Maya (AI): within my $50 limit") and on the teammate's page.
 - Each teammate has a daily limit of turns (200 by default, in **Settings** on
   its page); past it, its decisions go to people until tomorrow.
 - A teammate reads each card through Claude on this computer's sign-in, with
-  no tools, no files and no internet: it only decides, and Standing Orders does
-  what it decided within the zone's choices. The card is data to it, never
+  no tools of its own, no files and no internet: it only decides, and Standing
+  Orders does what it decided within the zone's choices, and makes the tool
+  calls its rules allow. The card and what tools answer are data to it, never
   instructions, and a card that tries to change its rules is handed to a person.
+- Each tool call counts as a turn toward its daily limit.
