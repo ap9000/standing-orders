@@ -47,6 +47,7 @@ import { dirname } from "node:path";
 import { handleOf, parseSoul, SOUL_CHARS, TEAMMATE_TEMPLATES, teammateLabel } from "./teammates.js";
 import { createTeammateFrom, labelOf, leaveNote, nameOf, renamedSoul, saveSoul, setTeammateState } from "./teammate-admin.js";
 import { answerTeammateQuestion } from "./teammate-work.js";
+import { checkRule, defaultRule, grantListed, revokeTool, ruleWords, setToolRules } from "./teammate-tools.js";
 
 /** A tool from the lead's card: a common tool by its id, or the operator's own program or address. */
 function toolSpecFromRequest(input: Record<string, unknown>): ToolSpec {
@@ -114,6 +115,7 @@ export const CHAT_ACTIONS = {
   teammate_state: { label: "Change teammate", protected: false, password: false },
   teammate_note: { label: "Tell teammate", protected: false, password: false },
   teammate_answer: { label: "Answer teammate", protected: false, password: false },
+  teammate_tools: { label: "Change teammate's tools", protected: false, password: false },
   decision_record: { label: "Record decision", protected: false, password: false },
   decision_retire: { label: "Retire decision", protected: false, password: false },
   scope_approve: { label: "Approve work", protected: true, password: true },
@@ -172,6 +174,7 @@ export const CHAT_ACTION_FIELDS: Record<ChatAction, readonly string[]> = {
   teammate_state: ["teammate", "state"],
   teammate_note: ["teammate", "note"],
   teammate_answer: ["question", "choice", "text"],
+  teammate_tools: ["teammate", "tool", "change", "action", "use", "limitField", "limitOver"],
   decision_record: ["repo", "claim", "why", "supersedes", "source"],
   decision_retire: ["repo", "decision", "reason"],
   scope_approve: ["task"],
@@ -445,6 +448,40 @@ export function prepareSharedAction(
       state = { state: mate!.state };
       title = `${wanted === "paused" ? "Pause" : wanted === "active" ? "Resume" : "Remove"} ${labelOf(mate!)}`;
       terms.push(wanted === "paused" ? "Its decisions go to people and the zones it handles wait until you resume it." : wanted === "active" ? "It picks up its zones' cards again." : "It leaves the team: zones that name it go to people.");
+    } else if (operation === "teammate_tools") {
+      // v94: which project tools it may use, and its rule for one action.
+      const tool = text(input, "tool", 40);
+      const change = input["change"];
+      const grant = store.teammateGrant(mate!.id, tool);
+      const name = nameOf(mate!);
+      const grants = store.teammateGrants(mate!.id);
+      const uses = grants.length === 0 ? ` ${name} doesn't use any tools yet.` : ` ${name} uses ${grants.map(one => `${one.tool} (actions: ${one.actions.map(each => each.name).join(", ")})`).join("; ")}.`;
+      if (change === "grant") {
+        const found = projectToolsOf(store, repo).find(one => one.name === tool);
+        const named = projectToolsOf(store, repo).map(one => one.name);
+        if (found === undefined) throw Error(`${project} has no tool called ${tool}.${named.length === 0 ? " Add it on the Tools page first." : ` Its tools: ${named.join(", ")}.`}${uses}`);
+        if (grant !== null) throw Error(`${name} can already use ${tool}.`);
+        const actions = found.lastTest?.tools ?? [];
+        if (actions.length === 0) throw Error(`${tool} hasn't said what it can do yet. Test it on the Tools page first.`);
+        state = { rules: "" };
+        title = `Let ${name} use ${tool}`;
+        terms.push(...actions.map(one => `${one}: ${defaultRule({ name: one, readOnly: false }).use === "free" ? "does it" : "asks you first"}`),
+          `${name} asks for each call on its turn; Standing Orders makes it by these rules, and every call is kept on the card. Change a rule any time.`);
+      } else if (change === "revoke") {
+        if (grant === null) throw Error(`${name} doesn't use a tool called ${tool}.${uses}`);
+        state = { rules: JSON.stringify(grant.rules) };
+        title = `Stop ${name} using ${tool}`;
+        terms.push("Calls waiting for your approval are cancelled.");
+      } else if (change === "rule") {
+        if (grant === null) throw Error(`${name} doesn't use a tool called ${tool}.${uses}`);
+        const action = text(input, "action", 64);
+        const limit = input["limitField"] === undefined || input["limitField"] === null || input["limitField"] === "" ? null : { field: input["limitField"], over: input["limitOver"] };
+        const checked = checkRule(grant, action, { use: input["use"], limit });
+        if (!checked.ok) throw Error(checked.said);
+        state = { rules: JSON.stringify(grant.rules) };
+        title = `${name}: ${action} — ${ruleWords(checked.rule)}`;
+        terms.push(`${tool} → ${action}: ${ruleWords(checked.rule)}.`, `Was: ${ruleWords(grant.rules[action] ?? { use: "ask" })}.`);
+      } else throw Error("Choose grant, revoke or rule.");
     } else if (operation === "teammate_note") {
       const note = text(input, "note", 1000).trim();
       if (note === "") throw Error("Say what it should know.");
@@ -1197,6 +1234,17 @@ function runTeammateAction(store: Store, payload: SharedAction, actor: string, n
   }
   const mate = store.getTeammate(Number(req["teammate"]));
   if (mate === null || mate.state === "removed") throw Error("That teammate is off the team.");
+  if (payload.operation === "teammate_tools") {
+    const tool = String(req["tool"]);
+    const grant = store.teammateGrant(mate.id, tool);
+    if ((grant === null ? "" : JSON.stringify(grant.rules)) !== payload.state["rules"]) throw Error("Someone changed its tools since. Ask for a fresh proposal.");
+    const found = projectToolsOf(store, mate.repo).find(one => one.name === tool);
+    const done = req["change"] === "grant" ? found === undefined ? { ok: false as const, said: `There's no tool called ${tool} any more.` } : grantListed(store, mate, found, null, actor, now)
+      : req["change"] === "revoke" ? revokeTool(store, mate, tool)
+      : setToolRules(store, mate, tool, { [String(req["action"])]: { use: req["use"], limit: req["limitField"] === undefined || req["limitField"] === null || req["limitField"] === "" ? null : { field: req["limitField"], over: req["limitOver"] } } }, actor, now);
+    if (!done.ok) throw Error(done.said);
+    return { said: done.said, href: `/teammates/${mate.id}#tools` };
+  }
   if (payload.operation === "teammate_soul" && mate.version !== payload.state["version"]) throw Error("Someone changed its soul file since. Ask for a fresh proposal.");
   const done = payload.operation === "teammate_soul" ? saveSoul(store, mate, String(req["soul"]), actor, now)
     : payload.operation === "teammate_state" ? setTeammateState(store, mate, req["state"] as "active" | "paused" | "removed", actor, now)

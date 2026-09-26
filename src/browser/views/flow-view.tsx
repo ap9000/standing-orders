@@ -337,8 +337,9 @@ function CardPanel({ card, view, csrf, apply, onClose }: { card: BrowserFlowCard
     {card.source !== null && <p className="text-[12px] text-muted-foreground">From {card.source.url === null ? card.source.label
       : <a className="font-medium text-primary underline-offset-4 hover:underline" href={card.source.url} {...(card.source.url.startsWith("/") ? {} : { target: "_blank", rel: "noreferrer" })}>{card.source.label}</a>}</p>}
     {card.description !== null && <p className="whitespace-pre-wrap text-[13px]">{card.description}</p>}
-    {card.waiting !== null && <p className="rounded-md bg-muted px-3 py-2 text-[13px]">{card.waiting}{card.deadline != null && <span className="block text-muted-foreground">{deadlineWords(card.deadline)}</span>}</p>}
+    {card.waiting !== null && card.question == null && <p className="rounded-md bg-muted px-3 py-2 text-[13px]">{card.waiting}{card.deadline != null && <span className="block text-muted-foreground">{deadlineWords(card.deadline)}</span>}</p>}
     {card.question != null && <TeammateQuestion question={card.question} csrf={csrf} apply={apply} />}
+    {card.question != null && card.deadline != null && <p className="text-[12px] text-muted-foreground">{deadlineWords(card.deadline)}</p>}
     <CardPeople card={card} view={view} csrf={csrf} apply={apply} />
     {card.task !== null && <a className="text-[13px] font-medium text-primary underline-offset-4 hover:underline" href={card.task.href}>Open its task</a>}
     {card.draft !== null && !card.canDecide && <details className="rounded-md border px-3 py-2" open data-flow-draft>
@@ -366,6 +367,14 @@ function CardPanel({ card, view, csrf, apply, onClose }: { card: BrowserFlowCard
         {view.stages.map(one => <option key={one.id} value={one.id}>{one.title}</option>)}
       </select>
     </div>}
+    {(card.calls ?? []).length > 0 && <details className="rounded-md border px-3 py-2" data-teammate-calls>
+      <summary className="cursor-pointer text-[13px] font-medium">Tool calls ({card.calls!.length})</summary>
+      <ol className="mt-2 flex flex-col gap-2.5">{card.calls!.map(call => <li key={call.id} className="flex flex-col gap-0.5 text-[12.5px]" data-teammate-call={call.state}>
+        <span className="break-words"><span className="font-medium">{call.who}</span> · {call.words}</span>
+        <span className="text-muted-foreground">{call.outcome}{call.why !== "" && call.state !== "refused" ? ` · ${call.why}` : ""}</span>
+        {call.result !== null && call.result !== "" && (call.state === "done" || call.state === "failed") && <span className="mt-0.5 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-muted px-2 py-1 text-[12px]">{call.result}</span>}
+      </li>)}</ol>
+    </details>}
     {card.outputs.length > 0 && <div className="flex flex-col gap-2">
       <h3 className="text-[13px] font-semibold">What zones reported</h3>
       {card.outputs.map(output => <details key={output.stage} className="rounded-md border px-3 py-2">
@@ -515,12 +524,14 @@ function TeammateQuestion({ question, csrf, apply }: { question: NonNullable<Bro
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const answer = async (fields: Record<string, string>) => { setBusy(true); const result = await send(`/teammates/questions/${question.id}/answer`, fields, csrf); setBusy(false); apply(result); if (result.ok) setText(""); };
+  const call = question.call ?? null;
   return <div className="flex flex-col gap-2 rounded-lg border border-attention/50 p-3" data-teammate-question={question.id}>
-    <p className="text-[12px] text-muted-foreground">{question.from} asks{question.mine ? " you" : ` ${question.askedOf}`}</p>
-    <p className="text-[13px] font-medium">{question.question}</p>
+    <p className="text-[12px] text-muted-foreground">{call === null ? `${question.from} asks${question.mine ? " you" : ` ${question.askedOf}`}` : `${question.from} needs ${question.mine ? "your" : `${question.askedOf}'s`} approval`}</p>
+    <p className="break-words text-[13px] font-medium">{question.question}</p>
+    {call !== null && <p className="text-[12.5px] text-muted-foreground" data-teammate-call-why>{call.why !== "" && <>{call.why} </>}({call.rule})</p>}
     {question.mine && <>
-      {question.options.length > 0 && <div className="flex flex-wrap gap-2">{question.options.map(one => <Button key={one.id} size="sm" variant="outline" disabled={busy} onClick={() => void answer({ choice: one.id })}>{one.label}</Button>)}</div>}
-      <Textarea value={text} onChange={event => setText(event.target.value)} rows={2} maxLength={2000} placeholder="Or answer in your words" aria-label="Your answer" />
+      {question.options.length > 0 && <div className="flex flex-wrap gap-2">{question.options.map((one, at) => <Button key={one.id} size="sm" variant={call !== null && at === 0 ? "default" : "outline"} disabled={busy} onClick={() => void answer({ choice: one.id })}>{one.label}</Button>)}</div>}
+      <Textarea value={text} onChange={event => setText(event.target.value)} rows={2} maxLength={2000} placeholder={call === null ? "Or answer in your words" : `Or tell ${question.from.split(" · ")[0]} what to do instead`} aria-label="Your answer" />
       <Button size="sm" className="self-start" disabled={busy || text.trim() === ""} onClick={() => void answer({ text })}>Answer</Button>
     </>}
   </div>;

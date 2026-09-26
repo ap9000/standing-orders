@@ -47,6 +47,8 @@ export function setTeammateState(store: Store, mate: TeammateRow, state: "active
   if (state === mate.state) return { ok: true, said: "No change." };
   if (state === "removed") {
     for (const question of store.openTeammateQuestions([mate.id])) store.dropTeammateQuestion(question.id, now);
+    // v94: calls waiting for approval, or approved and not made yet, are never made.
+    for (const call of store.teammateCallsOf(mate.id, 500).filter(one => one.state === "asked" || one.state === "approved")) store.moveTeammateCall(call.id, ["asked", "approved"], { state: "refused", result: `${name} left the team before the call was made.` }, now);
     store.updateTeammate(mate.id, { state }, by, now);
     return { ok: true, said: `${name} is off the team. Zones that named ${name} go to people now.` };
   }
@@ -89,9 +91,13 @@ export function summaryOf(store: Store, mate: TeammateRow, since: string | null)
   const count = (kind: string) => events.filter(one => one.kind === kind).length;
   const decided = count("decided"), handled = count("handled"), handed = count("handed"), asked = count("asked"), failed = count("failed");
   const open = store.openTeammateQuestions([mate.id]).length;
-  const quiet = decided + handled + handed + asked + failed === 0;
+  // v94: its tool calls — made, approved first, and what its people said no to.
+  const calls = store.teammateCallsOf(mate.id, 1000, since);
+  const made = calls.filter(one => one.state === "done" || one.state === "failed").length, approved = calls.filter(one => one.decidedBy !== null && one.state !== "denied").length, denied = calls.filter(one => one.state === "denied").length;
+  const quiet = decided + handled + handed + asked + failed + calls.length === 0;
   const lines = [
     quiet ? `${name} had nothing to do${since === null ? " yet" : " today"}.` : `${name} decided ${decided}, handled ${handled}, handed ${handed} to people, and asked ${asked} question${asked === 1 ? "" : "s"}${failed > 0 ? `; ${failed} turn${failed === 1 ? "" : "s"} failed` : ""}.`,
+    ...(calls.length === 0 ? [] : [`It made ${made} tool call${made === 1 ? "" : "s"}${approved > 0 ? ` (${approved} after a person approved)` : ""}${denied > 0 ? `; ${denied} ${denied === 1 ? "was" : "were"} turned down` : ""}.`]),
     ...(open > 0 ? [`${open} question${open === 1 ? " is" : "s are"} waiting for an answer.`] : []),
     ...events.filter(one => one.kind === "handed" || one.kind === "failed").slice(0, 5).map(one => `• ${one.said}`),
   ];

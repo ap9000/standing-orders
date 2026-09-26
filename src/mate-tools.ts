@@ -75,6 +75,7 @@ export { reportSummaryFor } from "./report-summary.js";
 import { reportSummaryFor } from "./report-summary.js";
 import { labelOf, nameOf, summaryOf, zonesOf } from "./teammate-admin.js";
 import { TEAMMATE_TEMPLATES, withSection } from "./teammates.js";
+import { callOutcome, callWords, defaultRule, ruleWords } from "./teammate-tools.js";
 
 const REPO_ID = /^r[0-9]{1,3}$/;
 const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -969,8 +970,13 @@ export const MATE_TOOLS: MateTool[] = [
           reportsTo: whoIs(mate.manager), soul: args["teammate"] === undefined ? mate.soul.slice(0, 600) : mate.soul, version: mate.version,
           worksOn: zonesOf(ctx.store, mate).map(one => ({ flow: one.flow, flowName: one.flowName, zone: one.title, how: one.kind })),
           today: summaryOf(ctx.store, mate, today.toISOString()).said,
-          questions: ctx.store.openTeammateQuestions([mate.id]).map(one => ({ question: one.id, card: one.card, asks: one.question, options: one.options.map(option => option.label), askedOf: whoIs(one.askedOf) })),
-          ...(args["teammate"] === undefined ? {} : { recent: ctx.store.teammateEvents(mate.id, 30).map(one => ({ kind: one.kind, said: one.said, at: one.at })) }),
+          questions: ctx.store.openTeammateQuestions([mate.id]).map(one => ({ question: one.id, card: one.card, asks: one.question, options: one.options.map(option => option.label), askedOf: whoIs(one.askedOf), ...(one.toolCall === null ? {} : { approvesToolCall: true }) })),
+          // v94: the tools it may use, and its rule for each action.
+          tools: ctx.store.teammateGrants(mate.id).map(grant => ({ tool: grant.tool, actions: grant.actions.map(action => ({ action: action.name, rule: ruleWords(grant.rules[action.name] ?? defaultRule(action)) })) })),
+          ...(args["teammate"] === undefined ? {} : {
+            recent: ctx.store.teammateEvents(mate.id, 30).map(one => ({ kind: one.kind, said: one.said, at: one.at })),
+            toolCalls: ctx.store.teammateCallsOf(mate.id, 20).map(one => ({ card: one.card, call: callWords(one.tool, one.action, one.input, 200), outcome: callOutcome(one), at: one.createdAt })),
+          }),
         })),
         templates: TEAMMATE_TEMPLATES.map(one => ({ template: one.id, about: one.about })),
         rule: "Change teammates with propose_teammate. They decide flow work within their rules and never approve code tasks or merges.",
@@ -979,9 +985,10 @@ export const MATE_TOOLS: MateTool[] = [
   },
   {
     name: "propose_teammate",
-    description: "Draft a teammate change as a card the operator confirms. create: a teammate in a project (repo) from a template (support, sales, ops, triage; name renames it) or a whole soul file (markdown: front matter with name and role, then sections like ## Who you are, ## How you write, ## What you know, ## Decide on your own, ## Ask first, ## Never). edit_section: replace one section of its soul file (section: its title, like 'Decide on your own'; text: the new section, as lines; a new title adds the section) — use this for changing its rules; edit_soul: the whole new soul file, when it's short (keep its name). pause, resume, remove. note: something for it to keep in mind (note). answer: answer its open question (question, and choice: one of its options, or text). Put a teammate to work with propose_flow (an approval step's teammate, or a 'teammate' step).",
+    description: "Draft a teammate change as a card the operator confirms. create: a teammate in a project (repo) from a template (support, sales, ops, triage; name renames it) or a whole soul file (markdown: front matter with name and role, then sections like ## Who you are, ## How you write, ## What you know, ## Decide on your own, ## Ask first, ## Never). edit_section: replace one section of its soul file (section: its title, like 'Decide on your own'; text: the new section, as lines; a new title adds the section) — use this for changing its rules; edit_soul: the whole new soul file, when it's short (keep its name). pause, resume, remove. note: something for it to keep in mind (note). answer: answer its open question (question, and choice: one of its options, or text); a tool call waiting for approval is a question too (choice approve or deny, or text to say what to do instead). Tools (get_teammates lists each teammate's tools and their actions; get_project_tools the project's): use_tool lets it use one of the project's tools (tool: the tool's name, like shop) — actions that only read start as do-it and the rest ask first; stop_tool; tool_rule sets one action's rule (tool: the tool's name, like shop; action: one of its actions, like refund_order; use: free, ask or never; with free, limitField and limitOver make it ask first above that number, like limitField amount and limitOver 100). Put a teammate to work with propose_flow (an approval step's teammate, or a 'teammate' step).",
     inputSchema: schema({
-      operation: { type: "string", enum: ["create", "edit_section", "edit_soul", "pause", "resume", "remove", "note", "answer"] }, section: { type: "string", maxLength: 60 },
+      operation: { type: "string", enum: ["create", "edit_section", "edit_soul", "pause", "resume", "remove", "note", "answer", "use_tool", "stop_tool", "tool_rule"] }, section: { type: "string", maxLength: 60 },
+      tool: { type: "string", maxLength: 40 }, action: { type: "string", maxLength: 64 }, use: { type: "string", enum: ["free", "ask", "never"] }, limitField: { type: "string", maxLength: 64 }, limitOver: { type: "number", minimum: 0 },
       repo: REPO_ARG, teammate: { type: "integer", minimum: 1 }, template: { type: "string", enum: TEAMMATE_TEMPLATES.map(one => one.id) },
       name: { type: "string", maxLength: 40 }, soul: { type: "string", maxLength: 12000 }, note: { type: "string", maxLength: 1000 },
       question: { type: "integer", minimum: 1 }, choice: { type: "string", maxLength: 60 }, text: { type: "string", maxLength: 2000 },
@@ -1006,7 +1013,23 @@ export const MATE_TOOLS: MateTool[] = [
           case "pause": case "resume": case "remove": operation = "teammate_state"; input = { ...pick(["teammate"]), state: args["operation"] === "pause" ? "paused" : args["operation"] === "resume" ? "active" : "removed" }; break;
           case "note": operation = "teammate_note"; input = pick(["teammate", "note"]); break;
           case "answer": operation = "teammate_answer"; input = pick(["question", "choice", "text"]); break;
-          default: return { ok: false, message: "Choose create, edit_section, edit_soul, pause, resume, remove, note or answer." };
+          case "use_tool": case "stop_tool": case "tool_rule": {
+            const mate = Number.isSafeInteger(args["teammate"]) ? ctx.store.getTeammate(Number(args["teammate"])) : null;
+            if (mate === null || !ctx.who.repos.includes(mate.repo)) return { ok: false, message: "Choose a teammate from get_teammates." };
+            // A tool's name and one of its actions: "shop" and "refund_order", also taken as "shop.refund_order", or the action alone when one tool has it.
+            let tool = typeof args["tool"] === "string" ? args["tool"].trim() : "", action = typeof args["action"] === "string" ? args["action"].trim() : "";
+            const dot = tool.search(/\.|→/);
+            if (dot > 0) { action ||= tool.slice(dot + 1).replace(/^>?\s*/, ""); tool = tool.slice(0, dot).trim(); }
+            if (action.includes(".")) action = action.slice(action.lastIndexOf(".") + 1);
+            const grants = ctx.store.teammateGrants(mate.id);
+            if (args["operation"] !== "use_tool" && !grants.some(one => one.tool === tool)) {
+              const owners = grants.filter(one => one.actions.some(each => each.name === tool));
+              if (owners.length === 1 && (action === "" || action === tool)) { action = tool; tool = owners[0]!.tool; }
+            }
+            operation = "teammate_tools";
+            input = { ...pick(["teammate", "use", "limitField", "limitOver"]), tool, ...(action === "" ? {} : { action }), change: args["operation"] === "use_tool" ? "grant" : args["operation"] === "stop_tool" ? "revoke" : "rule" }; break;
+          }
+          default: return { ok: false, message: "Choose create, edit_section, edit_soul, pause, resume, remove, note, answer, use_tool, stop_tool or tool_rule." };
         }
         const action = prepareSharedAction(ctx.store, ctx.who, operation, input, ctx.evidenceRoot, ctx.now);
         const id = ctx.draft("action", { ...action });

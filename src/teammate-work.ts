@@ -12,6 +12,11 @@
  * - "Teammate handles it" zone: pick one of the zone's answers (its text is
  *   kept for the next zones), ask its person a question and wait for the
  *   answer, or say it can't and take the failure path.
+ *
+ * Either way (v94), before it decides it may use the project tools its
+ * manager let it use: each call is checked against its rule for that action
+ * (teammate-tools.ts), made at once or put to its person first, and kept as
+ * a receipt; the turn goes on with what the tool answered.
  */
 import type { FlowCardRow, FlowRow, Store, TeammateRow } from "./store.js";
 import type { FlowDefinition, FlowStage } from "./flows.js";
@@ -19,11 +24,17 @@ import { decideFlowCard, draftFor, flowCardHref } from "./flow-engine.js";
 import { keptDraft } from "./flow-draft.js";
 import { notifyPeople } from "./flow-people.js";
 import { claudeTurnRunner, parseSoul, readTurn, teammateActor, teammateLabel, TURN_TIMEOUT_MS, turnPrompt, type TurnAnswer, type TurnContext, type TurnRunner } from "./teammates.js";
+import { callName, callOutcome, callWords, inputProblem, makeCall, offeredTools, refreshGrants, ruleFor, type OfferedTool, type ToolIo } from "./teammate-tools.js";
 
 /** A question waits for its answer this long before the step is due again on its own: never, in practice. */
 export const ASKED = "9999-12-31T00:00:00.000Z";
 /** What "handle" zones with no answers of their own offer: going on to the next zone. */
 const CARRY_ON = "Carry on";
+/** v94: tool calls one visit of a card may make, and turns one step run may take, before it must decide with what it has. */
+export const CALLS_PER_VISIT = 12;
+const TURNS_PER_RUN = 8;
+/** The two answers an ask-first call offers; words instead tell the teammate what to do. */
+export const APPROVE = "approve", DENY = "deny";
 
 export type TeammateOutcome = { state: "passed" | "failed" | "retry" | "waiting"; said: string; log?: string; decisionJson?: string; nextAt?: string };
 
@@ -44,7 +55,7 @@ export function handleAnswers(stage: FlowStage): { answer: string; to: string | 
 }
 
 /** Everything the turn is told. */
-function contextOf(store: Store, flow: FlowRow, definition: FlowDefinition, stage: FlowStage, card: FlowCardRow, mate: TeammateRow): TurnContext {
+function contextOf(store: Store, flow: FlowRow, definition: FlowDefinition, stage: FlowStage, card: FlowCardRow, mate: TeammateRow, tools: OfferedTool[] = [], spent = false): TurnContext {
   const soul = parseSoul(mate.soul);
   if (!soul.ok) throw new Error(soul.problem);
   const title = (id: string) => definition.stages.find(one => one.id === id)?.title ?? id;
@@ -64,20 +75,92 @@ function contextOf(store: Store, flow: FlowRow, definition: FlowDefinition, stag
     },
     asked: question !== null && question.state === "answered" ? [{ question: question.question, answer: [question.choice === null ? null : question.options.find(one => one.id === question.choice)?.label ?? question.choice, question.answer].filter(Boolean).join(" — ") }] : [],
     notes: notes.map(one => ({ by: one.by ?? "your manager", text: one.said })),
+    tools, toolsSpent: spent,
+    calls: store.teammateCallsOn(card.id, card.entry).map(call => {
+      const question = call.state === "denied" ? store.teammateQuestionForCall(call.id) : null;
+      return { name: callName(call.tool, call.action), input: JSON.stringify(call.input), outcome: callOutcome(call),
+        said: call.state === "denied" ? question?.answer ?? null : call.state === "asked" ? null : call.result };
+    }),
   };
 }
 
-/** Run one teammate turn on a card and carry out what it decided. */
+/**
+ * Run one teammate turn on a card and carry out what it decided. With tools
+ * (v94) a turn is a short loop: each tool call it asks for is made (or put to
+ * its person, and the turn waits), and it decides again with the answer —
+ * until it decides, or it has used its tools as much as a visit allows.
+ */
 export async function teammateTurn(store: Store, flow: FlowRow, definition: FlowDefinition, stage: FlowStage, card: FlowCardRow, mate: TeammateRow, now: Date,
-  io: { turn?: TurnRunner; evidenceRoot?: string }): Promise<TeammateOutcome> {
-  const context = contextOf(store, flow, definition, stage, card, mate);
+  io: { turn?: TurnRunner; evidenceRoot?: string } & ToolIo): Promise<TeammateOutcome> {
   const config = store.getChatConfig();
   const model = mate.model ?? (config?.provider === "claude-subscription" ? config.model : "default");
-  const reply = await (io.turn ?? claudeTurnRunner())({ model, prompt: turnPrompt(context), timeoutMs: TURN_TIMEOUT_MS });
-  if (!reply.ok) return { state: "retry", said: reply.said };
-  const answer = readTurn(reply.value, context);
-  if (answer === null) return { state: "retry", said: `${context.name}'s answer wasn't one this zone allows.`, log: JSON.stringify(reply.value).slice(0, 4000) };
-  return carryOut(store, flow, definition, stage, card, mate, context, answer, now, io, `${context.name} (${model}) · ${(reply.ms / 1000).toFixed(1)} s`);
+  if (store.teammateGrants(mate.id).length > 0) {
+    try { await refreshGrants(store, mate, now, io); } catch { /* the last listing stands */ }
+    // Calls a person approved since the last turn are made first, exactly as they approved them.
+    for (const call of store.teammateCallsOn(card.id, card.entry).filter(one => one.state === "approved")) await makeCall(store, call, flow.repo, io, now);
+  }
+  const log: string[] = [];
+  for (let turn = 1; ; turn++) {
+    const made = store.teammateCallsOn(card.id, card.entry).length;
+    const spent = made >= CALLS_PER_VISIT || turn > TURNS_PER_RUN;
+    const tools = spent ? [] : offeredTools(store, mate);
+    const context = contextOf(store, flow, definition, stage, card, mate, tools, spent && made > 0);
+    const reply = await (io.turn ?? claudeTurnRunner())({ model, prompt: turnPrompt(context), timeoutMs: TURN_TIMEOUT_MS });
+    if (!reply.ok) return { state: "retry", said: reply.said, ...(log.length === 0 ? {} : { log: log.join("\n\n") }) };
+    const answer = readTurn(reply.value, context);
+    if (answer === null) return { state: "retry", said: `${context.name}'s answer wasn't one this zone allows.`, log: [...log, JSON.stringify(reply.value).slice(0, 4000)].join("\n\n") };
+    const header = `${context.name} (${model}) · ${(reply.ms / 1000).toFixed(1)} s`;
+    if (answer.action !== "use_tool") {
+      const outcome = carryOut(store, flow, definition, stage, card, mate, context, answer, now, io, header);
+      return log.length === 0 ? outcome : { ...outcome, log: `${log.join("\n\n")}\n\n${outcome.log ?? ""}`.trim() };
+    }
+    log.push(`${header}\n\n${JSON.stringify(answer)}`);
+    const waiting = await useTool(store, flow, stage, card, mate, context, answer, io, now);
+    if (waiting !== null) return { ...waiting, log: log.join("\n\n") };
+  }
+}
+
+/**
+ * One tool call a turn asked for, checked against its rules: made now (the
+ * turn goes on: null), refused with the reason (the turn goes on and reads
+ * it), or put to its person — the turn waits for the answer.
+ */
+async function useTool(store: Store, flow: FlowRow, stage: FlowStage, card: FlowCardRow, mate: TeammateRow, context: TurnContext, answer: TurnAnswer, io: ToolIo, now: Date): Promise<TeammateOutcome | null> {
+  const split = answer.tool.indexOf(".");
+  const tool = split < 0 ? answer.tool : answer.tool.slice(0, split), action = split < 0 ? "" : answer.tool.slice(split + 1);
+  const receipt = { teammate: mate.id, card: card.id, entry: card.entry, tool: tool.slice(0, 40), action: action.slice(0, 64) || "(none)", why: answer.reason };
+  const refuse = (input: Record<string, unknown>, said: string) => { store.addTeammateCall({ ...receipt, input, rule: "never", state: "refused", result: said }, now); return null; };
+  if (!(context.tools ?? []).some(one => one.name === answer.tool)) return refuse({}, `There's no ${answer.tool} among the tools you may use.`);
+  let input: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(answer.input === "" ? "{}" : answer.input) as unknown;
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return refuse({}, "Its input wasn't a JSON object.");
+    input = parsed as Record<string, unknown>;
+  } catch {
+    return refuse({}, "Its input wasn't a JSON object.");
+  }
+  const grant = store.teammateGrant(mate.id, tool)!;
+  const info = grant.actions.find(one => one.name === action)!;
+  const problem = inputProblem(info, input);
+  if (problem !== null) return refuse(input, problem);
+  const rule = ruleFor(grant, action, input);
+  if (rule.use === "never") return refuse(input, rule.why);
+  if (rule.use === "free") {
+    const id = store.addTeammateCall({ ...receipt, input, rule: "free", state: "running" }, now);
+    await makeCall(store, store.teammateCall(id)!, flow.repo, io, now);
+    return null;
+  }
+  // Ask first: its person approves this exact call, in their chat app or on the card.
+  const soul = { name: context.name, role: context.role };
+  const id = store.addTeammateCall({ ...receipt, input, rule: "ask", state: "asked", result: rule.why }, now);
+  const words = callWords(tool, action, input, 480);
+  const question = store.openTeammateQuestion({ teammate: mate.id, card: card.id, entry: card.entry, question: `Use ${words}?`, options: [{ id: APPROVE, label: "Approve" }, { id: DENY, label: "Deny" }], askedOf: context.person, toolCall: id }, now);
+  if (question === null) return { state: "failed", said: "It asked to make the same call twice." };
+  notifyPeople(store, card, [context.person], null, { key: `teammate-q:${question}`, attention: true, subject: `${teammateLabel(soul)} asks to use ${action} on “${card.title}”`,
+    body: `${words}\n\n${answer.reason === "" ? "" : `Why: ${answer.reason}\n`}(${rule.why})\n\nApprove makes exactly this call. Deny stops it. Or answer in words to tell ${context.name} what to do instead.`,
+  }, now);
+  if (stage.kind !== "approval") store.updateFlowCard(card.id, { waiting: `${context.name} asked ${context.person} to approve: ${words}`.slice(0, 300) }, now);
+  return { state: "waiting", said: `Asked ${context.person} to approve ${action}`, nextAt: ASKED };
 }
 
 function carryOut(store: Store, flow: FlowRow, definition: FlowDefinition, stage: FlowStage, card: FlowCardRow, mate: TeammateRow, context: TurnContext, answer: TurnAnswer, now: Date,
@@ -143,14 +226,23 @@ export function answerTeammateQuestion(store: Store, id: number, answer: { choic
     const choice = answer.choice === null ? null : question.options.find(one => one.id === answer.choice) ?? null;
     const text = answer.text?.trim().slice(0, 2000) || null;
     if (choice === null && text === null) return { ok: false as const, said: "Pick an answer or write one." };
-    store.answerTeammateQuestion(id, { choice: choice?.id ?? null, text, by: answer.by, via: answer.via }, now);
     const card = store.getFlowCard(question.card);
+    // v94: an ask-first tool call. Approve makes exactly that call (on the card's next turn); Deny, or words alone, don't.
+    if (question.toolCall !== null) {
+      if (card === null || card.state !== "active" || card.entry !== question.entry) {
+        store.moveTeammateCall(question.toolCall, ["asked"], { state: "refused", result: "The card moved on before anyone approved it." }, now);
+        store.dropTeammateQuestion(id, now);
+        return { ok: false as const, said: "That card has moved on, so nothing was done." };
+      }
+      if (!store.moveTeammateCall(question.toolCall, ["asked"], { state: choice?.id === APPROVE ? "approved" : "denied", decidedBy: answer.by }, now)) return { ok: false as const, said: "That call was already decided." };
+    }
+    store.answerTeammateQuestion(id, { choice: choice?.id ?? null, text, by: answer.by, via: answer.via }, now);
     store.addTeammateEvent({ teammate: question.teammate, card: question.card, entry: question.entry, kind: "answered", said: `${answer.by}: ${[choice?.label, text].filter(Boolean).join(" — ")}`, by: answer.by }, now);
     if (card !== null && card.state === "active" && card.entry === question.entry) {
       store.updateFlowCard(card.id, { waiting: null }, now);
       store.wakeFlowStep(card.id, card.entry, now);
     }
-    return { ok: true as const, said: "Answered. It picks the card up again now." };
+    return { ok: true as const, said: question.toolCall === null ? "Answered. It picks the card up again now." : choice?.id === APPROVE ? "Approved. The call is made now, exactly as shown." : "It won't make that call. It picks the card up again now." };
   });
 }
 

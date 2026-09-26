@@ -41,6 +41,7 @@ import { replyInChannel } from "./chat-inbox.js";
 import { recordSent, threadOf } from "./flow-replies.js";
 import { ASKED, teammateReady, teammateTurn, type TeammateOutcome } from "./teammate-work.js";
 import type { TurnRunner } from "./teammates.js";
+import type { ToolLister } from "./teammate-tools.js";
 
 export type StepIo = {
   /** `gh` for GitHub; git and the check's shell, both without a model. */
@@ -65,6 +66,8 @@ export type StepIo = {
   toolHome?: string;
   /** Takes a teammate's turn (default: Claude through this computer's sign-in, answering in its fixed shape). */
   teammate?: TurnRunner;
+  /** Lists what a project tool offers a teammate (default: starts its MCP server and asks). */
+  listTools?: ToolLister;
 };
 export type StepPass = { ran: number; problems: string[] };
 type Outcome = { state: "passed" | "failed" | "retry"; said: string; log?: string; exitCode?: number | null;
@@ -160,14 +163,15 @@ async function teammateStep(store: Store, flow: FlowRow, definition: FlowDefinit
     if (card.waiting !== waiting) store.updateFlowCard(card.id, { waiting }, now);
     return true;
   }
-  const question = store.teammateQuestionFor(card.id, card.entry);
-  if (question?.state === "open") return true;
+  // Waiting on a person: its own question, or (v94) a tool call they approve first.
+  if (store.openTeammateQuestionOn(card.id, card.entry) !== null) return true;
   if (!store.claimFlowStep({ card: card.id, entry: card.entry, stage: stage.id, kind: "teammate", script: null, scriptVersion: null }, now)) return true;
   pass.ran++;
   const started = Date.now();
   let outcome: TeammateOutcome;
   try {
-    outcome = await teammateTurn(store, flow, definition, stage, card, mate!, now, { ...(io.teammate === undefined ? {} : { turn: io.teammate }), ...(io.evidenceRoot === undefined ? {} : { evidenceRoot: io.evidenceRoot }) });
+    outcome = await teammateTurn(store, flow, definition, stage, card, mate!, now, { ...(io.teammate === undefined ? {} : { turn: io.teammate }), ...(io.evidenceRoot === undefined ? {} : { evidenceRoot: io.evidenceRoot }),
+      ...(io.callTool === undefined ? {} : { callTool: io.callTool }), ...(io.listTools === undefined ? {} : { listTools: io.listTools }), ...(io.toolHome === undefined ? {} : { toolHome: io.toolHome }) });
   } catch (error) {
     outcome = { state: "retry", said: error instanceof Error ? error.message : "It couldn't take its turn." };
   }
