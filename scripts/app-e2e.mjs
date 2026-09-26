@@ -1164,6 +1164,9 @@ await check("One-click connections: Connect Stripe on the kit's checklist, allow
     await page.click("button.connect-wanted");
     await page.waitForURL(url => url.port === String(stand.port) && url.pathname === "/authorize", { timeout: 30_000 });
     if (stand.registered.at(-1)?.redirect_uris?.[0] !== `${base}/settings/tools/connected`) throw new Error(`registered with ${JSON.stringify(stand.registered.at(-1))}`);
+    // Someone else finishing this sign-in (the link sent to them) lands nowhere: the return must come to this browser.
+    const elsewhere = await (await fetch(`${base}/settings/tools/connected?state=${new URL(page.url()).searchParams.get("state")}&code=someone-elses`)).text();
+    if (!/started in another browser/.test(elsewhere)) throw new Error(`a return from another browser: ${elsewhere.slice(0, 200)}`);
     await Promise.all([page.waitForURL(/\/kits\/support-desk/, { timeout: 30_000 }), page.click('button:has-text("Allow")')]);
     const said = await page.locator('[role="status"]').first().innerText();
     if (!/Stripe is connected, and Maya can use it/.test(said)) throw new Error(`back on the kit: ${said}`);

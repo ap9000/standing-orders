@@ -949,14 +949,15 @@ export function createDecisionServer(options: ServeOptions): Server {
   }
 
   /** Google's redirect back: the code becomes a saved refresh token, and a page sends the person back to Settings. */
-  async function googleCallback(response: ServerResponse, url: URL): Promise<void> {
+  async function googleCallback(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
     const done = (said: string) => {
       const back = `/settings?said=${encodeURIComponent(said)}#email`;
-      response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer", "x-content-type-options": "nosniff", "x-frame-options": "DENY",
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer", "x-content-type-options": "nosniff", "x-frame-options": "DENY", "set-cookie": signInSpent(GOOGLE_CALLBACK),
         "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'" });
       response.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="0;url=${escape(back)}"><title>Standing Orders</title><p style="font:15px system-ui;margin:2rem">${escape(said)} <a href="${escape(back)}">Back to Settings</a></p>`);
     };
     const state = url.searchParams.get("state") ?? "";
+    if (!startedHere(request, state)) return done("That Google sign-in was started in another browser. Connect again from this one.");
     const visit = googleVisits.get(state);
     googleVisits.delete(state);
     if (options.configDir === undefined || visit === undefined || visit.expires < Date.now() || store.accountOf(visit.by)?.role !== "approver") return done("That Google sign-in expired. Connect again from Settings.");
@@ -972,14 +973,15 @@ export function createDecisionServer(options: ServeOptions): Server {
    * kept in its secrets file, and a page sends the person back to Tools (or
    * to the kit the Connect came from, whose teammate may then use the tool).
    */
-  async function connectCallback(response: ServerResponse, url: URL): Promise<void> {
+  async function connectCallback(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
     const done = (back: string, key: "said" | "problem", words: string) => {
       const to = `${back}${back.includes("?") ? "&" : "?"}${key}=${encodeURIComponent(words)}`;
-      response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer", "x-content-type-options": "nosniff", "x-frame-options": "DENY",
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer", "x-content-type-options": "nosniff", "x-frame-options": "DENY", "set-cookie": signInSpent(CONNECT_CALLBACK),
         "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'" });
       response.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="0;url=${escape(to)}"><title>Standing Orders</title><p style="font:15px system-ui;margin:2rem">${escape(words)} <a href="${escape(to)}">Back to Standing Orders</a></p>`);
     };
     const state = url.searchParams.get("state") ?? "";
+    if (!startedHere(request, state)) return done("/settings/tools", "problem", "That sign-in was started in another browser. Connect again from this one.");
     const visit = connectVisits.get(state);
     connectVisits.delete(state);
     if (visit === undefined || visit.expires < Date.now() || store.accountOf(visit.by)?.role !== "approver") return done("/settings/tools", "problem", "That sign-in expired. Connect again.");
@@ -1021,8 +1023,8 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
     // Back from Google's consent screen (v89). The session cookie is SameSite=Strict and stays behind on
     // a return from another site: the visit's one-time state (made by a signed-in approver) is the proof.
-    if (url.pathname === GOOGLE_CALLBACK && request.method === "GET") return googleCallback(response, url);
-    if (url.pathname === CONNECT_CALLBACK && request.method === "GET") return connectCallback(response, url);
+    if (url.pathname === GOOGLE_CALLBACK && request.method === "GET") return googleCallback(request, response, url);
+    if (url.pathname === CONNECT_CALLBACK && request.method === "GET") return connectCallback(request, response, url);
 
     const method = request.method ?? "GET";
     if (await sessionEndpoint(request, response)) return;
@@ -5849,7 +5851,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (!started.ok) return back(started.said);
       for (const [key, visit] of connectVisits) if (visit.expires < Date.now()) connectVisits.delete(key);
       connectVisits.set(started.state, started.visit);
-      return goOutside(response, started.go, `Going to ${service.label} to sign in…`);
+      return goOutside(response, started.go, `Going to ${service.label} to sign in…`, { state: started.state, path: CONNECT_CALLBACK, secure: origin.startsWith("https:") });
     }
     if (url.pathname === "/settings/tools/change") {
       if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "Sign in as an approver to manage tools.", "/settings/tools");
@@ -6357,7 +6359,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const consent = googleConsent(readGoogleMail(options.configDir)!, `${origin}${GOOGLE_CALLBACK}`, who.name);
       for (const [key, visit] of googleVisits) if (visit.expires < Date.now()) googleVisits.delete(key);
       googleVisits.set(consent.visit.state, consent.visit);
-      return goOutside(response, consent.url, "Going to Google to sign in…");
+      return goOutside(response, consent.url, "Going to Google to sign in…", { state: consent.visit.state, path: GOOGLE_CALLBACK, secure: origin.startsWith("https:") });
     }
 
     if (url.pathname === "/projects/select") {
@@ -9764,13 +9766,28 @@ function page(response: ServerResponse, status: number, html: string, nonce?: st
 }
 
 /**
+ * An outside sign-in comes back only to the browser that started it: the
+ * start leaves the visit's state in this cookie (Lax, so it rides the
+ * service's redirect back; the session cookie is Strict and doesn't), and a
+ * return whose state isn't the one this browser holds is refused. So nobody
+ * can start a sign-in and have someone else finish it into their project.
+ */
+const SIGN_IN_COOKIE = "so-sign-in";
+function startedHere(request: IncomingMessage, state: string): boolean {
+  const held = new RegExp(`(?:^|;\\s*)${SIGN_IN_COOKIE}=([A-Za-z0-9_-]{16,128})`).exec(request.headers.cookie ?? "")?.[1];
+  return held !== undefined && held.length === state.length && timingSafeEqual(Buffer.from(held), Buffer.from(state));
+}
+const signInSpent = (path: string) => `${SIGN_IN_COOKIE}=; Path=${path}; Max-Age=0; HttpOnly; SameSite=Lax`;
+
+/**
  * Off to another site's sign-in (Google, a service's one-click connection):
  * a page that moves on by itself. Not a redirect: every page's form-action
  * 'self' also covers where a form's answer redirects, so a browser stops a
  * form that is answered with another site's address.
  */
-function goOutside(response: ServerResponse, to: string, words: string): void {
+function goOutside(response: ServerResponse, to: string, words: string, bind: { state: string; path: string; secure: boolean }): void {
   response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer", "x-content-type-options": "nosniff", "x-frame-options": "DENY",
+    "set-cookie": `${SIGN_IN_COOKIE}=${bind.state}; Path=${bind.path}; Max-Age=900; HttpOnly; SameSite=Lax${bind.secure ? "; Secure" : ""}`,
     "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'" });
   response.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="0;url=${escape(to)}"><title>Standing Orders</title><p style="font:15px system-ui;margin:2rem">${escape(words)} <a href="${escape(to)}">Continue</a></p>`);
 }
