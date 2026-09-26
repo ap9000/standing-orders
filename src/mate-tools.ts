@@ -73,6 +73,8 @@ export type MateToolResult = { ok: true; body: unknown } | { ok: false; message:
 
 export { reportSummaryFor } from "./report-summary.js";
 import { reportSummaryFor } from "./report-summary.js";
+import { labelOf, nameOf, summaryOf, zonesOf } from "./teammate-admin.js";
+import { TEAMMATE_TEMPLATES, withSection } from "./teammates.js";
 
 const REPO_ID = /^r[0-9]{1,3}$/;
 const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -453,15 +455,16 @@ export const MATE_TOOLS: MateTool[] = [
     name: "get_actions",
     description: "List shared actions and required inputs. All channels use the same approvals.",
     inputSchema: schema({}),
-    handle: () => ({ok:true,body:{actions:Object.entries(CHAT_ACTIONS).filter(([operation])=>!operation.startsWith('flow_')).map(([operation,value])=>({operation,label:value.label,secureReview:value.protected,inputs:CHAT_ACTION_FIELDS[operation as keyof typeof CHAT_ACTIONS].filter(field=>field!=='nonce'&&field!=='files')})),notice:'Passwords and credentials never belong in a tool call or conversation. Secure review links complete protected actions.'}}),
+    handle: () => ({ok:true,body:{actions:Object.entries(CHAT_ACTIONS).filter(([operation])=>!operation.startsWith('flow_')&&!operation.startsWith('teammate_')).map(([operation,value])=>({operation,label:value.label,secureReview:value.protected,inputs:CHAT_ACTION_FIELDS[operation as keyof typeof CHAT_ACTIONS].filter(field=>field!=='nonce'&&field!=='files')})),notice:'Passwords and credentials never belong in a tool call or conversation. Secure review links complete protected actions.'}}),
   },
   {
     name: "propose_action",
     description: "Read get_actions and relevant skills/evidence first. Save an exact-state proposal only; protected or long terms require full secure review.",
-    inputSchema: schema({operation:{type:'string',enum:Object.keys(CHAT_ACTIONS).filter(one=>!one.startsWith('flow_'))},repo:{type:'string'},task:TASK_ARG,version:{type:'string'},restore:{type:'integer',minimum:1},sample:{type:'string',maxLength:800},content:{type:'string',maxLength:12000},instructions:{type:'string',maxLength:4000},title:{type:'string',maxLength:120},id:{type:'string'},run:{type:'integer',minimum:1},note:{type:'string',maxLength:2000},catalog:{type:'string',maxLength:40},name:{type:'string',maxLength:40},command:{type:'string',maxLength:400},args:{type:'array',items:{type:'string',maxLength:400},maxItems:40},url:{type:'string',maxLength:500},secrets:{type:'array',items:{type:'string',maxLength:64},maxItems:12},about:{type:'string',maxLength:240}},['operation']),
+    inputSchema: schema({operation:{type:'string',enum:Object.keys(CHAT_ACTIONS).filter(one=>!one.startsWith('flow_')&&!one.startsWith('teammate_'))},repo:{type:'string'},task:TASK_ARG,version:{type:'string'},restore:{type:'integer',minimum:1},sample:{type:'string',maxLength:800},content:{type:'string',maxLength:12000},instructions:{type:'string',maxLength:4000},title:{type:'string',maxLength:120},id:{type:'string'},run:{type:'integer',minimum:1},note:{type:'string',maxLength:2000},catalog:{type:'string',maxLength:40},name:{type:'string',maxLength:40},command:{type:'string',maxLength:400},args:{type:'array',items:{type:'string',maxLength:400},maxItems:40},url:{type:'string',maxLength:500},secrets:{type:'array',items:{type:'string',maxLength:64},maxItems:12},about:{type:'string',maxLength:240}},['operation']),
     handle:(ctx,args)=>{
       const operation=args['operation'];if(!isChatAction(operation))return {ok:false,message:'Choose an action from get_actions.'};
       if(operation.startsWith('flow_'))return {ok:false,message:'Use propose_flow for flows.'};
+      if(operation.startsWith('teammate_'))return {ok:false,message:'Use propose_teammate for teammates.'};
       const input={...args};delete input['operation'];
       if(operation.startsWith('skill_')||operation.startsWith('knowledge_')||operation.startsWith('tool_')){
         const repo=repoPathOf(ctx.who,args['repo']);if(repo===null)return {ok:false,message:'Choose a project from list_repos.'};input['repo']=repo;
@@ -796,6 +799,8 @@ export const MATE_TOOLS: MateTool[] = [
             ...(stage.kind === "sort" && stage.sort !== null ? { question: stage.sort.question, answers: stage.sort.answers.map(one => ({ answer: one.answer, means: one.means, goesTo: titleOf(one.to) })),
               sureAt: Math.round(stage.sort.sureAt * 100), ...(stage.sort.notes.length === 0 ? {} : { alsoNote: stage.sort.notes.map(one => ({ question: one.question, kind: one.kind, ...(one.levels === null ? {} : { levels: one.levels }) })) }) } : {}),
             ...(stage.wait === undefined ? {} : { waitFor: stage.wait.for, wait: durationWords(stage.wait.minutes) }),
+            ...(stage.teammate === undefined ? {} : { teammate: stage.teammate }),
+            ...(stage.kind === "teammate" && stage.routes !== undefined ? { routes: stage.routes.map(one => ({ answer: one.answer, goesTo: titleOf(one.to) })) } : {}),
             ...(stage.limit === undefined ? {} : { remindAfter: durationWords(stage.limit.minutes), ...(stage.limit.to === null ? {} : { thenMoveTo: titleOf(stage.limit.to) }) }),
             next: titleOf(stage.next), ...(stage.kind === "sort" ? { ifNotSure: titleOf(stage.onFail) } : stage.kind === "wait" ? { ifNoReply: titleOf(stage.onFail) } : { ifFails: titleOf(stage.onFail) }),
           })),
@@ -841,7 +846,7 @@ export const MATE_TOOLS: MateTool[] = [
   },
   {
     name: "propose_flow",
-    description: "Draft a flow change as a card the operator confirms. create: a template, or the steps in order (each leads to the next; Done is added; instructions may be left out). 'request' calls a web address (method, url with its host written out, headers — {{secret.NAME}} uses a secret the operator saved on the step, never in chat — and body); 'email' sends mail (to, subject, body; {{card.email}} is the card's email address); 'tool' calls one of the project's tools (server: the tool's name from get_project_tools, tool: its function, args: an object). Put a decision before any of these when they send what a model wrote or what an outsider sent. A 'draft' step has Claude write something from the card (instructions: what to write); follow it with an approval step (decider 'owner' asks the flow's owner in their chat app, where they can approve, edit or send it back), then an 'update' or 'notify' step whose message is '{{stage.<draft id>}}'. A 'sort' step has Jev pick one of its answers; make it the first step (never a holding step before it, or new cards wait unsorted): question, answers (answer, means: a few words Jev reads, goesTo: a step), sureAt (percent, default 80), ifNotSure (a step; otherwise the card waits for a person), and up to 3 alsoNote (score with levels lowest first, or yes-no); a sort has no next, so give each branch's last step its own next. A 'wait' step, after an 'email' step, waits for a reply to that email from someone it went to (waitFor 'reply', the default): next is where a reply goes (the reply is {{stage.<wait id>}}), ifNoReply where the card goes when none comes within wait (like '3 days', up to 30 days); waitFor 'time' just waits, then next. Any step but wait and done can have remindAfter (like '2 days': whoever it waits on is reminded once; 'none' removes it) and, on holding and approval steps, thenMoveTo (a step the card moves to then). edit: the full step list, keeping existing steps by id — what a kept step leaves out carries over. add_card (starts in the first zone unless zone is named), move_card, approve, send_back (needs a note), cancel_card, comment (note; @name pings that person), assign (owner: a name, 'me', or 'nobody'), follow, unfollow, save_script (repo, and script: name, about, language python|node|shell, and either body (short) or file (a path in the project, like scripts/enrich.py), and timeoutMinutes; scripts belong to the project, so no flow is needed; a 'check' step in any of its flows names it). A 'check' step runs its script with the card as JSON on stdin (and in $FLOW_INPUT); what it prints is its result for later steps ({{stage.<id>}}); runIn 'folder' (an empty folder: for scripts that work on data) or 'copy' (a copy of the card's work, after setup: for tests on code; the default); routes (answer, goesTo) that a last printed line 'goto: <answer>' picks; secrets (names of saved secrets it gets as variables). add_trigger with settings (kind button: label, questions; schedule: schedule like 'daily 09:00 Europe/London', and title, or script (a saved script whose printed items — one per line, a title or JSON with title, description, key — each become a card, once) with secrets; github: repo owner/name, watch issues|pulls|checks, label, branch, from team|anyone; linear: team, state, label; flow: follow (another flow's id), when (its zone); email: folder (default INBOX), sender (addresses or domains), subject (words it must contain)); pause_trigger, resume_trigger, remove_trigger with trigger. Read get_flows first except to create.",
+    description: "Draft a flow change as a card the operator confirms. create: a template, or the steps in order (each leads to the next; Done is added; instructions may be left out). 'request' calls a web address (method, url with its host written out, headers — {{secret.NAME}} uses a secret the operator saved on the step, never in chat — and body); 'email' sends mail (to, subject, body; {{card.email}} is the card's email address); 'tool' calls one of the project's tools (server: the tool's name from get_project_tools, tool: its function, args: an object). Put a decision before any of these when they send what a model wrote or what an outsider sent. A 'draft' step has Claude write something from the card (instructions: what to write); follow it with an approval step (decider 'owner' asks the flow's owner in their chat app, where they can approve, edit or send it back), then an 'update' or 'notify' step whose message is '{{stage.<draft id>}}'. A 'sort' step has Jev pick one of its answers; make it the first step (never a holding step before it, or new cards wait unsorted): question, answers (answer, means: a few words Jev reads, goesTo: a step), sureAt (percent, default 80), ifNotSure (a step; otherwise the card waits for a person), and up to 3 alsoNote (score with levels lowest first, or yes-no); a sort has no next, so give each branch's last step its own next. A 'wait' step, after an 'email' step, waits for a reply to that email from someone it went to (waitFor 'reply', the default): next is where a reply goes (the reply is {{stage.<wait id>}}), ifNoReply where the card goes when none comes within wait (like '3 days', up to 30 days); waitFor 'time' just waits, then next. Any step but wait and done can have remindAfter (like '2 days': whoever it waits on is reminded once; 'none' removes it) and, on holding and approval steps, thenMoveTo (a step the card moves to then). AI teammates (get_teammates): an approval step with teammate (its short name) is decided by that teammate within its rules, and it hands hard ones to the step's decider; a 'teammate' step (teammate, instructions, routes of answer and goesTo) has it read the card, pick where it goes and write what the next steps send (the email body is then {{stage.<id>}}), asking the flow's owner when its rules say to. edit: the full step list, keeping existing steps by id — what a kept step leaves out carries over. add_card (starts in the first zone unless zone is named), move_card, approve, send_back (needs a note), cancel_card, comment (note; @name pings that person), assign (owner: a name, 'me', or 'nobody'), follow, unfollow, save_script (repo, and script: name, about, language python|node|shell, and either body (short) or file (a path in the project, like scripts/enrich.py), and timeoutMinutes; scripts belong to the project, so no flow is needed; a 'check' step in any of its flows names it). A 'check' step runs its script with the card as JSON on stdin (and in $FLOW_INPUT); what it prints is its result for later steps ({{stage.<id>}}); runIn 'folder' (an empty folder: for scripts that work on data) or 'copy' (a copy of the card's work, after setup: for tests on code; the default); routes (answer, goesTo) that a last printed line 'goto: <answer>' picks; secrets (names of saved secrets it gets as variables). add_trigger with settings (kind button: label, questions; schedule: schedule like 'daily 09:00 Europe/London', and title, or script (a saved script whose printed items — one per line, a title or JSON with title, description, key — each become a card, once) with secrets; github: repo owner/name, watch issues|pulls|checks, label, branch, from team|anyone; linear: team, state, label; flow: follow (another flow's id), when (its zone); email: folder (default INBOX), sender (addresses or domains), subject (words it must contain)); pause_trigger, resume_trigger, remove_trigger with trigger. Read get_flows first except to create.",
     inputSchema: schema({
       operation: { type: "string", enum: ["create", "edit", "add_card", "move_card", "approve", "send_back", "cancel_card", "comment", "assign", "follow", "unfollow", "save_script", "add_trigger", "pause_trigger", "resume_trigger", "remove_trigger"] },
       repo: REPO_ARG, flow: { type: "integer", minimum: 1 }, card: { type: "integer", minimum: 1 },
@@ -861,7 +866,7 @@ export const MATE_TOOLS: MateTool[] = [
         runIn: { type: "string", enum: ["folder", "copy"] }, routes: { type: "array", maxItems: 12, items: { type: "object", additionalProperties: false, properties: { answer: { type: "string", maxLength: 40 }, goesTo: { type: "string", maxLength: 60 } } } },
         secrets: { type: "array", maxItems: 10, items: { type: "string", maxLength: 40 } },
         waitFor: { type: "string", enum: ["reply", "time"] }, wait: { type: "string", maxLength: 40 }, ifNoReply: { type: "string", maxLength: 60 },
-        remindAfter: { type: "string", maxLength: 40 }, thenMoveTo: { type: "string", maxLength: 60 },
+        remindAfter: { type: "string", maxLength: 40 }, thenMoveTo: { type: "string", maxLength: 60 }, teammate: { type: "string", maxLength: 40 },
         next: { type: "string", maxLength: 60 }, ifFails: { type: "string", maxLength: 60 }, ifNotSure: { type: "string", maxLength: 60 },
       } } },
       title: { type: "string", maxLength: 200 }, description: { type: "string", maxLength: 4000 }, zone: { type: "string", maxLength: 60 }, note: { type: "string", maxLength: 2000 },
@@ -944,6 +949,70 @@ export const MATE_TOOLS: MateTool[] = [
         return id === null ? tooMany() : { ok: true, body: { proposal: id, label: action.title, awaiting: sharedActionNeedsReview(action) ? "human review in the secure confirmation screen" : "human confirmation", executed: false } };
       } catch (error) {
         return { ok: false, message: error instanceof Error ? error.message : "That flow change couldn't be drafted." };
+      }
+    },
+  },
+  {
+    name: "get_teammates",
+    description: "The project's AI teammates: who each is (its soul file: role, rules), what it works on, what it did today, and the questions it's waiting on you for. With teammate, one in full with its recent log.",
+    inputSchema: schema({ repo: REPO_ARG, teammate: { type: "integer", minimum: 1 } }),
+    handle: (ctx, args) => {
+      const repos = args["repo"] === undefined ? ctx.who.repos : [repoPathOf(ctx.who, args["repo"])].filter((one): one is string => one !== null);
+      if (repos.length === 0) return { ok: false, message: "Choose a project from list_repos." };
+      const today = new Date(ctx.now); today.setHours(0, 0, 0, 0);
+      const whoIs = (name: string | null) => name === null ? null : name === ctx.who.name ? "you" : "a teammate";
+      const mates = ctx.store.teammates(repos).filter(one => args["teammate"] === undefined || one.id === args["teammate"]);
+      if (args["teammate"] !== undefined && mates.length === 0) return { ok: false, message: "No such teammate in your projects." };
+      return { ok: true, body: {
+        teammates: mates.map(mate => ({
+          teammate: mate.id, name: nameOf(mate), label: labelOf(mate), handle: mate.handle, project: repoIdOf(ctx.who, mate.repo), working: mate.state === "active",
+          reportsTo: whoIs(mate.manager), soul: args["teammate"] === undefined ? mate.soul.slice(0, 600) : mate.soul, version: mate.version,
+          worksOn: zonesOf(ctx.store, mate).map(one => ({ flow: one.flow, flowName: one.flowName, zone: one.title, how: one.kind })),
+          today: summaryOf(ctx.store, mate, today.toISOString()).said,
+          questions: ctx.store.openTeammateQuestions([mate.id]).map(one => ({ question: one.id, card: one.card, asks: one.question, options: one.options.map(option => option.label), askedOf: whoIs(one.askedOf) })),
+          ...(args["teammate"] === undefined ? {} : { recent: ctx.store.teammateEvents(mate.id, 30).map(one => ({ kind: one.kind, said: one.said, at: one.at })) }),
+        })),
+        templates: TEAMMATE_TEMPLATES.map(one => ({ template: one.id, about: one.about })),
+        rule: "Change teammates with propose_teammate. They decide flow work within their rules and never approve code tasks or merges.",
+      } };
+    },
+  },
+  {
+    name: "propose_teammate",
+    description: "Draft a teammate change as a card the operator confirms. create: a teammate in a project (repo) from a template (support, sales, ops, triage; name renames it) or a whole soul file (markdown: front matter with name and role, then sections like ## Who you are, ## How you write, ## What you know, ## Decide on your own, ## Ask first, ## Never). edit_section: replace one section of its soul file (section: its title, like 'Decide on your own'; text: the new section, as lines; a new title adds the section) — use this for changing its rules; edit_soul: the whole new soul file, when it's short (keep its name). pause, resume, remove. note: something for it to keep in mind (note). answer: answer its open question (question, and choice: one of its options, or text). Put a teammate to work with propose_flow (an approval step's teammate, or a 'teammate' step).",
+    inputSchema: schema({
+      operation: { type: "string", enum: ["create", "edit_section", "edit_soul", "pause", "resume", "remove", "note", "answer"] }, section: { type: "string", maxLength: 60 },
+      repo: REPO_ARG, teammate: { type: "integer", minimum: 1 }, template: { type: "string", enum: TEAMMATE_TEMPLATES.map(one => one.id) },
+      name: { type: "string", maxLength: 40 }, soul: { type: "string", maxLength: 12000 }, note: { type: "string", maxLength: 1000 },
+      question: { type: "integer", minimum: 1 }, choice: { type: "string", maxLength: 60 }, text: { type: "string", maxLength: 2000 },
+    }, ["operation"]),
+    handle: (ctx, args) => {
+      const pick = (keys: readonly string[]) => Object.fromEntries(keys.filter(key => args[key] !== undefined).map(key => [key, args[key]]));
+      let operation: ChatAction, input: Record<string, unknown>;
+      try {
+        switch (args["operation"]) {
+          case "create": {
+            const repo = repoPathOf(ctx.who, args["repo"]);
+            if (repo === null) return { ok: false, message: "Choose a project from list_repos." };
+            operation = "teammate_create"; input = { repo, ...pick(["template", "name", "soul"]) }; break;
+          }
+          case "edit_soul": operation = "teammate_soul"; input = pick(["teammate", "soul"]); break;
+          case "edit_section": {
+            const mate = Number.isSafeInteger(args["teammate"]) ? ctx.store.getTeammate(Number(args["teammate"])) : null;
+            if (mate === null || !ctx.who.repos.includes(mate.repo)) return { ok: false, message: "Choose a teammate from get_teammates." };
+            if (typeof args["section"] !== "string" || args["section"].trim() === "" || typeof args["text"] !== "string") return { ok: false, message: "Give the section's title and its new text." };
+            operation = "teammate_soul"; input = { teammate: mate.id, soul: withSection(mate.soul, args["section"], args["text"]) }; break;
+          }
+          case "pause": case "resume": case "remove": operation = "teammate_state"; input = { ...pick(["teammate"]), state: args["operation"] === "pause" ? "paused" : args["operation"] === "resume" ? "active" : "removed" }; break;
+          case "note": operation = "teammate_note"; input = pick(["teammate", "note"]); break;
+          case "answer": operation = "teammate_answer"; input = pick(["question", "choice", "text"]); break;
+          default: return { ok: false, message: "Choose create, edit_section, edit_soul, pause, resume, remove, note or answer." };
+        }
+        const action = prepareSharedAction(ctx.store, ctx.who, operation, input, ctx.evidenceRoot, ctx.now);
+        const id = ctx.draft("action", { ...action });
+        return id === null ? tooMany() : { ok: true, body: { proposal: id, label: action.title, awaiting: sharedActionNeedsReview(action) ? "human review in the secure confirmation screen" : "human confirmation", executed: false } };
+      } catch (error) {
+        return { ok: false, message: error instanceof Error ? error.message : "That teammate change couldn't be drafted." };
       }
     },
   },

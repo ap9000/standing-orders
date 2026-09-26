@@ -702,6 +702,96 @@ await check("Follow-ups: a card emails someone and waits; their reply moves it o
 
 // ------------------------------------------------------------------ two people on one flow
 
+await check("AI teammates: Maya (a support rep) answers a question card, approves a small refund on her own, brings the big one to you, and stops while paused (real Claude turns)", [], async () => {
+  // A teammate from the Support rep template, on the Teammates page; its soul file saves as a new version.
+  await page.goto(`${base}/teammates`);
+  await page.selectOption('form[data-new-teammate] select[name="template"]', "support");
+  await Promise.all([page.waitForNavigation(), page.click('form[data-new-teammate] button')]);
+  const mateId = Number(/\/teammates\/(\d+)/.exec(page.url())?.[1]);
+  if (!mateId) throw new Error(`no teammate page: ${page.url()}`);
+  const soul = await page.inputValue("#teammate-soul");
+  if (!/name: Maya/.test(soul) || !/Refunds and replacements up to \$50/.test(soul)) throw new Error(`the template's soul file: ${soul.slice(0, 200)}`);
+  await page.fill("#teammate-soul", soul.replace("## What you know\n", "## What you know\n- Order numbers look like #1234.\n"));
+  await Promise.all([page.waitForNavigation(), page.click('form[data-soul-form] button')]);
+  if (!/version 2/.test(new URL(page.url()).searchParams.get("said") ?? "")) throw new Error(`saving the soul file said: ${page.url()}`);
+  // A flow Maya works: she reads each message and picks where it goes, then decides the refunds.
+  const at = (id, title, kind, x, y, rest) => ({ id, title, kind, zone: zone(x, y), ...none, next: null, onFail: null, ...rest });
+  const id = await newFlow("Support desk", [
+    at("read", "Maya reads it", "teammate", 0, 0, { teammate: "maya", instructions: "Read the customer's message. Write the short reply we'd send them, and pick where it goes: a refund request goes to the refund decision; anything else is just a question.",
+      routes: [{ answer: "Just a question", to: "answered" }, { answer: "Refund request", to: "decide" }], onFail: "stuck" }),
+    at("decide", "Refund?", "approval", 360, 0, { teammate: "maya", toOwner: true, next: "refunded", onFail: "declined" }),
+    at("answered", "Answered", "inbox", 0, 380, {}), at("refunded", "Refunded", "inbox", 720, 0, {}), at("declined", "Declined", "inbox", 720, 380, {}), at("stuck", "For a person", "inbox", 360, 380, {}),
+  ], "read");
+  await addCard("Where is my order #1201?", "Hi, I ordered a lamp last week and it hasn't arrived yet. Any news? — Priya");
+  await addCard("Charged twice for order #1202", "I was charged $30 twice for the same order. Can I get the extra $30 back? — Sam");
+  await addCard("Broken TV, order #1203", "My $400 TV arrived with a cracked screen. I want my money back. — Lee");
+  const cardOf = async title => (await flowView(id)).cards.find(one => one.title.startsWith(title));
+  const question = await until("Maya to answer the question card", async () => { const one = await cardOf("Where is my order"); return one?.stage === "answered" ? one : null; }, { timeoutMs: 300_000, everyMs: 3000 });
+  const reply = question.outputs.find(one => one.stage === "read")?.text ?? "";
+  if (reply.length < 20) throw new Error(`her reply: ${reply}`);
+  const small = await until("Maya to approve the $30 refund on her own", async () => { const one = await cardOf("Charged twice"); return one?.stage === "refunded" ? one : null; }, { timeoutMs: 300_000, everyMs: 3000 });
+  if (!small.history.some(one => /Approved by Maya \(AI\)/.test(one.text))) throw new Error(`its history: ${small.history.map(one => one.text).join(" | ")}`);
+  // The $400 one is over her limit: she brings it to the flow's owner (a decision, or a question first).
+  const brought = await until("Maya to bring the $400 refund to you", async () => { const one = await cardOf("Broken TV"); return one?.canDecide || one?.question?.mine ? one : null; }, { timeoutMs: 300_000, everyMs: 3000 });
+  await page.reload(); await page.waitForSelector("[data-zone]");
+  await page.locator(`[data-card="${brought.id}"]`).click();
+  await page.waitForSelector(`[data-flow-card-panel="${brought.id}"]`);
+  await shot("teammate-brings-it");
+  if (brought.question?.mine) {
+    await page.locator(`[data-teammate-question] textarea`).fill("Yes, it's a refund request. Go ahead and send it to the refund decision.");
+    await page.locator(`[data-teammate-question] button:has-text("Answer")`).click();
+  }
+  const handed = await until("the decision to be yours", async () => { const one = await cardOf("Broken TV"); return one?.canDecide ? one : one?.stage === "refunded" ? one : null; }, { timeoutMs: 300_000, everyMs: 3000 });
+  if (handed.stage !== "refunded") {
+    await page.reload(); await page.waitForSelector("[data-zone]");
+    await page.locator(`[data-card="${handed.id}"]`).click();
+    // What Maya said when she handed it over is in front of the person deciding.
+    if (handed.handoff != null && !/^Maya · Support:/.test(await page.locator("[data-teammate-handoff]").innerText())) throw new Error("Maya's note isn't on the decision");
+    await page.click('[data-flow-card-panel] button:has-text("Approve")');
+    await until("the $400 refund to be approved by you", async () => (await cardOf("Broken TV"))?.stage === "refunded", { timeoutMs: 30_000, everyMs: 1000 });
+  }
+  const told = rows(`SELECT subject FROM notification WHERE recipient = 'alex' AND subject LIKE 'Maya · Support%'`);
+  if (told.length === 0) throw new Error("you weren't told by Maya, under her name");
+  if (rows(`SELECT 1 FROM flow_event WHERE actor = 'alex' AND outcome = 'approved'`).length === 0 && rows(`SELECT 1 FROM teammate_question WHERE answered_by = 'alex'`).length === 0) throw new Error("no person decided the $400 refund");
+  // Paused, the zones she handles wait; resumed, she picks the card up.
+  await page.goto(`${base}/teammates/${mateId}`);
+  await Promise.all([page.waitForNavigation(), page.click('button:has-text("Pause Maya")')]);
+  await page.goto(`${base}/flows/${id}`); await page.waitForSelector("[data-zone]");
+  await addCard("Where is order #1204?", "Just checking on my order. — Ana");
+  await until("the card to wait while Maya is paused", async () => /paused/.test((await cardOf("Where is order #1204"))?.waiting ?? ""), { timeoutMs: 60_000, everyMs: 2000 });
+  await page.goto(`${base}/teammates/${mateId}`);
+  await Promise.all([page.waitForNavigation(), page.click('button:has-text("Resume Maya")')]);
+  await until("Maya to pick it up again", async () => (await cardOf("Where is order #1204"))?.stage !== "read", { timeoutMs: 300_000, everyMs: 3000 });
+  // Her page: what she did and why, and today's summary sent to her manager.
+  await page.goto(`${base}/teammates/${mateId}`);
+  await Promise.all([page.waitForNavigation(), page.click('button:has-text("Send today\'s summary")')]);
+  if (rows(`SELECT 1 FROM notification WHERE kind = 'teammate-summary' AND recipient = 'alex'`).length === 0) throw new Error("no summary was sent");
+  await sleep(600);
+  await shot("teammate-page");
+  const phone = await signIn("alex", { width: 390, height: 844 }, "dark");
+  await phone.goto(`${base}/teammates/${mateId}`); await phone.waitForLoadState("load"); await sleep(700);
+  await phone.screenshot({ path: join(w.out, "teammate-phone.png") });
+  const wide = await phone.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
+  await phone.context().close();
+  if (wide) throw new Error("the teammate page scrolls sideways on a phone");
+  return { reply: reply.slice(0, 120), summary: (await page.locator(".teammate-summary").innerText()).slice(0, 200) };
+});
+
+await check("The lead adds a teammate and changes one's rules from plain words, as cards you confirm (real Claude turns)", ["Turn the lead chat on (first-run setup, with your password)", "AI teammates: Maya (a support rep) answers a question card, approves a small refund on her own, brings the big one to you, and stops while paused (real Claude turns)"], async () => {
+  const confirm = async reply => {
+    const card = reply.locator('[data-view="chat-card"][data-card-state="pending"]').first();
+    await card.waitFor({ timeout: 30_000 });
+    await card.locator("[data-card-confirm]").click();
+    await until("the card to be confirmed", async () => (await reply.locator('[data-view="chat-card"][data-card-state="confirmed"]').count()) > 0, { timeoutMs: 30_000 });
+  };
+  await confirm((await askLead("Add a sales rep teammate called Leo to this project. Just draft it, no need to ask.")).reply);
+  if (rows("SELECT 1 FROM teammate WHERE handle = 'leo' AND state = 'active'").length !== 1) throw new Error("Leo isn't on the team");
+  await confirm((await askLead("Maya can approve refunds and replacements up to $100 on her own now. Update her rules.")).reply);
+  const soul = rows("SELECT soul FROM teammate WHERE handle = 'maya'")[0]?.soul ?? "";
+  if (!/\$100/.test(soul) || !/name: Maya/.test(soul)) throw new Error(`Maya's soul file: ${soul.slice(0, 400)}`);
+  return { maya: soul.split("## Decide on your own")[1]?.split("##")[0]?.trim().slice(0, 200) };
+});
+
 await check("Live canvas: a teammate sees who's here and a card move without reloading", ["Code steps: a Python file and a Node script get the card, pass on what they print, pick the next zone, and get a secret"], async () => {
   const sam = await signIn("sam");
   try {

@@ -44,6 +44,9 @@ import type { FlowCardRow, FlowRow, FlowTriggerRow } from "./store.js";
 import { assignFlowCard, commentOnFlowCard, flowPeople, mentionsIn, watchFlowCard } from "./flow-people.js";
 import { addFlowTriggerTo, describeTrigger, readLinearKey, removeFlowTrigger, takesDeliveries, triggerConfigOf, validateTriggerConfig } from "./flow-triggers.js";
 import { dirname } from "node:path";
+import { handleOf, parseSoul, SOUL_CHARS, TEAMMATE_TEMPLATES, teammateLabel } from "./teammates.js";
+import { createTeammateFrom, labelOf, leaveNote, nameOf, renamedSoul, saveSoul, setTeammateState } from "./teammate-admin.js";
+import { answerTeammateQuestion } from "./teammate-work.js";
 
 /** A tool from the lead's card: a common tool by its id, or the operator's own program or address. */
 function toolSpecFromRequest(input: Record<string, unknown>): ToolSpec {
@@ -106,6 +109,11 @@ export const CHAT_ACTIONS = {
   flow_trigger_pause: { label: "Pause trigger", protected: false, password: false },
   flow_trigger_resume: { label: "Turn trigger on", protected: false, password: false },
   flow_trigger_remove: { label: "Remove trigger", protected: false, password: false },
+  teammate_create: { label: "Add teammate", protected: false, password: false },
+  teammate_soul: { label: "Update soul file", protected: false, password: false },
+  teammate_state: { label: "Change teammate", protected: false, password: false },
+  teammate_note: { label: "Tell teammate", protected: false, password: false },
+  teammate_answer: { label: "Answer teammate", protected: false, password: false },
   decision_record: { label: "Record decision", protected: false, password: false },
   decision_retire: { label: "Retire decision", protected: false, password: false },
   scope_approve: { label: "Approve work", protected: true, password: true },
@@ -159,6 +167,11 @@ export const CHAT_ACTION_FIELDS: Record<ChatAction, readonly string[]> = {
   flow_trigger_pause: ["trigger"],
   flow_trigger_resume: ["trigger"],
   flow_trigger_remove: ["trigger"],
+  teammate_create: ["repo", "template", "name", "soul"],
+  teammate_soul: ["teammate", "soul"],
+  teammate_state: ["teammate", "state"],
+  teammate_note: ["teammate", "note"],
+  teammate_answer: ["question", "choice", "text"],
   decision_record: ["repo", "claim", "why", "supersedes", "source"],
   decision_retire: ["repo", "decision", "reason"],
   scope_approve: ["task"],
@@ -288,12 +301,18 @@ export function prepareSharedAction(
   if (Object.keys(input).some((key) => !allowed.includes(key)))
     throw Error("This action contains an unsupported field.");
   const task =
-    operation.startsWith("skill_") || operation.startsWith("knowledge_") || operation.startsWith("decision_") || operation.startsWith("tool_") || operation.startsWith("flow_")
+    operation.startsWith("skill_") || operation.startsWith("knowledge_") || operation.startsWith("decision_") || operation.startsWith("tool_") || operation.startsWith("flow_") || operation.startsWith("teammate_")
       ? null
       : text(input, "task", 64);
   const flowTarget = operation.startsWith("flow_") && operation !== "flow_create" && operation !== "flow_script_save" ? flowTargetOf(store, input) : null;
+  // v92: a teammate names its project; a question names it through its card's flow.
+  const mateTarget = operation.startsWith("teammate_") && operation !== "teammate_create" && operation !== "teammate_answer" ? store.getTeammate(integer(input, "teammate")) : null;
+  if (mateTarget !== null && mateTarget.state === "removed") throw Error("That teammate is off the team.");
+  const questionTarget = operation === "teammate_answer" ? store.teammateQuestion(integer(input, "question")) : null;
+  const questionFlow = questionTarget === null ? null : store.getFlow(store.getFlowCard(questionTarget.card)?.flow ?? -1);
+  if (operation === "teammate_answer" && (questionTarget === null || questionFlow === null)) throw Error("That question isn't open any more.");
   const repo =
-    flowTarget !== null ? flowTarget.flow.repo : task === null ? text(input, "repo", 4096) : store.lookupRef(task)?.repo;
+    flowTarget !== null ? flowTarget.flow.repo : mateTarget !== null ? mateTarget.repo : questionFlow !== null ? questionFlow.repo : task === null ? text(input, "repo", 4096) : store.lookupRef(task)?.repo;
   if (!repo) throw Error("Choose an available project.");
   requireActor(store, who, repo);
   const request = structuredClone(input),
@@ -394,6 +413,57 @@ export function prepareSharedAction(
         throw Error(`${project} has no tool called ${name}.`);
       title = `Remove ${name} from ${project}`;
       terms.push("Builds stop using it right away. Its stored secrets are deleted.");
+    }
+  } else if (operation.startsWith("teammate_")) {
+    const project = repo.split(/[\\/]/).filter(Boolean).at(-1) ?? repo;
+    const mate = mateTarget;
+    if (operation === "teammate_create") {
+      const template = TEAMMATE_TEMPLATES.find(one => one.id === input["template"]);
+      const given = typeof input["soul"] === "string" && input["soul"].trim() !== "" ? text(input, "soul", SOUL_CHARS) : null;
+      if ((template === undefined) === (given === null)) throw Error("Start from a template, or write the whole soul file, not both.");
+      let soul = given ?? template!.soul;
+      if (typeof input["name"] === "string" && input["name"].trim() !== "") soul = renamedSoul(soul, text(input, "name", 40));
+      const read = parseSoul(soul);
+      if (!read.ok) throw Error(read.problem);
+      if (store.teammateByHandle(repo, handleOf(read.soul.name)) !== null) throw Error(`There's already a teammate called ${read.soul.name} in ${project}.`);
+      Object.assign(request, { soul }); delete request["template"]; delete request["name"];
+      state = { handle: handleOf(read.soul.name) };
+      title = `Add ${teammateLabel(read.soul)} to the team in ${project}`;
+      terms.push(soul.trim(), `${read.soul.name} decides only within these rules and asks you when they say to. Teammates never approve code tasks or merges.`);
+    } else if (operation === "teammate_soul") {
+      const soul = text(input, "soul", SOUL_CHARS);
+      const read = parseSoul(soul);
+      if (!read.ok) throw Error(read.problem);
+      if (handleOf(read.soul.name) !== mate!.handle) throw Error("Keep the teammate's name; make a new teammate for another name.");
+      if (soul.trim() === mate!.soul.trim()) throw Error("That's already its soul file.");
+      state = { version: mate!.version };
+      title = `Update ${teammateLabel(read.soul)}'s soul file`;
+      terms.push(soul.trim(), `Replaces version ${mate!.version}. Its next turn reads this.`);
+    } else if (operation === "teammate_state") {
+      const wanted = input["state"];
+      if (wanted !== "active" && wanted !== "paused" && wanted !== "removed") throw Error("Choose pause, resume or remove.");
+      state = { state: mate!.state };
+      title = `${wanted === "paused" ? "Pause" : wanted === "active" ? "Resume" : "Remove"} ${labelOf(mate!)}`;
+      terms.push(wanted === "paused" ? "Its decisions go to people and the zones it handles wait until you resume it." : wanted === "active" ? "It picks up its zones' cards again." : "It leaves the team: zones that name it go to people.");
+    } else if (operation === "teammate_note") {
+      const note = text(input, "note", 1000).trim();
+      if (note === "") throw Error("Say what it should know.");
+      request["note"] = note;
+      state = { teammate: mate!.id };
+      title = `Tell ${nameOf(mate!)}`;
+      terms.push(note, "Every turn reads its latest ten notes.");
+    } else {
+      const question = questionTarget!;
+      if (question.state !== "open") throw Error("That question was already answered.");
+      if (question.askedOf !== who.name) throw Error(`Only ${question.askedOf} can answer this one.`);
+      const choice = typeof input["choice"] === "string" ? question.options.find(one => one.id === input["choice"] || one.label.toLowerCase() === String(input["choice"]).trim().toLowerCase()) ?? null : null;
+      const said = typeof input["text"] === "string" ? text(input, "text", 2000).trim() : "";
+      if (choice === null && said === "") throw Error("Pick one of its options or say the answer.");
+      Object.assign(request, { choice: choice?.id ?? null, text: said || null });
+      state = { question: question.id };
+      const mateOf = store.getTeammate(question.teammate);
+      title = `Answer ${mateOf === null ? "the teammate" : nameOf(mateOf)}`;
+      terms.push(question.question, `Your answer: ${[choice?.label, said].filter(Boolean).join(" — ")}`);
     }
   } else if (operation.startsWith("flow_")) {
     const project = repo.split(/[\\/]/).filter(Boolean).at(-1) ?? repo;
@@ -984,6 +1054,10 @@ export function executeSharedAction(
         const done = runFlowAction(store, payload, actor, who.repos, options.root, now);
         return { ok: true as const, taskId: null, said: done.said, href: done.href };
       }
+      else if (payload.operation.startsWith("teammate_")) {
+        const done = runTeammateAction(store, payload, actor, now);
+        return { ok: true as const, taskId: null, said: done.said, href: done.href };
+      }
       else if (payload.operation === "tool_add") {
         const added = addToolTo(store, repo, toolSpecFromRequest(req), req["catalog"] === undefined ? "the lead, confirmed by you" : "the common tools list", actor, now);
         if (!added.ok) throw Error(added.message);
@@ -1105,6 +1179,30 @@ export function executeSharedAction(
         : "The action could not be completed.",
     );
   }
+}
+
+/** A confirmed teammate action (v92), through the same helpers the Teammates pages use. */
+function runTeammateAction(store: Store, payload: SharedAction, actor: string, now: Date): { said: string; href: string } {
+  const req = payload.request;
+  if (payload.operation === "teammate_create") {
+    const made = createTeammateFrom(store, { repo: payload.repo, soul: String(req["soul"]), by: actor }, now);
+    if (!made.ok) throw Error(made.said);
+    return { said: made.said, href: `/teammates/${made.id}` };
+  }
+  if (payload.operation === "teammate_answer") {
+    const question = store.teammateQuestion(Number(req["question"]));
+    const answered = answerTeammateQuestion(store, Number(req["question"]), { choice: req["choice"] === null ? null : String(req["choice"]), text: req["text"] === null ? null : String(req["text"]), by: actor, via: "chat" }, now);
+    if (!answered.ok) throw Error(answered.said);
+    return { said: answered.said, href: question === null ? "/teammates" : `/teammates/${question.teammate}` };
+  }
+  const mate = store.getTeammate(Number(req["teammate"]));
+  if (mate === null || mate.state === "removed") throw Error("That teammate is off the team.");
+  if (payload.operation === "teammate_soul" && mate.version !== payload.state["version"]) throw Error("Someone changed its soul file since. Ask for a fresh proposal.");
+  const done = payload.operation === "teammate_soul" ? saveSoul(store, mate, String(req["soul"]), actor, now)
+    : payload.operation === "teammate_state" ? setTeammateState(store, mate, req["state"] as "active" | "paused" | "removed", actor, now)
+    : leaveNote(store, mate, String(req["note"]), actor, now);
+  if (!done.ok) throw Error(done.said);
+  return { said: done.said, href: payload.operation === "teammate_state" && req["state"] === "removed" ? "/teammates" : `/teammates/${mate.id}` };
 }
 
 /** A confirmed flow action, through the same helpers the canvas uses; then

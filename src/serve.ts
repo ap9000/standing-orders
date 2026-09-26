@@ -20,6 +20,9 @@ import { changeSkills, githubSkill, importSkill, readSkillsSnapshot, reviseSkill
 import { skillsHtml, skillsScript, skillsSnapshotHtml, skillTestFeedbackHtml, SKILLS_CSS } from "./skills-ui.js";
 import { toolsHtml, TOOLS_CSS, type ToolsView } from "./tools-ui.js";
 import { flowFallbackHtml, flowsListHtml, flowView, FLOWS_CSS } from "./flows-ui.js";
+import { BLANK_SOUL, teammatePageHtml, teammatesListHtml } from "./teammates-ui.js";
+import { createTeammateFrom, labelOf, leaveNote, saveSoul, setTeammateState, teammateSettings, sendTeammateSummaries } from "./teammate-admin.js";
+import { answerTeammateQuestion } from "./teammate-work.js";
 import { createFlowRooms, flowFingerprint } from "./flow-live.js";
 import { disconnectGoogle, finishGoogleConsent, GOOGLE_CALLBACK, googleConnected, googleConsent, readGoogleMail, saveGoogleClient, type GoogleVisit } from "./google-mail.js";
 import { mailboxAccess, readThroughImap } from "./mailbox.js";
@@ -1424,6 +1427,8 @@ export function createDecisionServer(options: ServeOptions): Server {
       url.pathname !== "/recipes" &&
       // A flow names its own project; the list spans every project.
       url.pathname !== "/flows" && !/^\/flows\/[0-9]{1,15}(\/insights|\/runs\/[0-9]{1,15}\/[0-9]{1,15})?$/.test(url.pathname) &&
+      // Teammates (v92) name their own project, like flows.
+      !url.pathname.startsWith("/teammates") &&
       // New work names its project in the form (a dropdown of known
       // projects); /tasks/add still admits the posted repo on its own.
       url.pathname !== "/tasks/new" && url.pathname !== "/tasks/add" &&
@@ -2681,6 +2686,24 @@ export function createDecisionServer(options: ServeOptions): Server {
       const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
       const flows = store.listFlows(projects);
       return sendScreen(response, 200, screen("Flows", `<h1>Flows</h1>${flowsListHtml(store, flows, projects, who.via === "cookie" ? who.session.csrf : "", who.via === "cookie" && who.role === "approver", url.searchParams.get("problem"))}`, { chrome: chromeFor(project, "flows") }));
+    }
+    // v92: AI teammates — the team, and one page per teammate.
+    if (url.pathname === "/teammates") {
+      const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
+      return sendScreen(response, 200, screen("Teammates", `<h1>Teammates</h1>${teammatesListHtml(store, store.teammates(projects), projects, projectName, who.via === "cookie" ? who.session.csrf : "", who.via === "cookie" && who.role === "approver",
+        { said: url.searchParams.get("said"), problem: url.searchParams.get("problem") })}`, { chrome: chromeFor(project, "flows") }));
+    }
+    const teammateRead = /^\/teammates\/([1-9][0-9]{0,9})(\/soul\.md)?$/.exec(url.pathname);
+    if (teammateRead !== null) {
+      const mate = store.getTeammate(Number(teammateRead[1]));
+      if (mate === null || mate.state === "removed" || !visible(mate.repo) || !store.accountCanAccess(who.name, mate.repo)) return refuse(response, who, 404, "No such teammate in your projects.", "/teammates");
+      if (teammateRead[2] !== undefined) {
+        response.writeHead(200, { ...SAFETY, "Content-Type": "text/markdown; charset=utf-8", "Content-Disposition": `attachment; filename="${mate.handle}.md"` });
+        return void response.end(mate.soul);
+      }
+      const approvers = store.listApprovers().map(one => one.name).filter(name => store.accountCanAccess(name, mate.repo));
+      return sendScreen(response, 200, screen(labelOf(mate), `<h1>${escape(labelOf(mate))}</h1>${teammatePageHtml(store, mate, who.name, projectName, who.via === "cookie" ? who.session.csrf : "", who.via === "cookie" && who.role === "approver", approvers,
+        { said: url.searchParams.get("said"), problem: url.searchParams.get("problem") })}`, { chrome: chromeFor(mate.repo, "flows") }));
     }
     const flowRead = /^\/flows\/([1-9][0-9]{0,9})\/(insights|runs\/([1-9][0-9]{0,9})\/([1-9][0-9]{0,9}))$/.exec(url.pathname);
     if (flowRead !== null) {
@@ -5474,6 +5497,52 @@ export function createDecisionServer(options: ServeOptions): Server {
         try {content=skillsHtml(skillsView(store,repo,who.name),who.session.csrf,true,{error:message,draft:Object.fromEntries(['method','content','url','sample','sha'].map(k=>[k,body.get(k)??'']))});}catch{/* Do not display unverified packages. */}
         return sendScreen(response,409,screen('Skills',`<h1>Skills</h1>${content}`,{chrome:chromeFor(repo,'settings'),functional:{script:skillsScript()}}));
       }
+    }
+    // v92: looking after teammates, and answering their questions.
+    const teammatePost = url.pathname === "/teammates/new" ? ["", "0", "new"] as const : /^\/teammates\/([1-9][0-9]{0,9})\/(soul|state|note|settings|summary)$/.exec(url.pathname);
+    const questionPost = /^\/teammates\/questions\/([1-9][0-9]{0,9})\/answer$/.exec(url.pathname);
+    if (teammatePost !== null || questionPost !== null) {
+      const now = clock();
+      const wantsJson = (request.headers.accept ?? "").includes("application/json");
+      if (who.via !== "cookie") return refuse(response, who, 403, "Sign in to do that.", "/teammates");
+      if (questionPost !== null) {
+        const question = store.teammateQuestion(Number(questionPost[1]));
+        const card = question === null ? null : store.getFlowCard(question.card);
+        const flow = card === null ? null : store.getFlow(card.flow);
+        const done = question === null || flow === null || !visible(flow.repo) ? { ok: false as const, said: "No such question." }
+          : answerTeammateQuestion(store, question.id, { choice: body.get("choice"), text: body.get("text"), by: who.name, via: "web" }, now);
+        if (wantsJson) return respond(response, done.ok ? 200 : 409, "application/json; charset=utf-8", JSON.stringify(done));
+        const back = question === null ? "/teammates" : `/teammates/${question.teammate}`;
+        return redirect(response, `${back}?${done.ok ? "said" : "problem"}=${encodeURIComponent(done.said)}`);
+      }
+      if (who.role !== "approver") return refuse(response, who, 403, "Sign in as an approver to look after teammates.", "/teammates");
+      if (teammatePost![2] === "new") {
+        const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
+        const repo = body.get("repo") ?? "";
+        if (!projects.includes(repo)) return redirect(response, `/teammates?problem=${encodeURIComponent("Choose one of your projects.")}`);
+        const template = body.get("template") ?? "";
+        const made = createTeammateFrom(store, { repo, template: template === "blank" ? null : template, name: body.get("name"), soul: template === "blank" ? BLANK_SOUL.replace("name: \n", `name: ${(body.get("name") ?? "").trim() || "Sam"}\n`).replace("role: \n", "role: Assistant\n") : null, by: who.name }, now);
+        return made.ok ? redirect(response, `/teammates/${made.id}?said=${encodeURIComponent(made.said)}`) : redirect(response, `/teammates?problem=${encodeURIComponent(made.said)}`);
+      }
+      const mate = store.getTeammate(Number(teammatePost![1]));
+      if (mate === null || mate.state === "removed" || !visible(mate.repo) || !store.accountCanAccess(who.name, mate.repo)) return refuse(response, who, 404, "No such teammate in your projects.", "/teammates");
+      const back = `/teammates/${mate.id}`;
+      const action = teammatePost![2];
+      if (action === "soul") {
+        const soul = body.get("soul") ?? "";
+        const saved = saveSoul(store, mate, soul, who.name, now);
+        if (!saved.ok) {
+          const approvers = store.listApprovers().map(one => one.name).filter(name => store.accountCanAccess(name, mate.repo));
+          return sendScreen(response, 400, screen(labelOf(mate), `<h1>${escape(labelOf(mate))}</h1>${teammatePageHtml(store, mate, who.name, projectName, who.session.csrf, true, approvers, { problem: saved.said, soulDraft: soul })}`, { chrome: chromeFor(mate.repo, "flows") }));
+        }
+        return redirect(response, `${back}?said=${encodeURIComponent(saved.said)}`);
+      }
+      const done = action === "state" ? setTeammateState(store, mate, body.get("state") === "removed" ? "removed" : body.get("state") === "paused" ? "paused" : "active", who.name, now)
+        : action === "note" ? leaveNote(store, mate, body.get("note") ?? "", who.name, now)
+        : action === "settings" ? teammateSettings(store, mate, { model: body.get("model") ?? "default", dailyTurns: Number(body.get("dailyTurns")), manager: body.get("manager") ?? mate.manager }, who.name, now)
+        : sendTeammateSummaries(store, mate.repo, now, mate.id) > 0 ? { ok: true as const, said: `Sent today's summary to ${mate.manager}.` } : { ok: false as const, said: "The summary couldn't be sent." };
+      if (action === "state" && body.get("state") === "removed" && done.ok) return redirect(response, `/teammates?said=${encodeURIComponent(done.said)}`);
+      return redirect(response, `${back}?${done.ok ? "said" : "problem"}=${encodeURIComponent(done.said)}`);
     }
     const flowPost = /^\/flows\/([1-9][0-9]{0,9})\/(save|cards|archive|triggers|linear-key|hooks-address|scripts|secrets)$/.exec(url.pathname) ?? /^\/flows\/([1-9][0-9]{0,9})\/cards\/([1-9][0-9]{0,9})\/(move|decide|cancel|comment|assign|watch)$/.exec(url.pathname);
     const triggerPost = /^\/flows\/([1-9][0-9]{0,9})\/triggers\/([1-9][0-9]{0,9})\/(pause|resume|remove|check|press|renew|secret|share|unshare)$/.exec(url.pathname);

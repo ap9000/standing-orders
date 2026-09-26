@@ -12,6 +12,7 @@ import type { FlowCardRow, FlowRow, Store } from "./store.js";
 import { flowFingerprint } from "./flow-live.js";
 import { googleConnected } from "./google-mail.js";
 import { mailboxReady } from "./mailbox.js";
+import { labelOf, nameOf } from "./teammate-admin.js";
 
 const e = (value: unknown) =>
   String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
@@ -36,7 +37,8 @@ export function flowsListHtml(store: Store, flows: readonly FlowRow[], projects:
     ? `<form method="post" action="/flows/example" class="card flow-example"><input type="hidden" name="csrf" value="${e(csrf)}"><h2>See a flow work</h2><p class="meta">Claude drafts a reply to a sample customer question; you approve it here or in your chat app.</p>${projects.length === 1 ? `<input type="hidden" name="repo" value="${e(projects[0]!)}">` : `<label>Project<select name="repo">${projects.map(repo => `<option value="${e(repo)}">${e(projectName(repo))}</option>`).join("")}</select></label>`}<button>Try an example</button></form>`
     : "";
   const intro = `<p class="meta">A flow is your process drawn as zones. Cards move through them: agents do the work, people approve, and the team hears about it.</p>` +
-    (canCreate && projects.length > 0 ? `<p class="flow-chat">Describe how work should move and your lead drafts the flow for you to confirm, or start from a template below. <a href="/chat?draft=${encodeURIComponent("Make a flow for ")}">Describe it in chat</a></p>` : "");
+    (canCreate && projects.length > 0 ? `<p class="flow-chat">Describe how work should move and your lead drafts the flow for you to confirm, or start from a template below. <a href="/chat?draft=${encodeURIComponent("Make a flow for ")}">Describe it in chat</a></p>` : "") +
+    `<p class="flow-chat">AI teammates can decide and handle cards for you, within rules you write. <a href="/teammates">Teammates</a></p>`;
   return `<section class="flows">${problem === null ? "" : `<p class="problem" role="alert">${e(problem)}</p>`}${intro}${rows || example || '<p class="meta">No flows yet.</p>'}${create}</section>`;
 }
 
@@ -67,7 +69,9 @@ export function flowView(store: Store, flow: FlowRow, viewer: { name: string; ap
     const discussion = store.flowComments(card.id);
     const watchers = store.flowCardWatchers(card.id);
     const decider = stage?.kind === "approval" ? deciderOf(stage, flow) : null;
-    const canDecide = viewer.approver && card.state === "active" && stage?.kind === "approval" && (decider === null || decider === viewer.name);
+    // While its teammate is deciding (v92), the card isn't anyone else's to decide yet.
+    const teammateDeciding = stage?.teammate !== undefined && card.waiting !== null && card.waiting.endsWith(" is deciding");
+    const canDecide = viewer.approver && card.state === "active" && stage?.kind === "approval" && (decider === null || decider === viewer.name) && !teammateDeciding;
     // History reads moves and ownership together, newest first.
     const owned = discussion.filter(one => one.kind === "owner").map(one => ({ text: one.body === "" ? `${one.author} left it without an owner` : one.body === one.author ? `${one.author} took it on` : `${one.author} made ${one.body} the owner`, at: one.at }));
     const moves = store.flowEvents(card.id).map(event => ({ text: historyText(event, title, sortZones), at: event.at }));
@@ -80,6 +84,18 @@ export function flowView(store: Store, flow: FlowRow, viewer: { name: string; ap
       at: until.toISOString(),
       label: stage!.wait !== undefined ? (stage!.wait.for === "reply" ? "No reply by" : "Moves on at") : stage!.limit!.to !== null ? `Moves to ${title(stage!.limit!.to)} at` : "Reminder at",
     };
+    const asked = card.state === "active" ? store.teammateQuestionFor(card.id, card.entry) : null;
+    // A decision its teammate handed over carries what the teammate said (v92).
+    const turn = card.state === "active" && stage?.kind === "approval" && stage.teammate !== undefined ? store.flowStepRun(card.id, card.entry) : null;
+    let handoff: { from: string; note: string } | null = null;
+    if (turn !== null && turn.kind === "teammate" && turn.state === "passed") {
+      try {
+        const said = JSON.parse(turn.decisionJson ?? "{}") as { action?: unknown; note?: unknown };
+        const mate = store.teammateByHandle(flow.repo, stage!.teammate!);
+        if (said.action === "hand_off" && typeof said.note === "string" && said.note !== "" && mate !== null) handoff = { from: labelOf(mate), note: said.note };
+      } catch { handoff = null; }
+    }
+    const asker = asked === null || asked.state !== "open" ? null : store.getTeammate(asked.teammate);
     return {
       id: card.id, title: card.title, description: card.description, stage: card.stage, state: card.state, waiting: card.waiting,
       task: task === null ? null : { id: task, href: `/t/${encodeURIComponent(task)}` },
@@ -94,6 +110,9 @@ export function flowView(store: Store, flow: FlowRow, viewer: { name: string; ap
       sorted: decision === null ? null : { chip: sortChip(decision), confident: decision.confident },
       draft: shown === null || card.state !== "active" || card.outputs[shown.id] === undefined ? null : { zone: shown.id, title: shown.title, text: card.outputs[shown.id]! },
       deadline,
+      handoff,
+      question: asked === null || asked.state !== "open" || asker === null ? null
+        : { id: asked.id, from: labelOf(asker), question: asked.question, options: asked.options, askedOf: asked.askedOf, mine: asked.askedOf === viewer.name },
     };
   });
   const triggers: BrowserFlowTrigger[] = store.flowTriggers(flow.id).map(trigger => {
@@ -122,6 +141,7 @@ export function flowView(store: Store, flow: FlowRow, viewer: { name: string; ap
     startTrigger: setup.startTrigger ?? null,
     me: viewer.name,
     sortReady: setup.sortReady ?? false,
+    teammates: store.teammates([flow.repo]).map(mate => ({ handle: mate.handle, label: labelOf(mate), name: nameOf(mate), working: mate.state === "active", href: `/teammates/${mate.id}` })),
     emailReady: sendingReady(setup.dir),
     requestSecrets: flowSecretNames(setup.dir, flow.repo),
     tools: projectToolsOf(store, flow.repo).map(tool => ({ name: tool.name, about: tool.spec.about, functions: tool.lastTest?.ok === true ? tool.lastTest.tools : [],

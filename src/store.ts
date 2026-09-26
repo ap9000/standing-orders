@@ -122,7 +122,8 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // v89 adds inbox triggers: mail arriving in a mailbox (IMAP, or a connected Google account) and messages in a chat channel start cards.
 // v90 adds code steps: project scripts in Python and Node (or a file in the project), given the card and passing on what they print.
 // v91 adds waiting for replies: each card's email conversation (what was sent, what came back) and where the reply watcher stands.
-export const SCHEMA_VERSION = 91;
+// v92 adds AI teammates: soul files, what each decided and why, and the questions they put to people; a teammate's turn is a flow step.
+export const SCHEMA_VERSION = 92;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -475,7 +476,26 @@ export type MateProposal = {
 };
 
 /** The zones a worker's step pass runs, one run per visit. */
-export type FlowStepKind = "check" | "update" | "sort" | "draft" | "request" | "email" | "tool";
+export type FlowStepKind = "check" | "update" | "sort" | "draft" | "request" | "email" | "tool" | "teammate";
+/** An AI teammate (v92): who it is lives in its soul file; `handle` is how zones and chat name it. */
+export type TeammateRow = { id: number; repo: string; handle: string; state: "active" | "paused" | "removed"; version: number; soul: string; model: string | null; dailyTurns: number;
+  manager: string; createdBy: string; createdAt: string; updatedBy: string; updatedAt: string; summaryAt: string | null };
+export type TeammateEventKind = "decided" | "handled" | "handed" | "asked" | "answered" | "note" | "paused" | "resumed" | "summary" | "failed";
+export type TeammateEventRow = { id: number; teammate: number; card: number | null; entry: number | null; kind: TeammateEventKind; said: string; detail: Record<string, unknown> | null; by: string | null; at: string };
+export type TeammateQuestionRow = { id: number; teammate: number; card: number; entry: number; question: string; options: { id: string; label: string }[]; askedOf: string;
+  state: "open" | "answered" | "dropped"; choice: string | null; answer: string | null; answeredBy: string | null; answeredVia: string | null; answeredAt: string | null; createdAt: string };
+
+function readTeammateRow(row: Record<string, unknown>): TeammateRow {
+  return { id: Number(row["id"]), repo: String(row["repo"]), handle: String(row["handle"]), state: String(row["state"]) as TeammateRow["state"], version: Number(row["version"]), soul: String(row["soul"]),
+    model: row["model"] === null ? null : String(row["model"]), dailyTurns: Number(row["daily_turns"]), manager: String(row["manager"]), createdBy: String(row["created_by"]), createdAt: String(row["created_at"]),
+    updatedBy: String(row["updated_by"]), updatedAt: String(row["updated_at"]), summaryAt: row["summary_at"] === null ? null : String(row["summary_at"]) };
+}
+function readTeammateQuestion(row: Record<string, unknown>): TeammateQuestionRow {
+  const text = (key: string) => row[key] === null || row[key] === undefined ? null : String(row[key]);
+  return { id: Number(row["id"]), teammate: Number(row["teammate"]), card: Number(row["card"]), entry: Number(row["entry"]), question: String(row["question"]),
+    options: JSON.parse(String(row["options_json"])) as { id: string; label: string }[], askedOf: String(row["asked_of"]), state: String(row["state"]) as TeammateQuestionRow["state"],
+    choice: text("choice"), answer: text("answer"), answeredBy: text("answered_by"), answeredVia: text("answered_via"), answeredAt: text("answered_at"), createdAt: String(row["created_at"]) };
+}
 /** A flow; `owner` is who its "the owner decides" zones ask (v86): whoever made it, unless it was handed to someone else. */
 export type FlowRow = { id: number; repo: string; name: string; definitionJson: string; revision: number; state: "active" | "archived"; createdBy: string; createdAt: string; updatedBy: string; updatedAt: string; owner: string };
 export type FlowStepRunRow = { card: number; entry: number; stage: string; kind: FlowStepKind; script: string | null; scriptVersion: number | null; state: "running" | "passed" | "failed" | "waiting"; attempts: number;
@@ -2272,7 +2292,7 @@ CREATE TABLE IF NOT EXISTS flow_step_run (
   card           INTEGER NOT NULL REFERENCES flow_card(id),
   entry          INTEGER NOT NULL,
   stage          TEXT NOT NULL,
-  kind           TEXT NOT NULL CHECK (kind IN ('check','update','sort','draft','request','email','tool')),
+  kind           TEXT NOT NULL CHECK (kind IN ('check','update','sort','draft','request','email','tool','teammate')),
   script         TEXT,
   script_version INTEGER,
   state          TEXT NOT NULL CHECK (state IN ('running','passed','failed','waiting')),
@@ -2308,6 +2328,66 @@ CREATE TABLE IF NOT EXISTS flow_mail (
   at         TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS flow_mail_card ON flow_mail (card, at);
+-- v92: AI teammates. One per project and name; its soul file (who it is,
+-- how it writes, what it decides on its own, what it asks about, what it
+-- never does) is versioned like scripts. Its manager hears its questions
+-- and its daily summary.
+CREATE TABLE IF NOT EXISTS teammate (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo         TEXT NOT NULL,
+  handle       TEXT NOT NULL,
+  state        TEXT NOT NULL CHECK (state IN ('active','paused','removed')),
+  version      INTEGER NOT NULL,
+  soul         TEXT NOT NULL,
+  model        TEXT,
+  daily_turns  INTEGER NOT NULL DEFAULT 200,
+  manager      TEXT NOT NULL,
+  created_by   TEXT NOT NULL,
+  created_at   TEXT NOT NULL,
+  updated_by   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL,
+  summary_at   TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS teammate_live ON teammate (repo, handle) WHERE state <> 'removed';
+CREATE TABLE IF NOT EXISTS teammate_version (
+  teammate   INTEGER NOT NULL REFERENCES teammate(id),
+  version    INTEGER NOT NULL,
+  soul       TEXT NOT NULL,
+  saved_by   TEXT NOT NULL,
+  saved_at   TEXT NOT NULL,
+  PRIMARY KEY (teammate, version)
+);
+-- What a teammate did and why, what it asked, and what its people told it.
+CREATE TABLE IF NOT EXISTS teammate_event (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  teammate    INTEGER NOT NULL REFERENCES teammate(id),
+  card        INTEGER REFERENCES flow_card(id),
+  entry       INTEGER,
+  kind        TEXT NOT NULL CHECK (kind IN ('decided','handled','handed','asked','answered','note','paused','resumed','summary','failed')),
+  said        TEXT NOT NULL,
+  detail_json TEXT,
+  by          TEXT,
+  at          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS teammate_event_recent ON teammate_event (teammate, id);
+-- A question a teammate put to a person about one visit of a card: open until answered.
+CREATE TABLE IF NOT EXISTS teammate_question (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  teammate      INTEGER NOT NULL REFERENCES teammate(id),
+  card          INTEGER NOT NULL REFERENCES flow_card(id),
+  entry         INTEGER NOT NULL,
+  question      TEXT NOT NULL,
+  options_json  TEXT NOT NULL,
+  asked_of      TEXT NOT NULL,
+  state         TEXT NOT NULL CHECK (state IN ('open','answered','dropped')),
+  choice        TEXT,
+  answer        TEXT,
+  answered_by   TEXT,
+  answered_via  TEXT,
+  answered_at   TEXT,
+  created_at    TEXT NOT NULL,
+  UNIQUE (card, entry)
+);
 -- v91: where the reply watcher stands in the mailbox. One row.
 CREATE TABLE IF NOT EXISTS flow_mail_watch (
   id           INTEGER PRIMARY KEY CHECK (id = 1),
@@ -5682,6 +5762,35 @@ function migrate(db: Database, origin: number | null): void {
        entry          INTEGER NOT NULL,
        stage          TEXT NOT NULL,
        kind           TEXT NOT NULL CHECK (kind IN ('check','update','sort','draft','request','email','tool')),
+       script         TEXT,
+       script_version INTEGER,
+       state          TEXT NOT NULL CHECK (state IN ('running','passed','failed','waiting')),
+       attempts       INTEGER NOT NULL DEFAULT 0,
+       next_at        TEXT,
+       started_at     TEXT NOT NULL,
+       finished_at    TEXT,
+       duration_ms    INTEGER,
+       exit_code      INTEGER,
+       result         TEXT,
+       log            TEXT,
+       decision_json  TEXT,
+       PRIMARY KEY (card, entry)
+     )`,
+    ["card", "entry", "stage", "kind", "script", "script_version", "state", "attempts", "next_at", "started_at", "finished_at", "duration_ms", "exit_code", "result", "log", "decision_json"],
+  );
+  db.exec("CREATE INDEX IF NOT EXISTS flow_step_run_recent ON flow_step_run (started_at)");
+
+  // v92 (teammates): kind admits 'teammate', carrying every v87 run whole.
+  rebuildForV4(
+    db,
+    "flow_step_run",
+    "CHECK (kind IN ('check','update','sort','draft','request','email','tool'))",
+    "'teammate'",
+    `CREATE TABLE flow_step_run_next (
+       card           INTEGER NOT NULL REFERENCES flow_card(id),
+       entry          INTEGER NOT NULL,
+       stage          TEXT NOT NULL,
+       kind           TEXT NOT NULL CHECK (kind IN ('check','update','sort','draft','request','email','tool','teammate')),
        script         TEXT,
        script_version INTEGER,
        state          TEXT NOT NULL CHECK (state IN ('running','passed','failed','waiting')),
@@ -21013,6 +21122,115 @@ export class Store {
     this.db.prepare(`INSERT INTO flow_mail_watch (id, cursor, next_at, failures, last_outcome, updated_at) VALUES (1, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET cursor = excluded.cursor, next_at = excluded.next_at, failures = excluded.failures, last_outcome = excluded.last_outcome, updated_at = excluded.updated_at`)
       .run(change.cursor, change.nextAt, change.failures, change.lastOutcome, now.toISOString());
+  }
+
+  // ---- v92: AI teammates ---------------------------------------------------------------
+
+  createTeammate(mate: { repo: string; handle: string; soul: string; model: string | null; manager: string; by: string }, now: Date): number {
+    return this.transact(() => {
+      const stamp = now.toISOString();
+      const id = Number(this.db.prepare("INSERT INTO teammate (repo, handle, state, version, soul, model, manager, created_by, created_at, updated_by, updated_at) VALUES (?, ?, 'active', 1, ?, ?, ?, ?, ?, ?, ?)")
+        .run(mate.repo, mate.handle, mate.soul, mate.model, mate.manager, mate.by, stamp, mate.by, stamp).lastInsertRowid);
+      this.db.prepare("INSERT INTO teammate_version (teammate, version, soul, saved_by, saved_at) VALUES (?, 1, ?, ?, ?)").run(id, mate.soul, mate.by, stamp);
+      return id;
+    });
+  }
+
+  getTeammate(id: number): TeammateRow | null {
+    const row = this.db.prepare("SELECT * FROM teammate WHERE id = ?").get(id);
+    return row === undefined ? null : readTeammateRow(row);
+  }
+
+  /** The teammate a zone names in a project (paused ones too; never a removed one). */
+  teammateByHandle(repo: string, handle: string): TeammateRow | null {
+    const row = this.db.prepare("SELECT * FROM teammate WHERE repo = ? AND handle = ? AND state <> 'removed'").get(repo, handle);
+    return row === undefined ? null : readTeammateRow(row);
+  }
+
+  teammates(repos: readonly string[]): TeammateRow[] {
+    if (repos.length === 0) return [];
+    return this.db.prepare(`SELECT * FROM teammate WHERE state <> 'removed' AND repo IN (${repos.map(() => "?").join(", ")}) ORDER BY handle`).all(...repos).map(readTeammateRow);
+  }
+
+  /** A new version of a teammate's soul file; false when nothing changed. */
+  saveTeammateSoul(id: number, soul: string, by: string, now: Date): boolean {
+    return this.transact(() => {
+      const mate = this.getTeammate(id);
+      if (mate === null || mate.soul === soul) return false;
+      const stamp = now.toISOString();
+      this.db.prepare("UPDATE teammate SET soul = ?, version = version + 1, updated_by = ?, updated_at = ? WHERE id = ?").run(soul, by, stamp, id);
+      this.db.prepare("INSERT INTO teammate_version (teammate, version, soul, saved_by, saved_at) VALUES (?, ?, ?, ?, ?)").run(id, mate.version + 1, soul, by, stamp);
+      return true;
+    });
+  }
+
+  teammateVersions(id: number): { version: number; soul: string; savedBy: string; savedAt: string }[] {
+    return this.db.prepare("SELECT * FROM teammate_version WHERE teammate = ? ORDER BY version DESC LIMIT 50").all(id).map(row => ({ version: Number(row["version"]), soul: String(row["soul"]), savedBy: String(row["saved_by"]), savedAt: String(row["saved_at"]) }));
+  }
+
+  updateTeammate(id: number, change: { state?: TeammateRow["state"]; model?: string | null; dailyTurns?: number; manager?: string; summaryAt?: string }, by: string, now: Date): void {
+    const mate = this.getTeammate(id);
+    if (mate === null) return;
+    this.db.prepare("UPDATE teammate SET state = ?, model = ?, daily_turns = ?, manager = ?, summary_at = ?, updated_by = ?, updated_at = ? WHERE id = ?").run(
+      change.state ?? mate.state, change.model === undefined ? mate.model : change.model, change.dailyTurns ?? mate.dailyTurns, change.manager ?? mate.manager,
+      change.summaryAt ?? mate.summaryAt, by, now.toISOString(), id);
+  }
+
+  addTeammateEvent(event: { teammate: number; card?: number | null; entry?: number | null; kind: TeammateEventKind; said: string; detail?: Record<string, unknown> | null; by?: string | null }, now: Date): number {
+    return Number(this.db.prepare("INSERT INTO teammate_event (teammate, card, entry, kind, said, detail_json, by, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(event.teammate, event.card ?? null, event.entry ?? null, event.kind, event.said, event.detail === undefined || event.detail === null ? null : JSON.stringify(event.detail), event.by ?? null, now.toISOString()).lastInsertRowid);
+  }
+
+  /** A teammate's log, newest first; `since` bounds it (a day's summary). */
+  teammateEvents(teammate: number, limit: number, since: string | null = null): TeammateEventRow[] {
+    return this.db.prepare(`SELECT * FROM teammate_event WHERE teammate = ? ${since === null ? "" : "AND at >= ?"} ORDER BY id DESC LIMIT ?`).all(...(since === null ? [teammate, limit] : [teammate, since, limit])).map(row => ({
+      id: Number(row["id"]), teammate: Number(row["teammate"]), card: row["card"] === null ? null : Number(row["card"]), entry: row["entry"] === null ? null : Number(row["entry"]),
+      kind: String(row["kind"]) as TeammateEventKind, said: String(row["said"]), detail: row["detail_json"] === null ? null : JSON.parse(String(row["detail_json"])) as Record<string, unknown>,
+      by: row["by"] === null ? null : String(row["by"]), at: String(row["at"]) }));
+  }
+
+  /** How many turns (decisions, handled cards, hand-offs, questions, failures) a teammate took since a time: its daily limit. */
+  teammateTurnsSince(teammate: number, since: string): number {
+    return Number(this.db.prepare("SELECT COUNT(*) AS n FROM teammate_event WHERE teammate = ? AND at >= ? AND kind IN ('decided','handled','handed','asked','failed')").get(teammate, since)?.["n"] ?? 0);
+  }
+
+  /** Ask a person about one visit of a card; false when that visit already has a question. */
+  openTeammateQuestion(question: { teammate: number; card: number; entry: number; question: string; options: { id: string; label: string }[]; askedOf: string }, now: Date): number | null {
+    const { changes, lastInsertRowid } = this.db.prepare("INSERT OR IGNORE INTO teammate_question (teammate, card, entry, question, options_json, asked_of, state, created_at) VALUES (?, ?, ?, ?, ?, ?, 'open', ?)")
+      .run(question.teammate, question.card, question.entry, question.question, JSON.stringify(question.options), question.askedOf, now.toISOString());
+    return Number(changes) === 1 ? Number(lastInsertRowid) : null;
+  }
+
+  teammateQuestion(id: number): TeammateQuestionRow | null {
+    const row = this.db.prepare("SELECT * FROM teammate_question WHERE id = ?").get(id);
+    return row === undefined ? null : readTeammateQuestion(row);
+  }
+
+  teammateQuestionFor(card: number, entry: number): TeammateQuestionRow | null {
+    const row = this.db.prepare("SELECT * FROM teammate_question WHERE card = ? AND entry = ?").get(card, entry);
+    return row === undefined ? null : readTeammateQuestion(row);
+  }
+
+  /** Open questions for these teammates, oldest first. */
+  openTeammateQuestions(teammates: readonly number[]): TeammateQuestionRow[] {
+    if (teammates.length === 0) return [];
+    return this.db.prepare(`SELECT * FROM teammate_question WHERE state = 'open' AND teammate IN (${teammates.map(() => "?").join(", ")}) ORDER BY id`).all(...teammates).map(readTeammateQuestion);
+  }
+
+  /** The answer, once: false when it was already answered (or dropped). */
+  answerTeammateQuestion(id: number, answer: { choice: string | null; text: string | null; by: string; via: string }, now: Date): boolean {
+    const { changes } = this.db.prepare("UPDATE teammate_question SET state = 'answered', choice = ?, answer = ?, answered_by = ?, answered_via = ?, answered_at = ? WHERE id = ? AND state = 'open'")
+      .run(answer.choice, answer.text, answer.by, answer.via, now.toISOString(), id);
+    return Number(changes) === 1;
+  }
+
+  dropTeammateQuestion(id: number, now: Date): void {
+    this.db.prepare("UPDATE teammate_question SET state = 'dropped', answered_at = ? WHERE id = ? AND state = 'open'").run(now.toISOString(), id);
+  }
+
+  /** A step waiting on a person's answer becomes due now (the answer came). */
+  wakeFlowStep(card: number, entry: number, now: Date): void {
+    this.db.prepare("UPDATE flow_step_run SET next_at = ? WHERE card = ? AND entry = ? AND state = 'waiting'").run(now.toISOString(), card, entry);
   }
 
   /** Cards arriving in one zone of a flow after a history line: what a trigger on another flow follows. */
