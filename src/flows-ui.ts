@@ -49,8 +49,8 @@ const historyText = (event: { fromStage: string | null; toStage: string; outcome
     case "sent-back": return `Sent back to ${title(event.toStage)}${who}${note}`;
     case "fail": return `Moved to ${title(event.toStage)} after a problem${note}`;
     case "cancelled": return `Cancelled${who}`;
-    case "ok": return event.fromStage !== null && sorts.has(event.fromStage) ? `Sorted into ${title(event.toStage)}` : `Moved on to ${title(event.toStage)}`;
-    default: return `Moved to ${title(event.toStage)}${who}`;
+    case "ok": return event.fromStage !== null && sorts.has(event.fromStage) ? `Sorted into ${title(event.toStage)}` : `Moved on to ${title(event.toStage)}${note}`;
+    default: return `Moved to ${title(event.toStage)}${who}${note}`;
   }
 };
 
@@ -73,6 +73,13 @@ export function flowView(store: Store, flow: FlowRow, viewer: { name: string; ap
     const moves = store.flowEvents(card.id).map(event => ({ text: historyText(event, title, sortZones), at: event.at }));
     const decision = parseSortDecision(decisions.get(card.id)?.decisionJson ?? null);
     const shown = stage?.kind === "approval" && definition !== null ? draftFor(definition, stage) : null;
+    // v91: when a Wait zone gives up (or moves on), or a zone's time limit comes.
+    const clock = stage?.wait ?? stage?.limit;
+    const until = card.state !== "active" || stage === undefined || clock === undefined ? null : new Date(Date.parse(store.flowCardEnteredAt(card.id) ?? card.updatedAt) + clock.minutes * 60_000);
+    const deadline = until === null || until.getTime() <= Date.now() ? null : {
+      at: until.toISOString(),
+      label: stage!.wait !== undefined ? (stage!.wait.for === "reply" ? "No reply by" : "Moves on at") : stage!.limit!.to !== null ? `Moves to ${title(stage!.limit!.to)} at` : "Reminder at",
+    };
     return {
       id: card.id, title: card.title, description: card.description, stage: card.stage, state: card.state, waiting: card.waiting,
       task: task === null ? null : { id: task, href: `/t/${encodeURIComponent(task)}` },
@@ -86,6 +93,7 @@ export function flowView(store: Store, flow: FlowRow, viewer: { name: string; ap
       comments: discussion.filter(one => one.kind === "comment").map(one => ({ id: one.id, author: one.author, body: one.body, mentions: one.mentions, at: one.at })),
       sorted: decision === null ? null : { chip: sortChip(decision), confident: decision.confident },
       draft: shown === null || card.state !== "active" || card.outputs[shown.id] === undefined ? null : { zone: shown.id, title: shown.title, text: card.outputs[shown.id]! },
+      deadline,
     };
   });
   const triggers: BrowserFlowTrigger[] = store.flowTriggers(flow.id).map(trigger => {

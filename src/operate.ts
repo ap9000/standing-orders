@@ -1,6 +1,7 @@
 import { maybeTriggerRepair } from "./dispose.js";
 import { advanceFlows } from "./flow-engine.js";
 import { runFlowTriggers, type TriggerIo } from "./flow-triggers.js";
+import { watchFlowReplies } from "./flow-replies.js";
 import { runFlowSteps, type StepIo } from "./flow-steps.js";
 import {followDiscord} from "./discord.js";
 import { followTeams } from "./teams.js";
@@ -2192,6 +2193,12 @@ async function tickCommand(
       // A schedule's script (v90) runs like a code step: the same runner, in a clean folder beside the step copies.
       shell: context.flowTriggerIo?.shell ?? context.flowStepIo?.shell ?? run, scratch: context.flowTriggerIo?.scratch ?? context.flowStepIo?.scratch ?? join(pool, "flow-checks"),
       ...(context.flowTriggerIo?.mail === undefined ? {} : { mail: context.flowTriggerIo.mail }) });
+  // Replies to cards' emails (v91): read about once a minute, and only while
+  // a card is in an email conversation. A reply moves a waiting card on here,
+  // before its next step runs.
+  const replyPass = context.shouldStop?.() === true || context.shouldPauseAdmission?.() === true ? { read: 0, taken: 0, problem: null }
+    : await watchFlowReplies(store, clock(), { fetch: context.flowTriggerIo?.fetch ?? fetch, dir: context.flowTriggerIo?.dir ?? dirname(context.databaseFile),
+      ...(context.flowTriggerIo?.mail === undefined ? {} : { mail: context.flowTriggerIo.mail }) });
   // Check and update steps run outside a model: an approved command in a
   // fresh copy of the card's work, or a comment on the issue it came from.
   const stepPass = context.shouldStop?.() === true || context.shouldPauseAdmission?.() === true ? { ran: 0, problems: [] }
@@ -2201,8 +2208,9 @@ async function tickCommand(
       ...(context.evidenceRoot === undefined ? {} : { evidenceRoot: context.evidenceRoot }),
     });
   const flowPass = advanceFlows(store, repo, clock(), context.evidenceRoot === undefined ? {} : { evidenceRoot: context.evidenceRoot });
-  const flows = flowPass.moved + flowPass.filed.length + flowPass.problems.length + triggerPass.added + triggerPass.problems.length + stepPass.ran + stepPass.problems.length === 0 ? {} : { flows: { ...flowPass,
-    ...(triggerPass.added + triggerPass.problems.length === 0 ? {} : { triggers: triggerPass }), ...(stepPass.ran + stepPass.problems.length === 0 ? {} : { steps: stepPass }) } };
+  const replied = replyPass.taken > 0 || replyPass.problem !== null;
+  const flows = flowPass.moved + flowPass.filed.length + flowPass.problems.length + triggerPass.added + triggerPass.problems.length + stepPass.ran + stepPass.problems.length === 0 && !replied ? {} : { flows: { ...flowPass,
+    ...(triggerPass.added + triggerPass.problems.length === 0 ? {} : { triggers: triggerPass }), ...(stepPass.ran + stepPass.problems.length === 0 ? {} : { steps: stepPass }), ...(replied ? { replies: replyPass } : {}) } };
 
   // Tournament housekeeping before the ordinary pass (stage 4): interrupted
   // races recover by CAS, and an ANSWERED question re-admits its parked

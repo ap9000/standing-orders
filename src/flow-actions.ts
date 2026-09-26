@@ -34,7 +34,9 @@ import { callProjectTool, projectToolsOf, readToolSecrets, type ToolCall, type T
 import { ALL_CREDENTIAL_ENV } from "./provider.js";
 import type { FlowCardRow, Store } from "./store.js";
 
-export type ActionOutcome = { state: "passed" | "failed" | "retry"; said: string; log?: string; output?: string };
+export type ActionOutcome = { state: "passed" | "failed" | "retry"; said: string; log?: string; output?: string;
+  /** email (v91): the Message-ID it went out with, and to whom, so a reply finds the card. */
+  mail?: { id: string; to: string[] } };
 const OUTPUT_CHARS = 8000;
 const clip = (text: string, cap: number) => text.length <= cap ? text : `${text.slice(0, cap - 1)}…`;
 const blank = (text: string) => redactSecretAssignments(redactSecretLines(text, scanForSecrets(text)));
@@ -146,7 +148,10 @@ export const sendThroughServer: MailSender = async (settings, mail) => {
   }
 };
 
-export async function sendEmail(stage: FlowStage, card: FlowCardRow, io: { dir: string | null; mail?: MailSender; fetch?: typeof fetch }): Promise<ActionOutcome> {
+/** The thread a card's conversation is in (v91): the latest message, the chain, and everyone in it. */
+export type MailThread = { inReplyTo: string; references: string[]; people: Set<string> };
+
+export async function sendEmail(stage: FlowStage, card: FlowCardRow, io: { dir: string | null; mail?: MailSender; fetch?: typeof fetch }, thread: MailThread | null = null): Promise<ActionOutcome> {
   const account = await sendingAccount(io.dir, io.fetch ?? fetch);
   if (!account.ok) return { state: account.permanent ? "failed" : "retry", said: account.said };
   const settings = account.settings;
@@ -157,13 +162,14 @@ export async function sendEmail(stage: FlowStage, card: FlowCardRow, io: { dir: 
   const subject = clip(fillFlowText(email.subject, text).replace(/[\r\n]+/g, " "), 200);
   const body = clip(fillFlowText(email.body, text), 20_000);
   if (body.trim() === "") return { state: "failed", said: "The email would be empty." };
-  // A card that came from an email, answered to its sender: the reply stays in that thread.
-  const thread = card.source?.mail;
-  const threaded = thread?.id != null && to.some(one => one.toLowerCase() === thread.from) ? { inReplyTo: thread.id, references: [...thread.references, thread.id].slice(-20) } : {};
+  // To someone the card is already writing with (or who emailed it): the email stays in that thread.
+  const source = card.source?.mail;
+  const known = thread ?? (source?.id ? { inReplyTo: source.id, references: [...source.references, source.id].slice(-20), people: new Set([source.from]) } : null);
+  const threaded = known !== null && to.some(one => known.people.has(one.toLowerCase())) ? { inReplyTo: known.inReplyTo, references: known.references } : {};
   const sent = await (io.mail ?? sendThroughServer)(settings, { from: settings.from, to, subject, text: body, ...threaded });
   const log = `From ${settings.from} to ${to.join(", ")}\nSubject: ${subject}\n\n${blank(body)}`;
   if (!sent.ok) return { state: sent.permanent ? "failed" : "retry", said: sent.said, log };
-  return { state: "passed", said: `Emailed ${to.join(", ")}.`, log, output: `Sent to ${to.join(", ")}: “${subject}”` };
+  return { state: "passed", said: `Emailed ${to.join(", ")}.`, log, output: `Sent to ${to.join(", ")}: “${subject}”`, mail: { id: sent.id, to } };
 }
 
 // ---- tools ----------------------------------------------------------------------

@@ -121,7 +121,8 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // v88 brings flow decisions to Slack, Discord and Teams: Approve / Edit / Send back on the notice, and the prompt the next message answers.
 // v89 adds inbox triggers: mail arriving in a mailbox (IMAP, or a connected Google account) and messages in a chat channel start cards.
 // v90 adds code steps: project scripts in Python and Node (or a file in the project), given the card and passing on what they print.
-export const SCHEMA_VERSION = 90;
+// v91 adds waiting for replies: each card's email conversation (what was sent, what came back) and where the reply watcher stands.
+export const SCHEMA_VERSION = 91;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -2294,6 +2295,27 @@ CREATE TABLE IF NOT EXISTS flow_trigger_event (
   note       TEXT,
   at         TEXT NOT NULL,
   PRIMARY KEY (trigger, key)
+);
+-- v91: a card's email conversation. Each email a Send email step sent (its
+-- Message-ID and whom it went to) and each reply that came back, so a reply
+-- finds its card (and only from someone the card wrote to) and a follow-up
+-- stays in the thread.
+CREATE TABLE IF NOT EXISTS flow_mail (
+  message_id TEXT PRIMARY KEY,
+  card       INTEGER NOT NULL REFERENCES flow_card(id),
+  direction  TEXT NOT NULL CHECK (direction IN ('sent','received')),
+  address    TEXT NOT NULL,
+  at         TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS flow_mail_card ON flow_mail (card, at);
+-- v91: where the reply watcher stands in the mailbox. One row.
+CREATE TABLE IF NOT EXISTS flow_mail_watch (
+  id           INTEGER PRIMARY KEY CHECK (id = 1),
+  cursor       TEXT,
+  next_at      TEXT,
+  failures     INTEGER NOT NULL DEFAULT 0,
+  last_outcome TEXT,
+  updated_at   TEXT
 );
 
 -- v80: project tools. The MCP servers one project's builds may use (the
@@ -20914,14 +20936,16 @@ export class Store {
   }
 
   /** Move a card to a zone (a fresh entry: its step runs again), with the history line. `expectEntry` makes a stale move a no-op. */
-  moveFlowCard(id: number, move: { to: string; outcome: FlowEventOutcome; actor: string; note?: string | null; task?: string | null; expectEntry?: number }, now: Date): boolean {
+  moveFlowCard(id: number, move: { to: string; outcome: FlowEventOutcome; actor: string; note?: string | null; task?: string | null; expectEntry?: number;
+    /** v91: said in the card's history only; the card's note ({{note}}) is left as it is. */
+    historyNote?: string }, now: Date): boolean {
     return this.transact(() => {
       const card = this.getFlowCard(id);
       if (card === null || card.state !== "active" || (move.expectEntry !== undefined && card.entry !== move.expectEntry)) return false;
       const stamp = now.toISOString();
       this.db.prepare("UPDATE flow_card SET stage = ?, entry = entry + 1, task = ?, waiting = NULL, note = COALESCE(?, note), updated_at = ? WHERE id = ?")
         .run(move.to, move.task ?? null, move.note ?? null, stamp, id);
-      this.db.prepare("INSERT INTO flow_event (card, from_stage, to_stage, outcome, actor, note, at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(id, card.stage, move.to, move.outcome, move.actor, move.note ?? null, stamp);
+      this.db.prepare("INSERT INTO flow_event (card, from_stage, to_stage, outcome, actor, note, at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(id, card.stage, move.to, move.outcome, move.actor, move.historyNote ?? move.note ?? null, stamp);
       return true;
     });
   }
@@ -20945,6 +20969,50 @@ export class Store {
       fromStage: row["from_stage"] === null ? null : String(row["from_stage"]), toStage: String(row["to_stage"]), outcome: String(row["outcome"]) as FlowEventOutcome,
       actor: String(row["actor"]), note: row["note"] === null ? null : String(row["note"]), at: String(row["at"]),
     }));
+  }
+
+  /** When a card came into the zone it is in: its latest history line (it is written with every move). */
+  flowCardEnteredAt(card: number): string | null {
+    const row = this.db.prepare("SELECT at FROM flow_event WHERE card = ? ORDER BY id DESC LIMIT 1").get(card);
+    return row === undefined ? null : String(row["at"]);
+  }
+
+  /** v91: one email of a card's conversation. A Message-ID is kept once: false when it was already. */
+  recordFlowMail(mail: { messageId: string; card: number; direction: "sent" | "received"; address: string }, now: Date): boolean {
+    const { changes } = this.db.prepare("INSERT OR IGNORE INTO flow_mail (message_id, card, direction, address, at) VALUES (?, ?, ?, ?, ?)")
+      .run(mail.messageId, mail.card, mail.direction, mail.address.toLowerCase(), now.toISOString());
+    return Number(changes) === 1;
+  }
+
+  /** A card's conversation, oldest first. */
+  flowMailOf(card: number): { messageId: string; direction: "sent" | "received"; address: string; at: string }[] {
+    return this.db.prepare("SELECT * FROM flow_mail WHERE card = ? ORDER BY at, rowid").all(card).map(row => ({
+      messageId: String(row["message_id"]), direction: String(row["direction"]) as "sent" | "received", address: String(row["address"]), at: String(row["at"]) }));
+  }
+
+  /** The emails of any card's conversation among these Message-IDs: what a reply names in In-Reply-To and References. */
+  flowMailAmong(ids: readonly string[]): { messageId: string; card: number; direction: "sent" | "received"; address: string }[] {
+    if (ids.length === 0) return [];
+    return this.db.prepare(`SELECT * FROM flow_mail WHERE message_id IN (${ids.map(() => "?").join(", ")}) ORDER BY at DESC, rowid DESC`).all(...ids).map(row => ({
+      messageId: String(row["message_id"]), card: Number(row["card"]), direction: String(row["direction"]) as "sent" | "received", address: String(row["address"]) }));
+  }
+
+  /** Whether any card still active is in an email conversation: only then is the mailbox read for replies. */
+  flowConversationsOpen(): boolean {
+    return this.db.prepare("SELECT 1 AS hit FROM flow_mail m JOIN flow_card c ON c.id = m.card WHERE c.state = 'active' AND m.direction = 'sent' LIMIT 1").get() !== undefined;
+  }
+
+  /** v91: where the reply watcher stands in the mailbox. */
+  flowMailWatch(): { cursor: string | null; nextAt: string | null; failures: number; lastOutcome: string | null } {
+    const row = this.db.prepare("SELECT * FROM flow_mail_watch WHERE id = 1").get();
+    return row === undefined ? { cursor: null, nextAt: null, failures: 0, lastOutcome: null }
+      : { cursor: row["cursor"] === null ? null : String(row["cursor"]), nextAt: row["next_at"] === null ? null : String(row["next_at"]), failures: Number(row["failures"]), lastOutcome: row["last_outcome"] === null ? null : String(row["last_outcome"]) };
+  }
+
+  setFlowMailWatch(change: { cursor: string | null; nextAt: string; failures: number; lastOutcome: string | null }, now: Date): void {
+    this.db.prepare(`INSERT INTO flow_mail_watch (id, cursor, next_at, failures, last_outcome, updated_at) VALUES (1, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET cursor = excluded.cursor, next_at = excluded.next_at, failures = excluded.failures, last_outcome = excluded.last_outcome, updated_at = excluded.updated_at`)
+      .run(change.cursor, change.nextAt, change.failures, change.lastOutcome, now.toISOString());
   }
 
   /** Cards arriving in one zone of a flow after a history line: what a trigger on another flow follows. */

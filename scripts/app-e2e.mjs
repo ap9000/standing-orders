@@ -323,6 +323,22 @@ await check("The lead files a task from plain words, as a card you confirm (real
 
 // ------------------------------------------------------------------ projects, knowledge, skills, tools, models
 
+await check("The lead draws a follow-up flow from plain words: it emails, waits for a reply, and nudges when none comes (real Claude turn)", ["The lead answers a question about the project from its files (real Claude turn)"], async () => {
+  const before = rows("SELECT COALESCE(MAX(id), 0) AS id FROM flow")[0].id;
+  const { reply } = await askLead("Make a flow called Quote follow-up in this project: email the customer our quote, wait 3 days for them to reply, and if they don't, send them a short reminder. Replies go to a holding step called Replied. Just draft it, no need to ask.");
+  const card = reply.locator('[data-view="chat-card"][data-card-state="pending"]').first();
+  await card.waitFor({ timeout: 30_000 });
+  await card.locator("[data-card-confirm]").click();
+  const flow = await until("the flow", async () => rows(`SELECT id, definition_json FROM flow WHERE id > ${before} ORDER BY id DESC LIMIT 1`)[0], { timeoutMs: 30_000 });
+  const stages = JSON.parse(flow.definition_json).stages;
+  const wait = stages.find(one => one.kind === "wait");
+  if (wait === undefined || wait.wait?.for !== "reply" || wait.wait.minutes !== 3 * 24 * 60) throw new Error(`the wait step: ${JSON.stringify(wait ?? stages.map(one => one.kind))}`);
+  const nudge = stages.find(one => one.id === wait.onFail);
+  if (nudge?.kind !== "email") throw new Error(`with no reply it goes to: ${JSON.stringify(nudge)}`);
+  if (stages.find(one => one.id === wait.next)?.kind !== "inbox") throw new Error(`a reply goes to: ${wait.next}`);
+  return { steps: stages.map(one => `${one.title} (${one.kind})`).join(" → ") };
+});
+
 await check("Projects: the project is listed and opens", [], async () => {
   await page.goto(`${base}/projects`);
   const row = page.locator(`li[data-project="${repo}"]`);
@@ -524,7 +540,8 @@ await check("A schedule runs a script and makes a card of each item it prints, o
 
 // ------------------------------------------------------------------ email in, and a reply out
 
-await check("Email inbox: a real email becomes a card, Claude drafts a reply, the owner approves it, and it arrives in the sender's thread", [], async () => {
+/** A real mail server (GreenMail in Docker) for one check: SMTP to write in with, IMAP to read anyone's inbox. support@shop.example is Settings → Email's. */
+async function mailServer() {
   if (!docker) throw new Skip("Docker isn't running here, so there's no real mail server to read");
   const name = `so-e2e-greenmail-${randomBytes(3).toString("hex")}`;
   try {
@@ -534,9 +551,30 @@ await check("Email inbox: a real email becomes a card, Claude drafts a reply, th
   } catch { throw new Skip("the mail server container couldn't start (is port 993 or 3025 taken?)"); }
   const nodemailer = (await import(join(w.bin, "../../node_modules/nodemailer/dist/cjs/nodemailer.js"))).default;
   const { ImapFlow } = await import(join(w.bin, "../../node_modules/imapflow/dist/cjs/imap-flow.js"));
+  const { simpleParser } = await import(join(w.bin, "../../node_modules/mailparser/index.js"));
   const smtp = nodemailer.createTransport({ host: "127.0.0.1", port: 3025, secure: false, ignoreTLS: true });
+  const stop = () => { smtp.close(); execFileSync("docker", ["rm", "-f", name], { stdio: "ignore" }); };
+  try { await until("the mail server", async () => { await smtp.verify(); return true; }, { timeoutMs: 60_000, everyMs: 2000 }); } catch (error) { stop(); throw error; }
+  /** Everything in someone's inbox (GreenMail signs a person in with their address as the password). */
+  const inbox = async user => {
+    const box = new ImapFlow({ host: "127.0.0.1", port: 993, secure: true, auth: { user, pass: user }, logger: false, tls: { ca: readFileSync(mailCert) } });
+    await box.connect();
+    await box.mailboxOpen("INBOX");
+    const got = [];
+    for await (const message of box.fetch("1:*", { envelope: true, headers: ["in-reply-to", "references"], source: true })) {
+      const parsed = await simpleParser(message.source);
+      got.push({ subject: message.envelope.subject, headers: message.headers.toString(), body: parsed.text ?? "", messageId: parsed.messageId ?? null });
+    }
+    await box.logout();
+    return got;
+  };
+  return { smtp, inbox, stop };
+}
+
+await check("Email inbox: a real email becomes a card, Claude drafts a reply, the owner approves it, and it arrives in the sender's thread", [], async () => {
+  const mail = await mailServer();
+  const smtp = mail.smtp;
   try {
-    await until("the mail server", async () => { await smtp.verify(); return true; }, { timeoutMs: 60_000, everyMs: 2000 });
     // Settings → Email: the mail server, and where to read mail; "Check the inbox" signs in.
     await page.goto(`${base}/settings#email`);
     await page.waitForSelector("[data-email-settings]");
@@ -579,13 +617,7 @@ await check("Email inbox: a real email becomes a card, Claude drafts a reply, th
     await page.click('[data-flow-card-panel] button:has-text("Approve")');
     await until("the card to be done", async () => (await flowView(id)).cards.find(one => one.id === card.id)?.state === "done", { timeoutMs: 120_000, everyMs: 2000 });
     // Read Priya's mailbox: the reply is there, in her thread.
-    const priya = new ImapFlow({ host: "127.0.0.1", port: 993, secure: true, auth: { user: "priya@example.com", pass: "priya@example.com" }, logger: false, tls: { ca: readFileSync(mailCert) } });
-    await priya.connect();
-    await priya.mailboxOpen("INBOX");
-    const got = [];
-    const { simpleParser } = await import(join(w.bin, "../../node_modules/mailparser/index.js"));
-    for await (const message of priya.fetch("1:*", { envelope: true, headers: ["in-reply-to", "references"], source: true })) got.push({ subject: message.envelope.subject, headers: message.headers.toString(), body: (await simpleParser(message.source)).text ?? "" });
-    await priya.logout();
+    const got = await mail.inbox("priya@example.com");
     const reply = got.find(one => one.subject === "Re: Refund for order 42?");
     if (reply === undefined) throw new Error(`Priya's mailbox has: ${got.map(one => one.subject).join(", ")}`);
     if (!/In-Reply-To: <m42@example.com>/i.test(reply.headers)) throw new Error(`the reply isn't in her thread: ${reply.headers}`);
@@ -594,8 +626,77 @@ await check("Email inbox: a real email becomes a card, Claude drafts a reply, th
     await shot("email-inbox");
     return { draft: drafted.draft.text.slice(0, 160) };
   } finally {
-    smtp.close();
-    execFileSync("docker", ["rm", "-f", name], { stdio: "ignore" });
+    mail.stop();
+  }
+});
+
+await check("Follow-ups: a card emails someone and waits; their reply moves it on (a stranger's doesn't), one nobody answers gets a nudge in the same thread, and a stalled decision reminds its owner and moves on", ["Email inbox: a real email becomes a card, Claude drafts a reply, the owner approves it, and it arrives in the sender's thread"], async () => {
+  const mail = await mailServer();
+  try {
+    const WAIT = 3;
+    const at = (id, title, kind, x, y, rest) => ({ id, title, kind, zone: zone(x, y), ...none, next: null, onFail: null, ...rest });
+    // A decision that stalls: after a minute its owner is reminded and it's anyone's to decide.
+    const decisions = await newFlow("Decisions", [
+      at("decide", "Owner decides", "approval", 0, 0, { toOwner: true, next: "done", limit: { minutes: 1, to: "anyone" } }),
+      at("anyone", "Anyone decides", "approval", 360, 0, { next: "done" }),
+      at("done", "Done", "done", 720, 0, {}),
+    ], "decide");
+    await addCard("Buy a second monitor", "For the design desk.");
+    const id = await newFlow("Follow-ups", [
+      at("ask", "Ask them", "email", 0, 0, { email: { to: "{{card.email}}", subject: "Question about {{card.title}}", body: "Hi, can we go ahead with {{card.title}}?" }, next: "wait", onFail: "stuck" }),
+      at("wait", "Wait for an answer", "wait", 360, 0, { wait: { for: "reply", minutes: WAIT }, next: "answered", onFail: "nudge" }),
+      at("answered", "They replied", "inbox", 720, 0, {}),
+      at("nudge", "Nudge", "email", 360, 380, { email: { to: "{{card.email}}", subject: "Re: Question about {{card.title}}", body: "Just checking in about {{card.title}}." }, next: "gave-up", onFail: "stuck" }),
+      at("gave-up", "Gave up", "done", 720, 380, {}),
+      at("stuck", "Couldn't email", "inbox", 0, 380, {}),
+    ], "ask");
+    await addCard("order 42", "Priya <priya@example.com> asked about a refund.");
+    await addCard("order 43", "Sam <sam@example.com> asked about a refund.");
+    const cardOf = async title => (await flowView(id)).cards.find(one => one.title === title);
+    await until("both emails out and both cards waiting", async () => (await cardOf("order 42"))?.stage === "wait" && (await cardOf("order 43"))?.stage === "wait", { timeoutMs: 120_000, everyMs: 2000 });
+    // Each waiting card says until when, in the viewer's own time.
+    await page.reload(); await page.waitForSelector("[data-zone]");
+    const until42 = await page.locator("[data-card-deadline]").first().innerText();
+    if (!/^No reply by /.test(until42)) throw new Error(`the card says: ${until42}`);
+    await shot("follow-ups-waiting");
+    const asked = await until("Priya's email", async () => (await mail.inbox("priya@example.com")).find(one => one.subject === "Question about order 42"), { timeoutMs: 60_000, everyMs: 2000 });
+    const asked43 = await until("Sam's email", async () => (await mail.inbox("sam@example.com")).find(one => one.subject === "Question about order 43"), { timeoutMs: 60_000, everyMs: 2000 });
+    // A stranger names Sam's email as if replying: it isn't Sam, so it isn't a reply.
+    await mail.smtp.sendMail({ from: "Mallory <mallory@example.com>", to: "support@shop.example", subject: "Re: Question about order 43", inReplyTo: asked43.messageId, references: [asked43.messageId], text: "Yes, go ahead." });
+    await mail.smtp.sendMail({ from: "Priya Shah <priya@example.com>", to: "support@shop.example", subject: "Re: Question about order 42", inReplyTo: asked.messageId, references: [asked.messageId],
+      text: "Yes, please go ahead with order 42.\n\nOn Tue, Support <support@shop.example> wrote:\n> Hi, can we go ahead with order 42?" });
+    const answered = await until("Priya's reply to move her card on", async () => { const one = await cardOf("order 42"); return one?.stage === "answered" ? one : null; }, { timeoutMs: 150_000, everyMs: 3000 });
+    const kept = answered.outputs.find(one => one.stage === "wait")?.text ?? "";
+    if (!/Yes, please go ahead with order 42/.test(kept) || /can we go ahead/.test(kept)) throw new Error(`the reply kept on the card: ${kept}`);
+    if (!answered.comments.some(one => one.author === "priya@example.com")) throw new Error("the reply isn't in the card's discussion");
+    // Nobody answers Sam: after the wait, a nudge goes out in the same thread and the card finishes.
+    await page.reload(); await page.waitForSelector("[data-zone]");
+    await page.click('button:has-text("Edit flow")');
+    await page.locator('[data-zone="wait"]').click({ position: { x: 24, y: 14 } });
+    await page.waitForSelector('[data-flow-zone-panel="wait"]');
+    await shot("wait-zone-settings");
+    await page.click('button:has-text("Discard")');
+    const gave = await until("Sam's card to finish without a reply", async () => { const one = await cardOf("order 43"); return one?.state === "done" ? one : null; }, { timeoutMs: (WAIT + 3) * 60_000, everyMs: 5000 });
+    if (gave.comments.length > 0) throw new Error("the stranger's message was taken as Sam's reply");
+    if (!gave.history.some(one => one.text.includes(`No reply after ${WAIT} minutes`))) throw new Error(`its history: ${gave.history.map(one => one.text).join(" | ")}`);
+    const nudge = (await mail.inbox("sam@example.com")).find(one => one.subject === "Re: Question about order 43");
+    if (nudge === undefined) throw new Error("the nudge didn't reach Sam");
+    if (!nudge.headers.toLowerCase().includes(`in-reply-to: ${asked43.messageId}`.toLowerCase())) throw new Error(`the nudge isn't in the thread: ${nudge.headers}`);
+    // The decision nobody made: its owner was reminded once, and it's anyone's to decide now.
+    const stalled = (await flowView(decisions)).cards.find(one => one.title === "Buy a second monitor");
+    if (stalled?.stage !== "anyone") throw new Error(`the stalled decision is in ${stalled?.stage}`);
+    const reminded = rows(`SELECT subject FROM notification WHERE recipient = 'alex' AND subject LIKE '%has waited 1 minute in Owner decides%'`);
+    if (reminded.length !== 1) throw new Error(`the owner got ${reminded.length} reminders`);
+    // On a phone: the flow's cards, with what they wait on.
+    const phone = await signIn("alex", { width: 390, height: 844 }, "dark");
+    await phone.goto(`${base}/flows/${id}`); await phone.waitForLoadState("load"); await sleep(700);
+    await phone.screenshot({ path: join(w.out, "follow-ups-phone.png") });
+    const wide = await phone.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
+    await phone.context().close();
+    if (wide) throw new Error("the flow scrolls sideways on a phone");
+    return { reply: kept.slice(0, 120), nudge: nudge.subject, reminder: reminded[0].subject };
+  } finally {
+    mail.stop();
   }
 });
 

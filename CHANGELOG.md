@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- **Wait for replies.** A Wait zone after a Send email zone waits for the
+  person to answer. Their reply moves the card on and joins its discussion;
+  with none in time, the card takes its no-reply path, like a nudge that stays
+  in the same thread. Only replies from people the card wrote to count.
+- **Time limits.** Any zone can remind whoever a card is waiting on after a
+  while, and Holding and decision zones can move it on. New templates: Reply
+  and follow up, and Decisions that don't stall.
+- **Send-backs are planned again.** Sending a result back with a note has the
+  planner update the plan with it; a note asking for more becomes a change
+  you see and approve before anything builds.
+
 ## 0.5.0 — 2026-09-25
 
 Flows: your process drawn as zones that cards move through, with agents doing

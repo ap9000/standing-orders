@@ -175,7 +175,7 @@ export type BrowserResultView = {
 };
 /** One zone on a flow's canvas: its step, where it leads, and where it sits. */
 export type BrowserFlowStage = {
-  id: string; title: string; kind: "inbox" | "task" | "report" | "approval" | "check" | "update" | "notify" | "sort" | "draft" | "request" | "email" | "tool" | "done";
+  id: string; title: string; kind: "inbox" | "task" | "report" | "approval" | "check" | "update" | "notify" | "sort" | "draft" | "request" | "email" | "tool" | "wait" | "done";
   zone: { x: number; y: number; w: number; h: number; color: string };
   instructions: string | null; planning: "auto" | "required" | "skip" | null; approver: string | null; message: string | null;
   /** An approval zone the flow's owner decides. */
@@ -189,6 +189,9 @@ export type BrowserFlowStage = {
   runIn?: "folder" | "copy"; routes?: { answer: string; to: string }[]; secrets?: string[];
   /** A sort zone: Jev's question, its answers and where each goes, how sure it must be to act alone, and what else it notes. */
   sort: { question: string; answers: { answer: string; means: string; to: string }[]; sureAt: number; notes: { id: string; kind: "score" | "yes-no"; question: string; levels: string[] | null }[] } | null;
+  /** v91: a Wait zone waits for a reply to the card's email (onFail: no reply in time) or a set time; any other zone may have a time limit. */
+  wait?: { for: "reply" | "time"; minutes: number };
+  limit?: { minutes: number; to: string | null } | undefined;
   next: string | null; onFail: string | null;
 };
 
@@ -209,6 +212,8 @@ export type BrowserFlowCard = {
   sorted: { chip: string; confident: boolean } | null;
   /** Waiting at a decision after a draft: the draft, which the person can edit before approving. */
   draft: { zone: string; title: string; text: string } | null;
+  /** v91: when its Wait zone gives up or moves on, or its zone's time limit comes (shown in the viewer's own time). */
+  deadline?: { at: string; label: string } | null;
 };
 
 /** What starts cards in a flow on its own. */

@@ -38,6 +38,7 @@ import { agentFence } from "./agent-fence.js";
 import { readProviderKey } from "./keys.js";
 import type { FlowCardRow, FlowRow, FlowScriptRow, FlowStepKind, Store } from "./store.js";
 import { replyInChannel } from "./chat-inbox.js";
+import { recordSent, threadOf } from "./flow-replies.js";
 
 export type StepIo = {
   /** `gh` for GitHub; git and the check's shell, both without a model. */
@@ -66,7 +67,9 @@ type Outcome = { state: "passed" | "failed" | "retry"; said: string; log?: strin
   /** sort: where the card goes (null: it waits here), and what was decided. */
   to?: string | null; decisionJson?: string; unsure?: boolean;
   /** What the card keeps from this step, when it isn't `said` (a draft's text). */
-  output?: string };
+  output?: string;
+  /** email (v91): what went out, so a reply finds the card. */
+  mail?: { id: string; to: string[] } };
 
 const RETRY_MS = [5 * 60_000, 15 * 60_000];
 const OUTPUT_CHARS = 3000;
@@ -120,12 +123,14 @@ export async function runFlowSteps(store: Store, repo: string, now: Date, io: St
         : stage.kind === "sort" ? await sortCard(known.definition!, stage, card, key!, io)
         : stage.kind === "draft" ? await draftCard(store, known.definition!, stage, card, io)
         : stage.kind === "request" ? await runRequest(stage, card, repo, io)
-        : stage.kind === "email" ? await sendEmail(stage, card, io)
+        : stage.kind === "email" ? await sendEmail(stage, card, io, threadOf(store, card))
         : stage.kind === "tool" ? await useTool(store, stage, card, repo, io)
         : await updateSource(store, stage, card, io, now);
     } catch (error) {
       outcome = { state: "retry", said: error instanceof Error ? error.message : "It couldn't run." };
     }
+    // What went out is kept before the card moves on, so a reply that comes back at once still finds it.
+    if (outcome.state === "passed" && outcome.mail !== undefined) recordSent(store, card, outcome.mail, now);
     settle(store, known.definition!, stage, store.getFlowCard(card.id)!, outcome, now, Date.now() - started);
     if (outcome.state === "retry") pass.problems.push(`flow card ${card.id}: ${outcome.said}`);
   }
