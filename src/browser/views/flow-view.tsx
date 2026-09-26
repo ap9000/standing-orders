@@ -6,7 +6,7 @@
  * back or fails. Every change is the server's: it answers with the flow as
  * it now stands, and every open page hears the moment it changes (v88),
  * with the faces of whoever else has it open. */
-import { Background, BackgroundVariant, Controls, Handle, MarkerType, NodeResizer, Position, ReactFlow, ReactFlowProvider, applyNodeChanges, useReactFlow, type Connection, type Edge, type Node, type NodeChange, type NodeProps } from "@xyflow/react";
+import { Background, BackgroundVariant, BaseEdge, Controls, EdgeLabelRenderer, Handle, MarkerType, NodeResizer, Position, ReactFlow, ReactFlowProvider, applyNodeChanges, getSmoothStepPath, useReactFlow, type Connection, type Edge, type EdgeProps, type Node, type NodeChange, type NodeProps } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { Bell, BellOff, Bot, CalendarClock, Hourglass, LineChart, ListChecks, MessageSquareReply, Copy, Flag, GitPullRequest, Hammer, Inbox, Megaphone, MessageSquare, MousePointerClick, Pencil, PenLine, Plus, Search, Split, Globe, Mail, Wrench, SquareKanban, UserCheck, Webhook, Workflow, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -214,6 +214,60 @@ function TriggerNode({ data }: NodeProps<Node<TriggerData, "trigger">>) {
 }
 
 const NODE_TYPES = { zone: ZoneNode, trigger: TriggerNode };
+
+type StepPath = { offset?: number; borderRadius?: number };
+/** A named arrow whose name can sit along its line, clear of another arrow's name (see spreadLabels). */
+function NamedEdge({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition, label, labelStyle, labelBgStyle, markerEnd, style, data }: EdgeProps) {
+  const { path: options, shift } = (data ?? {}) as { path?: StepPath; shift?: { x: number; y: number } };
+  const [path, labelX, labelY] = getSmoothStepPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition, ...options });
+  // The name sits above every line (not just this one's), so another arrow never runs through it.
+  const words = labelStyle as { fill?: string; fontSize?: number; fontWeight?: number } | undefined;
+  return <>
+    <BaseEdge path={path} {...(markerEnd === undefined ? {} : { markerEnd })} {...(style === undefined ? {} : { style })} />
+    <EdgeLabelRenderer>
+      <div className="nodrag nopan pointer-events-none absolute rounded-sm px-1 leading-4 whitespace-nowrap"
+        style={{ transform: `translate(-50%, -50%) translate(${labelX + (shift?.x ?? 0)}px, ${labelY + (shift?.y ?? 0)}px)`, color: words?.fill, fontSize: words?.fontSize, fontWeight: words?.fontWeight, background: (labelBgStyle as { fill?: string } | undefined)?.fill }}>{label}</div>
+    </EdgeLabelRenderer>
+  </>;
+}
+const EDGE_TYPES = { named: NamedEdge };
+
+/**
+ * Arrows' names are drawn at their middles, so arrows that meet (a send-back
+ * loop crossing a branch into the same zone) can stack their names on one
+ * spot. Where one would land on another, it moves along its own line (up or
+ * down a vertical middle, sideways along a horizontal one) until it's clear.
+ */
+function spreadLabels(edges: Edge[], stages: readonly BrowserFlowStage[]): Edge[] {
+  const at = (id: string, handle: string | null | undefined) => {
+    const zone = stages.find(one => one.id === id)?.zone;
+    if (zone === undefined || handle == null) return null;
+    const side = handle.slice(2) as "Left" | "Right" | "Top" | "Bottom";
+    const x = side === "Left" ? zone.x : side === "Right" ? zone.x + zone.w : zone.x + zone.w / 2;
+    const y = side === "Top" ? zone.y : side === "Bottom" ? zone.y + zone.h : zone.y + zone.h / 2;
+    return { x, y, position: Position[side] };
+  };
+  const taken: { x: number; y: number; w: number; h: number }[] = [];
+  const clash = (box: { x: number; y: number; w: number; h: number }) => taken.some(one => Math.abs(one.x - box.x) < (one.w + box.w) / 2 + 4 && Math.abs(one.y - box.y) < (one.h + box.h) / 2 + 2);
+  return edges.map(edge => {
+    if (typeof edge.label !== "string" || edge.type !== "smoothstep") return edge;
+    const from = at(edge.source, edge.sourceHandle), to = at(edge.target, edge.targetHandle);
+    if (from === null || to === null) return edge;
+    const options = (edge as Edge & { pathOptions?: StepPath }).pathOptions;
+    const [, x, y] = getSmoothStepPath({ sourceX: from.x, sourceY: from.y, sourcePosition: from.position, targetX: to.x, targetY: to.y, targetPosition: to.position, ...options });
+    const w = edge.label.length * 6.4 + 10, h = 18;
+    const across = (from.position === Position.Left || from.position === Position.Right) && (to.position === Position.Left || to.position === Position.Right);
+    const step = across ? { x: 0, y: h + 6 } : { x: w / 2 + 34, y: 0 };
+    let shift = { x: 0, y: 0 };
+    for (const k of [0, 1, -1, 2, -2, 3, -3]) {
+      shift = { x: step.x * k, y: step.y * k };
+      if (!clash({ x: x + shift.x, y: y + shift.y, w, h })) break;
+    }
+    taken.push({ x: x + shift.x, y: y + shift.y, w, h });
+    const { pathOptions: _path, ...rest } = edge as Edge & { pathOptions?: StepPath };
+    return { ...rest, type: "named", data: { ...edge.data, path: options, shift } };
+  });
+}
 type FlowNode = Node<ZoneData, "zone"> | Node<TriggerData, "trigger">;
 
 /** Zones in the order work usually meets them: from the start, following each zone's next. */
@@ -1235,13 +1289,19 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
     const sides = (from: BrowserFlowStage, to: BrowserFlowStage, sendBack: boolean): { source: string; target: string } => {
       const a = center(from), b = center(to), dx = b.x - a.x, dy = b.y - a.y;
       const horizontal = Math.abs(dx) >= Math.abs(dy);
-      if (sendBack) return horizontal ? { source: "s-Bottom", target: "t-Bottom" } : { source: "s-Left", target: "t-Left" };
+      if (sendBack) {
+        // Back to a zone on another row and column: through the gap between them, not around (and across) the zones between.
+        const apartX = to.zone.x >= from.zone.x + from.zone.w || from.zone.x >= to.zone.x + to.zone.w;
+        const apartY = to.zone.y >= from.zone.y + from.zone.h || from.zone.y >= to.zone.y + to.zone.h;
+        if (apartX && apartY) return dx >= 0 ? { source: "s-Right", target: "t-Left" } : { source: "s-Left", target: "t-Right" };
+        return horizontal ? { source: "s-Bottom", target: "t-Bottom" } : { source: "s-Left", target: "t-Left" };
+      }
       if (horizontal) return dx >= 0 ? { source: "s-Right", target: "t-Left" } : { source: "s-Left", target: "t-Right" };
       return dy >= 0 ? { source: "s-Bottom", target: "t-Top" } : { source: "s-Top", target: "t-Bottom" };
     };
     const fromTriggers: Edge[] = triggerNodes.map(node => ({ id: `${node.id}->zone`, source: node.id, sourceHandle: "out", target: node.id.slice("trigger-".length), targetHandle: "t-Left",
       type: "smoothstep", animated: node.data.triggers.some(one => one.state === "active"), deletable: false, markerEnd: { type: MarkerType.ArrowClosed }, style: { strokeWidth: 1.5 } }));
-    return [...fromTriggers, ...stages.flatMap(stage => {
+    return spreadLabels([...fromTriggers, ...stages.flatMap(stage => {
       const next = stage.next === null ? undefined : stages.find(one => one.id === stage.next);
       const fail = stage.onFail === null ? undefined : stages.find(one => one.id === stage.onFail);
       const limitTo = stage.limit?.to == null ? undefined : stages.find(one => one.id === stage.limit!.to);
@@ -1260,7 +1320,8 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
         ...(next === undefined ? [] : [{ id: `${stage.id}->next`, source: stage.id, target: next.id, sourceHandle: sides(stage, next, false).source, targetHandle: sides(stage, next, false).target,
           type: "smoothstep", markerEnd: { type: MarkerType.ArrowClosed }, style: { strokeWidth: 2 }, deletable: editing,
           ...(stage.kind === "wait" && stage.wait?.for === "reply" ? { label: "replied", labelStyle: { fontSize: 11, fontWeight: 600, fill: "var(--color-foreground)" }, labelBgStyle: { fill: "var(--color-card)" } } : {}) }]),
-        ...(fail === undefined ? [] : [{ id: `${stage.id}->fail`, source: stage.id, target: fail.id, sourceHandle: sides(stage, fail, true).source, targetHandle: sides(stage, fail, true).target,
+        // Outside editing, a failure that lands where one of its answers already goes is that arrow, not a second one crossing the canvas.
+        ...(fail === undefined || (!editing && answers.some(one => one.target === fail.id)) ? [] : [{ id: `${stage.id}->fail`, source: stage.id, target: fail.id, sourceHandle: sides(stage, fail, true).source, targetHandle: sides(stage, fail, true).target,
           type: "smoothstep", pathOptions: { offset: 28, borderRadius: 10 }, label: stage.kind === "approval" ? "sent back" : stage.kind === "sort" ? "not sure" : stage.kind === "wait" ? "no reply" : "fails", labelStyle: { fontSize: 11, fill: stage.kind === "wait" ? "var(--color-muted-foreground)" : "var(--so-attention)" },
           labelBgStyle: { fill: "var(--color-card)" }, markerEnd: { type: MarkerType.ArrowClosed, color: stage.kind === "wait" ? "var(--color-muted-foreground)" : "var(--so-attention)" },
           style: { strokeWidth: 1.5, strokeDasharray: "6 4", stroke: stage.kind === "wait" ? "var(--color-muted-foreground)" : "var(--so-attention)" }, deletable: editing }]),
@@ -1270,7 +1331,7 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
           labelBgStyle: { fill: "var(--color-card)" }, markerEnd: { type: MarkerType.ArrowClosed, color: "var(--color-muted-foreground)" },
           style: { strokeWidth: 1.5, strokeDasharray: "2 4", stroke: "var(--color-muted-foreground)" }, deletable: editing }]),
       ];
-    })];
+    })], stages);
   }, [stages, editing, triggerNodes, start]);
 
   const updateStage = (id: string, change: Partial<BrowserFlowStage>) =>
@@ -1363,7 +1424,7 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
     </div>
     <div className="relative flex min-h-0 flex-1">
       <div className="relative min-w-0 flex-1" data-flow-canvas>
-        <ReactFlow nodes={nodes} edges={edges} nodeTypes={NODE_TYPES} onNodesChange={onNodesChange} onNodeDragStop={onNodeDragStop} onConnect={onConnect}
+        <ReactFlow nodes={nodes} edges={edges} nodeTypes={NODE_TYPES} edgeTypes={EDGE_TYPES} onNodesChange={onNodesChange} onNodeDragStop={onNodeDragStop} onConnect={onConnect}
           onEdgesDelete={deleted => { for (const edge of deleted) updateStage(edge.source, edge.id.endsWith("->fail") ? { onFail: null } : edge.id.endsWith("->limit") ? { limit: { ...(draft?.stages.find(one => one.id === edge.source)?.limit ?? { minutes: 1440 }), to: null } } : { next: null }); }}
           onPaneClick={() => { if (editing) setSelected(null); }}
           // A node with a click handler keeps its pointer events outside edit mode: cards are clicked and dragged.

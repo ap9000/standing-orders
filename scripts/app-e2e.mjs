@@ -1082,7 +1082,8 @@ await check("Starter kits: the Support desk kit sets up Maya and its flow in one
   // The sample carries the order's status, so Maya can answer it without a tool connected.
   if (worked.stage !== "check") throw new Error(`Maya sent the sample to "${worked.stage}" instead of a reply to check: ${draft.slice(0, 200)}`);
   if (worked.draft?.text !== draft || !worked.canDecide) throw new Error("the reply isn't in front of you to check");
-  await page.reload(); await page.waitForSelector("[data-zone]");
+  await page.goto(`${base}/flows/${flow}`); await page.waitForSelector("[data-zone]");
+  await shot("kit-flow");
   await page.locator(`[data-card="${worked.id}"]`).click();
   await page.waitForSelector("[data-flow-draft-edit]");
   await shot("kit-sample-draft");
