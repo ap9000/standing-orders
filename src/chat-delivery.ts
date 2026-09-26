@@ -1,4 +1,5 @@
 /** Shared saved replies, explicit confirmations and progress for private chat transports. */
+import { answerChatQuestionPrompt, applyChatQuestionTap, questionParts } from "./teammate-question.js";
 import {
   channelRepos,
   resolveChannelMate,
@@ -184,6 +185,9 @@ export async function processChatEvent(
       return true;
     }
     const text = String(input.text ?? "");
+    // A teammate's question asked for this person's next message (v93): it is the answer.
+    if (answerChatQuestionPrompt({ store, state, label: options.label }, event, binding,
+      { text, ...(typeof input.originalLength === "number" ? { originalLength: input.originalLength } : {}) }, nowOf(options))) return true;
     // A flow decision asked for this person's next message (Edit, Send back): it is the draft or the note.
     if (answerChatFlowPrompt({ store, state, label: options.label }, event, binding,
       { text, ...(typeof input.originalLength === "number" ? { originalLength: input.originalLength } : {}) }, repos, nowOf(options))) return true;
@@ -549,6 +553,8 @@ export function applyChatAction(
     const token = String(object(JSON.parse(event.payload)).token);
     // A flow decision's button (v88) is answered by the flow's own door.
     if (applyChatFlowTap({ store, state, label: options.label }, event, binding, token, repos, now)) return;
+    // A teammate's question's button (v93) is answered by the question's own door.
+    if (applyChatQuestionTap({ store, state, label: options.label }, event, binding, token, now)) return;
     const action = state
       .prepare(
         "SELECT a.*,p.message,e.binding,e.channel,e.thread FROM chat_action a JOIN chat_part p ON p.id=a.part JOIN chat_event e ON e.id=p.event WHERE token=?",
@@ -827,6 +833,11 @@ export async function planChatNotifications(
               ts: "", thread: "", payload: "{}", created: now.toISOString() });
             state.plan(id, parts, now);
           }
+        } else if (notification.kind === "flow-card" && questionParts(store, notification, binding) !== null) {
+          // A teammate's question (v93): its options and "Answer in words" on the notice, for the person it asks.
+          state.enqueue({ id, installation: identity.installation, binding: binding.id, kind: "notice", channel: binding.channel, member: binding.member,
+            ts: "", thread: "", payload: "{}", created: now.toISOString() });
+          state.plan(id, questionParts(store, notification, binding)!, now);
         } else if (notification.pushClass !== null || personal) {
           state.enqueue({
             id,

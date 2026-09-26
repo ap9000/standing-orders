@@ -1,5 +1,6 @@
 /** Microsoft Teams on the shared chat layer: activities in, Adaptive Cards
  * out, the same durable receipts, rooms and commands as every other channel. */
+import { chatQuestionButtons } from "./teammate-question.js";
 import { ChatState, chatHash, type ChatContent, type ChatIdentity, type ChatPart } from "./chat-delivery-state.js";
 import { channelAccess, chatObject as object, planChatNotifications, planRoomMessages, processChatEvent, type ChatDeliveryOptions } from "./chat-delivery.js";
 import { roomCommand } from "./chat-rooms.js";
@@ -170,7 +171,9 @@ export async function deliverTeamsPart(options: TeamsChatOptions): Promise<boole
     } else if (!content.image) {
       // A flow decision (v88): Approve / Edit / Send back, then the link.
       const flow = content.flow ? chatFlowButtons(state, row.id, now).map(one => ({ type: "Action.Submit", title: one.label, data: { so: one.token }, ...(one.action === "approve" ? { style: "positive" } : {}) })) : [];
-      actions = [...flow, ...openUrlAction(options.origin(), content.link)];
+      // A teammate's question (v93): its options, then "Answer in words".
+      const asked = content.question ? chatQuestionButtons(state, row.id, now).map(one => ({ type: "Action.Submit", title: one.label.slice(0, 80), data: { so: one.token } })) : [];
+      actions = [...flow, ...asked, ...openUrlAction(options.origin(), content.link)];
     }
     const target = content.edit ?? row.message;
     const body = actions.length || content.proposal ? teamsCard(text, actions) : { type: "message", text, textFormat: "plain" };

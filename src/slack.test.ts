@@ -1,4 +1,6 @@
 /** Scripted Slack API and membership runner. No live Slack acceptance is claimed. */
+import { notifyPeople } from "./flow-people.js";
+import { TEAMMATE_TEMPLATES } from "./teammates.js";
 import { beforeEach, afterEach, describe, expect, test, vi } from "vitest";
 import {
   mkdtempSync,
@@ -1078,6 +1080,58 @@ describe("Slack shared chat", () => {
     expect(String(repainted.args.text)).toContain("✅ You approved it. Approved. Moved to Post it.");
     expect(buttonsOf(repainted).map(one => one.text.text)).toEqual(["Open"]);
     expect(store.flowComments(card).map(one => one.body)).toEqual(["Edited the draft in Slack."]);
+  });
+
+  test("a teammate's question arrives with its options and Answer in words; a tap answers it once, a stale tap changes nothing, and Answer in words takes the next message (v93)", async () => {
+    now = new Date(now.getTime() + 30_000);
+    const flow = store.createFlow({ repo, name: "Support", by: "alex", definitionJson: JSON.stringify(flowFromSteps([{ title: "Inbox", kind: "inbox" }], null)) }, now);
+    const mate = store.createTeammate({ repo, handle: "maya", soul: TEAMMATE_TEMPLATES[0]!.soul, model: null, manager: "alex", by: "alex" }, now);
+    const ask = (title: string) => {
+      const card = store.addFlowCard({ flow, title, description: null, stage: "inbox", by: "alex" }, now);
+      const id = store.openTeammateQuestion({ teammate: mate, card, entry: 1, question: `Refund all of ${title}?`, options: [{ id: "o1", label: "Yes" }, { id: "o2", label: "Half" }], askedOf: "alex" }, now)!;
+      notifyPeople(store, store.getFlowCard(card)!, ["alex"], null, { key: `teammate-q:${id}`, attention: true, subject: `Maya · Support asks about “${title}”`, body: "Over my $50 limit." }, now);
+      return id;
+    };
+    const buttonsOf = (call: { args: Record<string, unknown> }) =>
+      ((call.args.blocks as Array<{ type: string; elements?: Array<{ text: { text: string }; value?: string; action_id: string }> }>).find(block => block.type === "actions")?.elements ?? []);
+    const partTs = () => String(state.db.prepare("SELECT message FROM slack_part WHERE json_extract(payload,'$.question') IS NOT NULL ORDER BY id DESC LIMIT 1").get()!.message);
+    const press = async (id: string, token: string, ts: string) => {
+      receiveSlack(state, ID, "interactive", { ...action(token, ts), message: {}, actions: [{ action_id: id, value: token, action_ts: `1789700001.${String(++serial).padStart(6, "0")}` }] }, now);
+      await processSlackEvent(options);
+      await drain();
+    };
+    const first = ask("order 42");
+    await planSlackNotifications(options);
+    await drain();
+    const notice = sends().at(-1)!;
+    expect(String(notice.args.text)).toContain("Maya · Support asks about “order 42”");
+    const buttons = buttonsOf(notice);
+    expect(buttons.map(one => one.text.text)).toEqual(["Yes", "Half", "Answer in words", "Open"]);
+    const firstTs = partTs();
+    // A tap on the wrong message changes nothing; the right one answers, once, and the notice says so without buttons.
+    await press("standing_orders_question_choice", buttons[1]!.value!, "1789700999.000001");
+    expect(store.teammateQuestion(first)!.state).toBe("open");
+    await press("standing_orders_question_choice", buttons[1]!.value!, firstTs);
+    expect(store.teammateQuestion(first)).toMatchObject({ state: "answered", choice: "o2", answeredBy: "alex", answeredVia: "slack" });
+    const repainted = sends().at(-1)!;
+    expect(repainted).toMatchObject({ method: "chat.update", args: { ts: firstTs } });
+    expect(String(repainted.args.text)).toContain("✅ You answered: Half.");
+    expect(buttonsOf(repainted).map(one => one.text.text)).toEqual(["Open"]);
+    await press("standing_orders_question_choice", buttons[0]!.value!, firstTs);
+    expect(store.teammateQuestion(first)!.choice).toBe("o2");
+    // In words: the next message is the answer.
+    const second = ask("order 43");
+    await planSlackNotifications(options);
+    await drain();
+    const words = buttonsOf(sends().at(-1)!).find(one => one.text.text === "Answer in words")!;
+    expect(words.action_id).toBe("standing_orders_question_words");
+    await press("standing_orders_question_words", words.value!, partTs());
+    expect(String(sends().at(-1)!.args.text)).toContain("Your next message here is your answer");
+    receive("Refund $50 and send a coupon for the rest.");
+    await processSlackEvent(options);
+    await drain();
+    expect(store.teammateQuestion(second)).toMatchObject({ state: "answered", choice: null, answer: "Refund $50 and send a coupon for the rest.", answeredVia: "slack" });
+    expect(String(sends().at(-1)!.args.text)).toContain("It picks the card up again now.");
   });
 
   test("a Slack channel feeds a flow: 'flow N' from a paired approver connects it, anyone's message is a card, a thread reply joins it, and an Update zone answers in the thread (v89)", async () => {

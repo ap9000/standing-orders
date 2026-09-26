@@ -123,7 +123,8 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // v90 adds code steps: project scripts in Python and Node (or a file in the project), given the card and passing on what they print.
 // v91 adds waiting for replies: each card's email conversation (what was sent, what came back) and where the reply watcher stands.
 // v92 adds AI teammates: soul files, what each decided and why, and the questions they put to people; a teammate's turn is a flow step.
-export const SCHEMA_VERSION = 92;
+// v93 lets people answer a teammate's question in their chat app: a tap on an option, or a reply in their words.
+export const SCHEMA_VERSION = 93;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -3254,6 +3255,30 @@ CREATE TABLE IF NOT EXISTS telegram_flow_action (
   consumed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS telegram_flow_action_visit ON telegram_flow_action (card, entry);
+-- v93: a teammate's question on Telegram. One button per option (choice)
+-- and one to reply in words (choice NULL), placed on the message it rides;
+-- a reply to the prompt the Reply button sends is the answer.
+CREATE TABLE IF NOT EXISTS telegram_question_action (
+  token       TEXT PRIMARY KEY,
+  binding     INTEGER NOT NULL REFERENCES telegram_binding(id) ON DELETE RESTRICT,
+  question    INTEGER NOT NULL REFERENCES teammate_question(id),
+  choice      TEXT,
+  chat_id     TEXT NOT NULL,
+  message_id  TEXT,
+  created_at  TEXT NOT NULL,
+  expires_at  TEXT NOT NULL,
+  consumed_at TEXT
+);
+CREATE TABLE IF NOT EXISTS telegram_question_prompt (
+  chat_id     TEXT NOT NULL,
+  message_id  TEXT NOT NULL,
+  binding     INTEGER NOT NULL REFERENCES telegram_binding(id) ON DELETE RESTRICT,
+  question    INTEGER NOT NULL REFERENCES teammate_question(id),
+  created_at  TEXT NOT NULL,
+  expires_at  TEXT NOT NULL,
+  consumed_at TEXT,
+  PRIMARY KEY (chat_id, message_id)
+);
 CREATE TABLE IF NOT EXISTS telegram_flow_prompt (
   chat_id     TEXT NOT NULL,
   message_id  TEXT NOT NULL,
@@ -20171,6 +20196,44 @@ export class Store {
     const row = this.db.prepare("SELECT * FROM telegram_flow_prompt WHERE chat_id = ? AND message_id = ? AND consumed_at IS NULL AND expires_at > ?").get(chatId, messageId, now.toISOString());
     if (row === undefined) return null;
     return { chatId: String(row["chat_id"]), messageId: String(row["message_id"]), binding: Number(row["binding"]), card: Number(row["card"]), entry: Number(row["entry"]), mode: String(row["mode"]) as TelegramFlowPrompt["mode"] };
+  }
+
+  // ---- v93: a teammate's question on Telegram ------------------------------------------
+
+  createTelegramQuestionActions(at: { binding: number; chatId: string; question: number }, choices: readonly { token: string; choice: string | null }[], now: Date, days = 7): void {
+    const stamp = now.toISOString(), expires = new Date(now.getTime() + days * 86_400_000).toISOString();
+    const insert = this.db.prepare("INSERT INTO telegram_question_action (token, binding, question, choice, chat_id, message_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, NULL, ?, ?)");
+    for (const one of choices) insert.run(one.token, at.binding, at.question, one.choice, at.chatId, stamp, expires);
+  }
+
+  getTelegramQuestionAction(token: string): { token: string; binding: number; question: number; choice: string | null; chatId: string; messageId: string | null; expiresAt: string; consumedAt: string | null } | null {
+    if (!/^[0-9a-f]{32}$/.test(token)) return null;
+    const row = this.db.prepare("SELECT * FROM telegram_question_action WHERE token = ?").get(token);
+    if (row === undefined) return null;
+    return { token: String(row["token"]), binding: Number(row["binding"]), question: Number(row["question"]), choice: row["choice"] === null ? null : String(row["choice"]),
+      chatId: String(row["chat_id"]), messageId: row["message_id"] === null ? null : String(row["message_id"]), expiresAt: String(row["expires_at"]), consumedAt: row["consumed_at"] === null ? null : String(row["consumed_at"]) };
+  }
+
+  placeTelegramQuestionActions(tokens: readonly string[], messageId: string): void {
+    const place = this.db.prepare("UPDATE telegram_question_action SET message_id = ? WHERE token = ?");
+    for (const token of tokens) place.run(messageId, token);
+  }
+
+  /** Retire every button and prompt for a question: it was answered (anywhere). */
+  retireTelegramQuestion(question: number, now: Date): void {
+    const stamp = now.toISOString();
+    this.db.prepare("UPDATE telegram_question_action SET consumed_at = ? WHERE question = ? AND consumed_at IS NULL").run(stamp, question);
+    this.db.prepare("UPDATE telegram_question_prompt SET consumed_at = ? WHERE question = ? AND consumed_at IS NULL").run(stamp, question);
+  }
+
+  recordTelegramQuestionPrompt(prompt: { chatId: string; messageId: string; binding: number; question: number }, now: Date, hours = 24): void {
+    this.db.prepare("INSERT OR REPLACE INTO telegram_question_prompt (chat_id, message_id, binding, question, created_at, expires_at, consumed_at) VALUES (?, ?, ?, ?, ?, ?, NULL)")
+      .run(prompt.chatId, prompt.messageId, prompt.binding, prompt.question, now.toISOString(), new Date(now.getTime() + hours * 3_600_000).toISOString());
+  }
+
+  telegramQuestionPrompt(chatId: string, messageId: string, now: Date): { chatId: string; messageId: string; binding: number; question: number } | null {
+    const row = this.db.prepare("SELECT * FROM telegram_question_prompt WHERE chat_id = ? AND message_id = ? AND consumed_at IS NULL AND expires_at > ?").get(chatId, messageId, now.toISOString());
+    return row === undefined ? null : { chatId: String(row["chat_id"]), messageId: String(row["message_id"]), binding: Number(row["binding"]), question: Number(row["question"]) };
   }
 
   getTelegramAction(token: string): TelegramAction | null {
