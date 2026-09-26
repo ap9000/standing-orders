@@ -265,7 +265,7 @@ import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, readProviderK
 import type { Routine, PublicationGrant, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription, RepairChainRow, TaskRef } from "./store.js";
 import type { ChatConfig, ChatSnapshot, DirectChatProviderId, SubscriptionChatProviderId } from "./store.js";
 import type { PlanRevision, PlanRevisionKind, PlanRevisionStatus, ReviewRetryState, RevisionLineage } from "./store.js";
-import { hashPairingCode, loadBotToken, mintPairingCode, PAIRING_TTL_MS, redactToken, saveBotToken, TOKEN_ENV, type TokenSource } from "./telegram.js";
+import { hashPairingCode, keepPushedUpdate, loadBotToken, mintPairingCode, PAIRING_TTL_MS, pushedByTelegram, redactToken, saveBotToken, TELEGRAM_HOOK_PATH, telegramHookSecret, TOKEN_ENV, type TokenSource } from "./telegram.js";
 import { telegramSettingsHtml } from "./telegram-settings.js";
 import { teamsSettingsHtml } from "./teams-settings.js";
 import { handleTeamsHttp } from "./teams.js";
@@ -866,6 +866,33 @@ export function createDecisionServer(options: ServeOptions): Server {
   /** Flow webhooks (v82): the one road a public relay may expose. The secret
    * address proves nothing about the sender on its own for GitHub and Linear:
    * their signatures are checked too. Nothing runs here; cards wait for a pass. */
+  /**
+   * v98: Telegram pushes this bot's updates here. Only a request carrying our
+   * secret header is Telegram's; each update is kept for the bridge (which
+   * applies it through the same door as a polled one), and answered at once so
+   * Telegram doesn't send it again. An update already kept or applied is fine.
+   */
+  async function telegramHook(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const reply = (status: number) => { response.writeHead(status, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" }); response.end(status === 200 ? "ok" : "no"); request.resume(); };
+    const source = options.configDir === undefined || options.telegramTokenFile === undefined ? null : loadBotToken(process.env, options.telegramTokenFile);
+    if (source === null || options.configDir === undefined) return reply(404);
+    if (request.method !== "POST") return reply(405);
+    if (!pushedByTelegram(request.headers["x-telegram-bot-api-secret-token"], telegramHookSecret(options.configDir))) return reply(401);
+    if (Number(request.headers["content-length"] ?? 0) > 1_000_000) return reply(413);
+    const chunks: Buffer[] = [];
+    try {
+      await new Promise<void>((resolve, reject) => {
+        let size = 0;
+        request.on("data", (chunk: Buffer) => { size += chunk.length; if (size > 1_000_000) reject(new Error("too-large")); else chunks.push(chunk); });
+        request.on("end", resolve);
+        request.on("error", reject);
+      });
+    } catch { return reply(413); }
+    try {
+      return reply(keepPushedUpdate(store, source.botId, Buffer.concat(chunks), clock()).ok ? 200 : 400);
+    } catch { return reply(500); }
+  }
+
   async function flowHook(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
     const reply = (status: number, said: string) => { response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" }); response.end(JSON.stringify({ said })); request.resume(); };
     if (url.pathname.startsWith(FORM_PATH)) return flowForm(request, response, url);
@@ -937,6 +964,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     // signed-in browser reads; a delivery carries no session and its answer
     // reveals nothing, so /hooks/ is answered before it, and only there.
     const hook = new URL(request.url ?? "/", "http://placeholder");
+    if (hook.pathname === TELEGRAM_HOOK_PATH) return telegramHook(request, response);
     if (hook.pathname.startsWith("/hooks/")) return flowHook(request, response, hook);
     if (!allowedHost(request.headers.host)) {
       return respond(response, 421, "text/plain; charset=utf-8", "wrong host");
@@ -3402,7 +3430,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           const googleView = { connected: googleConnected(options.configDir ?? null)?.address ?? null, clientId: google?.clientId ?? "", redirect: origin === null ? null : `${origin}${GOOGLE_CALLBACK}` };
           return email === null ? { set: false, host: "", port: 587, secure: false, user: "", from: "", imapHost: "", imapPort: 993, google: googleView }
             : { set: true, host: email.host, port: email.port, secure: email.secure, user: email.user, from: email.from, imapHost: email.imap?.host ?? "", imapPort: email.imap?.port ?? 993, google: googleView };
-        })() : null),
+        })() : null, telegramDeliveryWords(store, loadBotToken(process.env, options.telegramTokenFile))),
       );
     }
 
@@ -22150,6 +22178,14 @@ function capsPage(chrome: Chrome, caps: Capability[] | null, gaps: Gap[], repo: 
   ].join("\n"), { chrome });
 }
 
+/** v98: how the bot's messages reach Standing Orders, in words: pushed to the public address, or asked for. */
+function telegramDeliveryWords(store: Store, bot: TokenSource | null): string | null {
+  if (bot === null) return null;
+  const state = store.telegramPush(bot.botId);
+  if (state?.url) return `Telegram pushes new messages to ${state.url}${state.problem === null ? "." : `, but ${state.problem.charAt(0).toLowerCase()}${state.problem.slice(1)}.`}`;
+  return `Standing Orders asks Telegram for new messages every few seconds${state?.problem ? ` (${state.problem})` : ""}.`;
+}
+
 function settingsPage(
   chrome: Chrome,
   existing: TokenSource | null,
@@ -22163,6 +22199,7 @@ function settingsPage(
   permissionDefault: { mode: UnattendedPermissionMode; updatedAt: string | null; updatedBy: string | null; canManage: boolean } | null = null,
   qualityDefault: { mode: QualityMode; updatedAt: string | null; updatedBy: string | null; canManage: boolean } | null = null,
   email: NonNullable<BrowserSettingsView["email"]> | null = null,
+  telegramDelivery: string | null = null,
 ): Screen {
   const permissionCard =
     permissionDefault === null
@@ -22377,7 +22414,7 @@ function settingsPage(
     services: messaging === null || messaging.configured.length === 0 ? null : { configured: messaging.configured, channel: messaging.channel, implicit: messaging.implicit },
     push: push === null || csrf === "" ? null : { available: push.available, devices: push.devices.filter(one => one.retiredAt === null || one.retiredReason === "gone").map(one => ({ id: one.id, words: `${one.uaWords} · since ${when(one.createdAt)}`, state: one.retiredAt !== null ? "expired" : one.consecutiveFailures >= 20 ? "failing" : "ok", removable: one.retiredAt === null })) },
     digest: digest === null || csrf === "" ? null : { every: digest.everyMs === null ? "off" : String(Math.round(digest.everyMs / 60_000)), held: digest.everyMs === null ? null : `${digest.held} routine fact(s) held` },
-    telegram: { state: hasEnv ? "from the environment" : existing === null ? "not set" : "saved", current },
+    telegram: { state: hasEnv ? "from the environment" : existing === null ? "not set" : "saved", current, delivery: telegramDelivery },
     email,
   };
   return screen("Settings", [
@@ -22394,6 +22431,7 @@ function settingsPage(
     problem === null ? "" : `<p class="problem" role="alert">${escape(problem)}</p>`,
     `<details class="settings-more" id="telegram-token"><summary>Telegram bot token <span class="meta">${hasEnv ? "from the environment" : existing === null ? "not set" : "saved"}</span></summary>`,
     `<p class="meta">Current: ${current}</p>`,
+    telegramDelivery === null ? "" : `<p class="meta" data-telegram-delivery>${escape(telegramDelivery)}</p>`,
     `<form method="post" action="/settings/telegram-token">`,
     `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
     `<label>Token from @BotFather<input type="password" name="token" autocomplete="off"></label>`,

@@ -219,6 +219,7 @@ function TelegramToken({ view, csrf }: { view: BrowserSettingsView; csrf: string
     </button></CollapsibleTrigger>
     <CollapsibleContent className="grid gap-3 border-t border-border px-5 py-4 max-sm:px-4">
       <p className="text-[13px] text-muted-foreground">Current: {view.telegram.current}</p>
+      {view.telegram.delivery != null && <p className="text-[13px] text-muted-foreground" data-telegram-delivery>{view.telegram.delivery}</p>}
       <form method="post" action="/settings/telegram-token" className="flex flex-wrap items-end gap-3">
         <Csrf csrf={csrf} />
         <div className="grid min-w-56 flex-1 gap-2"><Label htmlFor="telegram-token-field">Token from @BotFather</Label><Input id="telegram-token-field" type="password" name="token" autoComplete="off" /></div>

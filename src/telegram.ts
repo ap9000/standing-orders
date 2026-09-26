@@ -24,8 +24,9 @@ import { messageTeammate } from "./teammate-desk.js";
 import { acceptanceEvidenceText } from "./chat-acceptance.js";
 import { verifyApproverStanding } from "./principal.js";
 import { resultImageFileName, resultTaskLabel, verifyResultImage } from "./chat-evidence.js";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { validateNote } from "./decision.js";
 import { isLifecycleNotification, isTelegramProgressNotification, TELEGRAM_HOLD_REASONS, type Store, type Decision, type Notification, type TelegramBinding, type TelegramDelivery } from "./store.js";
 import { telegramProgressCard, type ProgressEntity } from "./telegram-progress.js";
@@ -66,6 +67,50 @@ export const DELIVERY_CLAIM_MS = 2 * 60_000;
 const PART_CAP = 3_900;
 /** Pages of getUpdates one pass will read before reporting a backlog. */
 const PAGE_BUDGET = 10;
+
+// ---- pushed updates (v98) ----------------------------------------------------
+
+/** Where Telegram pushes this bot's updates: under the public hooks address (Tailscale Funnel covers /hooks). */
+export const TELEGRAM_HOOK_PATH = "/hooks/telegram";
+const HOOK_SECRET_FILE = "telegram-hook-secret";
+
+/** The secret Telegram sends with every push (its header), kept beside the database; made once when asked to. */
+export function telegramHookSecret(dir: string, make = false): string | null {
+  const file = join(dir, HOOK_SECRET_FILE);
+  try { const saved = readFileSync(file, "utf8").trim(); if (/^[A-Za-z0-9_-]{32,256}$/.test(saved)) return saved; } catch { /* none yet */ }
+  if (!make) return null;
+  const made = randomBytes(32).toString("base64url");
+  writeFileSync(file, made, { mode: 0o600 });
+  chmodSync(file, 0o600);
+  return made;
+}
+
+/** The address Telegram pushes to: the public hooks address (https only) and /hooks/telegram; null without one. */
+export function telegramPushUrl(hooksBase: string | null): string | null {
+  if (hooksBase === null) return null;
+  try {
+    const url = new URL(hooksBase);
+    return url.protocol === "https:" ? `${hooksBase.replace(/\/+$/, "")}${TELEGRAM_HOOK_PATH}` : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A push is Telegram's when its secret header matches ours (compared in constant time). */
+export function pushedByTelegram(header: unknown, secret: string | null): boolean {
+  if (secret === null || typeof header !== "string") return false;
+  const given = Buffer.from(header), wanted = Buffer.from(secret);
+  return given.length === wanted.length && timingSafeEqual(given, wanted);
+}
+
+/** Keep one pushed update for the bridge: a JSON object with a positive integer update_id. */
+export function keepPushedUpdate(store: Store, botId: string, body: Buffer, now: Date): { ok: true; kept: boolean } | { ok: false } {
+  let update: unknown;
+  try { update = JSON.parse(body.toString("utf8")); } catch { return { ok: false }; }
+  const id = (update as { update_id?: unknown } | null)?.update_id;
+  if (update === null || typeof update !== "object" || typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) return { ok: false };
+  return { ok: true, kept: store.queueTelegramUpdate(botId, id, JSON.stringify(update), now) };
+}
 
 // ---- the credential --------------------------------------------------------
 
@@ -244,6 +289,12 @@ export type BridgeReport = {
   chatRefused?: number;
   /** Proposal cards confirmed by a tap this pass. */
   chatConfirmed?: number;
+  /** v98: another program asked Telegram for this bot's updates (harmless: nothing is lost). */
+  contention?: number;
+  /** v98: Telegram answered that it pushes this bot's updates to a webhook. */
+  webhookActive?: boolean;
+  /** v98: pushed updates applied this pass. */
+  pushed?: number;
 };
 
 type Effect = () => Promise<void>;
@@ -291,6 +342,9 @@ export async function bridgePass(
       await deliverOutbox(store, botId, transport, owner, clock, report, options.readProjects, options.canDeliver, options.conversation?.phoneOrigin, options.conversation?.evidenceRoot);
       await deliverTeam(store, botId, transport, clock, report, options.readProjects, options.canDeliver, options.conversation?.phoneOrigin);
     }
+    // v98: updates Telegram pushed to the console apply first; asking for more only works while it isn't pushing.
+    const pushed = await drainInbox({ store, botId, transport, clock, report, readProjects: options.readProjects, conversation: options.conversation, projects: null }, owner, lease.generation);
+    if (pushed > 0) report.pushed = pushed;
     await drainUpdates(store, botId, transport, owner, lease.generation, lease.cursor, clock, report, 0, undefined, options.readProjects, options.conversation);
     if (options.conversation !== undefined && options.readProjects !== undefined) {
       // The queued turns, outside any transaction. A model turn can outlive
@@ -326,6 +380,9 @@ export const MAX_POLL_SECONDS = 25;
 const FOLLOW_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000] as const;
 /** A cycle that returned instantly with nothing is padded to this — a scripted or broken server must not spin the loop hot. */
 const FOLLOW_IDLE_FLOOR_MS = 1_000;
+/** v98: how often the bridge checks Telegram still pushes to us; how long pushes may keep failing before it asks
+ * for updates itself; and how long it asks before trying pushes again. */
+const PUSH_CHECK_MS = 60_000, PUSH_GIVE_UP_MS = 5 * 60_000, PUSH_RETRY_MS = 15 * 60_000, PUSH_IDLE_MS = 2_000;
 
 export type FollowReport = {
   cycles: number;
@@ -384,6 +441,10 @@ export async function followBridge(
     onCycle?: (report: BridgeReport) => void;
     /** Injectable for tests; the default resolves early on abort. */
     sleep?: (ms: number) => Promise<void>;
+    /** v98: have Telegram push updates to this public address (with this secret) instead of asking for them. */
+    push?: { url: string; secret: string } | null;
+    /** v98: how often to check Telegram still pushes to us (tests shorten it). */
+    pushCheckMs?: number;
   },
 ): Promise<FollowReport> {
   const clock = options.clock ?? (() => new Date());
@@ -426,6 +487,53 @@ export async function followBridge(
       });
   };
 
+  // v98: pushed updates. With a public address, Telegram pushes each update to
+  // /hooks/telegram and the console keeps it for us; while it does, nobody can
+  // ask Telegram for this bot's updates — no other program can take them. Every
+  // minute we check the address is still ours (a framework starting up elsewhere
+  // may delete it); if pushes keep failing we ask for updates ourselves for a
+  // while, then try pushes again.
+  const push = options.push ?? null;
+  const pushCheckMs = options.pushCheckMs ?? PUSH_CHECK_MS;
+  let pushMode: "push" | "poll" = push === null ? "poll" : "push";
+  let pushRegistered = false, pushCheckedAt = -Infinity, pushFailingSince: number | null = null, pollUntil = 0, pollNoted = false;
+  const pushing = (): boolean => push !== null && pushMode === "push" && pushRegistered;
+  const fallBack = (report: BridgeReport, problem: string): void => {
+    pushMode = "poll"; pushRegistered = false; pushFailingSince = null; pollUntil = clock().getTime() + PUSH_RETRY_MS;
+    report.problems.push(`${problem}. Asking Telegram for updates directly for now.`);
+    store.setTelegramPush(botId, { url: null, problem }, clock());
+  };
+  const managePush = async (report: BridgeReport): Promise<void> => {
+    if (push === null) {
+      if (!pollNoted) { store.setTelegramPush(botId, { url: null, problem: null }, clock()); pollNoted = true; }
+      return;
+    }
+    const now = clock().getTime();
+    if (pushMode === "poll") { if (now < pollUntil) return; pushMode = "push"; pushRegistered = false; }
+    if (pushRegistered && now - pushCheckedAt < pushCheckMs) return;
+    pushCheckedAt = now;
+    const info = await transport("getWebhookInfo", {}, signal);
+    if (!info.ok) { report.problems.push(`getWebhookInfo: ${info.description ?? "failed"}`); return; }
+    const hook = (info.result ?? {}) as { url?: string; pending_update_count?: number; last_error_date?: number; last_error_message?: string };
+    if (hook.url !== push.url) {
+      if (pushRegistered) report.problems.push(`Telegram stopped pushing to ${push.url} (${hook.url ? "another address was set" : "something switched this bot back to being asked for updates"}); set it again`);
+      const set = await transport("setWebhook", { url: push.url, secret_token: push.secret, allowed_updates: ["message", "callback_query"], max_connections: 4 }, signal);
+      if (!set.ok) { fallBack(report, `Telegram refused the push address ${push.url}: ${set.description ?? "failed"}`); return; }
+      pushRegistered = true; pushFailingSince = null;
+      store.setTelegramPush(botId, { url: push.url, problem: null }, clock());
+      return;
+    }
+    pushRegistered = true;
+    // Telegram couldn't deliver lately and updates are waiting: the address isn't reachable.
+    const failing = (hook.pending_update_count ?? 0) > 0 && typeof hook.last_error_date === "number" && now / 1000 - hook.last_error_date < 180;
+    if (!failing) { pushFailingSince = null; store.setTelegramPush(botId, { url: push.url, problem: null }, clock()); return; }
+    pushFailingSince ??= now;
+    store.setTelegramPush(botId, { url: push.url, problem: `Telegram can't reach it: ${hook.last_error_message ?? "no answer"}` }, clock());
+    if (now - pushFailingSince < PUSH_GIVE_UP_MS) return;
+    await transport("deleteWebhook", { drop_pending_updates: false }, signal);
+    fallBack(report, `Telegram couldn't reach ${push.url} (${hook.last_error_message ?? "no answer"})`);
+  };
+
   try {
     while (!signal.aborted) {
       const lease = store.acquireBridgeLease(botId, owner, BRIDGE_LEASE_MS, clock());
@@ -445,13 +553,22 @@ export async function followBridge(
       }
       const startedAt = Date.now();
       const report: BridgeReport = { sent: 0, answered: 0, paired: 0, ignored: 0, backlog: false, problems: [] };
+      await managePush(report);
       if (options.deliver !== false) {
         await deliverOutbox(store, botId, transport, owner, clock, report, options.readProjects, options.canDeliver, options.conversation?.phoneOrigin, options.conversation?.evidenceRoot);
         await deliverTeam(store, botId, transport, clock, report, options.readProjects, options.canDeliver, options.conversation?.phoneOrigin);
       }
-      await drainUpdates(
-        store, botId, transport, owner, lease.generation, lease.cursor, clock, report, pollSeconds, signal, options.readProjects, options.conversation,
-      );
+      // Pushed updates first (some may wait from before a fall back), then — only while
+      // Telegram isn't pushing — ask for more.
+      const pushed = await drainInbox({ store, botId, transport, clock, report, readProjects: options.readProjects, conversation: options.conversation, projects: null }, owner, lease.generation);
+      if (pushed > 0) report.pushed = pushed;
+      if (!pushing()) {
+        await drainUpdates(
+          store, botId, transport, owner, lease.generation, lease.cursor, clock, report, pollSeconds, signal, options.readProjects, options.conversation,
+        );
+        // A push address nobody here wants any more (the public address was removed): take it down, so asking works again.
+        if (report.webhookActive === true && push === null) await transport("deleteWebhook", { drop_pending_updates: false }, signal);
+      }
       kick();
 
       total.cycles++;
@@ -482,8 +599,10 @@ export async function followBridge(
       // instantly and empty (scripted transport, misbehaving server) gets
       // padded so the loop cannot spin hot.
       const took = Date.now() - startedAt;
-      if (!signal.aborted && report.sent === 0 && report.answered === 0 && took < FOLLOW_IDLE_FLOOR_MS) {
-        await wait(FOLLOW_IDLE_FLOOR_MS - took);
+      // While Telegram pushes (v98) there is no long poll to wait on: a pushed update waits at most this long.
+      const floor = pushing() ? PUSH_IDLE_MS : FOLLOW_IDLE_FLOOR_MS;
+      if (!signal.aborted && report.sent === 0 && report.answered === 0 && took < floor) {
+        await wait(floor - took);
       }
     }
   } finally {
@@ -1032,35 +1151,64 @@ async function drainUpdates(
       signal,
     );
     if (!answer.ok) {
-      report.problems.push(`getUpdates: ${answer.description ?? "failed"}`);
+      const said = answer.description ?? "failed";
+      // v98: another program asked Telegram for this bot's updates, and Telegram ended our
+      // request in its favour. Nothing is lost: an update is only gone once someone
+      // confirms it, and the next request asks again. Not a problem to report.
+      if (/terminated by other getUpdates/i.test(said)) { report.contention = (report.contention ?? 0) + 1; return; }
+      // Telegram is pushing this bot's updates to a webhook: polling isn't how they arrive now.
+      if (/webhook is active/i.test(said)) { report.webhookActive = true; return; }
+      report.problems.push(`getUpdates: ${said}`);
       return;
     }
     const updates = (answer.result as Update[] | undefined) ?? [];
     if (updates.length === 0) return;
 
     for (const update of updates) {
-      // A proposal tap confirms as a principal minted against the CURRENT
-      // enrolled ceiling, and the registry is a file read: it happens
-      // before the update's transaction, and only once the envelope has
-      // proved the exact paired sender and chat — a stranger reads nothing.
-      context.projects = update.message !== undefined ? await enrolledForMessage(context, update) : await projectsForTap(context, update);
-      const effects = applyUpdate(context, update);
-      // Effects are Telegram-side conveniences — acks, edits, replies. They
-      // retry-or-drop; they never decide whether the cursor moves, because
-      // an unreachable edit must not make the bridge re-apply an answer.
-      for (const effect of effects) {
-        try {
-          await effect();
-        } catch {
-          report.problems.push(`a telegram edit/ack failed for update ${update.update_id}`);
-        }
-      }
+      await processUpdate(context, update, owner, generation);
       offset = update.update_id + 1;
-      store.advanceBridgeCursor(botId, owner, generation, update.update_id, clock());
     }
   }
   // The budget ran out with Telegram still holding pages: said, not hidden.
   report.backlog = true;
+}
+
+/**
+ * One update, polled or pushed (v98): the projects it may read, applied in
+ * its own transaction (once: applyUpdate refuses an update id it has seen),
+ * its Telegram-side effects, and the cursor moved past it.
+ */
+async function processUpdate(context: Context, update: Update, owner: string, generation: number): Promise<void> {
+  // A proposal tap confirms as a principal minted against the CURRENT
+  // enrolled ceiling, and the registry is a file read: it happens
+  // before the update's transaction, and only once the envelope has
+  // proved the exact paired sender and chat — a stranger reads nothing.
+  context.projects = update.message !== undefined ? await enrolledForMessage(context, update) : await projectsForTap(context, update);
+  const effects = applyUpdate(context, update);
+  // Effects are Telegram-side conveniences — acks, edits, replies. They
+  // retry-or-drop; they never decide whether the cursor moves, because
+  // an unreachable edit must not make the bridge re-apply an answer.
+  for (const effect of effects) {
+    try {
+      await effect();
+    } catch {
+      context.report.problems.push(`a telegram edit/ack failed for update ${update.update_id}`);
+    }
+  }
+  context.store.advanceBridgeCursor(context.botId, owner, generation, update.update_id, context.clock());
+}
+
+/** v98: updates Telegram pushed to /hooks/telegram, applied in order through the same door as polled ones. */
+async function drainInbox(context: Context, owner: string, generation: number): Promise<number> {
+  let applied = 0;
+  for (const queued of context.store.telegramInbox(context.botId, PAGE_BUDGET * 100)) {
+    let update: Update | null = null;
+    try { update = JSON.parse(queued.payload) as Update; } catch { update = null; }
+    if (update !== null && update.update_id === queued.updateId) await processUpdate(context, update, owner, generation);
+    context.store.dropTelegramInbox(queued.updateId);
+    applied++;
+  }
+  return applied;
 }
 
 /** The enrolled registry, read before a message is applied: the team layer

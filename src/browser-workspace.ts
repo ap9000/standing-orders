@@ -76,7 +76,9 @@ export type BrowserSettingsView = {
   services: { configured: string[]; channel: string | null; implicit: boolean } | null;
   push: { available: boolean; devices: { id: number; words: string; state: string; removable: boolean }[] } | null;
   digest: { every: string; held: string | null } | null;
-  telegram: { state: string; current: string };
+  telegram: { state: string; current: string;
+    /** v98: how the bot's messages reach Standing Orders (pushed, or asked for), in words. */
+    delivery?: string | null };
   /** v87: the mail server Send email steps use (approvers only); the password is never shown back. */
   email?: { set: boolean; host: string; port: number; secure: boolean; user: string; from: string;
     /** v89: where Email inbox triggers read (IMAP), and a Google account connected instead of a mail server (`redirect`: the address to register with Google, when this page's address can take one). */
