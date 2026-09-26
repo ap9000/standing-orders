@@ -244,6 +244,21 @@ describe("shared chat action lifecycle", () => {
     expect(confirm(proposal("teammate_tools", { teammate: mate, tool: "github", change: "revoke" }))).toMatchObject({ ok: true });
     expect(store.teammateGrants(mate)).toEqual([]);
   });
+  test("the lead tells a teammate something, fixes what it remembers and has it forget, each as a card; a card drafted before a change is refused (v95)", () => {
+    const mate = store.createTeammate({ repo, handle: "maya", soul: "---\nname: Maya\nrole: Support\n---\n## Who you are\nHelpful.\n", model: null, manager: who.name, by: who.name }, now);
+    expect(confirm(proposal("teammate_note", { teammate: mate, note: "Offer free shipping this week." }))).toMatchObject({ ok: true });
+    const [told] = store.teammateMemories(mate);
+    expect(told).toMatchObject({ source: "person", text: "Offer free shipping this week.", createdBy: who.name });
+    expect(() => prepareSharedAction(store, who, "teammate_note", { teammate: mate, note: "x".repeat(301) }, root, now)).toThrow("Keep a memory to 300 characters");
+    const edit = proposal("teammate_memory", { teammate: mate, memory: told!.id, change: "edit", text: "Offer free shipping until Sunday." });
+    expect(store.getMateProposal(edit)!.payload).toMatchObject({ title: "Change what Maya remembers", terms: ["Was: Offer free shipping this week.", "Now: Offer free shipping until Sunday."] });
+    const forget = proposal("teammate_memory", { teammate: mate, memory: told!.id, change: "forget" });
+    expect(confirm(edit)).toMatchObject({ ok: true });
+    expect(store.teammateMemory(told!.id)?.text).toBe("Offer free shipping until Sunday.");
+    expect(confirm(forget)).toMatchObject({ ok: false });
+    expect(confirm(proposal("teammate_memory", { teammate: mate, memory: told!.id, change: "forget" }))).toMatchObject({ ok: true });
+    expect(store.teammateMemories(mate)).toEqual([]);
+  });
   function skill() {
     return importSkill(
       store,

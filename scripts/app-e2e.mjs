@@ -799,7 +799,8 @@ await check(TOOL_CHECK, [], async () => {
   writeFileSync(shop, `import { createInterface } from "node:readline";
 import { appendFileSync } from "node:fs";
 const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\\n");
-const orders = { "2201": "Order 2201: a desk lamp, $30. The card was charged twice: two $30 payments; one is a duplicate.", "2202": "Order 2202: a TV, $400. Delivered with a cracked screen; photo on file." };
+const orders = { "2201": "Order 2201: a desk lamp, $30. The card was charged twice: two $30 payments; one is a duplicate.", "2202": "Order 2202: a TV, $400. Delivered with a cracked screen; photo on file.",
+  ...Object.fromEntries([120, 125, 130, 135, 140].map((amount, at) => [String(2204 + at), "Order " + (2204 + at) + ": a chair, $" + amount + ". Arrived broken; photo on file. The customer is owed a full refund."])) };
 createInterface({ input: process.stdin }).on("line", line => {
   const message = JSON.parse(line);
   if (message.method === "initialize") reply(message.id, { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "store", version: "1" } });
@@ -917,6 +918,67 @@ await check("The lead changes a teammate's tool rule from plain words, as a card
   }, { timeoutMs: 30_000, everyMs: 1000 });
   if (rules.refund_order.use !== "free") throw new Error(`Rosa's refund rule: ${JSON.stringify(rules.refund_order)}`);
   return { rule: rules.refund_order };
+});
+
+await check("Teammates remember and learn: Rosa keeps a customer's preference for later cards, you correct her memory, and after approving refunds in a row she suggests a looser rule you accept in one tap (real Claude turns)", [TOOL_CHECK], async () => {
+  const mate = rows("SELECT id FROM teammate WHERE handle = 'rosa' AND state = 'active'")[0]?.id;
+  const flowId = rows("SELECT id FROM flow WHERE name = 'Refund desk'")[0]?.id;
+  if (!mate || !flowId) throw new Error("Rosa or her flow is missing");
+  const cardOf = async title => (await flowView(flowId)).cards.find(one => one.title.startsWith(title));
+  await page.goto(`${base}/flows/${flowId}`); await page.waitForSelector("[data-zone]");
+  // A customer says something worth keeping for later cards.
+  await addCard("Question from Priya Shah", "Hi, it's Priya Shah. For anything in future: I always prefer store credit over a refund, and please email me rather than call. Is order 2201 all sorted now? — Priya");
+  const kept = await until("Rosa to keep Priya's preference", async () => rows(`SELECT id, text FROM teammate_memory WHERE teammate = ${mate} AND source = 'teammate' AND state = 'active'`).find(one => /priya/i.test(one.text)) ?? null, { timeoutMs: 300_000, everyMs: 3000 });
+  // On her page, the memory says where it came from; you correct it.
+  await page.goto(`${base}/teammates/${mate}#memory`);
+  const line = page.locator(`[data-memory="${kept.id}"]`);
+  if (!/kept this from/.test(await line.innerText())) throw new Error(`the memory line: ${await line.innerText()}`);
+  await line.locator("summary").click();
+  await line.locator("textarea").fill("Priya Shah prefers store credit over refunds, and email over phone calls.");
+  await Promise.all([page.waitForNavigation(), line.locator('button:has-text("Save")').click()]);
+  if (rows(`SELECT text FROM teammate_memory WHERE id = ${kept.id}`)[0]?.text !== "Priya Shah prefers store credit over refunds, and email over phone calls.") throw new Error("the memory wasn't changed");
+  await page.locator("#memory").scrollIntoViewIfNeeded(); await sleep(300);
+  await shot("teammate-memory");
+  // Refunds over her limit, each approved: the approvals in a row teach her to suggest a looser rule.
+  await page.goto(`${base}/flows/${flowId}`); await page.waitForSelector("[data-zone]");
+  const amounts = [120, 125, 130, 135, 140];
+  for (const [at, amount] of amounts.entries()) await addCard(`Broken chair, order ${2204 + at}`, `My chair from order ${2204 + at} arrived broken. Please refund the $${amount}. — Kim`);
+  const suggestion = await until("Rosa to suggest a looser refund rule", async () => {
+    for (const [at] of amounts.entries()) {
+      const one = await cardOf(`Broken chair, order ${2204 + at}`);
+      if (one?.question?.mine) await post(`/teammates/questions/${one.question.id}/answer`, one.question.call != null ? { choice: "approve" } : { text: "Yes, refund it in full." });
+    }
+    return rows(`SELECT id, said, rule_json FROM teammate_suggestion WHERE teammate = ${mate} AND state = 'open'`)[0] ?? null;
+  }, { timeoutMs: 600_000, everyMs: 4000 });
+  if (!/refund_order/.test(suggestion.said)) throw new Error(`the suggestion: ${suggestion.said}`);
+  if (rows(`SELECT 1 FROM notification WHERE recipient = 'alex' AND subject LIKE '%Rosa · Support suggests a rule change%'`).length === 0) throw new Error("her manager wasn't told in their chat app");
+  // One tap on her page accepts it: that one rule changes.
+  await page.goto(`${base}/teammates/${mate}`);
+  const offered = page.locator("[data-suggestion]");
+  await offered.waitFor();
+  await shot("teammate-suggests");
+  const phone = await signIn("alex", { width: 390, height: 844 }, "dark");
+  await phone.goto(`${base}/teammates/${mate}`); await phone.waitForLoadState("load"); await sleep(700);
+  await phone.screenshot({ path: join(w.out, "teammate-suggests-phone.png") });
+  await phone.goto(`${base}/teammates/${mate}#memory`); await sleep(500);
+  await phone.screenshot({ path: join(w.out, "teammate-memory-phone.png") });
+  const wide = await phone.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
+  await phone.context().close();
+  if (wide) throw new Error("the teammate page scrolls sideways on a phone");
+  await Promise.all([page.waitForNavigation(), offered.locator('button:has-text("Yes, change it")').click()]);
+  const rule = JSON.parse(rows(`SELECT rules_json FROM teammate_tool WHERE teammate = ${mate} AND tool = 'store'`)[0]?.rules_json ?? "{}").refund_order;
+  if (JSON.stringify(rule) !== suggestion.rule_json) throw new Error(`her refund rule is ${JSON.stringify(rule)}, not the suggested ${suggestion.rule_json}`);
+  // Let the rest of the refunds finish so nothing is left waiting.
+  await until("the chair refunds to finish", async () => {
+    let left = 0;
+    for (const [at] of amounts.entries()) {
+      const one = await cardOf(`Broken chair, order ${2204 + at}`);
+      if (one?.question?.mine) await post(`/teammates/questions/${one.question.id}/answer`, one.question.call != null ? { choice: "approve" } : { text: "Yes, refund it in full." });
+      if (one?.stage === "rosa") left++;
+    }
+    return left === 0;
+  }, { timeoutMs: 600_000, everyMs: 4000 });
+  return { memory: kept.text, suggestion: suggestion.said, rule };
 });
 
 await check("Live canvas: a teammate sees who's here and a card move without reloading", ["Code steps: a Python file and a Node script get the card, pass on what they print, pick the next zone, and get a secret"], async () => {

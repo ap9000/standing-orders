@@ -25,6 +25,7 @@ import { keptDraft } from "./flow-draft.js";
 import { notifyPeople } from "./flow-people.js";
 import { claudeTurnRunner, parseSoul, readTurn, teammateActor, teammateLabel, TURN_TIMEOUT_MS, turnPrompt, type TurnAnswer, type TurnContext, type TurnRunner } from "./teammates.js";
 import { callName, callOutcome, callWords, inputProblem, makeCall, offeredTools, refreshGrants, ruleFor, type OfferedTool, type ToolIo } from "./teammate-tools.js";
+import { answerSuggestion, considerSuggestion, memoriesFor, remember } from "./teammate-memory.js";
 
 /** A question waits for its answer this long before the step is due again on its own: never, in practice. */
 export const ASKED = "9999-12-31T00:00:00.000Z";
@@ -61,7 +62,8 @@ function contextOf(store: Store, flow: FlowRow, definition: FlowDefinition, stag
   const title = (id: string) => definition.stages.find(one => one.id === id)?.title ?? id;
   const draft = stage.kind === "approval" ? draftFor(definition, stage) : null;
   const question = store.teammateQuestionFor(card.id, card.entry);
-  const notes = store.teammateEvents(mate.id, 40).filter(one => one.kind === "note").slice(0, 10).reverse();
+  // v95: what its people told it lately, and what it kept that fits this card.
+  const memory = memoriesFor(store, mate, `${card.title}\n${card.description ?? ""}`, new Date());
   return {
     soul: mate.soul, name: soul.soul.name, role: soul.soul.role, flow: flow.name, zone: stage.title, kind: stage.kind === "approval" ? "decide" : "handle",
     instructions: stage.instructions, draft: draft === null ? null : card.outputs[draft.id] ?? null, canSendBack: stage.onFail !== null,
@@ -74,7 +76,8 @@ function contextOf(store: Store, flow: FlowRow, definition: FlowDefinition, stag
       history: store.flowEvents(card.id).slice(-8).map(one => `${one.outcome} → ${title(one.toStage)}${one.note === null ? "" : `: ${one.note}`}`),
     },
     asked: question !== null && question.state === "answered" ? [{ question: question.question, answer: [question.choice === null ? null : question.options.find(one => one.id === question.choice)?.label ?? question.choice, question.answer].filter(Boolean).join(" — ") }] : [],
-    notes: notes.map(one => ({ by: one.by ?? "your manager", text: one.said })),
+    notes: memory.told.map(one => ({ by: one.createdBy, text: one.text })),
+    memory: memory.kept.map(one => one.text),
     tools, toolsSpent: spent,
     calls: store.teammateCallsOn(card.id, card.entry).map(call => {
       const question = call.state === "denied" ? store.teammateQuestionForCall(call.id) : null;
@@ -110,6 +113,7 @@ export async function teammateTurn(store: Store, flow: FlowRow, definition: Flow
     const answer = readTurn(reply.value, context);
     if (answer === null) return { state: "retry", said: `${context.name}'s answer wasn't one this zone allows.`, log: [...log, JSON.stringify(reply.value).slice(0, 4000)].join("\n\n") };
     const header = `${context.name} (${model}) · ${(reply.ms / 1000).toFixed(1)} s`;
+    if (answer.remember !== "") remember(store, mate, answer.remember, { source: "teammate", card: card.id, by: teammateActor({ name: context.name }) }, now);
     if (answer.action !== "use_tool") {
       const outcome = carryOut(store, flow, definition, stage, card, mate, context, answer, now, io, header);
       return log.length === 0 ? outcome : { ...outcome, log: `${log.join("\n\n")}\n\n${outcome.log ?? ""}`.trim() };
@@ -227,6 +231,14 @@ export function answerTeammateQuestion(store: Store, id: number, answer: { choic
     const text = answer.text?.trim().slice(0, 2000) || null;
     if (choice === null && text === null) return { ok: false as const, said: "Pick an answer or write one." };
     const card = store.getFlowCard(question.card);
+    // v95: a rule change it suggested to its manager. Nothing about the card waits on it.
+    if (question.suggestion !== null) {
+      const mate = store.getTeammate(question.teammate);
+      const decided = mate === null ? { ok: false as const, said: "That teammate is off the team." } : answerSuggestion(store, mate, question.suggestion, { choice: choice?.id ?? null, text, by: answer.by }, now);
+      store.answerTeammateQuestion(id, { choice: choice?.id ?? null, text, by: answer.by, via: answer.via }, now);
+      store.addTeammateEvent({ teammate: question.teammate, card: question.card, entry: question.entry, kind: "answered", said: `${answer.by}: ${[choice?.label, text].filter(Boolean).join(" — ")}`, by: answer.by }, now);
+      return decided;
+    }
     // v94: an ask-first tool call. Approve makes exactly that call (on the card's next turn); Deny, or words alone, don't.
     if (question.toolCall !== null) {
       if (card === null || card.state !== "active" || card.entry !== question.entry) {
@@ -235,6 +247,9 @@ export function answerTeammateQuestion(store: Store, id: number, answer: { choic
         return { ok: false as const, said: "That card has moved on, so nothing was done." };
       }
       if (!store.moveTeammateCall(question.toolCall, ["asked"], { state: choice?.id === APPROVE ? "approved" : "denied", decidedBy: answer.by }, now)) return { ok: false as const, said: "That call was already decided." };
+      // v95: approving the same action again and again teaches it to suggest a looser rule.
+      const mate = store.getTeammate(question.teammate), call = store.teammateCall(question.toolCall);
+      if (choice?.id === APPROVE && mate !== null && call !== null) considerSuggestion(store, mate, call, now);
     }
     store.answerTeammateQuestion(id, { choice: choice?.id ?? null, text, by: answer.by, via: answer.via }, now);
     store.addTeammateEvent({ teammate: question.teammate, card: question.card, entry: question.entry, kind: "answered", said: `${answer.by}: ${[choice?.label, text].filter(Boolean).join(" — ")}`, by: answer.by }, now);

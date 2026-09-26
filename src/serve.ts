@@ -22,7 +22,8 @@ import { toolsHtml, TOOLS_CSS, type ToolsView } from "./tools-ui.js";
 import { flowFallbackHtml, flowsListHtml, flowView, FLOWS_CSS } from "./flows-ui.js";
 import { BLANK_SOUL, TEAMMATE_CSS, teammatePageHtml, teammatesListHtml } from "./teammates-ui.js";
 import { grantTool, revokeTool, rulesFromForm, setToolRules } from "./teammate-tools.js";
-import { createTeammateFrom, labelOf, leaveNote, nameOf, saveSoul, setTeammateState, teammateSettings, sendTeammateSummaries } from "./teammate-admin.js";
+import { createTeammateFrom, labelOf, nameOf, saveSoul, setTeammateState, teammateSettings, sendTeammateSummaries } from "./teammate-admin.js";
+import { editMemory, forgetMemory, tellTeammate } from "./teammate-memory.js";
 import { answerTeammateQuestion } from "./teammate-work.js";
 import { createFlowRooms, flowFingerprint } from "./flow-live.js";
 import { disconnectGoogle, finishGoogleConsent, GOOGLE_CALLBACK, googleConnected, googleConsent, readGoogleMail, saveGoogleClient, type GoogleVisit } from "./google-mail.js";
@@ -2704,7 +2705,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       const approvers = store.listApprovers().map(one => one.name).filter(name => store.accountCanAccess(name, mate.repo));
       return sendScreen(response, 200, screen(labelOf(mate), `<h1>${escape(labelOf(mate))}</h1>${teammatePageHtml(store, mate, who.name, projectName, who.via === "cookie" ? who.session.csrf : "", who.via === "cookie" && who.role === "approver", approvers,
-        { said: url.searchParams.get("said"), problem: url.searchParams.get("problem") })}`, { chrome: chromeFor(mate.repo, "flows") }));
+        { said: url.searchParams.get("said"), problem: url.searchParams.get("problem"), query: url.searchParams.get("q") })}`, { chrome: chromeFor(mate.repo, "flows") }));
     }
     const flowRead = /^\/flows\/([1-9][0-9]{0,9})\/(insights|runs\/([1-9][0-9]{0,9})\/([1-9][0-9]{0,9}))$/.exec(url.pathname);
     if (flowRead !== null) {
@@ -5500,7 +5501,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
     }
     // v92: looking after teammates, and answering their questions.
-    const teammatePost = url.pathname === "/teammates/new" ? ["", "0", "new"] as const : /^\/teammates\/([1-9][0-9]{0,9})\/(soul|state|note|settings|summary|tools)$/.exec(url.pathname);
+    const teammatePost = url.pathname === "/teammates/new" ? ["", "0", "new"] as const : /^\/teammates\/([1-9][0-9]{0,9})\/(soul|state|note|settings|summary|tools|memory)$/.exec(url.pathname);
     const questionPost = /^\/teammates\/questions\/([1-9][0-9]{0,9})\/answer$/.exec(url.pathname);
     if (teammatePost !== null || questionPost !== null) {
       const now = clock();
@@ -5538,6 +5539,12 @@ export function createDecisionServer(options: ServeOptions): Server {
         }
         return redirect(response, `${back}?said=${encodeURIComponent(saved.said)}`);
       }
+      if (action === "memory") {
+        // v95: edit or forget one thing it remembers.
+        const memory = Number(body.get("id"));
+        const changed = body.get("op") === "forget" ? forgetMemory(store, mate, memory, who.name, now) : editMemory(store, mate, memory, body.get("text") ?? "", who.name, now);
+        return redirect(response, `${back}?${changed.ok ? "said" : "problem"}=${encodeURIComponent(changed.said)}#memory`);
+      }
       if (action === "tools") {
         // v94: which project tools it may use, and its rule for each action.
         const tool = body.get("tool") ?? "", op = body.get("op");
@@ -5548,11 +5555,11 @@ export function createDecisionServer(options: ServeOptions): Server {
         return redirect(response, `${back}?${changed.ok ? "said" : "problem"}=${encodeURIComponent(changed.said)}#tools`);
       }
       const done = action === "state" ? setTeammateState(store, mate, body.get("state") === "removed" ? "removed" : body.get("state") === "paused" ? "paused" : "active", who.name, now)
-        : action === "note" ? leaveNote(store, mate, body.get("note") ?? "", who.name, now)
+        : action === "note" ? tellTeammate(store, mate, body.get("note") ?? "", who.name, now)
         : action === "settings" ? teammateSettings(store, mate, { model: body.get("model") ?? "default", dailyTurns: Number(body.get("dailyTurns")), manager: body.get("manager") ?? mate.manager }, who.name, now)
         : sendTeammateSummaries(store, mate.repo, now, mate.id) > 0 ? { ok: true as const, said: `Sent today's summary to ${mate.manager}.` } : { ok: false as const, said: "The summary couldn't be sent." };
       if (action === "state" && body.get("state") === "removed" && done.ok) return redirect(response, `/teammates?said=${encodeURIComponent(done.said)}`);
-      return redirect(response, `${back}?${done.ok ? "said" : "problem"}=${encodeURIComponent(done.said)}`);
+      return redirect(response, `${back}?${done.ok ? "said" : "problem"}=${encodeURIComponent(done.said)}${action === "note" ? "#memory" : ""}`);
     }
     const flowPost = /^\/flows\/([1-9][0-9]{0,9})\/(save|cards|archive|triggers|linear-key|hooks-address|scripts|secrets)$/.exec(url.pathname) ?? /^\/flows\/([1-9][0-9]{0,9})\/cards\/([1-9][0-9]{0,9})\/(move|decide|cancel|comment|assign|watch)$/.exec(url.pathname);
     const triggerPost = /^\/flows\/([1-9][0-9]{0,9})\/triggers\/([1-9][0-9]{0,9})\/(pause|resume|remove|check|press|renew|secret|share|unshare)$/.exec(url.pathname);

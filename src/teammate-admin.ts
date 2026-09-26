@@ -57,15 +57,6 @@ export function setTeammateState(store: Store, mate: TeammateRow, state: "active
   return { ok: true, said: state === "paused" ? `${name} is paused. Its decisions go to people until you resume it.` : `${name} is working again.` };
 }
 
-/** Something for the teammate to keep in mind: every turn reads the latest ten. */
-export function leaveNote(store: Store, mate: TeammateRow, note: string, by: string, now: Date): Done {
-  const text = note.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").trim();
-  if (text === "") return { ok: false, said: "Write what it should know." };
-  if (text.length > 1000) return { ok: false, said: "Keep a note to 1,000 characters; put lasting rules in its soul file." };
-  store.addTeammateEvent({ teammate: mate.id, kind: "note", said: text, by }, now);
-  return { ok: true, said: `${nameOf(mate)} will keep that in mind.` };
-}
-
 export function teammateSettings(store: Store, mate: TeammateRow, change: { model?: string; dailyTurns?: number; manager?: string }, by: string, now: Date): Done {
   const model = change.model === undefined ? undefined : change.model === "default" ? null : TEAMMATE_MODELS.includes(change.model as typeof TEAMMATE_MODELS[number]) ? change.model : undefined;
   if (change.model !== undefined && model === undefined) return { ok: false, said: "Choose one of the models listed." };

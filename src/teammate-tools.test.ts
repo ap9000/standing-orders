@@ -60,7 +60,7 @@ createInterface({ input: process.stdin }).on("line", line => {
 });
 afterEach(() => { store.close(); rmSync(dir, { recursive: true, force: true }); });
 
-const blank = { answer: "", text: "", note: "", question: "", options: [], reason: "", tool: "", input: "" };
+const blank = { answer: "", text: "", note: "", question: "", options: [], reason: "", tool: "", input: "", remember: "" };
 /** Scripted turns: each gets the prompt it was sent; tests read them afterwards. */
 function turns(...answers: Record<string, unknown>[]): TurnRunner & { prompts: string[] } {
   const prompts: string[] = [];
@@ -200,4 +200,51 @@ test("an approved call is made only if its rules still allow it when it's made",
   expect(made()).toEqual([]);
   expect(store.teammateCallsOn(card)[0]).toMatchObject({ state: "refused", result: "Its rules changed before the call was made." });
   expect(after.prompts[0]).toContain("→ not made:\nIts rules changed before the call was made.");
+});
+
+test("approving the same call five times in a row, none denied, makes it suggest the rule that fits; its manager's answer is the only one that counts", () => {
+  setToolRules(store, mate, "shop", { refund_order: { use: "free", limit: { field: "amount", over: 50 } } }, "alex", T0);
+  let minute = 0;
+  const decide = (amount: number, choice: "approve" | "deny" | null = "approve", text: string | null = null) => {
+    minute++;
+    const card = cardFor(`Refund my $${amount} order ${minute}`);
+    const call = store.addTeammateCall({ teammate: mate.id, card, entry: 1, tool: "shop", action: "refund_order", input: { order: String(minute), amount }, rule: "ask", why: "Over my limit.", state: "asked" }, at(minute));
+    const question = store.openTeammateQuestion({ teammate: mate.id, card, entry: 1, question: "Use it?", options: [{ id: "approve", label: "Approve" }, { id: "deny", label: "Deny" }], askedOf: "alex", toolCall: call }, at(minute))!;
+    expect(answerTeammateQuestion(store, question, { choice, text, by: "alex", via: "telegram" }, at(minute))).toMatchObject({ ok: true });
+    return card;
+  };
+  const open = () => store.teammateSuggestions(mate.id).filter(one => one.state === "open");
+  for (const amount of [55, 60]) decide(amount);
+  decide(90, "deny");
+  for (const amount of [58, 62, 66, 70]) decide(amount);
+  expect(open()).toEqual([]);
+  const last = decide(72);
+  const [suggested] = open();
+  expect(suggested).toMatchObject({ tool: "shop", action: "refund_order", rule: { use: "free", limit: { field: "amount", over: 75 } }, was: { use: "free", limit: { field: "amount", over: 50 } },
+    said: "You approved my last 5 refund_order calls on shop (amount 58 to 72). May I make them on my own up to amount 75, and ask you above that?" });
+  const question = store.teammateQuestionForSuggestion(suggested!.id)!;
+  expect(question).toMatchObject({ askedOf: "alex", card: last, options: [{ id: "accept", label: "Yes, change it" }, { id: "dismiss", label: "Not now" }] });
+  expect(store.handle.prepare("SELECT subject FROM notification WHERE dedupe_key LIKE ?").get(`%teammate-q:${question.id}:%`)?.subject).toBe("Support: Maya · Support suggests a rule change");
+  // It never holds up a card.
+  expect(store.openTeammateQuestionOn(last, 1)).toBeNull();
+  expect(answerTeammateQuestion(store, question.id, { choice: "accept", text: null, by: "sam", via: "web" }, at(20))).toMatchObject({ ok: false });
+  expect(answerTeammateQuestion(store, question.id, { choice: "accept", text: null, by: "alex", via: "slack" }, at(20))).toMatchObject({ ok: true, said: "Changed. Maya makes refund_order calls on its own up to amount 75." });
+  expect(store.teammateGrant(mate.id, "shop")?.rules["refund_order"]).toEqual({ use: "free", limit: { field: "amount", over: 75 } });
+  // Five more over the new limit: it suggests again; "not now" in words is remembered.
+  minute = 30;
+  for (const amount of [80, 85, 90, 95]) decide(amount);
+  decide(120);
+  const again = open()[0]!;
+  expect(again.rule).toEqual({ use: "free", limit: { field: "amount", over: 125 } });
+  expect(answerTeammateQuestion(store, store.teammateQuestionForSuggestion(again.id)!.id, { choice: null, text: "Keep it at 75 until October.", by: "alex", via: "web" }, at(50))).toMatchObject({ ok: true, said: "Left as it is." });
+  expect(store.teammateSuggestion(again.id)?.state).toBe("dismissed");
+  expect(store.teammateMemories(mate.id, { source: "person" }).map(one => one.text)).toEqual(["About refund_order on shop: Keep it at 75 until October."]);
+  // A suggestion made before its rule changed can't be accepted.
+  minute = 60;
+  for (const amount of [80, 81, 82, 83, 84]) decide(amount);
+  const stale = open()[0]!;
+  setToolRules(store, mate, "shop", { refund_order: { use: "ask" } }, "alex", at(70));
+  expect(answerTeammateQuestion(store, store.teammateQuestionForSuggestion(stale.id)!.id, { choice: "accept", text: null, by: "alex", via: "web" }, at(71))).toMatchObject({ ok: false, said: "Its rules changed since it suggested this, so nothing was changed." });
+  expect(store.teammateSuggestion(stale.id)?.state).toBe("stale");
+  expect(store.teammateGrant(mate.id, "shop")?.rules["refund_order"]).toEqual({ use: "ask" });
 });

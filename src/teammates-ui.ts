@@ -8,9 +8,10 @@ import { labelOf, nameOf, summaryOf, TEAMMATE_MODELS, zonesOf } from "./teammate
 import { TEAMMATE_TEMPLATES } from "./teammates.js";
 import { projectToolsOf } from "./project-tools.js";
 import { callWords, defaultRule, numberFields, receiptWords } from "./teammate-tools.js";
+import { MEMORY_CHARS, searchMemories } from "./teammate-memory.js";
 
 /** v94: the Tools section's rule rows; a limit's fields show only while "Up to a limit" is chosen. */
-export const TEAMMATE_CSS = `.teammate-tools .tool-grant{border-top:1px solid var(--so-border,#e5e7eb);padding-top:12px;margin-top:12px}.teammate-tools .tool-grant:first-of-type{border-top:0;margin-top:0;padding-top:0}.teammate-tools h3{font-size:1rem;margin:0 0 4px}.teammate-tools .tool-rule{display:grid;gap:6px;padding:10px 0;border-bottom:1px solid var(--so-border,#e5e7eb)}.teammate-tools .tool-rule:last-of-type{border-bottom:0}.teammate-tools .tool-rule .meta{display:block}.teammate-tools select,.teammate-tools input{max-width:100%;box-sizing:border-box}.teammate-tools .tool-limit{display:none;flex-wrap:wrap;align-items:center;gap:6px}.teammate-tools .tool-rule:has(option[value="limit"]:checked) .tool-limit{display:flex}.teammate-tools .tool-rule>select{width:auto;min-width:16em}.teammate-tools .tool-limit select{width:auto}.teammate-tools .tool-limit input{width:7em}.teammate-tools .tool-buttons{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.teammate-tools button{min-height:44px}.teammate-activity li{overflow-wrap:anywhere}@media(max-width:600px){.teammate-tools select,.teammate-tools input{font-size:16px}}`;
+export const TEAMMATE_CSS = `.teammate-tools .tool-grant{border-top:1px solid var(--so-line);padding-top:12px;margin-top:12px}.teammate-tools .tool-grant:first-of-type{border-top:0;margin-top:0;padding-top:0}.teammate-tools h3{font-size:1rem;margin:0 0 4px}.teammate-tools .tool-rule{display:grid;gap:6px;padding:10px 0;border-bottom:1px solid var(--so-line)}.teammate-tools .tool-rule:last-of-type{border-bottom:0}.teammate-tools .tool-rule .meta{display:block}.teammate-tools select,.teammate-tools input{max-width:100%;box-sizing:border-box}.teammate-tools .tool-limit{display:none;flex-wrap:wrap;align-items:center;gap:6px}.teammate-tools .tool-rule:has(option[value="limit"]:checked) .tool-limit{display:flex}.teammate-tools .tool-rule>select{width:auto;min-width:16em}.teammate-tools .tool-limit select{width:auto}.teammate-tools .tool-limit input{width:7em}.teammate-tools .tool-buttons{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.teammate-tools button{min-height:44px}.teammate-activity li{overflow-wrap:anywhere}.teammate-memory .memory-tell,.teammate-memory .memory-search{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin:0 0 12px}.teammate-memory .memory-tell textarea{flex:1 1 280px}.teammate-memory .memory-search input{flex:1 1 220px}.teammate-memory button{min-height:44px}.teammate-memories{list-style:none;padding:0;margin:0}.teammate-memories li{padding:10px 0;border-top:1px solid var(--so-line);overflow-wrap:anywhere}.teammate-memories li:first-child{border-top:0}.teammate-memories .meta{display:block;font-size:.85rem}.teammate-memories details.memory-edit{border:0;padding:0;margin:2px 0 0;background:transparent;box-shadow:none}.memory-edit summary{cursor:pointer;min-height:32px;display:inline-flex;align-items:center;font-size:.85rem;font-weight:400;color:var(--so-muted)}.teammate-actions,.question-options{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}.teammate-actions form,.question-options form{margin:0}.memory-edit form{display:grid;gap:8px;margin-top:6px}.memory-buttons{display:flex;flex-wrap:wrap;gap:8px}@media(max-width:600px){.teammate-tools select,.teammate-tools input{font-size:16px}}`;
 
 const USES = [["free", "Do it"], ["limit", "Do it, up to a limit"], ["ask", "Ask first"], ["never", "Never"]] as const;
 
@@ -72,7 +73,24 @@ export function teammatesListHtml(store: Store, mates: readonly TeammateRow[], p
   return `<section class="teammates">${notice.problem ? `<p class="problem" role="alert">${e(notice.problem)}</p>` : ""}${notice.said ? `<p class="said" role="status">${e(notice.said)}</p>` : ""}${intro}${rows || '<p class="meta">No teammates yet.</p>'}${create}</section>`;
 }
 
-export function teammatePageHtml(store: Store, mate: TeammateRow, viewer: string, projectName: (repo: string) => string, csrf: string, canManage: boolean, approvers: readonly string[], notice: { said?: string | null; problem?: string | null; soulDraft?: string | null }): string {
+/** v95: what it remembers — what its people told it, and what it kept from cards — to search, edit and forget. */
+function memorySection(store: Store, mate: TeammateRow, csrf: string, canManage: boolean, query: string | null): string {
+  const name = nameOf(mate);
+  const all = store.teammateMemories(mate.id, { limit: 500 });
+  const shown = query === null || query.trim() === "" ? all.slice(0, 30) : searchMemories(store, mate, query);
+  const tell = canManage ? `<form method="post" action="/teammates/${mate.id}/note" class="memory-tell">${hidden(csrf)}<label class="sr-only" for="teammate-note">Tell ${e(name)} something</label><textarea id="teammate-note" name="note" rows="2" maxlength="${MEMORY_CHARS}" placeholder="For example: this week, offer free shipping instead of a refund when you can."></textarea><button>Tell ${e(name)}</button></form>` : "";
+  const search = all.length > 8 || (query ?? "") !== "" ? `<form method="get" action="/teammates/${mate.id}#memory" class="memory-search" role="search"><label class="sr-only" for="memory-q">Search what ${e(name)} remembers</label><input id="memory-q" type="search" name="q" value="${e(query ?? "")}" placeholder="Search what ${e(name)} remembers"><button class="secondary">Search</button></form>` : "";
+  const items = shown.map(one => {
+    const card = one.card === null ? null : store.getFlowCard(one.card);
+    const whence = one.source === "person" ? `${e(one.createdBy)} told it` : card === null ? "it kept this" : `it kept this from <a href="/flows/${card.flow}?card=${card.id}">${e(card.title.slice(0, 60))}</a>`;
+    const edit = canManage ? `<details class="memory-edit"><summary>Edit</summary><form method="post" action="/teammates/${mate.id}/memory">${hidden(csrf)}<input type="hidden" name="id" value="${one.id}"><label class="sr-only" for="memory-${one.id}">Memory</label><textarea id="memory-${one.id}" name="text" rows="2" maxlength="${MEMORY_CHARS}">${e(one.text)}</textarea><div class="memory-buttons"><button name="op" value="edit">Save</button><button name="op" value="forget" class="secondary">Forget</button></div></form></details>` : "";
+    return `<li data-memory="${one.id}" data-source="${one.source}"><span>${e(one.text)}</span> <span class="meta">${whence} · ${when(one.updatedAt)}</span>${edit}</li>`;
+  }).join("");
+  const empty = (query ?? "") !== "" ? `<p class="meta">Nothing ${e(name)} remembers matches that.</p>` : `<p class="meta">Nothing yet. What you tell ${e(name)} is kept here, and it keeps short facts from the cards it works.</p>`;
+  return `<section class="card teammate-memory" id="memory"><h2>Memory</h2>${tell}${search}${shown.length === 0 ? empty : `<ul class="teammate-memories">${items}</ul>`}${query === null && all.length > shown.length ? `<p class="meta">${all.length - shown.length} older ${all.length - shown.length === 1 ? "memory" : "memories"}: search to find them.</p>` : ""}</section>`;
+}
+
+export function teammatePageHtml(store: Store, mate: TeammateRow, viewer: string, projectName: (repo: string) => string, csrf: string, canManage: boolean, approvers: readonly string[], notice: { said?: string | null; problem?: string | null; soulDraft?: string | null; query?: string | null }): string {
   const name = nameOf(mate);
   const questions = store.openTeammateQuestions([mate.id]);
   const asked = questions.map(question => {
@@ -80,7 +98,7 @@ export function teammatePageHtml(store: Store, mate: TeammateRow, viewer: string
     const flow = card === null ? null : store.getFlow(card.flow);
     const mine = question.askedOf === viewer;
     const cardLink = card === null || flow === null ? "a card" : `<a href="/flows/${flow.id}?card=${card.id}">${e(card.title)}</a>`;
-    return `<article class="card teammate-question" data-question="${question.id}"><p class="meta">About ${cardLink} · ${when(question.createdAt)}${mine ? "" : ` · for ${e(question.askedOf)}`}</p><p><strong>${e(question.question)}</strong></p>` +
+    return `<article class="card teammate-question" data-question="${question.id}"${question.suggestion === null ? "" : " data-suggestion"}><p class="meta">${question.suggestion === null ? `About ${cardLink}` : "Suggests a rule change"} · ${when(question.createdAt)}${mine ? "" : ` · for ${e(question.askedOf)}`}</p><p><strong>${e(question.question)}</strong></p>` +
       (mine ? `<div class="question-options">${question.options.map(one => `<form method="post" action="/teammates/questions/${question.id}/answer">${hidden(csrf)}<input type="hidden" name="choice" value="${e(one.id)}"><button>${e(one.label)}</button></form>`).join("")}</div>` +
         `<form method="post" action="/teammates/questions/${question.id}/answer" class="question-reply">${hidden(csrf)}<label>Or answer in your words<textarea name="text" rows="2" maxlength="2000"></textarea></label><button>Answer</button></form>` : "") +
       `</article>`;
@@ -98,7 +116,6 @@ export function teammatePageHtml(store: Store, mate: TeammateRow, viewer: string
     const card = one.card === null ? null : store.getFlowCard(one.card);
     return `<li data-event="${one.kind}">${e(one.said)}${card === null ? "" : ` · <a href="/flows/${card.flow}?card=${card.id}">open</a>`} <span class="meta">${when(one.at)}</span></li>`;
   }).join("")}</ul>`;
-  const notes = store.teammateEvents(mate.id, 60).filter(one => one.kind === "note").slice(0, 10);
   const versions = store.teammateVersions(mate.id);
   const latest = versions[0];
   const manage = canManage ? `<div class="teammate-actions">` +
@@ -113,8 +130,7 @@ export function teammatePageHtml(store: Store, mate: TeammateRow, viewer: string
     `<section class="card"><h2>Today</h2><p class="teammate-summary">${e(summaryOf(store, mate, startOfDay()).said).replace(/\n/g, "<br>")}</p></section>`,
     `<section class="card"><h2>Works on</h2>${where}</section>`,
     toolsSection(store, mate, csrf, canManage),
-    canManage ? `<section class="card"><h2>Tell ${e(name)} something</h2><form method="post" action="/teammates/${mate.id}/note">${hidden(csrf)}<label class="sr-only" for="teammate-note">Note</label><textarea id="teammate-note" name="note" rows="2" maxlength="1000" placeholder="For example: this week, offer free shipping instead of a refund when you can."></textarea><button>Tell ${e(name)}</button></form>` +
-      (notes.length === 0 ? "" : `<ul class="teammate-notes">${notes.map(one => `<li>${e(one.said)} <span class="meta">${e(one.by ?? "")} · ${when(one.at)}</span></li>`).join("")}</ul>`) + `</section>` : "",
+    memorySection(store, mate, csrf, canManage, notice.query ?? null),
     `<details class="card"${canManage ? " open" : ""}><summary>Soul file</summary><p class="meta">Who ${e(name)} is and its rules, read every turn. Version ${mate.version}${latest === undefined ? "" : ` · saved by ${e(latest.savedBy)}, ${when(latest.savedAt)}`} · <a href="/teammates/${mate.id}/soul.md" download>Download</a></p>` +
       (canManage ? `<form method="post" action="/teammates/${mate.id}/soul" data-soul-form>${hidden(csrf)}<label class="sr-only" for="teammate-soul">Soul file</label><textarea id="teammate-soul" name="soul" rows="24" class="mono" maxlength="12000" spellcheck="false">${e(notice.soulDraft ?? mate.soul)}</textarea><button>Save</button></form>` : `<pre class="mono">${e(mate.soul)}</pre>`) + `</details>`,
     `<details class="card"><summary>What ${e(name)} did</summary>${activity}</details>`,

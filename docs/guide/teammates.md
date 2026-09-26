@@ -83,18 +83,44 @@ receipt: under **Tool calls** on the card, and in **What it did** on its page.
 A visit to a card allows up to 12 calls; after that it decides with what it
 has.
 
+## What a teammate remembers
+
+Each teammate has a memory, on its page under **Memory**:
+
+- **What you tell it.** "Tell Maya something" keeps a line ("this week, offer
+  free shipping instead of a refund"). Every turn reads the latest ten things
+  its people told it.
+- **What it keeps.** On any turn it may keep one short fact for later cards
+  ("Sam Rivera prefers email to phone calls"). A later card about the same
+  thing reads it back; it checks it against the card, and the card wins.
+
+Search it, edit a line, or **Forget** it; the lead can do the same from plain
+words. Secrets are refused. It keeps up to 300 facts of its own, forgetting
+its oldest; what you told it stays until you forget it.
+
+## It learns from your approvals
+
+When you approve the same ask-first tool action five times in a row without
+turning one down, the teammate suggests the rule that would have let it act
+alone: "You approved my last 5 refund_order calls on shop (amount 58 to 72).
+May I make them on my own up to amount 75, and ask you above that?" It reaches
+its manager in their chat app and on its page. **Yes, change it** changes only
+that rule (and only if it's still what it was); **Not now** leaves it, and any
+words you add are kept in its memory. It asks again only after five more
+approvals.
+
 ## Talking to your teammates
 
 - Its questions and hand-offs reach you in your chat app, under its name
   ("Maya · Support: …").
-- **Tell Maya something** on its page passes on a note for the next turns ("this
-  week, offer free shipping instead of a refund"). Lasting rules belong in the
-  soul file.
+- **Tell Maya something** on its page adds to its memory for the next turns
+  ("this week, offer free shipping instead of a refund"). Lasting rules belong
+  in the soul file.
 - The lead chat can add teammates, change one section of a soul file ("Maya can
   approve refunds up to $100 now"), let one use a tool or stop, change an
   action's rule ("Maya can refund up to $100 in the shop without asking"),
-  pause or resume one, pass on a note, or answer its question for you. Each is
-  a card you confirm.
+  pause or resume one, pass on a note, fix or forget something it remembers,
+  or answer its question for you. Each is a card you confirm.
 - Each teammate sends its manager a summary after 5 pm: what it decided,
   handled and handed over, and the tool calls it made. **Send today's
   summary** sends one now.

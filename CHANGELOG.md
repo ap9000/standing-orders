@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Teammates remember, and learn from you.** Each teammate keeps a memory:
+  what you tell it, and short facts it keeps from the cards it works, read
+  back when a later card is about the same thing. Search, edit or forget any
+  of it. Approve the same kind of call five times in a row and it suggests
+  the rule that lets it act alone; one tap accepts.
 - **Teammates that act.** Let a teammate use your project's tools (a shop, a
   CRM, a mailbox) with a rule for each action: do it, do it up to a limit,
   ask first, or never. An ask-first call reaches you on the card and in your
