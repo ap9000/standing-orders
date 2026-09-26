@@ -127,7 +127,8 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // v94 lets teammates use project tools within per-action rules: each call is a receipt, and an ask-first call waits for a person's approval.
 // v95 gives each teammate a memory (what it kept, and what its people told it) and lets it suggest its own rule changes from what people approved.
 // v96 gives each teammate a desk: its own flow, where messages to it by name and its routines land as cards.
-export const SCHEMA_VERSION = 96;
+// v97 keeps what each teammate turn cost, lets a person undo a teammate's tool call where the tool can, and sends a weekly report.
+export const SCHEMA_VERSION = 97;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -485,7 +486,9 @@ export type FlowStepKind = "check" | "update" | "sort" | "draft" | "request" | "
 export type TeammateRow = { id: number; repo: string; handle: string; state: "active" | "paused" | "removed"; version: number; soul: string; model: string | null; dailyTurns: number;
   manager: string; createdBy: string; createdAt: string; updatedBy: string; updatedAt: string; summaryAt: string | null;
   /** v96: its desk, the flow where what's asked of it directly lands (null until it's first needed). */
-  deskFlow: number | null };
+  deskFlow: number | null;
+  /** v97: when its last weekly report went out. */
+  weeklyAt: string | null };
 export type TeammateEventKind = "decided" | "handled" | "handed" | "asked" | "answered" | "note" | "paused" | "resumed" | "summary" | "failed";
 export type TeammateEventRow = { id: number; teammate: number; card: number | null; entry: number | null; kind: TeammateEventKind; said: string; detail: Record<string, unknown> | null; by: string | null; at: string };
 export type TeammateQuestionRow = { id: number; teammate: number; card: number; entry: number; question: string; options: { id: string; label: string }[]; askedOf: string;
@@ -514,12 +517,18 @@ function readTeammateSuggestion(row: Record<string, unknown>): TeammateSuggestio
 /** v94: one action a project tool offers, as it described itself when listed. */
 export type ToolActionInfo = { name: string; about: string; input: Record<string, unknown> | null; readOnly: boolean };
 /** v94: a teammate's rule for one action: do it, ask first, or never; "free" may ask first above a number in its input. */
-export type ToolRule = { use: "free" | "ask" | "never"; limit?: { field: string; over: number } };
+export type ToolRule = { use: "free" | "ask" | "never"; limit?: { field: string; over: number };
+  /** v97: another action of the same tool that undoes this one, called with the same input when a person presses Undo. */
+  undo?: string };
 export type TeammateGrantRow = { teammate: number; tool: string; actions: ToolActionInfo[]; rules: Record<string, ToolRule>; listedAt: string | null; updatedBy: string; updatedAt: string };
 export type TeammateCallState = "asked" | "approved" | "denied" | "refused" | "running" | "done" | "failed";
 /** v94: a tool call a teammate made, or asked to make, on one visit of a card: the receipt. */
 export type TeammateCallRow = { id: number; teammate: number; card: number; entry: number; tool: string; action: string; input: Record<string, unknown>; rule: ToolRule["use"]; why: string;
-  state: TeammateCallState; result: string | null; decidedBy: string | null; decidedAt: string | null; createdAt: string; doneAt: string | null };
+  state: TeammateCallState; result: string | null; decidedBy: string | null; decidedAt: string | null; createdAt: string; doneAt: string | null;
+  /** v97: the call this one undid (a person's Undo), and who undid this one. */
+  undoOf: number | null; undoneBy: string | null; undoneAt: string | null };
+/** v97: one model turn a teammate took. */
+export type TeammateTurnRow = { id: number; teammate: number; card: number | null; model: string; ok: boolean; ms: number; costUsd: number | null; tokensIn: number | null; tokensOut: number | null; at: string };
 
 function readTeammateCall(row: Record<string, unknown>): TeammateCallRow {
   const text = (key: string) => row[key] === null || row[key] === undefined ? null : String(row[key]);
@@ -527,7 +536,7 @@ function readTeammateCall(row: Record<string, unknown>): TeammateCallRow {
   try { input = JSON.parse(String(row["input_json"])) as Record<string, unknown>; } catch { input = {}; }
   return { id: Number(row["id"]), teammate: Number(row["teammate"]), card: Number(row["card"]), entry: Number(row["entry"]), tool: String(row["tool"]), action: String(row["action"]), input,
     rule: String(row["rule"]) as ToolRule["use"], why: String(row["why"]), state: String(row["state"]) as TeammateCallState, result: text("result"), decidedBy: text("decided_by"), decidedAt: text("decided_at"),
-    createdAt: String(row["created_at"]), doneAt: text("done_at") };
+    createdAt: String(row["created_at"]), doneAt: text("done_at"), undoOf: row["undo_of"] === null || row["undo_of"] === undefined ? null : Number(row["undo_of"]), undoneBy: text("undone_by"), undoneAt: text("undone_at") };
 }
 
 function readTeammateGrant(row: Record<string, unknown>): TeammateGrantRow {
@@ -540,7 +549,8 @@ function readTeammateRow(row: Record<string, unknown>): TeammateRow {
   return { id: Number(row["id"]), repo: String(row["repo"]), handle: String(row["handle"]), state: String(row["state"]) as TeammateRow["state"], version: Number(row["version"]), soul: String(row["soul"]),
     model: row["model"] === null ? null : String(row["model"]), dailyTurns: Number(row["daily_turns"]), manager: String(row["manager"]), createdBy: String(row["created_by"]), createdAt: String(row["created_at"]),
     updatedBy: String(row["updated_by"]), updatedAt: String(row["updated_at"]), summaryAt: row["summary_at"] === null ? null : String(row["summary_at"]),
-    deskFlow: row["desk_flow"] === null || row["desk_flow"] === undefined ? null : Number(row["desk_flow"]) };
+    deskFlow: row["desk_flow"] === null || row["desk_flow"] === undefined ? null : Number(row["desk_flow"]),
+    weeklyAt: row["weekly_at"] === null || row["weekly_at"] === undefined ? null : String(row["weekly_at"]) };
 }
 function readTeammateQuestion(row: Record<string, unknown>): TeammateQuestionRow {
   const text = (key: string) => row[key] === null || row[key] === undefined ? null : String(row[key]);
@@ -2401,7 +2411,8 @@ CREATE TABLE IF NOT EXISTS teammate (
   updated_by   TEXT NOT NULL,
   updated_at   TEXT NOT NULL,
   summary_at   TEXT,
-  desk_flow    INTEGER REFERENCES flow(id)
+  desk_flow    INTEGER REFERENCES flow(id),
+  weekly_at    TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS teammate_live ON teammate (repo, handle) WHERE state <> 'removed';
 CREATE TABLE IF NOT EXISTS teammate_version (
@@ -2475,9 +2486,27 @@ CREATE TABLE IF NOT EXISTS teammate_call (
   decided_by  TEXT,
   decided_at  TEXT,
   created_at  TEXT NOT NULL,
-  done_at     TEXT
+  done_at     TEXT,
+  undo_of     INTEGER REFERENCES teammate_call(id),
+  undone_by   TEXT,
+  undone_at   TEXT
 );
 CREATE INDEX IF NOT EXISTS teammate_call_card ON teammate_call (card, entry, id);
+-- v97: every model turn a teammate took: what it cost (the CLI's own
+-- estimate) and how long it took — its weekly report.
+CREATE TABLE IF NOT EXISTS teammate_turn (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  teammate    INTEGER NOT NULL REFERENCES teammate(id),
+  card        INTEGER REFERENCES flow_card(id),
+  model       TEXT NOT NULL,
+  ok          INTEGER NOT NULL,
+  ms          INTEGER NOT NULL,
+  cost_usd    REAL,
+  tokens_in   INTEGER,
+  tokens_out  INTEGER,
+  at          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS teammate_turn_recent ON teammate_turn (teammate, at);
 CREATE INDEX IF NOT EXISTS teammate_call_recent ON teammate_call (teammate, id);
 -- v95: what a teammate remembers: facts it kept from its own turns, and
 -- what its people told it (replacing v92's notes). Searchable, editable, and
@@ -5961,6 +5990,11 @@ function migrate(db: Database, origin: number | null): void {
   );
   // v96: a teammate's desk flow.
   addColumn(db, "teammate", "desk_flow", "INTEGER REFERENCES flow(id)");
+  // v97: its weekly report, and undoing its tool calls.
+  addColumn(db, "teammate", "weekly_at", "TEXT");
+  addColumn(db, "teammate_call", "undo_of", "INTEGER REFERENCES teammate_call(id)");
+  addColumn(db, "teammate_call", "undone_by", "TEXT");
+  addColumn(db, "teammate_call", "undone_at", "TEXT");
   // v95: a rule-change suggestion is a question too (to the manager, about the card that prompted it), never the visit's own question.
   addColumn(db, "teammate_question", "suggestion", "INTEGER REFERENCES teammate_suggestion(id)");
   if (/WHERE tool_call IS NULL\s*$/.test(String(db.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'teammate_question_visit'").get()?.["sql"] ?? ""))) db.exec("DROP INDEX teammate_question_visit");
@@ -21403,12 +21437,12 @@ export class Store {
     return this.db.prepare("SELECT * FROM teammate_version WHERE teammate = ? ORDER BY version DESC LIMIT 50").all(id).map(row => ({ version: Number(row["version"]), soul: String(row["soul"]), savedBy: String(row["saved_by"]), savedAt: String(row["saved_at"]) }));
   }
 
-  updateTeammate(id: number, change: { state?: TeammateRow["state"]; model?: string | null; dailyTurns?: number; manager?: string; summaryAt?: string }, by: string, now: Date): void {
+  updateTeammate(id: number, change: { state?: TeammateRow["state"]; model?: string | null; dailyTurns?: number; manager?: string; summaryAt?: string; weeklyAt?: string }, by: string, now: Date): void {
     const mate = this.getTeammate(id);
     if (mate === null) return;
-    this.db.prepare("UPDATE teammate SET state = ?, model = ?, daily_turns = ?, manager = ?, summary_at = ?, updated_by = ?, updated_at = ? WHERE id = ?").run(
+    this.db.prepare("UPDATE teammate SET state = ?, model = ?, daily_turns = ?, manager = ?, summary_at = ?, weekly_at = ?, updated_by = ?, updated_at = ? WHERE id = ?").run(
       change.state ?? mate.state, change.model === undefined ? mate.model : change.model, change.dailyTurns ?? mate.dailyTurns, change.manager ?? mate.manager,
-      change.summaryAt ?? mate.summaryAt, by, now.toISOString(), id);
+      change.summaryAt ?? mate.summaryAt, change.weeklyAt ?? mate.weeklyAt, by, now.toISOString(), id);
   }
 
   addTeammateEvent(event: { teammate: number; card?: number | null; entry?: number | null; kind: TeammateEventKind; said: string; detail?: Record<string, unknown> | null; by?: string | null }, now: Date): number {
@@ -21539,10 +21573,45 @@ export class Store {
     return Number(this.db.prepare("DELETE FROM teammate_tool WHERE teammate = ? AND tool = ?").run(teammate, tool).changes) === 1;
   }
 
-  addTeammateCall(call: { teammate: number; card: number; entry: number; tool: string; action: string; input: Record<string, unknown>; rule: ToolRule["use"]; why: string; state: TeammateCallState; result?: string | null }, now: Date): number {
-    return Number(this.db.prepare("INSERT INTO teammate_call (teammate, card, entry, tool, action, input_json, rule, why, state, result, created_at, done_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+  addTeammateCall(call: { teammate: number; card: number; entry: number; tool: string; action: string; input: Record<string, unknown>; rule: ToolRule["use"]; why: string; state: TeammateCallState; result?: string | null; undoOf?: number; decidedBy?: string }, now: Date): number {
+    return Number(this.db.prepare("INSERT INTO teammate_call (teammate, card, entry, tool, action, input_json, rule, why, state, result, created_at, done_at, undo_of, decided_by, decided_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
       .run(call.teammate, call.card, call.entry, call.tool, call.action, JSON.stringify(call.input), call.rule, call.why, call.state, call.result ?? null, now.toISOString(),
-        call.state === "refused" ? now.toISOString() : null).lastInsertRowid);
+        call.state === "refused" ? now.toISOString() : null, call.undoOf ?? null, call.decidedBy ?? null, call.decidedBy === undefined ? null : now.toISOString()).lastInsertRowid);
+  }
+
+  /** v97: a call was undone by a person; false when it already was. */
+  markTeammateCallUndone(id: number, by: string, now: Date): boolean {
+    return Number(this.db.prepare("UPDATE teammate_call SET undone_by = ?, undone_at = ? WHERE id = ? AND undone_by IS NULL").run(by, now.toISOString(), id).changes) === 1;
+  }
+
+  /** v97: cards someone moved by hand right after this actor (a teammate) moved them, since a time: what people overrode. */
+  flowMovesOverridden(actor: string, since: string): { card: number; flow: number; title: string; teammateTo: string; personTo: string; by: string; at: string }[] {
+    return this.db.prepare(`SELECT c.id AS card, c.flow AS flow, c.title AS title, mine.to_stage AS mine_to, later.to_stage AS later_to, later.actor AS later_actor, later.at AS later_at
+      FROM flow_event mine JOIN flow_event later ON later.card = mine.card AND later.id = (SELECT MIN(id) FROM flow_event WHERE card = mine.card AND id > mine.id)
+      JOIN flow_card c ON c.id = mine.card WHERE mine.actor = ? AND later.outcome = 'moved' AND later.actor <> ? AND later.at >= ? ORDER BY later.id DESC LIMIT 100`).all(actor, actor, since).map(row => ({
+      card: Number(row["card"]), flow: Number(row["flow"]), title: String(row["title"]), teammateTo: String(row["mine_to"]), personTo: String(row["later_to"]), by: String(row["later_actor"]), at: String(row["later_at"]) }));
+  }
+
+  /** v97: undo calls a person asked for that aren't made yet. */
+  pendingTeammateUndos(): TeammateCallRow[] {
+    return this.db.prepare("SELECT * FROM teammate_call WHERE undo_of IS NOT NULL AND state = 'approved' ORDER BY id LIMIT 50").all().map(readTeammateCall);
+  }
+
+  /** v97: an undo that failed leaves the call as it was. */
+  clearTeammateCallUndone(id: number): void {
+    this.db.prepare("UPDATE teammate_call SET undone_by = NULL, undone_at = NULL WHERE id = ?").run(id);
+  }
+
+  /** v97: one model turn a teammate took, with what it cost. */
+  addTeammateTurn(turn: { teammate: number; card: number | null; model: string; ok: boolean; ms: number; costUsd?: number | null; tokensIn?: number | null; tokensOut?: number | null }, now: Date): void {
+    this.db.prepare("INSERT INTO teammate_turn (teammate, card, model, ok, ms, cost_usd, tokens_in, tokens_out, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(turn.teammate, turn.card, turn.model, turn.ok ? 1 : 0, Math.round(turn.ms), turn.costUsd ?? null, turn.tokensIn ?? null, turn.tokensOut ?? null, now.toISOString());
+  }
+
+  teammateTurns(teammate: number, since: string): TeammateTurnRow[] {
+    return this.db.prepare("SELECT * FROM teammate_turn WHERE teammate = ? AND at >= ? ORDER BY id").all(teammate, since).map(row => ({
+      id: Number(row["id"]), teammate: Number(row["teammate"]), card: row["card"] === null ? null : Number(row["card"]), model: String(row["model"]), ok: Number(row["ok"]) === 1, ms: Number(row["ms"]),
+      costUsd: row["cost_usd"] === null ? null : Number(row["cost_usd"]), tokensIn: row["tokens_in"] === null ? null : Number(row["tokens_in"]), tokensOut: row["tokens_out"] === null ? null : Number(row["tokens_out"]), at: String(row["at"]) }));
   }
 
   teammateCall(id: number): TeammateCallRow | null {

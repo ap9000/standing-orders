@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **A weekly report per teammate, and undo.** Every Monday its manager gets the
+  week: what it did, its tool calls, what its turns cost, and what you
+  overrode, each linked. Name an action's opposite (remove_label for
+  add_label) and its receipts get an Undo that calls it with the same input,
+  as you.
 - **Message a teammate by name, and give it routines.** "@maya where's order
   2201?" in Telegram, Slack, Discord or Teams lands on Maya's desk, and the
   answer comes back to you there. Routines ("weekdays 09:00: look up

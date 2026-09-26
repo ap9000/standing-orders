@@ -12,7 +12,8 @@
  */
 import { flowCardHref, flowDefinitionOf } from "./flow-engine.js";
 import { flowFromSteps } from "./flows.js";
-import { addFlowTriggerTo, removeFlowTrigger, runScheduleNow, triggerConfigOf } from "./flow-triggers.js";
+import { addFlowTriggerTo, removeFlowTrigger, runScheduleNow, scheduleFromWords, triggerConfigOf } from "./flow-triggers.js";
+import { describeSchedule, parseSchedule } from "./routine.js";
 import type { FlowCardRow, FlowRow, Store, TeammateRow } from "./store.js";
 import { labelOf, nameOf } from "./teammate-admin.js";
 
@@ -35,7 +36,7 @@ export function ensureDesk(store: Store, mate: TeammateRow, now: Date): FlowRow 
   const name = nameOf(mate);
   const person = `For ${mate.manager}`.slice(0, 60);
   const definition = flowFromSteps([
-    { id: DESK_ZONE, title: `${name} handles it`, kind: "teammate", teammate: mate.handle, reply: true, instructions: DESK_INSTRUCTIONS,
+    { id: DESK_ZONE, title: "Requests", kind: "teammate", teammate: mate.handle, reply: true, instructions: DESK_INSTRUCTIONS,
       routes: [{ answer: "Done", goesTo: "Done" }, { answer: "Needs a code change", goesTo: "Build it" }, { answer: "Needs a person", goesTo: person }], ifFails: person },
     { id: "build", title: "Build it", kind: "task", planning: "auto", next: "Done" },
     { id: "person", title: person, kind: "inbox" },
@@ -104,15 +105,28 @@ export function routinesOf(store: Store, mate: TeammateRow): Routine[] {
   });
 }
 
+/** This computer's time zone: what a routine's time means when it names none. */
+export const localZone = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"; } catch { return "UTC"; } };
+
+/** A routine's schedule as kept: a calendar time with no zone is this computer's time, not UTC. */
+export function routineSchedule(words: string): string | null {
+  const read = scheduleFromWords(words);
+  // A zone the person named, UTC included, stays theirs.
+  if (read === null || read.startsWith("every:") || read.includes("@") || /\b(utc|gmt)$/i.test(words.trim())) return read;
+  return scheduleFromWords(`${words.trim()} ${localZone()}`) ?? read;
+}
+
 /** A routine: on this schedule ("weekdays 09:00", "daily 17:00 Europe/London", "every 2 hours"), a card on its desk saying what to do. */
 export function addRoutine(store: Store, mate: TeammateRow, schedule: string, text: string, by: string, now: Date, dir: string | null): Done {
   const what = text.replace(/\s+/g, " ").trim();
   if (what === "") return { ok: false, said: "Say what it should do each time." };
   if (what.length > 200) return { ok: false, said: "Keep a routine to 200 characters; put detail in its soul file." };
   if (routinesOf(store, mate).length >= 10) return { ok: false, said: "A teammate has at most 10 routines." };
+  const kept = routineSchedule(schedule);
+  if (kept === null) return { ok: false, said: "Say the schedule like “weekdays 09:00”, “daily 17:00”, “monday 09:00” or “every 2 hours”." };
   const desk = ensureDesk(store, mate, now);
-  const made = addFlowTriggerTo(store, desk, { kind: "schedule", schedule, title: what, zone: DESK_ZONE }, by, now, dir);
-  return made.ok ? { ok: true, said: `${nameOf(mate)} will do that ${schedule.trim()}. Its answer goes to ${mate.manager}.` } : { ok: false, said: made.message };
+  const made = addFlowTriggerTo(store, desk, { kind: "schedule", schedule: kept, title: what, zone: DESK_ZONE }, by, now, dir);
+  return made.ok ? { ok: true, said: `${nameOf(mate)} will do that ${describeSchedule(parseSchedule(kept)!)}. Its answer goes to ${mate.manager}.` } : { ok: false, said: made.message };
 }
 
 function routineOf(store: Store, mate: TeammateRow, id: number) {

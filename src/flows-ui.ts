@@ -14,6 +14,7 @@ import { googleConnected } from "./google-mail.js";
 import { mailboxReady } from "./mailbox.js";
 import { labelOf, nameOf } from "./teammate-admin.js";
 import { callWords, receiptWords } from "./teammate-tools.js";
+import { undoFor } from "./teammate-week.js";
 
 const e = (value: unknown) =>
   String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
@@ -120,8 +121,9 @@ export function flowView(store: Store, flow: FlowRow, viewer: { name: string; ap
           call: pending === null ? null : { why: pending.why, rule: pending.result ?? "" } },
       calls: store.teammateCallsOn(card.id).slice(-30).map(call => {
         const mate = mates.get(call.teammate) ?? null;
-        return { id: call.id, who: mate === null ? "A teammate" : nameOf(mate), words: callWords(call.tool, call.action, call.input, 400), state: call.state, outcome: receiptWords(store, call),
-          why: call.why, result: call.state === "asked" ? null : call.result, at: call.createdAt };
+        // A person's undo (v97) reads as theirs, and its outcome says what it undid.
+        return { id: call.id, who: call.undoOf !== null ? call.decidedBy ?? "A person" : mate === null ? "A teammate" : nameOf(mate), words: callWords(call.tool, call.action, call.input, 400), state: call.state, outcome: receiptWords(store, call),
+          why: call.undoOf !== null ? "" : call.why, result: call.state === "asked" ? null : call.result, at: call.createdAt, teammate: call.teammate, undo: viewer.approver ? undoFor(store, call) : null };
       }),
     };
   });

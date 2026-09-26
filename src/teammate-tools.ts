@@ -160,21 +160,25 @@ export function revokeTool(store: Store, mate: TeammateRow, tool: string): Done 
 }
 
 /** Check one rule: an action the tool offers, a known use, and a limit on one of its number fields. */
-export function checkRule(grant: Pick<TeammateGrantRow, "tool" | "actions">, action: string, rule: { use: unknown; limit?: { field: unknown; over: unknown } | null }): { ok: true; rule: ToolRule } | { ok: false; said: string } {
+export function checkRule(grant: Pick<TeammateGrantRow, "tool" | "actions">, action: string, rule: { use: unknown; limit?: { field: unknown; over: unknown } | null; undo?: unknown }): { ok: true; rule: ToolRule } | { ok: false; said: string } {
   const info = grant.actions.find(one => one.name === action);
   if (info === undefined) return { ok: false, said: `${grant.tool} has no action called ${action}. Its actions: ${grant.actions.map(one => one.name).join(", ")}.` };
   if (rule.use !== "free" && rule.use !== "ask" && rule.use !== "never") return { ok: false, said: "Choose do it, ask first or never." };
-  if (rule.use !== "free" || rule.limit === undefined || rule.limit === null) return { ok: true, rule: { use: rule.use } };
+  // v97: the action that undoes this one, when a person presses Undo on its receipt.
+  const undo = typeof rule.undo === "string" && rule.undo !== "" ? rule.undo : null;
+  if (undo !== null && (undo === action || !grant.actions.some(one => one.name === undo))) return { ok: false, said: `${grant.tool} has no other action called ${undo} to undo ${action} with.` };
+  const withUndo = (made: ToolRule): { ok: true; rule: ToolRule } => ({ ok: true, rule: undo === null ? made : { ...made, undo } });
+  if (rule.use !== "free" || rule.limit === undefined || rule.limit === null) return withUndo({ use: rule.use });
   const field = String(rule.limit.field ?? "");
   const over = numberOf(rule.limit.over);
   if (field === "") return { ok: false, said: `Choose which number of ${action} the limit is on.` };
   if (info.input !== null && !numberFields(info).includes(field)) return { ok: false, said: `${action} has no number called ${field}.` };
   if (over === null || over < 0 || over > 1e12) return { ok: false, said: "A limit is a number, 0 or more." };
-  return { ok: true, rule: { use: "free", limit: { field, over } } };
+  return withUndo({ use: "free", limit: { field, over } });
 }
 
 /** Set the rules for some of a granted tool's actions; the others keep theirs. */
-export function setToolRules(store: Store, mate: TeammateRow, tool: string, changes: Record<string, { use: unknown; limit?: { field: unknown; over: unknown } | null }>, by: string, now: Date): Done {
+export function setToolRules(store: Store, mate: TeammateRow, tool: string, changes: Record<string, { use: unknown; limit?: { field: unknown; over: unknown } | null; undo?: unknown }>, by: string, now: Date): Done {
   const grant = store.teammateGrant(mate.id, tool);
   if (grant === null) return { ok: false, said: `It doesn't use ${tool}. Let it use ${tool} first.` };
   const rules = { ...grant.rules };
@@ -194,10 +198,11 @@ const blank = (text: string) => redactSecretLines(text, scanForSecrets(text));
  * saw it). What the tool said is kept on the receipt, secrets scrubbed; a
  * tool that says it failed is an answer the teammate reads, not trouble.
  */
-export async function makeCall(store: Store, call: TeammateCallRow, repo: string, io: ToolIo, now: Date): Promise<TeammateCallRow> {
+export async function makeCall(store: Store, call: TeammateCallRow, repo: string, io: ToolIo, now: Date, options: { byPerson?: boolean } = {}): Promise<TeammateCallRow> {
   // Its rules are read again at the moment of the call: a tool taken away, or an action set to never, since it was approved stops it.
+  // (A person's own undo (v97) needs the tool still granted, not the teammate's rule for that action.)
   const grant = store.teammateGrant(call.teammate, call.tool);
-  if (grant === null || ruleFor(grant, call.action, call.input).use === "never") {
+  if (grant === null || (options.byPerson !== true && ruleFor(grant, call.action, call.input).use === "never")) {
     store.moveTeammateCall(call.id, ["approved", "running"], { state: "refused", result: "Its rules changed before the call was made." }, now);
     return store.teammateCall(call.id)!;
   }
@@ -238,7 +243,7 @@ export function receiptWords(store: Store, call: TeammateCallRow): string {
   switch (call.state) {
     case "asked": { const question = store.teammateQuestionForCall(call.id); return `Waiting for ${question?.askedOf ?? "a person"} to approve`; }
     case "approved": case "running": return call.decidedBy === null ? "Making it now" : `${call.decidedBy} approved · making it now`;
-    case "done": return call.decidedBy === null ? "Done" : `${call.decidedBy} approved · done`;
+    case "done": return call.undoneBy !== null ? `Done · undone by ${call.undoneBy}` : call.undoOf !== null ? `Undid ${store.teammateCall(call.undoOf)?.action ?? "a call"} · done` : call.decidedBy === null ? "Done" : `${call.decidedBy} approved · done`;
     case "failed": return call.decidedBy === null ? "Failed" : `${call.decidedBy} approved · failed`;
     case "denied": { const said = store.teammateQuestionForCall(call.id)?.answer; return `${call.decidedBy ?? "A person"} said no${said ? `: ${said}` : ""}`; }
     default: return `Not made: ${call.result ?? "outside its rules"}`;
@@ -246,10 +251,11 @@ export function receiptWords(store: Store, call: TeammateCallRow): string {
 }
 
 /** The Tools section's form, read into rule changes: every action the grant knows. */
-export function rulesFromForm(grant: Pick<TeammateGrantRow, "actions">, field: (key: string) => string | null): Record<string, { use: unknown; limit?: { field: unknown; over: unknown } }> {
+export function rulesFromForm(grant: Pick<TeammateGrantRow, "actions">, field: (key: string) => string | null): Record<string, { use: unknown; limit?: { field: unknown; over: unknown }; undo?: unknown }> {
   return Object.fromEntries(grant.actions.flatMap(action => {
     const use = field(`use.${action.name}`);
     if (use === null) return [];
-    return [[action.name, use === "limit" ? { use: "free", limit: { field: field(`field.${action.name}`) ?? "", over: field(`over.${action.name}`) ?? "" } } : { use }]];
+    const undo = field(`undo.${action.name}`) ?? "";
+    return [[action.name, { ...(use === "limit" ? { use: "free", limit: { field: field(`field.${action.name}`) ?? "", over: field(`over.${action.name}`) ?? "" } } : { use }), undo }]];
   }));
 }

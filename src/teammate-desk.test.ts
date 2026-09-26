@@ -13,7 +13,7 @@ import { addApprover } from "./scope.js";
 import { run as exec } from "./exec.js";
 import { runFlowSteps, type StepIo } from "./flow-steps.js";
 import { parseSchedule, nextFireAt } from "./routine.js";
-import { addressedTo, addRoutine, deskOf, messageTeammate, removeRoutine, routinesOf, runRoutine } from "./teammate-desk.js";
+import { addressedTo, addRoutine, deskOf, localZone, messageTeammate, removeRoutine, routineSchedule, routinesOf, runRoutine } from "./teammate-desk.js";
 import { setTeammateState } from "./teammate-admin.js";
 import { TEAMMATE_TEMPLATES, type TurnRequest, type TurnRunner } from "./teammates.js";
 
@@ -96,7 +96,11 @@ test("a code change it's asked for goes to the desk's Build zone, which files an
 
 test("routines: on a schedule (weekdays too), a card on its desk; run one now, its answer goes to its manager; remove it", async () => {
   expect(addRoutine(store, mate, "sometimes", "Count refunds", "alex", T0, null)).toMatchObject({ ok: false });
-  expect(addRoutine(store, mate, "weekdays 09:00", "Count yesterday's refunds and tell me the total", "alex", T0, null)).toMatchObject({ ok: true, said: "Maya will do that weekdays 09:00. Its answer goes to alex." });
+  // With no zone named, a time is this computer's; a named one (UTC too) is kept.
+  expect(routineSchedule("weekdays 09:00")).toBe(localZone() === "UTC" ? "weekdays:09:00" : `weekdays:09:00@${localZone()}`);
+  expect(routineSchedule("daily 17:00 Europe/London")).toBe("daily:17:00@Europe/London");
+  expect(routineSchedule("every 2 hours")).toBe("every:120");
+  expect(addRoutine(store, mate, "weekdays 09:00 UTC", "Count yesterday's refunds and tell me the total", "alex", T0, null)).toMatchObject({ ok: true, said: "Maya will do that weekdays at 09:00 UTC. Its answer goes to alex." });
   const fresh = store.getTeammate(mate.id)!;
   const [routine] = routinesOf(store, fresh);
   expect(routine).toMatchObject({ schedule: "weekdays:09:00", text: "Count yesterday's refunds and tell me the total", state: "active", nextAt: "2026-09-28T09:00:00.000Z" });

@@ -9,11 +9,12 @@ import { TEAMMATE_TEMPLATES } from "./teammates.js";
 import { projectToolsOf } from "./project-tools.js";
 import { callWords, defaultRule, numberFields, receiptWords } from "./teammate-tools.js";
 import { MEMORY_CHARS, searchMemories } from "./teammate-memory.js";
-import { deskOf, routinesOf } from "./teammate-desk.js";
+import { deskOf, localZone, routinesOf } from "./teammate-desk.js";
+import { weekOf, weekWords } from "./teammate-week.js";
 import { describeSchedule, parseSchedule } from "./routine.js";
 
 /** v94: the Tools section's rule rows; a limit's fields show only while "Up to a limit" is chosen. */
-export const TEAMMATE_CSS = `.teammate-tools .tool-grant{border-top:1px solid var(--so-line);padding-top:12px;margin-top:12px}.teammate-tools .tool-grant:first-of-type{border-top:0;margin-top:0;padding-top:0}.teammate-tools h3{font-size:1rem;margin:0 0 4px}.teammate-tools .tool-rule{display:grid;gap:6px;padding:10px 0;border-bottom:1px solid var(--so-line)}.teammate-tools .tool-rule:last-of-type{border-bottom:0}.teammate-tools .tool-rule .meta{display:block}.teammate-tools select,.teammate-tools input{max-width:100%;box-sizing:border-box}.teammate-tools .tool-limit{display:none;flex-wrap:wrap;align-items:center;gap:6px}.teammate-tools .tool-rule:has(option[value="limit"]:checked) .tool-limit{display:flex}.teammate-tools .tool-rule>select{width:auto;min-width:16em}.teammate-tools .tool-limit select{width:auto}.teammate-tools .tool-limit input{width:7em}.teammate-tools .tool-buttons{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.teammate-tools button{min-height:44px}.teammate-activity li{overflow-wrap:anywhere}.teammate-memory .memory-tell,.teammate-memory .memory-search{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin:0 0 12px}.teammate-memory .memory-tell textarea{flex:1 1 280px}.teammate-memory .memory-search input{flex:1 1 220px}.teammate-memory button{min-height:44px}.teammate-memories{list-style:none;padding:0;margin:0}.teammate-memories li{padding:10px 0;border-top:1px solid var(--so-line);overflow-wrap:anywhere}.teammate-memories li:first-child{border-top:0}.teammate-memories .meta{display:block;font-size:.85rem}.teammate-memories details.memory-edit{border:0;padding:0;margin:2px 0 0;background:transparent;box-shadow:none}.memory-edit summary{cursor:pointer;min-height:32px;display:inline-flex;align-items:center;font-size:.85rem;font-weight:400;color:var(--so-muted)}.teammate-routines{list-style:none;padding:0;margin:8px 0}.teammate-routines li{display:grid;gap:4px;padding:10px 0;border-top:1px solid var(--so-line)}.teammate-routines li:first-child{border-top:0}.routine-buttons{display:flex;flex-wrap:wrap;gap:8px}.routine-buttons button,.routine-add button{min-height:44px}.routine-add{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin:8px 0}.routine-add label{display:grid;gap:4px;flex:1 1 200px}.routine-add label:first-of-type{flex:0 1 180px}.teammate-actions,.question-options{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}.teammate-actions form,.question-options form{margin:0}.memory-edit form{display:grid;gap:8px;margin-top:6px}.memory-buttons{display:flex;flex-wrap:wrap;gap:8px}@media(max-width:600px){.teammate-tools select,.teammate-tools input{font-size:16px}}`;
+export const TEAMMATE_CSS = `.teammate-tools .tool-grant{border-top:1px solid var(--so-line);padding-top:12px;margin-top:12px}.teammate-tools .tool-grant:first-of-type{border-top:0;margin-top:0;padding-top:0}.teammate-tools h3{font-size:1rem;margin:0 0 4px}.teammate-tools .tool-rule{display:grid;gap:6px;padding:10px 0;border-bottom:1px solid var(--so-line)}.teammate-tools .tool-rule:last-of-type{border-bottom:0}.teammate-tools .tool-rule .meta{display:block}.teammate-tools select,.teammate-tools input{max-width:100%;box-sizing:border-box}.teammate-tools .tool-limit{display:none;flex-wrap:wrap;align-items:center;gap:6px}.teammate-tools .tool-rule:has(option[value="limit"]:checked) .tool-limit{display:flex}.teammate-tools .tool-rule>select{width:auto;min-width:16em}.teammate-tools .tool-limit select{width:auto}.teammate-tools .tool-limit input{width:7em}.teammate-tools .tool-buttons{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.teammate-tools button{min-height:44px}.teammate-activity li{overflow-wrap:anywhere}.teammate-memory .memory-tell,.teammate-memory .memory-search{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin:0 0 12px}.teammate-memory .memory-tell textarea{flex:1 1 280px}.teammate-memory .memory-search input{flex:1 1 220px}.teammate-memory button{min-height:44px}.teammate-memories{list-style:none;padding:0;margin:0}.teammate-memories li{padding:10px 0;border-top:1px solid var(--so-line);overflow-wrap:anywhere}.teammate-memories li:first-child{border-top:0}.teammate-memories .meta{display:block;font-size:.85rem}.teammate-memories details.memory-edit{border:0;padding:0;margin:2px 0 0;background:transparent;box-shadow:none}.memory-edit summary{cursor:pointer;min-height:32px;display:inline-flex;align-items:center;font-size:.85rem;font-weight:400;color:var(--so-muted)}.tool-undo{border:0;padding:0;margin:8px 0;background:transparent;box-shadow:none}.tool-undo summary{cursor:pointer;min-height:36px;display:inline-flex;align-items:center;font-size:.9rem}.tool-undo-row{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:6px 0}.tool-undo-row select{width:auto}.teammate-overrides,.teammate-undo{padding-left:18px}.teammate-undo li{margin:6px 0}.teammate-undo form{display:inline}.teammate-week h3{font-size:1rem;margin:14px 0 4px}.teammate-week button{min-height:44px}.teammate-routines{list-style:none;padding:0;margin:8px 0}.teammate-routines li{display:grid;gap:4px;padding:10px 0;border-top:1px solid var(--so-line)}.teammate-routines li:first-child{border-top:0}.routine-buttons{display:flex;flex-wrap:wrap;gap:8px}.routine-buttons button,.routine-add button{min-height:44px}.routine-add{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin:8px 0}.routine-add label{display:grid;gap:4px;flex:1 1 200px}.routine-add label:first-of-type{flex:0 1 180px}.teammate-actions,.question-options{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}.teammate-actions form,.question-options form{margin:0}.memory-edit form{display:grid;gap:8px;margin-top:6px}.memory-buttons{display:flex;flex-wrap:wrap;gap:8px}@media(max-width:600px){.teammate-tools select,.teammate-tools input{font-size:16px}}`;
 
 const USES = [["free", "Do it"], ["limit", "Do it, up to a limit"], ["ask", "Ask first"], ["never", "Never"]] as const;
 
@@ -38,9 +39,15 @@ function toolsSection(store: Store, mate: TeammateRow, csrf: string, canManage: 
         `</div>`;
     }).join("");
     const head = `<h3>${e(grant.tool)}</h3>${gone ? `<p class="problem">This project doesn't have ${e(grant.tool)} any more, so ${e(name)} can't use it.</p>` : ""}`;
+    // v97: which action undoes which, for the Undo button on its receipts. Optional, so it's folded away.
+    const undoing = grant.actions.filter(one => !one.readOnly).map(action => {
+      const chosen = grant.rules[action.name]?.undo ?? "";
+      return `<label class="tool-undo-row">${e(action.name)} is undone by<select name="undo.${e(action.name)}"><option value="">nothing</option>${grant.actions.filter(other => other.name !== action.name).map(other => `<option value="${e(other.name)}"${other.name === chosen ? " selected" : ""}>${e(other.name)}</option>`).join("")}</select></label>`;
+    }).join("");
+    const undoBox = undoing === "" ? "" : `<details class="tool-undo"${grant.actions.some(one => grant.rules[one.name]?.undo !== undefined) ? " open" : ""}><summary>Undo</summary><p class="meta">When an action has an opposite, a person can press Undo on its receipts: the opposite is called with the same input.</p>${undoing}</details>`;
     return canManage
       ? `<div class="tool-grant" data-tool-grant="${e(grant.tool)}">${head}<form method="post" action="/teammates/${mate.id}/tools">${hidden(csrf)}<input type="hidden" name="tool" value="${e(grant.tool)}">${rows}` +
-        `<div class="tool-buttons"><button name="op" value="rules">Save rules</button><button name="op" value="revoke" class="secondary">Stop using ${e(grant.tool)}</button></div></form></div>`
+        undoBox + `<div class="tool-buttons"><button name="op" value="rules">Save rules</button><button name="op" value="revoke" class="secondary">Stop using ${e(grant.tool)}</button></div></form></div>`
       : `<div class="tool-grant" data-tool-grant="${e(grant.tool)}">${head}<ul>${rows}</ul></div>`;
   }).join("");
   const open = tools.filter(one => !grants.some(grant => grant.tool === one.name));
@@ -75,6 +82,16 @@ export function teammatesListHtml(store: Store, mates: readonly TeammateRow[], p
   return `<section class="teammates">${notice.problem ? `<p class="problem" role="alert">${e(notice.problem)}</p>` : ""}${notice.said ? `<p class="said" role="status">${e(notice.said)}</p>` : ""}${intro}${rows || '<p class="meta">No teammates yet.</p>'}${create}</section>`;
 }
 
+/** v97: its week: what it did and cost, what people overrode, and calls that can be undone. */
+function weekSection(store: Store, mate: TeammateRow, csrf: string, canManage: boolean): string {
+  const week = weekOf(store, mate, new Date());
+  const overrides = week.overrides.length === 0 ? "" : `<h3>What you overrode</h3><ul class="teammate-overrides">${week.overrides.map(one => `<li>${e(one.said)}${one.href === null ? "" : ` · <a href="${e(one.href)}">open</a>`} <span class="meta">${when(one.at)}</span></li>`).join("")}</ul>`;
+  const undo = week.undoable.length === 0 ? "" : `<h3>Undo</h3><ul class="teammate-undo">${week.undoable.map(one => `<li data-undo="${one.call}"><span>${e(one.words)}</span> <span class="meta">${when(one.at)}${one.href === null ? "" : ` · <a href="${e(one.href)}">open</a>`}</span>` +
+    (canManage ? `<form method="post" action="/teammates/${mate.id}/week">${hidden(csrf)}<input type="hidden" name="id" value="${one.call}"><button name="op" value="undo" class="secondary">Undo with ${e(one.undo)}</button></form>` : "") + `</li>`).join("")}</ul>`;
+  const send = canManage ? `<form method="post" action="/teammates/${mate.id}/week">${hidden(csrf)}<button name="op" value="send" class="secondary">Send the week's report</button></form>` : "";
+  return `<details class="card teammate-week" id="week" open><summary>This week</summary><p class="teammate-week-said">${e(weekWords(mate, week)).replace(/\n/g, "<br>")}</p>${overrides}${undo}${send}</details>`;
+}
+
 /** v96: its desk — where messages to it by name and its routines land — and its routines. */
 function deskSection(store: Store, mate: TeammateRow, csrf: string, canManage: boolean): string {
   const name = nameOf(mate);
@@ -85,8 +102,8 @@ function deskSection(store: Store, mate: TeammateRow, csrf: string, canManage: b
     `<span class="meta">${one.state === "paused" ? "Paused" : one.nextAt === null ? "" : `Next ${when(one.nextAt)}`}${one.lastAt === null ? "" : ` · last ${when(one.lastAt)}${one.lastOutcome === null ? "" : `: ${e(one.lastOutcome)}`}`}</span>` +
     (canManage ? `<form method="post" action="/teammates/${mate.id}/routines" class="routine-buttons">${hidden(csrf)}<input type="hidden" name="id" value="${one.id}"><button name="op" value="run" class="secondary">Run now</button><button name="op" value="remove" class="secondary">Remove</button></form>` : "") + `</li>`).join("")}</ul>`;
   const add = canManage ? `<form method="post" action="/teammates/${mate.id}/routines" class="routine-add">${hidden(csrf)}<input type="hidden" name="op" value="add">` +
-    `<label>When<input name="schedule" maxlength="80" placeholder="weekdays 09:00" required></label><label>What to do<input name="text" maxlength="200" placeholder="Look up yesterday's refunds and tell me the total." required></label><button>Add routine</button></form>` : "";
-  return `<section class="card teammate-desk" id="desk"><h2>Desk and routines</h2>${intro}${list}${add}${canManage ? `<p class="meta">A routine puts a card on its desk on that schedule (“weekdays 09:00”, “daily 17:00 Europe/London”, “monday 09:00”, “every 2 hours”); the answer goes to ${e(mate.manager)}.</p>` : ""}</section>`;
+    `<label>When<input type="text" name="schedule" maxlength="80" placeholder="weekdays 09:00" required></label><label>What to do<input type="text" name="text" maxlength="200" placeholder="Look up yesterday's refunds and tell me the total." required></label><button>Add routine</button></form>` : "";
+  return `<section class="card teammate-desk" id="desk"><h2>Desk and routines</h2>${intro}${list}${add}${canManage ? `<p class="meta">A routine puts a card on its desk on that schedule (“weekdays 09:00”, “daily 17:00”, “monday 09:00”, “every 2 hours”; times are this computer's, ${e(localZone())}, unless you name one); the answer goes to ${e(mate.manager)}.</p>` : ""}</section>`;
 }
 
 /** A schedule's stored form ("weekdays:09:00@Europe/London") in words. */
@@ -147,6 +164,7 @@ export function teammatePageHtml(store: Store, mate: TeammateRow, viewer: string
     manage,
     questions.length === 0 ? "" : `<section><h2>Questions</h2>${asked}</section>`,
     `<section class="card"><h2>Today</h2><p class="teammate-summary">${e(summaryOf(store, mate, startOfDay()).said).replace(/\n/g, "<br>")}</p></section>`,
+    weekSection(store, mate, csrf, canManage),
     `<section class="card"><h2>Works on</h2>${where}</section>`,
     toolsSection(store, mate, csrf, canManage),
     deskSection(store, mate, csrf, canManage),

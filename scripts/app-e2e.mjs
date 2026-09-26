@@ -808,12 +808,14 @@ createInterface({ input: process.stdin }).on("line", line => {
     { name: "lookup_order", description: "Look an order up by its number", inputSchema: { type: "object", properties: { order: { type: "string" } }, required: ["order"] }, annotations: { readOnlyHint: true } },
     { name: "refund_order", description: "Refund money on an order to the original payment method", inputSchema: { type: "object", properties: { order: { type: "string" }, amount: { type: "number", description: "dollars" } }, required: ["order", "amount"] } },
     { name: "delete_customer", description: "Delete a customer and their history", inputSchema: { type: "object", properties: { email: { type: "string" } }, required: ["email"] } },
+    { name: "cancel_refund", description: "Cancel a refund that hasn't settled yet", inputSchema: { type: "object", properties: { order: { type: "string" }, amount: { type: "number" } }, required: ["order"] } },
   ] });
   else if (message.method === "tools/call") {
     appendFileSync(${JSON.stringify(log)}, JSON.stringify(message.params) + "\\n");
     const args = message.params.arguments ?? {};
     const order = String(args.order ?? "").replace(/^#/, "");
-    reply(message.id, { content: [{ type: "text", text: message.params.name === "lookup_order" ? orders[order] ?? "No order " + order : message.params.name === "refund_order" ? "Refunded $" + args.amount + " on order " + order + " (refund R-" + order + ")." : "Deleted." }] });
+    reply(message.id, { content: [{ type: "text", text: message.params.name === "lookup_order" ? orders[order] ?? "No order " + order : message.params.name === "refund_order" ? "Refunded $" + args.amount + " on order " + order + " (refund R-" + order + ")."
+      : message.params.name === "cancel_refund" ? "Cancelled the refund on order " + order + "." : "Deleted." }] });
   }
 });
 `);
@@ -1008,6 +1010,44 @@ await check("A teammate's routine: added on its page for weekdays, run now, it l
   await phone.context().close();
   if (wide) throw new Error("the teammate page scrolls sideways on a phone");
   return { answer: answer.body.slice(0, 160) };
+});
+
+await check("A teammate's week and undo: its page shows the week with what its turns cost and what you overrode; name an undo for refunds, undo Rosa's $30 refund from its card, and send the week's report", [TOOL_CHECK], async () => {
+  const mate = rows("SELECT id FROM teammate WHERE handle = 'rosa' AND state = 'active'")[0]?.id;
+  const flowId = rows("SELECT id FROM flow WHERE name = 'Refund desk'")[0]?.id;
+  if (!mate || !flowId) throw new Error("Rosa or her flow is missing");
+  if (rows(`SELECT COUNT(*) AS n FROM teammate_turn WHERE teammate = ${mate} AND cost_usd IS NOT NULL`)[0]?.n < 1) throw new Error("no turn kept what it cost");
+  // Under Tools → Undo: cancel_refund undoes refund_order.
+  await page.goto(`${base}/teammates/${mate}#tools`);
+  const store = page.locator('[data-tool-grant="store"]');
+  await store.locator("details.tool-undo summary").click();
+  await store.locator('select[name="undo.refund_order"]').selectOption("cancel_refund");
+  await Promise.all([page.waitForNavigation(), store.locator('button:has-text("Save rules")').click()]);
+  if (JSON.parse(rows(`SELECT rules_json FROM teammate_tool WHERE teammate = ${mate} AND tool = 'store'`)[0]?.rules_json ?? "{}").refund_order?.undo !== "cancel_refund") throw new Error("the undo wasn't saved");
+  // On the $30 card's receipts: Undo with cancel_refund, made as you with the same input.
+  const cardId = (await flowView(flowId)).cards.find(one => one.title.startsWith("Charged twice"))?.id;
+  await page.goto(`${base}/flows/${flowId}?card=${cardId}`); await page.waitForSelector(`[data-flow-card-panel="${cardId}"]`);
+  await page.evaluate(() => { const one = document.querySelector("[data-teammate-calls]"); if (one) one.open = true; });
+  await page.locator("[data-teammate-undo]").first().click();
+  const log = join(w.root, "shop-calls.log");
+  await until("the refund to be cancelled", async () => readFileSync(log, "utf8").includes('"cancel_refund"'), { timeoutMs: 30_000, everyMs: 500 });
+  const cancelled = readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line)).find(one => one.name === "cancel_refund");
+  if (String(cancelled.arguments.order).replace(/^#/, "") !== "2201" || Number(cancelled.arguments.amount) !== 30) throw new Error(`the undo call: ${JSON.stringify(cancelled)}`);
+  if (rows("SELECT undone_by FROM teammate_call WHERE action = 'refund_order' AND undone_by IS NOT NULL").length !== 1) throw new Error("the refund isn't marked undone");
+  await page.reload(); await page.waitForSelector(`[data-flow-card-panel="${cardId}"]`);
+  await page.evaluate(() => { const one = document.querySelector("[data-teammate-calls]"); if (one) { one.open = true; one.scrollIntoView({ block: "center" }); } });
+  await sleep(400);
+  await shot("teammate-undone");
+  // Its page: the week, and the report sent now.
+  await page.goto(`${base}/teammates/${mate}#week`);
+  const week = await page.locator("#week").innerText();
+  if (!/Tool calls: \d+ made/.test(week) || !/at API prices/.test(week) || !/undone/.test(week)) throw new Error(`the week reads: ${week.slice(0, 400)}`);
+  await Promise.all([page.waitForNavigation(), page.click('#week button:has-text("Send the week\'s report")')]);
+  const report = rows("SELECT subject, body FROM notification WHERE kind = 'teammate-weekly' AND recipient = 'alex'")[0];
+  if (report?.subject !== "Rosa · Support: the week") throw new Error(`the report: ${JSON.stringify(report)}`);
+  await page.locator("#week").scrollIntoViewIfNeeded(); await sleep(300);
+  await shot("teammate-week");
+  return { report: report.body.slice(0, 300) };
 });
 
 await check("Live canvas: a teammate sees who's here and a card move without reloading", ["Code steps: a Python file and a Node script get the card, pass on what they print, pick the next zone, and get a secret"], async () => {
