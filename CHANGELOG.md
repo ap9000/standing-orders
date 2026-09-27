@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Sign in with your identity provider.** Settings → Sign-in connects Okta,
+  Microsoft Entra, Google or any OpenID Connect provider. People sign in
+  there; their groups make their account and set its role (Operator or
+  Viewer) and projects again at each sign-in. Approvals are confirmed by
+  that sign-in (within ten minutes, or "Confirm with …"), not a password.
+  Passwords can be kept for instance operators only, as a way in if the
+  provider is down, and an existing account can be linked. Schema 100.
+
 - **Hardening for teams.** Five wrong passwords lock a name for 15 minutes,
   on every road a password takes (signing in, a request, a step-up), and one
   address guessing across names runs out of tries. The action ledger now

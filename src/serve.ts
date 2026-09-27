@@ -201,7 +201,7 @@ import {
   approve as approveScope,
   attendedDigestOf,
   attendedTermsJson,
-  authenticateApprover,
+  authenticateApprover as checkApproverPassword,
   canonicalProfileJson,
   chainFromJson,
   profileDigestOf,
@@ -262,8 +262,11 @@ import { effectivePrimary, isMessagingChannel, savePrimary } from "./webhooks.js
 import { resolvePhaseAgent, resolveRoutineAuthority, INSTALLATION_SCOPE, routeOfTask, agentChoicesFor, type AgentChoice } from "./agentconfig.js";
 import { isRiskLevel, projectRoute, riskTitle, riskConsequence, chosenWords, agentsSummary, postureWords, RISK_CHOICES, RISK_LEVELS, PHASES as ROUTE_PHASES, type PhaseRoute, type RouteProjection, type RouteOverride, type RouteStamp, type RiskLevel } from "./phase-routing.js";
 import { ALL_CREDENTIAL_ENV, isProviderId, reportsCost, PROVIDER_IDS, validModelId, validateSpec, type Phase, type ProviderId } from "./provider.js";
-import { authenticateAccount, hashPassword, modeFilingCoverage, PLACEHOLDER_RUBRIC } from "./scope.js";
+import { authenticateAccount, approverStanding, hashPassword, modeFilingCoverage, PLACEHOLDER_RUBRIC } from "./scope.js";
 import { DEFAULT_GUARD_POLICY, passwordGuardOf, SourceBudget } from "./sign-in-guard.js";
+import { accessFromGroups, accountNameFor, discoverOidc, exchangeOidcCode, newOidcVisit, oidcAuthorizeUrl, verifyIdToken, type OidcClaims, type OidcProvider, type OidcVisit } from "./oidc.js";
+import { readSsoSettings, removeSsoSettings, saveSsoSettings, SSO_CALLBACK, ssoChangeWords } from "./sso-settings.js";
+import { SSO_CSS, ssoSettingsHtml } from "./sso-ui.js";
 import { logEvent } from "./log.js";
 import { modeTermsFromJson, modeWords, presetTerms, modeTermsJson, modeDigestOf, MODE_MAX_DAYS, type ModeName, type ModeTerms } from "./modes.js";
 import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, readProviderKey, keyStatus, plausibleKey, readAuthMode, readAuthModeStrict, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
@@ -359,6 +362,8 @@ export type ServeOptions = {
   googleFetch?: typeof fetch;
   /** Tests: every request a one-click connection makes (discovery, registration, tokens). */
   connectFetch?: typeof fetch;
+  /** Tests: every request sign-in with the identity provider makes (discovery, keys, tokens). */
+  ssoFetch?: typeof fetch;
   chatEnv?: Record<string, string | undefined>;
   /**
    * The live peek's locality ASSERTION (live-peek v3 §3): the administrator
@@ -507,6 +512,8 @@ type Session = {
   project: string | null;
   /** Bumped on every open: stale tabs carry the revision they were rendered under. */
   projectRevision: number;
+  /** v100: signed in with the identity provider, and when it last checked them (a step-up within 10 minutes needs no password). */
+  sso?: { at: number };
   /** Onboarding preview records (arc: repo onboarding, finding 14) —
    * session-held, swept at mint, at most 3, consumed exactly once. */
   onboard?: Map<string, { nameWithOwner: string; rootIndex: number; target: string; diskUsageKib: number | null; large: boolean; mintedAt: number }>;
@@ -601,7 +608,37 @@ export function createDecisionServer(options: ServeOptions): Server {
   }
   // v99: wrong passwords. One address guessing across names runs out of tries here; each name
   // locks on its own (sign-in-guard.ts), and every lock, whatever road it came by, is kept.
+  /**
+   * Every step-up in the console (v100): a person the identity provider
+   * checked in the last ten minutes confirms with that (an empty password
+   * field); anyone else types their password. Standing (an approver, with
+   * access to the project) is checked either way.
+   */
+  const authenticateApprover = (on: Store, by: string, token: string, repo?: string | null): ReturnType<typeof checkApproverPassword> => {
+    const facts = requestContext.getStore();
+    if (token === "" && facts?.sso?.fresh === true && facts.actor === by) return approverStanding(on, by, repo);
+    return checkApproverPassword(on, by, token, repo);
+  };
   const signInBudget = new SourceBudget();
+  // v100: sign-in with the identity provider. A visit waits for the provider (15 minutes); a hand-off
+  // carries the proved person from the callback (reached from the provider's site, so without the
+  // Strict session cookie) to /login/sso/finish on this site (a minute).
+  type SsoIntent = "sign-in" | "reauth" | "link";
+  const ssoVisits = new Map<string, { visit: OidcVisit; provider: OidcProvider; redirect: string; intent: SsoIntent; returnTo: string; expires: number }>();
+  const ssoHandoffs = new Map<string, { claims: OidcClaims; issuer: string; intent: SsoIntent; returnTo: string; expires: number }>();
+  let ssoProvider: { issuer: string; provider: OidcProvider; at: number } | null = null;
+  const ssoSettings = () => readSsoSettings(options.configDir);
+  const ssoOffer = () => { const settings = ssoSettings(); return settings === null ? null : { label: settings.label, operatorsOnly: settings.passwords === "operators" }; };
+  /** A step-up within this long of the provider checking someone needs no password. */
+  const SSO_FRESH_MS = 10 * 60_000;
+  async function providerFor(issuer: string): Promise<{ ok: true; provider: OidcProvider } | { ok: false; said: string }> {
+    if (ssoProvider !== null && ssoProvider.issuer === issuer && Date.now() - ssoProvider.at < 10 * 60_000) return { ok: true, provider: ssoProvider.provider };
+    const found = await discoverOidc(issuer, options.ssoFetch ?? fetch);
+    if (found.ok) ssoProvider = { issuer, provider: found.provider, at: Date.now() };
+    return found;
+  }
+  /** Password sign-in is only for instance operators when the provider says so (a way in if it's down). */
+  const passwordAllowed = (name: string) => { const settings = ssoSettings(); return settings === null || settings.passwords === "everyone" || store.isInstanceOperator(name); };
   const minutesWords = (ms: number) => { const minutes = Math.max(1, Math.ceil(ms / 60_000)); return minutes >= 120 ? `${Math.round(minutes / 60)} hours` : `${minutes} minute${minutes === 1 ? "" : "s"}`; };
   /** A sign-in event names the account only when it exists: what someone typed into the name box stays out of history. */
   const signInActor = (name: string | null): string => name !== null && store.accountOf(name) !== null ? name : "unknown account";
@@ -992,6 +1029,34 @@ export function createDecisionServer(options: ServeOptions): Server {
    * kept in its secrets file, and a page sends the person back to Tools (or
    * to the kit the Connect came from, whose teammate may then use the tool).
    */
+  /** v100: back from the identity provider. Proves the person, then hands them to /login/sso/finish on this site. */
+  async function ssoCallback(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
+    const back = (words: string) => page(response, 400, loginPage(words, "/", ssoOffer()));
+    const state = url.searchParams.get("state") ?? "";
+    if (!startedHere(request, state)) return back("That sign-in was started in another browser. Sign in again from this one.");
+    const held = ssoVisits.get(state);
+    ssoVisits.delete(state);
+    const settings = ssoSettings();
+    if (held === undefined || held.expires < Date.now() || settings === null) return back("That sign-in expired. Try again.");
+    if (url.searchParams.has("error")) return back(url.searchParams.get("error") === "access_denied" ? `${settings.label} didn't let you in.` : `${settings.label} didn't finish the sign-in.`);
+    const code = url.searchParams.get("code") ?? "";
+    if (!/^[\x21-\x7e]{4,4096}$/.test(code)) return back(`${settings.label} didn't send a sign-in code.`);
+    const fetcher = options.ssoFetch ?? fetch;
+    const token = await exchangeOidcCode(held.provider, settings, code, held.visit, held.redirect, fetcher);
+    if (!token.ok) return back(token.said);
+    const verified = await verifyIdToken(token.idToken, held.provider, settings, held.visit.nonce, clock(), fetcher);
+    if (!verified.ok) { logEvent("warn", "sso.refused", { reason: verified.said }); return back(verified.said); }
+    // A step-up must be a check made just now, not a remembered one.
+    if (held.intent === "reauth" && verified.claims.authTime !== null && Date.now() / 1000 - verified.claims.authTime > 300) return back(`${settings.label} didn't check you again. Try once more.`);
+    const key = randomBytes(24).toString("base64url");
+    for (const [one, value] of ssoHandoffs) if (value.expires < Date.now()) ssoHandoffs.delete(one);
+    ssoHandoffs.set(key, { claims: verified.claims, issuer: held.provider.issuer, intent: held.intent, returnTo: held.returnTo, expires: Date.now() + 60_000 });
+    const to = `/login/sso/finish?h=${key}`;
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer", "x-content-type-options": "nosniff", "x-frame-options": "DENY",
+      "set-cookie": signInSpent(SSO_CALLBACK), "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'" });
+    response.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="0;url=${escape(to)}"><title>Standing Orders</title>${HANDOFF_STYLE}<p>Signing you in… <a href="${escape(to)}">Continue</a></p>`);
+  }
+
   async function connectCallback(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
     const done = (back: string, key: "said" | "problem", words: string) => {
       const to = `${back}${back.includes("?") ? "&" : "?"}${key}=${encodeURIComponent(words)}`;
@@ -1109,7 +1174,66 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (options.setupCode !== undefined && store.listApprovers().length === 0) {
         return page(response, 200, signupPage(null, setupAttemptsLeft));
       }
-      return page(response, 200, loginPage(null, loginReturn(url.searchParams.get("return"))));
+      return page(response, 200, loginPage(null, loginReturn(url.searchParams.get("return")), ssoOffer()));
+    }
+    // v100: sign-in with the identity provider. ?reauth=1 asks it to check the person again (a step-up);
+    // ?link=1 links the signed-in account to it. The browser that starts it holds the visit's state.
+    if (url.pathname === "/login/sso" && method === "GET") {
+      const settings = ssoSettings();
+      const intent: SsoIntent = url.searchParams.get("link") === "1" ? "link" : url.searchParams.get("reauth") === "1" ? "reauth" : "sign-in";
+      const returnTo = loginReturn(url.searchParams.get("return"));
+      if (settings === null) return page(response, 404, loginPage("Sign-in with an identity provider isn't on.", returnTo));
+      if (intent !== "sign-in" && who?.via !== "cookie") return redirect(response, loginHref(returnTo));
+      const origin = consoleOrigin(request.headers.host);
+      if (origin === null) return page(response, 400, loginPage("Sign in from this computer (localhost) or from your https address.", returnTo, ssoOffer()));
+      const found = await providerFor(settings.issuer);
+      if (!found.ok) return page(response, 502, loginPage(`${settings.label} isn't answering: ${found.said}`, returnTo, ssoOffer()));
+      const visit = newOidcVisit(), redirectUri = `${origin}${SSO_CALLBACK}`;
+      for (const [key, one] of ssoVisits) if (one.expires < Date.now()) ssoVisits.delete(key);
+      ssoVisits.set(visit.state, { visit, provider: found.provider, redirect: redirectUri, intent, returnTo, expires: Date.now() + 15 * 60_000 });
+      response.writeHead(302, { location: oidcAuthorizeUrl(found.provider, settings, visit, redirectUri, intent === "reauth"), "cache-control": "no-store", "referrer-policy": "no-referrer",
+        "set-cookie": `${SIGN_IN_COOKIE}=${visit.state}; Path=${SSO_CALLBACK}; Max-Age=900; HttpOnly; SameSite=Lax${origin.startsWith("https:") ? "; Secure" : ""}` });
+      response.end();
+      return;
+    }
+    if (url.pathname === SSO_CALLBACK && method === "GET") return ssoCallback(request, response, url);
+    if (url.pathname === "/login/sso/finish" && method === "GET") {
+      const key = url.searchParams.get("h") ?? "";
+      const handoff = ssoHandoffs.get(key);
+      ssoHandoffs.delete(key);
+      const settings = ssoSettings();
+      if (handoff === undefined || handoff.expires < Date.now() || settings === null) return page(response, 400, loginPage("That sign-in expired. Try again.", "/", ssoOffer()));
+      const { claims } = handoff;
+      const identity = { issuer: handoff.issuer, subject: claims.sub, email: claims.email, label: settings.label };
+      if (handoff.intent === "link" || handoff.intent === "reauth") {
+        if (who?.via !== "cookie") return redirect(response, loginHref(handoff.returnTo));
+        if (handoff.intent === "link") {
+          const linked = store.linkSsoIdentity(who.name, identity, clock());
+          if (!linked.ok) return redirect(response, `/settings/sign-in?problem=${encodeURIComponent(`That ${settings.label} account signs in as someone else here.`)}`);
+          who.session.sso = { at: Date.now() };
+          return redirect(response, `/settings/sign-in?said=${encodeURIComponent(`This account signs in with ${settings.label} now.`)}`);
+        }
+        // A step-up: the provider checked the same person again.
+        if (store.ssoAccount(identity.issuer, identity.subject) !== who.name) return page(response, 403, loginPage(`That ${settings.label} account isn't the one signed in here.`, handoff.returnTo, ssoOffer()));
+        who.session.sso = { at: Date.now() };
+        recordSignIn(who.name, "confirmed", settings.label);
+        return redirect(response, handoff.returnTo);
+      }
+      const rule = accessFromGroups(claims.groups, settings.rules);
+      const signedIn = store.signInWithSso(identity, rule === null ? null : { role: rule.role === "operator" ? "approver" : "viewer", projects: rule.projects === "all" ? null : rule.projects },
+        () => accountNameFor(claims, name => store.accountOf(name) !== null), clock());
+      if (!signedIn.ok) {
+        recordSignIn(store.ssoAccount(identity.issuer, identity.subject) ?? "unknown account", "sign-in refused", signedIn.reason === "no-group" ? "no matching group" : signedIn.reason);
+        return page(response, 403, loginPage(signedIn.reason === "no-group" ? `Your ${settings.label} account isn't in a group that may use Standing Orders. Ask whoever runs it.`
+          : signedIn.reason === "revoked" ? "This account was removed. Ask whoever runs Standing Orders." : "That change would leave no one who can run this installation.", "/", ssoOffer()));
+      }
+      const account = store.accountOf(signedIn.account)!;
+      const id = randomBytes(32).toString("hex");
+      sessions.set(id, { name: signedIn.account, csrf: randomBytes(32).toString("hex"), role: account.role, generation: account.generation, createdAt: Date.now(), sawBoardAt: null, lastSeen: Date.now(),
+        project: defaultProject, projectRevision: 1, sso: { at: Date.now() } });
+      recordSignIn(signedIn.account, "signed in", settings.label);
+      response.setHeader("Set-Cookie", `${SESSION_COOKIE}=${id}; HttpOnly; SameSite=Strict; Path=/${cookieSecure}`);
+      return redirect(response, handoff.returnTo);
     }
     if (url.pathname === "/signup" && method === "POST") {
       // Only while the table is empty, only with the printed code, only
@@ -1182,7 +1306,11 @@ export function createDecisionServer(options: ServeOptions): Server {
         }
         signInBudget.failed(source, at);
         recordSignIn(signInActor(name), "sign-in refused", "wrong password");
-        return page(response, 403, loginPage("wrong username or password", returnTo));
+        return page(response, 403, loginPage("wrong username or password", returnTo, ssoOffer()));
+      }
+      if (!passwordAllowed(name as string)) {
+        recordSignIn(name as string, "sign-in refused", "provider only");
+        return page(response, 403, loginPage(`Sign in with ${ssoSettings()?.label ?? "your identity provider"}.`, returnTo, ssoOffer()));
       }
       recordSignIn(name as string, "signed in", "browser");
       const id = randomBytes(32).toString("hex");
@@ -1300,6 +1428,8 @@ export function createDecisionServer(options: ServeOptions): Server {
       returnTo: safeReturn(url.pathname + url.search),
       // Every signed-in page shares the workspace shell; pages showing a one-time secret opt out (forceSensitive).
       browser: who.via === 'cookie',
+      // v100: signed in with the identity provider: its label, and whether it checked them recently enough to stand in for a password.
+      sso: who.via === 'cookie' && who.session.sso !== undefined ? { label: ssoSettings()?.label ?? "your identity provider", fresh: Date.now() - who.session.sso.at < SSO_FRESH_MS } : undefined,
       refusal: (answer: ServerResponse, status: number, body: string) => sendScreen(answer, status,
         screen(status === 404 ? "Not found" : "Request refused", body, { chrome: chromeFor(who.via === "cookie" ? who.session.project : null, "work") })),
       workspaceRead,
@@ -3423,6 +3553,16 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       return sendScreen(response, 200, screen("Tools", `<p><a href="/settings">Settings</a></p><h1>Tools</h1>${selector}${content}`, { chrome: chromeFor(chosen || project, "settings") }));
     }
+    // v100: Settings → Sign-in, the identity provider people sign in with. An instance operator's page.
+    if (url.pathname === "/settings/sign-in") {
+      if (who.via !== "cookie" || !store.isInstanceOperator(who.name) || !options.configDir) return refuse(response, who, 403, "An instance operator sets up sign-in.", "/settings");
+      const origin = consoleOrigin(request.headers.host);
+      const projects = [...new Set([...managedRepos(), ...store.knownRepos()])].filter(visible).map(path => ({ path, name: projectName(path) }));
+      const settings = ssoSettings();
+      const html = ssoSettingsHtml({ settings, redirect: origin === null ? null : `${origin}${SSO_CALLBACK}`, projects, linked: settings !== null && store.ssoIdentitiesOf(who.name).some(one => one.issuer.replace(/\/+$/, "") === settings.issuer) },
+        who.session.csrf, { said: url.searchParams.get("said"), problem: url.searchParams.get("problem") });
+      return sendScreen(response, 200, screen("Sign-in", `<p><a href="/settings">Settings</a></p><h1>Sign-in</h1>${html}`, { chrome: chromeFor(project, "settings") }));
+    }
     if (url.pathname === "/settings/knowledge") {
       const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
       const chosen = url.searchParams.get("repo") ?? project ?? projects[0] ?? "";
@@ -4134,6 +4274,13 @@ export function createDecisionServer(options: ServeOptions): Server {
    * are what sensitivity strips.
    */
   function sendScreen(response: ServerResponse, status: number, s: Screen): void {
+    // v100: signed in with the identity provider, a step-up's password field is that sign-in instead.
+    const ssoFacts = requestContext.getStore()?.sso;
+    if (ssoFacts !== undefined) {
+      const back = requestContext.getStore()?.returnTo ?? "/";
+      s = { ...s, body: ssoStepUps(s.body, ssoFacts, back), ...(s.workspace?.pageHtml == null ? {} : { workspace: { ...s.workspace, pageHtml: ssoStepUps(s.workspace.pageHtml, ssoFacts, back) } }) };
+      if (s.workspace?.view?.kind === "flow") s = { ...s, workspace: { ...s.workspace, view: { ...s.workspace.view, stepUp: { label: ssoFacts.label, fresh: ssoFacts.fresh, confirmHref: `/login/sso?reauth=1&return=${encodeURIComponent(back)}` } } } };
+    }
     const teamEntry = requestContext.getStore()?.returnTo;
     if (teamEntry?.startsWith('/chat') && !s.workspace?.team && !teamEntry.includes('task=') && !teamEntry.includes('proposal=')) {
       s.body = '<p class="team-entry"><a href="/chat?team=1">Open team chat</a></p>' + s.body;
@@ -5892,6 +6039,36 @@ export function createDecisionServer(options: ServeOptions): Server {
         return cancelled.ok ? settle(cancelled.said) : answer(409, { ok: false, said: cancelled.message });
       }
       return answer(404, { ok: false, said: "No such flow action." });
+    }
+    if (url.pathname === "/settings/sign-in") {
+      if (who.via !== "cookie" || !store.isInstanceOperator(who.name) || !options.configDir) return refuse(response, who, 403, "An instance operator sets up sign-in.", "/settings");
+      const back = (key: "said" | "problem", words: string) => redirect(response, `/settings/sign-in?${key}=${encodeURIComponent(words)}`);
+      const action = body.get("action") ?? "";
+      const before = ssoSettings();
+      if (action === "test") {
+        if (before === null) return back("problem", "Sign-in with a provider isn't set up.");
+        ssoProvider = null;
+        const found = await providerFor(before.issuer);
+        return found.ok ? back("said", `${before.label} answers: it's ready for people to sign in.`) : back("problem", found.said);
+      }
+      if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return back("problem", "Enter your Standing Orders password to change sign-in.");
+      if (action === "remove") {
+        removeSsoSettings(options.configDir);
+        ssoProvider = null;
+        store.recordAction({ at: now.toISOString(), actor: who.name, repo: null, taskId: null, runId: null, action: "sign-in with a provider turned off", outcome: "changed", source: "policy", detail: ssoChangeWords(before, null) });
+        return back("said", "Sign-in with the provider is off. Passwords work for everyone again.");
+      }
+      if (action !== "save") return back("problem", "Choose a sign-in action.");
+      const rules = [];
+      for (let index = 0; index < 50 && body.has(`group-${index}`); index++) rules.push({ group: body.get(`group-${index}`) ?? "", role: body.get(`role-${index}`) ?? "", projects: body.getAll(`projects-${index}`) });
+      const saved = saveSsoSettings(options.configDir, { issuer: body.get("issuer") ?? "", clientId: body.get("client-id") ?? "", clientSecret: body.get("client-secret") ?? "", label: body.get("label") ?? "",
+        scopes: body.get("scopes") ?? "", groupsClaim: body.get("groups-claim") ?? "", passwords: body.get("passwords") ?? "", rules }, before);
+      if (!saved.ok) return back("problem", saved.said);
+      // The provider has to answer before anyone depends on it.
+      ssoProvider = null;
+      const found = await providerFor(saved.settings.issuer);
+      store.recordAction({ at: now.toISOString(), actor: who.name, repo: null, taskId: null, runId: null, action: before === null ? "sign-in with a provider turned on" : "sign-in with a provider changed", outcome: "changed", source: "policy", detail: ssoChangeWords(before, saved.settings) });
+      return found.ok ? back("said", `Saved. People can sign in with ${saved.settings.label}.`) : back("problem", `Saved, but ${saved.settings.label} didn't answer: ${found.said}`);
     }
     if (url.pathname === "/settings/tools/connect") {
       if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "Sign in as an approver to connect tools.", "/settings/tools");
@@ -9205,7 +9382,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (signInBudget.waitFor(source, at) > 0) return null;
       const authenticated = authenticateAccount(store, bearer[1] as string, bearer[2] as string);
       if (!authenticated.ok && authenticated.reason === "unknown") signInBudget.failed(source, at);
-      return authenticated.ok ? { name: bearer[1] as string, via: "bearer", role: authenticated.role } : null;
+      return authenticated.ok && passwordAllowed(bearer[1] as string) ? { name: bearer[1] as string, via: "bearer", role: authenticated.role } : null;
     }
     const cookies = request.headers.cookie ?? "";
     const match = new RegExp(`(?:^|;\\s*)${SESSION_COOKIE}=([0-9a-f]{64})`).exec(cookies);
@@ -12209,6 +12386,12 @@ ${THEME_DARK}
   .so-brand-mark i { display: block; width: 4px; height: 15px; background: var(--so-accent); border-radius: 1px; }
   .so-brand-mark i:nth-child(2) { height: 22px; }
   .login-shell .login-brand { justify-content: center; font-size: 1.125rem; margin: 0 0 1.5rem; }
+  .sso-step-up { display: inline-flex; align-items: center; min-height: 36px; font-size: .9rem; }
+  .sso-step-up[data-sso-step-up="confirmed"] { color: var(--so-success); }
+  .sso-step-up[data-sso-step-up="confirmed"]::before { content: "✓"; margin-right: 6px; }
+  .login-shell .login-sso { display: flex; justify-content: center; align-items: center; min-height: 44px; border-radius: 8px; background: var(--so-accent); color: var(--so-on-accent); font-weight: 600; text-decoration: none; margin: 0 0 1rem; }
+  .login-shell .login-sso:hover { background: var(--so-accent-hover); }
+  .login-shell .login-password > summary { text-align: center; font-size: .875rem; color: var(--muted-foreground); cursor: pointer; margin: 0 0 .75rem; }
   .focus-page { max-width: 40rem; margin: 0 auto; padding: 2rem 1.25rem 3rem; }
   .focus-page .focus-brand { display: inline-flex; margin: 0 0 2.5rem; }
   .focus-page h1 { margin: 0 0 1rem; }
@@ -13185,7 +13368,7 @@ button.pick-file { min-height: 1.75rem; padding: 0 .55rem; font-size: .75rem; }
 
 /** Appearance: a three-way segmented switch, one tap per choice. */
 const THEME_CONTROLS_CSS = `.task-repo select{width:100%;min-height:2.75rem;font-size:1rem}.task-repo-add{margin:.35rem .1rem .5rem}.task-repo-add a{display:inline-flex;align-items:center;min-height:2.25rem}details.result-request-open.result-request-form>summary{border:0;background:transparent;padding:.5rem 0;min-height:2.75rem;font-weight:600;display:list-item;list-style:revert}details.result-request-open.result-request-form>summary::-webkit-details-marker{display:revert}form.js-autosave button[type=submit]{display:none}.provider-row{border-bottom:1px solid var(--so-line);padding:.35rem 0}.provider-row:first-of-type{border-top:1px solid var(--so-line)}.provider-head{display:flex;align-items:center;gap:.75rem;margin:.4rem 0 0}.provider-status{display:inline-flex;align-items:center;gap:.4rem;color:var(--so-muted);font-size:.875rem}.provider-status i{width:.5rem;height:.5rem;border-radius:50%;background:var(--so-muted)}.provider-status--ok i{background:var(--so-success)}.provider-status--warn i{background:var(--so-attention)}.provider-status--off i{background:transparent;border:1.5px solid var(--so-muted)}details.provider-manage>summary{cursor:pointer;color:var(--so-accent-text);font-size:.875rem;min-height:2.5rem;display:list-item;padding-block:.5rem}.card.props .row{display:grid;gap:.1rem;margin:0 0 .75rem}.card.props .row>.meta{display:block;font-size:.75rem}.card.props .row>.meta::first-letter{text-transform:uppercase}.card.props .row>.mono{font-family:var(--font-sans);font-size:.875rem}.card.props .row>.mono .seal{font-family:var(--font-mono);font-size:.8125rem}details.evidence-files{margin:1rem 0}details.evidence-files>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:600}details.evidence-files ul{list-style:none;margin:0;padding:0}details.evidence-files li{display:flex;justify-content:space-between;gap:1rem;padding:.5rem 0;border-bottom:1px solid var(--so-line)}.result-action .result-feedback-link{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;text-decoration:none}.result-action .result-feedback-link:hover{background:var(--so-raised)}.so-sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}.verdict{margin:.5rem 0 .75rem}.verdict-chips{display:flex;flex-wrap:wrap;gap:.4rem;list-style:none;padding:0;margin:0}.verdict-chip{display:inline-flex;align-items:center;gap:.3rem;min-height:1.75rem;padding:.2rem .65rem;border-radius:999px;font-size:.8125rem;font-weight:600;background:var(--so-neutral-soft);color:var(--so-neutral-ink)}.verdict-chip svg{width:.9rem;height:.9rem}.verdict-chip--success{background:var(--so-success-soft);color:var(--so-success)}.verdict-chip--danger{background:var(--so-danger-soft);color:var(--so-danger)}.verdict-chip--warning{background:var(--so-warning-soft);color:var(--so-warning)}.verdict-chip--info{background:var(--so-info-soft);color:var(--so-info)}.verdict-by{margin:.4rem 0 0}details.result-request-open{margin:.5rem 0}details.result-request-open>summary{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;cursor:pointer;list-style:none}details.result-request-open>summary::-webkit-details-marker{display:none}details.result-request-open[open]>summary{margin-bottom:.75rem}.settings-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(8.5rem,1fr));gap:.5rem;margin:0 0 2rem}.settings-tiles a{display:flex;align-items:center;gap:.6rem;min-height:3rem;padding:.65rem .8rem;border:1px solid var(--so-line);border-radius:.625rem;background:var(--so-paper);color:var(--so-ink);text-decoration:none;font-weight:550;font-size:.875rem}.settings-tiles a:hover{border-color:var(--so-input-line);background:var(--so-raised)}.settings-tiles svg{width:1.1rem;height:1.1rem;flex-shrink:0;color:var(--so-accent-text)}details.settings-more{margin:.25rem 0 1.25rem}details.settings-more>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:550}details.settings-more>summary .meta{font-weight:400;margin-left:.35rem}.settings-changed{margin-top:-.25rem}.appearance{margin:0 0 28px}.appearance h2{margin:0 0 10px}.theme-switch{display:inline-flex;flex-wrap:nowrap;max-width:100%;gap:4px;padding:4px;margin:0;border:1px solid var(--so-line);border-radius:10px;background:var(--so-raised)}.theme-switch .theme-choice,.so-native-region .theme-switch .theme-choice{flex:1 1 0;width:auto;white-space:nowrap;min-height:40px;padding:8px 16px;border:0;border-radius:7px;background:transparent;color:var(--so-muted);font:inherit;font-weight:550;box-shadow:none;cursor:pointer}.theme-switch .theme-choice:hover{color:var(--so-ink)}.theme-switch .theme-choice[aria-pressed="true"]{background:var(--so-paper);color:var(--so-ink);box-shadow:0 1px 2px rgb(0 0 0 / .1)}.appearance .meta{margin:8px 0 0}@media(max-width:600px){.theme-switch .theme-choice{min-height:44px}}`;
-const WORKSPACE_STYLE = styleAsset(STYLE + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KITS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
+const WORKSPACE_STYLE = styleAsset(STYLE + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KITS_CSS + SSO_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
@@ -13809,6 +13992,25 @@ function joinDeadPage(): string {
   ].join("\n"), { nav: false });
 }
 
+/**
+ * v100: for someone signed in with the identity provider, every step-up
+ * password field (autocomplete="current-password"; a secret like a bot token
+ * is never one) becomes that sign-in: confirmed, when the provider checked
+ * them in the last ten minutes, or a link to be checked again, then back here.
+ */
+export function ssoStepUps(html: string, sso: { label: string; fresh: boolean }, returnTo: string): string {
+  const stepUp = (attributes: string) => /\btype="password"/.test(attributes) && /\bautocomplete="current-password"/.test(attributes);
+  const swap = (attributes: string) => {
+    const name = /\bname="([^"]+)"/.exec(attributes)?.[1] ?? "token";
+    return `<input type="hidden" name="${name}" value="">` + (sso.fresh
+      ? `<span class="sso-step-up" data-sso-step-up="confirmed">Confirmed with ${escape(sso.label)}</span>`
+      : `<a class="sso-step-up" data-sso-step-up="confirm" href="/login/sso?reauth=1&amp;return=${escape(encodeURIComponent(returnTo))}">Confirm with ${escape(sso.label)}</a>`);
+  };
+  return html
+    .replace(/<label>[^<]*<input\b([^>]*)>\s*<\/label>/g, (whole, attributes: string) => stepUp(attributes) ? swap(attributes) : whole)
+    .replace(/<input\b([^>]*)>/g, (whole, attributes: string) => stepUp(attributes) ? swap(attributes) : whole);
+}
+
 /** The brand, as the workspace sidebar shows it. */
 const BRAND_HTML = `<span class="so-brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>Standing Orders`;
 
@@ -13817,12 +14019,17 @@ function focusDocument(title: string, body: string): string {
   return shell(title, `<div class="focus-page"><a class="so-wordmark focus-brand" href="/chat">${BRAND_HTML}</a>${body}</div>`);
 }
 
-function loginPage(problem: string | null, returnTo = "/"): string {
+function loginPage(problem: string | null, returnTo = "/", sso: { label: string; operatorsOnly: boolean } | null = null): string {
+  // v100: with an identity provider, its button comes first and passwords wait behind "Use a password".
+  const provider = sso === null ? "" : `<a class="button-link login-sso" href="/login/sso${returnTo === "/" ? "" : `?return=${encodeURIComponent(returnTo)}`}">Sign in with ${escape(sso.label)}</a>`;
   return shell("Standing Orders", [
     `<div class="login-viewport"><div class="login-shell">`,
     `<h1 class="so-wordmark login-brand">${BRAND_HTML}</h1>`,
+    problem === null || sso === null ? "" : `<div class="problem" role="alert">${escape(problem)}</div>`,
+    provider,
+    sso === null ? "" : `<details class="login-password"><summary>${sso.operatorsOnly ? "Instance operators: use a password" : "Use a password"}</summary>`,
     `<div class="login-card">`,
-    problem === null ? "" : `<div class="problem" role="alert">${escape(problem)}</div>`,
+    problem === null || sso !== null ? "" : `<div class="problem" role="alert">${escape(problem)}</div>`,
     `<form method="post" action="/login">`,
     returnTo === "/" ? "" : `<input type="hidden" name="return" value="${escape(returnTo)}">`,
     `<label>Username<input type="text" name="name" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus></label>`,
@@ -13830,7 +14037,8 @@ function loginPage(problem: string | null, returnTo = "/"): string {
     `<button type="submit">Sign in</button>`,
     "</form>",
     `</div>`,
-    `<p class="login-foot">Your login was shown when Standing Orders first started, and saved beside its database as <code>up-login.txt</code>.<br>No account? Ask whoever runs it for an invite link.</p>`,
+    sso === null ? "" : `</details>`,
+    `<p class="login-foot">${sso === null ? "Your login was shown when Standing Orders first started, and saved beside its database as <code>up-login.txt</code>.<br>" : ""}No account? Ask whoever runs it for an invite link.</p>`,
     `</div></div>`,
   ].join("\n"), { nav: false });
 }
@@ -16191,7 +16399,7 @@ function routineScreenPage(chrome: Chrome, data: {
     approved && !routine.paused && agents.state === "frozen"
       ? `<form method="post" action="${routineHref(routine.id)}/run-now" class="inline">` +
         `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
-        `<input type="password" name="token" class="inline" placeholder="your password" aria-label="password for run now" style="width:11rem"> ` +
+        `<input type="password" name="token" autocomplete="current-password" class="inline" placeholder="your password" aria-label="password for run now" style="width:11rem"> ` +
         `<button type="submit">run now</button></form>`
       : "";
   const acts =
@@ -17682,7 +17890,7 @@ function themeAttribute(): string {
   const theme = requestContext.getStore()?.theme ?? null;
   return theme === null ? "" : ` data-theme="${theme}"`;
 }
-const requestContext = new AsyncLocalStorage<{ refusal?: (response: ServerResponse, status: number, body: string) => void; theme?: "light" | "dark" | null; csrf: string; returnTo: string; actor?: string; createdTask?: string; browser?: boolean; workspaceRead?: boolean; workspaceRequest?: string | null; workCounts?: ReturnType<typeof workCountsByProject>; workCrew?: { project: string | null; page: WorkIndexPage }; workspaceValidator?: { key: string; revision: string; expiresAt: number; etag: string } }>();
+const requestContext = new AsyncLocalStorage<{ sso?: { label: string; fresh: boolean } | undefined; refusal?: (response: ServerResponse, status: number, body: string) => void; theme?: "light" | "dark" | null; csrf: string; returnTo: string; actor?: string; createdTask?: string; browser?: boolean; workspaceRead?: boolean; workspaceRequest?: string | null; workCounts?: ReturnType<typeof workCountsByProject>; workCrew?: { project: string | null; page: WorkIndexPage }; workspaceValidator?: { key: string; revision: string; expiresAt: number; etag: string } }>();
 
 /** A same-site path or "/": never a scheme, a host, or a protocol-relative road. */
 function safeReturn(raw: string | null | undefined): string {
@@ -22675,6 +22883,7 @@ const SETTINGS_TILE_ICONS: [string, string, string][] = [
     ["/settings/discord", "Discord", `<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>`],
     ["/settings/teams", "Teams", `<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8"/>`],
     ["/settings/learning", "Learning", `<path d="M3 3v18h18"/><path d="m7 15 4-4 3 3 5-6"/>`],
+    ["/settings/sign-in", "Sign-in", `<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>`],
 ];
 const SETTINGS_TILES = SETTINGS_TILE_ICONS.map(([href, label]) => [href, label] as const);
 

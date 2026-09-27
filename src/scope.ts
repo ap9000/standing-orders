@@ -71,6 +71,8 @@ export function hashPassword(password: string): string {
 
 /** Verify a presented secret against a stored hash of either scheme. */
 export function verifyCredential(stored: string, presented: string): boolean {
+  // v100: an account that signs in only with the identity provider has no password to match.
+  if (stored.startsWith("sso-only$")) return false;
   if (stored.startsWith("scrypt$")) {
     const [, salt, hex] = stored.split("$");
     if (salt === undefined || hex === undefined) return false;
@@ -1124,9 +1126,19 @@ export function authenticateApprover(
   if (!account.ok) {
     return { ok: false, reason: account.reason === "no-approvers" ? "no-approvers" : "not-an-approver" };
   }
+  return approverStanding(store, by, repo);
+}
+
+/**
+ * What an approval needs besides the password (v100: an identity-provider
+ * sign-in moments ago stands in for the password; nothing stands in for
+ * this): an active account in the approver role, with access to the project.
+ */
+export function approverStanding(store: Store, by: string, repo?: string | null): { ok: true } | { ok: false; reason: "no-approvers" | "not-an-approver" } {
+  const account = store.accountOf(by);
   // A viewer's credential is real and still cannot agree to anything —
   // the words every refused ceremony shows are the viewer words.
-  if (account.role !== "approver") return { ok: false, reason: "not-an-approver" };
+  if (account === null || account.revokedAt !== null || account.role !== "approver") return { ok: false, reason: "not-an-approver" };
   const context = projectAuthority.getStore();
   const resource = repo === undefined ? (context?.actor === by ? context.repo : null) : repo;
   if (!store.accountCanAccess(by, resource)) return { ok: false, reason: "not-an-approver" };

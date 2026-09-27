@@ -22,6 +22,33 @@ at the operating system:
 Each run records how it was fenced. Without bubblewrap on Linux, Claude is
 held back only by its own file-tool rules; install it.
 
+## Sign in with your identity provider
+
+**Settings → Sign-in** (instance operators) connects Standing Orders to
+your organisation's identity provider: Okta, Microsoft Entra, Google,
+Auth0, Keycloak or anything else that speaks OpenID Connect.
+
+1. In the provider, create a web app (OpenID Connect, authorization code)
+   and register the redirect address the Sign-in page shows
+   (`https://your-address/login/sso/callback`). Have it put the person's
+   groups in the ID token (the `groups` claim, or name another).
+2. On the Sign-in page, enter the provider's address (its issuer), the
+   client ID and secret, and which groups may sign in: each group is an
+   Operator or a Viewer, in all projects or chosen ones. A person's first
+   matching group decides, and it decides again at every sign-in, so
+   moving someone between groups in the provider changes their access here.
+   No matching group, no entry. `*` matches everyone.
+3. Choose who may still use a password: everyone, or only instance
+   operators (a way in if the provider is down).
+
+The client secret is kept in `sign-in.json` beside the database (`0600`),
+never in the database. People who sign in with the provider have no
+password here: an approval or any other step-up is confirmed by their
+provider sign-in in the last ten minutes, or by a **Confirm with …** link
+that asks the provider to check them again. An existing account can be
+linked to the provider from the Sign-in page. Every sign-in, account made,
+access change and settings change is in the action ledger.
+
 ## Guessing a password gets nowhere
 
 Five wrong passwords in a row lock that name for 15 minutes, doubling with

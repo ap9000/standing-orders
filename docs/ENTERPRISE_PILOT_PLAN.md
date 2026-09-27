@@ -11,7 +11,8 @@ exist. Missing: standard sign-in, separation of duties, a tamper-evident and
 streamed audit trail, cost guardrails, machine-readable telemetry, and data
 retention.
 
-Each sprint ships as its own release through the usual gate.
+Each sprint ships as its own release through the usual gate. Sprint 1 is
+PR #91 (schema 99); sprint 2 is PR #92 (schema 100).
 
 | Sprint | Theme | Ships |
 |---|---|---|
