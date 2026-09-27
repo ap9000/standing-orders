@@ -753,7 +753,7 @@ await check("Follow-ups: a card emails someone and waits; their reply moves it o
 
 // ------------------------------------------------------------------ two people on one flow
 
-await check("AI teammates: Maya (a support rep) answers a question card, approves a small refund on her own, brings the big one to you, and stops while paused (real Claude turns)", [], async () => {
+await check("AI teammates: Maya (a support rep) answers a question card, approves a small refund on its own, brings the big one to you, and stops while paused (real Claude turns)", [], async () => {
   // A teammate from the Support rep template, on the Teammates page; its soul file saves as a new version.
   await page.goto(`${base}/teammates`);
   await page.selectOption('form[data-new-teammate] select[name="template"]', "support");
@@ -767,7 +767,8 @@ await check("AI teammates: Maya (a support rep) answers a question card, approve
   if (!/version 2/.test(new URL(page.url()).searchParams.get("said") ?? "")) throw new Error(`saving the soul file said: ${page.url()}`);
   // A flow Maya works: she reads each message and picks where it goes, then decides the refunds.
   const at = (id, title, kind, x, y, rest) => ({ id, title, kind, zone: zone(x, y), ...none, next: null, onFail: null, ...rest });
-  const id = await newFlow("Support desk", [
+  // Not "Support desk": the starter kit of that name is set up later in this world.
+  const id = await newFlow("Customer help", [
     at("read", "Maya reads it", "teammate", 0, 0, { teammate: "maya", instructions: "Read the customer's message. Write the short reply we'd send them, and pick where it goes: a refund request goes to the refund decision; anything else is just a question.",
       routes: [{ answer: "Just a question", to: "answered" }, { answer: "Refund request", to: "decide" }], onFail: "stuck" }),
     at("decide", "Refund?", "approval", 360, 0, { teammate: "maya", toOwner: true, next: "refunded", onFail: "declined" }),
@@ -828,7 +829,7 @@ await check("AI teammates: Maya (a support rep) answers a question card, approve
   return { reply: reply.slice(0, 120), summary: (await page.locator(".teammate-summary").innerText()).slice(0, 200) };
 });
 
-await check("The lead adds a teammate and changes one's rules from plain words, as cards you confirm (real Claude turns)", ["Turn the lead chat on (first-run setup, with your password)", "AI teammates: Maya (a support rep) answers a question card, approves a small refund on her own, brings the big one to you, and stops while paused (real Claude turns)"], async () => {
+await check("The lead adds a teammate and changes one's rules from plain words, as cards you confirm (real Claude turns)", ["Turn the lead chat on (first-run setup, with your password)", "AI teammates: Maya (a support rep) answers a question card, approves a small refund on its own, brings the big one to you, and stops while paused (real Claude turns)"], async () => {
   const confirm = async reply => {
     const card = reply.locator('[data-view="chat-card"][data-card-state="pending"]').first();
     await card.waitFor({ timeout: 30_000 });
