@@ -50,6 +50,7 @@ import { createTeammateFrom, labelOf, nameOf, renamedSoul, saveSoul, setTeammate
 import { cleanMemory, editMemory, forgetMemory, tellTeammate } from "./teammate-memory.js";
 import { addRoutine, removeRoutine, routineSchedule, routinesOf } from "./teammate-desk.js";
 import { requestUndo, undoFor } from "./teammate-week.js";
+import { kitInstalled, kitOf, KITS, setUpKitNow } from "./kits.js";
 import { answerTeammateQuestion } from "./teammate-work.js";
 import { callWords, checkRule, defaultRule, grantListed, revokeTool, ruleWords, setToolRules } from "./teammate-tools.js";
 
@@ -123,6 +124,7 @@ export const CHAT_ACTIONS = {
   teammate_memory: { label: "Change teammate's memory", protected: false, password: false },
   teammate_routine: { label: "Change teammate's routines", protected: false, password: false },
   teammate_undo: { label: "Undo teammate's call", protected: false, password: false },
+  kit_setup: { label: "Set up kit", protected: false, password: false },
   decision_record: { label: "Record decision", protected: false, password: false },
   decision_retire: { label: "Retire decision", protected: false, password: false },
   scope_approve: { label: "Approve work", protected: true, password: true },
@@ -185,6 +187,7 @@ export const CHAT_ACTION_FIELDS: Record<ChatAction, readonly string[]> = {
   teammate_memory: ["teammate", "memory", "change", "text"],
   teammate_routine: ["teammate", "change", "routine", "schedule", "text"],
   teammate_undo: ["teammate", "call"],
+  kit_setup: ["repo", "kit"],
   decision_record: ["repo", "claim", "why", "supersedes", "source"],
   decision_retire: ["repo", "decision", "reason"],
   scope_approve: ["task"],
@@ -314,7 +317,7 @@ export function prepareSharedAction(
   if (Object.keys(input).some((key) => !allowed.includes(key)))
     throw Error("This action contains an unsupported field.");
   const task =
-    operation.startsWith("skill_") || operation.startsWith("knowledge_") || operation.startsWith("decision_") || operation.startsWith("tool_") || operation.startsWith("flow_") || operation.startsWith("teammate_")
+    operation.startsWith("skill_") || operation.startsWith("knowledge_") || operation.startsWith("decision_") || operation.startsWith("tool_") || operation.startsWith("flow_") || operation.startsWith("teammate_") || operation.startsWith("kit_")
       ? null
       : text(input, "task", 64);
   const flowTarget = operation.startsWith("flow_") && operation !== "flow_create" && operation !== "flow_script_save" ? flowTargetOf(store, input) : null;
@@ -427,6 +430,16 @@ export function prepareSharedAction(
       title = `Remove ${name} from ${project}`;
       terms.push("Builds stop using it right away. Its stored secrets are deleted.");
     }
+  } else if (operation === "kit_setup") {
+    // v99: a starter kit — its teammate, its flow and its buttons.
+    const project = repo.split(/[\\/]/).filter(Boolean).at(-1) ?? repo;
+    const kit = kitOf(String(input["kit"] ?? ""));
+    if (kit === null) throw Error(`Choose a kit: ${KITS.map(one => one.id).join(", ")}.`);
+    if (kitInstalled(store, kit, repo) !== null) throw Error(`${kit.name} is already set up in ${project}.`);
+    const template = TEAMMATE_TEMPLATES.find(one => one.id === kit.teammate.template);
+    title = `Set up ${kit.name} in ${project}`;
+    terms.push(kit.promise, `Adds ${kit.teammate.handle.charAt(0).toUpperCase()}${kit.teammate.handle.slice(1)} (${template?.label.toLowerCase() ?? "a teammate"}) and the ${kit.flowName} flow${kit.buttons.length === 0 ? "" : ` with its ${kit.buttons.map(one => `“${one.label}”`).join(" and ")} button`}. Nothing goes out without your approval.`);
+    state = {};
   } else if (operation.startsWith("teammate_")) {
     const project = repo.split(/[\\/]/).filter(Boolean).at(-1) ?? repo;
     const mate = mateTarget;
@@ -1143,6 +1156,12 @@ export function executeSharedAction(
       else if (payload.operation.startsWith("flow_")) {
         const done = runFlowAction(store, payload, actor, who.repos, options.root, now);
         return { ok: true as const, taskId: null, said: done.said, href: done.href };
+      }
+      else if (payload.operation === "kit_setup") {
+        const kit = kitOf(String(req["kit"]))!;
+        const made = setUpKitNow(store, kit, repo, actor, now, null, true);
+        if (!made.ok) throw Error(made.said);
+        return { ok: true as const, taskId: null, said: `${made.said} Try it with a sample card from its page.`, href: `/kits/${kit.id}?repo=${encodeURIComponent(repo)}` };
       }
       else if (payload.operation.startsWith("teammate_")) {
         const done = runTeammateAction(store, payload, actor, now);

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Starter kits.** Support desk, Bug triage, Sales follow-up and Ops
+  requests each set up a teammate, the flow it works and its buttons in one
+  click. The kit's page lists what's left (email, the tools it uses) and
+  **Try it** puts a sample card in front of the teammate so you see it work.
+  The lead can set one up too.
+- **Smoother page changes.** Moving between pages fades the old one out
+  before the new one arrives, so text never overlaps mid-change, and the
+  sidebar holds still.
+
 - **Telegram pushes your messages.** With a public hooks address, Telegram
   delivers each message and tap to Standing Orders the moment you send it,
   signed with a secret, instead of Standing Orders asking for them. No other

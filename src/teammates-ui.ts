@@ -78,7 +78,7 @@ export function teammatesListHtml(store: Store, mates: readonly TeammateRow[], p
       (projects.length === 1 ? `<input type="hidden" name="repo" value="${e(projects[0]!)}">` : `<label>Project<select name="repo">${projects.map(repo => `<option value="${e(repo)}">${e(projectName(repo))}</option>`).join("")}</select></label>`) +
       `<button>Add teammate</button></form></details>`
     : "";
-  const intro = `<p class="meta">AI teammates work your flows' cards within rules you write: they decide, reply and move cards on, and ask you when their rules say to.</p>`;
+  const intro = `<p class="meta">AI teammates work your flows' cards within rules you write: they decide, reply and move cards on, and ask you when their rules say to. The quickest start is a <a href="/kits">starter kit</a>: a teammate and its flow, set up in one click.</p>`;
   return `<section class="teammates">${notice.problem ? `<p class="problem" role="alert">${e(notice.problem)}</p>` : ""}${notice.said ? `<p class="said" role="status">${e(notice.said)}</p>` : ""}${intro}${rows || '<p class="meta">No teammates yet.</p>'}${create}</section>`;
 }
 

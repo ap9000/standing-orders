@@ -464,3 +464,6 @@ body:has(.so-workspace) { margin: 0; padding: 0; background: var(--so-ground); o
 .so-card-body :where(h3) { margin: 0 0 6px; font-size: 14px; }
 .so-card-body :where(p, ul) { margin-top: 0; }
 @media (max-width: 900px) { .so-slash-menu li { min-height: 44px; } }
+/* v99: starter kit shortcuts under the empty chat. */
+.so-kit-links { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; margin: 4px auto 0; max-width: 36rem; font-size: 13px; color: var(--so-muted); }
+.so-kit-links a { text-decoration: none; }

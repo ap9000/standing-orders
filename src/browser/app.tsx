@@ -370,6 +370,9 @@ function PhoneNavigation({ workspace }: { workspace: BrowserWorkspace }) {
     </DialogContent></Dialog>;
 }
 
+/** v99: the starter kits, offered where a first conversation starts. */
+const KIT_LINKS: readonly [string, string][] = [["support-desk", "Support desk"], ["bug-triage", "Bug triage"], ["sales-follow-up", "Sales follow-up"], ["ops-requests", "Ops requests"]];
+
 /** What to ask first, by the page the Ask panel sits beside. A trailing
  * space means the words start a message for the person to finish. */
 const DOCKED_SUGGESTIONS: Record<string, { title: string; hint: string; placeholder: string; suggestions: string[] }> = {
@@ -462,7 +465,9 @@ function LeadChat({ controller, docked = null }: { controller: ReturnType<typeof
       {chat.messages.length === 0 && (dock
         ? <div className="so-docked-empty"><p className="so-docked-empty-title">{dock.title}</p><p className="so-docked-empty-hint">{dock.hint}</p>
             <div className="so-suggestions">{dock.suggestions.map(one => <button key={one} type="button" className="so-suggestion" onClick={() => { controller.edit(one); box.current?.focus(); }}>{one.trim().replace(/:$/, "…")}</button>)}</div></div>
-        : <ConversationEmptyState title="What would you like to work on?" description="Plan the work with your lead. Your crew’s tasks and results stay beside the conversation." />)}
+        : <><ConversationEmptyState title="What would you like to work on?" description="Plan the work with your lead. Your crew’s tasks and results stay beside the conversation." />
+            {/* v99: or a working setup in one click — a teammate and the flow it works. */}
+            <nav className="so-kit-links" aria-label="Starter kits" data-kit-links><span>Or start from a kit:</span>{KIT_LINKS.map(([id, label]) => <a key={id} className="so-suggestion" href={`/kits/${id}`}>{label}</a>)}</nav></>)}
       <div id="chat-thread" data-chat-region="thread">{chat.messages.map(message => <Message from={message.role === "operator" ? "user" : "assistant"} key={message.id} data-message-id={message.id}>
         <div className="so-message-label">{message.role === "operator" ? "You" : "Lead"}</div>
         <MessageContent><GuardedHtml html={message.html} />{message.activity && <Disclosure summary="Activity"><p className="so-activity-copy">{message.activity}</p></Disclosure>}

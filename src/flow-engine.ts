@@ -326,7 +326,9 @@ export type FlowDecision = { ok: true; said: string } | { ok: false; message: st
 /** A person's decision on a card waiting in an approval zone. A send back to a build zone whose work has a result becomes a revision of that work. */
 /** The draft a decision is about: the draft zone that sends its cards to this one. */
 export function draftFor(definition: FlowDefinition, stage: FlowStage): FlowStage | null {
-  return definition.stages.find(one => one.kind === "draft" && one.next === stage.id) ?? null;
+  return definition.stages.find(one => one.kind === "draft" && one.next === stage.id)
+    // A teammate's zone that leads here (by its next, or one of its answers) wrote the draft this decision checks (starter kits).
+    ?? definition.stages.find(one => one.kind === "teammate" && (one.next === stage.id || (one.routes ?? []).some(route => route.to === stage.id))) ?? null;
 }
 
 export function decideFlowCard(store: Store, input: { card: number; decision: "approve" | "send-back"; note: string | null; actor: string; repos: readonly string[]; evidenceRoot?: string;

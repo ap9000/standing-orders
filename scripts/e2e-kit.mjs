@@ -161,7 +161,12 @@ export async function world(name, { seed, env = {} } = {}) {
   }
   const page = await signIn("alex");
   const json = async path => { const response = await page.request.get(`${base}${path}`, { headers: { accept: "application/json" } }); if (!response.ok()) throw new Error(`${path} answered ${response.status()}`); return response.json(); };
-  const shot = name => page.screenshot({ path: join(out, `${name}.png`) });
+  /** A screenshot once the page has settled: any page change and other finite animations finished (never mid-fade). */
+  const settle = on => on.evaluate(() => Promise.race([
+    Promise.all(document.getAnimations().filter(one => one.effect?.getComputedTiming().iterations !== Infinity).map(one => one.finished.catch(() => undefined))),
+    new Promise(done => setTimeout(done, 2000)),
+  ])).catch(() => undefined);
+  const shot = async name => { await settle(page); return page.screenshot({ path: join(out, `${name}.png`) }); };
 
   /** Send the lead a message and wait for its reply; returns the reply element and its text. */
   async function askLead(message, on = page) {

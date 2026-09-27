@@ -40,7 +40,7 @@ export function flowsListHtml(store: Store, flows: readonly FlowRow[], projects:
     : "";
   const intro = `<p class="meta">A flow is your process drawn as zones. Cards move through them: agents do the work, people approve, and the team hears about it.</p>` +
     (canCreate && projects.length > 0 ? `<p class="flow-chat">Describe how work should move and your lead drafts the flow for you to confirm, or start from a template below. <a href="/chat?draft=${encodeURIComponent("Make a flow for ")}">Describe it in chat</a></p>` : "") +
-    `<p class="flow-chat">AI teammates can decide and handle cards for you, within rules you write. <a href="/teammates">Teammates</a></p>`;
+    `<p class="flow-chat">AI teammates can decide and handle cards for you, within rules you write. <a href="/teammates">Teammates</a> · or set one up with its flow in one click: <a href="/kits">Starter kits</a></p>`;
   return `<section class="flows">${problem === null ? "" : `<p class="problem" role="alert">${e(problem)}</p>`}${intro}${rows || example || '<p class="meta">No flows yet.</p>'}${create}</section>`;
 }
 
