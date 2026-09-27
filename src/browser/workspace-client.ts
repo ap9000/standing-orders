@@ -122,6 +122,7 @@ export function isWorkspace(value: unknown): value is BrowserWorkspace {
   // A rebuilt page's view model: its kind selects the component; the server
   // shapes the rest, and an unknown kind falls back to the page HTML.
   if (value.view !== undefined && value.view !== null && !(record(value.view) && typeof value.view.kind === "string")) return false;
+  if (value.refreshSeconds !== undefined && !(typeof value.refreshSeconds === "number" && Number.isFinite(value.refreshSeconds) && value.refreshSeconds >= 5)) return false;
   if (value.chats !== undefined && !(Array.isArray(value.chats) && value.chats.every(item => record(item) && (item.kind === "project" || item.kind === "task")
     && typeof item.title === "string" && typeof item.href === "string" && item.href.startsWith("/") && typeof item.active === "boolean" && (item.at === null || typeof item.at === "string")))) return false;
   if (!Array.isArray(value.projects) || !value.projects.every(item => record(item) && [item.name, item.path, item.href, item.knowledgeHref].every(part => typeof part === "string"))) return false;

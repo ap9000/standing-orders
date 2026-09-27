@@ -300,6 +300,8 @@ export type BrowserWorkspace = {
   /** This person's recent project and task conversations (v77), newest first. */
   chats?: BrowserChatLink[];
   view?: BrowserView | null;
+  /** A live page (Inbox, System…) reads itself again this often; forms being edited are kept. */
+  refreshSeconds?: number;
 };
 
 /** Safe inside a script[type=application/json] element. JSON escaping alone

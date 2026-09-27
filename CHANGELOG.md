@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **One look on every page.** Board, Inbox, Next, Done, System, Portfolio,
+  Code and Settings → Tools now sit in the same workspace as everything else,
+  with the same navigation and search. Live pages (System, Activity) refresh
+  themselves inside it without disturbing a form you're filling in. Sign-in,
+  invites, error pages and "not found" share the look too, and a one-time
+  secret (a worker token, an invite link, a pairing code) gets a focused page
+  in the same style, still with no script on it.
 - **Connect a service with one click.** Stripe, Notion, Linear, Sentry, Jira,
   Intercom, Attio and ten more connect by signing in on the service's own
   page: no key to copy. The sign-in stays in the tool's secrets file and is
