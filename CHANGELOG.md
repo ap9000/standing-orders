@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Sessions and API tokens.** Settings → Sessions & tokens lists where
+  you're signed in and signs any of it out; sessions now survive a restart.
+  API tokens (read, or act as you, never approve) replace passwords on
+  requests for scripts and CI, expire in 30 to 365 days, are shown once and
+  named in the ledger on every request. Coordinator credentials expire (90
+  days unless `--days`), and runner tokens a year after registering.
+  Schema 101.
+
 - **Sign in with your identity provider.** Settings → Sign-in connects Okta,
   Microsoft Entra, Google or any OpenID Connect provider. People sign in
   there; their groups make their account and set its role (Operator or

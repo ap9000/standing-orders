@@ -66,11 +66,16 @@ export function mintCoordinator(
     perHour?: number;
     by: string;
     now: Date;
+    /** v101: how long it lives (90 days unless said; at most a year). */
+    days?: number;
     /** Injected in tests. */
     newToken?: () => string;
     newCid?: () => string;
   },
 ): MintResult {
+  const days = input.days ?? 90;
+  if (!Number.isInteger(days) || days < 1 || days > 365) return { ok: false, reason: "bad-rate" };
+  const expiresAt = new Date(input.now.getTime() + days * 86_400_000).toISOString();
   const name = input.name.normalize("NFC");
   if (!NAME.test(name)) return { ok: false, reason: "bad-name" };
   const perHour = input.perHour ?? 6;
@@ -85,10 +90,10 @@ export function mintCoordinator(
       try {
         store.handle
           .prepare(
-            `INSERT INTO coordinator_credential (cid, name, credential_hash, repos, per_hour, created_by, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO coordinator_credential (cid, name, credential_hash, repos, per_hour, created_by, created_at, expires_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           )
-          .run(cid, name, hashSecret(token), JSON.stringify(repos), perHour, input.by, input.now.toISOString());
+          .run(cid, name, hashSecret(token), JSON.stringify(repos), perHour, input.by, input.now.toISOString(), expiresAt);
         return { ok: true as const, cid, token, repos };
       } catch (error) {
         const said = String(error);
@@ -104,7 +109,7 @@ export function mintCoordinator(
 
 export type CoordinatorAuth =
   | { ok: true; who: VerifiedCoordinator }
-  | { ok: false; reason: "unknown" | "revoked" };
+  | { ok: false; reason: "unknown" | "revoked" | "expired" };
 
 /** The token IS the identity — no name travels with it. Verified against
  * the stored hash; the caller re-runs this INSIDE any mutating
@@ -115,6 +120,8 @@ export function authenticateCoordinator(store: Store, token: string): Coordinato
     .get(hashSecret(token));
   if (row === undefined) return { ok: false, reason: "unknown" };
   if (row["revoked_at"] !== null) return { ok: false, reason: "revoked" };
+  // v101: a credential made with an expiry stops at it (one made before expiry existed lives until it's renewed or revoked).
+  if (row["expires_at"] != null && Date.parse(String(row["expires_at"])) <= Date.now()) return { ok: false, reason: "expired" };
   return {
     ok: true,
     who: verified({
@@ -158,6 +165,8 @@ export type CoordinatorRow = {
   createdAt: string;
   revokedAt: string | null;
   lastFiledAt: string | null;
+  /** v101: when it stops (null: made before expiry existed, until renewed). */
+  expiresAt: string | null;
 };
 
 export function listCoordinators(store: Store): CoordinatorRow[] {
@@ -176,6 +185,7 @@ export function listCoordinators(store: Store): CoordinatorRow[] {
       createdAt: String(row["created_at"]),
       revokedAt: row["revoked_at"] === null ? null : String(row["revoked_at"]),
       lastFiledAt: row["last_filed"] === null ? null : String(row["last_filed"]),
+      expiresAt: row["expires_at"] == null ? null : String(row["expires_at"]),
     }));
 }
 
@@ -249,8 +259,8 @@ export function fileCoordinatorProposal(
     // The law lives here: the token re-verifies INSIDE the transaction.
     const auth = authenticateCoordinator(store, token);
     if (!auth.ok) {
-      return auth.reason === "revoked"
-        ? { ok: false as const, reason: "revoked" as const, message: "this credential was revoked — ask the operator for a new one" }
+      return auth.reason === "revoked" || auth.reason === "expired"
+        ? { ok: false as const, reason: "revoked" as const, message: auth.reason === "expired" ? "this credential expired — ask the operator for a new one" : "this credential was revoked — ask the operator for a new one" }
         : { ok: false as const, reason: "unauthenticated" as const, message: "no live coordinator credential matches this token" };
     }
     const { who } = auth;

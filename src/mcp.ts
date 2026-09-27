@@ -421,10 +421,10 @@ export function serveMcp(
   if (!auth.ok) {
     return {
       ok: false,
-      reason: auth.reason === "revoked" ? "revoked" : "unauthenticated",
+      reason: auth.reason === "revoked" || auth.reason === "expired" ? "revoked" : "unauthenticated",
       message:
-        auth.reason === "revoked"
-          ? "this coordinator credential was revoked — mint a new one"
+        auth.reason === "revoked" ? "this coordinator credential was revoked — mint a new one"
+          : auth.reason === "expired" ? "this coordinator credential expired — mint a new one"
           : "no live coordinator credential matches this token",
     };
   }

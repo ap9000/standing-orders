@@ -86,6 +86,9 @@ describe("the non-migrating door", () => {
       }
     }
     const reader = new V47Reader(new DatabaseSync(file));
+    // The fixture credential is minted with today's code, which writes the
+    // v101 expiry; the migrator's addColumn leaves an existing column alone.
+    reader.handle.exec("ALTER TABLE coordinator_credential ADD COLUMN expires_at TEXT");
     let migrated: Store | undefined;
     try {
       const now = new Date("2026-09-17T12:00:00Z");

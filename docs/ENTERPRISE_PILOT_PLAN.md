@@ -12,7 +12,8 @@ streamed audit trail, cost guardrails, machine-readable telemetry, and data
 retention.
 
 Each sprint ships as its own release through the usual gate. Sprint 1 is
-PR #91 (schema 99); sprint 2 is PR #92 (schema 100).
+PR #91 (schema 99); sprint 2 is PR #92 (schema 100); sprint 3 is PR #95
+(schema 101).
 
 | Sprint | Theme | Ships |
 |---|---|---|

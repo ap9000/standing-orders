@@ -237,6 +237,33 @@ await check("Sign-in hardening and the audit trail: five wrong passwords lock a 
   return { locked: casey };
 });
 
+await check("Sessions and API tokens: a read token made in Settings is shown once on a page with no script, a script reads with it but can't file work, and once revoked it names no one; this browser is in the sessions list", [], async () => {
+  await page.goto(`${base}/settings/sessions`);
+  await page.waitForSelector("[data-session]");
+  if (!/This browser/.test(await page.locator(".credentials").innerText())) throw new Error("the sessions list doesn't mark this browser");
+  await page.evaluate(() => document.querySelectorAll(".credentials details").forEach(one => { one.open = true; }));
+  await page.fill('.create input[name="name"]', "e2e-dashboard");
+  await page.selectOption('.create select[name="access"]', "read");
+  await page.fill('.create input[name="password"]', w.passwords.alex);
+  await Promise.all([page.waitForNavigation(), page.click('.create button:has-text("Make the token")')]);
+  if ((await page.locator("script").count()) !== 0) throw new Error("the page showing the token carries a script");
+  const token = (await page.locator(".secret-value").innerText()).trim();
+  if (!/^so_[a-f0-9]{12}_[A-Za-z0-9_-]{43}$/.test(token)) throw new Error(`the token: ${token.slice(0, 12)}…`);
+  await shot("api-token-shown");
+  const headers = { authorization: `Bearer ${token}` };
+  const reads = await fetch(`${base}/ledger?format=json`, { headers, redirect: "manual" });
+  if (reads.status !== 200) throw new Error(`a read with the token: ${reads.status}`);
+  const writes = await fetch(`${base}/tasks/add`, { method: "POST", headers, body: new URLSearchParams({ title: "from a read token", repo }), redirect: "manual" });
+  if (writes.status !== 403) throw new Error(`a read token filed work: ${writes.status}`);
+  await page.goto(`${base}/settings/sessions`);
+  await Promise.all([page.waitForNavigation(), page.locator('[data-token] button:has-text("Revoke")').first().click()]);
+  const after = await fetch(`${base}/ledger?format=json`, { headers, redirect: "manual" });
+  if (after.status !== 303) throw new Error(`the revoked token still answers: ${after.status}`);
+  if (rows("SELECT 1 FROM action_ledger WHERE action = 'API token revoked: e2e-dashboard'").length !== 1) throw new Error("the revocation isn't in the ledger");
+  await shot("sessions-and-tokens");
+  return { token: "revoked" };
+});
+
 await check("The command line answers: the task list, the approvers, the project's check, and help", [], async () => {
   const list = cli(["task", "list"]);
   const people = cli(["approver", "list"]);

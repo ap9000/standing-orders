@@ -58,7 +58,10 @@ export type Registration = {
 
 export type AuthResult =
   | { ok: true; runner: Runner }
-  | { ok: false; reason: "unknown" | "bad-token" | "retired" };
+  | { ok: false; reason: "unknown" | "bad-token" | "retired" | "expired" };
+
+/** v101: a runner's token lasts a year from its registration; registering again (every start does) renews it. */
+export const RUNNER_TOKEN_MS = 365 * 86_400_000;
 
 /**
  * How long a runner may go quiet before it is presumed gone.
@@ -151,6 +154,7 @@ export function authenticate(store: Store, name: string, token: string): AuthRes
   const found = store.getRunner(name);
   if (found === null) return { ok: false, reason: "unknown" };
   if (found.runner.retiredAt !== null) return { ok: false, reason: "retired" };
+  if (Date.now() - Date.parse(found.runner.registeredAt) > RUNNER_TOKEN_MS) return { ok: false, reason: "expired" };
 
   return sameDigest(found.credentialHash, hashToken(token))
     ? { ok: true, runner: found.runner }
@@ -282,7 +286,7 @@ export function acquireWatchLeaseAuthed(
   now: Date,
 ):
   | { ok: true; generation: number; superseded: string | null; recovered: number }
-  | { ok: false; reason: "unknown" | "bad-token" | "retired" | "watch-busy" | "unauthorized-repo"; holder?: string; until?: string } {
+  | { ok: false; reason: "unknown" | "bad-token" | "retired" | "expired" | "watch-busy" | "unauthorized-repo"; holder?: string; until?: string } {
   return store.transact(() => {
     const auth = authenticate(store, args.runner, args.token);
     if (!auth.ok) return { ok: false as const, reason: auth.reason };
@@ -326,7 +330,7 @@ export function retireRunnerIfCurrent(
   name: string,
   token: string,
   now: Date,
-): { ok: true } | { ok: false; reason: "unknown" | "bad-token" | "retired" } {
+): { ok: true } | { ok: false; reason: "unknown" | "bad-token" | "retired" | "expired" } {
   return store.transact(() => {
     const auth = authenticate(store, name, token);
     if (!auth.ok) return { ok: false as const, reason: auth.reason };

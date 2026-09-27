@@ -131,7 +131,43 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // v98 lets Telegram push a bot's updates to Standing Orders (a webhook) instead of being polled for them.
 // v99 gives the action ledger its own kinds of event for sign-ins and policy changes, each with a short detail (a change's before → after).
 // v100 lets people sign in with the organisation's identity provider: each provider identity is linked to one account.
-export const SCHEMA_VERSION = 100;
+// v101 adds API tokens (scoped, expiring, hashed), keeps browser sessions across restarts (listed and revocable), and lets coordinator credentials expire.
+export const SCHEMA_VERSION = 101;
+
+/** v101: API tokens and the browser sessions that survive a restart. Only hashes of their secrets are kept. */
+const CREDENTIALS_SCHEMA = `
+CREATE TABLE IF NOT EXISTS api_token (
+  id           TEXT PRIMARY KEY,
+  account      TEXT NOT NULL REFERENCES approver(name),
+  name         TEXT NOT NULL,
+  secret_hash  TEXT NOT NULL,
+  access       TEXT NOT NULL CHECK (access IN ('read','act')),
+  created_at   TEXT NOT NULL,
+  created_by   TEXT NOT NULL,
+  expires_at   TEXT NOT NULL,
+  last_used_at TEXT,
+  revoked_at   TEXT,
+  revoked_by   TEXT
+);
+CREATE INDEX IF NOT EXISTS api_token_account ON api_token (account);
+CREATE TABLE IF NOT EXISTS web_session (
+  id_hash          TEXT PRIMARY KEY,
+  account          TEXT NOT NULL,
+  csrf             TEXT NOT NULL,
+  role             TEXT NOT NULL CHECK (role IN ('approver','viewer')),
+  generation       INTEGER NOT NULL,
+  created_at       INTEGER NOT NULL,
+  last_seen        INTEGER NOT NULL,
+  project          TEXT,
+  project_revision INTEGER NOT NULL,
+  sso_at           INTEGER,
+  agent            TEXT,
+  address          TEXT
+);
+CREATE INDEX IF NOT EXISTS web_session_account ON web_session (account);
+`;
+export type ApiTokenRow = { id: string; account: string; name: string; access: "read" | "act"; createdAt: string; createdBy: string; expiresAt: string; lastUsedAt: string | null; revokedAt: string | null; revokedBy: string | null };
+export type WebSessionRow = { idHash: string; account: string; csrf: string; role: "approver" | "viewer"; generation: number; createdAt: number; lastSeen: number; project: string | null; projectRevision: number; ssoAt: number | null; agent: string | null; address: string | null };
 
 /** v100: which account each identity-provider identity (issuer + subject) signs in as. */
 const SSO_SCHEMA = `
@@ -4718,6 +4754,7 @@ function initializeStore(db: Database, file: string): Store {
   db.exec(chatSchema("teams"));
   db.exec(TEAM_SCHEMA);
   db.exec(SSO_SCHEMA);
+  db.exec(CREDENTIALS_SCHEMA);
   migrate(db, preflight === null ? null : Math.abs(preflight));
   addColumn(db, "flow_card", "source_json", "TEXT");
   addColumn(db, "flow_card", "owner", "TEXT");
@@ -6019,6 +6056,8 @@ function migrate(db: Database, origin: number | null): void {
   );
   // v99: the action ledger admits sign-in and policy events, each with a short detail.
   rebuildLedgerForV99(db);
+  // v101: a coordinator credential's expiry (null: made before expiry existed, until renewed).
+  addColumn(db, "coordinator_credential", "expires_at", "TEXT");
   // v98: where Telegram pushes this bot's updates, as the bridge last found it.
   addColumn(db, "bridge_lease", "push_url", "TEXT");
   addColumn(db, "bridge_lease", "push_at", "TEXT");
@@ -6345,6 +6384,18 @@ function rebuildExact(
   } finally {
     db.exec("PRAGMA foreign_keys = ON");
   }
+}
+
+function readApiToken(row: Record<string, unknown>): ApiTokenRow {
+  const text = (key: string) => row[key] == null ? null : String(row[key]);
+  return { id: String(row["id"]), account: String(row["account"]), name: String(row["name"]), access: row["access"] === "act" ? "act" : "read", createdAt: String(row["created_at"]), createdBy: String(row["created_by"]),
+    expiresAt: String(row["expires_at"]), lastUsedAt: text("last_used_at"), revokedAt: text("revoked_at"), revokedBy: text("revoked_by") };
+}
+
+function readWebSession(row: Record<string, unknown>): WebSessionRow {
+  return { idHash: String(row["id_hash"]), account: String(row["account"]), csrf: String(row["csrf"]), role: row["role"] === "viewer" ? "viewer" : "approver", generation: Number(row["generation"]),
+    createdAt: Number(row["created_at"]), lastSeen: Number(row["last_seen"]), project: row["project"] == null ? null : String(row["project"]), projectRevision: Number(row["project_revision"]),
+    ssoAt: row["sso_at"] == null ? null : Number(row["sso_at"]), agent: row["agent"] == null ? null : String(row["agent"]), address: row["address"] == null ? null : String(row["address"]) };
 }
 
 /**
@@ -10355,7 +10406,11 @@ export class Store {
     // v99: the machine credentials (coordinators) a person made end with their standing: a revocation or an
     // access change, not a password rotation (a new password is not less trust). Each end is audited as a
     // coordinator revocation, its pending proposals expire with it, and the ledger says why.
+    // v101: persisted browser sessions end with every change (they carry the old generation), and API tokens end
+    // with a revocation or an access change, not a password change.
+    this.db.prepare("DELETE FROM web_session WHERE account = ?").run(approver);
     if (by !== "credential-rotation") {
+      for (const row of this.db.prepare("SELECT id FROM api_token WHERE account = ? AND revoked_at IS NULL").all(approver)) this.revokeApiToken(String(row["id"]), by, now, "ended with the account's standing");
       for (const row of this.db.prepare("SELECT cid, name FROM coordinator_credential WHERE created_by = ? AND revoked_at IS NULL").all(approver)) {
         const cid = String(row["cid"]);
         this.db.prepare("UPDATE coordinator_credential SET revoked_at = ? WHERE cid = ?").run(stamp, cid);
@@ -10601,6 +10656,68 @@ export class Store {
       }
       return { ok: true as const, role };
     });
+  }
+
+  // ---- API tokens and browser sessions (v101) ------------------------------
+
+  createApiToken(token: { id: string; account: string; name: string; secretHash: string; access: "read" | "act"; expiresAt: string; by: string }, now: Date): void {
+    this.transact(() => {
+      this.db.prepare("INSERT INTO api_token (id, account, name, secret_hash, access, created_at, created_by, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(token.id, token.account, token.name, token.secretHash, token.access, now.toISOString(), token.by, token.expiresAt);
+      this.recordAction({ at: now.toISOString(), actor: token.by, repo: null, taskId: null, runId: null, action: `API token created: ${token.name}`, outcome: token.access, source: "access",
+        detail: `for ${token.account}, until ${token.expiresAt.slice(0, 10)}` });
+    });
+  }
+
+  /** A token by id with its kept hash (for the check), or null. */
+  apiTokenSecret(id: string): { row: ApiTokenRow; secretHash: string } | null {
+    const row = this.db.prepare("SELECT * FROM api_token WHERE id = ?").get(id);
+    return row === undefined ? null : { row: readApiToken(row), secretHash: String(row["secret_hash"]) };
+  }
+
+  /** Tokens, newest first: one person's, or everyone's (null). */
+  apiTokens(account: string | null): ApiTokenRow[] {
+    return (account === null ? this.db.prepare("SELECT * FROM api_token ORDER BY created_at DESC").all() : this.db.prepare("SELECT * FROM api_token WHERE account = ? ORDER BY created_at DESC").all(account)).map(readApiToken);
+  }
+
+  /** Kept at most once a minute: a busy script doesn't write on every request. */
+  touchApiToken(id: string, now: Date): void {
+    this.db.prepare("UPDATE api_token SET last_used_at = ? WHERE id = ? AND (last_used_at IS NULL OR last_used_at < ?)").run(now.toISOString(), id, new Date(now.getTime() - 60_000).toISOString());
+  }
+
+  revokeApiToken(id: string, by: string, now: Date, why = "revoked"): boolean {
+    return this.transact(() => {
+      const row = this.db.prepare("SELECT name, account FROM api_token WHERE id = ? AND revoked_at IS NULL").get(id);
+      if (row === undefined) return false;
+      this.db.prepare("UPDATE api_token SET revoked_at = ?, revoked_by = ? WHERE id = ?").run(now.toISOString(), by, id);
+      this.recordAction({ at: now.toISOString(), actor: by, repo: null, taskId: null, runId: null, action: `API token revoked: ${String(row["name"])}`, outcome: "revoked", source: "access", detail: `${String(row["account"])}'s · ${why}` });
+      return true;
+    });
+  }
+
+  saveWebSession(session: WebSessionRow): void {
+    this.db.prepare(`INSERT INTO web_session (id_hash, account, csrf, role, generation, created_at, last_seen, project, project_revision, sso_at, agent, address) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id_hash) DO UPDATE SET last_seen = excluded.last_seen, project = excluded.project, project_revision = excluded.project_revision, sso_at = excluded.sso_at`)
+      .run(session.idHash, session.account, session.csrf, session.role, session.generation, session.createdAt, session.lastSeen, session.project, session.projectRevision, session.ssoAt, session.agent, session.address);
+  }
+
+  webSession(idHash: string): WebSessionRow | null {
+    const row = this.db.prepare("SELECT * FROM web_session WHERE id_hash = ?").get(idHash);
+    return row === undefined ? null : readWebSession(row);
+  }
+
+  webSessions(account: string | null): WebSessionRow[] {
+    return (account === null ? this.db.prepare("SELECT * FROM web_session ORDER BY last_seen DESC").all() : this.db.prepare("SELECT * FROM web_session WHERE account = ? ORDER BY last_seen DESC").all(account)).map(readWebSession);
+  }
+
+  dropWebSession(idHash: string): void {
+    this.db.prepare("DELETE FROM web_session WHERE id_hash = ?").run(idHash);
+  }
+
+  /** Sessions past their idle or absolute limit, or opened under an old credential generation, are gone. */
+  sweepWebSessions(now: number, idleMs: number, absoluteMs: number): number {
+    return Number(this.db.prepare(`DELETE FROM web_session WHERE last_seen < ? OR created_at < ? OR generation <> COALESCE((SELECT generation FROM approver WHERE name = web_session.account AND revoked_at IS NULL), -1)`)
+      .run(now - idleMs, now - absoluteMs).changes);
   }
 
   /** v100: the account an identity-provider identity signs in as, or null. */

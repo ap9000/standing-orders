@@ -268,6 +268,8 @@ import { DEFAULT_GUARD_POLICY, passwordGuardOf, SourceBudget } from "./sign-in-g
 import { accessFromGroups, accountNameFor, discoverOidc, exchangeOidcCode, newOidcVisit, oidcAuthorizeUrl, verifyIdToken, type OidcClaims, type OidcProvider, type OidcVisit } from "./oidc.js";
 import { readSsoSettings, removeSsoSettings, saveSsoSettings, SSO_CALLBACK, ssoChangeWords } from "./sso-settings.js";
 import { SSO_CSS, ssoSettingsHtml } from "./sso-ui.js";
+import { mintApiToken, parseApiToken, secretMatches, TOKEN_DAYS } from "./api-tokens.js";
+import { CREDENTIALS_CSS, credentialsHtml, tokenShownHtml } from "./credentials-ui.js";
 import { logEvent } from "./log.js";
 import { modeTermsFromJson, modeWords, presetTerms, modeTermsJson, modeDigestOf, MODE_MAX_DAYS, type ModeName, type ModeTerms } from "./modes.js";
 import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, readProviderKey, keyStatus, plausibleKey, readAuthMode, readAuthModeStrict, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
@@ -515,6 +517,9 @@ type Session = {
   projectRevision: number;
   /** v100: signed in with the identity provider, and when it last checked them (a step-up within 10 minutes needs no password). */
   sso?: { at: number };
+  /** v101: the browser and address it signed in from, for the person to recognise it. */
+  agent?: string | null;
+  address?: string | null;
   /** Onboarding preview records (arc: repo onboarding, finding 14) —
    * session-held, swept at mint, at most 3, consumed exactly once. */
   onboard?: Map<string, { nameWithOwner: string; rootIndex: number; target: string; diskUsageKib: number | null; large: boolean; mintedAt: number }>;
@@ -557,7 +562,55 @@ type ApprovalNonce = {
   expiresAt: number;
 };
 
-type Who = { name: string; via: "cookie"; session: Session; role: "approver" | "viewer" } | { name: string; via: "bearer"; role: "approver" | "viewer" };
+type Who = { name: string; via: "cookie"; session: Session; role: "approver" | "viewer" } | { name: string; via: "bearer"; role: "approver" | "viewer"; /** v101: the API token it came with. */ token?: string };
+
+/**
+ * v101: browser sessions in memory and in the database (by a hash of the
+ * cookie, never the cookie), so a restart signs no one out and a person can
+ * see and end their sessions. The in-memory map is the working set; a cookie
+ * it hasn't seen is looked up by its hash.
+ */
+class PersistentSessions extends Map<string, Session> {
+  private readonly ids = new WeakMap<Session, string>();
+  private readonly savedAt = new WeakMap<Session, number>();
+  constructor(private readonly db: Store) { super(); }
+  static hash(id: string): string { return createHash("sha256").update(id, "utf8").digest("hex"); }
+  override set(id: string, session: Session): this {
+    super.set(id, session);
+    this.ids.set(session, id);
+    this.persist(session);
+    return this;
+  }
+  override delete(id: string): boolean {
+    this.db.dropWebSession(PersistentSessions.hash(id));
+    return super.delete(id);
+  }
+  /** Keep a changed session (its project, its provider check); `seen` only once a minute. */
+  persist(session: Session, seen = false): void {
+    const id = this.ids.get(session);
+    if (id === undefined || (seen && Date.now() - (this.savedAt.get(session) ?? 0) < 60_000)) return;
+    this.savedAt.set(session, Date.now());
+    this.db.saveWebSession({ idHash: PersistentSessions.hash(id), account: session.name, csrf: session.csrf, role: session.role, generation: session.generation, createdAt: session.createdAt,
+      lastSeen: session.lastSeen, project: session.project, projectRevision: session.projectRevision, ssoAt: session.sso?.at ?? null, agent: session.agent ?? null, address: session.address ?? null });
+  }
+  /** A cookie from before a restart, if its session is still kept. */
+  load(id: string): Session | null {
+    const row = this.db.webSession(PersistentSessions.hash(id));
+    if (row === null) return null;
+    const session: Session = { name: row.account, csrf: row.csrf, role: row.role, generation: row.generation, createdAt: row.createdAt, lastSeen: row.lastSeen, sawBoardAt: null,
+      project: row.project, projectRevision: row.projectRevision, agent: row.agent, address: row.address, ...(row.ssoAt === null ? {} : { sso: { at: row.ssoAt } }) };
+    super.set(id, session);
+    this.ids.set(session, id);
+    this.savedAt.set(session, Date.now());
+    return session;
+  }
+  /** End one session by its kept hash (from the Sessions page). */
+  endByHash(idHash: string): void {
+    for (const id of [...this.keys()]) if (PersistentSessions.hash(id) === idHash) super.delete(id);
+    this.db.dropWebSession(idHash);
+  }
+  hashOf(session: Session): string | null { const id = this.ids.get(session); return id === undefined ? null : PersistentSessions.hash(id); }
+}
 
 export function createDecisionServer(options: ServeOptions): Server {
   const { store, evidenceRoot } = options;
@@ -583,7 +636,11 @@ export function createDecisionServer(options: ServeOptions): Server {
     ...(options.modelRunner === undefined ? {} : { runner: options.modelRunner }),
     ...(options.modelPath === undefined ? {} : { path: options.modelPath }),
   };
-  const sessions = new Map<string, Session>();
+  const sessions = new PersistentSessions(store);
+  // Sessions from before a restart that ran out, or whose account changed since, go now.
+  store.sweepWebSessions(Date.now(), SESSION_IDLE_MS, SESSION_ABSOLUTE_MS);
+  /** Where a new session signs in from: the browser (its user agent, short) and the address. */
+  const arrival = (request: IncomingMessage) => ({ agent: (request.headers["user-agent"] ?? "").slice(0, 300) || null, address: joinSourceOf(request).replace(/^fwd:/, "") });
   /** Wrong setup codes left before the first-account road closes. */
   let setupAttemptsLeft = 5;
   // The /join road's limiter (D6; Codex people round 1, finding 4):
@@ -1219,11 +1276,13 @@ export function createDecisionServer(options: ServeOptions): Server {
           const linked = store.linkSsoIdentity(who.name, identity, clock());
           if (!linked.ok) return redirect(response, `/settings/sign-in?problem=${encodeURIComponent(`That ${settings.label} account signs in as someone else here.`)}`);
           who.session.sso = { at: Date.now() };
+          sessions.persist(who.session);
           return redirect(response, `/settings/sign-in?said=${encodeURIComponent(`This account signs in with ${settings.label} now.`)}`);
         }
         // A step-up: the provider checked the same person again.
         if (store.ssoAccount(identity.issuer, identity.subject) !== who.name) return page(response, 403, loginPage(`That ${settings.label} account isn't the one signed in here.`, handoff.returnTo, ssoOffer()));
         who.session.sso = { at: Date.now() };
+        sessions.persist(who.session);
         recordSignIn(who.name, "confirmed", settings.label);
         return redirect(response, handoff.returnTo);
       }
@@ -1237,7 +1296,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       const account = store.accountOf(signedIn.account)!;
       const id = randomBytes(32).toString("hex");
-      sessions.set(id, { name: signedIn.account, csrf: randomBytes(32).toString("hex"), role: account.role, generation: account.generation, createdAt: Date.now(), sawBoardAt: null, lastSeen: Date.now(),
+      sessions.set(id, { ...arrival(request), name: signedIn.account, csrf: randomBytes(32).toString("hex"), role: account.role, generation: account.generation, createdAt: Date.now(), sawBoardAt: null, lastSeen: Date.now(),
         project: defaultProject, projectRevision: 1, sso: { at: Date.now() } });
       recordSignIn(signedIn.account, "signed in", settings.label);
       response.setHeader("Set-Cookie", [signInSpent("/login/sso/finish"), `${SESSION_COOKIE}=${id}; HttpOnly; SameSite=Strict; Path=/${cookieSecure}`]);
@@ -1275,6 +1334,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (authenticated === null || !authenticated.ok) return page(response, 500, loginPage("the account was created but could not sign in — try again"));
       const id = randomBytes(32).toString("hex");
       sessions.set(id, {
+        ...arrival(request),
         name,
         csrf: randomBytes(32).toString("hex"),
         role: authenticated.role,
@@ -1323,6 +1383,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       recordSignIn(name as string, "signed in", "browser");
       const id = randomBytes(32).toString("hex");
       sessions.set(id, {
+        ...arrival(request),
         name: name as string,
         csrf: randomBytes(32).toString("hex"),
         role: authenticated.role,
@@ -1404,6 +1465,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       // The cookie mints only AFTER the commit — same shape as login.
       const id = randomBytes(32).toString("hex");
       sessions.set(id, {
+        ...arrival(request),
         name,
         csrf: randomBytes(32).toString("hex"),
         role: made.role,
@@ -1478,7 +1540,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (method === "GET" || url.pathname === "/session/attended-beats") return projectAuthority.run({ actor: who.name, repo: target.repo }, execute);
       // Request acceptance is separate from durable work completion. Never
       // persist a body, query string, token, password, or arbitrary URL.
-      const entry = { at: clock().toISOString(), actor: who.name, ...target, source: "request" as const };
+      const entry = { at: clock().toISOString(), actor: who.name, ...target, source: "request" as const, ...(who.via === "bearer" && who.token !== undefined ? { detail: `API token: ${who.token}` } : {}) };
       store.recordAction({ ...entry, outcome: "requested" });
       try {
         await projectAuthority.run({ actor: who.name, repo: target.repo }, execute);
@@ -2527,7 +2589,7 @@ export function createDecisionServer(options: ServeOptions): Server {
                 `<span class="mono">${escape(`${one.name}#${one.cid.slice(0, 4)}`)}</span> ` +
                 (one.revokedAt !== null
                   ? `<span class="meta">revoked ${escape(one.revokedAt.slice(0, 10))}</span>`
-                  : `<span class="meta">${one.perHour}/hour · files into ${one.repos.map(repo => escape(repo)).join(", ")} · last filed ${one.lastFiledAt === null ? "never" : escape(one.lastFiledAt.slice(0, 16).replace("T", " "))}</span>`) +
+                  : `<span class="meta">${one.perHour}/hour · files into ${one.repos.map(repo => escape(repo)).join(", ")} · ${one.expiresAt === null ? "no expiry (made before expiry)" : `expires ${escape(one.expiresAt.slice(0, 10))}`} · last filed ${one.lastFiledAt === null ? "never" : escape(one.lastFiledAt.slice(0, 16).replace("T", " "))}</span>`) +
                 `</p>`,
               ),
               `<details class="settings-more"><summary>Revoke an agent filer</summary><p class="meta">Run <code>standing-orders coordinator revoke &lt;cid&gt; --as you</code> on this computer.</p></details>`,
@@ -3561,6 +3623,16 @@ export function createDecisionServer(options: ServeOptions): Server {
         } catch { content = '<p class="problem" role="alert">Tools are unavailable. Reload to retry.</p>'; }
       }
       return sendScreen(response, 200, screen("Tools", `<p><a href="/settings">Settings</a></p><h1>Tools</h1>${selector}${content}`, { chrome: chromeFor(chosen || project, "settings") }));
+    }
+    // v101: Settings → Sessions & tokens: where you're signed in, and your API tokens. An instance operator can see everyone's.
+    if (url.pathname === "/settings/sessions") {
+      if (who.via !== "cookie") return refuse(response, who, 403, "Sign in in a browser to see your sessions.", "/settings");
+      const everyone = url.searchParams.get("everyone") === "1" && store.isInstanceOperator(who.name);
+      const here = sessions.hashOf(who.session);
+      const view = { who: who.name, everyone, canSeeEveryone: store.isInstanceOperator(who.name), now: Date.now(),
+        sessions: store.webSessions(everyone ? null : who.name).map(one => ({ ...one, here: one.idHash === here })), tokens: store.apiTokens(everyone ? null : who.name) };
+      return sendScreen(response, 200, screen("Sessions & tokens", `<p><a href="/settings">Settings</a></p><h1>Sessions &amp; tokens</h1>${credentialsHtml(view, who.session.csrf, { said: url.searchParams.get("said"), problem: url.searchParams.get("problem") })}`,
+        { chrome: chromeFor(project, "settings") }));
     }
     // v100: Settings → Sign-in, the identity provider people sign in with. An instance operator's page.
     if (url.pathname === "/settings/sign-in") {
@@ -6049,6 +6121,53 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       return answer(404, { ok: false, said: "No such flow action." });
     }
+    if (url.pathname === "/settings/sessions") {
+      if (who.via !== "cookie") return refuse(response, who, 403, "Sign in in a browser to manage sessions and tokens.", "/settings");
+      const operator = store.isInstanceOperator(who.name);
+      const back = (key: "said" | "problem", words: string) => redirect(response, `/settings/sessions?${body.get("everyone") === "1" && operator ? "everyone=1&" : ""}${key}=${encodeURIComponent(words)}`);
+      const action = body.get("action") ?? "";
+      if (action === "end-session") {
+        const target = store.webSessions(null).find(one => one.idHash === (body.get("session") ?? ""));
+        if (target === undefined) return back("problem", "That session has already ended.");
+        if (target.account !== who.name && !operator) return refuse(response, who, 403, "You can end only your own sessions.", "/settings/sessions");
+        sessions.endByHash(target.idHash);
+        recordSignIn(target.account, "signed out", target.account === who.name ? "by you elsewhere" : `by ${who.name}`);
+        return back("said", "Signed out there.");
+      }
+      if (action === "end-others") {
+        const here = sessions.hashOf(who.session);
+        const others = store.webSessions(who.name).filter(one => one.idHash !== here);
+        for (const one of others) sessions.endByHash(one.idHash);
+        if (others.length > 0) recordSignIn(who.name, "signed out", `everywhere else (${others.length})`);
+        return back("said", others.length === 0 ? "You aren't signed in anywhere else." : `Signed out of ${others.length} other session${others.length === 1 ? "" : "s"}.`);
+      }
+      if (action === "revoke-token") {
+        const token = store.apiTokens(null).find(one => one.id === (body.get("token") ?? ""));
+        if (token === undefined || token.revokedAt !== null) return back("problem", "That token was already revoked.");
+        if (token.account !== who.name && !operator) return refuse(response, who, 403, "You can revoke only your own tokens.", "/settings/sessions");
+        store.revokeApiToken(token.id, who.name, now);
+        return back("said", `Revoked ${token.name}. Anything using it stops working now.`);
+      }
+      if (action === "create-token") {
+        const name = (body.get("name") ?? "").trim().replace(/[\u0000-\u001f\u007f]+/g, " ");
+        const access = body.get("access") === "act" ? "act" as const : "read" as const;
+        const days = Number(body.get("days"));
+        if (name === "" || name.length > 60) return back("problem", "Name the token, in 60 characters or fewer.");
+        if (!(TOKEN_DAYS as readonly number[]).includes(days)) return back("problem", "Choose when it expires.");
+        if (access === "act" && who.role !== "approver") return back("problem", "A viewer's token can only read.");
+        // A token is a credential: made with the person's password (or their identity provider's check from moments ago), counted once.
+        const typed = body.get("password") ?? "";
+        const confirmed = who.role === "approver" ? authenticateApprover(store, who.name, typed).ok
+          : typed === "" ? requestContext.getStore()?.sso?.fresh === true : authenticateAccount(store, who.name, typed).ok;
+        if (!confirmed) return back("problem", "Enter your Standing Orders password to make a token.");
+        const minted = mintApiToken();
+        const expiresAt = new Date(now.getTime() + days * 86_400_000).toISOString();
+        store.createApiToken({ id: minted.id, account: who.name, name, secretHash: minted.hash, access, expiresAt, by: who.name }, now);
+        // The token, once, on a page with no script.
+        return sendScreen(response, 200, screen("API token", tokenShownHtml(name, minted.token, access, expiresAt), { chrome: chromeFor(projectOf(who, request) ?? null, "settings"), forceSensitive: true }));
+      }
+      return back("problem", "Choose an action.");
+    }
     if (url.pathname === "/settings/sign-in") {
       if (who.via !== "cookie" || !store.isInstanceOperator(who.name) || !options.configDir) return refuse(response, who, 403, "An instance operator sets up sign-in.", "/settings");
       const back = (key: "said" | "problem", words: string) => redirect(response, `/settings/sign-in?${key}=${encodeURIComponent(words)}`);
@@ -6631,6 +6750,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       who.session.project = canonicalPick;
       who.session.projectRevision += 1;
+      sessions.persist(who.session);
       return redirect(response, safeReturn(body.get("return")));
     }
 
@@ -9395,6 +9515,20 @@ export function createDecisionServer(options: ServeOptions): Server {
   // ---- identity ------------------------------------------------------------
 
   function identify(request: IncomingMessage, touch = true): Who | null {
+    // v101: an API token. Wrong ones spend the address's tries like a wrong password; expired or revoked ones, and a removed account's, name no one.
+    const presented = /^Bearer (so_\S+)$/.exec(request.headers.authorization ?? "")?.[1];
+    if (presented !== undefined) {
+      const source = joinSourceOf(request), at = Date.now();
+      if (signInBudget.waitFor(source, at) > 0) return null;
+      const parsed = parseApiToken(presented);
+      const kept = parsed === null ? null : store.apiTokenSecret(parsed.id);
+      if (parsed === null || kept === null || !secretMatches(parsed.secret, kept.secretHash)) { signInBudget.failed(source, at); return null; }
+      if (kept.row.revokedAt !== null || Date.parse(kept.row.expiresAt) <= at) return null;
+      const account = store.accountOf(kept.row.account);
+      if (account === null || account.revokedAt !== null) return null;
+      store.touchApiToken(kept.row.id, new Date(at));
+      return { name: kept.row.account, via: "bearer", role: kept.row.access === "read" ? "viewer" : account.role, token: kept.row.name };
+    }
     const bearer = /^Bearer (.+):(.+)$/.exec(request.headers.authorization ?? "");
     if (bearer !== null) {
       // A password on a request is a sign-in too: the same per-address tries and per-name lock.
@@ -9419,9 +9553,14 @@ export function createDecisionServer(options: ServeOptions): Server {
    */
   function lookupSession(candidate: string, touch = true): Session | null {
     const bytes = Buffer.from(candidate, "utf8");
+    let found: [string, Session] | null = null;
     for (const [id, session] of sessions) {
       const stored = Buffer.from(id, "utf8");
-      if (stored.length !== bytes.length || !timingSafeEqual(stored, bytes)) continue;
+      if (stored.length === bytes.length && timingSafeEqual(stored, bytes)) { found = [id, session]; break; }
+    }
+    // v101: not in memory, maybe from before a restart.
+    if (found === null) { const loaded = sessions.load(candidate); if (loaded !== null) found = [candidate, loaded]; }
+    for (const [id, session] of found === null ? [] : [found]) {
       const now = Date.now();
       if (now - session.lastSeen > SESSION_IDLE_MS || now - session.createdAt > SESSION_ABSOLUTE_MS) {
         sessions.delete(id);
@@ -9431,7 +9570,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         sessions.delete(id);
         return null;
       }
-      if (touch) session.lastSeen = now;
+      if (touch) { session.lastSeen = now; sessions.persist(session, true); }
       return session;
     }
     return null;
@@ -13386,7 +13525,7 @@ button.pick-file { min-height: 1.75rem; padding: 0 .55rem; font-size: .75rem; }
 
 /** Appearance: a three-way segmented switch, one tap per choice. */
 const THEME_CONTROLS_CSS = `.task-repo select{width:100%;min-height:2.75rem;font-size:1rem}.task-repo-add{margin:.35rem .1rem .5rem}.task-repo-add a{display:inline-flex;align-items:center;min-height:2.25rem}details.result-request-open.result-request-form>summary{border:0;background:transparent;padding:.5rem 0;min-height:2.75rem;font-weight:600;display:list-item;list-style:revert}details.result-request-open.result-request-form>summary::-webkit-details-marker{display:revert}form.js-autosave button[type=submit]{display:none}.provider-row{border-bottom:1px solid var(--so-line);padding:.35rem 0}.provider-row:first-of-type{border-top:1px solid var(--so-line)}.provider-head{display:flex;align-items:center;gap:.75rem;margin:.4rem 0 0}.provider-status{display:inline-flex;align-items:center;gap:.4rem;color:var(--so-muted);font-size:.875rem}.provider-status i{width:.5rem;height:.5rem;border-radius:50%;background:var(--so-muted)}.provider-status--ok i{background:var(--so-success)}.provider-status--warn i{background:var(--so-attention)}.provider-status--off i{background:transparent;border:1.5px solid var(--so-muted)}details.provider-manage>summary{cursor:pointer;color:var(--so-accent-text);font-size:.875rem;min-height:2.5rem;display:list-item;padding-block:.5rem}.card.props .row{display:grid;gap:.1rem;margin:0 0 .75rem}.card.props .row>.meta{display:block;font-size:.75rem}.card.props .row>.meta::first-letter{text-transform:uppercase}.card.props .row>.mono{font-family:var(--font-sans);font-size:.875rem}.card.props .row>.mono .seal{font-family:var(--font-mono);font-size:.8125rem}details.evidence-files{margin:1rem 0}details.evidence-files>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:600}details.evidence-files ul{list-style:none;margin:0;padding:0}details.evidence-files li{display:flex;justify-content:space-between;gap:1rem;padding:.5rem 0;border-bottom:1px solid var(--so-line)}.result-action .result-feedback-link{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;text-decoration:none}.result-action .result-feedback-link:hover{background:var(--so-raised)}.so-sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}.verdict{margin:.5rem 0 .75rem}.verdict-chips{display:flex;flex-wrap:wrap;gap:.4rem;list-style:none;padding:0;margin:0}.verdict-chip{display:inline-flex;align-items:center;gap:.3rem;min-height:1.75rem;padding:.2rem .65rem;border-radius:999px;font-size:.8125rem;font-weight:600;background:var(--so-neutral-soft);color:var(--so-neutral-ink)}.verdict-chip svg{width:.9rem;height:.9rem}.verdict-chip--success{background:var(--so-success-soft);color:var(--so-success)}.verdict-chip--danger{background:var(--so-danger-soft);color:var(--so-danger)}.verdict-chip--warning{background:var(--so-warning-soft);color:var(--so-warning)}.verdict-chip--info{background:var(--so-info-soft);color:var(--so-info)}.verdict-by{margin:.4rem 0 0}details.result-request-open{margin:.5rem 0}details.result-request-open>summary{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;cursor:pointer;list-style:none}details.result-request-open>summary::-webkit-details-marker{display:none}details.result-request-open[open]>summary{margin-bottom:.75rem}.settings-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(8.5rem,1fr));gap:.5rem;margin:0 0 2rem}.settings-tiles a{display:flex;align-items:center;gap:.6rem;min-height:3rem;padding:.65rem .8rem;border:1px solid var(--so-line);border-radius:.625rem;background:var(--so-paper);color:var(--so-ink);text-decoration:none;font-weight:550;font-size:.875rem}.settings-tiles a:hover{border-color:var(--so-input-line);background:var(--so-raised)}.settings-tiles svg{width:1.1rem;height:1.1rem;flex-shrink:0;color:var(--so-accent-text)}details.settings-more{margin:.25rem 0 1.25rem}details.settings-more>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:550}details.settings-more>summary .meta{font-weight:400;margin-left:.35rem}.settings-changed{margin-top:-.25rem}.appearance{margin:0 0 28px}.appearance h2{margin:0 0 10px}.theme-switch{display:inline-flex;flex-wrap:nowrap;max-width:100%;gap:4px;padding:4px;margin:0;border:1px solid var(--so-line);border-radius:10px;background:var(--so-raised)}.theme-switch .theme-choice,.so-native-region .theme-switch .theme-choice{flex:1 1 0;width:auto;white-space:nowrap;min-height:40px;padding:8px 16px;border:0;border-radius:7px;background:transparent;color:var(--so-muted);font:inherit;font-weight:550;box-shadow:none;cursor:pointer}.theme-switch .theme-choice:hover{color:var(--so-ink)}.theme-switch .theme-choice[aria-pressed="true"]{background:var(--so-paper);color:var(--so-ink);box-shadow:0 1px 2px rgb(0 0 0 / .1)}.appearance .meta{margin:8px 0 0}@media(max-width:600px){.theme-switch .theme-choice{min-height:44px}}`;
-const WORKSPACE_STYLE = styleAsset(STYLE + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KITS_CSS + SSO_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
+const WORKSPACE_STYLE = styleAsset(STYLE + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KITS_CSS + SSO_CSS + CREDENTIALS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
@@ -22917,6 +23056,7 @@ const SETTINGS_TILE_ICONS: [string, string, string][] = [
     ["/settings/teams", "Teams", `<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8"/>`],
     ["/settings/learning", "Learning", `<path d="M3 3v18h18"/><path d="m7 15 4-4 3 3 5-6"/>`],
     ["/settings/sign-in", "Sign-in", `<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>`],
+    ["/settings/sessions", "Sessions & tokens", `<circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/>`],
 ];
 const SETTINGS_TILES = SETTINGS_TILE_ICONS.map(([href, label]) => [href, label] as const);
 

@@ -36,8 +36,8 @@ export function proposeAsCoordinator(
     store.sweepCoordinatorProposals(now);
     const auth = authenticateCoordinator(store, token);
     if (!auth.ok) {
-      return auth.reason === "revoked"
-        ? { ok: false as const, reason: "revoked" as const, message: "this credential was revoked — ask the operator for a new one" }
+      return auth.reason === "revoked" || auth.reason === "expired"
+        ? { ok: false as const, reason: "revoked" as const, message: auth.reason === "expired" ? "this credential expired — ask the operator for a new one" : "this credential was revoked — ask the operator for a new one" }
         : { ok: false as const, reason: "unauthenticated" as const, message: "no live coordinator credential matches this token" };
     }
     const { who } = auth;

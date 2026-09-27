@@ -1668,10 +1668,13 @@ async function coordinatorCommand(
     }
     const perHourGiven = text(flags, "per-hour");
     const perHour = perHourGiven === undefined ? undefined : Number(perHourGiven);
+    const daysGiven = text(flags, "days");
+    const days = daysGiven === undefined ? undefined : Number(daysGiven);
     const made = mintCoordinator(store, {
       name,
       repos,
       ...(perHour === undefined ? {} : { perHour }),
+      ...(days === undefined ? {} : { days }),
       by: acting.name,
       now,
     });
@@ -1679,7 +1682,7 @@ async function coordinatorCommand(
       const said: Record<string, string> = {
         "bad-name": "a coordinator name is 1-32 characters of a-z, 0-9, and dashes",
         "name-taken": `a live coordinator already answers to \`${name}\` — revoke it first, or pick another name`,
-        "bad-rate": "--per-hour is a whole number from 1 to 60",
+        "bad-rate": "--per-hour is a whole number from 1 to 60, and --days from 1 to 365",
         "no-repos": "--repo names at least one repository",
       };
       return fail(write, json, "coordinator mint", made.reason, said[made.reason] ?? made.reason, made.reason === "name-taken" ? EXIT.refused : EXIT.usage);
@@ -1690,6 +1693,7 @@ async function coordinatorCommand(
       "",
       `  token  ${made.token}`,
       "",
+      `It expires in ${days ?? 90} days: mint a new one before then.`,
       "That token is shown once and is not stored — only a hash of it is.",
       "Give it to the MCP server via a 0600 token file or STANDING_ORDERS_COORDINATOR.",
     ]);
@@ -1838,6 +1842,7 @@ async function mcpCommand(
 function describeAuth(reason: string, name: string): string {
   if (reason === "unknown") return `no runner \`${name}\` — register it first`;
   if (reason === "retired") return `${name} has been retired`;
+  if (reason === "expired") return `${name}'s token expired a year after it registered — register it again`;
   return "that token does not match";
 }
 
