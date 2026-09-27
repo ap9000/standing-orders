@@ -54,6 +54,8 @@ function scopeOf(workspace: BrowserWorkspace): DraftScope | null {
 
 function canRefreshWorkspace(): boolean { return !document.hidden && navigator.onLine !== false; }
 
+const FULL_WIDTH_PAGES = new Set(["/work", "/board", "/queue", "/workbench", "/code"]);
+
 export function useWorkspace(initial: BrowserWorkspace) {
   const [workspace, setWorkspace] = useState(initial);
   const scope = scopeOf(initial);
@@ -94,7 +96,7 @@ export function useWorkspace(initial: BrowserWorkspace) {
   }, [initial]);
 
   const check = useCallback(async (force = true): Promise<void> => {
-    if (!mounted.current || state.current.stale || !initial.conversation || !canRefreshWorkspace()) return;
+    if (!mounted.current || state.current.stale || !(initial.conversation || initial.refreshSeconds) || !canRefreshWorkspace()) return;
     // A send or explicit refresh during a read must run immediately afterward,
     // rather than lose its receipt check or start an overlapping request.
     if (polling.current) { if (force) refreshQueued.current = true; return; }
@@ -138,7 +140,8 @@ export function useWorkspace(initial: BrowserWorkspace) {
           void check(true);
         } else {
           const busy = state.current.draft.pending !== null || state.current.workspace.conversation?.pendingTurnId != null || sendLatch.current;
-          pollDelay.current = workspacePollDelay(pollDelay.current, unchanged, busy);
+          // A live page (no conversation) reads itself on its own steady beat.
+          pollDelay.current = initial.conversation ? workspacePollDelay(pollDelay.current, unchanged, busy) : initial.refreshSeconds! * 1000;
           refreshTimer.current = window.setTimeout(() => { void check(false); }, pollDelay.current);
         }
       }
@@ -147,8 +150,9 @@ export function useWorkspace(initial: BrowserWorkspace) {
 
   useEffect(() => {
     mounted.current = true;
-    if (!initial.conversation) return;
-    void check();
+    if (!initial.conversation && !initial.refreshSeconds) return;
+    if (initial.conversation) void check();
+    else refreshTimer.current = window.setTimeout(() => { void check(false); }, initial.refreshSeconds! * 1000);
     const visible = () => { if (!document.hidden) void check(true); else clearTimeout(refreshTimer.current); };
     const online = () => { setOffline(false); void check(); };
     const offlineNow = () => { setOffline(true); clearTimeout(refreshTimer.current); };
@@ -162,7 +166,7 @@ export function useWorkspace(initial: BrowserWorkspace) {
       window.removeEventListener("online", online);
       window.removeEventListener("offline", offlineNow);
     };
-  }, [check, initial.conversation]);
+  }, [check, initial.conversation, initial.refreshSeconds]);
 
   const send = async (event: FormEvent) => {
     event.preventDefault();
@@ -545,7 +549,9 @@ export function WorkspaceApp({ initial }: { initial: BrowserWorkspace }) {
   const pageOnly = !workspace.team && (!workspace.conversation || docked);
   // The Tasks page already lists every task; the Crew panel would repeat it.
   // A flow's canvas needs the whole width.
-  const hidePanel = pageOnly && !docked && !hasWork && (new URL(workspace.path, window.location.origin).pathname === "/work" || workspace.view?.kind === "flow");
+  // Pages that are themselves a list of work, or need the width (the board's columns, a coding session), go without the side panel.
+  const pathname = new URL(workspace.path, window.location.origin).pathname;
+  const hidePanel = pageOnly && !docked && !hasWork && (FULL_WIDTH_PAGES.has(pathname) || pathname.startsWith("/code/") || workspace.view?.kind === "flow");
   useEffect(notifyWorkspaceRendered, []);
   useWindowStaysPut();
   return <><Toaster /><div className={`so-workspace${hidePanel ? " so-workspace--single" : ""}${docked ? " so-workspace--docked" : ""}`} data-workspace-shell data-workspace-phone-view={phoneView} data-workspace-has-result={workspace.result !== null}>

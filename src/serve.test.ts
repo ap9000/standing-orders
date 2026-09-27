@@ -1443,12 +1443,15 @@ describe("the operations console", () => {
     });
     const cookie = await login();
 
+    // Live inside the workspace: it reads itself every 10 s (forms being edited are kept), never a whole-page reload.
     const system = await (await fetch(url("/system"), { headers: { cookie } })).text();
-    expect(system).toContain('http-equiv="refresh" content="10"');
+    expect(workspaceOf(system).refreshSeconds).toBe(10);
+    expect(system).not.toContain('http-equiv="refresh"');
     expect(system).toContain("1/2 building");
     expect(system).toContain("standing-orders-t-live-abc123");
     // The inbox never auto-refreshes: it can hold typed input.
     const inbox = await (await fetch(url("/inbox"), { headers: { cookie } })).text();
+    expect(workspaceOf(inbox).refreshSeconds).toBeUndefined();
     expect(inbox).not.toContain('http-equiv="refresh"');
   });
 
@@ -4597,7 +4600,7 @@ describe("the workbench (attended A1) and the live substrate", () => {
     rmSync(evidenceRoot, { recursive: true, force: true });
   });
 
-  test("the rail carries needs-you and building sections, with the palette index and elapsed tickers", async () => {
+  test("the rail carries needs-you and building sections, inside the workspace, with elapsed tickers", async () => {
     const cookie = await login();
     const html = await (await fetch(url("/workbench"), { headers: { cookie } })).text();
     expect(html).toContain("needs you");
@@ -4607,7 +4610,9 @@ describe("the workbench (attended A1) and the live substrate", () => {
     expect(html).toContain("agent working");
     expect(html).not.toContain("agent-running");
     expect(html).toContain("data-elapsed-since=");
-    expect(html).toContain('id="palette-index"');
+    // The workspace's own search (⌘K) stands in for the console palette.
+    expect(workspaceOf(html).path).toBe("/workbench");
+    expect(html).not.toContain('id="palette-index"');
     expect(html).toContain('id="wb-rail"');
     // The CSP carries the script nonce.
     const response = await fetch(url("/workbench"), { headers: { cookie } });
@@ -5604,21 +5609,21 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     rmSync(dir, { recursive: true, force: true });
   });
 
-  test("the chrome layer is console-wide: /done carries the palette, the overlay, and a no-network nonce", async () => {
+  test("the workspace is console-wide: /done has its navigation and search, and a nonce'd script", async () => {
     const cookie = await login();
     const response = await fetch(url("/done"), { headers: { cookie } });
     const html = await response.text();
-    expect(html).toContain('id="palette-index"');
-    expect(html).toContain('aria-label="keyboard shortcuts"');
+    const workspace = workspaceOf(html);
+    expect(workspace.path).toBe("/done");
+    expect(workspace.navigation.map(one => one.label)).toEqual(expect.arrayContaining(["Chat", "Tasks", "Flows", "Projects", "Settings"]));
+    // The workspace's search (⌘K) stands in for the console palette and its overlay.
+    expect(html).not.toContain('id="palette-index"');
     const csp = response.headers.get("content-security-policy") ?? "";
     expect(csp).toMatch(/script-src 'nonce-/);
-    expect(csp).toContain("connect-src 'self'"); // v28: the chrome beat fetches
-    // No poller — no noscript auto-refresh to eat what someone was typing.
+    expect(csp).toContain("connect-src 'self'"); // the workspace beat fetches
+    // Not a live page: nothing reloads what someone was typing.
     expect(html).not.toContain('http-equiv="refresh"');
-    // The overlay's index lists the new destinations.
-    for (const label of ["fleet", "activity", "system", "builds", "requirements", "projects", "settings"]) {
-      expect(html).toContain(`{"label":"${label}"`);
-    }
+    expect(workspace.refreshSeconds).toBeUndefined();
   });
 
   test("settings is secondary: the first row of the settings group, only where the console offers it, and never a primary destination", async () => {
@@ -5688,8 +5693,9 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     const csp = response.headers.get("content-security-policy") ?? "";
     expect(csp).toMatch(/script-src 'nonce-/);
     expect(csp).toContain("connect-src 'self'");
-    // Scripting off still means no cross-fade on the fallback reloads.
-    expect(html).toContain('<noscript><meta http-equiv="refresh" content="30"><style>@view-transition { navigation: none; }</style></noscript>');
+    // Inside the workspace its own poller swaps the board; nothing reloads the page.
+    expect(workspaceOf(html).path).toBe("/board");
+    expect(html).not.toContain('http-equiv="refresh"');
     // The swap gives back what it took: focus without re-scroll, the
     // centered lane, each lane's place.
     expect(html).toContain("preventScroll");
@@ -5723,7 +5729,7 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     expect(settings.headers.get("content-security-policy") ?? "").toContain("connect-src 'self'");
   });
 
-  test("sensitivity is judged per response: /next with a step-up is bare, all-clear is chromed", async () => {
+  test("sensitivity is judged per response: /next with a step-up is sensitive, all-clear is not", async () => {
     store.createTask({ id: "t-a", title: "needs a yes" }, T0);
     store.saveScope({
       taskId: "t-a", goal: "do the thing", outOfScope: null, touches: [], acceptance: [],
@@ -5734,13 +5740,14 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     const pending = await (await fetch(url("/next"), { headers: { cookie } })).text();
     expect(pending).toContain("approve this scope");
     expect(pending).toContain('class="sticky-actions"');
+    expect(workspaceOf(pending).sensitive).toBe(true);
     expect(pending).not.toContain('id="palette-index"');
 
     const granted = approve(store, "t-a", "alex", T0, store.getScope("t-a")?.digest as string, approverToken);
     expect(granted.ok).toBe(true);
     const clear = await (await fetch(url("/next"), { headers: { cookie } })).text();
     expect(clear).not.toContain("approve this scope");
-    expect(clear).toContain('id="palette-index"');
+    expect(workspaceOf(clear).sensitive).toBe(false);
   });
 
   test("the signed rubric restates above the seal on the ceremony, the read-only card, and /next — never a second amber form (v39)", async () => {
@@ -5851,7 +5858,7 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     }
   });
 
-  test("the palette index is cached between renders, invalidated by an accepted mutation, and escaped", async () => {
+  test("the console palette (a page read with a token) is cached between renders, invalidated by an accepted mutation, and escaped", async () => {
     store.createTask({ id: "t-x", title: 'sharp <b>title</b> & "quotes"' }, T0);
     const real = store.paletteTasks.bind(store);
     let calls = 0;
@@ -5860,7 +5867,8 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
       return real(...args);
     };
     const cookie = await login();
-    const first = await (await fetch(url("/done"), { headers: { cookie } })).text();
+    const bearer = { authorization: `Bearer alex:${approverToken}` };
+    const first = await (await fetch(url("/done"), { headers: bearer })).text();
     const tasks = await (await fetch(url("/tasks"), { headers: { cookie } })).text();
     expect(calls).toBe(1);
 
@@ -5881,7 +5889,7 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
       body: new URLSearchParams({ csrf, title: "fresh work", repo: "/repo/main" }),
       redirect: "manual",
     });
-    await (await fetch(url("/done"), { headers: { cookie } })).text();
+    await (await fetch(url("/done"), { headers: bearer })).text();
     expect(calls).toBe(2);
   });
 });
@@ -8171,14 +8179,15 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     await boot();
     const cookie = await login();
 
-    const inbox = await (await fetch(url("/inbox"), { headers: { cookie } })).text();
+    // The page itself (the workspace's Crew panel lists every recent task, finished ones too).
+    const inbox = renderedHtmlOf(await (await fetch(url("/inbox"), { headers: { cookie } })).text());
     expect(inbox).not.toContain("conflicting evidence");
     expect(inbox).not.toContain("show me the proof");
     expect(store.proofVerdictFor(run)?.reasons).toContain("claimed changed path not in the sealed diff: src/other.ts");
     expect(await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text()).toContain("src/other.ts");
 
     store.acceptProof(run, "alex", null, T0);
-    const cleared = await (await fetch(url("/inbox"), { headers: { cookie } })).text();
+    const cleared = renderedHtmlOf(await (await fetch(url("/inbox"), { headers: { cookie } })).text());
     expect(cleared).not.toContain("show me the proof");
   });
 
@@ -8634,8 +8643,8 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     expect(board).toContain('<a class="manage" href="/projects">manage projects</a>');
     // The rail's row, the switcher's manage link, and the phone's Projects tab.
     expect((board.match(/href="\/projects"/g) ?? []).length).toBe(3);
-    // The chrome layer folds an open switcher on an outside tap.
-    expect(board).toContain('details.switcher[open]');
+    // The workspace's own project picker (the page's shell) offers the same projects.
+    expect(workspaceOf(board).projects.map(one => one.path)).toEqual(expect.arrayContaining([repoA, repoB]));
   });
 
   test("chat is a projectless, all-project surface when several projects are served", async () => {
@@ -10523,7 +10532,7 @@ describe("the first account (setup review): sign up on the login page with the p
 
   test("no accounts: the login page offers to create one; a wrong code refuses; the right code creates it and signs in; then the road is closed", async () => {
     const first = await (await fetch(`${base}/login`)).text();
-    expect(first).toContain("create the first account");
+    expect(first).toContain("Create the first account");
     expect(first).toContain('action="/signup"');
 
     const wrong = await fetch(`${base}/signup`, { method: "POST", body: new URLSearchParams({ code: "000000", name: "alex", password: "correct horse battery" }), redirect: "manual" });
@@ -10544,7 +10553,7 @@ describe("the first account (setup review): sign up on the login page with the p
 
     // The road is closed the moment an account exists.
     const again = await (await fetch(`${base}/login`)).text();
-    expect(again).not.toContain("create the first account");
+    expect(again).not.toContain("Create the first account");
     expect(again).toContain("Sign in");
     const second = await fetch(`${base}/signup`, { method: "POST", body: new URLSearchParams({ code: "424242", name: "mallory", password: "correct horse battery" }), redirect: "manual" });
     expect(second.status).toBe(409);
@@ -10569,7 +10578,7 @@ describe("the first account (setup review): sign up on the login page with the p
     const address = bare.address();
     const url = typeof address === "object" && address !== null ? `http://127.0.0.1:${address.port}` : "";
     const page = await (await fetch(`${url}/login`)).text();
-    expect(page).not.toContain("create the first account");
+    expect(page).not.toContain("Create the first account");
     const refused = await fetch(`${url}/signup`, { method: "POST", body: new URLSearchParams({ code: "424242", name: "x", password: "correct horse battery" }), redirect: "manual" });
     expect(refused.status).toBe(409);
     await new Promise<void>(resolve => bare.close(() => resolve()));
@@ -10817,12 +10826,12 @@ describe("the reduction pass (Laws of UX): five always-visible rows and two acco
   test("the rail is Chat · Tasks · Flows · Projects and two collapsed accordion groups (work tools, settings); the tab bar carries the same three; the queue and the switch link are gone from chrome", async () => {
     parkOne();
     const cookie = await login();
+    // The console chrome beneath the workspace (its fallback). Its collapse toggle and group
+    // script ride the console's chrome script, which a browser no longer runs: the workspace's
+    // own sidebar stands in for them.
     const home = await (await fetch(url("/inbox"), { headers: { cookie } })).text();
     const side = /<aside class="side">(.*?)<\/aside>/s.exec(home)?.[1] ?? "";
     const primary = /<nav>(.*?)<\/nav>/s.exec(side)?.[1] ?? "";
-    expect(side).toContain('class="side-toggle" aria-label="collapse sidebar" aria-expanded="true"');
-    expect(home).toContain("standing-orders:sidebar-collapsed");
-    expect(await stylesOf(home, base)).toContain(".app.sidebar-collapsed { grid-template-columns: 64px minmax(0, 1fr); }");
     // Workspace package 1 (plus Flows): four primary destinations, nothing else.
     expect([...primary.matchAll(/<a href="([^"]+)"/g)].map(m => m[1])).toEqual(["/chat", "/work", "/flows", "/projects"]);
     // The count rides the Work row (the inbox lives under it); every
@@ -10866,8 +10875,6 @@ describe("the reduction pass (Laws of UX): five always-visible rows and two acco
     expect(side).not.toContain('href="/queue"');
     expect(side).not.toContain('class="nav-settings"');
     expect(home).not.toContain("switch project");
-    // The client keeps the two groups exclusive.
-    expect(home).toContain('document.querySelectorAll(".nav-group")');
 
     const tabbar = /<nav class="tabbar">(.*?)<\/nav>/s.exec(home)?.[1] ?? "";
     expect([...tabbar.matchAll(/<a href="([^"]+)"/g)].map(m => m[1])).toEqual(["/chat", "/work", "/flows", "/projects"]);

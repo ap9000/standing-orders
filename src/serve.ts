@@ -1,6 +1,6 @@
 import { repositoryContext, repositoryContextRead } from './repository-context.js';
 import { repositoryContextHtml } from './repository-context-ui.js';
-import { browserAssetsAvailable, browserWorkspaceDocument, serveBrowserAsset, supportsBrowserWorkspace } from './browser-shell.js';
+import { browserAssetsAvailable, browserWorkspaceDocument, serveBrowserAsset } from './browser-shell.js';
 import { browserCrewOf, browserCrewFromIndex, browserWorkActionHref, browserProjectsOf, browserNavigationOf, type BrowserWorkspace, type BrowserChatLink, type BrowserTasksView, type BrowserSettingsView, type BrowserTaskView, type BrowserTaskFact, type BrowserTaskSection, type BrowserProjectsView, type BrowserProjectRow, type BrowserResultChip, type BrowserResultPanel, type BrowserResultView, type BrowserActionCard } from './browser-workspace.js';
 import { configureLeadFollow, leadFollowStatus, runLeadFollowPass } from './lead-follow.js';
 import { startMaintenance } from './maintenance.js';
@@ -954,7 +954,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const back = `/settings?said=${encodeURIComponent(said)}#email`;
       response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer", "x-content-type-options": "nosniff", "x-frame-options": "DENY", "set-cookie": signInSpent(GOOGLE_CALLBACK),
         "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'" });
-      response.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="0;url=${escape(back)}"><title>Standing Orders</title><p style="font:15px system-ui;margin:2rem">${escape(said)} <a href="${escape(back)}">Back to Settings</a></p>`);
+      response.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="0;url=${escape(back)}"><title>Standing Orders</title>${HANDOFF_STYLE}<p>${escape(said)} <a href="${escape(back)}">Back to Settings</a></p>`);
     };
     const state = url.searchParams.get("state") ?? "";
     if (!startedHere(request, state)) return done("That Google sign-in was started in another browser. Connect again from this one.");
@@ -978,7 +978,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const to = `${back}${back.includes("?") ? "&" : "?"}${key}=${encodeURIComponent(words)}`;
       response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer", "x-content-type-options": "nosniff", "x-frame-options": "DENY", "set-cookie": signInSpent(CONNECT_CALLBACK),
         "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'" });
-      response.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="0;url=${escape(to)}"><title>Standing Orders</title><p style="font:15px system-ui;margin:2rem">${escape(words)} <a href="${escape(to)}">Back to Standing Orders</a></p>`);
+      response.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="0;url=${escape(to)}"><title>Standing Orders</title>${HANDOFF_STYLE}<p>${escape(words)} <a href="${escape(to)}">Back to Standing Orders</a></p>`);
     };
     const state = url.searchParams.get("state") ?? "";
     if (!startedHere(request, state)) return done("/settings/tools", "problem", "That sign-in was started in another browser. Connect again from this one.");
@@ -1248,7 +1248,10 @@ export function createDecisionServer(options: ServeOptions): Server {
       actor: who.name,
       csrf: who.via === "cookie" ? who.session.csrf : "",
       returnTo: safeReturn(url.pathname + url.search),
-      browser: who.via === 'cookie' && supportsBrowserWorkspace(url.pathname),
+      // Every signed-in page shares the workspace shell; pages showing a one-time secret opt out (forceSensitive).
+      browser: who.via === 'cookie',
+      refusal: (answer: ServerResponse, status: number, body: string) => sendScreen(answer, status,
+        screen(status === 404 ? "Not found" : "Request refused", body, { chrome: chromeFor(who.via === "cookie" ? who.session.project : null, "work") })),
       workspaceRead,
       workspaceRequest: url.searchParams.get('request'),
     };
@@ -3367,7 +3370,7 @@ export function createDecisionServer(options: ServeOptions): Server {
             { said: url.searchParams.get("said"), problem: url.searchParams.get("problem") });
         } catch { content = '<p class="problem" role="alert">Tools are unavailable. Reload to retry.</p>'; }
       }
-      return sendScreen(response, 200, screen("Tools", `<p><a href="/settings">Settings</a></p><h1>Tools</h1>${selector}${content}`, { chrome: chromeFor(chosen || project, "settings"), forceSensitive: true }));
+      return sendScreen(response, 200, screen("Tools", `<p><a href="/settings">Settings</a></p><h1>Tools</h1>${selector}${content}`, { chrome: chromeFor(chosen || project, "settings") }));
     }
     if (url.pathname === "/settings/knowledge") {
       const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
@@ -3421,11 +3424,11 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
     if (url.pathname === "/settings/teams") {
       if (who.via !== "cookie" || who.role !== "approver" || restricted() || !options.configDir) return refuse(response, who, 403, "An installation approver can connect Teams.", "/settings");
-      return sendScreen(response, 200, screen("Teams", teamsSettingsHtml(store, options.configDir, who.session.csrf, { who: who.name, publicUrl: options.publicUrl ?? null }), { chrome: chromeFor(project, "settings"), forceSensitive: true }));
+      return sendScreen(response, 200, screen("Teams", teamsSettingsHtml(store, options.configDir, who.session.csrf, { who: who.name, publicUrl: options.publicUrl ?? null }), { chrome: chromeFor(project, "settings") }));
     }
     if (url.pathname === "/settings/discord") {
       if(who.via!=="cookie"||who.role!=="approver"||restricted()||!options.configDir) return refuse(response,who,403,"An installation approver can connect Discord.","/settings");
-      return sendScreen(response,200,screen("Discord",discordSettingsHtml(store,options.configDir,who.session.csrf,{who:who.name}),{chrome:chromeFor(project,"settings"),forceSensitive:true}));
+      return sendScreen(response,200,screen("Discord",discordSettingsHtml(store,options.configDir,who.session.csrf,{who:who.name}),{chrome:chromeFor(project,"settings")}));
     }
     if (url.pathname === "/settings/slack" || url.pathname === "/settings/slack/manifest") {
       if (who.via !== "cookie" || who.role !== "approver" || restricted() || !options.configDir) return refuse(response,who,403,"An installation approver can connect Slack.","/settings");
@@ -3433,7 +3436,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         response.writeHead(200,{"Content-Type":"application/json; charset=utf-8","Content-Disposition":'attachment; filename="standing-orders-slack.json"',"Cache-Control":"no-store"});
         response.end(JSON.stringify(SLACK_MANIFEST,null,2));return;
       }
-      return sendScreen(response,200,screen("Slack",slackSettingsHtml(store,options.configDir,who.session.csrf,{who:who.name}),{chrome:chromeFor(project,"settings"),forceSensitive:true}));
+      return sendScreen(response,200,screen("Slack",slackSettingsHtml(store,options.configDir,who.session.csrf,{who:who.name}),{chrome:chromeFor(project,"settings")}));
     }
 
     if (url.pathname === "/settings" && (options.telegramTokenFile === undefined || restricted())) {
@@ -3527,7 +3530,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       return decisionEvidence(response, Number(artifact[1]), Number(artifact[2]));
     }
 
-    return respond(response, 404, "text/plain; charset=utf-8", "nothing here");
+    return refuse(response, who, 404, "There's no page at this address.", "/chat");
   }
 
   /**
@@ -4146,6 +4149,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         pageHtml: extras.pageHtml === undefined ? (conversation === null ? pageHtml : null) : extras.pageHtml,
         navigation: [...browserNavigationOf(currentPath, s.chrome.project, needsYou), { label: 'Workspace tools', href: '/menu', active: path.pathname === '/menu' }],
         chats,
+        ...(s.refreshSeconds === undefined ? {} : { refreshSeconds: Math.max(5, Math.floor(s.refreshSeconds)) }),
       };
       if (requestFacts.workspaceRead) {
         const validator = requestFacts.workspaceValidator;
@@ -4164,14 +4168,16 @@ export function createDecisionServer(options: ServeOptions): Server {
       return page(response, status, browserWorkspaceDocument(document, workspace, nonce,
         functional + beatScript(!restricted()) + MOBILE_VIEWPORT_SCRIPT), nonce, true);
     }
+    // A one-time secret on screen (a token, an invite link, a pairing code): the
+    // page carries no script of any kind, so it leaves the workspace for a
+    // focused page in the same look: the brand, the one card, and the way back.
+    if (s.forceSensitive === true) return page(response, status, focusDocument(s.title, s.body));
     const chromeLayer = !sensitive && s.chrome !== undefined;
     const functional = s.functional?.script ?? "";
     // Sensitive pages strip the palette and keys but keep the MINIMAL beat
     // (round-1 finding 3): reading a ceremony for a minute must not lapse
     // every other session. The beat reads no DOM and posts no parameters.
-    // …except the one-time-secret pages (forceSensitive): those stay
-    // script-free absolutely, and simply do not keep sessions alive.
-    const sensitiveChrome = sensitive && s.forceSensitive !== true && s.chrome !== undefined
+    const sensitiveChrome = sensitive && s.chrome !== undefined
       ? beatScript(!restricted()) + sidebarScript()
       : "";
     const script = functional + (chromeLayer ? chromeScript(!restricted()) + WORKSPACE_MOTION_SCRIPT : sensitiveChrome);
@@ -4182,7 +4188,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     const html = shell(s.title, body, {
       ...(s.chrome === undefined ? {} : { chrome: s.chrome }),
       ...(sensitive ? { sensitive: true } : {}),
-      ...(s.chrome !== undefined && s.forceSensitive !== true ? { sidebarToggle: true } : {}),
+      ...(s.chrome !== undefined ? { sidebarToggle: true } : {}),
       ...(s.refreshSeconds === undefined ? {} : { refreshSeconds: s.refreshSeconds }),
       ...(nonce === undefined ? {} : { live: { nonce, script, fallbackRefresh: s.functional?.fetches === true } }),
     });
@@ -5395,7 +5401,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         return redirect(response, `/routines/${routineId}`);
       }
       default:
-        return respond(response, 404, "text/plain; charset=utf-8", "nothing here");
+        return refuse(response, who, 404, "That action isn't available here.", `/routines/${routineId}`);
     }
   }
 
@@ -6072,7 +6078,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (["connect","pair","unpair","disconnect","alerts"].some(action=>url.pathname===`/settings/slack/${action}`)) {
       if (who.via !== "cookie" || who.role !== "approver" || restricted() || !options.configDir) return refuse(response,who,403,"An installation approver can connect Slack.","/settings");
       const dir=options.configDir, state=new SlackState(store), action=url.pathname.split("/").at(-1);
-      const show=(problem:string,status=400)=>sendScreen(response,status,screen("Slack",slackSettingsHtml(store,dir,who.session.csrf,{problem,who:who.name}),{chrome:chromeFor(projectOf(who,request)??null,"settings"),forceSensitive:true}));
+      const show=(problem:string,status=400)=>sendScreen(response,status,screen("Slack",slackSettingsHtml(store,dir,who.session.csrf,{problem,who:who.name}),{chrome:chromeFor(projectOf(who,request)??null,"settings")}));
       if (["password","app-token","bot-token"].some(key=>body.getAll(key).length>1)) return show("Submit one value for each field.");
       const credentials=loadSlackCredentials(dir);
       if(action==="alerts") {
@@ -6112,7 +6118,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       // never touched from here.
       if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "An approver can pair their own phone.", "/settings");
       const botId = options.telegramTokenFile === undefined ? null : loadBotToken(process.env, options.telegramTokenFile)?.botId ?? null;
-      const show = (problem: string, status = 400) => sendScreen(response, status, screen("Telegram", telegramSettingsHtml(store, botId, who.name, who.session.csrf, { problem }), { chrome: chromeFor(projectOf(who, request) ?? null, "settings"), forceSensitive: true }));
+      const show = (problem: string, status = 400) => sendScreen(response, status, screen("Telegram", telegramSettingsHtml(store, botId, who.name, who.session.csrf, { problem }), { chrome: chromeFor(projectOf(who, request) ?? null, "settings") }));
       if (body.getAll("password").length > 1) return show("Submit one value for each field.");
       if (botId === null) return show("Connect the Telegram bot first.", 409);
       const pairingIdentity = authenticateAccount(store, who.name, body.get("password") ?? "");
@@ -6130,7 +6136,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (["connect","pair","unpair","disconnect","alerts"].some(action => url.pathname === `/settings/teams/${action}`)) {
       if (who.via !== "cookie" || who.role !== "approver" || restricted() || !options.configDir) return refuse(response, who, 403, "An installation approver can connect Teams.", "/settings");
       const dir = options.configDir, state = new ChatState(store, "teams"), action = url.pathname.split("/").at(-1);
-      const show = (problem: string, status = 400) => sendScreen(response, status, screen("Teams", teamsSettingsHtml(store, dir, who.session.csrf, { problem, who: who.name, publicUrl: options.publicUrl ?? null }), { chrome: chromeFor(projectOf(who, request) ?? null, "settings"), forceSensitive: true }));
+      const show = (problem: string, status = 400) => sendScreen(response, status, screen("Teams", teamsSettingsHtml(store, dir, who.session.csrf, { problem, who: who.name, publicUrl: options.publicUrl ?? null }), { chrome: chromeFor(projectOf(who, request) ?? null, "settings") }));
       if (["password", "app-id", "tenant", "secret"].some(key => body.getAll(key).length > 1)) return show("Submit one value for each field.");
       const credentials = loadTeamsCredentials(dir);
       if (action === "alerts") {
@@ -6167,7 +6173,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (["connect","pair","unpair","disconnect","alerts"].some(action=>url.pathname===`/settings/discord/${action}`)) {
       if (who.via !== "cookie" || who.role !== "approver" || restricted() || !options.configDir) return refuse(response,who,403,"An installation approver can connect Discord.","/settings");
       const dir=options.configDir, state=new ChatState(store,"discord"), action=url.pathname.split("/").at(-1);
-      const show=(problem:string,status=400)=>sendScreen(response,status,screen("Discord",discordSettingsHtml(store,dir,who.session.csrf,{problem,who:who.name}),{chrome:chromeFor(projectOf(who,request)??null,"settings"),forceSensitive:true}));
+      const show=(problem:string,status=400)=>sendScreen(response,status,screen("Discord",discordSettingsHtml(store,dir,who.session.csrf,{problem,who:who.name}),{chrome:chromeFor(projectOf(who,request)??null,"settings")}));
       if (["password","bot-token"].some(key=>body.getAll(key).length>1)) return show("Submit one value for each field.");
       const credentials=loadDiscordCredentials(dir);
       if(action==="alerts") {
@@ -6674,14 +6680,13 @@ export function createDecisionServer(options: ServeOptions): Server {
       const tokenScreen = screen(
         "fleet",
         [
-          `<h1>Fleet</h1>`,
+          `<h1>${escape(name)} is registered</h1>`,
           `<div class="card">`,
-          `<h2 style="margin-top:0">${escape(name)} is registered</h2>`,
-          `<p class="meta">its token — shown once, stored only as a hash, never recoverable:</p>`,
-          `<p class="mono" style="overflow-wrap:anywhere">${escape(minted)}</p>`,
-          `<p class="meta">keep it beside the worker (a 0600 file, a manager). If it is lost, register the name again — the old claims are taken back automatically.</p>`,
+          `<p>Its token, shown once. Only a hash is kept, so copy it now.</p>`,
+          `<p class="mono secret-value">${escape(minted)}</p>`,
+          `<p class="meta">Keep it beside the worker, in a file only you can read (0600) or a secrets manager. If it's lost, register the name again; its old claims are taken back.</p>`,
           `</div>`,
-          `<p class="meta"><a href="/fleet">back to the fleet</a></p>`,
+          `<p class="meta"><a href="/fleet">Back to Fleet</a></p>`,
         ].join("\n"),
         // A one-time secret on screen: no script of any kind rides along.
         { chrome: chromeFor(projectOf(who, request) ?? null, "fleet"), forceSensitive: true },
@@ -6820,13 +6825,13 @@ export function createDecisionServer(options: ServeOptions): Server {
       const linkScreen = screen(
         "people",
         [
-          `<h1>People</h1>`,
+          `<h1>Invite link</h1>`,
           `<div class="card">`,
-          `<h2 style="margin-top:0">the invite link \u2014 shown once</h2>`,
-          `<p class="mono" style="overflow-wrap:anywhere">${escape(`${origin}/join/${minted.token}`)}</p>`,
-          `<p class="meta">send it to ONE person. It works once, lets them ${role === "approver" ? "approve and act" : "read work"} in ${access.projects === null ? "all projects" : access.projects.map(repo => escape(projectName(repo))).join(", ")}, and dies ${escape(minted.expiresAt.slice(0, 16).replace("T", " "))} UTC. Cancel it any time from the people screen.</p>`,
+          `<p>Shown once, so copy it now.</p>`,
+          `<p class="mono secret-value">${escape(`${origin}/join/${minted.token}`)}</p>`,
+          `<p class="meta">Send it to one person. It works once, lets them ${role === "approver" ? "approve and act" : "read work"} in ${access.projects === null ? "all projects" : access.projects.map(repo => escape(projectName(repo))).join(", ")}, and expires ${escape(minted.expiresAt.slice(0, 16).replace("T", " "))} UTC. Cancel it any time on People.</p>`,
           `</div>`,
-          `<p class="meta"><a href="/people">back to people</a></p>`,
+          `<p class="meta"><a href="/people">Back to People</a></p>`,
         ].join("\n"),
         // A one-time secret on screen: no script of any kind rides along.
         { chrome: chromeFor(projectOf(who, request) ?? null, "people"), forceSensitive: true },
@@ -8043,7 +8048,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       return redirect(response, back);
     }
 
-    return respond(response, 404, "text/plain; charset=utf-8", "nothing here");
+    return refuse(response, who, 404, "There's no page at this address.", "/chat");
   }
 
   /**
@@ -9096,7 +9101,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         return redirect(response, back === "chat" ? `${taskChatHref(taskId)}#task-control` : `${taskHref(taskId)}#task-control`);
       }
       default:
-        return respond(response, 404, "text/plain; charset=utf-8", "nothing here");
+        return refuse(response, who, 404, "That action isn't available here.", taskHref(taskId));
     }
   }
 
@@ -9772,6 +9777,8 @@ function page(response: ServerResponse, status: number, html: string, nonce?: st
  * return whose state isn't the one this browser holds is refused. So nobody
  * can start a sign-in and have someone else finish it into their project.
  */
+/** A moment's page on the way to or back from another site's sign-in: no stylesheet may load there, so the palette rides inline. */
+const HANDOFF_STYLE = `<style>body{font:15px/1.5 "IBM Plex Sans",system-ui,sans-serif;margin:2rem;background:#f8f9f7;color:#252d29}a{color:#294f43}@media(prefers-color-scheme:dark){body{background:#0f1311;color:#e3e8e4}a{color:#8fcaae}}</style>`;
 const SIGN_IN_COOKIE = "so-sign-in";
 function startedHere(request: IncomingMessage, state: string): boolean {
   const held = new RegExp(`(?:^|;\\s*)${SIGN_IN_COOKIE}=([A-Za-z0-9_-]{16,128})`).exec(request.headers.cookie ?? "")?.[1];
@@ -9789,7 +9796,7 @@ function goOutside(response: ServerResponse, to: string, words: string, bind: { 
   response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer", "x-content-type-options": "nosniff", "x-frame-options": "DENY",
     "set-cookie": `${SIGN_IN_COOKIE}=${bind.state}; Path=${bind.path}; Max-Age=900; HttpOnly; SameSite=Lax${bind.secure ? "; Secure" : ""}`,
     "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'" });
-  response.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="0;url=${escape(to)}"><title>Standing Orders</title><p style="font:15px system-ui;margin:2rem">${escape(words)} <a href="${escape(to)}">Continue</a></p>`);
+  response.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="0;url=${escape(to)}"><title>Standing Orders</title>${HANDOFF_STYLE}<p>${escape(words)} <a href="${escape(to)}">Continue</a></p>`);
 }
 
 function redirect(response: ServerResponse, to: string): void {
@@ -9812,15 +9819,16 @@ function refuse(
   if (who === null || who.via === "bearer") {
     return respond(response, status, "text/plain; charset=utf-8", message);
   }
-  return page(
-    response,
-    status,
-    shell("refused", [
-      `<h1>Request refused</h1>`,
-      `<div class="problem">${escape(message)}</div>`,
-      `<p class="meta refusal-back"><a href="${escape(backHref)}">\u2190 Back</a></p>`,
-    ].join("\n")),
-  );
+  const body = [
+    `<h1>${status === 404 ? "Not found" : "Request refused"}</h1>`,
+    // A missing page is plain news, not an error.
+    status === 404 ? `<p>${escape(message)}</p>` : `<div class="problem">${escape(message)}</div>`,
+    `<p class="meta refusal-back"><a href="${escape(backHref)}">\u2190 Back</a></p>`,
+  ].join("\n");
+  // A signed-in browser keeps the workspace around it: the same navigation as every page.
+  const framed = requestContext.getStore()?.refusal;
+  if (framed !== undefined && who.via === "cookie") return framed(response, status, body);
+  return page(response, status, shell("refused", body));
 }
 
 /**
@@ -12136,11 +12144,20 @@ ${THEME_DARK}
   .login-card .problem { margin: 0 0 1rem; }
   .login-shell button {
     width: 100%; margin-top: 1.25rem;
-    background: var(--foreground); color: var(--background); border-color: var(--foreground); font-weight: 600;
+    background: var(--so-accent); color: var(--so-on-accent); border-color: var(--so-accent); font-weight: 600;
   }
-  .login-shell button:hover { background: color-mix(in srgb, var(--foreground) 85%, var(--background)); }
+  .login-shell button:hover { background: var(--so-accent-hover); border-color: var(--so-accent-hover); }
   .login-foot { text-align: center; margin: 1.5rem 0 0; font-size: 0.75rem; color: var(--muted-foreground); line-height: 1.9; }
   .login-foot code { background: none; padding: 0; color: var(--muted-foreground); overflow-wrap: anywhere; }
+  .so-wordmark { display: flex; align-items: center; gap: 9px; font-size: 13px; font-weight: 650; text-decoration: none; white-space: nowrap; letter-spacing: -.015em; color: var(--foreground); }
+  .so-brand-mark { width: 18px; height: 22px; display: flex; align-items: center; gap: 3px; transform: skewY(-10deg); }
+  .so-brand-mark i { display: block; width: 4px; height: 15px; background: var(--so-accent); border-radius: 1px; }
+  .so-brand-mark i:nth-child(2) { height: 22px; }
+  .login-shell .login-brand { justify-content: center; font-size: 1.125rem; margin: 0 0 1.5rem; }
+  .focus-page { max-width: 40rem; margin: 0 auto; padding: 2rem 1.25rem 3rem; }
+  .focus-page .focus-brand { display: inline-flex; margin: 0 0 2.5rem; }
+  .focus-page h1 { margin: 0 0 1rem; }
+  .secret-value { overflow-wrap: anywhere; font-size: .95rem; padding: .75rem .875rem; margin: .75rem 0; border: 1px solid var(--border); border-radius: 8px; background: var(--background); user-select: all; }
 
   @media (max-width: 640px) {
     button, form.option button { min-height: 2.75rem; }
@@ -13707,71 +13724,79 @@ function personChip(name: string): string {
 /** The invite's front door: cookie-free, script-free, sensitive by shape.
  * Rendered only for a LIVE token — everything dead gets joinDeadPage. */
 function joinFormPage(token: string, problem: string | null, name: string): string {
-  return shell("join", [
+  return shell("Join Standing Orders", [
     `<div class="login-viewport"><div class="login-shell">`,
-    `<h1>standing<span class="dot">\u00b7</span>orders</h1>`,
-    `<p class="meta hint">you were invited \u2014 pick a name and a password to sign in</p>`,
+    `<h1 class="so-wordmark login-brand">${BRAND_HTML}</h1>`,
+    `<p class="meta hint">You were invited. Pick a name and a password to sign in.</p>`,
     `<div class="login-card">`,
     problem === null ? "" : `<div class="problem" role="alert">${escape(problem)}</div>`,
     `<form method="post" action="/join/${escape(token)}">`,
     `<label>Username<input type="text" name="name" autocomplete="username" autocapitalize="none" spellcheck="false" required value="${escape(name)}" autofocus></label>`,
-    `<label>password<input type="password" name="password" autocomplete="new-password"></label>`,
-    `<button type="submit">create my sign-in</button>`,
+    `<label>Password<input type="password" name="password" autocomplete="new-password"></label>`,
+    `<button type="submit">Create my sign-in</button>`,
     "</form>",
     `</div>`,
-    `<p class="login-foot">this link works once, for you.</p>`,
+    `<p class="login-foot">This link works once, for you.</p>`,
     `</div></div>`,
   ].join("\n"), { nav: false });
 }
 
 /** Unknown, expired, revoked, consumed, attempts spent: ONE page (D6). */
 function joinDeadPage(): string {
-  return shell("join", [
+  return shell("Join Standing Orders", [
     `<div class="login-viewport"><div class="login-shell">`,
-    `<h1>standing<span class="dot">\u00b7</span>orders</h1>`,
+    `<h1 class="so-wordmark login-brand">${BRAND_HTML}</h1>`,
     `<div class="login-card">`,
-    `<p>this invite link is not usable.</p>`,
-    `<p class="meta">links work once and expire \u2014 ask the person who invited you for a fresh one.</p>`,
+    `<p>This invite link can't be used.</p>`,
+    `<p class="meta">Links work once and expire. Ask the person who invited you for a fresh one.</p>`,
     `</div>`,
     `</div></div>`,
   ].join("\n"), { nav: false });
 }
 
+/** The brand, as the workspace sidebar shows it. */
+const BRAND_HTML = `<span class="so-brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>Standing Orders`;
+
+/** A page on its own, in the workspace's look but with no script: the brand, then the page. */
+function focusDocument(title: string, body: string): string {
+  return shell(title, `<div class="focus-page"><a class="so-wordmark focus-brand" href="/chat">${BRAND_HTML}</a>${body}</div>`);
+}
+
 function loginPage(problem: string | null, returnTo = "/"): string {
-  return shell("standing-orders", [
+  return shell("Standing Orders", [
     `<div class="login-viewport"><div class="login-shell">`,
-    `<h1>standing<span class="dot">\u00b7</span>orders</h1>`,
+    `<h1 class="so-wordmark login-brand">${BRAND_HTML}</h1>`,
     `<div class="login-card">`,
     problem === null ? "" : `<div class="problem" role="alert">${escape(problem)}</div>`,
     `<form method="post" action="/login">`,
     returnTo === "/" ? "" : `<input type="hidden" name="return" value="${escape(returnTo)}">`,
     `<label>Username<input type="text" name="name" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus></label>`,
-    `<label>password<input type="password" name="token" autocomplete="current-password"></label>`,
+    `<label>Password<input type="password" name="token" autocomplete="current-password"></label>`,
     `<button type="submit">Sign in</button>`,
     "</form>",
     `</div>`,
-    `<p class="login-foot">your login was shown when the console was first started, and saved beside its database as <code>up-login.txt</code>.<br>no account? ask whoever runs this console for an invite link.</p>`,
+    `<p class="login-foot">Your login was shown when Standing Orders first started, and saved beside its database as <code>up-login.txt</code>.<br>No account? Ask whoever runs it for an invite link.</p>`,
     `</div></div>`,
   ].join("\n"), { nav: false });
 }
 
 /** The first-account page (setup review): shown only while no approver exists. */
 function signupPage(problem: string | null, attemptsLeft: number): string {
-  return shell("standing-orders", [
+  return shell("Standing Orders", [
     `<div class="login-viewport"><div class="login-shell">`,
-    `<h1>standing<span class="dot">\u00b7</span>orders</h1>`,
+    `<h1 class="so-wordmark login-brand">${BRAND_HTML}</h1>`,
     `<div class="login-card">`,
-    `<p><strong>create the first account</strong></p>`,
-    `<p class="meta">this console has no accounts yet. The terminal that started it printed a setup code; enter it here with the username and password you want.</p>`,
+    `<p><strong>Create the first account</strong></p>`,
+    `<p class="meta">There are no accounts yet. The terminal that started Standing Orders printed a setup code; enter it here with the username and password you want.</p>`,
     problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
     attemptsLeft <= 0
       ? ""
       : [
           `<form method="post" action="/signup">`,
-          `<label>setup code<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" autofocus></label>`,
+          `<label>Setup code<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" autofocus></label>`,
           `<label>Username<input type="text" name="name" autocomplete="username" autocapitalize="none" spellcheck="false" required></label>`,
-          `<label>password<input type="password" name="password" autocomplete="new-password"></label>`,
-          `<button type="submit">create account and sign in</button>`,
+          `<label>Password<input type="password" name="password" autocomplete="new-password"></label>`,
+          `<button type="submit">Create account and sign in</button>`,
           "</form>",
         ].join("\n"),
     `</div>`,
@@ -17602,7 +17627,7 @@ function themeAttribute(): string {
   const theme = requestContext.getStore()?.theme ?? null;
   return theme === null ? "" : ` data-theme="${theme}"`;
 }
-const requestContext = new AsyncLocalStorage<{ theme?: "light" | "dark" | null; csrf: string; returnTo: string; actor?: string; createdTask?: string; browser?: boolean; workspaceRead?: boolean; workspaceRequest?: string | null; workCounts?: ReturnType<typeof workCountsByProject>; workCrew?: { project: string | null; page: WorkIndexPage }; workspaceValidator?: { key: string; revision: string; expiresAt: number; etag: string } }>();
+const requestContext = new AsyncLocalStorage<{ refusal?: (response: ServerResponse, status: number, body: string) => void; theme?: "light" | "dark" | null; csrf: string; returnTo: string; actor?: string; createdTask?: string; browser?: boolean; workspaceRead?: boolean; workspaceRequest?: string | null; workCounts?: ReturnType<typeof workCountsByProject>; workCrew?: { project: string | null; page: WorkIndexPage }; workspaceValidator?: { key: string; revision: string; expiresAt: number; etag: string } }>();
 
 /** A same-site path or "/": never a scheme, a host, or a protocol-relative road. */
 function safeReturn(raw: string | null | undefined): string {

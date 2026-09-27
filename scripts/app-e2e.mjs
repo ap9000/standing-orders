@@ -129,6 +129,7 @@ await check("A wrong password is refused, and a signed-out visitor is sent to si
   await stranger.fill('input[name="name"]', "alex"); await stranger.fill('input[name="token"]', "not-the-password");
   await Promise.all([stranger.waitForLoadState("load"), stranger.press('input[name="token"]', "Enter")]);
   if (!stranger.url().includes("/login")) throw new Error(`a wrong password got in: ${stranger.url()}`);
+  if ((await stranger.locator(".login-brand .so-brand-mark").count()) !== 1) throw new Error("the sign-in page doesn't carry the brand");
   const text = (await stranger.locator("body").innerText()).toLowerCase();
   if (!/password|sign in|didn't|not/.test(text)) throw new Error(`no refusal shown: ${text.slice(0, 200)}`);
   const locked = await stranger.request.get(`${base}/flows`, { maxRedirects: 0 });
@@ -136,8 +137,9 @@ await check("A wrong password is refused, and a signed-out visitor is sent to si
   await wrong.close();
 });
 
-await check("Every main page opens without an error, on desktop and on a phone", [], async () => {
-  const paths = ["/chat", "/work", "/tasks", "/tasks/new", "/projects", "/flows", `/settings/knowledge?repo=${encodeURIComponent(repo)}`, "/settings", "/settings/models", "/settings/skills", `/settings/tools?repo=${encodeURIComponent(repo)}`, "/routines", "/recipes"];
+await check("Every main page opens without an error, in the one workspace look, on desktop and on a phone", [], async () => {
+  const paths = ["/chat", "/work", "/tasks", "/tasks/new", "/projects", "/flows", `/settings/knowledge?repo=${encodeURIComponent(repo)}`, "/settings", "/settings/models", "/settings/skills", `/settings/tools?repo=${encodeURIComponent(repo)}`, "/routines", "/recipes",
+    "/inbox", "/board", "/next", "/done", "/system", "/workbench", "/code", "/kits", "/teammates", "/fleet", "/people"];
   const broken = [];
   const phone = await signIn("sam", { width: 390, height: 844 }, "dark");
   for (const path of paths) {
@@ -146,6 +148,8 @@ await check("Every main page opens without an error, on desktop and on a phone",
       if (answer === null || answer.status() >= 400) { broken.push(`${who} ${path}: ${answer?.status()}`); continue; }
       // Live pages keep a stream open, so the network never goes quiet: let the page settle instead.
       await on.waitForLoadState("load"); await sleep(700);
+      // Every signed-in page is inside the workspace: one navigation, one look.
+      if (!(await on.evaluate(() => document.querySelector("[data-workspace-shell]") !== null))) { broken.push(`${who} ${path}: not in the workspace look`); continue; }
       // No page scrolls sideways on a phone.
       if (who === "phone") {
         const wide = await on.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
@@ -153,10 +157,14 @@ await check("Every main page opens without an error, on desktop and on a phone",
       }
     }
   }
+  // A page that doesn't exist is still a page in the workspace, not bare text.
+  const missing = await page.goto(`${base}/no-such-page`);
+  await sleep(700);
+  if (missing?.status() !== 404 || !(await page.evaluate(() => document.querySelector("[data-workspace-shell]") !== null)) || !/Not found/.test(await page.locator("h1").last().innerText())) broken.push("a missing page isn't a workspace page saying Not found");
   await phone.context().close();
   w.openPages.splice(w.openPages.indexOf(phone), 1);
   if (broken.length > 0) throw new Error(broken.join("; "));
-  return { pages: paths.length * 2 };
+  return { pages: paths.length * 2 + 1 };
 });
 
 await check("The command line answers: the task list, the approvers, the project's check, and help", [], async () => {
