@@ -58,7 +58,8 @@ afterEach(async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-const cookieOf = (answer: Response) => answer.headers.get("set-cookie")!.split(";")[0]!;
+/** The session cookie (a sign-in also clears its hand-off cookie), or the one cookie set. */
+const cookieOf = (answer: Response) => { const all = answer.headers.getSetCookie().map(one => one.split(";")[0]!); return all.find(one => one.startsWith("standing-orders_session=")) ?? all[0]!; };
 const csrfOf = (html: string) => /name="csrf" value="([0-9a-f]{64})"/.exec(html)![1]!;
 async function passwordSignIn(name: string, secret: string) {
   return fetch(`${base}/login`, { method: "POST", body: new URLSearchParams({ name, token: secret }), redirect: "manual" });
@@ -74,7 +75,9 @@ async function providerSignIn(query = "", cookie = ""): Promise<Response> {
   const html = await back.text();
   const finish = /content="0;url=([^"]+)"/.exec(html)?.[1];
   if (finish === undefined) return new Response(html, { status: back.status });
-  return fetch(`${base}${finish.replace(/&amp;/g, "&")}`, { headers: cookie ? { cookie } : {}, redirect: "manual" });
+  // The hand-off is this browser's: its cookie goes along to finish.
+  const handoff = back.headers.getSetCookie().map(one => one.split(";")[0]!).find(one => /^so-sign-in=.+/.test(one))!;
+  return fetch(`${base}${finish.replace(/&amp;/g, "&")}`, { headers: { cookie: [handoff, ...(cookie ? [cookie] : [])].join("; ") }, redirect: "manual" });
 }
 async function turnOn(passwords = "everyone") {
   const signedIn = await passwordSignIn("alex", password);
@@ -161,6 +164,19 @@ test("passwords for instance operators only: others are sent to the provider; an
   const again = await providerSignIn();
   expect(again.status).toBe(303);
   expect(store.accountOf("alex")?.role).toBe("approver");
+});
+
+test("the hand-off to finish is the starting browser's alone", async () => {
+  await turnOn();
+  const start = await fetch(`${base}/login/sso`, { redirect: "manual" });
+  const go = new URL(start.headers.get("location")!);
+  lastNonce = go.searchParams.get("nonce")!;
+  const back = await fetch(`${base}/login/sso/callback?code=the-code&state=${go.searchParams.get("state")}`, { headers: { cookie: cookieOf(start) }, redirect: "manual" });
+  const finish = /content="0;url=([^"]+)"/.exec(await back.text())![1]!.replace(/&amp;/g, "&");
+  const elsewhere = await fetch(`${base}${finish}`, { redirect: "manual" });
+  expect(elsewhere.status).toBe(400);
+  expect(await elsewhere.text()).toContain("started in another browser");
+  expect(store.accountOf("priya")).toBeNull();
 });
 
 test("only step-up password fields become the provider's check; a secret field stays", () => {

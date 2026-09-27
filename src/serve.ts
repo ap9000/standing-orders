@@ -1050,10 +1050,13 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (held.intent === "reauth" && verified.claims.authTime !== null && Date.now() / 1000 - verified.claims.authTime > 300) return back(`${settings.label} didn't check you again. Try once more.`);
     const key = randomBytes(24).toString("base64url");
     for (const [one, value] of ssoHandoffs) if (value.expires < Date.now()) ssoHandoffs.delete(one);
+    while (ssoHandoffs.size >= 1000) ssoHandoffs.delete(ssoHandoffs.keys().next().value!);
     ssoHandoffs.set(key, { claims: verified.claims, issuer: held.provider.issuer, intent: held.intent, returnTo: held.returnTo, expires: Date.now() + 60_000 });
     const to = `/login/sso/finish?h=${key}`;
     response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer", "x-content-type-options": "nosniff", "x-frame-options": "DENY",
-      "set-cookie": signInSpent(SSO_CALLBACK), "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'" });
+      // The hand-off key is this browser's alone, like the visit's state: its cookie rides to /login/sso/finish.
+      "set-cookie": [signInSpent(SSO_CALLBACK), `${SIGN_IN_COOKIE}=${key}; Path=/login/sso/finish; Max-Age=60; HttpOnly; SameSite=Lax${held.redirect.startsWith("https:") ? "; Secure" : ""}`],
+      "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'" });
     response.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="0;url=${escape(to)}"><title>Standing Orders</title>${HANDOFF_STYLE}<p>Signing you in… <a href="${escape(to)}">Continue</a></p>`);
   }
 
@@ -1190,6 +1193,8 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (!found.ok) return page(response, 502, loginPage(`${settings.label} isn't answering: ${found.said}`, returnTo, ssoOffer()));
       const visit = newOidcVisit(), redirectUri = `${origin}${SSO_CALLBACK}`;
       for (const [key, one] of ssoVisits) if (one.expires < Date.now()) ssoVisits.delete(key);
+      // Bounded: anyone may start a sign-in, so the oldest waiting ones give way.
+      while (ssoVisits.size >= 1000) ssoVisits.delete(ssoVisits.keys().next().value!);
       ssoVisits.set(visit.state, { visit, provider: found.provider, redirect: redirectUri, intent, returnTo, expires: Date.now() + 15 * 60_000 });
       response.writeHead(302, { location: oidcAuthorizeUrl(found.provider, settings, visit, redirectUri, intent === "reauth"), "cache-control": "no-store", "referrer-policy": "no-referrer",
         "set-cookie": `${SIGN_IN_COOKIE}=${visit.state}; Path=${SSO_CALLBACK}; Max-Age=900; HttpOnly; SameSite=Lax${origin.startsWith("https:") ? "; Secure" : ""}` });
@@ -1199,8 +1204,10 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (url.pathname === SSO_CALLBACK && method === "GET") return ssoCallback(request, response, url);
     if (url.pathname === "/login/sso/finish" && method === "GET") {
       const key = url.searchParams.get("h") ?? "";
+      if (!startedHere(request, key)) return page(response, 400, loginPage("That sign-in was started in another browser. Sign in again from this one.", "/", ssoOffer()));
       const handoff = ssoHandoffs.get(key);
       ssoHandoffs.delete(key);
+      response.setHeader("Set-Cookie", signInSpent("/login/sso/finish"));
       const settings = ssoSettings();
       if (handoff === undefined || handoff.expires < Date.now() || settings === null) return page(response, 400, loginPage("That sign-in expired. Try again.", "/", ssoOffer()));
       const { claims } = handoff;
@@ -1232,7 +1239,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       sessions.set(id, { name: signedIn.account, csrf: randomBytes(32).toString("hex"), role: account.role, generation: account.generation, createdAt: Date.now(), sawBoardAt: null, lastSeen: Date.now(),
         project: defaultProject, projectRevision: 1, sso: { at: Date.now() } });
       recordSignIn(signedIn.account, "signed in", settings.label);
-      response.setHeader("Set-Cookie", `${SESSION_COOKIE}=${id}; HttpOnly; SameSite=Strict; Path=/${cookieSecure}`);
+      response.setHeader("Set-Cookie", [signInSpent("/login/sso/finish"), `${SESSION_COOKIE}=${id}; HttpOnly; SameSite=Strict; Path=/${cookieSecure}`]);
       return redirect(response, handoff.returnTo);
     }
     if (url.pathname === "/signup" && method === "POST") {
