@@ -3,7 +3,7 @@ import type { ComponentProps } from "react";
 import { cn } from "./utils.js";
 
 export function Card({ className, ...props }: ComponentProps<"section">) {
-  return <section data-slot="card" className={cn("flex flex-col gap-4 rounded-lg border border-border bg-card p-5 text-card-foreground max-sm:p-4", className)} {...props} />;
+  return <section data-slot="card" className={cn("flex flex-col gap-4 rounded-[10px] border border-border bg-card p-5 text-card-foreground max-sm:p-4", className)} {...props} />;
 }
 export function CardHeader({ className, ...props }: ComponentProps<"div">) {
   return <div data-slot="card-header" className={cn("flex items-start justify-between gap-3", className)} {...props} />;

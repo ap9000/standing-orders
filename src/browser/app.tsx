@@ -247,7 +247,7 @@ export function useWorkspace(initial: BrowserWorkspace) {
 }
 
 function badgeTone(tone: BrowserCrewItem["tone"]) {
-  return tone === "problem" ? "danger" : tone === "attention" ? "warning" : tone === "done" || tone === "ready" ? "success" : tone === "live" ? "info" : "neutral";
+  return tone === "problem" ? "danger" : tone === "attention" ? "attention" : tone === "done" || tone === "ready" ? "success" : tone === "live" ? "info" : "neutral";
 }
 
 function CrewRows({ workspace, items }: { workspace: BrowserWorkspace; items: BrowserWorkspace["crew"] }) {

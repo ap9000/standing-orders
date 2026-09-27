@@ -38,7 +38,8 @@ One central installation, many surfaces, one truth: browser, CLI and every chat 
 
 - Name: Standing Orders (wordmark `standing·orders`), from a captain's night orders: "proceed without me, wake me only for these."
 - Voice: plain English, concise, calm; say it once; describe what happened and what the person can do (see AGENTS.md "simple, elegant UI").
-- IBM Plex Sans / Mono are the product's typefaces (self-hosted in `/fonts`).
+- Geist and Geist Mono are the product's typefaces (self-hosted in `/fonts`; chosen 2026-09-27, replacing IBM Plex).
+- Visual register (chosen 2026-09-27): the Raycast and Arc canon played straight. Neutral grey with one signature accent, chart magenta, reserved for what waits on a person; ink for every other act. Craft bar: Raycast, Arc, Linear, Vercel.
 
 ## Evidence on Hand
 

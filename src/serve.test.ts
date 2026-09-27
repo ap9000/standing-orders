@@ -5515,14 +5515,14 @@ describe("A2 — the live peek over real HTTP: guards, fence, and the names-only
   });
 
   test("the typefaces serve pre-auth as woff2, exact names only, and the page CSP admits them", async () => {
-    const font = await fetch(url("/fonts/plex-sans-400.woff2"));
+    const font = await fetch(url("/fonts/geist-sans-400.woff2"));
     expect(font.status).toBe(200);
     expect(font.headers.get("content-type")).toBe("font/woff2");
     expect(font.headers.get("x-content-type-options")).toBe("nosniff");
     expect(font.headers.get("cache-control")).toBe("public, max-age=3600");
     const bytes = Buffer.from(await font.arrayBuffer());
     expect(bytes.subarray(0, 4).toString("latin1")).toBe("wOF2");
-    expect((await fetch(url("/fonts/plex-mono-600.woff2"))).status).toBe(200);
+    expect((await fetch(url("/fonts/geist-mono-600.woff2"))).status).toBe(200);
     // Unknown names fall through to the ordinary unauthenticated refusal —
     // a redirect to sign-in, never a read and never a server error.
     expect((await fetch(url("/fonts/other.woff2"), { redirect: "manual" })).status).toBe(303);
@@ -5532,7 +5532,7 @@ describe("A2 — the live peek over real HTTP: guards, fence, and the names-only
     // would silently synthesize.
     const html = await login.text();
     const css = await stylesOf(html, base);
-    for (const face of ["plex-sans-400", "plex-sans-500", "plex-sans-600", "plex-mono-400", "plex-mono-500", "plex-mono-600"]) {
+    for (const face of ["geist-sans-400", "geist-sans-500", "geist-sans-600", "geist-mono-400", "geist-mono-500", "geist-mono-600"]) {
       expect(css).toContain(`/fonts/${face}.woff2`);
     }
   });
@@ -8484,7 +8484,7 @@ describe("the phone shell (mobile pass): one header row, drawn controls, thumb-s
     expect(html).toContain('<meta name="apple-mobile-web-app-capable" content="yes">');
   });
 
-  test("the design system (v3): one palette in two schemes, a pinned theme, a theme color per scheme, icons on the sidebar's primary rows", async () => {
+  test("the design system (v4): one palette in two schemes, a pinned theme, a theme color per scheme, icons on the sidebar's primary rows", async () => {
     const cookie = await login();
     const html = await (await fetch(url("/inbox"), { headers: { cookie } })).text();
     const css = await stylesOf(html, base);
@@ -8500,12 +8500,12 @@ describe("the phone shell (mobile pass): one header row, drawn controls, thumb-s
     for (const token of ["--background", "--foreground", "--card", "--muted", "--muted-foreground", "--border", "--input", "--brand", "--running", "--success", "--destructive", "--ring"]) {
       expect(root).toMatch(new RegExp(`${token}: var\\(--so-`));
     }
-    expect(html).toContain('<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0f1311">');
-    expect(html).toContain('<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f8f9f7">');
+    expect(html).toContain('<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0b0b0b">');
+    expect(html).toContain('<meta name="theme-color" media="(prefers-color-scheme: light)" content="#efefef">');
     // A pinned theme reaches the document before any script runs.
     const pinned = await (await fetch(url("/inbox"), { headers: { cookie: `${cookie}; so-theme=dark` } })).text();
     expect(pinned).toContain('<html lang="en" data-theme="dark">');
-    expect(pinned).toContain('<meta name="theme-color" content="#0f1311">');
+    expect(pinned).toContain('<meta name="theme-color" content="#0b0b0b">');
     // Sidebar primary rows carry a drawn icon; the foot's rows stay text.
     expect(html).toMatch(/<a href="\/work"[^>]*><span class="glyph"><svg/);
     expect(html).toMatch(/<a href="\/projects"[^>]*><span class="glyph"><svg/);
@@ -10941,7 +10941,7 @@ describe("the reduction pass (Laws of UX): five always-visible rows and two acco
     expect(card).toContain('<a class="badge badge-open" href="/">1 waiting on you</a>');
   });
 
-  test("amber lives in exactly two kinds of place: the needs-you count and the act that resolves a screen — never a card, a frame, or a seal", async () => {
+  test("the signal colour (magenta, once amber) lives in exactly two kinds of place: the needs-you count and the act that resolves a screen — never a card, a frame, or a seal", async () => {
     parkOne();
     const cookie = await login();
     const home = await (await fetch(url("/inbox"), { headers: { cookie } })).text();

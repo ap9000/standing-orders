@@ -29,7 +29,7 @@ export function Button({ className, variant = "primary", size = "default", asChi
 }
 
 export type BadgeProps = ComponentProps<"span"> & {
-  tone?: "neutral" | "success" | "warning" | "danger" | "info";
+  tone?: "neutral" | "success" | "warning" | "attention" | "danger" | "info";
 };
 export function Badge({ className, tone = "neutral", ...props }: BadgeProps) {
   return <span data-slot="badge" data-tone={tone} className={cn("ui-badge", `ui-badge--${tone}`, className)} {...props} />;
