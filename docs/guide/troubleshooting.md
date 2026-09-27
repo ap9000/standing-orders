@@ -24,5 +24,9 @@ failure path. **Insights** has the run's log.
 **The builder is disconnected.** Start `standing-orders up` again on the
 computer where your projects are; queued work resumes.
 
+**"Too many wrong passwords. Try again in 15 minutes."** Five wrong
+passwords in a row lock a name. Wait, or restart Standing Orders to clear
+it. **Action ledger** (filter Sign-ins) shows the attempts.
+
 **"database is locked" from the command line.** The app was writing at that
 moment: run the command again.

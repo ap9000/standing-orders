@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Hardening for teams.** Five wrong passwords lock a name for 15 minutes,
+  on every road a password takes (signing in, a request, a step-up), and one
+  address guessing across names runs out of tries. The action ledger now
+  records sign-ins and policy changes with what changed (the permission
+  default "Auto → Full access", a teammate's tool rules, an agent choice, an
+  operating mode), and shows installation events to instance operators. A
+  person's coordinators end with their standing. `/healthz` answers a probe,
+  errors are always logged (`STANDING_ORDERS_LOG_FORMAT=json` for JSON
+  lines), and more key shapes (Stripe, Google, GitLab, Telegram and Discord
+  tokens, passwords in URLs) are blanked. Schema 99.
+
 - **One look on every page.** Board, Inbox, Next, Done, System, Portfolio,
   Code and Settings → Tools now sit in the same workspace as everything else,
   with the same navigation and search. Live pages (System, Activity) refresh

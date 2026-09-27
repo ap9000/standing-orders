@@ -22,6 +22,34 @@ at the operating system:
 Each run records how it was fenced. Without bubblewrap on Linux, Claude is
 held back only by its own file-tool rules; install it.
 
+## Guessing a password gets nowhere
+
+Five wrong passwords in a row lock that name for 15 minutes, doubling with
+each further lock up to a day; the right password waits too. Every place a
+password is typed counts: signing in, a request that carries one, and each
+password step-up inside the console. One address trying many names runs out
+of tries on its own. Locks are kept in memory, so restarting Standing Orders
+clears them.
+
+## Everything is on the record
+
+**Workflows → Action ledger** keeps who did what, and when: work (runs,
+decisions, approvals), console requests, account and access changes,
+sign-ins (and refusals, locks and sign-outs), and policy changes with what
+changed, like "Auto → Full access" for the permission default, a teammate's
+tool rules, an agent choice or an operating mode. Filter it, open it as JSON,
+or export it as CSV. It is append-only in the database; it doesn't copy
+passwords, prompts or request bodies. A name typed at sign-in that isn't an
+account is kept as "unknown account", in case it was a password in the wrong
+box.
+
+## Running it as a service
+
+`/healthz` answers `{"status":"ok"}` (or 503) for a load balancer or
+orchestrator, from any address, and says nothing else. Errors are always
+logged; set `STANDING_ORDERS_LOG_FORMAT=json` for one JSON object per line.
+Key-shaped text is blanked from log lines.
+
 ## Secrets never travel
 
 Keys and passwords are entered only on the console's secure screens, never

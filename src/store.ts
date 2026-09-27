@@ -91,7 +91,7 @@ import type { QualityMode } from "./quality.js";
 import type { ProgressSnapshot } from "./plan.js";
 
 import { normalizeProjectAccess, projectAccessAllows, readProjectAccess, type ProjectAccess } from "./project-access.js";
-import { LEDGER_SCHEMA, installLedgerTriggers, type LedgerEntry } from "./action-ledger.js";
+import { LEDGER_SCHEMA, LEDGER_TABLE, LEDGER_V54_COLUMNS, LEDGER_V54_TABLE, installLedgerTriggers, type LedgerEntry } from "./action-ledger.js";
 import { PLAN_AUTO_SCHEMA } from "./plan-auto.js";
 import { RECIPE_SCHEMA } from "./recipes.js";
 
@@ -129,7 +129,8 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // v96 gives each teammate a desk: its own flow, where messages to it by name and its routines land as cards.
 // v97 keeps what each teammate turn cost, lets a person undo a teammate's tool call where the tool can, and sends a weekly report.
 // v98 lets Telegram push a bot's updates to Standing Orders (a webhook) instead of being polled for them.
-export const SCHEMA_VERSION = 98;
+// v99 gives the action ledger its own kinds of event for sign-ins and policy changes, each with a short detail (a change's before → after).
+export const SCHEMA_VERSION = 99;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -6000,6 +6001,8 @@ function migrate(db: Database, origin: number | null): void {
      )`,
     ["id", "teammate", "card", "entry", "question", "options_json", "asked_of", "state", "choice", "answer", "answered_by", "answered_via", "answered_at", "created_at", "tool_call", "suggestion"],
   );
+  // v99: the action ledger admits sign-in and policy events, each with a short detail.
+  rebuildLedgerForV99(db);
   // v98: where Telegram pushes this bot's updates, as the bridge last found it.
   addColumn(db, "bridge_lease", "push_url", "TEXT");
   addColumn(db, "bridge_lease", "push_at", "TEXT");
@@ -6326,6 +6329,22 @@ function rebuildExact(
   } finally {
     db.exec("PRAGMA foreign_keys = ON");
   }
+}
+
+/**
+ * v99: the ledger's source admits 'sign-in' and 'policy', and each row may
+ * carry a short detail. The work triggers on other tables write into the
+ * ledger, and a rename refuses while a trigger points at a table that's gone,
+ * so every trigger naming it is dropped first; openStore puts them back
+ * (LEDGER_SCHEMA and installLedgerTriggers run after migration).
+ */
+function rebuildLedgerForV99(db: Database): void {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'action_ledger'").get();
+  if (row === undefined || canonicalDdl(String(row["sql"])) === canonicalDdl(LEDGER_TABLE("action_ledger"))) return;
+  for (const trigger of db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND sql LIKE '%action_ledger%'").all()) {
+    db.exec(`DROP TRIGGER IF EXISTS "${String(trigger["name"]).replace(/"/g, '""')}"`);
+  }
+  rebuildExact(db, "action_ledger", LEDGER_V54_TABLE, LEDGER_TABLE, LEDGER_V54_COLUMNS);
 }
 
 /** v34: artifact.kind admits 'report'. A table already rebuilt to the v38
@@ -10129,6 +10148,8 @@ export class Store {
       this.db
         .prepare("INSERT INTO operating_mode_event (mode, kind, actor, at) VALUES (?, ?, ?, ?)")
         .run(id, renewal ? "renewed" : "signed", spec.signedBy, now.toISOString());
+      this.recordAction({ at: now.toISOString(), actor: spec.signedBy, repo: spec.repo, taskId: null, runId: null, source: "policy",
+        action: `operating mode ${renewal ? "renewed" : "signed"}: ${spec.name}`, outcome: renewal ? "renewed" : "signed", detail: `until ${spec.absoluteExpiry.slice(0, 16).replace("T", " ")} UTC · ${spec.publication === "automerge" ? "merges automatically" : "notifies on results"}` });
       this.reconcileIntentsForMode(spec.repo, { digest: spec.digest, publication: spec.publication }, now);
       return id;
     });
@@ -10149,6 +10170,7 @@ export class Store {
       this.db
         .prepare("INSERT INTO operating_mode_event (mode, kind, actor, at) VALUES (?, 'revoked', ?, ?)")
         .run(Number(row["id"]), by, now.toISOString());
+      this.recordAction({ at: now.toISOString(), actor: by, repo, taskId: null, runId: null, source: "policy", action: "operating mode revoked", outcome: "revoked", detail: reason });
       this.reconcileIntentsForMode(repo, null, now);
       return true;
     });
@@ -10314,6 +10336,18 @@ export class Store {
    */
   revokeDerivedAuthority(approver: string, by: string, now: Date): void {
     const stamp = now.toISOString();
+    // v99: the machine credentials (coordinators) a person made end with their standing: a revocation or an
+    // access change, not a password rotation (a new password is not less trust). Each end is audited as a
+    // coordinator revocation, its pending proposals expire with it, and the ledger says why.
+    if (by !== "credential-rotation") {
+      for (const row of this.db.prepare("SELECT cid, name FROM coordinator_credential WHERE created_by = ? AND revoked_at IS NULL").all(approver)) {
+        const cid = String(row["cid"]);
+        this.db.prepare("UPDATE coordinator_credential SET revoked_at = ? WHERE cid = ?").run(stamp, cid);
+        this.db.prepare("INSERT INTO coordinator_event (cid, kind, detail, created_at) VALUES (?, 'revoked', ?, ?)").run(cid, `with ${approver}'s standing, by ${by}`, stamp);
+        this.sweepCoordinatorProposals(now, cid);
+        this.recordAction({ at: stamp, actor: by, repo: null, taskId: null, runId: null, action: `coordinator revoked: ${String(row["name"])}`, outcome: "revoked", source: "access", detail: `made by ${approver}` });
+      }
+    }
     // The mate (ruling 10; slice-2 review finding 1): a credential rotation
     // or a revocation ends every session the old standing minted, its live
     // turns (charged whole), and its thread with every proposal in it.
@@ -10396,9 +10430,16 @@ export class Store {
     });
   }
 
-  recordAction(entry: Omit<LedgerEntry, "id">): number {
-    const row = this.db.prepare("INSERT INTO action_ledger(at,actor,repo,task_id,run_id,action,outcome,source) VALUES (?,?,?,?,?,?,?,?)")
-      .run(entry.at, entry.actor, entry.repo, entry.taskId, entry.runId, entry.action, entry.outcome, entry.source);
+  /** v99: a policy change, as the ledger keeps it: what changed and from what to what. Nothing is kept when nothing changed. */
+  private recordPolicy(by: string, repo: string | null, action: string, before: string, after: string, now: Date, outcome = "changed"): void {
+    if (before === after) return;
+    this.recordAction({ at: now.toISOString(), actor: by, repo, taskId: null, runId: null, action, outcome, source: "policy", detail: `${before} → ${after}` });
+  }
+
+  recordAction(entry: Omit<LedgerEntry, "id" | "detail"> & { detail?: string | null }): number {
+    const detail = entry.detail == null ? null : entry.detail.replace(/[\u0000-\u001f\u007f]+/g, " ").slice(0, 300);
+    const row = this.db.prepare("INSERT INTO action_ledger(at,actor,repo,task_id,run_id,action,outcome,source,detail) VALUES (?,?,?,?,?,?,?,?,?)")
+      .run(entry.at, entry.actor, entry.repo, entry.taskId, entry.runId, entry.action, entry.outcome, entry.source, detail);
     return Number(row.lastInsertRowid);
   }
 
@@ -10415,12 +10456,14 @@ export class Store {
       .run(key, value, now.toISOString());
   }
 
-  actionLedger(query: { repos: readonly string[] | null; actor?: string; outcome?: string; source?: string; taskId?: string; before?: number; limit?: number }): LedgerEntry[] {
+  /** `instance`: also the events that belong to no project (sign-ins, accounts, installation policy), for an instance operator. */
+  actionLedger(query: { repos: readonly string[] | null; instance?: boolean; actor?: string; outcome?: string; source?: string; taskId?: string; before?: number; limit?: number }): LedgerEntry[] {
     const clauses: string[] = [];
     const args: (string | number)[] = [];
     if (query.repos !== null) {
-      if (query.repos.length === 0) return [];
-      clauses.push(`repo IN (${query.repos.map(() => "?").join(",")})`);
+      if (query.repos.length === 0 && query.instance !== true) return [];
+      const inProjects = query.repos.length === 0 ? null : `repo IN (${query.repos.map(() => "?").join(",")})`;
+      clauses.push(query.instance === true ? `(${inProjects === null ? "" : `${inProjects} OR `}repo IS NULL)` : inProjects!);
       args.push(...query.repos);
     }
     for (const [field, value] of [["actor", query.actor], ["outcome", query.outcome], ["source", query.source], ["task_id", query.taskId]] as const) {
@@ -10432,6 +10475,7 @@ export class Store {
       id: Number(row["id"]), at: String(row["at"]), actor: String(row["actor"]), repo: row["repo"] === null ? null : String(row["repo"]),
       taskId: row["task_id"] === null ? null : String(row["task_id"]), runId: row["run_id"] === null ? null : Number(row["run_id"]),
       action: String(row["action"]), outcome: String(row["outcome"]), source: String(row["source"]) as LedgerEntry["source"],
+      detail: row["detail"] == null ? null : String(row["detail"]),
     }));
   }
 
@@ -14652,9 +14696,12 @@ export class Store {
   }
 
   setPermissionDefault(mode: UnattendedPermissionMode, by: string, now: Date): void {
+    const before = this.permissionDefault().mode;
     this.db
       .prepare("UPDATE permission_default SET mode = ?, updated_at = ?, updated_by = ? WHERE id = 1")
       .run(mode, now.toISOString(), by);
+    const words = (value: UnattendedPermissionMode) => value === "bypassPermissions" ? "Full access" : "Auto";
+    this.recordPolicy(by, null, "permission default changed", words(before), words(mode), now);
   }
 
   /** Installation filing default for evidence depth. It never rewrites an
@@ -14669,9 +14716,12 @@ export class Store {
   }
 
   setQualityDefault(mode: QualityMode, by: string, now: Date): void {
+    const before = this.qualityDefault().mode;
     this.db
       .prepare("UPDATE quality_default SET mode = ?, updated_at = ?, updated_by = ? WHERE id = 1")
       .run(mode, now.toISOString(), by);
+    const words = (value: QualityMode) => value === "strict" ? "Strict / release" : "Default";
+    this.recordPolicy(by, null, "quality default changed", words(before), words(mode), now);
   }
 
   /** One phase's configured agent at one scope, or null. */
@@ -14704,6 +14754,9 @@ export class Store {
 
   /** Write one complete pair. Audited: who changed spend routing, and when. */
   setPhaseConfig(scope: string, phase: string, provider: string, model: string | null, by: string, now: Date): void {
+    const was = this.phaseConfig(scope, phase);
+    const words = (agent: { provider: string; model: string | null } | null) => agent === null ? "not set" : `${agent.provider} · ${agent.model ?? "its default model"}`;
+    this.recordPolicy(by, scope === "installation" ? null : scope, `agent for ${phase} changed`, words(was), words({ provider, model }), now);
     this.db
       .prepare(
         `INSERT INTO phase_config (scope, phase, provider, model, updated_at, updated_by)
@@ -15439,6 +15492,7 @@ export class Store {
     by: string,
     now: Date,
   ): void {
+    const before = this.getSpendDefaults();
     this.db
       .prepare(
         `INSERT INTO spend_defaults (id, build_per_run_microusd, race_per_agent_microusd, race_total_microusd, race_agents, updated_at, updated_by)
@@ -15451,6 +15505,10 @@ export class Store {
            updated_at = excluded.updated_at, updated_by = excluded.updated_by`,
       )
       .run(defaults.buildPerRunMicrousd, defaults.racePerAgentMicrousd, defaults.raceTotalMicrousd, defaults.raceAgents ?? null, now.toISOString(), by);
+    const dollars = (micro: number | null) => micro === null ? "none" : `$${(micro / 1_000_000).toFixed(2)}`;
+    const words = (row: { buildPerRunMicrousd: number | null; racePerAgentMicrousd: number | null; raceTotalMicrousd: number | null } | null) => row === null ? "not set"
+      : `per build ${dollars(row.buildPerRunMicrousd)}, per race agent ${dollars(row.racePerAgentMicrousd)}, per race ${dollars(row.raceTotalMicrousd)}`;
+    this.recordPolicy(by, null, "spend limits changed", words(before), words(defaults), now);
   }
 
   getSpendDefaults(): { buildPerRunMicrousd: number | null; racePerAgentMicrousd: number | null; raceTotalMicrousd: number | null; raceAgents: number | null; updatedBy: string } | null {
@@ -21580,13 +21638,30 @@ export class Store {
 
   /** Grant a tool, or change what it offers and the rules: the whole row is written. `listedAt` undefined keeps it. */
   saveTeammateGrant(grant: { teammate: number; tool: string; actions: ToolActionInfo[]; rules: Record<string, ToolRule>; listedAt?: string | null }, by: string, now: Date): void {
+    // v99: what the teammate may now do with the tool, action by action.
+    const was = this.teammateGrant(grant.teammate, grant.tool);
+    const mate = this.getTeammate(grant.teammate);
+    const words = (rule: ToolRule | undefined) => rule === undefined ? "not offered" : rule.use === "never" ? "never" : rule.use === "ask" ? "ask first"
+      : rule.limit === undefined ? "do it" : `do it up to ${rule.limit.over} (${rule.limit.field})`;
+    const changes = [...new Set([...Object.keys(was?.rules ?? {}), ...Object.keys(grant.rules)])]
+      .filter(action => words(was?.rules[action]) !== words(grant.rules[action]))
+      .map(action => `${action}: ${words(was?.rules[action])} → ${words(grant.rules[action])}`);
+    if (was === null || changes.length > 0) {
+      this.recordAction({ at: now.toISOString(), actor: by, repo: mate?.repo ?? null, taskId: null, runId: null, source: "policy",
+        action: `${was === null ? "tool given" : "tool rules changed"}: ${mate?.handle ?? `teammate ${grant.teammate}`} · ${grant.tool}`, outcome: was === null ? "granted" : "changed",
+        detail: was === null ? Object.entries(grant.rules).map(([action, rule]) => `${action}: ${words(rule)}`).join("; ") : changes.join("; ") });
+    }
     this.db.prepare(`INSERT INTO teammate_tool (teammate, tool, actions_json, rules_json, listed_at, updated_by, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(teammate, tool) DO UPDATE SET actions_json = excluded.actions_json, rules_json = excluded.rules_json, listed_at = ${grant.listedAt === undefined ? "teammate_tool.listed_at" : "excluded.listed_at"}, updated_by = excluded.updated_by, updated_at = excluded.updated_at`)
       .run(grant.teammate, grant.tool, JSON.stringify(grant.actions), JSON.stringify(grant.rules), grant.listedAt ?? null, by, now.toISOString());
   }
 
-  dropTeammateGrant(teammate: number, tool: string): boolean {
-    return Number(this.db.prepare("DELETE FROM teammate_tool WHERE teammate = ? AND tool = ?").run(teammate, tool).changes) === 1;
+  dropTeammateGrant(teammate: number, tool: string, by: string, now: Date): boolean {
+    const dropped = Number(this.db.prepare("DELETE FROM teammate_tool WHERE teammate = ? AND tool = ?").run(teammate, tool).changes) === 1;
+    const mate = this.getTeammate(teammate);
+    if (dropped) this.recordAction({ at: now.toISOString(), actor: by, repo: mate?.repo ?? null, taskId: null, runId: null, source: "policy",
+      action: `tool taken away: ${mate?.handle ?? `teammate ${teammate}`} · ${tool}`, outcome: "removed" });
+    return dropped;
   }
 
   addTeammateCall(call: { teammate: number; card: number; entry: number; tool: string; action: string; input: Record<string, unknown>; rule: ToolRule["use"]; why: string; state: TeammateCallState; result?: string | null; undoOf?: number; decidedBy?: string }, now: Date): number {
@@ -21916,6 +21991,7 @@ export class Store {
     if (clash !== undefined) return false;
     this.db.prepare("INSERT INTO project_tool (repo, name, spec_json, digest, source, state, created_at, created_by) VALUES (?, ?, ?, ?, ?, 'active', ?, ?)")
       .run(tool.repo, tool.name, tool.specJson, tool.digest, tool.source, now.toISOString(), tool.by);
+    this.recordAction({ at: now.toISOString(), actor: tool.by, repo: tool.repo, taskId: null, runId: null, source: "policy", action: `tool added: ${tool.name}`, outcome: "added", detail: `from ${tool.source}` });
     return true;
   }
 
@@ -21923,6 +21999,7 @@ export class Store {
   removeProjectTool(repo: string, name: string, by: string, now: Date): boolean {
     const { changes } = this.db.prepare("UPDATE project_tool SET state = 'removed', removed_at = ?, removed_by = ? WHERE repo = ? AND name = ? AND state = 'active'")
       .run(now.toISOString(), by, repo, name);
+    if (Number(changes) === 1) this.recordAction({ at: now.toISOString(), actor: by, repo, taskId: null, runId: null, source: "policy", action: `tool removed: ${name}`, outcome: "removed" });
     return Number(changes) === 1;
   }
 

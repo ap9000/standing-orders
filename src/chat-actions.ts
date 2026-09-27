@@ -1330,7 +1330,7 @@ function runTeammateAction(store: Store, payload: SharedAction, actor: string, n
     if ((grant === null ? "" : JSON.stringify(grant.rules)) !== payload.state["rules"]) throw Error("Someone changed its tools since. Ask for a fresh proposal.");
     const found = projectToolsOf(store, mate.repo).find(one => one.name === tool);
     const done = req["change"] === "grant" ? found === undefined ? { ok: false as const, said: `There's no tool called ${tool} any more.` } : grantListed(store, mate, found, null, actor, now)
-      : req["change"] === "revoke" ? revokeTool(store, mate, tool)
+      : req["change"] === "revoke" ? revokeTool(store, mate, tool, actor, now)
       : setToolRules(store, mate, tool, { [String(req["action"])]: { use: req["use"], limit: req["limitField"] === undefined || req["limitField"] === null || req["limitField"] === "" ? null : { field: req["limitField"], over: req["limitOver"] },
         undo: req["undoWith"] ?? grant?.rules[String(req["action"])]?.undo ?? "" } }, actor, now);
     if (!done.ok) throw Error(done.said);

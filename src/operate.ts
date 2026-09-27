@@ -1,4 +1,5 @@
 import { maybeTriggerRepair } from "./dispose.js";
+import { logEvent } from "./log.js";
 import { advanceFlows } from "./flow-engine.js";
 import { readHooksBase, runFlowTriggers, type TriggerIo } from "./flow-triggers.js";
 import { watchFlowReplies } from "./flow-replies.js";
@@ -7932,6 +7933,8 @@ async function watchCommand(
   // C-1): in --json mode every progress line goes to stderr, and stdout
   // receives exactly the final envelope.
   const progress = (line: string): void => {
+    // v99: with STANDING_ORDERS_LOG_FORMAT=json, each line is one JSON event on stderr for a log shipper.
+    if (process.env["STANDING_ORDERS_LOG_FORMAT"] === "json") return logEvent(/\b(fail|failed|died|stopped|error|red)\b/i.test(line) ? "warn" : "info", "worker", { message: line });
     if (json) process.stderr.write(`${line}\n`);
     else write(line);
   };
@@ -8216,6 +8219,8 @@ async function upCommand(
   const allowFlag = text(flags, "allow-host");
 
   const progress = (line: string): void => {
+    // v99: with STANDING_ORDERS_LOG_FORMAT=json, each line is one JSON event on stderr for a log shipper.
+    if (process.env["STANDING_ORDERS_LOG_FORMAT"] === "json") return logEvent(/\b(fail|failed|died|stopped|error|red)\b/i.test(line) ? "warn" : "info", "worker", { message: line });
     if (json) process.stderr.write(`${line}\n`);
     else write(line);
   };

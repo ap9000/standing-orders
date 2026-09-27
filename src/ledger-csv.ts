@@ -7,7 +7,7 @@ export function csvCell(value: string | number | null): string {
   const safe = /^[\s\uFEFF]*[=+@-]/u.test(raw) || /^[\t\r\n]/u.test(raw) ? "'" + raw : raw;
   return `"${safe.replaceAll('"', '""')}"`;
 }
-export const LEDGER_CSV_HEADER = "\uFEFF" + ["ID", "Time (UTC)", "Actor", "Project", "Task", "Run", "Action", "Outcome", "Source"].map(csvCell).join(",") + "\r\n";
+export const LEDGER_CSV_HEADER = "\uFEFF" + ["ID", "Time (UTC)", "Actor", "Project", "Task", "Run", "Action", "Outcome", "Source", "Detail"].map(csvCell).join(",") + "\r\n";
 export function ledgerCsvRows(rows: readonly LedgerEntry[]): string {
-  return rows.map(row => [row.id, row.at, row.actor, row.repo, row.taskId, row.runId, row.action, row.outcome, row.source].map(csvCell).join(",") + "\r\n").join("");
+  return rows.map(row => [row.id, row.at, row.actor, row.repo, row.taskId, row.runId, row.action, row.outcome, row.source, row.detail].map(csvCell).join(",") + "\r\n").join("");
 }
