@@ -15,10 +15,10 @@ const TOOL_ICONS: Record<string, ReactNode> = {
 };
 
 export function TasksView({ view }: { view: BrowserTasksView }) {
-  return <div className="flex w-full max-w-5xl flex-col gap-5">
+  return <div className="flex w-full flex-col gap-5">
     <h1 className="sr-only">Tasks</h1>
     <div className="flex flex-wrap items-center gap-3">
-      <nav aria-label="Task views" className="-mx-1 min-w-0 max-w-full overflow-x-auto px-1 max-sm:-mr-4 max-sm:pr-4">
+      <nav aria-label="Task views" className="-mx-1 min-w-0 max-w-full overflow-x-auto px-1 max-sm:-mr-4 max-sm:max-w-none max-sm:pr-4">
         <ul className="inline-flex h-8 items-center gap-0.5 rounded-lg bg-muted p-0.5 max-sm:h-11">
           {view.tabs.map(tab => <li key={tab.href} className="h-full">
             <a href={tab.href} aria-current={tab.active ? "page" : undefined}
