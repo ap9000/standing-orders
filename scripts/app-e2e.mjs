@@ -16,7 +16,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { createServer as createHttpServer } from "node:http";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes, sign as signWith } from "node:crypto";
 import { flag, freePort, mailSink, Skip, sleep, world } from "./e2e-kit.mjs";
 
 const skipBuild = flag("--skip-build");
@@ -81,6 +81,40 @@ const standIn = createHttpServer(async (request, response) => {
   send(404, {});
 });
 await new Promise(done => standIn.listen(stand.port, "127.0.0.1", done));
+
+// A stand-in identity provider on this computer (OpenID Connect): discovery, its keys, a sign-in page with
+// one button per person, and an ID token signed with its key for the nonce the console asked with.
+const idp = { port: await freePort(), keys: generateKeyPairSync("rsa", { modulusLength: 2048 }), codes: new Map() };
+const idpBase = `http://127.0.0.1:${idp.port}`;
+const idpPeople = { priya: { sub: "idp-priya", email: "priya@acme.example", groups: ["eng-leads"] }, sam: { sub: "idp-sales", email: "sales@acme.example", groups: ["sales"] } };
+const idpServer = createHttpServer(async (request, response) => {
+  const url = new URL(request.url, idpBase);
+  const chunks = []; for await (const chunk of request) chunks.push(chunk);
+  const send = (status, body, type = "application/json") => { response.writeHead(status, { "content-type": type }); response.end(typeof body === "string" ? body : JSON.stringify(body)); };
+  if (url.pathname === "/.well-known/openid-configuration") return send(200, { issuer: idpBase, authorization_endpoint: `${idpBase}/authorize`, token_endpoint: `${idpBase}/token`, jwks_uri: `${idpBase}/keys` });
+  if (url.pathname === "/keys") return send(200, { keys: [{ ...idp.keys.publicKey.export({ format: "jwk" }), kid: "e2e", use: "sig" }] });
+  if (url.pathname === "/authorize") {
+    const buttons = Object.keys(idpPeople).map(who => `<a href="/choose?who=${who}&${url.searchParams.toString().replace(/"/g, "&quot;")}">Sign in as ${who}</a>`).join(" ");
+    return send(200, `<!doctype html><title>Acme SSO</title><h1>Acme SSO</h1>${buttons}`, "text/html; charset=utf-8");
+  }
+  if (url.pathname === "/choose") {
+    const code = randomBytes(12).toString("hex");
+    idp.codes.set(code, { who: url.searchParams.get("who"), nonce: url.searchParams.get("nonce"), challenge: url.searchParams.get("code_challenge") });
+    const back = new URL(url.searchParams.get("redirect_uri")); back.searchParams.set("code", code); back.searchParams.set("state", url.searchParams.get("state"));
+    response.writeHead(302, { location: back.toString() }); return response.end();
+  }
+  if (url.pathname === "/token") {
+    const form = new URLSearchParams(Buffer.concat(chunks).toString("utf8"));
+    const held = idp.codes.get(form.get("code")); idp.codes.delete(form.get("code"));
+    if (held === undefined || createHash("sha256").update(form.get("code_verifier") ?? "").digest("base64url") !== held.challenge) return send(400, { error: "invalid_grant" });
+    const person = idpPeople[held.who], now = Math.floor(Date.now() / 1000);
+    const part = value => Buffer.from(JSON.stringify(value)).toString("base64url");
+    const data = `${part({ alg: "RS256", kid: "e2e" })}.${part({ iss: idpBase, aud: "so-e2e", sub: person.sub, email: person.email, groups: person.groups, nonce: held.nonce, iat: now, exp: now + 300, auth_time: now })}`;
+    return send(200, { id_token: `${data}.${signWith("sha256", Buffer.from(data), idp.keys.privateKey).toString("base64url")}`, token_type: "Bearer" });
+  }
+  send(404, {});
+});
+await new Promise(done => idpServer.listen(idp.port, "127.0.0.1", done));
 
 const w = await world("app", {
   env: { STANDING_ORDERS_TEST_CONNECT: `stripe|Stripe|${standBase}/mcp`, ...(mailCert === null ? {} : { NODE_EXTRA_CA_CERTS: mailCert }) },
@@ -1238,6 +1272,56 @@ await check("One-click connections: Connect Stripe on the kit's checklist, allow
   }
 });
 
+await check("Sign-in with an identity provider: turned on in Settings, a person signs in there and gets an account from their groups, their approvals are that sign-in (no password), and a group that may not enter is refused", [], async () => {
+  await page.goto(`${base}/settings/sign-in`);
+  if (!(await page.locator(".redirect code").innerText()).endsWith("/login/sso/callback")) throw new Error("the page doesn't say which address to register");
+  await page.fill('input[name="issuer"]', idpBase); await page.fill('input[name="client-id"]', "so-e2e"); await page.fill('input[name="client-secret"]', `idp-${randomBytes(6).toString("hex")}`);
+  await page.locator("details:has(input[name=\"label\"]) > summary").click(); await page.fill('input[name="label"]', "Acme SSO");
+  await page.fill('input[name="group-0"]', "eng-leads"); await page.selectOption('select[name="role-0"]', "operator"); await page.selectOption('select[name="projects-0"]', ["all"]);
+  await page.fill('.sign-in form input[name="password"]', w.passwords.alex);
+  await Promise.all([page.waitForNavigation(), page.click('.sign-in form button:has-text("Turn on sign-in with the provider")')]);
+  const said = await page.locator('[role="status"]').first().innerText();
+  if (!/People can sign in with Acme SSO/.test(said)) throw new Error(`turning it on: ${said}`);
+  await shot("sign-in-settings");
+  const context = await w.browser.newContext();
+  try {
+    const priya = await context.newPage();
+    await priya.goto(`${base}/login`);
+    await sleep(300); await priya.screenshot({ path: join(w.out, "sign-in-with-provider.png") });
+    await Promise.all([priya.waitForURL(/127\.0\.0\.1:\d+\/authorize/), priya.click('a.login-sso:has-text("Sign in with Acme SSO")')]);
+    await Promise.all([priya.waitForURL(url => url.port === new URL(base).port && !url.pathname.startsWith("/login"), { timeout: 30_000 }), priya.click('a:has-text("Sign in as priya")')]);
+    await priya.waitForSelector("[data-workspace-shell]");
+    if (rows("SELECT role FROM approver WHERE name = 'priya'")[0]?.role !== "approver") throw new Error("priya didn't get an operator account from the eng-leads group");
+    // A step-up is that sign-in: no password field, and adding a tool goes through.
+    await priya.goto(`${base}/settings/tools?repo=${encodeURIComponent(repo)}`);
+    await priya.evaluate(() => document.querySelectorAll("details").forEach(one => { if (one.querySelector('select[name="catalog"]')) one.open = true; }));
+    if ((await priya.locator('form:has(select[name="catalog"]) [data-sso-step-up="confirmed"]').count()) !== 1 || (await priya.locator('form:has(select[name="catalog"]) input[type="password"]').count()) !== 0) throw new Error("the step-up still asks priya for a password");
+    await priya.selectOption('select[name="catalog"]', "chrome-devtools");
+    await Promise.all([priya.waitForNavigation(), priya.click('form:has(select[name="catalog"]) button:has-text("Add")')]);
+    if (!/Added Chrome DevTools/.test(await priya.locator('[role="status"]').first().innerText())) throw new Error("priya's tool wasn't added");
+    await sleep(300); await priya.screenshot({ path: join(w.out, "sign-in-step-up.png") });
+    // A group that may not enter.
+    await priya.context().clearCookies();
+    await priya.goto(`${base}/login`);
+    await Promise.all([priya.waitForURL(/\/authorize/), priya.click("a.login-sso")]);
+    await Promise.all([priya.waitForLoadState("load"), priya.click('a:has-text("Sign in as sam")')]);
+    await priya.waitForSelector(".problem");
+    if (!/isn.t in a group that may use Standing Orders/.test(await priya.locator(".problem").innerText())) throw new Error("the sales group got in");
+  } finally {
+    await context.close();
+    // Off again: the other checks sign in with passwords on the plain sign-in page.
+    await page.goto(`${base}/settings/sign-in`);
+    await page.locator("details.card:has(button.danger) > summary").click();
+    await page.fill('details.card:has(button.danger) input[name="password"]', w.passwords.alex);
+    await Promise.all([page.waitForNavigation(), page.click("button.danger")]);
+  }
+  const history = rows("SELECT actor, action, outcome, detail FROM action_ledger WHERE source IN ('sign-in','access','policy') ORDER BY id").map(row => `${row.actor}|${row.action}|${row.outcome}`);
+  for (const expected of ["alex|sign-in with a provider turned on|changed", "priya|joined|operator", "priya|signed in|Acme SSO", "unknown account|sign-in refused|no matching group", "alex|sign-in with a provider turned off|changed"]) {
+    if (!history.includes(expected)) throw new Error(`the ledger lacks ${expected}: ${history.slice(-12).join("; ")}`);
+  }
+  return { account: "priya" };
+});
+
 await check("Live canvas: a teammate sees who's here and a card move without reloading", ["Code steps: a Python file and a Node script get the card, pass on what they print, pick the next zone, and get a secret"], async () => {
   const sam = await signIn("sam");
   try {
@@ -1290,5 +1374,5 @@ await check("Signing out ends the session: pages ask to sign in again", [], asyn
   if (answer.status() < 300 || answer.status() >= 400) throw new Error(`after signing out, /flows answered ${answer.status()}`);
 });
 
-standIn.close(); standIn.closeAllConnections();
+standIn.close(); standIn.closeAllConnections(); idpServer.close(); idpServer.closeAllConnections();
 await w.finish("Standing Orders end to end");

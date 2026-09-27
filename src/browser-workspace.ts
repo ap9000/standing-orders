@@ -247,6 +247,8 @@ export type BrowserFlowTrigger = {
 /** A flow's canvas: zones, cards, and what this person may change. */
 export type BrowserFlowView = {
   kind: "flow";
+  /** v100: signed in with the identity provider, a step-up is that sign-in (confirmed, or a link to confirm), not a password. */
+  stepUp?: { label: string; fresh: boolean; confirmHref: string };
   flow: { id: number; name: string; project: string; revision: number; href: string; owner: string };
   /** Opens the lead's chat with a message about this flow started for the person to finish. */
   chatHref: string;

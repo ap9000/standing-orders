@@ -972,8 +972,8 @@ function TriggerSettings({ view, csrf, apply }: { view: BrowserFlowView; csrf: s
         : <form className="flex flex-col gap-2" onSubmit={event => { event.preventDefault(); void act(`${view.flow.href}/linear-key`, { key, password }); }}>
             <Field label="Linear key" hint="From Linear → Settings → Security & access → Personal API keys. Kept on this computer only.">
               <Input type="password" autoComplete="off" value={key} onChange={event => setKey(event.target.value)} placeholder="lin_api_…" /></Field>
-            <Field label="Your Standing Orders password"><Input type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} /></Field>
-            <Button type="submit" size="sm" className="self-start" disabled={busy || key.trim() === "" || password === ""}>Save key</Button>
+            <StepUp view={view} password={password} setPassword={setPassword} />
+            <Button type="submit" size="sm" className="self-start" disabled={busy || key.trim() === "" || !stepUpReady(view, password)}>Save key</Button>
           </form>}
       <form className="flex flex-col gap-2" onSubmit={event => { event.preventDefault(); void act(`${view.flow.href}/hooks-address`, { address }); }}>
         <Field label="Public webhook address" hint="The https site your reverse proxy (Caddy, for example) serves. Have it pass only paths starting /hooks/ to this console.">
@@ -983,6 +983,15 @@ function TriggerSettings({ view, csrf, apply }: { view: BrowserFlowView; csrf: s
     </div>
   </details>;
 }
+
+/** A step-up: the person's password, or (signed in with the identity provider) that sign-in, confirmed or to confirm. */
+function StepUp({ view, password, setPassword }: { view: BrowserFlowView; password: string; setPassword: (value: string) => void }) {
+  if (view.stepUp === undefined) return <Field label="Your Standing Orders password"><Input type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} /></Field>;
+  return view.stepUp.fresh
+    ? <p className="text-[13px] text-success" data-sso-step-up="confirmed">✓ Confirmed with {view.stepUp.label}</p>
+    : <a className="text-[13px] underline" data-sso-step-up="confirm" href={view.stepUp.confirmHref}>Confirm with {view.stepUp.label}</a>;
+}
+const stepUpReady = (view: BrowserFlowView, password: string) => view.stepUp === undefined ? password !== "" : view.stepUp.fresh;
 
 function LinearSecret({ trigger, view, csrf, apply }: { trigger: BrowserFlowTrigger; view: BrowserFlowView; csrf: string; apply: (result: Said) => void }) {
   const [secret, setSecret] = useState("");
@@ -994,8 +1003,8 @@ function LinearSecret({ trigger, view, csrf, apply }: { trigger: BrowserFlowTrig
     setBusy(false); apply(result); if (result.ok) { setSecret(""); setPassword(""); }
   }}>
     <Field label="Linear's signing secret" hint="Linear shows it when you create the webhook."><Input type="password" autoComplete="off" value={secret} onChange={event => setSecret(event.target.value)} /></Field>
-    <Field label="Your Standing Orders password"><Input type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} /></Field>
-    <Button type="submit" size="sm" className="self-start" disabled={busy || secret.trim() === "" || password === ""}>Save secret</Button>
+    <StepUp view={view} password={password} setPassword={setPassword} />
+    <Button type="submit" size="sm" className="self-start" disabled={busy || secret.trim() === "" || !stepUpReady(view, password)}>Save secret</Button>
   </form>;
 }
 

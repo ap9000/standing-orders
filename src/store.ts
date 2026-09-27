@@ -130,7 +130,22 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // v97 keeps what each teammate turn cost, lets a person undo a teammate's tool call where the tool can, and sends a weekly report.
 // v98 lets Telegram push a bot's updates to Standing Orders (a webhook) instead of being polled for them.
 // v99 gives the action ledger its own kinds of event for sign-ins and policy changes, each with a short detail (a change's before → after).
-export const SCHEMA_VERSION = 99;
+// v100 lets people sign in with the organisation's identity provider: each provider identity is linked to one account.
+export const SCHEMA_VERSION = 100;
+
+/** v100: which account each identity-provider identity (issuer + subject) signs in as. */
+const SSO_SCHEMA = `
+CREATE TABLE IF NOT EXISTS sso_identity (
+  issuer       TEXT NOT NULL,
+  subject      TEXT NOT NULL,
+  account      TEXT NOT NULL REFERENCES approver(name),
+  email        TEXT,
+  created_at   TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  PRIMARY KEY (issuer, subject)
+);
+CREATE INDEX IF NOT EXISTS sso_identity_account ON sso_identity (account);
+`;
 
 /**
  * Every timestamp column holds `Date.prototype.toISOString()` output and
@@ -4702,6 +4717,7 @@ function initializeStore(db: Database, file: string): Store {
   db.exec(chatSchema("discord"));
   db.exec(chatSchema("teams"));
   db.exec(TEAM_SCHEMA);
+  db.exec(SSO_SCHEMA);
   migrate(db, preflight === null ? null : Math.abs(preflight));
   addColumn(db, "flow_card", "source_json", "TEXT");
   addColumn(db, "flow_card", "owner", "TEXT");
@@ -10584,6 +10600,73 @@ export class Store {
         this.recordAction({ at: now.toISOString(), actor: args.name, repo, taskId: null, runId: null, action: "joined", outcome: role === "viewer" ? "viewer" : "operator", source: "access" });
       }
       return { ok: true as const, role };
+    });
+  }
+
+  /** v100: the account an identity-provider identity signs in as, or null. */
+  ssoAccount(issuer: string, subject: string): string | null {
+    const row = this.db.prepare("SELECT account FROM sso_identity WHERE issuer = ? AND subject = ?").get(issuer, subject);
+    return row === undefined ? null : String(row["account"]);
+  }
+
+  /** v100: the provider identities linked to an account. */
+  ssoIdentitiesOf(account: string): { issuer: string; subject: string; email: string | null; lastSeenAt: string }[] {
+    return this.db.prepare("SELECT issuer, subject, email, last_seen_at FROM sso_identity WHERE account = ? ORDER BY created_at").all(account)
+      .map(row => ({ issuer: String(row["issuer"]), subject: String(row["subject"]), email: row["email"] == null ? null : String(row["email"]), lastSeenAt: String(row["last_seen_at"]) }));
+  }
+
+  /**
+   * v100: someone the identity provider vouched for. Linked before, they sign
+   * in as that account, and their groups set its role and projects again (a
+   * change ends its other sessions, as any access change does). New, they get
+   * an account named for them (`name`) that has no password. No matching group
+   * (`access` null), a revoked account, or a change that would leave the
+   * installation without an instance operator, refuses.
+   */
+  signInWithSso(identity: { issuer: string; subject: string; email: string | null; label: string }, access: { role: "approver" | "viewer"; projects: ProjectAccess } | null, name: () => string, now: Date):
+    { ok: true; account: string; role: "approver" | "viewer"; created: boolean } | { ok: false; reason: "no-group" | "revoked" | "last-instance-operator" } {
+    return this.transact(() => {
+      const stamp = now.toISOString();
+      const linked = this.ssoAccount(identity.issuer, identity.subject);
+      if (access === null) return { ok: false as const, reason: "no-group" as const };
+      const projects = normalizeProjectAccess(access.projects);
+      const words = (role: string, list: ProjectAccess) => `${role === "viewer" ? "viewer" : "operator"} · ${list === null ? "all projects" : list.length === 0 ? "no projects" : list.map(one => one.split(/[\\/]/).filter(Boolean).at(-1) ?? one).join(", ")}`;
+      if (linked !== null) {
+        const account = this.accountOf(linked);
+        if (account === null || account.revokedAt !== null) return { ok: false as const, reason: "revoked" as const };
+        this.db.prepare("UPDATE sso_identity SET last_seen_at = ?, email = ? WHERE issuer = ? AND subject = ?").run(stamp, identity.email, identity.issuer, identity.subject);
+        const same = account.role === access.role && JSON.stringify(account.projects) === JSON.stringify(projects);
+        if (!same) {
+          const stillOperator = access.role === "approver" && projects === null;
+          if (this.isInstanceOperator(linked) && !stillOperator && !this.accountFacts().some(one => one.name !== linked && this.isInstanceOperator(one.name))) {
+            return { ok: false as const, reason: "last-instance-operator" as const };
+          }
+          this.db.prepare("UPDATE approver SET role = ?, projects_json = ?, generation = generation + 1 WHERE name = ?").run(access.role, projects === null ? null : JSON.stringify(projects), linked);
+          this.revokeDerivedAuthority(linked, `${identity.label} groups`, now);
+          this.recordAction({ at: stamp, actor: linked, repo: null, taskId: null, runId: null, action: "access changed by groups", outcome: access.role === "viewer" ? "viewer" : "operator", source: "access",
+            detail: `${words(account.role, account.projects)} → ${words(access.role, projects)}` });
+        }
+        return { ok: true as const, account: linked, role: access.role, created: false };
+      }
+      const chosen = name();
+      this.db.prepare("INSERT INTO approver (name, credential_hash, added_at, role, generation, projects_json) VALUES (?, ?, ?, ?, 1, ?)")
+        .run(chosen, `sso-only$${randomBytes(16).toString("hex")}`, stamp, access.role, projects === null ? null : JSON.stringify(projects));
+      this.db.prepare("INSERT INTO sso_identity (issuer, subject, account, email, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?)").run(identity.issuer, identity.subject, chosen, identity.email, stamp, stamp);
+      this.recordAction({ at: stamp, actor: chosen, repo: null, taskId: null, runId: null, action: "joined", outcome: access.role === "viewer" ? "viewer" : "operator", source: "access", detail: `via ${identity.label} · ${words(access.role, projects)}` });
+      return { ok: true as const, account: chosen, role: access.role, created: true };
+    });
+  }
+
+  /** v100: sign in with the identity provider as an existing account from now on (the person proved both). */
+  linkSsoIdentity(account: string, identity: { issuer: string; subject: string; email: string | null; label: string }, now: Date): { ok: true } | { ok: false; reason: "linked-elsewhere" } {
+    return this.transact(() => {
+      const linked = this.ssoAccount(identity.issuer, identity.subject);
+      if (linked !== null && linked !== account) return { ok: false as const, reason: "linked-elsewhere" as const };
+      if (linked === null) {
+        this.db.prepare("INSERT INTO sso_identity (issuer, subject, account, email, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?)").run(identity.issuer, identity.subject, account, identity.email, now.toISOString(), now.toISOString());
+        this.recordAction({ at: now.toISOString(), actor: account, repo: null, taskId: null, runId: null, action: `linked to ${identity.label}`, outcome: "linked", source: "access", detail: identity.email });
+      }
+      return { ok: true as const };
     });
   }
 
