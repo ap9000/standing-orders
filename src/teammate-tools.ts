@@ -150,13 +150,13 @@ export function grantListed(store: Store, mate: TeammateRow, tool: ProjectTool, 
   return { ok: true, said: `It can use ${tool.name} now: ${free} of its ${offered.length} action${offered.length === 1 ? "" : "s"} freely (the ones that only read), and the rest after a person approves each call. Change that under Tools.` };
 }
 
-export function revokeTool(store: Store, mate: TeammateRow, tool: string): Done {
+export function revokeTool(store: Store, mate: TeammateRow, tool: string, by: string, now: Date = new Date()): Done {
   for (const call of store.teammateCallsOf(mate.id, 200).filter(one => one.tool === tool && one.state === "asked")) {
     store.moveTeammateCall(call.id, ["asked"], { state: "refused", result: `It can't use ${tool} any more.` }, new Date());
     const question = store.teammateQuestionForCall(call.id);
     if (question !== null) store.dropTeammateQuestion(question.id, new Date());
   }
-  return store.dropTeammateGrant(mate.id, tool) ? { ok: true, said: `It can't use ${tool} any more.` } : { ok: true, said: `It wasn't using ${tool}.` };
+  return store.dropTeammateGrant(mate.id, tool, by, now) ? { ok: true, said: `It can't use ${tool} any more.` } : { ok: true, said: `It wasn't using ${tool}.` };
 }
 
 /** Check one rule: an action the tool offers, a known use, and a limit on one of its number fields. */

@@ -55,7 +55,7 @@ export function isVerifiedApprover(value: unknown): value is VerifiedApprover {
   return typeof value === "object" && value !== null && minted.has(value);
 }
 
-export type PrincipalRefusal = { ok: false; reason: "no-approvers" | "unknown" | "revoked" | "not-an-approver" | "generation" | "forged" };
+export type PrincipalRefusal = { ok: false; reason: "no-approvers" | "unknown" | "revoked" | "locked" | "not-an-approver" | "generation" | "forged" };
 
 /** The password road: the CLI, and any ceremony that retypes it. */
 export function verifyApproverByPassword(

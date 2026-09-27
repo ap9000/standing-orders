@@ -167,6 +167,42 @@ await check("Every main page opens without an error, in the one workspace look, 
   return { pages: paths.length * 2 + 1 };
 });
 
+await check("Sign-in hardening and the audit trail: five wrong passwords lock a name, and its sign-ins and a policy change (with what changed) are in the action ledger and its CSV; /healthz answers", [], async () => {
+  // A throwaway account, so the lock touches no one else's checks.
+  const casey = `casey-${randomBytes(3).toString("hex")}`, secret = `casey-${randomBytes(8).toString("hex")}`;
+  cli(["approver", "add", casey, "--password", secret, ...auth]);
+  const context = await w.browser.newContext();
+  const guest = await context.newPage();
+  const tryPassword = async attempt => {
+    await guest.goto(`${base}/login`);
+    await guest.fill('input[name="name"]', casey); await guest.fill('input[name="token"]', attempt);
+    await Promise.all([guest.waitForLoadState("load"), guest.press('input[name="token"]', "Enter")]);
+    return (await guest.locator("body").innerText()).replace(/\s+/g, " ");
+  };
+  for (let i = 0; i < 5; i++) await tryPassword("not-the-password");
+  const locked = await tryPassword(secret);
+  if (!/Too many wrong passwords\. Try again in 15 minutes\./.test(locked) || !guest.url().includes("/login")) throw new Error(`the right password after five wrong ones: ${locked.slice(0, 200)}`);
+  await context.close();
+  // A policy change, the way Settings makes it, and back.
+  await page.goto(`${base}/settings`);
+  for (const mode of ["bypassPermissions", "auto"]) {
+    const changed = await page.request.post(`${base}/settings/permission-default`, { form: { csrf: await csrfOf(page), "permission-mode": mode }, headers: { origin: base }, maxRedirects: 0 });
+    if (changed.status() !== 303) throw new Error(`the permission default refused ${mode}: ${changed.status()}`);
+  }
+  await page.goto(`${base}/ledger?source=sign-in`); await page.waitForSelector("[data-ledger-id]");
+  const signIns = (await page.locator(".ledger-list").innerText()).replace(/\s+/g, " ");
+  if (!signIns.includes(casey) || !/account locked/.test(signIns) || !/5 wrong passwords in a row; locked for 15 minutes/.test(signIns)) throw new Error(`the sign-in events: ${signIns.slice(0, 300)}`);
+  await page.goto(`${base}/ledger?source=policy`); await page.waitForSelector("[data-ledger-id]");
+  const policy = (await page.locator(".ledger-list").innerText()).replace(/\s+/g, " ");
+  if (!/permission default changed/.test(policy) || !policy.includes("Auto → Full access") || !policy.includes("Full access → Auto")) throw new Error(`the policy events: ${policy.slice(0, 300)}`);
+  await shot("ledger-policy");
+  const csv = await (await page.request.get(`${base}/ledger?format=csv&source=policy`)).text();
+  if (!csv.split("\r\n")[0].includes('"Detail"') || !csv.includes("Auto → Full access")) throw new Error(`the CSV: ${csv.slice(0, 300)}`);
+  const health = await page.request.get(`${base}/healthz`);
+  if (health.status() !== 200 || (await health.json()).status !== "ok") throw new Error(`/healthz: ${health.status()}`);
+  return { locked: casey };
+});
+
 await check("The command line answers: the task list, the approvers, the project's check, and help", [], async () => {
   const list = cli(["task", "list"]);
   const people = cli(["approver", "list"]);

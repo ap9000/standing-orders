@@ -746,11 +746,18 @@ export function storeHandoffArtifact(
  */
 const SECRET_PATTERNS: readonly { name: string; pattern: RegExp }[] = [
   { name: "private-key", pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/ },
-  { name: "aws-access-key", pattern: /\bAKIA[0-9A-Z]{16}\b/ },
+  { name: "aws-access-key", pattern: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/ },
   { name: "github-token", pattern: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}\b|github_pat_[A-Za-z0-9_]{22,}/ },
   { name: "slack-token", pattern: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/ },
   { name: "npm-auth-token", pattern: /_authToken\s*=\s*[^\s$][^\s]*/ },
   { name: "openai-key", pattern: /\bsk-[A-Za-z0-9_-]{32,}\b/ },
+  // v99: the other keys a team pastes most.
+  { name: "stripe-key", pattern: /\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{24,}\b|\bwhsec_[A-Za-z0-9]{24,}\b/ },
+  { name: "google-api-key", pattern: /\bAIza[0-9A-Za-z_-]{35}\b/ },
+  { name: "gitlab-token", pattern: /\bglpat-[A-Za-z0-9_-]{20,}\b/ },
+  { name: "telegram-bot-token", pattern: /\b\d{8,10}:AA[A-Za-z0-9_-]{33}\b/ },
+  { name: "discord-bot-token", pattern: /\b[MN][A-Za-z\d]{23,25}\.[\w-]{6}\.[\w-]{27,}\b/ },
+  { name: "password-in-url", pattern: /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s:@/]{3,}@[^\s/]/i },
 ];
 
 export type SecretHit = { name: string; line: number };

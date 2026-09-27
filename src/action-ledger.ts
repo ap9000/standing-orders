@@ -1,19 +1,37 @@
 import type { Database } from "./store.js";
 
+/** v99: sign-ins (and refusals, lockouts, sign-outs) and policy changes are their own kinds of event. */
+export const LEDGER_SOURCES = ["work", "request", "access", "sign-in", "policy"] as const;
+export type LedgerSource = typeof LEDGER_SOURCES[number];
+
 export type LedgerEntry = {
   id: number; at: string; actor: string; repo: string | null;
   taskId: string | null; runId: number | null;
-  action: string; outcome: string; source: "work" | "request" | "access";
+  action: string; outcome: string; source: LedgerSource;
+  /** v99: what changed, in a short line (a policy's "before → after"); never a secret, prompt or body. */
+  detail: string | null;
 };
 
-export const LEDGER_SCHEMA = `
-CREATE TABLE IF NOT EXISTS action_ledger (
+/** The table as v54 made it: the one earlier shape the v99 rebuild accepts. */
+export const LEDGER_V54_TABLE = (name: string) => `CREATE TABLE ${name} (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   at TEXT NOT NULL, actor TEXT NOT NULL, repo TEXT,
   task_id TEXT, run_id INTEGER,
   action TEXT NOT NULL, outcome TEXT NOT NULL,
   source TEXT NOT NULL CHECK (source IN ('work','request','access'))
-);
+)`;
+export const LEDGER_V54_COLUMNS = ["id", "at", "actor", "repo", "task_id", "run_id", "action", "outcome", "source"] as const;
+export const LEDGER_TABLE = (name: string) => `CREATE TABLE ${name} (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at TEXT NOT NULL, actor TEXT NOT NULL, repo TEXT,
+  task_id TEXT, run_id INTEGER,
+  action TEXT NOT NULL, outcome TEXT NOT NULL,
+  source TEXT NOT NULL CHECK (source IN ('work','request','access','sign-in','policy')),
+  detail TEXT
+)`;
+
+export const LEDGER_SCHEMA = `
+${LEDGER_TABLE("IF NOT EXISTS action_ledger")};
 CREATE INDEX IF NOT EXISTS action_ledger_project ON action_ledger(repo, id DESC);
 CREATE INDEX IF NOT EXISTS action_ledger_actor ON action_ledger(actor, id DESC);
 CREATE TRIGGER IF NOT EXISTS action_ledger_no_update BEFORE UPDATE ON action_ledger

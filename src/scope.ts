@@ -1,3 +1,4 @@
+import { passwordGuardOf } from "./sign-in-guard.js";
 import { validateScopeText } from "./task-text.js";
 import { projectAuthority } from "./project-access.js";
 /**
@@ -1098,12 +1099,17 @@ export function authenticateAccount(
   store: Store,
   by: string,
   secret: string,
-): { ok: true; role: "approver" | "viewer"; generation: number } | { ok: false; reason: "no-approvers" | "unknown" | "revoked" } {
+): { ok: true; role: "approver" | "viewer"; generation: number } | { ok: false; reason: "no-approvers" | "unknown" | "revoked" | "locked" } {
   if (store.listApprovers().length === 0) return { ok: false, reason: "no-approvers" };
+  // v99: wrong passwords in a row lock the name for a while, whatever road they came by.
+  const guard = passwordGuardOf(store), now = Date.now();
+  if (guard.lockedFor(by, now) > 0) return { ok: false, reason: "locked" };
   const account = store.accountOf(by);
   if (account === null || !verifyCredential(account.credentialHash, secret)) {
+    guard.failed(by, now);
     return { ok: false, reason: "unknown" };
   }
+  guard.succeeded(by);
   if (account.revokedAt !== null) return { ok: false, reason: "revoked" };
   return { ok: true, role: account.role, generation: account.generation };
 }

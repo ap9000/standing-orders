@@ -263,6 +263,8 @@ import { resolvePhaseAgent, resolveRoutineAuthority, INSTALLATION_SCOPE, routeOf
 import { isRiskLevel, projectRoute, riskTitle, riskConsequence, chosenWords, agentsSummary, postureWords, RISK_CHOICES, RISK_LEVELS, PHASES as ROUTE_PHASES, type PhaseRoute, type RouteProjection, type RouteOverride, type RouteStamp, type RiskLevel } from "./phase-routing.js";
 import { ALL_CREDENTIAL_ENV, isProviderId, reportsCost, PROVIDER_IDS, validModelId, validateSpec, type Phase, type ProviderId } from "./provider.js";
 import { authenticateAccount, hashPassword, modeFilingCoverage, PLACEHOLDER_RUBRIC } from "./scope.js";
+import { DEFAULT_GUARD_POLICY, passwordGuardOf, SourceBudget } from "./sign-in-guard.js";
+import { logEvent } from "./log.js";
 import { modeTermsFromJson, modeWords, presetTerms, modeTermsJson, modeDigestOf, MODE_MAX_DAYS, type ModeName, type ModeTerms } from "./modes.js";
 import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, readProviderKey, keyStatus, plausibleKey, readAuthMode, readAuthModeStrict, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
 import type { Routine, PublicationGrant, ChatTurn, ChatProviderId, Contest, TournamentTerms, SteerNote, PushSubscription, RepairChainRow, TaskRef } from "./store.js";
@@ -597,6 +599,21 @@ export function createDecisionServer(options: ServeOptions): Server {
     const lastHop = chain.split(",").pop()?.trim() ?? "";
     return lastHop === "" ? peer : `fwd:${lastHop.slice(0, 64)}`;
   }
+  // v99: wrong passwords. One address guessing across names runs out of tries here; each name
+  // locks on its own (sign-in-guard.ts), and every lock, whatever road it came by, is kept.
+  const signInBudget = new SourceBudget();
+  const minutesWords = (ms: number) => { const minutes = Math.max(1, Math.ceil(ms / 60_000)); return minutes >= 120 ? `${Math.round(minutes / 60)} hours` : `${minutes} minute${minutes === 1 ? "" : "s"}`; };
+  /** A sign-in event names the account only when it exists: what someone typed into the name box stays out of history. */
+  const signInActor = (name: string | null): string => name !== null && store.accountOf(name) !== null ? name : "unknown account";
+  const recordSignIn = (actor: string, action: string, outcome: string, detail: string | null = null) => {
+    try { store.recordAction({ at: clock().toISOString(), actor, repo: null, taskId: null, runId: null, action, outcome, source: "sign-in", detail }); }
+    catch (error) { logEvent("error", "ledger.write-failed", { action, error: error instanceof Error ? error.message : String(error) }); }
+  };
+  passwordGuardOf(store).onLock = (account, lockMs) => {
+    const actor = signInActor(account);
+    recordSignIn(actor, "account locked", "locked", `${DEFAULT_GUARD_POLICY.failuresBeforeLock} wrong passwords in a row; locked for ${minutesWords(lockMs)}`);
+    logEvent("warn", "sign-in.locked", { account: actor, minutes: Math.ceil(lockMs / 60_000) });
+  };
   let joinGlobal = { tokens: 30, refilledAt: Date.now() };
   function takeJoinAttempt(source: string): boolean {
     const at = Date.now();
@@ -742,6 +759,8 @@ export function createDecisionServer(options: ServeOptions): Server {
 
   const server = createServer((request, response) => {
     void handle(request, response).catch(error => {
+      // Every unhandled error is logged (v99): the path and the message, never the request's body or query.
+      logEvent("error", "serve.error", { method: request.method, path: new URL(request.url ?? "/", "http://placeholder").pathname, error: error instanceof Error ? error.message : String(error) });
       if (process.env["STANDING_ORDERS_SERVE_DEBUG"] === "1") console.error("SERVE ERROR:", error);
       if (!response.headersSent) {
         const updating = error instanceof Error && error.message.includes(UPDATE_PAUSED);
@@ -1003,12 +1022,23 @@ export function createDecisionServer(options: ServeOptions): Server {
     return done(back, "said", finished.said);
   }
 
+  function healthz(response: ServerResponse, head: boolean): void {
+    let healthy = true;
+    try { store.handle.prepare("SELECT 1 FROM schema_version").get(); } catch { healthy = false; }
+    const body = JSON.stringify({ status: healthy ? "ok" : "unavailable" });
+    response.writeHead(healthy ? 200 : 503, { "content-type": "application/json", "cache-control": "no-store", "x-content-type-options": "nosniff" });
+    response.end(head ? undefined : body);
+  }
+
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     // Webhooks come through a public relay (Tailscale Funnel, a reverse
     // proxy) that forwards its own host name. The host check guards pages a
     // signed-in browser reads; a delivery carries no session and its answer
     // reveals nothing, so /hooks/ is answered before it, and only there.
     const hook = new URL(request.url ?? "/", "http://placeholder");
+    // v99: a liveness probe for a load balancer or orchestrator. It answers before the host check (a probe
+    // uses the address it reached), reads one row, and says nothing else about the installation.
+    if (hook.pathname === "/healthz" && (request.method === "GET" || request.method === "HEAD")) return healthz(response, request.method === "HEAD");
     if (hook.pathname === TELEGRAM_HOOK_PATH) return telegramHook(request, response);
     if (hook.pathname.startsWith("/hooks/")) return flowHook(request, response, hook);
     if (!allowedHost(request.headers.host)) {
@@ -1134,11 +1164,27 @@ export function createDecisionServer(options: ServeOptions): Server {
       // path, re-checked here on both roads: a failed sign-in keeps it, a
       // successful one lands on it. Nothing about the sign-in itself changes.
       const returnTo = loginReturn(body.get("return"));
+      const source = joinSourceOf(request), at = Date.now();
+      const wait = signInBudget.waitFor(source, at);
+      if (wait > 0) {
+        recordSignIn(signInActor(name), "sign-in refused", "too many tries", "from one address");
+        response.setHeader("Retry-After", String(Math.ceil(wait / 1000)));
+        return page(response, 429, loginPage(`Too many sign-in attempts. Try again in ${minutesWords(wait)}.`, returnTo));
+      }
       const authenticated =
         name !== null && token !== null ? authenticateAccount(store, name, token) : null;
       if (authenticated === null || !authenticated.ok) {
+        if (authenticated?.reason === "locked") {
+          const locked = passwordGuardOf(store).lockedFor(name ?? "", at);
+          recordSignIn(signInActor(name), "sign-in refused", "locked");
+          response.setHeader("Retry-After", String(Math.ceil(locked / 1000)));
+          return page(response, 429, loginPage(`Too many wrong passwords. Try again in ${minutesWords(locked)}.`, returnTo));
+        }
+        signInBudget.failed(source, at);
+        recordSignIn(signInActor(name), "sign-in refused", "wrong password");
         return page(response, 403, loginPage("wrong username or password", returnTo));
       }
+      recordSignIn(name as string, "signed in", "browser");
       const id = randomBytes(32).toString("hex");
       sessions.set(id, {
         name: name as string,
@@ -1161,7 +1207,11 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (url.pathname === "/logout" && method === "POST") {
       const cookies = request.headers.cookie ?? "";
       const match = new RegExp(`(?:^|;\\s*)${SESSION_COOKIE}=([0-9a-f]{64})`).exec(cookies);
-      if (match !== null) sessions.delete(match[1] as string);
+      if (match !== null) {
+        const leaving = sessions.get(match[1] as string);
+        if (leaving !== undefined) recordSignIn(leaving.name, "signed out", "browser");
+        sessions.delete(match[1] as string);
+      }
       response.setHeader("Set-Cookie", `${SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${cookieSecure}`);
       return redirect(response, "/login");
     }
@@ -2110,7 +2160,8 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (chosen !== "" && !projects.includes(chosen)) return refuse(response, who, 403, "That project is outside your access.", "/ledger");
       const before = url.searchParams.get("before");
       if (before !== null && (!/^[1-9][0-9]{0,14}$/.test(before) || !Number.isSafeInteger(Number(before)))) return refuse(response, who, 400, "Invalid ledger cursor.", "/ledger");
-      const query = { repos: chosen === "" ? admitted : [chosen],
+      // Events that belong to no project (sign-ins, accounts, installation policy) are an instance operator's to read.
+      const query = { repos: chosen === "" ? admitted : [chosen], instance: chosen === "" && store.isInstanceOperator(who.name),
         actor: (url.searchParams.get("actor") ?? "").slice(0, 200), outcome: (url.searchParams.get("outcome") ?? "").slice(0, 100),
         source: url.searchParams.get("source") ?? "", taskId: (url.searchParams.get("task") ?? "").slice(0, 200) };
       if (url.searchParams.get("format") === "csv") {
@@ -5685,7 +5736,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         const tool = body.get("tool") ?? "", op = body.get("op");
         const grant = store.teammateGrant(mate.id, tool);
         const changed = op === "grant" ? await grantTool(store, mate, tool, who.name, now, { toolHome })
-          : op === "revoke" ? revokeTool(store, mate, tool)
+          : op === "revoke" ? revokeTool(store, mate, tool, who.name, now)
           : grant === null ? { ok: false as const, said: `${nameOf(mate)} doesn't use ${tool}.` } : setToolRules(store, mate, tool, rulesFromForm(grant, key => body.get(key)), who.name, now);
         return redirect(response, `${back}?${changed.ok ? "said" : "problem"}=${encodeURIComponent(changed.said)}#tools`);
       }
@@ -9149,7 +9200,11 @@ export function createDecisionServer(options: ServeOptions): Server {
   function identify(request: IncomingMessage, touch = true): Who | null {
     const bearer = /^Bearer (.+):(.+)$/.exec(request.headers.authorization ?? "");
     if (bearer !== null) {
+      // A password on a request is a sign-in too: the same per-address tries and per-name lock.
+      const source = joinSourceOf(request), at = Date.now();
+      if (signInBudget.waitFor(source, at) > 0) return null;
       const authenticated = authenticateAccount(store, bearer[1] as string, bearer[2] as string);
+      if (!authenticated.ok && authenticated.reason === "unknown") signInBudget.failed(source, at);
       return authenticated.ok ? { name: bearer[1] as string, via: "bearer", role: authenticated.role } : null;
     }
     const cookies = request.headers.cookie ?? "";
