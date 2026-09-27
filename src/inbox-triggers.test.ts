@@ -182,7 +182,7 @@ describe("a Google account", () => {
     expect(await googleAccessToken(dir, lost.fetcher, T0.getTime() + 86_400_000)).toEqual({ ok: false, permanent: true, said: "Google no longer accepts this connection. Connect the account again in Settings → Email." });
   });
 
-  test("the console: Connect goes to Google, the return needs no cookie but a live state, and Settings then shows the account", async () => {
+  test("the console: Connect goes to Google, the return needs no session but a live state from this browser, and Settings then shows the account", async () => {
     const token = google({ status: 200, body: { access_token: "at", refresh_token: "rt", scope: "https://mail.google.com/ openid email", id_token: idToken("alex@gmail.example") } });
     const server = createDecisionServer({ store, evidenceRoot: join(dir, "evidence"), repos: [repo], configDir: dir, googleFetch: token.fetcher, telegramTokenFile: join(dir, "telegram-token") });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -198,14 +198,25 @@ describe("a Google account", () => {
       // The address to register with Google is this page's own.
       expect((await view()).google).toEqual({ connected: null, clientId: "", redirect: `${base}/settings/google/callback` });
       const connect = await fetch(`${base}/settings/google`, { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf, clientId: CLIENT, clientSecret: secret() }), redirect: "manual" });
-      expect(connect.status).toBe(303);
-      const google = new URL(connect.headers.get("location")!);
+      // A page that moves on to Google by itself: a form answered with another site's address is stopped by form-action 'self'.
+      expect(connect.status).toBe(200);
+      const going = await connect.text();
+      expect(going).toContain("Going to Google to sign in");
+      const google = new URL(/content="0;url=([^"]+)"/.exec(going)![1]!.replace(/&amp;/g, "&"));
+      expect(google.origin).toBe("https://accounts.google.com");
       expect(google.searchParams.get("redirect_uri")).toBe(`${base}/settings/google/callback`);
-      // A made-up state is refused; the real one works once, without the session cookie (it stays behind on a return from Google).
-      expect(await (await fetch(`${base}/settings/google/callback?state=made-up&code=4%2Fcode-from-google`)).text()).toContain("That Google sign-in expired.");
-      const back = await fetch(`${base}/settings/google/callback?state=${google.searchParams.get("state")}&code=4%2Fcode-from-google`);
+      // The browser that started it holds the state (Lax, so it rides Google's redirect back; the session cookie is Strict and stays behind).
+      const started = connect.headers.get("set-cookie")!;
+      expect(started).toMatch(new RegExp(`^so-sign-in=${google.searchParams.get("state")}; Path=/settings/google/callback; Max-Age=900; HttpOnly; SameSite=Lax$`));
+      const here = { cookie: started.split(";")[0]! };
+      const callback = `${base}/settings/google/callback?state=${google.searchParams.get("state")}&code=4%2Fcode-from-google`;
+      // Anyone else's browser (someone sent the sign-in link) is refused, and the sign-in isn't spent.
+      expect(await (await fetch(callback)).text()).toContain("That Google sign-in was started in another browser.");
+      expect(await (await fetch(`${base}/settings/google/callback?state=made-up-state-0000&code=4%2Fcode-from-google`, { headers: { cookie: "so-sign-in=made-up-state-0000" } })).text()).toContain("That Google sign-in expired.");
+      const back = await fetch(callback, { headers: here });
       expect(await back.text()).toContain("Connected alex@gmail.example. Send email steps and Email inbox triggers use it now.");
-      expect(await (await fetch(`${base}/settings/google/callback?state=${google.searchParams.get("state")}&code=4%2Fcode-from-google`)).text()).toContain("That Google sign-in expired.");
+      expect(back.headers.get("set-cookie")).toBe("so-sign-in=; Path=/settings/google/callback; Max-Age=0; HttpOnly; SameSite=Lax");
+      expect(await (await fetch(callback, { headers: here })).text()).toContain("That Google sign-in expired.");
       expect((await view()).google).toMatchObject({ connected: "alex@gmail.example", clientId: CLIENT });
       expect(JSON.stringify(readGoogleMail(dir))).toContain('"refreshToken":"rt"');
     } finally {

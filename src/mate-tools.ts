@@ -1,3 +1,4 @@
+import { connectionsOf, oneClickOf } from "./mcp-connect.js";
 import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { repositoryContextRead } from './repository-context.js';
@@ -744,7 +745,7 @@ export const MATE_TOOLS: MateTool[] = [
   },
   {
     name: "get_project_tools",
-    description: "Read a project's tools (the MCP servers its builds get, and only those), the common tools list and servers found on this computer. Add/remove with propose_action tool_add/tool_remove; secrets are set only on the Tools page.",
+    description: "Read a project's tools (the MCP servers its builds get, and only those), the services that connect by signing in, the common tools list and servers found on this computer. A service in connectBySigningIn (Stripe, Notion, Linear, Sentry, Jira…) connects in one click: the person signs in on the service's own page, so give them its connect link and never propose tool_add for it. Add/remove others with propose_action tool_add/tool_remove; secrets are set only on the Tools page.",
     inputSchema: schema({ repo: REPO_ARG }, ["repo"]),
     handle: (ctx, args) => {
       const repo = repoPathOf(ctx.who, args["repo"]);
@@ -761,7 +762,8 @@ export const MATE_TOOLS: MateTool[] = [
             secrets: tool.spec.secrets.map(one => ({ name: one.name, optional: one.optional, set: set.includes(one.name) })),
             lastTest: tool.lastTest === null ? null : { ok: tool.lastTest.ok, at: tool.lastTest.at, tools: tool.lastTest.tools.slice(0, 40), problem: tool.lastTest.problem } };
         }),
-        commonTools: TOOL_CATALOG.filter(one => !names.has(one.name)).map(one => ({ catalog: one.name, label: one.label, about: one.about, needs: one.secrets.filter(secret => !secret.optional).map(secret => secret.name) })),
+        connectBySigningIn: connectionsOf(ctx.store, repo).map(one => ({ service: one.id, label: one.label, about: one.about, state: one.state, connect: `/settings/tools?repo=${encodeURIComponent(repo)}&connect=${one.id}#connect` })),
+        commonTools: TOOL_CATALOG.filter(one => !names.has(one.name) && oneClickOf(one.name) === null).map(one => ({ catalog: one.name, label: one.label, about: one.about, needs: one.secrets.filter(secret => !secret.optional).map(secret => secret.name) })),
         foundOnThisComputer: found.filter(one => !names.has(one.spec.name)).map(one => ({ name: one.spec.name, source: one.source })),
         notice: "Never ask for, accept or repeat a secret's value in chat. Name the secret and open the Tools page (show_control tools with this repo).",
       } };
@@ -900,7 +902,7 @@ export const MATE_TOOLS: MateTool[] = [
       try {
         switch (args["operation"]) {
           case "kit": {
-            // v99: a starter kit — a teammate, the flow it works, its buttons.
+            // a starter kit — a teammate, the flow it works, its buttons.
             const repo = repoPathOf(ctx.who, args["repo"]);
             if (repo === null) return { ok: false, message: "Choose a project from list_repos." };
             operation = "kit_setup"; input = { repo, kit: args["kit"] };

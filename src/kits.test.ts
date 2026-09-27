@@ -1,5 +1,5 @@
 /**
- * Starter kits (v99): one click sets up a teammate, the flow it works and its
+ * Starter kits: one click sets up a teammate, the flow it works and its
  * safe triggers; a second click opens what's there instead of doubling it; the
  * checklist says what's left; and a sample card puts the teammate to work.
  */

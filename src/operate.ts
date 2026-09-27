@@ -4,6 +4,7 @@ import { readHooksBase, runFlowTriggers, type TriggerIo } from "./flow-triggers.
 import { watchFlowReplies } from "./flow-replies.js";
 import { sendTeammateSummaries } from "./teammate-admin.js";
 import { runRequestedUndos, sendTeammateWeeklies } from "./teammate-week.js";
+import { refreshConnections } from "./mcp-connect.js";
 import { runFlowSteps, type StepIo } from "./flow-steps.js";
 import {followDiscord} from "./discord.js";
 import { followTeams } from "./teams.js";
@@ -2218,6 +2219,11 @@ async function tickCommand(
   if (context.shouldStop?.() !== true) {
     try { await runRequestedUndos(store, {}, clock()); }
     catch (error) { flowPass.problems.push(`teammate undo: ${error instanceof Error ? error.message : "could not run"}`); }
+  }
+  // Tools connected by signing in: a sign-in that runs out within ten minutes is renewed here, so a build or a teammate's call starts with a fresh one.
+  if (context.shouldStop?.() !== true) {
+    try { flowPass.problems.push(...(await refreshConnections(store, [repo], clock(), context.flowStepIo?.fetch === undefined ? {} : { fetcher: context.flowStepIo.fetch })).problems); }
+    catch (error) { flowPass.problems.push(`tool sign-ins: ${error instanceof Error ? error.message : "could not renew"}`); }
   }
   const replied = replyPass.taken > 0 || replyPass.problem !== null;
   const flows = flowPass.moved + flowPass.filed.length + flowPass.problems.length + triggerPass.added + triggerPass.problems.length + stepPass.ran + stepPass.problems.length === 0 && !replied ? {} : { flows: { ...flowPass,

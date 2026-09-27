@@ -274,7 +274,7 @@ describe("shared chat action lifecycle", () => {
     expect(store.pendingTeammateUndos().map(one => [one.action, one.undoOf, one.decidedBy])).toEqual([["remove_label", call, who.name]]);
     expect(store.teammateCall(call)?.undoneBy).toBe(who.name);
   });
-  test("the lead sets a starter kit up as one card: its teammate, its flow and its buttons; a second card is refused (v99)", () => {
+  test("the lead sets a starter kit up as one card: its teammate, its flow and its buttons; a second card is refused", () => {
     expect(() => prepareSharedAction(store, who, "kit_setup", { repo, kit: "nope" }, root, now)).toThrow("Choose a kit");
     const card = proposal("kit_setup", { repo, kit: "ops-requests" });
     expect(store.getMateProposal(card)!.payload).toMatchObject({ title: `Set up Ops requests in ${repo.split("/").at(-1)}`, terms: expect.arrayContaining([expect.stringContaining("Adds Ada (ops coordinator) and the Ops requests flow with its “Ask for something” button.")]) });

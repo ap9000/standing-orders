@@ -343,7 +343,12 @@ await check("A Draft step writes a real reply with Claude, and the owner edits a
 });
 
 await check("The lead drafts a reply-and-approve flow from plain words (real Claude turn)", ["Sign in and turn the lead chat on (first-run setup)"], async () => {
-  const { reply, text } = await askLead("Make a flow called Customer replies in this project: Claude drafts a reply to each new question, I approve or edit it in my chat app, then it's posted to the team chat.");
+  let { reply, text } = await askLead("Make a flow called Customer replies in this project: Claude drafts a reply to each new question, I approve or edit it in my chat app, then it's posted to the team chat.");
+  // An earlier check made a similar "Replies" flow, and the lead may fairly ask whether to reuse it: answered the way a person would.
+  const drafted = await reply.locator('[data-view="chat-card"][data-card-state="pending"]').filter({ hasText: "Customer replies" }).first().waitFor({ timeout: 10_000 }).then(() => true, () => false);
+  if (!drafted && /\?/.test(text)) {
+    ({ reply, text } = await askLead("A separate new flow, please: draft Customer replies."));
+  }
   const { href } = await confirmCard(reply, "Customer replies");
   const id = Number(/\/flows\/(\d+)/.exec(href ?? "")?.[1] ?? rows("SELECT id FROM flow WHERE name = 'Customer replies' ORDER BY id DESC LIMIT 1")[0]?.id);
   if (!id) throw new Error(`no flow was created; the lead said: ${text.slice(0, 300)}`);

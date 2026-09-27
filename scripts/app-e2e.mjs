@@ -12,10 +12,12 @@
  * for the Python script. Spends a few Claude turns and real builds.
  */
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
+import { homedir } from "node:os";
 import { join } from "node:path";
-import { randomBytes } from "node:crypto";
-import { flag, mailSink, Skip, sleep, world } from "./e2e-kit.mjs";
+import { createHash, randomBytes } from "node:crypto";
+import { flag, freePort, mailSink, Skip, sleep, world } from "./e2e-kit.mjs";
 
 const skipBuild = flag("--skip-build");
 
@@ -31,8 +33,57 @@ if (docker) {
   mailCert = join(certDir, "cert.pem");
 }
 
+// A stand-in for Stripe's MCP server and its sign-in, on this computer: it says where to sign in, lets
+// Standing Orders register itself, asks the person to allow it, trades the code (PKCE checked) for a
+// two-minute token the worker has to renew, and answers MCP only with a current token.
+const stand = { port: await freePort(), codes: new Map(), live: new Set(), refresh: new Map(), grants: [], registered: [] };
+const standBase = `http://127.0.0.1:${stand.port}`;
+const standIn = createHttpServer(async (request, response) => {
+  const url = new URL(request.url, standBase);
+  const chunks = []; for await (const chunk of request) chunks.push(chunk);
+  const raw = Buffer.concat(chunks).toString("utf8");
+  const send = (status, body, headers = {}) => { response.writeHead(status, { "content-type": "application/json", ...headers }); response.end(typeof body === "string" ? body : JSON.stringify(body)); };
+  if (url.pathname === "/mcp") {
+    const bearer = /^Bearer (.+)$/.exec(request.headers.authorization ?? "")?.[1];
+    if (bearer === undefined || !stand.live.has(bearer)) return send(401, { error: "unauthorized" }, { "www-authenticate": `Bearer resource_metadata="${standBase}/.well-known/oauth-protected-resource/mcp"` });
+    const message = JSON.parse(raw);
+    if (message.id === undefined) return send(202, "");
+    if (message.method === "initialize") return send(200, { jsonrpc: "2.0", id: message.id, result: { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "stripe", version: "1" } } });
+    if (message.method === "tools/list") return send(200, { jsonrpc: "2.0", id: message.id, result: { tools: [
+      { name: "list_payments", description: "List recent payments", inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: true } },
+      { name: "create_refund", description: "Refund a payment", inputSchema: { type: "object", properties: { payment: { type: "string" }, amount: { type: "number" } }, required: ["payment"] } }] } });
+    return send(200, { jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text: "No payments yet." }] } });
+  }
+  if (url.pathname === "/.well-known/oauth-protected-resource/mcp") return send(200, { resource: `${standBase}/mcp`, authorization_servers: [standBase] });
+  if (url.pathname === "/.well-known/oauth-authorization-server") return send(200, { issuer: standBase, authorization_endpoint: `${standBase}/authorize`, token_endpoint: `${standBase}/token`, registration_endpoint: `${standBase}/register`, code_challenge_methods_supported: ["S256"] });
+  if (url.pathname === "/register") { const body = JSON.parse(raw); stand.registered.push(body); return send(201, { client_id: `client-${stand.registered.length}`, redirect_uris: body.redirect_uris }); }
+  if (url.pathname === "/authorize") {
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    return response.end(`<!doctype html><title>Stripe</title><h1>Allow Standing Orders to use your Stripe account?</h1><form method="get" action="/allow">${[...url.searchParams].map(([k, v]) => `<input type="hidden" name="${k}" value="${v.replace(/"/g, "&quot;")}">`).join("")}<button>Allow</button></form>`);
+  }
+  if (url.pathname === "/allow") {
+    const code = randomBytes(12).toString("hex");
+    stand.codes.set(code, { challenge: url.searchParams.get("code_challenge"), redirect: url.searchParams.get("redirect_uri"), resource: url.searchParams.get("resource") });
+    const back = new URL(url.searchParams.get("redirect_uri")); back.searchParams.set("code", code); back.searchParams.set("state", url.searchParams.get("state"));
+    response.writeHead(302, { location: back.toString() }); return response.end();
+  }
+  if (url.pathname === "/token") {
+    const form = new URLSearchParams(raw); stand.grants.push(Object.fromEntries(form));
+    const issue = () => { const access = `at-${randomBytes(6).toString("hex")}`, refresh = `rt-${randomBytes(6).toString("hex")}`; stand.live.add(access); stand.refresh.set(refresh, true); return send(200, { access_token: access, refresh_token: refresh, token_type: "Bearer", expires_in: 120 }); };
+    if (form.get("grant_type") === "authorization_code") {
+      const held = stand.codes.get(form.get("code")); stand.codes.delete(form.get("code"));
+      if (held === undefined || createHash("sha256").update(form.get("code_verifier") ?? "").digest("base64url") !== held.challenge || form.get("redirect_uri") !== held.redirect || form.get("resource") !== `${standBase}/mcp`) return send(400, { error: "invalid_grant" });
+      return issue();
+    }
+    if (form.get("grant_type") === "refresh_token" && stand.refresh.has(form.get("refresh_token"))) return issue();
+    return send(400, { error: "invalid_grant" });
+  }
+  send(404, {});
+});
+await new Promise(done => standIn.listen(stand.port, "127.0.0.1", done));
+
 const w = await world("app", {
-  env: mailCert === null ? {} : { NODE_EXTRA_CA_CERTS: mailCert },
+  env: { STANDING_ORDERS_TEST_CONNECT: `stripe|Stripe|${standBase}/mcp`, ...(mailCert === null ? {} : { NODE_EXTRA_CA_CERTS: mailCert }) },
   seed: repo => {
     mkdirSync(join(repo, "scripts"), { recursive: true });
     writeFileSync(join(repo, "scripts", "size.py"), "import json, sys\ncard = json.load(sys.stdin)['card']\nprint(f\"{card['title']} looks {'big' if 'Acme' in card['title'] else 'small'}\")\nprint('goto: Big' if 'Acme' in card['title'] else 'goto: Small')\n");
@@ -702,7 +753,7 @@ await check("Follow-ups: a card emails someone and waits; their reply moves it o
 
 // ------------------------------------------------------------------ two people on one flow
 
-await check("AI teammates: Maya (a support rep) answers a question card, approves a small refund on her own, brings the big one to you, and stops while paused (real Claude turns)", [], async () => {
+await check("AI teammates: Maya (a support rep) answers a question card, approves a small refund on its own, brings the big one to you, and stops while paused (real Claude turns)", [], async () => {
   // A teammate from the Support rep template, on the Teammates page; its soul file saves as a new version.
   await page.goto(`${base}/teammates`);
   await page.selectOption('form[data-new-teammate] select[name="template"]', "support");
@@ -716,7 +767,8 @@ await check("AI teammates: Maya (a support rep) answers a question card, approve
   if (!/version 2/.test(new URL(page.url()).searchParams.get("said") ?? "")) throw new Error(`saving the soul file said: ${page.url()}`);
   // A flow Maya works: she reads each message and picks where it goes, then decides the refunds.
   const at = (id, title, kind, x, y, rest) => ({ id, title, kind, zone: zone(x, y), ...none, next: null, onFail: null, ...rest });
-  const id = await newFlow("Support desk", [
+  // Not "Support desk": the starter kit of that name is set up later in this world.
+  const id = await newFlow("Customer help", [
     at("read", "Maya reads it", "teammate", 0, 0, { teammate: "maya", instructions: "Read the customer's message. Write the short reply we'd send them, and pick where it goes: a refund request goes to the refund decision; anything else is just a question.",
       routes: [{ answer: "Just a question", to: "answered" }, { answer: "Refund request", to: "decide" }], onFail: "stuck" }),
     at("decide", "Refund?", "approval", 360, 0, { teammate: "maya", toOwner: true, next: "refunded", onFail: "declined" }),
@@ -777,7 +829,7 @@ await check("AI teammates: Maya (a support rep) answers a question card, approve
   return { reply: reply.slice(0, 120), summary: (await page.locator(".teammate-summary").innerText()).slice(0, 200) };
 });
 
-await check("The lead adds a teammate and changes one's rules from plain words, as cards you confirm (real Claude turns)", ["Turn the lead chat on (first-run setup, with your password)", "AI teammates: Maya (a support rep) answers a question card, approves a small refund on her own, brings the big one to you, and stops while paused (real Claude turns)"], async () => {
+await check("The lead adds a teammate and changes one's rules from plain words, as cards you confirm (real Claude turns)", ["Turn the lead chat on (first-run setup, with your password)", "AI teammates: Maya (a support rep) answers a question card, approves a small refund on its own, brings the big one to you, and stops while paused (real Claude turns)"], async () => {
   const confirm = async reply => {
     const card = reply.locator('[data-view="chat-card"][data-card-state="pending"]').first();
     await card.waitFor({ timeout: 30_000 });
@@ -1092,6 +1144,56 @@ await check("Starter kits: the Support desk kit sets up Maya and its flow in one
   return { stage: worked.stage, draft: draft.slice(0, 160) };
 });
 
+await check("One-click connections: Connect Stripe on the kit's checklist, allow it on Stripe's page, and Maya can use it; the sign-in stays out of the database and the worker renews it", ["Starter kits: the Support desk kit sets up Maya and its flow in one click, its checklist says what's left, and Try it has Maya draft a reply for you to check (real Claude turn)"], async () => {
+  const secrets = join(homedir(), ".standing-orders", "tool-secrets", createHash("sha256").update(repo).digest("hex").slice(0, 16), "stripe.json");
+  try {
+    await page.goto(`${base}/kits/support-desk?repo=${encodeURIComponent(repo)}`);
+    await Promise.all([page.waitForNavigation(), page.locator('[data-step="tool-stripe"] a:has-text("Connect")').click()]);
+    if (!/\/settings\/tools\?.*kit=support-desk&connect=stripe#connect$/.test(page.url())) throw new Error(`Connect went to ${page.url()}`);
+    if ((await page.locator('#connect-stripe[data-state="open"]').count()) !== 1 || (await page.locator(".connect-tile").count()) < 15) throw new Error("the one-click services aren't offered");
+    if (!(await page.locator("#connect-heading").isVisible()) || (await page.locator("button.connect-wanted").innerText()) !== "Connect Stripe") throw new Error("the page doesn't open on Connect with one click and a Connect Stripe button");
+    if ((await page.locator('select[name="catalog"] option[value="sentry"]').count()) !== 0) throw new Error("Sentry is still offered with a key as well as by signing in");
+    await shot("connect-tiles");
+    const phone = await signIn("alex", { width: 390, height: 844 });
+    await phone.goto(`${base}/settings/tools?repo=${encodeURIComponent(repo)}&kit=support-desk&connect=stripe#connect`); await phone.waitForSelector("#connect-stripe"); await sleep(300);
+    await phone.screenshot({ path: join(w.out, "connect-tiles-phone.png") });
+    const wide = await phone.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
+    await phone.context().close();
+    if (wide) throw new Error("the connect tiles scroll sideways on a phone");
+    // One click (with the password every new tool takes), then Stripe's own page.
+    await page.fill('.tool-connect input[name="password"]', w.passwords.alex);
+    await page.click("button.connect-wanted");
+    await page.waitForURL(url => url.port === String(stand.port) && url.pathname === "/authorize", { timeout: 30_000 });
+    if (stand.registered.at(-1)?.redirect_uris?.[0] !== `${base}/settings/tools/connected`) throw new Error(`registered with ${JSON.stringify(stand.registered.at(-1))}`);
+    // Someone else finishing this sign-in (the link sent to them) lands nowhere: the return must come to this browser.
+    const elsewhere = await (await fetch(`${base}/settings/tools/connected?state=${new URL(page.url()).searchParams.get("state")}&code=someone-elses`)).text();
+    if (!/started in another browser/.test(elsewhere)) throw new Error(`a return from another browser: ${elsewhere.slice(0, 200)}`);
+    await Promise.all([page.waitForURL(/\/kits\/support-desk/, { timeout: 30_000 }), page.click('button:has-text("Allow")')]);
+    const said = await page.locator('[role="status"]').first().innerText();
+    if (!/Stripe is connected, and Maya can use it/.test(said)) throw new Error(`back on the kit: ${said}`);
+    if ((await page.locator('[data-step="tool-stripe"]').getAttribute("data-done")) !== "true") throw new Error("the checklist doesn't say Maya can use Stripe");
+    await shot("kit-connected");
+    const tool = rows("SELECT spec_json FROM project_tool WHERE name = 'stripe'")[0];
+    if (!tool || JSON.parse(tool.spec_json).url !== `${standBase}/mcp`) throw new Error(`the tool: ${JSON.stringify(tool)}`);
+    if (rows("SELECT 1 FROM teammate_tool t JOIN teammate m ON m.id = t.teammate WHERE m.handle = 'maya' AND t.tool = 'stripe'").length !== 1) throw new Error("Maya wasn't given Stripe");
+    const first = JSON.parse(readFileSync(secrets, "utf8"));
+    if (!stand.live.has(first.OAUTH_ACCESS_TOKEN) || !first.OAUTH_REFRESH_TOKEN) throw new Error("the sign-in isn't in the tool's secrets file");
+    for (const file of [w.db, `${w.db}-wal`].filter(existsSync)) if (readFileSync(file).includes(first.OAUTH_REFRESH_TOKEN)) throw new Error(`the sign-in reached ${file}`);
+    // Two minutes left on it: the worker renews it, and the tool works with the new one.
+    await until("the worker to renew the sign-in", async () => stand.grants.some(one => one.grant_type === "refresh_token" && one.refresh_token === first.OAUTH_REFRESH_TOKEN) ? true : null, { timeoutMs: 90_000, everyMs: 1000 });
+    const renewed = JSON.parse(readFileSync(secrets, "utf8"));
+    if (renewed.OAUTH_ACCESS_TOKEN === first.OAUTH_ACCESS_TOKEN) throw new Error("the renewed sign-in wasn't kept");
+    stand.live.delete(first.OAUTH_ACCESS_TOKEN);
+    await page.goto(`${base}/settings/tools?repo=${encodeURIComponent(repo)}`);
+    await Promise.all([page.waitForNavigation(), page.locator('#tool-stripe button:has-text("Test")').click()]);
+    const tested = await page.locator('[role="status"]').first().innerText();
+    if (!/stripe works: 2 tools/.test(tested)) throw new Error(`the test after renewal: ${tested}`);
+    return { grants: stand.grants.map(one => one.grant_type) };
+  } finally {
+    rmSync(secrets, { force: true });
+  }
+});
+
 await check("Live canvas: a teammate sees who's here and a card move without reloading", ["Code steps: a Python file and a Node script get the card, pass on what they print, pick the next zone, and get a secret"], async () => {
   const sam = await signIn("sam");
   try {
@@ -1144,4 +1246,5 @@ await check("Signing out ends the session: pages ask to sign in again", [], asyn
   if (answer.status() < 300 || answer.status() >= 400) throw new Error(`after signing out, /flows answered ${answer.status()}`);
 });
 
+standIn.close(); standIn.closeAllConnections();
 await w.finish("Standing Orders end to end");

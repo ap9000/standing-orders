@@ -70,6 +70,21 @@ what it does, and its arguments as JSON with fill-ins. **Test** on the Tools
 page lists what a tool can do. A tool that says it failed takes the failure
 path.
 
+### Connect a service with one click
+
+Settings → Tools → **Connect with one click** lists services whose tools you
+connect by signing in: Stripe, Notion, Linear, Sentry, Jira and Confluence,
+Intercom, Attio, Zapier, Square, PayPal, Klaviyo, Webflow, Wix, Canva, Vercel
+and Cloudflare. Enter your Standing Orders password, pick the service, and
+allow Standing Orders on the service's own page. You never copy a key.
+
+The sign-in is kept in the tool's secrets file on this computer, never in the
+database, and Standing Orders renews it before it runs out. If a service
+stops accepting it (you removed the app on the service's side, say), the log
+says so and the tool's test fails; click the service again to sign in again.
+Connecting from a starter kit's checklist also lets the kit's teammate use
+the tool: reading freely, the rest after you approve each call.
+
 ## Update where it came from
 
 For cards that came from GitHub or Linear: comments on the issue, and can

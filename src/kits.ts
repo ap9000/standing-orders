@@ -1,5 +1,5 @@
 /**
- * Starter kits (v99): a working setup in one click — an AI teammate, the flow
+ * Starter kits: a working setup in one click — an AI teammate, the flow
  * it works, and the triggers that are safe to add straight away — plus a
  * checklist of what's left (connect email, connect a tool) and a sample card
  * that shows the teammate at work within seconds.
@@ -200,7 +200,7 @@ export function kitChecklist(store: Store, kit: Kit, repo: string, dir: string |
       ? { id: `tool-${tool.tool}`, done: true, said: `${name} can use ${tool.label}`, href: `/teammates/${set.mate.id}#tools` }
       : connected
         ? { id: `tool-${tool.tool}`, done: false, said: `Let ${name} use ${tool.label}, ${tool.why}`, href: `/teammates/${set.mate.id}#tools` }
-        : { id: `tool-${tool.tool}`, done: false, said: `Connect ${tool.label}, ${tool.why}`, href: `/settings/tools?repo=${encodeURIComponent(repo)}#connect-${tool.tool}`, action: "connect", tool: tool.tool });
+        : { id: `tool-${tool.tool}`, done: false, said: `Connect ${tool.label}, ${tool.why}`, href: `/settings/tools?repo=${encodeURIComponent(repo)}&kit=${kit.id}&connect=${tool.tool}#connect`, action: "connect", tool: tool.tool });
   }
   const tried = store.flowCards(set.flow.id, true).length > 0;
   steps.push({ id: "sample", done: tried, said: tried ? `${name} has worked a card` : `See ${name} work a sample card`, href: tried ? `/flows/${set.flow.id}` : null, ...(tried ? {} : { action: "sample" as const }) });
