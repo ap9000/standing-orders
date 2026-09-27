@@ -15,10 +15,10 @@ const TOOL_ICONS: Record<string, ReactNode> = {
 };
 
 export function TasksView({ view }: { view: BrowserTasksView }) {
-  return <div className="mx-auto flex w-full max-w-5xl flex-col gap-5">
+  return <div className="flex w-full max-w-5xl flex-col gap-5">
     <h1 className="sr-only">Tasks</h1>
     <div className="flex flex-wrap items-center gap-3">
-      <nav aria-label="Task views" className="-mx-1 min-w-0 max-w-full overflow-x-auto px-1">
+      <nav aria-label="Task views" className="-mx-1 min-w-0 max-w-full overflow-x-auto px-1 max-sm:-mr-4 max-sm:pr-4">
         <ul className="inline-flex h-8 items-center gap-0.5 rounded-lg bg-muted p-0.5 max-sm:h-11">
           {view.tabs.map(tab => <li key={tab.href} className="h-full">
             <a href={tab.href} aria-current={tab.active ? "page" : undefined}
@@ -44,13 +44,13 @@ export function TasksView({ view }: { view: BrowserTasksView }) {
     {view.empty !== null ? <Card className="items-start py-10">
       <p className="text-base text-muted-foreground">{view.empty.text}</p>
       {view.empty.action && <Button asChild variant="outline"><a href={view.empty.action.href}>{view.empty.action.label}</a></Button>}
-    </Card> : <Card className="gap-0 p-0 max-sm:p-0">
-      <ul className="divide-y divide-border">
+    </Card> : <div className="border-y border-border">
+      <ul className="divide-y divide-border sm:grid sm:grid-cols-[minmax(0,1fr)_auto_auto]">
         {view.rows.map(row => {
           const tone = toneOf(row.status.tone);
           return <li key={row.id} data-task={row.id} data-work-status={row.status.token}
-            className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 transition-colors hover:bg-[var(--so-raised)]">
-            <div className="min-w-0 flex-1 basis-72">
+            className="grid grid-cols-1 gap-y-2 px-2 py-3 transition-colors hover:bg-[var(--so-raised)] sm:col-span-3 sm:grid-cols-subgrid sm:items-center sm:gap-x-6">
+            <div className="min-w-0">
               <a href={row.href} className="block text-[13.5px] font-medium leading-snug hover:underline hover:underline-offset-4 max-sm:py-1">{row.title}</a>
               <p className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[12.5px] text-muted-foreground">
                 {row.project && <span className="text-foreground/80">{row.project}</span>}
@@ -61,16 +61,16 @@ export function TasksView({ view }: { view: BrowserTasksView }) {
               {row.problem && <p className="mt-1 text-[12.5px] text-destructive">{row.problem}</p>}
               {row.notes.map(note => <p key={note} className="mt-1 text-[12.5px] text-muted-foreground">{note}</p>)}
             </div>
-            <div className="flex items-center gap-3 max-sm:w-full max-sm:justify-between">
-              <Badge tone={tone}>{row.status.label}</Badge>
-              {row.action && <Button asChild variant="outline" size="sm">
+            <div className="flex items-center gap-3 max-sm:w-full max-sm:justify-between sm:contents">
+              <Badge tone={tone} className="sm:justify-self-start">{row.status.label}</Badge>
+              {row.action && <Button asChild variant="outline" size="sm" className="sm:justify-self-end">
                 <a href={row.action.href} data-primary-action>{row.action.label}<ArrowRight /></a>
               </Button>}
             </div>
           </li>;
         })}
       </ul>
-    </Card>}
+    </div>}
 
     {(view.pages.first || view.pages.next) && <nav aria-label="Task pages" className="flex gap-2">
       {view.pages.first && <Button asChild variant="outline" size="sm"><a href={view.pages.first}>First page</a></Button>}

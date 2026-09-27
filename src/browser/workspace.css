@@ -115,7 +115,7 @@ body:has(.so-workspace) { margin: 0; padding: 0; background: var(--so-ground); o
 .so-workspace-header { flex-shrink: 0; min-height: 52px; padding: 8px 12px 8px 20px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--so-line); }
 .so-workspace-header h1, .so-header-title { font-size: 14px; font-weight: 600; line-height: 1.3; letter-spacing: -.01em; margin: 0; flex-shrink: 0; }
 .so-focus-label { font-size: 12px; color: var(--so-muted); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; min-width: 0; margin-left: 3px; }
-.so-workspace-notices { padding: 12px 20px 0; display: grid; gap: 8px; flex-shrink: 0; }
+.so-workspace-notices { padding: 12px 28px 0; display: grid; gap: 8px; flex-shrink: 0; }
 .so-workspace .so-main-content { flex: 1; min-height: 0; min-width: 0; max-width: none; width: 100%; margin: 0; padding: 0; display: flex; flex-direction: column; }
 .so-page-content { padding: 24px 28px; overflow: auto; min-height: 0; }
 .so-lead-chat { display: flex; flex-direction: column; flex: 1; min-height: 0; }

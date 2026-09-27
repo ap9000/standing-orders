@@ -33,7 +33,7 @@ function Section({ title, description, children, id }: { title: string; descript
 }
 
 function StatusDot({ tone }: { tone: "ok" | "warn" | "off" | "neutral" }) {
-  return <span aria-hidden="true" className={cn("size-2 shrink-0 rounded-full", tone === "ok" && "bg-success", tone === "warn" && "bg-attention", tone === "neutral" && "bg-muted-foreground", tone === "off" && "border-[1.5px] border-muted-foreground")} />;
+  return <span aria-hidden="true" className={cn("size-2 shrink-0 rounded-full", tone === "ok" && "bg-success", tone === "warn" && "bg-warning", tone === "neutral" && "bg-muted-foreground", tone === "off" && "border-[1.5px] border-muted-foreground")} />;
 }
 
 function Themes({ view, csrf }: { view: BrowserSettingsView; csrf: string }) {
@@ -175,7 +175,7 @@ function Notifications({ view, csrf }: { view: BrowserSettingsView; csrf: string
       ? <div className="flex items-center gap-3"><span className="font-semibold capitalize">{view.services.configured[0]}</span><span className="inline-flex items-center gap-2 text-sm text-muted-foreground"><StatusDot tone="ok" />Receiving alerts</span></div>
       : <AutoForm action="/settings/messaging" csrf={csrf}>{submit => <div className="grid gap-2">
         <Label>Alert service</Label>
-        {view.services!.implicit && <p className="text-[13px] text-attention">Several are connected and none was chosen. Pick one.</p>}
+        {view.services!.implicit && <p className="text-[13px] text-warning">Several are connected and none was chosen. Pick one.</p>}
         <RadioGroup name="primary" {...(view.services!.channel === null ? {} : { defaultValue: view.services!.channel })} onValueChange={submit} className="grid gap-2 sm:grid-cols-2">
           {view.services!.configured.map(one => <RadioCard key={one} id={`${base}-${one}`} value={one} title={one.charAt(0).toUpperCase() + one.slice(1)} description={one === "telegram" ? "Answer buttons and replies" : "Messages with links"} />)}
         </RadioGroup></div>}</AutoForm>)}
