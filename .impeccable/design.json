@@ -1,0 +1,1233 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-27T23:43:39.775Z",
+  "title": "Design System: Signal",
+  "extensions": {
+    "colorMeta": {
+      "signal": {
+        "role": "primary",
+        "displayName": "Chart Magenta",
+        "scheme": "light",
+        "cssVar": "--so-signal",
+        "tonalRamp": [
+          "#1c000e",
+          "#48012b",
+          "#79014b",
+          "#ad056e",
+          "#d53d90",
+          "#fe64b3",
+          "#ffacd1",
+          "#ffe7f1"
+        ],
+        "canonical": "oklch(54.7% 0.202 351.5)"
+      },
+      "signal-hover": {
+        "role": "primary",
+        "displayName": "Chart Magenta, Pressed",
+        "scheme": "light",
+        "cssVar": "--so-signal-hover",
+        "tonalRamp": [
+          "#1c000e",
+          "#48002b",
+          "#79024b",
+          "#a71e6c",
+          "#cf488e",
+          "#f76db2",
+          "#ffadd1",
+          "#fee7f0"
+        ],
+        "canonical": "oklch(49.5% 0.184 351.7)"
+      },
+      "on-signal": {
+        "role": "primary",
+        "displayName": "On Magenta",
+        "scheme": "light",
+        "cssVar": "--so-on-signal",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ],
+        "canonical": "oklch(100.0% 0.000 0)"
+      },
+      "signal-soft": {
+        "role": "primary",
+        "displayName": "Magenta Wash",
+        "scheme": "light",
+        "cssVar": "--so-signal-soft",
+        "tonalRamp": [
+          "#12080d",
+          "#2d2128",
+          "#4b3e45",
+          "#6b5c64",
+          "#8c7d85",
+          "#b0a0a8",
+          "#d4c4cd",
+          "#fae9f2"
+        ],
+        "canonical": "oklch(95.3% 0.022 344.2)"
+      },
+      "selection": {
+        "role": "primary",
+        "displayName": "Chart Selection",
+        "scheme": "light",
+        "cssVar": "--so-selection",
+        "tonalRamp": [
+          "#180310",
+          "#351b2a",
+          "#543848",
+          "#755768",
+          "#977889",
+          "#bb9aac",
+          "#e0bed0",
+          "#fee7f3"
+        ],
+        "canonical": "oklch(90.2% 0.046 344.2)"
+      },
+      "ground": {
+        "role": "neutral",
+        "displayName": "Frame Grey",
+        "scheme": "light",
+        "cssVar": "--so-ground",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ],
+        "canonical": "oklch(95.2% 0.000 0)"
+      },
+      "paper": {
+        "role": "neutral",
+        "displayName": "Paper",
+        "scheme": "light",
+        "cssVar": "--so-paper",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ],
+        "canonical": "oklch(100.0% 0.000 0)"
+      },
+      "raised": {
+        "role": "neutral",
+        "displayName": "Raised",
+        "scheme": "light",
+        "cssVar": "--so-raised",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ],
+        "canonical": "oklch(97.0% 0.000 0)"
+      },
+      "soft": {
+        "role": "neutral",
+        "displayName": "Soft",
+        "scheme": "light",
+        "cssVar": "--so-soft",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ],
+        "canonical": "oklch(96.1% 0.000 0)"
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Ink",
+        "scheme": "light",
+        "cssVar": "--so-ink",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ],
+        "canonical": "oklch(20.5% 0.000 0)"
+      },
+      "ink-hover": {
+        "role": "neutral",
+        "displayName": "Ink, Pressed",
+        "scheme": "light",
+        "cssVar": "--so-accent-hover",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ],
+        "canonical": "oklch(34.1% 0.000 0)"
+      },
+      "on-ink": {
+        "role": "neutral",
+        "displayName": "On Ink",
+        "scheme": "light",
+        "cssVar": "--so-on-accent",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ],
+        "canonical": "oklch(100.0% 0.000 0)"
+      },
+      "muted": {
+        "role": "neutral",
+        "displayName": "Muted",
+        "scheme": "light",
+        "cssVar": "--so-muted",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ],
+        "canonical": "oklch(51.0% 0.000 0)"
+      },
+      "nav-ink": {
+        "role": "neutral",
+        "displayName": "Nav Ink",
+        "scheme": "light",
+        "cssVar": "--so-nav-ink",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ],
+        "canonical": "oklch(43.9% 0.000 0)"
+      },
+      "nav-hover": {
+        "role": "neutral",
+        "displayName": "Nav Hover",
+        "scheme": "light",
+        "cssVar": "--so-nav-hover",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ],
+        "canonical": "oklch(91.9% 0.000 0)"
+      },
+      "line": {
+        "role": "neutral",
+        "displayName": "Hairline",
+        "scheme": "light",
+        "cssVar": "--so-line",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ],
+        "canonical": "oklch(92.5% 0.000 0)"
+      },
+      "input-line": {
+        "role": "neutral",
+        "displayName": "Control Line",
+        "scheme": "light",
+        "cssVar": "--so-input-line",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ],
+        "canonical": "oklch(87.0% 0.000 0)"
+      },
+      "neutral-ink": {
+        "role": "neutral",
+        "displayName": "Neutral Badge Ink",
+        "scheme": "light",
+        "cssVar": "--so-neutral-ink",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ],
+        "canonical": "oklch(43.9% 0.000 0)"
+      },
+      "neutral-soft": {
+        "role": "neutral",
+        "displayName": "Neutral Badge Fill",
+        "scheme": "light",
+        "cssVar": "--so-neutral-soft",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ],
+        "canonical": "oklch(95.5% 0.000 0)"
+      },
+      "danger": {
+        "role": "status",
+        "displayName": "Vermilion",
+        "scheme": "light",
+        "cssVar": "--so-danger",
+        "tonalRamp": [
+          "#1c0200",
+          "#480b00",
+          "#791901",
+          "#af2800",
+          "#db4a28",
+          "#fe7556",
+          "#ffb4a2",
+          "#fee9e4"
+        ],
+        "canonical": "oklch(54.1% 0.188 34.2)"
+      },
+      "danger-soft": {
+        "role": "status",
+        "displayName": "Vermilion Wash",
+        "scheme": "light",
+        "cssVar": "--so-danger-soft",
+        "tonalRamp": [
+          "#130806",
+          "#2f211f",
+          "#4d3e3b",
+          "#6d5d5a",
+          "#8f7e7a",
+          "#b2a09d",
+          "#d7c4c1",
+          "#fdeae6"
+        ],
+        "canonical": "oklch(95.4% 0.021 31.8)"
+      },
+      "warning": {
+        "role": "status",
+        "displayName": "Amber",
+        "scheme": "light",
+        "cssVar": "--so-warning",
+        "tonalRamp": [
+          "#150800",
+          "#381e00",
+          "#613601",
+          "#8c5101",
+          "#b76f19",
+          "#dd9245",
+          "#ffb875",
+          "#feebd9"
+        ],
+        "canonical": "oklch(57.1% 0.129 63.9)"
+      },
+      "warning-soft": {
+        "role": "status",
+        "displayName": "Amber Wash",
+        "scheme": "light",
+        "cssVar": "--so-warning-soft",
+        "tonalRamp": [
+          "#100a00",
+          "#2d240a",
+          "#4a4127",
+          "#6a6146",
+          "#8c8266",
+          "#afa587",
+          "#d3c9ab",
+          "#f9eecf"
+        ],
+        "canonical": "oklch(96.8% 0.042 90.8)"
+      },
+      "success": {
+        "role": "status",
+        "displayName": "Built Green",
+        "scheme": "light",
+        "cssVar": "--so-success",
+        "tonalRamp": [
+          "#000f06",
+          "#012e1a",
+          "#014f31",
+          "#03744a",
+          "#39966a",
+          "#60ba8c",
+          "#85e0af",
+          "#c3ffdd"
+        ],
+        "canonical": "oklch(54.3% 0.112 159.5)"
+      },
+      "success-soft": {
+        "role": "status",
+        "displayName": "Green Wash",
+        "scheme": "light",
+        "cssVar": "--so-success-soft",
+        "tonalRamp": [
+          "#040e07",
+          "#1c2820",
+          "#39463d",
+          "#57655c",
+          "#78877d",
+          "#9aa99f",
+          "#becec3",
+          "#e3f3e8"
+        ],
+        "canonical": "oklch(95.8% 0.022 155.9)"
+      },
+      "info": {
+        "role": "status",
+        "displayName": "Live Blue",
+        "scheme": "light",
+        "cssVar": "--so-info",
+        "tonalRamp": [
+          "#000b1d",
+          "#012549",
+          "#02427b",
+          "#0062b2",
+          "#2784df",
+          "#59a9ff",
+          "#a3cdfe",
+          "#e3f0ff"
+        ],
+        "canonical": "oklch(55.6% 0.162 252.2)"
+      },
+      "info-soft": {
+        "role": "status",
+        "displayName": "Blue Wash",
+        "scheme": "light",
+        "cssVar": "--so-info-soft",
+        "tonalRamp": [
+          "#040c13",
+          "#1c272e",
+          "#38444c",
+          "#57636c",
+          "#78848d",
+          "#9aa7b0",
+          "#becbd5",
+          "#e3f1fb"
+        ],
+        "canonical": "oklch(96.0% 0.020 238.7)"
+      },
+      "signal-dark": {
+        "role": "primary",
+        "displayName": "Chart Magenta (dark)",
+        "scheme": "dark",
+        "cssVar": "--so-signal",
+        "tonalRamp": [
+          "#1c000e",
+          "#48002a",
+          "#79024a",
+          "#a9196b",
+          "#d1458d",
+          "#fa6ab0",
+          "#ffadd0",
+          "#fee7f0"
+        ],
+        "canonical": "oklch(73.6% 0.189 352.4)"
+      },
+      "signal-hover-dark": {
+        "role": "primary",
+        "displayName": "Chart Magenta, Pressed (dark)",
+        "scheme": "dark",
+        "cssVar": "--so-signal-hover",
+        "tonalRamp": [
+          "#1c000e",
+          "#47012c",
+          "#77074c",
+          "#9d336c",
+          "#c3568e",
+          "#ea79b1",
+          "#ffadd2",
+          "#fee7f1"
+        ],
+        "canonical": "oklch(78.0% 0.152 350.6)"
+      },
+      "on-signal-dark": {
+        "role": "primary",
+        "displayName": "On Magenta (dark)",
+        "scheme": "dark",
+        "cssVar": "--so-on-signal",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ],
+        "canonical": "oklch(14.5% 0.000 0)"
+      },
+      "signal-soft-dark": {
+        "role": "primary",
+        "displayName": "Magenta Wash (dark)",
+        "scheme": "dark",
+        "cssVar": "--so-signal-soft",
+        "tonalRamp": [
+          "#1c000e",
+          "#48002a",
+          "#79024a",
+          "#a9196b",
+          "#d1458d",
+          "#fa6ab0",
+          "#ffadd0",
+          "#fee7f0"
+        ],
+        "note": "Translucent wash over the dark paper; the ramp is built from its opaque base hue."
+      },
+      "selection-dark": {
+        "role": "primary",
+        "displayName": "Chart Selection (dark)",
+        "scheme": "dark",
+        "cssVar": "--so-selection",
+        "tonalRamp": [
+          "#1c0010",
+          "#3c142b",
+          "#5d3249",
+          "#7f5169",
+          "#a2718a",
+          "#c694ad",
+          "#ecb7d2",
+          "#ffe7f2"
+        ],
+        "canonical": "oklch(31.4% 0.070 347.1)"
+      },
+      "ground-dark": {
+        "role": "neutral",
+        "displayName": "Frame Grey (dark)",
+        "scheme": "dark",
+        "cssVar": "--so-ground",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ],
+        "canonical": "oklch(15.0% 0.000 0)"
+      },
+      "paper-dark": {
+        "role": "neutral",
+        "displayName": "Paper (dark)",
+        "scheme": "dark",
+        "cssVar": "--so-paper",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ],
+        "canonical": "oklch(20.0% 0.000 0)"
+      },
+      "raised-dark": {
+        "role": "neutral",
+        "displayName": "Raised (dark)",
+        "scheme": "dark",
+        "cssVar": "--so-raised",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ],
+        "canonical": "oklch(22.6% 0.000 0)"
+      },
+      "soft-dark": {
+        "role": "neutral",
+        "displayName": "Soft (dark)",
+        "scheme": "dark",
+        "cssVar": "--so-soft",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ],
+        "canonical": "oklch(23.9% 0.000 0)"
+      },
+      "ink-dark": {
+        "role": "neutral",
+        "displayName": "Ink (dark)",
+        "scheme": "dark",
+        "cssVar": "--so-ink",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ],
+        "canonical": "oklch(94.6% 0.000 0)"
+      },
+      "ink-hover-dark": {
+        "role": "neutral",
+        "displayName": "Ink, Pressed (dark)",
+        "scheme": "dark",
+        "cssVar": "--so-accent-hover",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ],
+        "canonical": "oklch(100.0% 0.000 0)"
+      },
+      "on-ink-dark": {
+        "role": "neutral",
+        "displayName": "On Ink (dark)",
+        "scheme": "dark",
+        "cssVar": "--so-on-accent",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ],
+        "canonical": "oklch(14.5% 0.000 0)"
+      },
+      "muted-dark": {
+        "role": "neutral",
+        "displayName": "Muted (dark)",
+        "scheme": "dark",
+        "cssVar": "--so-muted",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ],
+        "canonical": "oklch(70.9% 0.000 0)"
+      },
+      "nav-ink-dark": {
+        "role": "neutral",
+        "displayName": "Nav Ink (dark)",
+        "scheme": "dark",
+        "cssVar": "--so-nav-ink",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ],
+        "canonical": "oklch(70.9% 0.000 0)"
+      },
+      "nav-hover-dark": {
+        "role": "neutral",
+        "displayName": "Nav Hover (dark)",
+        "scheme": "dark",
+        "cssVar": "--so-nav-hover",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ],
+        "canonical": "oklch(20.5% 0.000 0)"
+      },
+      "line-dark": {
+        "role": "neutral",
+        "displayName": "Hairline (dark)",
+        "scheme": "dark",
+        "cssVar": "--so-line",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ],
+        "canonical": "oklch(26.9% 0.000 0)"
+      },
+      "input-line-dark": {
+        "role": "neutral",
+        "displayName": "Control Line (dark)",
+        "scheme": "dark",
+        "cssVar": "--so-input-line",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ],
+        "canonical": "oklch(33.3% 0.000 0)"
+      },
+      "neutral-ink-dark": {
+        "role": "neutral",
+        "displayName": "Neutral Badge Ink (dark)",
+        "scheme": "dark",
+        "cssVar": "--so-neutral-ink",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ],
+        "canonical": "oklch(77.0% 0.000 0)"
+      },
+      "neutral-soft-dark": {
+        "role": "neutral",
+        "displayName": "Neutral Badge Fill (dark)",
+        "scheme": "dark",
+        "cssVar": "--so-neutral-soft",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ],
+        "canonical": "oklch(23.9% 0.000 0)"
+      },
+      "danger-dark": {
+        "role": "status",
+        "displayName": "Vermilion (dark)",
+        "scheme": "dark",
+        "cssVar": "--so-danger",
+        "tonalRamp": [
+          "#1c0200",
+          "#470d01",
+          "#781b02",
+          "#9d3f28",
+          "#c4624a",
+          "#eb856b",
+          "#feb4a1",
+          "#ffe9e3"
+        ],
+        "canonical": "oklch(77.9% 0.131 34.9)"
+      },
+      "danger-soft-dark": {
+        "role": "status",
+        "displayName": "Vermilion Wash (dark)",
+        "scheme": "dark",
+        "cssVar": "--so-danger-soft",
+        "tonalRamp": [
+          "#1c0200",
+          "#470d01",
+          "#781b02",
+          "#9d3f28",
+          "#c4624a",
+          "#eb856b",
+          "#feb4a1",
+          "#ffe9e3"
+        ],
+        "note": "Translucent wash over the dark paper; the ramp is built from its opaque base hue."
+      },
+      "warning-dark": {
+        "role": "status",
+        "displayName": "Amber (dark)",
+        "scheme": "dark",
+        "cssVar": "--so-warning",
+        "tonalRamp": [
+          "#100a00",
+          "#2f2301",
+          "#523f01",
+          "#785d05",
+          "#a07d05",
+          "#ca9f03",
+          "#f5c20e",
+          "#ffedc0"
+        ],
+        "canonical": "oklch(86.2% 0.173 89.0)"
+      },
+      "warning-soft-dark": {
+        "role": "status",
+        "displayName": "Amber Wash (dark)",
+        "scheme": "dark",
+        "cssVar": "--so-warning-soft",
+        "tonalRamp": [
+          "#100a00",
+          "#2f2301",
+          "#523f01",
+          "#785d05",
+          "#a07d05",
+          "#ca9f03",
+          "#f5c20e",
+          "#ffedc0"
+        ],
+        "note": "Translucent wash over the dark paper; the ramp is built from its opaque base hue."
+      },
+      "success-dark": {
+        "role": "status",
+        "displayName": "Built Green (dark)",
+        "scheme": "dark",
+        "cssVar": "--so-success",
+        "tonalRamp": [
+          "#000f06",
+          "#012e19",
+          "#00502e",
+          "#047446",
+          "#029b5f",
+          "#1bc37a",
+          "#55e99d",
+          "#c4ffda"
+        ],
+        "canonical": "oklch(77.9% 0.165 157.3)"
+      },
+      "success-soft-dark": {
+        "role": "status",
+        "displayName": "Green Wash (dark)",
+        "scheme": "dark",
+        "cssVar": "--so-success-soft",
+        "tonalRamp": [
+          "#000f06",
+          "#012e19",
+          "#00502e",
+          "#047446",
+          "#029b5f",
+          "#1bc37a",
+          "#55e99d",
+          "#c4ffda"
+        ],
+        "note": "Translucent wash over the dark paper; the ramp is built from its opaque base hue."
+      },
+      "info-dark": {
+        "role": "status",
+        "displayName": "Live Blue (dark)",
+        "scheme": "dark",
+        "cssVar": "--so-info",
+        "tonalRamp": [
+          "#000c1c",
+          "#002647",
+          "#034476",
+          "#1764a5",
+          "#3f87ca",
+          "#63aaf0",
+          "#9fcefe",
+          "#e3f0fe"
+        ],
+        "canonical": "oklch(76.4% 0.126 249.5)"
+      },
+      "info-soft-dark": {
+        "role": "status",
+        "displayName": "Blue Wash (dark)",
+        "scheme": "dark",
+        "cssVar": "--so-info-soft",
+        "tonalRamp": [
+          "#000c1c",
+          "#002647",
+          "#034476",
+          "#1764a5",
+          "#3f87ca",
+          "#63aaf0",
+          "#9fcefe",
+          "#e3f0fe"
+        ],
+        "note": "Translucent wash over the dark paper; the ramp is built from its opaque base hue."
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display",
+        "purpose": "Page titles on task, result and projects pages; the empty-chat greeting. 22px on phones."
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "The state line of a status card, after a 10px state dot."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Fold and section summaries; server-fragment h2s."
+      },
+      "title-sm": {
+        "displayName": "Title Small",
+        "purpose": "The sheet header's page name, panel headers, plan and confirmation titles. 16px on phones."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "The workspace base: rows, crew items, menus, forms."
+      },
+      "body-reading": {
+        "displayName": "Body Reading",
+        "purpose": "Chat messages and long prose, max 72ch. 15px on phones."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Buttons, nav rows, tab triggers."
+      },
+      "caption": {
+        "displayName": "Caption",
+        "purpose": "Field labels, fact keys, section-heading links."
+      },
+      "badge": {
+        "displayName": "Badge",
+        "purpose": "Status badges, sentence case."
+      },
+      "mono": {
+        "displayName": "Mono",
+        "purpose": "Machine facts: task ids, paths, seals, slash commands."
+      },
+      "mono-count": {
+        "displayName": "Mono Count",
+        "purpose": "The needs-you count, tab counts, the shortcut hint."
+      }
+    },
+    "shadows": [
+      {
+        "name": "sheet",
+        "value": "0 0 0 1px rgb(0 0 0 / .06), 0 1px 2px rgb(0 0 0 / .04), 0 4px 12px -6px rgb(0 0 0 / .06)",
+        "dark": "0 0 0 1px #262626, 0 1px 2px rgb(0 0 0 / .4)",
+        "cssVar": "--so-sheet-shadow",
+        "purpose": "The paper sheets inset in the frame; nothing else rests at this height."
+      },
+      {
+        "name": "pill",
+        "value": "0 0 0 1px rgb(0 0 0 / .06), 0 1px 2px rgb(0 0 0 / .06)",
+        "dark": "0 0 0 1px #2a2a2a, 0 1px 2px rgb(0 0 0 / .5)",
+        "cssVar": "--so-pill-shadow",
+        "purpose": "The raised current nav pill, the active segmented tab, outline buttons, the project switch."
+      },
+      {
+        "name": "overlay",
+        "value": "0 0 0 1px rgb(0 0 0 / .08), 0 24px 48px -12px rgb(0 0 0 / .22)",
+        "dark": "0 0 0 1px #2e2e2e, 0 24px 48px -12px rgb(0 0 0 / .7)",
+        "cssVar": "--so-shadow-overlay",
+        "purpose": "Dialogs, the command menu, dropdown and slash menus, the scroll-to-latest button."
+      },
+      {
+        "name": "focus-halo",
+        "value": "0 0 0 3px var(--so-signal-soft)",
+        "purpose": "A focused field or the composer, with the border turned magenta."
+      },
+      {
+        "name": "scrim",
+        "value": "rgb(0 0 0 / .32)",
+        "dark": "rgb(0 0 0 / .6)",
+        "cssVar": "--so-overlay",
+        "purpose": "Behind a dialog or the phone navigation drawer."
+      }
+    ],
+    "motion": [
+      {
+        "name": "control-transition",
+        "value": "120ms ease-out",
+        "purpose": "Background, colour and shadow changes on buttons, nav rows, rows and fields."
+      },
+      {
+        "name": "page-leave",
+        "value": "80ms ease-in (opacity)",
+        "purpose": "The old page fades out on navigation (view transition)."
+      },
+      {
+        "name": "page-arrive",
+        "value": "140ms ease-out, 60ms delay (opacity)",
+        "purpose": "The new page fades in after the old one has gone; the sidebar swaps in place."
+      },
+      {
+        "name": "disclosure-chevron",
+        "value": "150ms (transform: rotate 90deg)",
+        "purpose": "Fold chevrons."
+      },
+      {
+        "name": "reduced-motion",
+        "value": "0s",
+        "purpose": "Every transition and animation drops to zero under prefers-reduced-motion."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "compact-desk",
+        "value": "1150px",
+        "purpose": "Sidebar 184px, Crew 286px (901 to 1150px)."
+      },
+      {
+        "name": "phone",
+        "value": "900px",
+        "purpose": "The frame dissolves; one full-screen sheet; 44px controls."
+      },
+      {
+        "name": "sm",
+        "value": "640px",
+        "purpose": "Tailwind max-sm: shadcn controls go to 44px; task rows stack."
+      },
+      {
+        "name": "facts-two-column",
+        "value": "480px",
+        "purpose": "Task facts grid goes from one column to two."
+      },
+      {
+        "name": "lg",
+        "value": "1024px",
+        "purpose": "Task facts grid goes to three columns."
+      }
+    ],
+    "layout": {
+      "frameColumns": "216px minmax(0, 1fr) 320px",
+      "frameGap": "8px",
+      "framePadding": "8px 8px 8px 0",
+      "detailColumns": "196px minmax(330px, 1fr) minmax(400px, 1.12fr)",
+      "dockedColumns": "204px minmax(0, 1fr) minmax(340px, 400px)",
+      "singleColumns": "216px minmax(0, 1fr)",
+      "sheetHeaderHeight": "52px",
+      "pagePadding": "24px 28px",
+      "phonePagePadding": "20px 16px"
+    }
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Ink fill: every ordinary act a person can take (New task, Mark complete).",
+      "html": "<button class=\"ds-btn-primary\">Mark complete</button>",
+      "css": ".ds-btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 12px; border: 0; border-radius: 8px; font: 500 13px/1.2 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); white-space: nowrap; cursor: pointer; transition: background-color 120ms ease-out, color 120ms ease-out; background: var(--so-accent, #171717); color: var(--so-on-accent, #ffffff); } .ds-btn-primary:hover { background: var(--so-accent-hover, #383838); } .ds-btn-primary:focus-visible { outline: 2px solid var(--so-signal, #c0267e); outline-offset: 2px; } .ds-btn-primary:disabled { opacity: .5; cursor: not-allowed; }"
+    },
+    {
+      "name": "Signal Button",
+      "kind": "button",
+      "refersTo": "button-signal",
+      "description": "The one magenta verb, only when the screen waits on the person.",
+      "html": "<button class=\"ds-btn-signal\">Inspect the result <svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M5 12h14\"/><path d=\"m12 5 7 7-7 7\"/></svg></button>",
+      "css": ".ds-btn-signal { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 12px; border: 0; border-radius: 8px; font: 500 13px/1.2 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); white-space: nowrap; cursor: pointer; transition: background-color 120ms ease-out, color 120ms ease-out; background: var(--so-signal, #c0267e); color: var(--so-on-signal, #ffffff); } .ds-btn-signal:hover { background: var(--so-signal-hover, #a81f6d); } .ds-btn-signal:focus-visible { outline: 2px solid var(--so-signal, #c0267e); outline-offset: 2px; }"
+    },
+    {
+      "name": "Outline Button",
+      "kind": "button",
+      "refersTo": "button-outline",
+      "description": "A paper pill: row actions, page tools and secondary choices.",
+      "html": "<button class=\"ds-btn-outline\">Review plan <svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M5 12h14\"/><path d=\"m12 5 7 7-7 7\"/></svg></button>",
+      "css": ".ds-btn-outline { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 12px; border: 0; border-radius: 8px; font: 500 13px/1.2 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); white-space: nowrap; cursor: pointer; transition: background-color 120ms ease-out, color 120ms ease-out; height: 28px; padding: 0 10px; font-size: 12.5px; background: var(--so-paper, #ffffff); color: var(--so-ink, #171717); box-shadow: var(--so-pill-shadow, 0 0 0 1px rgb(0 0 0 / .06), 0 1px 2px rgb(0 0 0 / .06)); } .ds-btn-outline:hover { background: var(--so-soft, #f2f2f2); } .ds-btn-outline:focus-visible { outline: 2px solid var(--so-signal, #c0267e); outline-offset: 2px; }"
+    },
+    {
+      "name": "Ghost Button",
+      "kind": "button",
+      "refersTo": "button-ghost",
+      "description": "Muted text on nothing: toolbars and quiet links; vermilion text for a remove act far from the primary.",
+      "html": "<button class=\"ds-btn-ghost\">Knowledge</button> <button class=\"ds-btn-ghost ds-btn-ghost--danger\">Remove</button>",
+      "css": ".ds-btn-ghost { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 12px; border: 0; border-radius: 8px; font: 500 13px/1.2 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); white-space: nowrap; cursor: pointer; transition: background-color 120ms ease-out, color 120ms ease-out; background: transparent; color: var(--so-muted, #666666); } .ds-btn-ghost:hover { background: var(--so-soft, #f2f2f2); color: var(--so-ink, #171717); } .ds-btn-ghost--danger, .ds-btn-ghost--danger:hover { color: var(--so-danger, #c4320a); } .ds-btn-ghost:focus-visible { outline: 2px solid var(--so-signal, #c0267e); outline-offset: 2px; }"
+    },
+    {
+      "name": "Text Field",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Paper field, control-line border, magenta border and wash halo on focus.",
+      "html": "<label class=\"ds-label\" for=\"ds-field\">Project name</label><input id=\"ds-field\" class=\"ds-input\" placeholder=\"web-console\">",
+      "css": ".ds-label { display: block; font: 500 12px/1.5 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); color: var(--so-ink, #171717); margin-bottom: 6px; } .ds-input { width: 100%; height: 32px; padding: 0 10px; border: 1px solid var(--so-input-line, #d4d4d4); border-radius: 8px; background: var(--so-paper, #ffffff); color: var(--so-ink, #171717); font: 400 13px/1.5 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); caret-color: var(--so-signal, #c0267e); transition: border-color 120ms ease-out, box-shadow 120ms ease-out; } .ds-input::placeholder { color: var(--so-muted, #666666); } .ds-input:hover { border-color: var(--so-muted, #666666); } .ds-input:focus-visible { outline: 0; border-color: var(--so-signal, #c0267e); box-shadow: 0 0 0 3px var(--so-signal-soft, #fbeaf3); }"
+    },
+    {
+      "name": "Status Badges",
+      "kind": "chip",
+      "refersTo": "badge-neutral",
+      "description": "Soft-fill status words; magenta only for a wait, vermilion for failure.",
+      "html": "<span class=\"ds-badge ds-badge--attention\">Needs your decision</span> <span class=\"ds-badge\">Queued</span> <span class=\"ds-badge ds-badge--info\">Running</span> <span class=\"ds-badge ds-badge--success\">Ready</span> <span class=\"ds-badge ds-badge--warning\">Failing</span> <span class=\"ds-badge ds-badge--danger\">Failed</span>",
+      "css": ".ds-badge { display: inline-flex; align-items: center; gap: 4px; border-radius: 5px; padding: 1px 6px; font: 500 11.5px/18px var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); white-space: nowrap; background: var(--so-neutral-soft, #f0f0f0); color: var(--so-neutral-ink, #525252); } .ds-badge--attention { background: var(--so-signal-soft, #fbeaf3); color: var(--so-signal, #c0267e); } .ds-badge--info { background: var(--so-info-soft, #e6f4fe); color: var(--so-info, #0d74ce); } .ds-badge--success { background: var(--so-success-soft, #e6f6eb); color: var(--so-success, #218358); } .ds-badge--warning { background: var(--so-warning-soft, #fff4d5); color: var(--so-warning, #ab6400); } .ds-badge--danger { background: var(--so-danger-soft, #feebe7); color: var(--so-danger, #c4320a); }"
+    },
+    {
+      "name": "Sidebar Navigation",
+      "kind": "nav",
+      "refersTo": "nav-item",
+      "description": "Rows on the frame; the current page is a raised paper pill; the needs-you count is a magenta pill.",
+      "html": "<nav class=\"ds-nav\" aria-label=\"Workspace\"><a class=\"ds-nav-new\" href=\"#\">+ New task</a><a class=\"ds-nav-row\" href=\"#\">Chat</a><a class=\"ds-nav-row\" href=\"#\" aria-current=\"page\">Tasks<span class=\"ds-nav-count\">9</span></a><a class=\"ds-nav-row\" href=\"#\">Projects</a><a class=\"ds-nav-row\" href=\"#\">Settings</a></nav>",
+      "css": ".ds-nav { display: flex; flex-direction: column; gap: 1px; width: 216px; padding: 12px 10px; background: var(--so-ground, #efefef); font-family: var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); } .ds-nav-new { display: flex; align-items: center; justify-content: center; height: 32px; margin-bottom: 14px; border-radius: 8px; background: var(--so-accent, #171717); color: var(--so-on-accent, #ffffff); font: 500 13px/1 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); text-decoration: none; } .ds-nav-new:hover { background: var(--so-accent-hover, #383838); } .ds-nav-row { display: flex; align-items: center; gap: 10px; min-height: 32px; padding: 6px 8px; border-radius: 8px; color: var(--so-nav-ink, #525252); font: 500 13px/1.2 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); text-decoration: none; transition: background-color 120ms ease-out, color 120ms ease-out; } .ds-nav-row:hover { background: var(--so-nav-hover, #e4e4e4); color: var(--so-ink, #171717); } .ds-nav-row[aria-current=\"page\"] { background: var(--so-nav-current, #ffffff); color: var(--so-nav-current-ink, #171717); box-shadow: var(--so-pill-shadow, 0 0 0 1px rgb(0 0 0 / .06), 0 1px 2px rgb(0 0 0 / .06)); } .ds-nav-row:focus-visible, .ds-nav-new:focus-visible { outline: 2px solid var(--so-signal, #c0267e); outline-offset: 2px; } .ds-nav-count { margin-left: auto; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; display: inline-flex; align-items: center; justify-content: center; background: var(--so-signal, #c0267e); color: var(--so-on-signal, #ffffff); font: 500 11px/1 var(--font-mono, 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace); font-variant-numeric: tabular-nums; }"
+    },
+    {
+      "name": "Segmented Tabs",
+      "kind": "nav",
+      "refersTo": "tabs-list",
+      "description": "Link tabs on a raised track; only the Needs you count turns magenta.",
+      "html": "<ul class=\"ds-tabs\"><li><a href=\"#\" aria-current=\"page\">All <span>11</span></a></li><li><a href=\"#\">Needs you <span class=\"ds-tabs-hot\">9</span></a></li><li><a href=\"#\">Running <span>1</span></a></li></ul>",
+      "css": ".ds-tabs { display: inline-flex; align-items: center; gap: 2px; height: 32px; margin: 0; padding: 2px; list-style: none; border-radius: 12px; background: var(--so-raised, #f5f5f5); font-family: var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); } .ds-tabs li { height: 100%; } .ds-tabs a { display: inline-flex; align-items: center; gap: 6px; height: 100%; padding: 0 10px; border-radius: 8px; color: var(--so-muted, #666666); font: 500 13px/1 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); text-decoration: none; transition: color 120ms ease-out; } .ds-tabs a:hover { color: var(--so-ink, #171717); } .ds-tabs a[aria-current=\"page\"] { background: var(--so-paper, #ffffff); color: var(--so-ink, #171717); box-shadow: var(--so-pill-shadow, 0 0 0 1px rgb(0 0 0 / .06), 0 1px 2px rgb(0 0 0 / .06)); } .ds-tabs a:focus-visible { outline: 2px solid var(--so-signal, #c0267e); outline-offset: 2px; } .ds-tabs span { min-width: 18px; padding: 0 6px; border-radius: 9px; text-align: center; font: 500 11px/18px var(--font-mono, 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace); font-variant-numeric: tabular-nums; } .ds-tabs .ds-tabs-hot { background: var(--so-signal, #c0267e); color: var(--so-on-signal, #ffffff); }"
+    },
+    {
+      "name": "Task Row",
+      "kind": "custom",
+      "refersTo": "task-row",
+      "description": "Signature: title and meta, a status column shared by every row (subgrid), one outline action; rows between hairlines.",
+      "html": "<ul class=\"ds-rows\"><li class=\"ds-row\"><div><a class=\"ds-row-title\" href=\"#\">Guard the payout limiter against concurrent settlement</a><p class=\"ds-row-meta\"><span>payments-api</span> · <span>4h ago</span></p></div><span class=\"ds-badge ds-badge--attention\">Needs your decision</span><a class=\"ds-btn-outline\" href=\"#\">Review plan <svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M5 12h14\"/><path d=\"m12 5 7 7-7 7\"/></svg></a></li><li class=\"ds-row\"><div><a class=\"ds-row-title\" href=\"#\">Rotate the request-log format to JSON lines</a><p class=\"ds-row-meta\"><span>web-console</span> · <span>30h ago</span></p></div><span class=\"ds-badge\">Queued</span><span></span></li></ul>",
+      "css": ".ds-rows { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--so-line, #e6e6e6); border-bottom: 1px solid var(--so-line, #e6e6e6); font-family: var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); } .ds-row { display: grid; grid-template-columns: minmax(0, 1fr) 11rem auto; align-items: center; column-gap: 16px; padding: 12px 8px; transition: background-color 120ms ease-out; } .ds-row + .ds-row { border-top: 1px solid var(--so-line, #e6e6e6); } .ds-row:hover { background: var(--so-raised, #f5f5f5); } .ds-row-title { display: block; color: var(--so-ink, #171717); font: 500 13.5px/1.375 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); text-decoration: none; } .ds-row-title:hover { text-decoration: underline; text-underline-offset: 4px; } .ds-row-meta { margin: 2px 0 0; color: var(--so-muted, #666666); font: 400 12.5px/1.5 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); } .ds-row .ds-badge { justify-self: start; display: inline-flex; border-radius: 5px; padding: 1px 6px; font: 500 11.5px/18px var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); background: var(--so-neutral-soft, #f0f0f0); color: var(--so-neutral-ink, #525252); } .ds-row .ds-badge--attention { background: var(--so-signal-soft, #fbeaf3); color: var(--so-signal, #c0267e); } .ds-row .ds-btn-outline { justify-self: end; display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: 8px; background: var(--so-paper, #ffffff); color: var(--so-ink, #171717); box-shadow: var(--so-pill-shadow, 0 0 0 1px rgb(0 0 0 / .06), 0 1px 2px rgb(0 0 0 / .06)); font: 500 12.5px/1 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); text-decoration: none; } .ds-row .ds-btn-outline:hover { background: var(--so-soft, #f2f2f2); }"
+    },
+    {
+      "name": "Status Card",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "Signature: the state, one sentence, and the one action; neutral border, magenta verb only for a wait.",
+      "html": "<section class=\"ds-status\" aria-label=\"Task status\"><div class=\"ds-status-main\"><h2><span class=\"ds-status-dot\"></span>Needs your decision</h2><p>The remaining requirements need a person's inspection.</p></div><a class=\"ds-status-act\" href=\"#\">Inspect the result <svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M5 12h14\"/><path d=\"m12 5 7 7-7 7\"/></svg></a><p class=\"ds-status-note\">Criterion c1 needs manual-review evidence before this can verify.</p></section>",
+      "css": ".ds-status { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; padding: 20px; border: 1px solid var(--so-line, #e6e6e6); border-radius: 10px; background: var(--so-paper, #ffffff); color: var(--so-ink, #171717); font-family: var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); } .ds-status-main { flex: 1 1 16rem; min-width: 0; } .ds-status h2 { display: flex; align-items: center; gap: 10px; margin: 0; font: 600 18px/1.375 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); } .ds-status-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--so-signal, #c0267e); flex-shrink: 0; } .ds-status-main p { margin: 6px 0 0; color: var(--so-muted, #666666); font: 400 14px/1.5 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); } .ds-status-act { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; border-radius: 8px; background: var(--so-signal, #c0267e); color: var(--so-on-signal, #ffffff); font: 500 13px/1 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); text-decoration: none; transition: background-color 120ms ease-out; } .ds-status-act:hover { background: var(--so-signal-hover, #a81f6d); } .ds-status-act:focus-visible { outline: 2px solid var(--so-signal, #c0267e); outline-offset: 2px; } .ds-status-note { flex-basis: 100%; margin: 0; padding: 8px 12px; border-radius: 8px; background: var(--so-raised, #f5f5f5); color: var(--so-ink, #171717); font: 400 13px/1.5 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Chart Light",
+    "overview": "A nautical chart is printed in quiet greys and black, and the few things a navigator must act on (lights, cautions) are printed in magenta. Signal works the same way. Standing Orders is a control plane for unattended coding agents, and most of what it shows needs nobody: builds running, results filed, queues moving. That material is grey and black on paper. The one colour on the screen is chart magenta, and it appears only where a person is needed: the needs-you count, the badge on a waiting task, and the one verb that settles it. A person should be able to glance at the screen, see the magenta, open the one thing that needs them, act, and leave.\n\nThe surface is the Raycast and Arc canon, played straight. A neutral grey frame holds the sidebar directly, and the work sits on white paper sheets inset 8px into that frame: the main sheet, and beside it the Crew sheet. Density is Raycast-compact, with 13px rows and 32px controls at a desk. Depth comes from the contrast between frame and paper, one soft sheet shadow, and 1px hairlines inside the sheets. Words are set in Geist and machine facts in Geist Mono. Every act a person can take is ink: a black button in light mode, a near-white one in dark.\n\nThe system rejects the dashboard default. Status does not get coloured everywhere, buttons do not all get an accent, and there is no glass, no gradients and no blur. The four status hues (vermilion, amber, blue, green) exist, but they speak quietly through soft badges and small dots. Magenta never means \"failed\".",
+    "keyCharacteristics": [
+      "Grey frame, paper sheets, 8px inset and 12px sheet corners; the sidebar sits on the frame, not on a sheet.",
+      "Ink is the colour of every act; chart magenta is kept for \"a person is needed\", plus focus, caret and selection.",
+      "Geist for words, Geist Mono only for machine facts (ids, counts, seals, paths, shortcut keys).",
+      "Compact desk density (13px body, 32px controls, 52px sheet headers) that becomes 44px touch targets on phones.",
+      "Flat and hairline-first: one soft sheet shadow, a smaller pill shadow for the raised current item, a deeper one only for floating menus and dialogs.",
+      "Light and dark are equal schemes. The device decides unless the person pins one."
+    ],
+    "rules": [
+      {
+        "name": "The One Signal Rule",
+        "body": "Chart magenta means that a person is needed, and nothing else. Its only other jobs are focus, caret, selection and the brand mark. A screen that waits on nobody shows no magenta beyond the brand mark.",
+        "section": "colors"
+      },
+      {
+        "name": "The Ink Acts Rule",
+        "body": "Every act a person can take is ink (primary) or a paper pill (outline). The magenta verb is the exception. There is at most one per screen or card, and only when that screen waits on the person.",
+        "section": "colors"
+      },
+      {
+        "name": "The Quiet List Rule",
+        "body": "In a list, the colour goes on the status badge and the row's action stays an outline button. Nine magenta buttons in a list would shout.",
+        "section": "colors"
+      },
+      {
+        "name": "The Status Keeps Its Hue Rule",
+        "body": "Failure is vermilion, setup trouble is amber, live is blue, and done is green. Magenta is never a failure, a warning, or a card border. A problem line inside a card that has not failed is neutral (raised fill, ink text), not red.",
+        "section": "colors"
+      },
+      {
+        "name": "The Machine Fact Rule",
+        "body": "Geist Mono is only for facts a machine produced: ids, counts, seals, paths, keys, models and clocks. Headings, labels and status words are never mono, and mono is never used to make something look technical.",
+        "section": "typography"
+      },
+      {
+        "name": "The Sentence Case Rule",
+        "body": "Titles, badges, buttons and headings are in sentence case. Server-rendered headings inside the workspace are raised to sentence case with `::first-letter`, and nothing is uppercase and letter-spaced.",
+        "section": "typography"
+      },
+      {
+        "name": "The Hairline First Rule",
+        "body": "Separate things with a 1px line before you reach for a shadow. A new surface inside a sheet gets a hairline or a raised fill and never its own shadow.",
+        "section": "elevation"
+      },
+      {
+        "name": "The One Sheet Shadow Rule",
+        "body": "Only sheets rest on the sheet shadow. Cards inside a sheet are flat (a hairline border and no shadow), and cards are never nested.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "**Do** keep chart magenta for what waits on a person: the needs-you count, an attention badge, and the one verb that resolves the wait, plus focus, caret, selection and the brand mark.",
+      "**Do** make every other act ink (primary) or a paper pill (outline). In lists, rows' actions are outline buttons and the badge carries the colour.",
+      "**Do** put work on paper sheets (12px corners, sheet shadow) inset 8px into frame grey, with the sidebar directly on the frame.",
+      "**Do** separate with 1px hairlines inside a sheet. Lists sit between hairlines and facts sit under one, without being boxed in cards.",
+      "**Do** use Geist for every word and Geist Mono (tabular) for ids, counts, seals, paths and keys.",
+      "**Do** map failure to vermilion (#c4320a / #ff977d), setup trouble to amber, live to blue, and done to green, as soft badges or small dots.",
+      "**Do** size controls at 32px at a desk and 44px on phones, and set phone inputs at 16px.",
+      "**Do** dissolve the frame at 900px and below: the sheet fills the screen with no inset, radius or shadow.",
+      "**Do** drop the Crew sheet on pages whose content is already the crew (the Tasks list, board, queue and flows).",
+      "**Do** give every token a light and a dark value, and let the device decide unless the person pins a theme.",
+      "**Do** keep motion to 120ms colour transitions and an 80ms / 140ms page fade-through, and remove all of it under `prefers-reduced-motion`."
+    ],
+    "donts": [
+      "**Don't** colour a card's border or a heading magenta to announce a wait. The badge and the single magenta verb already say it. (The flow canvas's decision cards still carry a magenta outline. That is a known divergence, not the rule.)",
+      "**Don't** put more than one magenta verb on a screen or card, and don't make a recommended option magenta. A recommendation is not urgency.",
+      "**Don't** use magenta, or any hue near it, for failure. Failure is vermilion.",
+      "**Don't** colour a problem line red inside a card that has not failed. Render it neutral (raised fill, ink text).",
+      "**Don't** use glass, backdrop blur or gradients, or a shadow on a card inside a sheet.",
+      "**Don't** set headings, labels or status words in Geist Mono, and don't use uppercase, letter-spaced labels.",
+      "**Don't** use a coloured side stripe as an accent on callouts, cards or alerts.",
+      "**Don't** repeat a state that a heading already names. A chip that restates its group's title is removed.",
+      "**Don't** nest cards, or wrap a single server card in a second card."
+    ]
+  }
+}
