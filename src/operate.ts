@@ -11692,7 +11692,10 @@ async function projectRulesCommand(positional: readonly string[], flags: Map<str
   for (const name of flags.keys()) if (!allowed.has(name)) return fail(context.write, context.json, command, "usage", `--${name} is not a project rules option.`, EXIT.usage);
   const repoFlag = text(flags, "repo");
   if (positional.length > 1 || repoFlag === undefined) return fail(context.write, context.json, command, "usage", "Use project rules --repo <project path> [--not-requester on|off] [--protect none|project] [--protect-paths \"infra/**,migrations/**\"].", EXIT.usage);
-  const repo = context.store.knownRepos().find(one => one === repoFlag || one === resolve(repoFlag));
+  // The projects Settings shows: those with work, and those registered (enrolled) with none yet.
+  const registered = await loadRepos(registryPathOf(context)).catch(() => ({ error: "unreadable" }));
+  const known = [...new Set([...context.store.knownRepos(), ...("error" in registered ? [] : registered.repos)])];
+  const repo = known.find(one => one === repoFlag || one === resolve(repoFlag));
   if (repo === undefined) return fail(context.write, context.json, command, "not-found", "That isn't a project Standing Orders knows.", EXIT.refused);
   const current = context.store.approvalRules(repo);
   const changing = ["not-requester", "protect", "protect-paths"].some(name => flags.has(name));

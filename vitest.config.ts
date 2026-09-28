@@ -13,6 +13,8 @@ export default defineConfig({
     // processes. Shared CI runners, and every core busy when the files run
     // in parallel, can legitimately take more than Vitest's five-second
     // unit-test default without the underlying operation hanging.
-    testTimeout: 30_000,
+    // The migration suites open and upgrade whole databases file by file;
+    // on the slowest shared macOS runners those alone can pass 30 s.
+    testTimeout: 90_000,
   },
 });

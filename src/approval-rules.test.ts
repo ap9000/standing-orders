@@ -192,12 +192,16 @@ test("the command line shows a project's rules, and only an instance operator ch
   await fileAsAlex(await signIn("alex"), "Anything", ["src/a.ts"]);
   const lines: string[] = [];
   const run = (args: string[]) => runOperate("project", ["rules", "--repo", REPO, "--json", ...args], line => lines.push(line), { databaseFile: join(dir, "orders.db"), now: new Date() });
+  // A registered project with no tasks yet is known too.
+  const { writeFileSync } = await import("node:fs");
+  writeFileSync(join(dir, "repos.json"), JSON.stringify({ version: 1, repos: ["/repo/fresh"] }));
   expect(await run([])).toBe(0);
   expect(JSON.parse(lines.at(-1)!)).toMatchObject({ ok: true, repo: REPO, rules: { notRequester: false, protectProject: false, protectedPaths: [] } });
   expect(await run(["--not-requester", "on", "--as", "sam", "--token", passwords["sam"]!])).toBe(3);
   expect(store.approvalRules(REPO).notRequester).toBe(false);
   expect(await run(["--not-requester", "on", "--protect-paths", "infra/**,migrations/**", "--as", "alex", "--token", passwords["alex"]!])).toBe(0);
   expect(store.approvalRules(REPO)).toMatchObject({ notRequester: true, protectProject: false, protectedPaths: ["infra/**", "migrations/**"], updatedBy: "alex" });
+  expect(await runOperate("project", ["rules", "--repo", "/repo/fresh", "--json"], line => lines.push(line), { databaseFile: join(dir, "orders.db"), now: new Date() })).toBe(0);
 });
 
 test("whoever wrote the scope counts as a requester, and a revision's root filer does too", async () => {
