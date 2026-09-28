@@ -200,6 +200,14 @@ test("a task filed under an explicit id an older lookup registered starts its hi
   expect(entries.map(one => one.action)).toEqual(expect.arrayContaining(["task registered", "task filed"]));
 });
 
+test("a task filed under an id another backend's ref already names starts its history at its filing too", () => {
+  store.refFor("github-issues", "42");
+  store.recordAction({ at: "2026-09-01T00:00:00.000Z", actor: "mallory", repo: null, taskId: "42", runId: null, action: "run started", outcome: "builder", source: "work" });
+  expect(store.createConsoleTask({ id: "42", title: "Issue 42", repo: "/repo/a", filedVia: "console", filedBy: { name: "alex", kind: "person" } }, new Date())).toMatchObject({ ok: true, id: "42" });
+  const { entries } = store.taskLedgerEntries({ taskIds: ["42"], runIds: [] }, { entries: 100, requests: 100 });
+  expect(entries.some(one => one.actor === "mallory")).toBe(false);
+});
+
 test("an export walks the whole chain (reusing only a walk from the last minute), so an edit between page views' walks shows there", () => {
   act("one"); const two = act("two"); act("three");
   expect(store.ledgerChain().ok).toBe(true);

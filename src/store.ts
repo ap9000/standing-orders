@@ -8254,7 +8254,8 @@ export class Store {
         .run(spec.id, spec.title, stamp, stamp);
       // A ref some lookup made before this task existed registered then, not now: register it again, so the task's
       // ledger history (v103 evidence packs) starts at its filing.
-      const earlier = this.db.prepare("SELECT 1 AS hit FROM task_ref WHERE backend = ? AND external_id = ?").get(BUILT_IN, spec.id) !== undefined;
+      // (Any backend's: the ledger names a task by its id alone.)
+      const earlier = this.db.prepare("SELECT 1 AS hit FROM task_ref WHERE external_id = ?").get(spec.id) !== undefined;
       // Created here, so it is ours — the one place that is true by construction.
       const ref = this.refFor(BUILT_IN, spec.id, "ours");
       if (earlier) this.recordAction({ at: stamp, actor: "system", repo: ref.repo, taskId: spec.id, runId: null, action: "task registered", outcome: "recorded", source: "work", detail: REGISTERED_AT_FILING });
@@ -10732,14 +10733,16 @@ export class Store {
     const report = this.readAtOnce(() => verifyLedgerChain(this.db, whole ? undefined : cached!, checkedAt));
     // Inside someone's transaction, what was read may yet roll back: nothing is remembered from it.
     if (this.transacting) return report;
+    // A walk counts as fresh from when it finished (a long one mustn't send everyone waiting on it into another).
+    const finished = whole ? Date.now() : now;
     if (!report.ok || alarm !== null) {
       const first = alarm?.first ?? report.problem!;
       const latest = report.ok ? { ...report, ok: false, problem: first } : report;
       this.chainHead = null;
-      this.chainBreak = { first, latest, walkedAt: whole ? now : alarm?.walkedAt ?? now };
+      this.chainBreak = { first, latest, walkedAt: whole ? finished : alarm?.walkedAt ?? finished };
       return latest;
     }
-    if (report.through !== null) this.chainHead = { through: report.through, head: report.head, entries: report.entries, checkedAt, walkedAt: whole ? now : cached!.walkedAt };
+    if (report.through !== null) this.chainHead = { through: report.through, head: report.head, entries: report.entries, checkedAt, walkedAt: whole ? finished : cached!.walkedAt };
     return report;
   }
 

@@ -175,6 +175,8 @@ export type LedgerExport = {
 };
 
 const EXPORT_ENTRIES = 100_000;
+/** Entries per piece of an export: small enough that a slow, steady reader finishes each well inside the server's minute. */
+const EXPORT_PAGE = 250;
 const EXPORT_PACKS = 200;
 
 /** Every ledger entry in [from, to) that `who` may read, sealed, with a pack for each task they name: one JSON
@@ -194,12 +196,12 @@ export function* ledgerExportChunks(store: Store, range: { from: string; to: str
   const seen = new Set<string>();
   let after = 0, written = 0, moreEntries = false;
   for (;;) {
-    const page = store.sealedLedgerEntries({ ...range, repos: scope.repos, instance: scope.instance, after, limit: 1000 });
-    const kept = page.slice(0, Math.min(1000, EXPORT_ENTRIES - written));
+    const page = store.sealedLedgerEntries({ ...range, repos: scope.repos, instance: scope.instance, after, limit: EXPORT_PAGE });
+    const kept = page.slice(0, Math.min(EXPORT_PAGE, EXPORT_ENTRIES - written));
     if (kept.length > 0) yield `${written === 0 ? "" : ","}${kept.map(one => JSON.stringify(one)).join(",")}`;
     written += kept.length;
     for (const one of kept) if (one.taskId !== null && !seen.has(one.taskId)) { seen.add(one.taskId); named.push(one.taskId); }
-    if (page.length <= 1000) break;
+    if (page.length <= EXPORT_PAGE) break;
     if (written >= EXPORT_ENTRIES) { moreEntries = true; break; }
     after = kept.at(-1)!.id;
   }
