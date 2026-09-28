@@ -1,5 +1,6 @@
 import { passwordGuardOf } from "./sign-in-guard.js";
 import { validateScopeText } from "./task-text.js";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { projectAuthority } from "./project-access.js";
 /**
  * What a task is allowed to become, agreed before anything builds it.
@@ -1116,12 +1117,25 @@ export function authenticateAccount(
   return { ok: true, role: account.role, generation: account.generation };
 }
 
+/**
+ * v100: someone who signed in with the identity provider moments ago has no
+ * password to type again. The console marks such a request with this, for
+ * that person only, and an EMPTY password then stands for the fresh sign-in
+ * at every step-up that reaches `authenticateApprover` (scope and routine
+ * approval, chat-action review, the console's own ceremonies). A typed
+ * password is always checked, and nothing else stands in.
+ */
+export const freshIdentitySignIn = new AsyncLocalStorage<{ actor: string | null }>();
+export const hasFreshIdentitySignIn = (by: string): boolean => freshIdentitySignIn.getStore()?.actor === by;
+
 export function authenticateApprover(
   store: Store,
   by: string,
   token: string,
   repo?: string | null,
 ): { ok: true } | { ok: false; reason: "no-approvers" | "not-an-approver" } {
+  // An empty password is never checked as a password (and never counts toward a lockout).
+  if (token === "") return hasFreshIdentitySignIn(by) ? approverStanding(store, by, repo) : { ok: false, reason: "not-an-approver" };
   const account = authenticateAccount(store, by, token);
   if (!account.ok) {
     return { ok: false, reason: account.reason === "no-approvers" ? "no-approvers" : "not-an-approver" };

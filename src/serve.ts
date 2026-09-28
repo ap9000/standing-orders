@@ -263,7 +263,7 @@ import { effectivePrimary, isMessagingChannel, savePrimary } from "./webhooks.js
 import { resolvePhaseAgent, resolveRoutineAuthority, INSTALLATION_SCOPE, routeOfTask, agentChoicesFor, type AgentChoice } from "./agentconfig.js";
 import { isRiskLevel, projectRoute, riskTitle, riskConsequence, chosenWords, agentsSummary, postureWords, RISK_CHOICES, RISK_LEVELS, PHASES as ROUTE_PHASES, type PhaseRoute, type RouteProjection, type RouteOverride, type RouteStamp, type RiskLevel } from "./phase-routing.js";
 import { ALL_CREDENTIAL_ENV, isProviderId, reportsCost, PROVIDER_IDS, validModelId, validateSpec, type Phase, type ProviderId } from "./provider.js";
-import { authenticateAccount, approverStanding, hashPassword, modeFilingCoverage, PLACEHOLDER_RUBRIC } from "./scope.js";
+import { authenticateAccount, freshIdentitySignIn, hasFreshIdentitySignIn, hashPassword, modeFilingCoverage, PLACEHOLDER_RUBRIC } from "./scope.js";
 import { DEFAULT_GUARD_POLICY, passwordGuardOf, SourceBudget } from "./sign-in-guard.js";
 import { accessFromGroups, accountNameFor, discoverOidc, exchangeOidcCode, newOidcVisit, oidcAuthorizeUrl, verifyIdToken, type OidcClaims, type OidcProvider, type OidcVisit } from "./oidc.js";
 import { readSsoSettings, removeSsoSettings, saveSsoSettings, SSO_CALLBACK, ssoChangeWords } from "./sso-settings.js";
@@ -672,11 +672,8 @@ export function createDecisionServer(options: ServeOptions): Server {
    * field); anyone else types their password. Standing (an approver, with
    * access to the project) is checked either way.
    */
-  const authenticateApprover = (on: Store, by: string, token: string, repo?: string | null): ReturnType<typeof checkApproverPassword> => {
-    const facts = requestContext.getStore();
-    if (token === "" && facts?.sso?.fresh === true && facts.actor === by) return approverStanding(on, by, repo);
-    return checkApproverPassword(on, by, token, repo);
-  };
+  // v100: the shared check honours a fresh identity-provider sign-in itself (freshIdentitySignIn, set per request below).
+  const authenticateApprover = checkApproverPassword;
   const signInBudget = new SourceBudget();
   // v100: sign-in with the identity provider. A visit waits for the provider (15 minutes); a hand-off
   // carries the proved person from the callback (reached from the provider's site, so without the
@@ -1506,7 +1503,8 @@ export function createDecisionServer(options: ServeOptions): Server {
       workspaceRead,
       workspaceRequest: url.searchParams.get('request'),
     };
-    if (method === "GET" || method === "POST") return requestContext.run(requestFacts, async () => {
+    // An empty password stands for a fresh identity-provider sign-in, for this person only (v100).
+    if (method === "GET" || method === "POST") return freshIdentitySignIn.run({ actor: requestFacts.sso?.fresh === true ? who.name : null }, () => requestContext.run(requestFacts, async () => {
       const taskTextForm = url.pathname === "/tasks/add" || /^\/t\/[^/]+\/scope$/.test(url.pathname);
       const body = method === "POST" ? await form(request, url.pathname === "/settings/skills/import" ? 2 * 1024 * 1024 : taskTextForm ? TASK_FORM_BODY_CAP : BODY_CAP) : null;
       const target = actionTarget(url, who, request, body);
@@ -1551,7 +1549,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         store.recordAction({ ...entry, at: clock().toISOString(), outcome: "error" });
         throw error;
       }
-    });
+    }));
     return respond(response, 405, "text/plain; charset=utf-8", "no such method here");
   }
 
@@ -5628,7 +5626,7 @@ export function createDecisionServer(options: ServeOptions): Server {
             return routinePage(response, who, routineId, "that approval form is stale — read it again", 409);
           }
         }
-        if (token === "") {
+        if (token === "" && !hasFreshIdentitySignIn(who.name)) {
           return routinePage(response, who, routineId, "approval requires your password, typed again", 400);
         }
         const approved = approveRoutine(store, routineId, who.name, now, digest, token);
@@ -5665,7 +5663,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         // re-proved its credential on this very request.
         if (who.via === "cookie") {
           const token = body.get("token") ?? "";
-          if (token === "") {
+          if (token === "" && !hasFreshIdentitySignIn(who.name)) {
             return routinePage(response, who, routineId, "run now requires your password, typed again", 400);
           }
           const authenticated = authenticateApprover(store, who.name, token);
@@ -7033,7 +7031,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (url.pathname === "/fleet/runner/register") {
       if (who.via !== "cookie") return refuse(response, who, 403, "runner registration is a browser surface");
       const token = body.get("token") ?? "";
-      if (token === "" || !authenticateApprover(store, who.name, token).ok) {
+      if (!authenticateApprover(store, who.name, token).ok) {
         return refuse(response, who, 403, "registering a worker takes your password, typed again", "/fleet");
       }
       const name = (body.get("name") ?? "").trim();
@@ -7137,7 +7135,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         return refuse(response, who, 409, "the terms moved while you were reading — read them again", "/mode");
       }
       const token = body.get("token") ?? "";
-      if (token === "" || !authenticateApprover(store, who.name, token).ok) {
+      if (!authenticateApprover(store, who.name, token).ok) {
         return refuse(response, who, 403, "signing a mode takes your password, typed again", "/mode");
       }
       store.signMode(
@@ -7181,7 +7179,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const token = body.get("token") ?? "";
       // RAISING authority is a password ceremony (the doctrine): adding a
       // person to the instance is exactly that.
-      if (token === "" || !authenticateApprover(store, who.name, token).ok) {
+      if (!authenticateApprover(store, who.name, token).ok) {
         return refuse(response, who, 403, "making an invite takes your password, typed again", "/people");
       }
       const role = body.get("role") === "approver" ? ("approver" as const) : ("viewer" as const);
@@ -7210,7 +7208,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (url.pathname === "/people/invite-revoke") {
       if (who.via !== "cookie") return refuse(response, who, 403, "inviting is a browser surface");
       const token = body.get("token") ?? "";
-      if (token === "" || !authenticateApprover(store, who.name, token).ok) {
+      if (!authenticateApprover(store, who.name, token).ok) {
         return refuse(response, who, 403, "cancelling an invite takes your password, typed again", "/people");
       }
       const id = Number(body.get("id") ?? "");
@@ -7221,7 +7219,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (url.pathname === "/people/revoke") {
       if (who.via !== "cookie") return refuse(response, who, 403, "removing a person is a browser surface");
       const token = body.get("token") ?? "";
-      if (token === "" || !authenticateApprover(store, who.name, token).ok) {
+      if (!authenticateApprover(store, who.name, token).ok) {
         return refuse(response, who, 403, "removing a person takes your password, typed again", "/people");
       }
       const name = (body.get("name") ?? "").trim();
@@ -7244,7 +7242,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (url.pathname === "/fleet/runner/retire") {
       if (who.via !== "cookie") return refuse(response, who, 403, "runner retirement is a browser surface");
       const token = body.get("token") ?? "";
-      if (token === "" || !authenticateApprover(store, who.name, token).ok) {
+      if (!authenticateApprover(store, who.name, token).ok) {
         return refuse(response, who, 403, "retiring a worker takes your password, typed again", "/fleet");
       }
       const name = (body.get("name") ?? "").trim();
@@ -7352,7 +7350,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       // POST minted. The store consumes the nonce conditionally inside the
       // same transaction that moves the tournament — replay finds it gone.
       const token = body.get("token") ?? "";
-      if (token === "" || !authenticateApprover(store, who.name, token).ok) {
+      if (!authenticateApprover(store, who.name, token).ok) {
         return contestScreen(response, who, contestId, "that decision takes your password, typed again", 403);
       }
       const nonceValue = body.get("nonce") ?? "";
@@ -8649,7 +8647,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
     const token = body.get("token") ?? "";
     let basis: { kind: "mode"; digest: string } | undefined;
-    if (token === "") {
+    if (token === "" && !hasFreshIdentitySignIn(who.name)) {
       // Quick mint (C2/M4): no password typed — valid ONLY when a live
       // mode with quickMint was signed by THIS session's person. The mint
       // transaction re-proves it; this pre-check only shapes the refusal.
@@ -9002,7 +9000,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           // authority takes the password ceremony again — the same act
           // that would be required to approve that authority from scratch.
           const token = (body.get("token") ?? "").trim();
-          if (token === "" || !authenticateApprover(store, who.name, token).ok) {
+          if (!authenticateApprover(store, who.name, token).ok) {
             return taskScreen(response, who, taskId, "accepting this revision takes your password, typed again", 403);
           }
         }
@@ -9303,7 +9301,7 @@ export function createDecisionServer(options: ServeOptions): Server {
             return approvalProblem("that approval form is stale — read it again", 409);
           }
         }
-        if (token === "") {
+        if (token === "" && !hasFreshIdentitySignIn(who.name)) {
           return approvalProblem("approval requires your password, typed again", 400);
         }
         const scopeRow = store.getScope(taskId);
@@ -9438,7 +9436,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (!/^[0-9]{1,15}$/.test(named)) return taskScreen(response, who, taskId, "which attempt? the resume names the exact stopped run", 400);
         const runId = Number(named);
         const token = body.get("token") ?? "";
-        if (token === "" || !authenticateApprover(store, who.name, token).ok) {
+        if (!authenticateApprover(store, who.name, token).ok) {
           return taskScreen(response, who, taskId, "resuming takes your password, typed again", 403);
         }
         const nonceValue = body.get("nonce") ?? "";
