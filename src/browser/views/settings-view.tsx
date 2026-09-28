@@ -5,6 +5,7 @@ import { BookOpen, ChevronDown, Cpu, Hash, LineChart, MessageSquare, Monitor, Mo
 import { useEffect, useId, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { BrowserSettingsView } from "../../browser-workspace.js";
+import { accentNote, accentTokens, normalHex } from "../../accent-colors.js";
 import {
   Badge, Button, Card, CardDescription, CardHeader, CardTitle, Collapsible, CollapsibleContent, CollapsibleTrigger,
   Input, Label, RadioCard, RadioGroup, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Separator, cn, toast,
@@ -40,12 +41,112 @@ function Themes({ view, csrf }: { view: BrowserSettingsView; csrf: string }) {
   const options = [["system", "Match device", <Monitor key="m" />], ["light", "Light", <Sun key="s" />], ["dark", "Dark", <Moon key="d" />]] as const;
   return <form method="post" action="/settings/appearance" className="flex flex-wrap items-center gap-3">
     <Csrf csrf={csrf} />
-    <div role="group" aria-label="Theme" className="inline-flex rounded-lg bg-muted p-1">
+    <div role="group" aria-label="Theme" className="inline-flex rounded-lg bg-muted p-0.5">
       {options.map(([value, label, icon]) => <button key={value} type="submit" name="theme" value={value} aria-pressed={view.theme === value}
-        className={cn("inline-flex h-9 items-center gap-2 rounded-md px-3 text-sm font-semibold text-muted-foreground transition-colors hover:text-foreground max-sm:h-11 [&_svg]:size-4", view.theme === value && "bg-card text-foreground shadow-sm")}>{icon}{label}</button>)}
+        className={cn("inline-flex h-7 items-center gap-2 rounded-md px-2.5 text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground max-sm:h-11 [&_svg]:size-3.5", view.theme === value && "bg-card text-foreground shadow-[var(--so-pill-shadow)]")}>{icon}{label}</button>)}
     </div>
     <span className="text-[13px] text-muted-foreground">Saved in this browser.</span>
   </form>;
+}
+
+type Hsv = { h: number; s: number; v: number };
+const clamp = (n: number) => Math.min(1, Math.max(0, n));
+function hsvToHex({ h, s, v }: Hsv): string {
+  const f = (n: number) => { const k = (n + h / 60) % 6; return v - v * s * Math.max(0, Math.min(k, 4 - k, 1)); };
+  return `#${[f(5), f(3), f(1)].map(x => Math.round(x * 255).toString(16).padStart(2, "0")).join("")}`;
+}
+function hexToHsv(hex: string): Hsv {
+  const [r, g, b] = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255) as [number, number, number];
+  const max = Math.max(r, g, b), d = max - Math.min(r, g, b);
+  const h = d === 0 ? 0 : max === r ? ((g - b) / d + 6) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  return { h: h * 60, s: max === 0 ? 0 : d / max, v: max };
+}
+/** Preview a colour on the whole page at once: the same readable tokens the server will print after it's saved. */
+function previewAccent(hex: string) {
+  const root = document.documentElement;
+  const dark = root.dataset["theme"] === "dark" || (root.dataset["theme"] !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+  const tokens = accentTokens(hex)[dark ? "dark" : "light"];
+  for (const [name, value] of [["signal", tokens.signal], ["signal-hover", tokens.hover], ["on-signal", tokens.on], ["signal-soft", tokens.soft], ["selection", tokens.selection]]) root.style.setProperty(`--so-${name}`, value!);
+}
+
+/** Saturation (across) and brightness (down) for the current hue; drag, or arrow keys (Shift for bigger steps). */
+function ColourPlane({ hsv, onChange }: { hsv: Hsv; onChange: (next: Hsv) => void }) {
+  const at = (event: React.PointerEvent<HTMLDivElement>) => {
+    const box = event.currentTarget.getBoundingClientRect();
+    onChange({ h: hsv.h, s: clamp((event.clientX - box.left) / box.width), v: 1 - clamp((event.clientY - box.top) / box.height) });
+  };
+  return <div role="slider" tabIndex={0} aria-label="Saturation and brightness" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(hsv.s * 100)}
+    aria-valuetext={`saturation ${Math.round(hsv.s * 100)}%, brightness ${Math.round(hsv.v * 100)}%`}
+    className="relative h-28 w-44 shrink-0 cursor-crosshair touch-none rounded-lg shadow-[inset_0_0_0_1px_rgb(0_0_0/.08)] max-sm:h-36 max-sm:w-full"
+    style={{ background: `linear-gradient(to top, #000, transparent), linear-gradient(to right, #fff, hsl(${hsv.h} 100% 50%))` }}
+    onPointerDown={event => { event.currentTarget.setPointerCapture(event.pointerId); at(event); }}
+    onPointerMove={event => { if (event.buttons !== 0) at(event); }}
+    onKeyDown={event => {
+      const step = event.shiftKey ? 0.1 : 0.02;
+      const move = ({ ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, step], ArrowDown: [0, -step] } as Record<string, [number, number]>)[event.key];
+      if (move === undefined) return;
+      event.preventDefault();
+      onChange({ h: hsv.h, s: clamp(hsv.s + move[0]), v: clamp(hsv.v + move[1]) });
+    }}>
+    <span aria-hidden="true" className="pointer-events-none absolute size-3.5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white shadow-[0_0_0_1px_rgb(0_0_0/.35)]"
+      style={{ left: `${hsv.s * 100}%`, top: `${(1 - hsv.v) * 100}%` }} />
+  </div>;
+}
+
+/** The signal colour: any colour from the picker, with Pantone's colours of the year as presets. It previews on
+ * the whole page as it moves and saves in the background once it settles. */
+function AccentPicker({ view, csrf }: { view: BrowserSettingsView; csrf: string }) {
+  const [hex, setHex] = useState(view.accent);
+  const [hsv, setHsv] = useState<Hsv>(() => hexToHsv(view.accent));
+  const [draft, setDraft] = useState(view.accent);
+  const [saved, setSaved] = useState<string | null>(null);
+  const timer = useRef<number | undefined>(undefined);
+  const choose = (next: string, from?: Hsv) => {
+    setHex(next); setDraft(next); setHsv(from ?? hexToHsv(next)); previewAccent(next); setSaved(null);
+    window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(async () => {
+      const answer = await fetch("/settings/appearance", { method: "POST", body: new URLSearchParams({ csrf, accent: next, quiet: "1" }) }).catch(() => null);
+      setSaved(answer?.ok ? "Saved" : "Not saved. Try again.");
+    }, 400);
+  };
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  const commitDraft = () => { const next = normalHex(draft); if (next === null) setDraft(hex); else if (next !== hex) choose(next); };
+  const preset = view.accentPresets.find(one => one.hex === hex);
+  const note = accentNote(hex);
+  return <div className="flex flex-col gap-3" data-accent-picker>
+    <div className="flex flex-wrap gap-4">
+      <ColourPlane hsv={hsv} onChange={next => choose(hsvToHex(next), next)} />
+      <div className="flex min-w-0 flex-1 basis-52 flex-col gap-2.5">
+        <input type="range" min={0} max={359} value={Math.round(hsv.h)} aria-label="Hue"
+          onChange={event => { const next = { ...hsv, h: Number(event.target.value), s: hsv.s || 0.75, v: hsv.v || 0.75 }; choose(hsvToHex(next), next); }}
+          className="h-3 w-full cursor-pointer appearance-none rounded-full bg-[linear-gradient(to_right,#f00,#ff0,#0f0,#0ff,#00f,#f0f,#f00)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring [&::-moz-range-thumb]:size-4 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-2 [&::-moz-range-thumb]:border-white [&::-moz-range-thumb]:bg-transparent [&::-webkit-slider-thumb]:size-4 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:border-2 [&::-webkit-slider-thumb]:border-white [&::-webkit-slider-thumb]:shadow-[0_0_0_1px_rgb(0_0_0/.35)]" />
+        <div className="flex items-center gap-2">
+          <span aria-hidden="true" className="size-8 shrink-0 rounded-md shadow-[inset_0_0_0_1px_rgb(0_0_0/.12)]" style={{ background: hex }} />
+          <Input value={draft} aria-label="Hex colour" spellCheck={false} autoComplete="off" className="w-28 font-mono"
+            onChange={event => setDraft(event.target.value)} onBlur={commitDraft}
+            onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); commitDraft(); } }} />
+          <Button variant="ghost" size="sm" disabled={hex === view.accentPresets[0]!.hex} onClick={() => choose(view.accentPresets[0]!.hex)}>Reset</Button>
+        </div>
+        <div className="flex flex-wrap items-center gap-2" aria-hidden="true">
+          <span className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-attention px-1.5 font-mono text-[11px] leading-none text-on-attention">3</span>
+          <Badge tone="attention">Needs your decision</Badge>
+          <span className="inline-flex h-7 items-center rounded-md bg-attention px-2.5 text-[12.5px] font-medium text-on-attention">Approve</span>
+        </div>
+        <p className="text-[12.5px] text-muted-foreground" aria-live="polite" data-accent-status>
+          {preset !== undefined ? <>{preset.name}{preset.year !== null && <span className="font-mono"> {preset.year}</span>}</> : "Custom"}{saved !== null && ` · ${saved}`}
+        </p>
+      </div>
+    </div>
+    {note !== null && <p className="text-[12.5px] text-warning">{note}</p>}
+    <div role="group" aria-label="Presets" className="flex flex-wrap gap-1.5">
+      {view.accentPresets.map(one => <button key={one.id} type="button" data-preset={one.id} aria-pressed={one.hex === hex}
+        aria-label={`${one.name}${one.year === null ? ", the default" : `, ${one.year}`}`} title={`${one.name}${one.year === null ? "" : ` · ${one.year}`}`}
+        onClick={() => choose(one.hex)} style={{ background: one.hex }}
+        className={cn("size-6 rounded-full shadow-[inset_0_0_0_1px_rgb(0_0_0/.12)] ring-offset-2 ring-offset-card transition-shadow max-sm:size-11",
+          one.hex === hex ? "ring-2 ring-foreground" : "hover:ring-2 hover:ring-input")} />)}
+    </div>
+    <p className="text-[12.5px] text-muted-foreground">Presets are Pantone's colours of the year. Colours are deepened or lightened as needed so text stays readable. Saved in this browser.</p>
+  </div>;
 }
 
 function DefaultChoice({ title, description, action, field, value, canManage, changed, options, csrf }: {
@@ -240,6 +341,7 @@ export function SettingsView({ view, csrf }: { view: BrowserSettingsView; csrf: 
         {TILE_ICONS[tile.href]}{tile.label}</a>)}
     </nav>
     <Section title="Appearance"><Themes view={view} csrf={csrf} /></Section>
+    <Section id="accent" title="Accent colour" description="The one colour that marks what needs you."><AccentPicker view={view} csrf={csrf} /></Section>
     {view.permission && <DefaultChoice title="Unattended permissions" description="The starting choice for new tasks. Approved tasks keep their setting." action="/settings/permission-default" field="permission-mode"
       value={view.permission.mode} canManage={view.permission.canManage} changed={view.permission.changed} csrf={csrf}
       options={[{ value: "auto", title: "Auto", description: "Asks before risky actions." }, { value: "bypassPermissions", title: "Full access", description: "Never asks and can change files anywhere on this computer. Trusted repositories only." }]} />}
