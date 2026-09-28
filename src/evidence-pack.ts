@@ -181,8 +181,8 @@ const EXPORT_PACKS = 200;
  * document (a `LedgerExport`), a piece at a time (a page of entries, or one pack), so an export never holds
  * the whole range at once. */
 export function* ledgerExportChunks(store: Store, range: { from: string; to: string }, scope: { repos: readonly string[] | null; instance: boolean }, access: AssignmentAccess, who: string, now: Date, evidenceRoot: string): Generator<string, void, undefined> {
-  // An export is the record someone takes away: the whole chain is walked for it.
-  const chain = store.ledgerChain({ full: true });
+  // An export is the record someone takes away: the whole chain is walked for it (or was, within the last minute).
+  const chain = store.ledgerChain({ full: true, fresh: 60_000 });
   const latest = store.ledgerCheckpoints(1)[0] ?? null;
   const head = {
     format: "standing-orders/ledger-export/v1", generatedAt: now.toISOString(), generatedBy: who, from: range.from, to: range.to,

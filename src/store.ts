@@ -94,7 +94,7 @@ import { normalizeProjectAccess, projectAccessAllows, readProjectAccess, type Pr
 import { LEDGER_SCHEMA, LEDGER_TABLE, LEDGER_V54_COLUMNS, LEDGER_V54_TABLE, installLedgerTriggers, type LedgerEntry } from "./action-ledger.js";
 import { PLAN_AUTO_SCHEMA } from "./plan-auto.js";
 import { RECIPE_SCHEMA } from "./recipes.js";
-import { LEDGER_CHAIN_SCHEMA, safeWhole, sealLedger, verifyLedgerChain, type LedgerChainReport, type VerifiedHead } from "./ledger-chain.js";
+import { IN_RANGE, LEDGER_CHAIN_SCHEMA, safeWhole, sealLedger, verifyLedgerChain, type LedgerChainReport, type VerifiedHead } from "./ledger-chain.js";
 import { NO_RULES, filerFor, isProtectedWork, protectedChanges, rulesWords, type ApprovalGate, type ApprovalRules, type ApproverKind, type Filer, type FilerKind } from "./approval-policy.js";
 
 // v60 fenced older readers before the chat action cards; v61 adds notification
@@ -10685,7 +10685,7 @@ export class Store {
   private sealIfFree(): void {
     if (this.transacting) { sealLedger(this.db); return; }
     // Nothing new: no lock at all.
-    const ends = this.db.prepare(`SELECT (SELECT MAX(id) FROM action_ledger WHERE id <= ${Number.MAX_SAFE_INTEGER}) AS entry, (SELECT MAX(id) FROM ledger_seal) AS seal`).get();
+    const ends = this.db.prepare(`SELECT (SELECT MAX(id) FROM action_ledger WHERE id ${IN_RANGE}) AS entry, (SELECT MAX(id) FROM ledger_seal WHERE id ${IN_RANGE}) AS seal`).get();
     if (ends !== undefined && ends["entry"] === ends["seal"]) return;
     try { beginWriteWithin(this.db, 200); }
     catch (error) { if (isDatabaseBusy(error)) return; throw error; }
@@ -10712,14 +10712,16 @@ export class Store {
 
   /** The chain, checked: sealed first. The whole chain is walked every ten minutes (or when asked); between walks,
    * only entries after the last walked head, which must itself be unchanged. */
-  ledgerChain(options: { full?: boolean } = {}): LedgerChainReport {
+  ledgerChain(options: { full?: boolean; fresh?: number } = {}): LedgerChainReport {
     const WALK_EVERY = 10 * 60_000;
     this.sealIfFree();
     const now = Date.now();
+    // `full`: a whole walk, unless one finished within `fresh` ms (so a burst of exports costs one walk).
+    const recent = (walkedAt: number) => options.full === true ? options.fresh !== undefined && now - walkedAt <= options.fresh : now - walkedAt <= WALK_EVERY;
     const alarm = this.chainBreak;
-    if (alarm !== null && options.full !== true && now - alarm.walkedAt <= WALK_EVERY) return alarm.latest;
+    if (alarm !== null && recent(alarm.walkedAt)) return alarm.latest;
     const cached = alarm === null ? this.chainHead : null;
-    const whole = options.full === true || cached === null || now - cached.walkedAt > WALK_EVERY;
+    const whole = cached === null || !recent(cached.walkedAt);
     const checkedAt = whole ? new Date(now).toISOString() : cached!.checkedAt;
     const report = this.readAtOnce(() => verifyLedgerChain(this.db, whole ? undefined : cached!, checkedAt));
     // Inside someone's transaction, what was read may yet roll back: nothing is remembered from it.
@@ -10742,7 +10744,7 @@ export class Store {
     if (!report.ok) return { problem: report.problem?.what ?? "the chain doesn't verify" };
     return this.transact(() => {
       sealLedger(this.db);
-      const last = this.db.prepare("SELECT id, hash FROM ledger_seal ORDER BY id DESC LIMIT 1").get();
+      const last = this.db.prepare(`SELECT id, hash FROM ledger_seal WHERE id ${IN_RANGE} ORDER BY id DESC LIMIT 1`).get();
       if (last === undefined) return null;
       const through = Number(last["id"]), hash = String(last["hash"]);
       this.db.prepare("INSERT INTO ledger_checkpoint (through, hash, at, by) VALUES (?, ?, ?, ?)").run(through, hash, now.toISOString(), by);
@@ -10754,7 +10756,7 @@ export class Store {
 
   /** The checkpoints kept so far, newest first. */
   ledgerCheckpoints(limit = 20): { through: number; hash: string; at: string; by: string }[] {
-    return this.db.prepare("SELECT through, hash, at, by FROM ledger_checkpoint ORDER BY id DESC LIMIT ?").all(limit)
+    return this.db.prepare(`SELECT through, hash, at, by FROM ledger_checkpoint WHERE typeof(through) = 'integer' AND through ${IN_RANGE} ORDER BY id DESC LIMIT ?`).all(limit)
       .map(row => ({ through: Number(row["through"]), hash: String(row["hash"]), at: String(row["at"]), by: String(row["by"]) }));
   }
 
@@ -10780,8 +10782,12 @@ export class Store {
   taskLedgerEntries(family: { taskIds: readonly string[]; runIds: readonly number[] }, limits: { entries: number; requests: number }): { entries: SealedLedgerEntry[]; truncated: boolean } {
     this.sealIfFree();
     if (family.taskIds.length === 0) return { entries: [], truncated: false };
-    const registered = this.db.prepare("SELECT MIN(id) AS id FROM action_ledger WHERE task_id = ? AND action = 'task registered' AND source = 'work' AND actor = 'system'");
-    const versions = family.taskIds.map(id => ({ id, from: Number(registered.get(id)?.["id"] ?? 0) }));
+    // Its registration as the task was made (a ref planted earlier under the same id registered before the task existed);
+    // a task from before registration rows existed counts from the start.
+    const registered = this.db.prepare(`SELECT COALESCE(
+      (SELECT MIN(l.id) FROM action_ledger l JOIN task t ON t.id = l.task_id WHERE l.task_id = ? AND l.action = 'task registered' AND l.source = 'work' AND l.actor = 'system' AND l.at >= t.created_at),
+      (SELECT MIN(id) FROM action_ledger WHERE task_id = ? AND action = 'task registered' AND source = 'work' AND actor = 'system'), 0) AS id`);
+    const versions = family.taskIds.map(id => ({ id, from: Number(registered.get(id, id)?.["id"] ?? 0) }));
     const named = `(${versions.map(() => "(l.task_id = ? AND l.id >= ?)").join(" OR ")})`;
     const namedArgs = versions.flatMap(one => [one.id, one.from]);
     const byRun = family.runIds.length === 0 ? "" : ` OR (l.run_id IN (${family.runIds.map(() => "?").join(",")}) AND l.task_id IS NULL)`;
@@ -10792,10 +10798,11 @@ export class Store {
   }
 
   private sealedRows(where: string, args: (string | number)[]): SealedLedgerEntry[] {
-    return this.db.prepare(`SELECT ${safeWhole("l.id", "id")}, l.at, l.actor, l.repo, l.task_id, ${safeWhole("l.run_id", "run_id")}, l.action, l.outcome, l.source, l.detail,
-      s.prev AS seal_prev, s.hash AS seal_hash FROM action_ledger l LEFT JOIN ledger_seal s ON s.id = l.id WHERE ${where}`).all(...args).map(row => ({
+    // Entries numbered outside the chain are left to the chain report, which names them.
+    return this.db.prepare(`SELECT l.id, l.at, l.actor, l.repo, l.task_id, ${safeWhole("l.run_id", "run_id")}, l.action, l.outcome, l.source, l.detail,
+      s.prev AS seal_prev, s.hash AS seal_hash FROM action_ledger l LEFT JOIN ledger_seal s ON s.id = l.id WHERE l.id ${IN_RANGE} AND ${where}`).all(...args).map(row => ({
       id: Number(row["id"]), at: String(row["at"]), actor: String(row["actor"]), repo: row["repo"] === null ? null : String(row["repo"]),
-      taskId: row["task_id"] === null ? null : String(row["task_id"]), runId: row["run_id"] === null ? null : Number(row["run_id"]),
+      taskId: row["task_id"] === null ? null : String(row["task_id"]), runId: typeof row["run_id"] === "number" ? row["run_id"] : null,
       action: String(row["action"]), outcome: String(row["outcome"]), source: String(row["source"]) as LedgerEntry["source"],
       detail: row["detail"] == null ? null : String(row["detail"]),
       seal: row["seal_hash"] == null ? null : { prev: String(row["seal_prev"]), hash: String(row["seal_hash"]) },
@@ -10853,9 +10860,9 @@ export class Store {
     }
     if (query.before !== undefined) { clauses.push("id < ?"); args.push(query.before); }
     args.push(Math.max(1, Math.min(101, query.limit ?? 51)));
-    return this.db.prepare(`SELECT ${safeWhole("id")}, at, actor, repo, task_id, ${safeWhole("run_id")}, action, outcome, source, detail FROM action_ledger ${clauses.length ? `WHERE ${clauses.join(" AND ")}` : ""} ORDER BY id DESC LIMIT ?`).all(...args).map(row => ({
+    return this.db.prepare(`SELECT id, at, actor, repo, task_id, ${safeWhole("run_id")}, action, outcome, source, detail FROM action_ledger WHERE id ${IN_RANGE}${clauses.length ? ` AND ${clauses.join(" AND ")}` : ""} ORDER BY id DESC LIMIT ?`).all(...args).map(row => ({
       id: Number(row["id"]), at: String(row["at"]), actor: String(row["actor"]), repo: row["repo"] === null ? null : String(row["repo"]),
-      taskId: row["task_id"] === null ? null : String(row["task_id"]), runId: row["run_id"] === null ? null : Number(row["run_id"]),
+      taskId: row["task_id"] === null ? null : String(row["task_id"]), runId: typeof row["run_id"] === "number" ? row["run_id"] : null,
       action: String(row["action"]), outcome: String(row["outcome"]), source: String(row["source"]) as LedgerEntry["source"],
       detail: row["detail"] == null ? null : String(row["detail"]),
     }));
@@ -14952,7 +14959,8 @@ export class Store {
         const base =
           spec.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 56) || "task";
         id = base;
-        for (let n = 2; this.db.prepare("SELECT 1 AS hit FROM task WHERE id = ?").get(id) !== undefined; n++) {
+        // An id a built-in ref already names (made by a lookup before any task existed) is taken too: its ledger history isn't this task's.
+        for (let n = 2; this.db.prepare("SELECT 1 AS hit FROM task WHERE id = ? UNION ALL SELECT 1 FROM task_ref WHERE backend = 'built-in' AND external_id = ?").get(id, id) !== undefined; n++) {
           id = `${base}-${n}`;
         }
       } else if (this.db.prepare("SELECT 1 AS hit FROM task WHERE id = ?").get(id) !== undefined) {

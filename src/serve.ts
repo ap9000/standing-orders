@@ -678,6 +678,8 @@ export function createDecisionServer(options: ServeOptions): Server {
   // v100: the shared check honours a fresh identity-provider sign-in itself (freshIdentitySignIn, set per request below).
   const authenticateApprover = checkApproverPassword;
   const signInBudget = new SourceBudget();
+  // v103: one audit export at a time (each walks the chain and reads its whole range).
+  let ledgerExporting = false;
   // v100: sign-in with the identity provider. A visit waits for the provider (15 minutes); a hand-off
   // carries the proved person from the callback (reached from the provider's site, so without the
   // Strict session cookie) to /login/sso/finish on this site (a minute).
@@ -2382,7 +2384,9 @@ export function createDecisionServer(options: ServeOptions): Server {
             yield ledgerCsvRows(page);
             const cursor = page.at(-1)!.id;
             await yieldEventLoop();
-            page = store.actionLedger({ ...query, before: cursor, limit: 100 });
+            const next = store.actionLedger({ ...query, before: cursor, limit: 100 });
+            // Pages only ever move to older entries; one that doesn't is the end.
+            page = next.length > 0 && next[0]!.id < cursor ? next : [];
           }
         }
         response.writeHead(200, { "content-type": "text/csv; charset=utf-8", "content-disposition": 'attachment; filename="standing-orders-actions.csv"', "cache-control": "no-store", "x-content-type-options": "nosniff" });
@@ -2841,25 +2845,38 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (from === null || last === null) return refuse(response, who, 400, "Choose a start and end day.", "/ledger");
       const to = new Date(Date.parse(last) + 86_400_000).toISOString();
       if (to <= from || Date.parse(to) - Date.parse(from) > 366 * 86_400_000) return refuse(response, who, 400, "Choose a range of a year or less, ending on or after its start.", "/ledger");
+      // One export at a time: each walks the chain and reads every entry in its range.
+      if (ledgerExporting) return refuse(response, who, 429, "An audit export is already running. Try again when it finishes.", "/ledger");
       const access = { principal: "operator" as const, repos: admissionList(), includeUnplaced: visible(null) };
       store.recordAction({ at: now.toISOString(), actor: who.name, repo: null, taskId: null, runId: null, action: "ledger exported", outcome: "exported", source: "access",
         detail: `${from.slice(0, 10)} to ${last.slice(0, 10)}` });
-      // A piece at a time (a page of entries, or one pack), yielding between them, and stopping if the reader's access changes.
+      // A piece at a time (a page of entries, or one pack), yielding between them, and stopping if the reader's access
+      // changes: their account, and the session or API token they came with (read without writing anything).
       const generation = store.accountOf(who.name)?.generation;
-      const pieces = ledgerExportChunks(store, { from, to }, { repos: access.repos, instance: store.isInstanceOperator(who.name) }, access, who.name, now, evidenceRoot);
-      async function* chunks() {
-        for (const piece of pieces) {
-          const current = store.accountOf(who.name);
-          // The reader's standing, and the session or API token they came with, still hold.
-          if (current === null || current.revokedAt !== null || current.generation !== generation || identify(request, false)?.name !== who.name) throw new Error("Ledger access changed during export");
-          yield piece;
-          await yieldEventLoop();
+      const tokenId = who.via === "bearer" && who.token !== undefined ? parseApiToken(/^Bearer (so_\S+)$/.exec(request.headers.authorization ?? "")?.[1] ?? "")?.id ?? null : null;
+      const stillLive = () => {
+        const current = store.accountOf(who.name);
+        if (current === null || current.revokedAt !== null || current.generation !== generation) return false;
+        if (who.via === "cookie") return identify(request, false)?.name === who.name;
+        if (tokenId === null) return true;
+        const token = store.apiTokenSecret(tokenId)?.row;
+        return token !== undefined && token.revokedAt === null && Date.parse(token.expiresAt) > Date.now();
+      };
+      ledgerExporting = true;
+      try {
+        const pieces = ledgerExportChunks(store, { from, to }, { repos: access.repos, instance: store.isInstanceOperator(who.name) }, access, who.name, now, evidenceRoot);
+        async function* chunks() {
+          for (const piece of pieces) {
+            if (!stillLive()) throw new Error("Ledger access changed during export");
+            yield piece;
+            await yieldEventLoop();
+          }
         }
-      }
-      response.writeHead(200, { "content-type": "application/json; charset=utf-8", "content-disposition": `attachment; filename="standing-orders-audit-${from.slice(0, 10)}-to-${last.slice(0, 10)}.json"`,
-        "cache-control": "no-store", "x-content-type-options": "nosniff" });
-      try { await pipeline(Readable.from(chunks()), response); }
-      catch { response.destroy(); }
+        response.writeHead(200, { "content-type": "application/json; charset=utf-8", "content-disposition": `attachment; filename="standing-orders-audit-${from.slice(0, 10)}-to-${last.slice(0, 10)}.json"`,
+          "cache-control": "no-store", "x-content-type-options": "nosniff" });
+        try { await pipeline(Readable.from(chunks()), response); }
+        catch { response.destroy(); }
+      } finally { ledgerExporting = false; }
       return;
     }
 

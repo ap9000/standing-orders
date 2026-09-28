@@ -1906,6 +1906,8 @@ async function buildCommand(
   if (!auth.runner.repos.includes(canonicalProject(repo) ?? resolve(repo))) {
     return fail(write, json, "build", "unauthorized-repo", `${runner} is not bound to ${repo} — \`runner bind\` adds it`, EXIT.refused);
   }
+  // Only a task that exists: a lookup must never register an id before the task is filed (its ledger history would be the task's).
+  if (store.getTask(id) === null) return fail(write, json, "build", "unknown-task", `No task ${id}.`, EXIT.refused);
   const pool = text(flags, "pool") ?? join(dirname(databasePath(process.env, homedir())), "worktrees");
   const ref = store.refFor(BUILT_IN, id);
 

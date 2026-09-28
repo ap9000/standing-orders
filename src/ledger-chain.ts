@@ -59,8 +59,9 @@ export function entryHash(prev: string, row: Record<string, unknown>): string {
   return createHash("sha256").update(`${prev}\n${JSON.stringify(fields)}`, "utf8").digest("hex");
 }
 
-/** The largest entry number a seal can name (JavaScript's safe integers). */
+/** The largest entry number a seal can name (JavaScript's safe integers); anything outside 1..LARGEST was put there by hand. */
 const LARGEST = Number.MAX_SAFE_INTEGER;
+export const IN_RANGE = `BETWEEN 1 AND ${LARGEST}`;
 
 /** Why a row can't be an entry the ledger wrote: each field is exactly the kind of value its writers store. */
 export function rowProblem(row: Record<string, unknown>): string | null {
@@ -75,7 +76,7 @@ export function rowProblem(row: Record<string, unknown>): string | null {
 
 /** Seal every entry written since the last seal, in id order. Returns how many were sealed. Call inside a write transaction. */
 export function sealLedger(db: Database): number {
-  const last = db.prepare("SELECT id, hash FROM ledger_seal ORDER BY id DESC LIMIT 1").get();
+  const last = db.prepare(`SELECT id, hash FROM ledger_seal WHERE id ${IN_RANGE} ORDER BY id DESC LIMIT 1`).get();
   let prevId = last === undefined ? 0 : Number(last["id"]);
   let prev = last === undefined ? LEDGER_GENESIS : String(last["hash"]);
   let sealed = 0;
@@ -129,20 +130,25 @@ export type VerifiedHead = { through: number; head: string; entries: number };
  * and every checkpoint still matching. With `from`, the walk starts at a head verified earlier, after checking that
  * the head is still there (a chain rebuilt since doesn't match it). Reads only; call inside one read transaction. */
 export function verifyLedgerChain(db: Database, from?: VerifiedHead, checkedAt: string | null = null): LedgerChainReport {
+  let prev = from?.head ?? LEDGER_GENESIS, entries = from?.entries ?? 0, through: number | null = from?.through ?? null, kept = 0;
+  const report = (problem: LedgerChainReport["problem"], unsealed = 0): LedgerChainReport =>
+    ({ ok: problem === null, entries, through, head: prev, unsealed, checkpoints: kept, problem, checkedAt });
+  // Entries, seals and checkpoints are numbered from 1 up to what a seal can name; anything outside was put there by hand.
+  const outside = db.prepare(`SELECT CAST(id AS TEXT) AS id FROM action_ledger WHERE NOT (id ${IN_RANGE}) LIMIT 1`).get();
+  if (outside !== undefined) return report({ id: null, what: `entry #${String(outside["id"])} was added outside the sealed history` });
+  const strayed = db.prepare(`SELECT CAST(id AS TEXT) AS id FROM ledger_seal WHERE NOT (id ${IN_RANGE}) LIMIT 1`).get();
+  if (strayed !== undefined) return report({ id: null, what: `a seal for entry #${String(strayed["id"])} was added outside the chain` });
+  const astray = db.prepare(`SELECT CAST(through AS TEXT) AS through FROM ledger_checkpoint WHERE typeof(through) <> 'integer' OR NOT (through ${IN_RANGE}) LIMIT 1`).get();
+  if (astray !== undefined) return report({ id: null, what: `a checkpoint names entry #${String(astray["through"])}, outside the chain` });
   const checkpoints = db.prepare("SELECT through, hash FROM ledger_checkpoint ORDER BY id").all()
     .map(one => ({ through: Number(one["through"]), hash: String(one["hash"]) }));
-  let prev = from?.head ?? LEDGER_GENESIS, entries = from?.entries ?? 0, through: number | null = from?.through ?? null;
-  const report = (problem: LedgerChainReport["problem"], unsealed = 0): LedgerChainReport =>
-    ({ ok: problem === null, entries, through, head: prev, unsealed, checkpoints: checkpoints.length, problem, checkedAt });
-  // Entries are numbered from 1 up to what a seal can name; anything outside was put there by hand.
-  const outside = db.prepare(`SELECT CAST(id AS TEXT) AS id FROM action_ledger WHERE id <= 0 OR id > ${LARGEST} LIMIT 1`).get();
-  if (outside !== undefined) return report({ id: null, what: `entry #${String(outside["id"])} was added outside the sealed history` });
+  kept = checkpoints.length;
   if (from !== undefined) {
     const still = db.prepare("SELECT hash FROM ledger_seal WHERE id = ?").get(from.through);
     if (still === undefined || String(still["hash"]) !== from.head) return report({ id: from.through, what: `the chain was rewritten since it was last checked (entry #${from.through} changed)` });
   }
-  const rows = pages(db, `SELECT ${SEALED} FROM action_ledger WHERE id > ? ORDER BY id LIMIT ${PAGE}`, from?.through ?? 0);
-  const seals = pages(db, `SELECT id, prev, hash FROM ledger_seal WHERE id > ? ORDER BY id LIMIT ${PAGE}`, from?.through ?? 0);
+  const rows = pages(db, `SELECT ${SEALED} FROM action_ledger WHERE id > ? AND id <= ${LARGEST} ORDER BY id LIMIT ${PAGE}`, from?.through ?? 0);
+  const seals = pages(db, `SELECT id, prev, hash FROM ledger_seal WHERE id > ? AND id <= ${LARGEST} ORDER BY id LIMIT ${PAGE}`, from?.through ?? 0);
   const wanted = new Set(checkpoints.map(one => one.through));
   const reached = new Map<number, string>();
   let row = rows.next();

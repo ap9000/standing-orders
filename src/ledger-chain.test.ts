@@ -160,11 +160,48 @@ test("a run number past what JavaScript holds, put in by hand (no trigger stops 
   expect(store.handle.prepare("SELECT COUNT(*) AS n FROM ledger_seal").get()?.n).toBe(3);
 });
 
-test("an export always walks the whole chain, so an edit between walks shows there", () => {
+test("a seal or checkpoint numbered outside the chain (a plain insert) is a break, never a crash; readers skip entries outside it", () => {
+  act("one"); act("two");
+  store.ledgerChain();
+  store.handle.exec("INSERT INTO ledger_seal (id, prev, hash) VALUES (9007199254740993, 'x', 'y')");
+  expect(store.ledgerChain({ full: true })).toMatchObject({ ok: false, problem: { what: "a seal for entry #9007199254740993 was added outside the chain" } });
+  act("three");
+  expect(store.actionLedger({ repos: null, limit: 10 })).toHaveLength(3);
+  const other = openStore(join(dir, "other.db"));
+  try {
+    other.recordAction({ at: T0.toISOString(), actor: "alex", repo: null, taskId: null, runId: null, action: "one", outcome: "done", source: "policy" });
+    other.ledgerChain();
+    other.handle.exec("INSERT INTO ledger_checkpoint (through, hash, at, by) VALUES (9007199254740993, 'x', '2026-09-20T10:00:00.000Z', 'x')");
+    expect(other.ledgerChain({ full: true })).toMatchObject({ ok: false, problem: { what: "a checkpoint names entry #9007199254740993, outside the chain" } });
+    expect(other.ledgerCheckpoints()).toEqual([]);
+    // Entries numbered past the chain are named by the report and skipped by readers, not read back rounded.
+    other.handle.exec("INSERT INTO action_ledger (id, at, actor, repo, task_id, run_id, action, outcome, source, detail) VALUES (4611686018427387904, '2026-09-20T10:00:00.000Z', 'x', NULL, NULL, NULL, 'forged', 'done', 'policy', NULL)");
+    expect(other.actionLedger({ repos: null, limit: 10 }).map(one => one.action)).toEqual(["one"]);
+  } finally { other.close(); }
+});
+
+test("a task filed under an id a lookup registered before it existed gets its own id, so none of that history is its", () => {
+  store.refFor("built-in", "fix-login");
+  store.recordAction({ at: T0.toISOString(), actor: "system", repo: null, taskId: "fix-login", runId: null, action: "run started", outcome: "builder", source: "work" });
+  const made = store.createConsoleTask({ title: "Fix login", repo: "/repo/a", filedVia: "console", filedBy: { name: "alex", kind: "person" } }, new Date());
+  expect(made).toMatchObject({ ok: true, id: "fix-login-2" });
+  const { entries } = store.taskLedgerEntries({ taskIds: ["fix-login-2"], runIds: [] }, { entries: 100, requests: 100 });
+  expect(entries.every(one => one.taskId === "fix-login-2")).toBe(true);
+  expect(entries.map(one => one.action)).toEqual(expect.arrayContaining(["task registered", "task filed"]));
+});
+
+test("an export walks the whole chain (reusing only a walk from the last minute), so an edit between page views' walks shows there", () => {
   act("one"); const two = act("two"); act("three");
   expect(store.ledgerChain().ok).toBe(true);
   unguard();
   store.handle.prepare("UPDATE action_ledger SET actor = 'mallory' WHERE id = ?").run(two);
+  // A walk from the last minute is reused (a burst of exports costs one walk)...
+  const chainOf = (bundle: string) => (JSON.parse(bundle) as { chain: { ok: boolean } }).chain.ok;
+  expect(chainOf([...ledgerExportChunks(store, { from: "2026-09-20T00:00:00.000Z", to: "2026-09-21T00:00:00.000Z" }, { repos: null, instance: true },
+    { principal: "operator", repos: null, includeUnplaced: true }, "alex", T0, join(dir, "evidence"))].join(""))).toBe(true);
+  // ...and past it (here, a console started since), the export walks it all.
+  store.close();
+  store = openStore(file);
   const bundle = JSON.parse([...ledgerExportChunks(store, { from: "2026-09-20T00:00:00.000Z", to: "2026-09-21T00:00:00.000Z" }, { repos: null, instance: true },
     { principal: "operator", repos: null, includeUnplaced: true }, "alex", T0, join(dir, "evidence"))].join("")) as { chain: { ok: boolean; problem: string } };
   expect(bundle.chain).toMatchObject({ ok: false, problem: `entry #${two} was changed after it was sealed` });
