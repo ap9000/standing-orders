@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Separation of duties.** Every task records who filed it (the person, or
+  the person a coordinator acts for). Settings → Approval rules (or
+  `project rules`) lets an instance operator turn on, per project,
+  "someone other than the requester approves" and protected work: the whole
+  project, or paths like `infra/**`, need two different people to approve
+  the same scope ("1 of 2" until the second; a changed scope starts over),
+  and never an operating mode, a routine, a watched run or an AI teammate.
+  Whoever wrote the scope or made a standing order counts as a requester,
+  and a result whose actual diff reaches protected files on a one-person
+  approval completes only by someone else. Everything is off until a
+  project turns it on. Schema 102.
+
 - **Sessions and API tokens.** Settings → Sessions & tokens lists where
   you're signed in and signs any of it out; sessions now survive a restart.
   API tokens (read, or act as you, never approve) replace passwords on

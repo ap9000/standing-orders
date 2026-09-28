@@ -201,6 +201,7 @@ export function createResultRevision(store: Store, evidenceRoot: string, input: 
           },
           commentIds: comments.map(one => one.id),
           coverage,
+          requestedBy: input.actor,
         },
         now,
       );

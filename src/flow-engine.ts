@@ -6,6 +6,7 @@
  * waits for people. See flows.ts for what each zone does.
  */
 import { assignmentOf } from "./assignment.js";
+import { filerFor } from "./approval-policy.js";
 import { diagnoseTaskDispatch } from "./dispatch.js";
 import { deciderOf, durationWords, fillFlowText, validateFlowDefinition, type FlowDefinition, type FlowStage } from "./flows.js";
 import { reportSummaryFor } from "./report-summary.js";
@@ -172,7 +173,8 @@ function advanceCard(store: Store, flow: FlowRow, definition: FlowDefinition | n
       const who = decider ?? "an approver";
       // v92: a zone an active teammate staffs is its to decide first (the step pass runs it). A person hears
       // about the card only when the teammate hands it over, can't decide, or is paused or gone.
-      const mate = stage.teammate === undefined ? null : store.teammateByHandle(flow.repo, stage.teammate);
+      // v102: on a protected project an AI teammate never decides; the person does.
+      const mate = stage.teammate === undefined || store.approvalRules(flow.repo).protectProject ? null : store.teammateByHandle(flow.repo, stage.teammate);
       const turn = mate === null ? null : store.flowStepRun(card.id, card.entry);
       const handed = turn !== null && turn.kind === "teammate" && (turn.state === "failed" || turn.state === "passed");
       if (mate !== null && mate.state === "active" && !handed) {
@@ -220,7 +222,7 @@ function workStage(store: Store, flow: FlowRow, stage: FlowStage, card: FlowCard
       title: (report ? `${stage.title}: ${card.title}` : card.title).slice(0, 200),
       repo: flow.repo,
       goal: workGoal(stage.instructions ?? card.title, card).slice(0, 8000),
-      filedVia: `flow:${flow.id}`,
+      filedVia: `flow:${flow.id}`, filedBy: filerFor(card.createdBy), // who made the card asked for the work (an owner can be reassigned by anyone)
       deliverable: report ? "report" : "branch",
       planning: report ? "skip" : stage.planning ?? "auto",
       acceptance: report ? ACCEPTANCE.report : ACCEPTANCE.task,
@@ -347,6 +349,8 @@ export function decideFlowCard(store: Store, input: { card: number; decision: "a
   // A teammate decides only a zone it staffs; its person (and only them) can always decide instead.
   const decider = deciderOf(stage, flow);
   if (input.teammate !== undefined ? stage.teammate !== input.teammate : decider !== null && decider !== input.actor) return { ok: false, message: `Only ${decider ?? "an approver"} decides here.` };
+  // v102: a protected project's decisions are a person's, never an AI teammate's.
+  if (input.teammate !== undefined && store.approvalRules(flow.repo).protectProject) return { ok: false, message: "This project is protected: a person decides here." };
   if (input.decision === "approve") {
     // An edited draft replaces the one Claude wrote, so the steps after this send what the person approved.
     const draft = draftFor(definition, stage);

@@ -288,7 +288,7 @@ export const BUDGET_WINDOW_MS = 7 * 24 * 60 * 60_000;
 
 export type ApproveRoutineResult =
   | { ok: true; routine: Routine }
-  | { ok: false; reason: "no-such-routine" | "profile-unresolved" | "changed" | "no-approvers" | "not-an-approver" };
+  | { ok: false; reason: "no-such-routine" | "profile-unresolved" | "changed" | "no-approvers" | "not-an-approver" | "requester" };
 
 /**
  * A person agrees to the standing order — schedule, budget, and "each
@@ -327,6 +327,10 @@ export function approveRoutine(
 
     const schedule = parseSchedule(routine.schedule);
     if (schedule === null) return { ok: false as const, reason: "changed" as const };
+    // v102: a project that refuses the requester refuses the standing order's maker too (each firing is their task).
+    if (store.approvalRules(routine.repo).notRequester && routine.createdBy !== null && routine.createdBy === by) {
+      return { ok: false as const, reason: "requester" as const };
+    }
 
     // The schedule starts counting from the yes — never retroactively.
     store.stampRoutineApproval(routineId, by, routine.digest, firstFireAt(schedule, now), now);
@@ -630,7 +634,7 @@ function fireRoutineInTransaction(store: Store, routineId: number, now: Date, ma
     }
     const title = `${routine.name} · ${scheduledFor.slice(0, 16).replace("T", " ")} UTC`;
 
-    store.createTask({ id: taskId, title }, now);
+    store.createTask({ id: taskId, title, filedBy: routine.createdBy === null ? { name: null, kind: "automation" } : { name: routine.createdBy, kind: "person" } }, now);
     const ref = store.refFor(BUILT_IN, taskId, "ours");
     // Placement BEFORE the scope exists — placeTask refuses to move scoped
     // work, and this ordering is what keeps that guard out of the way here.
@@ -686,7 +690,8 @@ function fireRoutineInTransaction(store: Store, routineId: number, now: Date, ma
     // store refuses (an unreadable route, a profile that disagrees) rolls
     // the whole firing back — no instance, no ledger row, no advanced slot
     // — and says why.
-    const sealed = store.sealScopeApproval(taskId, routine.approvedBy ?? "routine", now);
+    // v102: a firing is sealed by the standing order's approval, not a person voting now — protected work waits for two people.
+    const sealed = store.sealScopeApproval(taskId, routine.approvedBy ?? "routine", now, {}, undefined, "automation");
     const sealedRoute = sealed ? store.sealedRouteOf(taskId) : null;
     if (!sealed || sealedRoute === null || !sealedRoute.ok || routeDigestOf(sealedRoute.route) !== routeDigestOf(frozenRoute)) {
       const why = !sealed ? "the store refused to seal the instance's approval" : sealedRoute !== null && !sealedRoute.ok ? sealedRoute.detail : "the sealed route is not the frozen route";

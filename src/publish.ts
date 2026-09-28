@@ -21,6 +21,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { protectedPublicationHold } from "./result-completion.js";
 import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -136,6 +137,8 @@ export async function publishPass(
     repo: string;
     clock?: () => Date;
     exec?: PublishExec;
+    /** v102: where the builds' sealed diffs live, to hold a branch that changed protected files on a one-person approval. */
+    evidenceRoot: string;
   },
 ): Promise<PublishReport> {
   const clock = options.clock ?? (() => new Date());
@@ -160,6 +163,13 @@ export async function publishPass(
       const attempts = store.recordPublicationError(publication.id, verdict.message, clock());
       if (attempts >= MAX_PUBLISH_ATTEMPTS) concede(store, publication, verdict.message, report, clock);
       continue;
+    }
+
+    // v102: separation of duties holds the push itself (so no PR and no merge follow) until a second person
+    // has seen a result that changed protected files on a one-person approval.
+    if (publication.state === "intended") {
+      const held = protectedPublicationHold(store, publication.run, options.evidenceRoot);
+      if (held !== null) { report.problems.push(`publication ${publication.id}: ${held}`); continue; }
     }
 
     if (publication.state === "intended") {

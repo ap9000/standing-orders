@@ -1,4 +1,5 @@
 import { validateTaskText } from "./task-text.js";
+import type { Filer } from "./approval-policy.js";
 export { validateTaskText } from "./task-text.js";
 /**
  * The one door work enters through (Codex adoption review, finding 7).
@@ -78,6 +79,8 @@ export type TaskProposalInput = {
   acceptance?: unknown;
   /** Which door filed this: 'cli', 'console', 'intake', 'template:<name>'. */
   filedVia: string;
+  /** v102: who filed it — the person, or the person a coordinator acts for (separation of duties reads it). */
+  filedBy?: Filer;
   /** The scope text's author when it is an LLM's (ruling 2; §10 for a
    * scout's follow-up): mode coverage never seals it. */
   proposedVia?: "mate" | "coordinator" | "scout";
@@ -127,6 +130,8 @@ export function shouldPlanTask(input: TaskProposalInput): boolean {
 
 export type RoutineProposalInput = {
   name: string;
+  /** v102: who is making it (its instances are filed as theirs). */
+  createdBy?: string | null;
   repo: string;
   goal: string;
   outOfScope: string | null;
@@ -213,6 +218,7 @@ export function fileTaskProposal(
       touches,
       acceptance: input.acceptance,
       filedVia: input.filedVia,
+      ...(input.filedBy === undefined ? {} : { filedBy: input.filedBy }),
       proposedVia: input.proposedVia ?? null,
       ...(input.deliverable === undefined ? {} : { deliverable: input.deliverable }),
     },
@@ -307,6 +313,7 @@ export function fileRoutineProposal(
       ...terms,
       digest: routineDigestOf(terms, routineProfile, routineRoute),
       filedVia: input.filedVia,
+      createdBy: input.createdBy ?? null,
       ...(routineProfile === null ? {} : { profile: routineProfile }),
       ...(routineRoute === null ? {} : { route: routineRoute }),
     },

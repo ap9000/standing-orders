@@ -197,10 +197,10 @@ export function createCodingHandoff(store: Store, input: CodingHandoffInput): Ha
       if (actorGeneration(store, input.actor, input.repo) !== receipt.generation) throw Error('Your account changed. Sign in again.');
       if (branchHead(input.repo, receipt.branch) !== receipt.base) throw Error('The review branch moved before filing. Its work has been preserved.');
       const made = fileTaskProposal(store, { id: receipt.taskId, title: receipt.title, repo: receipt.repo, goal: receipt.goal,
-        outOfScope: receipt.outOfScope, acceptance: receipt.acceptance, filedVia: PREFIX + receipt.id, planning: 'skip', admittedRepos: [receipt.repo] }, new Date());
+        outOfScope: receipt.outOfScope, acceptance: receipt.acceptance, filedVia: PREFIX + receipt.id, filedBy: { name: input.actor, kind: "person" as const }, planning: 'skip', admittedRepos: [receipt.repo] }, new Date());
       if (!made.ok) throw Error(made.message);
       const ref = store.lookupRef(made.id)!;
-      const proposed = proposeGuarded(store, { taskId: made.id, taskRef: ref.id, sawDigest: store.getScope(made.id)!.digest,
+      const proposed = proposeGuarded(store, { taskId: made.id, author: input.actor, taskRef: ref.id, sawDigest: store.getScope(made.id)!.digest,
         goal: receipt.goal, outOfScope: receipt.outOfScope, acceptance: receipt.acceptance, candidate: receipt.candidate, now: new Date() });
       if (!proposed.ok) throw Error(proposed.message || 'The prepared review scope could not be saved.');
       const seal = sealPayload(receipt, proposed.scope.digest);

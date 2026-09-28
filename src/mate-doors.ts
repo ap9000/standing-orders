@@ -287,7 +287,7 @@ function executeProposal(
         acceptance: payload["acceptance"],
         ...(payload["report"] === true ? { deliverable: "report" as const } : {}),
         planning,
-        filedVia: "mate",
+        filedVia: "mate", filedBy: { name: actor.name, kind: "person" as const },
         proposedVia: "mate",
         admittedRepos: [...actor.repos],
       },
@@ -526,6 +526,9 @@ function executeProposal(
       if (edited.reason === "no-task") return refuse("unknown-task", "no such task");
       return refuse("refused", edited.detail);
     }
+    // v102: changing how a task runs is authoring it — the requester rule then refuses this person too.
+    const routed = taskId === null ? null : store.getScope(taskId);
+    if (routed !== null && taskId !== null) store.recordScopeAuthor(taskId, routed.digest, actor.name, now);
     const taskName = payloadString(payload, "taskTitle") ?? taskId;
     const roleWord = typeof phase === "string" ? ({ plan: "planner", build: "builder", repair: "repair", review: "reviewer" } as Record<string, string>)[phase] ?? phase : null;
     const changed = [
@@ -544,7 +547,7 @@ function executeProposal(
     const goal = payloadString(payload, "goal");
     if (goal === null) return refuse("refused", "this proposal carries no goal");
     const proposed = proposeGuarded(store, {
-      taskId,
+      taskId, author: actor.name,
       goal,
       outOfScope: payloadString(payload, "not"),
       touches: payloadStrings(payload, "touches"),

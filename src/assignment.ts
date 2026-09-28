@@ -2,6 +2,7 @@
  * approval or proof state. Lead ownership and exact receipt acknowledgments
  * are append-only actions; handoffs use the existing durable outbox. */
 import { createHash } from "node:crypto";
+import { COMPLETION_ACTION, familyChangedFiles } from "./result-completion.js";
 import { homedir } from "node:os";
 import { readSchemaVersion, type Store, type ProofVerdictRow, type ProofAcceptanceRow, type Artifact } from "./store.js";
 import { approvalOf } from "./scope.js";
@@ -61,7 +62,7 @@ export function assignmentBrief(assignment: AssignmentSnapshot | null) {
 }
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const OWNER_ACTION = "assignment claimed";
-const CHECK_ACTION = "assignment handoff checked";
+const CHECK_ACTION = COMPLETION_ACTION;
 const actorOf = (owner: AssignmentOwner) => `${owner.kind}:${owner.id}`;
 
 function ownerOf(store: Store, rootId: string, repo: string | null): AssignmentSnapshot["owner"] {
@@ -312,6 +313,10 @@ function acknowledgeCurrent(store: Store, current: AssignmentSnapshot, receiptDi
   const receipt = current.receipt;
   if (current.state !== "ready-to-check" && current.state !== "complete") return { ok: false, reason: "not-ready", message: "This assignment still has unresolved execution, scope or decisions." };
   if (current.state !== "complete") {
+    // v102: declared paths are only a promise. A result whose actual diff reaches protected files, on a
+    // scope one person approved, completes only by someone else — two people have then seen the work.
+    const problem = store.protectedResultProblem(receipt.taskId, familyChangedFiles(store, receipt.taskId, receipt.runId, root), actor.startsWith("operator:") ? actor.slice("operator:".length) : null);
+    if (problem !== null) return { ok: false, reason: "approval-rules", message: problem };
     store.recordAction({ at: now.toISOString(), actor, repo: current.repo,
       taskId: current.rootId, runId: receipt.runId, action: CHECK_ACTION, outcome: receiptDigest, source: "work" });
     store.bumpWake();

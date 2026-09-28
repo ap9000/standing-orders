@@ -6,6 +6,11 @@
 
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { openStore, type Store } from "./store.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { storeEvidence } from "./evidence.js";
+import { addApprover } from "./scope.js";
 import {
   bodyHashOf,
   observeChecks,
@@ -172,6 +177,31 @@ describe("publication", () => {
     expect(done).toMatchObject({ state: "opened", prNumber: 7, prUrl: "https://github.com/alex/thing/pull/7" });
     // The morning hears about it.
     expect(store.listNotifications("pending").some(one_ => one_.kind === "publication-opened")).toBe(true);
+  });
+
+  test("v102: a branch that changed protected files on a one-person approval isn't pushed until someone else marks it complete", async () => {
+    const root = mkdtempSync(join(tmpdir(), "so-publish-held-"));
+    try {
+      const alex = addApprover(store, "alex", T0);
+      if (!alex.ok) throw new Error("alex");
+      expect(addApprover(store, "sam", T0, { name: "alex", token: alex.token }).ok).toBe(true);
+      store.placeTask(taskRef, REPO, {}, T0);
+      store.setApprovalRules(REPO, { notRequester: false, protectProject: false, protectedPaths: ["infra/**"] }, "alex", T0);
+      storeEvidence(store, root, runId, "diff-stat", "terminal-diff-stat.json", Buffer.from(JSON.stringify({ filesTruncated: false, files: [{ path: "infra/main.tf", added: 1, deleted: 0 }] })), "git diff --numstat", T0, { captureStatus: "ok" });
+      grantIt();
+      intendIt();
+      const held = scripted();
+      const one = await publishPass(store, { repo: REPO, clock: () => T0, exec: held.exec, evidenceRoot: root });
+      expect(one.pushed).toBe(0);
+      expect(held.calls).toEqual([]);
+      expect(one.problems[0]).toContain("held: it changed protected files");
+      // sam (not its approver or requester) marks the result complete: the push goes.
+      store.recordAction({ at: T0.toISOString(), actor: "operator:sam", repo: REPO, taskId: "t-1", runId, action: "assignment handoff checked", outcome: "x".repeat(64), source: "work" });
+      const two = await publishPass(store, { repo: REPO, clock: () => T0, exec: scripted({ "gh pr list": { code: 0, stdout: "[]" }, "gh pr create": { code: 0, stdout: "https://github.com/alex/thing/pull/8\n" } }).exec, evidenceRoot: root });
+      expect(two.pushed).toBe(1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("an existing PR on the head is adopted, never twinned", async () => {

@@ -806,6 +806,8 @@ export type Approval =
 
 export type ScopeInput = {
   taskId: string;
+  /** v102: the person writing these words (a web edit, a chat confirmation, a coding hand-off); the requester rule refuses them. */
+  author?: string;
   goal: string;
   outOfScope?: string | null;
   touches?: readonly string[];
@@ -949,7 +951,9 @@ export function propose(store: Store, input: ScopeInput): Scope {
   });
   // The store may have RECOMPUTED the digest to bind the resolved profile
   // (v24 filing invariant) — what callers display must be what is stored.
-  return store.getScope(taskId) ?? scope;
+  const saved = store.getScope(taskId) ?? scope;
+  if (input.author !== undefined && input.author !== "") store.recordScopeAuthor(taskId, saved.digest, input.author, now);
+  return saved;
 }
 
 export type GuardedProposeResult =
@@ -1081,7 +1085,11 @@ export function addApprover(
 
 export type ApproveResult =
   | { ok: true; scope: Scope }
-  | { ok: false; reason: "no-scope" | "changed" | "no-approvers" | "not-an-approver" | "profile-unresolved" | "unrouted" };
+  | { ok: false; reason: "no-scope" | "changed" | "no-approvers" | "not-an-approver" | "profile-unresolved" | "unrouted" }
+  /** v102: the project's approval rules stopped it — the requester can't approve, protected work needs a person —
+   * or recorded this person's yes and needs a second one (`second-approver`). */
+  | { ok: false; reason: "requester" | "person-required" }
+  | { ok: false; reason: "second-approver"; have: number; need: number; already: boolean };
 
 /**
  * Whether this name-and-token pair is a person the store knows. Shared by
@@ -1283,6 +1291,17 @@ export function approve(
     if (scope.routeEra == null) {
       return { ok: false as const, reason: "unrouted" as const };
     }
+
+    // SEPARATION OF DUTIES (v102): the project's rules, asked first so the
+    // answer is words, not a silent refusal from the seal. Protected work
+    // keeps each person's yes to these exact bytes and seals on the second.
+    const gate = store.approvalGate(taskId, by, "person");
+    if (gate.verdict === "refuse") return { ok: false as const, reason: gate.reason };
+    if (gate.verdict === "vote") {
+      store.recordApprovalVote(taskId, scope.digest, by, now);
+      return { ok: false as const, reason: "second-approver" as const, have: gate.have, need: gate.need, already: gate.already };
+    }
+    if (gate.protectedWork) store.recordApprovalVote(taskId, scope.digest, by, now);
 
     // SEAL, never re-resolve: the approval snapshots the stored working
     // profile — the exact bytes the digest the approver signed was bound

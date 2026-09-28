@@ -1,6 +1,7 @@
 /** Shared, exact-state actions. Models may prepare; only the existing human
  * confirmation door executes. Protected actions use a one-use review receipt. */
 import { publicChatText } from "./chat-display.js";
+import { gateWords } from "./approval-policy.js";
 import { createHash, randomBytes } from "node:crypto";
 import { verifiedAuthor, type Store } from "./store.js";
 import {
@@ -1210,7 +1211,12 @@ export function executeSharedAction(
           scope.digest,
           options.review!.password,
         );
-        if (!result.ok) throw Error(`Approval refused: ${result.reason}.`);
+        if (!result.ok) {
+          // v102: the project's approval rules speak for themselves.
+          if (result.reason === "second-approver") throw Error(gateWords({ verdict: "vote", have: result.have, need: 2, already: result.already }));
+          if (result.reason === "requester" || result.reason === "person-required") throw Error(gateWords({ verdict: "refuse", reason: result.reason }));
+          throw Error(`Approval refused: ${result.reason}.`);
+        }
         if (
           race &&
           !store.approveTournamentTerms(race.id, actor, race.raceDigest, now)
