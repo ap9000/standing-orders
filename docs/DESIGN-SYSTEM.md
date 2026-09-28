@@ -56,7 +56,7 @@ The full list with light and dark values, contrast and roles is in
 | `--so-ink` | `#171717` | `#ededed` | text |
 | `--so-muted` | `#666666` | `#a1a1a1` | dim text (≥4.5:1 on paper and frame) |
 | `--so-accent` | `#171717` | `#ededed` | every act (ink, by design); console `--primary` |
-| `--so-signal` | `#c0267e` | `#ff6fb5` | waits on a person; focus (`--ring`), caret, selection |
+| `--so-signal` | `#c0267e` | `#ff6fb5` | waits on a person; focus (`--ring`), caret, selection; a person may swap it for a Pantone colour of the year in Settings → Appearance (`src/accent-colors.ts`) |
 | `--so-danger` | `#c4320a` | `#ff977d` | failed; the arm-to-cancel act |
 | `--so-warning` | `#ab6400` | `#ffca16` | setup trouble, caution |
 | `--so-info` | `#0d74ce` | `#70b8ff` | live (console `--running`) |

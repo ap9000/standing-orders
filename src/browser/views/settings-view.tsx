@@ -40,11 +40,44 @@ function Themes({ view, csrf }: { view: BrowserSettingsView; csrf: string }) {
   const options = [["system", "Match device", <Monitor key="m" />], ["light", "Light", <Sun key="s" />], ["dark", "Dark", <Moon key="d" />]] as const;
   return <form method="post" action="/settings/appearance" className="flex flex-wrap items-center gap-3">
     <Csrf csrf={csrf} />
-    <div role="group" aria-label="Theme" className="inline-flex rounded-lg bg-muted p-1">
+    <div role="group" aria-label="Theme" className="inline-flex rounded-lg bg-muted p-0.5">
       {options.map(([value, label, icon]) => <button key={value} type="submit" name="theme" value={value} aria-pressed={view.theme === value}
-        className={cn("inline-flex h-9 items-center gap-2 rounded-md px-3 text-sm font-semibold text-muted-foreground transition-colors hover:text-foreground max-sm:h-11 [&_svg]:size-4", view.theme === value && "bg-card text-foreground shadow-sm")}>{icon}{label}</button>)}
+        className={cn("inline-flex h-7 items-center gap-2 rounded-md px-2.5 text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground max-sm:h-11 [&_svg]:size-3.5", view.theme === value && "bg-card text-foreground shadow-[var(--so-pill-shadow)]")}>{icon}{label}</button>)}
     </div>
     <span className="text-[13px] text-muted-foreground">Saved in this browser.</span>
+  </form>;
+}
+
+/** The signal colour, from Pantone's colours of the year. The swatch is the published colour; the preview is
+ * how it reads here (light ones are deepened, dark ones lightened, so text passes AA). */
+function Accents({ view, csrf }: { view: BrowserSettingsView; csrf: string }) {
+  const current = view.accents.find(one => one.id === view.accent) ?? view.accents[0]!;
+  return <form method="post" action="/settings/appearance" className="flex flex-col gap-3" data-accent-picker>
+    <Csrf csrf={csrf} />
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+      <div aria-hidden="true" className="flex items-center gap-2">
+        <span className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-attention px-1.5 font-mono text-[11px] leading-none text-on-attention">3</span>
+        <Badge tone="attention">Needs your decision</Badge>
+        <span className="inline-flex h-7 items-center rounded-md bg-attention px-2.5 text-[12.5px] font-medium text-on-attention">Approve</span>
+      </div>
+      <p className="text-[13px]" data-accent-current={current.id}>
+        <span className="font-medium">{current.name}</span>{current.year !== null && <span className="font-mono text-[12px] text-muted-foreground"> {current.year}</span>}
+      </p>
+    </div>
+    {current.note !== null && <p className="text-[12.5px] text-warning" data-accent-note>{current.note}</p>}
+    <div role="group" aria-label="Accent colour" className="grid grid-cols-[repeat(auto-fill,minmax(9.5rem,1fr))] gap-1">
+      {view.accents.map(one => <button key={one.id} type="submit" name="accent" value={one.id} aria-pressed={one.id === current.id}
+        aria-label={`${one.name}${one.year === null ? ", the default" : `, ${one.year}`}`}
+        className={cn("flex min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-accent max-sm:min-h-11",
+          one.id === current.id && "bg-card shadow-[var(--so-pill-shadow)] hover:bg-card")}>
+        <span aria-hidden="true" className="size-5 shrink-0 rounded-[5px] shadow-[inset_0_0_0_1px_rgb(0_0_0/.12)]" style={{ background: one.hex }} />
+        <span className="min-w-0">
+          <span className="block truncate text-[12.5px] font-medium leading-tight">{one.name}</span>
+          <span className="block font-mono text-[11px] leading-tight text-muted-foreground">{one.year ?? "Default"}</span>
+        </span>
+      </button>)}
+    </div>
+    <p className="text-[12.5px] text-muted-foreground">Pantone's colours of the year. Light ones are deepened so text stays readable; {view.accentsLeftOut} are left out because a grey can't stand out here. Saved in this browser.</p>
   </form>;
 }
 
@@ -240,6 +273,7 @@ export function SettingsView({ view, csrf }: { view: BrowserSettingsView; csrf: 
         {TILE_ICONS[tile.href]}{tile.label}</a>)}
     </nav>
     <Section title="Appearance"><Themes view={view} csrf={csrf} /></Section>
+    <Section id="accent" title="Accent colour" description="The one colour that marks what needs you."><Accents view={view} csrf={csrf} /></Section>
     {view.permission && <DefaultChoice title="Unattended permissions" description="The starting choice for new tasks. Approved tasks keep their setting." action="/settings/permission-default" field="permission-mode"
       value={view.permission.mode} canManage={view.permission.canManage} changed={view.permission.changed} csrf={csrf}
       options={[{ value: "auto", title: "Auto", description: "Asks before risky actions." }, { value: "bypassPermissions", title: "Full access", description: "Never asks and can change files anywhere on this computer. Trusted repositories only." }]} />}
