@@ -6,7 +6,7 @@ import { BookOpen, FolderOpen, GitBranch, Plus } from "lucide-react";
 import type { ReactNode } from "react";
 import type { BrowserProjectRow, BrowserProjectsView } from "../../browser-workspace.js";
 import { GuardedHtml } from "../guarded-html.js";
-import { Badge, Button, Card, badgeVariants, cn } from "../components/ui/index.js";
+import { Badge, Button, badgeVariants, cn } from "../components/ui/index.js";
 
 function OpenForm({ csrf, path, destination, children }: { csrf: string; path: string; destination: string; children: ReactNode }) {
   return <form method="post" action="/projects/open" className="inline-flex">
@@ -29,7 +29,7 @@ function openedWords(iso: string): string {
 }
 
 function Row({ row, csrf, returnTo, choosing }: { row: BrowserProjectRow; csrf: string; returnTo: string; choosing: boolean }) {
-  return <li className={cn("flex items-center gap-x-4 px-5 py-3 max-sm:gap-x-2 max-sm:px-4", row.open && "bg-accent/40")} data-project={row.path}>
+  return <li className={cn("flex items-center gap-x-4 px-2 py-3 max-sm:gap-x-2", row.open && "bg-accent/40")} data-project={row.path}>
     <FolderOpen className="size-4 shrink-0 text-muted-foreground max-sm:hidden" aria-hidden="true" />
     <div className="min-w-0 flex-1">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -64,16 +64,16 @@ function Row({ row, csrf, returnTo, choosing }: { row: BrowserProjectRow; csrf: 
 function Group({ label, rows, ...rest }: { label: string; rows: BrowserProjectRow[]; csrf: string; returnTo: string; choosing: boolean }) {
   return rows.length === 0 ? null : <section aria-label={label} className="flex flex-col gap-2">
     <h2 className="text-sm font-semibold text-muted-foreground">{label}</h2>
-    <Card className="gap-0 overflow-hidden p-0 max-sm:p-0">
+    <div className="border-y border-border">
       <ul className="divide-y divide-border">{rows.map(row => <Row key={row.path} row={row} {...rest} />)}</ul>
-    </Card>
+    </div>
   </section>;
 }
 
 export function ProjectsView({ view, csrf }: { view: BrowserProjectsView; csrf: string }) {
   const shared = { csrf, returnTo: view.returnTo, choosing: view.choosing };
   const empty = view.recent.length === 0 && view.available.length === 0;
-  return <div className="mx-auto flex w-full max-w-4xl flex-col gap-5">
+  return <div className="flex w-full flex-col gap-5">
     <header className="flex flex-wrap items-center gap-3">
       <div className="min-w-0 flex-1">
         <h1 className="text-[26px] font-semibold leading-tight tracking-tight max-sm:text-[22px]">{view.choosing ? "New task" : "Projects"}</h1>
@@ -87,13 +87,13 @@ export function ProjectsView({ view, csrf }: { view: BrowserProjectsView; csrf: 
     <Group label="Recent" rows={view.recent} {...shared} />
     <Group label="Available" rows={view.available} {...shared} />
 
-    <Card id="add-project" className="scroll-mt-4 gap-3">
+    <section id="add-project" className="flex scroll-mt-4 flex-col gap-3 border-t border-border pt-5">
       <h2 className="text-base font-semibold">{empty ? "Add your first project" : "Add a project"}</h2>
       {(view.add.browse !== null || view.add.github !== null) && <div className="flex flex-wrap gap-2">
         {view.add.browse !== null && <Button asChild variant="outline"><a href={view.add.browse}><FolderOpen />Choose a folder</a></Button>}
         {view.add.github !== null && <Button asChild variant="outline"><a href={view.add.github}><GitBranch />Add from GitHub</a></Button>}
       </div>}
       <GuardedHtml html={view.add.html} immutable className="so-project-add" />
-    </Card>
+    </section>
   </div>;
 }

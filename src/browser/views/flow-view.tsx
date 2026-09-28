@@ -33,7 +33,7 @@ const KIND_ICONS: Record<BrowserFlowStage["kind"], ReactNode> = {
 
 /** What Jev decided about a card: its answer and how sure. A card it wasn't sure about says so. */
 function SortChip({ sorted }: { sorted: NonNullable<BrowserFlowCard["sorted"]> }) {
-  return <span className={cn("inline-flex max-w-full items-center gap-1 rounded-full bg-muted px-1.5 py-0.5 text-[11px] font-medium", !sorted.confident && "text-attention")}
+  return <span className={cn("inline-flex max-w-full items-center gap-1 rounded-full bg-muted px-1.5 py-0.5 text-[11px] font-medium", !sorted.confident && "text-warning")}
     title={sorted.confident ? "Sorted by Jev" : "Jev wasn't sure"} data-sort-chip>
     <Split className="size-3 shrink-0" style={{ color: sorted.confident ? COLORS["violet"] : undefined }} aria-hidden="true" /><span className="truncate">{sorted.confident ? sorted.chip : `Not sure · ${sorted.chip}`}</span></span>;
 }
@@ -147,7 +147,7 @@ function ZoneNode({ data, selected }: NodeProps<Node<ZoneData, "zone">>) {
     {editing && <NodeResizer isVisible={selected} minWidth={220} minHeight={160} lineClassName="!border-primary" handleClassName="!size-2 !bg-primary" onResizeEnd={(_event, box) => data.onResize(stage.id, box)} />}
     {/* Drawing handles: the right dot makes a "then" arrow, the bottom dot an "if sent back" arrow; any side receives. */}
     <Handle type="source" position={Position.Right} id="next" className={cn(handle, "!bg-primary")} isConnectable={editing} />
-    <Handle type="source" position={Position.Bottom} id="fail" className={cn(handle, "!bg-attention")} style={{ left: "75%" }} isConnectable={editing} />
+    <Handle type="source" position={Position.Bottom} id="fail" className={cn(handle, "!bg-destructive")} style={{ left: "75%" }} isConnectable={editing} />
     {(["Left", "Right", "Top", "Bottom"] as const).map(side => <Handle key={`t-${side}`} type="target" position={Position[side]} id={`t-${side}`} className={handle} isConnectable={editing}
 />)}
     {/* Routing handles: arrows leave from whichever side faces their target. Never drawn from. */}
@@ -205,7 +205,7 @@ function TriggerNode({ data }: NodeProps<Node<TriggerData, "trigger">>) {
         <span className="inline-flex size-6 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">{TRIGGER_ICONS[trigger.kind] ?? <Zap className="size-3.5" aria-hidden="true" />}</span>
         <button type="button" className="nodrag nopan min-w-0 flex-1 cursor-pointer text-left" onClick={() => data.onOpen(trigger.id)} aria-label={`Trigger: ${trigger.words}`}>
           <div className="truncate text-[12px] font-semibold">{trigger.name}</div>
-          <div className={cn("truncate text-[11px]", attention ? "text-attention" : "text-muted-foreground")}>{line}</div>
+          <div className={cn("truncate text-[11px]", attention ? "text-warning" : "text-muted-foreground")}>{line}</div>
         </button>
         {trigger.button !== null && trigger.state === "active" && <Button size="sm" className="nodrag nopan h-7 px-2.5" onClick={() => data.onPress(trigger.id)}>Start</Button>}
       </div>;
@@ -461,7 +461,7 @@ function SortSettings({ sort, others, ready, set }: { sort: SortSettingsValue; o
   const answer = (index: number, change: Partial<SortSettingsValue["answers"][number]>) => set({ ...sort, answers: sort.answers.map((one, at) => at === index ? { ...one, ...change } : one) });
   const note = (index: number, change: Partial<SortSettingsValue["notes"][number]>) => set({ ...sort, notes: sort.notes.map((one, at) => at === index ? { ...one, ...change } : one) });
   return <>
-    {!ready && <p className="rounded-md border border-attention/50 px-3 py-2 text-[12.5px]" data-sort-needs-key>Sorting needs an OpenRouter key. <a className="font-medium text-primary underline-offset-4 hover:underline" href="/settings#providers">Add it in Settings</a></p>}
+    {!ready && <p className="rounded-md border border-border px-3 py-2 text-[12.5px]" data-sort-needs-key>Sorting needs an OpenRouter key. <a className="font-medium text-primary underline-offset-4 hover:underline" href="/settings#providers">Add it in Settings</a></p>}
     <Field label="Question">
       <Input value={sort.question} maxLength={300} onChange={event => set({ ...sort, question: event.target.value })} aria-label="Question" />
     </Field>
@@ -547,7 +547,7 @@ function SecretsBox({ view, csrf, apply, words, chosen, choose }: { view: Browse
         ? <p className="flex flex-wrap gap-1.5">{view.requestSecrets.map(name => <Badge key={name} tone="neutral" className="font-mono">{name}</Badge>)}</p>
         : <div className="flex flex-wrap gap-x-3 gap-y-1.5">{view.requestSecrets.map(name => <label key={name} className="inline-flex items-center gap-1.5 font-mono text-[12px]">
             <input type="checkbox" className="size-4 accent-[var(--so-accent)]" checked={picked.includes(name)} onChange={event => choose(event.target.checked ? [...picked, name] : picked.filter(one => one !== name))} />{name}</label>)}</div>)}
-      {picked.filter(name => !view.requestSecrets.includes(name)).map(name => <p key={name} className="text-[12px] text-attention">{name} isn't saved yet: save it below.</p>)}
+      {picked.filter(name => !view.requestSecrets.includes(name)).map(name => <p key={name} className="text-[12px] text-warning">{name} isn't saved yet: save it below.</p>)}
       <div className="flex gap-1.5">
         <Input value={secret.name} onChange={event => setSecret({ ...secret, name: event.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, "_") })} className="w-32 shrink-0 font-mono text-[12px]" placeholder="API_TOKEN" aria-label="Secret name" />
         <Input type="password" autoComplete="off" value={secret.value} onChange={event => setSecret({ ...secret, value: event.target.value })} placeholder="Its value (empty removes it)" aria-label="Secret value" />
@@ -643,7 +643,7 @@ const SCRIPT_EXAMPLES: Record<string, string> = {
 /** An email: who it goes to, the subject and the words. */
 function EmailSettings({ email, view, set }: { email: NonNullable<BrowserFlowStage["email"]>; view: BrowserFlowView; set: (email: NonNullable<BrowserFlowStage["email"]>) => void }) {
   return <>
-    {!view.emailReady && <p className="rounded-md border border-attention/50 px-3 py-2 text-[12.5px]" data-email-needs-setup>Email isn't set up yet. <a className="font-medium text-primary underline-offset-4 hover:underline" href="/settings#email">Add your mail server in Settings</a></p>}
+    {!view.emailReady && <p className="rounded-md border border-border px-3 py-2 text-[12.5px]" data-email-needs-setup>Email isn't set up yet. <a className="font-medium text-primary underline-offset-4 hover:underline" href="/settings#email">Add your mail server in Settings</a></p>}
     <Field label="To"><Input value={email.to} maxLength={500} onChange={event => set({ ...email, to: event.target.value })} aria-label="To" /></Field>
     <Field label="Subject"><Input value={email.subject} maxLength={200} onChange={event => set({ ...email, subject: event.target.value })} aria-label="Subject" /></Field>
     <Field label="Email" hint={FILL_INS}><Textarea rows={6} value={email.body} maxLength={8000} onChange={event => set({ ...email, body: event.target.value })} aria-label="Email" /></Field>
@@ -654,7 +654,7 @@ function EmailSettings({ email, view, set }: { email: NonNullable<BrowserFlowSta
 function ToolSettings({ tool, view, set }: { tool: NonNullable<BrowserFlowStage["tool"]>; view: BrowserFlowView; set: (tool: NonNullable<BrowserFlowStage["tool"]>) => void }) {
   const chosen = view.tools.find(one => one.name === tool.server);
   return <>
-    {view.tools.length === 0 ? <p className="rounded-md border border-attention/50 px-3 py-2 text-[12.5px]" data-tool-needs-setup>This project has no tools yet. <a className="font-medium text-primary underline-offset-4 hover:underline" href="/settings/tools">Add one on the Tools page</a></p>
+    {view.tools.length === 0 ? <p className="rounded-md border border-border px-3 py-2 text-[12.5px]" data-tool-needs-setup>This project has no tools yet. <a className="font-medium text-primary underline-offset-4 hover:underline" href="/settings/tools">Add one on the Tools page</a></p>
       : <Field label="Tool" {...(chosen !== undefined && !chosen.ready ? { hint: "It needs its secrets set on the Tools page first." } : chosen !== undefined ? { hint: chosen.about } : {})}>
         <select className={SELECT} value={tool.server} onChange={event => set({ ...tool, server: event.target.value, name: view.tools.find(one => one.name === event.target.value)?.functions[0] ?? "" })} aria-label="Tool">
           {chosen === undefined && <option value={tool.server}>{tool.server === "" ? "Choose a tool" : `${tool.server} (missing)`}</option>}
@@ -1031,7 +1031,7 @@ function TriggersPanel({ view, csrf, apply, focus, onPress, onClose }: { view: B
         <div className="min-w-0 flex-1">
           <p className="text-[13px] font-medium leading-snug">{trigger.words}</p>
           <p className="text-[12px] text-muted-foreground">Starts in {trigger.zone}{trigger.state === "paused" ? " · Paused" : ""}{trigger.shared ? " · Shared as a form" : ""}</p>
-          {trigger.status !== null && <p className={cn("text-[12px]", trigger.failing ? "text-attention" : "text-muted-foreground")}>{ago(trigger.statusAt)}: {trigger.status}</p>}
+          {trigger.status !== null && <p className={cn("text-[12px]", trigger.failing ? "text-warning" : "text-muted-foreground")}>{ago(trigger.statusAt)}: {trigger.status}</p>}
         </div>
       </div>
       {trigger.hook?.needsSecret === true && !trigger.hook.ready && <LinearSecret trigger={trigger} view={view} csrf={csrf} apply={apply} />}
@@ -1166,7 +1166,7 @@ function InsightsPanel({ view, onClose }: { view: BrowserFlowView; onClose: () =
       <section className="flex flex-col gap-2">
         <h3 className="text-[13px] font-semibold">Where it breaks</h3>
         {data.breaks.length === 0 ? <p className="text-[12.5px] text-muted-foreground">Nothing failed or was sent back in this period.</p>
-          : <ul className="flex flex-col gap-2">{data.breaks.map(one => { const zone = data.zones.find(z => z.zone === one.zone); return <li key={one.zone} className="rounded-lg border border-attention/50 p-2.5 text-[13px]">
+          : <ul className="flex flex-col gap-2">{data.breaks.map(one => { const zone = data.zones.find(z => z.zone === one.zone); return <li key={one.zone} className="rounded-lg border border-border p-2.5 text-[13px]">
             <p><span className="font-semibold">{one.title}</span>: {one.problems} of {one.of} card{one.of === 1 ? "" : "s"} failed or were sent back</p>
             {zone?.lastProblem && <p className="mt-0.5 text-[12px] text-muted-foreground">Latest: {zone.lastProblem.cardTitle}{zone.lastProblem.note === null ? "" : ` — ${zone.lastProblem.note.split("\n")[0]}`}</p>}
           </li>; })}</ul>}
@@ -1176,7 +1176,7 @@ function InsightsPanel({ view, onClose }: { view: BrowserFlowView; onClose: () =
         <table className="w-full text-left text-[12px]"><thead className="text-muted-foreground"><tr><th className="py-1 font-medium">Zone</th><th className="font-medium">In</th><th className="font-medium">On</th><th className="font-medium">Failed</th><th className="font-medium">Back</th><th className="font-medium">Typical stay</th></tr></thead>
           <tbody>{data.zones.map(zone => <tr key={zone.zone} className="border-t">
             <td className="py-1.5 pr-2 font-medium">{zone.title}{zone.here > 0 ? <span className="text-muted-foreground"> · {zone.here} here</span> : null}</td>
-            <td>{zone.entered}</td><td>{zone.movedOn}</td><td className={zone.failed > 0 ? "font-semibold text-attention" : ""}>{zone.failed}</td><td className={zone.sentBack > 0 ? "font-semibold text-attention" : ""}>{zone.sentBack}</td><td>{duration(zone.typicalMinutes)}</td>
+            <td>{zone.entered}</td><td>{zone.movedOn}</td><td className={zone.failed > 0 ? "font-semibold text-destructive" : ""}>{zone.failed}</td><td className={zone.sentBack > 0 ? "font-semibold text-foreground" : ""}>{zone.sentBack}</td><td>{duration(zone.typicalMinutes)}</td>
           </tr>)}</tbody></table>
       </section>
       {data.scripts.length > 0 && <section className="flex flex-col gap-1.5">
@@ -1197,7 +1197,7 @@ function InsightsPanel({ view, onClose }: { view: BrowserFlowView; onClose: () =
         {data.runs.length === 0 ? <p className="text-[12.5px] text-muted-foreground">No scripts, sorts or updates have run in this period.</p>
           : <ul className="flex flex-col gap-1.5">{data.runs.map(run => { const key = `${run.card}:${run.entry}`; return <li key={key} className="rounded-md border px-2.5 py-2 text-[12.5px]" data-run={key}>
             <button type="button" className="flex w-full items-start gap-2 text-left" onClick={() => void openLog(run.card, run.entry)} aria-expanded={log?.key === key}>
-              <span className={cn("mt-1 size-2 shrink-0 rounded-full", run.state === "passed" ? "bg-success" : run.state === "failed" ? "bg-destructive" : "bg-attention")} aria-hidden="true" />
+              <span className={cn("mt-1 size-2 shrink-0 rounded-full", run.state === "passed" ? "bg-success" : run.state === "failed" ? "bg-destructive" : "bg-info")} aria-hidden="true" />
               <span className="min-w-0 flex-1"><span className="font-medium">{run.script ?? run.zoneTitle}</span> · {run.cardTitle}<span className="block text-[12px] text-muted-foreground">{run.kind === "sort" && run.state === "passed" && run.result !== null ? run.result.split(". ")[0]!.replace(/\.$/, "") : run.state === "passed" ? "Passed" : run.state === "failed" ? "Failed" : run.state === "waiting" ? "Trying again" : "Running"}{run.durationMs === null ? "" : run.kind === "sort" ? ` · ${run.durationMs < 1000 ? `${run.durationMs} ms` : `${(run.durationMs / 1000).toFixed(1)} s`}` : ` in ${Math.max(1, Math.round(run.durationMs / 1000))} s`} · {when(run.at)}</span></span>
             </button>
             {log?.key === key && <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap rounded-md bg-muted p-2 font-mono text-[11.5px]" data-run-log>{log.text}</pre>}
@@ -1331,9 +1331,9 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
           ...(stage.kind === "wait" && stage.wait?.for === "reply" ? { label: "replied", labelStyle: { fontSize: 11, fontWeight: 600, fill: "var(--color-foreground)" }, labelBgStyle: { fill: "var(--color-card)" } } : {}) }]),
         // Outside editing, a failure that lands where one of its answers already goes is that arrow, not a second one crossing the canvas.
         ...(fail === undefined || (!editing && answers.some(one => one.target === fail.id)) ? [] : [{ id: `${stage.id}->fail`, source: stage.id, target: fail.id, sourceHandle: sides(stage, fail, true).source, targetHandle: sides(stage, fail, true).target,
-          type: "smoothstep", pathOptions: { offset: 28, borderRadius: 10 }, label: stage.kind === "approval" ? "sent back" : stage.kind === "sort" ? "not sure" : stage.kind === "wait" ? "no reply" : "fails", labelStyle: { fontSize: 11, fill: stage.kind === "wait" ? "var(--color-muted-foreground)" : "var(--so-attention)" },
-          labelBgStyle: { fill: "var(--color-card)" }, markerEnd: { type: MarkerType.ArrowClosed, color: stage.kind === "wait" ? "var(--color-muted-foreground)" : "var(--so-attention)" },
-          style: { strokeWidth: 1.5, strokeDasharray: "6 4", stroke: stage.kind === "wait" ? "var(--color-muted-foreground)" : "var(--so-attention)" }, deletable: editing }]),
+          type: "smoothstep", pathOptions: { offset: 28, borderRadius: 10 }, label: stage.kind === "approval" ? "sent back" : stage.kind === "sort" ? "not sure" : stage.kind === "wait" ? "no reply" : "fails", labelStyle: { fontSize: 11, fill: stage.kind === "wait" ? "var(--color-muted-foreground)" : "var(--color-muted-foreground)" },
+          labelBgStyle: { fill: "var(--color-card)" }, markerEnd: { type: MarkerType.ArrowClosed, color: stage.kind === "wait" ? "var(--color-muted-foreground)" : "var(--color-muted-foreground)" },
+          style: { strokeWidth: 1.5, strokeDasharray: "6 4", stroke: stage.kind === "wait" ? "var(--color-muted-foreground)" : "var(--color-muted-foreground)" }, deletable: editing }]),
         // A time limit that moves the card on (v91): a dashed arrow named by the time.
         ...(limitTo === undefined || stage.limit === undefined ? [] : [{ id: `${stage.id}->limit`, source: stage.id, target: limitTo.id, sourceHandle: sides(stage, limitTo, true).source, targetHandle: sides(stage, limitTo, true).target,
           type: "smoothstep", pathOptions: { offset: 36, borderRadius: 10 }, label: `after ${minutesWords(stage.limit.minutes)}`, labelStyle: { fontSize: 11, fill: "var(--color-muted-foreground)" },
@@ -1500,7 +1500,7 @@ function PhoneFlow({ view: initial, csrf }: { view: BrowserFlowView; csrf: strin
     {live.length > 0 && <section className="rounded-lg border p-3" data-flow-triggers>
       <h2 className="text-[14px] font-semibold">Triggers</h2>
       <ul className="mt-2 flex flex-col gap-2">{live.map(one => <li key={one.id} className="text-[13px]"><span className="font-medium">{one.name}</span> · {one.detail}
-        <div className={cn("text-[12px]", one.failing ? "text-attention" : "text-muted-foreground")}>{one.state === "paused" ? "Paused" : one.status === null ? `Starts in ${one.zone}` : `${ago(one.statusAt)}: ${one.status}`}</div></li>)}</ul>
+        <div className={cn("text-[12px]", one.failing ? "text-warning" : "text-muted-foreground")}>{one.state === "paused" ? "Paused" : one.status === null ? `Starts in ${one.zone}` : `${ago(one.statusAt)}: ${one.status}`}</div></li>)}</ul>
     </section>}
   </div>;
 }

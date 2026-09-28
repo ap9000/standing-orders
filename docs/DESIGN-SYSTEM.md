@@ -1,94 +1,100 @@
-# The Console — design system v2
+# The Console — design system v4, "Signal"
 
-The one visual world the console and its React package share, rebuilt on
-2026-09-02 to sit beside Linear and Vercel: their craft level is the bar.
-`src/serve.ts` implements it as plain CSS; `design/` implements it as a
-shadcn theme with the same token names. When they disagree, this document
-decides, and the `:root` blocks of both are brought back together in the
-same commit.
+Rebuilt on 2026-09-27 (v4) on the Raycast and Arc canon, with Linear and
+Vercel as the craft bar. **`DESIGN.md` at the repository root is the authority
+for the visual system**: tokens, type, shapes, depth and components, written
+from the built code. This document keeps what `DESIGN.md` does not: the
+console's voice, how its pages are structured, and how a change lands.
+
+The palette lives once, in `THEME_LIGHT` / `THEME_DARK` in `src/serve.ts`.
+The server pages (`STYLE`), the React workspace (`src/browser/workspace.css`)
+and the shadcn components (`src/browser/tailwind.css` maps Tailwind's names
+onto it) all read those tokens. The older `design/` package still carries the
+v2 tokens (IBM Plex, amber). It is not part of the build; bring it over before
+using it again.
 
 ## 1. Voice
 
-- **Quiet density.** An identifier and a status on every row; hairlines,
-  not boxes; whitespace does the grouping. A screen holds many rows and
-  stays calm.
-- **Two schemes, one ramp.** A true neutral ramp with a whisper of cool.
-  Dark is the default scene (an operator after hours); light follows the
-  device (a phone in daylight). Every token has a value in both; no rule may
-  name a color that only exists in one.
-- **Amber means one thing, in two places.** `--brand` marks what waits on a
-  person: the needs-you count (rail badge, tab dot, lane-header dot, the
-  pill's count) and the one act that resolves a screen (approve, answer,
-  retry). Cards, ceremony frames, seals, and chips are neutral — the header
-  above a card carries the colour for it (reduction pass §3). A recommended
-  option is never amber; a selected row is never blue.
-- **Two faces, strictly cast.** IBM Plex Sans is the human voice: titles,
-  sentences, section headers, chips. IBM Plex Mono is every machine fact:
-  ids, workers, models, clocks, dollars, digests, tokens. Mono is never a
-  costume for "technical", and section headers are no longer mono.
+- **Quiet until a person is needed.** A neutral grey frame with paper sheets
+  inset into it; hairlines, not boxes; whitespace does the grouping. A screen
+  holds many rows and stays calm.
+- **Ink is what you can do.** Every button, link and choice a person can take
+  is ink: a black button in light, a near-white one in dark. Secondary acts
+  are paper pills with a one-pixel shadow ring.
+- **Magenta means one thing.** Chart magenta (`--so-signal`, which
+  `--so-attention` and the console's `--brand` point to) marks what waits on a
+  person: the needs-you count, a "Needs your decision" badge, and the one act
+  that resolves a screen (approve, answer, inspect the result). Its only other
+  jobs are focus, the caret, selection and the brand mark. Cards, frames,
+  seals, headings and list actions stay neutral; a list's actions are outline
+  buttons and the badge carries the colour. A recommended option is never
+  magenta, and magenta never means failed.
+- **Status keeps its own hue.** Failure is vermilion, setup trouble is amber,
+  live is blue, done is green, each as a soft badge or a small dot, and the
+  word always carries the meaning.
+- **Two faces, strictly cast.** Geist is the human voice: titles, sentences,
+  section headers, chips. Geist Mono is every machine fact: ids, counts,
+  models, clocks, digests, paths, keys. Mono is never a costume for
+  "technical", and headings are never mono.
 - **Honest words.** needs you · building · queued · waiting · done;
   measured or unmeasured, never a summed $0; a stage and a clock, never a
   percent.
-- **Drawn icons.** One stroke weight (1.75) on a 24-unit grid, from one set,
-  in the sidebar, the tab bar, the queue's controls. Never a glyph.
+- **Drawn icons.** One stroke weight on a 24-unit grid, from one set
+  (lucide in the workspace), never a glyph or an emoji.
 
 ## 2. Tokens
 
-| Token | Dark | Light | Role |
+The full list with light and dark values, contrast and roles is in
+`DESIGN.md` (Colors). The load-bearing ones:
+
+| Token | Light | Dark | Role |
 |---|---|---|---|
-| `--background` | `#0b0c0e` | `#fafafa` | ground |
-| `--card` | `#121316` | `#ffffff` | surface |
-| `--muted` / `--secondary` / `--accent` | `#1a1c20` | `#f1f2f4` | inset wells, hover fills |
-| `--border` | `#24272d` | `#e4e5e9` | hairlines |
-| `--input` | `#3a3e46` | `#c4c7cf` | control boundaries |
-| `--muted-foreground` | `#8b919c` | `#64697a` | dim text (≥4.5:1 on ground and surface) |
-| `--foreground` | `#ededef` | `#171717` | text |
-| `--primary` (console) | ink on paper | paper on ink | the one primary button per form |
-| `--brand` | `#f5a524` | `#a15c00` | waits on you; `--brand-foreground` is its button text |
-| `--running` / `--ring` | `#52a8ff` | `#0b6fd6` | a live build; focus |
-| `--success` (`--built`) | `#3ecf8e` | `#118a4f` | built |
-| `--destructive` (`--failed`) | `#f06a5e` | `#d1332e` | failed; the arm-to-cancel act |
-| `--radius` | `0.5rem` | | cards; `-2px` rows, buttons, inputs; `-4px` chips and wells |
-| `--shadow` / `--shadow-overlay` | deep | faint | cards and menus; light carries real offset shadows |
+| `--so-ground` | `#efefef` | `#0b0b0b` | the frame the sidebar sits on; server page ground |
+| `--so-paper` | `#ffffff` | `#161616` | sheets, cards, fields, menus |
+| `--so-raised` / `--so-soft` | `#f5f5f5` / `#f2f2f2` | `#1c1c1c` / `#1f1f1f` | tracks, notices, hover fills |
+| `--so-line` / `--so-input-line` | `#e6e6e6` / `#d4d4d4` | `#262626` / `#363636` | hairlines / field boundaries |
+| `--so-ink` | `#171717` | `#ededed` | text |
+| `--so-muted` | `#666666` | `#a1a1a1` | dim text (≥4.5:1 on paper and frame) |
+| `--so-accent` | `#171717` | `#ededed` | every act (ink, by design); console `--primary` |
+| `--so-signal` | `#c0267e` | `#ff6fb5` | waits on a person; focus (`--ring`), caret, selection |
+| `--so-danger` | `#c4320a` | `#ff977d` | failed; the arm-to-cancel act |
+| `--so-warning` | `#ab6400` | `#ffca16` | setup trouble, caution |
+| `--so-info` | `#0d74ce` | `#70b8ff` | live (console `--running`) |
+| `--so-success` | `#218358` | `#3dd68c` | built, passed |
 
-`color-scheme: light dark` on `:root`; the light block overrides under
-`@media (prefers-color-scheme: light)`. Two `theme-color` metas, one per
-scheme. The manifest stays dark.
+The console's older names (`--background`, `--card`, `--primary`, `--brand`,
+`--running`, `--ring`, `--glass*`) are views onto these, never a second ramp.
+Light is the root; dark follows the device unless the person pins a theme
+(`html[data-theme]`, from the `so-theme` cookie). Two `theme-color` metas
+(`#efefef`, `#0b0b0b`); the manifest is `#0b0b0b`.
 
-Type: body 14px/1.5 Plex Sans; meta 13px; chips and facts 11px; h1 20px
-semibold, -0.02em; h2 13px semibold dim sans (Linear's "In Progress 5"
-register), with a count pill where a count exists. Rhythm: 0.125 / 0.375 /
-0.625 / 0.875 / 1.25rem; more space above a heading than below it.
+Type: 13px/1.5 Geist for the workspace, 14px/1.7 for reading; page titles
+22–26px semibold with tight tracking; section headers 15px semibold ink.
+Controls: 32px at a desk (28px small), 44px to a thumb. Focus: a 2px magenta
+ring at 2px offset on buttons and links; a magenta border with a 3px wash on
+fields and the composer. Radii nest: sheet 12, card 10, control 8, badge 5.
 
-Controls: 2.25rem tall at a desk, 2.75rem to a thumb (≤40rem). Focus: a 2px
-ring at 2px offset on buttons and links; a ring-colored border with a soft
-3px halo on fields.
+## 3. Components and where they live
 
-## 3. Components and their two implementations
-
-| Component | Console (CSS) | Package (`design/src`) | Rule |
+| Component | Server page (CSS in `STYLE`) | Workspace (React) | Rule |
 |---|---|---|---|
-| Status chip | `.badge` + `.badge-open`, `-parked` (neutral), `-running`, `-done`, `-failed`; `.count.badge-open` (amber, the needs-you count only) | `StatusChip` | sans 11px pill; a state word wears a dot before it, a neutral fact (project, routine) does not |
-| Attention card | `.decide-card`, `.lane-attention .lane-card`, `.workspace-card.hot` | `AttentionCard` | neutral border; the lane header's amber dot and count say "needs you" for every card beneath |
-| Row | `.row` (2.25rem, hairline below, hover fill) | `LedgerRow` | title · mono facts · chip at the end |
-| Facts | `.facts` (`.fact > .k + .v`) | `KeyValueRow` | dim mono key, ink mono value |
-| Seal | `.seal` | `DigestSeal` | the signed digest, mono, boxed in the hairline |
-| Acceptance rubric | `acceptanceCeremonyHtml` (`<ul class="recap acceptance-rubric">`) | — | one line per signed criterion — mono id, sans statement, its required evidence kinds after it; restated text above the seal, never a second amber action |
-| Criterion matrix | `.badge-manual-review` (+ existing `.badge-done`/`-failed`); `criterionMatrixHtml` / `criterionMatrixSummary` | — | one row per criterion — a state badge (pass/missing/failed/manual review), mono id, statement, required evidence, and the proof's own answered evidence refs (a link to the underlying artifact where one resolves, plain text otherwise); the SAME states and words on the task page, the run page, done, builds, board, inbox, and `task show` |
-| Review judgement | reuses `.badge-done`/`-failed`/`-manual-review` (never a fourth color); `reviewJudgementBadge` | — | a second badge beside the matrix row's own — upholds/contradicts/cannot-tell read exactly as pass/failed/manual-review already do; hover title carries the reviewer's author and note |
-| Context coverage (v51) | reuses `.badge`/`-manual-review`/`-failed`; `coverageBadge`, `data-context-coverage` | — | a third badge on a revision's matrix row only — in patch / sealed context / context gap; hover title and the row's `context:` line carry the same `coverageStateWords` the CLI prints; a gap is never folded into the compact view |
-| Semantic coverage (v51) | `.semantic-coverage`, `.receipt-coverage`; `semanticCoverageHtml`, `coverageWords` | — | one line beside (never inside) the machine verdict: N/M upheld by an independent reviewer, the signed policy in words (optional under default, required under strict), NOT satisfied when anything is cannot-tell, contradicted, or unreviewed, then one `context gap <id>: …` line per named gap — identical on the task page, run page, chat receipt, and `task show` |
-| Diff review | `.diff-review`, `.diff-file`, `.diff-line`, `.diff-modes`, `.diff-annotate` | — | sealed patch rendered as folding files and hunks; View is quiet and default, Annotate reveals exact old/new-line targets; raw patch remains downloadable and annotations only become work through the separate revision act |
-| Repair chain card | `.card.repair-chain`; `repairChainHtml` | — | one card, one chain — drafted (awaiting approval or mode-approved), resolved, or one of the three stops (attempts-spent, no-progress, integrity-refused); the same words on the task page and the run page, and the SAME shared `passFraction` helper (never a hand-rolled "N/M criteria") on board and chat |
-| Card | `.card` | `Card` | surface, hairline, 0.5rem radius, faint shadow; never nested |
-| Buttons | `button` (secondary), `form.card > [type=submit]` (primary), `.approve-form [type=submit]` (amber), `.danger` | `Button` | one primary per form; approve is the only amber verb |
-| Fields | `input`, `textarea`, `select` | `Input` | surface-colored, hairline, hover darkens, focus halo |
-| Section header | `h2` (+ `.lane-count` pill) | — | small semibold dim sans |
-| Lane | `details.lane` with `summary > h2` | — | a column on a desktop, a folding section on a phone; a state dot on every header |
-| Workspace card | `.workspace-card` | — | name · status word · four inset count cells · proportional bar · board tap |
-| Chat workspace | `.chat-workspace` + `.chat-projects` + `.thread` | — | one bounded project pulse beside the shared mate thread; project actions remain ordinary guarded forms; an empty thread asks for one outcome, infers routine task fields, and keeps its prompt → suggestions → composer sequence in document flow on a phone |
-| Switcher | `details.switcher` + `.switcher-menu` | `NavBar` | POST forms with the session token; a check marks the current row; inert on sensitive pages |
-| Shell | `.side` 220px with icon rows; `.mobile-top` + `.tabbar` | `NavBar` | primary rows carry icons, the foot list stays text; one visible `/projects` link per breakpoint |
+| Status chip | `.badge` + `.badge-open` (magenta: waits on you), `-parked` (neutral), `-running`, `-done`, `-failed`; `.count.badge-open` (the needs-you count) | `Badge` with `toneOf()` | sentence case, 11.5px, soft fill; one mapping so a task reads the same everywhere |
+| Attention card | `.decide-card`, `.lane-attention .lane-card`, `.workspace-card.hot` | status card in `task-view.tsx` | neutral border; the badge and the one magenta verb say "needs you" |
+| Row | `.row` (hairline below, hover fill) | task rows in `tasks-view.tsx` (a subgrid shared by the list) | title · meta · badge · one outline action |
+| Facts | `.facts` (`.fact > .k + .v`) | task facts under a hairline | dim key, mono value for machine facts |
+| Seal | `.seal` | — | the signed digest, mono, boxed in the hairline |
+| Acceptance rubric | `acceptanceCeremonyHtml` (`<ul class="recap acceptance-rubric">`) | — | one line per signed criterion — mono id, sans statement, its required evidence kinds after it; restated text above the seal, never a second magenta action |
+| Criterion matrix | `.badge-manual-review` (+ `.badge-done`/`-failed`); `criterionMatrixHtml` / `criterionMatrixSummary` | — | one row per criterion — a state badge (pass/missing/failed/manual review), mono id, statement, required evidence, and the proof's answered evidence refs; the SAME states and words on every surface and in `task show` |
+| Review judgement | reuses `.badge-done`/`-failed`/`-manual-review`; `reviewJudgementBadge` | — | a second badge beside the matrix row's own; hover title carries the reviewer's author and note |
+| Context coverage (v51) | reuses `.badge`/`-manual-review`/`-failed`; `coverageBadge`, `data-context-coverage` | — | a third badge on a revision's matrix row only; a gap is never folded into the compact view |
+| Semantic coverage (v51) | `.semantic-coverage`, `.receipt-coverage`; `semanticCoverageHtml`, `coverageWords` | — | one line beside (never inside) the machine verdict; identical on the task page, run page, chat receipt, and `task show` |
+| Diff review | `.diff-review`, `.diff-file`, `.diff-line`, `.diff-modes`, `.diff-annotate` | — | View is quiet and default, Annotate reveals exact line targets; annotations only become work through the separate revision act |
+| Repair chain card | `.card.repair-chain`; `repairChainHtml` | — | one card, one chain; the shared `passFraction` helper, never a hand-rolled "N/M criteria" |
+| Card | `.card` | `Card` | paper, 1px hairline, 10px radius, no shadow; never nested |
+| Buttons | `button` (secondary), `form.card > [type=submit]` (primary, ink), `.approve-form [type=submit]` (magenta), `.danger` | `Button` (`default` ink, `attention` magenta, `outline`, `ghost`, `destructive`) | one primary per form; approve is the only magenta verb |
+| Fields | `input`, `textarea`, `select` | `Input`, `Select` | paper, control line, magenta focus |
+| Section header | `h2` (+ `.lane-count` pill) | — | 15px semibold ink in the workspace |
+| Shell | `.side` and `.mobile-top` + `.tabbar` (legacy chrome, Bearer reads and the pre-script fallback only) | `.so-workspace` in `app.tsx` | see §5 |
 
 ## 4. The board
 
@@ -112,7 +118,7 @@ top-down and every long thing folds.
    beneath it speaks the machine's own proof verdict (Priority 2) —
    *verified*, *evidence captured*, *missing evidence*, or *conflicting
    evidence* — never re-derived from the page. Accepting the latter two is
-   an explicit, neutral *accepted with exception* disclosure, not an amber
+   an explicit, neutral *accepted with exception* disclosure, not a magenta
    approval ceremony.
 3. **Acts bar** — every verb in one row; the act that resolves the task's
    state first and primary (retry on a stalled task, plan-first with no
@@ -121,7 +127,7 @@ top-down and every long thing folds.
    stays armed at the foot of the page, far from the primary.
 4. **What waits on you** — when a scope waits for its yes, the approval
    ceremony IS the first card under the title (the consent-sheet shape:
-   the wait stated, every bound term restated, the amber approve act in the
+   the wait stated, every bound term restated, the magenta approve act in the
    first screen, "edit instead →" beside the heading); the acts bar then
    follows it with no competing primary. A scope the store cannot route
    gets the problem and a primary "edit the scope to fix it" road instead
@@ -210,50 +216,62 @@ lands as a confirmable card.
 
 ## 5. The shell
 
-Desktop: a 220px sidebar (inbox · portfolio · work{board, queue} · builds ·
-fleet, each with its icon; more: text rows) and a primary "+ new task". The
-scope bar under the banner names what the screen shows; its name is the
-switcher's summary, listing every served project and "all projects" as POST
-forms returning to the same screen; "switch project →" keeps the road to
-`/projects`.
+Every signed-in page renders in the React workspace (`[data-workspace-shell]`).
+At a desk the frame is grey and the sidebar sits directly on it: the magenta
+mark, the ink New task button, the project switch, then Chat · Tasks · Flows ·
+Projects · Knowledge · Settings with the current page as a raised paper pill
+and the magenta needs-you count on Tasks. The main sheet (52px header, page
+name, ⌘K search) and the Crew sheet sit inset 8px into the frame. Full-width
+pages (the Tasks list, board, queue, workbench, code, flows) drop the Crew
+sheet because the list already is the crew. A task, result or project with its
+own conversation docks an Ask sheet on the right.
 
-Phone: one sticky header row — brand, the project pill (name · counts; tap
-for the same menu as a sheet above the tab bar, with "manage projects →"),
-quick capture — then the five-tab bar padded for the home indicator.
-`viewport-fit=cover` makes the safe areas real.
+At 900px and below the frame dissolves: the sheet fills the screen, the
+sidebar becomes a left drawer from the header's menu button, and Crew or Ask
+becomes a second full-screen view with a back button. `viewport-fit=cover`
+makes the safe areas real.
 
-Sensitive pages (a password ceremony on screen) gain no chrome scripts or
-chrome forms: the switcher renders as the name and its one link. The minimal
-same-origin session heartbeat remains, under the page's nonce and CSP.
+One-time secrets render as script-free focus pages (`focusDocument()`), with
+the brand and one card. The legacy console chrome (`.side`, `.mobile-top`,
+`.tabbar`) remains only for Bearer reads and the fallback a page paints before
+the workspace script runs.
 
 ## 6. Motion and browser surfaces
 
-One navigation cross-fade (140ms) for navigation a person chose; liveness
-swaps are instant; the pulse dot is the one "alive" signal; everything dies
-under `prefers-reduced-motion`. Selection, caret, scrollbars, focus rings and
+Colour fills on hover and press run 120ms ease-out; nothing lifts or bounces.
+One navigation cross-fade for navigation a person chose; liveness swaps are
+instant; the pulse dot is the one "alive" signal; everything stops under
+`prefers-reduced-motion`. Selection, caret, scrollbars, focus rings and
 tabular numerals are themed from the palette in both schemes.
 
 ## 7. Recording a change
 
-A token or component rule lands in three places in one commit: `src/serve.ts`,
-`design/src/globals.css` (or the component), and this document. The ds-bundle
-recompiles from the package (`_ds_needs_recompile`).
+A token lands in `THEME_LIGHT` / `THEME_DARK` in `src/serve.ts`; a shell or
+component rule lands in `STYLE`, `src/browser/workspace.css` or the component.
+Record it in `DESIGN.md` (and its sidecar `.impeccable/design.json`) in the
+same commit, and here only if it changes the voice or a page's structure.
+Every page carries the direction contract as its first body comment
+(`DESIGN_CONTRACT` in `src/serve.ts`).
 
 ## 8. References (Mobbin)
 
-The bar: [Linear issues](https://mobbin.com/screens/610d34b6-6ad8-45ab-80fb-2107b31ed01e)
-(identifier + status icon on every row, dim section headers with counts),
+The bar for v4 is Raycast (compact density, one accent, keycaps), Arc (the
+frame with the page as an inset sheet, the raised pill for the current tab),
+[Linear issues, dark](https://mobbin.com/screens/e142df2a-3527-499c-8f81-1b715947ac0c)
+and [backlog, light](https://mobbin.com/screens/fd1b4d88-f021-49a3-98af-4cd3a87e1d29)
+(inset canvas, a sidebar with no rule, grouped rows), and
+[Vercel deployments](https://mobbin.com/screens/e9576405-bcef-419a-922a-8fb84b044a54)
+and [a failed build](https://mobbin.com/screens/ff81f1e9-25b1-46f9-8448-31fa40a77e4b)
+(Geist, ink primary buttons, status dots, mono hashes). Earlier references:
+[Linear issues](https://mobbin.com/screens/610d34b6-6ad8-45ab-80fb-2107b31ed01e),
 [Linear inbox on iOS](https://mobbin.com/screens/3d9ccfd8-2425-49e9-a00b-27189140d3a3),
-[Vercel project overview](https://mobbin.com/screens/21283de1-3b87-491d-9503-2a4c13f6a181)
-(status dot + word, mono commit facts, black primary button, paper ground),
-[Railway](https://mobbin.com/screens/cf56574a-01d3-4efe-b841-e091c9ecc39d)
-(dark ops surfaces, status pills). Earlier board references:
+[Vercel project overview](https://mobbin.com/screens/21283de1-3b87-491d-9503-2a4c13f6a181),
+[Railway](https://mobbin.com/screens/cf56574a-01d3-4efe-b841-e091c9ecc39d),
 [Plane](https://mobbin.com/screens/69990ffa-9153-4bf1-bb53-87317f9e040f),
 [GitHub iOS](https://mobbin.com/screens/b2165009-6e10-4b74-9c30-4be5b19ad123),
 [Asana iOS](https://mobbin.com/screens/51074f57-02ca-4420-9c8e-dc7317c4bcf6),
 [Linear switcher](https://mobbin.com/screens/2679ae03-f852-47c3-a880-480c493c1369).
 
-Declined on purpose: a blue brand accent (amber is the product's one accent
-and it already carries meaning), Geist or Inter (Plex is vendored, licensed,
-and already the product's voice; the system is the grammar, not the face), a
-percent on builds, a select-then-confirm decision screen.
+Declined on purpose: an accent on every button, glass, blur and gradient
+surfaces, hover lifts, uppercase eyebrow labels, a percent on builds, and a
+select-then-confirm decision screen.

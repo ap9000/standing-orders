@@ -132,7 +132,7 @@ import { listCoordinators } from "./coordinator.js";
 import { diagnoseTaskDispatch, withDispatchDiagnoses, type DispatchDiagnosis } from "./dispatch.js";
 import { requestTaskStop, resumeTaskStop, taskControlOf, type TaskControlView } from "./task-control.js";
 import { WorktreePool } from "./worktree.js";
-import { PLEX_SANS_400, PLEX_SANS_500, PLEX_SANS_600, PLEX_MONO_400, PLEX_MONO_500, PLEX_MONO_600 } from "./fonts.js";
+import { GEIST_SANS_400, GEIST_SANS_500, GEIST_SANS_600, GEIST_MONO_400, GEIST_MONO_500, GEIST_MONO_600 } from "./fonts.js";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { UPDATE_PAUSED, updateAdmissionPaused } from "./desktop-update-gate.js";
 import { createHash, createHmac, randomBytes, timingSafeEqual, randomUUID } from "node:crypto";
@@ -437,12 +437,12 @@ const PWA_ICON_APPLE = "iVBORw0KGgoAAAANSUhEUgAAALQAAAC0CAIAAACyr5FlAAABqklEQVR4
 const PWA_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect x="6" y="6" width="88" height="88" rx="14" fill="#1a202c"/><rect x="28" y="28" width="44" height="8" rx="4" fill="#ebebeb"/><rect x="28" y="47" width="44" height="8" rx="4" fill="#ebebeb"/><rect x="28" y="66" width="44" height="8" rx="4" fill="#ebebeb"/></svg>`;
 /** The typefaces by route: exact names only, served pre-auth like the icons. */
 const FONT_FILES: Record<string, string> = {
-  "/fonts/plex-sans-400.woff2": PLEX_SANS_400,
-  "/fonts/plex-sans-500.woff2": PLEX_SANS_500,
-  "/fonts/plex-sans-600.woff2": PLEX_SANS_600,
-  "/fonts/plex-mono-400.woff2": PLEX_MONO_400,
-  "/fonts/plex-mono-500.woff2": PLEX_MONO_500,
-  "/fonts/plex-mono-600.woff2": PLEX_MONO_600,
+  "/fonts/geist-sans-400.woff2": GEIST_SANS_400,
+  "/fonts/geist-sans-500.woff2": GEIST_SANS_500,
+  "/fonts/geist-sans-600.woff2": GEIST_SANS_600,
+  "/fonts/geist-mono-400.woff2": GEIST_MONO_400,
+  "/fonts/geist-mono-500.woff2": GEIST_MONO_500,
+  "/fonts/geist-mono-600.woff2": GEIST_MONO_600,
 };
 const PWA_MANIFEST = JSON.stringify({
   name: "standing orders",
@@ -451,8 +451,8 @@ const PWA_MANIFEST = JSON.stringify({
   scope: "/",
   start_url: "/",
   display: "standalone",
-  background_color: "#0b0c0e",
-  theme_color: "#0b0c0e",
+  background_color: "#0b0b0b",
+  theme_color: "#0b0b0b",
   icons: [
     { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
     { src: "/icon-512.png", sizes: "512x512", type: "image/png" },
@@ -10017,7 +10017,7 @@ function page(response: ServerResponse, status: number, html: string, nonce?: st
  * can start a sign-in and have someone else finish it into their project.
  */
 /** A moment's page on the way to or back from another site's sign-in: no stylesheet may load there, so the palette rides inline. */
-const HANDOFF_STYLE = `<style>body{font:15px/1.5 "IBM Plex Sans",system-ui,sans-serif;margin:2rem;background:#f8f9f7;color:#252d29}a{color:#294f43}@media(prefers-color-scheme:dark){body{background:#0f1311;color:#e3e8e4}a{color:#8fcaae}}</style>`;
+const HANDOFF_STYLE = `<style>body{font:15px/1.5 "Geist",system-ui,sans-serif;margin:2rem;background:#efefef;color:#171717}a{color:#171717;text-decoration-color:#c0267e;text-underline-offset:3px}@media(prefers-color-scheme:dark){body{background:#0b0b0b;color:#ededed}a{color:#ededed;text-decoration-color:#ff6fb5}}</style>`;
 const SIGN_IN_COOKIE = "so-sign-in";
 function startedHere(request: IncomingMessage, state: string): boolean {
   const held = new RegExp(`(?:^|;\\s*)${SIGN_IN_COOKIE}=([A-Za-z0-9_-]{16,128})`).exec(request.headers.cookie ?? "")?.[1];
@@ -10364,8 +10364,8 @@ function approvalPathsHtml(touches: readonly string[]): string {
 
 /** The rubric, restated above the seal (v39) — the same claim the digest
  * line already makes ("approval binds to this exact wording") extended to
- * the acceptance terms: an id in Plex Mono (a machine fact the proof must
- * answer by), a statement in Plex Sans, the signed evidence kinds after
+ * the acceptance terms: an id in Geist Mono (a machine fact the proof must
+ * answer by), a statement in Geist, the signed evidence kinds after
  * it. `how` never renders here — it is advisory, never signed. Empty
  * renders nothing: a grandfathered scope's ceremony is unchanged. */
 function acceptanceCeremonyHtml(criteria: readonly AcceptanceCriterion[]): string {
@@ -10742,30 +10742,42 @@ function escape(text: string): string {
  * not worth that posture. The same semantic tokens render both system light
  * and dark themes.
  */
-/** The shared palette, light and dark. Semantic names only; every surface
- * (server pages, the React workspace, the pre-script fallback) reads these. */
+/** The shared palette, light and dark (2026-09-27, "Signal"): neutral grey
+ * grounds, ink for every act a person can take, and one chart magenta, the
+ * colour nautical charts print lights and cautions in, for what needs a
+ * person (the needs-you count, the act that resolves a screen, focus and
+ * selection). Status keeps its own four hues; magenta never means "failed".
+ * The frame is the ground the sidebar sits on; work sits on paper sheets
+ * inset into it. Semantic names only; every surface (server pages, the
+ * React workspace, the pre-script fallback) reads these. */
 const THEME_LIGHT = `
-    --so-ground: #f8f9f7; --so-paper: #ffffff; --so-sidebar: #f0f2ee; --so-raised: #f3f5f1;
-    --so-ink: #252d29; --so-muted: #5f6a63; --so-line: #dde2db; --so-input-line: #c7d1c5;
-    --so-accent: #294f43; --so-accent-hover: #1c3b31; --so-accent-text: #294f43; --so-on-accent: #ffffff; --so-soft: #e7eee8;
-    --so-nav-ink: #556057; --so-nav-hover: #e5ebe2; --so-nav-current: #e0e8dc; --so-nav-current-ink: #294b36;
-    --so-danger: #9a332d; --so-danger-soft: #fae9e5; --so-success: #305b3e; --so-success-soft: #e7f0e4;
-    --so-warning: #80530b; --so-warning-soft: #fff1d2; --so-info: #325970; --so-info-soft: #e8eff3;
-    --so-neutral-ink: #535d56; --so-neutral-soft: #edf0eb; --so-live: #56825c;
-    --so-attention: #94600a; --so-on-attention: #ffffff; --so-attention-soft: #fdf1d8;
-    --so-overlay: rgb(22 35 28 / .33); --so-shadow-overlay: 0 18px 55px rgb(10 33 26 / .15);
-    --so-selection: #d7e5d8; --so-scroll: #b7c2b8; --so-code-bg: #f7f8f5; --so-user-bubble: #f0f2ee;`;
+    --so-ground: #efefef; --so-paper: #ffffff; --so-sidebar: #efefef; --so-raised: #f5f5f5;
+    --so-ink: #171717; --so-muted: #666666; --so-line: #e6e6e6; --so-input-line: #d4d4d4;
+    --so-accent: #171717; --so-accent-hover: #383838; --so-accent-text: #171717; --so-on-accent: #ffffff; --so-soft: #f2f2f2;
+    --so-nav-ink: #525252; --so-nav-hover: #e4e4e4; --so-nav-current: #ffffff; --so-nav-current-ink: #171717;
+    --so-signal: #c0267e; --so-signal-hover: #a81f6d; --so-on-signal: #ffffff; --so-signal-soft: #fbeaf3;
+    --so-danger: #c4320a; --so-danger-soft: #feebe7; --so-success: #218358; --so-success-soft: #e6f6eb;
+    --so-warning: #ab6400; --so-warning-soft: #fff4d5; --so-info: #0d74ce; --so-info-soft: #e6f4fe;
+    --so-neutral-ink: #525252; --so-neutral-soft: #f0f0f0; --so-live: #0d74ce;
+    --so-attention: var(--so-signal); --so-on-attention: var(--so-on-signal); --so-attention-soft: var(--so-signal-soft);
+    --so-sheet-shadow: 0 0 0 1px rgb(0 0 0 / .06), 0 1px 2px rgb(0 0 0 / .04), 0 4px 12px -6px rgb(0 0 0 / .06);
+    --so-pill-shadow: 0 0 0 1px rgb(0 0 0 / .06), 0 1px 2px rgb(0 0 0 / .06);
+    --so-overlay: rgb(0 0 0 / .32); --so-shadow-overlay: 0 0 0 1px rgb(0 0 0 / .08), 0 24px 48px -12px rgb(0 0 0 / .22);
+    --so-selection: #f6d3e6; --so-scroll: #cfcfcf; --so-code-bg: #fafafa; --so-user-bubble: #f2f2f2;`;
 const THEME_DARK = `
-    --so-ground: #0f1311; --so-paper: #151a17; --so-sidebar: #0c100e; --so-raised: #1b221e;
-    --so-ink: #e3e8e4; --so-muted: #9aa69e; --so-line: #29322d; --so-input-line: #3a463f;
-    --so-accent: #86c2a6; --so-accent-hover: #a0d4bb; --so-accent-text: #8fcaae; --so-on-accent: #0c1d15; --so-soft: #1f2a24;
-    --so-nav-ink: #aab5ad; --so-nav-hover: #19211c; --so-nav-current: #1f2b24; --so-nav-current-ink: #cfe6d9;
-    --so-danger: #f19486; --so-danger-soft: rgb(241 148 134 / .12); --so-success: #8fcf9c; --so-success-soft: rgb(143 207 156 / .12);
-    --so-warning: #e6b660; --so-warning-soft: rgb(230 182 96 / .13); --so-info: #8dbde0; --so-info-soft: rgb(141 189 224 / .12);
-    --so-neutral-ink: #b3bfb7; --so-neutral-soft: #202823; --so-live: #7fc08f;
-    --so-attention: #e8b45a; --so-on-attention: #231703; --so-attention-soft: rgb(232 180 90 / .13);
-    --so-overlay: rgb(0 0 0 / .55); --so-shadow-overlay: 0 18px 55px rgb(0 0 0 / .5);
-    --so-selection: #2d4a3c; --so-scroll: #3a463f; --so-code-bg: #111613; --so-user-bubble: #1d2520;`;
+    --so-ground: #0b0b0b; --so-paper: #161616; --so-sidebar: #0b0b0b; --so-raised: #1c1c1c;
+    --so-ink: #ededed; --so-muted: #a1a1a1; --so-line: #262626; --so-input-line: #363636;
+    --so-accent: #ededed; --so-accent-hover: #ffffff; --so-accent-text: #ededed; --so-on-accent: #0a0a0a; --so-soft: #1f1f1f;
+    --so-nav-ink: #a1a1a1; --so-nav-hover: #171717; --so-nav-current: #1f1f1f; --so-nav-current-ink: #ededed;
+    --so-signal: #ff6fb5; --so-signal-hover: #ff8cc4; --so-on-signal: #0a0a0a; --so-signal-soft: rgb(255 111 181 / .13);
+    --so-danger: #ff977d; --so-danger-soft: rgb(255 151 125 / .12); --so-success: #3dd68c; --so-success-soft: rgb(61 214 140 / .12);
+    --so-warning: #ffca16; --so-warning-soft: rgb(255 202 22 / .12); --so-info: #70b8ff; --so-info-soft: rgb(112 184 255 / .12);
+    --so-neutral-ink: #b4b4b4; --so-neutral-soft: #1f1f1f; --so-live: #70b8ff;
+    --so-attention: var(--so-signal); --so-on-attention: var(--so-on-signal); --so-attention-soft: var(--so-signal-soft);
+    --so-sheet-shadow: 0 0 0 1px #262626, 0 1px 2px rgb(0 0 0 / .4);
+    --so-pill-shadow: 0 0 0 1px #2a2a2a, 0 1px 2px rgb(0 0 0 / .5);
+    --so-overlay: rgb(0 0 0 / .6); --so-shadow-overlay: 0 0 0 1px #2e2e2e, 0 24px 48px -12px rgb(0 0 0 / .7);
+    --so-selection: #4a2138; --so-scroll: #333333; --so-code-bg: #111111; --so-user-bubble: #202020;`;
 /** The console's original token names, now views onto the palette. */
 const THEME_MAPPING = `
     --background: var(--so-ground); --foreground: var(--so-ink); --card: var(--so-paper);
@@ -10773,46 +10785,48 @@ const THEME_MAPPING = `
     --primary: var(--so-accent); --primary-foreground: var(--so-on-accent); --secondary: var(--so-raised); --secondary-foreground: var(--so-ink);
     --accent: var(--so-soft); --destructive: var(--so-danger); --destructive-strong: var(--so-danger); --destructive-soft: var(--so-danger-soft);
     --success: var(--so-success); --success-soft: var(--so-success-soft); --warning: var(--so-warning); --warning-soft: var(--so-warning-soft);
-    --running: var(--so-info); --running-soft: var(--so-info-soft); --ring: var(--so-accent);
-    /* Amber means one thing: a person is needed (approve, answer, decide). */
+    --running: var(--so-info); --running-soft: var(--so-info-soft); --ring: var(--so-signal);
+    /* Magenta means one thing: a person is needed (approve, answer, decide). */
     --brand: var(--so-attention); --brand-foreground: var(--so-on-attention); --brand-soft: var(--so-attention-soft);
     --glass: var(--so-paper); --glass-strong: var(--so-paper); --glass-border: var(--so-line); --glass-highlight: transparent;
     --ambient-one: transparent; --ambient-two: transparent; --user-message: var(--so-user-bubble);
     --surface: var(--so-paper); --ok: var(--so-success); --danger: var(--so-danger); --fg-muted: var(--so-muted);
-    --shadow: 0 1px 2px rgb(0 0 0 / .04); --shadow-overlay: var(--so-shadow-overlay);`;
+    --shadow: none; --shadow-overlay: var(--so-shadow-overlay);`;
 
 const STYLE = `
-/* The Console — the design system, v3 (2026-09-06). Quiet operational density
-   now sits on a softer, glass-backed shell: translucent layers, generous
-   radii, and light caught only at the edges. Amber still means "waits on you"
-   and nothing else; blue means live. Zero dependencies, zero page JS beyond
-   the nonce'd chrome layer. IBM Plex stays the product's own voice. */
+/* The Console — the design system, v4 "Signal" (2026-09-27). A neutral
+   frame with paper sheets inset into it (Arc, Linear), compact Raycast
+   density, Geist for words and Geist Mono for machine facts. Ink is every
+   act a person can take; chart magenta means "waits on you" and nothing
+   else; blue means live. Flat surfaces: hairlines and one soft sheet
+   shadow, no glass. Zero dependencies, zero page JS beyond the nonce'd
+   chrome layer. */
   @font-face {
-    font-family: "IBM Plex Sans"; font-style: normal; font-weight: 400;
-    font-display: swap; src: url("/fonts/plex-sans-400.woff2") format("woff2");
+    font-family: "Geist"; font-style: normal; font-weight: 400;
+    font-display: swap; src: url("/fonts/geist-sans-400.woff2") format("woff2");
   }
   @font-face {
-    font-family: "IBM Plex Sans"; font-style: normal; font-weight: 500;
-    font-display: swap; src: url("/fonts/plex-sans-500.woff2") format("woff2");
+    font-family: "Geist"; font-style: normal; font-weight: 500;
+    font-display: swap; src: url("/fonts/geist-sans-500.woff2") format("woff2");
   }
   @font-face {
-    font-family: "IBM Plex Sans"; font-style: normal; font-weight: 600;
-    font-display: swap; src: url("/fonts/plex-sans-600.woff2") format("woff2");
+    font-family: "Geist"; font-style: normal; font-weight: 600;
+    font-display: swap; src: url("/fonts/geist-sans-600.woff2") format("woff2");
   }
   @font-face {
-    font-family: "IBM Plex Mono"; font-style: normal; font-weight: 400;
-    font-display: swap; src: url("/fonts/plex-mono-400.woff2") format("woff2");
+    font-family: "Geist Mono"; font-style: normal; font-weight: 400;
+    font-display: swap; src: url("/fonts/geist-mono-400.woff2") format("woff2");
   }
   @font-face {
-    font-family: "IBM Plex Mono"; font-style: normal; font-weight: 500;
-    font-display: swap; src: url("/fonts/plex-mono-500.woff2") format("woff2");
+    font-family: "Geist Mono"; font-style: normal; font-weight: 500;
+    font-display: swap; src: url("/fonts/geist-mono-500.woff2") format("woff2");
   }
   @font-face {
-    font-family: "IBM Plex Mono"; font-style: normal; font-weight: 600;
-    font-display: swap; src: url("/fonts/plex-mono-600.woff2") format("woff2");
+    font-family: "Geist Mono"; font-style: normal; font-weight: 600;
+    font-display: swap; src: url("/fonts/geist-mono-600.woff2") format("woff2");
   }
-  /* One palette for every page (2026-09-23): the workspace's sage-and-paper
-   * identity, light by day and dark after hours. The device decides unless
+  /* One palette for every page (2026-09-27): neutral grey and paper with
+   * one chart magenta, light by day and dark after hours. The device decides unless
    * the person pins a theme (html[data-theme], set from their cookie). The
    * console's older token names map onto it, so the React workspace, the
    * server-rendered pages and the pre-script fallback all paint the same. */
@@ -10820,9 +10834,9 @@ const STYLE = `
     color-scheme: light;
 ${THEME_LIGHT}
 ${THEME_MAPPING}
-    --radius: 0.75rem;
-    --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-    --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    --radius: 0.625rem;
+    --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    --font-mono: "Geist Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
@@ -10835,17 +10849,13 @@ ${THEME_DARK}
 ${THEME_DARK}
   }
   * { box-sizing: border-box; }
-  ::selection { background: color-mix(in srgb, var(--running) 30%, transparent); }
+  ::selection { background: var(--so-selection); color: var(--so-ink); }
   ::placeholder { color: var(--muted-foreground); }
   body {
     margin: 0; color: var(--foreground);
-    background:
-      radial-gradient(circle at 20% -10%, var(--ambient-one), transparent 30rem),
-      radial-gradient(circle at 86% 18%, var(--ambient-two), transparent 34rem),
-      var(--background);
-    background-attachment: fixed;
-    caret-color: var(--foreground);
-    font: 400 0.875rem/1.5 var(--font-sans);
+    background: var(--background);
+    caret-color: var(--so-signal);
+    font: 400 0.875rem/1.5 var(--font-sans); font-feature-settings: "ss01" 0;
     -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
   }
   :focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
@@ -10953,7 +10963,7 @@ ${THEME_DARK}
     color: color-mix(in srgb, var(--muted-foreground) 80%, var(--foreground)); border-color: var(--border);
   }
   /* "open" and "parked" are neutral facts (an open PR, a parked decision);
-     the AMBER form is the attention count — the number that waits on you.
+     the MAGENTA form is the attention count — the number that waits on you.
      One accent, two places (reduction pass §3): the needs-you count and
      the act that resolves the screen. Cards, frames, and seals are neutral. */
   .badge-open, .badge-parked { color: var(--foreground); }
@@ -10972,8 +10982,7 @@ ${THEME_DARK}
 
   .card {
     border: 1px solid var(--glass-border); border-radius: var(--radius); background: var(--glass);
-    padding: 1rem 1.125rem; margin: .75rem 0; box-shadow: var(--shadow), 0 1px 0 var(--glass-highlight) inset;
-    -webkit-backdrop-filter: blur(18px) saturate(125%); backdrop-filter: blur(18px) saturate(125%);
+    padding: 1rem 1.125rem; margin: .75rem 0;
   }
   .problem {
     border: 1px solid color-mix(in srgb, var(--destructive) 35%, transparent);
@@ -11003,25 +11012,25 @@ ${THEME_DARK}
   .decide-card:hover { border-color: color-mix(in srgb, var(--border) 55%, var(--muted-foreground)); }
   .decide-card .q { font-weight: 600; margin: 0 0 .25rem; }
 
-  /* Buttons: secondary by default (surface + hairline); a form's one
+  /* Buttons: secondary by default (paper + hairline); a form's one
      submit is primary (ink on paper, paper on ink); the approve act is
-     amber; danger is red and outlined. 2.25rem at a desk, 2.75rem to a thumb. */
+     magenta; danger is red and outlined. 2.125rem at a desk, 2.75rem to a thumb. */
   button {
     font: 500 0.8125rem/1.4 var(--font-sans); cursor: pointer; border-radius: calc(var(--radius) - 3px);
-    border: 1px solid var(--glass-border); background: var(--glass-strong); color: var(--foreground);
-    padding: .4rem .8rem; min-height: 2.375rem; box-shadow: var(--shadow), 0 1px 0 var(--glass-highlight) inset;
-    transition: transform .15s ease, background .15s, border-color .15s, box-shadow .15s;
+    border: 1px solid var(--input); background: var(--card); color: var(--foreground);
+    padding: .35rem .75rem; min-height: 2.125rem;
+    transition: background .12s ease-out, border-color .12s ease-out, color .12s ease-out;
   }
-  button:hover { background: color-mix(in srgb, var(--muted) 84%, var(--foreground)); border-color: var(--input); transform: translateY(-1px); }
-  button:active { transform: translateY(0); }
+  button:hover { background: var(--so-soft); }
+  button:active { background: var(--so-nav-hover); }
   form.card > button[type=submit], .sticky-actions button[type=submit], form.card .sticky-actions button {
     background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); font-weight: 600;
   }
   form.card > button[type=submit]:hover, .sticky-actions button[type=submit]:hover {
     background: color-mix(in srgb, var(--primary) 85%, var(--background)); border-color: color-mix(in srgb, var(--primary) 85%, var(--background));
   }
-  /* The approve act is the one amber verb: it resolves what waits on you.
-     The ceremony's frame is neutral so the button is the only warm thing
+  /* The approve act is the one magenta verb: it resolves what waits on you.
+     The ceremony's frame is neutral so the button is the only coloured thing
      in it; a danger act stays red even inside one. */
   .approve-form button[type=submit], .approve-form .sticky-actions button[type=submit] {
     background: var(--brand); color: var(--brand-foreground); border-color: var(--brand); font-weight: 600;
@@ -11040,8 +11049,8 @@ ${THEME_DARK}
 
   label { display: block; font-size: 0.8125rem; font-weight: 500; margin: .75rem 0 0; color: var(--foreground); }
   input[type=text], input[type=password], input[type=number], input[type=url], input[type=email], input[type=search], input[type=time], textarea, select {
-    width: 100%; margin: .35rem 0 0; padding: .5rem .7rem; font: 400 0.875rem/1.4 var(--font-sans);
-    color: var(--foreground); background: color-mix(in srgb, var(--glass-strong) 90%, transparent); min-height: 2.375rem;
+    width: 100%; margin: .35rem 0 0; padding: .45rem .7rem; font: 400 0.875rem/1.4 var(--font-sans);
+    color: var(--foreground); background: var(--card); min-height: 2.125rem;
     border: 1px solid var(--input); border-radius: calc(var(--radius) - 3px);
     transition: border-color .15s, box-shadow .15s;
   }
@@ -11077,14 +11086,13 @@ ${THEME_DARK}
   .task-intake-hero { text-align: center; margin: 0 auto 1.35rem; max-width: 38rem; }
   .task-intake-mark {
     display: grid; place-items: center; width: 3rem; height: 3rem; margin: 0 auto .85rem;
-    border: 1px solid var(--glass-border); border-radius: 1rem;
-    background: linear-gradient(145deg, color-mix(in srgb, var(--running) 18%, var(--glass-strong)), var(--glass));
-    box-shadow: 0 18px 45px -28px var(--running), 0 1px 0 var(--glass-highlight) inset;
+    border: 1px solid var(--border); border-radius: .75rem;
+    background: var(--card); box-shadow: var(--so-pill-shadow);
     font: 600 .72rem/1 var(--font-mono); letter-spacing: -.05em;
   }
   .task-intake-hero h1 { margin: 0; font-size: clamp(1.65rem, 4vw, 2.2rem); letter-spacing: -.045em; }
   .task-intake-hero p { margin: .45rem 0 0; color: var(--muted-foreground); }
-  .task-composer { padding: .75rem; border-radius: 1.45rem; box-shadow: var(--shadow-overlay), 0 1px 0 var(--glass-highlight) inset; }
+  .task-composer { padding: .75rem; border-radius: 1.45rem; box-shadow: var(--shadow-overlay); }
   .task-prompt { margin: 0; font-size: 0; }
   .task-prompt textarea {
     min-height: 8.5rem; max-height: 18rem; margin: 0; padding: .9rem 1rem; resize: vertical;
@@ -11156,7 +11164,7 @@ ${THEME_DARK}
     display: block; width: 100%; text-align: left; font-size: 0.9375rem; font-weight: 600;
     min-height: 2.75rem;
   }
-  /* Recommended is a suggestion, not attention: neutral emphasis, no amber. */
+  /* Recommended is a suggestion, not attention: neutral emphasis, no magenta. */
   form.option.recommended { border-color: color-mix(in srgb, var(--foreground) 30%, var(--border)); }
   form.option.recommended .badge { background: var(--muted); color: var(--foreground); }
   .consequence { font-size: 0.8125rem; color: var(--muted-foreground); margin: 0 0 .625rem; white-space: pre-wrap; }
@@ -11166,15 +11174,15 @@ ${THEME_DARK}
   #scope .recap, #scope .scope-paths, .approval-goal { overflow-wrap: anywhere; }
   .result-card {
     margin: 1.25rem 0; border-color: color-mix(in srgb, var(--success) 32%, var(--glass-border));
-    background: linear-gradient(145deg, color-mix(in srgb, var(--success-soft) 52%, var(--glass-strong)), var(--glass));
-    box-shadow: var(--shadow-card), 0 1px 0 var(--glass-highlight) inset;
+    background: var(--card);
+    box-shadow: var(--shadow-card);
   }
   .result-card h2 { margin: 0; }
   .completion-receipt {
     position: relative; overflow: hidden; margin: 1rem 0 1.25rem; padding: 1.15rem;
     border-color: color-mix(in srgb, var(--foreground) 13%, var(--glass-border));
-    background: linear-gradient(145deg, color-mix(in srgb, var(--glass-strong) 88%, transparent), var(--glass));
-    box-shadow: var(--shadow-card), 0 1px 0 var(--glass-highlight) inset;
+    background: var(--card);
+    box-shadow: var(--shadow-card);
   }
   .completion-receipt::after {
     content: ""; position: absolute; width: 11rem; height: 11rem; right: -5rem; top: -7rem;
@@ -11241,7 +11249,7 @@ ${THEME_DARK}
   .cockpit-head h1 { margin: .2rem 0 .55rem; color: var(--foreground); font-size: clamp(1.2rem, 2vw, 1.45rem); font-weight: 600; line-height: 1.3; letter-spacing: -.025em; overflow-wrap: anywhere; }
   .cockpit-chips { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem .75rem; margin: 0 0 .35rem; }
   .cockpit-next { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin: .85rem 0 1rem; padding: .85rem 1rem;
-    border-color: var(--glass-border); background: color-mix(in srgb, var(--glass-strong) 88%, transparent); }
+    border-color: var(--glass-border); background: var(--glass-strong); }
   .cockpit-next > div { display: grid; gap: .2rem; min-width: 0; overflow-wrap: anywhere; }
   .cockpit-next .meta { font-size: .78rem; line-height: 1.45; }
   .cockpit-next form { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin: 0; }
@@ -11293,7 +11301,7 @@ ${THEME_DARK}
   .diff-review {
     overflow: hidden; margin: .8rem 0 .5rem; border: 1px solid var(--glass-border);
     border-radius: var(--radius); background: color-mix(in srgb, var(--card) 82%, transparent);
-    box-shadow: 0 1px 0 var(--glass-highlight) inset;
+    
   }
   .diff-review-bar {
     display: flex; align-items: center; justify-content: space-between; gap: .75rem;
@@ -11382,7 +11390,7 @@ ${THEME_DARK}
   .revision-from-comments {
     display: flex; align-items: center; justify-content: space-between; gap: 1rem;
     margin: .75rem 0; padding: .85rem; border-color: color-mix(in srgb, var(--running) 24%, var(--glass-border));
-    background: linear-gradient(145deg, color-mix(in srgb, var(--running) 6%, var(--glass-strong)), var(--glass));
+    background: var(--card);
   }
   .revision-from-comments > div { display: grid; gap: .15rem; }
   .revision-from-comments > div > span { display: block; }
@@ -11401,7 +11409,7 @@ ${THEME_DARK}
   .requirement-heading .badge { margin: 0; white-space: normal; }
   .requirement-statement { margin: .5rem 0; line-height: 1.55; white-space: pre-wrap; }
   .requirement-review { margin: .4rem 0; font-size: .78rem; color: var(--muted-foreground); }
-  .requirement-warning { margin: .65rem 0; padding: .6rem .75rem; border-left: 2px solid var(--warning); background: var(--warning-soft); font-size: .8125rem; }
+  .requirement-warning { margin: .65rem 0; padding: .6rem .75rem; border: 1px solid color-mix(in srgb, var(--warning) 35%, var(--border)); border-radius: 8px; background: var(--warning-soft); font-size: .8125rem; }
   .requirement-warning strong { font-size: .78rem; }
   .requirement-warning p { margin: .3rem 0 0; }
   .requirement-issues { font-size: .8125rem; }
@@ -11443,7 +11451,7 @@ ${THEME_DARK}
   .filters strong { background: var(--muted); color: var(--foreground); }
   .filters a:hover { color: var(--foreground); }
 
-  /* A picked tournament result: marked in the built green, not amber. */
+  /* A picked tournament result: marked in the built green, not magenta. */
   .card.picked { border-color: color-mix(in srgb, var(--success) 40%, var(--border)); }
   .seal {
     display: inline-block; font-family: var(--font-mono); font-size: .75rem;
@@ -11457,10 +11465,9 @@ ${THEME_DARK}
   .app { display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: 100vh; }
   .side {
     border-right: 1px solid var(--glass-border);
-    background: color-mix(in srgb, var(--glass-strong) 88%, transparent);
+    background: var(--glass-strong);
     padding: 1rem .875rem 1.125rem; display: flex; flex-direction: column; gap: .175rem;
     position: sticky; top: 0; height: 100vh; overflow-y: auto;
-    -webkit-backdrop-filter: blur(24px) saturate(135%); backdrop-filter: blur(24px) saturate(135%);
     box-shadow: 1px 0 0 var(--glass-highlight) inset;
   }
   .side-head { display: flex; align-items: center; gap: .25rem; min-height: 2.5rem; margin-bottom: .45rem; }
@@ -11473,14 +11480,13 @@ ${THEME_DARK}
   .side-toggle:hover { background: var(--glass); color: var(--foreground); transform: none; }
   .side-toggle svg { width: 1rem; height: 1rem; }
   /* The scope bar: one hairline row, the single scope truth on every
-   * screen; its name is the switcher. Amber never appears here except
+   * screen; its name is the switcher. Magenta never appears here except
    * the needs-you count. */
   .scope-bar {
     display: flex; align-items: baseline; gap: .625rem; flex-wrap: wrap;
     position: sticky; top: 0; z-index: 20;
     padding: .625rem 2rem; border-bottom: 1px solid var(--glass-border);
-    background: color-mix(in srgb, var(--glass-strong) 88%, transparent); font-size: .8125rem;
-    -webkit-backdrop-filter: blur(20px) saturate(130%); backdrop-filter: blur(20px) saturate(130%);
+    background: var(--glass-strong); font-size: .8125rem;
   }
   .scope-bar .eyebrow { font-size: .6875rem; font-weight: 500; color: var(--muted-foreground); }
   .scope-bar .name { font-weight: 600; }
@@ -11544,15 +11550,15 @@ ${THEME_DARK}
     display: grid; grid-template-columns: 2.75rem minmax(0, 1fr) auto;
     align-items: center; gap: .75rem; min-height: 5rem; padding: .75rem .875rem;
     border: 1px solid var(--glass-border); border-radius: calc(var(--radius) - 1px);
-    background: color-mix(in srgb, var(--glass-strong) 82%, transparent);
+    background: var(--glass-strong);
     color: var(--foreground); text-decoration: none;
-    box-shadow: 0 1px 0 var(--glass-highlight) inset;
+    
     transition: transform .15s ease, background .15s, border-color .15s, box-shadow .15s;
   }
   .project-add-action:hover {
     border-color: color-mix(in srgb, var(--border) 50%, var(--muted-foreground));
-    background: var(--card); text-decoration: none; transform: translateY(-1px);
-    box-shadow: var(--shadow), 0 1px 0 var(--glass-highlight) inset;
+    background: var(--card); text-decoration: none;
+    box-shadow: var(--shadow);
   }
   .project-add-action:active { transform: translateY(0); }
   .project-add-icon {
@@ -11576,8 +11582,8 @@ ${THEME_DARK}
   .project-add-more > summary:hover { color: var(--foreground); }
   .project-add-more > .card { margin: 0 0 .25rem; }
   .side nav { display: flex; flex-direction: column; gap: .125rem; }
-  /* Inline decision options: neutral buttons — the card's amber outline is
-   * the attention signal; recommendation is a neutral badge, never amber. */
+  /* Inline decision options: neutral buttons — the card's magenta outline is
+   * the attention signal; recommendation is a neutral badge, never magenta. */
   .decide-options { margin-top: .5rem; display: flex; flex-direction: column; gap: .375rem; }
   .decide-option { margin: 0; display: flex; align-items: baseline; gap: .5rem; flex-wrap: wrap; }
   .decide-option button { margin: 0; }
@@ -11630,8 +11636,8 @@ ${THEME_DARK}
   .app.sidebar-collapsed .side .new-task::after { content: "+"; font-size: 1rem; }
   .app.sidebar-collapsed .side .nav-groups { display: none; }
   .side nav a.active {
-    background: linear-gradient(135deg, color-mix(in srgb, var(--running) 14%, var(--glass)), var(--glass));
-    color: var(--foreground); box-shadow: 0 1px 0 var(--glass-highlight) inset, 0 8px 22px -18px var(--running);
+    background: var(--card);
+    color: var(--foreground); box-shadow: 0 1px 0 var(--glass-highlight) inset;
   }
   .side nav a.active .glyph { color: var(--foreground); }
   .side nav a .count { margin-left: auto; }
@@ -11658,7 +11664,6 @@ ${THEME_DARK}
   .banner {
     border-bottom: 1px solid var(--glass-border); background: var(--glass);
     padding: .375rem .9rem; font-size: .8125rem; color: var(--muted-foreground);
-    -webkit-backdrop-filter: blur(18px); backdrop-filter: blur(18px);
   }
   .banner .badge { margin-right: .5rem; }
   .banner a { color: var(--muted-foreground); }
@@ -11696,14 +11701,14 @@ ${THEME_DARK}
   .task-view-switch {
     display: inline-grid; grid-template-columns: repeat(2, auto); flex: none; padding: .2rem;
     border: 1px solid var(--glass-border); border-radius: .72rem; background: color-mix(in srgb, var(--glass) 82%, transparent);
-    box-shadow: 0 1px 0 var(--glass-highlight) inset;
+    
   }
   .task-view-switch a {
     min-width: 4.6rem; padding: .4rem .72rem; border-radius: .52rem; color: var(--muted-foreground);
     font-size: .72rem; font-weight: 550; text-align: center; text-decoration: none;
   }
   .task-view-switch a:hover { color: var(--foreground); background: color-mix(in srgb, var(--muted) 70%, transparent); }
-  .task-view-switch a.active { color: var(--foreground); background: var(--glass-strong); box-shadow: 0 1px 5px rgb(0 0 0 / .1), 0 1px 0 var(--glass-highlight) inset; }
+  .task-view-switch a.active { color: var(--foreground); background: var(--glass-strong); box-shadow: 0 1px 5px rgb(0 0 0 / .1); }
   .acts-bar { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin: .75rem 0 .25rem; }
   .acts-bar form.inline { margin: 0; display: inline-flex; align-items: center; gap: .375rem; }
   .acts-bar form.inline button { width: auto; }
@@ -11896,7 +11901,7 @@ ${THEME_DARK}
   .approval-confirm label { margin: 0; }
   .approval-card .approval-confirm button { min-height: 44px; white-space: nowrap; }
   /* The ceremony's orientation and exact-terms group (UI polish 2026-09-13). */
-  /* Neutral by law: amber belongs to the count and the approve act alone. */
+  /* Neutral by law: magenta belongs to the count and the approve act alone. */
   .approval-orient { margin: .85rem 0 .25rem; }
   .approval-terms { scroll-margin-top: 5rem; }
   .approval-confirm { scroll-margin-top: 5rem; }
@@ -12256,9 +12261,8 @@ ${THEME_DARK}
     .side { display: none; }
     .mobile-top {
       display: flex; align-items: center; gap: .5rem; position: sticky; top: 0; z-index: 30;
-      background: color-mix(in srgb, var(--glass-strong) 90%, transparent); border-bottom: 1px solid var(--glass-border);
+      background: var(--glass-strong); border-bottom: 1px solid var(--glass-border);
       padding: calc(.375rem + env(safe-area-inset-top, 0rem)) .75rem .375rem;
-      -webkit-backdrop-filter: blur(22px) saturate(135%); backdrop-filter: blur(22px) saturate(135%);
     }
     /* One header row: the pill carries scope, counts, and the switch. */
     .scope-bar { display: none; }
@@ -12311,9 +12315,8 @@ ${THEME_DARK}
     @media (max-width: 360px) { .mobile-top .mobile-new { padding: 0 .625rem; } }
     .tabbar {
       display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
-      background: color-mix(in srgb, var(--glass-strong) 92%, transparent); border-top: 1px solid var(--glass-border);
+      background: var(--glass-strong); border-top: 1px solid var(--glass-border);
       padding: .25rem max(.25rem, env(safe-area-inset-right, 0rem)) calc(.25rem + env(safe-area-inset-bottom, 0rem)) max(.25rem, env(safe-area-inset-left, 0rem));
-      -webkit-backdrop-filter: blur(22px) saturate(135%); backdrop-filter: blur(22px) saturate(135%);
     }
     .tabbar a {
       flex: 1; display: flex; flex-direction: column; align-items: center; gap: .125rem;
@@ -12363,7 +12366,7 @@ ${THEME_DARK}
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .dot { display: inline-block; width: .5rem; height: .5rem; border-radius: 9999px; flex: none; }
   .dot-ok { background: var(--success); }
-  /* Caution without a claim on the operator: quiet, not amber. */
+  /* Caution without a claim on the operator: quiet, not magenta. */
   .dot-warn { background: var(--muted-foreground); }
   .dot-off { background: var(--muted-foreground); opacity: .5; }
   .dot-bad { background: var(--destructive); }
@@ -12387,10 +12390,10 @@ ${THEME_DARK}
   }
   .login-shell button:hover { background: var(--so-accent-hover); border-color: var(--so-accent-hover); }
   .login-foot { text-align: center; margin: 1.5rem 0 0; font-size: 0.75rem; color: var(--muted-foreground); line-height: 1.9; }
-  .login-foot code { background: none; padding: 0; color: var(--muted-foreground); overflow-wrap: anywhere; }
-  .so-wordmark { display: flex; align-items: center; gap: 9px; font-size: 13px; font-weight: 650; text-decoration: none; white-space: nowrap; letter-spacing: -.015em; color: var(--foreground); }
+  .login-foot code { background: none; padding: 0; color: var(--muted-foreground); white-space: nowrap; }
+  .so-wordmark { display: flex; align-items: center; gap: 9px; font-size: 13px; font-weight: 600; text-decoration: none; white-space: nowrap; letter-spacing: -.02em; color: var(--foreground); }
   .so-brand-mark { width: 18px; height: 22px; display: flex; align-items: center; gap: 3px; transform: skewY(-10deg); }
-  .so-brand-mark i { display: block; width: 4px; height: 15px; background: var(--so-accent); border-radius: 1px; }
+  .so-brand-mark i { display: block; width: 4px; height: 15px; background: var(--so-signal); border-radius: 1px; }
   .so-brand-mark i:nth-child(2) { height: 22px; }
   .login-shell .login-brand { justify-content: center; font-size: 1.125rem; margin: 0 0 1.5rem; }
   .sso-step-up { display: inline-flex; align-items: center; min-height: 36px; font-size: .9rem; }
@@ -12539,8 +12542,7 @@ ${THEME_DARK}
   .task-chat-context {
     position: sticky; top: 6rem; align-self: start; padding: 1rem;
     border: 1px solid var(--glass-border); border-radius: calc(var(--radius) + 3px);
-    background: var(--glass); box-shadow: var(--shadow), 0 1px 0 var(--glass-highlight) inset;
-    -webkit-backdrop-filter: blur(20px) saturate(130%); backdrop-filter: blur(20px) saturate(130%);
+    background: var(--glass); box-shadow: var(--shadow);
   }
   .task-chat-context-head { display: flex; align-items: center; justify-content: space-between; gap: .65rem; }
   .task-chat-context h2 { margin: .7rem 0 .25rem; color: var(--foreground); font-size: 1rem; line-height: 1.35; letter-spacing: -.025em; }
@@ -12560,7 +12562,7 @@ ${THEME_DARK}
   .task-journey {
     position: relative; overflow: hidden; padding: 1rem 1.05rem;
     border-color: color-mix(in srgb, var(--accent) 16%, var(--glass-border));
-    background: linear-gradient(145deg, color-mix(in srgb, var(--glass) 92%, white 8%), color-mix(in srgb, var(--card) 93%, var(--accent) 7%));
+    background: var(--card);
   }
   .task-journey::after { content: ""; position: absolute; width: 9rem; height: 9rem; right: -4rem; top: -5rem; border-radius: 50%; background: color-mix(in srgb, var(--accent) 8%, transparent); filter: blur(12px); pointer-events: none; }
   .task-journey-head { position: relative; z-index: 1; display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
@@ -12641,10 +12643,8 @@ ${THEME_DARK}
   .chat-main .chat-limits + .chat-fleet-context, .chat-main .chat-fleet-context + .chat-limits { margin-top: .5rem; }
   .chat-overview {
     margin: 0 0 1.35rem; padding: 1rem; border-radius: calc(var(--radius) + 2px);
-    background:
-      linear-gradient(145deg, color-mix(in srgb, var(--running-soft) 45%, transparent), transparent 48%),
-      var(--glass);
-    box-shadow: var(--shadow), 0 1px 0 var(--glass-highlight) inset;
+    background: var(--glass);
+    box-shadow: var(--shadow);
   }
   .chat-overview-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
   .chat-overview-head h2 { margin: .1rem 0 0; color: var(--foreground); font-size: .95rem; letter-spacing: -.02em; }
@@ -12685,8 +12685,7 @@ ${THEME_DARK}
   .chat-projects {
     position: sticky; top: 4rem; align-self: start; max-height: calc(100vh - 5rem); overflow-y: auto;
     padding: 1rem; border: 1px solid var(--glass-border); border-radius: calc(var(--radius) + 3px);
-    background: var(--glass); box-shadow: var(--shadow), 0 1px 0 var(--glass-highlight) inset;
-    -webkit-backdrop-filter: blur(20px) saturate(130%); backdrop-filter: blur(20px) saturate(130%);
+    background: var(--glass); box-shadow: var(--shadow);
   }
   .chat-projects-head { display: flex; align-items: center; justify-content: space-between; gap: .5rem; margin-bottom: .75rem; padding: 0 .15rem; }
   .chat-projects-head h2 { margin: 0; color: var(--foreground); font-size: .8125rem; letter-spacing: -.01em; }
@@ -12697,8 +12696,8 @@ ${THEME_DARK}
     transition: transform .16s ease, background .16s, border-color .16s, box-shadow .16s;
   }
   .chat-project-card:hover {
-    transform: translateY(-1px); border-color: var(--glass-border); background: color-mix(in srgb, var(--muted) 82%, transparent);
-    box-shadow: 0 12px 28px -24px rgb(0 0 0 / .8), 0 1px 0 var(--glass-highlight) inset;
+    border-color: var(--glass-border); background: color-mix(in srgb, var(--muted) 82%, transparent);
+    box-shadow: 0 12px 28px -24px rgb(0 0 0 / .8);
   }
   .chat-project-name { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: .45rem; }
   .chat-project-name strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .8125rem; }
@@ -12730,9 +12729,9 @@ ${THEME_DARK}
   .thread .msg.mate::before {
     content: "s·o"; position: absolute; top: .7rem; left: .1rem; width: 2.35rem; height: 2.35rem;
     display: grid; place-items: center; border: 1px solid var(--glass-border); border-radius: .8rem;
-    background: linear-gradient(145deg, color-mix(in srgb, var(--running) 24%, var(--glass-strong)), var(--glass-strong));
+    background: var(--glass-strong);
     color: var(--foreground); font: 600 .6875rem/1 var(--font-mono); letter-spacing: -.04em;
-    box-shadow: 0 12px 28px -20px var(--running), 0 1px 0 var(--glass-highlight) inset;
+    box-shadow: var(--so-pill-shadow);
   }
   .chat-copy > :first-child { margin-top: 0; }
   .chat-copy > :last-child { margin-bottom: 0; }
@@ -12783,8 +12782,8 @@ ${THEME_DARK}
   .chat-empty::before {
     content: "s·o"; display: grid; place-items: center; width: 3.5rem; height: 3.5rem; margin: 0 auto 1.1rem;
     border: 1px solid var(--glass-border); border-radius: 1.15rem;
-    background: linear-gradient(145deg, color-mix(in srgb, var(--running) 24%, var(--glass-strong)), color-mix(in srgb, var(--ambient-one) 35%, var(--glass-strong)));
-    box-shadow: 0 20px 50px -25px var(--running), 0 1px 0 var(--glass-highlight) inset;
+    background: var(--glass-strong);
+    box-shadow: var(--so-pill-shadow);
     font: 600 .8rem/1 var(--font-mono); letter-spacing: -.05em;
   }
   .chat-empty > strong { display: block; font-size: 1.2rem; letter-spacing: -.025em; }
@@ -12824,7 +12823,7 @@ ${THEME_DARK}
   /* On a desk the overview is its own card — no second frame around it. */
   .chat-fleet-context, .chat-fleet-context[open] { margin: 0; padding: 0; border: 0; background: transparent; }
   .chat-fleet-context > summary { display: none; }
-  /* The summary's needs-you count is amber wherever the summary shows (a count, by the law). */
+  /* The summary's needs-you count is magenta wherever the summary shows (a count, by the law). */
   .chat-fleet-context > summary .hot { color: var(--brand); font-weight: 600; }
   @media (min-width: 761px) {
     /* A fresh conversation on a desk (annotation on build 1540): the
@@ -12877,7 +12876,6 @@ ${THEME_DARK}
     .chat-projects { display: none; }
     .chat-workspace.projects-open::before {
       content: ""; position: fixed; inset: 0 0 0 232px; z-index: 23; background: rgb(0 0 0 / .18);
-      -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px);
     }
     .chat-workspace.projects-open .chat-projects {
       display: block; position: fixed; top: 4rem; left: calc(232px + 1.25rem); z-index: 25;
@@ -12899,7 +12897,7 @@ ${THEME_DARK}
     .chat-workspace.projects-hidden .chat-projects, .chat-projects { display: none; }
     .chat-project-toggle { display: inline-flex; min-height: 2.75rem; }
     .chat-project-close { display: grid; place-items: center; min-height: 2.75rem; min-width: 2.75rem; }
-    .chat-workspace.projects-open::before { content: ""; position: fixed; inset: 0; z-index: 30; background: rgb(0 0 0 / .18); backdrop-filter: blur(3px); }
+    .chat-workspace.projects-open::before { content: ""; position: fixed; inset: 0; z-index: 30; background: rgb(0 0 0 / .18); }
     .chat-workspace.projects-open .chat-projects { display: block; position: fixed; top: 5rem; left: 1rem; right: 1rem; width: auto; max-height: calc(100dvh - 10rem); overflow-y: auto; overscroll-behavior: contain; z-index: 31; background: var(--card); }
     .chat-project-list { display: grid; gap: 0; padding: 0; }
     .chat-project-card {
@@ -13022,8 +13020,8 @@ ${THEME_DARK}
   .mate-mint::before {
     content: "s·o"; position: absolute; top: 1.4rem; left: 1.4rem; width: 3rem; height: 3rem;
     display: grid; place-items: center; border: 1px solid var(--glass-border); border-radius: 1rem;
-    background: linear-gradient(145deg, color-mix(in srgb, var(--running) 24%, var(--glass-strong)), color-mix(in srgb, var(--ambient-one) 35%, var(--glass-strong)));
-    box-shadow: 0 18px 45px -24px var(--running), 0 1px 0 var(--glass-highlight) inset;
+    background: var(--glass-strong);
+    box-shadow: var(--so-pill-shadow);
     font: 600 .75rem/1 var(--font-mono); letter-spacing: -.05em;
   }
   .mate-mint > p:first-child { min-height: 3rem; margin: 0; padding: .15rem 0 1.25rem 4rem; font-size: .95rem; }
@@ -13308,7 +13306,7 @@ button { min-height: 44px; }
   @media (hover: hover) and (pointer: fine) {
     .lane-card, .decide-card, .menu-row, .chat-overview-item, .proposal { transition: border-color .15s, transform .15s, box-shadow .15s; }
     .lane-card:hover, .decide-card:hover, .menu-row:hover {
-      transform: translateY(-1px);
+     
       box-shadow: 0 2px 8px -2px rgb(0 0 0 / .35);
     }
   }
@@ -13703,6 +13701,14 @@ function screen(
  */
 export const SENSITIVE_INPUT = /<input\b[^>]*[\s"']type\s*=\s*["']?password/i;
 
+/** The design contract every page carries (impeccable direction, 2026-09-27). */
+const DESIGN_CONTRACT = `<!-- THESIS: a control plane that stays quiet until a person is needed; it refuses the dashboard default of coloured status everywhere and an accent on every button.
+OWN-WORLD: a neutral grey frame with paper sheets inset into it (Arc, Linear), Geist for words and Geist Mono for machine facts, ink for every act a person can take, one chart magenta only for what waits on a person plus focus and selection; hairlines and one soft sheet shadow, no glass, no gradients.
+STORY: glance, see the magenta count, open the one thing that needs you, act with the one magenta verb, leave.
+FIRST VIEWPORT: sidebar on the frame (magenta mark, ink New task, the current page as a raised pill, the magenta needs-you count); the main sheet with a 52px header over compact 13px rows; the Crew sheet beside it.
+FORM: the Raycast and Arc canon, user-pinned; seed 9c849086.
+FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md -->`;
+
 /** The shortcuts overlay: display-only, toggled by the chrome layer,
  * absent from sensitive pages. Navigation help in plain words — no key
  * ever posts. */
@@ -13752,8 +13758,8 @@ function shell(
     // notched phone; without it the tab bar sits under the home indicator.
     `<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">`,
     ...(requestContext.getStore()?.theme
-      ? [`<meta name="theme-color" content="${requestContext.getStore()?.theme === "dark" ? "#0f1311" : "#f8f9f7"}">`]
-      : [`<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0f1311">`, `<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f8f9f7">`]),
+      ? [`<meta name="theme-color" content="${requestContext.getStore()?.theme === "dark" ? "#0b0b0b" : "#efefef"}">`]
+      : [`<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0b0b0b">`, `<meta name="theme-color" media="(prefers-color-scheme: light)" content="#efefef">`]),
     `<meta name="mobile-web-app-capable" content="yes">`,
     `<meta name="apple-mobile-web-app-capable" content="yes">`,
     `<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">`,
@@ -13773,7 +13779,7 @@ function shell(
     ...(options.live?.fallbackRefresh !== true
       ? []
       : [`<noscript><meta http-equiv="refresh" content="30"><style>@view-transition { navigation: none; }</style></noscript>`]),
-    `<title>${escape(title)}</title><link rel="stylesheet" href="${WORKSPACE_STYLE.path}"></head><body>`,
+    `<title>${escape(title)}</title><link rel="stylesheet" href="${WORKSPACE_STYLE.path}"></head><body>${DESIGN_CONTRACT}`,
   ].join("\n");
   const tail =
     options.live === undefined
@@ -16994,7 +17000,7 @@ function projectChip(repo: string | null | undefined): string {
  * never a letter; an irreversible option is a LINK to the decision page,
  * where the server-side confirm=yes guard lives. The roll-up inbox keeps
  * its links-only cards and never renders this partial. The recommended
- * option wears a neutral badge — recommendation is not urgency, and amber
+ * option wears a neutral badge — recommendation is not urgency, and magenta
  * stays on the card's outline.
  */
 function decisionAnswerCard(
@@ -17772,9 +17778,9 @@ function projectsPage(
       isOpen ? `<a class="badge ${cls}" href="${href}">${text}</a>` : openForm(path, text, href, `badge ${cls}`);
     const bits: string[] = [];
     if (peek.waiting > 0) bits.push(chip(`${peek.waiting} waiting on you`, "/", "badge-open"));
-    if (peek.running > 0) bits.push(chip(`${peek.running} running`, "/runs", "badge-running"));
+    if (peek.running > 0) bits.push(chip(`${peek.running} running`, "/runs", "badge-parked"));
     if (peek.queued > 0) bits.push(chip(`${peek.queued} queued`, "/board?view=order", "badge-queued"));
-    if (peek.doneRecently > 0) bits.push(chip(`${peek.doneRecently} built today`, "/done", "badge-done"));
+    if (peek.doneRecently > 0) bits.push(chip(`${peek.doneRecently} built today`, "/done", "badge-parked"));
     return bits.length === 0 ? `<span class="meta">quiet — nothing queued or waiting</span>` : bits.join(" ");
   };
   const projectCard = (one: { path: string; name: string; note: string; peek: ProjectPeek | null }): string =>
@@ -17807,9 +17813,9 @@ function projectsPage(
       knowledgeHref: `/settings/knowledge?repo=${encodeURIComponent(path)}`,
       peek: peek === null ? null : [
         ...(peek.waiting > 0 ? [{ label: `${peek.waiting} waiting on you`, href: "/", tone: "attention" as const }] : []),
-        ...(peek.running > 0 ? [{ label: `${peek.running} running`, href: "/runs", tone: "info" as const }] : []),
+        ...(peek.running > 0 ? [{ label: `${peek.running} running`, href: "/runs", tone: "neutral" as const }] : []),
         ...(peek.queued > 0 ? [{ label: `${peek.queued} queued`, href: "/board?view=order", tone: "neutral" as const }] : []),
-        ...(peek.doneRecently > 0 ? [{ label: `${peek.doneRecently} built today`, href: "/done", tone: "success" as const }] : []),
+        ...(peek.doneRecently > 0 ? [{ label: `${peek.doneRecently} built today`, href: "/done", tone: "neutral" as const }] : []),
       ],
     };
   };
@@ -18970,7 +18976,7 @@ function taskBodyParts(data: {
       const accepted = proof.proofAccepted;
       const humanReview = manualReviewOnly({ verdict: proof.proofVerdict ?? "", reasons: proof.proofReasons, matrix: proof.proofMatrix });
       // Accepting contradictory or incomplete evidence is an explicit,
-      // recorded exception—not the ordinary amber approval ceremony.
+      // recorded exception—not the ordinary magenta approval ceremony.
       const acceptForm =
         accepted || data.csrf === ""
           ? ""

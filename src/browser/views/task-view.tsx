@@ -41,7 +41,7 @@ function StatusCard({ card, approval }: { card: AssignmentCard; approval: string
   const tone = toneOf(card.tone);
   const history = card.attempts.length > 1 || card.lead !== null;
   return <Card data-task-status data-work-status={card.token} aria-label="Task status"
-    className={cn(tone === "attention" && "border-attention/50", tone === "danger" && "border-destructive/50")}>
+    className={cn(tone === "danger" && "border-destructive/50")}>
     <div className="flex flex-wrap items-center gap-x-4 gap-y-3">
       <div className="min-w-0 flex-1 basis-64">
         <h2 className="flex items-center gap-2.5 text-lg font-semibold leading-snug">
@@ -57,7 +57,9 @@ function StatusCard({ card, approval }: { card: AssignmentCard; approval: string
         <a href={card.action.href} data-primary-action {...(card.action.openResult ? { "data-open-result": "" } : {})}>{card.action.label}<ArrowRight /></a>
       </Button>}
     </div>
-    {card.problems.map(one => <p key={one} role="alert" className="rounded-md bg-destructive-soft px-3 py-2 text-[13px] text-destructive">{one}</p>)}
+    {card.problems.map(one => tone === "danger"
+      ? <p key={one} role="alert" className="rounded-md bg-destructive-soft px-3 py-2 text-[13px] text-destructive">{one}</p>
+      : <p key={one} className="rounded-md bg-muted px-3 py-2 text-[13px] text-foreground">{one}</p>)}
     {card.diagnostics.map(one => <p key={one.token} data-work-diagnostic={one.token}
       className={cn("text-[13px]", one.problem ? "rounded-md bg-destructive-soft px-3 py-2 text-destructive" : "text-muted-foreground")}>{one.label} · {one.detail}</p>)}
     {approval !== "" && <Html html={approval} className="so-task-approval" />}
@@ -148,16 +150,16 @@ export function TaskView({ view }: { view: BrowserTaskView }) {
 
     {view.lead.map(block => <Html key={block.key} html={block.html} className={`so-task-lead so-task-lead--${block.key}`} />)}
 
-    {view.questions !== "" && <Card className="border-attention/50"><Html html={view.questions} className="so-task-questions" /></Card>}
+    {view.questions !== "" && <Card><Html html={view.questions} className="so-task-questions" /></Card>}
 
-    {view.facts.length > 0 && <Card aria-label="Task facts">
-      <dl className="grid grid-cols-2 gap-x-8 gap-y-4 max-sm:gap-x-5 lg:grid-cols-3">
+    {view.facts.length > 0 && <section aria-label="Task facts" className="border-t border-border pt-4">
+      <dl className="grid grid-cols-1 gap-x-8 gap-y-4 min-[480px]:grid-cols-2 lg:grid-cols-3">
         {view.facts.map(fact => <div key={fact.label} className="min-w-0">
           <dt className="text-xs font-medium text-muted-foreground">{fact.label}</dt>
           <dd className="mt-1 text-sm leading-relaxed [overflow-wrap:anywhere]"><FactValue fact={fact} /></dd>
         </div>)}
       </dl>
-    </Card>}
+    </section>}
 
     <Sections sections={view.sections} label="Task details" />
 
