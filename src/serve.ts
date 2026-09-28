@@ -2850,7 +2850,8 @@ export function createDecisionServer(options: ServeOptions): Server {
       async function* chunks() {
         for (const piece of pieces) {
           const current = store.accountOf(who.name);
-          if (current === null || current.revokedAt !== null || current.generation !== generation) throw new Error("Ledger access changed during export");
+          // The reader's standing, and the session or API token they came with, still hold.
+          if (current === null || current.revokedAt !== null || current.generation !== generation || identify(request, false)?.name !== who.name) throw new Error("Ledger access changed during export");
           yield piece;
           await yieldEventLoop();
         }

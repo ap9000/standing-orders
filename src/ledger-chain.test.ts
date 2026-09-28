@@ -13,6 +13,7 @@ import { addApprover } from "./scope.js";
 import { entryHash, LEDGER_GENESIS, matchesOutsideCheckpoint, sealLedger, verifyLedgerChain } from "./ledger-chain.js";
 import { mintCoordinator } from "./coordinator.js";
 import { runOperate } from "./operate.js";
+import { ledgerExportChunks } from "./evidence-pack.js";
 
 let dir: string, file: string, store: Store;
 const T0 = new Date("2026-09-20T10:00:00.000Z");
@@ -70,9 +71,11 @@ test("an entry removed after it was sealed is found", () => {
   unguard();
   store.handle.prepare("DELETE FROM action_ledger WHERE id = ?").run(two);
   expect(store.ledgerChain()).toMatchObject({ ok: false, problem: { id: two, what: `entry #${two} was removed after it was sealed` } });
-  // Removing its seal too breaks the link to the next entry instead.
+  // Removing its seal too breaks the link to the next entry instead. A page view serves the last walk's report
+  // (a broken chain doesn't cost a walk per view); the next whole walk says what it finds now.
   store.handle.prepare("DELETE FROM ledger_seal WHERE id = ?").run(two);
-  expect(store.ledgerChain()).toMatchObject({ ok: false, problem: { what: expect.stringContaining("doesn't follow the entry before it") } });
+  expect(store.ledgerChain()).toMatchObject({ ok: false, problem: { what: `entry #${two} was removed after it was sealed` } });
+  expect(store.ledgerChain({ full: true })).toMatchObject({ ok: false, problem: { what: expect.stringContaining("doesn't follow the entry before it") } });
 });
 
 test("an entry slipped in among sealed ones is found", () => {
@@ -142,6 +145,44 @@ test("an entry numbered past what a seal can name is reported, not a crash", () 
   store.sealLedger();
   store.handle.exec("INSERT INTO action_ledger (id, at, actor, repo, task_id, run_id, action, outcome, source, detail) VALUES (9007199254740993, '2026-09-20T10:00:00.000Z', 'x', NULL, NULL, NULL, 'forged', 'done', 'policy', NULL)");
   expect(store.ledgerChain({ full: true })).toMatchObject({ ok: false, problem: { what: "entry #9007199254740993 was added outside the sealed history" } });
+});
+
+test("a run number past what JavaScript holds, put in by hand (no trigger stops an insert), is a break everywhere, never a crash", () => {
+  act("one");
+  store.ledgerChain();
+  store.handle.exec("INSERT INTO action_ledger (at, actor, repo, task_id, run_id, action, outcome, source, detail) VALUES ('2026-09-20T10:00:00.000Z', 'x', '/repo/a', NULL, 9007199254740993, 'forged', 'done', 'policy', NULL)");
+  expect(store.ledgerChain({ full: true })).toMatchObject({ ok: false, problem: { what: "entry #2 holds a run number the ledger never writes" } });
+  expect(store.actionLedger({ repos: null, limit: 5 })).toHaveLength(2);
+  // Sealing carries on after it.
+  act("three");
+  expect(store.handle.prepare("SELECT COUNT(*) AS n FROM ledger_seal").get()?.n).toBe(2);
+  store.ledgerChain({ full: true });
+  expect(store.handle.prepare("SELECT COUNT(*) AS n FROM ledger_seal").get()?.n).toBe(3);
+});
+
+test("an export always walks the whole chain, so an edit between walks shows there", () => {
+  act("one"); const two = act("two"); act("three");
+  expect(store.ledgerChain().ok).toBe(true);
+  unguard();
+  store.handle.prepare("UPDATE action_ledger SET actor = 'mallory' WHERE id = ?").run(two);
+  const bundle = JSON.parse([...ledgerExportChunks(store, { from: "2026-09-20T00:00:00.000Z", to: "2026-09-21T00:00:00.000Z" }, { repos: null, instance: true },
+    { principal: "operator", repos: null, includeUnplaced: true }, "alex", T0, join(dir, "evidence"))].join("")) as { chain: { ok: boolean; problem: string } };
+  expect(bundle.chain).toMatchObject({ ok: false, problem: `entry #${two} was changed after it was sealed` });
+});
+
+test("a task's entries count from each version's own registration; a version from before that row existed keeps its history", () => {
+  const entry = (taskId: string, action: string, source: "work" | "request" = "work", actor = "system") =>
+    store.recordAction({ at: T0.toISOString(), actor, repo: "/repo/a", taskId, runId: null, action, outcome: "recorded", source });
+  // A request about the revision before it existed, then the legacy root's history (it predates registration rows).
+  entry("legacy-2", "task approve", "request", "kim");
+  entry("legacy", "scope approved", "work", "alex");
+  entry("legacy", "task state changed");
+  entry("legacy-2", "task registered");
+  entry("legacy-2", "task filed", "work", "alex");
+  const { entries } = store.taskLedgerEntries({ taskIds: ["legacy", "legacy-2"], runIds: [] }, { entries: 100, requests: 100 });
+  expect(entries.map(one => [one.taskId, one.action])).toEqual([
+    ["legacy", "scope approved"], ["legacy", "task state changed"], ["legacy-2", "task registered"], ["legacy-2", "task filed"],
+  ]);
 });
 
 test("a chain rebuilt from scratch still verifies on its own, but not against a checkpoint", () => {

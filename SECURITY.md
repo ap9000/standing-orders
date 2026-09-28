@@ -42,7 +42,8 @@ user. What it promises:
   checkpoint you copied off the machine wasn't touched (an instance
   operator makes one with `ledger checkpoint` or **Make a checkpoint**;
   `ledger verify --checkpoint <it>` checks it), and, while the console
-  runs, history it has already checked isn't rewritten. Each task has an
+  runs, that a change to history it already checked is noticed within ten
+  minutes (at once by `ledger verify` and the audit export). Each task has an
   evidence pack (the task page's **Evidence pack**, or `task evidence`):
   who filed it, the approved terms and approvers, the rules in force, the
   agents and their cost, the changed files, the checks, completion and

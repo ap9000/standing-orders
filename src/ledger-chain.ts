@@ -46,6 +46,12 @@ BEGIN SELECT RAISE(ABORT, 'ledger checkpoints are append-only'); END;
 export const LEDGER_GENESIS = createHash("sha256").update("standing-orders/action-ledger/v103", "utf8").digest("hex");
 
 const FIELDS = ["id", "at", "actor", "repo", "task_id", "run_id", "action", "outcome", "source", "detail"] as const;
+/** A whole number column as JavaScript can hold it: one past 2^53 (only a hand edit puts one there) reads as its text,
+ * which `rowProblem` names, instead of failing the read. */
+export const safeWhole = (column: string, as = column) =>
+  `CASE WHEN typeof(${column}) = 'integer' AND ${column} NOT BETWEEN -9007199254740991 AND 9007199254740991 THEN CAST(${column} AS TEXT) ELSE ${column} END AS ${as}`;
+/** The fields a seal covers, read safely. */
+const SEALED = FIELDS.map(name => name === "id" || name === "run_id" ? safeWhole(name) : name).join(", ");
 
 /** An entry's fingerprint: the previous one and the entry's own fields, in a fixed order. */
 export function entryHash(prev: string, row: Record<string, unknown>): string {
@@ -74,7 +80,7 @@ export function sealLedger(db: Database): number {
   let prev = last === undefined ? LEDGER_GENESIS : String(last["hash"]);
   let sealed = 0;
   const insert = db.prepare("INSERT INTO ledger_seal (id, prev, hash) VALUES (?, ?, ?)");
-  const next = db.prepare(`SELECT ${FIELDS.join(", ")} FROM action_ledger WHERE id > ? AND id <= ${LARGEST} ORDER BY id LIMIT 1000`);
+  const next = db.prepare(`SELECT ${SEALED} FROM action_ledger WHERE id > ? AND id <= ${LARGEST} ORDER BY id LIMIT 1000`);
   for (;;) {
     const rows = next.all(prevId);
     if (rows.length === 0) return sealed;
@@ -135,7 +141,7 @@ export function verifyLedgerChain(db: Database, from?: VerifiedHead, checkedAt: 
     const still = db.prepare("SELECT hash FROM ledger_seal WHERE id = ?").get(from.through);
     if (still === undefined || String(still["hash"]) !== from.head) return report({ id: from.through, what: `the chain was rewritten since it was last checked (entry #${from.through} changed)` });
   }
-  const rows = pages(db, `SELECT ${FIELDS.join(", ")} FROM action_ledger WHERE id > ? ORDER BY id LIMIT ${PAGE}`, from?.through ?? 0);
+  const rows = pages(db, `SELECT ${SEALED} FROM action_ledger WHERE id > ? ORDER BY id LIMIT ${PAGE}`, from?.through ?? 0);
   const seals = pages(db, `SELECT id, prev, hash FROM ledger_seal WHERE id > ? ORDER BY id LIMIT ${PAGE}`, from?.through ?? 0);
   const wanted = new Set(checkpoints.map(one => one.through));
   const reached = new Map<number, string>();
