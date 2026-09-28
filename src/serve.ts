@@ -62,6 +62,7 @@ import { assignmentCardOf, assignmentStatusOf, assignmentSummaryHtml, assignment
 import { assignmentPresentationOf, historicalAssessmentReason, shortenedMaterialReason } from './assignment-presentation.js';
 import type { TaskFamily } from "./store.js";
 import { ledgerBody } from "./ledger-view.js";
+import { EVIDENCE_PACK_CSS, evidencePack, evidencePackHtml, exportDay, ledgerExport } from "./evidence-pack.js";
 import { CHAT_CONTINUITY_SCRIPT } from "./chat-continuity.js";
 import { chatWorkingHtml, chatActivityDetailsHtml, completedWorkHtml, CHAT_POLISH_CSS } from "./chat-polish.js";
 import { TRANSITIONS_CSS } from "./transitions-recipes.js";
@@ -1639,9 +1640,9 @@ export function createDecisionServer(options: ServeOptions): Server {
       if(action&&proposal&&store.getMateThread(proposal.thread)?.approver===who.name&&visible(action.repo)&&store.accountCanAccess(who.name,action.repo))return true;
       refuse(response,who,404,'No such action in your projects.','/projects');return false;
     }
-    const read = new Set(["/settings/skills", "/settings/knowledge", "/settings", "/settings/learning", "/recipes", "/recipes/run", "/recipes/start", "/recipes/new", "/recipes/edit", "/recipes/from-task", "/recipes/preview", "/recipes/export", "/", "/inbox", "/work", "/projects", "/people", "/ledger", "/next", "/board", "/tasks", "/tasks/new", "/runs", "/review", "/done", "/routines", "/menu"]);
+    const read = new Set(["/settings/skills", "/settings/knowledge", "/settings", "/settings/learning", "/recipes", "/recipes/run", "/recipes/start", "/recipes/new", "/recipes/edit", "/recipes/from-task", "/recipes/preview", "/recipes/export", "/", "/inbox", "/work", "/projects", "/people", "/ledger", "/ledger/export", "/next", "/board", "/tasks", "/tasks/new", "/runs", "/review", "/done", "/routines", "/menu"]);
     const write = new Set(["/settings/skills/import", "/settings/skills/change", "/settings/skills/revise", "/settings/knowledge/change", "/settings/knowledge/refresh", "/settings/learning/change", "/recipes/prepare", "/recipes/preview", "/recipes/import", "/recipes/save", "/recipes/launch", "/projects/select", "/tasks/add", "/routines/add"]);
-    const task = matchTaskPath(path, request.method === "GET" ? "" : "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|next|reopen|steer|accept-proof|accept-revision|reject-revision|route|retry-review|complete|stop|resume-arm|resume)$");
+    const task = matchTaskPath(path, request.method === "GET" ? "(/evidence)?$" : "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|next|reopen|steer|accept-proof|accept-revision|reject-revision|route|retry-review|complete|stop|resume-arm|resume)$");
     const resource = request.method === "GET"
       ? /^\/(?:r|d)\/[0-9]{1,15}(?:\/evidence\/[0-9]{1,15})?$/.test(path) || /^\/routines\/[0-9]{1,15}$/.test(path) || path === "/flows" || /^\/flows\/[0-9]{1,15}(\/insights|\/runs\/[0-9]{1,15}\/[0-9]{1,15})?$/.test(path)
       : /^\/d\/[0-9]{1,15}\/answer$/.test(path) || /^\/routines\/[0-9]{1,15}\/(approve|refresh|pause|resume|run-now)$/.test(path) || path === "/flows/new" || /^\/flows\/[0-9]{1,15}\/(save|cards|archive|scripts)$/.test(path) || /^\/flows\/[0-9]{1,15}\/cards\/[0-9]{1,15}\/(move|decide|cancel|comment|assign|watch)$/.test(path) || /^\/flows\/[0-9]{1,15}\/triggers(\/[0-9]{1,15}\/(pause|resume|remove|check|press|renew|secret|share|unshare))?$/.test(path) || /^\/r\/[0-9]{1,15}\/(note|comment|revise|draft-repair)$/.test(path);
@@ -1656,7 +1657,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
     // Every collection except these three must have a concrete project;
     // NULL otherwise means all rows in legacy store APIs.
-    if (!["/settings/skills", "/settings/skills/import", "/settings/skills/change", "/settings/skills/revise", "/settings/knowledge", "/settings/knowledge/change", "/settings/knowledge/refresh", "/settings", "/settings/learning", "/settings/learning/change", "/projects", "/people", "/ledger", "/projects/select"].includes(path) && !visible(projectOf(who, request) ?? null)) {
+    if (!["/settings/skills", "/settings/skills/import", "/settings/skills/change", "/settings/skills/revise", "/settings/knowledge", "/settings/knowledge/change", "/settings/knowledge/refresh", "/settings", "/settings/learning", "/settings/learning/change", "/projects", "/people", "/ledger", "/ledger/export", "/projects/select"].includes(path) && !visible(projectOf(who, request) ?? null)) {
       refuse(response, who, 403, "No assigned project is available. Ask an instance operator for access.", "/projects"); return false;
     }
     if (request.method === "GET" && path === "/board") {
@@ -1764,7 +1765,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       // New work names its project in the form (a dropdown of known
       // projects); /tasks/add still admits the posted repo on its own.
       url.pathname !== "/tasks/new" && url.pathname !== "/tasks/add" &&
-      !/^\/t\/[^/]+$/.test(url.pathname) &&
+      !/^\/t\/[^/]+(\/evidence)?$/.test(url.pathname) &&
       !/^\/r\/[0-9]{1,15}(?:\/evidence\/[0-9]{1,15})?$/.test(url.pathname) &&
       !url.pathname.startsWith("/d/") && !url.pathname.startsWith("/contest/") &&
       url.pathname !== "/projects" &&
@@ -1772,7 +1773,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       url.pathname !== "/fleet" &&
       url.pathname !== "/chat" && url.pathname !== "/chat/mate/status" && url.pathname !== "/chat/task-status" && url.pathname !== "/chat/stream" &&
       !/^\/chat\/action\/[0-9]{1,15}$/.test(url.pathname) &&
-      !url.pathname.startsWith("/settings") && url.pathname !== "/logout" && url.pathname !== "/people" && url.pathname !== "/ledger" &&
+      !url.pathname.startsWith("/settings") && url.pathname !== "/logout" && url.pathname !== "/people" && url.pathname !== "/ledger" && url.pathname !== "/ledger/export" &&
       !(url.pathname === "/board" && url.searchParams.get("scope") === "all");
     if (needsProject) return redirect(response, `/projects?return=${encodeURIComponent(safeReturn(url.pathname + url.search))}`);
 
@@ -2389,9 +2390,15 @@ export function createDecisionServer(options: ServeOptions): Server {
         catch { response.destroy(); }
         return;
       }
+      // v103: the chain is sealed and checked before it's shown; an operator sees the checkpoint to copy off the machine.
+      const report = store.ledgerChain();
+      const operator = who.via === "cookie" && store.isInstanceOperator(who.name);
+      const latest = store.ledgerCheckpoints(1)[0] ?? null;
+      const chainView = { ok: report.ok, entries: report.entries, through: report.through, head: report.head, unsealed: report.unsealed, problem: report.problem,
+        latest: operator && latest !== null ? latest : null, csrf: operator ? who.session.csrf : null, today: now.toISOString().slice(0, 10) };
       const rows = store.actionLedger({ ...query, ...(before === null ? {} : { before: Number(before) }), limit: 51 });
-      if (url.searchParams.get("format") === "json") return respond(response, 200, "application/json; charset=utf-8", JSON.stringify({ entries: rows.slice(0, 50), nextBefore: rows.length > 50 ? rows[49]!.id : null }));
-      return sendScreen(response, 200, screen("Action ledger", ledgerBody(rows, projects, url.searchParams), { chrome: chromeFor(chosen === "" ? null : chosen, "ledger", undefined, chosen === "" ? "all" : "project") }));
+      if (url.searchParams.get("format") === "json") return respond(response, 200, "application/json; charset=utf-8", JSON.stringify({ chain: { ok: report.ok, entries: report.entries, through: report.through, head: report.head, problem: report.problem }, entries: rows.slice(0, 50), nextBefore: rows.length > 50 ? rows[49]!.id : null }));
+      return sendScreen(response, 200, screen("Action ledger", ledgerBody(rows, projects, url.searchParams, chainView), { chrome: chromeFor(chosen === "" ? null : chosen, "ledger", undefined, chosen === "" ? "all" : "project") }));
     }
 
     if (url.pathname === "/activity") {
@@ -2809,6 +2816,38 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (version !== null && !family.versions.some(one => one.id === version)) return refuse(response, who, 404, "That version is not available for this task.", taskHref(family.root.id));
       if (task.taskId !== family.root.id) return redirect(response, `${taskHref(family.root.id)}?version=${encodeURIComponent(task.taskId)}`);
       return taskScreen(response, who, version ?? family.current.id, null, 200);
+    }
+
+    // v103: a task's evidence pack, as a printable page or JSON (the whole family, sealed ledger entries included).
+    const evidence = matchTaskPath(url.pathname, "/evidence$");
+    if (evidence !== null) {
+      const access = { principal: "operator" as const, repos: admissionList(), includeUnplaced: visible(null) };
+      const family = store.taskFamilyOf(evidence.taskId, access.repos, access.includeUnplaced);
+      if (family === null || !visible(family.root.repo)) return refuse(response, who, 404, "no such task", "/tasks");
+      if (evidence.taskId !== family.root.id) return redirect(response, `${taskHref(family.root.id)}/evidence${url.search}`);
+      const pack = evidencePack(store, family.root.id, access, who.name, now, evidenceRoot);
+      if (pack === null) return refuse(response, who, 404, "no such task", "/tasks");
+      if (url.searchParams.get("format") === "json") {
+        response.writeHead(200, { "content-type": "application/json; charset=utf-8", "content-disposition": `attachment; filename="evidence-${family.root.id.replace(/[^A-Za-z0-9._-]/g, "_")}.json"`,
+          "cache-control": "no-store", "x-content-type-options": "nosniff" });
+        return void response.end(JSON.stringify(pack, null, 2));
+      }
+      return sendScreen(response, 200, screen(`Evidence pack · ${family.root.id}`, evidencePackHtml(pack), { chrome: chromeFor(family.root.repo, "tasks") }));
+    }
+
+    // v103: every ledger entry in a date range, sealed, with an evidence pack for each task it names.
+    if (url.pathname === "/ledger/export") {
+      const from = exportDay(url.searchParams.get("from")), last = exportDay(url.searchParams.get("to"));
+      if (from === null || last === null) return refuse(response, who, 400, "Choose a start and end day.", "/ledger");
+      const to = new Date(Date.parse(last) + 86_400_000).toISOString();
+      if (to <= from || Date.parse(to) - Date.parse(from) > 366 * 86_400_000) return refuse(response, who, 400, "Choose a range of a year or less, ending on or after its start.", "/ledger");
+      const access = { principal: "operator" as const, repos: admissionList(), includeUnplaced: visible(null) };
+      const bundle = ledgerExport(store, { from, to }, { repos: access.repos, instance: store.isInstanceOperator(who.name) }, access, who.name, now, evidenceRoot);
+      store.recordAction({ at: now.toISOString(), actor: who.name, repo: null, taskId: null, runId: null, action: "ledger exported", outcome: "exported", source: "access",
+        detail: `${from.slice(0, 10)} to ${last.slice(0, 10)} · ${bundle.entries.length} entries · ${bundle.packs.length} evidence packs` });
+      response.writeHead(200, { "content-type": "application/json; charset=utf-8", "content-disposition": `attachment; filename="standing-orders-audit-${from.slice(0, 10)}-to-${last.slice(0, 10)}.json"`,
+        "cache-control": "no-store", "x-content-type-options": "nosniff" });
+      return void response.end(JSON.stringify(bundle));
     }
 
     if (url.pathname === "/runs") {
@@ -6142,6 +6181,12 @@ export function createDecisionServer(options: ServeOptions): Server {
         return cancelled.ok ? settle(cancelled.said) : answer(409, { ok: false, said: cancelled.message });
       }
       return answer(404, { ok: false, said: "No such flow action." });
+    }
+    // v103: an instance operator records a checkpoint of the ledger chain (its head, to copy off the machine).
+    if (url.pathname === "/ledger/checkpoint") {
+      if (who.via !== "cookie" || !store.isInstanceOperator(who.name)) return refuse(response, who, 403, "An instance operator makes ledger checkpoints.", "/ledger");
+      const made = store.ledgerCheckpoint(who.name, now);
+      return redirect(response, made === null ? "/ledger" : `/ledger?checkpoint=${made.through}`);
     }
     // v102: an instance operator changes a project's approval rules, with a step-up; the ledger keeps before → after.
     if (url.pathname === "/settings/approval") {
@@ -13572,7 +13617,7 @@ button.pick-file { min-height: 1.75rem; padding: 0 .55rem; font-size: .75rem; }
 
 /** Appearance: a three-way segmented switch, one tap per choice. */
 const THEME_CONTROLS_CSS = `.task-repo select{width:100%;min-height:2.75rem;font-size:1rem}.task-repo-add{margin:.35rem .1rem .5rem}.task-repo-add a{display:inline-flex;align-items:center;min-height:2.25rem}details.result-request-open.result-request-form>summary{border:0;background:transparent;padding:.5rem 0;min-height:2.75rem;font-weight:600;display:list-item;list-style:revert}details.result-request-open.result-request-form>summary::-webkit-details-marker{display:revert}form.js-autosave button[type=submit]{display:none}.provider-row{border-bottom:1px solid var(--so-line);padding:.35rem 0}.provider-row:first-of-type{border-top:1px solid var(--so-line)}.provider-head{display:flex;align-items:center;gap:.75rem;margin:.4rem 0 0}.provider-status{display:inline-flex;align-items:center;gap:.4rem;color:var(--so-muted);font-size:.875rem}.provider-status i{width:.5rem;height:.5rem;border-radius:50%;background:var(--so-muted)}.provider-status--ok i{background:var(--so-success)}.provider-status--warn i{background:var(--so-attention)}.provider-status--off i{background:transparent;border:1.5px solid var(--so-muted)}details.provider-manage>summary{cursor:pointer;color:var(--so-accent-text);font-size:.875rem;min-height:2.5rem;display:list-item;padding-block:.5rem}.card.props .row{display:grid;gap:.1rem;margin:0 0 .75rem}.card.props .row>.meta{display:block;font-size:.75rem}.card.props .row>.meta::first-letter{text-transform:uppercase}.card.props .row>.mono{font-family:var(--font-sans);font-size:.875rem}.card.props .row>.mono .seal{font-family:var(--font-mono);font-size:.8125rem}details.evidence-files{margin:1rem 0}details.evidence-files>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:600}details.evidence-files ul{list-style:none;margin:0;padding:0}details.evidence-files li{display:flex;justify-content:space-between;gap:1rem;padding:.5rem 0;border-bottom:1px solid var(--so-line)}.result-action .result-feedback-link{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;text-decoration:none}.result-action .result-feedback-link:hover{background:var(--so-raised)}.so-sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}.verdict{margin:.5rem 0 .75rem}.verdict-chips{display:flex;flex-wrap:wrap;gap:.4rem;list-style:none;padding:0;margin:0}.verdict-chip{display:inline-flex;align-items:center;gap:.3rem;min-height:1.75rem;padding:.2rem .65rem;border-radius:999px;font-size:.8125rem;font-weight:600;background:var(--so-neutral-soft);color:var(--so-neutral-ink)}.verdict-chip svg{width:.9rem;height:.9rem}.verdict-chip--success{background:var(--so-success-soft);color:var(--so-success)}.verdict-chip--danger{background:var(--so-danger-soft);color:var(--so-danger)}.verdict-chip--warning{background:var(--so-warning-soft);color:var(--so-warning)}.verdict-chip--info{background:var(--so-info-soft);color:var(--so-info)}.verdict-by{margin:.4rem 0 0}details.result-request-open{margin:.5rem 0}details.result-request-open>summary{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;cursor:pointer;list-style:none}details.result-request-open>summary::-webkit-details-marker{display:none}details.result-request-open[open]>summary{margin-bottom:.75rem}.settings-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(8.5rem,1fr));gap:.5rem;margin:0 0 2rem}.settings-tiles a{display:flex;align-items:center;gap:.6rem;min-height:3rem;padding:.65rem .8rem;border:1px solid var(--so-line);border-radius:.625rem;background:var(--so-paper);color:var(--so-ink);text-decoration:none;font-weight:550;font-size:.875rem}.settings-tiles a:hover{border-color:var(--so-input-line);background:var(--so-raised)}.settings-tiles svg{width:1.1rem;height:1.1rem;flex-shrink:0;color:var(--so-accent-text)}details.settings-more{margin:.25rem 0 1.25rem}details.settings-more>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:550}details.settings-more>summary .meta{font-weight:400;margin-left:.35rem}.settings-changed{margin-top:-.25rem}.appearance{margin:0 0 28px}.appearance h2{margin:0 0 10px}.theme-switch{display:inline-flex;flex-wrap:nowrap;max-width:100%;gap:4px;padding:4px;margin:0;border:1px solid var(--so-line);border-radius:10px;background:var(--so-raised)}.theme-switch .theme-choice,.so-native-region .theme-switch .theme-choice{flex:1 1 0;width:auto;white-space:nowrap;min-height:40px;padding:8px 16px;border:0;border-radius:7px;background:transparent;color:var(--so-muted);font:inherit;font-weight:550;box-shadow:none;cursor:pointer}.theme-switch .theme-choice:hover{color:var(--so-ink)}.theme-switch .theme-choice[aria-pressed="true"]{background:var(--so-paper);color:var(--so-ink);box-shadow:0 1px 2px rgb(0 0 0 / .1)}.appearance .meta{margin:8px 0 0}@media(max-width:600px){.theme-switch .theme-choice{min-height:44px}}`;
-const WORKSPACE_STYLE = styleAsset(STYLE + APPROVAL_RULES_CSS + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KITS_CSS + SSO_CSS + CREDENTIALS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
+const WORKSPACE_STYLE = styleAsset(STYLE + APPROVAL_RULES_CSS + EVIDENCE_PACK_CSS + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KITS_CSS + SSO_CSS + CREDENTIALS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
@@ -19842,6 +19887,8 @@ function taskBodyParts(data: {
       ? (votes.length === 0 ? "needs two approvers" : `approved by ${votes.join(", ")} · needs one more`)
       : data.approvalRules.words] });
   }
+  // v103: everything an auditor asks about this task, printable or as JSON.
+  facts.push({ label: "Audit", parts: [{ label: "Evidence pack", href: `${taskHref(task.id)}/evidence` }] });
   if (data.publication !== null && data.publication !== undefined) {
     const prHref = safePrUrl(data.publication.prUrl), pr = `PR #${data.publication.prNumber ?? "?"}`;
     facts.push({ label: "Published", parts: [prHref === null ? pr : { label: pr, href: prHref },

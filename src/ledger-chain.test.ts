@@ -1,0 +1,201 @@
+/**
+ * The ledger as a hash chain (v103): every entry sealed with the one before
+ * it; changing, removing or slipping in an entry is found and named; a
+ * checkpoint copied off the machine catches a chain rebuilt from scratch;
+ * teammate tool calls and minted coordinators are in the ledger too.
+ */
+import { afterEach, beforeEach, expect, test } from "vitest";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { openStore, type Store } from "./store.js";
+import { addApprover } from "./scope.js";
+import { entryHash, LEDGER_GENESIS, matchesOutsideCheckpoint, sealLedger, verifyLedgerChain } from "./ledger-chain.js";
+import { mintCoordinator } from "./coordinator.js";
+import { runOperate } from "./operate.js";
+
+let dir: string, file: string, store: Store;
+const T0 = new Date("2026-09-20T10:00:00.000Z");
+
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), "so-ledger-chain-"));
+  file = join(dir, "orders.db");
+  store = openStore(file);
+});
+afterEach(() => {
+  store.close();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+const act = (action: string, at = T0) => store.recordAction({ at: at.toISOString(), actor: "alex", repo: "/repo/a", taskId: null, runId: null, action, outcome: "done", source: "policy" });
+/** What someone with the database file (and no care for the triggers) could do. */
+const unguard = () => store.handle.exec("DROP TRIGGER action_ledger_no_update; DROP TRIGGER action_ledger_no_delete; DROP TRIGGER ledger_seal_no_update; DROP TRIGGER ledger_seal_no_delete");
+
+test("every entry is sealed, in order, with the one before it; the chain verifies", () => {
+  const ids = [act("one"), act("two"), act("three")];
+  const report = store.ledgerChain();
+  expect(report).toMatchObject({ ok: true, entries: 3, through: ids[2], unsealed: 0, problem: null });
+  const seals = store.handle.prepare("SELECT id, prev, hash FROM ledger_seal ORDER BY id").all();
+  expect(seals[0]!["prev"]).toBe(LEDGER_GENESIS);
+  expect(seals[1]!["prev"]).toBe(seals[0]!["hash"]);
+  expect(report.head).toBe(seals[2]!["hash"]);
+  // Anyone can recompute a seal from the entry's own fields.
+  const row = store.handle.prepare("SELECT * FROM action_ledger WHERE id = ?").get(ids[1]!)!;
+  expect(entryHash(String(seals[0]!["hash"]), row)).toBe(seals[1]!["hash"]);
+  // An entry written after the last seal is counted, and sealed on the next read.
+  act("four");
+  expect(verifyLedgerChain(store.handle)).toMatchObject({ ok: true, entries: 3, unsealed: 1 });
+  expect(store.ledgerChain()).toMatchObject({ ok: true, entries: 4, unsealed: 0 });
+});
+
+test("the seals themselves are append-only", () => {
+  act("one");
+  store.sealLedger();
+  expect(() => store.handle.prepare("UPDATE ledger_seal SET hash = 'x'").run()).toThrow(/append-only/);
+  expect(() => store.handle.prepare("DELETE FROM ledger_seal").run()).toThrow(/append-only/);
+  expect(() => store.handle.prepare("DELETE FROM ledger_checkpoint").run()).not.toThrow();
+});
+
+test("an entry changed after it was sealed is found, and named", () => {
+  act("one"); const two = act("two"); act("three");
+  store.sealLedger();
+  unguard();
+  store.handle.prepare("UPDATE action_ledger SET actor = 'mallory' WHERE id = ?").run(two);
+  expect(store.ledgerChain()).toMatchObject({ ok: false, problem: { id: two, what: `entry #${two} was changed after it was sealed` } });
+});
+
+test("an entry removed after it was sealed is found", () => {
+  act("one"); const two = act("two"); act("three");
+  store.sealLedger();
+  unguard();
+  store.handle.prepare("DELETE FROM action_ledger WHERE id = ?").run(two);
+  expect(store.ledgerChain()).toMatchObject({ ok: false, problem: { id: two, what: `entry #${two} was removed after it was sealed` } });
+  // Removing its seal too breaks the link to the next entry instead.
+  store.handle.prepare("DELETE FROM ledger_seal WHERE id = ?").run(two);
+  expect(store.ledgerChain()).toMatchObject({ ok: false, problem: { what: expect.stringContaining("doesn't follow the entry before it") } });
+});
+
+test("an entry slipped in among sealed ones is found", () => {
+  const one = act("one"); const two = act("two"); act("three");
+  store.sealLedger();
+  unguard();
+  // Make room, then put a different entry where one was.
+  store.handle.prepare("DELETE FROM action_ledger WHERE id = ?").run(two);
+  store.handle.prepare("DELETE FROM ledger_seal WHERE id = ?").run(two);
+  store.handle.prepare("INSERT INTO action_ledger (id, at, actor, repo, task_id, run_id, action, outcome, source, detail) VALUES (?, ?, 'alex', NULL, NULL, NULL, 'forged', 'done', 'policy', NULL)")
+    .run(two, T0.toISOString());
+  const report = store.ledgerChain();
+  expect(report.ok).toBe(false);
+  expect(report.through).toBe(one);
+});
+
+test("an entry numbered below the first, where sealing never reaches, is found", () => {
+  act("one");
+  store.sealLedger();
+  store.handle.prepare("INSERT INTO action_ledger (id, at, actor, repo, task_id, run_id, action, outcome, source, detail) VALUES (-1, ?, 'alex', NULL, NULL, NULL, 'forged', 'done', 'policy', NULL)").run(T0.toISOString());
+  expect(store.ledgerChain()).toMatchObject({ ok: false, problem: { id: -1, what: "entry #-1 was added outside the sealed history" } });
+});
+
+test("a long ledger is walked a page at a time", () => {
+  for (let i = 0; i < 2500; i++) act(`many ${i}`);
+  expect(store.ledgerChain()).toMatchObject({ ok: true, entries: 2500, through: 2500 });
+  unguard();
+  store.handle.prepare("UPDATE action_ledger SET detail = 'late' WHERE id = 2001").run();
+  expect(store.ledgerChain()).toMatchObject({ ok: false, problem: { id: 2001 } });
+});
+
+test("a chain rebuilt from scratch still verifies on its own, but not against a checkpoint", () => {
+  act("one"); const two = act("two"); act("three");
+  const checkpoint = store.ledgerCheckpoint("alex", T0)!;
+  expect(checkpoint.through).toBe(3);
+  expect(store.ledgerCheckpoints(1)[0]).toMatchObject({ through: 3, hash: checkpoint.hash, by: "alex" });
+  // The checkpoint itself is in the ledger.
+  expect(store.actionLedger({ repos: null, limit: 1 })[0]).toMatchObject({ action: "ledger checkpoint", actor: "alex", detail: `3:${checkpoint.hash}` });
+  const copied = `${checkpoint.through}:${checkpoint.hash}`;
+  expect(matchesOutsideCheckpoint(store.handle, copied)).toMatchObject({ ok: true });
+  // Someone with the file rewrites entry two, then reseals everything.
+  unguard();
+  store.handle.prepare("UPDATE action_ledger SET action = 'rewritten' WHERE id = ?").run(two);
+  store.handle.exec("DELETE FROM ledger_seal");
+  sealLedger(store.handle);
+  // The checkpoint kept here catches it...
+  expect(store.ledgerChain()).toMatchObject({ ok: false, problem: { id: 3, what: "the chain no longer matches the checkpoint at entry #3" } });
+  // ...and so does the copy kept elsewhere, even when the local checkpoints are gone too.
+  store.handle.exec("DROP TRIGGER ledger_checkpoint_no_delete; DELETE FROM ledger_checkpoint");
+  expect(store.ledgerChain().ok).toBe(true);
+  expect(matchesOutsideCheckpoint(store.handle, copied)).toMatchObject({ ok: false, what: expect.stringContaining("does NOT match") });
+  expect(matchesOutsideCheckpoint(store.handle, "nonsense").ok).toBe(false);
+});
+
+test("teammate tool calls, their decisions and undos are in the ledger, as the teammate or the person who decided", () => {
+  const repo = "/repo/a";
+  const mate = store.createTeammate({ repo, handle: "maya", soul: "---\nname: Maya\nrole: Support\n---\n## Who you are\nHelpful.\n", model: null, manager: "alex", by: "alex" }, T0);
+  const flow = store.createFlow({ repo, name: "Support", definitionJson: JSON.stringify({ version: 1, start: "inbox", stages: [{ id: "inbox", title: "Inbox", kind: "inbox", zone: {}, next: null, onFail: null }] }), by: "alex" }, T0);
+  const card = store.addFlowCard({ flow, title: "Refund it", description: null, stage: "inbox", by: "alex" }, T0);
+  const call = store.addTeammateCall({ teammate: mate, card, entry: 1, tool: "shop", action: "refund_order", input: { order: "54" }, rule: "ask", why: "Over the limit.", state: "asked" }, T0);
+  expect(store.moveTeammateCall(call, ["asked"], { state: "approved", decidedBy: "alex" }, new Date(T0.getTime() + 1000))).toBe(true);
+  expect(store.moveTeammateCall(call, ["approved"], { state: "done", result: "refunded" }, new Date(T0.getTime() + 2000))).toBe(true);
+  expect(store.markTeammateCallUndone(call, "sam", new Date(T0.getTime() + 3000))).toBe(true);
+  const rows = store.actionLedger({ repos: [repo], limit: 20 }).filter(one => one.action.startsWith("teammate tool call")).reverse();
+  expect(rows.map(one => [one.actor, one.action, one.outcome])).toEqual([
+    ["maya (AI)", "teammate tool call: shop refund_order", "asked"],
+    ["alex", "teammate tool call: shop refund_order", "approved"],
+    ["maya (AI)", "teammate tool call: shop refund_order", "done"],
+    ["sam", "teammate tool call undone: shop refund_order", "undone"],
+  ]);
+  expect(rows[0]!.detail).toBe("rule: ask");
+  expect(rows[2]!.at).toBe(new Date(T0.getTime() + 2000).toISOString());
+  // An undo that failed says so; the call stands.
+  store.clearTeammateCallUndone(call, new Date(T0.getTime() + 4000));
+  expect(store.actionLedger({ repos: [repo], limit: 1 })[0]).toMatchObject({ actor: "maya (AI)", action: "teammate tool call undo failed: shop refund_order", outcome: "failed" });
+});
+
+test("minting a coordinator is in the ledger, with its projects", () => {
+  const minted = mintCoordinator(store, { name: "release-bot", repos: ["/repo/a"], by: "alex", now: T0 });
+  expect(minted.ok).toBe(true);
+  expect(store.actionLedger({ repos: null, limit: 5 }).find(one => one.action === "coordinator minted: release-bot")).toMatchObject({ actor: "alex", outcome: "minted", source: "access", detail: 'projects: ["/repo/a"]' });
+});
+
+test("the command line verifies the chain, compares a copied checkpoint, and makes one only for an instance operator", async () => {
+  const alex = addApprover(store, "alex", T0);
+  if (!alex.ok) throw new Error("alex");
+  act("one"); act("two");
+  store.close();
+  let lines: string[] = [];
+  const write = (line: string) => { lines.push(line); };
+  const run = async (argv: string[]) => { lines = []; const code = await runOperate("ledger", argv, write, { databaseFile: file, now: T0 }); return { code, out: lines.join("\n") }; };
+  const verified = await run(["verify"]);
+  expect(verified.code).toBe(0);
+  expect(verified.out).toMatch(/^Chain verified: \d+ entries through #\d+, head [0-9a-f]{64}\.$/);
+  expect((await run(["checkpoint", "--json"])).code).toBe(3);
+  const made = await run(["checkpoint", "--as", "alex", "--token", alex.token, "--json"]);
+  expect(made.code).toBe(0);
+  const checkpoint = (JSON.parse(made.out) as { checkpoint: string }).checkpoint;
+  expect(checkpoint).toMatch(/^\d+:[0-9a-f]{64}$/);
+  expect((await run(["verify", "--checkpoint", checkpoint])).out).toContain("still matches the checkpoint");
+  const wrong = await run(["verify", "--checkpoint", checkpoint.replace(/.$/, c => c === "0" ? "1" : "0"), "--json"]);
+  expect(wrong.code).toBe(1);
+  expect(JSON.parse(wrong.out)).toMatchObject({ ok: false, outside: { ok: false } });
+  // A broken chain fails the command.
+  store = openStore(file);
+  unguard();
+  store.handle.prepare("UPDATE action_ledger SET actor = 'mallory' WHERE id = 1").run();
+  store.close();
+  const broken = await run(["verify"]);
+  expect(broken.code).toBe(1);
+  expect(broken.out).toContain("Chain BROKEN: entry #1 was changed after it was sealed.");
+  store = openStore(file);
+  // An export of the range, to a file that doesn't exist yet (and never over one that does).
+  store.close();
+  const out = join(dir, "audit.json");
+  const exported = await run(["export", "--from", "2026-09-20", "--to", "2026-09-20", "--out", out, "--json"]);
+  expect(exported.code).toBe(0);
+  const bundle = JSON.parse(readFileSync(out, "utf8")) as { format: string; entries: { action: string; seal: unknown }[]; chain: { ok: boolean } };
+  expect(bundle.format).toBe("standing-orders/ledger-export/v1");
+  expect(bundle.entries.map(one => one.action)).toEqual(expect.arrayContaining(["one", "two"]));
+  expect(bundle.chain.ok).toBe(false);
+  expect((await run(["export", "--from", "2026-09-20", "--to", "2026-09-20", "--out", out])).code).toBe(1);
+  expect((await run(["export", "--from", "2026-09-21", "--to", "2026-09-20"])).code).toBe(2);
+  store = openStore(file);
+  expect(store.actionLedger({ repos: null, instance: true, limit: 5 }).find(one => one.action === "ledger exported")).toMatchObject({ source: "access", detail: expect.stringContaining("2026-09-20 to 2026-09-20") });
+});

@@ -35,11 +35,26 @@ user. What it promises:
   one-person approval completes only by someone else. Only an instance
   operator changes the rules, with a step-up, and the action ledger keeps
   every change and every approval.
+- **An audit trail you can check.** Every action ledger entry is sealed
+  with a hash of the entry before it, so changing, removing or slipping in
+  an entry breaks the chain from that point; `standing-orders ledger verify`
+  (and the ledger page) says where. An instance operator makes a checkpoint
+  (`ledger checkpoint`, or **Make a checkpoint**) to copy off the machine;
+  `ledger verify --checkpoint <it>` then proves the history up to it wasn't
+  rewritten, even by someone who rebuilt the whole chain. Each task has an
+  evidence pack (the task page's **Evidence pack**, or `task evidence`):
+  who filed it, the approved terms and approvers, the rules in force, the
+  agents and their cost, the changed files, the checks, completion and
+  publication, and its ledger entries with their seals.
 - **Secrets stay out of the database, URLs and logs,** in 0600 files.
 - **Reviews** run with no tools, confined to their sealed files.
 
 Known limits:
 
+- The ledger chain proves the ledger wasn't edited after it was sealed
+  (within a worker pass, or when anything reads it). Someone who can write
+  the database file can rewrite history and rebuild the chain; only a
+  checkpoint kept somewhere else catches that, so copy them off the machine.
 - Approval rules bind the people the console knows about. Tasks filed from
   the command line or before schema 102 name no filer, and turning a rule on
   doesn't withdraw approvals already given.

@@ -121,7 +121,7 @@ export async function finishUndo(store: Store, id: number, io: ToolIo, now: Date
   if (pending === null || mate === null || pending.undoOf === null || pending.state !== "approved") return { ok: false, said: "That undo was already made." };
   const made = await makeCall(store, pending, mate.repo, io, now, { byPerson: true });
   if (made.state === "done") return { ok: true, said: `Undone: ${callWords(made.tool, made.action, made.input, 120)}. ${made.result ?? ""}`.trim() };
-  store.clearTeammateCallUndone(pending.undoOf);
+  store.clearTeammateCallUndone(pending.undoOf, now);
   return { ok: false, said: `The undo call failed: ${made.result ?? "no answer"}. The original call stands.` };
 }
 

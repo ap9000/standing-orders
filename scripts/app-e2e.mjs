@@ -297,6 +297,37 @@ await check("Approval rules: with 'someone other than the requester' on, the tas
   }
 });
 
+await check("Audit: the ledger chain verifies, a checkpoint made on the ledger page verifies from the command line, and the task's evidence pack names who filed and who approved it", [], async () => {
+  await page.goto(`${base}/ledger`);
+  if (await page.locator('[data-ledger-chain="ok"]').count() !== 1) throw new Error(`the chain: ${(await page.locator(".ledger-chain-panel").innerText()).slice(0, 200)}`);
+  await Promise.all([page.waitForNavigation(), page.locator('.ledger-checkpoint-form button').click()]);
+  const checkpoint = (await page.locator(".ledger-checkpoint-value").innerText()).trim();
+  if (!/^\d+:[0-9a-f]{64}$/.test(checkpoint)) throw new Error(`the checkpoint: ${checkpoint.slice(0, 80)}`);
+  const verified = cli(["ledger", "verify", "--checkpoint", checkpoint]);
+  if (verified.ok !== true || verified.outside?.ok !== true) throw new Error(`ledger verify: ${JSON.stringify(verified).slice(0, 300)}`);
+  await shot("ledger-chain");
+  const id = "e2e-rules";
+  await page.goto(`${base}/t/${id}`);
+  await Promise.all([page.waitForNavigation(), page.locator(`a[href="/t/${id}/evidence"]`).first().click()]);
+  const pack = page.locator(`[data-evidence-pack="${id}"]`);
+  await pack.waitFor({ timeout: 15_000 });
+  if (await pack.locator("script").count() !== 0) throw new Error("the evidence pack carries a script");
+  const text = await pack.innerText();
+  if (!/Filed[\s\S]*alex/.test(text) || !/Approved[\s\S]*sam/.test(text)) throw new Error(`the pack page: ${text.slice(0, 400)}`);
+  await shot("evidence-pack");
+  await page.setViewportSize({ width: 390, height: 844 });
+  if (await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1)) throw new Error("the evidence pack scrolls sideways on a phone");
+  await shot("evidence-pack-phone");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const download = await page.request.get(`${base}/t/${id}/evidence?format=json`);
+  const json = await download.json();
+  if (json.versions?.[0]?.filedBy?.name !== "alex" || json.versions?.[0]?.scope?.approved?.by !== "sam" || json.ledger?.chain?.ok !== true) throw new Error(`the pack JSON: ${JSON.stringify(json).slice(0, 300)}`);
+  if (!json.ledger.entries.every(one => one.seal !== null)) throw new Error("an entry in the pack isn't sealed");
+  const fromCli = cli(["task", "evidence", id]);
+  if (fromCli.pack?.versions?.[0]?.scope?.approved?.by !== "sam") throw new Error("task evidence on the command line");
+  return { checkpoint: checkpoint.split(":")[0], entries: json.ledger.entries.length };
+});
+
 await check("The command line answers: the task list, the approvers, the project's check, and help", [], async () => {
   const list = cli(["task", "list"]);
   const people = cli(["approver", "list"]);

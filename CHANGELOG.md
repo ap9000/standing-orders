@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **Audit you can prove.** The action ledger is now a hash chain: each entry
+  is sealed with the one before it, and the ledger page (or `ledger verify`)
+  says whether it still verifies, or the first entry that was changed,
+  removed or added. Instance operators make checkpoints to copy off the
+  machine (`ledger checkpoint`); `ledger verify --checkpoint` compares one.
+  Every task has an evidence pack, as a printable page and JSON: who filed
+  it, the approved terms and approvers, the rules in force, agents and
+  cost, changed files, checks, completion, publication and its sealed
+  ledger entries (`task evidence <id>`). The ledger page's Audit export (or
+  `ledger export --from --to`) downloads a date range with a pack for each
+  task. AI teammates' tool calls (and who approved or undid them) and new
+  coordinators are in the ledger now too. Schema 103.
+
 - **Separation of duties.** Every task records who filed it (the person, or
   the person a coordinator acts for). Settings → Approval rules (or
   `project rules`) lets an instance operator turn on, per project,
