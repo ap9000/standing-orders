@@ -288,4 +288,7 @@ test("a revision's branch carries its source's changes, so the family's diffs de
   const revision = build("revision", ["docs/x.md"]);
   expect(familyChangedFiles(store, "revision", revision.run, root)?.sort()).toEqual(["docs/x.md", "infra/main.tf"]);
   expect(familyChangedFiles(store, "source", source.run, root)).toEqual(["infra/main.tf"]);
+  // Whoever wrote the source's words is a requester of every revision that copies them.
+  store.recordScopeAuthor("source", "any-digest", "sam", now);
+  expect(store.requestersOf("revision").has("sam")).toBe(true);
 });

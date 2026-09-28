@@ -10588,9 +10588,11 @@ export class Store {
       const filer = this.taskFiler(id);
       if (filer?.name != null && (filer.kind === "person" || filer.kind === "coordinator")) names.add(filer.name);
     }
-    // Anyone who wrote any version of its scope (or changed its routing): a later refile that changes the
-    // digest without an author must not wash their words clean.
-    for (const row of this.db.prepare("SELECT DISTINCT author FROM scope_author WHERE task_id = ?").all(taskId)) names.add(String(row["author"]));
+    // Anyone who wrote any version of its scope (or changed its routing), here or on any task it revises: a
+    // revision copies its source's words, and a refile that changes the digest must not wash them clean.
+    for (const id of chain.length === 0 ? [taskId] : chain) {
+      for (const row of this.db.prepare("SELECT DISTINCT author FROM scope_author WHERE task_id = ?").all(id)) names.add(String(row["author"]));
+    }
     return names;
   }
 
