@@ -5657,7 +5657,9 @@ export function createDecisionServer(options: ServeOptions): Server {
           const words =
             approved.reason === "profile-unresolved"
               ? "not approved: the routine cannot name an exact agent for every role — configure the project's agents, then file the standing order again"
-              : `not approved: ${approved.reason}`;
+              : approved.reason === "requester"
+                ? "You made this standing order, and this project needs someone else to approve it."
+                : `not approved: ${approved.reason}`;
           return routinePage(response, who, routineId, words, status);
         }
         return redirect(response, `/routines/${routineId}`);
@@ -8005,7 +8007,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           requirements: [],
           schedule: candidate.draft.schedule,
           costCeilingUsd: null,
-          filedVia,
+          filedVia, createdBy: who.name,
           admittedRepos: managedRepos(),
         },
         now,
@@ -8158,7 +8160,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           requirements: [],
           schedule: scheduled.schedule,
           costCeilingUsd: ceilingGiven === "" ? null : Number(ceilingGiven),
-          filedVia: "console",
+          filedVia: "console", createdBy: who.name,
           ...(routineAdmitted === null ? {} : { admittedRepos: routineAdmitted }),
         },
         now,
@@ -9233,7 +9235,7 @@ export function createDecisionServer(options: ServeOptions): Server {
               ? modeFilingCoverage(store, ref.repo, who.name, now)
               : null;
           const proposed = proposeGuarded(store, {
-            taskId,
+            taskId, author: who.name,
             goal: body.get("goal") ?? "",
             outOfScope: body.get("not") ?? null,
             touches: (body.get("touches") ?? "").split(/[\n,]/),

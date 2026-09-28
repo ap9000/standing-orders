@@ -254,7 +254,7 @@ export function launchWorkflow(store: Store, actor: string, repo: string, token:
       if (operatorFiling) applyModeToNewFiling(store, taskId, actor, now);
     } else {
       const slug = d.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 32) || "workflow";
-      const made = fileRoutineProposal(store, { name: `${slug}-${token.slice(0, 8)}`, repo, goal: d.goal, outOfScope: d.outOfScope, touches: d.touches, acceptance: d.acceptance, requirements: [], schedule: d.schedule, costCeilingUsd: d.costCeilingUsd, filedVia: provenance, admittedRepos: [repo] }, now);
+      const made = fileRoutineProposal(store, { name: `${slug}-${token.slice(0, 8)}`, repo, goal: d.goal, outOfScope: d.outOfScope, touches: d.touches, acceptance: d.acceptance, requirements: [], schedule: d.schedule, costCeilingUsd: d.costCeilingUsd, filedVia: provenance, createdBy: actor, admittedRepos: [repo] }, now);
       if (!made.ok) throw new RecipeError(made.message);
       routineId = made.id;
     }

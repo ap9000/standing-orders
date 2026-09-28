@@ -806,6 +806,8 @@ export type Approval =
 
 export type ScopeInput = {
   taskId: string;
+  /** v102: the person writing these words (a web edit, a chat confirmation, a coding hand-off); the requester rule refuses them. */
+  author?: string;
   goal: string;
   outOfScope?: string | null;
   touches?: readonly string[];
@@ -949,7 +951,9 @@ export function propose(store: Store, input: ScopeInput): Scope {
   });
   // The store may have RECOMPUTED the digest to bind the resolved profile
   // (v24 filing invariant) — what callers display must be what is stored.
-  return store.getScope(taskId) ?? scope;
+  const saved = store.getScope(taskId) ?? scope;
+  if (input.author !== undefined && input.author !== "") store.recordScopeAuthor(taskId, saved.digest, input.author, now);
+  return saved;
 }
 
 export type GuardedProposeResult =

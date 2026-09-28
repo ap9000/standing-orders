@@ -75,6 +75,7 @@ function withoutNew(table: string, row: Record<string, unknown>): Record<string,
   if (table === "mate_thread") { delete copy["scope_kind"]; delete copy["scope_key"]; }
   // v102's filer is a later additive column on the task reference (null for tasks filed before it).
   if (table === "task_ref") { delete copy["filed_by"]; delete copy["filed_by_kind"]; }
+  if (table === "routine") delete copy["created_by"];
   return copy;
 }
 

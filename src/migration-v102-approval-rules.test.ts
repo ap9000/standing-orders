@@ -18,7 +18,7 @@ test.each([101, -101])("v%s: tasks filed before keep working with no filer; rule
   first.close();
   // The v101 shape: no filer columns, no rules, no approvals kept per person.
   const db = new DatabaseSync(file);
-  db.exec("DROP TABLE approval_policy; DROP TABLE scope_approval_vote; ALTER TABLE task_ref DROP COLUMN filed_by; ALTER TABLE task_ref DROP COLUMN filed_by_kind");
+  db.exec("DROP TABLE approval_policy; DROP TABLE scope_approval_vote; DROP TABLE scope_author; ALTER TABLE task_ref DROP COLUMN filed_by; ALTER TABLE task_ref DROP COLUMN filed_by_kind; ALTER TABLE routine DROP COLUMN created_by");
   db.prepare("UPDATE schema_version SET version = ?").run(version);
   db.close();
   store = openStore(file);
@@ -32,4 +32,7 @@ test.each([101, -101])("v%s: tasks filed before keep working with no filer; rule
   expect(store.taskFiler("new-task")).toEqual({ name: "alex", kind: "person" });
   store.recordApprovalVote("new-task", "d1", "alex", now);
   expect(store.handle.prepare("SELECT COUNT(*) AS n FROM scope_approval_vote").get()?.n).toBe(1);
+  store.recordScopeAuthor("new-task", "d1", "sam", now);
+  expect(store.handle.prepare("SELECT author FROM scope_author").get()?.author).toBe("sam");
+  expect(store.handle.prepare("SELECT created_by FROM routine LIMIT 1").all()).toEqual([]);
 });

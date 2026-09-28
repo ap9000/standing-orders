@@ -94,7 +94,7 @@ import { normalizeProjectAccess, projectAccessAllows, readProjectAccess, type Pr
 import { LEDGER_SCHEMA, LEDGER_TABLE, LEDGER_V54_COLUMNS, LEDGER_V54_TABLE, installLedgerTriggers, type LedgerEntry } from "./action-ledger.js";
 import { PLAN_AUTO_SCHEMA } from "./plan-auto.js";
 import { RECIPE_SCHEMA } from "./recipes.js";
-import { NO_RULES, filerFor, isProtectedWork, rulesWords, type ApprovalGate, type ApprovalRules, type ApproverKind, type Filer, type FilerKind } from "./approval-policy.js";
+import { NO_RULES, filerFor, isProtectedWork, protectedChanges, rulesWords, type ApprovalGate, type ApprovalRules, type ApproverKind, type Filer, type FilerKind } from "./approval-policy.js";
 
 // v60 fenced older readers before the chat action cards; v61 adds notification
 // provenance and Telegram destination receipts, and readers below v61 refuse it.
@@ -152,6 +152,13 @@ CREATE TABLE IF NOT EXISTS scope_approval_vote (
   approver TEXT NOT NULL,
   at       TEXT NOT NULL,
   PRIMARY KEY (task_id, digest, approver)
+);
+CREATE TABLE IF NOT EXISTS scope_author (
+  task_id TEXT NOT NULL,
+  digest  TEXT NOT NULL,
+  author  TEXT NOT NULL,
+  at      TEXT NOT NULL,
+  PRIMARY KEY (task_id, digest, author)
 );
 `;
 
@@ -743,6 +750,8 @@ export type MateTurn = {
 export type Routine = {
   id: number;
   name: string;
+  /** v102: who made it (its instances are filed as theirs); null before v102 or when no person is known. */
+  createdBy: string | null;
   repo: string;
   goal: string;
   outOfScope: string | null;
@@ -6083,6 +6092,8 @@ function migrate(db: Database, origin: number | null): void {
   // v102: who filed a task (a person, or the person a coordinator acts for; null when no person is known) and what kind of filer.
   addColumn(db, "task_ref", "filed_by", "TEXT");
   addColumn(db, "task_ref", "filed_by_kind", "TEXT");
+  // v102: who made a standing order (its instances are filed as theirs).
+  addColumn(db, "routine", "created_by", "TEXT");
   // v98: where Telegram pushes this bot's updates, as the bridge last found it.
   addColumn(db, "bridge_lease", "push_url", "TEXT");
   addColumn(db, "bridge_lease", "push_at", "TEXT");
@@ -9999,7 +10010,7 @@ export class Store {
    * approved profile — one UPDATE, no re-resolution, so what is sealed is
    * exactly what the signed digest was bound to. Returns false when the
    * scope vanished mid-ceremony. */
-  sealScopeApproval(taskId: string, by: string, now: Date, mutation: Mutation = {}, basis?: { kind: "mode"; modeDigest: string }): boolean {
+  sealScopeApproval(taskId: string, by: string, now: Date, mutation: Mutation = {}, basis?: { kind: "mode"; modeDigest: string }, approverKind?: ApproverKind): boolean {
     return (
       this.once(mutation, "sealScopeApproval", () => {
         // THE COORDINATOR QUARANTINE, enforced in the primitive (MCP spec
@@ -10026,7 +10037,7 @@ export class Store {
         // protected work seals only once two people approved these exact
         // bytes (the ceremony records each vote first) — never on a mode,
         // a routine or an AI teammate's word.
-        const kind: ApproverKind = basis !== undefined ? "mode" : by.endsWith(" (AI)") ? "ai" : "person";
+        const kind: ApproverKind = approverKind ?? (basis !== undefined ? "mode" : by.endsWith(" (AI)") ? "ai" : "person");
         if (this.approvalGate(taskId, by, kind).verdict !== "seal") return false;
         // THE SEAL'S BELT (v47, one strict projection since the v48
         // integrity repair): the row seals only what `scopeAuthorityOf`
@@ -10567,28 +10578,76 @@ export class Store {
     return { name: row["filed_by"] == null ? null : String(row["filed_by"]), kind: String(row["filed_by_kind"]) as FilerKind };
   }
 
+  /** Everyone who asked for this task's current work: whoever filed it or any
+   * task it revises (up to the root), and whoever wrote its current scope.
+   * The requester rule refuses all of them. */
+  requestersOf(taskId: string): Set<string> {
+    const names = new Set<string>();
+    const chain = this.revisionAncestryStatus(taskId).chain;
+    for (const id of chain.length === 0 ? [taskId] : chain) {
+      const filer = this.taskFiler(id);
+      if (filer?.name != null && (filer.kind === "person" || filer.kind === "coordinator")) names.add(filer.name);
+    }
+    const digest = this.db.prepare("SELECT digest FROM task_scope WHERE task_id = ?").get(taskId)?.["digest"];
+    if (digest != null) {
+      for (const row of this.db.prepare("SELECT author FROM scope_author WHERE task_id = ? AND digest = ?").all(taskId, String(digest))) names.add(String(row["author"]));
+    }
+    return names;
+  }
+
+  /** Who wrote these exact scope bytes (a person at a scope edit, a chat confirmation, a coding hand-off). */
+  recordScopeAuthor(taskId: string, digest: string, author: string, now: Date): void {
+    this.db.prepare("INSERT OR IGNORE INTO scope_author (task_id, digest, author, at) VALUES (?,?,?,?)").run(taskId, digest, author, now.toISOString());
+  }
+
   /** What the project's rules say about `by` approving this task's current scope. */
   approvalGate(taskId: string, by: string, kind: ApproverKind): ApprovalGate {
-    const ref = this.db.prepare("SELECT repo, filed_by, filed_by_kind FROM task_ref WHERE backend = ? AND external_id = ?").get(BUILT_IN, taskId);
+    const ref = this.db.prepare("SELECT repo FROM task_ref WHERE backend = ? AND external_id = ?").get(BUILT_IN, taskId);
     const scope = this.db.prepare("SELECT digest, touches FROM task_scope WHERE task_id = ?").get(taskId);
     if (ref === undefined || ref["repo"] == null) return { verdict: "seal", protectedWork: false };
-    const rules = this.approvalRules(String(ref["repo"]));
+    const repo = String(ref["repo"]);
+    const rules = this.approvalRules(repo);
     let touches: string[] = [];
     try { const parsed = JSON.parse(String(scope?.["touches"] ?? "[]")); if (Array.isArray(parsed)) touches = parsed.map(String); } catch { touches = []; }
     const protectedWork = isProtectedWork(rules, touches);
     if (!rules.notRequester && !protectedWork) return { verdict: "seal", protectedWork: false };
     if (kind === "ai") return { verdict: "refuse", reason: "person-required" };
-    const kindOfFiler = ref["filed_by_kind"] == null ? null : String(ref["filed_by_kind"]);
-    const requester = ref["filed_by"] != null && (kindOfFiler === "person" || kindOfFiler === "coordinator") ? String(ref["filed_by"]) : null;
-    if (rules.notRequester && requester !== null && by === requester) return { verdict: "refuse", reason: "requester" };
+    const requesters = rules.notRequester ? this.requestersOf(taskId) : new Set<string>();
+    if (requesters.has(by)) return { verdict: "refuse", reason: "requester" };
     if (!protectedWork) return { verdict: "seal", protectedWork: false };
     if (kind !== "person") return { verdict: "refuse", reason: "person-required" };
+    // Only people who can still approve here count: a vote from an account since revoked, demoted or moved off the project doesn't.
+    const standing = (name: string) => { const account = this.accountOf(name); return account !== null && account.revokedAt === null && account.role === "approver" && this.accountCanAccess(name, repo); };
     const digest = scope === undefined ? "" : String(scope["digest"]);
-    const voters = new Set(this.db.prepare("SELECT approver FROM scope_approval_vote WHERE task_id = ? AND digest = ?").all(taskId, digest).map(row => String(row["approver"])));
+    const voters = new Set(this.db.prepare("SELECT approver FROM scope_approval_vote WHERE task_id = ? AND digest = ?").all(taskId, digest).map(row => String(row["approver"])).filter(standing));
     const already = voters.has(by);
     voters.add(by);
-    if (rules.notRequester && requester !== null) voters.delete(requester);
+    for (const name of requesters) voters.delete(name);
     return voters.size >= 2 ? { verdict: "seal", protectedWork: true } : { verdict: "vote", have: voters.size, need: 2, already };
+  }
+
+  /** v102: a result that changed protected files, with a scope only one person approved, completes only
+   * by someone other than that approver and the requesters (two people have then seen the work). The
+   * changed files come from the build's own diff; `null` (unreadable) counts as protected. */
+  protectedResultProblem(taskId: string, changed: readonly string[] | null, completer: string | null): string | null {
+    const ref = this.db.prepare("SELECT repo FROM task_ref WHERE backend = ? AND external_id = ?").get(BUILT_IN, taskId);
+    if (ref === undefined || ref["repo"] == null) return null;
+    const repo = String(ref["repo"]);
+    const rules = this.approvalRules(repo);
+    if (!rules.protectProject && rules.protectedPaths.length === 0) return null;
+    const hits = changed === null ? null : protectedChanges(rules, changed);
+    if (hits !== null && hits.length === 0) return null;
+    const scope = this.db.prepare("SELECT approved_by, approved_digest FROM task_scope WHERE task_id = ?").get(taskId);
+    const approvedDigest = scope?.["approved_digest"] == null ? "" : String(scope["approved_digest"]);
+    const voters = new Set(this.db.prepare("SELECT approver FROM scope_approval_vote WHERE task_id = ? AND digest = ?").all(taskId, approvedDigest).map(row => String(row["approver"])));
+    const requesters = rules.notRequester ? this.requestersOf(taskId) : new Set<string>();
+    for (const name of requesters) voters.delete(name);
+    if (voters.size >= 2) return null;
+    const approver = scope?.["approved_by"] == null ? null : String(scope["approved_by"]);
+    const what = hits === null ? "files this project protects (its changed files couldn't be read)" : `protected files (${hits.slice(0, 3).join(", ")}${hits.length > 3 ? ` and ${hits.length - 3} more` : ""})`;
+    if (completer === null) return `This result changed ${what}, so a person other than its approver marks it complete.`;
+    if (completer === approver || requesters.has(completer)) return `This result changed ${what}, and ${approver ?? "one person"} approved its scope alone. Someone else has to mark it complete.`;
+    return null;
   }
 
   /** One person's yes to these exact bytes (protected work counts two). */
@@ -15727,6 +15786,8 @@ export class Store {
       digest: string;
       /** Immutable provenance (v12), same contract as createConsoleTask's. */
       filedVia?: string;
+      /** v102: who made it; its instances are filed as theirs. */
+      createdBy?: string | null;
       /** v24: resolved at filing by the caller who computed the digest —
        * stored verbatim so digest and profile can never disagree. */
       profile?: ExecutionProfile;
@@ -15768,6 +15829,7 @@ export class Store {
           spec.acceptance.length === 0 ? null : JSON.stringify(spec.acceptance),
           spec.route === undefined ? null : canonicalRouteJson(spec.route),
         );
+      if (spec.createdBy != null && spec.createdBy !== "") this.db.prepare("UPDATE routine SET created_by = ? WHERE id = ?").run(spec.createdBy, Number(inserted.lastInsertRowid));
       return { ok: true as const, id: Number(inserted.lastInsertRowid) };
     });
   }
@@ -19321,8 +19383,10 @@ export class Store {
         // v102: a watched run is one person's yes, so a project's approval rules bind it like a seal:
         // never the requester's where that's refused, never protected work (which takes two people).
         const externalId = this.externalIdFor(input.taskRef);
-        if (externalId !== null && this.approvalGate(externalId, input.approver, input.basis === undefined ? "person" : "mode").verdict !== "seal") {
-          return { ok: false as const, reason: "approval-rules" as const };
+        if (externalId !== null) {
+          const gate = this.approvalGate(externalId, input.approver, input.basis === undefined ? "person" : "mode");
+          // Protected work runs only on a scope two people sealed; a watched run is never the second yes.
+          if (gate.verdict !== "seal" || (gate.protectedWork && !this.scopeSealed(externalId))) return { ok: false as const, reason: "approval-rules" as const };
         }
         if (input.basis !== undefined) {
           const ref = this.refForId(input.taskRef);
@@ -26161,6 +26225,7 @@ function readRoutine(row: Record<string, unknown>): Routine {
     digest: String(row["digest"]),
     approvedAt: row["approved_at"] === null ? null : String(row["approved_at"]),
     approvedBy: row["approved_by"] === null ? null : String(row["approved_by"]),
+    createdBy: row["created_by"] == null ? null : String(row["created_by"]),
     approvedDigest: row["approved_digest"] === null ? null : String(row["approved_digest"]),
     nextFireAt: row["next_fire_at"] === null ? null : String(row["next_fire_at"]),
     filedVia: row["filed_via"] === null || row["filed_via"] === undefined ? null : String(row["filed_via"]),

@@ -307,11 +307,28 @@ export function assignmentEvidenceIntact(store: Store, root: string, receipt: As
   } catch { return false; }
 }
 
+/** The files a build changed, from its sealed diff inventory; null when it can't be read whole. */
+function changedFilesOf(store: Store, runId: number, root: string): string[] | null {
+  const stat = store.artifactsFor(runId).find(one => one.kind === "diff-stat");
+  if (stat === undefined || stat.truncated || stat.captureStatus !== "ok") return null;
+  const read = readVerifiedArtifact(root, stat);
+  if (!read.ok) return null;
+  try {
+    const inventory = JSON.parse(read.content.toString("utf8")) as { filesTruncated?: boolean; files?: { path?: unknown }[] };
+    if (inventory.filesTruncated !== false || !Array.isArray(inventory.files)) return null;
+    return inventory.files.map(one => one.path).filter((path): path is string => typeof path === "string");
+  } catch { return null; }
+}
+
 function acknowledgeCurrent(store: Store, current: AssignmentSnapshot, receiptDigest: string, actor: string, now: Date, root: string, access: AssignmentAccess): MutationResult {
   if (!/^[a-f0-9]{64}$/.test(receiptDigest) || current.receipt?.digest !== receiptDigest) return { ok: false, reason: "stale", message: "The result changed. Read the current assignment before checking it." };
   const receipt = current.receipt;
   if (current.state !== "ready-to-check" && current.state !== "complete") return { ok: false, reason: "not-ready", message: "This assignment still has unresolved execution, scope or decisions." };
   if (current.state !== "complete") {
+    // v102: declared paths are only a promise. A result whose actual diff reaches protected files, on a
+    // scope one person approved, completes only by someone else — two people have then seen the work.
+    const problem = store.protectedResultProblem(receipt.taskId, changedFilesOf(store, receipt.runId, root), actor.startsWith("operator:") ? actor.slice("operator:".length) : null);
+    if (problem !== null) return { ok: false, reason: "approval-rules", message: problem };
     store.recordAction({ at: now.toISOString(), actor, repo: current.repo,
       taskId: current.rootId, runId: receipt.runId, action: CHECK_ACTION, outcome: receiptDigest, source: "work" });
     store.bumpWake();

@@ -544,7 +544,7 @@ function executeProposal(
     const goal = payloadString(payload, "goal");
     if (goal === null) return refuse("refused", "this proposal carries no goal");
     const proposed = proposeGuarded(store, {
-      taskId,
+      taskId, author: actor.name,
       goal,
       outOfScope: payloadString(payload, "not"),
       touches: payloadStrings(payload, "touches"),

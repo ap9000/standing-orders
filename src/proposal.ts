@@ -130,6 +130,8 @@ export function shouldPlanTask(input: TaskProposalInput): boolean {
 
 export type RoutineProposalInput = {
   name: string;
+  /** v102: who is making it (its instances are filed as theirs). */
+  createdBy?: string | null;
   repo: string;
   goal: string;
   outOfScope: string | null;
@@ -311,6 +313,7 @@ export function fileRoutineProposal(
       ...terms,
       digest: routineDigestOf(terms, routineProfile, routineRoute),
       filedVia: input.filedVia,
+      createdBy: input.createdBy ?? null,
       ...(routineProfile === null ? {} : { profile: routineProfile }),
       ...(routineRoute === null ? {} : { route: routineRoute }),
     },

@@ -222,7 +222,7 @@ function workStage(store: Store, flow: FlowRow, stage: FlowStage, card: FlowCard
       title: (report ? `${stage.title}: ${card.title}` : card.title).slice(0, 200),
       repo: flow.repo,
       goal: workGoal(stage.instructions ?? card.title, card).slice(0, 8000),
-      filedVia: `flow:${flow.id}`, filedBy: filerFor(card.owner ?? card.createdBy),
+      filedVia: `flow:${flow.id}`, filedBy: filerFor(card.createdBy), // who made the card asked for the work (an owner can be reassigned by anyone)
       deliverable: report ? "report" : "branch",
       planning: report ? "skip" : stage.planning ?? "auto",
       acceptance: report ? ACCEPTANCE.report : ACCEPTANCE.task,

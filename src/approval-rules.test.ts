@@ -17,6 +17,8 @@ import { createDecisionServer } from "./serve.js";
 import { decideFlowCard } from "./flow-engine.js";
 import { TEAMMATE_TEMPLATES } from "./teammates.js";
 import { isProtectedWork, touchesProtected } from "./approval-policy.js";
+import { fileRoutineProposal } from "./proposal.js";
+import { approveRoutine } from "./routine.js";
 
 const REPO = "/repo/main";
 let dir: string, store: Store, server: Server, base: string;
@@ -165,6 +167,11 @@ test("protected paths match what a task says it touches, erring toward protectin
   expect(touchesProtected("src/**", "src/db/schema.sql")).toBe(true);
   expect(touchesProtected("src/app.ts", "*.sql")).toBe(false);
   expect(touchesProtected("schema.sql", "*.sql")).toBe(true);
+  // The review's bypasses: a bare directory, a trailing slash, "..", case, braces, any-depth patterns, leaving the checkout.
+  for (const touch of ["infra", "infra/", "docs/../infra/main.tf", "INFRA/main.tf", "{infra,docs}/**", "../elsewhere"]) expect(touchesProtected(touch, "infra/**"), touch).toBe(true);
+  expect(touchesProtected("secrets", "**/secrets/**")).toBe(true);
+  expect(touchesProtected("src/db/schema.sql", "*.sql")).toBe(true);
+  expect(touchesProtected("infrastructure/x", "infra/**")).toBe(false);
   expect(isProtectedWork({ notRequester: false, protectProject: false, protectedPaths: ["infra/**"] }, [])).toBe(true);
   expect(isProtectedWork({ notRequester: true, protectProject: false, protectedPaths: [] }, ["infra/x"])).toBe(false);
 });
@@ -180,4 +187,55 @@ test("the command line shows a project's rules, and only an instance operator ch
   expect(store.approvalRules(REPO).notRequester).toBe(false);
   expect(await run(["--not-requester", "on", "--protect-paths", "infra/**,migrations/**", "--as", "alex", "--token", passwords["alex"]!])).toBe(0);
   expect(store.approvalRules(REPO)).toMatchObject({ notRequester: true, protectProject: false, protectedPaths: ["infra/**", "migrations/**"], updatedBy: "alex" });
+});
+
+test("whoever wrote the scope counts as a requester, and a revision's root filer does too", async () => {
+  store.setApprovalRules(REPO, { notRequester: true, protectProject: false, protectedPaths: [] }, "alex", new Date());
+  const alex = await signIn("alex"), sam = await signIn("sam");
+  // sam files a placeholder; alex rewrites its scope, then tries to approve their own words.
+  const made = store.createConsoleTask({ title: "Placeholder", repo: REPO, filedVia: "console", filedBy: { name: "sam", kind: "person" } }, new Date());
+  if (!made.ok) throw new Error(made.reason);
+  const csrf = csrfOf(await page(alex, "/tasks"));
+  expect((await post(alex, `/t/${made.id}/scope`, { csrf, acceptance: "c1: ok | manual-review", sawDigest: "", goal: "alex's words", not: "", touches: "src/a.ts" })).status).toBe(303);
+  expect([...store.requestersOf(made.id)].sort()).toEqual(["alex", "sam"]);
+  expect((await approveAs("alex", alex, made.id)).text).toContain("You filed this task");
+  expect((await approveAs("sam", sam, made.id)).status).toBe(403);
+});
+
+test("a standing order's maker can't approve it, and its firings are filed as theirs", () => {
+  store.setApprovalRules(REPO, { notRequester: true, protectProject: false, protectedPaths: [] }, "alex", new Date());
+  const made = fileRoutineProposal(store, { name: "nightly-deps", repo: REPO, goal: "refresh the lockfile", outOfScope: null, touches: [], createdBy: "alex",
+    acceptance: [{ id: "c1", statement: "The lockfile is refreshed.", evidence: ["check"] }], requirements: [], schedule: "daily:03:30", costCeilingUsd: null, filedVia: "console" }, new Date());
+  if (!made.ok) throw new Error(JSON.stringify(made));
+  expect(store.getRoutine(made.id)?.createdBy).toBe("alex");
+  expect(approveRoutine(store, made.id, "alex", new Date(), made.digest, passwords["alex"]!)).toEqual({ ok: false, reason: "requester" });
+  expect(approveRoutine(store, made.id, "sam", new Date(), made.digest, passwords["sam"]!)).toMatchObject({ ok: true });
+});
+
+test("votes count only while their people can still approve; a watched run is never the second yes; the diff decides completion", async () => {
+  store.setApprovalRules(REPO, { notRequester: false, protectProject: true, protectedPaths: [] }, "alex", new Date());
+  const alex = await signIn("alex"), sam = await signIn("sam");
+  const id = await fileAsAlex(alex, "Rotate the keys", ["src/keys.ts"]);
+  expect((await approveAs("sam", sam, id)).text).toContain("(1 of 2)");
+  const now = new Date();
+  const mint = () => store.mintAttendedAuthorization({ id: randomUUID(), taskRef: store.lookupRef(id)!.id, approver: "alex", runner: "r1", runnerGeneration: 1, compositeDigest: "d",
+    termsJson: "{}", maxSessionTurns: 1, budgetMicrousd: 1, absoluteExpiry: new Date(now.getTime() + 60_000).toISOString(), now });
+  expect(mint()).toEqual({ ok: false, reason: "approval-rules" });
+  // sam moves off the project: their vote no longer counts, so alex's is the first.
+  expect(store.setAccountProjects("sam", ["/elsewhere"], "alex", now)).toEqual({ ok: true });
+  expect((await approveAs("alex", alex, id)).text).toContain("(1 of 2)");
+  expect(store.getScope(id)?.approvedBy ?? null).toBeNull();
+});
+
+test("a result that changed protected files on a one-person approval completes only by someone else", async () => {
+  const alex = await signIn("alex");
+  const id = await fileAsAlex(alex, "Tidy config", ["src/config.ts"]);
+  expect((await approveAs("alex", alex, id)).status).toBe(303);
+  // The rule arrives (or the build strays) after a single approval.
+  store.setApprovalRules(REPO, { notRequester: false, protectProject: false, protectedPaths: ["infra/**"] }, "alex", new Date());
+  expect(store.protectedResultProblem(id, ["docs/readme.md"], "alex")).toBeNull();
+  expect(store.protectedResultProblem(id, ["infra/main.tf"], "alex")).toContain("Someone else has to mark it complete.");
+  expect(store.protectedResultProblem(id, null, "alex")).toContain("couldn't be read");
+  expect(store.protectedResultProblem(id, ["infra/main.tf"], null)).toContain("a person other than its approver");
+  expect(store.protectedResultProblem(id, ["infra/main.tf"], "sam")).toBeNull();
 });

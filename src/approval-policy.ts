@@ -36,8 +36,19 @@ export type ApprovalGate =
   | { verdict: "vote"; have: number; need: 2; already: boolean }
   | { verdict: "refuse"; reason: "requester" | "person-required" };
 
-const clean = (path: string) => path.trim().replace(/^\.?\/+/, "").replace(/\/+$/, "");
-const wild = /[*?[]/;
+/** A path as the rules compare it: forward slashes, no "." or "..", lower case (macOS
+ * checkouts ignore case). null when it climbs out of the checkout. */
+function normal(path: string): string | null {
+  const parts: string[] = [];
+  for (const part of path.trim().replace(/\\/g, "/").toLowerCase().split("/")) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") { if (parts.length === 0) return null; parts.pop(); continue; }
+    parts.push(part);
+  }
+  return parts.join("/");
+}
+const clean = (path: string) => normal(path) ?? "";
+const wild = /[*?[{]/;
 const literalPrefix = (glob: string) => { const at = glob.search(wild); return at === -1 ? glob : glob.slice(0, at); };
 function globRegex(glob: string): RegExp {
   let out = "";
@@ -52,15 +63,31 @@ function globRegex(glob: string): RegExp {
 }
 
 /** Whether a task that says it touches `touch` may touch something under
- * `protectedGlob`. Exact paths are matched; two patterns that could reach
- * the same files (one's literal start inside the other's) count as
- * overlapping, which errs toward protecting. */
+ * `protectedGlob`, or a changed file is protected. A plain path covers
+ * itself and everything under it; a pattern with no slash matches at any
+ * depth (as in .gitignore); two patterns that could reach the same files
+ * count as overlapping; a path that climbs out of the checkout is
+ * protected. Every doubt errs toward protecting. */
 export function touchesProtected(touch: string, protectedGlob: string): boolean {
-  const a = clean(touch), b = clean(protectedGlob);
-  if (a === "" || b === "") return b === "" ? false : true;
-  if (!wild.test(a)) return globRegex(b).test(a);
+  const g = normal(protectedGlob);
+  if (g === null || g === "") return false;
+  const b = g.includes("/") ? g : `**/${g}`;
+  const a = normal(touch);
+  if (a === null || a === "") return true;
+  const pattern = globRegex(b);
+  if (!wild.test(a)) {
+    if (pattern.test(a) || pattern.test(`${a}/x`) || pattern.test(`${a}/x/y.z`)) return true;
+    const pb = literalPrefix(b);
+    return pb === a || pb.startsWith(`${a}/`);
+  }
   const pa = literalPrefix(a), pb = literalPrefix(b);
   return pa.startsWith(pb) || pb.startsWith(pa);
+}
+
+/** The changed files (from a build's diff) that the rules protect. */
+export function protectedChanges(rules: ApprovalRules, changed: readonly string[]): string[] {
+  if (rules.protectProject) return [...changed];
+  return changed.filter(file => rules.protectedPaths.some(glob => touchesProtected(file, glob)));
 }
 
 /** Whether a task's declared paths reach protected work. A task that
