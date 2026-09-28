@@ -135,6 +135,8 @@ import { NO_RULES, filerFor, isProtectedWork, protectedChanges, rulesWords, type
 // v100 lets people sign in with the organisation's identity provider: each provider identity is linked to one account.
 // v101 adds API tokens (scoped, expiring, hashed), keeps browser sessions across restarts (listed and revocable), and lets coordinator credentials expire.
 // v102 records who filed each task and adds per-project approval rules: the requester can't approve, and protected work needs two approvers.
+/** The detail on a task's registration written again at its filing (v103), over a ref an earlier lookup made. */
+const REGISTERED_AT_FILING = "again, as it was filed";
 /** A ledger entry with its seal (v103); null until the next pass seals it. */
 export type SealedLedgerEntry = LedgerEntry & { seal: { prev: string; hash: string } | null };
 // v103 chains the action ledger (every entry sealed with the one before it), keeps checkpoints of the chain, and records teammate tool calls (from the store) and minted coordinators (by trigger) in it.
@@ -8250,8 +8252,12 @@ export class Store {
           "INSERT INTO task (id, title, state, created_at, updated_at) VALUES (?, ?, 'queued', ?, ?)",
         )
         .run(spec.id, spec.title, stamp, stamp);
+      // A ref some lookup made before this task existed registered then, not now: register it again, so the task's
+      // ledger history (v103 evidence packs) starts at its filing.
+      const earlier = this.db.prepare("SELECT 1 AS hit FROM task_ref WHERE backend = ? AND external_id = ?").get(BUILT_IN, spec.id) !== undefined;
       // Created here, so it is ours — the one place that is true by construction.
       const ref = this.refFor(BUILT_IN, spec.id, "ours");
+      if (earlier) this.recordAction({ at: stamp, actor: "system", repo: ref.repo, taskId: spec.id, runId: null, action: "task registered", outcome: "recorded", source: "work", detail: REGISTERED_AT_FILING });
       // v102: who filed it, set once with the filing (separation of duties reads it; nothing changes it).
       if (spec.filedBy !== undefined) {
         this.db.prepare("UPDATE task_ref SET filed_by = ?, filed_by_kind = ? WHERE id = ?").run(spec.filedBy.name, spec.filedBy.kind, ref.id);
@@ -10782,12 +10788,12 @@ export class Store {
   taskLedgerEntries(family: { taskIds: readonly string[]; runIds: readonly number[] }, limits: { entries: number; requests: number }): { entries: SealedLedgerEntry[]; truncated: boolean } {
     this.sealIfFree();
     if (family.taskIds.length === 0) return { entries: [], truncated: false };
-    // Its registration as the task was made (a ref planted earlier under the same id registered before the task existed);
-    // a task from before registration rows existed counts from the start.
+    // Its registration as the task was filed: the one filing wrote again over a ref an earlier lookup made, else the
+    // ref's own; a task from before registration rows existed counts from the start.
     const registered = this.db.prepare(`SELECT COALESCE(
-      (SELECT MIN(l.id) FROM action_ledger l JOIN task t ON t.id = l.task_id WHERE l.task_id = ? AND l.action = 'task registered' AND l.source = 'work' AND l.actor = 'system' AND l.at >= t.created_at),
+      (SELECT MIN(id) FROM action_ledger WHERE task_id = ? AND action = 'task registered' AND source = 'work' AND actor = 'system' AND detail = ?),
       (SELECT MIN(id) FROM action_ledger WHERE task_id = ? AND action = 'task registered' AND source = 'work' AND actor = 'system'), 0) AS id`);
-    const versions = family.taskIds.map(id => ({ id, from: Number(registered.get(id, id)?.["id"] ?? 0) }));
+    const versions = family.taskIds.map(id => ({ id, from: Number(registered.get(id, REGISTERED_AT_FILING, id)?.["id"] ?? 0) }));
     const named = `(${versions.map(() => "(l.task_id = ? AND l.id >= ?)").join(" OR ")})`;
     const namedArgs = versions.flatMap(one => [one.id, one.from]);
     const byRun = family.runIds.length === 0 ? "" : ` OR (l.run_id IN (${family.runIds.map(() => "?").join(",")}) AND l.task_id IS NULL)`;

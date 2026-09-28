@@ -190,6 +190,16 @@ test("a task filed under an id a lookup registered before it existed gets its ow
   expect(entries.map(one => one.action)).toEqual(expect.arrayContaining(["task registered", "task filed"]));
 });
 
+test("a task filed under an explicit id an older lookup registered starts its history at its filing", () => {
+  store.refFor("built-in", "fix-login");
+  store.recordAction({ at: "2026-09-01T00:00:00.000Z", actor: "mallory", repo: null, taskId: "fix-login", runId: null, action: "run started", outcome: "builder", source: "work" });
+  const made = store.createConsoleTask({ id: "fix-login", title: "Fix login", repo: "/repo/a", filedVia: "console", filedBy: { name: "alex", kind: "person" } }, new Date());
+  expect(made).toMatchObject({ ok: true, id: "fix-login" });
+  const { entries } = store.taskLedgerEntries({ taskIds: ["fix-login"], runIds: [] }, { entries: 100, requests: 100 });
+  expect(entries.some(one => one.actor === "mallory")).toBe(false);
+  expect(entries.map(one => one.action)).toEqual(expect.arrayContaining(["task registered", "task filed"]));
+});
+
 test("an export walks the whole chain (reusing only a walk from the last minute), so an edit between page views' walks shows there", () => {
   act("one"); const two = act("two"); act("three");
   expect(store.ledgerChain().ok).toBe(true);

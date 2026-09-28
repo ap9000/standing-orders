@@ -678,8 +678,6 @@ export function createDecisionServer(options: ServeOptions): Server {
   // v100: the shared check honours a fresh identity-provider sign-in itself (freshIdentitySignIn, set per request below).
   const authenticateApprover = checkApproverPassword;
   const signInBudget = new SourceBudget();
-  // v103: one audit export at a time (each walks the chain and reads its whole range).
-  let ledgerExporting = false;
   // v100: sign-in with the identity provider. A visit waits for the provider (15 minutes); a hand-off
   // carries the proved person from the callback (reached from the provider's site, so without the
   // Strict session cookie) to /login/sso/finish on this site (a minute).
@@ -2845,8 +2843,6 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (from === null || last === null) return refuse(response, who, 400, "Choose a start and end day.", "/ledger");
       const to = new Date(Date.parse(last) + 86_400_000).toISOString();
       if (to <= from || Date.parse(to) - Date.parse(from) > 366 * 86_400_000) return refuse(response, who, 400, "Choose a range of a year or less, ending on or after its start.", "/ledger");
-      // One export at a time: each walks the chain and reads every entry in its range.
-      if (ledgerExporting) return refuse(response, who, 429, "An audit export is already running. Try again when it finishes.", "/ledger");
       const access = { principal: "operator" as const, repos: admissionList(), includeUnplaced: visible(null) };
       store.recordAction({ at: now.toISOString(), actor: who.name, repo: null, taskId: null, runId: null, action: "ledger exported", outcome: "exported", source: "access",
         detail: `${from.slice(0, 10)} to ${last.slice(0, 10)}` });
@@ -2862,21 +2858,20 @@ export function createDecisionServer(options: ServeOptions): Server {
         const token = store.apiTokenSecret(tokenId)?.row;
         return token !== undefined && token.revokedAt === null && Date.parse(token.expiresAt) > Date.now();
       };
-      ledgerExporting = true;
-      try {
-        const pieces = ledgerExportChunks(store, { from, to }, { repos: access.repos, instance: store.isInstanceOperator(who.name) }, access, who.name, now, evidenceRoot);
-        async function* chunks() {
-          for (const piece of pieces) {
-            if (!stillLive()) throw new Error("Ledger access changed during export");
-            yield piece;
-            await yieldEventLoop();
-          }
+      // The whole walk it starts from is shared by exports in the same minute; a reader who stops reading for a minute is let go.
+      const pieces = ledgerExportChunks(store, { from, to }, { repos: access.repos, instance: store.isInstanceOperator(who.name) }, access, who.name, now, evidenceRoot);
+      async function* chunks() {
+        for (const piece of pieces) {
+          if (!stillLive()) throw new Error("Ledger access changed during export");
+          yield piece;
+          await yieldEventLoop();
         }
-        response.writeHead(200, { "content-type": "application/json; charset=utf-8", "content-disposition": `attachment; filename="standing-orders-audit-${from.slice(0, 10)}-to-${last.slice(0, 10)}.json"`,
-          "cache-control": "no-store", "x-content-type-options": "nosniff" });
-        try { await pipeline(Readable.from(chunks()), response); }
-        catch { response.destroy(); }
-      } finally { ledgerExporting = false; }
+      }
+      response.setTimeout(60_000, () => response.destroy());
+      response.writeHead(200, { "content-type": "application/json; charset=utf-8", "content-disposition": `attachment; filename="standing-orders-audit-${from.slice(0, 10)}-to-${last.slice(0, 10)}.json"`,
+        "cache-control": "no-store", "x-content-type-options": "nosniff" });
+      try { await pipeline(Readable.from(chunks()), response); }
+      catch { response.destroy(); }
       return;
     }
 

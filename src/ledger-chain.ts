@@ -62,6 +62,8 @@ export function entryHash(prev: string, row: Record<string, unknown>): string {
 /** The largest entry number a seal can name (JavaScript's safe integers); anything outside 1..LARGEST was put there by hand. */
 const LARGEST = Number.MAX_SAFE_INTEGER;
 export const IN_RANGE = `BETWEEN 1 AND ${LARGEST}`;
+/** Outside it, written so SQLite finds such rows by key rather than reading every row. */
+const OUTSIDE = (column: string) => `${column} < 1 OR ${column} > ${LARGEST}`;
 
 /** Why a row can't be an entry the ledger wrote: each field is exactly the kind of value its writers store. */
 export function rowProblem(row: Record<string, unknown>): string | null {
@@ -134,11 +136,11 @@ export function verifyLedgerChain(db: Database, from?: VerifiedHead, checkedAt: 
   const report = (problem: LedgerChainReport["problem"], unsealed = 0): LedgerChainReport =>
     ({ ok: problem === null, entries, through, head: prev, unsealed, checkpoints: kept, problem, checkedAt });
   // Entries, seals and checkpoints are numbered from 1 up to what a seal can name; anything outside was put there by hand.
-  const outside = db.prepare(`SELECT CAST(id AS TEXT) AS id FROM action_ledger WHERE NOT (id ${IN_RANGE}) LIMIT 1`).get();
+  const outside = db.prepare(`SELECT CAST(id AS TEXT) AS id FROM action_ledger WHERE ${OUTSIDE("id")} LIMIT 1`).get();
   if (outside !== undefined) return report({ id: null, what: `entry #${String(outside["id"])} was added outside the sealed history` });
-  const strayed = db.prepare(`SELECT CAST(id AS TEXT) AS id FROM ledger_seal WHERE NOT (id ${IN_RANGE}) LIMIT 1`).get();
+  const strayed = db.prepare(`SELECT CAST(id AS TEXT) AS id FROM ledger_seal WHERE ${OUTSIDE("id")} LIMIT 1`).get();
   if (strayed !== undefined) return report({ id: null, what: `a seal for entry #${String(strayed["id"])} was added outside the chain` });
-  const astray = db.prepare(`SELECT CAST(through AS TEXT) AS through FROM ledger_checkpoint WHERE typeof(through) <> 'integer' OR NOT (through ${IN_RANGE}) LIMIT 1`).get();
+  const astray = db.prepare(`SELECT CAST(through AS TEXT) AS through FROM ledger_checkpoint WHERE typeof(through) <> 'integer' OR ${OUTSIDE("through")} LIMIT 1`).get();
   if (astray !== undefined) return report({ id: null, what: `a checkpoint names entry #${String(astray["through"])}, outside the chain` });
   const checkpoints = db.prepare("SELECT through, hash FROM ledger_checkpoint ORDER BY id").all()
     .map(one => ({ through: Number(one["through"]), hash: String(one["hash"]) }));
