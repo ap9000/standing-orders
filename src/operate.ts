@@ -1,4 +1,6 @@
 import { maybeTriggerRepair } from "./dispose.js";
+import { parseProtectedPaths } from "./approval-policy.js";
+import { rulesSummary } from "./approval-rules-ui.js";
 import { logEvent } from "./log.js";
 import { advanceFlows } from "./flow-engine.js";
 import { readHooksBase, runFlowTriggers, type TriggerIo } from "./flow-triggers.js";
@@ -324,6 +326,8 @@ export const OPERATE_HELP = `standing-orders — operating the queue
   standing-orders task show <id>
   standing-orders project use <path>        remember a saved project (optional --token-file)
   standing-orders project show              show the current project and credential reference
+  standing-orders project rules --repo <p>  a project's approval rules; an instance operator changes them with
+                                        --not-requester on|off, --protect none|project, --protect-paths "a/**,b/**"
   standing-orders task complete <id>        mark the current result complete (--digest for JSON/agents)
   standing-orders task revise <id> --feedback "requested change"
   standing-orders assignment show <task>    root, current work and exact handoff
@@ -652,6 +656,8 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "for", "tick-every", "bridge-every", "reconcile-every", "incarnation",
   "say", "ceiling-usd",
   "token-file", "bin", "poll", "github", "remote", "head-prefix", "password",
+  // v102: project rules.
+  "not-requester", "protect", "protect-paths",
   "project-root", "schedule", "ceiling", "require",
   "provider", "plan-model", "plan-provider", "public-url", "editor",
   "command", "timeout-seconds", "setup-digest", "stop-grace", "title", "name", "every", "lines",
@@ -947,6 +953,7 @@ async function dispatch(
     case "task":
       return taskCommand(positional, flags, context);
     case "project":
+      if (positional[0] === "rules") return projectRulesCommand(positional, flags, context);
       return runProjectCommand(positional, flags, context);
     case "assignment":
       return runAssignmentCommand(positional, flags, context);
@@ -11265,6 +11272,10 @@ async function approveTask(
 
 function describeApproveFailure(reason: string, id: string): string {
   if (reason === "changed") return "the scope changed since you read it — look again before approving";
+  // v102: the project's approval rules.
+  if (reason === "requester") return `you filed ${id}, and this project needs someone else to approve it`;
+  if (reason === "person-required") return `${id} is protected work: a person has to approve it, not an operating mode, a routine or an AI teammate`;
+  if (reason === "second-approver") return `your approval of ${id} is recorded; it is protected work, so a second person needs to approve it (standing-orders task approve ${id} as them)`;
   if (reason === "no-approvers") {
     return "nobody can approve anything yet — `standing-orders approver add <you>` mints the credential that lets a person say yes";
   }
@@ -11666,6 +11677,46 @@ async function resumeTaskCommand(
 }
 
 // ---- shared ---------------------------------------------------------------
+
+/**
+ * `project rules --repo <path>` shows a project's approval rules (v102);
+ * with --not-requester on|off, --protect none|project or --protect-paths
+ * "a/**,b/**" an instance operator changes them (with --as/--token, or the
+ * remembered login). The ledger keeps before → after, as in Settings.
+ */
+async function projectRulesCommand(positional: readonly string[], flags: Map<string, string | true>, context: Parameters<typeof taskCommand>[2]): Promise<number> {
+  const command = "project rules";
+  const allowed = new Set(["repo", "not-requester", "protect", "protect-paths", "as", "token", "token-file", "token-env", "db", "json"]);
+  for (const name of flags.keys()) if (!allowed.has(name)) return fail(context.write, context.json, command, "usage", `--${name} is not a project rules option.`, EXIT.usage);
+  const repoFlag = text(flags, "repo");
+  if (positional.length > 1 || repoFlag === undefined) return fail(context.write, context.json, command, "usage", "Use project rules --repo <project path> [--not-requester on|off] [--protect none|project] [--protect-paths \"infra/**,migrations/**\"].", EXIT.usage);
+  const repo = context.store.knownRepos().find(one => one === repoFlag || one === resolve(repoFlag));
+  if (repo === undefined) return fail(context.write, context.json, command, "not-found", "That isn't a project Standing Orders knows.", EXIT.refused);
+  const current = context.store.approvalRules(repo);
+  const changing = ["not-requester", "protect", "protect-paths"].some(name => flags.has(name));
+  if (!changing) {
+    return succeed(context.write, context.json, command, { repo, rules: current }, () => [`${repo}: ${rulesSummary(current)}`]);
+  }
+  const onOff = text(flags, "not-requester");
+  if (onOff !== undefined && onOff !== "on" && onOff !== "off") return fail(context.write, context.json, command, "usage", "--not-requester takes on or off.", EXIT.usage);
+  const protect = text(flags, "protect");
+  if (protect !== undefined && protect !== "none" && protect !== "project") return fail(context.write, context.json, command, "usage", "--protect takes none or project; list paths with --protect-paths.", EXIT.usage);
+  const pathsFlag = text(flags, "protect-paths");
+  const paths = pathsFlag === undefined ? null : parseProtectedPaths(pathsFlag);
+  if (paths !== null && !paths.ok) return fail(context.write, context.json, command, "usage", paths.problem, EXIT.usage);
+  const acting = await askCredentials(flags, context);
+  const verified = acting === null ? null : authenticateApprover(context.store, acting.name, acting.token);
+  if (acting === null || verified === null || !verified.ok || !context.store.isInstanceOperator(acting.name)) {
+    return fail(context.write, context.json, command, "refused", "An instance operator changes approval rules: pass --as and --token (or use the remembered login).", EXIT.refused);
+  }
+  const next = {
+    notRequester: onOff === undefined ? current.notRequester : onOff === "on",
+    protectProject: protect === undefined ? (paths !== null && paths.ok ? false : current.protectProject) : protect === "project",
+    protectedPaths: protect !== undefined ? [] : paths !== null && paths.ok ? paths.paths : current.protectedPaths,
+  };
+  context.store.setApprovalRules(repo, next, acting.name, context.clock());
+  return succeed(context.write, context.json, command, { repo, rules: next }, () => [`${repo}: ${rulesSummary(next)}`]);
+}
 
 function succeed(
   write: Write,

@@ -23,6 +23,13 @@ user. What it promises:
   every platform; Claude and Gemini through a sandbox on macOS. On Linux and
   Windows, Claude's file tools are fenced but its shell is not yet, and Gemini
   is not fenced. The README's "What an agent can reach" has the full table.
+- **Separation of duties, per project** (Settings → Approval rules, or
+  `project rules`). Every task records who filed it. A project can refuse
+  the requester's own approval, and can mark the whole project or chosen
+  paths as protected: protected work needs two different people to approve
+  the same exact scope, and an operating mode, a routine or an AI teammate
+  can never decide it. Only an instance operator changes the rules, with a
+  step-up, and the action ledger keeps every change and every approval.
 - **Secrets stay out of the database, URLs and logs,** in 0600 files.
 - **Reviews** run with no tools, confined to their sealed files.
 

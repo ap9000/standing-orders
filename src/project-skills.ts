@@ -675,7 +675,7 @@ export function testSkill(
             evidence: ["manual-review"],
           },
         ],
-        filedVia: "skills-test",
+        filedVia: "skills-test", filedBy: { name: args.actor, kind: "person" as const },
         deliverable: "report",
         planning: "skip",
         admittedRepos: [args.repo],

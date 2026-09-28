@@ -287,7 +287,7 @@ function executeProposal(
         acceptance: payload["acceptance"],
         ...(payload["report"] === true ? { deliverable: "report" as const } : {}),
         planning,
-        filedVia: "mate",
+        filedVia: "mate", filedBy: { name: actor.name, kind: "person" as const },
         proposedVia: "mate",
         admittedRepos: [...actor.repos],
       },

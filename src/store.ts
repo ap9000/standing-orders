@@ -94,6 +94,7 @@ import { normalizeProjectAccess, projectAccessAllows, readProjectAccess, type Pr
 import { LEDGER_SCHEMA, LEDGER_TABLE, LEDGER_V54_COLUMNS, LEDGER_V54_TABLE, installLedgerTriggers, type LedgerEntry } from "./action-ledger.js";
 import { PLAN_AUTO_SCHEMA } from "./plan-auto.js";
 import { RECIPE_SCHEMA } from "./recipes.js";
+import { NO_RULES, filerFor, isProtectedWork, rulesWords, type ApprovalGate, type ApprovalRules, type ApproverKind, type Filer, type FilerKind } from "./approval-policy.js";
 
 // v60 fenced older readers before the chat action cards; v61 adds notification
 // provenance and Telegram destination receipts, and readers below v61 refuse it.
@@ -132,7 +133,27 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 // v99 gives the action ledger its own kinds of event for sign-ins and policy changes, each with a short detail (a change's before → after).
 // v100 lets people sign in with the organisation's identity provider: each provider identity is linked to one account.
 // v101 adds API tokens (scoped, expiring, hashed), keeps browser sessions across restarts (listed and revocable), and lets coordinator credentials expire.
-export const SCHEMA_VERSION = 101;
+// v102 records who filed each task and adds per-project approval rules: the requester can't approve, and protected work needs two approvers.
+export const SCHEMA_VERSION = 102;
+
+/** v102: a project's approval rules, and each person's approval of an exact scope (two are needed for protected work). */
+const APPROVAL_SCHEMA = `
+CREATE TABLE IF NOT EXISTS approval_policy (
+  repo            TEXT PRIMARY KEY,
+  not_requester   INTEGER NOT NULL DEFAULT 0 CHECK (not_requester IN (0,1)),
+  protect_project INTEGER NOT NULL DEFAULT 0 CHECK (protect_project IN (0,1)),
+  protected_paths TEXT NOT NULL DEFAULT '[]',
+  updated_by      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS scope_approval_vote (
+  task_id  TEXT NOT NULL,
+  digest   TEXT NOT NULL,
+  approver TEXT NOT NULL,
+  at       TEXT NOT NULL,
+  PRIMARY KEY (task_id, digest, approver)
+);
+`;
 
 /** v101: API tokens and the browser sessions that survive a restart. Only hashes of their secrets are kept. */
 const CREDENTIALS_SCHEMA = `
@@ -4755,6 +4776,7 @@ function initializeStore(db: Database, file: string): Store {
   db.exec(TEAM_SCHEMA);
   db.exec(SSO_SCHEMA);
   db.exec(CREDENTIALS_SCHEMA);
+  db.exec(APPROVAL_SCHEMA);
   migrate(db, preflight === null ? null : Math.abs(preflight));
   addColumn(db, "flow_card", "source_json", "TEXT");
   addColumn(db, "flow_card", "owner", "TEXT");
@@ -6058,6 +6080,9 @@ function migrate(db: Database, origin: number | null): void {
   rebuildLedgerForV99(db);
   // v101: a coordinator credential's expiry (null: made before expiry existed, until renewed).
   addColumn(db, "coordinator_credential", "expires_at", "TEXT");
+  // v102: who filed a task (a person, or the person a coordinator acts for; null when no person is known) and what kind of filer.
+  addColumn(db, "task_ref", "filed_by", "TEXT");
+  addColumn(db, "task_ref", "filed_by_kind", "TEXT");
   // v98: where Telegram pushes this bot's updates, as the bridge last found it.
   addColumn(db, "bridge_lease", "push_url", "TEXT");
   addColumn(db, "bridge_lease", "push_at", "TEXT");
@@ -8192,7 +8217,7 @@ export class Store {
    * `TaskRef` cannot be claimed, held, or scheduled — it would be work the
    * control plane can see and never act on.
    */
-  createTask(spec: { id: string; title: string; deliverable?: "branch" | "report" }, now: Date, mutation: Mutation = {}): Task {
+  createTask(spec: { id: string; title: string; deliverable?: "branch" | "report"; filedBy?: Filer }, now: Date, mutation: Mutation = {}): Task {
     return this.once(mutation, "createTask", () =>
       // Both rows or neither, and the comment above is why: this used to be
       // two unwrapped statements, and the first real database caught it. A
@@ -8211,6 +8236,11 @@ export class Store {
         .run(spec.id, spec.title, stamp, stamp);
       // Created here, so it is ours — the one place that is true by construction.
       const ref = this.refFor(BUILT_IN, spec.id, "ours");
+      // v102: who filed it, set once with the filing (separation of duties reads it; nothing changes it).
+      if (spec.filedBy !== undefined) {
+        this.db.prepare("UPDATE task_ref SET filed_by = ?, filed_by_kind = ? WHERE id = ?").run(spec.filedBy.name, spec.filedBy.kind, ref.id);
+        this.recordAction({ at: stamp, actor: spec.filedBy.name ?? "system", repo: null, taskId: spec.id, runId: null, action: "task filed", outcome: "recorded", source: "work", detail: spec.filedBy.kind === "person" ? null : spec.filedBy.kind });
+      }
       // The deliverable (v34) lands in the SAME transaction as the filing,
       // and there is no API to change it afterwards.
       if (spec.deliverable === "report") {
@@ -9991,6 +10021,13 @@ export class Store {
             .get(taskId);
           if (writtenByMate !== undefined) return false;
         }
+        // SEPARATION OF DUTIES (v102), enforced in the primitive so no road
+        // around it exists: a project's rules can refuse the requester, and
+        // protected work seals only once two people approved these exact
+        // bytes (the ceremony records each vote first) — never on a mode,
+        // a routine or an AI teammate's word.
+        const kind: ApproverKind = basis !== undefined ? "mode" : by.endsWith(" (AI)") ? "ai" : "person";
+        if (this.approvalGate(taskId, by, kind).verdict !== "seal") return false;
         // THE SEAL'S BELT (v47, one strict projection since the v48
         // integrity repair): the row seals only what `scopeAuthorityOf`
         // proves from its raw bytes — exact-key profile, chain, and route;
@@ -10499,6 +10536,74 @@ export class Store {
         action: `account access changed for ${name}`, outcome: access === null ? "instance access" : `${access.length} projects`, source: "access" });
       return { ok: true as const };
     });
+  }
+
+  // ---- Separation of duties (v102) -----------------------------------------
+
+  /** A project's approval rules; no row is no rules. */
+  approvalRules(repo: string): ApprovalRules & { updatedBy: string | null; updatedAt: string | null } {
+    const row = this.db.prepare("SELECT * FROM approval_policy WHERE repo = ?").get(repo);
+    if (row === undefined) return { ...NO_RULES, updatedBy: null, updatedAt: null };
+    let paths: string[] = [];
+    try { const parsed = JSON.parse(String(row["protected_paths"])); if (Array.isArray(parsed)) paths = parsed.filter((one): one is string => typeof one === "string"); } catch { paths = []; }
+    return { notRequester: Number(row["not_requester"]) === 1, protectProject: Number(row["protect_project"]) === 1, protectedPaths: paths, updatedBy: String(row["updated_by"]), updatedAt: String(row["updated_at"]) };
+  }
+
+  /** Change a project's rules; the ledger keeps before → after. */
+  setApprovalRules(repo: string, next: ApprovalRules, by: string, now: Date): void {
+    this.transact(() => {
+      const before = this.approvalRules(repo);
+      this.db.prepare(`INSERT INTO approval_policy (repo, not_requester, protect_project, protected_paths, updated_by, updated_at) VALUES (?,?,?,?,?,?)
+        ON CONFLICT(repo) DO UPDATE SET not_requester = excluded.not_requester, protect_project = excluded.protect_project, protected_paths = excluded.protected_paths, updated_by = excluded.updated_by, updated_at = excluded.updated_at`)
+        .run(repo, next.notRequester ? 1 : 0, next.protectProject ? 1 : 0, JSON.stringify(next.protectedPaths), by, now.toISOString());
+      this.recordPolicy(by, repo, "approval rules changed", rulesWords(before), rulesWords(next), now);
+    });
+  }
+
+  /** Who filed a task, when anyone knows. */
+  taskFiler(taskId: string): Filer | null {
+    const row = this.db.prepare("SELECT filed_by, filed_by_kind FROM task_ref WHERE backend = ? AND external_id = ?").get(BUILT_IN, taskId);
+    if (row === undefined || row["filed_by_kind"] == null) return null;
+    return { name: row["filed_by"] == null ? null : String(row["filed_by"]), kind: String(row["filed_by_kind"]) as FilerKind };
+  }
+
+  /** What the project's rules say about `by` approving this task's current scope. */
+  approvalGate(taskId: string, by: string, kind: ApproverKind): ApprovalGate {
+    const ref = this.db.prepare("SELECT repo, filed_by, filed_by_kind FROM task_ref WHERE backend = ? AND external_id = ?").get(BUILT_IN, taskId);
+    const scope = this.db.prepare("SELECT digest, touches FROM task_scope WHERE task_id = ?").get(taskId);
+    if (ref === undefined || ref["repo"] == null) return { verdict: "seal", protectedWork: false };
+    const rules = this.approvalRules(String(ref["repo"]));
+    let touches: string[] = [];
+    try { const parsed = JSON.parse(String(scope?.["touches"] ?? "[]")); if (Array.isArray(parsed)) touches = parsed.map(String); } catch { touches = []; }
+    const protectedWork = isProtectedWork(rules, touches);
+    if (!rules.notRequester && !protectedWork) return { verdict: "seal", protectedWork: false };
+    if (kind === "ai") return { verdict: "refuse", reason: "person-required" };
+    const kindOfFiler = ref["filed_by_kind"] == null ? null : String(ref["filed_by_kind"]);
+    const requester = ref["filed_by"] != null && (kindOfFiler === "person" || kindOfFiler === "coordinator") ? String(ref["filed_by"]) : null;
+    if (rules.notRequester && requester !== null && by === requester) return { verdict: "refuse", reason: "requester" };
+    if (!protectedWork) return { verdict: "seal", protectedWork: false };
+    if (kind !== "person") return { verdict: "refuse", reason: "person-required" };
+    const digest = scope === undefined ? "" : String(scope["digest"]);
+    const voters = new Set(this.db.prepare("SELECT approver FROM scope_approval_vote WHERE task_id = ? AND digest = ?").all(taskId, digest).map(row => String(row["approver"])));
+    const already = voters.has(by);
+    voters.add(by);
+    if (rules.notRequester && requester !== null) voters.delete(requester);
+    return voters.size >= 2 ? { verdict: "seal", protectedWork: true } : { verdict: "vote", have: voters.size, need: 2, already };
+  }
+
+  /** One person's yes to these exact bytes (protected work counts two). */
+  recordApprovalVote(taskId: string, digest: string, by: string, now: Date): void {
+    const fresh = this.db.prepare("INSERT OR IGNORE INTO scope_approval_vote (task_id, digest, approver, at) VALUES (?,?,?,?)").run(taskId, digest, by, now.toISOString());
+    if (fresh.changes > 0) {
+      const repo = this.db.prepare("SELECT repo FROM task_ref WHERE backend = ? AND external_id = ?").get(BUILT_IN, taskId)?.["repo"];
+      this.recordAction({ at: now.toISOString(), actor: by, repo: repo == null ? null : String(repo), taskId, runId: null, action: "approval recorded", outcome: "recorded", source: "work", detail: `digest ${digest.slice(0, 12)}` });
+    }
+  }
+
+  /** Who has approved the current scope so far (protected work). */
+  approvalVotes(taskId: string): { approver: string; at: string }[] {
+    return this.db.prepare(`SELECT v.approver, v.at FROM scope_approval_vote v JOIN task_scope s ON s.task_id = v.task_id AND s.digest = v.digest
+      WHERE v.task_id = ? ORDER BY v.at`).all(taskId).map(row => ({ approver: String(row["approver"]), at: String(row["at"]) }));
   }
 
   /** v99: a policy change, as the ledger keeps it: what changed and from what to what. Nothing is kept when nothing changed. */
@@ -13616,6 +13721,8 @@ export class Store {
       child: { id?: string; title: string; repair: string };
       /** Comments to consume, or null when the brief has no comment batch (CI / criterion repair). */
       commentIds: readonly number[] | null;
+      /** v102: who asked for this revision (a person, an AI teammate's "Name (AI)", or none for machine repairs): its filer. */
+      requestedBy?: string | null;
       /** Fresh mode filing coverage, re-proved by the caller INSIDE this
        * transaction (never carried across one): its budget default may only
        * TIGHTEN the inherited ceiling; its escalated posture may apply only when the source already
@@ -13723,6 +13830,7 @@ export class Store {
               planPin: terms.planPin,
               ...(terms.escalated ? { posture: "escalated" as const } : {}),
               filedVia: "revision",
+              filedBy: filerFor(args.requestedBy),
             },
             now,
           );
@@ -14579,6 +14687,8 @@ export class Store {
        * whenever a `goal` is also being set (a scope is about to exist);
        * a bare title with no goal creates no scope yet, so nothing to sign. */
       acceptance?: unknown;
+      /** v102: who filed it (the person, or the person a coordinator acts for). */
+      filedBy?: Filer;
       /** Immutable provenance (v12): which door filed this. Stamped in the
        * same transaction as the create; there is no API to change it. */
       filedVia?: string;
@@ -14643,7 +14753,7 @@ export class Store {
         return { ok: false as const, reason: "duplicate" as const };
       }
 
-      this.createTask({ id, title: spec.title.trim(), ...(spec.deliverable === undefined ? {} : { deliverable: spec.deliverable }) }, now);
+      this.createTask({ id, title: spec.title.trim(), ...(spec.deliverable === undefined ? {} : { deliverable: spec.deliverable }), ...(spec.filedBy === undefined ? {} : { filedBy: spec.filedBy }) }, now);
       const ref = this.refFor(BUILT_IN, id, "ours");
       if (spec.filedVia !== undefined) {
         this.db.prepare("UPDATE task_ref SET filed_via = ? WHERE id = ? AND filed_via IS NULL").run(spec.filedVia, ref.id);
@@ -19204,10 +19314,16 @@ export class Store {
       now: Date;
     },
     mutation: Mutation = {},
-  ): { ok: true; authorization: AttendedAuthorization } | { ok: false; reason: "authorization-open" | "mode-ended" } {
+  ): { ok: true; authorization: AttendedAuthorization } | { ok: false; reason: "authorization-open" | "mode-ended" | "approval-rules" } {
     return this.once(mutation, "mintAttendedAuthorization", () =>
       this.transact(() => {
         const now = input.now.toISOString();
+        // v102: a watched run is one person's yes, so a project's approval rules bind it like a seal:
+        // never the requester's where that's refused, never protected work (which takes two people).
+        const externalId = this.externalIdFor(input.taskRef);
+        if (externalId !== null && this.approvalGate(externalId, input.approver, input.basis === undefined ? "person" : "mode").verdict !== "seal") {
+          return { ok: false as const, reason: "approval-rules" as const };
+        }
         if (input.basis !== undefined) {
           const ref = this.refForId(input.taskRef);
           const mode = ref === null || ref.repo === null ? null : this.activeMode(ref.repo, input.now);

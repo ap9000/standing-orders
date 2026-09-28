@@ -248,7 +248,7 @@ export function launchWorkflow(store: Store, actor: string, repo: string, token:
     const provenance = `recipe:${preview.savedId ?? preview.source}`;
     let taskId: string | null = null, routineId: number | null = null;
     if (d.schedule === null) {
-      const made = fileTaskProposal(store, { id: `workflow-${token}`, title: d.name, repo, goal: d.goal, outOfScope: d.outOfScope, touches: d.touches, acceptance: d.acceptance, planning: d.planning, deliverable: d.deliverable, filedVia: provenance, admittedRepos: [repo] }, now);
+      const made = fileTaskProposal(store, { id: `workflow-${token}`, title: d.name, repo, goal: d.goal, outOfScope: d.outOfScope, touches: d.touches, acceptance: d.acceptance, planning: d.planning, deliverable: d.deliverable, filedVia: provenance, filedBy: { name: actor, kind: "person" as const }, admittedRepos: [repo] }, now);
       if (!made.ok) throw new RecipeError(made.message, made.reason === "backlog-full" ? 429 : 400);
       taskId = made.id;
       if (operatorFiling) applyModeToNewFiling(store, taskId, actor, now);

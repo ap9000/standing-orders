@@ -264,6 +264,39 @@ await check("Sessions and API tokens: a read token made in Settings is shown onc
   return { token: "revoked" };
 });
 
+await check("Approval rules: with 'someone other than the requester' on, the task alex filed can't be approved by alex; sam approves it, and the task says who filed it", [], async () => {
+  await page.goto(`${base}/settings/approval?repo=${encodeURIComponent(repo)}`);
+  await page.locator('.approval-rules input[name="not_requester"]').check();
+  await page.locator('.approval-rules input[name="password"]').fill(w.passwords.alex);
+  await Promise.all([page.waitForNavigation(), page.locator('.approval-rules button[type="submit"]').click()]);
+  if (!/Saved\./.test(await page.locator(".approval-rules").innerText())) throw new Error(`the rules weren't saved: ${(await page.locator("body").innerText()).slice(0, 300)}`);
+  const id = "e2e-rules";
+  try {
+    const filed = await post("/tasks/add", { id, title: "Rename the helper in src/math.js", repo, "planning-policy": "choice" });
+    if (filed.status >= 400) throw new Error(`filing: ${filed.status} ${filed.body.slice(0, 200)}`);
+    if (rows(`SELECT filed_by FROM task_ref WHERE external_id = '${id}'`)[0]?.filed_by !== "alex") throw new Error("the task doesn't record who filed it");
+    cli(["task", "hold", id, "--reason", "e2e: approval rules only", ...auth]);
+    cli(["task", "scope", id, "--goal", "Rename the helper in src/math.js.", "--acceptance", "the helper is renamed|check", ...auth]);
+    await page.goto(`${base}/t/${id}`);
+    const review = page.locator("summary", { hasText: /Review plan|Updated approval terms/ }).first();
+    if (await review.count() > 0) await review.click();
+    const form = page.locator("form#approve");
+    await form.waitFor({ timeout: 15_000 });
+    await form.locator('input[name="token"]').fill(w.passwords.alex);
+    await Promise.all([page.waitForNavigation(), form.locator("button").first().click()]);
+    if (!/You filed this task/.test(await page.locator("body").innerText())) throw new Error(`alex's own approval wasn't refused: ${(await page.locator("body").innerText()).slice(0, 300)}`);
+    if (rows(`SELECT approved_by FROM task_scope WHERE task_id = '${id}'`)[0]?.approved_by) throw new Error("alex approved their own task");
+    await shot("approval-rules-refused");
+    const digest = cli(["task", "show", id]).scope.digest;
+    cli(["task", "approve", id, "--yes", "--digest", digest, "--as", "sam", "--token", w.passwords.sam]);
+    if (rows(`SELECT approved_by FROM task_scope WHERE task_id = '${id}'`)[0]?.approved_by !== "sam") throw new Error("sam's approval didn't seal it");
+    return { filedBy: "alex", approvedBy: "sam" };
+  } finally {
+    cli(["task", "state", id, "cancelled", "--reason", "e2e: approval rules only"]);
+    cli(["project", "rules", "--repo", repo, "--not-requester", "off", ...auth]);
+  }
+});
+
 await check("The command line answers: the task list, the approvers, the project's check, and help", [], async () => {
   const list = cli(["task", "list"]);
   const people = cli(["approver", "list"]);

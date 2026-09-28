@@ -154,6 +154,8 @@ export async function runFlowSteps(store: Store, repo: string, now: Date, io: St
 
 /** One teammate turn, when one is due for this card: claimed like any step, retried on failure, and waiting while its question is open. */
 async function teammateStep(store: Store, flow: FlowRow, definition: FlowDefinition, stage: FlowStage, card: FlowCardRow, now: Date, io: StepIo, pass: StepPass): Promise<boolean> {
+  // v102: on a protected project an AI teammate never decides an approval; the engine asks the person.
+  if (stage.kind === "approval" && store.approvalRules(flow.repo).protectProject) return true;
   const mate = stage.teammate === undefined ? null : store.teammateByHandle(flow.repo, stage.teammate);
   const ready = teammateReady(store, mate, now);
   if (!ready.ok) {

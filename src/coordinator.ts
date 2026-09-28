@@ -336,7 +336,7 @@ export function fileCoordinatorProposal(
               ],
             }),
         ...(input.deliverable === undefined ? {} : { deliverable: input.deliverable }),
-        filedVia: `mcp:${who.name}`,
+        filedVia: `mcp:${who.name}`, filedBy: { name: (store.handle.prepare("SELECT created_by FROM coordinator_credential WHERE cid = ?").get(who.cid)?.["created_by"] as string | undefined) ?? null, kind: "coordinator" as const },
         admittedRepos: who.repos,
       },
       now,

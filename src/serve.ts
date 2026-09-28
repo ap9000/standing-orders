@@ -134,6 +134,8 @@ import { requestTaskStop, resumeTaskStop, taskControlOf, type TaskControlView } 
 import { WorktreePool } from "./worktree.js";
 import { GEIST_SANS_400, GEIST_SANS_500, GEIST_SANS_600, GEIST_MONO_400, GEIST_MONO_500, GEIST_MONO_600 } from "./fonts.js";
 import { ACCENT_PRESETS, DEFAULT_ACCENT, accentStyle, normalHex, pinnedAccent } from "./accent-colors.js";
+import { gateWords, parseProtectedPaths } from "./approval-policy.js";
+import { APPROVAL_RULES_CSS, approvalRulesHtml, rulesSummary } from "./approval-rules-ui.js";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { UPDATE_PAUSED, updateAdmissionPaused } from "./desktop-update-gate.js";
 import { createHash, createHmac, randomBytes, timingSafeEqual, randomUUID } from "node:crypto";
@@ -3622,6 +3624,17 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       return sendScreen(response, 200, screen("Tools", `<p><a href="/settings">Settings</a></p><h1>Tools</h1>${selector}${content}`, { chrome: chromeFor(chosen || project, "settings") }));
     }
+    // v102: Settings → Approval rules, a project's separation of duties. Anyone who sees the project reads them; an instance operator sets them.
+    if (url.pathname === "/settings/approval") {
+      const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
+      const chosen = url.searchParams.get("repo") ?? project ?? projects[0] ?? "";
+      if (chosen && !projects.includes(chosen)) return refuse(response, who, 403, "That project is outside your access.", "/settings/approval");
+      const selector = projects.length > 1 ? `<form class="approval-project" method="get" action="/settings/approval"><label>Project<select name="repo">${projects.map(p => `<option value="${escape(p)}"${p === chosen ? " selected" : ""}>${escape(projectName(p))}</option>`).join("")}</select></label><button>Show</button></form>` : "";
+      const approvers = chosen === "" ? 0 : store.listApprovers().filter(one => { const account = store.accountOf(one.name); return account !== null && account.revokedAt === null && account.role === "approver" && store.accountCanAccess(one.name, chosen); }).length;
+      const content = chosen === "" ? "<p>Add a project to set its approval rules.</p>" : approvalRulesHtml({ repo: chosen, name: projectName(chosen), rules: store.approvalRules(chosen), canChange: who.via === "cookie" && store.isInstanceOperator(who.name), approvers },
+        who.via === "cookie" ? who.session.csrf : "", { said: url.searchParams.get("said"), problem: url.searchParams.get("problem") });
+      return sendScreen(response, 200, screen("Approval rules", `<p><a href="/settings">Settings</a></p><h1>Approval rules</h1>${selector}${content}`, { chrome: chromeFor(chosen || project, "settings") }));
+    }
     // v101: Settings → Sessions & tokens: where you're signed in, and your API tokens. An instance operator can see everyone's.
     if (url.pathname === "/settings/sessions") {
       if (who.via !== "cookie") return refuse(response, who, 403, "Sign in in a browser to see your sessions.", "/settings");
@@ -4950,6 +4963,15 @@ export function createDecisionServer(options: ServeOptions): Server {
         control: ref === null ? { kind: "none" as const } : taskControlOf(store, ref.id, now),
         canRetryReview: who.via === "cookie" && who.role === "approver",
         strikes: ref?.strikes ?? 0,
+        filer: store.taskFiler(taskId),
+        approvalRules: (() => {
+          const repo = ref?.repo ?? null;
+          if (repo === null) return null;
+          const rules = store.approvalRules(repo);
+          if (!rules.notRequester && !rules.protectProject && rules.protectedPaths.length === 0) return null;
+          const gate = store.approvalGate(taskId, "\u0000nobody", "person");
+          return { words: rulesSummary(rules), votes: store.approvalVotes(taskId).map(one => one.approver), needsTwo: gate.verdict === "vote" || (gate.verdict === "seal" && gate.protectedWork) };
+        })(),
         plan: ref?.plan ?? null,
         planAuto: planAutoPending(store, taskId, now),
         planDocument: planView?.document ?? null,
@@ -6119,6 +6141,22 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       return answer(404, { ok: false, said: "No such flow action." });
     }
+    // v102: an instance operator changes a project's approval rules, with a step-up; the ledger keeps before → after.
+    if (url.pathname === "/settings/approval") {
+      if (who.via !== "cookie" || !store.isInstanceOperator(who.name)) return refuse(response, who, 403, "An instance operator sets approval rules.", "/settings/approval");
+      const repo = body.get("repo") ?? "";
+      const known = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
+      if (!known.includes(repo)) return refuse(response, who, 403, "That project is outside your access.", "/settings/approval");
+      const back = (key: "said" | "problem", words: string) => redirect(response, `/settings/approval?repo=${encodeURIComponent(repo)}&${key}=${encodeURIComponent(words)}`);
+      if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return back("problem", "That password didn't match. Nothing changed.");
+      const protect = body.get("protect") ?? "none";
+      const paths = parseProtectedPaths(body.get("paths") ?? "");
+      if (!paths.ok) return back("problem", paths.problem);
+      if (protect === "paths" && paths.paths.length === 0) return back("problem", "List at least one path to protect, or protect the whole project.");
+      const next = { notRequester: body.get("not_requester") === "1", protectProject: protect === "project", protectedPaths: protect === "paths" ? paths.paths : [] };
+      store.setApprovalRules(repo, next, who.name, now);
+      return back("said", `Saved. ${rulesSummary(next)}`);
+    }
     if (url.pathname === "/settings/sessions") {
       if (who.via !== "cookie") return refuse(response, who, 403, "Sign in in a browser to manage sessions and tokens.", "/settings");
       const operator = store.isInstanceOperator(who.name);
@@ -6880,7 +6918,7 @@ export function createDecisionServer(options: ServeOptions): Server {
                 : body.get("planning-policy") === "choice"
                   ? body.get("plan-first") === "1" ? "required" : "skip"
                   : "auto",
-            filedVia: "console",
+            filedVia: "console", filedBy: { name: who.name, kind: "person" as const },
             ...(admitted === null ? {} : { admittedRepos: admitted }),
           },
           now,
@@ -7943,7 +7981,7 @@ export function createDecisionServer(options: ServeOptions): Server {
             outOfScope: candidate.draft.outOfScope,
             touches: candidate.draft.touches,
             acceptance: candidate.draft.acceptance,
-            filedVia,
+            filedVia, filedBy: { name: who.name, kind: "person" as const },
             admittedRepos: managedRepos(),
           },
           now,
@@ -8376,6 +8414,7 @@ export function createDecisionServer(options: ServeOptions): Server {
               `Read the failing checks on GitHub before approving; this draft carries no log content.`,
           },
           commentIds: null,
+          requestedBy: who.name,
         },
         now,
       );
@@ -8680,10 +8719,12 @@ export function createDecisionServer(options: ServeOptions): Server {
       return refuse(
         response,
         who,
-        minted.reason === "mode-ended" ? 403 : 409,
+        minted.reason === "authorization-open" ? 409 : 403,
         minted.reason === "mode-ended"
           ? "the mode that covered quick minting has ended — your password, typed again, still works"
-          : "an authorization is already open — revoke it first",
+          : minted.reason === "approval-rules"
+            ? "this project's approval rules need someone else's approval (or two people's) — a watched run can't stand in for it"
+            : "an authorization is already open — revoke it first",
         taskHref(taskId),
       );
     }
@@ -8903,7 +8944,7 @@ export function createDecisionServer(options: ServeOptions): Server {
             // review as the outstanding work, the same posture a
             // coordinator's bare intent takes.
             acceptance: PLACEHOLDER_RUBRIC,
-            filedVia: "console",
+            filedVia: "console", filedBy: { name: who.name, kind: "person" as const },
             proposedVia: "scout",
             ...(unscopedMode ? {} : { admittedRepos: admissionList() ?? [] }),
           },
@@ -9336,6 +9377,7 @@ export function createDecisionServer(options: ServeOptions): Server {
             return scopeApproved;
           });
           if (!both.ok) {
+            if (both.reason === "second-approver") return approvalProblem(gateWords({ verdict: "vote", have: both.have, need: 2, already: both.already }), 200);
             const status = both.reason === "changed" || both.reason === "unrouted" ? 409 : 403;
             return approvalProblem(approveRefusalWords(both.reason), status);
           }
@@ -9343,6 +9385,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         }
         const approved = approveScope(store, taskId, who.name, now, scopeRow.digest, token);
         if (!approved.ok) {
+          // v102: a first yes on protected work is recorded, not refused — the page says who else is needed.
+          if (approved.reason === "second-approver") return approvalProblem(gateWords({ verdict: "vote", have: approved.have, need: 2, already: approved.already }), 200);
           const status = approved.reason === "changed" || approved.reason === "unrouted" ? 409 : 403;
           return approvalProblem(approveRefusalWords(approved.reason), status);
         }
@@ -13523,7 +13567,7 @@ button.pick-file { min-height: 1.75rem; padding: 0 .55rem; font-size: .75rem; }
 
 /** Appearance: a three-way segmented switch, one tap per choice. */
 const THEME_CONTROLS_CSS = `.task-repo select{width:100%;min-height:2.75rem;font-size:1rem}.task-repo-add{margin:.35rem .1rem .5rem}.task-repo-add a{display:inline-flex;align-items:center;min-height:2.25rem}details.result-request-open.result-request-form>summary{border:0;background:transparent;padding:.5rem 0;min-height:2.75rem;font-weight:600;display:list-item;list-style:revert}details.result-request-open.result-request-form>summary::-webkit-details-marker{display:revert}form.js-autosave button[type=submit]{display:none}.provider-row{border-bottom:1px solid var(--so-line);padding:.35rem 0}.provider-row:first-of-type{border-top:1px solid var(--so-line)}.provider-head{display:flex;align-items:center;gap:.75rem;margin:.4rem 0 0}.provider-status{display:inline-flex;align-items:center;gap:.4rem;color:var(--so-muted);font-size:.875rem}.provider-status i{width:.5rem;height:.5rem;border-radius:50%;background:var(--so-muted)}.provider-status--ok i{background:var(--so-success)}.provider-status--warn i{background:var(--so-attention)}.provider-status--off i{background:transparent;border:1.5px solid var(--so-muted)}details.provider-manage>summary{cursor:pointer;color:var(--so-accent-text);font-size:.875rem;min-height:2.5rem;display:list-item;padding-block:.5rem}.card.props .row{display:grid;gap:.1rem;margin:0 0 .75rem}.card.props .row>.meta{display:block;font-size:.75rem}.card.props .row>.meta::first-letter{text-transform:uppercase}.card.props .row>.mono{font-family:var(--font-sans);font-size:.875rem}.card.props .row>.mono .seal{font-family:var(--font-mono);font-size:.8125rem}details.evidence-files{margin:1rem 0}details.evidence-files>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:600}details.evidence-files ul{list-style:none;margin:0;padding:0}details.evidence-files li{display:flex;justify-content:space-between;gap:1rem;padding:.5rem 0;border-bottom:1px solid var(--so-line)}.result-action .result-feedback-link{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;text-decoration:none}.result-action .result-feedback-link:hover{background:var(--so-raised)}.so-sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}.verdict{margin:.5rem 0 .75rem}.verdict-chips{display:flex;flex-wrap:wrap;gap:.4rem;list-style:none;padding:0;margin:0}.verdict-chip{display:inline-flex;align-items:center;gap:.3rem;min-height:1.75rem;padding:.2rem .65rem;border-radius:999px;font-size:.8125rem;font-weight:600;background:var(--so-neutral-soft);color:var(--so-neutral-ink)}.verdict-chip svg{width:.9rem;height:.9rem}.verdict-chip--success{background:var(--so-success-soft);color:var(--so-success)}.verdict-chip--danger{background:var(--so-danger-soft);color:var(--so-danger)}.verdict-chip--warning{background:var(--so-warning-soft);color:var(--so-warning)}.verdict-chip--info{background:var(--so-info-soft);color:var(--so-info)}.verdict-by{margin:.4rem 0 0}details.result-request-open{margin:.5rem 0}details.result-request-open>summary{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;cursor:pointer;list-style:none}details.result-request-open>summary::-webkit-details-marker{display:none}details.result-request-open[open]>summary{margin-bottom:.75rem}.settings-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(8.5rem,1fr));gap:.5rem;margin:0 0 2rem}.settings-tiles a{display:flex;align-items:center;gap:.6rem;min-height:3rem;padding:.65rem .8rem;border:1px solid var(--so-line);border-radius:.625rem;background:var(--so-paper);color:var(--so-ink);text-decoration:none;font-weight:550;font-size:.875rem}.settings-tiles a:hover{border-color:var(--so-input-line);background:var(--so-raised)}.settings-tiles svg{width:1.1rem;height:1.1rem;flex-shrink:0;color:var(--so-accent-text)}details.settings-more{margin:.25rem 0 1.25rem}details.settings-more>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:550}details.settings-more>summary .meta{font-weight:400;margin-left:.35rem}.settings-changed{margin-top:-.25rem}.appearance{margin:0 0 28px}.appearance h2{margin:0 0 10px}.theme-switch{display:inline-flex;flex-wrap:nowrap;max-width:100%;gap:4px;padding:4px;margin:0;border:1px solid var(--so-line);border-radius:10px;background:var(--so-raised)}.theme-switch .theme-choice,.so-native-region .theme-switch .theme-choice{flex:1 1 0;width:auto;white-space:nowrap;min-height:40px;padding:8px 16px;border:0;border-radius:7px;background:transparent;color:var(--so-muted);font:inherit;font-weight:550;box-shadow:none;cursor:pointer}.theme-switch .theme-choice:hover{color:var(--so-ink)}.theme-switch .theme-choice[aria-pressed="true"]{background:var(--so-paper);color:var(--so-ink);box-shadow:0 1px 2px rgb(0 0 0 / .1)}.appearance .meta{margin:8px 0 0}@media(max-width:600px){.theme-switch .theme-choice{min-height:44px}}`;
-const WORKSPACE_STYLE = styleAsset(STYLE + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KITS_CSS + SSO_CSS + CREDENTIALS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
+const WORKSPACE_STYLE = styleAsset(STYLE + APPROVAL_RULES_CSS + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KITS_CSS + SSO_CSS + CREDENTIALS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
@@ -14925,6 +14969,7 @@ type ChatProjectPulse = {
  * tab fail when somebody edits the plan before approval. */
 /** The approve POST's refusal, in words a person can act on. */
 function approveRefusalWords(reason: string): string {
+  if (reason === "requester" || reason === "person-required") return gateWords({ verdict: "refuse", reason });
   if (reason === "unrouted") return "not approved: this scope predates agent routing and its old approval no longer stands — edit and re-file the scope so it is routed under today’s agents, then approve it";
   if (reason === "profile-unresolved") return "not approved: the scope cannot name an exact agent for every role — fix the agent setup and re-file it";
   return `not approved: ${reason}`;
@@ -18771,6 +18816,9 @@ function taskBodyParts(data: {
   /** v52: the exact-run Stop / Stopping / Resume control. */
   control?: TaskControlView;
   strikes: number;
+  /** v102: who filed it, and the project's approval rules as they bear on this task (null: none apply). */
+  filer?: { name: string | null; kind: string } | null;
+  approvalRules?: { words: string; votes: string[]; needsTwo: boolean } | null;
   plan: "requested" | "drafted" | null;
   planDocument: string | null;
   planAuto?: boolean;
@@ -19781,6 +19829,14 @@ function taskBodyParts(data: {
     : approval.approved ? { label: "Approved scope", parts: [{ seal: `signs ${scope.digest.length <= 12 ? scope.digest : `${scope.digest.slice(0, 12)}…`}` }, ` · ${qualityModeTitle(scope.qualityMode ?? "default")} · approved by ${approval.by} · ${when(approval.at)}`] }
     : { label: "Scope", parts: [approval.reason === "changed" ? "rewritten since its approval — needs a new yes" : "not approved"] });
   facts.push({ label: "Publishes as", parts: [publishesAs] });
+  // v102: who asked for it, and what the project's approval rules need.
+  if (data.filer != null) facts.push({ label: "Filed by", parts: [data.filer.name === null ? "automation" : data.filer.kind === "coordinator" ? `${data.filer.name}, through a coordinator` : data.filer.name] });
+  if (data.approvalRules != null) {
+    const votes = data.approvalRules.votes;
+    facts.push({ label: "Approval rules", parts: [data.approvalRules.needsTwo && !approval.approved
+      ? (votes.length === 0 ? "needs two approvers" : `approved by ${votes.join(", ")} · needs one more`)
+      : data.approvalRules.words] });
+  }
   if (data.publication !== null && data.publication !== undefined) {
     const prHref = safePrUrl(data.publication.prUrl), pr = `PR #${data.publication.prNumber ?? "?"}`;
     facts.push({ label: "Published", parts: [prHref === null ? pr : { label: pr, href: prHref },
@@ -23055,6 +23111,7 @@ const SETTINGS_TILE_ICONS: [string, string, string][] = [
     ["/settings/learning", "Learning", `<path d="M3 3v18h18"/><path d="m7 15 4-4 3 3 5-6"/>`],
     ["/settings/sign-in", "Sign-in", `<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>`],
     ["/settings/sessions", "Sessions & tokens", `<circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/>`],
+    ["/settings/approval", "Approval rules", `<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/>`],
 ];
 const SETTINGS_TILES = SETTINGS_TILE_ICONS.map(([href, label]) => [href, label] as const);
 
