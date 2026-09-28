@@ -1,6 +1,8 @@
 import { maybeTriggerRepair } from "./dispose.js";
 import { parseProtectedPaths } from "./approval-policy.js";
 import { rulesSummary } from "./approval-rules-ui.js";
+import { evidencePack, exportDay, ledgerExportChunks, standaloneEvidenceHtml, type LedgerExport } from "./evidence-pack.js";
+import { matchesOutsideCheckpoint } from "./ledger-chain.js";
 import { logEvent } from "./log.js";
 import { advanceFlows } from "./flow-engine.js";
 import { readHooksBase, runFlowTriggers, type TriggerIo } from "./flow-triggers.js";
@@ -328,6 +330,11 @@ export const OPERATE_HELP = `standing-orders — operating the queue
   standing-orders project show              show the current project and credential reference
   standing-orders project rules --repo <p>  a project's approval rules; an instance operator changes them with
                                         --not-requester on|off, --protect none|project, --protect-paths "a/**,b/**"
+  standing-orders task evidence <id>        the task's evidence pack as JSON (--html for a printable page; --out <file>)
+  standing-orders ledger verify             check the action ledger's hash chain (--checkpoint <n:hash> to compare a copied head)
+  standing-orders ledger checkpoint         record the chain's head to copy off this machine (instance operator)
+  standing-orders ledger export --from <YYYY-MM-DD> --to <YYYY-MM-DD> [--out <file>]
+                                        every sealed entry in the range, with an evidence pack per task
   standing-orders task complete <id>        mark the current result complete (--digest for JSON/agents)
   standing-orders task revise <id> --feedback "requested change"
   standing-orders assignment show <task>    root, current work and exact handoff
@@ -658,6 +665,8 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "token-file", "bin", "poll", "github", "remote", "head-prefix", "password",
   // v102: project rules.
   "not-requester", "protect", "protect-paths",
+  // v103: the ledger chain and evidence packs.
+  "checkpoint", "out", "from", "to",
   "project-root", "schedule", "ceiling", "require",
   "provider", "plan-model", "plan-provider", "public-url", "editor",
   "command", "timeout-seconds", "setup-digest", "stop-grace", "title", "name", "every", "lines",
@@ -671,6 +680,7 @@ export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "clear", "follow", "ready", "all-tasks", "inbound-only", "help", "undo", "anyone", "allow-dispatch", "allow-merge", "merge-delete-branch",
   "no-open", "no-verify", "no-follow", "end", "report", "off", "tmux",
   "self-heal", "plan-auto", "repair-auto", "review-retry-auto", "no-local",
+  "html",
 ]);
 
 export function parseOperateArgs(argv: readonly string[]): Args | { error: string } {
@@ -952,6 +962,8 @@ async function dispatch(
       return readyCommand(flags, context);
     case "task":
       return taskCommand(positional, flags, context);
+    case "ledger":
+      return ledgerCommand(positional, flags, context);
     case "project":
       if (positional[0] === "rules") return projectRulesCommand(positional, flags, context);
       return runProjectCommand(positional, flags, context);
@@ -1894,6 +1906,8 @@ async function buildCommand(
   if (!auth.runner.repos.includes(canonicalProject(repo) ?? resolve(repo))) {
     return fail(write, json, "build", "unauthorized-repo", `${runner} is not bound to ${repo} — \`runner bind\` adds it`, EXIT.refused);
   }
+  // Only a task that exists: a lookup must never register an id before the task is filed (its ledger history would be the task's).
+  if (store.getTask(id) === null) return fail(write, json, "build", "unknown-task", `No task ${id}.`, EXIT.refused);
   const pool = text(flags, "pool") ?? join(dirname(databasePath(process.env, homedir())), "worktrees");
   const ref = store.refFor(BUILT_IN, id);
 
@@ -7802,6 +7816,9 @@ async function runWatchLoop(args: {
         }
       }
 
+      // v103: seal whatever the ledger gained since the last pass into its chain (a no-op when nothing did).
+      try { store.sealLedger(); } catch (error) { progress(`watch: the ledger chain could not be sealed this pass (${error instanceof Error ? error.message : String(error)})`); }
+
       // Built work goes out in the same window it was built: the pass is one
       // SELECT when nothing is owed, and each phase is durable if we crash.
       // Except under a stop (audit IV-1): once the signal lands, nothing
@@ -9656,6 +9673,8 @@ function taskCommand(
       return listTasks(flags, context);
     case "show":
       return showTask(rest, context);
+    case "evidence":
+      return taskEvidenceCommand(rest, flags, context);
     case "state":
       return stateTask(rest, flags, context);
     case "block":
@@ -11721,6 +11740,82 @@ async function projectRulesCommand(positional: readonly string[], flags: Map<str
   };
   context.store.setApprovalRules(repo, next, acting.name, context.clock());
   return succeed(context.write, context.json, command, { repo, rules: next }, () => [`${repo}: ${rulesSummary(next)}`]);
+}
+
+/** Write a pack or export where asked (never over an existing file), or to the terminal. */
+function writeOut(context: Context, command: string, out: string | undefined, content: string, summary: Record<string, unknown>, line: string, data: Record<string, unknown>): number {
+  if (out === undefined) { context.write(context.json ? envelopeJson({ ok: true, command, ...summary, ...data }) : content.replace(/\n$/, "")); return EXIT.ok; }
+  try { writeFileSync(resolve(out), content, { mode: 0o600, flag: "wx" }); }
+  catch (error) {
+    const exists = (error as NodeJS.ErrnoException).code === "EEXIST";
+    return fail(context.write, context.json, command, exists ? "exists" : "unwritable", exists ? "That file exists already; choose another name." : "That file couldn't be written.", EXIT.failed);
+  }
+  return succeed(context.write, context.json, command, { ...summary, out: resolve(out) }, () => [`${line} Saved to ${resolve(out)}.`]);
+}
+
+/** `task evidence <id>`: everything an auditor asks about one task (v103). Read locally; needs no login. */
+function taskEvidenceCommand(rest: readonly string[], flags: Map<string, string | true>, context: Context): number {
+  const command = "task evidence";
+  const allowed = new Set(["html", "out", "db", "json"]);
+  for (const name of flags.keys()) if (!allowed.has(name)) return fail(context.write, context.json, command, "usage", `--${name} is not a task evidence option.`, EXIT.usage);
+  const [taskId, ...extra] = rest;
+  if (taskId === undefined || extra.length > 0) return fail(context.write, context.json, command, "usage", "Use task evidence <id> [--html] [--out <file>].", EXIT.usage);
+  const pack = evidencePack(context.store, taskId, { principal: "operator", repos: null, includeUnplaced: true }, "command line", context.clock(), context.evidenceRoot);
+  if (pack === null) return fail(context.write, context.json, command, "unknown-task", `No task ${taskId}.`, EXIT.refused);
+  const content = flags.has("html") ? standaloneEvidenceHtml(pack) : `${JSON.stringify(pack, null, 2)}\n`;
+  return writeOut(context, command, text(flags, "out"), content, { task: pack.task.id, digest: pack.digest, chainOk: pack.ledger.chain.ok },
+    `Evidence pack for ${pack.task.id} (${pack.ledger.entries.length} ledger entries, chain ${pack.ledger.chain.ok ? "verified" : "BROKEN"}).`, flags.has("html") ? { html: content } : { pack });
+}
+
+/** `ledger verify | checkpoint | export` (v103): the action ledger's hash chain. */
+async function ledgerCommand(positional: readonly string[], flags: Map<string, string | true>, context: Context): Promise<number> {
+  const [action, ...extra] = positional;
+  const command = `ledger ${action ?? ""}`.trim();
+  const allowed = new Set(action === "verify" ? ["checkpoint", "db", "json"] : action === "checkpoint" ? ["as", "token", "token-file", "token-env", "db", "json"] : ["from", "to", "out", "db", "json"]);
+  for (const name of flags.keys()) if (!allowed.has(name)) return fail(context.write, context.json, command, "usage", `--${name} is not a ${command} option.`, EXIT.usage);
+  if (extra.length > 0 || (action !== "verify" && action !== "checkpoint" && action !== "export")) {
+    return fail(context.write, context.json, command, "usage", "Use ledger verify, ledger checkpoint or ledger export --from <day> --to <day>.", EXIT.usage);
+  }
+  const store = context.store;
+  if (action === "verify") {
+    // The command walks the whole chain, every time.
+    const report = store.ledgerChain({ full: true });
+    const copied = text(flags, "checkpoint");
+    const outside = copied === undefined ? null : matchesOutsideCheckpoint(store.handle, copied);
+    const inside = store.ledgerCheckpoints(1)[0] ?? null;
+    const ok = report.ok && (outside === null || outside.ok);
+    const lines = [
+      report.ok ? `Chain verified: ${report.entries} entries through #${report.through ?? 0}, head ${report.head}.` : `Chain BROKEN: ${report.problem?.what ?? "it doesn't verify"}.`,
+      ...(report.checkpoints > 0 && report.ok ? [`All ${report.checkpoints} checkpoints kept here still match${inside === null ? "" : `; the latest is ${inside.through}:${inside.hash}`}.`] : []),
+      ...(outside === null ? [] : [outside.what]),
+    ];
+    context.write(context.json ? envelopeJson({ ok, command, chain: report, outside }) : lines.join("\n"));
+    return ok ? EXIT.ok : EXIT.failed;
+  }
+  if (action === "checkpoint") {
+    const acting = await askCredentials(flags, context);
+    const verified = acting === null ? null : authenticateApprover(store, acting.name, acting.token);
+    if (acting === null || verified === null || !verified.ok || !store.isInstanceOperator(acting.name)) {
+      return fail(context.write, context.json, command, "refused", "An instance operator makes checkpoints: pass --as and --token (or use the remembered login).", EXIT.refused);
+    }
+    const made = store.ledgerCheckpoint(acting.name, context.clock());
+    if (made === null) return fail(context.write, context.json, command, "empty", "The ledger has no entries yet.", EXIT.refused);
+    if ("problem" in made) return fail(context.write, context.json, command, "broken", `No checkpoint: the chain doesn't verify (${made.problem}).`, EXIT.failed);
+    return succeed(context.write, context.json, command, { through: made.through, hash: made.hash, checkpoint: `${made.through}:${made.hash}` },
+      () => [`${made.through}:${made.hash}`, "Copy this somewhere outside this machine; ledger verify --checkpoint <it> proves nothing before it was rewritten."]);
+  }
+  const from = exportDay(text(flags, "from") ?? null), last = exportDay(text(flags, "to") ?? null);
+  if (from === null || last === null) return fail(context.write, context.json, command, "usage", "Use ledger export --from <YYYY-MM-DD> --to <YYYY-MM-DD> [--out <file>].", EXIT.usage);
+  const to = new Date(Date.parse(last) + 86_400_000).toISOString();
+  if (to <= from) return fail(context.write, context.json, command, "usage", "--to is on or after --from.", EXIT.usage);
+  // Reading the database file needs no login, so the ledger names the road, not a person it can't vouch for.
+  const who = "command line";
+  const content = [...ledgerExportChunks(store, { from, to }, { repos: null, instance: true }, { principal: "operator", repos: null, includeUnplaced: true }, who, context.clock(), context.evidenceRoot)].join("");
+  const bundle = JSON.parse(content) as LedgerExport;
+  store.recordAction({ at: context.clock().toISOString(), actor: who, repo: null, taskId: null, runId: null, action: "ledger exported", outcome: "exported", source: "access",
+    detail: `${from.slice(0, 10)} to ${last.slice(0, 10)} · ${bundle.entries.length} entries · ${bundle.packs.length} evidence packs` });
+  return writeOut(context, command, text(flags, "out"), `${content}\n`, { entries: bundle.entries.length, packs: bundle.packs.length, chainOk: bundle.chain.ok },
+    `${bundle.entries.length} ledger entries and ${bundle.packs.length} evidence packs (chain ${bundle.chain.ok ? "verified" : "BROKEN"}).`, { export: bundle });
 }
 
 function succeed(

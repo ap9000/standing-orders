@@ -97,7 +97,7 @@ function event(store: Store, repo: string, actor: string, action: string, before
 /** A write problem is optional: preserve core completion, leave a visible diagnostic, retry on the next read/admission. */
 export function learningFailure(store: Store, repo: string, run: number | null, now: Date): void {
   try { event(store, repo, 'controller', 'failure', 'pending', 'retryable', 'Learning could not be saved. Core review is unchanged; reload to retry.', null, run, [], now, `failure:${run ?? repo}`); }
-  catch { try { store.recordAction({ at: now.toISOString(), actor: 'controller', repo, taskId: null, runId: run, action: 'Learning storage unavailable; core review retained', outcome: 'error', source: 'request' }); } catch { /* storage outage: never rewrite a completed review */ } }
+  catch { try { store.recordAction({ at: now.toISOString(), actor: 'controller', repo, taskId: null, runId: run, action: 'Learning storage unavailable; core review retained', outcome: 'error', source: 'work' }); } catch { /* storage outage: never rewrite a completed review */ } }
 }
 function reviewSnapshot(store: Store, reviewer: number): Record<string, unknown> | undefined {
   let run = store.getRun(reviewer);

@@ -94,6 +94,7 @@ import { normalizeProjectAccess, projectAccessAllows, readProjectAccess, type Pr
 import { LEDGER_SCHEMA, LEDGER_TABLE, LEDGER_V54_COLUMNS, LEDGER_V54_TABLE, installLedgerTriggers, type LedgerEntry } from "./action-ledger.js";
 import { PLAN_AUTO_SCHEMA } from "./plan-auto.js";
 import { RECIPE_SCHEMA } from "./recipes.js";
+import { IN_RANGE, LEDGER_CHAIN_SCHEMA, safeWhole, sealLedger, verifyLedgerChain, type LedgerChainReport, type VerifiedHead } from "./ledger-chain.js";
 import { NO_RULES, filerFor, isProtectedWork, protectedChanges, rulesWords, type ApprovalGate, type ApprovalRules, type ApproverKind, type Filer, type FilerKind } from "./approval-policy.js";
 
 // v60 fenced older readers before the chat action cards; v61 adds notification
@@ -134,7 +135,12 @@ import { NO_RULES, filerFor, isProtectedWork, protectedChanges, rulesWords, type
 // v100 lets people sign in with the organisation's identity provider: each provider identity is linked to one account.
 // v101 adds API tokens (scoped, expiring, hashed), keeps browser sessions across restarts (listed and revocable), and lets coordinator credentials expire.
 // v102 records who filed each task and adds per-project approval rules: the requester can't approve, and protected work needs two approvers.
-export const SCHEMA_VERSION = 102;
+/** The detail on a task's registration written again at its filing (v103), over a ref an earlier lookup made. */
+const REGISTERED_AT_FILING = "again, as it was filed";
+/** A ledger entry with its seal (v103); null until the next pass seals it. */
+export type SealedLedgerEntry = LedgerEntry & { seal: { prev: string; hash: string } | null };
+// v103 chains the action ledger (every entry sealed with the one before it), keeps checkpoints of the chain, and records teammate tool calls (from the store) and minted coordinators (by trigger) in it.
+export const SCHEMA_VERSION = 103;
 
 /** v102: a project's approval rules, and each person's approval of an exact scope (two are needed for protected work). */
 const APPROVAL_SCHEMA = `
@@ -4786,6 +4792,7 @@ function initializeStore(db: Database, file: string): Store {
   db.exec(SSO_SCHEMA);
   db.exec(CREDENTIALS_SCHEMA);
   db.exec(APPROVAL_SCHEMA);
+  db.exec(LEDGER_CHAIN_SCHEMA);
   migrate(db, preflight === null ? null : Math.abs(preflight));
   addColumn(db, "flow_card", "source_json", "TEXT");
   addColumn(db, "flow_card", "owner", "TEXT");
@@ -8245,8 +8252,13 @@ export class Store {
           "INSERT INTO task (id, title, state, created_at, updated_at) VALUES (?, ?, 'queued', ?, ?)",
         )
         .run(spec.id, spec.title, stamp, stamp);
+      // A ref some lookup made before this task existed registered then, not now: register it again, so the task's
+      // ledger history (v103 evidence packs) starts at its filing.
+      // (Any backend's: the ledger names a task by its id alone.)
+      const earlier = this.db.prepare("SELECT 1 AS hit FROM task_ref WHERE external_id = ?").get(spec.id) !== undefined;
       // Created here, so it is ours — the one place that is true by construction.
       const ref = this.refFor(BUILT_IN, spec.id, "ours");
+      if (earlier) this.recordAction({ at: stamp, actor: "system", repo: ref.repo, taskId: spec.id, runId: null, action: "task registered", outcome: "recorded", source: "work", detail: REGISTERED_AT_FILING });
       // v102: who filed it, set once with the filing (separation of duties reads it; nothing changes it).
       if (spec.filedBy !== undefined) {
         this.db.prepare("UPDATE task_ref SET filed_by = ?, filed_by_kind = ? WHERE id = ?").run(spec.filedBy.name, spec.filedBy.kind, ref.id);
@@ -10668,6 +10680,154 @@ export class Store {
       WHERE v.task_id = ? ORDER BY v.at`).all(taskId).map(row => ({ approver: String(row["approver"]), at: String(row["at"]) }));
   }
 
+  // ---- The ledger chain (v103) --------------------------------------------
+
+  /** Seal every ledger entry written since the last seal (the worker does this each pass; readers before they read). */
+  sealLedger(): number {
+    return this.transact(() => sealLedger(this.db));
+  }
+
+  /** Seal if the database is free within a moment; a reader never waits on (or fails for) a busy worker, and what's
+   * left is sealed on the worker's next pass (the report counts it as unsealed). */
+  private sealIfFree(): void {
+    if (this.transacting) { sealLedger(this.db); return; }
+    // Nothing new: no lock at all.
+    const ends = this.db.prepare(`SELECT (SELECT MAX(id) FROM action_ledger WHERE id ${IN_RANGE}) AS entry, (SELECT MAX(id) FROM ledger_seal WHERE id ${IN_RANGE}) AS seal`).get();
+    if (ends !== undefined && ends["entry"] === ends["seal"]) return;
+    try { beginWriteWithin(this.db, 200); }
+    catch (error) { if (isDatabaseBusy(error)) return; throw error; }
+    this.transacting = true;
+    try { sealLedger(this.db); this.db.exec("COMMIT"); }
+    catch (error) { this.db.exec("ROLLBACK"); throw error; }
+    finally { this.transacting = false; }
+  }
+
+  /** Reads that must see one moment of the database (the chain and its seals). */
+  private readAtOnce<T>(body: () => T): T {
+    if (this.transacting) return body();
+    this.db.exec("BEGIN");
+    try { const result = body(); this.db.exec("COMMIT"); return result; }
+    catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  /** The head this process last walked the whole chain to (and when), so a page view checks only what's new; and,
+   * once the chain has broken, the first break (reported from then on, even if the chain is later rebuilt to look
+   * whole) and the latest walk's report (served until the next whole walk, so a broken chain doesn't cost a walk
+   * per page view). */
+  private chainHead: (VerifiedHead & { checkedAt: string; walkedAt: number }) | null = null;
+  private chainBreak: { first: NonNullable<LedgerChainReport["problem"]>; latest: LedgerChainReport; walkedAt: number } | null = null;
+
+  /** The chain, checked: sealed first. The whole chain is walked every ten minutes (or when asked); between walks,
+   * only entries after the last walked head, which must itself be unchanged. */
+  ledgerChain(options: { full?: boolean; fresh?: number } = {}): LedgerChainReport {
+    const WALK_EVERY = 10 * 60_000;
+    this.sealIfFree();
+    const now = Date.now();
+    // `full`: a whole walk, unless one finished within `fresh` ms (so a burst of exports costs one walk).
+    const recent = (walkedAt: number) => options.full === true ? options.fresh !== undefined && now - walkedAt <= options.fresh : now - walkedAt <= WALK_EVERY;
+    const alarm = this.chainBreak;
+    if (alarm !== null && recent(alarm.walkedAt)) return alarm.latest;
+    const cached = alarm === null ? this.chainHead : null;
+    const whole = cached === null || !recent(cached.walkedAt);
+    const checkedAt = whole ? new Date(now).toISOString() : cached!.checkedAt;
+    const report = this.readAtOnce(() => verifyLedgerChain(this.db, whole ? undefined : cached!, checkedAt));
+    // Inside someone's transaction, what was read may yet roll back: nothing is remembered from it.
+    if (this.transacting) return report;
+    // A walk counts as fresh from when it finished (a long one mustn't send everyone waiting on it into another).
+    const finished = whole ? Date.now() : now;
+    if (!report.ok || alarm !== null) {
+      const first = alarm?.first ?? report.problem!;
+      const latest = report.ok ? { ...report, ok: false, problem: first } : report;
+      this.chainHead = null;
+      this.chainBreak = { first, latest, walkedAt: whole ? finished : alarm?.walkedAt ?? finished };
+      return latest;
+    }
+    if (report.through !== null) this.chainHead = { through: report.through, head: report.head, entries: report.entries, checkedAt, walkedAt: whole ? finished : cached!.walkedAt };
+    return report;
+  }
+
+  /** A checkpoint of the chain as it stands: its head, recorded here and handed back to be copied off the machine.
+   * Never over a chain that doesn't verify: that would vouch for what broke it. */
+  ledgerCheckpoint(by: string, now: Date): { through: number; hash: string } | { problem: string } | null {
+    const report = this.ledgerChain({ full: true });
+    if (!report.ok) return { problem: report.problem?.what ?? "the chain doesn't verify" };
+    return this.transact(() => {
+      sealLedger(this.db);
+      const last = this.db.prepare(`SELECT id, hash FROM ledger_seal WHERE id ${IN_RANGE} ORDER BY id DESC LIMIT 1`).get();
+      if (last === undefined) return null;
+      const through = Number(last["id"]), hash = String(last["hash"]);
+      this.db.prepare("INSERT INTO ledger_checkpoint (through, hash, at, by) VALUES (?, ?, ?, ?)").run(through, hash, now.toISOString(), by);
+      this.recordAction({ at: now.toISOString(), actor: by, repo: null, taskId: null, runId: null, action: "ledger checkpoint", outcome: "recorded", source: "policy", detail: `${through}:${hash}` });
+      sealLedger(this.db);
+      return { through, hash };
+    });
+  }
+
+  /** The checkpoints kept so far, newest first. */
+  ledgerCheckpoints(limit = 20): { through: number; hash: string; at: string; by: string }[] {
+    return this.db.prepare(`SELECT through, hash, at, by FROM ledger_checkpoint WHERE typeof(through) = 'integer' AND through ${IN_RANGE} ORDER BY id DESC LIMIT ?`).all(limit)
+      .map(row => ({ through: Number(row["through"]), hash: String(row["hash"]), at: String(row["at"]), by: String(row["by"]) }));
+  }
+
+  /** Ledger entries in [from, to) within `repos` (as `actionLedger` reads them), with their seals, oldest first,
+   * after entry `after` (a page at a time). Seals first. Reads one more than `limit`, so a caller can tell it was cut short. */
+  sealedLedgerEntries(query: { from: string; to: string; repos: readonly string[] | null; instance?: boolean; after?: number; limit: number }): SealedLedgerEntry[] {
+    if (query.after === undefined) this.sealIfFree();
+    const clauses = ["l.at >= ?", "l.at < ?", "l.id > ?"];
+    const args: (string | number)[] = [query.from, query.to, query.after ?? 0];
+    if (query.repos !== null) {
+      if (query.repos.length === 0 && query.instance !== true) return [];
+      const inProjects = query.repos.length === 0 ? null : `l.repo IN (${query.repos.map(() => "?").join(",")})`;
+      clauses.push(query.instance === true ? `(${inProjects === null ? "" : `${inProjects} OR `}l.repo IS NULL)` : inProjects!);
+      args.push(...query.repos);
+    }
+    return this.sealedRows(`${clauses.join(" AND ")} ORDER BY l.id LIMIT ?`, [...args, query.limit + 1]);
+  }
+
+  /** A task family's ledger entries, with their seals, oldest first. Each version's entries count only from the row
+   * its registration wrote (which nothing else can write; a version from before that row existed counts from the
+   * start); the worker's own entries also by run. Requests made through the console are kept apart and capped at
+   * the newest `requests`, so a flood of them can never push the family's own entries out. */
+  taskLedgerEntries(family: { taskIds: readonly string[]; runIds: readonly number[] }, limits: { entries: number; requests: number }): { entries: SealedLedgerEntry[]; truncated: boolean } {
+    this.sealIfFree();
+    if (family.taskIds.length === 0) return { entries: [], truncated: false };
+    // Its registration as the task was filed: the one filing wrote again over a ref an earlier lookup made, else the
+    // ref's own; a task from before registration rows existed counts from the start.
+    const registered = this.db.prepare(`SELECT COALESCE(
+      (SELECT MIN(id) FROM action_ledger WHERE task_id = ? AND action = 'task registered' AND source = 'work' AND actor = 'system' AND detail = ?),
+      (SELECT MIN(id) FROM action_ledger WHERE task_id = ? AND action = 'task registered' AND source = 'work' AND actor = 'system'), 0) AS id`);
+    const versions = family.taskIds.map(id => ({ id, from: Number(registered.get(id, REGISTERED_AT_FILING, id)?.["id"] ?? 0) }));
+    const named = `(${versions.map(() => "(l.task_id = ? AND l.id >= ?)").join(" OR ")})`;
+    const namedArgs = versions.flatMap(one => [one.id, one.from]);
+    const byRun = family.runIds.length === 0 ? "" : ` OR (l.run_id IN (${family.runIds.map(() => "?").join(",")}) AND l.task_id IS NULL)`;
+    const own = this.sealedRows(`(${named}${byRun}) AND l.source <> 'request' ORDER BY l.id LIMIT ?`, [...namedArgs, ...family.runIds, limits.entries + 1]);
+    const asked = this.sealedRows(`${named} AND l.source = 'request' ORDER BY l.id DESC LIMIT ?`, [...namedArgs, limits.requests + 1]);
+    const truncated = own.length > limits.entries || asked.length > limits.requests;
+    return { entries: [...own.slice(0, limits.entries), ...asked.slice(0, limits.requests)].sort((a, b) => a.id - b.id), truncated };
+  }
+
+  private sealedRows(where: string, args: (string | number)[]): SealedLedgerEntry[] {
+    // Entries numbered outside the chain are left to the chain report, which names them.
+    return this.db.prepare(`SELECT l.id, l.at, l.actor, l.repo, l.task_id, ${safeWhole("l.run_id", "run_id")}, l.action, l.outcome, l.source, l.detail,
+      s.prev AS seal_prev, s.hash AS seal_hash FROM action_ledger l LEFT JOIN ledger_seal s ON s.id = l.id WHERE l.id ${IN_RANGE} AND ${where}`).all(...args).map(row => ({
+      id: Number(row["id"]), at: String(row["at"]), actor: String(row["actor"]), repo: row["repo"] === null ? null : String(row["repo"]),
+      taskId: row["task_id"] === null ? null : String(row["task_id"]), runId: typeof row["run_id"] === "number" ? row["run_id"] : null,
+      action: String(row["action"]), outcome: String(row["outcome"]), source: String(row["source"]) as LedgerEntry["source"],
+      detail: row["detail"] == null ? null : String(row["detail"]),
+      seal: row["seal_hash"] == null ? null : { prev: String(row["seal_prev"]), hash: String(row["seal_hash"]) },
+    }));
+  }
+
+  /** Everyone who wrote a version of this task's scope, and every yes given to any version of it (the evidence pack). */
+  scopeHistory(taskId: string): { authors: { digest: string; author: string; at: string }[]; votes: { digest: string; approver: string; at: string }[] } {
+    return {
+      authors: this.db.prepare("SELECT digest, author, at FROM scope_author WHERE task_id = ? ORDER BY at, author").all(taskId)
+        .map(row => ({ digest: String(row["digest"]), author: String(row["author"]), at: String(row["at"]) })),
+      votes: this.db.prepare("SELECT digest, approver, at FROM scope_approval_vote WHERE task_id = ? ORDER BY at, approver").all(taskId)
+        .map(row => ({ digest: String(row["digest"]), approver: String(row["approver"]), at: String(row["at"]) })),
+    };
+  }
+
   /** v99: a policy change, as the ledger keeps it: what changed and from what to what. Nothing is kept when nothing changed. */
   private recordPolicy(by: string, repo: string | null, action: string, before: string, after: string, now: Date, outcome = "changed"): void {
     if (before === after) return;
@@ -10709,9 +10869,9 @@ export class Store {
     }
     if (query.before !== undefined) { clauses.push("id < ?"); args.push(query.before); }
     args.push(Math.max(1, Math.min(101, query.limit ?? 51)));
-    return this.db.prepare(`SELECT * FROM action_ledger ${clauses.length ? `WHERE ${clauses.join(" AND ")}` : ""} ORDER BY id DESC LIMIT ?`).all(...args).map(row => ({
+    return this.db.prepare(`SELECT id, at, actor, repo, task_id, ${safeWhole("run_id")}, action, outcome, source, detail FROM action_ledger WHERE id ${IN_RANGE}${clauses.length ? ` AND ${clauses.join(" AND ")}` : ""} ORDER BY id DESC LIMIT ?`).all(...args).map(row => ({
       id: Number(row["id"]), at: String(row["at"]), actor: String(row["actor"]), repo: row["repo"] === null ? null : String(row["repo"]),
-      taskId: row["task_id"] === null ? null : String(row["task_id"]), runId: row["run_id"] === null ? null : Number(row["run_id"]),
+      taskId: row["task_id"] === null ? null : String(row["task_id"]), runId: typeof row["run_id"] === "number" ? row["run_id"] : null,
       action: String(row["action"]), outcome: String(row["outcome"]), source: String(row["source"]) as LedgerEntry["source"],
       detail: row["detail"] == null ? null : String(row["detail"]),
     }));
@@ -14808,7 +14968,8 @@ export class Store {
         const base =
           spec.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 56) || "task";
         id = base;
-        for (let n = 2; this.db.prepare("SELECT 1 AS hit FROM task WHERE id = ?").get(id) !== undefined; n++) {
+        // An id a built-in ref already names (made by a lookup before any task existed) is taken too: its ledger history isn't this task's.
+        for (let n = 2; this.db.prepare("SELECT 1 AS hit FROM task WHERE id = ? UNION ALL SELECT 1 FROM task_ref WHERE backend = 'built-in' AND external_id = ?").get(id, id) !== undefined; n++) {
           id = `${base}-${n}`;
         }
       } else if (this.db.prepare("SELECT 1 AS hit FROM task WHERE id = ?").get(id) !== undefined) {
@@ -22048,14 +22209,30 @@ export class Store {
   }
 
   addTeammateCall(call: { teammate: number; card: number; entry: number; tool: string; action: string; input: Record<string, unknown>; rule: ToolRule["use"]; why: string; state: TeammateCallState; result?: string | null; undoOf?: number; decidedBy?: string }, now: Date): number {
-    return Number(this.db.prepare("INSERT INTO teammate_call (teammate, card, entry, tool, action, input_json, rule, why, state, result, created_at, done_at, undo_of, decided_by, decided_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .run(call.teammate, call.card, call.entry, call.tool, call.action, JSON.stringify(call.input), call.rule, call.why, call.state, call.result ?? null, now.toISOString(),
-        call.state === "refused" ? now.toISOString() : null, call.undoOf ?? null, call.decidedBy ?? null, call.decidedBy === undefined ? null : now.toISOString()).lastInsertRowid);
+    return this.transact(() => {
+      const id = Number(this.db.prepare("INSERT INTO teammate_call (teammate, card, entry, tool, action, input_json, rule, why, state, result, created_at, done_at, undo_of, decided_by, decided_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(call.teammate, call.card, call.entry, call.tool, call.action, JSON.stringify(call.input), call.rule, call.why, call.state, call.result ?? null, now.toISOString(),
+          call.state === "refused" ? now.toISOString() : null, call.undoOf ?? null, call.decidedBy ?? null, call.decidedBy === undefined ? null : now.toISOString()).lastInsertRowid);
+      this.recordTeammateCall(id, call.decidedBy ?? null, "", call.state, `rule: ${call.rule}${call.undoOf === undefined ? "" : ` · undoes call ${call.undoOf}`}`, now);
+      return id;
+    });
+  }
+
+  /** v103: a teammate's tool call in the ledger, as the teammate (or the person who decided it), on its card's task. */
+  private recordTeammateCall(id: number, person: string | null, verb: string, outcome: string, detail: string | null, now: Date): void {
+    const row = this.db.prepare(`SELECT c.tool, c.action, m.handle, m.repo, f.task FROM teammate_call c LEFT JOIN teammate m ON m.id = c.teammate LEFT JOIN flow_card f ON f.id = c.card WHERE c.id = ?`).get(id);
+    if (row === undefined) return;
+    this.recordAction({ at: now.toISOString(), actor: person ?? `${row["handle"] == null ? "teammate" : String(row["handle"])} (AI)`, repo: row["repo"] == null ? null : String(row["repo"]),
+      taskId: row["task"] == null ? null : String(row["task"]), runId: null, action: `teammate tool call${verb}: ${String(row["tool"])} ${String(row["action"])}`, outcome, source: "work", detail });
   }
 
   /** v97: a call was undone by a person; false when it already was. */
   markTeammateCallUndone(id: number, by: string, now: Date): boolean {
-    return Number(this.db.prepare("UPDATE teammate_call SET undone_by = ?, undone_at = ? WHERE id = ? AND undone_by IS NULL").run(by, now.toISOString(), id).changes) === 1;
+    return this.transact(() => {
+      const marked = Number(this.db.prepare("UPDATE teammate_call SET undone_by = ?, undone_at = ? WHERE id = ? AND undone_by IS NULL").run(by, now.toISOString(), id).changes) === 1;
+      if (marked) this.recordTeammateCall(id, by, " undone", "undone", null, now);
+      return marked;
+    });
   }
 
   /** v97: cards someone moved by hand right after this actor (a teammate) moved them, since a time: what people overrode. */
@@ -22072,8 +22249,11 @@ export class Store {
   }
 
   /** v97: an undo that failed leaves the call as it was. */
-  clearTeammateCallUndone(id: number): void {
-    this.db.prepare("UPDATE teammate_call SET undone_by = NULL, undone_at = NULL WHERE id = ?").run(id);
+  clearTeammateCallUndone(id: number, now: Date): void {
+    this.transact(() => {
+      const cleared = Number(this.db.prepare("UPDATE teammate_call SET undone_by = NULL, undone_at = NULL WHERE id = ? AND undone_by IS NOT NULL").run(id).changes) === 1;
+      if (cleared) this.recordTeammateCall(id, null, " undo failed", "failed", null, now);
+    });
   }
 
   /** v97: one model turn a teammate took, with what it cost. */
@@ -22097,9 +22277,14 @@ export class Store {
   moveTeammateCall(id: number, from: readonly TeammateCallState[], change: { state: TeammateCallState; result?: string | null; decidedBy?: string }, now: Date): boolean {
     const stamp = now.toISOString();
     const done = ["denied", "refused", "done", "failed"].includes(change.state);
-    return Number(this.db.prepare(`UPDATE teammate_call SET state = ?, result = COALESCE(?, result), decided_by = COALESCE(?, decided_by), decided_at = CASE WHEN ? IS NULL THEN decided_at ELSE ? END,
-      done_at = CASE WHEN ? THEN ? ELSE done_at END WHERE id = ? AND state IN (${from.map(() => "?").join(", ")})`)
-      .run(change.state, change.result ?? null, change.decidedBy ?? null, change.decidedBy ?? null, stamp, done ? 1 : 0, stamp, id, ...from).changes) === 1;
+    return this.transact(() => {
+      const moved = Number(this.db.prepare(`UPDATE teammate_call SET state = ?, result = COALESCE(?, result), decided_by = COALESCE(?, decided_by), decided_at = CASE WHEN ? IS NULL THEN decided_at ELSE ? END,
+        done_at = CASE WHEN ? THEN ? ELSE done_at END WHERE id = ? AND state IN (${from.map(() => "?").join(", ")})`)
+        .run(change.state, change.result ?? null, change.decidedBy ?? null, change.decidedBy ?? null, stamp, done ? 1 : 0, stamp, id, ...from).changes) === 1;
+      // A person's yes or no is theirs; everything else the call does is the teammate's.
+      if (moved) this.recordTeammateCall(id, change.state === "approved" || change.state === "denied" ? change.decidedBy ?? null : null, "", change.state, null, now);
+      return moved;
+    });
   }
 
   /** A card's receipts, oldest first: one visit (`entry`), or every visit. */
