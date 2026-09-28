@@ -108,7 +108,7 @@ export type AcquireResult =
   /** The credential presented with this acquisition did not verify against
    * the runner row AT CLAIM TIME (MCP spec v6): stale incarnations never
    * ride a successor's rotation. */
-  | { ok: false; reason: "unauthenticated"; detail: "unknown" | "bad-token" | "retired" }
+  | { ok: false; reason: "unauthenticated"; detail: "unknown" | "bad-token" | "retired" | "expired" }
   /** The task is placed nowhere — a repo-scoped runner cannot be
    * authorized for null. Place it, then dispatch. */
   | { ok: false; reason: "unplaced" }

@@ -148,6 +148,31 @@ test("a step-up is the provider's check from moments ago; later, a link to be ch
   expect(store.actionLedger({ repos: null, source: "sign-in", limit: 1 })[0]).toMatchObject({ actor: "priya", action: "confirmed", outcome: "Okta" });
 });
 
+test("someone who signs in only with the provider approves a task on a fresh sign-in, and not on a stale one", async () => {
+  await turnOn();
+  person.groups = ["eng-leads"];
+  const cookie = cookieOf(await providerSignIn());
+  // Approvals bind exact routing: every phase names a model.
+  for (const phase of ["build", "plan", "review"] as const) store.setPhaseConfig("installation", phase, "claude", "sonnet", "test", new Date());
+  store.createTask({ id: "t-sso", title: "approve me" }, new Date());
+  const csrf = csrfOf(await (await fetch(`${base}/tasks`, { headers: { cookie } })).text());
+  const post = (path: string, fields: Record<string, string>) => fetch(`${base}${path}`, { method: "POST", headers: { cookie, origin: base }, redirect: "manual", body: new URLSearchParams({ csrf, ...fields }) });
+  expect((await post("/t/t-sso/scope", { acceptance: "c1: ok | manual-review", sawDigest: "", goal: "the goal", not: "", touches: "" })).status).toBe(303);
+  const digest = store.getScope("t-sso")?.digest ?? "";
+  const page = async () => (await fetch(`${base}/t/t-sso`, { headers: { cookie } })).text();
+  const nonceOf = (html: string) => /name="nonce" value="([0-9a-f]{32})"/.exec(html)?.[1] ?? "";
+  // Eleven minutes on, an empty password approves nothing.
+  vi.spyOn(Date, "now").mockReturnValue(Date.now() + 11 * 60_000);
+  expect((await post("/t/t-sso/approve", { nonce: nonceOf(await page()), digest, token: "" })).status).toBe(400);
+  expect(store.getScope("t-sso")?.approvedBy ?? null).toBeNull();
+  vi.restoreAllMocks();
+  // Fresh: the form says the provider confirmed it, and the approval is priya's.
+  const html = await page();
+  expect(html).toContain('data-sso-step-up="confirmed"');
+  expect((await post("/t/t-sso/approve", { nonce: nonceOf(html), digest, token: "" })).status).toBe(303);
+  expect(store.getScope("t-sso")?.approvedBy).toBe("priya");
+});
+
 test("passwords for instance operators only: others are sent to the provider; an existing account can be linked", async () => {
   const operator = await turnOn("operators");
   // A password viewer from before.

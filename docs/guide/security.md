@@ -49,6 +49,25 @@ that asks the provider to check them again. An existing account can be
 linked to the provider from the Sign-in page. Every sign-in, account made,
 access change and settings change is in the action ledger.
 
+## Sessions and API tokens
+
+**Settings → Sessions & tokens** shows where you're signed in (the browser,
+the address, when it was last active) and signs out any one of them, or
+everywhere else at once. Sessions survive a restart of Standing Orders;
+only a hash of each session's cookie is kept. Instance operators can see and
+end everyone's.
+
+Scripts and CI use an **API token** instead of a password:
+`Authorization: Bearer so_…`. A token reads, or acts as its person (files
+and manages work), and never approves anything; it expires in 30, 90 or 365
+days; it is shown once and only its hash is kept. Each request a token makes
+is named in the action ledger. A token outlives a password change and ends
+when its person is removed or their access changes.
+
+Coordinator credentials (`coordinator mint --days`, 90 days unless said)
+and runner tokens (a year from registering; every start registers again)
+expire too.
+
 ## Guessing a password gets nowhere
 
 Five wrong passwords in a row lock that name for 15 minutes, doubling with
