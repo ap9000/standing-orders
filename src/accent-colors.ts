@@ -1,28 +1,32 @@
 /**
  * The accent a person can choose (Settings → Appearance): the signal colour
- * that marks what waits on a person, re-pigmented from Pantone's Colours of
- * the Year. Chart magenta stays the default. A per-browser preference, like
- * the theme: it lives in the person's `so-accent` cookie and never in the
- * database.
+ * that marks what waits on a person. Any colour from the picker, with
+ * Pantone's Colours of the Year as presets; chart magenta stays the default.
+ * A per-browser preference, like the theme: it lives in the person's
+ * `so-accent` cookie (six hex digits) and never in the database.
+ *
+ * Pure and shared: the server derives the tokens it prints for the cookie's
+ * colour, and the picker derives the same tokens to preview a colour live.
  *
  * Each colour keeps its hue and gives up only lightness (and, when needed,
  * chroma to stay in sRGB) until it reads: in light, its text passes 4.5:1 on
- * its own soft wash; in dark, 6:1 on the dark paper. The swatch shows the
- * published colour; the page uses the readable one. Greys and whites (Sand
- * Dollar, Ultimate Gray, Cloud Dancer) are left out: a grey cannot mark what
- * needs a person against a grey interface.
+ * its own soft wash; in dark, 6:1 on the dark paper. The swatch is the chosen
+ * colour; the page uses the readable one.
  *
- * Colour names are Pantone LLC's; the hex values are the published screen
+ * Preset names are Pantone LLC's; the hex values are the published screen
  * approximations. Pantone is not affiliated with Standing Orders.
  */
 
-export type AccentChoice = { id: string; name: string; year: number | null; hex: string; note: string | null };
-type Tokens = { signal: string; hover: string; on: string; soft: string; selection: string };
+export type AccentTokens = { signal: string; hover: string; on: string; soft: string; selection: string };
+export type AccentPreset = { id: string; name: string; year: number | null; hex: string };
 
+export const DEFAULT_ACCENT = "#c0267e";
 const PAPER_LIGHT = "#ffffff", FRAME_LIGHT = "#efefef", PAPER_DARK = "#161616", INK_DARK = "#0a0a0a";
 
-/** Newest first, as Pantone announced them. */
-const COLOURS_OF_THE_YEAR: [number, string, string][] = [
+/** Chart magenta, then Pantone's colours of the year, newest first. The greys and whites (Sand Dollar 2006,
+ * Ultimate Gray 2021, Cloud Dancer 2026) are left out: a grey can't mark what needs a person here. */
+export const ACCENT_PRESETS: AccentPreset[] = ([
+  [null, "Chart magenta", DEFAULT_ACCENT],
   [2025, "Mocha Mousse", "#a47864"], [2024, "Peach Fuzz", "#ffbe98"], [2023, "Viva Magenta", "#bb2649"],
   [2022, "Very Peri", "#6667ab"], [2021, "Illuminating", "#f5df4d"], [2020, "Classic Blue", "#0f4c81"],
   [2019, "Living Coral", "#ff6f61"], [2018, "Ultra Violet", "#5f4b8b"], [2017, "Greenery", "#88b04b"],
@@ -32,9 +36,7 @@ const COLOURS_OF_THE_YEAR: [number, string, string][] = [
   [2008, "Blue Iris", "#5a5b9f"], [2007, "Chili Pepper", "#9b1b30"], [2005, "Blue Turquoise", "#53b0ae"],
   [2004, "Tigerlily", "#e2583e"], [2003, "Aqua Sky", "#7bc4c4"], [2002, "True Red", "#bf1932"],
   [2001, "Fuchsia Rose", "#c74375"], [2000, "Cerulean", "#9bb7d4"],
-];
-/** Left out on purpose; named so the page can say so. */
-export const LEFT_OUT = "Sand Dollar (2006), Ultimate Gray (2021) and Cloud Dancer (2026)";
+] as [number | null, string, string][]).map(([year, name, hex]) => ({ id: name.toLowerCase().replace(/[^a-z0-9]+/g, "-"), name, year, hex }));
 
 // --- colour arithmetic (sRGB ⇄ OKLab), enough to move lightness honestly ---
 type Rgb = [number, number, number];
@@ -63,7 +65,7 @@ function fromOklch(L: number, C: number, H: number): Rgb | null {
 /** The colour at lightness L with its hue kept, giving up chroma only to stay in sRGB. */
 function atLightness(L: number, C: number, H: number): string {
   for (let c = C; c >= 0; c -= 0.002) { const rgb = fromOklch(L, c, H); if (rgb !== null) return toHex(rgb); }
-  return toHex(fromOklch(L, 0, H)!);
+  return toHex(fromOklch(L, 0, H) ?? [L, L, L]);
 }
 const luminance = (hex: string) => { const [r, g, b] = toRgb(hex).map(lin) as Rgb; return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
 export function contrast(a: string, b: string): number {
@@ -72,66 +74,53 @@ export function contrast(a: string, b: string): number {
 }
 const mix = (a: string, b: string, weight: number) => { const [p, q] = [toRgb(a), toRgb(b)]; return toHex(p.map((c, i) => c * weight + q[i]! * (1 - weight)) as Rgb); };
 
-function lightTokens(hex: string): Tokens {
-  const [L0, C, H] = toOklch(hex);
-  let signal = hex;
-  const reads = (one: string) => contrast(one, mix(one, PAPER_LIGHT, 0.12)) >= 4.5 && contrast(one, FRAME_LIGHT) >= 3;
-  for (let L = L0; !reads(signal) && L > 0.05; L -= 0.005) signal = atLightness(L, C, H);
-  const [L1] = toOklch(signal);
-  return {
-    signal, hover: atLightness(Math.max(0.05, L1 - 0.06), C, H),
-    on: contrast(signal, "#ffffff") >= 4.5 ? "#ffffff" : INK_DARK,
-    soft: mix(signal, PAPER_LIGHT, 0.12), selection: mix(signal, PAPER_LIGHT, 0.24),
-  };
+/** "#rrggbb" from "#rgb", "rgb", "#rrggbb" or "rrggbb" (any case); null otherwise. */
+export function normalHex(raw: string): string | null {
+  const value = raw.trim().replace(/^#/, "").toLowerCase();
+  if (/^[0-9a-f]{6}$/.test(value)) return `#${value}`;
+  if (/^[0-9a-f]{3}$/.test(value)) return `#${[...value].map(c => c + c).join("")}`;
+  return null;
 }
-function darkTokens(hex: string): Tokens {
+
+/** The readable tokens a colour resolves to, light and dark. */
+export function accentTokens(hex: string): { light: AccentTokens; dark: AccentTokens } {
   const [L0, C, H] = toOklch(hex);
-  let signal = hex;
-  const reads = (one: string) => contrast(one, PAPER_DARK) >= 6 && contrast(one, mix(one, PAPER_DARK, 0.13)) >= 4.5;
-  for (let L = L0; !reads(signal) && L < 0.98; L += 0.005) signal = atLightness(L, C, H);
-  const [L1] = toOklch(signal);
+  let light = hex;
+  const readsLight = (one: string) => contrast(one, mix(one, PAPER_LIGHT, 0.12)) >= 4.5 && contrast(one, FRAME_LIGHT) >= 3;
+  for (let L = L0; !readsLight(light) && L > 0.02; L -= 0.005) light = atLightness(L, C, H);
+  let dark = hex;
+  const readsDark = (one: string) => contrast(one, PAPER_DARK) >= 6 && contrast(one, mix(one, PAPER_DARK, 0.13)) >= 4.5;
+  for (let L = L0; !readsDark(dark) && L < 0.99; L += 0.005) dark = atLightness(L, C, H);
+  const [Ll] = toOklch(light), [Ld] = toOklch(dark);
   return {
-    signal, hover: atLightness(Math.min(0.98, L1 + 0.06), C, H),
-    on: contrast(signal, INK_DARK) >= 4.5 ? INK_DARK : "#ffffff",
-    soft: mix(signal, PAPER_DARK, 0.13), selection: mix(signal, PAPER_DARK, 0.32),
+    light: { signal: light, hover: atLightness(Math.max(0.02, Ll - 0.06), C, H), on: contrast(light, "#ffffff") >= 4.5 ? "#ffffff" : INK_DARK,
+      soft: mix(light, PAPER_LIGHT, 0.12), selection: mix(light, PAPER_LIGHT, 0.24) },
+    dark: { signal: dark, hover: atLightness(Math.min(0.99, Ld + 0.06), C, H), on: contrast(dark, INK_DARK) >= 4.5 ? INK_DARK : "#ffffff",
+      soft: mix(dark, PAPER_DARK, 0.13), selection: mix(dark, PAPER_DARK, 0.32) },
   };
 }
 
-/** A status hue the accent sits near: the page names it so a person can decide. */
+/** What a person should know before keeping a colour: a grey won't stand out, and a status hue can be mistaken. */
 const STATUS: [string, string, string, string][] = [
   ["#c4320a", "red", "failures", "a failed one"], ["#ab6400", "amber", "warnings", "a warning"],
   ["#218358", "green", "passed checks", "a passed one"], ["#0d74ce", "blue", "running work", "a running one"],
 ];
-function nearStatus(signal: string): string | null {
-  const [, , hue] = toOklch(signal);
-  const near = STATUS.find(([hex]) => { const d = Math.abs(toOklch(hex)[2] - hue); return Math.min(d, 360 - d) < 25; });
+export function accentNote(hex: string): string | null {
+  const [, chroma, hue] = toOklch(accentTokens(hex).light.signal);
+  if (chroma < 0.04) return "Close to grey, so what needs you won't stand out.";
+  const near = STATUS.find(([one]) => { const d = Math.abs(toOklch(one)[2] - hue); return Math.min(d, 360 - d) < 25; });
   return near === undefined ? null : `Close to the ${near[1]} used for ${near[2]}, so a task waiting on you can look like ${near[3]}.`;
 }
 
-const slug = (name: string) => name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-const CHOICES = COLOURS_OF_THE_YEAR.map(([year, name, hex]) => ({ id: slug(name), name, year, hex, light: lightTokens(hex), dark: darkTokens(hex) }));
-
-/** Chart magenta first (the default, no cookie), then the colours of the year. */
-export const ACCENTS: AccentChoice[] = [
-  { id: "signal", name: "Chart magenta", year: null, hex: "#c0267e", note: null },
-  ...CHOICES.map(one => ({ id: one.id, name: one.name, year: one.year, hex: one.hex, note: nearStatus(one.light.signal) })),
-];
-const IDS = new Set(ACCENTS.map(one => one.id));
-
-/** The person's chosen accent from their own cookie; null is chart magenta. */
+/** The person's chosen colour from their own cookie ("#rrggbb"); null is chart magenta. */
 export function pinnedAccent(cookieHeader: string | undefined): string | null {
-  const value = /(?:^|;\s*)so-accent=([a-z0-9-]{1,40})(?:;|$)/.exec(cookieHeader ?? "")?.[1];
-  return value !== undefined && value !== "signal" && IDS.has(value) ? value : null;
-}
-export const isAccent = (id: string) => IDS.has(id);
-
-/** The token overrides per accent, light and dark, for the shared stylesheet. */
-export function accentCss(): string {
-  const block = (t: Tokens) => `--so-signal: ${t.signal}; --so-signal-hover: ${t.hover}; --so-on-signal: ${t.on}; --so-signal-soft: ${t.soft}; --so-selection: ${t.selection};`;
-  return CHOICES.map(one => `  :root[data-accent="${one.id}"] { ${block(one.light)} }\n` +
-    `  @media (prefers-color-scheme: dark) { :root[data-accent="${one.id}"]:not([data-theme="light"]) { ${block(one.dark)} } }\n` +
-    `  :root[data-theme="dark"][data-accent="${one.id}"] { ${block(one.dark)} }`).join("\n");
+  const value = /(?:^|;\s*)so-accent=([0-9a-f]{6})(?:;|$)/.exec(cookieHeader ?? "")?.[1];
+  return value === undefined || `#${value}` === DEFAULT_ACCENT ? null : `#${value}`;
 }
 
-/** For tests: the readable tokens each accent resolves to. */
-export const accentTokens = (id: string) => { const one = CHOICES.find(choice => choice.id === id); return one === undefined ? null : { light: one.light, dark: one.dark }; };
+/** The token overrides for a chosen colour, light and dark, for the page head. */
+export function accentStyle(hex: string): string {
+  const { light, dark } = accentTokens(hex);
+  const block = (t: AccentTokens) => `--so-signal:${t.signal};--so-signal-hover:${t.hover};--so-on-signal:${t.on};--so-signal-soft:${t.soft};--so-selection:${t.selection}`;
+  return `:root{${block(light)}}@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){${block(dark)}}}:root[data-theme="dark"]{${block(dark)}}`;
+}

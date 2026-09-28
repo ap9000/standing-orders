@@ -8519,23 +8519,23 @@ describe("the phone shell (mobile pass): one header row, drawn controls, thumb-s
     expect(css).not.toContain(".badge-running::before");
   });
 
-  test("an accent from the colours of the year re-pigments the signal for this browser only", async () => {
+  test("an accent colour re-pigments the signal for this browser only", async () => {
     const cookie = await login();
     const page = await (await fetch(url("/inbox"), { headers: { cookie } })).text();
     const csrf = /name="csrf" value="([^"]+)"/.exec(page)?.[1] ?? "";
-    const post = (accent: string) => fetch(url("/settings/appearance"), { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf, accent }), redirect: "manual" });
-    const chosen = await post("viva-magenta");
+    const post = (accent: string, quiet = false) => fetch(url("/settings/appearance"), { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf, accent, ...(quiet ? { quiet: "1" } : {}) }), redirect: "manual" });
+    const chosen = await post("#BB2649");
     expect(chosen.status).toBe(303);
-    expect(chosen.headers.get("set-cookie")).toBe("so-accent=viva-magenta; SameSite=Lax; Path=/; Max-Age=31536000");
-    const html = await (await fetch(url("/inbox"), { headers: { cookie: `${cookie}; so-accent=viva-magenta` } })).text();
-    expect(html).toContain('<html lang="en" data-accent="viva-magenta">');
-    const css = await stylesOf(html, base);
-    expect(css).toContain(':root[data-accent="viva-magenta"] { --so-signal: #bb2649;');
-    expect(css).toContain(':root[data-theme="dark"][data-accent="viva-magenta"] { --so-signal:');
-    // An unknown accent is refused, a stale cookie is ignored, and the default clears the cookie.
+    expect(chosen.headers.get("set-cookie")).toBe("so-accent=bb2649; SameSite=Lax; Path=/; Max-Age=31536000");
+    // The picker saves in the background: no page to go back to.
+    expect((await post("009473", true)).status).toBe(204);
+    const html = await (await fetch(url("/inbox"), { headers: { cookie: `${cookie}; so-accent=bb2649` } })).text();
+    expect(html).toMatch(/<link rel="stylesheet" href="[^"]+"><style data-accent="#bb2649">:root\{--so-signal:#bb2649;/);
+    expect(html).toContain(':root[data-theme="dark"]{--so-signal:');
+    // Not a colour: refused; a stale cookie: ignored; the default: clears the cookie.
     expect((await post("not-a-colour")).status).toBe(400);
-    expect(await (await fetch(url("/inbox"), { headers: { cookie: `${cookie}; so-accent=not-a-colour` } })).text()).toContain('<html lang="en">');
-    expect((await post("signal")).headers.get("set-cookie")).toBe("so-accent=; SameSite=Lax; Path=/; Max-Age=0");
+    expect(await (await fetch(url("/inbox"), { headers: { cookie: `${cookie}; so-accent=not-a-colour` } })).text()).not.toContain("data-accent");
+    expect((await post("#c0267e")).headers.get("set-cookie")).toBe("so-accent=; SameSite=Lax; Path=/; Max-Age=0");
   });
 
   test("the header pill names the scope: project with counts when one is open, 'all projects' on the portfolio", async () => {

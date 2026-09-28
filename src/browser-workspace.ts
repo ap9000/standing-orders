@@ -66,10 +66,9 @@ export type BrowserSettingsView = {
   said: string | null;
   tiles: BrowserLink[];
   theme: 'system' | 'light' | 'dark';
-  /** The signal colour chosen for this browser (Settings → Appearance); "signal" is chart magenta. */
+  /** The signal colour chosen for this browser (Settings → Appearance), "#rrggbb"; chart magenta by default. */
   accent: string;
-  accents: { id: string; name: string; year: number | null; hex: string; note: string | null }[];
-  accentsLeftOut: string;
+  accentPresets: { id: string; name: string; year: number | null; hex: string }[];
   permission: { mode: string; canManage: boolean; changed: string | null } | null;
   quality: { mode: string; canManage: boolean; changed: string | null } | null;
   providers: {

@@ -564,13 +564,15 @@ await check("Routines: a standing order is filed, approved with your password, a
 await check("Settings: the theme switches to dark and the accent to Emerald, and both stay", [], async () => {
   await page.goto(`${base}/settings`);
   await Promise.all([page.waitForNavigation(), page.click('form[action="/settings/appearance"] button[value="dark"]')]);
-  await Promise.all([page.waitForNavigation(), page.click('[data-accent-picker] button[value="emerald"]')]);
+  await page.click('[data-accent-picker] button[data-preset="emerald"]');
+  await page.locator("[data-accent-status]", { hasText: "Saved" }).waitFor({ timeout: 10_000 });
   await page.goto(`${base}/chat`);
   if ((await page.locator("html").getAttribute("data-theme")) !== "dark") throw new Error("the theme didn't stay dark");
-  if ((await page.locator("html").getAttribute("data-accent")) !== "emerald") throw new Error("the accent didn't stay Emerald");
+  if ((await page.locator('style[data-accent="#009473"]').count()) !== 1) throw new Error("the accent didn't stay Emerald");
   await page.goto(`${base}/settings`);
   await Promise.all([page.waitForNavigation(), page.click('form[action="/settings/appearance"] button[value="system"]')]);
-  await Promise.all([page.waitForNavigation(), page.click('[data-accent-picker] button[value="signal"]')]);
+  await page.click('[data-accent-picker] button[data-preset="chart-magenta"]');
+  await page.locator("[data-accent-status]", { hasText: "Saved" }).waitFor({ timeout: 10_000 });
 });
 
 await check("Search finds the project and a task", [], async () => {

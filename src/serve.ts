@@ -133,7 +133,7 @@ import { diagnoseTaskDispatch, withDispatchDiagnoses, type DispatchDiagnosis } f
 import { requestTaskStop, resumeTaskStop, taskControlOf, type TaskControlView } from "./task-control.js";
 import { WorktreePool } from "./worktree.js";
 import { GEIST_SANS_400, GEIST_SANS_500, GEIST_SANS_600, GEIST_MONO_400, GEIST_MONO_500, GEIST_MONO_600 } from "./fonts.js";
-import { ACCENTS, LEFT_OUT, accentCss, isAccent, pinnedAccent } from "./accent-colors.js";
+import { ACCENT_PRESETS, DEFAULT_ACCENT, accentStyle, normalHex, pinnedAccent } from "./accent-colors.js";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { UPDATE_PAUSED, updateAdmissionPaused } from "./desktop-update-gate.js";
 import { createHash, createHmac, randomBytes, timingSafeEqual, randomUUID } from "node:crypto";
@@ -6166,12 +6166,15 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (url.pathname === "/settings/appearance") {
       // A per-browser preference, not a shared setting: it lives in this
       // person's own cookie and never in the database.
-      const accent = body.get("accent");
-      if (accent !== null) {
-        if (!isAccent(accent)) return refuse(response, who, 400, "Choose one of the accent colours.", "/settings");
-        response.setHeader("Set-Cookie", accent === "signal"
+      const accentField = body.get("accent");
+      if (accentField !== null) {
+        const accent = normalHex(accentField);
+        if (accent === null) return refuse(response, who, 400, "Choose a colour as six hex digits, like #c0267e.", "/settings");
+        response.setHeader("Set-Cookie", accent === DEFAULT_ACCENT
           ? "so-accent=; SameSite=Lax; Path=/; Max-Age=0"
-          : `so-accent=${accent}; SameSite=Lax; Path=/; Max-Age=31536000`);
+          : `so-accent=${accent.slice(1)}; SameSite=Lax; Path=/; Max-Age=31536000`);
+        // The picker saves in the background as the colour settles; a plain form post goes back.
+        if (body.get("quiet") === "1") { response.writeHead(204); response.end(); return; }
         return redirect(response, safeReturn(body.get("return") ?? "/settings"));
       }
       const theme = body.get("theme") ?? "";
@@ -10858,8 +10861,6 @@ ${THEME_DARK}
     color-scheme: dark;
 ${THEME_DARK}
   }
-  /* A chosen accent (Settings → Appearance) re-pigments the signal only. */
-${accentCss()}
   * { box-sizing: border-box; }
   ::selection { background: var(--so-selection); color: var(--so-ink); }
   ::placeholder { color: var(--muted-foreground); }
@@ -13791,7 +13792,7 @@ function shell(
     ...(options.live?.fallbackRefresh !== true
       ? []
       : [`<noscript><meta http-equiv="refresh" content="30"><style>@view-transition { navigation: none; }</style></noscript>`]),
-    `<title>${escape(title)}</title><link rel="stylesheet" href="${WORKSPACE_STYLE.path}"></head><body>${DESIGN_CONTRACT}`,
+    `<title>${escape(title)}</title><link rel="stylesheet" href="${WORKSPACE_STYLE.path}">${accentHead()}</head><body>${DESIGN_CONTRACT}`,
   ].join("\n");
   const tail =
     options.live === undefined
@@ -17912,9 +17913,13 @@ export function pinnedTheme(cookieHeader: string | undefined): "light" | "dark" 
   return value === "light" || value === "dark" ? value : null;
 }
 function themeAttribute(): string {
-  const store = requestContext.getStore();
-  const theme = store?.theme ?? null, accent = store?.accent ?? null;
-  return (theme === null ? "" : ` data-theme="${theme}"`) + (accent === null ? "" : ` data-accent="${accent}"`);
+  const theme = requestContext.getStore()?.theme ?? null;
+  return theme === null ? "" : ` data-theme="${theme}"`;
+}
+/** A chosen accent (Settings → Appearance) re-pigments the signal tokens only, after the shared stylesheet. */
+function accentHead(): string {
+  const accent = requestContext.getStore()?.accent ?? null;
+  return accent === null ? "" : `<style data-accent="${accent}">${accentStyle(accent)}</style>`;
 }
 const requestContext = new AsyncLocalStorage<{ sso?: { label: string; fresh: boolean } | undefined; refusal?: (response: ServerResponse, status: number, body: string) => void; theme?: "light" | "dark" | null; accent?: string | null; csrf: string; returnTo: string; actor?: string; createdTask?: string; browser?: boolean; workspaceRead?: boolean; workspaceRequest?: string | null; workCounts?: ReturnType<typeof workCountsByProject>; workCrew?: { project: string | null; page: WorkIndexPage }; workspaceValidator?: { key: string; revision: string; expiresAt: number; etag: string } }>();
 
@@ -22842,9 +22847,8 @@ function settingsPage(
     said: problem,
     tiles: SETTINGS_TILES.map(([href, label]) => ({ href, label })),
     theme,
-    accent: requestContext.getStore()?.accent ?? "signal",
-    accents: ACCENTS,
-    accentsLeftOut: LEFT_OUT,
+    accent: requestContext.getStore()?.accent ?? DEFAULT_ACCENT,
+    accentPresets: ACCENT_PRESETS,
     permission: permissionDefault === null ? null : { mode: permissionDefault.mode, canManage: permissionDefault.canManage && csrf !== "", changed: permissionDefault.updatedAt === null ? null : `Changed ${when(permissionDefault.updatedAt)}${permissionDefault.updatedBy === null ? "" : ` by ${permissionDefault.updatedBy}`}` },
     quality: qualityDefault === null ? null : { mode: qualityDefault.mode, canManage: qualityDefault.canManage && csrf !== "", changed: qualityDefault.updatedAt === null ? null : `Changed ${when(qualityDefault.updatedAt)}${qualityDefault.updatedBy === null ? "" : ` by ${qualityDefault.updatedBy}`}` },
     providers: providerKeys === null || csrf === "" ? null : providerKeys.map(one => {
