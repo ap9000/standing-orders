@@ -32,5 +32,5 @@ test.each([102, -102])("v%s: the ledger written before is sealed whole on first 
   expect(store.ledgerChain()).toMatchObject({ ok: true, entries: before, unsealed: 0, checkpoints: 0 });
   expect(mintCoordinator(store, { name: "after", repos: ["/repo/a"], by: "alex", now }).ok).toBe(true);
   expect(store.ledgerChain()).toMatchObject({ ok: true, entries: before + 1 });
-  expect(store.ledgerCheckpoint("alex", now)?.through).toBe(before + 1);
+  expect(store.ledgerCheckpoint("alex", now)).toMatchObject({ through: before + 1 });
 });

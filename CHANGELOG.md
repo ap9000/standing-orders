@@ -6,7 +6,8 @@
   is sealed with the one before it, and the ledger page (or `ledger verify`)
   says whether it still verifies, or the first entry that was changed,
   removed or added. Instance operators make checkpoints to copy off the
-  machine (`ledger checkpoint`); `ledger verify --checkpoint` compares one.
+  machine (`ledger checkpoint`); `ledger verify --checkpoint` compares one,
+  and is what proves history before it wasn't rewritten.
   Every task has an evidence pack, as a printable page and JSON: who filed
   it, the approved terms and approvers, the rules in force, agents and
   cost, changed files, checks, completion, publication and its sealed

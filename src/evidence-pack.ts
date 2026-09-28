@@ -13,18 +13,19 @@
 import { createHash } from "node:crypto";
 import { rulesWords, type Filer } from "./approval-policy.js";
 import { assignmentOf, type AssignmentAccess, type AssignmentSnapshot } from "./assignment.js";
-import type { LedgerEntry } from "./action-ledger.js";
 import { projectName } from "./project.js";
 import { changedFilesOf } from "./result-completion.js";
-import type { Store } from "./store.js";
+import type { SealedLedgerEntry, Store } from "./store.js";
 import type { LedgerChainReport } from "./ledger-chain.js";
 
 export const EVIDENCE_PACK_FORMAT = "standing-orders/evidence-pack/v1";
 /** How to recheck one entry's seal, for whoever reads the JSON. */
 export const SEAL_RECIPE = 'hash = sha256(prev + "\\n" + JSON.stringify([id, at, actor, repo, taskId, runId, action, outcome, source, detail]))';
+/** A pack carries up to this many of the task's own entries, and the newest this many requests made about it. */
 const MAX_ENTRIES = 5000;
+const MAX_REQUESTS = 500;
 
-type SealedEntry = LedgerEntry & { seal: { prev: string; hash: string } | null };
+type SealedEntry = SealedLedgerEntry;
 
 export type EvidencePack = {
   format: typeof EVIDENCE_PACK_FORMAT;
@@ -62,9 +63,10 @@ export type EvidencePack = {
   totals: { runs: number; costUsd: number; tokensIn: number; tokensOut: number };
   ledger: {
     entries: SealedEntry[];
-    /** More entries exist than a pack carries; the ledger export has them all. */
+    /** More entries (or requests) exist than a pack carries; the ledger export has them all. */
     truncated: boolean;
-    chain: { ok: boolean; entries: number; through: number | null; head: string; problem: string | null };
+    /** `checkedAt`: when the whole chain was last walked (entries since were checked as they came). */
+    chain: { ok: boolean; entries: number; through: number | null; head: string; problem: string | null; checkedAt: string | null };
     checkpoint: { through: number; hash: string; at: string } | null;
     recipe: string;
   };
@@ -114,8 +116,7 @@ export function evidencePack(store: Store, taskId: string, access: AssignmentAcc
   const assignment = assignmentOf(store, family.current.id, now, access, evidenceRoot);
   const receipt = assignment?.receipt ?? null;
   const runIds = versions.flatMap(version => version.runs.map(run => run.id));
-  const entries = store.sealedLedgerEntries({ taskIds: family.versions.map(version => version.id), runIds, limit: MAX_ENTRIES });
-  const truncated = entries.length > MAX_ENTRIES;
+  const { entries, truncated } = store.taskLedgerEntries({ taskIds: family.versions.map(version => version.id), runIds }, { entries: MAX_ENTRIES, requests: MAX_REQUESTS });
   const allRuns = versions.flatMap(version => version.runs);
   const sum = (pick: (run: (typeof allRuns)[number]) => number | null) => allRuns.reduce((total, run) => total + (pick(run) ?? 0), 0);
   const latest = store.ledgerCheckpoints(1)[0] ?? null;
@@ -139,9 +140,9 @@ export function evidencePack(store: Store, taskId: string, access: AssignmentAcc
     },
     totals: { runs: allRuns.length, costUsd: Math.round(sum(run => run.costUsd) * 1e6) / 1e6, tokensIn: sum(run => run.tokensIn), tokensOut: sum(run => run.tokensOut) },
     ledger: {
-      entries: entries.slice(0, MAX_ENTRIES),
+      entries,
       truncated,
-      chain: { ok: chain.ok, entries: chain.entries, through: chain.through, head: chain.head, problem: chain.problem?.what ?? null },
+      chain: { ok: chain.ok, entries: chain.entries, through: chain.through, head: chain.head, problem: chain.problem?.what ?? null, checkedAt: chain.checkedAt },
       checkpoint: latest === null ? null : { through: latest.through, hash: latest.hash, at: latest.at },
       recipe: SEAL_RECIPE,
     },
@@ -168,39 +169,55 @@ export type LedgerExport = {
   checkpoint: EvidencePack["ledger"]["checkpoint"];
   recipe: string;
   entries: SealedEntry[];
-  /** An evidence pack for every task the range's entries name (as its first version). */
+  /** An evidence pack for every task the range's entries name. */
   packs: EvidencePack[];
   truncated: { entries: boolean; packs: boolean };
 };
 
-const EXPORT_ENTRIES = 50_000;
+const EXPORT_ENTRIES = 100_000;
 const EXPORT_PACKS = 200;
 
-/** Every ledger entry in [from, to) that `who` may read, sealed, with a pack for each task they name. */
-export function ledgerExport(store: Store, range: { from: string; to: string }, scope: { repos: readonly string[] | null; instance: boolean }, access: AssignmentAccess, who: string, now: Date, evidenceRoot: string): LedgerExport {
+/** Every ledger entry in [from, to) that `who` may read, sealed, with a pack for each task they name: one JSON
+ * document (a `LedgerExport`), a piece at a time (a page of entries, or one pack), so an export never holds
+ * the whole range at once. */
+export function* ledgerExportChunks(store: Store, range: { from: string; to: string }, scope: { repos: readonly string[] | null; instance: boolean }, access: AssignmentAccess, who: string, now: Date, evidenceRoot: string): Generator<string, void, undefined> {
   const chain = store.ledgerChain();
-  const entries = store.sealedLedgerEntries({ from: range.from, to: range.to, repos: scope.repos, instance: scope.instance, limit: EXPORT_ENTRIES });
-  const kept = entries.slice(0, EXPORT_ENTRIES);
-  const packs: EvidencePack[] = [];
-  const seen = new Set<string>();
-  let morePacks = false;
-  for (const taskId of new Set(kept.flatMap(one => one.taskId === null ? [] : [one.taskId]))) {
-    if (seen.has(taskId)) continue;
-    const family = store.taskFamilyOf(taskId, access.repos, access.principal === "operator" && access.includeUnplaced === true);
-    if (family === null || seen.has(family.root.id)) { seen.add(taskId); continue; }
-    for (const version of family.versions) seen.add(version.id);
-    seen.add(family.root.id);
-    if (packs.length === EXPORT_PACKS) { morePacks = true; break; }
-    const pack = evidencePack(store, family.root.id, access, who, now, evidenceRoot, chain);
-    if (pack !== null) packs.push(pack);
-  }
   const latest = store.ledgerCheckpoints(1)[0] ?? null;
-  return {
+  const head = {
     format: "standing-orders/ledger-export/v1", generatedAt: now.toISOString(), generatedBy: who, from: range.from, to: range.to,
-    chain: { ok: chain.ok, entries: chain.entries, through: chain.through, head: chain.head, problem: chain.problem?.what ?? null },
-    checkpoint: latest === null ? null : { through: latest.through, hash: latest.hash, at: latest.at },
-    recipe: SEAL_RECIPE, entries: kept, packs, truncated: { entries: entries.length > EXPORT_ENTRIES, packs: morePacks },
+    chain: { ok: chain.ok, entries: chain.entries, through: chain.through, head: chain.head, problem: chain.problem?.what ?? null, checkedAt: chain.checkedAt },
+    checkpoint: latest === null ? null : { through: latest.through, hash: latest.hash, at: latest.at }, recipe: SEAL_RECIPE,
   };
+  yield `${JSON.stringify(head).slice(0, -1)},"entries":[`;
+  const named: string[] = [];
+  const seen = new Set<string>();
+  let after = 0, written = 0, moreEntries = false;
+  for (;;) {
+    const page = store.sealedLedgerEntries({ ...range, repos: scope.repos, instance: scope.instance, after, limit: 1000 });
+    const kept = page.slice(0, Math.min(1000, EXPORT_ENTRIES - written));
+    if (kept.length > 0) yield `${written === 0 ? "" : ","}${kept.map(one => JSON.stringify(one)).join(",")}`;
+    written += kept.length;
+    for (const one of kept) if (one.taskId !== null && !seen.has(one.taskId)) { seen.add(one.taskId); named.push(one.taskId); }
+    if (page.length <= 1000) break;
+    if (written >= EXPORT_ENTRIES) { moreEntries = true; break; }
+    after = kept.at(-1)!.id;
+  }
+  yield `],"packs":[`;
+  const packed = new Set<string>();
+  let packs = 0, morePacks = false;
+  for (const taskId of named) {
+    if (packed.has(taskId)) continue;
+    const family = store.taskFamilyOf(taskId, access.repos, access.principal === "operator" && access.includeUnplaced === true);
+    if (family === null || packed.has(family.root.id)) { packed.add(taskId); continue; }
+    for (const version of family.versions) packed.add(version.id);
+    packed.add(family.root.id);
+    if (packs === EXPORT_PACKS) { morePacks = true; break; }
+    const pack = evidencePack(store, family.root.id, access, who, now, evidenceRoot, chain);
+    if (pack === null) continue;
+    yield `${packs === 0 ? "" : ","}${JSON.stringify(pack)}`;
+    packs++;
+  }
+  yield `],"truncated":${JSON.stringify({ entries: moreEntries, packs: morePacks })}}`;
 }
 
 // ---- The printable page -----------------------------------------------------
@@ -227,7 +244,7 @@ export const EVIDENCE_PACK_CSS = `.evidence-pack{max-width:960px;min-width:0}.ev
 export function evidencePackHtml(pack: EvidencePack): string {
   const task = pack.task;
   const chain = pack.ledger.chain.ok
-    ? `<p class="evidence-chain ok" data-evidence-chain="ok"><strong>Ledger chain verified</strong> · ${pack.ledger.chain.entries} entries · head ${short(pack.ledger.chain.head)}${pack.ledger.checkpoint === null ? "" : ` · last checkpoint at entry #${pack.ledger.checkpoint.through}`}</p>`
+    ? `<p class="evidence-chain ok" data-evidence-chain="ok"><strong>Ledger chain verified</strong> · ${pack.ledger.chain.entries} entries · head ${short(pack.ledger.chain.head)}${pack.ledger.chain.checkedAt === null ? "" : ` · checked in full ${when(pack.ledger.chain.checkedAt)}`}${pack.ledger.checkpoint === null ? "" : ` · last checkpoint at entry #${pack.ledger.checkpoint.through}`}</p>`
     : `<p class="evidence-chain problem" role="alert" data-evidence-chain="broken"><strong>Ledger chain broken</strong> · ${e(pack.ledger.chain.problem)}</p>`;
   const versions = pack.versions.map((version, index) => {
     const scope = version.scope;
@@ -266,10 +283,11 @@ export function evidencePackHtml(pack: EvidencePack): string {
     `</dl></section>`;
   const decisions = pack.ledger.entries.filter(one => one.source !== "request");
   const requests = pack.ledger.entries.length - decisions.length;
+  const askedWords = `${requests} ${requests === 1 ? "request" : "requests"} made through the console (accepted or refused)`;
   const ledger = `<section><h2>Ledger</h2>${decisions.length === 0 ? `<p class="meta">No entries.</p>` :
     `<div class="evidence-table"><table><thead><tr><th>#</th><th>Time</th><th>Who</th><th>What</th><th>Outcome</th><th>Seal</th></tr></thead><tbody>` +
     decisions.map(one => `<tr data-ledger-id="${one.id}"><td>${one.id}</td><td>${when(one.at)}</td><td>${e(one.actor)}</td><td>${e(one.action)}${one.detail ? `<br><span class="meta">${e(one.detail)}</span>` : ""}</td><td>${e(one.outcome)}</td><td>${short(one.seal?.hash ?? null)}</td></tr>`).join("") +
-    `</tbody></table></div>`}${requests > 0 ? `<p class="meta">Plus ${requests} page ${requests === 1 ? "request" : "requests"}, listed in the JSON.</p>` : ""}${pack.ledger.truncated ? `<p class="meta">This pack holds the first ${pack.ledger.entries.length} entries; the ledger export has the rest.</p>` : ""}</section>`;
+    `</tbody></table></div>`}${requests > 0 ? `<p class="meta">Plus ${askedWords}, listed in the JSON.</p>` : ""}${pack.ledger.truncated ? `<p class="meta">This pack holds ${decisions.length} of the task's entries and the newest ${requests} requests; the ledger export has the rest.</p>` : ""}</section>`;
   const cost = pack.totals.runs === 0 ? "None ran" : `${pack.totals.runs} ${pack.totals.runs === 1 ? "run" : "runs"} · ${usd(pack.totals.costUsd)}`;
   // The rules as they stand, and each change to them (the approval above was under whichever applied then).
   const rules = pack.rules === null ? "None" : `${e(pack.rules.now)}${pack.rules.changes.length === 0 ? "" :

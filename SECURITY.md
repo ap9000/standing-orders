@@ -36,12 +36,13 @@ user. What it promises:
   operator changes the rules, with a step-up, and the action ledger keeps
   every change and every approval.
 - **An audit trail you can check.** Every action ledger entry is sealed
-  with a hash of the entry before it, so changing, removing or slipping in
-  an entry breaks the chain from that point; `standing-orders ledger verify`
-  (and the ledger page) says where. An instance operator makes a checkpoint
-  (`ledger checkpoint`, or **Make a checkpoint**) to copy off the machine;
-  `ledger verify --checkpoint <it>` then proves the history up to it wasn't
-  rewritten, even by someone who rebuilt the whole chain. Each task has an
+  with a hash of the entry before it, and `standing-orders ledger verify`
+  (or the ledger page) walks the chain and names the first entry that was
+  changed, removed or added. What that proves: history before a
+  checkpoint you copied off the machine wasn't touched (an instance
+  operator makes one with `ledger checkpoint` or **Make a checkpoint**;
+  `ledger verify --checkpoint <it>` checks it), and, while the console
+  runs, history it has already checked isn't rewritten. Each task has an
   evidence pack (the task page's **Evidence pack**, or `task evidence`):
   who filed it, the approved terms and approvers, the rules in force, the
   agents and their cost, the changed files, the checks, completion and
@@ -51,10 +52,12 @@ user. What it promises:
 
 Known limits:
 
-- The ledger chain proves the ledger wasn't edited after it was sealed
-  (within a worker pass, or when anything reads it). Someone who can write
-  the database file can rewrite history and rebuild the chain; only a
-  checkpoint kept somewhere else catches that, so copy them off the machine.
+- The chain has no secret key. Someone who can edit the database file can
+  rewrite history after the last checkpoint kept off the machine, and the
+  next pass reseals it for them; checkpoints kept in the same database
+  don't stop that. Copy checkpoints off the machine (streaming them out is
+  the next release). Times are as written: an entry added later with an
+  earlier time isn't caught.
 - Approval rules bind the people the console knows about. Tasks filed from
   the command line or before schema 102 name no filer, and turning a rule on
   doesn't withdraw approvals already given.

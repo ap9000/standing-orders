@@ -1,7 +1,7 @@
 import { maybeTriggerRepair } from "./dispose.js";
 import { parseProtectedPaths } from "./approval-policy.js";
 import { rulesSummary } from "./approval-rules-ui.js";
-import { evidencePack, exportDay, ledgerExport, standaloneEvidenceHtml } from "./evidence-pack.js";
+import { evidencePack, exportDay, ledgerExportChunks, standaloneEvidenceHtml, type LedgerExport } from "./evidence-pack.js";
 import { matchesOutsideCheckpoint } from "./ledger-chain.js";
 import { logEvent } from "./log.js";
 import { advanceFlows } from "./flow-engine.js";
@@ -11776,7 +11776,8 @@ async function ledgerCommand(positional: readonly string[], flags: Map<string, s
   }
   const store = context.store;
   if (action === "verify") {
-    const report = store.ledgerChain();
+    // The command walks the whole chain, every time.
+    const report = store.ledgerChain({ full: true });
     const copied = text(flags, "checkpoint");
     const outside = copied === undefined ? null : matchesOutsideCheckpoint(store.handle, copied);
     const inside = store.ledgerCheckpoints(1)[0] ?? null;
@@ -11797,6 +11798,7 @@ async function ledgerCommand(positional: readonly string[], flags: Map<string, s
     }
     const made = store.ledgerCheckpoint(acting.name, context.clock());
     if (made === null) return fail(context.write, context.json, command, "empty", "The ledger has no entries yet.", EXIT.refused);
+    if ("problem" in made) return fail(context.write, context.json, command, "broken", `No checkpoint: the chain doesn't verify (${made.problem}).`, EXIT.failed);
     return succeed(context.write, context.json, command, { through: made.through, hash: made.hash, checkpoint: `${made.through}:${made.hash}` },
       () => [`${made.through}:${made.hash}`, "Copy this somewhere outside this machine; ledger verify --checkpoint <it> proves nothing before it was rewritten."]);
   }
@@ -11806,10 +11808,11 @@ async function ledgerCommand(positional: readonly string[], flags: Map<string, s
   if (to <= from) return fail(context.write, context.json, command, "usage", "--to is on or after --from.", EXIT.usage);
   // Reading the database file needs no login, so the ledger names the road, not a person it can't vouch for.
   const who = "command line";
-  const bundle = ledgerExport(store, { from, to }, { repos: null, instance: true }, { principal: "operator", repos: null, includeUnplaced: true }, who, context.clock(), context.evidenceRoot);
+  const content = [...ledgerExportChunks(store, { from, to }, { repos: null, instance: true }, { principal: "operator", repos: null, includeUnplaced: true }, who, context.clock(), context.evidenceRoot)].join("");
+  const bundle = JSON.parse(content) as LedgerExport;
   store.recordAction({ at: context.clock().toISOString(), actor: who, repo: null, taskId: null, runId: null, action: "ledger exported", outcome: "exported", source: "access",
     detail: `${from.slice(0, 10)} to ${last.slice(0, 10)} · ${bundle.entries.length} entries · ${bundle.packs.length} evidence packs` });
-  return writeOut(context, command, text(flags, "out"), `${JSON.stringify(bundle)}\n`, { entries: bundle.entries.length, packs: bundle.packs.length, chainOk: bundle.chain.ok },
+  return writeOut(context, command, text(flags, "out"), `${content}\n`, { entries: bundle.entries.length, packs: bundle.packs.length, chainOk: bundle.chain.ok },
     `${bundle.entries.length} ledger entries and ${bundle.packs.length} evidence packs (chain ${bundle.chain.ok ? "verified" : "BROKEN"}).`, { export: bundle });
 }
 

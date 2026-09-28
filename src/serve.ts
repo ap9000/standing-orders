@@ -62,7 +62,7 @@ import { assignmentCardOf, assignmentStatusOf, assignmentSummaryHtml, assignment
 import { assignmentPresentationOf, historicalAssessmentReason, shortenedMaterialReason } from './assignment-presentation.js';
 import type { TaskFamily } from "./store.js";
 import { ledgerBody } from "./ledger-view.js";
-import { EVIDENCE_PACK_CSS, evidencePack, evidencePackHtml, exportDay, ledgerExport } from "./evidence-pack.js";
+import { EVIDENCE_PACK_CSS, evidencePack, evidencePackHtml, exportDay, ledgerExportChunks } from "./evidence-pack.js";
 import { CHAT_CONTINUITY_SCRIPT } from "./chat-continuity.js";
 import { chatWorkingHtml, chatActivityDetailsHtml, completedWorkHtml, CHAT_POLISH_CSS } from "./chat-polish.js";
 import { TRANSITIONS_CSS } from "./transitions-recipes.js";
@@ -2394,7 +2394,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const report = store.ledgerChain();
       const operator = who.via === "cookie" && store.isInstanceOperator(who.name);
       const latest = store.ledgerCheckpoints(1)[0] ?? null;
-      const chainView = { ok: report.ok, entries: report.entries, through: report.through, head: report.head, unsealed: report.unsealed, problem: report.problem,
+      const chainView = { ok: report.ok, entries: report.entries, through: report.through, head: report.head, unsealed: report.unsealed, problem: report.problem, checkedAt: report.checkedAt,
         latest: operator && latest !== null ? latest : null, csrf: operator ? who.session.csrf : null, today: now.toISOString().slice(0, 10) };
       const rows = store.actionLedger({ ...query, ...(before === null ? {} : { before: Number(before) }), limit: 51 });
       if (url.searchParams.get("format") === "json") return respond(response, 200, "application/json; charset=utf-8", JSON.stringify({ chain: { ok: report.ok, entries: report.entries, through: report.through, head: report.head, problem: report.problem }, entries: rows.slice(0, 50), nextBefore: rows.length > 50 ? rows[49]!.id : null }));
@@ -2842,12 +2842,24 @@ export function createDecisionServer(options: ServeOptions): Server {
       const to = new Date(Date.parse(last) + 86_400_000).toISOString();
       if (to <= from || Date.parse(to) - Date.parse(from) > 366 * 86_400_000) return refuse(response, who, 400, "Choose a range of a year or less, ending on or after its start.", "/ledger");
       const access = { principal: "operator" as const, repos: admissionList(), includeUnplaced: visible(null) };
-      const bundle = ledgerExport(store, { from, to }, { repos: access.repos, instance: store.isInstanceOperator(who.name) }, access, who.name, now, evidenceRoot);
       store.recordAction({ at: now.toISOString(), actor: who.name, repo: null, taskId: null, runId: null, action: "ledger exported", outcome: "exported", source: "access",
-        detail: `${from.slice(0, 10)} to ${last.slice(0, 10)} · ${bundle.entries.length} entries · ${bundle.packs.length} evidence packs` });
+        detail: `${from.slice(0, 10)} to ${last.slice(0, 10)}` });
+      // A piece at a time (a page of entries, or one pack), yielding between them, and stopping if the reader's access changes.
+      const generation = store.accountOf(who.name)?.generation;
+      const pieces = ledgerExportChunks(store, { from, to }, { repos: access.repos, instance: store.isInstanceOperator(who.name) }, access, who.name, now, evidenceRoot);
+      async function* chunks() {
+        for (const piece of pieces) {
+          const current = store.accountOf(who.name);
+          if (current === null || current.revokedAt !== null || current.generation !== generation) throw new Error("Ledger access changed during export");
+          yield piece;
+          await yieldEventLoop();
+        }
+      }
       response.writeHead(200, { "content-type": "application/json; charset=utf-8", "content-disposition": `attachment; filename="standing-orders-audit-${from.slice(0, 10)}-to-${last.slice(0, 10)}.json"`,
         "cache-control": "no-store", "x-content-type-options": "nosniff" });
-      return void response.end(JSON.stringify(bundle));
+      try { await pipeline(Readable.from(chunks()), response); }
+      catch { response.destroy(); }
+      return;
     }
 
     if (url.pathname === "/runs") {
@@ -6186,6 +6198,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (url.pathname === "/ledger/checkpoint") {
       if (who.via !== "cookie" || !store.isInstanceOperator(who.name)) return refuse(response, who, 403, "An instance operator makes ledger checkpoints.", "/ledger");
       const made = store.ledgerCheckpoint(who.name, now);
+      if (made !== null && "problem" in made) return refuse(response, who, 409, `No checkpoint was made: the chain doesn't verify (${made.problem}).`, "/ledger");
       return redirect(response, made === null ? "/ledger" : `/ledger?checkpoint=${made.through}`);
     }
     // v102: an instance operator changes a project's approval rules, with a step-up; the ledger keeps before → after.

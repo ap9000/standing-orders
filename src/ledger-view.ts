@@ -10,6 +10,8 @@ const EVENT_KINDS = [["work", "Work"], ["request", "Requests"], ["access", "Acce
 export type LedgerChainView = {
   ok: boolean; entries: number; through: number | null; head: string; unsealed: number;
   problem: { id: number | null; what: string } | null;
+  /** When the whole chain was last walked. */
+  checkedAt: string | null;
   latest: { through: number; hash: string; at: string } | null;
   csrf: string | null;
   /** Today (UTC, YYYY-MM-DD): the audit export's default range ends here. */
@@ -18,7 +20,7 @@ export type LedgerChainView = {
 function chainHtml(chain: LedgerChainView): string {
   const html = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
   const status = chain.ok
-    ? `<p class="ledger-chain ok" data-ledger-chain="ok"><strong>Chain verified</strong> · ${chain.entries} entries through #${chain.through ?? 0} · head <code>${html(chain.head.slice(0, 16))}…</code></p>`
+    ? `<p class="ledger-chain ok" data-ledger-chain="ok"><strong>Chain verified</strong> · ${chain.entries} entries through #${chain.through ?? 0} · head <code>${html(chain.head.slice(0, 16))}…</code>${chain.checkedAt === null ? "" : ` · checked in full ${html(chain.checkedAt.slice(11, 16))} UTC`}</p>`
     : `<p class="ledger-chain problem" role="alert" data-ledger-chain="broken"><strong>Chain broken</strong> · ${html(chain.problem?.what ?? "the chain doesn't verify")}</p>`;
   const latest = chain.latest === null ? "" : `<p class="meta ledger-checkpoint">Latest checkpoint (${html(chain.latest.at.slice(0, 16).replace("T", " "))} UTC), copy it somewhere outside this machine: <code class="ledger-checkpoint-value">${chain.latest.through}:${html(chain.latest.hash)}</code></p>`;
   const make = chain.csrf === null ? "" : `<form method="post" action="/ledger/checkpoint" class="ledger-checkpoint-form"><input type="hidden" name="csrf" value="${html(chain.csrf)}"><button type="submit">Make a checkpoint</button></form>`;

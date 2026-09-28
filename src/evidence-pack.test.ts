@@ -142,8 +142,32 @@ test("the printable page shows the same facts, with no script, and the task page
   store.handle.exec("DROP TRIGGER action_ledger_no_update");
   const first = store.handle.prepare("SELECT MIN(id) AS id FROM action_ledger WHERE task_id = ?").get(id)!["id"];
   store.handle.prepare("UPDATE action_ledger SET actor = 'mallory' WHERE id = ?").run(first);
+  // Page views check what's new; the next whole walk (here, asked for) finds the old entry changed, and the pages say so from then on.
+  expect(store.ledgerChain({ full: true }).ok).toBe(false);
   expect(await page(alex, `/t/${id}/evidence`)).toContain('data-evidence-chain="broken"');
   expect(((await (await get(alex, `/t/${id}/evidence?format=json`)).json()) as EvidencePack).ledger.chain.ok).toBe(false);
+});
+
+test("requests made about a task before it existed, or a flood of them since, never push its own entries out", async () => {
+  const at = new Date().toISOString();
+  const forged = (fields: { repo?: string | null; taskId?: string | null; runId?: number | null; outcome: string }) =>
+    store.recordAction({ at, actor: "kim", repo: fields.repo ?? null, taskId: fields.taskId ?? null, runId: fields.runId ?? null, action: "task approve", outcome: fields.outcome, source: "request" });
+  // Before the task exists: its id (a slug of its title) and the next run's number are easy to guess.
+  for (let i = 0; i < 50; i++) { forged({ taskId: "rotate-the-signing-key", outcome: "refused" }); forged({ runId: 1, outcome: "refused" }); }
+  const { id, run } = await approvedBuild();
+  expect(id).toBe("rotate-the-signing-key");
+  // After it exists: more than a pack carries.
+  for (let i = 0; i < 600; i++) forged({ repo: REPO, taskId: id, outcome: "refused" });
+  const alex = await signIn("alex");
+  const pack = await (await get(alex, `/t/${id}/evidence?format=json`)).json() as EvidencePack;
+  const own = pack.ledger.entries.filter(one => one.source !== "request");
+  expect(own.map(one => one.action)).toEqual(expect.arrayContaining(["task registered", "task filed", "scope approved", "run started", "run finished"]));
+  expect(pack.ledger.entries.filter(one => one.source === "request")).toHaveLength(500);
+  expect(pack.ledger.truncated).toBe(true);
+  // Nothing from before it existed, and nothing named only by its run's number from a request.
+  expect(pack.ledger.entries.some(one => one.repo === null && one.source === "request")).toBe(false);
+  expect(pack.ledger.entries.filter(one => one.runId === run).every(one => one.source !== "request" || one.taskId === id)).toBe(true);
+  expect(await page(alex, `/t/${id}/evidence`)).toContain("the newest 500 requests");
 });
 
 test("only people who can see the task get its pack", async () => {

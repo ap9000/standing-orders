@@ -94,7 +94,7 @@ import { normalizeProjectAccess, projectAccessAllows, readProjectAccess, type Pr
 import { LEDGER_SCHEMA, LEDGER_TABLE, LEDGER_V54_COLUMNS, LEDGER_V54_TABLE, installLedgerTriggers, type LedgerEntry } from "./action-ledger.js";
 import { PLAN_AUTO_SCHEMA } from "./plan-auto.js";
 import { RECIPE_SCHEMA } from "./recipes.js";
-import { LEDGER_CHAIN_SCHEMA, sealLedger, verifyLedgerChain, type LedgerChainReport } from "./ledger-chain.js";
+import { LEDGER_CHAIN_SCHEMA, sealLedger, verifyLedgerChain, type LedgerChainReport, type VerifiedHead } from "./ledger-chain.js";
 import { NO_RULES, filerFor, isProtectedWork, protectedChanges, rulesWords, type ApprovalGate, type ApprovalRules, type ApproverKind, type Filer, type FilerKind } from "./approval-policy.js";
 
 // v60 fenced older readers before the chat action cards; v61 adds notification
@@ -135,6 +135,8 @@ import { NO_RULES, filerFor, isProtectedWork, protectedChanges, rulesWords, type
 // v100 lets people sign in with the organisation's identity provider: each provider identity is linked to one account.
 // v101 adds API tokens (scoped, expiring, hashed), keeps browser sessions across restarts (listed and revocable), and lets coordinator credentials expire.
 // v102 records who filed each task and adds per-project approval rules: the requester can't approve, and protected work needs two approvers.
+/** A ledger entry with its seal (v103); null until the next pass seals it. */
+export type SealedLedgerEntry = LedgerEntry & { seal: { prev: string; hash: string } | null };
 // v103 chains the action ledger (every entry sealed with the one before it), keeps checkpoints of the chain, and records teammate tool calls (from the store) and minted coordinators (by trigger) in it.
 export const SCHEMA_VERSION = 103;
 
@@ -10678,14 +10680,54 @@ export class Store {
     return this.transact(() => sealLedger(this.db));
   }
 
-  /** The whole chain, checked: sealed first, so the report covers everything written so far. */
-  ledgerChain(): LedgerChainReport {
-    this.sealLedger();
-    return verifyLedgerChain(this.db);
+  /** Seal if the database is free within a moment; a reader never waits on (or fails for) a busy worker, and what's
+   * left is sealed on the worker's next pass (the report counts it as unsealed). */
+  private sealIfFree(): void {
+    if (this.transacting) { sealLedger(this.db); return; }
+    try { beginWriteWithin(this.db, 200); }
+    catch (error) { if (isDatabaseBusy(error)) return; throw error; }
+    this.transacting = true;
+    try { sealLedger(this.db); this.db.exec("COMMIT"); }
+    catch (error) { this.db.exec("ROLLBACK"); throw error; }
+    finally { this.transacting = false; }
   }
 
-  /** A checkpoint of the chain as it stands: its head, recorded here and handed back to be copied off the machine. */
-  ledgerCheckpoint(by: string, now: Date): { through: number; hash: string } | null {
+  /** Reads that must see one moment of the database (the chain and its seals). */
+  private readAtOnce<T>(body: () => T): T {
+    if (this.transacting) return body();
+    this.db.exec("BEGIN");
+    try { const result = body(); this.db.exec("COMMIT"); return result; }
+    catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  /** The head this process last walked the whole chain to (and when), so a page view checks only what's new; and the
+   * first break it found, which stays reported even if the chain is later rebuilt to look whole. */
+  private chainHead: (VerifiedHead & { checkedAt: string; walkedAt: number }) | null = null;
+  private chainBreak: LedgerChainReport | null = null;
+
+  /** The chain, checked: sealed first. The whole chain is walked every ten minutes (or when asked); between walks,
+   * only entries after the last walked head, which must itself be unchanged. */
+  ledgerChain(options: { full?: boolean } = {}): LedgerChainReport {
+    this.sealIfFree();
+    const cached = this.chainHead;
+    const whole = options.full === true || cached === null || Date.now() - cached.walkedAt > 10 * 60_000;
+    const checkedAt = whole ? new Date().toISOString() : cached!.checkedAt;
+    const report = this.readAtOnce(() => verifyLedgerChain(this.db, whole ? undefined : cached!, checkedAt));
+    if (!report.ok) {
+      this.chainHead = null;
+      this.chainBreak ??= report;
+      return report;
+    }
+    if (this.chainBreak !== null) return { ...report, ok: false, problem: this.chainBreak.problem };
+    if (report.through !== null) this.chainHead = { through: report.through, head: report.head, entries: report.entries, checkedAt, walkedAt: whole ? Date.now() : cached!.walkedAt };
+    return report;
+  }
+
+  /** A checkpoint of the chain as it stands: its head, recorded here and handed back to be copied off the machine.
+   * Never over a chain that doesn't verify: that would vouch for what broke it. */
+  ledgerCheckpoint(by: string, now: Date): { through: number; hash: string } | { problem: string } | null {
+    const report = this.ledgerChain({ full: true });
+    if (!report.ok) return { problem: report.problem?.what ?? "the chain doesn't verify" };
     return this.transact(() => {
       sealLedger(this.db);
       const last = this.db.prepare("SELECT id, hash FROM ledger_seal ORDER BY id DESC LIMIT 1").get();
@@ -10704,30 +10746,41 @@ export class Store {
       .map(row => ({ through: Number(row["through"]), hash: String(row["hash"]), at: String(row["at"]), by: String(row["by"]) }));
   }
 
-  /** Ledger entries with their seals, oldest first: those naming any of `taskIds` or `runIds`, or those in
-   * [from, to) within `repos` (as `actionLedger` reads them). Seals first. Reads one more than `limit`, so a
-   * caller can tell it was cut short. */
-  sealedLedgerEntries(query: { taskIds?: readonly string[]; runIds?: readonly number[]; from?: string; to?: string; repos?: readonly string[] | null; instance?: boolean; limit: number }): (LedgerEntry & { seal: { prev: string; hash: string } | null })[] {
-    this.sealLedger();
-    const clauses: string[] = [];
-    const args: (string | number)[] = [];
-    if (query.taskIds !== undefined || query.runIds !== undefined) {
-      const tasks = query.taskIds ?? [], runs = query.runIds ?? [];
-      if (tasks.length === 0 && runs.length === 0) return [];
-      clauses.push(`(${[tasks.length ? `l.task_id IN (${tasks.map(() => "?").join(",")})` : null, runs.length ? `l.run_id IN (${runs.map(() => "?").join(",")})` : null].filter(Boolean).join(" OR ")})`);
-      args.push(...tasks, ...runs);
-    }
-    if (query.repos !== undefined && query.repos !== null) {
+  /** Ledger entries in [from, to) within `repos` (as `actionLedger` reads them), with their seals, oldest first,
+   * after entry `after` (a page at a time). Seals first. Reads one more than `limit`, so a caller can tell it was cut short. */
+  sealedLedgerEntries(query: { from: string; to: string; repos: readonly string[] | null; instance?: boolean; after?: number; limit: number }): SealedLedgerEntry[] {
+    if (query.after === undefined) this.sealIfFree();
+    const clauses = ["l.at >= ?", "l.at < ?", "l.id > ?"];
+    const args: (string | number)[] = [query.from, query.to, query.after ?? 0];
+    if (query.repos !== null) {
       if (query.repos.length === 0 && query.instance !== true) return [];
       const inProjects = query.repos.length === 0 ? null : `l.repo IN (${query.repos.map(() => "?").join(",")})`;
       clauses.push(query.instance === true ? `(${inProjects === null ? "" : `${inProjects} OR `}l.repo IS NULL)` : inProjects!);
       args.push(...query.repos);
     }
-    if (query.from !== undefined) { clauses.push("l.at >= ?"); args.push(query.from); }
-    if (query.to !== undefined) { clauses.push("l.at < ?"); args.push(query.to); }
-    args.push(query.limit + 1);
-    return this.db.prepare(`SELECT l.*, s.prev AS seal_prev, s.hash AS seal_hash FROM action_ledger l LEFT JOIN ledger_seal s ON s.id = l.id
-      ${clauses.length ? `WHERE ${clauses.join(" AND ")}` : ""} ORDER BY l.id LIMIT ?`).all(...args).map(row => ({
+    return this.sealedRows(`${clauses.join(" AND ")} ORDER BY l.id LIMIT ?`, [...args, query.limit + 1]);
+  }
+
+  /** A task family's ledger entries, with their seals, oldest first. Only entries written once the task existed
+   * (from the row its registration wrote, which nothing else can), naming one of its versions, or (for the
+   * worker's own entries) one of its runs. Requests made through the console are kept apart and capped at the
+   * newest `requests`, so a flood of them can never push the family's own entries out. */
+  taskLedgerEntries(family: { taskIds: readonly string[]; runIds: readonly number[] }, limits: { entries: number; requests: number }): { entries: SealedLedgerEntry[]; truncated: boolean } {
+    this.sealIfFree();
+    if (family.taskIds.length === 0) return { entries: [], truncated: false };
+    const tasks = family.taskIds.map(() => "?").join(",");
+    const anchor = this.db.prepare(`SELECT MIN(id) AS id FROM action_ledger WHERE task_id IN (${tasks}) AND action = 'task registered' AND source = 'work' AND actor = 'system'`).get(...family.taskIds)?.["id"];
+    const from = anchor == null ? 0 : Number(anchor);
+    const runs = family.runIds.length === 0 ? "" : ` OR (l.run_id IN (${family.runIds.map(() => "?").join(",")}) AND l.task_id IS NULL AND l.source <> 'request')`;
+    const match = `l.id >= ? AND (l.task_id IN (${tasks})${runs})`;
+    const own = this.sealedRows(`${match} AND l.source <> 'request' ORDER BY l.id LIMIT ?`, [from, ...family.taskIds, ...family.runIds, limits.entries + 1]);
+    const asked = this.sealedRows(`${match} AND l.source = 'request' ORDER BY l.id DESC LIMIT ?`, [from, ...family.taskIds, ...family.runIds, limits.requests + 1]);
+    const truncated = own.length > limits.entries || asked.length > limits.requests;
+    return { entries: [...own.slice(0, limits.entries), ...asked.slice(0, limits.requests)].sort((a, b) => a.id - b.id), truncated };
+  }
+
+  private sealedRows(where: string, args: (string | number)[]): SealedLedgerEntry[] {
+    return this.db.prepare(`SELECT l.*, s.prev AS seal_prev, s.hash AS seal_hash FROM action_ledger l LEFT JOIN ledger_seal s ON s.id = l.id WHERE ${where}`).all(...args).map(row => ({
       id: Number(row["id"]), at: String(row["at"]), actor: String(row["actor"]), repo: row["repo"] === null ? null : String(row["repo"]),
       taskId: row["task_id"] === null ? null : String(row["task_id"]), runId: row["run_id"] === null ? null : Number(row["run_id"]),
       action: String(row["action"]), outcome: String(row["outcome"]), source: String(row["source"]) as LedgerEntry["source"],

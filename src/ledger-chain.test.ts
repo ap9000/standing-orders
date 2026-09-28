@@ -93,27 +93,69 @@ test("an entry numbered below the first, where sealing never reaches, is found",
   act("one");
   store.sealLedger();
   store.handle.prepare("INSERT INTO action_ledger (id, at, actor, repo, task_id, run_id, action, outcome, source, detail) VALUES (-1, ?, 'alex', NULL, NULL, NULL, 'forged', 'done', 'policy', NULL)").run(T0.toISOString());
-  expect(store.ledgerChain()).toMatchObject({ ok: false, problem: { id: -1, what: "entry #-1 was added outside the sealed history" } });
+  expect(store.ledgerChain()).toMatchObject({ ok: false, problem: { what: "entry #-1 was added outside the sealed history" } });
 });
 
-test("a long ledger is walked a page at a time", () => {
+test("a long ledger is walked a page at a time; between whole walks a read checks only what's new", () => {
   for (let i = 0; i < 2500; i++) act(`many ${i}`);
-  expect(store.ledgerChain()).toMatchObject({ ok: true, entries: 2500, through: 2500 });
+  expect(store.ledgerChain()).toMatchObject({ ok: true, entries: 2500, through: 2500, checkedAt: expect.any(String) });
+  act("one more");
+  expect(store.ledgerChain()).toMatchObject({ ok: true, entries: 2501, through: 2501 });
   unguard();
   store.handle.prepare("UPDATE action_ledger SET detail = 'late' WHERE id = 2001").run();
-  expect(store.ledgerChain()).toMatchObject({ ok: false, problem: { id: 2001 } });
+  // The next whole walk (every ten minutes, `ledger verify`, before a checkpoint) finds it.
+  expect(store.ledgerChain({ full: true })).toMatchObject({ ok: false, problem: { id: 2001 } });
+  expect(store.ledgerCheckpoint("alex", T0)).toEqual({ problem: "entry #2001 was changed after it was sealed" });
+});
+
+test("a chain rebuilt while this process watches is caught at the next read, and stays reported", () => {
+  act("one"); const two = act("two"); act("three");
+  expect(store.ledgerChain().ok).toBe(true);
+  unguard();
+  store.handle.prepare("UPDATE action_ledger SET action = 'rewritten' WHERE id = ?").run(two);
+  store.handle.prepare("DELETE FROM ledger_seal WHERE id >= ?").run(two);
+  // The next read reseals it all, and the head it walked to before is gone.
+  expect(store.ledgerChain()).toMatchObject({ ok: false, problem: { what: "the chain was rewritten since it was last checked (entry #3 changed)" } });
+  expect(store.ledgerChain({ full: true })).toMatchObject({ ok: false, problem: { what: "the chain was rewritten since it was last checked (entry #3 changed)" } });
+});
+
+test("every checkpoint row counts: a later matching one can't cover an earlier mismatch", () => {
+  act("one"); act("two");
+  const good = store.ledgerCheckpoint("alex", T0) as { through: number; hash: string };
+  store.handle.prepare("INSERT INTO ledger_checkpoint (through, hash, at, by) VALUES (?, ?, ?, 'mallory')").run(good.through, "0".repeat(64), T0.toISOString());
+  store.handle.prepare("INSERT INTO ledger_checkpoint (through, hash, at, by) VALUES (?, ?, ?, 'mallory')").run(good.through, good.hash, T0.toISOString());
+  expect(store.ledgerChain({ full: true })).toMatchObject({ ok: false, problem: { what: `the chain no longer matches the checkpoint at entry #${good.through}` } });
+});
+
+test("a value the ledger never writes (Infinity, a blob) is a break, not a quiet match", () => {
+  act("one"); const two = act("two");
+  store.sealLedger();
+  unguard();
+  store.handle.prepare("UPDATE action_ledger SET run_id = 9e999 WHERE id = ?").run(two);
+  expect(store.ledgerChain({ full: true })).toMatchObject({ ok: false, problem: { id: two, what: `entry #${two} holds a run number the ledger never writes` } });
+  store.handle.prepare("UPDATE action_ledger SET run_id = NULL, actor = x'00' WHERE id = ?").run(two);
+  expect(store.ledgerChain({ full: true })).toMatchObject({ ok: false, problem: { what: `entry #${two} holds a actor the ledger never writes` } });
+});
+
+test("an entry numbered past what a seal can name is reported, not a crash", () => {
+  act("one");
+  store.sealLedger();
+  store.handle.exec("INSERT INTO action_ledger (id, at, actor, repo, task_id, run_id, action, outcome, source, detail) VALUES (9007199254740993, '2026-09-20T10:00:00.000Z', 'x', NULL, NULL, NULL, 'forged', 'done', 'policy', NULL)");
+  expect(store.ledgerChain({ full: true })).toMatchObject({ ok: false, problem: { what: "entry #9007199254740993 was added outside the sealed history" } });
 });
 
 test("a chain rebuilt from scratch still verifies on its own, but not against a checkpoint", () => {
   act("one"); const two = act("two"); act("three");
-  const checkpoint = store.ledgerCheckpoint("alex", T0)!;
+  const checkpoint = store.ledgerCheckpoint("alex", T0) as { through: number; hash: string };
   expect(checkpoint.through).toBe(3);
   expect(store.ledgerCheckpoints(1)[0]).toMatchObject({ through: 3, hash: checkpoint.hash, by: "alex" });
   // The checkpoint itself is in the ledger.
   expect(store.actionLedger({ repos: null, limit: 1 })[0]).toMatchObject({ action: "ledger checkpoint", actor: "alex", detail: `3:${checkpoint.hash}` });
   const copied = `${checkpoint.through}:${checkpoint.hash}`;
   expect(matchesOutsideCheckpoint(store.handle, copied)).toMatchObject({ ok: true });
-  // Someone with the file rewrites entry two, then reseals everything.
+  // Someone with the file (and no running console watching) rewrites entry two, then reseals everything.
+  store.close();
+  store = openStore(file);
   unguard();
   store.handle.prepare("UPDATE action_ledger SET action = 'rewritten' WHERE id = ?").run(two);
   store.handle.exec("DELETE FROM ledger_seal");
@@ -122,6 +164,8 @@ test("a chain rebuilt from scratch still verifies on its own, but not against a 
   expect(store.ledgerChain()).toMatchObject({ ok: false, problem: { id: 3, what: "the chain no longer matches the checkpoint at entry #3" } });
   // ...and so does the copy kept elsewhere, even when the local checkpoints are gone too.
   store.handle.exec("DROP TRIGGER ledger_checkpoint_no_delete; DELETE FROM ledger_checkpoint");
+  store.close();
+  store = openStore(file);
   expect(store.ledgerChain().ok).toBe(true);
   expect(matchesOutsideCheckpoint(store.handle, copied)).toMatchObject({ ok: false, what: expect.stringContaining("does NOT match") });
   expect(matchesOutsideCheckpoint(store.handle, "nonsense").ok).toBe(false);
