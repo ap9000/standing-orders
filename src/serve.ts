@@ -9125,6 +9125,9 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (!edited.ok) {
           return taskScreen(response, who, taskId, edited.reason === "not-configured" ? `agents not changed: ${edited.detail}` : edited.detail, edited.reason === "unauthenticated" ? 403 : edited.reason === "nothing" || edited.reason === "not-configured" ? 400 : 409);
         }
+        // v102: changing how a task runs is authoring it — the requester rule then refuses this person too.
+        const routed = store.getScope(taskId);
+        if (routed !== null) store.recordScopeAuthor(taskId, routed.digest, who.name, now);
         const toChat = body.get("return") === "chat";
         const back = toChat ? taskChatHref(taskId) : taskHref(taskId);
         const said = [

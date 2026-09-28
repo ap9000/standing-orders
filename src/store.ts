@@ -10588,10 +10588,9 @@ export class Store {
       const filer = this.taskFiler(id);
       if (filer?.name != null && (filer.kind === "person" || filer.kind === "coordinator")) names.add(filer.name);
     }
-    const digest = this.db.prepare("SELECT digest FROM task_scope WHERE task_id = ?").get(taskId)?.["digest"];
-    if (digest != null) {
-      for (const row of this.db.prepare("SELECT author FROM scope_author WHERE task_id = ? AND digest = ?").all(taskId, String(digest))) names.add(String(row["author"]));
-    }
+    // Anyone who wrote any version of its scope (or changed its routing): a later refile that changes the
+    // digest without an author must not wash their words clean.
+    for (const row of this.db.prepare("SELECT DISTINCT author FROM scope_author WHERE task_id = ?").all(taskId)) names.add(String(row["author"]));
     return names;
   }
 
@@ -10639,14 +10638,16 @@ export class Store {
     if (hits !== null && hits.length === 0) return null;
     const scope = this.db.prepare("SELECT approved_by, approved_digest FROM task_scope WHERE task_id = ?").get(taskId);
     const approvedDigest = scope?.["approved_digest"] == null ? "" : String(scope["approved_digest"]);
-    const voters = new Set(this.db.prepare("SELECT approver FROM scope_approval_vote WHERE task_id = ? AND digest = ?").all(taskId, approvedDigest).map(row => String(row["approver"])));
-    const requesters = rules.notRequester ? this.requestersOf(taskId) : new Set<string>();
+    const standing = (name: string) => { const account = this.accountOf(name); return account !== null && account.revokedAt === null && account.role === "approver" && this.accountCanAccess(name, repo); };
+    const voters = new Set(this.db.prepare("SELECT approver FROM scope_approval_vote WHERE task_id = ? AND digest = ?").all(taskId, approvedDigest).map(row => String(row["approver"])).filter(standing));
+    // Whoever asked for the work never counts as the second pair of eyes on it, whatever the requester rule says.
+    const requesters = this.requestersOf(taskId);
     for (const name of requesters) voters.delete(name);
     if (voters.size >= 2) return null;
     const approver = scope?.["approved_by"] == null ? null : String(scope["approved_by"]);
     const what = hits === null ? "files this project protects (its changed files couldn't be read)" : `protected files (${hits.slice(0, 3).join(", ")}${hits.length > 3 ? ` and ${hits.length - 3} more` : ""})`;
     if (completer === null) return `This result changed ${what}, so a person other than its approver marks it complete.`;
-    if (completer === approver || requesters.has(completer)) return `This result changed ${what}, and ${approver ?? "one person"} approved its scope alone. Someone else has to mark it complete.`;
+    if (completer === approver || requesters.has(completer) || !standing(completer)) return `This result changed ${what}, and ${approver ?? "one person"} approved its scope alone. Someone else has to mark it complete.`;
     return null;
   }
 

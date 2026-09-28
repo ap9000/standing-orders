@@ -76,9 +76,13 @@ export function touchesProtected(touch: string, protectedGlob: string): boolean 
   if (a === null || a === "") return true;
   const pattern = globRegex(b);
   if (!wild.test(a)) {
-    if (pattern.test(a) || pattern.test(`${a}/x`) || pattern.test(`${a}/x/y.z`)) return true;
+    if (pattern.test(a)) return true;
+    // A protected pattern that lives inside this path (".github" holding ".github/workflows/**") is reached, whatever the name looks like.
     const pb = literalPrefix(b);
-    return pb === a || pb.startsWith(`${a}/`);
+    if (pb === a || pb.startsWith(`${a}/`)) return true;
+    // A file ("docs/readme.md") is only itself; a folder ("infra", or a name with no extension) may hold anything a pattern reaches.
+    if (/\.[^/.]+$/.test(a)) return false;
+    return pattern.test(`${a}/x`) || pattern.test(`${a}/x/y.z`) || `${a}/`.startsWith(pb);
   }
   const pa = literalPrefix(a), pb = literalPrefix(b);
   return pa.startsWith(pb) || pb.startsWith(pa);

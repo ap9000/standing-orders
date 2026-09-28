@@ -19,6 +19,10 @@ import { TEAMMATE_TEMPLATES } from "./teammates.js";
 import { isProtectedWork, touchesProtected } from "./approval-policy.js";
 import { fileRoutineProposal } from "./proposal.js";
 import { approveRoutine } from "./routine.js";
+import { createHash } from "node:crypto";
+import { writeEvidenceFile } from "./evidence.js";
+import { changedFilesOf, familyChangedFiles } from "./result-completion.js";
+import { storeEvidence } from "./evidence.js";
 
 const REPO = "/repo/main";
 let dir: string, store: Store, server: Server, base: string;
@@ -172,6 +176,13 @@ test("protected paths match what a task says it touches, erring toward protectin
   expect(touchesProtected("secrets", "**/secrets/**")).toBe(true);
   expect(touchesProtected("src/db/schema.sql", "*.sql")).toBe(true);
   expect(touchesProtected("infrastructure/x", "infra/**")).toBe(false);
+  // A folder may hold whatever a pattern reaches; a file is only itself.
+  expect(touchesProtected("infra", "*.tf")).toBe(true);
+  expect(touchesProtected("src", "**/secrets/**")).toBe(true);
+  expect(touchesProtected("docs/readme.md", "*.tf")).toBe(false);
+  // A folder whose name looks like a file still holds what's under it.
+  expect(touchesProtected(".github", ".github/workflows/**")).toBe(true);
+  expect(touchesProtected("nginx.d", "nginx.d/**")).toBe(true);
   expect(isProtectedWork({ notRequester: false, protectProject: false, protectedPaths: ["infra/**"] }, [])).toBe(true);
   expect(isProtectedWork({ notRequester: true, protectProject: false, protectedPaths: [] }, ["infra/x"])).toBe(false);
 });
@@ -238,4 +249,43 @@ test("a result that changed protected files on a one-person approval completes o
   expect(store.protectedResultProblem(id, null, "alex")).toContain("couldn't be read");
   expect(store.protectedResultProblem(id, ["infra/main.tf"], null)).toContain("a person other than its approver");
   expect(store.protectedResultProblem(id, ["infra/main.tf"], "sam")).toBeNull();
+});
+
+test("a rename counts on both sides of the build's diff", () => {
+  const root = join(dir, "evidence");
+  const bytes = Buffer.from(JSON.stringify({ filesTruncated: false, files: [{ path: "docs/policy.rego", renamedFrom: "infra/policy.rego", added: 0, deleted: 0 }] }));
+  const key = writeEvidenceFile(root, 7, "terminal-diff-stat.json", bytes);
+  const stat = { id: 1, run: 7, kind: "diff-stat", key, sha256: createHash("sha256").update(bytes).digest("hex"), bytesStored: bytes.length, bytesOriginal: bytes.length, truncated: false, captureStatus: "ok" };
+  expect(changedFilesOf({ artifactsFor: () => [stat] } as never, 7, root)).toEqual(["docs/policy.rego", "infra/policy.rego"]);
+  expect(changedFilesOf({ artifactsFor: () => [] } as never, 7, root)).toBeNull();
+});
+
+test("the requester is never the second pair of eyes, and a route edit makes its editor an author", async () => {
+  const alex = await signIn("alex");
+  const id = await fileAsAlex(alex, "Tidy config", ["src/config.ts"]);
+  expect((await approveAs("alex", alex, id)).status).toBe(303);
+  // Protected paths only, no requester rule: sam approved nothing, so alex (the filer) can't complete a protected change either.
+  store.setApprovalRules(REPO, { notRequester: false, protectProject: false, protectedPaths: ["infra/**"] }, "alex", new Date());
+  store.recordScopeAuthor(id, "an-older-digest", "sam", new Date());
+  expect(store.requestersOf(id).has("sam")).toBe(true);
+  expect(store.protectedResultProblem(id, ["infra/main.tf"], "sam")).toContain("Someone else");
+});
+
+test("a revision's branch carries its source's changes, so the family's diffs decide", () => {
+  const root = join(dir, "evidence");
+  const now = new Date();
+  const legacy = { route: { routeDigest: "legacy", phase: "build" as const, provider: "claude", model: null, chosen: "legacy" as const } };
+  const build = (taskId: string, files: string[]) => {
+    const ref = store.lookupRef(taskId)!.id;
+    const run = store.startRun({ taskRef: ref, leaseId: `lease-${taskId}`, runner: "b1", branch: `b-${taskId}`, worktree: `/w/${taskId}`, ...legacy, now });
+    const artifact = storeEvidence(store, root, run, "diff-stat", "terminal-diff-stat.json", Buffer.from(JSON.stringify({ filesTruncated: false, files: files.map(path => ({ path, added: 1, deleted: 0 })) })), "git diff --numstat", now, { captureStatus: "ok" });
+    return { run, artifact };
+  };
+  store.createTask({ id: "source", title: "source" }, now);
+  const source = build("source", ["infra/main.tf"]);
+  store.createTask({ id: "revision", title: "revision" }, now);
+  store.markRevision(store.lookupRef("revision")!.id, "source", source.artifact);
+  const revision = build("revision", ["docs/x.md"]);
+  expect(familyChangedFiles(store, "revision", revision.run, root)?.sort()).toEqual(["docs/x.md", "infra/main.tf"]);
+  expect(familyChangedFiles(store, "source", source.run, root)).toEqual(["infra/main.tf"]);
 });

@@ -7810,6 +7810,7 @@ async function runWatchLoop(args: {
       if (!admissionStopped() && store.pendingPublications().length > 0) {
         const published = await publishPass(store, {
           repo,
+          evidenceRoot: context.evidenceRoot,
           ...(context.publishExec === undefined ? {} : { exec: context.publishExec }),
         });
         if (published.pushed + published.opened + published.adopted + published.failed > 0) {
@@ -9237,6 +9238,7 @@ async function publishCommand(
   const report = await publishPass(store, {
     repo,
     clock,
+    evidenceRoot: context.evidenceRoot,
     ...(context.publishExec === undefined ? {} : { exec: context.publishExec }),
   });
   // The merge sweep rides every publish pass: green, proved, granted work

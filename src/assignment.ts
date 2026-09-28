@@ -2,6 +2,7 @@
  * approval or proof state. Lead ownership and exact receipt acknowledgments
  * are append-only actions; handoffs use the existing durable outbox. */
 import { createHash } from "node:crypto";
+import { COMPLETION_ACTION, familyChangedFiles } from "./result-completion.js";
 import { homedir } from "node:os";
 import { readSchemaVersion, type Store, type ProofVerdictRow, type ProofAcceptanceRow, type Artifact } from "./store.js";
 import { approvalOf } from "./scope.js";
@@ -61,7 +62,7 @@ export function assignmentBrief(assignment: AssignmentSnapshot | null) {
 }
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const OWNER_ACTION = "assignment claimed";
-const CHECK_ACTION = "assignment handoff checked";
+const CHECK_ACTION = COMPLETION_ACTION;
 const actorOf = (owner: AssignmentOwner) => `${owner.kind}:${owner.id}`;
 
 function ownerOf(store: Store, rootId: string, repo: string | null): AssignmentSnapshot["owner"] {
@@ -307,19 +308,6 @@ export function assignmentEvidenceIntact(store: Store, root: string, receipt: As
   } catch { return false; }
 }
 
-/** The files a build changed, from its sealed diff inventory; null when it can't be read whole. */
-function changedFilesOf(store: Store, runId: number, root: string): string[] | null {
-  const stat = store.artifactsFor(runId).find(one => one.kind === "diff-stat");
-  if (stat === undefined || stat.truncated || stat.captureStatus !== "ok") return null;
-  const read = readVerifiedArtifact(root, stat);
-  if (!read.ok) return null;
-  try {
-    const inventory = JSON.parse(read.content.toString("utf8")) as { filesTruncated?: boolean; files?: { path?: unknown }[] };
-    if (inventory.filesTruncated !== false || !Array.isArray(inventory.files)) return null;
-    return inventory.files.map(one => one.path).filter((path): path is string => typeof path === "string");
-  } catch { return null; }
-}
-
 function acknowledgeCurrent(store: Store, current: AssignmentSnapshot, receiptDigest: string, actor: string, now: Date, root: string, access: AssignmentAccess): MutationResult {
   if (!/^[a-f0-9]{64}$/.test(receiptDigest) || current.receipt?.digest !== receiptDigest) return { ok: false, reason: "stale", message: "The result changed. Read the current assignment before checking it." };
   const receipt = current.receipt;
@@ -327,7 +315,7 @@ function acknowledgeCurrent(store: Store, current: AssignmentSnapshot, receiptDi
   if (current.state !== "complete") {
     // v102: declared paths are only a promise. A result whose actual diff reaches protected files, on a
     // scope one person approved, completes only by someone else — two people have then seen the work.
-    const problem = store.protectedResultProblem(receipt.taskId, changedFilesOf(store, receipt.runId, root), actor.startsWith("operator:") ? actor.slice("operator:".length) : null);
+    const problem = store.protectedResultProblem(receipt.taskId, familyChangedFiles(store, receipt.taskId, receipt.runId, root), actor.startsWith("operator:") ? actor.slice("operator:".length) : null);
     if (problem !== null) return { ok: false, reason: "approval-rules", message: problem };
     store.recordAction({ at: now.toISOString(), actor, repo: current.repo,
       taskId: current.rootId, runId: receipt.runId, action: CHECK_ACTION, outcome: receiptDigest, source: "work" });
