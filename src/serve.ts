@@ -273,6 +273,7 @@ import { readSsoSettings, removeSsoSettings, saveSsoSettings, SSO_CALLBACK, ssoC
 import { monitoringChange, readMonitoring, saveMonitoring } from "./monitoring-settings.js";
 import { MONITORING_CSS, monitoringHtml, signingSecretHtml } from "./monitoring-ui.js";
 import { prometheusMetrics } from "./metrics.js";
+import { targetOf } from "./monitoring.js";
 import { SSO_CSS, ssoSettingsHtml } from "./sso-ui.js";
 import { mintApiToken, parseApiToken, secretMatches, TOKEN_DAYS } from "./api-tokens.js";
 import { CREDENTIALS_CSS, credentialsHtml, tokenShownHtml } from "./credentials-ui.js";
@@ -3723,7 +3724,13 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (url.pathname === "/metrics") {
       if (!store.isInstanceOperator(who.name)) return refuse(response, who, 403, "An instance operator reads metrics.", "/");
       response.writeHead(200, { "content-type": "text/plain; version=0.0.4; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
-      return void response.end(prometheusMetrics(store, now, admissionList()));
+      const set = options.configDir === undefined ? null : readMonitoring(options.configDir);
+      const destinations = new Map<string, string>([
+        ...(set?.webhook ? [["webhook", targetOf(set.webhook.url)] as [string, string]] : []),
+        ...(set?.folder ? [["folder", targetOf(set.folder.path)] as [string, string]] : []),
+        ...(set?.traces ? [["traces", targetOf(set.traces.endpoint)] as [string, string]] : []),
+      ]);
+      return void response.end(prometheusMetrics(store, now, admissionList(), destinations));
     }
     // v100: Settings → Sign-in, the identity provider people sign in with. An instance operator's page.
     if (url.pathname === "/settings/sign-in") {

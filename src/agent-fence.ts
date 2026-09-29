@@ -25,6 +25,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { readMonitoring } from "./monitoring-settings.js";
 
 /** How a launch was fenced, as recorded on the run and said on the task. */
 export type FenceMethod = "codex-profile" | "macos-sandbox" | "linux-bubblewrap" | "claude-rules" | "none";
@@ -78,6 +79,11 @@ export function agentFence(options: { databaseFile: string | null; worktree: str
   }
   const secrets = join(home, ".standing-orders");
   if (existsSync(secrets)) fence.add(secrets);
+  // v104: the folder the audit stream writes to holds the whole instance's history.
+  if (options.databaseFile !== null && options.databaseFile !== "" && options.databaseFile !== ":memory:") {
+    const stream = readMonitoring(dirname(real(options.databaseFile))).folder?.path;
+    if (stream !== undefined && existsSync(stream)) fence.add(real(stream));
+  }
   for (const path of options.extra ?? []) if (existsSync(path)) fence.add(real(path));
   // Never fence the run's own worktree or anything above it.
   return [...fence].filter(path => worktree === null || (path !== worktree && !inside(worktree, path))).sort();

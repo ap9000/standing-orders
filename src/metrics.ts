@@ -18,7 +18,7 @@ const line = (name: string, sample: Sample) => {
 };
 
 /** `repos`: the projects this console serves (null: all); task, run and worker figures count only theirs. */
-export function prometheusMetrics(store: Store, now: Date, repos: readonly string[] | null = null): string {
+export function prometheusMetrics(store: Store, now: Date, repos: readonly string[] | null = null, destinations?: ReadonlyMap<string, string>): string {
   const db = store.handle;
   const inProjects = (column: string) => repos === null ? "1 = 1" : repos.length === 0 ? "1 = 0" : `${column} IN (${repos.map(() => "?").join(",")})`;
   const scoped = repos ?? [];
@@ -55,7 +55,8 @@ export function prometheusMetrics(store: Store, now: Date, repos: readonly strin
   add("standing_orders_ledger_checked_timestamp_seconds", "When the whole chain was last walked.", "gauge", chain.checkedAt === null ? [] : [{ value: Math.floor(Date.parse(chain.checkedAt) / 1000) }]);
 
   const head = store.ledgerHeadId();
-  const status = store.monitoringStatus();
+  // Only destinations set up now, each for its current address (`destinations`: sink → target; all when not given).
+  const status = store.monitoringStatus().filter(one => destinations === undefined || destinations.get(one.sink) === one.target);
   add("standing_orders_monitoring_lag_entries", "Ledger entries a monitoring destination hasn't been sent yet.", "gauge", status.map(one => ({ labels: { destination: one.sink }, value: Math.max(0, head - one.through) })));
   add("standing_orders_monitoring_failures", "Failed deliveries in a row, by destination.", "gauge", status.map(one => ({ labels: { destination: one.sink }, value: one.failures })));
   add("standing_orders_monitoring_last_ok_timestamp_seconds", "When a destination last took a delivery.", "gauge",

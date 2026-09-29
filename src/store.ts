@@ -4815,6 +4815,7 @@ function initializeStore(db: Database, file: string): Store {
   db.exec(APPROVAL_SCHEMA);
   db.exec(LEDGER_CHAIN_SCHEMA);
   db.exec(MONITORING_SCHEMA);
+  addColumn(db, "monitoring_status", "target", "TEXT");
   migrate(db, preflight === null ? null : Math.abs(preflight));
   addColumn(db, "flow_card", "source_json", "TEXT");
   addColumn(db, "flow_card", "owner", "TEXT");

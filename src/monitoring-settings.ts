@@ -9,7 +9,7 @@
  * - Traces: each finished run as an OpenTelemetry span, to a collector.
  */
 import { randomBytes } from "node:crypto";
-import { closeSync, constants, existsSync, fsyncSync, openSync, readFileSync, realpathSync, renameSync, writeSync } from "node:fs";
+import { closeSync, constants, existsSync, fsyncSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
 const FILE = "monitoring.json";
@@ -62,8 +62,10 @@ function write(dir: string, settings: MonitoringSettings): void {
   // A fresh name, made here (never a file or link already there), readable by its owner only, then swapped in.
   const next = `${file}.${randomBytes(8).toString("hex")}.tmp`;
   const handle = openSync(next, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-  try { writeSync(handle, `${JSON.stringify(settings, null, 2)}\n`); fsyncSync(handle); } finally { closeSync(handle); }
-  renameSync(next, file);
+  try {
+    try { writeSync(handle, `${JSON.stringify(settings, null, 2)}\n`); fsyncSync(handle); } finally { closeSync(handle); }
+    renameSync(next, file);
+  } catch (error) { rmSync(next, { force: true }); throw error; }
 }
 
 /** A fresh signing secret for the webhook (shown once; the receiver keeps it to check each request). */
@@ -77,11 +79,12 @@ export type MonitoringForm = { webhook: string; folder: string; tracesEndpoint: 
  * Save what the form sent. A blank field turns that destination off; a header value left blank keeps the one
  * saved. A new webhook address, or `rotate`, makes a new signing secret, handed back once as `secret`.
  */
-/** A path as it really is: its nearest existing folder resolved (so /tmp and /private/tmp are one). */
+/** A path as it really is: its nearest existing folder resolved (so /tmp and /private/tmp are one), in one case
+ * (macOS folders ignore it). */
 function realish(path: string): string {
   let at = resolve(path), rest = "";
   while (!existsSync(at) && dirname(at) !== at) { rest = join(at.slice(dirname(at).length + 1), rest); at = dirname(at); }
-  try { return join(realpathSync(at), rest); } catch { return resolve(path); }
+  try { return join(realpathSync.native(at), rest).toLowerCase(); } catch { return resolve(path).toLowerCase(); }
 }
 const within = (path: string, folder: string) => path === folder || path.startsWith(`${folder}/`);
 
