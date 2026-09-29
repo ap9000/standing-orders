@@ -5,15 +5,15 @@
  * and the ledger chain, keeps the current database first, and dry-runs.
  */
 import { afterEach, beforeEach, expect, test } from "vitest";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { openStore, SCHEMA_VERSION, type Store } from "./store.js";
 import { addApprover } from "./scope.js";
 import { createDecisionServer } from "./serve.js";
 import { runOperate } from "./operate.js";
-import { backupDue, backupFiles, backupNow, backupPass, onlineCopy, pruneBackups, restoreDatabase } from "./backup.js";
+import { backupDue, backupFiles, backupNow, backupOwner, backupPass, databaseTag, onlineCopy, pruneBackups, restoreDatabase } from "./backup.js";
 
 let dir: string, file: string, store: Store;
 const NOW = new Date("2026-09-28T05:00:00.000Z");
@@ -47,8 +47,8 @@ test("a backup is an online copy: running work carries on, the copy is checked, 
   const made = await backupNow(store, file, "manual", () => NOW);
   expect(made).toMatchObject({ ok: true, removed: 0 });
   if (!made.ok) throw new Error(made.error);
-  expect(made.file).toBe(join(folder(), "standing-orders-2026-09-28-050000.db"));
-  expect(readdirSync(folder())).toEqual(["standing-orders-2026-09-28-050000.db"]);
+  expect(made.file).toBe(join(folder(), `standing-orders-${databaseTag(file)}-2026-09-28-050000.db`));
+  expect(readdirSync(folder())).toEqual([`standing-orders-${databaseTag(file)}-2026-09-28-050000.db`]);
   expect(statSync(made.file).mode & 0o777).toBe(0o600);
   expect(tasksIn(made.file)).toEqual(["before"]);
   expect(readFileSync(made.file).includes(["sk", "ant", "secret", "value"].join("-"))).toBe(false);
@@ -65,10 +65,52 @@ test("the newest N are kept; nothing else in the folder is touched", async () =>
   }
   writeFileSync(join(folder(), "notes.txt"), "mine");
   writeFileSync(join(folder(), "before-restore-2026-09-01-000000-abc123.db"), "kept");
-  expect(backupFiles(folder()).map(one => one.path)).toEqual(made.slice(2).reverse());
+  expect(backupFiles(folder(), backupOwner(store, file)).map(one => one.path)).toEqual(made.slice(2).reverse());
   expect(store.backupRuns().map(run => run.removed)).toEqual([1, 1, 0, 0, 0]);
-  expect(pruneBackups(folder(), 1)).toBe(2);
-  expect(readdirSync(folder()).sort()).toEqual(["before-restore-2026-09-01-000000-abc123.db", "notes.txt", "standing-orders-2026-09-28-090000.db"]);
+  expect(pruneBackups(folder(), 1, backupOwner(store, file))).toBe(2);
+  expect(readdirSync(folder()).sort()).toEqual(["before-restore-2026-09-01-000000-abc123.db", "notes.txt", `standing-orders-${databaseTag(file)}-2026-09-28-090000.db`]);
+});
+
+test("two databases backing up into one folder each keep their own newest N and never delete the other's", async () => {
+  const shared = join(dir, "shared");
+  const otherFile = join(dir, "other", "orders.db");
+  mkdirSync(dirname(otherFile));
+  const other = openStore(otherFile);
+  try {
+    expect(databaseTag(otherFile)).not.toBe(databaseTag(file));
+    store.setBackupSettings({ enabled: true, everyHours: 1, keep: 2, folder: shared }, "alex", NOW);
+    other.setBackupSettings({ enabled: true, everyHours: 1, keep: 3, folder: shared }, "alex", NOW);
+    const mine: string[] = [], theirs: string[] = [];
+    for (let hour = 0; hour < 5; hour++) {
+      const one = await backupNow(store, file, "scheduled", () => at(hour));
+      const two = await backupNow(other, otherFile, "scheduled", () => at(hour));
+      if (!one.ok || !two.ok) throw new Error("backup");
+      mine.push(one.file);
+      theirs.push(two.file);
+    }
+    expect(backupFiles(shared, backupOwner(store, file)).map(one => one.path)).toEqual(mine.slice(3).reverse());
+    expect(backupFiles(shared, backupOwner(other, otherFile)).map(one => one.path)).toEqual(theirs.slice(2).reverse());
+    expect(readdirSync(shared).sort()).toEqual([...mine.slice(3), ...theirs.slice(2)].map(path => basename(path)).sort());
+  } finally { other.close(); }
+});
+
+test("backups made before they were tagged: this database's history claims its own; any other untagged backup is never its own, so never pruned", async () => {
+  const shared = folder();
+  mkdirSync(shared);
+  const legacy = (stamp: string) => { const path = join(shared, `standing-orders-${stamp}.db`); writeFileSync(path, "old"); return path; };
+  const ours = legacy("2026-09-01-000000");
+  const unknown = legacy("2026-09-02-000000");
+  store.handle.prepare("INSERT INTO backup_run (trigger, started_at, finished_at, ok, file) VALUES ('scheduled', ?, ?, 1, ?)").run(NOW.toISOString(), NOW.toISOString(), ours);
+  // Even alone in the folder, an untagged backup its history doesn't record may be another database's (one that hasn't
+  // tagged a backup yet): it isn't this database's to prune.
+  expect(backupFiles(shared, backupOwner(store, file)).map(one => one.path)).toEqual([ours]);
+  const otherTag = databaseTag(join(dir, "other.db"));
+  writeFileSync(join(shared, `standing-orders-${otherTag}-2026-09-03-000000.db`), "theirs");
+  expect(backupFiles(shared, backupOwner(store, file)).map(one => one.path)).toEqual([ours]);
+  store.setBackupSettings({ enabled: true, everyHours: 1, keep: 1, folder: null }, "alex", NOW);
+  const made = await backupNow(store, file, "manual", () => NOW);
+  expect(made).toMatchObject({ ok: true, removed: 1 });
+  expect(readdirSync(shared).sort()).toEqual([basename(unknown), `standing-orders-${databaseTag(file)}-2026-09-28-050000.db`, `standing-orders-${otherTag}-2026-09-03-000000.db`].sort());
 });
 
 test("a failed backup is recorded and notified, and the schedule retries within the hour", async () => {
@@ -109,7 +151,13 @@ test("backup now and backup list on the command line", async () => {
   const list = await run("backup", ["list"]);
   expect(list.out).toContain("Every 24 hours, keeping the newest 7");
   expect(list.out).toMatch(/Last backup .* UTC: succeeded\./);
-  expect(list.out).toMatch(/standing-orders-\d{4}-\d{2}-\d{2}-\d{6}\.db/);
+  expect(list.out).toContain(`standing-orders-${databaseTag(file)}-`);
+  // Another database's backup in the same folder isn't listed.
+  const theirs = `standing-orders-${databaseTag(join(dir, "other.db"))}-2026-09-28-040000.db`;
+  writeFileSync(join(folder(), theirs), "theirs");
+  const listed = await run("backup", ["list", "--json"]);
+  expect(JSON.parse(listed.out).files.map((one: { name: string }) => one.name)).toEqual([expect.stringContaining(databaseTag(file))]);
+  expect((await run("backup", ["list"])).out).not.toContain(theirs);
   expect((await run("backup", ["sideways"])).code).toBe(2);
   store = openStore(file);
 });
@@ -149,8 +197,8 @@ test("restore: a dry run checks and changes nothing; a restore keeps the current
   expect(tasksIn(file)).toEqual(["kept"]);
   expect(existsSync(`${file}-wal`) && statSync(`${file}-wal`).size > 0).toBe(false);
   // Retention never counts the copy kept before a restore.
-  expect(backupFiles(join(dir, "backups")).map(one => one.path)).toEqual([backup]);
   store = openStore(file);
+  expect(backupFiles(join(dir, "backups"), backupOwner(store, file)).map(one => one.path)).toEqual([backup]);
   expect(store.actionLedger({ repos: null, instance: true, limit: 5 })[0]).toMatchObject({ action: "database restored", outcome: "restored" });
   expect(store.ledgerChain({ full: true }).ok).toBe(true);
 });
@@ -246,6 +294,11 @@ test("Settings → Backups is an instance operator's: the last backup and its re
     const after = await page();
     expect(after).toContain('data-backup-state="ok"');
     expect(after).toContain("Backed up ");
+    // Only this database's backups: another database's in the same folder isn't shown.
+    expect(after).toContain(`standing-orders-${databaseTag(file)}-`);
+    const theirs = `standing-orders-${databaseTag(join(dir, "other.db"))}-2026-09-28-040000.db`;
+    writeFileSync(join(folder(), theirs), "theirs");
+    expect(await page()).not.toContain(theirs);
 
     // A failed backup is what the page leads with.
     store.handle.prepare("INSERT INTO backup_run (trigger, started_at, finished_at, ok, error) VALUES ('scheduled', ?, ?, 0, 'disk full')").run(new Date().toISOString(), new Date().toISOString());

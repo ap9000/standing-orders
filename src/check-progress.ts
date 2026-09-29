@@ -9,7 +9,11 @@ export type CheckSuiteProgress = {
   failed: number;
   skipped: number;
   total: number | null;
+  /** Only when the journeys run in parallel groups: how many groups have passed or failed, of how many. */
+  groups?: CheckGroupsProgress;
 };
+
+export type CheckGroupsProgress = { passed: number; failed: number; total: number };
 
 export type CheckProgressSnapshot = {
   version: 1;
@@ -34,6 +38,11 @@ function safeCount(raw: string | undefined): number | null {
 }
 
 function suiteWords(name: CheckSuiteName, suite: CheckSuiteProgress): string {
+  const words = countWords(name, suite);
+  return suite.groups === undefined ? words : `${words} · ${suite.groups.passed}/${suite.groups.total} groups`;
+}
+
+function countWords(name: CheckSuiteName, suite: CheckSuiteProgress): string {
   const completed = suite.passed + suite.failed + suite.skipped;
   if (suite.state === "passed") {
     const count = suite.total !== null && suite.skipped > 0 ? `${suite.passed}/${suite.total}` : String(suite.passed);
@@ -53,7 +62,8 @@ export function checkProgressLine(suites: Record<CheckSuiteName, CheckSuiteProgr
 
 /** A machine-only count line that is safe to send through a push provider. */
 export function isCheckProgressLine(value: string): boolean {
-  return /^(?:unit|flows|app) (?:…|\?(?: [0-9]{1,9})?|[0-9]{1,9}(?:\/[0-9]{1,9})?|✓ [0-9]{1,9}(?:\/[0-9]{1,9})?|✕ [0-9]{1,9}(?:\/[0-9]{1,9})?)(?: · (?:unit|flows|app) (?:…|\?(?: [0-9]{1,9})?|[0-9]{1,9}(?:\/[0-9]{1,9})?|✓ [0-9]{1,9}(?:\/[0-9]{1,9})?|✕ [0-9]{1,9}(?:\/[0-9]{1,9})?)){2}$/.test(value);
+  const suite = String.raw`(?:unit|flows|app) (?:…|\?(?: [0-9]{1,9})?|[0-9]{1,9}(?:\/[0-9]{1,9})?|✓ [0-9]{1,9}(?:\/[0-9]{1,9})?|✕ [0-9]{1,9}(?:\/[0-9]{1,9})?)(?: · [0-9]{1,9}\/[0-9]{1,9} groups)?`;
+  return new RegExp(`^${suite}(?: · ${suite}){2}$`).test(value);
 }
 
 export function parseCheckProgressSnapshot(raw: string): CheckProgressSnapshot | null {
@@ -70,6 +80,12 @@ export function parseCheckProgressSnapshot(raw: string): CheckProgressSnapshot |
       if (suite.total !== null && completed > Number(suite.total)) return null;
       if (value.final && (suite.state === "pending" || suite.state === "running")) return null;
       suites[name] = { state: suite.state as CheckSuiteState, passed: Number(suite.passed), failed: Number(suite.failed), skipped: Number(suite.skipped), total: suite.total === null ? null : Number(suite.total) };
+      if (suite.groups !== undefined) {
+        const groups = suite.groups as Partial<CheckGroupsProgress> | null;
+        if (groups === null || typeof groups !== "object" || ![groups.passed, groups.failed, groups.total].every(one => Number.isSafeInteger(one) && Number(one) >= 0)) return null;
+        if (Number(groups.passed) + Number(groups.failed) > Number(groups.total)) return null;
+        suites[name].groups = { passed: Number(groups.passed), failed: Number(groups.failed), total: Number(groups.total) };
+      }
     }
     if (checkProgressLine(suites) !== value.line) return null;
     return { version: 1, final: value.final, line: value.line, suites };
@@ -92,6 +108,7 @@ export class CheckProgressTracker {
   private readonly events = new Set<string>();
   private last = "";
   private recognized = false;
+  private parallel: ParallelRun | null = null;
 
   constructor(private readonly update: (snapshot: CheckProgressSnapshot) => void) {}
 
@@ -117,7 +134,11 @@ export class CheckProgressTracker {
   }
 
   snapshot(final = false): CheckProgressSnapshot {
-    const suites = Object.fromEntries(CHECK_SUITES.map(name => [name, { ...this.suites[name] }])) as Record<CheckSuiteName, CheckSuiteProgress>;
+    const suites = Object.fromEntries(CHECK_SUITES.map(name => {
+      const suite = { ...this.suites[name] };
+      if (suite.groups !== undefined) suite.groups = { ...suite.groups };
+      return [name, suite];
+    })) as Record<CheckSuiteName, CheckSuiteProgress>;
     return { version: 1, final, line: checkProgressLine(suites), suites };
   }
 
@@ -146,6 +167,38 @@ export class CheckProgressTracker {
         this.suites.unit = { state: failed > 0 ? "failed" : "passed", passed, failed, skipped: Math.max(0, total - passed - failed), total };
         this.emit();
       }
+      return;
+    }
+
+    // scripts/e2e-parallel.mjs: "Running 7 groups at once: console, task, …", then every group's
+    // lines as "[group] [app] …", then "✅ group  3.1 min" per group and "N of M groups passed …".
+    const starting = /^Running ([0-9]+) groups at once: (.+)$/.exec(line);
+    if (starting !== null) {
+      const total = safeCount(starting[1]);
+      const names = starting[2]!.split(",").map(one => one.trim()).filter(one => one !== "");
+      if (total !== null && names.length === total) this.parallel = { suite: null, total, groups: new Map(names.map(one => [one, emptyGroup()])) };
+      return;
+    }
+    const parallel = this.parallel;
+    if (parallel !== null) {
+      const exited = /^(✅|❌)\s+(\S+)\s+[0-9.]+ min$/.exec(line);
+      const group = exited === null ? undefined : parallel.groups.get(exited[2]!);
+      if (group !== undefined && parallel.suite !== null) {
+        group.result = exited![1] === "✅" ? "passed" : "failed";
+        this.summarize(parallel);
+        return;
+      }
+      const summary = /^([0-9]+) of ([0-9]+) groups passed\b/.exec(line);
+      if (summary !== null && parallel.suite !== null && safeCount(summary[2]) === parallel.total) {
+        const passed = safeCount(summary[1]) ?? 0;
+        this.summarize(parallel, passed === parallel.total);
+        this.parallel = null;
+        return;
+      }
+    }
+    const grouped = /^\[\s*([A-Za-z0-9_.-]+)\s*\]\s*\[(flows|app)\]\s*(.*)$/i.exec(line);
+    if (grouped !== null && parallel !== null && parallel.groups.has(grouped[1]!)) {
+      this.readGroup(parallel, grouped[1]!, grouped[2]!.toLowerCase() as "flows" | "app", grouped[3] ?? "");
       return;
     }
 
@@ -192,4 +245,59 @@ export class CheckProgressTracker {
     };
     this.emit();
   }
+
+  /** One group's journey line: count its events, and take its own totals line as that group's result. */
+  private readGroup(parallel: ParallelRun, name: string, suite: "flows" | "app", body: string): void {
+    if (parallel.suite !== null && parallel.suite !== suite) return;
+    parallel.suite = suite;
+    this.recognized = true;
+    const group = parallel.groups.get(name)!;
+    const totals = /\b([0-9]+)\s+passed\s*,\s*([0-9]+)\s+failed(?:\s*,\s*([0-9]+)\s+skipped)?\b/i.exec(body);
+    if (totals !== null) {
+      group.passed = safeCount(totals[1]) ?? 0;
+      group.failed = safeCount(totals[2]) ?? 0;
+      group.skipped = safeCount(totals[3]) ?? 0;
+      group.total = group.passed + group.failed + group.skipped;
+      group.result ??= group.failed > 0 ? "failed" : "passed";
+      this.summarize(parallel);
+      return;
+    }
+    const event = /^\s*(?:[0-9]+s\s+)?(PASS|FAIL|SKIP)\b/i.exec(body)?.[1]?.toUpperCase();
+    if (event === undefined || group.total !== null) return;
+    const identity = `${suite}:${name}:${event}:${body}`;
+    if (this.events.has(identity)) return;
+    this.events.add(identity);
+    if (event === "PASS") group.passed += 1;
+    else if (event === "FAIL") group.failed += 1;
+    else group.skipped += 1;
+    this.summarize(parallel);
+  }
+
+  /** The suite is the sum of its groups; its total is known once every group has reported one. */
+  private summarize(parallel: ParallelRun, allPassed?: boolean): void {
+    const name = parallel.suite;
+    if (name === null) return;
+    const groups = [...parallel.groups.values()];
+    const sum = (pick: (group: GroupRun) => number) => groups.reduce((total, group) => total + pick(group), 0);
+    const passedGroups = groups.filter(group => group.result === "passed").length;
+    const failedGroups = groups.filter(group => group.result === "failed").length;
+    const failed = sum(group => group.failed);
+    const total = groups.every(group => group.total !== null) ? sum(group => group.total ?? 0) : null;
+    const state: CheckSuiteState = allPassed === false || failed > 0 || failedGroups > 0 ? "failed"
+      : allPassed === true || passedGroups === parallel.total ? "passed" : "running";
+    this.suites[name] = {
+      state,
+      passed: sum(group => group.passed),
+      failed,
+      skipped: sum(group => group.skipped),
+      total,
+      groups: { passed: passedGroups, failed: failedGroups, total: parallel.total },
+    };
+    this.emit();
+  }
 }
+
+type GroupRun = { passed: number; failed: number; skipped: number; total: number | null; result: "passed" | "failed" | null };
+type ParallelRun = { suite: "flows" | "app" | null; total: number; groups: Map<string, GroupRun> };
+
+const emptyGroup = (): GroupRun => ({ passed: 0, failed: 0, skipped: 0, total: null, result: null });

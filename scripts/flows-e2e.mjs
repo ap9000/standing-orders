@@ -620,8 +620,11 @@ await check("A GitHub trigger checks a real repository with gh (Check now)", ["A
 });
 
 const scheduleAddedAt = Date.now();
+// Daily at the next whole minute at least 45 s away (UTC): it fires in about a minute, where the
+// shortest "every" schedule (5 minutes) kept the whole run waiting for it.
+const fireAt = new Date(Math.ceil((scheduleAddedAt + 45_000) / 60_000) * 60_000);
 const scheduled = await check("A schedule trigger is added (checked at the end)", ["A failing script sends the card back, and Insights show where and why"], async () => {
-  await trigger(checksFlow, async form => { await pick(form, "What starts cards", "schedule"); await type(form, "When", "every 5 minutes"); await type(form, "Card title", "Health check"); });
+  await trigger(checksFlow, async form => { await pick(form, "What starts cards", "schedule"); await type(form, "When", `daily ${fireAt.toISOString().slice(11, 16)}`); await type(form, "Card title", "Health check"); });
   if ((await page.locator("[data-trigger-row]", { hasText: "Health check" }).count()) === 0) throw new Error("the schedule trigger isn't listed");
 });
 
@@ -652,7 +655,7 @@ await check("The lead explains where the flows break (real Claude turn)", ["A fa
 });
 
 if (scheduled !== null && scheduled !== undefined) await check("The schedule trigger makes its card on time", ["A schedule trigger is added (checked at the end)"], async () => {
-  const card = await until("the scheduled card", async () => (await flowView(checksFlow)).cards.find(one => one.title.startsWith("Health check")), { timeoutMs: Math.max(30_000, scheduleAddedAt + 6 * 60_000 - Date.now()), everyMs: 5000 });
+  const card = await until("the scheduled card", async () => (await flowView(checksFlow)).cards.find(one => one.title.startsWith("Health check")), { timeoutMs: Math.max(30_000, fireAt.getTime() + 60_000 - Date.now()), everyMs: 5000 });
   return { title: card.title, minutes: Math.round((Date.now() - scheduleAddedAt) / 6000) / 10 };
 });
 

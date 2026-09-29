@@ -1,5 +1,6 @@
-import { describe, test, expect, beforeAll, afterAll } from "vitest";
-import { existsSync, readFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { describe, test, expect, beforeAll, afterAll, afterEach } from "vitest";
+import { existsSync, readFileSync, readdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,14 +18,27 @@ const bareLegacy = (phase: "build" | "plan" | "repair" | "review", provider: str
  * relay, control sockets, and fences. No claude binary is involved.
  */
 
+/**
+ * The tool a fake agent leaves behind. It writes its PID to a checkpoint so the
+ * test can end it, and it ends itself once that checkpoint is removed (the test
+ * directory goes in afterAll) or after a minute, so a missed cleanup can never
+ * leave it running after the suite.
+ */
+const TOOL_FIXTURE = [
+  "const fs=require('node:fs');const at=process.argv[1];const born=Date.now();",
+  "fs.writeFileSync(at,String(process.pid));",
+  "setInterval(()=>{if(!fs.existsSync(at)||Date.now()-born>60000)process.exit(0)},100)",
+].join("");
+
 const FAKE_AGENT = `
+const TOOL_FIXTURE = ${JSON.stringify(TOOL_FIXTURE)};
 process.stdin.setEncoding("utf8");
 let buf = "";
 let n = 0;
 const mode = process.argv[2] ?? "echo";
 if(mode === "detached" || mode === "inherited" || mode === "escaped-relay") {
  const {spawn}=require("node:child_process");
- spawn(process.execPath,["-e","require('node:fs').writeFileSync(process.argv[1],String(process.pid));setInterval(()=>{},100)",process.argv[3]],{detached:mode !== "inherited",stdio:mode === "detached" ? "ignore" : ["ignore","inherit","inherit"]}).unref();
+ spawn(process.execPath,["-e",TOOL_FIXTURE,process.argv[3]],{detached:mode !== "inherited",stdio:mode === "detached" ? "ignore" : ["ignore","inherit","inherit"]}).unref();
 }
 process.stdin.on("data", c => {
   buf += c;
@@ -65,12 +79,32 @@ const socket = (): string => {
 const turn = (text: string): string =>
   JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text }] } });
 
+const alive = (pid: number): boolean => {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+};
+/** End every tool fixture that wrote a checkpoint, whether or not the product
+ * fenced it. Runs after each test, pass or fail, so no fixture outlives it. */
+const releaseFixtures = async (): Promise<void> => {
+  if (!dir || !existsSync(dir)) return;
+  const pids = readdirSync(dir).filter(name => name.endsWith("-pid")).map(name => {
+    const path = join(dir, name);
+    const pid = Number(readFileSync(path, "utf8"));
+    rmSync(path, { force: true });
+    return pid;
+  }).filter(pid => Number.isInteger(pid) && pid > 0);
+  for (const pid of pids) { try { process.kill(pid, "SIGKILL"); } catch {} }
+  const deadline = Date.now() + 3000;
+  while (pids.some(alive) && Date.now() < deadline) await new Promise(pass => setTimeout(pass, 20));
+};
+
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), "so-held-test-"));
   agentPath = join(dir, "fake-agent.cjs");
   writeFileSync(agentPath, FAKE_AGENT);
 });
-afterAll(() => {
+afterEach(releaseFixtures);
+afterAll(async () => {
+  await releaseFixtures();
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -272,9 +306,8 @@ describe("the held-session transport under the real supervisor", () => {
       expect(unknown).toBe(true);
     } finally {
       // The fixture deliberately leaves a live tool beyond observed custody.
-      // Release only that fixture process; production recovery never signals
-      // a saved PID after its owned ancestry has disappeared.
-      if (existsSync(checkpoint)) { try { process.kill(Number(readFileSync(checkpoint, "utf8")), "SIGKILL"); } catch {} }
+      // afterEach releases only that fixture process; production recovery
+      // never signals a saved PID after its owned ancestry has disappeared.
       start.handle.terminate(); await start.handle.exited;
     }
   }, 12000);
@@ -291,6 +324,42 @@ describe("the held-session transport under the real supervisor", () => {
     const exit = await start.handle.exited;
     expect(exit.code === 0).toBe(false);
   }, 20_000);
+});
+
+describe("the tool fixture never outlives the suite", () => {
+  const orphan = async (checkpoint: string): Promise<number> => {
+    // The fake agent alone, with no supervisor to fence it: its detached tool
+    // is orphaned once the agent dies, just as when a real fence fails.
+    const agent = spawn(process.execPath, [agentPath, "detached", checkpoint], { stdio: ["pipe", "ignore", "ignore"] });
+    try {
+      const deadline = Date.now() + 3000;
+      while (!existsSync(checkpoint) && Date.now() < deadline) await new Promise(pass => setTimeout(pass, 20));
+      expect(existsSync(checkpoint)).toBe(true);
+      return Number(readFileSync(checkpoint, "utf8"));
+    } finally {
+      agent.kill("SIGKILL");
+      await new Promise(pass => { if (agent.exitCode !== null || agent.signalCode !== null) pass(null); else agent.once("exit", pass); });
+    }
+  };
+  const gone = async (pid: number): Promise<boolean> => {
+    const deadline = Date.now() + 3000;
+    while (alive(pid) && Date.now() < deadline) await new Promise(pass => setTimeout(pass, 20));
+    return !alive(pid);
+  };
+
+  test("the cleanup after each test ends a tool that escaped every fence", async () => {
+    const pid = await orphan(join(dir, "orphan-pid"));
+    expect(alive(pid)).toBe(true);
+    await releaseFixtures();
+    expect(await gone(pid)).toBe(true);
+  });
+
+  test("a tool ends itself once its checkpoint is removed", async () => {
+    const checkpoint = join(dir, "self-ending-pid");
+    const pid = await orphan(checkpoint);
+    rmSync(checkpoint);
+    expect(await gone(pid)).toBe(true);
+  });
 });
 
 describe("the held invocation gateway", () => {

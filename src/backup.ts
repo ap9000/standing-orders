@@ -12,8 +12,8 @@
  * the backup's schema version and walks its ledger chain first, keeps the
  * current database as a copy, and with --dry-run changes nothing.
  */
-import { randomBytes, randomUUID } from "node:crypto";
-import { chmodSync, closeSync, constants, copyFileSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { chmodSync, closeSync, constants, copyFileSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, realpathSync, renameSync, rmSync, statSync } from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { createRequire } from "node:module";
@@ -22,8 +22,9 @@ import { BACKUP_EVERY_HOURS, MAX_KEEP } from "./backup-ui.js";
 import { verifyLedgerChain } from "./ledger-chain.js";
 import { openStore, readSchemaVersion, SCHEMA_VERSION, type BackupSettings, type Database, type Store } from "./store.js";
 
-/** A scheduled backup's name: sortable by when it was made. Retention only ever removes files named like this. */
-const BACKUP_NAME = /^standing-orders-\d{4}-\d{2}-\d{2}-\d{6}(?:-\d+)?\.db$/;
+/** A scheduled backup's name: the database it came from (see `databaseTag`), then when it was made. Backups made
+ * before the tag was added have none. Retention only ever removes files named like this. */
+const BACKUP_NAME = /^standing-orders-(?:([0-9a-f]{8})-)?(\d{4}-\d{2}-\d{2}-\d{6})(?:-(\d+))?\.db$/;
 /** The oldest schema whose ledger has a hash chain to verify. */
 export const OLDEST_RESTORABLE = 103;
 export { BACKUP_EVERY_HOURS, MAX_KEEP };
@@ -82,20 +83,40 @@ export function checkBackupFolder(path: string, forbidden: readonly string[]): s
   return null;
 }
 
-/** Backups in a folder made on a schedule or by `backup now`, newest first. */
-export function backupFiles(folder: string): { name: string; path: string; bytes: number }[] {
-  let names: string[];
-  try { names = readdirSync(folder); } catch { return []; }
-  return names.filter(name => BACKUP_NAME.test(name)).sort().reverse().flatMap(name => {
-    const path = join(folder, name);
-    try { const stat = lstatSync(path); return stat.isFile() ? [{ name, path, bytes: stat.size }] : []; } catch { return []; }
-  });
+/** A short tag for one database, from its full path, so databases that share a backup folder tell their backups apart. */
+export function databaseTag(databaseFile: string): string {
+  let path = resolve(databaseFile);
+  try { path = realpathSync(path); } catch { /* not there yet: its path as given */ }
+  return createHash("sha256").update(path).digest("hex").slice(0, 8);
 }
 
-/** Remove all but the newest `keep` backups. Never touches anything else in the folder. */
-export function pruneBackups(folder: string, keep: number): number {
+/** Whose backups are whose: this database's tag, and every backup file its own history records making. */
+export type BackupOwner = { tag: string; made: ReadonlySet<string> };
+export function backupOwner(store: Store, databaseFile: string): BackupOwner {
+  const made = store.handle.prepare("SELECT file FROM backup_run WHERE ok = 1 AND file IS NOT NULL").all().map(row => resolve(String(row["file"])));
+  return { tag: databaseTag(databaseFile), made: new Set(made) };
+}
+
+/** This database's backups in a folder, made on a schedule or by `backup now`, newest first. A backup tagged for
+ * another database is never this one's. An untagged one (made before backups were tagged) is this one's only when its
+ * own history records making it: pruning deletes, so what can't be proved ours is left alone. */
+export function backupFiles(folder: string, owner: BackupOwner): { name: string; path: string; bytes: number }[] {
+  let names: string[];
+  try { names = readdirSync(folder); } catch { return []; }
+  const named = names.flatMap(name => { const m = BACKUP_NAME.exec(name); return m === null ? [] : [{ name, tag: m[1] ?? null, order: `${m[2]}-${(m[3] ?? "1").padStart(6, "0")}` }]; });
+  return named
+    .filter(one => one.tag === owner.tag || (one.tag === null && owner.made.has(resolve(folder, one.name))))
+    .sort((a, b) => a.order < b.order ? 1 : a.order > b.order ? -1 : a.name < b.name ? 1 : -1)
+    .flatMap(({ name }) => {
+      const path = join(folder, name);
+      try { const stat = lstatSync(path); return stat.isFile() ? [{ name, path, bytes: stat.size }] : []; } catch { return []; }
+    });
+}
+
+/** Remove all but this database's newest `keep` backups. Never touches another database's, or anything else in the folder. */
+export function pruneBackups(folder: string, keep: number, owner: BackupOwner): number {
   let removed = 0;
-  for (const one of backupFiles(folder).slice(Math.max(1, keep))) {
+  for (const one of backupFiles(folder, owner).slice(Math.max(1, keep))) {
     try { rmSync(one.path); removed++; } catch { /* the next backup tries again */ }
   }
   return removed;
@@ -120,7 +141,7 @@ export async function backupNow(store: Store, databaseFile: string, trigger: "sc
   let partial: string | null = null;
   try {
     mkdirSync(folder, { recursive: true, mode: 0o700 });
-    const stamp = stampOf(clock());
+    const stamp = `${databaseTag(databaseFile)}-${stampOf(clock())}`;
     let name = `standing-orders-${stamp}.db`;
     for (let n = 2; existsSync(join(folder, name)); n++) name = `standing-orders-${stamp}-${n}.db`;
     partial = join(folder, `.${name}.${randomBytes(4).toString("hex")}.partial`);
@@ -128,7 +149,7 @@ export async function backupNow(store: Store, databaseFile: string, trigger: "sc
     const file = join(folder, name);
     renameSync(partial, file);
     partial = null;
-    const removed = pruneBackups(folder, settings.keep);
+    const removed = pruneBackups(folder, settings.keep, backupOwner(store, databaseFile));
     store.finishBackupRun(id, { ok: true, file, bytes: made.bytes, schemaVersion: made.schemaVersion, removed }, clock());
     return { ok: true, id, file, bytes: made.bytes, removed };
   } catch (error) {

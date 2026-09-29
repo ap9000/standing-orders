@@ -15,7 +15,7 @@ Each sprint ships as its own release through the usual gate. Sprint 1 is
 PR #91 (schema 99); sprint 2 is PR #92 (schema 100); sprint 3 is PR #95
 (schema 101); sprint 4 is PR #96 (schema 102); sprint 5 is PR #98
 (schema 103); sprint 6 is PR #100 (schema 104); sprint 7 is PR #101
-(schema 105).
+(schema 105); sprint 8 is PR #102 (schema 106).
 
 | Sprint | Theme | Ships |
 |---|---|---|

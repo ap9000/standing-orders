@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CheckProgressTracker, type CheckProgressSnapshot } from "./check-progress.js";
+import { CheckProgressTracker, isCheckProgressLine, parseCheckProgressSnapshot, type CheckProgressSnapshot } from "./check-progress.js";
 import { isTelegramProgressNotification, openStore, type Store } from "./store.js";
 import { addApprover } from "./scope.js";
 import { register } from "./runner.js";
@@ -76,6 +76,41 @@ describe("check output progress", () => {
     tracker.feed("[flows] FAIL  saves feedback\n[flows] 17 passed, 1 failed, 0 skipped\n");
     expect(tracker.finish()!.line).toBe("unit ✕ 1/191 · flows ✕ 1/18 · app ?");
   });
+
+  // Regression: the release check runs the app journeys through scripts/e2e-parallel.mjs, which
+  // prefixes every line with the group's name; those lines used to leave the app suite at "…".
+  test("reads the app journeys from the parallel runner, with each group's final result", () => {
+    const seen: CheckProgressSnapshot[] = [];
+    const tracker = new CheckProgressTracker(snapshot => seen.push(snapshot));
+    tracker.feed("Test Files  191 passed (191)\n[flows] 2 passed, 0 failed, 0 skipped\n");
+    tracker.feed("Running 3 groups at once: console, task, flows\n");
+    tracker.feed("[console] [app]     4s  ...   Sign-in\n[console] [app]     9s  PASS  Sign-in (5 s)\n");
+    tracker.feed("[flows  ] [app]     6s  PASS  Code steps (6 s)\n[task   ] [app]     7s  PASS  An idea (7 s)\n");
+    expect(seen.at(-1)!.line).toBe("unit ✓ 191 · flows ✓ 2 · app 3 · 0/3 groups");
+    tracker.feed("[flows  ] [app]    20s  PASS  No browser errors on any page (0 s)\n[flows  ] [app]    21s  2 passed, 0 failed, 0 skipped — /tmp/flows/report.md\n");
+    tracker.feed("[console] [app]    30s  PASS  No browser errors on any page (0 s)\n[console] [app]    31s  2 passed, 0 failed, 0 skipped — /tmp/console/report.md\n");
+    expect(seen.at(-1)!.line).toBe("unit ✓ 191 · flows ✓ 2 · app 5 · 2/3 groups");
+    tracker.feed("[task   ] [app]    40s  FAIL  Sent back: timed out\n[task   ] [app]    41s  1 passed, 1 failed, 0 skipped — /tmp/task/report.md\n");
+    expect(seen.at(-1)!.line).toBe("unit ✓ 191 · flows ✓ 2 · app ✕ 1/6 · 2/3 groups");
+    tracker.feed("\n# console — 2 passed, 0 failed, 0 skipped (0.5 min)\n- ✅ Sign-in — 5 s\n");
+    tracker.feed("✅ console  0.5 min\n❌ task     0.7 min\n✅ flows    0.4 min\n\n2 of 3 groups passed in 0.7 min — /tmp/out\n");
+    const final = tracker.finish()!;
+    expect(final).toMatchObject({
+      final: true,
+      line: "unit ✓ 191 · flows ✓ 2 · app ✕ 1/6 · 2/3 groups",
+      suites: { app: { state: "failed", passed: 5, failed: 1, skipped: 0, total: 6, groups: { passed: 2, failed: 1, total: 3 } } },
+    });
+    expect(parseCheckProgressSnapshot(JSON.stringify(final))).toEqual(final);
+    expect(isCheckProgressLine(final.line)).toBe(true);
+
+    const passing = new CheckProgressTracker(() => undefined);
+    passing.feed("Test Files  1 passed (1)\n[flows] 1 passed, 0 failed, 0 skipped\nRunning 2 groups at once: console, mail\n");
+    passing.feed("[console] [app]  9s  PASS  Sign-in (5 s)\n[console] [app]  10s  1 passed, 0 failed, 0 skipped — r\n");
+    expect(passing.snapshot().line).toBe("unit ✓ 1 · flows ✓ 1 · app 1 · 1/2 groups");
+    passing.feed("[mail   ] [app]  3s  SKIP  Email inbox (no Docker)\n[mail   ] [app]  4s  0 passed, 0 failed, 1 skipped — r\n");
+    passing.feed("✅ console  0.2 min\n✅ mail     0.1 min\n\n2 of 2 groups passed in 0.2 min — /tmp/out\n");
+    expect(passing.finish()!.line).toBe("unit ✓ 1 · flows ✓ 1 · app ✓ 1/2 · 2/2 groups");
+  });
 });
 
 describe("saved and delivered progress", () => {
@@ -128,5 +163,59 @@ describe("saved and delivered progress", () => {
     const code = await runOperate("check-progress", [String(run), "--json"], line => lines.push(line), { databaseFile: file, now: T0 });
     expect(code).toBe(0);
     expect(JSON.parse(lines.join("\n"))).toMatchObject({ ok: true, command: "check-progress", run, progress: { line: final.line, final: true } });
+  });
+
+  test("progress and the result share one row, and a running check does not block its result", () => {
+    dir = mkdtempSync(join(tmpdir(), "so-check-progress-"));
+    const store = openStore(join(dir, "orders.db"));
+    const run = fixture(store);
+    const seen = samples();
+    store.saveCheckProgress(run, seen[0]!, T0);
+    expect(store.runCheckFor(run)).toBeNull();
+
+    store.recordRunCheck(run, { status: "passed", exitCode: 0, suites: [{ name: "unit", status: "passed", exitCode: 0 }] }, later(1_000));
+    store.recordRunCheck(run, { status: "failed", exitCode: 1, suites: [] }, later(2_000));
+    store.saveCheckProgress(run, seen.at(-1)!, later(3_000));
+    expect(store.runCheckFor(run)).toEqual({ status: "passed", exitCode: 0, suites: [{ name: "unit", status: "passed", exitCode: 0 }] });
+    expect(store.checkProgress(run)).toMatchObject({ run, line: seen.at(-1)!.line, final: true });
+    expect(store.handle.prepare("SELECT count(*) AS n FROM run_check").get()).toEqual({ n: 1 });
+    expect(store.handle.prepare("SELECT name FROM sqlite_master WHERE name = 'check_progress'").get()).toBeUndefined();
+    store.close();
+  });
+
+  test("a file with the older separate tables opens with one row per run", () => {
+    dir = mkdtempSync(join(tmpdir(), "so-check-progress-"));
+    const file = join(dir, "orders.db");
+    const old = openStore(file);
+    const run = fixture(old);
+    const final = samples().at(-1)!;
+    old.handle.exec(`DROP TABLE run_check;
+      CREATE TABLE run_check (run INTEGER PRIMARY KEY, status TEXT NOT NULL CHECK (status IN ('passed', 'failed', 'not-run')),
+        exit_code INTEGER, suites_json TEXT NOT NULL DEFAULT '[]', release INTEGER NOT NULL DEFAULT 0 CHECK (release IN (0, 1)), recorded_at TEXT NOT NULL);
+      CREATE INDEX run_check_release ON run_check (run DESC) WHERE release = 1;
+      CREATE TABLE check_progress (run INTEGER PRIMARY KEY REFERENCES run(id) ON DELETE CASCADE, snapshot TEXT NOT NULL, line TEXT NOT NULL,
+        final INTEGER NOT NULL DEFAULT 0 CHECK (final IN (0,1)), updated_at TEXT NOT NULL, notified_at TEXT);`);
+    old.handle.prepare("INSERT INTO run_check (run, status, exit_code, release, recorded_at) VALUES (?, 'failed', 1, 1, ?), (?, 'passed', 0, 0, ?)")
+      .run(run, T0.toISOString(), run + 50, T0.toISOString());
+    old.handle.prepare("INSERT INTO check_progress (run, snapshot, line, final, updated_at, notified_at) VALUES (?, ?, ?, 1, ?, ?)")
+      .run(run, JSON.stringify(final), final.line, T0.toISOString(), T0.toISOString());
+    old.close();
+
+    const store = openStore(file);
+    expect(store.runCheckFor(run)).toEqual({ status: "failed", exitCode: 1, suites: [] });
+    expect(store.checkProgress(run)).toMatchObject({ run, line: final.line, final: true, notifiedAt: T0.toISOString() });
+    expect(store.runCheckFor(run + 50)).toBeNull();
+    expect(store.handle.prepare("SELECT run, release FROM run_check").all()).toEqual([{ run, release: 1 }]);
+    expect(store.handle.prepare("SELECT name FROM sqlite_master WHERE name = 'run_check_next'").all()).toEqual([]);
+    expect(store.handle.prepare("SELECT name FROM sqlite_master WHERE name = 'run_check_release'").get()).toEqual({ name: "run_check_release" });
+    // The old table keeps its rows (a deploy refuses a migration that loses them) …
+    expect(store.handle.prepare("SELECT run, line FROM check_progress").all()).toEqual([{ run, line: final.line }]);
+    // … and never overwrites newer progress when the file opens again.
+    const first = samples()[0]!;
+    store.saveCheckProgress(run, first, later(5_000));
+    store.close();
+    const again = openStore(file);
+    expect(again.checkProgress(run)).toMatchObject({ run, line: first.line, final: first.final });
+    again.close();
   });
 });
