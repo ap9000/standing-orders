@@ -48,6 +48,8 @@ export function teammateReady(store: Store, mate: TeammateRow | null, now: Date)
   if (mate.state !== "active") return { ok: false, why: "paused" };
   if (!parseSoul(mate.soul).ok) return { ok: false, why: "its soul file can't be read" };
   if (store.teammateTurnsSince(mate.id, startOfDay(now)) >= mate.dailyTurns) return { ok: false, why: `it reached today's limit of ${mate.dailyTurns} turns` };
+  // v105: a monthly budget its turns count toward (its own, its project's, everything), used up.
+  if (store.budgetGate(now)({ project: mate.repo, person: null, teammate: mate.id }).over !== null) return { ok: false, why: "a monthly budget its work counts toward is used up" };
   return { ok: true };
 }
 

@@ -374,6 +374,30 @@ await check("Monitoring: a webhook set in Settings gets the audit stream, signed
   }
 });
 
+await check("Spend: the month's cost shows by project and person; a budget set on the Spend page is listed, and the month downloads as CSV", [], async () => {
+  await page.goto(`${base}/spend`);
+  await page.locator(".spend-total").waitFor({ timeout: 15_000 });
+  const add = page.locator("details", { hasText: "Add a budget" });
+  if (!(await add.evaluate(one => one.open))) await add.locator("summary").click();
+  await add.locator('select[name="target"]').selectOption({ label: "Everything" });
+  await add.locator('input[name="usd"]').fill("500");
+  await add.locator('input[name="password"]').fill(w.passwords.alex);
+  await Promise.all([page.waitForNavigation(), add.locator('button[type="submit"]').click()]);
+  const budget = page.locator(".budget").first();
+  if (!/Everything|whole installation/i.test(await budget.innerText()) || !/\$500/.test(await budget.innerText())) throw new Error(`the budget: ${(await page.locator(".spend").innerText()).slice(0, 400)}`);
+  if (rows("SELECT 1 FROM budget WHERE scope_kind = 'installation' AND removed_at IS NULL").length !== 1) throw new Error("the budget isn't kept");
+  await shot("spend");
+  await page.setViewportSize({ width: 390, height: 844 });
+  if (await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1)) throw new Error("the Spend page scrolls sideways on a phone");
+  await shot("spend-phone");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const csv = await page.request.get(`${base}/spend?format=csv`);
+  if (csv.status() !== 200 || !(await csv.text()).includes("time_utc,kind,project,person")) throw new Error(`the CSV: ${csv.status()}`);
+  // Leave nothing that could hold later checks' work back.
+  cli(["budget", "remove", "--all", ...auth]);
+  return { budget: "$500 a month" };
+});
+
 await check("The command line answers: the task list, the approvers, the project's check, and help", [], async () => {
   const list = cli(["task", "list"]);
   const people = cli(["approver", "list"]);

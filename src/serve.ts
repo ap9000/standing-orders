@@ -273,6 +273,8 @@ import { readSsoSettings, removeSsoSettings, saveSsoSettings, SSO_CALLBACK, ssoC
 import { monitoringChange, readMonitoring, saveMonitoring } from "./monitoring-settings.js";
 import { MONITORING_CSS, monitoringHtml, signingSecretHtml } from "./monitoring-ui.js";
 import { prometheusMetrics } from "./metrics.js";
+import { SPEND_CSS, spendCsv, spendHtml } from "./spend-ui.js";
+import { budgetLabel, budgetStates, monthNamed, monthOf, spendItems, usd as spendUsd } from "./spend.js";
 import { targetOf } from "./monitoring.js";
 import { SSO_CSS, ssoSettingsHtml } from "./sso-ui.js";
 import { mintApiToken, parseApiToken, secretMatches, TOKEN_DAYS } from "./api-tokens.js";
@@ -1777,7 +1779,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       url.pathname !== "/fleet" &&
       url.pathname !== "/chat" && url.pathname !== "/chat/mate/status" && url.pathname !== "/chat/task-status" && url.pathname !== "/chat/stream" &&
       !/^\/chat\/action\/[0-9]{1,15}$/.test(url.pathname) &&
-      !url.pathname.startsWith("/settings") && url.pathname !== "/logout" && url.pathname !== "/people" && url.pathname !== "/ledger" && url.pathname !== "/ledger/export" && url.pathname !== "/metrics" &&
+      !url.pathname.startsWith("/settings") && url.pathname !== "/logout" && url.pathname !== "/people" && url.pathname !== "/ledger" && url.pathname !== "/ledger/export" && url.pathname !== "/metrics" && url.pathname !== "/spend" && url.pathname !== "/spend/budget" &&
       !(url.pathname === "/board" && url.searchParams.get("scope") === "all");
     if (needsProject) return redirect(response, `/projects?return=${encodeURIComponent(safeReturn(url.pathname + url.search))}`);
 
@@ -2357,6 +2359,36 @@ export function createDecisionServer(options: ServeOptions): Server {
         : dockedConversation(who, reviewFocus, null, now, reviewHref(selected.taskId), selected.run !== null && reviewFocus.family.versions.some(one => one.refId === store.getRun(selected.run!.id)?.taskRef) ? selected.run.id : null);
       if (reviewDocked !== null) reviewPage.workspace = { ...reviewPage.workspace, conversation: reviewDocked, pageHtml: reviewPage.body };
       return sendScreen(response, 200, reviewPage);
+    }
+
+    // v105: what agent work cost, by month, and the monthly budgets. An instance operator's page.
+    if (url.pathname === "/spend") {
+      if (!store.isInstanceOperator(who.name)) return refuse(response, who, 403, "An instance operator sees spend.", "/");
+      const current = monthOf(now);
+      const asked = url.searchParams.get("month");
+      const month = asked === null ? current : monthNamed(asked);
+      if (month === null) return refuse(response, who, 400, "Choose a month like 2026-09.", "/spend");
+      const items = spendItems(store.handle, month.from, month.to);
+      const teammates = store.teammates([...new Set([...managedRepos(), ...store.knownRepos()])]);
+      const teammateNames = new Map(teammates.map(one => [one.id, one.handle]));
+      if (url.searchParams.get("format") === "csv") {
+        response.writeHead(200, { "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="standing-orders-spend-${month.name}.csv"`, "cache-control": "no-store", "x-content-type-options": "nosniff" });
+        return void response.end(spendCsv(items, teammateNames));
+      }
+      const shift = (by: number) => { const at = new Date(`${month.name}-01T00:00:00.000Z`); at.setUTCMonth(at.getUTCMonth() + by); return at.toISOString().slice(0, 7); };
+      const projects = [...new Set([...managedRepos(), ...store.knownRepos()])].filter(visible);
+      const people = store.accountFacts().filter(one => one.revokedAt === null).map(one => one.name);
+      const view = {
+        month: month.name, previous: shift(-1), next: month.name === current.name ? null : shift(1),
+        items, budgets: budgetStates(store.budgets(), items), teammateNames, csrf: who.via === "cookie" ? who.session.csrf : "",
+        targets: [
+          { value: "installation:*", label: "Everything", group: "Everything" as const },
+          ...projects.map(repo => ({ value: `project:${repo}`, label: projectName(repo), group: "Projects" as const })),
+          ...people.map(name => ({ value: `person:${name}`, label: name, group: "People" as const })),
+          ...teammates.map(one => ({ value: `teammate:${one.id}`, label: `${one.handle} (${projectName(one.repo)})`, group: "Teammates" as const })),
+        ],
+      };
+      return sendScreen(response, 200, screen("Spend", spendHtml(view, { said: url.searchParams.get("said"), problem: url.searchParams.get("problem") }), { chrome: chromeFor(null, "spend") }));
     }
 
     if (url.pathname === "/ledger") {
@@ -5051,6 +5083,12 @@ export function createDecisionServer(options: ServeOptions): Server {
         canRetryReview: who.via === "cookie" && who.role === "approver",
         strikes: ref?.strikes ?? 0,
         filer: store.taskFiler(taskId),
+        // v105: a waiting task whose monthly budget is used up says so.
+        budgetHold: (() => {
+          if (ref === null || found.state !== "queued") return null;
+          const over = store.budgetGate(now)(store.budgetSubject(ref.id)).over;
+          return over === null ? null : `${budgetLabel(over)} monthly budget is used up, so this waits until next month or a higher budget`;
+        })(),
         approvalRules: (() => {
           const repo = ref?.repo ?? null;
           if (repo === null) return null;
@@ -6231,6 +6269,30 @@ export function createDecisionServer(options: ServeOptions): Server {
       return answer(404, { ok: false, said: "No such flow action." });
     }
     // v103: an instance operator records a checkpoint of the ledger chain (its head, to copy off the machine).
+    // v105: set or remove a monthly budget. An instance operator, with a step-up; the ledger keeps before → after.
+    if (url.pathname === "/spend/budget") {
+      if (who.via !== "cookie" || !store.isInstanceOperator(who.name)) return refuse(response, who, 403, "An instance operator sets budgets.", "/spend");
+      const back = (key: "said" | "problem", words: string) => redirect(response, `/spend?${key}=${encodeURIComponent(words)}`);
+      if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return back("problem", "Enter your Standing Orders password to change a budget.");
+      const target = /^(installation|project|person|teammate):(.+)$/.exec(body.get("target") ?? "");
+      if (target === null) return back("problem", "Choose what the budget is for.");
+      const scope = target[1] as "installation" | "project" | "person" | "teammate", key = target[2]!;
+      const known = scope === "installation" ? key === "*"
+        : scope === "project" ? [...new Set([...managedRepos(), ...store.knownRepos()])].filter(visible).includes(key)
+        : scope === "person" ? store.accountFacts().some(one => one.name === key && one.revokedAt === null)
+        : store.teammates([...new Set([...managedRepos(), ...store.knownRepos()])]).some(one => String(one.id) === key);
+      if (!known) return back("problem", "That isn't a project, person or teammate here.");
+      const label = budgetLabel({ scope, key }).replace(/'s$/, "");
+      if (body.get("action") === "remove") {
+        const existing = store.budgets().find(one => one.scope === scope && one.key === key);
+        if (existing === undefined || !store.removeBudget(existing.id, who.name, now)) return back("problem", "That budget is already gone.");
+        return back("said", `${label}: budget removed.`);
+      }
+      const dollars = Number(body.get("usd") ?? "");
+      if (!Number.isFinite(dollars) || dollars < 1 || dollars > 10_000_000) return back("problem", "A monthly limit is a whole number of dollars, at least $1.");
+      const saved = store.setBudget({ scope, key, limitMicrousd: Math.round(dollars) * 1_000_000, hardStop: body.get("stop") === "1" }, who.name, now);
+      return back("said", `${label}: ${spendUsd(saved.limitMicrousd)} a month${saved.hardStop ? ", new work stops at 100%" : ", alerts only"}.`);
+    }
     if (url.pathname === "/ledger/checkpoint") {
       if (who.via !== "cookie" || !store.isInstanceOperator(who.name)) return refuse(response, who, 403, "An instance operator makes ledger checkpoints.", "/ledger");
       const made = store.ledgerCheckpoint(who.name, now);
@@ -8049,7 +8111,9 @@ export function createDecisionServer(options: ServeOptions): Server {
               ? "one turn at a time — this one is still running"
               : opened.reason === "daily-cap"
                 ? "the daily turn cap is reached"
-                : "the weekly spend ceiling would be exceeded";
+                : opened.reason === "monthly-budget"
+                  ? "a monthly budget this counts toward is used up (the Spend page says which)"
+                  : "the weekly spend ceiling would be exceeded";
         return redirect(response, `/chat?said=${encodeURIComponent(said)}`);
       }
       void runChatTurn(opened.id, who.session, enabled, message, document, turnRepos);
@@ -13688,12 +13752,12 @@ button.pick-file { min-height: 1.75rem; padding: 0 .55rem; font-size: .75rem; }
 
 /** Appearance: a three-way segmented switch, one tap per choice. */
 const THEME_CONTROLS_CSS = `.task-repo select{width:100%;min-height:2.75rem;font-size:1rem}.task-repo-add{margin:.35rem .1rem .5rem}.task-repo-add a{display:inline-flex;align-items:center;min-height:2.25rem}details.result-request-open.result-request-form>summary{border:0;background:transparent;padding:.5rem 0;min-height:2.75rem;font-weight:600;display:list-item;list-style:revert}details.result-request-open.result-request-form>summary::-webkit-details-marker{display:revert}form.js-autosave button[type=submit]{display:none}.provider-row{border-bottom:1px solid var(--so-line);padding:.35rem 0}.provider-row:first-of-type{border-top:1px solid var(--so-line)}.provider-head{display:flex;align-items:center;gap:.75rem;margin:.4rem 0 0}.provider-status{display:inline-flex;align-items:center;gap:.4rem;color:var(--so-muted);font-size:.875rem}.provider-status i{width:.5rem;height:.5rem;border-radius:50%;background:var(--so-muted)}.provider-status--ok i{background:var(--so-success)}.provider-status--warn i{background:var(--so-attention)}.provider-status--off i{background:transparent;border:1.5px solid var(--so-muted)}details.provider-manage>summary{cursor:pointer;color:var(--so-accent-text);font-size:.875rem;min-height:2.5rem;display:list-item;padding-block:.5rem}.card.props .row{display:grid;gap:.1rem;margin:0 0 .75rem}.card.props .row>.meta{display:block;font-size:.75rem}.card.props .row>.meta::first-letter{text-transform:uppercase}.card.props .row>.mono{font-family:var(--font-sans);font-size:.875rem}.card.props .row>.mono .seal{font-family:var(--font-mono);font-size:.8125rem}details.evidence-files{margin:1rem 0}details.evidence-files>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:600}details.evidence-files ul{list-style:none;margin:0;padding:0}details.evidence-files li{display:flex;justify-content:space-between;gap:1rem;padding:.5rem 0;border-bottom:1px solid var(--so-line)}.result-action .result-feedback-link{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;text-decoration:none}.result-action .result-feedback-link:hover{background:var(--so-raised)}.so-sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}.verdict{margin:.5rem 0 .75rem}.verdict-chips{display:flex;flex-wrap:wrap;gap:.4rem;list-style:none;padding:0;margin:0}.verdict-chip{display:inline-flex;align-items:center;gap:.3rem;min-height:1.75rem;padding:.2rem .65rem;border-radius:999px;font-size:.8125rem;font-weight:600;background:var(--so-neutral-soft);color:var(--so-neutral-ink)}.verdict-chip svg{width:.9rem;height:.9rem}.verdict-chip--success{background:var(--so-success-soft);color:var(--so-success)}.verdict-chip--danger{background:var(--so-danger-soft);color:var(--so-danger)}.verdict-chip--warning{background:var(--so-warning-soft);color:var(--so-warning)}.verdict-chip--info{background:var(--so-info-soft);color:var(--so-info)}.verdict-by{margin:.4rem 0 0}details.result-request-open{margin:.5rem 0}details.result-request-open>summary{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;cursor:pointer;list-style:none}details.result-request-open>summary::-webkit-details-marker{display:none}details.result-request-open[open]>summary{margin-bottom:.75rem}.settings-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(8.5rem,1fr));gap:.5rem;margin:0 0 2rem}.settings-tiles a{display:flex;align-items:center;gap:.6rem;min-height:3rem;padding:.65rem .8rem;border:1px solid var(--so-line);border-radius:.625rem;background:var(--so-paper);color:var(--so-ink);text-decoration:none;font-weight:550;font-size:.875rem}.settings-tiles a:hover{border-color:var(--so-input-line);background:var(--so-raised)}.settings-tiles svg{width:1.1rem;height:1.1rem;flex-shrink:0;color:var(--so-accent-text)}details.settings-more{margin:.25rem 0 1.25rem}details.settings-more>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:550}details.settings-more>summary .meta{font-weight:400;margin-left:.35rem}.settings-changed{margin-top:-.25rem}.appearance{margin:0 0 28px}.appearance h2{margin:0 0 10px}.theme-switch{display:inline-flex;flex-wrap:nowrap;max-width:100%;gap:4px;padding:4px;margin:0;border:1px solid var(--so-line);border-radius:10px;background:var(--so-raised)}.theme-switch .theme-choice,.so-native-region .theme-switch .theme-choice{flex:1 1 0;width:auto;white-space:nowrap;min-height:40px;padding:8px 16px;border:0;border-radius:7px;background:transparent;color:var(--so-muted);font:inherit;font-weight:550;box-shadow:none;cursor:pointer}.theme-switch .theme-choice:hover{color:var(--so-ink)}.theme-switch .theme-choice[aria-pressed="true"]{background:var(--so-paper);color:var(--so-ink);box-shadow:0 1px 2px rgb(0 0 0 / .1)}.appearance .meta{margin:8px 0 0}@media(max-width:600px){.theme-switch .theme-choice{min-height:44px}}`;
-const WORKSPACE_STYLE = styleAsset(STYLE + APPROVAL_RULES_CSS + MONITORING_CSS + EVIDENCE_PACK_CSS + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KITS_CSS + SSO_CSS + CREDENTIALS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
+const WORKSPACE_STYLE = styleAsset(STYLE + APPROVAL_RULES_CSS + SPEND_CSS + MONITORING_CSS + EVIDENCE_PACK_CSS + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KITS_CSS + SSO_CSS + CREDENTIALS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
   projectScoped?: boolean;
-  active: "code" | "inbox" | "board" | "queue" | "fleet" | "workbench" | "work" | "done" | "activity" | "review" | "system" | "tasks" | "runs" | "caps" | "routines" | "recipes" | "projects" | "flows" | "settings" | "chat" | "people" | "ledger" | "mode" | "menu" | "none";
+  active: "code" | "inbox" | "board" | "queue" | "fleet" | "workbench" | "work" | "done" | "activity" | "review" | "system" | "tasks" | "runs" | "caps" | "routines" | "recipes" | "projects" | "flows" | "settings" | "chat" | "people" | "ledger" | "spend" | "mode" | "menu" | "none";
   project: string | null;
   /** The surface's scope for the scope bar — which rows this screen can
    * show. Derived from the ROUTE, not the session: portfolio and fleet are
@@ -18361,8 +18425,9 @@ function workToolRows(scoped = false, _offersChat = false, offersCode = false): 
     { key: "routines", href: "/routines", label: "routines", hint: "scheduled tracks and their firings" },
     { key: "workbench", href: "/workbench", label: "portfolio", hint: "every project and live build in one place" },
     { key: "ledger", href: "/ledger", label: "action ledger", hint: "who acted, what happened, and the result" },
+    { key: "spend", href: "/spend", label: "spend", hint: "what agent work cost, and monthly budgets" },
   ];
-  return scoped ? rows.filter(row => row.key !== "workbench") : rows;
+  return scoped ? rows.filter(row => row.key !== "workbench" && row.key !== "spend") : rows;
 }
 function settingsRows(scoped = false, offersSettings = false): NavRow[] {
   const rows: NavRow[] = [
@@ -18939,6 +19004,7 @@ function taskBodyParts(data: {
   strikes: number;
   /** v102: who filed it, and the project's approval rules as they bear on this task (null: none apply). */
   filer?: { name: string | null; kind: string } | null;
+  budgetHold?: string | null;
   approvalRules?: { words: string; votes: string[]; needsTwo: boolean } | null;
   plan: "requested" | "drafted" | null;
   planDocument: string | null;
@@ -19960,6 +20026,7 @@ function taskBodyParts(data: {
   }
   // v103: everything an auditor asks about this task, printable or as JSON.
   facts.push({ label: "Audit", parts: [{ label: "Evidence pack", href: `${taskHref(task.id)}/evidence` }] });
+  if (data.budgetHold != null) facts.push({ label: "Budget", parts: [`${data.budgetHold} · `, { label: "Spend", href: "/spend" }] });
   if (data.publication !== null && data.publication !== undefined) {
     const prHref = safePrUrl(data.publication.prUrl), pr = `PR #${data.publication.prNumber ?? "?"}`;
     facts.push({ label: "Published", parts: [prHref === null ? pr : { label: pr, href: prHref },

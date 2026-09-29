@@ -4,6 +4,9 @@ import { rulesSummary } from "./approval-rules-ui.js";
 import { evidencePack, exportDay, ledgerExportChunks, standaloneEvidenceHtml, type LedgerExport } from "./evidence-pack.js";
 import { matchesOutsideCheckpoint } from "./ledger-chain.js";
 import { bytesWords, storageReport } from "./storage.js";
+import { budgetLabel, budgetStates, monthNamed, monthOf, spendItems, usd as spendUsd } from "./spend.js";
+import { spendCsv } from "./spend-ui.js";
+import { startBudgetAlerts } from "./budget-alerts.js";
 import { packageVersion, startMonitoring, targetOf } from "./monitoring.js";
 import { origin, readMonitoring } from "./monitoring-settings.js";
 import { logEvent } from "./log.js";
@@ -341,6 +344,8 @@ export const OPERATE_HELP = `standing-orders — operating the queue
   standing-orders task evidence <id>        the task's evidence pack as JSON (--html for a printable page; --out <file>)
   standing-orders storage                   where the disk goes: database, build checkouts, releases, evidence
   standing-orders monitoring                where the audit stream and traces go, and how each destination is doing
+  standing-orders spend [--month YYYY-MM] [--csv]   what agent work cost, by project, person, teammate and model
+  standing-orders budget list|set|remove    monthly budgets (--all | --project <p> | --person <name> | --teammate <id>) --usd <n> [--alerts-only]
   standing-orders ledger verify             check the action ledger's hash chain (--checkpoint <n:hash> to compare a copied head)
   standing-orders ledger checkpoint         record the chain's head to copy off this machine (instance operator)
   standing-orders ledger export --from <YYYY-MM-DD> --to <YYYY-MM-DD> [--out <file>]
@@ -677,6 +682,8 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "not-requester", "protect", "protect-paths",
   // v103: the ledger chain and evidence packs.
   "checkpoint", "out", "from", "to",
+  // v105: spend and budgets.
+  "month", "usd", "person", "teammate",
   "project-root", "schedule", "ceiling", "require",
   "provider", "plan-model", "plan-provider", "public-url", "editor",
   "command", "timeout-seconds", "setup-digest", "stop-grace", "title", "name", "every", "lines",
@@ -690,7 +697,7 @@ export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "clear", "follow", "ready", "all-tasks", "inbound-only", "help", "undo", "anyone", "allow-dispatch", "allow-merge", "merge-delete-branch",
   "no-open", "no-verify", "no-follow", "end", "report", "off", "tmux",
   "self-heal", "plan-auto", "repair-auto", "review-retry-auto", "no-local",
-  "html",
+  "html", "csv", "alerts-only",
 ]);
 
 export function parseOperateArgs(argv: readonly string[]): Args | { error: string } {
@@ -974,6 +981,10 @@ async function dispatch(
       return taskCommand(positional, flags, context);
     case "ledger":
       return ledgerCommand(positional, flags, context);
+    case "spend":
+      return spendCommand(flags, context);
+    case "budget":
+      return budgetCommand(positional, flags, context);
     case "storage": {
       const report = storageReport(context.store, context.databaseFile, context.clock(), CHECKOUT_KEEP_MS);
       return succeed(context.write, context.json, "storage", report, () => [
@@ -2603,6 +2614,8 @@ async function tickCommand(
   // gateway re-checks freshly at spawn; this cache only keeps a skipped
   // queue from probing once per task.
   const attestedThisPass = new Map<ProviderId, AttestOutcome | null>();
+  // v105: monthly budgets, read once a pass (a used-up hard-stop budget holds new work back).
+  let budgetGate: ReturnType<Store["budgetGate"]> | null = null;
 
   for (const ref of ready) {
     // The build budget governs UNATTENDED admissions (round-1 finding 4):
@@ -2943,6 +2956,15 @@ async function tickCommand(
     }
     if (unattestedLane !== null) {
       dispatched.push({ id, outcome: "skipped", reason: "provider-unattested", detail: unattestedLane });
+      continue;
+    }
+
+    // v105: a monthly budget that stops new work, used up: the task waits in the queue until the month turns or the
+    // budget is raised (the 100% alert went out; the task page and the spend page say why).
+    budgetGate ??= store.budgetGate(clock());
+    const budgeted = budgetGate(store.budgetSubject(ref.id));
+    if (budgeted.over !== null) {
+      dispatched.push({ id, outcome: "skipped", reason: "budget", detail: `${budgetLabel(budgeted.over)} budget is used up for ${monthOf(clock()).name}` });
       continue;
     }
 
@@ -3789,8 +3811,9 @@ async function tickCommand(
     // explicit budgets; never pretend).
     const scopeBudget = store.getScope(id)?.budgetMicrousd ?? null;
     const backstop = store.getSpendDefaults()?.buildPerRunMicrousd ?? null;
-    const capMicrousd =
-      scopeBudget === null ? backstop : backstop === null ? scopeBudget : Math.min(scopeBudget, backstop);
+    // v105: what's left of a monthly budget caps a provider that can hold a cap (the rest stop at the gate above).
+    const budgetLeft = budgeted.remainingMicrousd !== null && MONEY_CAPABILITIES[spec.provider].nativeDollarCapFlag !== null ? Math.max(1, budgeted.remainingMicrousd) : null;
+    const capMicrousd = [scopeBudget, backstop, budgetLeft].reduce<number | null>((least, one) => one === null ? least : least === null ? one : Math.min(least, one), null);
     if (capMicrousd !== null && MONEY_CAPABILITIES[spec.provider].nativeDollarCapFlag === null) {
       // The run row and any chain cycle already exist — FINISH and RESOLVE
       // them (E3d verify, R6): a refused-but-open run would defer a chain
@@ -4991,6 +5014,8 @@ async function startConsole(options: {
     instance: options.publicUrl ?? hostname(), version: packageVersion(),
   });
   server.on("close", stopMonitoring);
+  // v105: budget alerts at 50/80/100 %, a pass a minute.
+  server.on("close", startBudgetAlerts(context.store));
   const bound = server.address();
   const port = typeof bound === "object" && bound !== null ? bound.port : options.port;
   // A bind-everywhere address is not a place a browser can go: the URL
@@ -11802,6 +11827,66 @@ function writeOut(context: Context, command: string, out: string | undefined, co
     return fail(context.write, context.json, command, exists ? "exists" : "unwritable", exists ? "That file exists already; choose another name." : "That file couldn't be written.", EXIT.failed);
   }
   return succeed(context.write, context.json, command, { ...summary, out: resolve(out) }, () => [`${line} Saved to ${resolve(out)}.`]);
+}
+
+/** `spend [--month YYYY-MM] [--csv]` (v105): what agent work cost in a month, by project, person, teammate and model. */
+function spendCommand(flags: Map<string, string | true>, context: Context): number {
+  const command = "spend";
+  for (const name of flags.keys()) if (!["month", "csv", "db", "json"].includes(name)) return fail(context.write, context.json, command, "usage", `--${name} is not a spend option.`, EXIT.usage);
+  const month = text(flags, "month") === undefined ? monthOf(context.clock()) : monthNamed(text(flags, "month") ?? null);
+  if (month === null) return fail(context.write, context.json, command, "usage", "Use spend --month YYYY-MM.", EXIT.usage);
+  const items = spendItems(context.store.handle, month.from, month.to);
+  const names = new Map(context.store.handle.prepare("SELECT id, handle FROM teammate").all().map(row => [Number(row["id"]), String(row["handle"])]));
+  if (flags.has("csv")) { context.write(spendCsv(items, names).replace(/^\ufeff/, "").trimEnd()); return EXIT.ok; }
+  const budgets = budgetStates(context.store.budgets(), items);
+  const total = items.reduce((sum, item) => sum + (item.microusd ?? 0), 0);
+  const unpriced = items.filter(item => item.microusd === null && (item.tokensIn !== null || item.kind !== "run")).length;
+  const byProject = new Map<string, number>();
+  for (const item of items) if (item.project !== null) byProject.set(item.project, (byProject.get(item.project) ?? 0) + (item.microusd ?? 0));
+  return succeed(context.write, context.json, command, { month: month.name, totalMicrousd: total, unpriced, items: items.length, budgets }, () => [
+    `${month.name}: ${spendUsd(total)} (${items.length} pieces of work${unpriced > 0 ? `, ${unpriced} unpriced` : ""})`,
+    ...[...byProject.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([repo, microusd]) => `  ${basename(repo).padEnd(24)} ${spendUsd(microusd)}`),
+    ...budgets.map(one => `  budget ${budgetLabel(one, names.get(Number(one.key))).replace(/'s$/, "").padEnd(24)} ${spendUsd(one.spentMicrousd)} of ${spendUsd(one.limitMicrousd)} (${one.percent}%)${one.hardStop ? "" : " alerts only"}`),
+  ]);
+}
+
+/** `budget list | set | remove` (v105): monthly budgets. Setting and removing take an instance operator. */
+async function budgetCommand(positional: readonly string[], flags: Map<string, string | true>, context: Context): Promise<number> {
+  const [action] = positional;
+  const command = `budget ${action ?? ""}`.trim();
+  const store = context.store;
+  if (action === undefined || action === "list") {
+    const budgets = store.monthSpend(context.clock()).budgets;
+    return succeed(context.write, context.json, command, { budgets }, () => budgets.length === 0 ? ["No budgets. `budget set --all|--project <path>|--person <name>|--teammate <id> --usd <n>` makes one."]
+      : budgets.map(one => `#${one.id} ${budgetLabel(one).replace(/'s$/, "")}: ${spendUsd(one.spentMicrousd)} of ${spendUsd(one.limitMicrousd)} this month (${one.percent}%)${one.hardStop ? ", stops new work at 100%" : ", alerts only"}`));
+  }
+  if (action !== "set" && action !== "remove") return fail(context.write, context.json, command, "usage", "Use budget list, budget set or budget remove.", EXIT.usage);
+  const allowed = new Set(["all", "project", "person", "teammate", "usd", "alerts-only", "as", "token", "token-file", "token-env", "db", "json"]);
+  for (const name of flags.keys()) if (!allowed.has(name)) return fail(context.write, context.json, command, "usage", `--${name} is not a budget option.`, EXIT.usage);
+  const chosen = [flags.has("all") ? { scope: "installation" as const, key: "*" } : null,
+    text(flags, "project") === undefined ? null : { scope: "project" as const, key: resolve(text(flags, "project")!) },
+    text(flags, "person") === undefined ? null : { scope: "person" as const, key: text(flags, "person")! },
+    text(flags, "teammate") === undefined ? null : { scope: "teammate" as const, key: text(flags, "teammate")! }].filter(one => one !== null);
+  if (chosen.length !== 1) return fail(context.write, context.json, command, "usage", "Name one of --all, --project <path>, --person <name> or --teammate <id>.", EXIT.usage);
+  const target = chosen[0]!;
+  const acting = await askCredentials(flags, context);
+  const verified = acting === null ? null : authenticateApprover(store, acting.name, acting.token);
+  if (acting === null || verified === null || !verified.ok || !store.isInstanceOperator(acting.name)) {
+    return fail(context.write, context.json, command, "refused", "An instance operator sets budgets: pass --as and --token (or use the remembered login).", EXIT.refused);
+  }
+  const known = target.scope === "installation" || (target.scope === "project" ? store.knownRepos().includes(target.key)
+    : target.scope === "person" ? store.accountFacts().some(one => one.name === target.key && one.revokedAt === null)
+    : store.handle.prepare("SELECT 1 FROM teammate WHERE id = ?").get(Number(target.key)) !== undefined);
+  if (!known) return fail(context.write, context.json, command, "not-found", "That isn't a project, person or teammate here.", EXIT.refused);
+  if (action === "remove") {
+    const existing = store.budgets().find(one => one.scope === target.scope && one.key === target.key);
+    if (existing === undefined || !store.removeBudget(existing.id, acting.name, context.clock())) return fail(context.write, context.json, command, "not-found", "There's no such budget.", EXIT.refused);
+    return succeed(context.write, context.json, command, { removed: existing.id }, () => [`Removed the ${budgetLabel(existing).replace(/'s$/, "")} budget.`]);
+  }
+  const dollars = Number(text(flags, "usd") ?? "");
+  if (!Number.isFinite(dollars) || dollars < 1 || dollars > 10_000_000) return fail(context.write, context.json, command, "usage", "--usd is a whole number of dollars, at least 1.", EXIT.usage);
+  const saved = store.setBudget({ scope: target.scope, key: target.key, limitMicrousd: Math.round(dollars) * 1_000_000, hardStop: !flags.has("alerts-only") }, acting.name, context.clock());
+  return succeed(context.write, context.json, command, { budget: saved }, () => [`${budgetLabel(saved).replace(/'s$/, "")}: ${spendUsd(saved.limitMicrousd)} a month${saved.hardStop ? ", new work stops at 100%" : ", alerts only"}.`]);
 }
 
 /** `task evidence <id>`: everything an auditor asks about one task (v103). Read locally; needs no login. */

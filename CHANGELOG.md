@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **Cost guardrails.** Every run is priced: what the provider reported, or
+  (for Codex, Gemini and OpenRouter, which don't report cost) its tokens at
+  the model's price in Settings → Models, frozen when the run settles; work
+  with neither is counted as unpriced, never as free. The Spend page (and
+  `standing-orders spend`) shows each month by project, person, teammate
+  and model, with a CSV. Monthly budgets for the whole installation, a
+  project, a person or an AI teammate alert at 50, 80 and 100 % (once each,
+  a person's budget to that person) and, unless set to alert only, stop new
+  work at 100 %: queued tasks wait (the task page says why), teammates and
+  chats refuse, and a Claude run's cap shrinks to what's left. Budgets are
+  set on the Spend page or with `standing-orders budget`, with a step-up,
+  and every change is in the ledger. Schema 105.
+
 - **Stream it out.** Settings → Monitoring sends what Standing Orders does
   to the tools a company already watches. The audit stream delivers every
   sealed ledger entry, in order and at least once (retried, never skipped),

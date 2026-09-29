@@ -94,6 +94,7 @@ import { normalizeProjectAccess, projectAccessAllows, readProjectAccess, type Pr
 import { LEDGER_SCHEMA, LEDGER_TABLE, LEDGER_V54_COLUMNS, LEDGER_V54_TABLE, installLedgerTriggers, type LedgerEntry } from "./action-ledger.js";
 import { PLAN_AUTO_SCHEMA } from "./plan-auto.js";
 import { RECIPE_SCHEMA } from "./recipes.js";
+import { SPEND_SCHEMA, budgetStates, countsToward, monthOf, priceWork, spendItems, usd, type Budget, type BudgetScope, type BudgetState, type SpendItem } from "./spend.js";
 import { IN_RANGE, LEDGER_CHAIN_SCHEMA, safeWhole, sealLedger, verifyLedgerChain, type LedgerChainReport, type VerifiedHead } from "./ledger-chain.js";
 import { NO_RULES, filerFor, isProtectedWork, protectedChanges, rulesWords, type ApprovalGate, type ApprovalRules, type ApproverKind, type Filer, type FilerKind } from "./approval-policy.js";
 
@@ -135,6 +136,11 @@ import { NO_RULES, filerFor, isProtectedWork, protectedChanges, rulesWords, type
 // v100 lets people sign in with the organisation's identity provider: each provider identity is linked to one account.
 // v101 adds API tokens (scoped, expiring, hashed), keeps browser sessions across restarts (listed and revocable), and lets coordinator credentials expire.
 // v102 records who filed each task and adds per-project approval rules: the requester can't approve, and protected work needs two approvers.
+/** A budget's scope in words, for the ledger. */
+function budgetName(scope: BudgetScope, key: string): string {
+  return scope === "installation" ? "everything" : `${scope} ${key}`;
+}
+
 /** v104: each monitoring destination's progress. `target` names the destination it's for (a digest of its
  * address), `through` is a cursor (the last ledger entry sent); `holder` and `held_until` make sure one process
  * sends at a time. A delivery lands only if the target and the cursor are still what it started from. */
@@ -161,7 +167,8 @@ const REGISTERED_AT_FILING = "again, as it was filed";
 export type SealedLedgerEntry = LedgerEntry & { seal: { prev: string; hash: string } | null };
 // v103 chains the action ledger (every entry sealed with the one before it), keeps checkpoints of the chain, and records teammate tool calls (from the store) and minted coordinators (by trigger) in it.
 // v104 keeps where each monitoring destination (the audit stream to a webhook or a folder, traces to an OpenTelemetry collector) has delivered to, and who is sending.
-export const SCHEMA_VERSION = 104;
+// v105 prices every run (reported, or tokens at the catalogue price) and keeps monthly budgets per project, person, teammate and installation.
+export const SCHEMA_VERSION = 105;
 
 /** v102: a project's approval rules, and each person's approval of an exact scope (two are needed for protected work). */
 const APPROVAL_SCHEMA = `
@@ -4815,6 +4822,7 @@ function initializeStore(db: Database, file: string): Store {
   db.exec(APPROVAL_SCHEMA);
   db.exec(LEDGER_CHAIN_SCHEMA);
   db.exec(MONITORING_SCHEMA);
+  db.exec(SPEND_SCHEMA);
   addColumn(db, "monitoring_status", "target", "TEXT");
   migrate(db, preflight === null ? null : Math.abs(preflight));
   addColumn(db, "flow_card", "source_json", "TEXT");
@@ -16909,12 +16917,14 @@ export class Store {
       deadlineMs: number;
     },
     now: Date,
-  ): { ok: true; id: number } | { ok: false; reason: "latched" | "concurrent" | "daily-cap" | "over-budget" } {
+  ): { ok: true; id: number } | { ok: false; reason: "latched" | "concurrent" | "daily-cap" | "over-budget" | "monthly-budget" } {
     return this.transact(() => {
       const latched = this.db
         .prepare("SELECT 1 AS hit FROM chat_turn WHERE credential_key = ? AND unknown_spend = 1 AND acknowledged_at IS NULL LIMIT 1")
         .get(args.credentialKey);
       if (latched !== undefined) return { ok: false as const, reason: "latched" as const };
+      // v105: a monthly budget this person's spend counts toward, used up.
+      if (this.budgetGate(now)({ project: null, person: args.approver, teammate: null }).over !== null) return { ok: false as const, reason: "monthly-budget" as const };
       const live = this.db
         .prepare("SELECT 1 AS hit FROM chat_turn WHERE approver = ? AND state IN ('queued','running') LIMIT 1")
         .get(args.approver);
@@ -18860,6 +18870,7 @@ export class Store {
     const prior = this.db
       .prepare("SELECT task_ref, role, parent_run, contestant, review_attempt, outcome FROM run WHERE id = ?")
       .get(id);
+    this.settleRunSpend(id, result.now);
     this.db
       .prepare("UPDATE run SET outcome = ?, reason = ?, committed = ?, finished_at = ? WHERE id = ?")
       .run(
@@ -19005,6 +19016,91 @@ export class Store {
         usage.usageJson ?? null,
         id,
       );
+    this.settleRunSpend(id, new Date());
+  }
+
+  /** v105: price a run as it stands (reported cost, or tokens at the catalogue price, or unpriced), frozen at the
+   * price of the moment it's settled. Settled again whenever its usage changes. */
+  settleRunSpend(id: number, now: Date): void {
+    const row = this.db.prepare("SELECT provider, model, cost_usd, tokens_in, tokens_out FROM run WHERE id = ?").get(id);
+    if (row === undefined) return;
+    const priced = priceWork(this.db, { provider: String(row["provider"]), model: row["model"] == null ? null : String(row["model"]),
+      costUsd: row["cost_usd"] == null ? null : Number(row["cost_usd"]), tokensIn: row["tokens_in"] == null ? null : Number(row["tokens_in"]), tokensOut: row["tokens_out"] == null ? null : Number(row["tokens_out"]) });
+    this.db.prepare(`INSERT INTO run_spend (run, microusd, source, price_model, input_usd, output_usd, priced_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(run) DO UPDATE SET microusd = excluded.microusd, source = excluded.source, price_model = excluded.price_model, input_usd = excluded.input_usd, output_usd = excluded.output_usd, priced_at = excluded.priced_at`)
+      .run(id, priced.microusd, priced.source, priced.price?.model ?? null, priced.price?.inputUsd ?? null, priced.price?.outputUsd ?? null, now.toISOString());
+  }
+
+  // ---- Budgets (v105) -------------------------------------------------------
+
+  /** The budgets in force. */
+  budgets(): Budget[] {
+    return this.db.prepare("SELECT * FROM budget WHERE removed_at IS NULL ORDER BY scope_kind, scope_key").all().map(row => ({
+      id: Number(row["id"]), scope: String(row["scope_kind"]) as BudgetScope, key: String(row["scope_key"]), limitMicrousd: Number(row["limit_microusd"]),
+      hardStop: Number(row["hard_stop"]) === 1, updatedBy: String(row["updated_by"]), updatedAt: String(row["updated_at"]),
+    }));
+  }
+
+  /** Set a monthly budget (replacing the one for that scope); the ledger keeps before → after. */
+  setBudget(budget: { scope: BudgetScope; key: string; limitMicrousd: number; hardStop: boolean }, by: string, now: Date): Budget {
+    return this.transact(() => {
+      const key = budget.scope === "installation" ? "*" : budget.key;
+      const before = this.budgets().find(one => one.scope === budget.scope && one.key === key) ?? null;
+      const stamp = now.toISOString();
+      if (before === null) {
+        this.db.prepare("INSERT INTO budget (scope_kind, scope_key, limit_microusd, hard_stop, created_by, created_at, updated_by, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+          .run(budget.scope, key, budget.limitMicrousd, budget.hardStop ? 1 : 0, by, stamp, by, stamp);
+      } else {
+        this.db.prepare("UPDATE budget SET limit_microusd = ?, hard_stop = ?, updated_by = ?, updated_at = ? WHERE id = ?").run(budget.limitMicrousd, budget.hardStop ? 1 : 0, by, stamp, before.id);
+      }
+      const words = (one: Pick<Budget, "limitMicrousd" | "hardStop"> | null) => one === null ? "none" : `${usd(one.limitMicrousd)} a month${one.hardStop ? ", stops new work" : ", alerts only"}`;
+      this.recordPolicy(by, budget.scope === "project" ? key : null, `budget set: ${budgetName(budget.scope, key)}`, words(before), words(budget), now);
+      return this.budgets().find(one => one.scope === budget.scope && one.key === key)!;
+    });
+  }
+
+  removeBudget(id: number, by: string, now: Date): boolean {
+    return this.transact(() => {
+      const before = this.budgets().find(one => one.id === id);
+      if (before === undefined) return false;
+      this.db.prepare("UPDATE budget SET removed_by = ?, removed_at = ? WHERE id = ?").run(by, now.toISOString(), id);
+      this.recordPolicy(by, before.scope === "project" ? before.key : null, `budget removed: ${budgetName(before.scope, before.key)}`, usd(before.limitMicrousd), "none", now);
+      return true;
+    });
+  }
+
+  /** This month's spend, and each budget's state. */
+  monthSpend(now: Date): { month: string; items: SpendItem[]; budgets: BudgetState[] } {
+    const month = monthOf(now);
+    const items = spendItems(this.db, month.from, month.to);
+    return { month: month.name, items, budgets: budgetStates(this.budgets(), items) };
+  }
+
+  /** A gate for this moment: given what a piece of new work would count toward, the first hard-stop budget it's over,
+   * or null. Built once and asked many times (a tick asks for every task). */
+  budgetGate(now: Date): (work: { project: string | null; person: string | null; teammate: number | null }) => { over: BudgetState | null; remainingMicrousd: number | null } {
+    const hard = this.budgets().filter(one => one.hardStop);
+    if (hard.length === 0) return () => ({ over: null, remainingMicrousd: null });
+    const states = this.monthSpend(now).budgets.filter(one => one.hardStop);
+    return work => {
+      const item: SpendItem = { ...work, kind: "run", at: "", microusd: 0, source: "reported", provider: "", model: null, tokensIn: null, tokensOut: null, taskId: null, runId: null, authMode: null };
+      const mine = states.filter(budget => countsToward(item, budget));
+      const over = mine.find(budget => budget.spentMicrousd >= budget.limitMicrousd) ?? null;
+      const remaining = mine.length === 0 ? null : Math.min(...mine.map(budget => budget.limitMicrousd - budget.spentMicrousd));
+      return { over, remainingMicrousd: remaining };
+    };
+  }
+
+  /** What a task's new work counts toward: its project, its filer (a person, or the person behind a coordinator), and
+   * the teammate that filed it. */
+  budgetSubject(taskRef: number): { project: string | null; person: string | null; teammate: number | null } {
+    const row = this.db.prepare(`SELECT r.repo, r.filed_by, r.filed_by_kind,
+        (SELECT m.id FROM teammate m WHERE m.repo = r.repo AND r.filed_by_kind = 'teammate' AND r.filed_by = m.handle || ' (AI)' ORDER BY m.id DESC LIMIT 1) AS teammate
+      FROM task_ref r WHERE r.id = ?`).get(taskRef);
+    if (row === undefined) return { project: null, person: null, teammate: null };
+    const kind = row["filed_by_kind"] == null ? null : String(row["filed_by_kind"]);
+    return { project: row["repo"] == null ? null : String(row["repo"]), person: (kind === "person" || kind === "coordinator") && row["filed_by"] != null ? String(row["filed_by"]) : null,
+      teammate: row["teammate"] == null ? null : Number(row["teammate"]) };
   }
 
   /**
@@ -20123,6 +20219,7 @@ export class Store {
                 tokens_out = COALESCE(tokens_out, 0) + ? WHERE id = ?`,
       )
       .run(microusd / 1_000_000, tokensOut, run);
+    this.settleRunSpend(run, new Date());
   }
 
   /**
@@ -22902,7 +22999,7 @@ export class Store {
   openMateTurn(
     args: { approver: string; session: number; thread: number; credentialKey: string; reservedMicrousd: number; dailyTurns: number; weeklyCeilingMicrousd: number; deadlineMs: number },
     now: Date,
-  ): { ok: true; id: number } | { ok: false; reason: "latched" | "concurrent" | "daily-cap" | "session-exhausted" | "session-ended" | "not-yours" | "thread-closed" | "over-budget" } {
+  ): { ok: true; id: number } | { ok: false; reason: "latched" | "concurrent" | "daily-cap" | "session-exhausted" | "session-ended" | "not-yours" | "thread-closed" | "over-budget" | "monthly-budget" } {
     return this.transact(() => {
       // The binding (slice-1 review, finding 2): the session and the thread
       // are THIS approver's, under THIS credential, under one ceiling, and
@@ -22915,6 +23012,11 @@ export class Store {
         return { ok: false as const, reason: "not-yours" as const };
       }
       if (thread.closedAt !== null || (!teamBinding && thread.ceilingDigest !== session.ceilingDigest)) return { ok: false as const, reason: "thread-closed" as const };
+      // v105: a monthly budget this turn counts toward (the person's, the thread's project's, everything), used up.
+      const threadProject = this.db.prepare("SELECT scope_kind, scope_key FROM mate_thread WHERE id = ?").get(args.thread);
+      if (this.budgetGate(now)({ project: threadProject?.["scope_kind"] === "project" && threadProject["scope_key"] != null ? String(threadProject["scope_key"]) : null, person: args.approver, teammate: null }).over !== null) {
+        return { ok: false as const, reason: "monthly-budget" as const };
+      }
       const latched = this.db
         .prepare("SELECT 1 AS hit FROM chat_turn WHERE credential_key = ? AND unknown_spend = 1 AND acknowledged_at IS NULL LIMIT 1")
         .get(args.credentialKey);

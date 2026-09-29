@@ -131,6 +131,8 @@ describe("the machine envelope", () => {
       ledger: ["verify", "--json"],
       storage: ["--json"],
       monitoring: ["--json"],
+      spend: ["--json"],
+      budget: ["list", "--json"],
       assignment: ["show", "no-such-task", "--json"],
       claim: ["--json"],
       heartbeat: ["--json"],
