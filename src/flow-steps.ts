@@ -30,7 +30,7 @@ import { flowDefinitionOf } from "./flow-engine.js";
 import { cardFollowers, notifyPeople } from "./flow-people.js";
 import { LINEAR_URL, readLinearKey } from "./flow-triggers.js";
 import { cardEmailOf, fillFlowText, type FlowDefinition, type FlowStage } from "./flows.js";
-import { askJev, readJevAnswers, sortLog, sortRequest, sortState, sortWords } from "./flow-sort.js";
+import { JEV_MODEL, askJev, readJevAnswers, sortLog, sortRequest, sortState, sortWords } from "./flow-sort.js";
 import { claudeDraftRunner, DRAFT_TIMEOUT, draftPrompt, keptDraft, type DraftRunner } from "./flow-draft.js";
 import { readFlowSecrets, sendingReady, runRequest, sendEmail, toolWaiting, useTool, type MailSender, type ToolCaller } from "./flow-actions.js";
 import { cleanFolder, runCode } from "./flow-code.js";
@@ -43,6 +43,7 @@ import { ASKED, teammateReady, teammateTurn, type TeammateOutcome } from "./team
 import type { TurnRunner } from "./teammates.js";
 import type { ToolLister } from "./teammate-tools.js";
 import { budgetHoldWords, claudeMachineBilling, monthOf } from "./spend.js";
+import { toolRefusal } from "./policy.js";
 
 export type StepIo = {
   /** `gh` for GitHub; git and the check's shell, both without a model. */
@@ -127,6 +128,14 @@ export async function runFlowSteps(store: Store, repo: string, now: Date, io: St
     if (held !== null && held.over !== null) {
       const waiting = `${budgetHoldWords(held, monthOf(now).name)}. Raise it on Spend to go on.`;
       if (card.waiting !== waiting) store.updateFlowCard(card.id, { waiting }, now);
+      continue;
+    }
+    // Sprint 8: a sort, a draft or a tool call the organisation policy doesn't allow waits, saying which rule.
+    const disallowed = stage.kind === "sort" ? store.agentPolicyRefusal("openrouter", JEV_MODEL)
+      : stage.kind === "draft" ? store.agentPolicyRefusal("claude", draftModel(store))
+        : stage.kind === "tool" && stage.tool !== undefined && stage.tool !== null ? toolRefusal(store.orgPolicy(), stage.tool.server) : null;
+    if (disallowed !== null) {
+      if (card.waiting !== disallowed) store.updateFlowCard(card.id, { waiting: disallowed }, now);
       continue;
     }
     const script = stage.kind === "check" && stage.script !== null ? store.flowScript(repo, stage.script) : null;
@@ -258,10 +267,15 @@ function tail(text: string): string {
   return scanForSecrets(end).length > 0 ? "(Its output held something that looked like a key, so it isn't shown.)" : end;
 }
 
+/** The Claude model a draft runs on: the lead chat's Claude model, or Claude's default. */
+function draftModel(store: Store): string {
+  const config = store.getChatConfig();
+  return config?.provider === "claude-subscription" ? config.model : "default";
+}
+
 /** A draft: Claude writes what the zone asks, from the card, with the lead chat's Claude model; the text stays on the card. */
 async function draftCard(store: Store, definition: FlowDefinition, stage: FlowStage, card: FlowCardRow, io: StepIo, repo: string, now: Date): Promise<Outcome> {
-  const config = store.getChatConfig();
-  const model = config?.provider === "claude-subscription" ? config.model : "default";
+  const model = draftModel(store);
   const answer = await (io.draft ?? claudeDraftRunner())({ model, prompt: draftPrompt(stage, card, definition), timeoutMs: DRAFT_TIMEOUT });
   if (!answer.ok) return { state: "retry", said: answer.said };
   // v105: what it cost, billed as this computer's Claude does (a plan's is $0).

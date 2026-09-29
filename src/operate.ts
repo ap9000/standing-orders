@@ -4,9 +4,13 @@ import { rulesSummary } from "./approval-rules-ui.js";
 import { evidencePack, exportDay, ledgerExportChunks, standaloneEvidenceHtml, type LedgerExport } from "./evidence-pack.js";
 import { matchesOutsideCheckpoint } from "./ledger-chain.js";
 import { bytesWords, storageReport } from "./storage.js";
+import { MIN_DAYS, RETENTION_KINDS, countWords, dailyRetention, isRetentionKind, lastSweepAt, parsePeriod, periodWords, retentionPlan, sweepWords, type RetentionKind, type RetentionSweep } from "./retention.js";
+import { checkPolicy, parseList, policyParts, type SavedPolicy } from "./policy.js";
 import { billingOf, budgetHoldWords, budgetLabel, budgetStates, monthNamed, monthOf, spendItems, teammateNames, usd as spendUsd, type BudgetAgent, type BudgetHold } from "./spend.js";
 import { spendCsv } from "./spend-ui.js";
+import { buildExport, exportSummary, exportZip, writeExportFolder } from "./export.js";
 import { startBudgetAlerts } from "./budget-alerts.js";
+import { backupFiles, backupFolderOf, backupNow, restoreDatabase, startBackups } from "./backup.js";
 import { pushLimitSink } from "./provider-limits.js";
 import { limitsView } from "./limits-ui.js";
 import { startCodexLimits } from "./codex-limits.js";
@@ -63,6 +67,8 @@ import { basename, dirname, join, resolve } from "node:path";
 import {
   openStore,
   openStoreNoMigrate,
+  CONCURRENT_WRITER_WAIT_MS,
+  isDatabaseBusy,
   databasePath,
   BUILT_IN,
   DEFAULT_ACTOR,
@@ -78,7 +84,8 @@ import { randomBytes, randomInt, randomUUID } from "node:crypto";
 import { authorizePlanUnderMode } from "./plan-auto.js";
 import { ghDispatchAdapter, mirrorTaskId, syncPass, type DispatchAdapter } from "./sync.js";
 import { sweepLiveLogs } from "./live.js";
-import { configPath, addRepos, updateRepos, loadRepos, loadProjectRegistry, updateProjectRegistry } from "./repos.js";
+import { configPath, addRepos, removeRepos, updateRepos, loadRepos, loadProjectRegistry, updateProjectRegistry } from "./repos.js";
+import { deleteProject, holdingsWords, projectHoldings, projectRunning } from "./project-delete.js";
 import { pushPass } from "./push.js";
 import { chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, openSync, readFileSync, readSync, realpathSync, unlinkSync, writeSync, writeFileSync, mkdirSync } from "node:fs";
 import { createServer as createNetServer } from "node:net";
@@ -224,6 +231,8 @@ import {
   validRunnerName,
   canonicalRepos,
   RUNNER_NAME_MAX,
+  RUNNER_CAPACITY_MAX,
+  parseRunnerCapacity,
 } from "./runner.js";
 import { mintCoordinator, revokeCoordinator, listCoordinators } from "./coordinator.js";
 import { serveMcp } from "./mcp.js";
@@ -278,6 +287,7 @@ import { runModelsCommand } from "./models-cli.js";
 import { updateAdmissionPaused, UPDATE_PAUSED } from "./desktop-update-gate.js";
 import { beads } from "./beads.js";
 import { githubIssues } from "./issues.js";
+import { installationStatus, renderInstallationStatus, renderTaskWait, taskWaitSnapshot } from "./lead-status.js";
 
 export type Write = (line: string) => void;
 
@@ -330,16 +340,21 @@ export type OperateOptions = {
    * the attended road exactly as a co-located `up` would (production wires
    * one only inside `up`). */
   heldCoordinator?: import("./held.js").HeldSessionCoordinator;
+  /** Test seam for the short indexed wait loop. */
+  waitSleep?: (milliseconds: number) => Promise<void>;
 };
 
 const STATES: readonly TaskState[] = ["queued", "running", "done", "failed", "cancelled"];
 
 export const OPERATE_HELP = `standing-orders — operating the queue
 
+  standing-orders status                    running, queued, ready results, release check and plan windows
   standing-orders ready                     what could be dispatched right now
   standing-orders task add <title>          queue work
   standing-orders task list [--view <v>] [--limit <n>] [--cursor <c>]   paginated saved task status
   standing-orders task show <id>
+  standing-orders task wait <id> [--timeout <seconds>]
+                                        wait for this attempt to finish or need a person
   standing-orders project use <path>        remember a saved project (optional --token-file)
   standing-orders project show              show the current project and credential reference
   standing-orders project rules --repo <p>  a project's approval rules; an instance operator changes them with
@@ -347,8 +362,16 @@ export const OPERATE_HELP = `standing-orders — operating the queue
   standing-orders task evidence <id>        the task's evidence pack as JSON (--html for a printable page; --out <file>)
   standing-orders storage                   where the disk goes: database, build checkouts, releases, evidence
   standing-orders monitoring                where the audit stream and traces go, and how each destination is doing
+  standing-orders check-progress <run>      current or final approved check progress
   standing-orders spend [--month YYYY-MM] [--csv]   what agent work cost, by project, person, teammate and model
+  standing-orders export --out <path> [--zip]   everything Standing Orders knows, in a folder or .zip (no secrets)
   standing-orders budget list|set|remove    monthly budgets (--all | --project <p> | --person <name> | --teammate <id>) --usd <n> [--alerts-only]
+  standing-orders retention show|preview    how long evidence, checkout records, chat and notifications are kept; what the daily sweep would remove
+  standing-orders retention set <kind> <period>   evidence|checkouts|chat|notifications, 30d|1y|forever (instance operator)
+  standing-orders backup now|list          back the database up now; list backups and how the last ones went
+  standing-orders restore <file> [--dry-run]  put a backup back (Standing Orders stopped; the current database is kept)
+  standing-orders policy show|set          the organisation policy; an instance operator sets it with --providers claude,codex|any,
+                                        --models <m,…>|any, --tools <t,…>|any, --ceiling safe|standard|escalated
   standing-orders ledger verify             check the action ledger's hash chain (--checkpoint <n:hash> to compare a copied head)
   standing-orders ledger checkpoint         record the chain's head to copy off this machine (instance operator)
   standing-orders ledger export --from <YYYY-MM-DD> --to <YYYY-MM-DD> [--out <file>]
@@ -463,6 +486,8 @@ External trackers — build what a tracker nominates, under local approvals
                                         --host 0.0.0.0 --allow-host name:port
                                         reaches a phone over a tailnet;
                                         --runner names the worker;
+                                        --capacity <n> sets how many tasks
+                                        it runs at once (kept across starts);
                                         --editor vscode links changed files
                                         to VS Code on the device you browse
                                         from (turn on per device, in the
@@ -617,6 +642,10 @@ Runners — the machines that may be given work
   standing-orders runner heartbeat <name> --token <token>
   standing-orders runner reap               take back what a dead runner held
   standing-orders runner retire <name>
+  standing-orders runner capacity <name> <n> --as <you> --token <t>
+                                        how many tasks it runs at once (1–64);
+                                        running work carries on, the new
+                                        number applies at the next claim
 
 Write access — discovery stays read-only until you grant it
   standing-orders enroll [repo] --backend <name> --paths <p>[,<p>]
@@ -632,7 +661,7 @@ Options
   --help            this, from any queue command — nothing runs, nothing is created
   --json            one envelope per command: { ok, command, ... }
   --key <key>       idempotency key; a retry returns the first answer
-  --db <path>       use a different queue
+  --db <path>       use a different queue; waits up to 15 seconds for another writer
   --backend <name>  which backend the id belongs to (default: built-in)
 
 Exit codes
@@ -655,7 +684,7 @@ type Args = {
  * (surface.ts) is tested for exact equality against them.
  */
 export const TASK_ACTIONS = [
-  "add", "list", "show", "state", "block", "unblock", "next", "steer", "assign",
+  "add", "list", "show", "wait", "state", "block", "unblock", "next", "steer", "assign",
   "reopen", "scope", "approve", "hold", "unhold", "require", "requeue", "regate", "plan",
   "review", "accept", "repair", "route", "stop", "resume", "complete", "revise",
 ] as const;
@@ -687,13 +716,15 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "checkpoint", "out", "from", "to",
   // v105: spend and budgets.
   "month", "usd", "person", "teammate",
+  // Sprint 8: the organisation policy.
+  "providers", "models", "tools",
   "project-root", "schedule", "ceiling", "require",
   "provider", "plan-model", "plan-provider", "public-url", "editor",
   "command", "timeout-seconds", "setup-digest", "stop-grace", "title", "name", "every", "lines",
   "label", "reviewers", "limit", "role", "key-file", "weekly-usd", "daily-turns", "per-hour", "token-file", "race", "compare", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd", "sync-max-age", "merge-method",
   "phase", "risk", "tier", "clear-phase",
   "run", "containment",
-  "token-env", "after", "repair-max-attempts", "consumer", "batch", "feedback", "source", "view", "cursor", "why", "supersedes", "decision", "sessions",
+  "token-env", "after", "repair-max-attempts", "consumer", "batch", "feedback", "source", "view", "cursor", "why", "supersedes", "decision", "sessions", "timeout",
 ]);
 export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "json", "yes", "all", "local", "history", "latest-watch", "dry-run", "file", "allow-paid-fallback",
@@ -701,6 +732,8 @@ export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "no-open", "no-verify", "no-follow", "end", "report", "off", "tmux",
   "self-heal", "plan-auto", "repair-auto", "review-retry-auto", "no-local",
   "html", "csv", "alerts-only",
+  // v105: the full export.
+  "zip",
 ]);
 
 export function parseOperateArgs(argv: readonly string[]): Args | { error: string } {
@@ -804,12 +837,16 @@ export async function runOperate(
   if (command === "mcp") {
     return mcpCommand(file, flags, write, json);
   }
+  // Restore replaces the database file itself, so it opens (and closes) the database on its own.
+  if (command === "restore") {
+    return restoreCommand(file, positional, flags, write, json, now);
+  }
 
   let store: Store;
   try {
     store = (options.openDatabase ?? openStore)(file);
   } catch (error) {
-    return fail(write, json, command, "database", describe(error), EXIT.failed);
+    return databaseFailure(write, json, command, file, error);
   }
   // v105: a Claude turn anywhere in this command says its plan's usage windows; keep the latest.
   const dropLimitSink = pushLimitSink(reading => store.recordProviderLimits(reading, new Date()));
@@ -849,8 +886,10 @@ export async function runOperate(
       ...(options.shouldStop === undefined ? {} : { shouldStop: options.shouldStop }),
       ...(options.mateSeams === undefined ? {} : { mateSeams: options.mateSeams }),
       ...(options.heldCoordinator === undefined ? {} : { heldCoordinator: options.heldCoordinator }),
+      ...(options.waitSleep === undefined ? {} : { waitSleep: options.waitSleep }),
     });
   } catch (error) {
+    if (isDatabaseBusy(error)) return databaseFailure(write, json, command, file, error);
     return fail(write, json, command, "failed", describe(error), EXIT.failed);
   } finally {
     dropLimitSink();
@@ -908,6 +947,8 @@ type Context = {
   heldGraceMs?: number;
   /** v28: optional attended-session cap; absent = unbounded. */
   maxHeldSessions?: number;
+  /** Test seam for task wait; production uses a timer. */
+  waitSleep?: (milliseconds: number) => Promise<void>;
 };
 
 
@@ -981,6 +1022,8 @@ async function dispatch(
   context: Context,
 ): Promise<number> {
   switch (command) {
+    case "status":
+      return statusCommand(positional, flags, context);
     case "ready":
       return readyCommand(flags, context);
     case "task":
@@ -991,6 +1034,14 @@ async function dispatch(
       return spendCommand(flags, context);
     case "budget":
       return budgetCommand(positional, flags, context);
+    case "retention":
+      return retentionCommand(positional, flags, context);
+    case "backup":
+      return backupCommand(positional, flags, context);
+    case "export":
+      return exportCommand(positional, flags, context);
+    case "policy":
+      return policyCommand(positional, flags, context);
     case "storage": {
       const report = storageReport(context.store, context.databaseFile, context.clock(), CHECKOUT_KEEP_MS);
       return succeed(context.write, context.json, "storage", report, () => [
@@ -1011,8 +1062,11 @@ async function dispatch(
       return succeed(context.write, context.json, "monitoring", { destinations, ledgerHead: head }, () => destinations.length === 0 ? ["Monitoring is off. Settings → Monitoring sets it up."] :
         destinations.map(one => `${one.sink.padEnd(8)} ${one.to} — ${one.status === null ? "starting" : one.status.failures > 0 ? `failing: ${one.status.lastError ?? "?"}` : `sent through #${one.status.through}${one.sink === "traces" ? "" : ` (${Math.max(0, head - one.status.through)} to go)`}`}`));
     }
+    case "check-progress":
+      return checkProgressCommand(positional, context);
     case "project":
       if (positional[0] === "rules") return projectRulesCommand(positional, flags, context);
+      if (positional[0] === "delete") return projectDeleteCommand(positional, flags, context);
       return runProjectCommand(positional, flags, context);
     case "assignment":
       return runAssignmentCommand(positional, flags, context);
@@ -1676,12 +1730,42 @@ async function runnerCommand(
     ]);
   }
 
+  if (action === "capacity") {
+    // Changing how much a worker takes on is an operator act, kept in the
+    // ledger as before → after. It never stops running work: claims already
+    // held keep going, and the new number applies at the next claim.
+    const given = positional[2];
+    if (name === undefined || given === undefined || positional.length > 3) {
+      return fail(write, json, "runner capacity", "usage", "`runner capacity <name> <n> --as <you> --token <t>`", EXIT.usage);
+    }
+    const capacity = parseRunnerCapacity(given);
+    if (capacity === null) {
+      return fail(write, json, "runner capacity", "usage", `capacity is a whole number of tasks, 1 to ${RUNNER_CAPACITY_MAX}`, EXIT.usage);
+    }
+    const acting = await askCredentials(flags, context);
+    const verified = acting === null ? null : authenticateApprover(store, acting.name, acting.token);
+    if (acting === null || verified === null || !verified.ok || !store.isInstanceOperator(acting.name)) {
+      return fail(write, json, "runner capacity", "refused", "An instance operator changes a worker's capacity: pass --as and --token (or use the remembered login).", EXIT.refused);
+    }
+    const changed = store.setRunnerCapacity(name, capacity, acting.name, now);
+    if (!changed.ok) {
+      return fail(write, json, "runner capacity", changed.reason, changed.reason === "retired" ? `${name} is retired` : `no runner \`${name}\``, EXIT.refused);
+    }
+    const running = store.liveClaimCount(name, now);
+    return succeed(write, json, "runner capacity", { name, before: changed.before, after: changed.after, running }, () => [
+      changed.before === changed.after
+        ? `${name} already runs up to ${changed.after} at once.`
+        : `${name} now runs up to ${changed.after} at once (was ${changed.before}).`,
+      ...(running > changed.after ? [`It is running ${running} now; those carry on, and it takes nothing new until fewer than ${changed.after} are running.`] : []),
+    ]);
+  }
+
   return fail(
     write,
     json,
     "runner",
     "usage",
-    `unknown \`runner ${action}\` — try list, register, bind, heartbeat, reap, retire`,
+    `unknown \`runner ${action}\` — try list, register, bind, capacity, heartbeat, reap, retire`,
     EXIT.usage,
   );
 }
@@ -2330,6 +2414,24 @@ async function tickCommand(
   let budgetGate: ReturnType<Store["budgetGate"]> | null = null;
   const budgetHold = (taskRef: number, agents: readonly BudgetAgent[]) => (budgetGate ??= store.budgetGate(clock()))({ ...store.budgetSubject(taskRef), agents });
   const budgetWords = (hold: BudgetHold) => budgetHoldWords(hold, monthOf(clock()).name);
+  // Sprint 8: the organisation policy, asked before any claim on every road below: a provider or model it doesn't
+  // allow never starts (the task waits, saying which rule and where to change it); terms above its permission ceiling
+  // start and run lowered (build() lowers them and says so), except an attended session's, signed at exactly those.
+  const policyHold = (agents: readonly ({ profile: ExecutionProfile; attended?: boolean } | { provider: string; model: string | null; session?: string })[]): string | null => {
+    for (const agent of agents) {
+      if ("profile" in agent) {
+        const refused = agent.attended === true ? store.attendedPolicyRefusal(agent.profile) : null;
+        if (refused !== null) return refused;
+        const verdict = store.runPolicy(agent.profile);
+        if (!verdict.ok) return verdict.message;
+      } else {
+        // A planner or scout has no profile to lower: the ceiling stops one whose provider can't run that low.
+        const refused = agent.session !== undefined ? store.sessionPolicyRefusal(agent.provider, agent.model, agent.session) : store.agentPolicyRefusal(agent.provider, agent.model);
+        if (refused !== null) return refused;
+      }
+    }
+    return null;
+  };
   for (const waiting of store.contestsInStates(["decision-wait"])) {
     if (context.shouldStop?.() === true || context.shouldPauseAdmission?.() === true) break;
     // D1 belt-and-braces (external dispatch, finding 41): a mirror and a
@@ -2367,6 +2469,12 @@ async function tickCommand(
       const taskId = store.externalIdFor(waiting.taskRef);
       if (custody === null || custody.runner !== runner || taskId === null) {
         backToParked();
+        continue;
+      }
+      const lanePolicy = policyHold([racer.profile == null ? { provider: racer.provider, model: racer.model } : { profile: racer.profile }]);
+      if (lanePolicy !== null) {
+        backToParked();
+        resumed.push({ id: taskId, outcome: "skipped", reason: "policy", detail: lanePolicy });
         continue;
       }
       const laneBudget = budgetHold(waiting.taskRef, store.agentsFor([racer.provider]));
@@ -2738,12 +2846,12 @@ async function tickCommand(
     // The attended spec comes from the authorization's PINNED terms — the
     // courtesy half of the proof; the coordinator's transaction re-proves
     // byte-for-byte at the actual HEAD (v6 W1).
-    let attendedSpec: { provider: ProviderId; model: string | null; digest: string } | null = null;
+    let attendedSpec: { provider: ProviderId; model: string | null; digest: string; profile: ExecutionProfile } | null = null;
     if (attendedDispatch !== null) {
       try {
         const terms = JSON.parse(attendedDispatch.termsJson) as { profileJson?: unknown };
         const pinned = profileFromJson(typeof terms.profileJson === "string" ? terms.profileJson : null);
-        if (pinned !== null) attendedSpec = { provider: pinned.provider, model: pinned.model, digest: profileDigestOf(pinned) };
+        if (pinned !== null) attendedSpec = { provider: pinned.provider, model: pinned.model, digest: profileDigestOf(pinned), profile: pinned };
       } catch {
         attendedSpec = null;
       }
@@ -2979,6 +3087,18 @@ async function tickCommand(
     if (unattestedLane !== null) {
       dispatched.push({ id, outcome: "skipped", reason: "provider-unattested", detail: unattestedLane });
       continue;
+    }
+
+    // Sprint 8: the organisation policy before the claim (build() looks again before spawn, and lowers).
+    {
+      const sealed = wantsPlan || wantsScout ? null : store.approvedChainOf(id)?.[0]?.profile ?? store.getScope(id)?.approvedProfile ?? null;
+      const refused = racedAhead !== null ? policyHold(racedAhead.agents.map(agent => ({ provider: agent.provider, model: agent.model })))
+        : policyHold([attendedSpec !== null ? { profile: attendedSpec.profile, attended: true } : sealed !== null ? { profile: sealed }
+          : { provider: spec.provider, model: spec.model, ...(wantsPlan ? { session: "planning" } : wantsScout ? { session: "scouting" } : {}) }]);
+      if (refused !== null) {
+        dispatched.push({ id, outcome: "skipped", reason: "policy", detail: refused });
+        continue;
+      }
     }
 
     // v105: a monthly budget that stops new API work, used up: the task waits in the queue until the month turns or the
@@ -4022,6 +4142,12 @@ async function tickCommand(
     // v105: a fallback billed to an API key spends dollars: a used-up budget holds it like any new work.
     const chainEntry = store.approvedChainOf(pending.taskId)?.[pending.cursor];
     const chainAgents = chainEntry === undefined ? [] : [{ provider: chainEntry.profile.provider, billing: chainEntry.authMode }];
+    // Sprint 8: a fallback entry the organisation policy doesn't allow never starts.
+    const chainPolicy = chainEntry === undefined ? null : policyHold([{ profile: chainEntry.profile }]);
+    if (chainPolicy !== null) {
+      dispatched.push({ id: pending.taskId, outcome: "skipped", reason: "policy", detail: chainPolicy });
+      continue;
+    }
     const chainBudget = budgetHold(pending.taskRef, chainAgents);
     if (chainBudget.over !== null) {
       dispatched.push({ id: pending.taskId, outcome: "skipped", reason: "budget", detail: budgetWords(chainBudget) });
@@ -4225,16 +4351,22 @@ async function tickCommand(
       if (parentRef.repo !== null && parentRef.repo !== repo) continue;
       const taskId = parentRef.externalId;
 
-      let pinned: { provider: ProviderId; model: string | null; digest: string } | null = null;
+      let pinned: { provider: ProviderId; model: string | null; digest: string; profile: ExecutionProfile } | null = null;
       try {
         const terms = JSON.parse(continuation.termsJson) as { profileJson?: unknown };
         const profile = profileFromJson(typeof terms.profileJson === "string" ? terms.profileJson : null);
-        if (profile !== null) pinned = { provider: profile.provider, model: profile.model, digest: profileDigestOf(profile) };
+        if (profile !== null) pinned = { provider: profile.provider, model: profile.model, digest: profileDigestOf(profile), profile };
       } catch {
         pinned = null;
       }
       if (pinned === null) {
         dispatched.push({ id: taskId, outcome: "skipped", reason: "attended-only", detail: "the continuation's pinned profile cannot be read" });
+        continue;
+      }
+      // Sprint 8: an attended continuation runs at exactly its signed terms, or not at all.
+      const continuationPolicy = policyHold([{ profile: pinned.profile, attended: true }]);
+      if (continuationPolicy !== null) {
+        dispatched.push({ id: taskId, outcome: "skipped", reason: "policy", detail: continuationPolicy });
         continue;
       }
       const continuationBudget = budgetHold(parent.taskRef, store.agentsFor([pinned.provider]));
@@ -4592,7 +4724,13 @@ async function reconcileCommand(
       action: "checkout removed", outcome: "removed", source: "work", detail: `${basename(row.path)} (released ${row.releasedAt?.slice(0, 10) ?? "?"})` });
   }
 
+  // Retention (Settings → Retention): once a day, what's older than its setting goes; one ledger entry says what.
+  let retention: RetentionSweep | null = null;
+  try { retention = dailyRetention(store, context.evidenceRoot, clock()); } catch { retention = null; /* the next pass tries again */ }
+  const retained = retention === null ? [] : retention.counts.filter(one => one.count > 0);
+
   const nothing =
+    retained.length === 0 &&
     recovered.length === 0 &&
     reaped.length === 0 &&
     adoption.adopted.length === 0 &&
@@ -4612,6 +4750,7 @@ async function reconcileCommand(
       checkoutsRemoved: pruned.removed.map(row => row.path),
       checkoutsKept: pruned.kept,
       liveViewsSwept: liveSwept.removed.length,
+      retention: retention === null ? null : { counts: retention.counts, freedBytes: retention.freed },
     },
     () =>
       nothing
@@ -4626,6 +4765,7 @@ async function reconcileCommand(
             ...adoption.forgotten.map(path => `Forgot ${path} — its directory is gone.`),
             ...(pruned.removed.length === 0 ? [] : [`Removed ${pruned.removed.length} checkout(s) nobody has used for two days; their branches stay.`]),
             ...(liveSwept.removed.length === 0 ? [] : [`Cleared ${liveSwept.removed.length} finished live view(s).`]),
+            ...(retention === null || retained.length === 0 ? [] : [`Retention removed ${sweepWords(retention.counts, retention.freed)}.`]),
           ],
   );
 }
@@ -5064,6 +5204,8 @@ async function startConsole(options: {
   server.on("close", stopMonitoring);
   // v105: budget alerts at 50/80/100 %, a pass a minute.
   server.on("close", startBudgetAlerts(context.store));
+  // Sprint 8: scheduled backups, a pass a minute; its lease also tells a restore that the console is running.
+  server.on("close", startBackups(context.store, context.databaseFile));
   server.on("close", startCodexLimits(context.store));
   const bound = server.address();
   const port = typeof bound === "object" && bound !== null ? bound.port : options.port;
@@ -8361,6 +8503,11 @@ async function upCommand(
   if (forGiven !== undefined && (!Number.isInteger(Number(forGiven)) || Number(forGiven) <= 0)) {
     return fail(write, json, "up", "usage", "--for takes a positive whole number of milliseconds", EXIT.usage);
   }
+  const capacityGiven = text(flags, "capacity");
+  const capacityFlag = capacityGiven === undefined ? null : parseRunnerCapacity(capacityGiven);
+  if (capacityGiven !== undefined && capacityFlag === null) {
+    return fail(write, json, "up", "usage", `--capacity is a whole number of tasks, 1 to ${RUNNER_CAPACITY_MAX}`, EXIT.usage);
+  }
   const runnerFlag = text(flags, "runner");
   if (runnerFlag !== undefined && !validRunnerName(runnerFlag)) {
     return fail(write, json, "up", "usage", `a worker name is 1–${RUNNER_NAME_MAX} characters with no control characters`, EXIT.usage);
@@ -8563,6 +8710,13 @@ async function upCommand(
         retireRunnerIfCurrent(store, runnerName, runnerToken, clock());
         return fail(write, json, "up", "registry", `${enrolled.message} — nothing started`, EXIT.refused);
       }
+    }
+
+    // --capacity: the built-in worker's own number, set under the verified
+    // login and kept in the ledger. Without it a restart keeps the last one.
+    if (capacityFlag !== null) {
+      const changed = store.setRunnerCapacity(runnerName, capacityFlag, approverPlan.approver ?? "operator", clock());
+      if (changed.ok && changed.before !== changed.after) progress(`${runnerName} now runs up to ${changed.after} task(s) at once (was ${changed.before})`);
     }
   } finally {
     await new Promise<void>(done => probe.close(() => done()));
@@ -9719,6 +9873,21 @@ function grantsCommand(context: Context): number {
   return EXIT.ok;
 }
 
+function checkProgressCommand(positional: readonly string[], context: Context): number {
+  if (positional.length !== 1 || !/^[1-9][0-9]{0,14}$/.test(positional[0] ?? "")) {
+    return fail(context.write, context.json, "check-progress", "usage", "use check-progress <run>", EXIT.usage);
+  }
+  const run = Number(positional[0]);
+  if (!Number.isSafeInteger(run) || context.store.getRun(run) === null) {
+    return fail(context.write, context.json, "check-progress", "unknown-run", "no such run", EXIT.refused);
+  }
+  const progress = context.store.checkProgress(run);
+  if (progress === null) {
+    return fail(context.write, context.json, "check-progress", "no-progress", "this run has no saved check progress", EXIT.refused);
+  }
+  return succeed(context.write, context.json, "check-progress", { run, progress }, () => [progress.line]);
+}
+
 function revokeCommand(
   positional: readonly string[],
   flags: Map<string, string | true>,
@@ -9770,6 +9939,72 @@ function readPaths(flags: Map<string, string | true>, backend: string): string[]
 
 // ---- authoring ------------------------------------------------------------
 
+function statusCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): number {
+  const command = "status";
+  const allowed = new Set(["db", "json"]);
+  for (const name of flags.keys()) {
+    if (!allowed.has(name)) return fail(context.write, context.json, command, "usage", `--${name} is not a status option.`, EXIT.usage);
+  }
+  if (positional.length > 0) return fail(context.write, context.json, command, "usage", "Use `standing-orders status [--json]`.", EXIT.usage);
+  const status = installationStatus(context.store, context.clock());
+  return succeed(context.write, context.json, command, { ...status }, () => renderInstallationStatus(status));
+}
+
+async function waitTask(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const command = "task wait";
+  const allowed = new Set(["db", "json", "timeout"]);
+  for (const name of flags.keys()) {
+    if (!allowed.has(name)) return fail(context.write, context.json, command, "usage", `--${name} is not a task wait option.`, EXIT.usage);
+  }
+  if (positional.length !== 1) {
+    return fail(context.write, context.json, command, "usage", "Use `standing-orders task wait <id> [--timeout <seconds>]`.", EXIT.usage);
+  }
+  const givenTimeout = text(flags, "timeout");
+  const timeoutSeconds = givenTimeout === undefined ? null : Number(givenTimeout);
+  if (timeoutSeconds !== null && (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 0)) {
+    return fail(context.write, context.json, command, "usage", "--timeout must be zero or a positive number of seconds.", EXIT.usage);
+  }
+
+  const task = positional[0]!;
+  const startedAt = Date.now();
+  const timeoutMs = timeoutSeconds === null ? null : timeoutSeconds * 1_000;
+  const sleep = context.waitSleep ?? ((milliseconds: number) => new Promise<void>(resolve => setTimeout(resolve, milliseconds)));
+  let watchedRun: number | undefined;
+  while (true) {
+    const snapshot = taskWaitSnapshot(context.store, task, context.clock(), watchedRun);
+    if (snapshot === null) return fail(context.write, context.json, command, "unknown-task", `No task named ${task}.`, EXIT.failed, { task });
+    if (watchedRun === undefined && snapshot.outcome === "Running" && snapshot.run !== null) watchedRun = snapshot.run;
+    const data = {
+      task: snapshot.task,
+      outcome: snapshot.outcome,
+      run: snapshot.run,
+      phase: snapshot.phase,
+      check: snapshot.check,
+      next: snapshot.next,
+    };
+    if (snapshot.terminal) {
+      const line = renderTaskWait(snapshot);
+      if (snapshot.exitCode === EXIT.ok) return succeed(context.write, context.json, command, data, () => [line]);
+      return fail(context.write, context.json, command, snapshot.reason ?? "failed", line, EXIT.failed, data);
+    }
+    const elapsed = Date.now() - startedAt;
+    if (timeoutMs !== null && elapsed >= timeoutMs) {
+      const line = renderTaskWait(snapshot, "Timed out");
+      return fail(context.write, context.json, command, "timeout", line, EXIT.usage, { ...data, outcome: "Timed out" });
+    }
+    const remaining = timeoutMs === null ? 250 : Math.max(1, Math.min(250, timeoutMs - elapsed));
+    await sleep(remaining);
+  }
+}
+
 function taskCommand(
   positional: readonly string[],
   flags: Map<string, string | true>,
@@ -9798,6 +10033,8 @@ function taskCommand(
       return listTasks(flags, context);
     case "show":
       return showTask(rest, context);
+    case "wait":
+      return waitTask(rest, flags, context);
     case "evidence":
       return taskEvidenceCommand(rest, flags, context);
     case "state":
@@ -10481,7 +10718,7 @@ async function repairTaskCommand(
   }
   const approved = approve(store, draftId, acting.name, clock(), draftScope.digest, acting.token);
   if (!approved.ok) {
-    return fail(write, json, "task repair", approved.reason, describeApproveFailure(approved.reason, draftId), EXIT.refused);
+    return fail(write, json, "task repair", approved.reason, approved.reason === "policy" ? `${draftId}: ${approved.message}` : describeApproveFailure(approved.reason, draftId), EXIT.refused);
   }
   return succeed(write, json, "task repair", { run: runId, draft: draftId, approvedBy: acting.name }, () => [
     `Approved: ${draftId} (attempt ${chain.attempt}) will build on the next dispatch.`,
@@ -11395,7 +11632,7 @@ async function approveTask(
       return scopeApproved;
     });
     if (!both.ok) {
-      return fail(write, json, "task approve", both.reason, describeApproveFailure(both.reason, id), EXIT.refused);
+      return fail(write, json, "task approve", both.reason, both.reason === "policy" ? `${id}: ${both.message}` : describeApproveFailure(both.reason, id), EXIT.refused);
     }
     return succeed(write, json, "task approve", { scope: both.scope, race: raceTerms }, () => [
       `Approved — scope AND tournament, with one yes. ${raceTerms.n} agents will build ${id} independently:`,
@@ -11407,6 +11644,7 @@ async function approveTask(
 
   const approved = approve(store, id, asWho, now, saw, token, mutationFrom(flags, now));
   if (!approved.ok) {
+    if (approved.reason === "policy") return fail(write, json, "task approve", "policy", `${id}: ${approved.message}`, EXIT.refused);
     return fail(write, json, "task approve", approved.reason, describeApproveFailure(approved.reason, id), EXIT.refused);
   }
 
@@ -11878,6 +12116,42 @@ function writeOut(context: Context, command: string, out: string | undefined, co
   return succeed(context.write, context.json, command, { ...summary, out: resolve(out) }, () => [`${line} Saved to ${resolve(out)}.`]);
 }
 
+/** `project delete --repo <path> [--yes]`: without --yes, what would go; with it, everything Standing Orders holds for the
+ * project goes (never its repository or branches it didn't make). An instance operator; refused while its work runs. */
+async function projectDeleteCommand(positional: readonly string[], flags: Map<string, string | true>, context: Parameters<typeof taskCommand>[2]): Promise<number> {
+  const command = "project delete";
+  const allowed = new Set(["repo", "yes", "as", "token", "token-file", "token-env", "db", "json"]);
+  for (const name of flags.keys()) if (!allowed.has(name)) return fail(context.write, context.json, command, "usage", `--${name} is not a project delete option.`, EXIT.usage);
+  const repoFlag = text(flags, "repo");
+  if (positional.length > 1 || repoFlag === undefined) return fail(context.write, context.json, command, "usage", "Use project delete --repo <project path> [--yes].", EXIT.usage);
+  const registryFile = registryPathOf(context);
+  const registered = await loadRepos(registryFile).catch(() => ({ error: "unreadable" }));
+  const known = [...new Set([...context.store.knownRepos(), ...context.store.listProjects().map(one => one.path), ...("error" in registered ? [] : registered.repos)])];
+  const repo = known.find(one => one === repoFlag || one === resolve(repoFlag));
+  if (repo === undefined) return fail(context.write, context.json, command, "not-found", "That isn't a project Standing Orders knows.", EXIT.refused);
+  const store = context.store;
+  const acting = await askCredentials(flags, context);
+  const verified = acting === null ? null : authenticateApprover(store, acting.name, acting.token);
+  if (acting === null || verified === null || !verified.ok || !store.isInstanceOperator(acting.name)) {
+    return fail(context.write, context.json, command, "refused", "An instance operator deletes projects: pass --as and --token (or use the remembered login).", EXIT.refused);
+  }
+  const holdings = projectHoldings(store, repo);
+  const running = projectRunning(store, repo, context.clock());
+  if (running.length > 0) return fail(context.write, context.json, command, "running", `Nothing was deleted: ${running.join(", ")}. Stop it, then try again.`, EXIT.refused);
+  if (!flags.has("yes")) {
+    return succeed(context.write, context.json, command, { repo, deleted: false, holdings }, () => [
+      `${repo}: Standing Orders holds ${holdingsWords(holdings)} for it, and the checkouts and standing-orders/ branches it made.`,
+      "Deleting removes all of it; the repository and its own branches stay. There's no undo. Add --yes to delete.",
+    ]);
+  }
+  const done = await deleteProject(store, repo, { actor: acting.name, via: "command line", now: context.clock(), evidenceRoot: context.evidenceRoot ?? join(dirname(context.databaseFile), "evidence"), poolRoot: join(dirname(context.databaseFile), "worktrees") });
+  if (!done.ok) return fail(context.write, context.json, command, done.reason, done.said, done.reason === "running" ? EXIT.refused : EXIT.failed);
+  if (!("error" in registered) && registered.repos.includes(repo)) await updateRepos(registryFile, repos => removeRepos(repos, [repo])).catch(() => undefined);
+  return succeed(context.write, context.json, command, { repo, deleted: true, removed: done.removed, left: done.left, ledgerEntry: done.ledgerId }, () => [
+    `Deleted ${repo}: ${holdingsWords(done.removed)}.`, ...done.left.map(one => `Git kept ${one}.`), `The ledger records it as entry #${done.ledgerId}.`,
+  ]);
+}
+
 /** `spend [--month YYYY-MM] [--csv]` (v105): what agent work cost in a month, by project, person, teammate and model. */
 function spendCommand(flags: Map<string, string | true>, context: Context): number {
   const command = "spend";
@@ -11901,6 +12175,76 @@ function spendCommand(flags: Map<string, string | true>, context: Context): numb
     ...[...byProject.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([repo, microusd]) => `  ${basename(repo).padEnd(24)} ${spendUsd(microusd)}`),
     ...budgets.map(one => `  budget ${budgetLabel(one, names.get(Number(one.key))).replace(/'s$/, "").padEnd(24)} ${spendUsd(one.spentMicrousd)} of ${spendUsd(one.limitMicrousd)} (${one.percent}%)${one.hardStop ? "" : " alerts only"}`),
   ]);
+}
+
+/** `backup now | list` (sprint 8): back the database up now, or list backups and how the latest ones went. */
+async function backupCommand(positional: readonly string[], flags: Map<string, string | true>, context: Context): Promise<number> {
+  const [action, ...extra] = positional;
+  const command = `backup ${action ?? ""}`.trim();
+  for (const name of flags.keys()) if (!["db", "json"].includes(name)) return fail(context.write, context.json, command, "usage", `--${name} is not a backup option.`, EXIT.usage);
+  if (extra.length > 0 || (action !== "now" && action !== "list")) return fail(context.write, context.json, command, "usage", "Use backup now or backup list.", EXIT.usage);
+  const store = context.store;
+  if (action === "now") {
+    const made = await backupNow(store, context.databaseFile, "manual", context.clock);
+    if (!made.ok) return fail(context.write, context.json, command, "failed", `The backup failed: ${made.error}`, EXIT.failed, { backup: made.id });
+    return succeed(context.write, context.json, command, { backup: made }, () => [
+      `Backed up to ${made.file} (${bytesWords(made.bytes)}).${made.removed === 0 ? "" : ` Removed ${made.removed} older ${made.removed === 1 ? "backup" : "backups"}.`}`,
+    ]);
+  }
+  const settings = store.backupSettings();
+  const folder = backupFolderOf(settings, context.databaseFile);
+  const files = backupFiles(folder);
+  const runs = store.backupRuns(10);
+  const last = runs[0] ?? null;
+  return succeed(context.write, context.json, command, { settings, folder, files, runs }, () => [
+    settings.enabled ? `Every ${settings.everyHours === 1 ? "hour" : `${settings.everyHours} hours`}, keeping the newest ${settings.keep}, in ${folder}.` : `Scheduled backups are off. Backups are kept in ${folder}.`,
+    last === null ? "No backup has run yet." : last.ok === true ? `Last backup ${last.startedAt.slice(0, 16).replace("T", " ")} UTC: succeeded.` : last.ok === false ? `Last backup ${last.startedAt.slice(0, 16).replace("T", " ")} UTC: FAILED (${last.error ?? "no reason recorded"}).` : `A backup started ${last.startedAt.slice(0, 16).replace("T", " ")} UTC is still running.`,
+    ...(files.length === 0 ? ["No backups in the folder."] : files.map(one => `  ${one.name}  ${bytesWords(one.bytes)}`)),
+  ]);
+}
+
+/** `restore <file> [--dry-run]` (sprint 8): put a backup back. Refuses while Standing Orders is running; checks the
+ * backup's schema version and ledger chain; keeps the current database as a copy first. */
+async function restoreCommand(file: string, positional: readonly string[], flags: Map<string, string | true>, write: Write, json: boolean, now: Date): Promise<number> {
+  const command = "restore";
+  for (const name of flags.keys()) if (!["db", "json", "dry-run"].includes(name)) return fail(write, json, command, "usage", `--${name} is not a restore option.`, EXIT.usage);
+  const [backupFile, ...extra] = positional;
+  if (backupFile === undefined || extra.length > 0) return fail(write, json, command, "usage", "Use restore <backup file> [--dry-run].", EXIT.usage);
+  const dryRun = flags.has("dry-run");
+  let report;
+  try { report = await restoreDatabase({ databaseFile: file, file: backupFile, dryRun, now }); }
+  catch (error) { return fail(write, json, command, "failed", `The restore failed: ${describe(error)}. The database is unchanged.`, EXIT.failed); }
+  if (!report.ok) {
+    return fail(write, json, command, report.refusals[0]?.reason ?? "refused", ["Nothing was restored.", ...report.refusals.map(one => `  ${one.words}`)].join("\n"), EXIT.refused, { report });
+  }
+  const checked = `schema ${report.schemaVersion}, ledger chain verified (${report.ledger?.entries ?? 0} entries)`;
+  return succeed(write, json, command, { report }, () => dryRun
+    ? [`Dry run: ${report.file} can be restored (${checked}). Nothing was changed.`]
+    : [`Restored ${report.file} (${checked}).`, `The database as it was is kept at ${report.savedAs}.`]);
+}
+
+/** `export --out <path> [--zip]` (v105): everything Standing Orders knows, in a new folder or .zip, without secrets. */
+function exportCommand(positional: readonly string[], flags: Map<string, string | true>, context: Context): number {
+  const command = "export";
+  for (const name of flags.keys()) if (!["out", "zip", "db", "json"].includes(name)) return fail(context.write, context.json, command, "usage", `--${name} is not an export option.`, EXIT.usage);
+  const out = text(flags, "out");
+  if (positional.length > 0 || out === undefined || out === "") return fail(context.write, context.json, command, "usage", "Use export --out <path> [--zip].", EXIT.usage);
+  const target = resolve(out);
+  if (existsSync(target)) return fail(context.write, context.json, command, "exists", "That path exists already; choose a new one.", EXIT.failed);
+  // Reading the database file needs no login, so the ledger names the road, not a person it can't vouch for.
+  const who = "command line";
+  const now = context.clock();
+  const zip = flags.has("zip");
+  context.store.recordAction({ at: now.toISOString(), actor: who, repo: null, taskId: null, runId: null, action: "everything exported", outcome: "exported", source: "access", detail: zip ? "as a .zip" : "as a folder" });
+  const exported = buildExport(context.store, { who, now, evidenceRoot: context.evidenceRoot, configDir: dirname(context.databaseFile) });
+  try {
+    if (zip) writeFileSync(target, exportZip(exported), { mode: 0o600, flag: "wx" });
+    else writeExportFolder(target, exported);
+  } catch {
+    return fail(context.write, context.json, command, "unwritable", "The export couldn't be written there.", EXIT.failed);
+  }
+  return succeed(context.write, context.json, command, { out: target, zip, files: exported.files.length, tables: exported.tables, packs: exported.packs },
+    () => [`Exported ${exportSummary(exported)} to ${target}.`, "manifest.json lists every file with its SHA-256; README.md explains the layout."]);
 }
 
 /** `budget list | set | remove` (v105): monthly budgets. Setting and removing take an instance operator. */
@@ -11940,6 +12284,88 @@ async function budgetCommand(positional: readonly string[], flags: Map<string, s
   if (!Number.isFinite(dollars) || dollars < 1 || dollars > 10_000_000) return fail(context.write, context.json, command, "usage", "--usd is a whole number of dollars, at least 1.", EXIT.usage);
   const saved = store.setBudget({ scope: target.scope, key: target.key, limitMicrousd: Math.round(dollars) * 1_000_000, hardStop: !flags.has("alerts-only") }, acting.name, context.clock());
   return succeed(context.write, context.json, command, { budget: saved }, () => [`${budgetLabel(saved).replace(/'s$/, "")}: ${spendUsd(saved.limitMicrousd)} a month${saved.hardStop ? ", API work stops at 100%" : ", alerts only"}.`]);
+}
+
+/** `retention show | preview | set <kind> <period>` (v105): how long each kind of data is kept, and what the daily
+ * sweep would remove now. Setting takes an instance operator. */
+async function retentionCommand(positional: readonly string[], flags: Map<string, string | true>, context: Context): Promise<number> {
+  const [action, ...rest] = positional;
+  const command = `retention ${action ?? ""}`.trim();
+  const store = context.store;
+  const allowed = new Set(action === "set" ? ["as", "token", "token-file", "token-env", "db", "json"] : ["db", "json"]);
+  for (const name of flags.keys()) if (!allowed.has(name)) return fail(context.write, context.json, command, "usage", `--${name} is not a ${command} option.`, EXIT.usage);
+  const label = (kind: RetentionKind) => RETENTION_KINDS.find(one => one.kind === kind)!.label;
+  if (action === undefined || action === "show") {
+    const periods = store.retentionPeriods();
+    const last = lastSweepAt(store);
+    return succeed(context.write, context.json, command, { periods, lastSweep: last }, () => [
+      ...RETENTION_KINDS.map(one => `  ${one.kind.padEnd(14)} ${periodWords(periods[one.kind]).padEnd(9)} ${one.label}`),
+      last === null ? "No sweep yet; the worker runs one a day." : `Last sweep ${last.slice(0, 16).replace("T", " ")} UTC.`,
+    ]);
+  }
+  if (action === "preview") {
+    const plan = retentionPlan(store, context.evidenceRoot, context.clock());
+    const kept = plan.counts.filter(one => one.days === null).map(one => one.kind);
+    return succeed(context.write, context.json, command, { counts: plan.counts }, () => [
+      ...plan.counts.filter(one => one.days !== null).map(one => `  ${label(one.kind).padEnd(26)} ${countWords(one)} older than ${periodWords(one.days)}, about ${bytesWords(one.bytes)}${one.more ? " (more after this sweep)" : ""}`),
+      kept.length === RETENTION_KINDS.length ? "Everything is kept forever; nothing would be removed." : `Nothing was removed.${kept.length === 0 ? "" : ` Kept forever: ${kept.join(", ")}.`}`,
+    ]);
+  }
+  if (action !== "set") return fail(context.write, context.json, command, "usage", "Use retention show, retention preview or retention set <kind> <period>.", EXIT.usage);
+  const [kind, period, ...extra] = rest;
+  if (kind === undefined || !isRetentionKind(kind) || period === undefined || extra.length > 0) {
+    return fail(context.write, context.json, command, "usage", `Use retention set <${RETENTION_KINDS.map(one => one.kind).join("|")}> <days, like 90d or 1y, or forever>.`, EXIT.usage);
+  }
+  const days = parsePeriod(period);
+  if (days === undefined) return fail(context.write, context.json, command, "usage", `A period is forever, or ${MIN_DAYS} days to 10 years (90d, 12w, 1y).`, EXIT.usage);
+  const acting = await askCredentials(flags, context);
+  const verified = acting === null ? null : authenticateApprover(store, acting.name, acting.token);
+  if (acting === null || verified === null || !verified.ok || !store.isInstanceOperator(acting.name)) {
+    return fail(context.write, context.json, command, "refused", "An instance operator sets retention: pass --as and --token (or use the remembered login).", EXIT.refused);
+  }
+  const periods = store.setRetentionPeriod(kind, days, acting.name, context.clock());
+  return succeed(context.write, context.json, command, { periods }, () => [`${label(kind)}: kept ${days === null ? "forever" : `for ${periodWords(days)}`}.`]);
+}
+
+/** `policy show | set` (sprint 8): the organisation policy. Setting it takes an instance operator's credentials; each rule
+ * that changed is in the ledger, before → after. A flag left out keeps its rule; "any" lifts it. */
+async function policyCommand(positional: readonly string[], flags: Map<string, string | true>, context: Context): Promise<number> {
+  const [action, ...extra] = positional;
+  const command = `policy ${action ?? ""}`.trim();
+  const store = context.store;
+  const shown = (policy: SavedPolicy): string[] => {
+    const parts = policyParts(policy);
+    return [`Providers: ${parts.providers}`, `Models:    ${parts.models}`, `Tools:     ${parts.tools}`, `Ceiling:   ${parts.ceiling}`,
+      ...(policy.updatedBy === null ? [] : [`Changed by ${policy.updatedBy} at ${policy.updatedAt}.`])];
+  };
+  if (extra.length > 0 || (action !== undefined && action !== "show" && action !== "set")) return fail(context.write, context.json, command, "usage", "Use policy show or policy set.", EXIT.usage);
+  if (action === undefined || action === "show") {
+    for (const name of flags.keys()) if (!["history", "db", "json"].includes(name)) return fail(context.write, context.json, command, "usage", `--${name} is not a policy show option.`, EXIT.usage);
+    const policy = store.orgPolicy();
+    const history = flags.has("history") ? store.policyHistory(50) : [];
+    return succeed(context.write, context.json, command, { policy, ...(flags.has("history") ? { history } : {}) }, () => [
+      ...shown(policy),
+      ...history.map(one => `  ${one.at.slice(0, 16).replace("T", " ")}  ${one.actor}  ${one.action.replace(/^organisation policy: /, "")}: ${one.detail ?? ""}`),
+    ]);
+  }
+  const allowed = new Set(["providers", "models", "tools", "ceiling", "as", "token", "token-file", "token-env", "db", "json"]);
+  for (const name of flags.keys()) if (!allowed.has(name)) return fail(context.write, context.json, command, "usage", `--${name} is not a policy set option.`, EXIT.usage);
+  if (!["providers", "models", "tools", "ceiling"].some(name => flags.has(name))) return fail(context.write, context.json, command, "usage", "Say what to set: --providers, --models, --tools or --ceiling.", EXIT.usage);
+  const acting = await askCredentials(flags, context);
+  const verified = acting === null ? null : authenticateApprover(store, acting.name, acting.token);
+  if (acting === null || verified === null || !verified.ok || !store.isInstanceOperator(acting.name)) {
+    return fail(context.write, context.json, command, "refused", "An instance operator sets the policy: pass --as and --token (or use the remembered login).", EXIT.refused);
+  }
+  const current = store.orgPolicy();
+  const listFlag = (name: string, now: readonly string[] | null): readonly string[] | null => {
+    if (!flags.has(name)) return now;
+    const given = text(flags, name) ?? "";
+    return given.trim().toLowerCase() === "any" ? null : parseList(given) ?? [];
+  };
+  const checked = checkPolicy({ providers: listFlag("providers", current.providers), models: listFlag("models", current.models), tools: listFlag("tools", current.tools), ceiling: text(flags, "ceiling") ?? current.ceiling });
+  if (!checked.ok) return fail(context.write, context.json, command, "usage", `${checked.problem} Nothing changed.`, EXIT.usage);
+  const saved = store.setOrgPolicy(checked.policy, acting.name, context.clock());
+  return succeed(context.write, context.json, command, { policy: saved }, () => ["Policy saved.", ...shown(saved)]);
 }
 
 /** `task evidence <id>`: everything an auditor asks about one task (v103). Read locally; needs no login. */
@@ -12126,4 +12552,22 @@ function refExternalId(store: Store, taskRef: number): string | null {
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function databaseFailure(
+  write: Write,
+  json: boolean,
+  command: string,
+  file: string,
+  error: unknown,
+): number {
+  if (!isDatabaseBusy(error)) return fail(write, json, command, "database", describe(error), EXIT.failed);
+  return fail(
+    write,
+    json,
+    command,
+    "database-busy",
+    `The database ${file} stayed busy for ${CONCURRENT_WRITER_WAIT_MS / 1_000} seconds. Wait for the other Standing Orders process to finish, then try again.`,
+    EXIT.failed,
+  );
 }

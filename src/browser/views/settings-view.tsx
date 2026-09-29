@@ -268,6 +268,29 @@ function Providers({ providers, csrf }: { providers: NonNullable<BrowserSettings
   </Section>;
 }
 
+function Workers({ workers }: { workers: NonNullable<BrowserSettingsView["workers"]> }) {
+  return <Section id="workers" title="Workers" description="How many tasks each worker runs at once, and what it is running now.">
+    {workers.length === 0
+      ? <p className="text-sm text-muted-foreground">No worker is connected. Run <code className="font-mono text-xs">standing-orders up</code> on the computer with your projects.</p>
+      : <ul className="-my-1 divide-y divide-border">
+        {workers.map(one => <li key={one.name} className="grid gap-1.5 py-2.5" data-worker={one.name}>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span className="min-w-0 break-all font-semibold">{one.name}</span>
+            <span className="inline-flex items-center gap-2 text-sm text-muted-foreground"><StatusDot tone={one.tone} />{one.state}</span>
+            <span className="ml-auto text-sm tabular-nums" data-worker-load>{one.busy} of {one.capacity} running</span>
+          </div>
+          {one.running.length === 0
+            ? <p className="text-[13px] text-muted-foreground">Nothing running.</p>
+            : <ul className="grid gap-1">{one.running.map(task => <li key={task.taskId} className="flex min-w-0 items-baseline gap-2 text-sm">
+              <a className="min-w-0 truncate underline-offset-4 hover:underline" href={task.href}>{task.title}</a>
+              {task.project && <span className="shrink-0 text-[13px] text-muted-foreground">{task.project}</span>}
+            </li>)}</ul>}
+        </li>)}
+      </ul>}
+    {workers.length > 0 && <p className="mt-3 text-[13px] text-muted-foreground">To change how many a worker runs at once: <code className="font-mono text-xs">standing-orders runner capacity &lt;name&gt; &lt;n&gt;</code></p>}
+  </Section>;
+}
+
 function Notifications({ view, csrf }: { view: BrowserSettingsView; csrf: string }) {
   const base = useId();
   if (view.services === null && view.push === null && view.digest === null) return null;
@@ -349,6 +372,7 @@ export function SettingsView({ view, csrf }: { view: BrowserSettingsView; csrf: 
       value={view.quality.mode} canManage={view.quality.canManage} changed={view.quality.changed} csrf={csrf}
       options={[{ value: "default", title: "Default", description: "Everyday agents and the repository check." }, { value: "strict", title: "Strict / release", description: "Strongest agents. Release approval stays separate." }]} />}
     {view.providers && <Providers providers={view.providers} csrf={csrf} />}
+    {view.workers && <Workers workers={view.workers} />}
     {view.email && csrf && <Email email={view.email} csrf={csrf} />}
     <Notifications view={view} csrf={csrf} />
     {csrf && <TelegramToken view={view} csrf={csrf} />}

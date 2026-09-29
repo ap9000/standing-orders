@@ -26,6 +26,8 @@ export const CHAT_CONTROLS = {
   knowledge: { label: "Edit project knowledge", href: "/settings/knowledge" },
   learning: { label: "Review learning history", href: "/settings/learning" },
   mode: { label: "Review automatic approvals", href: "/mode" },
+  // Sprint 8: allowed providers, models and tools, and the permission ceiling. Changed there, with a password.
+  policy: { label: "Review organisation policy", href: "/settings/policy" },
 } as const;
 export type ChatControl = keyof typeof CHAT_CONTROLS;
 export function isChatControl(value: unknown): value is ChatControl {

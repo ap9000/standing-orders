@@ -89,13 +89,16 @@ import { authenticate as runnerAuthenticate } from "./runner.js";
 import type { Scope } from "./scope.js";
 import type { QualityMode } from "./quality.js";
 import type { ProgressSnapshot } from "./plan.js";
+import { parseCheckProgressSnapshot, type CheckProgressSnapshot } from "./check-progress.js";
 
 import { normalizeProjectAccess, projectAccessAllows, readProjectAccess, type ProjectAccess } from "./project-access.js";
 import { LEDGER_SCHEMA, LEDGER_TABLE, LEDGER_V54_COLUMNS, LEDGER_V54_TABLE, installLedgerTriggers, type LedgerEntry } from "./action-ledger.js";
 import { PLAN_AUTO_SCHEMA } from "./plan-auto.js";
 import { RECIPE_SCHEMA } from "./recipes.js";
 import type { LimitReading, LimitWindow } from "./provider-limits.js";
+import { POLICY_SCHEMA, agentRefusal, approvalRefusal, attendedRefusal, policyParts, readPolicy, underCeiling, sessionCeilingRefusal, type OrgPolicy, type SavedPolicy } from "./policy.js";
 import { SPEND_SCHEMA, billingOf, budgetStates, canPrice, claudeMachineBilling, countsToward, filersOf, monthOf, priceWork, seenBilling as seenBillingOf, spendItems, teammateFilers, usd, type Billing, type Budget, type BudgetAgent, type BudgetHold, type BudgetScope, type BudgetState, type SpendItem } from "./spend.js";
+import { FOREVER, RETENTION_SCHEMA, periodWords, type RetentionKind, type RetentionPeriods } from "./retention.js";
 import { IN_RANGE, LEDGER_CHAIN_SCHEMA, safeWhole, sealLedger, verifyLedgerChain, type LedgerChainReport, type VerifiedHead } from "./ledger-chain.js";
 import { NO_RULES, filerFor, isProtectedWork, protectedChanges, rulesWords, type ApprovalGate, type ApprovalRules, type ApproverKind, type Filer, type FilerKind } from "./approval-policy.js";
 
@@ -160,7 +163,102 @@ CREATE TABLE IF NOT EXISTS monitoring_status (
   held_until  TEXT
 );
 `;
+/** Sprint 8: database backups. One settings row (off, or every so many hours, keeping the newest N in a folder; no
+ * folder means `backups` beside the database), every backup's outcome, and a lease the console's backup loop holds
+ * and renews while it runs: one process backs up at a time, and a restore sees that the console is running. */
+const BACKUP_SCHEMA = `
+CREATE TABLE IF NOT EXISTS backup_settings (
+  id          INTEGER PRIMARY KEY CHECK (id = 1),
+  enabled     INTEGER NOT NULL DEFAULT 1,
+  every_hours INTEGER NOT NULL DEFAULT 24,
+  keep        INTEGER NOT NULL DEFAULT 7,
+  folder      TEXT
+);
+CREATE TABLE IF NOT EXISTS backup_run (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  trigger        TEXT NOT NULL CHECK (trigger IN ('scheduled', 'manual')),
+  started_at     TEXT NOT NULL,
+  finished_at    TEXT,
+  ok             INTEGER,
+  file           TEXT,
+  bytes          INTEGER,
+  schema_version INTEGER,
+  removed        INTEGER NOT NULL DEFAULT 0,
+  error          TEXT
+);
+CREATE TABLE IF NOT EXISTS backup_lease (
+  id         INTEGER PRIMARY KEY CHECK (id = 1),
+  holder     TEXT,
+  held_until TEXT
+);
+`;
+export type BackupSettings = { enabled: boolean; everyHours: number; keep: number; folder: string | null };
+export const DEFAULT_BACKUP_SETTINGS: BackupSettings = { enabled: true, everyHours: 24, keep: 7, folder: null };
+export type BackupRun = { id: number; trigger: "scheduled" | "manual"; startedAt: string; finishedAt: string | null; ok: boolean | null; file: string | null; bytes: number | null; schemaVersion: number | null; removed: number; error: string | null };
+/** The settings in words, for the ledger. */
+export function backupSettingsWords(settings: BackupSettings): string {
+  if (!settings.enabled) return `off, keep ${settings.keep}, ${settings.folder ?? "the default folder"}`;
+  return `every ${settings.everyHours === 1 ? "hour" : `${settings.everyHours} hours`}, keep ${settings.keep}, ${settings.folder ?? "the default folder"}`;
+}
+/** The small, machine-owned summary of a run's approved project check, one
+ * row per run, so `status` and `task wait` report the real result without
+ * opening retained logs. The sealed receipt stays the evidence. `release` is
+ * copied from the run's Strict mode at recording time so the newest release
+ * check is one indexed read. A run without a row is history from before
+ * summaries were recorded. The run table itself is unchanged. */
+const RUN_CHECK_SCHEMA = `
+CREATE TABLE IF NOT EXISTS run_check (
+  run         INTEGER PRIMARY KEY,
+  status      TEXT NOT NULL CHECK (status IN ('passed', 'failed', 'not-run')),
+  exit_code   INTEGER,
+  suites_json TEXT NOT NULL DEFAULT '[]',
+  release     INTEGER NOT NULL DEFAULT 0 CHECK (release IN (0, 1)),
+  recorded_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS run_check_release ON run_check (run DESC) WHERE release = 1;
+`;
+
+export type RunCheckSuite = {
+  name: string;
+  status: "passed" | "failed" | "not-run";
+  exitCode: number | null;
+};
+export type RunCheck = { status: "passed" | "failed" | "not-run"; exitCode: number | null; suites: RunCheckSuite[] };
+
+const isCheckExitCode = (value: unknown): boolean =>
+  value === null || (Number.isSafeInteger(value) && Number(value) >= 0 && Number(value) <= 2_147_483_647);
+
+/** Read a stored suite list; a malformed optional summary reads as no suite detail. */
+export function checkSuitesOf(value: unknown): RunCheckSuite[] {
+  try {
+    const parsed = JSON.parse(String(value ?? "[]")) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((one): one is RunCheckSuite => {
+      if (one === null || typeof one !== "object") return false;
+      const row = one as Record<string, unknown>;
+      return typeof row["name"] === "string" && row["name"].trim() !== "" && row["name"].length <= 80 &&
+        ["passed", "failed", "not-run"].includes(String(row["status"])) && isCheckExitCode(row["exitCode"]);
+    }).slice(0, 8);
+  } catch {
+    return [];
+  }
+}
+
 export type MonitoringStatus = { sink: string; target: string | null; through: number; sent: number; lastOkAt: string | null; lastError: string | null; lastErrorAt: string | null; failures: number; nextTryAt: string | null };
+
+/** Live approved-check state is additive in v105; older readers may ignore it. */
+const CHECK_PROGRESS_SCHEMA = `
+CREATE TABLE IF NOT EXISTS check_progress (
+  run         INTEGER PRIMARY KEY REFERENCES run(id) ON DELETE CASCADE,
+  snapshot    TEXT NOT NULL,
+  line        TEXT NOT NULL,
+  final       INTEGER NOT NULL DEFAULT 0 CHECK (final IN (0,1)),
+  updated_at  TEXT NOT NULL,
+  notified_at TEXT
+);
+`;
+
+export type CheckProgress = CheckProgressSnapshot & { run: number; updatedAt: string; notifiedAt: string | null };
 
 /** The detail on a task's registration written again at its filing (v103), over a ref an earlier lookup made. */
 const REGISTERED_AT_FILING = "again, as it was filed";
@@ -169,7 +267,8 @@ export type SealedLedgerEntry = LedgerEntry & { seal: { prev: string; hash: stri
 // v103 chains the action ledger (every entry sealed with the one before it), keeps checkpoints of the chain, and records teammate tool calls (from the store) and minted coordinators (by trigger) in it.
 // v104 keeps where each monitoring destination (the audit stream to a webhook or a folder, traces to an OpenTelemetry collector) has delivered to, and who is sending.
 // v105 prices every run (reported, or tokens at the catalogue price) and keeps monthly budgets per project, person, teammate and installation.
-export const SCHEMA_VERSION = 105;
+// v106 keeps the organisation policy, retention periods, backup settings and runs, check progress, and runner capacity changes.
+export const SCHEMA_VERSION = 106;
 
 /** v102: a project's approval rules, and each person's approval of an exact scope (two are needed for protected work). */
 const APPROVAL_SCHEMA = `
@@ -924,6 +1023,7 @@ export const LIFECYCLE_KINDS = [
   "task-cancelled",
   "run-started",
   "run-phase",
+  "check-progress",
   "run-finished",
   "run-stopping",
   "run-stopped",
@@ -944,6 +1044,7 @@ export function isLifecycleNotification(row: Pick<Notification, "dedupeKey">): b
 /** Only known progress producers can repaint a card. Decisions and urgent
  * incidents keep their own alerts; a routine retry updates its saved attempt. */
 export function isTelegramProgressNotification(row: Pick<Notification, "dedupeKey" | "kind" | "pushClass" | "run">): boolean {
+  if (row.kind === "check-progress" && row.pushClass === "progress" && row.run !== null) return isLifecycleNotification(row);
   if (row.pushClass !== null) return false;
   if (row.kind === "build-failed" && row.run !== null && row.dedupeKey === `run:${row.run}:failed`) return true;
   return isLifecycleNotification(row) &&
@@ -1022,7 +1123,7 @@ export type Notification = {
   deliveredAt: string | null;
   receipt: string | null;
   /** The closed push attention class, or null = this fact never pushes. */
-  pushClass: "decision" | "pick" | "merge" | "attention" | null;
+  pushClass: "decision" | "pick" | "merge" | "attention" | "progress" | null;
   /** The machine-minted console path a push may deep-link — never free text. */
   link: string | null;
   /**
@@ -4558,7 +4659,7 @@ export type OpenOptions = {
 };
 
 /** Every connection's wait at SQLite's lock boundary, in milliseconds. */
-const CONCURRENT_WRITER_WAIT_MS = 5000;
+export const CONCURRENT_WRITER_WAIT_MS = 15_000;
 
 /** A brief competing CLI/worker write queues at SQLite's lock boundary.
  * This is per connection, including non-migrating desktop/MCP connections.
@@ -4574,7 +4675,7 @@ const WRITE_WAIT_SLICE_MS = 100;
 
 /** SQLITE_BUSY in its primary or any extended form (node:sqlite reports
  * the extended code as `errcode`; the low byte is the primary code). */
-function isDatabaseBusy(error: unknown): boolean {
+export function isDatabaseBusy(error: unknown): boolean {
   const code = (error as { errcode?: unknown } | null)?.errcode;
   return typeof code === "number" && (code & 0xff) === 5;
 }
@@ -4824,6 +4925,12 @@ function initializeStore(db: Database, file: string): Store {
   db.exec(LEDGER_CHAIN_SCHEMA);
   db.exec(MONITORING_SCHEMA);
   db.exec(SPEND_SCHEMA);
+  db.exec(RETENTION_SCHEMA);
+  db.exec(BACKUP_SCHEMA);
+  // Sprint 8: the organisation policy (one row, or none: nothing restricted).
+  db.exec(POLICY_SCHEMA);
+  db.exec(CHECK_PROGRESS_SCHEMA);
+  db.exec(RUN_CHECK_SCHEMA);
   addColumn(db, "monitoring_status", "target", "TEXT");
   // v105: how a teammate's turn was billed (this computer's Claude sign-in, as last seen).
   addColumn(db, "teammate_turn", "billing", "TEXT");
@@ -4868,6 +4975,9 @@ CREATE INDEX IF NOT EXISTS work_open_decision ON decision (run, id DESC) WHERE s
 CREATE INDEX IF NOT EXISTS run_task_outcome ON run (task_ref, outcome, id DESC);
 CREATE INDEX IF NOT EXISTS task_done_recent ON task (updated_at DESC, id DESC) WHERE state = 'done';
 CREATE INDEX IF NOT EXISTS run_started ON run (started_at, id);
+-- Lead status and task wait stay on bounded indexed reads: this follows one
+-- task's attempts. The newest release check is indexed on run_check itself.
+CREATE INDEX IF NOT EXISTS lead_status_task_run ON run (task_ref, id DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS diff_comment_source ON diff_comment (source_key) WHERE source_key IS NOT NULL;
 -- One open question per racing agent (v14, finding 28) — lives here, after
 -- the migration, because decision.contestant arrives by addColumn on
@@ -9755,10 +9865,15 @@ export class Store {
       let unresolvedReason: string | null = null;
       let provenance: string | null = options.profile === undefined ? null : JSON.stringify({ resolvedFrom: "explicit" });
       const ref = this.lookupRef(scope.taskId);
-      const permissionMode: UnattendedPermissionMode =
+      // Sprint 8: the organisation policy's permission ceiling lowers what a new filing asks for (a mode's escalated
+      // posture, the installation default, the task's own choice) before anyone reads or signs it.
+      const orgPolicy = this.orgPolicy();
+      const escalatedAllowed = orgPolicy.ceiling === "escalated";
+      const asked: UnattendedPermissionMode =
         options.posture === "escalated"
           ? "bypassPermissions"
           : options.permissionMode ?? ref?.permissionMode ?? this.permissionDefault().mode;
+      const permissionMode: UnattendedPermissionMode = escalatedAllowed ? asked : "auto";
       const qualityMode: QualityMode = options.qualityMode ?? ref?.qualityMode ?? this.qualityDefault().mode;
       // A form/CLI choice is a durable TASK choice. The active operating
       // mode's escalated posture is intentionally not persisted here: when
@@ -9877,7 +9992,7 @@ export class Store {
       // demo fixtures depend on that). The signed operating mode's
       // escalated posture is the one exception, retained from C7: it must
       // apply even when a CLI caller supplied a concrete profile.
-      if (options.posture === "escalated" && profile !== null) {
+      if (options.posture === "escalated" && escalatedAllowed && profile !== null) {
         profile =
           profile.provider === "claude"
             ? { ...profile, permissionArgv: "bypassPermissions" }
@@ -9885,6 +10000,10 @@ export class Store {
               ? { ...profile, approvalArgv: "yolo" }
               : { ...profile, sandboxMode: "danger-full-access" };
       }
+      // Anything still above the ceiling files at the highest level beneath it its provider has; a provider with none
+      // keeps its terms, and approval refuses them in words.
+      const lowered = (one: ExecutionProfile): ExecutionProfile => { const verdict = underCeiling(orgPolicy, one); return verdict.ok ? verdict.profile : one; };
+      if (profile !== null) profile = lowered(profile);
       const digestInput = {
         goal: scope.goal,
         outOfScope: scope.outOfScope,
@@ -9959,6 +10078,7 @@ export class Store {
               )
             : { ok: false as const, reason: "bad-auth-mode" as const, problem: baseAuth.problem };
           if (chain.ok && chain.kind === "chain") {
+            chain.chain = chain.chain.map(entry => ({ ...entry, profile: lowered(entry.profile) }));
             proposedChainJson = canonicalChainJson(chain.chain);
             boundDigest = digestOf(
               { goal: scope.goal, outOfScope: scope.outOfScope, touches: scope.touches, budgetMicrousd: scope.budgetMicrousd, acceptance: scope.acceptance, qualityMode },
@@ -10088,6 +10208,8 @@ export class Store {
         // a routine or an AI teammate's word.
         const kind: ApproverKind = approverKind ?? (basis !== undefined ? "mode" : by.endsWith(" (AI)") ? "ai" : "person");
         if (this.approvalGate(taskId, by, kind).verdict !== "seal") return false;
+        // Sprint 8: the organisation policy, on every road that seals (a person's yes says why first).
+        if (this.scopePolicyRefusal(taskId) !== null) return false;
         // THE SEAL'S BELT (v47, one strict projection since the v48
         // integrity repair): the row seals only what `scopeAuthorityOf`
         // proves from its raw bytes — exact-key profile, chain, and route;
@@ -10924,6 +11046,12 @@ export class Store {
     this.recordAction({ at: now.toISOString(), actor: by, repo, taskId: null, runId: null, action, outcome, source: "policy", detail: `${before} → ${after}` });
   }
 
+  /** A project deleted (project-delete.ts): who, and what it held → how it went. Returns the entry's id. */
+  recordProjectDeleted(by: string, repo: string, held: string, how: string, now: Date): number {
+    this.recordPolicy(by, repo, "project deleted", held, how, now, "deleted");
+    return this.ledgerHeadId();
+  }
+
   recordAction(entry: Omit<LedgerEntry, "id" | "detail"> & { detail?: string | null }): number {
     const detail = entry.detail == null ? null : entry.detail.replace(/[\u0000-\u001f\u007f]+/g, " ").slice(0, 300);
     const row = this.db.prepare("INSERT INTO action_ledger(at,actor,repo,task_id,run_id,action,outcome,source,detail) VALUES (?,?,?,?,?,?,?,?,?)")
@@ -11449,6 +11577,28 @@ export class Store {
         .run(JSON.stringify(bound), name);
       void now;
       return { ok: true as const, repos: bound };
+    });
+  }
+
+  /**
+   * How many tasks a worker runs at once, set by an operator and kept in
+   * the ledger as before → after. Only the number changes: work already
+   * running keeps its claim, and the new number applies at the next claim.
+   */
+  setRunnerCapacity(
+    name: string,
+    capacity: number,
+    by: string,
+    now: Date,
+  ): { ok: true; before: number; after: number } | { ok: false; reason: "unknown" | "retired" } {
+    return this.transact(() => {
+      const found = this.getRunner(name);
+      if (found === null) return { ok: false as const, reason: "unknown" as const };
+      if (found.runner.retiredAt !== null) return { ok: false as const, reason: "retired" as const };
+      const before = found.runner.capacity;
+      this.db.prepare("UPDATE runner SET capacity = ? WHERE name = ?").run(capacity, name);
+      this.recordPolicy(by, null, `worker capacity: ${name}`, String(before), String(capacity), now);
+      return { ok: true as const, before, after: capacity };
     });
   }
 
@@ -17534,6 +17684,58 @@ export class Store {
 
   // ---- lifecycle updates ---------------------------------------------------
 
+  /** The latest saved line for one approved check. Corrupt rows stay absent. */
+  checkProgress(run: number): CheckProgress | null {
+    const row = this.db.prepare("SELECT * FROM check_progress WHERE run = ?").get(run);
+    if (row === undefined) return null;
+    const snapshot = parseCheckProgressSnapshot(String(row["snapshot"]));
+    if (snapshot === null || snapshot.line !== String(row["line"]) || snapshot.final !== (Number(row["final"]) === 1)) return null;
+    return {
+      ...snapshot,
+      run,
+      updatedAt: String(row["updated_at"]),
+      notifiedAt: row["notified_at"] == null ? null : String(row["notified_at"]),
+    };
+  }
+
+  /**
+   * Save every visible change, but notify at most once a minute. The final
+   * summary is an exception to the wait and is emitted exactly once.
+   */
+  saveCheckProgress(run: number, snapshot: CheckProgressSnapshot, now: Date): { changed: boolean; notified: boolean } {
+    const validated = parseCheckProgressSnapshot(JSON.stringify(snapshot));
+    if (validated === null) throw new Error("invalid check progress");
+    return this.transact(() => {
+      const source = this.getRun(run);
+      if (source === null) return { changed: false, notified: false };
+      const prior = this.db.prepare("SELECT * FROM check_progress WHERE run = ?").get(run);
+      const priorSnapshot = prior === undefined ? null : parseCheckProgressSnapshot(String(prior["snapshot"]));
+      if (priorSnapshot !== null && JSON.stringify(priorSnapshot) === JSON.stringify(validated)) return { changed: false, notified: false };
+
+      const priorNotified = prior?.["notified_at"] == null ? null : String(prior["notified_at"]);
+      const due = validated.final
+        ? priorSnapshot?.final !== true
+        : priorNotified === null || !Number.isFinite(Date.parse(priorNotified)) || now.getTime() - Date.parse(priorNotified) >= 60_000;
+      this.db.prepare(`INSERT INTO check_progress (run, snapshot, line, final, updated_at, notified_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(run) DO UPDATE SET snapshot = excluded.snapshot, line = excluded.line,
+          final = excluded.final, updated_at = excluded.updated_at, notified_at = excluded.notified_at`)
+        .run(run, JSON.stringify(validated), validated.line, validated.final ? 1 : 0, now.toISOString(), priorNotified);
+
+      const notified = due && this.noteLifecycle({
+        taskRef: source.taskRef,
+        run,
+        kind: "check-progress",
+        identity: `r${run}`,
+        subject: validated.final ? `Attempt #${run}: checks finished` : `Attempt #${run}: checks in progress`,
+        body: validated.line,
+        link: `/r/${run}`,
+      }, now);
+      if (notified) this.db.prepare("UPDATE check_progress SET notified_at = ? WHERE run = ?").run(now.toISOString(), run);
+      return { changed: true, notified };
+    });
+  }
+
   /**
    * One project-bound lifecycle fact (Telegram task updates, 2026-09-16),
    * recorded by the mutation that made it true and inside that mutation's
@@ -17544,8 +17746,9 @@ export class Store {
    * earlier facts under the same head, read in this same transaction, so a
    * real recurrence (held, released, held again — even under one clock
    * value) is a new row, while each caller's own same-state guard keeps a
-   * repeat from reaching here at all. No new table, no event bus, no clock
-   * in the identity. Never a push class: progress is digest-eligible.
+   * repeat from reaching here at all. No new event bus or clock in the
+   * identity. Most lifecycle facts remain digest-only; validated check
+   * progress is also eligible for the separate push-delivery ledger.
    */
   private noteLifecycle(
     fact: { taskRef: number; run?: number | null; kind: LifecycleKind; identity: string; subject: string; body: string; link: string | null; attention?: boolean },
@@ -19041,6 +19244,136 @@ export class Store {
       .run(id, priced.microusd, priced.source, billing, priced.price?.model ?? null, priced.price?.inputUsd ?? null, priced.price?.outputUsd ?? null, now.toISOString());    this.spendCache = null;
   }
 
+  // ---- Backups (sprint 8) ---------------------------------------------------
+
+  backupSettings(): BackupSettings {
+    const row = this.db.prepare("SELECT * FROM backup_settings WHERE id = 1").get();
+    if (row === undefined) return { ...DEFAULT_BACKUP_SETTINGS };
+    return { enabled: Number(row["enabled"]) === 1, everyHours: Number(row["every_hours"]), keep: Number(row["keep"]), folder: row["folder"] == null ? null : String(row["folder"]) };
+  }
+
+  /** Change the backup settings; the ledger keeps before → after. */
+  setBackupSettings(next: BackupSettings, by: string, now: Date): BackupSettings {
+    return this.transact(() => {
+      const before = this.backupSettings();
+      this.db.prepare(`INSERT INTO backup_settings (id, enabled, every_hours, keep, folder) VALUES (1, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled, every_hours = excluded.every_hours, keep = excluded.keep, folder = excluded.folder`)
+        .run(next.enabled ? 1 : 0, next.everyHours, next.keep, next.folder);
+      this.recordPolicy(by, null, "backup settings changed", backupSettingsWords(before), backupSettingsWords(next), now);
+      return this.backupSettings();
+    });
+  }
+
+  startBackupRun(trigger: "scheduled" | "manual", now: Date): number {
+    return Number(this.db.prepare("INSERT INTO backup_run (trigger, started_at) VALUES (?, ?)").run(trigger, now.toISOString()).lastInsertRowid);
+  }
+
+  finishBackupRun(id: number, outcome: { ok: true; file: string; bytes: number; schemaVersion: number | null; removed: number } | { ok: false; error: string }, now: Date): void {
+    if (outcome.ok) {
+      this.db.prepare("UPDATE backup_run SET finished_at = ?, ok = 1, file = ?, bytes = ?, schema_version = ?, removed = ? WHERE id = ?")
+        .run(now.toISOString(), outcome.file, outcome.bytes, outcome.schemaVersion, outcome.removed, id);
+    } else {
+      this.db.prepare("UPDATE backup_run SET finished_at = ?, ok = 0, error = ? WHERE id = ?").run(now.toISOString(), outcome.error.replace(/[\u0000-\u001f\u007f]+/g, " ").slice(0, 300), id);
+    }
+  }
+
+  /** Backups, newest first. */
+  backupRuns(limit = 20): BackupRun[] {
+    return this.db.prepare("SELECT * FROM backup_run ORDER BY id DESC LIMIT ?").all(limit).map(row => ({
+      id: Number(row["id"]), trigger: String(row["trigger"]) as BackupRun["trigger"], startedAt: String(row["started_at"]), finishedAt: row["finished_at"] == null ? null : String(row["finished_at"]),
+      ok: row["ok"] == null ? null : Number(row["ok"]) === 1, file: row["file"] == null ? null : String(row["file"]), bytes: row["bytes"] == null ? null : Number(row["bytes"]),
+      schemaVersion: row["schema_version"] == null ? null : Number(row["schema_version"]), removed: Number(row["removed"]), error: row["error"] == null ? null : String(row["error"]),
+    }));
+  }
+
+  /** Take (or keep) the backup loop's lease until `until`; false while another process holds it. */
+  holdBackupLease(holder: string, now: Date, until: Date): boolean {
+    return this.transact(() => {
+      this.db.prepare("INSERT OR IGNORE INTO backup_lease (id) VALUES (1)").run();
+      return Number(this.db.prepare("UPDATE backup_lease SET holder = ?, held_until = ? WHERE id = 1 AND (holder IS NULL OR holder = ? OR held_until IS NULL OR held_until < ?)")
+        .run(holder, until.toISOString(), holder, now.toISOString()).changes) === 1;
+    });
+  }
+
+  releaseBackupLease(holder: string): void {
+    this.db.prepare("UPDATE backup_lease SET holder = NULL, held_until = NULL WHERE id = 1 AND holder = ?").run(holder);
+  }
+
+  /** Who holds the backup loop's lease, if it hasn't run out: a console that's running. */
+  backupLease(now: Date): { holder: string; heldUntil: string } | null {
+    const row = this.db.prepare("SELECT holder, held_until FROM backup_lease WHERE id = 1 AND holder IS NOT NULL AND held_until >= ?").get(now.toISOString());
+    return row === undefined ? null : { holder: String(row["holder"]), heldUntil: String(row["held_until"]) };
+  }
+
+  // ---- Organisation policy (sprint 8) -----------------------------------------
+
+  /** The organisation policy in force: allowed providers, models and tools, and the permission ceiling. */
+  orgPolicy(): SavedPolicy {
+    return readPolicy(this.db);
+  }
+
+  /** Save the organisation policy. The ledger keeps each rule that changed, before → after. */
+  setOrgPolicy(policy: OrgPolicy, by: string, now: Date): SavedPolicy {
+    return this.transact(() => {
+      const before = policyParts(this.orgPolicy());
+      const json = (list: readonly string[] | null) => list === null ? null : JSON.stringify(list);
+      this.db.prepare(`INSERT INTO org_policy (id, providers_json, models_json, tools_json, ceiling, updated_by, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET providers_json = excluded.providers_json, models_json = excluded.models_json, tools_json = excluded.tools_json,
+          ceiling = excluded.ceiling, updated_by = excluded.updated_by, updated_at = excluded.updated_at`)
+        .run(json(policy.providers), json(policy.models), json(policy.tools), policy.ceiling, by, now.toISOString());
+      const after = policyParts(policy);
+      const words = { providers: "allowed providers", models: "allowed models", tools: "allowed tools", ceiling: "permission ceiling" } as const;
+      for (const rule of ["providers", "models", "tools", "ceiling"] as const) this.recordPolicy(by, null, `organisation policy: ${words[rule]}`, before[rule], after[rule], now);
+      return this.orgPolicy();
+    });
+  }
+
+  /** The policy's changes, newest first, from the action ledger. */
+  policyHistory(limit = 50): LedgerEntry[] {
+    return this.db.prepare(`SELECT id, at, actor, action, detail FROM action_ledger WHERE source = 'policy' AND action LIKE 'organisation policy:%' ORDER BY id DESC LIMIT ?`)
+      .all(Math.max(1, Math.min(500, limit))).map(row => ({
+        id: Number(row["id"]), at: String(row["at"]), actor: String(row["actor"]), repo: null, taskId: null, runId: null,
+        action: String(row["action"]), outcome: "changed", source: "policy" as LedgerEntry["source"], detail: row["detail"] == null ? null : String(row["detail"]),
+      }));
+  }
+
+  /** Why the policy stops a task's approved terms (its profile, every fallback entry, every routed leg), or null. */
+  scopePolicyRefusal(taskId: string): string | null {
+    const policy = this.orgPolicy();
+    const scope = this.getScope(taskId);
+    if (scope === null) return null;
+    const profiles = [scope.profile ?? null, ...(chainFromJson(scope.proposedChainJson ?? null) ?? []).map(entry => entry.profile)].filter((one): one is ExecutionProfile => one !== null);
+    const ref = this.lookupRef(taskId);
+    // A race's lanes are legs too: each names its provider and model in the terms signed with the scope.
+    const lanes = ref === null ? [] : (this.activeTournamentTerms(ref.id)?.agents ?? []).map(agent => ({ provider: agent.provider, model: agent.model }));
+    const legs = [...(routeFromJson(scope.proposedRouteJson ?? null)?.legs.map(leg => ({ provider: leg.provider, model: leg.model })) ?? []), ...lanes];
+    return approvalRefusal(policy, profiles, legs);
+  }
+
+  /** Why the policy stops an agent on a provider and model now, or null (chats, teammates, flow steps). */
+  agentPolicyRefusal(provider: string, model: string | null): string | null {
+    return agentRefusal(this.orgPolicy(), provider, model);
+  }
+
+  /** Why the policy stops a planner, scout or native coding session (no profile to lower) on a provider and model, or null. */
+  sessionPolicyRefusal(provider: string, model: string | null, what: string): string | null {
+    const policy = this.orgPolicy();
+    return agentRefusal(policy, provider, model) ?? sessionCeilingRefusal(policy, provider, what);
+  }
+
+  /** Why the policy stops an attended session's signed profile, or null (it is never lowered: see policy.attendedRefusal). */
+  attendedPolicyRefusal(profile: ExecutionProfile): string | null {
+    return attendedRefusal(this.orgPolicy(), profile);
+  }
+
+  /** The policy's word on a profile about to run: refused, or what runs (lowered under the ceiling, with words). */
+  runPolicy(profile: ExecutionProfile): ReturnType<typeof underCeiling> {
+    const policy = this.orgPolicy();
+    const refused = agentRefusal(policy, profile.provider, profile.model);
+    if (refused !== null) return { ok: false, message: refused };
+    return underCeiling(policy, profile);
+  }
+
   // ---- Budgets (v105) -------------------------------------------------------
 
   /** The budgets in force. */
@@ -19078,6 +19411,28 @@ export class Store {
       this.db.prepare("UPDATE budget SET removed_by = ?, removed_at = ? WHERE id = ?").run(by, now.toISOString(), id);
       this.recordPolicy(by, before.scope === "project" ? before.key : null, `budget removed: ${budgetName(before.scope, before.key)}`, usd(before.limitMicrousd), "none", now);
       return true;
+    });
+  }
+
+  // ---- Retention (v105) -----------------------------------------------------
+
+  /** How long each kind of data is kept; null is forever (every kind, until someone chooses). */
+  retentionPeriods(): RetentionPeriods {
+    const periods: RetentionPeriods = { ...FOREVER };
+    for (const row of this.db.prepare("SELECT kind, days FROM retention_setting").all()) {
+      periods[String(row["kind"]) as RetentionKind] = row["days"] === null ? null : Number(row["days"]);
+    }
+    return periods;
+  }
+
+  /** Set how long one kind is kept (null: forever); the ledger keeps before → after. */
+  setRetentionPeriod(kind: RetentionKind, days: number | null, by: string, now: Date): RetentionPeriods {
+    return this.transact(() => {
+      const before = this.retentionPeriods()[kind];
+      this.db.prepare("INSERT INTO retention_setting (kind, days, updated_by, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(kind) DO UPDATE SET days = excluded.days, updated_by = excluded.updated_by, updated_at = excluded.updated_at")
+        .run(kind, days, by, now.toISOString());
+      this.recordPolicy(by, null, `retention changed: ${kind}`, periodWords(before), periodWords(days), now);
+      return this.retentionPeriods();
     });
   }
 
@@ -19222,6 +19577,38 @@ export class Store {
           WHERE id = ?`,
       )
       .run(facts.headRevision ?? null, facts.handoff ?? null, id);
+  }
+
+  /** Save the small, machine-owned projection of a run's approved project
+   * check. The sealed receipt remains the evidence; this is only the status
+   * index and first write wins so a later read cannot rewrite history. */
+  recordRunCheck(
+    id: number,
+    check: { status: "passed" | "failed" | "not-run"; exitCode: number | null; suites: readonly RunCheckSuite[] },
+    at: Date = new Date(),
+  ): void {
+    if (!isCheckExitCode(check.exitCode)) {
+      throw new Error("a check exit code must be a non-negative 32-bit integer");
+    }
+    if (check.suites.length > 8 || check.suites.some(one => one.name.trim() === "" || one.name.length > 80 ||
+      !["passed", "failed", "not-run"].includes(one.status) || !isCheckExitCode(one.exitCode))) {
+      throw new Error("the check suite summary is not bounded");
+    }
+    this.db.prepare(`INSERT INTO run_check (run, status, exit_code, suites_json, release, recorded_at)
+      SELECT id, ?, ?, ?, CASE WHEN quality_mode = 'strict' THEN 1 ELSE 0 END, ? FROM run WHERE id = ?
+      ON CONFLICT(run) DO NOTHING`)
+      .run(check.status, check.exitCode, JSON.stringify(check.suites), at.toISOString(), id);
+  }
+
+  /** A run's recorded check summary, or null for a run recorded before summaries existed. */
+  runCheckFor(id: number): RunCheck | null {
+    const row = this.db.prepare("SELECT status, exit_code, suites_json FROM run_check WHERE run = ?").get(id);
+    if (row === undefined) return null;
+    return {
+      status: String(row["status"]) as RunCheck["status"],
+      exitCode: wholeNumber(row["exit_code"]),
+      suites: checkSuitesOf(row["suites_json"]),
+    };
   }
 
   /** Every attempt since a moment, task ids attached — the overnight, as data. */
@@ -25799,7 +26186,7 @@ export class Store {
         `INSERT OR IGNORE INTO push_delivery (notification, subscription, created_at)
          SELECT notification.id, push_subscription.id, ?
            FROM notification, push_subscription
-          WHERE notification.push_class IS NOT NULL
+          WHERE (notification.push_class IS NOT NULL OR notification.kind = 'check-progress')
             AND notification.resolved_at IS NULL
             AND (notification.recipient IS NULL OR notification.recipient = push_subscription.approver)
             AND push_subscription.retired_at IS NULL
@@ -25879,7 +26266,7 @@ export class Store {
     const approver = this.db.prepare("SELECT generation FROM approver WHERE name = ?").get(String(subscription["approver"]));
     if (approver === undefined || Number(approver["generation"]) !== Number(subscription["approver_generation"])) return null;
     const notification = this.db
-      .prepare("SELECT * FROM notification WHERE id = ? AND resolved_at IS NULL AND push_class IS NOT NULL")
+      .prepare("SELECT * FROM notification WHERE id = ? AND resolved_at IS NULL AND (push_class IS NOT NULL OR kind = 'check-progress')")
       .get(Number(pair["notification"]));
     if (notification === undefined) return null;
     return { ...readPushPair(pair), subscriptionRow: readPushSubscription(subscription), notificationRow: readNotification(notification) };
@@ -26232,7 +26619,9 @@ function readNotification(row: Record<string, unknown>): Notification {
         ? null
         : String(row["resolved_at"]),
     pushClass:
-      row["push_class"] === null || row["push_class"] === undefined
+      (row["push_class"] === null || row["push_class"] === undefined) && String(row["kind"]) === "check-progress"
+        ? "progress"
+        : row["push_class"] === null || row["push_class"] === undefined
         ? null
         : (String(row["push_class"]) as Notification["pushClass"]),
     link: row["link"] === null || row["link"] === undefined ? null : String(row["link"]),

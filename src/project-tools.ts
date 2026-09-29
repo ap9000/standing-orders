@@ -14,6 +14,7 @@
  * console's password-gated screen, and reach exactly that project's
  * server processes at launch.
  */
+import { toolRefusal } from "./policy.js";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -613,7 +614,7 @@ export function projectToolsOf(store: ToolRows, repo: string): ProjectTool[] {
  * sealed gets today's list), each with every required secret set. What is
  * left out says why, in words the task page can show.
  */
-export function toolLaunchFor(store: Pick<Store, "projectTools" | "getRun" | "refById" | "getScope" | "toolSealFor">, runId: number, home: string = homedir()): ToolLaunch {
+export function toolLaunchFor(store: Pick<Store, "projectTools" | "getRun" | "refById" | "getScope" | "toolSealFor" | "orgPolicy">, runId: number, home: string = homedir()): ToolLaunch {
   const run = store.getRun(runId);
   const ref = run === null ? null : store.refById(run.taskRef);
   if (ref === null || ref.repo === null) return { tools: [], skipped: [] };
@@ -621,7 +622,11 @@ export function toolLaunchFor(store: Pick<Store, "projectTools" | "getRun" | "re
   const seal = approved === null ? null : store.toolSealFor(ref.externalId, approved);
   const launch: ToolLaunch = { tools: [], skipped: [] };
   const claimed = new Map<string, string>();
+  const policy = store.orgPolicy();
   for (const tool of projectToolsOf(store, ref.repo)) {
+    // Sprint 8: a tool the organisation policy doesn't allow is left out, and the run says why.
+    const disallowed = toolRefusal(policy, tool.name);
+    if (disallowed !== null) { launch.skipped.push({ name: tool.name, reason: disallowed }); continue; }
     if (seal !== null && !seal.some(one => one.name === tool.name && one.digest === tool.digest)) {
       launch.skipped.push({ name: tool.name, reason: "added or changed after this task was approved; approve it again to use it" });
       continue;
@@ -644,7 +649,7 @@ export function toolLaunchFor(store: Pick<Store, "projectTools" | "getRun" | "re
  * with `argv`/`env` and calls `cleanup` when the process is done.
  */
 export function prepareRunTools(
-  store: Pick<Store, "projectTools" | "getRun" | "refById" | "getScope" | "toolSealFor" | "recordRunTools">,
+  store: Pick<Store, "projectTools" | "getRun" | "refById" | "getScope" | "toolSealFor" | "recordRunTools" | "orgPolicy">,
   runId: number,
   provider: "claude" | "codex" | "openrouter" | "gemini",
   options: { home?: string; now: Date; includeModel: boolean },

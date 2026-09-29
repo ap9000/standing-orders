@@ -1089,7 +1089,9 @@ export type ApproveResult =
   /** v102: the project's approval rules stopped it — the requester can't approve, protected work needs a person —
    * or recorded this person's yes and needs a second one (`second-approver`). */
   | { ok: false; reason: "requester" | "person-required" }
-  | { ok: false; reason: "second-approver"; have: number; need: number; already: boolean };
+  | { ok: false; reason: "second-approver"; have: number; need: number; already: boolean }
+  /** Sprint 8: the organisation policy stops these terms (a provider, a model, the permission ceiling); `message` says which. */
+  | { ok: false; reason: "policy"; message: string };
 
 /**
  * Whether this name-and-token pair is a person the store knows. Shared by
@@ -1295,6 +1297,10 @@ export function approve(
     // SEPARATION OF DUTIES (v102): the project's rules, asked first so the
     // answer is words, not a silent refusal from the seal. Protected work
     // keeps each person's yes to these exact bytes and seals on the second.
+    // Sprint 8: the organisation policy, before any vote is kept: a disallowed provider or model, or terms above the
+    // permission ceiling, are refused in words that name the rule.
+    const policy = store.scopePolicyRefusal(taskId);
+    if (policy !== null) return { ok: false as const, reason: "policy" as const, message: policy };
     const gate = store.approvalGate(taskId, by, "person");
     if (gate.verdict === "refuse") return { ok: false as const, reason: gate.reason };
     if (gate.verdict === "vote") {

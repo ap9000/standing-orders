@@ -5729,6 +5729,30 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     expect(settings.headers.get("content-security-policy") ?? "").toContain("connect-src 'self'");
   });
 
+  test("settings lists each worker with its capacity and the tasks it is running", async () => {
+    const now = new Date();
+    const busy = register(store, { name: "mac-mini", host: "here", capacity: 3, repos: ["/repo/main"], now });
+    register(store, { name: "spare", host: "there", capacity: 1, repos: ["/repo/main"], now });
+    store.createTask({ id: "t-live", title: "Fix the checkout total" }, now);
+    const ref = store.refFor("built-in", "t-live").id;
+    store.placeTask(ref, "/repo/main");
+    expect(acquire(store, ref, "mac-mini", { token: busy.token, now, ttlMs: 10 * 60_000, newLeaseId: () => "lease-live" })).toMatchObject({ ok: true });
+    const cookie = await login();
+    const html = await (await fetch(url("/settings"), { headers: { cookie } })).text();
+    const view = workspaceOf(html).view as import("./browser-workspace.js").BrowserSettingsView;
+    expect(view.workers).toEqual([
+      { name: "mac-mini", tone: "ok", state: "Connected", capacity: 3, busy: 1, running: [{ taskId: "t-live", title: "Fix the checkout total", href: "/t/t-live", project: "main" }] },
+      { name: "spare", tone: "ok", state: "Connected", capacity: 1, busy: 0, running: [] },
+    ]);
+    expect(html).toContain("1 of 3 running");
+    expect(html).toContain("Nothing running.");
+    expect(html).toContain("runner capacity &lt;name&gt; &lt;n&gt;");
+    // A retired worker is not listed.
+    store.retireRunner("spare", new Date());
+    const after = workspaceOf(await (await fetch(url("/settings"), { headers: { cookie } })).text()).view as import("./browser-workspace.js").BrowserSettingsView;
+    expect(after.workers?.map(one => one.name)).toEqual(["mac-mini"]);
+  });
+
   test("sensitivity is judged per response: /next with a step-up is sensitive, all-clear is not", async () => {
     store.createTask({ id: "t-a", title: "needs a yes" }, T0);
     store.saveScope({
@@ -8194,6 +8218,16 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
   test("the attempt panel names the run; its pollers hit the RUN's fragments, never the task URL", async () => {
     const ref = seed("t-live", "being built");
     const run = live("t-live", ref);
+    store.saveCheckProgress(run, {
+      version: 1,
+      final: false,
+      line: "unit ✓ 191 · flows 12/18 · app 30/45",
+      suites: {
+        unit: { state: "passed", passed: 191, failed: 0, skipped: 0, total: 191 },
+        flows: { state: "running", passed: 12, failed: 0, skipped: 0, total: 18 },
+        app: { state: "running", passed: 30, failed: 0, skipped: 0, total: 45 },
+      },
+    }, T0);
     await boot({ localRunner: "night-shift-1" });
     const cookie = await login();
     const html = await (await fetch(url("/t/t-live"), { headers: { cookie } })).text();
@@ -8206,11 +8240,31 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(html).toContain('id="run-peek"');
     expect(html).toContain('id="live-transcript"');
     expect(html).toContain(`"/r/${run}?fragment=peek"`);
+    expect(html).toContain(`"/r/${run}?fragment=check"`);
+    expect(html).toContain('id="check-progress"');
+    expect(html).toContain("unit ✓ 191 · flows 12/18 · app 30/45");
     expect(html).toContain(`"/r/${run}"+"?fragment=transcript&from="`);
     expect(html).not.toContain("fetch(location.pathname");
     expect(html).not.toContain("/t/t-live?fragment");
     // Honesty lines preserved verbatim from the run page.
     expect(html).toContain("display only");
+
+    const check = await (await fetch(url(`/r/${run}?fragment=check`), { headers: { cookie } })).text();
+    expect(check).toContain('data-final="live"');
+    expect(check).toContain("unit ✓ 191 · flows 12/18 · app 30/45");
+    store.saveCheckProgress(run, {
+      version: 1,
+      final: true,
+      line: "unit ✓ 191 · flows ✓ 18 · app ✕ 1/45",
+      suites: {
+        unit: { state: "passed", passed: 191, failed: 0, skipped: 0, total: 191 },
+        flows: { state: "passed", passed: 18, failed: 0, skipped: 0, total: 18 },
+        app: { state: "failed", passed: 44, failed: 1, skipped: 0, total: 45 },
+      },
+    }, new Date(T0.getTime() + 1_000));
+    const finalCheck = await (await fetch(url(`/r/${run}?fragment=check`), { headers: { cookie } })).text();
+    expect(finalCheck).toContain('data-final="failed"');
+    expect(finalCheck).toContain("unit ✓ 191 · flows ✓ 18 · app ✕ 1/45");
 
     // The Claude-only transcript limitation is kept: a codex build gets the
     // peek and the stated limit, not an empty transcript.

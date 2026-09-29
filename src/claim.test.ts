@@ -1519,6 +1519,27 @@ describe("capacity and quota, at the claim", () => {
     expect(acquireIfReady(store, b, "small", { token: tok("small"), now: later(3_000) })).toMatchObject({ ok: true });
   });
 
+  test("lowering capacity never interrupts running work; the new number applies at the next claim", () => {
+    register(store, { name: "pair", host: "h", now: T0, capacity: 2, repos: [REPO], newToken: () => tok("pair") });
+    expect(acquireIfReady(store, a, "pair", { token: tok("pair"), now: T0, newLeaseId: ids("lease-a") })).toMatchObject({ ok: true });
+    expect(acquireIfReady(store, b, "pair", { token: tok("pair"), now: later(500), newLeaseId: ids("lease-b") })).toMatchObject({ ok: true });
+
+    expect(store.setRunnerCapacity("pair", 1, "alex", later(1_000))).toEqual({ ok: true, before: 2, after: 1 });
+
+    // Both running tasks keep their claims and can still check in.
+    expect(store.liveClaimCount("pair", later(1_500))).toBe(2);
+    expect(currentClaim(store, a, later(1_500))).toMatchObject({ leaseId: "lease-a", runner: "pair" });
+    expect(currentClaim(store, b, later(1_500))).toMatchObject({ leaseId: "lease-b", runner: "pair" });
+    expect(heartbeat(store, "lease-a", later(2_000))).toMatchObject({ ok: true });
+    expect(heartbeat(store, "lease-b", later(2_000))).toMatchObject({ ok: true });
+
+    // One finishes: with one still running, a capacity of 1 takes nothing new.
+    release(store, "lease-b", later(3_000));
+    expect(acquireIfReady(store, b, "pair", { token: tok("pair"), now: later(4_000) })).toMatchObject({ ok: false, reason: "capacity" });
+    release(store, "lease-a", later(5_000));
+    expect(acquireIfReady(store, b, "pair", { token: tok("pair"), now: later(6_000) })).toMatchObject({ ok: true });
+  });
+
   test("an unregistered runner cannot claim at all — identity is proven in the claim transaction", () => {
     // The old law ("unregistered runners are not capacity-gated") is gone
     // with the runner gate (MCP spec v6): no row, no claim, whoever asks.

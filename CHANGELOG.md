@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+- **Retention settings.** An instance operator chooses how long run
+  evidence and logs, finished checkout records, chat messages and
+  notifications are kept (forever until chosen), on Settings → Retention or
+  with `standing-orders retention show|set|preview`. Changes take the
+  password and are in the action ledger. The worker sweeps once a day and
+  writes one ledger entry saying what it removed and about how much space it
+  freed. The ledger, unfinished tasks, results not yet completed and anything
+  on hold are never removed; removed evidence says so instead of looking
+  damaged.
+
+- **Delete a project.** An instance operator can remove everything Standing
+  Orders holds for a project: its tasks and their versions, runs and their
+  evidence, the checkouts and `standing-orders/` branches it made, chats,
+  flows and cards, teammates, budgets, settings and knowledge. Settings →
+  Project asks for the project's name, then shows exactly what goes and
+  asks for the password; `standing-orders project delete --repo <path>`
+  previews and `--yes` deletes. Nothing is deleted while any of the
+  project's work is running. The repository, its working copy and its own
+  branches are never touched, other projects keep their rows, and the ledger
+  keeps every entry (the chain still verifies) and gains one saying who
+  deleted what. No undo; no schema change.
+
+- **Organisation policy.** Settings → Policy (and `standing-orders policy
+  show|set`) sets which providers and models may run, which project tools
+  agents may use, and the highest permission level anything runs with
+  (safe, standard or escalated). Saving takes your password; each change is
+  in the action ledger, before → after, and the page shows that history.
+  Scope approval, the tick and the last check before a build, fallback
+  entries, race lanes, attended sessions, the lead and project chats,
+  teammates and flow steps all obey it and say which rule stopped them.
+  New filings are lowered to the ceiling; work approved above it runs
+  lowered (the ledger says so), attended sessions are refused, and a
+  provider with no setting that low (Codex at Safe) is refused.
+
 - **Cost guardrails.** Work on a subscription (a Claude or Codex sign-in)
   counts as $0: what binds it is the plan's usage windows, which Tasks now
   shows as tiles (Claude's 5-hour and weekly windows as Claude reports them

@@ -37,8 +37,9 @@ export type CommandRow = {
   readonly synopsis: string;
   /** Who this act belongs to. "operator" rows are ceremonies or
    * infrastructure: an agent must not invoke them even when credentials
-   * are within reach — the credential IS the person. They carry no flag
-   * detail on purpose: a schema is not permission. */
+   * are within reach — the credential IS the person. The operator() helper
+   * omits flag detail on purpose; an explicit row may document flags when
+   * its command contract requires them. A schema is never permission. */
   readonly audience: "agent" | "operator";
   readonly agentMayInvoke: boolean;
   /** Truthful retry semantics, not a boolean:
@@ -60,6 +61,7 @@ export const SURFACE_NOTES = {
   authority: "documentation is not permission; session descriptors also drive parser and request validation; legacy entries remain advisory",
   flags: "session flags are exact per operation; legacy flags are intended per command and may use a global parser vocabulary",
   reasons: "curated, not exhaustive — the runtime `reason` field is the truth; ignore tokens you do not recognize",
+  database: "local database commands wait up to 15 seconds for another writer; an exhausted wait returns database-busy and names the selected file",
 } as const;
 
 export const SURFACE_SCHEMA_VERSION = 1;
@@ -127,7 +129,20 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
   { invocation: "skills get", synopsis: "print one guide's markdown (raw on stdout; --json wraps it)", audience: "agent", agentMayInvoke: true, mutation: "none",
     positionals: [{ name: "name", required: true, meaning: "a guide name from `skills list`" }],
     flags: [jsonFlag], notableReasons: ["unknown-skill", "usage"] },
-  operator("skills install", "write the Agent Skills entry (and optional AGENTS.md block) into a repository — previewed, --yes to apply"),
+  {
+    invocation: "skills install",
+    synopsis: "install or refresh this binary's Standing Orders guides for Claude Code; without --claude-code, write the repository-local Agent Skills entry",
+    audience: "operator",
+    agentMayInvoke: false,
+    mutation: "identity-idempotent",
+    flags: [jsonFlag,
+      { name: "claude-code", takesValue: false, meaning: "install the user-level Claude Code skill" },
+      { name: "dir", takesValue: true, meaning: "skill directory (default: ~/.claude/skills/standing-orders)" },
+      { name: "yes", takesValue: false, meaning: "write the previewed files" },
+      { name: "repo", takesValue: true, meaning: "repository for the existing project-local install" },
+      { name: "write-context", takesValue: false, meaning: "also add the managed AGENTS.md block for a project-local install" }],
+    notableReasons: ["unconfirmed", "foreign-file", "usage"],
+  },
   operator("link", "put standing-orders on PATH"),
   operator("unlink", "take it off PATH"),
   operator("demo", "a seeded throwaway sandbox"),
@@ -143,6 +158,7 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
   ...MODELS_DESCRIPTORS.map(spec => ({ invocation: `models ${spec.action}`, synopsis: spec.synopsis, audience: "agent" as const, agentMayInvoke: true, mutation: spec.mutation, flags: spec.flags, ...(spec.takesQuery ? { positionals: [{ name: "target", required: true, meaning: "the CLI to update, or on/off" }] } : {}) })),
 
   // ---- the queue (agent surface) ----
+  { invocation: "status", synopsis: "running work, queued reasons, results to review, the latest release check and plan windows", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag, dbFlag] },
   { invocation: "ready", synopsis: "what could be dispatched right now (rows carry reservedFor)", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag, dbFlag] },
   { invocation: "brief", synopsis: "with a saved central profile, --lead <id> --conversation <id> reads messages, proposals and saved work; --request-id inspects your saved receipt without resending; --local uses local DB catch-up, where --history selects the older operational report", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag, dbFlag] },
   { invocation: "gaps", synopsis: "requirement gaps blocking dispatch", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag, dbFlag, repoFlag] },
@@ -165,6 +181,11 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
       { name: "repo", takesValue: true, meaning: "filter to one project" }] },
   { invocation: "task show", synopsis: "one task in full", audience: "agent", agentMayInvoke: true, mutation: "none",
     positionals: [{ name: "id", required: true, meaning: "the task" }], flags: [jsonFlag, dbFlag], notableReasons: ["unknown-task"] },
+  { invocation: "check-progress", synopsis: "current or final approved check progress", audience: "agent", agentMayInvoke: true, mutation: "none",
+    positionals: [{ name: "run", required: true, meaning: "the build run" }], flags: [jsonFlag, dbFlag], notableReasons: ["unknown-run", "no-progress"] },
+  { invocation: "task wait", synopsis: "wait for the current attempt to finish or need a person", audience: "agent", agentMayInvoke: true, mutation: "none",
+    positionals: [{ name: "id", required: true, meaning: "the task" }], flags: [jsonFlag, dbFlag,
+      { name: "timeout", takesValue: true, meaning: "stop waiting after this many seconds" }], notableReasons: ["unknown-task", "timeout", "failed", "needs-person"] },
   { invocation: "project show", synopsis: "show the saved local project and optional credential-file reference", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag, dbFlag] },
   { invocation: "project use", synopsis: "select an exact saved checkout; grants no project or execution authority", audience: "agent", agentMayInvoke: true, mutation: "identity-idempotent",
     positionals: [{ name: "path", required: true, meaning: "exact saved project checkout path" }], flags: [jsonFlag, dbFlag, { name: "token-file", takesValue: true, meaning: "optional existing scoped coordinator credential file; saves only its path" }] },
@@ -320,6 +341,7 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
   operator("runner register", "register a worker bound to its repositories; its token is shown once"),
   operator("runner retire", "retire a worker"),
   operator("runner bind", "replace which repositories a worker may build in"),
+  operator("runner capacity", "set how many tasks a worker runs at once; running work carries on, the new number applies at the next claim"),
   operator("coordinator mint", "mint the MCP filing credential — repo-bound, rate-limited, token shown once"),
   operator("coordinator revoke", "revoke an MCP filing credential"),
   operator("mcp", "serve the MCP gateway over stdio — the coordinator credential is the only key it accepts"),

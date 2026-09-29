@@ -198,6 +198,7 @@ import {
   type TaskState,
   type WorktreeRow,
   type SessionTurn,
+  type CheckProgress,
 } from "./store.js";
 import { attendedLivenessState } from "./liveness.js";
 import {
@@ -232,7 +233,7 @@ import { loadOrCreateVapidKeys, validatePushEndpoint } from "./push.js";
 import { parseGithubRepo, previewGithubRepo, cloneGithubRepo, listGithubRepos, isLargeRepo, type ListOutcome } from "./onboard.js";
 import { verifiedAuthor, LEAD_THREAD, type MateThreadScope } from "./store.js";
 import type { MateProgress } from "./mate-progress.js";
-import { updateRepos, addRepos } from "./repos.js";
+import { updateRepos, addRepos, removeRepos } from "./repos.js";
 import { run as execRun } from "./exec.js";
 
 /** A user agent, reduced to safe display words — never echoed raw. */
@@ -266,14 +267,24 @@ import { effectivePrimary, isMessagingChannel, savePrimary } from "./webhooks.js
 import { resolvePhaseAgent, resolveRoutineAuthority, INSTALLATION_SCOPE, routeOfTask, agentChoicesFor, type AgentChoice } from "./agentconfig.js";
 import { isRiskLevel, projectRoute, riskTitle, riskConsequence, chosenWords, agentsSummary, postureWords, RISK_CHOICES, RISK_LEVELS, PHASES as ROUTE_PHASES, type PhaseRoute, type RouteProjection, type RouteOverride, type RouteStamp, type RiskLevel } from "./phase-routing.js";
 import { ALL_CREDENTIAL_ENV, isProviderId, reportsCost, PROVIDER_IDS, validModelId, validateSpec, type Phase, type ProviderId } from "./provider.js";
-import { authenticateAccount, freshIdentitySignIn, hasFreshIdentitySignIn, hashPassword, modeFilingCoverage, PLACEHOLDER_RUBRIC } from "./scope.js";
+import { authenticateAccount, freshIdentitySignIn, hasFreshIdentitySignIn, hashPassword, modeFilingCoverage, PLACEHOLDER_RUBRIC, profileFromJson } from "./scope.js";
 import { DEFAULT_GUARD_POLICY, passwordGuardOf, SourceBudget } from "./sign-in-guard.js";
 import { accessFromGroups, accountNameFor, discoverOidc, exchangeOidcCode, newOidcVisit, oidcAuthorizeUrl, verifyIdToken, type OidcClaims, type OidcProvider, type OidcVisit } from "./oidc.js";
 import { readSsoSettings, removeSsoSettings, saveSsoSettings, SSO_CALLBACK, ssoChangeWords } from "./sso-settings.js";
 import { monitoringChange, readMonitoring, saveMonitoring } from "./monitoring-settings.js";
 import { MONITORING_CSS, monitoringHtml, signingSecretHtml } from "./monitoring-ui.js";
+import { BACKUP_CSS, backupHtml } from "./backup-ui.js";
+import { BACKUP_EVERY_HOURS, MAX_KEEP, backupFolderOf, backupNow, checkBackupFolder, defaultBackupFolder } from "./backup.js";
 import { prometheusMetrics } from "./metrics.js";
 import { SPEND_CSS, spendCsv, spendHtml } from "./spend-ui.js";
+import { RETENTION_CSS, retentionHtml } from "./retention-ui.js";
+import { RETENTION_KINDS, lastSweepAt, parsePeriod, retentionPlan } from "./retention.js";
+import { EXPORT_CSS, dataExportHtml } from "./export-ui.js";
+import { buildExport, exportZip } from "./export.js";
+import { PROJECT_DELETE_CSS, projectDeleteConfirmHtml, projectSettingsHtml, type ProjectSettingsView } from "./project-delete-ui.js";
+import { deleteProject, holdingsWords, projectHoldings, projectRunning } from "./project-delete.js";
+import { POLICY_CSS, policyHtml } from "./policy-ui.js";
+import { checkPolicy, parseList, policyParts } from "./policy.js";
 import { LIMITS_CSS, limitsHtml, limitsView } from "./limits-ui.js";
 import { budgetHoldWords, budgetLabel, budgetStates, monthNamed, monthOf, spendItems, teammateNames as teammateNamesOf, usd as spendUsd } from "./spend.js";
 import { targetOf } from "./monitoring.js";
@@ -768,17 +779,24 @@ export function createDecisionServer(options: ServeOptions): Server {
   /** The explicit, currently proved project list. The callback is supplied
    * only by `up`, after it has independently checked git-ness and the root
    * ceiling; this server still filters every row through its own ceiling. */
+  /** Projects deleted while this console runs: gone from its lists though a builder started with them still watches. */
+  const deletedRepos = new Set<string>();
   const managedRepos = (): string[] => {
     const seen = new Set<string>();
     const repos: string[] = [];
     for (const path of [...ceiling.repos, ...(options.currentRepos?.() ?? [])]) {
       const canonical = canonicalProject(path) ?? path;
-      if (seen.has(canonical) || !visible(canonical)) continue;
+      if (seen.has(canonical) || !visible(canonical) || deletedRepos.has(canonical)) continue;
       seen.add(canonical);
       repos.push(canonical);
     }
     return repos;
   };
+  /** Settings → Project's view of a project: what's held for it, what's running, and whether this person may delete it. */
+  const projectViewOf = (repo: string, who: Who): ProjectSettingsView => ({
+    repo, name: projectName(repo), holdings: projectHoldings(store, repo), running: projectRunning(store, repo, clock()),
+    canDelete: who.via === "cookie" && store.isInstanceOperator(who.name),
+  });
   /** Codex's own MCP servers for a project (`codex mcp list --json`), for "Found on this computer"; null when Codex can't say. */
   const codexServers = async (repo: string): Promise<unknown[] | null> => {
     try {
@@ -2955,6 +2973,10 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       const taskId = store.externalIdFor(found.taskRef) ?? "?";
       const running = runIsLive(found);
+      if (url.searchParams.get("fragment") === "check") {
+        response.setHeader("cache-control", "no-store");
+        return respond(response, 200, "text/html; charset=utf-8", checkProgressHtml(store.checkProgress(found.id)));
+      }
       if (url.searchParams.get("fragment") === "facts") {
         // The facts region alone — same auth and ceiling as the page; a
         // finished or no-longer-live run says so rather than growing forms
@@ -3729,6 +3751,17 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       return sendScreen(response, 200, screen("Tools", `<p><a href="/settings">Settings</a></p><h1>Tools</h1>${selector}${content}`, { chrome: chromeFor(chosen || project, "settings") }));
     }
+    // Settings → Project: what Standing Orders holds for a project; an instance operator deletes it here.
+    if (url.pathname === "/settings/project") {
+      const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible).filter(one => !deletedRepos.has(one));
+      const asked = url.searchParams.get("repo");
+      const chosen = asked ?? (project != null && projects.includes(project) ? project : projects[0] ?? "");
+      if (chosen && !projects.includes(chosen)) return refuse(response, who, 403, "That project is outside your access.", "/settings/project");
+      const selector = projects.length > 1 ? `<form class="approval-project" method="get" action="/settings/project"><label>Project<select name="repo">${projects.map(p => `<option value="${escape(p)}"${p === chosen ? " selected" : ""}>${escape(projectName(p))}</option>`).join("")}</select></label><button>Show</button></form>` : "";
+      const notice = { said: url.searchParams.get("said"), problem: url.searchParams.get("problem") };
+      const content = chosen === "" ? `${notice.said ? `<p role="status">${escape(notice.said)}</p>` : ""}<p>No projects yet.</p>` : projectSettingsHtml(projectViewOf(chosen, who), who.via === "cookie" ? who.session.csrf : "", notice);
+      return sendScreen(response, 200, screen("Project", `<p><a href="/settings">Settings</a></p><h1>Project</h1>${selector}${content}`, { chrome: chromeFor(chosen || null, "settings") }));
+    }
     // v102: Settings → Approval rules, a project's separation of duties. Anyone who sees the project reads them; an instance operator sets them.
     if (url.pathname === "/settings/approval") {
       const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
@@ -3739,6 +3772,14 @@ export function createDecisionServer(options: ServeOptions): Server {
       const content = chosen === "" ? "<p>Add a project to set its approval rules.</p>" : approvalRulesHtml({ repo: chosen, name: projectName(chosen), rules: store.approvalRules(chosen), canChange: who.via === "cookie" && store.isInstanceOperator(who.name), approvers },
         who.via === "cookie" ? who.session.csrf : "", { said: url.searchParams.get("said"), problem: url.searchParams.get("problem") });
       return sendScreen(response, 200, screen("Approval rules", `<p><a href="/settings">Settings</a></p><h1>Approval rules</h1>${selector}${content}`, { chrome: chromeFor(chosen || project, "settings") }));
+    }
+    // Sprint 8: Settings → Policy, the organisation policy and its history. Anyone signed in reads it; an instance operator changes it.
+    if (url.pathname === "/settings/policy") {
+      const repos = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
+      const toolNames = [...new Set(repos.flatMap(repo => store.projectTools(repo).map(one => one.name)))].sort();
+      const view = { policy: store.orgPolicy(), history: store.policyHistory(50), canChange: who.via === "cookie" && store.isInstanceOperator(who.name), toolNames };
+      return sendScreen(response, 200, screen("Policy", `<p><a href="/settings">Settings</a></p><h1>Policy</h1>${policyHtml(view, who.via === "cookie" ? who.session.csrf : "", { said: url.searchParams.get("said"), problem: url.searchParams.get("problem") })}`,
+        { chrome: chromeFor(project, "settings") }));
     }
     // v101: Settings → Sessions & tokens: where you're signed in, and your API tokens. An instance operator can see everyone's.
     if (url.pathname === "/settings/sessions") {
@@ -3755,6 +3796,28 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (who.via !== "cookie" || !store.isInstanceOperator(who.name) || !options.configDir) return refuse(response, who, 403, "An instance operator sets up monitoring.", "/settings");
       const view = { settings: readMonitoring(options.configDir), status: store.monitoringStatus(), head: store.ledgerHeadId(), origin: consoleOrigin(request.headers.host) };
       return sendScreen(response, 200, screen("Monitoring", `<p><a href="/settings">Settings</a></p><h1>Monitoring</h1>${monitoringHtml(view, who.session.csrf, { said: url.searchParams.get("said"), problem: url.searchParams.get("problem") })}`,
+        { chrome: chromeFor(project, "settings") }));
+    }
+    // v105: Settings → Retention, how long each kind of data is kept. An instance operator's page.
+    if (url.pathname === "/settings/retention") {
+      if (who.via !== "cookie" || !store.isInstanceOperator(who.name)) return refuse(response, who, 403, "An instance operator sets retention.", "/settings");
+      const view = { periods: store.retentionPeriods(), next: retentionPlan(store, evidenceRoot, now).counts, lastSweep: lastSweepAt(store), csrf: who.session.csrf };
+      return sendScreen(response, 200, screen("Retention", `<p><a href="/settings">Settings</a></p><h1>Retention</h1>${retentionHtml(view, { said: url.searchParams.get("said"), problem: url.searchParams.get("problem") })}`,
+        { chrome: chromeFor(project, "settings") }));
+    }
+    // Sprint 8: Settings → Backups, how the last backup went and the schedule. An instance operator's page.
+    if (url.pathname === "/settings/backups") {
+      const databaseFile = store.databaseFile();
+      if (who.via !== "cookie" || !store.isInstanceOperator(who.name) || databaseFile === null) return refuse(response, who, 403, "An instance operator looks after backups.", "/settings");
+      const settings = store.backupSettings();
+      const view = { settings, folder: backupFolderOf(settings, databaseFile), defaultFolder: defaultBackupFolder(databaseFile), runs: store.backupRuns(20), csrf: who.session.csrf, now };
+      return sendScreen(response, 200, screen("Backups", `<p><a href="/settings">Settings</a></p><h1>Backups</h1>${backupHtml(view, { said: url.searchParams.get("said"), problem: url.searchParams.get("problem") })}`,
+        { chrome: chromeFor(project, "settings") }));
+    }
+    // v105: Settings → Data, where an instance operator downloads everything. The download is a POST with the password.
+    if (url.pathname === "/settings/data") {
+      if (who.via !== "cookie" || !store.isInstanceOperator(who.name)) return refuse(response, who, 403, "An instance operator exports data.", "/settings");
+      return sendScreen(response, 200, screen("Data", `<p><a href="/settings">Settings</a></p><h1>Data</h1>${dataExportHtml(who.session.csrf, { problem: url.searchParams.get("problem") })}`,
         { chrome: chromeFor(project, "settings") }));
     }
     // v104: Prometheus metrics, for an instance operator (a scraper sends one's API token).
@@ -3898,7 +3961,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           const googleView = { connected: googleConnected(options.configDir ?? null)?.address ?? null, clientId: google?.clientId ?? "", redirect: origin === null ? null : `${origin}${GOOGLE_CALLBACK}` };
           return email === null ? { set: false, host: "", port: 587, secure: false, user: "", from: "", imapHost: "", imapPort: 993, google: googleView }
             : { set: true, host: email.host, port: email.port, secure: email.secure, user: email.user, from: email.from, imapHost: email.imap?.host ?? "", imapPort: email.imap?.port ?? 993, google: googleView };
-        })() : null, telegramDeliveryWords(store, loadBotToken(process.env, options.telegramTokenFile))),
+        })() : null, telegramDeliveryWords(store, loadBotToken(process.env, options.telegramTokenFile)), settingsWorkers(store, now)),
       );
     }
 
@@ -5077,8 +5140,10 @@ export function createDecisionServer(options: ServeOptions): Server {
     const family = familyOf(taskId);
     const recordedAssignment = family?.current.id !== taskId ? null : assignmentOf(store, taskId, now, { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) }, evidenceRoot);
     const assignment = freshAssignment(recordedAssignment, completion?.receipt ?? null);
+    const progressRun = runs.find(one => runIsLive(one))?.id ?? completion?.runId ?? null;
     return {
         assignment,
+        checkProgress: progressRun === null ? null : store.checkProgress(progressRun),
         task: found,
         status: workRowOf({ ...found, repo: ref?.repo ?? null }, now, completion?.receipt).status,
         dispatch: diagnoseTaskDispatch(store, taskId, now),
@@ -5098,6 +5163,14 @@ export function createDecisionServer(options: ServeOptions): Server {
           if (hold.over === null) return null;
           return hold.why === "unpriced" ? `${budgetHoldWords(hold, monthOf(now).name)}; this waits until then`
             : `${budgetLabel(hold.over)} monthly budget is used up, so this waits until next month or a higher budget`;
+        })(),
+        // Sprint 8: a waiting task the organisation policy stops says which rule, or that it runs lowered.
+        policyHold: (() => {
+          if (ref === null || found.state !== "queued") return null;
+          const base = store.approvedChainOf(taskId)?.[0]?.profile ?? store.getScope(taskId)?.approvedProfile ?? null;
+          if (base === null) return null;
+          const verdict = store.runPolicy(base);
+          return !verdict.ok ? `${verdict.message.replace(/ An instance operator can change it in Settings → Policy\.$/, "")} It waits until the policy allows it.` : verdict.lowered;
         })(),
         approvalRules: (() => {
           const repo = ref?.repo ?? null;
@@ -5364,6 +5437,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       milestoneProgress: view?.milestoneProgress ?? progressOf(ref.id, planRevisions?.current?.document ?? null),
       claimed: view?.claimed ?? store.hasLiveClaim(ref.id, now),
       liveRun: live === null ? null : { id: live.id, runner: live.runner, startedAt: live.startedAt, phase: live.phase },
+      checkProgress: view?.checkProgress ?? (live === null && latest === null ? null : store.checkProgress((live ?? latest)!.id)),
       control: view?.control ?? taskControlOf(store, ref.id, now),
       route: view?.route ?? null,
       approval:
@@ -5924,6 +5998,13 @@ export function createDecisionServer(options: ServeOptions): Server {
       if ([...new Set(body.keys())].some(key => body.getAll(key).length !== 1)) return fail(400, 'Submit one value for each field.');
       const actor = { name: who.name, generation: who.session.generation };
       const permitted = (repo: string): boolean => visible(repo) && codingProjectAllowed(repo);
+      // Sprint 8: a coding session is Codex taking turns: the organisation policy decides whether it may (provider,
+      // model, and a ceiling Codex can't run under), when it starts and on every action that makes it take another turn.
+      const turnAction = /^\/code\/[a-f0-9]{32}\/(send|resume|recover|continue|answer)$/.test(url.pathname);
+      if (url.pathname === '/code/start' || turnAction) {
+        const stopped = store.sessionPolicyRefusal('codex', url.pathname === '/code/start' ? body.get('model')?.trim() || null : null, 'coding sessions');
+        if (stopped !== null) return fail(403, stopped);
+      }
       try {
         let id: string;
         if (url.pathname === '/code/start') {
@@ -6303,11 +6384,45 @@ export function createDecisionServer(options: ServeOptions): Server {
       const saved = store.setBudget({ scope, key, limitMicrousd: Math.round(dollars) * 1_000_000, hardStop: body.get("stop") === "1" }, who.name, now);
       return back("said", `${label}: ${spendUsd(saved.limitMicrousd)} a month${saved.hardStop ? ", API work stops at 100%" : ", alerts only"}.`);
     }
+    // Delete a project, in two steps: its name, then what goes and the password. An instance operator; the ledger keeps who and what.
+    if (url.pathname === "/settings/project/delete") {
+      if (who.via !== "cookie" || !store.isInstanceOperator(who.name)) return refuse(response, who, 403, "An instance operator deletes projects.", "/settings/project");
+      const repo = body.get("repo") ?? "";
+      const known = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
+      if (!known.includes(repo)) return refuse(response, who, 403, "That project is outside your access.", "/settings/project");
+      const back = (key: "said" | "problem", words: string, to = repo) => redirect(response, `/settings/project?${to === "" ? "" : `repo=${encodeURIComponent(to)}&`}${key}=${encodeURIComponent(words)}`);
+      const view = projectViewOf(repo, who);
+      if ((body.get("name") ?? "").trim() !== view.name) return back("problem", `Type ${view.name} exactly to delete it.`);
+      const confirm = (problem: string | null) => sendScreen(response, 200, screen(`Delete ${view.name}?`, `<p><a href="/settings/project?repo=${escape(encodeURIComponent(repo))}">${escape(view.name)}</a></p><h1>Delete ${escape(view.name)}?</h1>${projectDeleteConfirmHtml(view, who.session.csrf, problem)}`,
+        { chrome: chromeFor(repo, "settings"), forceSensitive: true }));
+      if (view.running.length > 0) return back("problem", `Nothing was deleted: ${view.running.join(", ")}. Stop it, then try again.`);
+      if (body.get("step") !== "delete") return confirm(null);
+      if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return confirm("That password didn't match. Nothing was deleted.");
+      const done = await deleteProject(store, repo, { actor: who.name, via: "console", now, evidenceRoot, poolRoot: options.poolRoot ?? null });
+      if (!done.ok) return back("problem", done.said);
+      if (options.registryPath !== undefined) await updateRepos(options.registryPath, repos => removeRepos(repos, [repo])).catch(() => undefined);
+      deletedRepos.add(repo);
+      if (who.session.project === repo) { who.session.project = null; who.session.projectRevision += 1; sessions.persist(who.session); }
+      return back("said", `Deleted ${view.name}: ${holdingsWords(done.removed)}.${done.left.length > 0 ? ` Git kept ${done.left.length === 1 ? "one item" : `${done.left.length} items`}: ${done.left.join("; ")}.` : ""}`, "");
+    }
     if (url.pathname === "/ledger/checkpoint") {
       if (who.via !== "cookie" || !store.isInstanceOperator(who.name)) return refuse(response, who, 403, "An instance operator makes ledger checkpoints.", "/ledger");
       const made = store.ledgerCheckpoint(who.name, now);
       if (made !== null && "problem" in made) return refuse(response, who, 409, `No checkpoint was made: the chain doesn't verify (${made.problem}).`, "/ledger");
       return redirect(response, made === null ? "/ledger" : `/ledger?checkpoint=${made.through}`);
+    }
+    // Sprint 8: an instance operator saves the organisation policy, with a step-up; the ledger keeps each rule's before → after.
+    if (url.pathname === "/settings/policy") {
+      if (who.via !== "cookie" || !store.isInstanceOperator(who.name)) return refuse(response, who, 403, "An instance operator sets the policy.", "/settings/policy");
+      const back = (key: "said" | "problem", words: string) => redirect(response, `/settings/policy?${key}=${encodeURIComponent(words)}`);
+      if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return back("problem", "That password didn't match. Nothing changed.");
+      const chosen = body.getAll("provider");
+      const checked = checkPolicy({ providers: chosen.length === 4 ? null : chosen, models: parseList(body.get("models")), tools: parseList(body.get("tools")), ceiling: body.get("ceiling") ?? "" });
+      if (!checked.ok) return back("problem", `${checked.problem} Nothing changed.`);
+      const before = policyParts(store.orgPolicy());
+      const after = policyParts(store.setOrgPolicy(checked.policy, who.name, now));
+      const same = (Object.keys(before) as (keyof typeof before)[]).every(rule => before[rule] === after[rule]);
+      return back("said", same ? "Nothing changed." : "Policy saved.");
     }
     // v102: an instance operator changes a project's approval rules, with a step-up; the ledger keeps before → after.
     if (url.pathname === "/settings/approval") {
@@ -6401,6 +6516,59 @@ export function createDecisionServer(options: ServeOptions): Server {
       const found = await providerFor(saved.settings.issuer);
       store.recordAction({ at: now.toISOString(), actor: who.name, repo: null, taskId: null, runId: null, action: before === null ? "sign-in with a provider turned on" : "sign-in with a provider changed", outcome: "changed", source: "policy", detail: ssoChangeWords(before, saved.settings) });
       return found.ok ? back("said", `Saved. People can sign in with ${saved.settings.label}.`) : back("problem", `Saved, but ${saved.settings.label} didn't answer: ${found.said}`);
+    }
+    // v105: change how long each kind of data is kept. A step-up; the ledger keeps before → after for each kind.
+    if (url.pathname === "/settings/retention") {
+      if (who.via !== "cookie" || !store.isInstanceOperator(who.name)) return refuse(response, who, 403, "An instance operator sets retention.", "/settings");
+      const back = (key: "said" | "problem", words: string) => redirect(response, `/settings/retention?${key}=${encodeURIComponent(words)}`);
+      if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return back("problem", "Enter your Standing Orders password to change retention.");
+      const before = store.retentionPeriods();
+      const chosen = RETENTION_KINDS.map(({ kind }) => ({ kind, days: body.has(kind) ? parsePeriod(body.get(kind) ?? "") : before[kind] }));
+      if (chosen.some(one => one.days === undefined)) return back("problem", "Choose a period for each kind of data.");
+      const changed = chosen.filter(one => one.days !== before[one.kind]);
+      for (const one of changed) store.setRetentionPeriod(one.kind, one.days ?? null, who.name, now);
+      return back("said", changed.length === 0 ? "Nothing changed." : "Saved. The next daily sweep uses these periods.");
+    }
+    // Sprint 8: back up now. An instance operator; the outcome is kept like a scheduled one's.
+    if (url.pathname === "/settings/backups/now") {
+      const databaseFile = store.databaseFile();
+      if (who.via !== "cookie" || !store.isInstanceOperator(who.name) || databaseFile === null) return refuse(response, who, 403, "An instance operator looks after backups.", "/settings");
+      const made = await backupNow(store, databaseFile, "manual", clock);
+      return redirect(response, made.ok ? `/settings/backups?said=${encodeURIComponent("Backed up.")}` : `/settings/backups?problem=${encodeURIComponent(`The backup failed: ${made.error}`)}`);
+    }
+    // Sprint 8: change the backup schedule. A step-up; the ledger keeps before → after.
+    if (url.pathname === "/settings/backups") {
+      const databaseFile = store.databaseFile();
+      if (who.via !== "cookie" || !store.isInstanceOperator(who.name) || databaseFile === null) return refuse(response, who, 403, "An instance operator looks after backups.", "/settings");
+      const back = (key: "said" | "problem", words: string) => redirect(response, `/settings/backups?${key}=${encodeURIComponent(words)}`);
+      if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return back("problem", "Enter your Standing Orders password to change backups.");
+      const every = body.get("every") ?? "";
+      const hours = Number(every);
+      if (every !== "off" && !(BACKUP_EVERY_HOURS as readonly number[]).includes(hours)) return back("problem", "Choose how often to back up.");
+      const keep = Number(body.get("keep") ?? "");
+      if (!Number.isSafeInteger(keep) || keep < 1 || keep > MAX_KEEP) return back("problem", `Keep between 1 and ${MAX_KEEP} backups.`);
+      const typed = (body.get("folder") ?? "").trim();
+      const folder = typed === "" || typed === defaultBackupFolder(databaseFile) ? null : typed;
+      if (folder !== null) {
+        const problem = checkBackupFolder(folder, [...new Set([...managedRepos(), ...store.knownRepos(), ...(options.poolRoot === undefined ? [] : [options.poolRoot])])]);
+        if (problem !== null) return back("problem", problem);
+      }
+      const before = store.backupSettings();
+      store.setBackupSettings({ enabled: every !== "off", everyHours: every === "off" ? before.everyHours : hours, keep, folder }, who.name, now);
+      return back("said", every === "off" ? "Saved. Scheduled backups are off." : "Saved.");
+    }
+    // v105: download everything as a .zip. An instance operator, with a step-up; the ledger records it.
+    if (url.pathname === "/settings/data") {
+      if (who.via !== "cookie" || !store.isInstanceOperator(who.name)) return refuse(response, who, 403, "An instance operator exports data.", "/settings");
+      if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) {
+        return redirect(response, `/settings/data?problem=${encodeURIComponent("Enter your Standing Orders password to download the export.")}`);
+      }
+      store.recordAction({ at: now.toISOString(), actor: who.name, repo: null, taskId: null, runId: null, action: "everything exported", outcome: "exported", source: "access", detail: "downloaded as a .zip" });
+      const exported = buildExport(store, { who: who.name, now, evidenceRoot, configDir: options.configDir ?? null });
+      const zip = exportZip(exported);
+      response.writeHead(200, { "content-type": "application/zip", "content-disposition": `attachment; filename="${exported.root}.zip"`, "content-length": String(zip.length),
+        "cache-control": "no-store", "x-content-type-options": "nosniff" });
+      return void response.end(zip);
     }
     // v104: change where monitoring goes. A step-up; the ledger keeps before → after (addresses, never secrets).
     if (url.pathname === "/settings/monitoring") {
@@ -7005,7 +7173,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       // project list. A co-located `up` notices that list and connects its
       // builder; there is no separate restart or runner-binding step.
       if (options.registryPath !== undefined) {
-        const enrolled = await updateRepos(options.registryPath, repos => addRepos(repos, [canonical]));
+        const enrolled = await updateRepos(options.registryPath, repos => addRepos(repos, [canonical])); deletedRepos.delete(canonical);
         if (!enrolled.ok) {
           return void projectsScreen(response, who, `that project is valid, but it could not be added — ${enrolled.message}`, 400, safeReturn(body.get("return")));
         }
@@ -7709,7 +7877,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         return projectsScreen(response, who, `the clone landed at ${cloned.target} but did not prove under the ceiling — it was left in place; enroll it by hand`, 400);
       }
       if (options.registryPath !== undefined) {
-        const enrolled = await updateRepos(options.registryPath, (repos: string[]) => addRepos(repos, [admitted]));
+        const enrolled = await updateRepos(options.registryPath, (repos: string[]) => addRepos(repos, [admitted])); deletedRepos.delete(admitted);
         if (!enrolled.ok) {
           return projectsScreen(response, who, `${cloned.target} is cloned but not enrolled — ${enrolled.message}`, 400);
         }
@@ -8099,6 +8267,9 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (scanForSecrets(composed.body).length > 0) {
         return redirect(response, `/chat?said=${encodeURIComponent("fleet context contains something credential-shaped — chat refuses to send it; find and remove it first")}`);
       }
+      // Sprint 8: the organisation policy allows this chat's provider and model, or the turn doesn't start.
+      const disallowed = store.agentPolicyRefusal(enabled.config.provider, enabled.config.model);
+      if (disallowed !== null) return redirect(response, `/chat?said=${encodeURIComponent(disallowed)}`);
       const reserved = worstCaseForPrice(enabled.price, Buffer.byteLength(composed.body, "utf8"));
       const opened = store.openChatTurn(
         {
@@ -8860,6 +9031,13 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
     const live = await liveAttendedTerms(taskId, inputs, now);
     if (!live.ok) return refuse(response, who, 409, live.problem, taskHref(taskId));
+    // Sprint 8: an attended session runs at exactly what the person signs, so the organisation policy refuses it
+    // outright (a provider, a model, or a posture above the permission ceiling) before anyone signs.
+    {
+      const pinned = profileFromJson(live.terms.profileJson);
+      const refused = pinned === null ? null : store.attendedPolicyRefusal(pinned);
+      if (refused !== null) return refuse(response, who, 403, refused, taskHref(taskId));
+    }
     const digest = attendedDigestOf(live.terms);
 
     if (verb === "attend-preview") {
@@ -9573,6 +9751,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           });
           if (!both.ok) {
             if (both.reason === "second-approver") return approvalProblem(gateWords({ verdict: "vote", have: both.have, need: 2, already: both.already }), 200);
+            if (both.reason === "policy") return approvalProblem(both.message, 403);
             const status = both.reason === "changed" || both.reason === "unrouted" ? 409 : 403;
             return approvalProblem(approveRefusalWords(both.reason), status);
           }
@@ -9582,6 +9761,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (!approved.ok) {
           // v102: a first yes on protected work is recorded, not refused — the page says who else is needed.
           if (approved.reason === "second-approver") return approvalProblem(gateWords({ verdict: "vote", have: approved.have, need: 2, already: approved.already }), 200);
+          if (approved.reason === "policy") return approvalProblem(approved.message, 403);
           const status = approved.reason === "changed" || approved.reason === "unrouted" ? 409 : 403;
           return approvalProblem(approveRefusalWords(approved.reason), status);
         }
@@ -12966,6 +13146,14 @@ ${THEME_DARK}
   .task-journey li.active span { color: var(--foreground); font-weight: 650; }
   .task-journey > .meta { margin: 0; line-height: 1.45; }
   .task-journey-action { margin-top: .75rem; min-height: 44px; }
+  .check-progress {
+    margin: .5rem 0 0; color: var(--running); font-size: clamp(.625rem,2.2vw,.75rem);
+    line-height: 1.5; font-variant-numeric: tabular-nums; white-space: nowrap;
+    overflow-x: auto; scrollbar-width: thin;
+  }
+  .check-progress[data-final="passed"] { color: var(--success); }
+  .check-progress[data-final="failed"] { color: var(--destructive); }
+  .check-progress[data-final="unknown"] { color: var(--warning); }
   .receipt-actions [data-primary-action], .task-plan-review .button-link { min-height: 44px; }
   .task-status-reason { margin-top: .75rem; }
   .task-status-reason summary, .task-status-details > summary { color: var(--muted-foreground); }
@@ -13762,7 +13950,7 @@ button.pick-file { min-height: 1.75rem; padding: 0 .55rem; font-size: .75rem; }
 
 /** Appearance: a three-way segmented switch, one tap per choice. */
 const THEME_CONTROLS_CSS = `.task-repo select{width:100%;min-height:2.75rem;font-size:1rem}.task-repo-add{margin:.35rem .1rem .5rem}.task-repo-add a{display:inline-flex;align-items:center;min-height:2.25rem}details.result-request-open.result-request-form>summary{border:0;background:transparent;padding:.5rem 0;min-height:2.75rem;font-weight:600;display:list-item;list-style:revert}details.result-request-open.result-request-form>summary::-webkit-details-marker{display:revert}form.js-autosave button[type=submit]{display:none}.provider-row{border-bottom:1px solid var(--so-line);padding:.35rem 0}.provider-row:first-of-type{border-top:1px solid var(--so-line)}.provider-head{display:flex;align-items:center;gap:.75rem;margin:.4rem 0 0}.provider-status{display:inline-flex;align-items:center;gap:.4rem;color:var(--so-muted);font-size:.875rem}.provider-status i{width:.5rem;height:.5rem;border-radius:50%;background:var(--so-muted)}.provider-status--ok i{background:var(--so-success)}.provider-status--warn i{background:var(--so-attention)}.provider-status--off i{background:transparent;border:1.5px solid var(--so-muted)}details.provider-manage>summary{cursor:pointer;color:var(--so-accent-text);font-size:.875rem;min-height:2.5rem;display:list-item;padding-block:.5rem}.card.props .row{display:grid;gap:.1rem;margin:0 0 .75rem}.card.props .row>.meta{display:block;font-size:.75rem}.card.props .row>.meta::first-letter{text-transform:uppercase}.card.props .row>.mono{font-family:var(--font-sans);font-size:.875rem}.card.props .row>.mono .seal{font-family:var(--font-mono);font-size:.8125rem}details.evidence-files{margin:1rem 0}details.evidence-files>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:600}details.evidence-files ul{list-style:none;margin:0;padding:0}details.evidence-files li{display:flex;justify-content:space-between;gap:1rem;padding:.5rem 0;border-bottom:1px solid var(--so-line)}.result-action .result-feedback-link{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;text-decoration:none}.result-action .result-feedback-link:hover{background:var(--so-raised)}.so-sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}.verdict{margin:.5rem 0 .75rem}.verdict-chips{display:flex;flex-wrap:wrap;gap:.4rem;list-style:none;padding:0;margin:0}.verdict-chip{display:inline-flex;align-items:center;gap:.3rem;min-height:1.75rem;padding:.2rem .65rem;border-radius:999px;font-size:.8125rem;font-weight:600;background:var(--so-neutral-soft);color:var(--so-neutral-ink)}.verdict-chip svg{width:.9rem;height:.9rem}.verdict-chip--success{background:var(--so-success-soft);color:var(--so-success)}.verdict-chip--danger{background:var(--so-danger-soft);color:var(--so-danger)}.verdict-chip--warning{background:var(--so-warning-soft);color:var(--so-warning)}.verdict-chip--info{background:var(--so-info-soft);color:var(--so-info)}.verdict-by{margin:.4rem 0 0}details.result-request-open{margin:.5rem 0}details.result-request-open>summary{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;cursor:pointer;list-style:none}details.result-request-open>summary::-webkit-details-marker{display:none}details.result-request-open[open]>summary{margin-bottom:.75rem}.settings-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(8.5rem,1fr));gap:.5rem;margin:0 0 2rem}.settings-tiles a{display:flex;align-items:center;gap:.6rem;min-height:3rem;padding:.65rem .8rem;border:1px solid var(--so-line);border-radius:.625rem;background:var(--so-paper);color:var(--so-ink);text-decoration:none;font-weight:550;font-size:.875rem}.settings-tiles a:hover{border-color:var(--so-input-line);background:var(--so-raised)}.settings-tiles svg{width:1.1rem;height:1.1rem;flex-shrink:0;color:var(--so-accent-text)}details.settings-more{margin:.25rem 0 1.25rem}details.settings-more>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:550}details.settings-more>summary .meta{font-weight:400;margin-left:.35rem}.settings-changed{margin-top:-.25rem}.appearance{margin:0 0 28px}.appearance h2{margin:0 0 10px}.theme-switch{display:inline-flex;flex-wrap:nowrap;max-width:100%;gap:4px;padding:4px;margin:0;border:1px solid var(--so-line);border-radius:10px;background:var(--so-raised)}.theme-switch .theme-choice,.so-native-region .theme-switch .theme-choice{flex:1 1 0;width:auto;white-space:nowrap;min-height:40px;padding:8px 16px;border:0;border-radius:7px;background:transparent;color:var(--so-muted);font:inherit;font-weight:550;box-shadow:none;cursor:pointer}.theme-switch .theme-choice:hover{color:var(--so-ink)}.theme-switch .theme-choice[aria-pressed="true"]{background:var(--so-paper);color:var(--so-ink);box-shadow:0 1px 2px rgb(0 0 0 / .1)}.appearance .meta{margin:8px 0 0}@media(max-width:600px){.theme-switch .theme-choice{min-height:44px}}`;
-const WORKSPACE_STYLE = styleAsset(STYLE + APPROVAL_RULES_CSS + SPEND_CSS + LIMITS_CSS + MONITORING_CSS + EVIDENCE_PACK_CSS + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KITS_CSS + SSO_CSS + CREDENTIALS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
+const WORKSPACE_STYLE = styleAsset(STYLE + APPROVAL_RULES_CSS + SPEND_CSS + RETENTION_CSS + LIMITS_CSS + MONITORING_CSS + BACKUP_CSS + EXPORT_CSS + PROJECT_DELETE_CSS + POLICY_CSS + EVIDENCE_PACK_CSS + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KITS_CSS + SSO_CSS + CREDENTIALS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
@@ -15204,6 +15392,7 @@ type TaskChatFocus = {
   milestoneProgress: MilestoneProgressView[] | null;
   claimed: boolean;
   liveRun: { id: number; runner: string; startedAt: string; phase: string | null } | null;
+  checkProgress: CheckProgress | null;
   /** v52: the exact-run control — the task page's own projection. */
   control: TaskControlView;
   /** The phase route (v47): the task page's exact projection, so chat and
@@ -15304,6 +15493,13 @@ function taskStatusCard(status: DisplayStatus & { diagnostics?: WorkStatus["diag
     `<h2>${escape(status.label)}</h2>` +
     (!approvalAction && status.action !== null && href !== null ? `<a class="button-link task-journey-action" href="${escape(href)}" data-primary-action>${escape(status.action.label)}</a>` : "") +
     `<details class="task-status-reason"><summary>Status details</summary><p class="meta">${escape(status.detail)}</p>${workDiagnosticsHtml(status.diagnostics)}</details></section>`;
+}
+
+function checkProgressHtml(progress: CheckProgress | null, id = "check-progress"): string {
+  if (progress === null) return `<p id="${id}" class="check-progress mono" data-check-progress hidden></p>`;
+  const state = !progress.final ? "live" : Object.values(progress.suites).some(one => one.state === "failed") ? "failed"
+    : Object.values(progress.suites).every(one => one.state === "passed") ? "passed" : "unknown";
+  return `<p id="${id}" class="check-progress mono" data-check-progress data-final="${escape(state)}" role="status" aria-live="polite">${escape(progress.line)}</p>`;
 }
 
 function taskControlDetailsHtml(control: TaskControlView, taskId: string, csrf: string, surface: "task" | "chat", inert = false): string {
@@ -15534,6 +15730,7 @@ function taskChatLiveRegion(focus: TaskChatFocus, csrf: string, fragment = false
     `<section id="task-chat-live" aria-live="polite" data-task="${escape(focus.id)}" data-execution="${escape(focus.executionId)}" data-source="/chat/task-status?task=${encodeURIComponent(focus.id)}" data-poll="${polling ? "1" : "0"}" data-approval="${escape(focus.approval?.digest ?? "")}" data-plan="${escape(focus.plan ?? "")}">` +
     `<div class="task-live-summary">` +
     (focus.assignment !== null ? assignmentSummaryHtml(focus.assignment, { workStatus: focus.status, hideAction: focus.approval !== null && focus.dispatch?.action === "approve-scope", ...(receiptLeads ? { resultHref: chatResultHref(focus.id, focus.result!.runId) } : {}) }) + (receiptLeads ? completionReceiptCard(focus.result!, focus.id, "chat", focus.status, focus.assignment, false) : "") : receiptLeads ? completionReceiptCard(focus.result!, focus.id, "chat", focus.status) : taskStatusCard(focus.status, focus.id, focus.dispatch, focus.liveRun?.id ?? null, focus.approval !== null && focus.dispatch?.action === "approve-scope")) +
+    checkProgressHtml(focus.checkProgress) +
     // The exact-run control (v52): the SAME component the task page
     // renders, refreshed with the live region — typed input in the
     // composer is untouched because only this region is replaced.
@@ -19002,6 +19199,7 @@ function revisionLineageHtml(lineage: RevisionLineage | null): string {
 
 function taskBodyParts(data: {
   assignment?: AssignmentSnapshot | null;
+  checkProgress?: CheckProgress | null;
   rootId?: string;
   rootTitle?: string;
   history?: string;
@@ -19016,6 +19214,7 @@ function taskBodyParts(data: {
   /** v102: who filed it, and the project's approval rules as they bear on this task (null: none apply). */
   filer?: { name: string | null; kind: string } | null;
   budgetHold?: string | null;
+  policyHold?: string | null;
   approvalRules?: { words: string; votes: string[]; needsTwo: boolean } | null;
   plan: "requested" | "drafted" | null;
   planDocument: string | null;
@@ -20038,6 +20237,7 @@ function taskBodyParts(data: {
   // v103: everything an auditor asks about this task, printable or as JSON.
   facts.push({ label: "Audit", parts: [{ label: "Evidence pack", href: `${taskHref(task.id)}/evidence` }] });
   if (data.budgetHold != null) facts.push({ label: "Budget", parts: [`${data.budgetHold} · `, { label: "Spend", href: "/spend" }] });
+  if (data.policyHold != null) facts.push({ label: "Policy", parts: [`${data.policyHold} · `, { label: "Policy", href: "/settings/policy" }] });
   if (data.publication !== null && data.publication !== undefined) {
     const prHref = safePrUrl(data.publication.prUrl), pr = `PR #${data.publication.prNumber ?? "?"}`;
     facts.push({ label: "Published", parts: [prHref === null ? pr : { label: pr, href: prHref },
@@ -20252,7 +20452,7 @@ function taskBodyParts(data: {
       }${data.deliverable === "report" ? ` · <span class="badge">scout</span>` : ""}</p>`;
   const assignmentOptions = data.assignment == null ? null : { workStatus: status, hideAction: approveForm !== "" && data.dispatch?.action === "approve-scope", problem: status.tone === "problem", diagnostics: [...((status as WorkStatus).diagnostics ?? []), ...(status.tone === "problem" && status.detail !== data.assignment.detail ? [status] : [])] };
   // The result takes over from the task status as soon as it is ready.
-  const statusHtml = data.assignment != null && assignmentOptions !== null ? assignmentSummaryHtml(data.assignment, assignmentOptions) : receiptLeads ? completionReceiptCard(data.completion!.receipt!, task.id, "task", status) : taskStatusCard(status, task.id, data.dispatch ?? null, liveRunId, approveForm !== "" && data.dispatch?.action === "approve-scope");
+  const statusHtml = (data.assignment != null && assignmentOptions !== null ? assignmentSummaryHtml(data.assignment, assignmentOptions) : receiptLeads ? completionReceiptCard(data.completion!.receipt!, task.id, "task", status) : taskStatusCard(status, task.id, data.dispatch ?? null, liveRunId, approveForm !== "" && data.dispatch?.action === "approve-scope")) + checkProgressHtml(data.checkProgress ?? null);
   // The exact-run control (v52), directly under the scheduler's answer:
   // the one place a person stops or resumes THIS attempt.
   const controlHtml = taskControlDetailsHtml(data.control ?? { kind: "none" }, task.id, data.csrf, "task");
@@ -20448,6 +20648,7 @@ function taskPage(chrome: Chrome, data: Parameters<typeof taskBody>[0]): Screen 
   const liveRunId = data.liveRunId ?? null;
   const liveRun = liveRunId === null ? undefined : data.runs.find(one => one.id === liveRunId);
   const script =
+    (liveRun === undefined ? "" : regionScript("check-progress", "check", 5, `/r/${liveRun.id}`)) +
     (liveRun !== undefined && data.peekable === true ? regionScript("run-peek", "peek", 15, `/r/${liveRun.id}`) : "") +
     (liveRun !== undefined && data.peekable === true && liveRun.provider === "claude" ? transcriptScript(`/r/${liveRun.id}`) : "") +
     (data.csrf !== "" && data.decisions.some(one => one.state === "open" || one.state === "expired") ? decisionAnswerScript() : "");
@@ -23047,6 +23248,7 @@ function settingsPage(
   qualityDefault: { mode: QualityMode; updatedAt: string | null; updatedBy: string | null; canManage: boolean } | null = null,
   email: NonNullable<BrowserSettingsView["email"]> | null = null,
   telegramDelivery: string | null = null,
+  workers: NonNullable<BrowserSettingsView["workers"]> | null = null,
 ): Screen {
   const permissionCard =
     permissionDefault === null
@@ -23265,6 +23467,7 @@ function settingsPage(
     digest: digest === null || csrf === "" ? null : { every: digest.everyMs === null ? "off" : String(Math.round(digest.everyMs / 60_000)), held: digest.everyMs === null ? null : `${digest.held} routine fact(s) held` },
     telegram: { state: hasEnv ? "from the environment" : existing === null ? "not set" : "saved", current, delivery: telegramDelivery },
     email,
+    workers,
   };
   return screen("Settings", [
     "<h1>Settings</h1>",
@@ -23273,6 +23476,7 @@ function settingsPage(
     permissionCard,
     qualityCard,
     keysCard,
+    workersCard(workers),
     pushCard === "" && messagingCard === "" && digestCard === "" ? "" : `<h2>Notifications</h2>`,
     messagingCard,
     pushCard,
@@ -23289,6 +23493,45 @@ function settingsPage(
     `<p class="meta">Stored privately on this computer. Then pair your phone under <a href="/settings/telegram">Telegram</a>. In Telegram, send <code>/status</code>, <code>/task &lt;id&gt;</code> or <code>/help</code>; these use no AI model.</p>`,
     `</details>`,
   ].join("\n"), { chrome, workspace: { view }, functional: { script: SETTINGS_AUTOSAVE_SCRIPT + (pushScript ?? ""), ...(pushScript === null ? {} : { fetches: true }) } });
+}
+
+/** Every worker that is not retired: its capacity, and the tasks it holds now. */
+function settingsWorkers(store: Store, now: Date): NonNullable<BrowserSettingsView["workers"]> {
+  const claims = store.liveClaims(null, now);
+  return store.listRunners().filter(one => one.retiredAt === null).map(one => {
+    const age = now.getTime() - new Date(one.heartbeatAt).getTime();
+    const alive = runnerAlive(one, now);
+    return {
+      name: one.name,
+      tone: alive ? "ok" as const : age < 60 * 60_000 ? "warn" as const : "off" as const,
+      state: alive ? "Connected" : age < 60 * 60_000 ? `Quiet for ${Math.max(1, Math.round(age / 60_000))} min` : "Not connected",
+      capacity: one.capacity,
+      busy: store.liveClaimCount(one.name, now),
+      running: claims.filter(claim => claim.runner === one.name).map(claim => ({
+        taskId: claim.taskId,
+        title: store.getTask(claim.taskId)?.title ?? claim.taskId,
+        href: taskHref(claim.taskId),
+        project: claim.repo === null ? null : projectName(claim.repo),
+      })),
+    };
+  });
+}
+
+/** The page's workers section, for browsers without the app script. */
+function workersCard(workers: NonNullable<BrowserSettingsView["workers"]> | null): string {
+  if (workers === null) return "";
+  return `<section id="workers" aria-labelledby="workers-title"><h2 id="workers-title">Workers</h2>` +
+    (workers.length === 0
+      ? `<p class="meta">No worker is connected. Run <code>standing-orders up</code> on the computer with your projects.</p>`
+      : workers.map(one =>
+          `<div class="card" data-worker="${escape(one.name)}"><p class="row"><strong>${escape(one.name)}</strong> <span class="meta">${escape(one.state)}</span>` +
+          `<span class="right">${one.busy} of ${one.capacity} running</span></p>` +
+          (one.running.length === 0
+            ? `<p class="meta">Nothing running.</p>`
+            : `<ul>${one.running.map(task => `<li><a href="${escape(task.href)}">${escape(task.title)}</a>${task.project === null ? "" : ` <span class="meta">${escape(task.project)}</span>`}</li>`).join("")}</ul>`) +
+          `</div>`).join("") +
+        `<p class="meta">To change how many a worker runs at once: <code>standing-orders runner capacity &lt;name&gt; &lt;n&gt;</code></p>`) +
+    `</section>`;
 }
 
 /** Choices save the moment they change; without the script the Save
@@ -23312,8 +23555,13 @@ const SETTINGS_TILE_ICONS: [string, string, string][] = [
     ["/settings/learning", "Learning", `<path d="M3 3v18h18"/><path d="m7 15 4-4 3 3 5-6"/>`],
     ["/settings/sign-in", "Sign-in", `<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>`],
     ["/settings/sessions", "Sessions & tokens", `<circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/>`],
+    ["/settings/project", "Project", `<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>`],
+    ["/settings/policy", "Policy", `<path d="M9 12l2 2 4-4"/><rect x="4" y="3" width="16" height="18" rx="2"/>`],
     ["/settings/approval", "Approval rules", `<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/>`],
     ["/settings/monitoring", "Monitoring", `<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>`],
+    ["/settings/retention", "Retention", `<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>`],
+    ["/settings/backups", "Backups", `<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3"/>`],
+    ["/settings/data", "Data", `<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>`],
 ];
 const SETTINGS_TILES = SETTINGS_TILE_ICONS.map(([href, label]) => [href, label] as const);
 

@@ -3336,6 +3336,7 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
     expect(result).toMatchObject({ ok: true, committed: true });
     expect(store.artifactsFor(req.runId as number).map(one => one.kind)).toContain("proof");
     expect(store.proofVerdictFor(req.runId as number)).toMatchObject({ verdict: "attested" });
+    expect(store.runCheckFor(req.runId as number)).toEqual({ status: "not-run", exitCode: null, suites: [] });
   });
 
   test("a sound proof, an approved verify command that passes: verified, and the check-log is captured", async () => {
@@ -3349,6 +3350,11 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
     expect(result).toMatchObject({ ok: true, committed: true });
     expect(store.proofVerdictFor(req.runId as number)).toMatchObject({ verdict: "verified" });
     expect(store.artifactsFor(req.runId as number).map(one => one.kind)).toContain("check-log");
+    expect(store.runCheckFor(req.runId as number)).toEqual({
+      status: "passed",
+      exitCode: 0,
+      suites: [{ name: "Project check · attempt 1", status: "passed", exitCode: 0 }],
+    });
   });
 
   test.each([0, 1])("pending final check settles from the machine once (exit %i), with the original receipt retained", async exitCode => {
@@ -3400,6 +3406,11 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
 
     expect(result).toMatchObject({ ok: true, committed: true });
     expect(store.proofVerdictFor(req.runId as number)).toMatchObject({ verdict: "refuted" });
+    expect(store.runCheckFor(req.runId as number)).toEqual({
+      status: "failed",
+      exitCode: 1,
+      suites: [{ name: "Project check · attempt 1", status: "failed", exitCode: 1 }],
+    });
   });
 
   test("a missing dependency replays its bound setup once, retries once, and records one combined verified log", async () => {

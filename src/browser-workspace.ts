@@ -90,6 +90,9 @@ export type BrowserSettingsView = {
   telegram: { state: string; current: string;
     /** v98: how the bot's messages reach Standing Orders (pushed, or asked for), in words. */
     delivery?: string | null };
+  /** Each worker: how many tasks it runs at once, and what it is running now. */
+  workers?: { name: string; tone: 'ok' | 'warn' | 'off'; state: string; capacity: number; busy: number;
+    running: { taskId: string; title: string; href: string; project: string | null }[] }[] | null;
   /** v87: the mail server Send email steps use (approvers only); the password is never shown back. */
   email?: { set: boolean; host: string; port: number; secure: boolean; user: string; from: string;
     /** v89: where Email inbox triggers read (IMAP), and a Google account connected instead of a mail server (`redirect`: the address to register with Google, when this page's address can take one). */

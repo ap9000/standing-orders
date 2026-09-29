@@ -141,6 +141,15 @@ describe("the mate's turn", () => {
     expect(MATE_CONTRACT).toContain("Set propose_task planning to 'required'");
   });
 
+  test("the organisation policy stops a chat on a provider or model it doesn't allow, before anything is admitted or sent", async () => {
+    const neverSent = (async () => { throw new Error("a refused turn sends nothing"); }) as unknown as typeof fetch;
+    store.setOrgPolicy({ providers: ["codex"], models: null, tools: null, ceiling: "escalated" }, "root", T0);
+    expect(await turn("what needs me?", neverSent)).toEqual({ ok: false, refused: "policy", message: "The organisation policy doesn't allow Claude. An instance operator can change it in Settings → Policy." });
+    store.setOrgPolicy({ providers: null, models: ["claude-opus-*"], tools: null, ceiling: "escalated" }, "root", T0);
+    expect(await turn("what needs me?", neverSent)).toMatchObject({ ok: false, refused: "policy", message: expect.stringContaining("doesn't allow the model claude-sonnet-5") });
+    expect(store.handle.prepare("SELECT COUNT(*) AS n FROM mate_turn").get()).toEqual({ n: 0 });
+  });
+
   test("saved context fits the existing allowance by bounding steps, without increasing spend authority", async () => {
     const live = session(5_000_000), script = scripted(Array.from({ length: 8 }, (_, i) => answer([{ type: "tool_use", id: `r${i}`, name: "list_repos", input: {} }])));
     const result = await turn("Catch me up", script.fetcher, { session: live, context: "Saved project context. ".repeat(500) });

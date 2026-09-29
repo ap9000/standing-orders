@@ -43,6 +43,12 @@ export type TeammateOutcome = { state: "passed" | "failed" | "retry" | "waiting"
 
 const startOfDay = (now: Date) => { const day = new Date(now); day.setHours(0, 0, 0, 0); return day.toISOString(); };
 
+/** The Claude model a teammate's turns run on: its own, or the lead chat's Claude model, or Claude's default. */
+export function teammateModel(store: Store, mate: TeammateRow): string {
+  const config = store.getChatConfig();
+  return mate.model ?? (config?.provider === "claude-subscription" ? config.model : "default");
+}
+
 /** Whether a teammate can take a turn now: active, readable, and under its daily limit. */
 export function teammateReady(store: Store, mate: TeammateRow | null, now: Date): { ok: true } | { ok: false; why: string } {
   if (mate === null) return { ok: false, why: "gone" };
@@ -52,6 +58,9 @@ export function teammateReady(store: Store, mate: TeammateRow | null, now: Date)
   // v105: its turns bill as this computer's Claude does with no key from us; billed to a key, a budget holds them.
   const held = store.budgetGate(now)({ project: mate.repo, person: null, teammate: mate.id, agents: [{ provider: "claude", billing: claudeMachineBilling(store.handle) }] });
   if (held.over !== null) return { ok: false, why: held.why === "used-up" ? "a monthly budget its work counts toward is used up" : "a monthly budget can't price its work yet" };
+  // Sprint 8: its turns run on Claude, with its own model or the lead chat's: the organisation policy has to allow them.
+  const disallowed = store.agentPolicyRefusal("claude", teammateModel(store, mate));
+  if (disallowed !== null) return { ok: false, why: disallowed };
   return { ok: true };
 }
 
@@ -100,8 +109,7 @@ function contextOf(store: Store, flow: FlowRow, definition: FlowDefinition, stag
  */
 export async function teammateTurn(store: Store, flow: FlowRow, definition: FlowDefinition, stage: FlowStage, card: FlowCardRow, mate: TeammateRow, now: Date,
   io: { turn?: TurnRunner; evidenceRoot?: string } & ToolIo): Promise<TeammateOutcome> {
-  const config = store.getChatConfig();
-  const model = mate.model ?? (config?.provider === "claude-subscription" ? config.model : "default");
+  const model = teammateModel(store, mate);
   if (store.teammateGrants(mate.id).length > 0) {
     try { await refreshGrants(store, mate, now, io); } catch { /* the last listing stands */ }
     // Calls a person approved since the last turn are made first, exactly as they approved them.

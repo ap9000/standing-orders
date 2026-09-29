@@ -210,6 +210,15 @@ export function addRunnerReposAuthed(
  */
 export const RUNNER_NAME_MAX = 60;
 
+/** The most tasks one worker may be set to run at once (the console's register form says the same). */
+export const RUNNER_CAPACITY_MAX = 64;
+
+/** A capacity as typed: a whole number from 1 to RUNNER_CAPACITY_MAX, or null. */
+export function parseRunnerCapacity(value: string): number | null {
+  const capacity = Number(value.trim());
+  return value.trim() !== "" && Number.isInteger(capacity) && capacity >= 1 && capacity <= RUNNER_CAPACITY_MAX ? capacity : null;
+}
+
 export function validRunnerName(name: string): boolean {
   if (name === "" || name.length > RUNNER_NAME_MAX) return false;
   for (const char of name) {
@@ -267,7 +276,8 @@ export function registerRunnerIfIdle(
     // read while it still exists; register()'s releaseClaimsOf would
     // otherwise hide it from every later recovery.
     const recoveredRuns = existing === null ? 0 : store.recoverRunnerWork(name, now).runs.length;
-    const registration = register(store, options);
+    // A restart keeps the capacity an operator set; only an explicit one changes it.
+    const registration = register(store, { ...options, capacity: options.capacity ?? existing?.runner.capacity ?? 1 });
     return { ok: true as const, ...registration, recoveredRuns };
   });
 }
