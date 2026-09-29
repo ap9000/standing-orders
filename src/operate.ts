@@ -3,6 +3,7 @@ import { parseProtectedPaths } from "./approval-policy.js";
 import { rulesSummary } from "./approval-rules-ui.js";
 import { evidencePack, exportDay, ledgerExportChunks, standaloneEvidenceHtml, type LedgerExport } from "./evidence-pack.js";
 import { matchesOutsideCheckpoint } from "./ledger-chain.js";
+import { bytesWords, storageReport } from "./storage.js";
 import { logEvent } from "./log.js";
 import { advanceFlows } from "./flow-engine.js";
 import { readHooksBase, runFlowTriggers, type TriggerIo } from "./flow-triggers.js";
@@ -50,7 +51,7 @@ import { runTaskOutcomeCommand } from "./task-outcome-cli.js";
  */
 
 import { homedir, hostname, tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import {
   openStore,
   openStoreNoMigrate,
@@ -281,6 +282,11 @@ export type Write = (line: string) => void;
  */
 export const EXIT = { ok: 0, failed: 1, usage: 2, refused: 3 } as const;
 
+/** Storage retention: how long a finished task's clean checkout is kept after it was let go, and a result marked
+ * complete's or a release candidate's after it was (its checkout holds the build a deploy installs). */
+export const CHECKOUT_KEEP_MS = 2 * 24 * 60 * 60_000;
+export const RESULT_KEEP_MS = 7 * 24 * 60 * 60_000;
+
 export type OperateOptions = {
   /** Native-shell proof key, passed in memory rather than command-line arguments. */
   desktopIdentity?: string;
@@ -331,6 +337,7 @@ export const OPERATE_HELP = `standing-orders — operating the queue
   standing-orders project rules --repo <p>  a project's approval rules; an instance operator changes them with
                                         --not-requester on|off, --protect none|project, --protect-paths "a/**,b/**"
   standing-orders task evidence <id>        the task's evidence pack as JSON (--html for a printable page; --out <file>)
+  standing-orders storage                   where the disk goes: database, build checkouts, releases, evidence
   standing-orders ledger verify             check the action ledger's hash chain (--checkpoint <n:hash> to compare a copied head)
   standing-orders ledger checkpoint         record the chain's head to copy off this machine (instance operator)
   standing-orders ledger export --from <YYYY-MM-DD> --to <YYYY-MM-DD> [--out <file>]
@@ -964,6 +971,13 @@ async function dispatch(
       return taskCommand(positional, flags, context);
     case "ledger":
       return ledgerCommand(positional, flags, context);
+    case "storage": {
+      const report = storageReport(context.store, context.databaseFile, context.clock(), CHECKOUT_KEEP_MS);
+      return succeed(context.write, context.json, "storage", report, () => [
+        `${report.folder}: ${bytesWords(report.total)}`,
+        ...report.lines.map(one => `  ${one.what.padEnd(17)} ${bytesWords(one.bytes).padStart(8)}${one.count === undefined ? "" : `  (${one.count})`}${one.note === undefined ? "" : `  ${one.note}`}`),
+      ]);
+    }
     case "project":
       if (positional[0] === "rules") return projectRulesCommand(positional, flags, context);
       return runProjectCommand(positional, flags, context);
@@ -3261,6 +3275,8 @@ async function tickCommand(
         taskRef: ref.id,
         now: clock(),
         base: revised?.head ?? base,
+        // A plan branch from an earlier plan (its checkout removed by storage retention) is reused, as its kept checkout was.
+        reuseBranch: true,
         reclaim: { evidenceRoot: context.evidenceRoot },
       });
       if (!planLeased.ok) {
@@ -4481,11 +4497,20 @@ async function reconcileCommand(
     });
   }
 
+  // Storage retention: finished work's clean checkouts go two days after they were let go (their branches stay); a
+  // result marked complete, or a release candidate, a week after (a deploy installs the build in its checkout).
+  const pruned = await worktrees.prune(repo, clock(), CHECKOUT_KEEP_MS, () => store.keptBranches(repo, clock(), RESULT_KEEP_MS));
+  for (const row of pruned.removed) {
+    store.recordAction({ at: clock().toISOString(), actor: "worker", repo, taskId: row.taskRef === null ? null : store.externalIdFor(row.taskRef), runId: null,
+      action: "checkout removed", outcome: "removed", source: "work", detail: `${basename(row.path)} (released ${row.releasedAt?.slice(0, 10) ?? "?"})` });
+  }
+
   const nothing =
     recovered.length === 0 &&
     reaped.length === 0 &&
     adoption.adopted.length === 0 &&
     adoption.forgotten.length === 0 &&
+    pruned.removed.length === 0 &&
     liveSwept.removed.length === 0;
 
   return succeed(
@@ -4497,6 +4522,8 @@ async function reconcileCommand(
       reaped: reaped.map(claim => claim.leaseId),
       adopted: adoption.adopted,
       forgotten: adoption.forgotten,
+      checkoutsRemoved: pruned.removed.map(row => row.path),
+      checkoutsKept: pruned.kept,
       liveViewsSwept: liveSwept.removed.length,
     },
     () =>
@@ -4510,6 +4537,7 @@ async function reconcileCommand(
             ...(reaped.length === 0 ? [] : [`Reaped ${reaped.length} expired lease(s).`]),
             ...adoption.adopted.map(path => `Adopted ${path} — released, unverified, somebody should look.`),
             ...adoption.forgotten.map(path => `Forgot ${path} — its directory is gone.`),
+            ...(pruned.removed.length === 0 ? [] : [`Removed ${pruned.removed.length} checkout(s) nobody has used for two days; their branches stay.`]),
             ...(liveSwept.removed.length === 0 ? [] : [`Cleared ${liveSwept.removed.length} finished live view(s).`]),
           ],
   );

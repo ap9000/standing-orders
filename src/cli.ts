@@ -221,6 +221,7 @@ export const OPERATE_COMMANDS = new Set([
   "task",
   "project",
   "ledger",
+  "storage",
   "assignment",
   "knowledge",
   "memory",

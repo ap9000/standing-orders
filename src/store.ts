@@ -11508,6 +11508,22 @@ export class Store {
     this.db.prepare("DELETE FROM worktree WHERE path = ?").run(path);
   }
 
+  /** The branches storage retention keeps a repository's checkouts of: every task not done or cancelled (a failed
+   * one included: it can be requeued), and unplaced ones (they're dispatched anywhere); and a done task whose result
+   * was marked complete (the completion names its family's root; its run names the version), or a release candidate
+   * done, within `resultMs` (a deploy installs the build in its checkout). Each task's own branch and every branch its runs used. */
+  keptBranches(repo: string, now: Date, resultMs: number): string[] {
+    const since = new Date(now.getTime() - resultMs).toISOString();
+    const tasks = `SELECT r.id AS ref, r.external_id AS id FROM task_ref r JOIN task t ON t.id = r.external_id LEFT JOIN task_scope s ON s.task_id = t.id
+      WHERE (r.repo = ? OR r.repo IS NULL) AND (t.state NOT IN ('done', 'cancelled') OR (t.state = 'done' AND (
+        (s.candidate IS NOT NULL AND t.updated_at >= ?) OR EXISTS (SELECT 1 FROM action_ledger l JOIN run ON run.id = l.run_id
+          WHERE run.task_ref = r.id AND l.action = 'assignment handoff checked' AND l.at >= ?))))`;
+    const own = this.db.prepare(tasks).all(repo, since, since).map(row => `standing-orders/${String(row["id"])}`);
+    const used = this.db.prepare(`SELECT DISTINCT run.branch AS branch FROM run WHERE run.branch IS NOT NULL AND run.task_ref IN (SELECT ref FROM (${tasks}))`).all(repo, since, since)
+      .map(row => String(row["branch"]));
+    return [...new Set([...own, ...used])];
+  }
+
   // ---- worktree setup (M5.7) ---------------------------------------------
 
   /**
