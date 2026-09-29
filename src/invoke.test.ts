@@ -176,6 +176,36 @@ describe("the invocation gateway", () => {
     expect(existsSync(dirname(childDb!))).toBe(false);
   });
 
+  test("v105: a held session on the plan stays on the plan when a later turn reports no windows (they come only when they move)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "so-held-billing-"));
+    mkdirSync(join(home, ".standing-orders", "keys"), { recursive: true });
+    writeFileSync(join(home, ".standing-orders", "keys", "claude.auth"), "subscription");
+    let stream: ((event: Record<string, unknown>) => void) | undefined;
+    try {
+      const started = await invokeHeldAgent(store, runId, CLAUDE, ["--held"], {
+        socketPath: "/tmp/standing-orders-held-billing.sock", cookie: "cookie", keyHome: home,
+        starter: async (_file, _args, options) => {
+          stream = options.events?.onStreamEvent;
+          return { ok: true, handle: { supervisorPid: 1, agentPgid: 2, writeTurn: () => true, endInput: () => {}, terminate: () => {}, killHard: () => {}, exited: new Promise(() => {}) } };
+        },
+      });
+      expect(started.ok).toBe(true);
+      const init = { type: "system", subtype: "init", apiKeySource: "none", model: "claude-sonnet-5" };
+      const windows = { type: "rate_limit_event", rate_limit_info: { status: "allowed", unifiedWindows: { five_hour: { utilization: 0.2 } } } };
+      const result = { type: "result", subtype: "success", result: "ok", total_cost_usd: 8 };
+      for (const event of [init, windows, result, init, result, init, windows, result]) stream!(event);
+      store.recordUsage(runId, { costUsd: 8 });
+      expect(store.handle.prepare("SELECT microusd, billing FROM run_spend WHERE run = ?").get(runId)).toEqual({ microusd: 0, billing: "subscription" });
+      expect(store.handle.prepare("SELECT billing FROM provider_account WHERE provider = 'claude'").get()?.["billing"]).toBe("subscription");
+      // A named key source later in the session does make it a key.
+      stream!({ ...init, apiKeySource: "apiKeyHelper" });
+      stream!(result);
+      expect(store.handle.prepare("SELECT billing FROM run_spend WHERE run = ?").get(runId)?.["billing"]).toBe("api-key");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test("a held provider keeps its disposable database only until the session exits", async () => {
     let childDb: string | undefined;
     let finish: (value: { code: number | null }) => void = () => {};

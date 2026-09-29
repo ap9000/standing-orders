@@ -4827,6 +4827,9 @@ function initializeStore(db: Database, file: string): Store {
   addColumn(db, "monitoring_status", "target", "TEXT");
   // v105: how a teammate's turn was billed (this computer's Claude sign-in, as last seen).
   addColumn(db, "teammate_turn", "billing", "TEXT");
+  // (A database from an earlier build of v105 made run_spend before these.)
+  addColumn(db, "run_spend", "billing", "TEXT NOT NULL DEFAULT 'subscription' CHECK (billing IN ('subscription', 'api-key'))");
+  addColumn(db, "run_spend", "billing_fixed", "INTEGER NOT NULL DEFAULT 0");
   migrate(db, preflight === null ? null : Math.abs(preflight));
   addColumn(db, "flow_card", "source_json", "TEXT");
   addColumn(db, "flow_card", "owner", "TEXT");
@@ -22531,12 +22534,14 @@ export class Store {
   addTeammateTurn(turn: { teammate: number; card: number | null; model: string; ok: boolean; ms: number; costUsd?: number | null; tokensIn?: number | null; tokensOut?: number | null }, now: Date): void {
     this.db.prepare("INSERT INTO teammate_turn (teammate, card, model, ok, ms, cost_usd, tokens_in, tokens_out, at, billing) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
       .run(turn.teammate, turn.card, turn.model, turn.ok ? 1 : 0, Math.round(turn.ms), turn.costUsd ?? null, turn.tokensIn ?? null, turn.tokensOut ?? null, now.toISOString(), claudeMachineBilling(this.db));
+    this.spendCache = null;
   }
 
   /** v105: a flow's Claude draft, with what the CLI said it cost, billed as the sign-in was. */
   recordDraftSpend(draft: { repo: string | null; model: string | null; costUsd: number | null }, now: Date): void {
     this.db.prepare("INSERT INTO side_spend (kind, repo, provider, model, cost_usd, billing, at) VALUES ('draft', ?, 'claude', ?, ?, ?, ?)")
       .run(draft.repo, draft.model, draft.costUsd, claudeMachineBilling(this.db), now.toISOString());
+    this.spendCache = null;
   }
 
   teammateTurns(teammate: number, since: string): TeammateTurnRow[] {

@@ -724,7 +724,7 @@ export async function invokeHeldAgent(
 
   const heldKey =
     heldMode === "api-key" ? readProviderKey("claude", keyHome) ?? (process.env[PROVIDER_KEY_ENV.claude] || null) : null;
-  const heldSeen = { keySource: null as string | null, model: null as string | null, planWindows: false };
+  const heldSeen = { keySource: null as string | null, model: null as string | null, planWindows: false, decided: false };
   // A session given a key bills the key from its first byte.
   if (heldMode === "api-key") store.fixRunBilling(runId, "api-key", clock());
   const start = starter ?? startClaudeHeldSession;
@@ -797,7 +797,9 @@ export async function invokeHeldAgent(
       ...(readyTimeoutMs === undefined ? {} : { readyTimeoutMs }),
       events: {
         ...events,
-        // v105: the session's billing from its own stream, each turn (a later turn can only make it a key).
+        // v105: the session's billing from its own stream. A sign-in can't change inside one process, and Claude reports
+        // its plan's windows on a process's first answer but later only when they move: so the first answer decides, and
+        // after it only a named key source or a cloud model can make the session a key.
         onStreamEvent: event => {
           if (event["type"] === "system" && event["subtype"] === "init") {
             if (typeof event["apiKeySource"] === "string") heldSeen.keySource = event["apiKeySource"].slice(0, 80);
@@ -805,12 +807,14 @@ export async function invokeHeldAgent(
           } else if (event["type"] === "rate_limit_event") {
             heldSeen.planWindows = true;
           } else if (event["type"] === "result") {
-            const billing = heldMode === "api-key" ? "api-key" : claudeBillingFrom(heldSeen);
+            const billing = heldMode === "api-key" ? "api-key"
+              : !heldSeen.decided ? claudeBillingFrom(heldSeen)
+              : claudeBillingFrom({ ...heldSeen, keySource: heldSeen.keySource === "none" ? null : heldSeen.keySource, planWindows: false }) === "api-key" ? "api-key" : null;
             if (billing !== null) {
               store.fixRunBilling(runId, billing, new Date());
-              if (heldMode === "subscription" && heldKey === null) store.recordProviderBilling("claude", billing, new Date());
+              if (!heldSeen.decided && heldMode === "subscription" && heldKey === null) store.recordProviderBilling("claude", billing, new Date());
             }
-            heldSeen.planWindows = false;
+            heldSeen.decided = true;
           }
           events?.onStreamEvent?.(event);
         },
