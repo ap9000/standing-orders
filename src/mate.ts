@@ -111,6 +111,7 @@ export type MateRefusal =
   | "session-ended"
   | "over-budget"
   | "monthly-budget"
+  | "policy"
   | "invalid-request"
   | "request-changed"
   | "channel";
@@ -139,6 +140,7 @@ export const MATE_REFUSAL_COPY: Record<MateRefusal, string> = {
   "session-ended": "this mate session has ended — mint a new one to continue",
   "over-budget": "the weekly chat spend ceiling would be exceeded",
   "monthly-budget": "a monthly budget this counts toward holds it: used up, or its cost can't be priced yet (the Spend page says which)",
+  policy: "the organisation policy doesn't allow this chat's provider or model (Settings → Policy says which)",
   "invalid-request": "This message could not be identified. Reload the conversation before sending it.",
   "request-changed": "That send was already received with different text or task context. Reload the conversation before sending a new message.",
   channel: "this conversation's connection changed — reconnect it before sending again",
@@ -192,6 +194,9 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
   if (!isVerifiedApprover(who) || !reproveApprover(store, who).ok || who.generation !== session.approverGeneration) return refuse("standing");
   // Ruling 9: the session and the thread are bound to the ceiling this surface holds.
   if (session.ceilingDigest !== who.ceilingDigest || thread.ceilingDigest !== who.ceilingDigest) return refuse("ceiling-changed");
+  // Sprint 8: the lead and project chats run on a provider and model the organisation policy allows, or not at all.
+  const disallowed = store.agentPolicyRefusal(config.provider, config.model);
+  if (disallowed !== null) return { ok: false, refused: "policy", message: disallowed };
   const directProvider = isDirectChatProvider(config.provider) ? config.provider : null;
   const subscriptionProvider = directProvider === null ? config.provider as SubscriptionChatProviderId : null;
   const direct = directProvider !== null;

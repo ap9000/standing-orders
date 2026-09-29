@@ -43,9 +43,14 @@ export const CAPABILITIES: readonly string[] = [
  */
 export const DOCUMENTED_REASONS: readonly string[] = [
   "usage", //             the invocation itself was malformed
+  "database-busy", //     another writer held the selected database for the full wait
   "unknown-task", //      the named task does not exist
+  "timeout", //           task wait reached its caller-supplied deadline
+  "failed", //            the watched attempt or task failed
+  "needs-person", //      the task reached a decision or approval only a person can provide
   "unknown-skill", //     the named guide does not exist (skills get)
   "unconfirmed", //       a preview answered; add --yes to apply
+  "foreign-file", //      an installer target exists but is not managed by it
   "not-an-approver", //   the credential offered does not authenticate
   "held", //              somebody else holds it
   "fenced", //            a newer lease superseded yours — stop

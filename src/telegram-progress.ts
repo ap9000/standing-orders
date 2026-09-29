@@ -108,6 +108,8 @@ export function telegramProgressCard(store: Store, run: Run, taskId: string, pro
   } else if (accessBlocked && holds.some(hold => hold.ownerKind === "backoff")) {
     next = "The worker will retry after a short pause. Check its folder access.";
   }
+  const checkProgress = store.checkProgress(run.id);
+  if (checkProgress !== null) checks = checkProgress.line;
   const publication = store.publicationForRun(run.id);
   const delivery = publication?.remoteState === "MERGED" ? "Merged · Installation not confirmed" : publication?.remoteState === "CLOSED" ? "Pull request closed without merging" : publication?.state === "opened" ? "Pull request open · Not merged" : publication?.state === "pushed" ? "Branch pushed · Pull request pending" : publication?.state === "intended" ? "Publication queued" : publication?.state === "failed" ? "Publication failed · Local result preserved" : built ? "Saved locally · Not published" : null;
   const acceptance = accepted ? (human ? "Accepted by a person · Recorded checks unchanged" : "Accepted with an exception · Recorded checks unchanged") : null;

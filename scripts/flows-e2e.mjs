@@ -51,7 +51,7 @@ mkdirSync(out, { recursive: true });
 const repo = join(root, "shop"), state = join(root, "state"), db = join(state, "orders.db");
 mkdirSync(repo); mkdirSync(state);
 const started = Date.now();
-const say = line => { const stamp = `${Math.round((Date.now() - started) / 1000)}s`.padStart(6); console.log(`${stamp}  ${line}`); };
+const say = line => { const stamp = `${Math.round((Date.now() - started) / 1000)}s`.padStart(6); console.log(`[flows] ${stamp}  ${line}`); };
 
 // ------------------------------------------------------------------ helpers
 

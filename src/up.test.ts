@@ -88,6 +88,37 @@ describe("standing-orders up", () => {
     expect(String(again["passwordFile"]).endsWith("up-login.txt")).toBe(true);
   });
 
+  test("--capacity sets the built-in worker's capacity, in the ledger, and a restart keeps it", async () => {
+    expect(await up(["--capacity", "3"], PORT + 11)).toBe(0);
+    const answer = envelope();
+    const runner = String(answer["runner"]);
+    let store = openStore(db);
+    try {
+      expect(store.getRunner(runner)?.runner.capacity).toBe(3);
+      const entry = store.handle.prepare("SELECT actor, action, detail FROM action_ledger WHERE action = ?").get(`worker capacity: ${runner}`);
+      expect(entry).toMatchObject({ actor: String(answer["approver"]), detail: "1 → 3" });
+    } finally {
+      store.close();
+    }
+    lines = [];
+    expect(await up([], PORT + 12)).toBe(0);
+    store = openStore(db);
+    try {
+      expect(store.getRunner(runner)?.runner.capacity).toBe(3);
+    } finally {
+      store.close();
+    }
+  });
+
+  test("--capacity must be a whole number from 1 to 64, refused before anything starts", async () => {
+    for (const bad of ["0", "65", "1.5", "two"]) {
+      lines = [];
+      expect(await up(["--capacity", bad], PORT + 13)).toBe(2);
+      expect(envelope()).toMatchObject({ ok: false, reason: "usage" });
+    }
+    expect(existsSync(join(base, "up-login.txt"))).toBe(false);
+  });
+
   test("the saved projects folder reconnects projects when started outside a repository", async () => {
     expect(await up(["--project-root", base], PORT + 7)).toBe(0);
     lines = [];

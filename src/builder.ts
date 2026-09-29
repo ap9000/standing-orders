@@ -44,7 +44,7 @@ import { stopRequestedFor, stopWords, underStopWatch } from "./task-control.js";
 import { witnessedRunner } from "./process-custody.js";
 import { runWithIsolatedDatabase } from "./child-database.js";
 import { recordWorktreeProcess } from "./worktree.js";
-import type { Decision, SteerNote, Store } from "./store.js";
+import type { Decision, RunCheckSuite, SteerNote, Store } from "./store.js";
 import { approvalOf, digestOf, profileDigestOf, chainDigestOf, entryDigestOf, routeParityProblem, type ExecutionProfile, type Scope, profileFromJson } from "./scope.js";
 import { legOf, routeDigestOf, routeFromJson, type RouteStamp } from "./phase-routing.js";
 import { execFileSync } from "node:child_process";
@@ -58,6 +58,7 @@ import { invokeAgent, type AgentOutcome, type InvokeResult } from "./invoke.js";
 import { TOKEN_ENV as TELEGRAM_TOKEN_ENV } from "./telegram.js";
 import { OPENROUTER_ENV_KEY, auditOf, ALL_CREDENTIAL_ENV } from "./provider.js";
 import { openLiveLog } from "./live.js";
+import { CheckProgressTracker } from "./check-progress.js";
 import {
   captureParkEvidence,
   captureTerminalDiff,
@@ -272,6 +273,8 @@ export type BuildResult =
 
 export type BuildRefusal =
   | "skills-unavailable"
+  /** Sprint 8: the organisation policy stops this provider, model or permission level. */
+  | "policy"
   | "unapproved"
   | "scope-changed"
   | "stale-approval"
@@ -781,6 +784,22 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
         reason: "stale-approval",
         message: `${taskId}: run #${request.runId} was admitted under ${existing.routeDigest} but the proven profile is profile:${provenProfileDigest} — refusing to run (stale-approval)`,
       };
+    }
+  }
+
+  // THE ORGANISATION POLICY (sprint 8), the last look before money on every build road — the tick, a fallback entry,
+  // a race lane, an attended session: a provider or model it doesn't allow never spawns; terms above its permission
+  // ceiling run lowered (unattended work, said on the run) or, for an attended session the person signed at exactly
+  // these terms, are refused. The sealed terms and their stamps are untouched: only what this invocation runs with.
+  {
+    const attendedRefused = attended === undefined ? null : store.attendedPolicyRefusal(effective.profile);
+    if (attendedRefused !== null) return { ok: false, reason: "policy", message: `${taskId}: ${attendedRefused}` };
+    const verdict = store.runPolicy(effective.profile);
+    if (!verdict.ok) return { ok: false, reason: "policy", message: `${taskId}: ${verdict.message}` };
+    if (verdict.lowered !== null) {
+      effective = { ...effective, profile: verdict.profile, skipPermissions: profileWantsSkip(verdict.profile) };
+      store.recordAction({ at: now.toISOString(), actor: "standing-orders", repo: store.refForId(taskRef)?.repo ?? null, taskId, runId: request.runId,
+        action: "permission lowered by policy", outcome: "lowered", source: "policy", detail: verdict.lowered });
     }
   }
 
@@ -2520,6 +2539,14 @@ async function settleProof(
   let verifyCommand: VerifyCommandFacts;
   const checkLog: string[] = [];
   const checkOutcomes: string[] = [];
+  const checkSuites: RunCheckSuite[] = [];
+  const noteCheckSuite = (name: string, result: ExecResult): void => {
+    checkSuites.push({
+      name,
+      status: result.notFound ? "not-run" : result.code === 0 ? "passed" : "failed",
+      exitCode: result.notFound ? null : result.code,
+    });
+  };
   const recordCheckNote = (note: string): void => {
     checkLogSourceBodyBytes += Buffer.byteLength(note);
     checkLog.push(note);
@@ -2545,7 +2572,11 @@ async function settleProof(
   } else {
     const verifyRunner = request.verify ?? run;
     const verifyShell = approvedCommandShell(configured.command);
+    const checkProgress = new CheckProgressTracker(snapshot => {
+      store.saveCheckProgress(runId, snapshot, now());
+    });
     const runVerification = async (label: string): Promise<ExecResult> => {
+      const streamed = { stdout: false, stderr: false };
       // The check runs under the stop watch (v52), owned by this run.
       const result = await underStopWatch(store, runId, () => runWithIsolatedDatabase(witnessedRunner(store, runId, now, verifyRunner), verifyShell.file, verifyShell.args, {
         cwd: worktree,
@@ -2559,8 +2590,15 @@ async function settleProof(
         },
         envAllowlist: SETUP_ENV_ALLOWLIST,
         omitEnv: SETUP_ENV_DENYLIST,
+        onStdout: chunk => { streamed.stdout = true; checkProgress.feed(chunk, "stdout"); },
+        onStderr: chunk => { streamed.stderr = true; checkProgress.feed(chunk, "stderr"); },
       }));
+      if (!streamed.stdout) checkProgress.feed(result.stdout, "stdout");
+      if (!streamed.stderr) checkProgress.feed(result.stderr, "stderr");
+      checkProgress.feed("\n", "stdout");
+      checkProgress.feed("\n", "stderr");
       checkOutcomes.push(attemptOutcome(label, result));
+      noteCheckSuite(label, result);
       checkLog.push(attemptLog(label, configured.command, result));
       return result;
     };
@@ -2632,6 +2670,7 @@ async function settleProof(
               omitEnv: SETUP_ENV_DENYLIST,
             }));
             checkOutcomes.push(attemptOutcome("Automatic recovery · approved project setup", restored));
+            noteCheckSuite("Automatic recovery · approved project setup", restored);
             checkLog.push(attemptLog("Automatic recovery · approved project setup", liveBeforeSetup.command, restored));
             if (restored.notFound || restored.timedOut || restored.code !== 0) {
               verifyCommand = { configured: true, ran: false, attemptFailed: true, failure: "setup-failed" };
@@ -2669,6 +2708,7 @@ async function settleProof(
         }
       }
     }
+    checkProgress.finish();
   }
   if (configured !== null && checkLog.length > 0) {
     const summary = `=== Attempt summary ===\n${checkOutcomes.length === 0 ? "No command started." : checkOutcomes.map(one => `- ${one}`).join("\n")}`;
@@ -2696,6 +2736,26 @@ async function settleProof(
   }
 
   if (configured !== null && checkLog.length > 0) sealVerificationReceipt(store, root, runId, sealedHead, configured, verifyCommand, now());
+
+  // The receipt above remains the evidence. This compact projection is what
+  // `status` and `task wait` can read without opening logs. A reused gate did
+  // not execute here, so its label says so instead of implying a fresh run.
+  const checkStatus = verifyCommand.configured === false ? "not-run" as const
+    : verifyCommand.ran ? verifyCommand.exitCode === 0 ? "passed" as const : "failed" as const
+    : checkSuites.some(one => one.status === "failed") ? "failed" as const
+    : "not-run" as const;
+  const suites: RunCheckSuite[] = checkSuites.length > 0 ? checkSuites : verifyCommand.configured === false ? [] : [{
+    name: reused === null ? "Project check" : "Project check (reused)",
+    status: checkStatus,
+    exitCode: "ran" in verifyCommand && verifyCommand.ran ? verifyCommand.exitCode : null,
+  }];
+  const checkExitCode = "ran" in verifyCommand && verifyCommand.ran ? verifyCommand.exitCode
+    : [...suites].reverse().find(one => one.status === "failed")?.exitCode ?? null;
+  store.recordRunCheck(runId, {
+    status: checkStatus,
+    exitCode: checkExitCode,
+    suites,
+  }, now());
 
   // 4. The sealed diff-stat was restated above, before the correction; it
   // is re-read now, after the gate, and the cached facts are adjudicated
@@ -2910,6 +2970,8 @@ async function ingestPark(args: {
     // v105: a repair turn spends too — a budget used up since the build began stops further turns (billed to a key).
     // It bills as the attempt it mends did (a pinned chain entry's key included).
     if (store.budgetGate(clock())({ ...store.budgetSubject(request.taskRef), agents: [{ provider: repairProvider, billing: store.runBilling(request.runId) ?? store.agentsFor([repairProvider])[0]!.billing }] }).over !== null) break;
+    // Sprint 8: nor does a repair run on a provider or model the organisation policy doesn't allow.
+    if (store.agentPolicyRefusal(repairProvider, repairModel ?? null) !== null) break;
     const admitted = admitProtocolRepair(store, request, args.profile, sessionId, clock);
     if (!admitted.ok) return admitted;
     const repairRun = admitted.runId;

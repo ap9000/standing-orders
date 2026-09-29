@@ -5,7 +5,13 @@
  * (scripts/e2e-kit.mjs). Flows have their own run (scripts/flows-e2e.mjs);
  * this one covers the rest, and the newer flow features on top.
  *
- *   npm run e2e:app      (or: node scripts/app-e2e.mjs [--only <pattern>] [--keep] [--skip-build])
+ *   npm run e2e:app      (or: node scripts/app-e2e.mjs [--group <name>] [--only <pattern>] [--keep] [--skip-build])
+ *   npm run e2e:app:parallel      (every group at once, each in its own world)
+ *   node scripts/app-e2e.mjs --groups      (the groups and what each covers)
+ *
+ * The journeys are in groups. Each group runs in a world of its own, so the
+ * groups can run at once; a journey that needs an earlier one is in its group.
+ * With no --group, every journey runs in one world, one after another.
  *
  * Needs: a built dist/, `claude` logged in, git, npm, sqlite3; Docker for the
  * real mail server (the email inbox check is skipped without it); python3
@@ -17,13 +23,31 @@ import { createServer as createHttpServer } from "node:http";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createHash, generateKeyPairSync, randomBytes, sign as signWith } from "node:crypto";
-import { flag, freePort, mailSink, Skip, sleep, world } from "./e2e-kit.mjs";
+import { flag, freePort, mailSink, option, Skip, sleep, world } from "./e2e-kit.mjs";
 
 const skipBuild = flag("--skip-build");
 
+/** The groups, in the order they're listed, with how many journeys each has (checked at the end of every run). */
+const GROUPS = {
+  console: { journeys: 20, about: "Sign-in, pages, sessions and tokens, approval rules and audit, monitoring, spend, the command line, projects, knowledge, skills, tools, models, routines, settings, search, identity provider, the demo, signing out" },
+  task: { journeys: 4, about: "A task from an idea to an accepted result, then sent back twice" },
+  builds: { journeys: 2, about: "A build that asks a question, and a build stopped and resumed" },
+  lead: { journeys: 6, about: "The lead chat, and AI teammates (Maya) the lead then changes" },
+  rosa: { journeys: 5, about: "A teammate that acts with a real tool: its rules, memory, routine, week and undo" },
+  mail: { journeys: 2, about: "A real mail server: the email inbox and follow-ups (needs Docker)" },
+  flows: { journeys: 5, about: "Code steps and schedules in flows, the live canvas, starter kits and one-click connections" },
+};
+const group = option("--group", null);
+if (flag("--groups")) {
+  const list = Object.entries(GROUPS).map(([name, one]) => ({ name, journeys: one.journeys, about: one.about }));
+  console.log(flag("--json") ? JSON.stringify(list) : list.map(one => `${one.name.padEnd(8)} ${String(one.journeys).padStart(2)} journeys  ${one.about}`).join("\n"));
+  process.exit(0);
+}
+if (group !== null && !(group in GROUPS)) { console.error(`No group "${group}". The groups: ${Object.keys(GROUPS).join(", ")}`); process.exit(2); }
+
 // The real mail server for the email inbox: GreenMail in Docker, over TLS on 127.0.0.1:993 with a
 // certificate made for this run (the console and worker trust it, and only it, beside the usual ones).
-const docker = (() => { try { execFileSync("docker", ["info"], { stdio: "ignore", timeout: 20_000 }); return true; } catch { return false; } })();
+const docker = (group === null || group === "mail") && (() => { try { execFileSync("docker", ["info"], { stdio: "ignore", timeout: 20_000 }); return true; } catch { return false; } })();
 let mailCert = null;
 const certDir = join(process.env.TMPDIR ?? "/tmp", `so-e2e-mail-${randomBytes(4).toString("hex")}`);
 if (docker) {
@@ -116,7 +140,7 @@ const idpServer = createHttpServer(async (request, response) => {
 });
 await new Promise(done => idpServer.listen(idp.port, "127.0.0.1", done));
 
-const w = await world("app", {
+const w = await world(group === null ? "app" : `app-${group}`, {
   env: { STANDING_ORDERS_TEST_CONNECT: `stripe|Stripe|${standBase}/mcp`, ...(mailCert === null ? {} : { NODE_EXTRA_CA_CERTS: mailCert }) },
   seed: repo => {
     mkdirSync(join(repo, "scripts"), { recursive: true });
@@ -125,6 +149,14 @@ const w = await world("app", {
   },
 });
 const { base, page, cli, rows, until, check, shot, json, signIn, askLead, confirmCard, auth, repo } = w;
+const placed = new Map();
+/** A journey in its group: it runs when its group (or every group) runs, and what it needs is in the same group. */
+function journey(name, title, needs, body) {
+  const elsewhere = needs.filter(one => placed.get(one) !== name);
+  if (!(name in GROUPS) || placed.has(title) || elsewhere.length > 0) throw new Error(`"${title}" in group ${name}: ${elsewhere.length > 0 ? `needs ${elsewhere.join(", ")} from another group` : "an unknown group, or a second journey of that name"}`);
+  placed.set(title, name);
+  return group === null || group === name ? check(title, needs, body) : null;
+}
 const flowView = id => json(`/flows/${id}?format=json`);
 const csrfOf = async on => on.locator('input[name="csrf"]').first().inputValue();
 const post = async (path, form, on = page) => {
@@ -156,7 +188,7 @@ async function addCard(title, details) {
 
 // ------------------------------------------------------------------ the console itself
 
-await check("A wrong password is refused, and a signed-out visitor is sent to sign in", [], async () => {
+await journey("console", "A wrong password is refused, and a signed-out visitor is sent to sign in", [], async () => {
   const wrong = await w.browser.newContext();
   const stranger = await wrong.newPage();
   await stranger.goto(`${base}/login`);
@@ -171,7 +203,7 @@ await check("A wrong password is refused, and a signed-out visitor is sent to si
   await wrong.close();
 });
 
-await check("Every main page opens without an error, in the one workspace look, on desktop and on a phone", [], async () => {
+await journey("console", "Every main page opens without an error, in the one workspace look, on desktop and on a phone", [], async () => {
   const paths = ["/chat", "/work", "/tasks", "/tasks/new", "/projects", "/flows", `/settings/knowledge?repo=${encodeURIComponent(repo)}`, "/settings", "/settings/models", "/settings/skills", `/settings/tools?repo=${encodeURIComponent(repo)}`, "/routines", "/recipes",
     "/inbox", "/board", "/next", "/done", "/system", "/workbench", "/code", "/kits", "/teammates", "/fleet", "/people"];
   const broken = [];
@@ -201,7 +233,7 @@ await check("Every main page opens without an error, in the one workspace look, 
   return { pages: paths.length * 2 + 1 };
 });
 
-await check("Sign-in hardening and the audit trail: five wrong passwords lock a name, and its sign-ins and a policy change (with what changed) are in the action ledger and its CSV; /healthz answers", [], async () => {
+await journey("console", "Sign-in hardening and the audit trail: five wrong passwords lock a name, and its sign-ins and a policy change (with what changed) are in the action ledger and its CSV; /healthz answers", [], async () => {
   // A throwaway account, so the lock touches no one else's checks.
   const casey = `casey-${randomBytes(3).toString("hex")}`, secret = `casey-${randomBytes(8).toString("hex")}`;
   cli(["approver", "add", casey, "--password", secret, ...auth]);
@@ -237,7 +269,7 @@ await check("Sign-in hardening and the audit trail: five wrong passwords lock a 
   return { locked: casey };
 });
 
-await check("Sessions and API tokens: a read token made in Settings is shown once on a page with no script, a script reads with it but can't file work, and once revoked it names no one; this browser is in the sessions list", [], async () => {
+await journey("console", "Sessions and API tokens: a read token made in Settings is shown once on a page with no script, a script reads with it but can't file work, and once revoked it names no one; this browser is in the sessions list", [], async () => {
   await page.goto(`${base}/settings/sessions`);
   await page.waitForSelector("[data-session]");
   if (!/This browser/.test(await page.locator(".credentials").innerText())) throw new Error("the sessions list doesn't mark this browser");
@@ -264,7 +296,7 @@ await check("Sessions and API tokens: a read token made in Settings is shown onc
   return { token: "revoked" };
 });
 
-await check("Approval rules: with 'someone other than the requester' on, the task alex filed can't be approved by alex; sam approves it, and the task says who filed it", [], async () => {
+await journey("console", "Approval rules: with 'someone other than the requester' on, the task alex filed can't be approved by alex; sam approves it, and the task says who filed it", [], async () => {
   await page.goto(`${base}/settings/approval?repo=${encodeURIComponent(repo)}`);
   await page.locator('.approval-rules input[name="not_requester"]').check();
   await page.locator('.approval-rules input[name="password"]').fill(w.passwords.alex);
@@ -297,7 +329,7 @@ await check("Approval rules: with 'someone other than the requester' on, the tas
   }
 });
 
-await check("Audit: the ledger chain verifies, a checkpoint made on the ledger page verifies from the command line, and the task's evidence pack names who filed and who approved it", [], async () => {
+await journey("console", "Audit: the ledger chain verifies, a checkpoint made on the ledger page verifies from the command line, and the task's evidence pack names who filed and who approved it", [], async () => {
   await page.goto(`${base}/ledger`);
   if (await page.locator('[data-ledger-chain="ok"]').count() !== 1) throw new Error(`the chain: ${(await page.locator(".ledger-chain-panel").innerText()).slice(0, 200)}`);
   await Promise.all([page.waitForNavigation(), page.locator('.ledger-checkpoint-form button').click()]);
@@ -328,7 +360,7 @@ await check("Audit: the ledger chain verifies, a checkpoint made on the ledger p
   return { checkpoint: checkpoint.split(":")[0], entries: json.ledger.entries.length };
 });
 
-await check("Monitoring: a webhook set in Settings gets the audit stream, signed with the secret shown once; /metrics answers an operator", [], async () => {
+await journey("console", "Monitoring: a webhook set in Settings gets the audit stream, signed with the secret shown once; /metrics answers an operator", [], async () => {
   const got = [];
   const receiver = createHttpServer((request, response) => {
     let body = "";
@@ -374,7 +406,7 @@ await check("Monitoring: a webhook set in Settings gets the audit stream, signed
   }
 });
 
-await check("Spend: the month's cost shows by project and person; a budget set on the Spend page is listed, and the month downloads as CSV", [], async () => {
+await journey("console", "Spend: the month's cost shows by project and person; a budget set on the Spend page is listed, and the month downloads as CSV", [], async () => {
   await page.goto(`${base}/spend`);
   await page.locator(".spend-total").waitFor({ timeout: 15_000 });
   const add = page.locator("details", { hasText: "Add a budget" });
@@ -404,7 +436,7 @@ await check("Spend: the month's cost shows by project and person; a budget set o
   return { budget: "$500 a month" };
 });
 
-await check("The command line answers: the task list, the approvers, the project's check, and help", [], async () => {
+await journey("console", "The command line answers: the task list, the approvers, the project's check, and help", [], async () => {
   const list = cli(["task", "list"]);
   const people = cli(["approver", "list"]);
   const verify = cli(["verify", "show", "--repo", repo], { json: false });
@@ -441,7 +473,7 @@ async function builtAndChecked(id, timeoutMs = 600_000) {
 }
 
 let firstTask = null;
-await check("File a task in the console; the planner (Claude) drafts its scope; approve it with your password", [], async () => {
+await journey("task", "File a task in the console; the planner (Claude) drafts its scope; approve it with your password", [], async () => {
   await page.goto(`${base}/chat`);
   await page.click("a.so-new-task");
   await page.waitForSelector('form[action="/tasks/add"]');
@@ -458,7 +490,7 @@ await check("File a task in the console; the planner (Claude) drafts its scope; 
   return { task: firstTask, plan: planned.plan, goal: scope.goal.slice(0, 160) };
 });
 
-await check("Claude builds it, the project's checks pass, and the result shows what changed; mark it complete", ["File a task in the console; the planner (Claude) drafts its scope; approve it with your password"], async () => {
+await journey("task", "Claude builds it, the project's checks pass, and the result shows what changed; mark it complete", ["File a task in the console; the planner (Claude) drafts its scope; approve it with your password"], async () => {
   const run = await builtAndChecked(firstTask);
   const diff = execFileSync("git", ["-C", repo, "diff", "main", `refs/heads/${rows(`SELECT branch FROM run WHERE id = ${run.id}`)[0].branch}`, "--", "src/math.js"], { encoding: "utf8" });
   if (!/subtract/.test(diff)) throw new Error(`the build's branch doesn't add subtract: ${diff.slice(0, 300)}`);
@@ -497,7 +529,7 @@ async function sendBack(id, note) {
 }
 const branchFile = (runId, file) => execFileSync("git", ["-C", repo, "show", `refs/heads/${rows(`SELECT branch FROM run WHERE id = ${runId}`)[0].branch}:${file}`], { encoding: "utf8" });
 
-await check("Send it back with a note: the revision is approved again and rebuilt with the fix", ["Claude builds it, the project's checks pass, and the result shows what changed; mark it complete"], async () => {
+await journey("task", "Send it back with a note: the revision is approved again and rebuilt with the fix", ["Claude builds it, the project's checks pass, and the result shows what changed; mark it complete"], async () => {
   const revision = await sendBack(firstTask, "The subtract test should also check a negative result: subtract(2, 5) is -3.");
   await approveOnPage(revision);
   const built = await builtAndChecked(revision);
@@ -506,7 +538,7 @@ await check("Send it back with a note: the revision is approved again and rebuil
   return { revision, run: built.id };
 });
 
-await check("Send it back asking for more than the plan allows: the planner adds it, you approve the change, and it's built", ["Send it back with a note: the revision is approved again and rebuilt with the fix"], async () => {
+await journey("task", "Send it back asking for more than the plan allows: the planner adds it, you approve the change, and it's built", ["Send it back with a note: the revision is approved again and rebuilt with the fix"], async () => {
   const done = rows(`SELECT t.external_id AS id FROM task_ref t WHERE t.revision_of = '${firstTask}' ORDER BY t.id DESC LIMIT 1`)[0]?.id;
   const child = await sendBack(done, "Also add multiply(a, b), with its own test.");
   const scope = rows(`SELECT goal, acceptance_json FROM task_scope WHERE task_id = '${child}'`)[0];
@@ -536,7 +568,7 @@ await check("Send it back asking for more than the plan allows: the planner adds
   return { revision: child, change: reason.replace(/\s+/g, " ").slice(0, 240), run: built.id };
 });
 
-await check("A build stops to ask a question the plan leaves open; you answer on the decision page and it carries on", [], async () => {
+await journey("builds", "A build stops to ask a question the plan leaves open; you answer on the decision page and it carries on", [], async () => {
   const id = "round";
   cli(["task", "add", "Add a round2 function", "--id", id, "--repo", repo, ...auth]);
   cli(["task", "scope", id, "--goal", "Add round2(x) to src/math.js (round to 2 decimal places) with a test in test/math.test.js. Whether an exact half rounds up or to the nearest even digit is the operator's call and is not decided yet: before writing any code, stop and ask the operator with two options (half up, half to even), then build what they choose.", "--acceptance", "round2 follows the operator's answer, with a test|check", ...auth]);
@@ -561,7 +593,7 @@ await check("A build stops to ask a question the plan leaves open; you answer on
   return { question: asked.question.slice(0, 160), answer: labels[pick].trim(), run: built.id };
 });
 
-await check("Stop a build while it runs, then resume it with your password; it finishes", [], async () => {
+await journey("builds", "Stop a build while it runs, then resume it with your password; it finishes", [], async () => {
   const id = "divide";
   cli(["task", "add", "Add a divide function", "--id", id, "--repo", repo, ...auth]);
   cli(["task", "scope", id, "--goal", "Add divide(a, b) to src/math.js, throwing on division by zero, with tests for both in test/math.test.js.", "--acceptance", "divide works and refuses zero|check", ...auth]);
@@ -590,7 +622,8 @@ await check("Stop a build while it runs, then resume it with your password; it f
 
 // ------------------------------------------------------------------ the lead
 
-await check("Turn the lead chat on (first-run setup, with your password)", [], async () => {
+let leadChatOn = false;
+async function turnLeadChatOn() {
   await page.goto(`${base}/chat`);
   await page.selectOption('form[action="/chat/config"] select[name="provider"]', "claude-subscription");
   await page.fill('form[action="/chat/config"] input[name="model"]', "sonnet");
@@ -598,15 +631,17 @@ await check("Turn the lead chat on (first-run setup, with your password)", [], a
   await Promise.all([page.waitForNavigation(), page.click('form[action="/chat/config"] button[type="submit"]')]);
   await page.goto(`${base}/chat`);
   await page.waitForSelector("[data-workspace-composer] textarea", { timeout: 15_000 });
-});
+  leadChatOn = true;
+}
+await journey("lead", "Turn the lead chat on (first-run setup, with your password)", [], turnLeadChatOn);
 
-await check("The lead answers a question about the project from its files (real Claude turn)", ["Turn the lead chat on (first-run setup, with your password)"], async () => {
+await journey("lead", "The lead answers a question about the project from its files (real Claude turn)", ["Turn the lead chat on (first-run setup, with your password)"], async () => {
   const { text } = await askLead("What does src/math.js export? One line.");
   if (!/add/i.test(text)) throw new Error(`the answer doesn't mention add: ${text.slice(0, 300)}`);
   return { answer: text.slice(0, 200) };
 });
 
-await check("The lead files a task from plain words, as a card you confirm (real Claude turn)", ["The lead answers a question about the project from its files (real Claude turn)"], async () => {
+await journey("lead", "The lead files a task from plain words, as a card you confirm (real Claude turn)", ["The lead answers a question about the project from its files (real Claude turn)"], async () => {
   const { reply } = await askLead("File a task in this project to add a short usage section about add() to README.md. Just file it, no need to ask.");
   const card = reply.locator('[data-view="chat-card"][data-card-kind="task"][data-card-state="pending"]').first();
   await card.waitFor({ timeout: 20_000 });
@@ -619,7 +654,7 @@ await check("The lead files a task from plain words, as a card you confirm (real
 
 // ------------------------------------------------------------------ projects, knowledge, skills, tools, models
 
-await check("The lead draws a follow-up flow from plain words: it emails, waits for a reply, and nudges when none comes (real Claude turn)", ["The lead answers a question about the project from its files (real Claude turn)"], async () => {
+await journey("lead", "The lead draws a follow-up flow from plain words: it emails, waits for a reply, and nudges when none comes (real Claude turn)", ["The lead answers a question about the project from its files (real Claude turn)"], async () => {
   const before = rows("SELECT COALESCE(MAX(id), 0) AS id FROM flow")[0].id;
   const { reply } = await askLead("Make a flow called Quote follow-up in this project: email the customer our quote, wait 3 days for them to reply, and if they don't, send them a short reminder. Replies go to a holding step called Replied. Just draft it, no need to ask.");
   const card = reply.locator('[data-view="chat-card"][data-card-state="pending"]').first();
@@ -635,7 +670,7 @@ await check("The lead draws a follow-up flow from plain words: it emails, waits 
   return { steps: stages.map(one => `${one.title} (${one.kind})`).join(" → ") };
 });
 
-await check("Projects: the project is listed and opens", [], async () => {
+await journey("console", "Projects: the project is listed and opens", [], async () => {
   await page.goto(`${base}/projects`);
   const row = page.locator(`li[data-project="${repo}"]`);
   await row.waitFor({ timeout: 10_000 });
@@ -645,7 +680,7 @@ await check("Projects: the project is listed and opens", [], async () => {
   if (!/Open now/.test(await page.locator(`li[data-project="${repo}"]`).innerText())) throw new Error("the project isn't the open one");
 });
 
-await check("Knowledge: instructions saved for a project are kept for future tasks", [], async () => {
+await journey("console", "Knowledge: instructions saved for a project are kept for future tasks", [], async () => {
   await page.goto(`${base}/settings/knowledge?repo=${encodeURIComponent(repo)}`);
   await page.evaluate(() => { for (const one of document.querySelectorAll("details")) one.open = true; });
   await page.fill('textarea[name="instructions"]', "Use plain ES modules. Every function gets a test.");
@@ -655,7 +690,7 @@ await check("Knowledge: instructions saved for a project are kept for future tas
   if (!/Every function gets a test/.test(await page.locator("body").innerText())) throw new Error("the instructions aren't shown back");
 });
 
-await check("Skills: a pasted skill joins the library and can be turned on", [], async () => {
+await journey("console", "Skills: a pasted skill joins the library and can be turned on", [], async () => {
   await page.goto(`${base}/settings/skills?repo=${encodeURIComponent(repo)}`);
   await page.getByText("Add skill", { exact: true }).first().click();
   const form = page.locator("form[data-skill-import]");
@@ -671,7 +706,7 @@ await check("Skills: a pasted skill joins the library and can be turned on", [],
   if (!/Enabled/.test(await page.locator("article[id^='skill-']").first().innerText())) throw new Error("the skill didn't turn on");
 });
 
-await check("Tools: a project's own MCP tool is added (with your password) and tested", [], async () => {
+await journey("console", "Tools: a project's own MCP tool is added (with your password) and tested", [], async () => {
   const echo = join(w.root, "echo-mcp.mjs");
   writeFileSync(echo, `import { createInterface } from "node:readline";
 const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\\n");
@@ -696,7 +731,7 @@ createInterface({ input: process.stdin }).on("line", line => {
   if (!/echo works: 1 tool/.test(tested)) throw new Error(`testing said: ${tested}`);
 });
 
-await check("Models: Check now reads the live model lists", [], async () => {
+await journey("console", "Models: Check now reads the live model lists", [], async () => {
   await page.goto(`${base}/settings/models`);
   await Promise.all([page.waitForNavigation(), page.click('form[action="/settings/models/check"] button')]);
   const said = await page.locator('p[role="status"]').first().innerText().catch(() => "");
@@ -706,7 +741,7 @@ await check("Models: Check now reads the live model lists", [], async () => {
 
 // ------------------------------------------------------------------ routines, settings, search, signing out
 
-await check("Routines: a standing order is filed, approved with your password, and run now files its task", [], async () => {
+await journey("console", "Routines: a standing order is filed, approved with your password, and run now files its task", [], async () => {
   await page.goto(`${base}/routines`);
   const form = page.locator('form[action="/routines/add"]');
   await form.waitFor({ timeout: 10_000 });
@@ -728,7 +763,7 @@ await check("Routines: a standing order is filed, approved with your password, a
   return { routine: routine.id, task: fired.id };
 });
 
-await check("Settings: the theme switches to dark and the accent to Emerald, and both stay", [], async () => {
+await journey("console", "Settings: the theme switches to dark and the accent to Emerald, and both stay", [], async () => {
   await page.goto(`${base}/settings`);
   await Promise.all([page.waitForNavigation(), page.click('form[action="/settings/appearance"] button[value="dark"]')]);
   await page.click('[data-accent-picker] button[data-preset="emerald"]');
@@ -742,7 +777,7 @@ await check("Settings: the theme switches to dark and the accent to Emerald, and
   await page.locator("[data-accent-status]", { hasText: "Saved" }).waitFor({ timeout: 10_000 });
 });
 
-await check("Search finds the project and a task", [], async () => {
+await journey("console", "Search finds the project and a task", [], async () => {
   // Search is left off pages that show a password field; Flows has none.
   await page.goto(`${base}/flows`);
   await page.click("button.so-command-trigger");
@@ -756,7 +791,7 @@ await check("Search finds the project and a task", [], async () => {
 // ------------------------------------------------------------------ code in flows
 
 let codeFlow = null;
-await check("Code steps: a Python file and a Node script get the card, pass on what they print, pick the next zone, and get a secret", [], async () => {
+await journey("flows", "Code steps: a Python file and a Node script get the card, pass on what they print, pick the next zone, and get a secret", [], async () => {
   codeFlow = await newFlow("Leads", [
     { ...none, id: "size", title: "Size it up", kind: "check", script: "size", runIn: "folder", routes: [{ answer: "Big", to: "call" }, { answer: "Small", to: "note" }], zone: zone(0), next: null, onFail: "inbox" },
     { ...none, id: "call", title: "Call them", kind: "inbox", zone: zone(360), next: null, onFail: null },
@@ -811,7 +846,7 @@ await check("Code steps: a Python file and a Node script get the card, pass on w
   return { waited: waiting.waiting, small: said("note"), big: big.stage };
 });
 
-await check("A schedule runs a script and makes a card of each item it prints, once (Run now)", ["Code steps: a Python file and a Node script get the card, pass on what they print, pick the next zone, and get a secret"], async () => {
+await journey("flows", "A schedule runs a script and makes a card of each item it prints, once (Run now)", ["Code steps: a Python file and a Node script get the card, pass on what they print, pick the next zone, and get a secret"], async () => {
   await page.click("[data-open-scripts]");
   if (!(await page.locator("[data-script-form]").isVisible())) await page.click('[data-flow-scripts] button:has-text("New script")');
   const form = page.locator("[data-script-form]");
@@ -872,7 +907,7 @@ async function mailServer() {
   return { smtp, inbox, stop };
 }
 
-await check("Email inbox: a real email becomes a card, Claude drafts a reply, the owner approves it, and it arrives in the sender's thread", [], async () => {
+await journey("mail", "Email inbox: a real email becomes a card, Claude drafts a reply, the owner approves it, and it arrives in the sender's thread", [], async () => {
   const mail = await mailServer();
   const smtp = mail.smtp;
   try {
@@ -931,7 +966,7 @@ await check("Email inbox: a real email becomes a card, Claude drafts a reply, th
   }
 });
 
-await check("Follow-ups: a card emails someone and waits; their reply moves it on (a stranger's doesn't), one nobody answers gets a nudge in the same thread, and a stalled decision reminds its owner and moves on", ["Email inbox: a real email becomes a card, Claude drafts a reply, the owner approves it, and it arrives in the sender's thread"], async () => {
+await journey("mail", "Follow-ups: a card emails someone and waits; their reply moves it on (a stranger's doesn't), one nobody answers gets a nudge in the same thread, and a stalled decision reminds its owner and moves on", ["Email inbox: a real email becomes a card, Claude drafts a reply, the owner approves it, and it arrives in the sender's thread"], async () => {
   const mail = await mailServer();
   try {
     const WAIT = 3;
@@ -1003,7 +1038,7 @@ await check("Follow-ups: a card emails someone and waits; their reply moves it o
 
 // ------------------------------------------------------------------ two people on one flow
 
-await check("AI teammates: Maya (a support rep) answers a question card, approves a small refund on its own, brings the big one to you, and stops while paused (real Claude turns)", [], async () => {
+await journey("lead", "AI teammates: Maya (a support rep) answers a question card, approves a small refund on its own, brings the big one to you, and stops while paused (real Claude turns)", [], async () => {
   // A teammate from the Support rep template, on the Teammates page; its soul file saves as a new version.
   await page.goto(`${base}/teammates`);
   await page.selectOption('form[data-new-teammate] select[name="template"]', "support");
@@ -1079,7 +1114,7 @@ await check("AI teammates: Maya (a support rep) answers a question card, approve
   return { reply: reply.slice(0, 120), summary: (await page.locator(".teammate-summary").innerText()).slice(0, 200) };
 });
 
-await check("The lead adds a teammate and changes one's rules from plain words, as cards you confirm (real Claude turns)", ["Turn the lead chat on (first-run setup, with your password)", "AI teammates: Maya (a support rep) answers a question card, approves a small refund on its own, brings the big one to you, and stops while paused (real Claude turns)"], async () => {
+await journey("lead", "The lead adds a teammate and changes one's rules from plain words, as cards you confirm (real Claude turns)", ["Turn the lead chat on (first-run setup, with your password)", "AI teammates: Maya (a support rep) answers a question card, approves a small refund on its own, brings the big one to you, and stops while paused (real Claude turns)"], async () => {
   const confirm = async reply => {
     const card = reply.locator('[data-view="chat-card"][data-card-state="pending"]').first();
     await card.waitFor({ timeout: 30_000 });
@@ -1095,7 +1130,7 @@ await check("The lead adds a teammate and changes one's rules from plain words, 
 });
 
 const TOOL_CHECK = "Teammates that act: Rosa uses a real store tool under her rules — looks orders up and refunds $30 on her own, asks you before $400, and your Approve makes exactly that call (real Claude turns)";
-await check(TOOL_CHECK, [], async () => {
+await journey("rosa", TOOL_CHECK, [], async () => {
   // A real MCP server over stdio (named store: the lead never sees this project's folder name, shop): it looks orders up and refunds them, and writes down every call it gets.
   const shop = join(w.root, "shop-mcp.mjs"), log = join(w.root, "shop-calls.log");
   writeFileSync(shop, `import { createInterface } from "node:readline";
@@ -1207,7 +1242,9 @@ createInterface({ input: process.stdin }).on("line", line => {
   return { small: small.outputs.find(one => one.stage === "rosa")?.text?.slice(0, 120), big: approved.outputs.find(one => one.stage === "rosa")?.text?.slice(0, 120), calls: calls().map(one => `${one.name} ${JSON.stringify(one.arguments)}`) };
 });
 
-await check("The lead changes a teammate's tool rule from plain words, as a card you confirm (real Claude turn)", ["Turn the lead chat on (first-run setup, with your password)", TOOL_CHECK], async () => {
+// In the rosa group's own world the lead chat isn't on yet: this journey turns it on the same way first.
+await journey("rosa", "The lead changes a teammate's tool rule from plain words, as a card you confirm (real Claude turn)", [TOOL_CHECK], async () => {
+  if (!leadChatOn) await turnLeadChatOn();
   const { reply } = await askLead("Rosa can refund orders up to $100 in the store without asking me now. Just draft it.");
   const pending = reply.locator('[data-view="chat-card"][data-card-state="pending"]:has([data-card-confirm])');
   await pending.first().waitFor({ timeout: 30_000 });
@@ -1224,7 +1261,7 @@ await check("The lead changes a teammate's tool rule from plain words, as a card
   return { rule: rules.refund_order };
 });
 
-await check("Teammates remember and learn: Rosa keeps a customer's preference for later cards, you correct her memory, and after approving refunds in a row she suggests a looser rule you accept in one tap (real Claude turns)", [TOOL_CHECK], async () => {
+await journey("rosa", "Teammates remember and learn: Rosa keeps a customer's preference for later cards, you correct her memory, and after approving refunds in a row she suggests a looser rule you accept in one tap (real Claude turns)", [TOOL_CHECK], async () => {
   const mate = rows("SELECT id FROM teammate WHERE handle = 'rosa' AND state = 'active'")[0]?.id;
   const flowId = rows("SELECT id FROM flow WHERE name = 'Refund desk'")[0]?.id;
   if (!mate || !flowId) throw new Error("Rosa or her flow is missing");
@@ -1285,7 +1322,7 @@ await check("Teammates remember and learn: Rosa keeps a customer's preference fo
   return { memory: kept.text, suggestion: suggestion.said, rule };
 });
 
-await check("A teammate's routine: added on its page for weekdays, run now, it looks the order up with its tool and its answer reaches its manager (real Claude turn)", [TOOL_CHECK], async () => {
+await journey("rosa", "A teammate's routine: added on its page for weekdays, run now, it looks the order up with its tool and its answer reaches its manager (real Claude turn)", [TOOL_CHECK], async () => {
   const mate = rows("SELECT id FROM teammate WHERE handle = 'rosa' AND state = 'active'")[0]?.id;
   if (!mate) throw new Error("Rosa is missing");
   await page.goto(`${base}/teammates/${mate}#desk`);
@@ -1314,7 +1351,7 @@ await check("A teammate's routine: added on its page for weekdays, run now, it l
   return { answer: answer.body.slice(0, 160) };
 });
 
-await check("A teammate's week and undo: its page shows the week with what its turns cost and what you overrode; name an undo for refunds, undo Rosa's $30 refund from its card, and send the week's report", [TOOL_CHECK], async () => {
+await journey("rosa", "A teammate's week and undo: its page shows the week with what its turns cost and what you overrode; name an undo for refunds, undo Rosa's $30 refund from its card, and send the week's report", [TOOL_CHECK], async () => {
   const mate = rows("SELECT id FROM teammate WHERE handle = 'rosa' AND state = 'active'")[0]?.id;
   const flowId = rows("SELECT id FROM flow WHERE name = 'Refund desk'")[0]?.id;
   if (!mate || !flowId) throw new Error("Rosa or her flow is missing");
@@ -1352,7 +1389,7 @@ await check("A teammate's week and undo: its page shows the week with what its t
   return { report: report.body.slice(0, 300) };
 });
 
-await check("Starter kits: the Support desk kit sets up Maya and its flow in one click, its checklist says what's left, and Try it has Maya draft a reply for you to check (real Claude turn)", [], async () => {
+await journey("flows", "Starter kits: the Support desk kit sets up Maya and its flow in one click, its checklist says what's left, and Try it has Maya draft a reply for you to check (real Claude turn)", [], async () => {
   await page.goto(`${base}/kits`);
   await page.waitForSelector('[data-kit="support-desk"]');
   if ((await page.locator("[data-kit]").count()) !== 4) throw new Error("the gallery doesn't show the four kits");
@@ -1394,7 +1431,7 @@ await check("Starter kits: the Support desk kit sets up Maya and its flow in one
   return { stage: worked.stage, draft: draft.slice(0, 160) };
 });
 
-await check("One-click connections: Connect Stripe on the kit's checklist, allow it on Stripe's page, and Maya can use it; the sign-in stays out of the database and the worker renews it", ["Starter kits: the Support desk kit sets up Maya and its flow in one click, its checklist says what's left, and Try it has Maya draft a reply for you to check (real Claude turn)"], async () => {
+await journey("flows", "One-click connections: Connect Stripe on the kit's checklist, allow it on Stripe's page, and Maya can use it; the sign-in stays out of the database and the worker renews it", ["Starter kits: the Support desk kit sets up Maya and its flow in one click, its checklist says what's left, and Try it has Maya draft a reply for you to check (real Claude turn)"], async () => {
   const secrets = join(homedir(), ".standing-orders", "tool-secrets", createHash("sha256").update(repo).digest("hex").slice(0, 16), "stripe.json");
   try {
     await page.goto(`${base}/kits/support-desk?repo=${encodeURIComponent(repo)}`);
@@ -1444,7 +1481,7 @@ await check("One-click connections: Connect Stripe on the kit's checklist, allow
   }
 });
 
-await check("Sign-in with an identity provider: turned on in Settings, a person signs in there and gets an account from their groups, their approvals are that sign-in (no password), and a group that may not enter is refused", [], async () => {
+await journey("console", "Sign-in with an identity provider: turned on in Settings, a person signs in there and gets an account from their groups, their approvals are that sign-in (no password), and a group that may not enter is refused", [], async () => {
   await page.goto(`${base}/settings/sign-in`);
   if (!(await page.locator(".redirect code").innerText()).endsWith("/login/sso/callback")) throw new Error("the page doesn't say which address to register");
   await page.fill('input[name="issuer"]', idpBase); await page.fill('input[name="client-id"]', "so-e2e"); await page.fill('input[name="client-secret"]', `idp-${randomBytes(6).toString("hex")}`);
@@ -1494,7 +1531,7 @@ await check("Sign-in with an identity provider: turned on in Settings, a person 
   return { account: "priya" };
 });
 
-await check("Live canvas: a teammate sees who's here and a card move without reloading", ["Code steps: a Python file and a Node script get the card, pass on what they print, pick the next zone, and get a secret"], async () => {
+await journey("flows", "Live canvas: a teammate sees who's here and a card move without reloading", ["Code steps: a Python file and a Node script get the card, pass on what they print, pick the next zone, and get a secret"], async () => {
   const sam = await signIn("sam");
   try {
     await sam.goto(`${base}/flows/${codeFlow}`); await sam.waitForSelector("[data-zone]");
@@ -1514,7 +1551,7 @@ await check("Live canvas: a teammate sees who's here and a card move without rel
 
 // ------------------------------------------------------------------ the demo
 
-await check("The demo starts with flows already moving, and opens in a browser", [], async () => {
+await journey("console", "The demo starts with flows already moving, and opens in a browser", [], async () => {
   const demo = spawn(process.execPath, [w.bin, "demo", "--json"], { env: { ...process.env, NODE_OPTIONS: "" }, stdio: ["ignore", "pipe", "pipe"] });
   try {
     const started = await new Promise((done, fail) => {
@@ -1535,7 +1572,7 @@ await check("The demo starts with flows already moving, and opens in a browser",
   } finally { demo.kill("SIGINT"); }
 });
 
-await check("Signing out ends the session: pages ask to sign in again", [], async () => {
+await journey("console", "Signing out ends the session: pages ask to sign in again", [], async () => {
   const sam = await signIn("sam");
   await sam.goto(`${base}/chat`);
   await Promise.all([sam.waitForNavigation(), sam.locator('.so-account form[action="/logout"] button').click()]);
@@ -1547,4 +1584,8 @@ await check("Signing out ends the session: pages ask to sign in again", [], asyn
 });
 
 standIn.close(); standIn.closeAllConnections(); idpServer.close(); idpServer.closeAllConnections();
-await w.finish("Standing Orders end to end");
+await w.finish(group === null ? "Standing Orders end to end" : `Standing Orders end to end: ${group}`);
+for (const [name, one] of Object.entries(GROUPS)) {
+  const counted = [...placed.values()].filter(each => each === name).length;
+  if (counted !== one.journeys) { console.error(`Group ${name} has ${counted} journeys, not the ${one.journeys} GROUPS lists`); process.exitCode = 1; }
+}

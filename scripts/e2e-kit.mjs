@@ -63,7 +63,7 @@ export async function world(name, { seed, env = {} } = {}) {
   const repo = join(root, "shop"), state = join(root, "state"), db = join(state, "orders.db");
   mkdirSync(repo); mkdirSync(state);
   const started = Date.now();
-  const say = line => { const stamp = `${Math.round((Date.now() - started) / 1000)}s`.padStart(6); console.log(`${stamp}  ${line}`); };
+  const say = line => { const stamp = `${Math.round((Date.now() - started) / 1000)}s`.padStart(6); console.log(`[${name}] ${stamp}  ${line}`); };
 
   const cli = (argv, { ok = [0], json = true, env = {} } = {}) => {
     try {

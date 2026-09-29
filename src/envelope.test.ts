@@ -126,13 +126,20 @@ describe("the machine envelope", () => {
       sync: ["--json"],
       // The usage road terminates without binding a port or minting anything.
       up: ["--for", "not-a-number", "--json"],
+      status: ["--json"],
       ready: ["--json"],
       task: ["list", "--json"],
       ledger: ["verify", "--json"],
       storage: ["--json"],
       monitoring: ["--json"],
+      "check-progress": ["999", "--json"],
       spend: ["--json"],
       budget: ["list", "--json"],
+      retention: ["show", "--json"],
+      policy: ["show", "--json"],
+      backup: ["list", "--json"],
+      restore: ["--json"],
+      export: ["--json"],
       assignment: ["show", "no-such-task", "--json"],
       claim: ["--json"],
       heartbeat: ["--json"],
@@ -208,12 +215,28 @@ describe("the machine envelope", () => {
       }
     }
 
+    // Subcommands that only answer with a login hold the same contract on
+    // the road an agent hits first: no login, a usage slip.
+    const subcommandTable: [string, string[]][] = [
+      ["runner", ["capacity", "no-such-worker", "2", "--json"]],
+      ["runner", ["capacity", "no-such-worker", "zero", "--json"]],
+    ];
+    for (const [verb, argv] of subcommandTable) {
+      lines = [];
+      await runOperate(verb, argv, write, { databaseFile: db, now: T0, gitRunner: quickGit });
+      const body = JSON.parse(out()) as Record<string, unknown>;
+      expect(body["envelopeVersion"], `${verb} ${argv.join(" ")} lacks envelopeVersion`).toBe(ENVELOPE_VERSION);
+      expect(body, `${verb} ${argv.join(" ")}`).toMatchObject({ ok: false, command: "runner capacity" });
+      expect(typeof body["reason"]).toBe("string");
+    }
+
     // The cli-level commands hold the same contract.
     const cliTable: string[][] = [
       ["contract", "--json"],
       ["demo", "--port", "99999999", "--json"], // invalid port: the fast, non-serving path
 
       ["skills", "--json"],
+      ["skills", "install", "--claude-code", "--dir", join(dir, "claude-skill"), "--json"],
       ["repos", "--json"],
       ["pulls", dir, "--json"],
       ["graph", dir, "--json"],

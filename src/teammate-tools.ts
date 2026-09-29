@@ -19,6 +19,7 @@
 import { redactSecretLines, scanForSecrets } from "./evidence.js";
 import type { ToolCaller } from "./flow-actions.js";
 import { scrubSecrets } from "./flow-secrets.js";
+import { toolRefusal } from "./policy.js";
 import { callProjectTool, listProjectToolActions, projectToolsOf, readToolSecrets, type ProjectTool, type ToolSpec } from "./project-tools.js";
 import { ALL_CREDENTIAL_ENV } from "./provider.js";
 import type { Store, TeammateCallRow, TeammateGrantRow, TeammateRow, ToolActionInfo, ToolRule } from "./store.js";
@@ -105,7 +106,9 @@ export type OfferedTool = { name: string; about: string; input: string; rule: st
 /** What a teammate may use now: its grants' actions on tools the project still has, "never" left out. */
 export function offeredTools(store: Store, mate: TeammateRow): OfferedTool[] {
   const present = new Set(projectToolsOf(store, mate.repo).map(one => one.name));
-  return store.teammateGrants(mate.id).filter(grant => present.has(grant.tool)).flatMap(grant => grant.actions.flatMap(action => {
+  // Sprint 8: a tool the organisation policy doesn't allow isn't offered.
+  const policy = store.orgPolicy();
+  return store.teammateGrants(mate.id).filter(grant => present.has(grant.tool) && toolRefusal(policy, grant.tool) === null).flatMap(grant => grant.actions.flatMap(action => {
     const rule = grant.rules[action.name] ?? defaultRule(action);
     if (rule.use === "never") return [];
     const input = action.input === null ? "any" : JSON.stringify({ properties: action.input["properties"] ?? {}, required: action.input["required"] ?? [] });
@@ -204,6 +207,12 @@ export async function makeCall(store: Store, call: TeammateCallRow, repo: string
   const grant = store.teammateGrant(call.teammate, call.tool);
   if (grant === null || (options.byPerson !== true && ruleFor(grant, call.action, call.input).use === "never")) {
     store.moveTeammateCall(call.id, ["approved", "running"], { state: "refused", result: "Its rules changed before the call was made." }, now);
+    return store.teammateCall(call.id)!;
+  }
+  // Sprint 8: nor does a call to a tool the organisation policy doesn't allow (a person's undo included).
+  const disallowed = toolRefusal(store.orgPolicy(), call.tool);
+  if (disallowed !== null) {
+    store.moveTeammateCall(call.id, ["approved", "running"], { state: "refused", result: disallowed }, now);
     return store.teammateCall(call.id)!;
   }
   if (call.state !== "running" && !store.moveTeammateCall(call.id, ["approved"], { state: "running" }, now)) return store.teammateCall(call.id)!;

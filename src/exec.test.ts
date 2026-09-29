@@ -14,6 +14,18 @@ import { adapterFor } from "./provider.js";
 const NODE = process.execPath;
 
 describe("run", () => {
+  test("buffered groups expose stdout and stderr as they arrive without changing the result", async () => {
+    const stdout: string[] = [], stderr: string[] = [];
+    const result = await run(NODE, ["-e", "process.stdout.write('unit');process.stderr.write('flows')"], {
+      processGroup: true,
+      timeoutMs: 10_000,
+      onStdout: chunk => stdout.push(chunk),
+      onStderr: chunk => stderr.push(chunk),
+    });
+    expect(stdout.join("")).toBe("unit");
+    expect(stderr.join("")).toBe("flows");
+    expect(result).toMatchObject({ code: 0, stdout: "unit", stderr: "flows" });
+  });
   test("buffered group delivers large Unicode stdin completely and closes input", async () => {
     const input = "Unicode ✓ 😀\n".repeat(32_768);
     const result = await run(NODE, ["-e", "const h=require('node:crypto').createHash('sha256');process.stdin.on('data',x=>h.update(x));process.stdin.on('end',()=>console.log(h.digest('hex')));"], { processGroup: true, stdin: input, timeoutMs: 10_000 });

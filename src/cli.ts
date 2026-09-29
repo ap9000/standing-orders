@@ -17,7 +17,14 @@ import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { configPath, loadRepos, addRepos, removeRepos, updateRepos } from "./repos.js";
 import { CAPABILITIES, ENVELOPE_VERSION, capturedEnvelope, envelopeJson, onEnvelopeCaptured, resetCapturedEnvelope } from "./envelope.js";
-import { applyInstall, contextBlock, planInstall } from "./skills.js";
+import {
+  applyClaudeCodeInstall,
+  applyInstall,
+  contextBlock,
+  defaultClaudeCodeSkillDir,
+  planClaudeCodeInstall,
+  planInstall,
+} from "./skills.js";
 import { GUIDES, guideNamed } from "./guides.js";
 import { parseGithubRepo, previewGithubRepo, cloneGithubRepo, isLargeRepo } from "./onboard.js";
 import { run as execRun } from "./exec.js";
@@ -89,11 +96,14 @@ Usage
   standing-orders unlink           take it off again
   standing-orders contract         the machine contract: envelope version + capabilities
                                    (--commands dumps the declared command guide)
+  standing-orders skills install --claude-code [--dir <path>]
+                                   install this binary's guides for Claude Code (preview first)
   standing-orders skills install   teach a repo's agents this queue exists (preview first)
   standing-orders skills list      the guides this exact binary serves
   standing-orders skills get <name>  print one guide (version-matched, never stale)
   standing-orders demo             a seeded throwaway sandbox — see it working in 90 seconds
   standing-orders up               app + builder for every saved project — the normal start
+  standing-orders status           running, queued, ready results, release check and plan windows
   standing-orders session          native coding sessions through the running service
   standing-orders connect          save a private connection to your central service
   standing-orders lead             named leads on the connected service
@@ -105,6 +115,9 @@ and any queue command + --help prints it too
   standing-orders approver add <name>
                                mint the credential that lets a person say yes
   standing-orders ready            what could be dispatched right now
+  standing-orders check-progress <run>  current or final approved check progress
+  standing-orders task wait <id> [--timeout <seconds>]
+                               wait for this attempt to finish or need a person
   standing-orders task add <title> queue work
   standing-orders task scope <id> --goal <text>
                                state what success is; approval binds to it
@@ -217,14 +230,21 @@ export const TOP_LEVEL_COMMANDS: readonly string[] = [
 
 export const OPERATE_COMMANDS = new Set([
   "up",
+  "status",
   "ready",
   "task",
   "project",
   "ledger",
   "storage",
   "monitoring",
+  "check-progress",
   "spend",
   "budget",
+  "retention",
+  "backup",
+  "restore",
+  "export",
+  "policy",
   "assignment",
   "knowledge",
   "memory",
@@ -1127,17 +1147,18 @@ async function runUnlink(dir: string, yes: boolean, write: Write): Promise<numbe
 }
 
 /**
- * `skills install` (M7.13): teach a repository's agents that this queue
- * exists — the Agent Skills entry all four major CLIs read, plus an
- * optional managed AGENTS.md block. Preview by default; --yes writes;
- * a skill file this installer did not write is refused, never eaten.
+ * `skills install`: with --claude-code, install this binary's lead guides
+ * in the user's Claude Code skills directory. Without it, retain the older
+ * repository-local Agent Skills entry and optional managed AGENTS.md block.
+ * Both paths preview by default, write only with --yes, and refuse files
+ * they do not own.
  */
 /** The skills subcommands and their EXACT flag vocabularies — consulted
  * by the parser above and compared verbatim by the command guide's tests
  * (arc-5 review, finding 5). */
 export const SKILLS_ACTIONS = ["install", "list", "get"] as const;
 export const SKILLS_FLAGS = {
-  install: { json: "flag", yes: "flag", "write-context": "flag", repo: "value" },
+  install: { json: "flag", yes: "flag", "claude-code": "flag", dir: "value", "write-context": "flag", repo: "value" },
   list: { json: "flag" },
   get: { json: "flag" },
 } as const;
@@ -1150,7 +1171,7 @@ function runSkillsCommand(argv: readonly string[], write: Write): number {
     return USAGE_EXIT;
   };
   if (action === undefined || !(SKILLS_ACTIONS as readonly string[]).includes(action)) {
-    return usage("`standing-orders skills install [--repo <path>] [--write-context] [--yes]` · `skills list` · `skills get <name>` — all take --json");
+    return usage("`standing-orders skills install --claude-code [--dir <path>] [--yes]` · `skills install [--repo <path>] [--write-context] [--yes]` · `skills list` · `skills get <name>` — all take --json");
   }
 
   // Exact per-action vocabularies (arc-5 review, finding 5): an unknown
@@ -1208,11 +1229,66 @@ function runSkillsCommand(argv: readonly string[], write: Write): number {
   }
 
   // install
+  const claudeCode = argv.includes("--claude-code");
+  const confirmed = argv.includes("--yes");
+  if (positionals.length > 1) return usage("`skills install` takes no arguments beyond its flags");
+
+  if (claudeCode) {
+    if (argv.includes("--repo") || argv.includes("--write-context")) {
+      return usage("--claude-code uses --dir, not --repo or --write-context");
+    }
+    const dirAt = argv.indexOf("--dir");
+    const directory = dirAt === -1
+      ? defaultClaudeCodeSkillDir()
+      : resolve(argv[dirAt + 1] as string);
+    const plan = planClaudeCodeInstall(directory);
+    if (!confirmed) {
+      const blocked = plan.files.some(file => file.action === "refuse-foreign");
+      const message = blocked
+        ? "Nothing was written. Move the existing file you want to keep, or choose another --dir."
+        : "Nothing was written. Re-run with --yes to install the Claude Code skill.";
+      if (json) {
+        write(envelopeJson({
+          ok: false,
+          command: "skills install",
+          reason: "unconfirmed",
+          message,
+          plan,
+        }));
+        return 3;
+      }
+      write(`Would install the Claude Code skill in ${plan.directory}:`);
+      for (const file of plan.files) {
+        const action = file.action === "refuse-foreign"
+          ? "REFUSED — this file was not written by the installer"
+          : file.action;
+        write(`  ${file.path}  (${action})`);
+      }
+      write("");
+      write(message);
+      return 3;
+    }
+
+    const result = applyClaudeCodeInstall(directory);
+    if (!result.ok) {
+      write(json
+        ? envelopeJson({ ok: false, command: "skills install", reason: result.reason, message: result.message, plan: result.plan })
+        : result.message);
+      return 1;
+    }
+    if (json) {
+      write(envelopeJson({ ok: true, command: "skills install", target: "claude-code", wrote: result.wrote, plan: result.plan }));
+      return 0;
+    }
+    for (const file of result.wrote) write(`wrote ${file}`);
+    write("Claude Code will use the refreshed Standing Orders guides in its next session.");
+    return 0;
+  }
+
+  if (argv.includes("--dir")) return usage("--dir belongs with --claude-code");
   const repoAt = argv.indexOf("--repo");
   const repo = repoAt !== -1 ? resolve(argv[repoAt + 1] as string) : process.cwd();
   const writeContext = argv.includes("--write-context");
-  const confirmed = argv.includes("--yes");
-  if (positionals.length > 1) return usage("`skills install` takes no arguments beyond its flags");
 
   if (!existsSync(join(repo, ".git"))) {
     write(json ? envelopeJson({ ok: false, command: "skills install", reason: "not-a-repo", message: `${repo} has no .git — name the repository with --repo` }) : `${repo} has no .git — name the repository with --repo`);

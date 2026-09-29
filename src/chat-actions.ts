@@ -1215,6 +1215,7 @@ export function executeSharedAction(
           // v102: the project's approval rules speak for themselves.
           if (result.reason === "second-approver") throw Error(gateWords({ verdict: "vote", have: result.have, need: 2, already: result.already }));
           if (result.reason === "requester" || result.reason === "person-required") throw Error(gateWords({ verdict: "refuse", reason: result.reason }));
+          if (result.reason === "policy") throw Error(result.message);
           throw Error(`Approval refused: ${result.reason}.`);
         }
         if (

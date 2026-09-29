@@ -3,6 +3,7 @@ import { openStore } from "./store.js";
 import { presetTerms, modeTermsJson, modeDigestOf } from "./modes.js";
 import { DEFAULT_LIVENESS_MS, register } from "./runner.js";
 import { completeFenced } from "./claim.js";
+import { addApprover } from "./scope.js";
 import { canonicalProject } from "./project.js";
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -1937,6 +1938,61 @@ describe("runner ceremonies (MCP spec v6)", () => {
     expect(await run(["runner", "retire", "w-1", "--json"])).toBe(EXIT.usage);
     expect(await run(["runner", "retire", "w-1", "--as", "alex", "--token", "nope", "--json"])).toBe(EXIT.refused);
     expect(await run(["runner", "retire", "w-1", "--as", "alex", "--token", token, "--json"])).toBe(EXIT.ok);
+  });
+
+  test("capacity takes the operator login, changes the number, and keeps before → after in the ledger", async () => {
+    const token = await approver();
+    await run(["runner", "register", "w-1", "--repo", "/repo/a", "--as", "alex", "--token", token, "--json"]);
+    expect(await run(["runner", "capacity", "w-1", "3", "--json"])).toBe(EXIT.refused);
+    expect(await run(["runner", "capacity", "w-1", "3", "--as", "alex", "--token", "wrong", "--json"])).toBe(EXIT.refused);
+    expect(await run(["runner", "capacity", "w-1", "3", "--as", "alex", "--token", token, "--json"])).toBe(EXIT.ok);
+    expect(payload()).toMatchObject({ ok: true, command: "runner capacity", name: "w-1", before: 1, after: 3, running: 0 });
+    const store = openStore(db);
+    try {
+      expect(store.getRunner("w-1")?.runner.capacity).toBe(3);
+      const entries = store.handle.prepare("SELECT actor, action, outcome, source, detail FROM action_ledger WHERE action LIKE 'worker capacity:%'").all();
+      expect(entries).toEqual([{ actor: "alex", action: "worker capacity: w-1", outcome: "changed", source: "policy", detail: "1 → 3" }]);
+    } finally {
+      store.close();
+    }
+    // The same number again changes nothing and adds nothing to the ledger.
+    expect(await run(["runner", "capacity", "w-1", "3", "--as", "alex", "--token", token])).toBe(EXIT.ok);
+    expect(lines.join("\n")).toContain("already runs up to 3");
+    const again = openStore(db);
+    try {
+      expect(again.handle.prepare("SELECT COUNT(*) AS n FROM action_ledger WHERE action LIKE 'worker capacity:%'").get()).toEqual({ n: 1 });
+    } finally {
+      again.close();
+    }
+  });
+
+  test("capacity refuses bad numbers, unknown and retired workers, and people who are not instance operators", async () => {
+    const token = await approver();
+    await run(["runner", "register", "w-1", "--repo", "/repo/a", "--as", "alex", "--token", token, "--json"]);
+    for (const bad of ["0", "65", "2.5", "lots"]) {
+      expect(await run(["runner", "capacity", "w-1", bad, "--as", "alex", "--token", token, "--json"])).toBe(EXIT.usage);
+    }
+    expect(await run(["runner", "capacity", "w-1", "--as", "alex", "--token", token, "--json"])).toBe(EXIT.usage);
+    expect(await run(["runner", "capacity", "ghost", "2", "--as", "alex", "--token", token, "--json"])).toBe(EXIT.refused);
+    expect(payload()).toMatchObject({ ok: false, reason: "unknown" });
+    await run(["runner", "retire", "w-1", "--as", "alex", "--token", token, "--json"]);
+    expect(await run(["runner", "capacity", "w-1", "2", "--as", "alex", "--token", token, "--json"])).toBe(EXIT.refused);
+    expect(payload()).toMatchObject({ ok: false, reason: "retired" });
+
+    // A person limited to one project is not an instance operator.
+    await run(["runner", "register", "w-2", "--repo", "/repo/a", "--as", "alex", "--token", token, "--json"]);
+    const store = openStore(db);
+    let limited: string;
+    try {
+      const added = addApprover(store, "sam", T0, { name: "alex", token });
+      if (!added.ok) throw new Error("sam was not added");
+      limited = added.token;
+      expect(store.setAccountProjects("sam", ["/repo/a"], "alex", T0)).toEqual({ ok: true });
+    } finally {
+      store.close();
+    }
+    expect(await run(["runner", "capacity", "w-2", "2", "--as", "sam", "--token", limited, "--json"])).toBe(EXIT.refused);
+    expect(payload()).toMatchObject({ ok: false, reason: "refused" });
   });
 
   test("bind REPLACES the repo list, refuses unknown and retired runners, and is itself a ceremony", async () => {

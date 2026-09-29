@@ -7,8 +7,8 @@
  * PASS (claim pairs from the store's ledger, fence, send, settle by the
  * full outcome table). The payload that transits Apple's and Google's
  * servers is a fixed phrase keyed on the notification's CLASS plus a
- * machine-minted console path — subject, body, task titles, branch and
- * repository names never leave the machine.
+ * machine-minted console path. Check progress may also send one validated
+ * suite/count line; task titles, branches and repository names stay local.
  *
  * 'accepted' means the push service took the message (RFC 8030). Nothing
  * here ever claims a phone displayed anything, and delivery is
@@ -21,6 +21,7 @@ import { closeSync, constants as fsConstants, fsyncSync, openSync, readFileSync,
 import { join } from "node:path";
 import { createCipheriv, createECDH, createPrivateKey, hkdfSync, randomBytes, createHash, sign as cryptoSign } from "node:crypto";
 import type { Notification, PushSubscription, Store } from "./store.js";
+import { isCheckProgressLine } from "./check-progress.js";
 
 export const VAPID_FILE = "vapid-keys.json";
 /** RFC 8291 §4: rs 4096 leaves room for the record's delimiter and tag. */
@@ -211,12 +212,13 @@ export function validatePushEndpoint(raw: string): { ok: true; url: URL } | { ok
 
 // ---- the payload ------------------------------------------------------------
 
-/** The fixed vocabulary — the ONLY words that ever transit a push service. */
+/** Fixed words, except for one validated machine-only suite/count line. */
 export const PUSH_WORDS: Record<NonNullable<Notification["pushClass"]>, { title: string; body: string }> = {
   decision: { title: "standing orders", body: "a decision needs you" },
   pick: { title: "standing orders", body: "agents finished — pick a winner" },
   merge: { title: "standing orders", body: "a pull request needs a person" },
   attention: { title: "standing orders", body: "the plane needs attention" },
+  progress: { title: "standing orders", body: "checks in progress" },
 };
 
 const LINK_SHAPES = [/^\/next$/, /^\/review$/, /^\/system$/, /^\/routines$/, /^\/routines\/[0-9]{1,15}$/, /^\/d\/[0-9]{1,15}$/, /^\/contest\/[0-9]{1,15}$/, /^\/r\/[0-9]{1,15}$/];
@@ -225,6 +227,7 @@ const CLASS_FALLBACK: Record<NonNullable<Notification["pushClass"]>, string> = {
   pick: "/next",
   merge: "/review",
   attention: "/next",
+  progress: "/next",
 };
 
 /** Static words and machine-minted numbers only — re-proved at send time. */
@@ -238,10 +241,10 @@ export function buildPushPayload(notification: Notification, waiting: number | n
   const words = PUSH_WORDS[pushClass];
   return JSON.stringify({
     title: words.title,
-    body: words.body,
+    body: pushClass === "progress" && isCheckProgressLine(notification.body) ? notification.body : words.body,
     url: safePushLink(pushClass, notification.link),
     // The opaque tag collapses a crash-duplicate on the lock screen.
-    tag: `so-${notification.id}`,
+    tag: pushClass === "progress" && notification.run !== null ? `so-run-${notification.run}` : `so-${notification.id}`,
     // The app-icon badge (Phase 2E, v2 S4): the server-computed
     // waiting-on-you COUNT at send time — a number, never content, so the
     // closed-class discipline holds. The console page recomputes and

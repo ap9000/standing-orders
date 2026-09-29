@@ -1,4 +1,5 @@
 import { connectionsOf, oneClickOf } from "./mcp-connect.js";
+import { policyParts } from "./policy.js";
 import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { repositoryContextRead } from './repository-context.js';
@@ -1236,7 +1237,7 @@ export const MATE_TOOLS: MateTool[] = [
   },
   {
     name: "get_agents",
-    description: "Read current roles, risk, approval and configured alternatives before propose_agents.",
+    description: "Read current roles, risk, approval, configured alternatives and the organisation policy (allowed providers, models, tools, permission ceiling; changed only on Settings → Policy) before propose_agents.",
     inputSchema: schema({ task: TASK_ARG }, ["task"]),
     handle: (ctx, args) => {
       const taskId = taskIdOf(args);
@@ -1245,7 +1246,7 @@ export const MATE_TOOLS: MateTool[] = [
       if (ref === null) return notFound();
       const view = agentsOver(ctx.store, taskId, ctx.now);
       if (view === null) return notFound();
-      return { ok: true, body: { repo: ref.repoId, ...view } };
+      return { ok: true, body: { repo: ref.repoId, ...view, organisationPolicy: { ...policyParts(ctx.store.orgPolicy()), changeAt: "Settings → Policy (show_control policy)" } } };
     },
   },
   {

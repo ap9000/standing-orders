@@ -19,7 +19,8 @@
  * touches nothing without --yes.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { guideNamed } from "./guides.js";
 
@@ -149,6 +150,124 @@ export function applyInstall(repo: string, writeContext: boolean): InstallResult
   if (plan.contextPath !== null) {
     writeFileSync(plan.contextPath, contextNext ?? `${contextBlock()}\n`);
     wrote.push(plan.contextPath);
+  }
+  return { ok: true, plan, wrote };
+}
+
+/**
+ * The user-level Claude Code skill is separate from the repository-local
+ * skill above. The former teaches one Claude Code installation how to use
+ * this exact Standing Orders binary; the latter remains part of the shared
+ * project setup flow.
+ */
+export const CLAUDE_CODE_MANAGED_MARK = "<!-- standing-orders:claude-code-skill:v1 -->";
+export const CLAUDE_CODE_GUIDES = ["console", "operating", "runner"] as const;
+
+export type ClaudeCodeSkillFile = {
+  name: string;
+  path: string;
+  action: "create" | "replace" | "refuse-foreign";
+};
+
+export type ClaudeCodeInstallPlan = {
+  directory: string;
+  directoryAction: "create" | "use" | "refuse-foreign";
+  files: ClaudeCodeSkillFile[];
+};
+
+export type ClaudeCodeInstallResult =
+  | { ok: true; plan: ClaudeCodeInstallPlan; wrote: string[] }
+  | { ok: false; reason: "foreign-file"; message: string; plan: ClaudeCodeInstallPlan };
+
+export function defaultClaudeCodeSkillDir(home = homedir()): string {
+  return join(home, ".claude", "skills", "standing-orders");
+}
+
+/** SKILL.md links to the full guides instead of copying their detail. */
+export function claudeCodeSkillContent(): string {
+  return `---
+name: standing-orders
+description: Use this machine's Standing Orders installation from Claude Code. Use when the user asks about its console, tasks, approvals, results, or runner workflow.
+---
+
+${CLAUDE_CODE_MANAGED_MARK}
+
+# Standing Orders
+
+Use the installed \`standing-orders\` command. Its live help is authoritative.
+
+- [Console guide](console.md) — where a person can review and act.
+- [Operating guide](operating.md) — the command contract and safe workflow.
+- [Runner guide](runner.md) — claims, leases, heartbeats, and fencing.
+`;
+}
+
+/** One linked file, generated from the guide embedded in this binary. */
+export function claudeCodeGuideContent(name: typeof CLAUDE_CODE_GUIDES[number]): string {
+  const guide = guideNamed(name);
+  if (guide === null) throw new Error(`the ${name} guide is missing from the build`);
+  return `${CLAUDE_CODE_MANAGED_MARK}\n\n${guide.content.replace(/\n*$/, "\n")}`;
+}
+
+function claudeCodeFiles(directory: string): { name: string; path: string; content: string }[] {
+  return [
+    { name: "SKILL.md", path: join(directory, "SKILL.md"), content: claudeCodeSkillContent() },
+    ...CLAUDE_CODE_GUIDES.map(name => ({
+      name: `${name}.md`,
+      path: join(directory, `${name}.md`),
+      content: claudeCodeGuideContent(name),
+    })),
+  ];
+}
+
+function isClaudeCodeManaged(name: string, content: string): boolean {
+  if (name === "SKILL.md") {
+    return content.startsWith("---\nname: standing-orders\n") && content.includes(`\n${CLAUDE_CODE_MANAGED_MARK}\n`);
+  }
+  return content.startsWith(`${CLAUDE_CODE_MANAGED_MARK}\n\n`);
+}
+
+/** Compute the complete write set without changing the filesystem. */
+export function planClaudeCodeInstall(directory = defaultClaudeCodeSkillDir()): ClaudeCodeInstallPlan {
+  let directoryAction: ClaudeCodeInstallPlan["directoryAction"] = "create";
+  if (existsSync(directory)) {
+    const entry = lstatSync(directory);
+    directoryAction = entry.isDirectory() && !entry.isSymbolicLink() ? "use" : "refuse-foreign";
+  }
+
+  const files = claudeCodeFiles(directory).map(({ name, path }): ClaudeCodeSkillFile => {
+    if (directoryAction === "refuse-foreign" || !existsSync(path)) return {
+      name,
+      path,
+      action: directoryAction === "refuse-foreign" ? "refuse-foreign" : "create",
+    };
+    const entry = lstatSync(path);
+    if (entry.isSymbolicLink() || !entry.isFile() || entry.size > 2_000_000) {
+      return { name, path, action: "refuse-foreign" };
+    }
+    const current = readFileSync(path, "utf8");
+    return { name, path, action: isClaudeCodeManaged(name, current) ? "replace" : "refuse-foreign" };
+  });
+
+  return { directory, directoryAction, files };
+}
+
+/** Refresh every managed file, after validating the whole set first. */
+export function applyClaudeCodeInstall(directory = defaultClaudeCodeSkillDir()): ClaudeCodeInstallResult {
+  const plan = planClaudeCodeInstall(directory);
+  const refused = plan.files.find(file => file.action === "refuse-foreign");
+  if (refused !== undefined) {
+    const message = plan.directoryAction === "refuse-foreign"
+      ? `${plan.directory} is not a regular directory — refusing to replace it`
+      : `${refused.path} exists and was not written by this installer — refusing to overwrite it`;
+    return { ok: false, reason: "foreign-file", message, plan };
+  }
+
+  mkdirSync(directory, { recursive: true });
+  const wrote: string[] = [];
+  for (const file of claudeCodeFiles(directory)) {
+    writeFileSync(file.path, file.content);
+    wrote.push(file.path);
   }
   return { ok: true, plan, wrote };
 }

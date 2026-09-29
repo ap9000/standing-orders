@@ -65,6 +65,8 @@ export const PROGRESS_PREFIX = "STANDING-ORDERS-PROGRESS-";
  * at most once, read once at settlement. */
 export const PROPOSAL_PREFIX = "STANDING-ORDERS-PROPOSAL-";
 export const MAILBOX_SUFFIX = ".json";
+/** v105: left in a run's evidence folder when the retention setting removed its files (retention.ts). */
+export const RETENTION_NOTE = "REMOVED-BY-RETENTION";
 
 /** Bounds on a claimed screenshot file's own bytes — independent of the
  * proof manifest's byte cap, since these are binary images, not JSON. */
@@ -475,6 +477,7 @@ export function readVerifiedArtifact(
       return { ok: false, problem: "the file resolves outside the evidence root" };
     }
   } catch {
+    if (existsSync(join(root, segments[0]!, RETENTION_NOTE))) return { ok: false, problem: "the file was removed by the retention setting" };
     return { ok: false, problem: "the file is gone or unresolvable" };
   }
 
@@ -744,7 +747,7 @@ export function storeHandoffArtifact(
  * ordinary source line matches by accident; generic "password=" shapes
  * are deliberately absent — test fixtures would drown the signal.
  */
-const SECRET_PATTERNS: readonly { name: string; pattern: RegExp }[] = [
+export const SECRET_PATTERNS: readonly { name: string; pattern: RegExp }[] = [
   { name: "private-key", pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/ },
   { name: "aws-access-key", pattern: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/ },
   { name: "github-token", pattern: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}\b|github_pat_[A-Za-z0-9_]{22,}/ },
