@@ -18441,7 +18441,7 @@ function settingsRows(scoped = false, offersSettings = false): NavRow[] {
   return scoped ? rows.filter(row => row.key === "people" || row.key === "settings") : rows;
 }
 /** Which accordion group opens by default for a given active page. */
-const TOOL_KEYS = new Set<Chrome["active"]>(["code", "inbox", "board", "queue", "tasks", "workbench", "recipes", "routines", "ledger"]);
+const TOOL_KEYS = new Set<Chrome["active"]>(["code", "inbox", "board", "queue", "tasks", "workbench", "recipes", "routines", "ledger", "spend"]);
 const SETTINGS_KEYS = new Set<Chrome["active"]>(["settings", "fleet", "caps", "people", "mode", "system"]);
 
 /** The builds screen's views (reduction pass §1): done, the review queue,

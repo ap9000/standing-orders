@@ -80,8 +80,8 @@ export function spendHtml(view: SpendView, notice: { said?: string | null; probl
     `<label>Your Standing Orders password<input type="password" name="password" autocomplete="current-password"></label>` +
     `<button type="submit" name="action" value="save">Add budget</button></form></details>`;
   const csv = `/spend?month=${e(view.month)}&amp;format=csv`;
-  return `<article class="spend">${note}` +
-    `<div class="spend-head"><h1>Spend</h1><p class="spend-month"><a href="/spend?month=${e(view.previous)}">← ${e(view.previous)}</a><strong>${e(view.month)}</strong>${view.next === null ? "" : `<a href="/spend?month=${e(view.next)}">${e(view.next)} →</a>`}<a href="${csv}" download>CSV</a></p></div>` +
+  return `<article class="spend">` +
+    `<div class="spend-head"><h1>Spend</h1><p class="spend-month"><a href="/spend?month=${e(view.previous)}">← ${e(view.previous)}</a><strong>${e(view.month)}</strong>${view.next === null ? "" : `<a href="/spend?month=${e(view.next)}">${e(view.next)} →</a>`}<a href="${csv}" download>CSV</a></p></div>${note}` +
     `<p class="spend-total" data-spend-total="${total}">${usd(total)}</p><p class="meta">${parts.join(" · ")}${unpriced > 0 ? ` · ${unpriced} unpriced (no reported cost or catalogue price)` : ""} · UTC month</p>` +
     `<section><h2>Budgets</h2>${budgets === "" ? `<p class="meta">No budgets yet.</p>` : budgets}${add}</section>` +
     `<div class="spend-grid">` +
