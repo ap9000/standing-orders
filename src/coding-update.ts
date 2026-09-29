@@ -5,7 +5,7 @@ import { sqliteRuntime } from './sqlite-runtime.js';
 import type { Database } from './store.js';
 
 const gatePrefix = 'so_coding_update_';
-const pausedMessage = 'Standing Orders is updating. Current work can finish; new coding work will resume after the update.';
+const pausedMessage = 'Toolroll is updating. Current work can finish; new coding work will resume after the update.';
 
 export function codingCatalogPath(orders: Database): string | null {
   const main = orders.prepare('PRAGMA database_list').all().find(row => row['name'] === 'main')?.['file'];

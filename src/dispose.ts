@@ -258,7 +258,7 @@ function disposeBuildOutcomeLocked(context: DisposeContext, result: BuildResult)
             dedupeKey: `run:${runId}:external-closed`,
             kind: "external-closed",
             subject: `${taskId}: the tracker closed this while it was being built`,
-            body: `The branch ${branch} is kept as evidence; nothing is published. Reopen the tracker item and \`standing-orders task reopen ${taskId}\` if the work should continue.`,
+            body: `The branch ${branch} is kept as evidence; nothing is published. Reopen the tracker item and \`toolroll task reopen ${taskId}\` if the work should continue.`,
           },
           clock(),
         );
@@ -635,7 +635,7 @@ export function regateTask(
         return { ok: false as const, reason: why[queued.reason] ?? "not-rejected", message: `${taskId} could not be queued again: ${queued.reason}` };
       }
     }
-    store.addRunNote(last.id, "Standing Orders", `The check will run again on this exact commit (${head.slice(0, 7)}) as a new attempt, ${approval.kind === "operator" ? `on ${approval.name}'s say-so` : "automatically once, because the failure was outside this change"}.`, now);
+    store.addRunNote(last.id, "Toolroll", `The check will run again on this exact commit (${head.slice(0, 7)}) as a new attempt, ${approval.kind === "operator" ? `on ${approval.name}'s say-so` : "automatically once, because the failure was outside this change"}.`, now);
     return { ok: true as const, run: last.id, head };
   });
 }
@@ -683,7 +683,7 @@ export function maybeTriggerRepair(store: Store, repo: string, evidenceRoot: str
       const contradicted = cause === "review";
       store.enqueueNotification({ source: { run: sourceRunId }, dedupeKey: `regate-failed:${sourceRunId}`, kind: "repair-evidence", pushClass: "attention",
         subject: contradicted ? "The rerun on the same commit was contradicted by its review" : "The project check failed again on the same commit",
-        body: `Attempt #${sourceRunId} reran commit ${run.headRevision.slice(0, 7)} and ${contradicted ? "its review contradicted the result" : "the approved check failed again"}. No repair task was filed: decide whether the code or the check is wrong, then run \`standing-orders task regate ${rerunTask}\` or re-scope a corrected candidate.`,
+        body: `Attempt #${sourceRunId} reran commit ${run.headRevision.slice(0, 7)} and ${contradicted ? "its review contradicted the result" : "the approved check failed again"}. No repair task was filed: decide whether the code or the check is wrong, then run \`toolroll task regate ${rerunTask}\` or re-scope a corrected candidate.`,
         link: `/t/${encodeURIComponent(rerunTask)}` }, now);
       return { kind: "none" };
     }

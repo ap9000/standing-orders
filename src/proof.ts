@@ -1024,7 +1024,7 @@ function verificationFailureWords(failure: Extract<VerifyCommandFacts, { ran: fa
         case "checkout-moved":
           return "automatic recovery stopped because the checkout moved away from the built commit";
         case "cleanliness-unavailable":
-          return "automatic recovery stopped because Standing Orders could not confirm that the built checkout was unchanged";
+          return "automatic recovery stopped because Toolroll could not confirm that the built checkout was unchanged";
         case "dependency-still-missing":
           return "the required project executable was still unavailable after replaying the approved setup command";
         case "retry-spawn-failed":

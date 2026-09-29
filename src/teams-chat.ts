@@ -165,7 +165,7 @@ export async function deliverTeamsPart(options: TeamsChatOptions): Promise<boole
           if (!actions.length) text = "This confirmation expired. Ask for a fresh proposal.";
         } else {
           actions = openUrlAction(options.origin(), proposalLink(store, proposal, repos, "teams") ?? { label: "Review action", path: "/chat" });
-          text = "Review the full action in Standing Orders before confirming.";
+          text = "Review the full action in Toolroll before confirming.";
         }
       }
     } else if (!content.image) {

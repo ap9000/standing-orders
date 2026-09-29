@@ -555,7 +555,7 @@ const codexArgv = (extra: readonly string[]) => (invocation: Invocation): string
     "--skip-git-repo-check",
     ...(invocation.phase === "review"
       ? CODEX_REVIEW_ISOLATION_ARGV(resuming)
-      // The agent fence: Codex's own sandbox with Standing Orders' secrets
+      // The agent fence: Codex's own sandbox with Toolroll's secrets
       // denied. Full access becomes that sandbox widened to write anywhere
       // with network, instead of no sandbox (which fenced nothing).
       : invocation.fence !== undefined && invocation.fence.length > 0
@@ -888,7 +888,7 @@ const ADAPTERS: Record<ProviderId, Adapter> = {
       // Asks Codex to keep the key out of the agent's shells. codex-cli
       // 0.156 ignores shell_environment_policy, so the key IS readable from
       // the agent's shell in practice; kept for Codex builds that honour it.
-      // What does hold is the agent fence: nothing else of Standing Orders'
+      // What does hold is the agent fence: nothing else of Toolroll's
       // (other keys, logins, tokens, the database) is reachable.
       "-c",
       `shell_environment_policy.exclude=[${toml(OPENROUTER_ENV_KEY)}]`,
@@ -1135,7 +1135,7 @@ export function reportsCost(provider: ProviderId): boolean {
   return provider === "claude";
 }
 
-/** The non-spending inspection surface: what `standing-orders providers` reports. */
+/** The non-spending inspection surface: what `toolroll providers` reports. */
 export type ProviderInspection = {
   id: ProviderId;
   binary: string;

@@ -125,7 +125,7 @@ describe("a code step", () => {
     expect(execFileSync("ls", [join(dir, "scratch")], { encoding: "utf8" }).trim()).toBe("");
   });
 
-  test.runIf(macosFenceAvailable() || linuxFenceAvailable())("a script can't read Standing Orders' own database, like an agent can't", async () => {
+  test.runIf(macosFenceAvailable() || linuxFenceAvailable())("a script can't read Toolroll's own database, like an agent can't", async () => {
     save({ name: "peek", about: "Tries to read the database", body: `if cat "${join(dir, "orders.db")}" > /dev/null 2>&1; then echo read; else echo denied; fi` });
     const flow = flowOf([{ title: "Inbox", kind: "inbox" }, { id: "peek", title: "Peek", kind: "check", script: "peek", runIn: "folder" }]);
     const card = store.addFlowCard({ flow, title: "Look", description: null, stage: "peek", by: "alex" }, T0);

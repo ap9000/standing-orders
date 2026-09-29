@@ -148,7 +148,7 @@ async function main() {
   const steps = [];
   const assertRuntime = async () => {
     if (runtime !== null && JSON.stringify(await runtimeIdentity()) !== JSON.stringify(runtime)) {
-      throw new Error("the Standing Orders runtime changed during the canary; rerun against one fixed build");
+      throw new Error("the Toolroll runtime changed during the canary; rerun against one fixed build");
     }
   };
 
@@ -177,12 +177,12 @@ async function main() {
     await mkdir(repo, { recursive: true });
     await git("init", "-q", "-b", "main");
     await git("config", "user.email", "canary@standing-orders.local");
-    await git("config", "user.name", "Standing Orders Canary");
+    await git("config", "user.name", "Toolroll Canary");
     await writeFile(
       join(repo, "package.json"),
       `${JSON.stringify({ name: "standing-orders-provider-canary", private: true, type: "module", scripts: { test: "node --test" } }, null, 2)}\n`,
     );
-    await writeFile(join(repo, "README.md"), "# Standing Orders provider canary\n\nThis repository is disposable.\n");
+    await writeFile(join(repo, "README.md"), "# Toolroll provider canary\n\nThis repository is disposable.\n");
     await git("add", ".");
     await git("commit", "-qm", "seed provider canary");
     const baseSha = await git("rev-parse", "HEAD");

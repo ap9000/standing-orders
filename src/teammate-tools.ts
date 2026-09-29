@@ -2,7 +2,7 @@
  * The tools a teammate may use (v94), and its rule for each of their actions.
  *
  * A teammate never calls a tool itself. On its turn it may ask for one call
- * ("use_tool": which action, with what input, and why), and Standing Orders
+ * ("use_tool": which action, with what input, and why), and Toolroll
  * checks the rule its manager set for that action:
  *
  * - do it: the call is made and its answer goes back to the teammate, whose

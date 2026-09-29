@@ -1,7 +1,7 @@
 import type { Database } from "./store.js";
 import { activeCodingUpdateWork, installCodingUpdateGate, removeCodingUpdateGate } from "./coding-update.js";
 
-export const UPDATE_PAUSED = "Standing Orders is updating. Current work can finish; new work will resume after the update. Open Update status in the desktop app.";
+export const UPDATE_PAUSED = "Toolroll is updating. Current work can finish; new work will resume after the update. Open Update status in the desktop app.";
 const prefix = "so_desktop_update_";
 const rows = (db: Database) => db.prepare("SELECT name, sql FROM sqlite_master WHERE type='trigger' AND name GLOB 'so_desktop_update_*' ORDER BY name").all();
 const statements = (id: string, frozen = false): string[] => {

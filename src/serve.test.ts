@@ -2951,7 +2951,7 @@ describe("the rolled-up board — every project, one ceiling", () => {
   });
 });
 
-describe("routines — standing orders on the console", () => {
+describe("routines on the console", () => {
   let store: Store;
   let server: Server;
   let base: string;
@@ -3195,7 +3195,7 @@ describe("routines — standing orders on the console", () => {
   test("/routines names the empty state and shows the ledger once firings exist", async () => {
     const cookie = await login();
     const empty = await (await fetch(url("/routines"), { headers: { cookie } })).text();
-    expect(empty).toContain("No standing orders");
+    expect(empty).toContain("No routines");
     // The empty state points at the filing form on this very page — not at
     // the terminal (round-5 copy fix).
     expect(empty).toContain("file one");
@@ -3329,7 +3329,7 @@ describe("the agents card — configuration, readable at a glance", () => {
       expect(html).toContain("gpt-5-codex");
       expect(html).toContain("no dollar costs");
       expect(html).toContain("the default — nothing configured"); // repair, untouched
-      expect(html).toContain("standing-orders config");
+      expect(html).toContain("toolroll config");
       expect(html).not.toMatch(/<form[^>]*config/);
     } finally {
       await new Promise<void>(resolve => server.close(() => resolve()));
@@ -3749,7 +3749,7 @@ describe("the first-run checklist (adoption track, step 3)", () => {
     // Scoped: the ceiling step is done and names the repo.
     expect(html).toContain("name what this console may see");
     // No spend routing yet: the exact command, and the four-facts honesty.
-    expect(html).toContain("standing-orders config set build");
+    expect(html).toContain("toolroll config set build");
     expect(html).toContain("four separate facts");
     // No work yet: the templates are offered.
     expect(html).toContain("/routines?template=nightly-deps");
@@ -3930,7 +3930,7 @@ describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
     const cookie = await login();
     const html = await (await fetch(url("/chat"), { headers: { cookie } })).text();
     expect(html).toContain("Chat isn’t available in demo mode");
-    expect(html).toContain("Demo data never contacts an external model. Start Standing Orders with a real project to use chat.");
+    expect(html).toContain("Demo data never contacts an external model. Start Toolroll with a real project to use chat.");
     expect(html).not.toContain("chat is off.");
   });
 
@@ -7796,13 +7796,13 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(offline).toContain('id="run-status" data-dispatch-status="no-worker-online"');
     expect(offline).toContain("Builder disconnected");
     expect(offline).toContain("stopped checking in");
-    expect(offline).toContain("standing-orders up");
+    expect(offline).toContain("toolroll up");
     expect(offline).toContain("Check connection");
     expect(offline).toContain('<details class="dispatch-recovery" open>');
-    expect(offline).toContain('class="dispatch-recovery-command">standing-orders up</code>');
-    expect(offline).toContain("Reopen Standing Orders on the machine where the project lives");
+    expect(offline).toContain('class="dispatch-recovery-command">toolroll up</code>');
+    expect(offline).toContain("Reopen Toolroll on the machine where the project lives");
     expect(offline).toContain("This task resumes automatically when the builder reconnects");
-    expect(offline).not.toContain("standing-orders daemon install");
+    expect(offline).not.toContain("toolroll daemon install");
     expect(offline).not.toContain('data-dispatch-status="ready-to-run"');
 
     // A current heartbeat for a worker bound to this project changes the
@@ -7981,9 +7981,9 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     const recoveryNotEnabled = await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text();
     expect(recoveryNotEnabled).toContain("the approved verification command could not start because a required project executable was unavailable and no approved recovery was enabled");
 
-    store.saveProofVerdict(run, "short", ["automatic recovery stopped because Standing Orders could not confirm that the built checkout was unchanged"], T0);
+    store.saveProofVerdict(run, "short", ["automatic recovery stopped because Toolroll could not confirm that the built checkout was unchanged"], T0);
     const recoveryUnconfirmed = await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text();
-    expect(recoveryUnconfirmed).toContain("automatic recovery stopped because Standing Orders could not confirm that the built checkout was unchanged");
+    expect(recoveryUnconfirmed).toContain("automatic recovery stopped because Toolroll could not confirm that the built checkout was unchanged");
 
     store.saveProofVerdict(run, "short", ["automatic recovery stopped because tracked files no longer matched the built result"], T0);
     const recoveryFilesChanged = await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text();
@@ -10766,16 +10766,16 @@ describe("the inbox says when nothing will build (install review)", () => {
     let inbox = await (await fetch(`${base}/inbox`, { headers: { cookie } })).text();
     expect(inbox).toContain('data-builder-status="not-connected"');
     expect(inbox).toContain("No builder is connected yet.");
-    expect(inbox).toContain("Standing Orders is open, but no machine is connected to do project work.");
-    expect(inbox).toContain("standing-orders up");
-    expect(inbox).not.toContain("standing-orders daemon install");
+    expect(inbox).toContain("Toolroll is open, but no machine is connected to do project work.");
+    expect(inbox).toContain("toolroll up");
+    expect(inbox).not.toContain("toolroll daemon install");
 
     register(store, { name: "old-1", host: "h", capacity: 1, repos: ["/repo/main"], now: new Date(Date.now() - 30 * 24 * 60 * 60_000), newToken: () => "tok-old" });
     inbox = await (await fetch(`${base}/inbox`, { headers: { cookie } })).text();
     expect(inbox).toContain('data-builder-status="disconnected"');
     expect(inbox).toContain("Builder disconnected.");
     expect(inbox).toContain("1 builder is configured, last checked in");
-    expect(inbox).toContain("Reopen Standing Orders on that machine.");
+    expect(inbox).toContain("Reopen Toolroll on that machine.");
     expect(inbox).toContain("Queued work starts automatically when a builder reconnects.");
 
     store.touchRunner("old-1", new Date());

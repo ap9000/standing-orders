@@ -38,7 +38,7 @@ export function retentionHtml(view: RetentionView, notice: { said?: string | nul
   const last = view.lastSweep === null ? "" : ` Last sweep ${e(view.lastSweep.slice(0, 10))}.`;
   return `<article class="retention">${note}<p class="retention-next" data-retention-next>${e(nextWords(view))}${last}</p>` +
     `<form method="post" action="/settings/retention"><input type="hidden" name="csrf" value="${e(view.csrf)}">${rows}` +
-    `<label class="step-up">Your Standing Orders password<input type="password" name="password" autocomplete="current-password" required></label>` +
+    `<label class="step-up">Your Toolroll password<input type="password" name="password" autocomplete="current-password" required></label>` +
     `<button type="submit">Save</button></form>` +
     `<p class="meta">Never removed: the action ledger, and anything a task still needs (unfinished tasks, results not yet completed, anything on hold).</p></article>`;
 }

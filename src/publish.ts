@@ -58,7 +58,7 @@ export function describePublicationGrant(grant: {
     `  may push     branches under ${grant.headPrefix} — nothing else, ever`,
     `  base         PRs target ${grant.base}`,
     `  capabilities ${grant.capabilities.join(", ")}`,
-    `  tasks        ${grant.selector === "ours" ? "only tasks standing-orders created or was given" : "any task"}`,
+    `  tasks        ${grant.selector === "ours" ? "only tasks Toolroll created or was given" : "any task"}`,
     `  mode         ${grant.draft ? "draft PRs" : "ready-for-review PRs"}`,
   ];
 }
@@ -91,7 +91,7 @@ export function publicationBody(store: Store, publication: Publication): string 
     `## ${mdInline(task?.title ?? taskId)}`,
     "",
     ...(scope === null ? [] : [`**Goal:** ${mdInline(scope.goal)}`, ""]),
-    `Built unattended by standing-orders (task \`${taskId}\`, run #${publication.run}).`,
+    `Built unattended by Toolroll (task \`${taskId}\`, run #${publication.run}).`,
     `Base \`${run?.baseRevision ?? "?"}\` → head \`${publication.headSha}\`.`,
   ];
 
@@ -632,7 +632,7 @@ export async function sweepMerges(
       pagePerson(
         publication, "blocked",
         "PR #" + prNumber + " holds for a repair",
-        "A CI repair (" + (blocker.taskId ?? "?") + ") is in flight. It merges nothing until you lift it: standing-orders publish unblock " + prNumber + ".",
+        "A CI repair (" + (blocker.taskId ?? "?") + ") is in flight. It merges nothing until you lift it: toolroll publish unblock " + prNumber + ".",
       );
       continue;
     }
@@ -651,7 +651,7 @@ export async function sweepMerges(
       pagePerson(
         publication, "waiting-human",
         "PR #" + prNumber + " waits for your go-ahead",
-        "Merges wait for you while this posture holds. When you want it merged: standing-orders publish merge " + prNumber + " --as <you> --token <t>. It still merges only when CI is seen green on the exact head.",
+        "Merges wait for you while this posture holds. When you want it merged: toolroll publish merge " + prNumber + " --as <you> --token <t>. It still merges only when CI is seen green on the exact head.",
       );
       continue;
     }
@@ -681,7 +681,7 @@ export async function sweepMerges(
           pagePerson(
             publication, "half-fired",
             "PR #" + prNumber + " may have half-merged",
-            "A merge was issued and its owner went silent; the PR is still open on the same commit. Nothing retries by itself. If you want it fired again: standing-orders publish refire " + prNumber + " --as <you> --token <t>.",
+            "A merge was issued and its owner went silent; the PR is still open on the same commit. Nothing retries by itself. If you want it fired again: toolroll publish refire " + prNumber + " --as <you> --token <t>.",
           );
         }
       } else {
@@ -711,8 +711,8 @@ export async function sweepMerges(
         publication, queue.why,
         "PR #" + prNumber + " will not auto-merge",
         queue.why === "merge-queue"
-          ? "The base branch requires a merge queue - out of this release's scope. Merge it on GitHub, or lift the queue and run: standing-orders publish rearm " + prNumber + "."
-          : "The branch's protection could not be READ well enough to prove no merge queue governs it - auto-merge stays paused. Check access, then run: standing-orders publish rearm " + prNumber + ".",
+          ? "The base branch requires a merge queue - out of this release's scope. Merge it on GitHub, or lift the queue and run: toolroll publish rearm " + prNumber + "."
+          : "The branch's protection could not be READ well enough to prove no merge queue governs it - auto-merge stays paused. Check access, then run: toolroll publish rearm " + prNumber + ".",
       );
       continue;
     }
@@ -726,7 +726,7 @@ export async function sweepMerges(
         pagePerson(
           publication, "draft",
           "PR #" + prNumber + " is a draft",
-          "Drafts never merge themselves. Mark it ready on GitHub, then run: standing-orders publish rearm " + prNumber + ".",
+          "Drafts never merge themselves. Mark it ready on GitHub, then run: toolroll publish rearm " + prNumber + ".",
         );
       } else if (seen.why.startsWith("pr-")) {
         settle("superseded", { error: seen.why });
@@ -758,7 +758,7 @@ export async function sweepMerges(
         pagePerson(
           publication, "waiting-human",
           "PR #" + prNumber + " waits for your go-ahead",
-          fired.why + " - when you want it merged: standing-orders publish merge " + prNumber + " --as <you> --token <t>.",
+          fired.why + " - when you want it merged: toolroll publish merge " + prNumber + " --as <you> --token <t>.",
         );
       }
       continue;
@@ -801,7 +801,7 @@ export async function sweepMerges(
       pagePerson(
         publication, "credential",
         "PR #" + prNumber + ": gh is not signed in",
-        "The merge acts as this machine's GitHub account, and it could not authenticate. Run gh auth login, then: standing-orders publish rearm " + prNumber + ".",
+        "The merge acts as this machine's GitHub account, and it could not authenticate. Run gh auth login, then: toolroll publish rearm " + prNumber + ".",
       );
       continue;
     }
@@ -820,7 +820,7 @@ export async function sweepMerges(
       pagePerson(
         publication, "rejected",
         "PR #" + prNumber + " would not merge",
-        (firstLine(merged.stderr) || "GitHub rejected the merge") + " - likely branch protection, required reviews, or a conflict. Fix the cause, then run: standing-orders publish rearm " + prNumber + ".",
+        (firstLine(merged.stderr) || "GitHub rejected the merge") + " - likely branch protection, required reviews, or a conflict. Fix the cause, then run: toolroll publish rearm " + prNumber + ".",
       );
     } else {
       settle("pending", { error: firstLine(merged.stderr) || "transport", countAttempt: true, from: "firing" });

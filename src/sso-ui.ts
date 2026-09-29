@@ -22,7 +22,7 @@ export type SsoSettingsView = {
   linked: boolean;
 };
 
-const password = '<label>Your Standing Orders password<input type="password" name="password" autocomplete="current-password" required></label>';
+const password = '<label>Your Toolroll password<input type="password" name="password" autocomplete="current-password" required></label>';
 
 function ruleRow(index: number, rule: OidcSettings["rules"][number] | null, projects: SsoSettingsView["projects"]): string {
   const chosen = rule === null ? [] : rule.projects === "all" ? ["all"] : rule.projects;

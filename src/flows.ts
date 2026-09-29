@@ -71,7 +71,7 @@ export type FlowStage = {
    * `{{card.description}}`, `{{note}}` (the latest send-back note) and
    * `{{stage.<id>}}` (an earlier zone's report) are filled in. */
   instructions: string | null;
-  /** task: plan first (required), let Standing Orders decide (auto), or build directly (skip). */
+  /** task: plan first (required), let Toolroll decide (auto), or build directly (skip). */
   planning: "auto" | "required" | "skip" | null;
   /** approval: the one person who decides, or null for any approver on the project. */
   approver: string | null;

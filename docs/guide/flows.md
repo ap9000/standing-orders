@@ -75,11 +75,11 @@ and starts from the moment it's added. Out-of-office replies, bounces and
 your own messages never become cards.
 
 A **chat channel** in Slack, Discord, Teams or a Telegram group feeds a flow
-once you connect it from the channel itself: where Standing Orders is, send
+once you connect it from the channel itself: where Toolroll is, send
 `flow 12` (the flow's number, from its address). Each new message there
 becomes a card, the bot says so in the message's thread, and replies in that
 thread join the card's discussion. `flow off` stops it. In Teams, mention
-Standing Orders in each message; in a Telegram group, turn the bot's privacy
+Toolroll in each message; in a Telegram group, turn the bot's privacy
 mode off in BotFather so it sees every message, not just commands.
 
 ## People

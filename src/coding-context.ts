@@ -72,7 +72,7 @@ export function prepareCodingContext(store: Store, args: {
   const parts: string[] = [];
   if (captured.knowledge.revision > 0) parts.push(KNOWLEDGE_GUIDANCE, JSON.stringify(captured.knowledge));
   if (supplied.catalog.length) parts.push('Project skills supplied for this coding session. ' + PROJECT_SKILLS_GUIDANCE, JSON.stringify(supplied.catalog));
-  const text = parts.length ? '\nStanding Orders project context, frozen when this coding session started. Native repository and home instructions, tools, and MCP configuration still apply.\n' + parts.join('\n') + '\n' : '';
+  const text = parts.length ? '\nToolroll project context, frozen when this coding session started. Native repository and home instructions, tools, and MCP configuration still apply.\n' + parts.join('\n') + '\n' : '';
   const metadata: CodingContextMetadata = {
     version: 1,
     repo: args.repo,

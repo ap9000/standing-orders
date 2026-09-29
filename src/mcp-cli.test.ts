@@ -1,5 +1,5 @@
 /**
- * `standing-orders mcp` — the token-file matrix (MCP gateway spec v6).
+ * `toolroll mcp` — the token-file matrix (MCP gateway spec v6).
  *
  * The CLI's credential door: a 0600 regular file owned by us, read through
  * the fd (no symlink, no FIFO hang), XOR the environment variable. Every
@@ -46,7 +46,7 @@ describe("the MCP server's credential door", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  /** Run `standing-orders mcp` with --json and keep the envelope lines. */
+  /** Run `toolroll mcp` with --json and keep the envelope lines. */
   const run = (argv: string[]) => {
     lines = [];
     return runOperate("mcp", argv, line => lines.push(line), { databaseFile: db, now: T0 });

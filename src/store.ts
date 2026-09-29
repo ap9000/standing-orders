@@ -135,7 +135,7 @@ import { NO_RULES, filerFor, isProtectedWork, protectedChanges, rulesWords, type
 // v95 gives each teammate a memory (what it kept, and what its people told it) and lets it suggest its own rule changes from what people approved.
 // v96 gives each teammate a desk: its own flow, where messages to it by name and its routines land as cards.
 // v97 keeps what each teammate turn cost, lets a person undo a teammate's tool call where the tool can, and sends a weekly report.
-// v98 lets Telegram push a bot's updates to Standing Orders (a webhook) instead of being polled for them.
+// v98 lets Telegram push a bot's updates to Toolroll (a webhook) instead of being polled for them.
 // v99 gives the action ledger its own kinds of event for sign-ins and policy changes, each with a short detail (a change's before → after).
 // v100 lets people sign in with the organisation's identity provider: each provider identity is linked to one account.
 // v101 adds API tokens (scoped, expiring, hashed), keeps browser sessions across restarts (listed and revocable), and lets coordinator credentials expire.
@@ -1911,7 +1911,7 @@ CREATE TABLE IF NOT EXISTS task_edge (
 -- The overlay starts here. Nothing below this line knows which backend the
 -- work actually lives in.
 -- The origin column is what the grant's default selector actually rests on.
--- It records whether Standing Orders created this task or merely came across it,
+-- It records whether Toolroll created this task or merely came across it,
 -- and it is written here rather than asserted by whoever is asking to write:
 -- a policy that says "only our tasks" while letting the caller declare which
 -- those are is not a policy.
@@ -5211,7 +5211,7 @@ export function openStoreNoMigrate(
 ): { ok: true; store: Store } | { ok: false; reason: "missing" | "version"; message: string } {
   const connect = options.connect ?? defaultConnect;
   if (file === ":memory:" || !existsSync(file)) {
-    return { ok: false, reason: "missing", message: `${file} does not exist — run \`standing-orders\` once to create it` };
+    return { ok: false, reason: "missing", message: `${file} does not exist — run \`toolroll\` once to create it` };
   }
   const db = connect(file);
   waitForConcurrentWriter(db);
@@ -12238,7 +12238,7 @@ export class Store {
       }
       const reassessed = args.evidenceRoot === undefined || args.bindings.verification === undefined || args.bindings.context == null
         ? null : assessmentFromSavedEvidence(this, args.evidenceRoot, args.runId);
-      if (reassessed !== null) this.addRunNote(args.runId, "Standing Orders", "Fresh goal assessment uses this result's original saved source and verification receipt. Its earlier status was: no proof was written. No check or artifact was replaced.", now);
+      if (reassessed !== null) this.addRunNote(args.runId, "Toolroll", "Fresh goal assessment uses this result's original saved source and verification receipt. Its earlier status was: no proof was written. No check or artifact was replaced.", now);
       const folded = foldReview(
         reassessed ?? { verdict: existing.verdict, reasons: existing.reasons, matrix: existing.matrix, ...(existing.machineVerdict === null ? {} : { machineVerdict: existing.machineVerdict }) },
         args.judgements.map((j): CriterionJudgement => ({ id: j.id, judgement: j.judgement, note: j.note, author: args.author })),
@@ -23303,7 +23303,7 @@ export class Store {
       CASE WHEN json_extract(tools_json, '$.fence') IS NULL THEN excluded.tools_json ELSE json_set(excluded.tools_json, '$.fence', json(json_extract(tools_json, '$.fence'))) END`).run(run, toolsJson, now.toISOString());
   }
 
-  /** How one attempt was kept away from Standing Orders' own secrets (the agent fence), kept beside its tools. */
+  /** How one attempt was kept away from Toolroll's own secrets (the agent fence), kept beside its tools. */
   recordRunFence(run: number, fence: { method: string; paths: number }, now: Date): void {
     this.db.prepare(`INSERT INTO run_tool (run, tools_json, created_at) VALUES (?, json_object('fence', json(?)), ?)
       ON CONFLICT (run) DO UPDATE SET tools_json = json_set(tools_json, '$.fence', json(?))`).run(run, JSON.stringify(fence), now.toISOString(), JSON.stringify(fence));

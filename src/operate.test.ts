@@ -596,7 +596,7 @@ describe("operating the queue from the command line", () => {
 
   test("prints the surface when asked for `task` alone", async () => {
     expect(await run(["task"])).toBe(EXIT.ok);
-    expect(out()).toContain("standing-orders claim");
+    expect(out()).toContain("toolroll claim");
   });
 });
 
@@ -654,7 +654,7 @@ describe("write access", () => {
     expect(code).toBe(EXIT.refused);
     expect(out()).toContain("Nothing has been granted");
     expect(out()).toContain("may do");
-    expect(out()).toContain("only those Standing Orders created or was given");
+    expect(out()).toContain("only those Toolroll created or was given");
 
     await run(["grants", "--json"]);
     expect(payload().count).toBe(0);
@@ -793,7 +793,7 @@ describe("the grant is actually enforced", () => {
 
     expect(code).toBe(EXIT.refused);
     expect(payload()).toMatchObject({ ok: false, reason: "no-grant" });
-    expect(payload().message).toContain("standing-orders enroll");
+    expect(payload().message).toContain("toolroll enroll");
   });
 
   test("still refuses once enrolled, when the task is not ours", async () => {
@@ -1045,7 +1045,7 @@ describe("agreeing to a scope from the command line", () => {
   });
 });
 
-describe("routine — standing orders from the command line", () => {
+describe("routine — from the command line", () => {
   let dir: string;
   let db: string;
   let lines: string[];
@@ -2052,7 +2052,7 @@ describe("coordinator ceremonies (MCP spec v6)", () => {
 describe("the CLI router", () => {
   test("every verb the operate dispatcher knows is reachable from the binary", async () => {
     // routine/config/providers shipped reachable only through runOperate —
-    // the real `standing-orders` binary refused them (found by the console
+    // the real `toolroll` binary refused them (found by the console
     // polish pass). The two lists must never drift again.
     const { readFileSync } = await import("node:fs");
     const operate = readFileSync("src/operate.ts", "utf8");

@@ -706,7 +706,7 @@ function ZonePanel({ stage, stages, view, csrf, apply, update, remove, makeStart
     </Field>}
     {stage.kind === "task" && <Field label="Plan first?">
       <select className={select} aria-label="Plan first?" value={stage.planning ?? "auto"} onChange={event => update({ planning: event.target.value as "auto" | "required" | "skip" })}>
-        <option value="auto">Let Standing Orders decide</option><option value="required">Always plan first</option><option value="skip">Build directly</option>
+        <option value="auto">Let Toolroll decide</option><option value="required">Always plan first</option><option value="skip">Build directly</option>
       </select>
     </Field>}
     {stage.kind === "approval" && <Field label="Who decides">
@@ -930,9 +930,9 @@ function AddTrigger({ view, csrf, open, onResult }: { view: BrowserFlowView; csr
           <option value="">The end</option>{source?.zones.map(one => <option key={one.id} value={one.id}>{one.title}</option>)}</select></Field>
       </>)}
       {kind === "chat" && <div className="flex flex-col gap-2 rounded-md bg-muted px-2.5 py-2 text-[12.5px]" data-chat-connect>
-        <p>Connect a Slack, Discord or Teams channel, or a Telegram group, from the channel itself. Where Standing Orders is, send:</p>
+        <p>Connect a Slack, Discord or Teams channel, or a Telegram group, from the channel itself. Where Toolroll is, send:</p>
         <p><code className="rounded bg-background px-1.5 py-0.5 font-semibold">flow {view.flow.id}</code></p>
-        <p className="text-muted-foreground">Each new message there becomes a card here, and replies in its thread join the card's discussion. “flow off” stops it. In Teams, mention Standing Orders in each message. In Telegram, send /flow {view.flow.id}, and turn the bot's privacy mode off in BotFather so it sees every message.</p>
+        <p className="text-muted-foreground">Each new message there becomes a card here, and replies in its thread join the card's discussion. “flow off” stops it. In Teams, mention Toolroll in each message. In Telegram, send /flow {view.flow.id}, and turn the bot's privacy mode off in BotFather so it sees every message.</p>
       </div>}
       {kind === "email" && <>
         {setup.mailbox === null
@@ -986,7 +986,7 @@ function TriggerSettings({ view, csrf, apply }: { view: BrowserFlowView; csrf: s
 
 /** A step-up: the person's password, or (signed in with the identity provider) that sign-in, confirmed or to confirm. */
 function StepUp({ view, password, setPassword }: { view: BrowserFlowView; password: string; setPassword: (value: string) => void }) {
-  if (view.stepUp === undefined) return <Field label="Your Standing Orders password"><Input type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} /></Field>;
+  if (view.stepUp === undefined) return <Field label="Your Toolroll password"><Input type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} /></Field>;
   return view.stepUp.fresh
     ? <p className="text-[13px] text-success" data-sso-step-up="confirmed">✓ Confirmed with {view.stepUp.label}</p>
     : <a className="text-[13px] underline" data-sso-step-up="confirm" href={view.stepUp.confirmHref}>Confirm with {view.stepUp.label}</a>;

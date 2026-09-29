@@ -1,6 +1,6 @@
 # Desktop control app and guided setup
 
-The macOS shell opens the existing Standing Orders console and supervises the
+The macOS shell opens the existing Toolroll console and supervises the
 existing `up` command with launchd. There is one queue, one project registry,
 one worker/recovery implementation, and the same approval controls in the
 browser and desktop app. Closing the window leaves the service running.
@@ -214,12 +214,12 @@ access to the test app itself does not obscure the worker check:
 
 ```sh
 preview_root="$(mktemp -d)"
-npm run build:desktop -- --development "$preview_root/Standing Orders Development.app"
-open -n "$preview_root/Standing Orders Development.app" --args --state "$preview_root/state"
+npm run build:desktop -- --development "$preview_root/Toolroll Development.app"
+open -n "$preview_root/Toolroll Development.app" --args --state "$preview_root/state"
 ```
 
 Development builds require an explicit destination and use
-`com.standing-orders.desktop.development`, a **Standing Orders Development**
+`com.standing-orders.desktop.development`, a **Toolroll Development**
 window, and separate default state/Keychain/service identities. They cannot
 replace the installed release. Ad-hoc development builds are not evidence
 that permissions persist across release updates. Do not combine development
@@ -311,7 +311,7 @@ Settings, or **set up** on a portfolio project card.
   already approved tasks; the builder default applies to new tasks. Clearing
   preparation is respected on later visits. Task scopes and signed routes are
   not rewritten.
-- Preview and install the existing managed Standing Orders agent instructions.
+- Preview and install the existing managed Toolroll agent instructions.
   Linked paths and foreign instructions are refused; stale previews must be
   reviewed again. Installation writes only the managed skill file.
 

@@ -251,12 +251,12 @@ export async function uploadSlackBytes(
 /** DM scopes plus channel history for rooms that follow a team conversation. */
 export const SLACK_MANIFEST = {
   display_information: {
-    name: "Standing Orders",
+    name: "Toolroll",
     description: "Manage your projects and review results in a private chat",
     background_color: "#142b2b",
   },
   features: {
-    bot_user: { display_name: "Standing Orders", always_online: false },
+    bot_user: { display_name: "Toolroll", always_online: false },
     app_home: {
       home_tab_enabled: false,
       messages_tab_enabled: true,

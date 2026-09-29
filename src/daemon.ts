@@ -1,10 +1,10 @@
 /**
  * The daemon manager: the loop as a service, with no crontab in sight.
  *
- * `standing-orders daemon install` writes the platform's own supervision unit —
+ * `toolroll daemon install` writes the platform's own supervision unit —
  * a launchd LaunchAgent on macOS, a systemd user unit on Linux, a Task
  * Scheduler task on Windows, chosen by process.platform — pointed at
- * `standing-orders watch`, and loads it. The OS keeps it alive across crashes
+ * `toolroll watch`, and loads it. The OS keeps it alive across crashes
  * and reboots; watch's incarnation recovery is what makes those restarts
  * safe, so the two halves were built for each other.
  *
@@ -93,7 +93,7 @@ async function waitForLaunchdBootout(
 }
 
 /**
- * Pin a service to the Node runtime that is executing Standing Orders.
+ * Pin a service to the Node runtime that is executing Toolroll.
  *
  * launchd does not inherit an interactive shell's PATH, so invoking a JS
  * package bin through `#!/usr/bin/env node` can install successfully and then
@@ -211,7 +211,7 @@ export function planDaemon(args: {
   const pathEnv = args.pathEnv ?? process.env["PATH"] ?? "";
   if (platform !== "darwin" && platform !== "linux" && platform !== "win32") {
     return {
-      error: `no supervisor template for ${platform} — run \`standing-orders watch\` under your own service manager`,
+      error: `no supervisor template for ${platform} — run \`toolroll watch\` under your own service manager`,
     };
   }
 
@@ -264,7 +264,7 @@ export function planDaemon(args: {
     const unitContent = `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
-    <Description>standing-orders watch — ${xml(repo)}</Description>
+    <Description>toolroll watch — ${xml(repo)}</Description>
   </RegistrationInfo>
   <Triggers>
     <LogonTrigger>
@@ -307,7 +307,7 @@ export function planDaemon(args: {
   // not trigger a restart. Whether the user manager itself survives logout
   // is linger (`loginctl enable-linger`) — documented, not assumed.
   const unitContent = `[Unit]
-Description=standing-orders watch — ${repo}
+Description=toolroll watch — ${repo}
 
 [Service]
 Environment=${systemdEscape(`PATH=${pathEnv}`)}

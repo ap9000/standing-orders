@@ -23,7 +23,7 @@ const signature = app => {
 const previousApp = options.upgradeFrom;
 const comparePrevious = previousApp && (options.explicitUpgradeFrom || existsSync(previousApp));
 if (comparePrevious) {
-  if (!existsSync(previousApp) || lstatSync(previousApp).isSymbolicLink() || !lstatSync(previousApp).isDirectory() || !existsSync(join(previousApp, "Contents", "Resources", "standing-orders-bundle"))) throw Error("The upgrade reference must be an existing Standing Orders app, not a link.");
+  if (!existsSync(previousApp) || lstatSync(previousApp).isSymbolicLink() || !lstatSync(previousApp).isDirectory() || !existsSync(join(previousApp, "Contents", "Resources", "standing-orders-bundle"))) throw Error("The upgrade reference must be an existing Toolroll app, not a link.");
   if (signature(previousApp).bundleId !== options.bundleId) throw Error("The upgrade reference has a different app identity.");
 }
 // A login service must not depend on a removable nvm version or Homebrew

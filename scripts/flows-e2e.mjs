@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { SKIPPED_FADE } from "./e2e-kit.mjs";
 /**
- * Flows, end to end. A throwaway Standing Orders instance — the real CLI,
+ * Flows, end to end. A throwaway Toolroll instance — the real CLI,
  * the real console (`serve`) and the real worker loop (`watch`) — against a
  * real git repository, driven through a real browser, with real Claude turns
  * for the lead and a real Claude build. Nothing is stubbed: every check waits
@@ -12,7 +12,7 @@ import { SKIPPED_FADE } from "./e2e-kit.mjs";
  * Needs: a built dist/, `claude` logged in (subscription), `gh` logged in,
  * git, npm. Spends a few subscription turns and one real build. Everything it
  * writes lives in a temporary folder (database, login, worktrees, evidence);
- * the installed Standing Orders is never touched.
+ * the installed Toolroll is never touched.
  */
 import { spawn, execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync, createWriteStream } from "node:fs";

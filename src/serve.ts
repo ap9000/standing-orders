@@ -80,7 +80,7 @@ import { setImmediate as yieldEventLoop } from "node:timers/promises";
 import { projectAuthority } from "./project-access.js";
 /**
  * The web console (§7, grown per the console review): the whole built-in
- * queue, visible and operable from a phone. `standing-orders serve` — node:http,
+ * queue, visible and operable from a phone. `toolroll serve` — node:http,
  * no dependencies, no JavaScript in the page. TLS is a proxy's job and the
  * docs say so; what is not delegated is everything else:
  *
@@ -469,8 +469,8 @@ const FONT_FILES: Record<string, string> = {
   "/fonts/geist-mono-600.woff2": GEIST_MONO_600,
 };
 const PWA_MANIFEST = JSON.stringify({
-  name: "standing orders",
-  short_name: "standing orders",
+  name: "Toolroll",
+  short_name: "Toolroll",
   id: "/",
   scope: "/",
   start_url: "/",
@@ -488,7 +488,7 @@ const PWA_MANIFEST = JSON.stringify({
 // and the tap, only. notificationclick resolves ONLY allow-listed relative
 // paths — the payload URL is data, revalidated, never handed raw to the
 // browser (arc 3 finding 5).
-const PWA_WORKER = `// standing orders — push only; deliberately NO fetch handler (no offline cache of an authenticated console).
+const PWA_WORKER = `// Toolroll — push only; deliberately NO fetch handler (no offline cache of an authenticated console).
 const SHAPES = [/^\\/next$/, /^\\/review$/, /^\\/system$/, /^\\/routines$/, /^\\/routines\\/[0-9]+$/, /^\\/d\\/[0-9]+$/, /^\\/contest\\/[0-9]+$/, /^\\/r\\/[0-9]+$/];
 self.addEventListener("push", function (event) {
   var data = {};
@@ -500,7 +500,7 @@ self.addEventListener("push", function (event) {
     // A count, never content. Honest no-op where unsupported.
     event.waitUntil(self.registration.setAppBadge(Math.floor(data.waiting)).catch(function () {}));
   }
-  event.waitUntil(self.registration.showNotification("standing orders", { body: body, tag: tag, data: { url: url } }));
+  event.waitUntil(self.registration.showNotification("Toolroll", { body: body, tag: tag, data: { url: url } }));
 });
 self.addEventListener("message", function (event) {
   // The page recomputes on load/focus and is authoritative over any stale
@@ -1093,7 +1093,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const back = `/settings?said=${encodeURIComponent(said)}#email`;
       response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer", "x-content-type-options": "nosniff", "x-frame-options": "DENY", "set-cookie": signInSpent(GOOGLE_CALLBACK),
         "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'" });
-      response.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="0;url=${escape(back)}"><title>Standing Orders</title>${HANDOFF_STYLE}<p>${escape(said)} <a href="${escape(back)}">Back to Settings</a></p>`);
+      response.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="0;url=${escape(back)}"><title>Toolroll</title>${HANDOFF_STYLE}<p>${escape(said)} <a href="${escape(back)}">Back to Settings</a></p>`);
     };
     const state = url.searchParams.get("state") ?? "";
     if (!startedHere(request, state)) return done("That Google sign-in was started in another browser. Connect again from this one.");
@@ -1140,7 +1140,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       // The hand-off key is this browser's alone, like the visit's state: its cookie rides to /login/sso/finish.
       "set-cookie": [signInSpent(SSO_CALLBACK), `${SIGN_IN_COOKIE}=${key}; Path=/login/sso/finish; Max-Age=60; HttpOnly; SameSite=Lax${held.redirect.startsWith("https:") ? "; Secure" : ""}`],
       "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'" });
-    response.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="0;url=${escape(to)}"><title>Standing Orders</title>${HANDOFF_STYLE}<p>Signing you in… <a href="${escape(to)}">Continue</a></p>`);
+    response.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="0;url=${escape(to)}"><title>Toolroll</title>${HANDOFF_STYLE}<p>Signing you in… <a href="${escape(to)}">Continue</a></p>`);
   }
 
   async function connectCallback(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
@@ -1148,7 +1148,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const to = `${back}${back.includes("?") ? "&" : "?"}${key}=${encodeURIComponent(words)}`;
       response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer", "x-content-type-options": "nosniff", "x-frame-options": "DENY", "set-cookie": signInSpent(CONNECT_CALLBACK),
         "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'" });
-      response.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="0;url=${escape(to)}"><title>Standing Orders</title>${HANDOFF_STYLE}<p>${escape(words)} <a href="${escape(to)}">Back to Standing Orders</a></p>`);
+      response.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="0;url=${escape(to)}"><title>Toolroll</title>${HANDOFF_STYLE}<p>${escape(words)} <a href="${escape(to)}">Back to Toolroll</a></p>`);
     };
     const state = url.searchParams.get("state") ?? "";
     if (!startedHere(request, state)) return done("/settings/tools", "problem", "That sign-in was started in another browser. Connect again from this one.");
@@ -1316,8 +1316,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         () => accountNameFor(claims, name => store.accountOf(name) !== null), clock());
       if (!signedIn.ok) {
         recordSignIn(store.ssoAccount(identity.issuer, identity.subject) ?? "unknown account", "sign-in refused", signedIn.reason === "no-group" ? "no matching group" : signedIn.reason);
-        return page(response, 403, loginPage(signedIn.reason === "no-group" ? `Your ${settings.label} account isn't in a group that may use Standing Orders. Ask whoever runs it.`
-          : signedIn.reason === "revoked" ? "This account was removed. Ask whoever runs Standing Orders." : "That change would leave no one who can run this installation.", "/", ssoOffer()));
+        return page(response, 403, loginPage(signedIn.reason === "no-group" ? `Your ${settings.label} account isn't in a group that may use Toolroll. Ask whoever runs it.`
+          : signedIn.reason === "revoked" ? "This account was removed. Ask whoever runs Toolroll." : "That change would leave no one who can run this installation.", "/", ssoOffer()));
       }
       const account = store.accountOf(signedIn.account)!;
       const id = randomBytes(32).toString("hex");
@@ -2660,7 +2660,7 @@ export function createDecisionServer(options: ServeOptions): Server {
                   : `<span class="meta">${one.perHour}/hour · files into ${one.repos.map(repo => escape(repo)).join(", ")} · ${one.expiresAt === null ? "no expiry (made before expiry)" : `expires ${escape(one.expiresAt.slice(0, 10))}`} · last filed ${one.lastFiledAt === null ? "never" : escape(one.lastFiledAt.slice(0, 16).replace("T", " "))}</span>`) +
                 `</p>`,
               ),
-              `<details class="settings-more"><summary>Revoke an agent filer</summary><p class="meta">Run <code>standing-orders coordinator revoke &lt;cid&gt; --as you</code> on this computer.</p></details>`,
+              `<details class="settings-more"><summary>Revoke an agent filer</summary><p class="meta">Run <code>toolroll coordinator revoke &lt;cid&gt; --as you</code> on this computer.</p></details>`,
               `</div>`,
             ].join("\n");
           })();
@@ -2787,7 +2787,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           `<p class="row"><a href="/r/${run.id}" class="mono">#${run.id}</a> <a href="${taskHref(run.taskId)}"><strong>${escape(run.title)}</strong></a>${projectChip(run.repo)} ` +
             `<span class="right meta mono">${escape(run.runner)} \u00b7 ${escape(run.role)} \u00b7 ${escape(stage)} \u00b7 ${escape(relativeAge(run.startedAt, now))}</span></p>`,
           options.localRunner === undefined
-            ? `<p class="meta">the transcript is readable on the machine that runs the worker \u2014 start the console there with <code>standing-orders up</code></p>`
+            ? `<p class="meta">the transcript is readable on the machine that runs the worker \u2014 start the console there with <code>toolroll up</code></p>`
             : `<pre class="recap plan-doc live-pane" id="live-transcript-${run.id}" data-initial-offset="0">${escape(tail)}</pre><p class="meta" id="live-transcript-${run.id}-state"></p>`,
           `</section>`,
         ].join("\n");
@@ -3269,7 +3269,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           const readiness = [
             { title: "Project", detail: projectName(project) },
             { title: agents.ok ? "Agents configured" : "Choose your agents", detail: agents.ok ? "The project has an exact agent route. The created work will show the agents it binds." : agents.problem, ...(!restricted() && !agents.ok ? { href: "/control" } : {}) },
-            { title: workers.length ? "Worker connected" : "Worker needed", detail: workers.length ? `${workers.length} worker${workers.length === 1 ? " is" : "s are"} answering for this project.` : "Open Standing Orders on the machine with this project. Work waits safely until a worker connects." },
+            { title: workers.length ? "Worker connected" : "Worker needed", detail: workers.length ? `${workers.length} worker${workers.length === 1 ? " is" : "s are"} answering for this project.` : "Open Toolroll on the machine with this project. Work waits safely until a worker connects." },
             { title: "Approval", detail: mode?.signedBy === who.name ? "Your signed project policy is available. Its scope, expiry, and approval options will be checked at filing." : "Review and approve the created work before it starts.", ...(!restricted() ? { href: "/mode" } : {}) },
           ];
           return render(workflowPreviewHtml(preview, csrf, revision, now, readiness, mode?.signedBy === who.name));
@@ -3665,7 +3665,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (url.pathname === "/control/connection") {
         const command = asked === "claude" ? "claude auth login" : asked === "codex" ? "codex login" : asked === "gemini" ? "gemini" : null;
         return sendScreen(response, 200, screen(`${ASSISTANTS[asked].name} connection`, `<h1>${escape(ASSISTANTS[asked].name)} ${connection.state === "connected" ? "is connected" : "connection"}</h1>` +
-          connectionHtml(asked, connection, task) + (command === null ? "" : `<p>On the computer running Standing Orders, sign in with:</p><pre class="recap">${escape(command)}</pre>`) +
+          connectionHtml(asked, connection, task) + (command === null ? "" : `<p>On the computer running Toolroll, sign in with:</p><pre class="recap">${escape(command)}</pre>`) +
           `<p><a href="/settings#providers">Manage API keys and authentication mode</a></p>` + hiddenFields({ "resume-task": task }), { chrome: chromeFor(project, "settings") }));
       }
       const setup = store.liveWorktreeSetup(project);
@@ -3751,7 +3751,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       return sendScreen(response, 200, screen("Tools", `<p><a href="/settings">Settings</a></p><h1>Tools</h1>${selector}${content}`, { chrome: chromeFor(chosen || project, "settings") }));
     }
-    // Settings → Project: what Standing Orders holds for a project; an instance operator deletes it here.
+    // Settings → Project: what Toolroll holds for a project; an instance operator deletes it here.
     if (url.pathname === "/settings/project") {
       const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible).filter(one => !deletedRepos.has(one));
       const asked = url.searchParams.get("repo");
@@ -4025,7 +4025,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         done: !unscopedMode,
         title: "name what this console may see",
         detail: unscopedMode
-          ? `no ceiling is configured — this server currently shows everything. Restart it naming the repos: <code>standing-orders serve --repo &lt;path&gt; --port …</code>`
+          ? `no ceiling is configured — this server currently shows everything. Restart it naming the repos: <code>toolroll serve --repo &lt;path&gt; --port …</code>`
           : repos.length === 0
             ? `the ceiling is configured but empty — no repository is visible here`
             : `ceiling: ${repos.map(one => escape(projectName(one))).join(", ")}`,
@@ -4037,8 +4037,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         done: store.hasPhaseConfig(),
         title: "route the spend to a provider",
         detail: store.hasPhaseConfig()
-          ? `spend routing is configured in this database. Binary and authentication facts stay machine-side: run <code>standing-orders providers</code> where the workers run`
-          : `nothing routes builds to a provider yet: <code>standing-orders config set build --provider claude --as &lt;you&gt; --token &lt;t&gt;</code> — then check <code>standing-orders providers</code> on the worker's machine (installed, configured, historically-successful, and authenticated are four separate facts there)`,
+          ? `spend routing is configured in this database. Binary and authentication facts stay machine-side: run <code>toolroll providers</code> where the workers run`
+          : `nothing routes builds to a provider yet: <code>toolroll config set build --provider claude --as &lt;you&gt; --token &lt;t&gt;</code> — then check <code>toolroll providers</code> on the worker's machine (installed, configured, historically-successful, and authenticated are four separate facts there)`,
       },
       {
         done: repos.length > 0 && setupDone === repos.length,
@@ -4046,7 +4046,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         detail:
           setupDone > 0
             ? `setup command set${counted(setupDone)}`
-            : `agents build in throwaway workspaces; give them the preparation step: <code>standing-orders setup set --repo &lt;path&gt; --command "npm ci"</code>`,
+            : `agents build in throwaway workspaces; give them the preparation step: <code>toolroll setup set --repo &lt;path&gt; --command "npm ci"</code>`,
       },
       {
         done: repos.length > 0 && skillDone === repos.length,
@@ -4054,7 +4054,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         detail:
           skillDone > 0
             ? `skill installed${counted(skillDone)}`
-            : `<code>standing-orders skills install --repo &lt;path&gt;</code> previews; add <code>--yes</code> to write the skill file`,
+            : `<code>toolroll skills install --repo &lt;path&gt;</code> previews; add <code>--yes</code> to write the skill file`,
       },
       {
         done: store.hasAnyWork(),
@@ -4224,7 +4224,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
     if (managedRepos().length === 0) return { ok: false, code: "empty", why: "add a project first — chat will include it automatically" };
     const config = store.getChatConfig();
-    if (config === null) return { ok: false, code: "unconfigured", why: "chat is not configured yet — set it up below, or from the terminal: standing-orders config set chat" };
+    if (config === null) return { ok: false, code: "unconfigured", why: "chat is not configured yet — set it up below, or from the terminal: toolroll config set chat" };
     if (isSubscriptionChatProvider(config.provider)) {
       return {
         ok: true,
@@ -4996,7 +4996,7 @@ export function createDecisionServer(options: ServeOptions): Server {
               ? {
                   enabled: false as const,
                   why: options.upConsole === true
-                    ? "Choose a projects folder once: standing-orders up --project-root <dir>"
+                    ? "Choose a projects folder once: toolroll up --project-root <dir>"
                     : "choose which folder this server may use with --project-root <dir>",
                 }
               : { enabled: true as const, roots: ceiling.roots, record: [...(who.session.onboard?.entries() ?? [])][0] ?? null };
@@ -5994,7 +5994,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         ? respond(response, status, 'application/json', JSON.stringify({ ok: false, error: message, delivery, ...(sessionId ? { sessionId } : {}) }))
         : refuse(response, who, status, message, '/code');
       if (who.via !== 'cookie' || !codingActorAllowed({ name: who.name, generation: who.session.generation }) || store.isDemo()) return fail(403, 'Coding sessions require installation-wide operator access. You can manage project tasks in Work.');
-      if (!coding) return fail(409, codingProblem || 'Open Standing Orders on the machine with your installed coding agent.');
+      if (!coding) return fail(409, codingProblem || 'Open Toolroll on the machine with your installed coding agent.');
       if ([...new Set(body.keys())].some(key => body.getAll(key).length !== 1)) return fail(400, 'Submit one value for each field.');
       const actor = { name: who.name, generation: who.session.generation };
       const permitted = (repo: string): boolean => visible(repo) && codingProjectAllowed(repo);
@@ -6010,7 +6010,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (url.pathname === '/code/start') {
           const repo = body.get('repo') ?? '';
           if (!permitted(repo)) return fail(403, 'Choose a project available to your account.');
-          if (!authenticateApprover(store, who.name, body.get('password') ?? '').ok) return fail(403, 'Enter your Standing Orders password to authorize this coding session.');
+          if (!authenticateApprover(store, who.name, body.get('password') ?? '').ok) return fail(403, 'Enter your Toolroll password to authorize this coding session.');
           const session = await coding.start(actor, { repo, title: body.get('title') ?? '', model: body.get('model')?.trim() || null, prompt: body.get('prompt') ?? '', requestId: body.get('requestId') ?? '' });
           id = session.id;
         } else {
@@ -6276,7 +6276,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           return renewed.ok ? settle(renewed.said, { reveal: renewed.reveal }) : answer(409, { ok: false, said: renewed.message });
         }
         // Linear's signing secret, pasted on this secure panel behind the password — never in chat.
-        if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return answer(403, { ok: false, said: "Enter your Standing Orders password to save a secret." });
+        if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return answer(403, { ok: false, said: "Enter your Toolroll password to save a secret." });
         const saved = saveLinearSigningSecret(trigger, body.get("secret") ?? "", dir);
         return saved.ok ? settle("Signing secret saved. Linear's deliveries can be proved now.") : answer(400, { ok: false, said: saved.message });
       }
@@ -6301,7 +6301,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           return saved.ok ? settle(saved.base === null ? "Public address cleared." : "Public address saved.") : answer(400, { ok: false, said: saved.message });
         }
         if (body.get("remove") === "yes") { removeLinearKey(dir); return settle("Linear key removed."); }
-        if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return answer(403, { ok: false, said: "Enter your Standing Orders password to save a key." });
+        if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return answer(403, { ok: false, said: "Enter your Toolroll password to save a key." });
         const saved = saveLinearKey(dir, body.get("key") ?? "");
         return saved.ok ? settle("Linear key saved on this computer.") : answer(400, { ok: false, said: saved.message });
       }
@@ -6364,7 +6364,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (url.pathname === "/spend/budget") {
       if (who.via !== "cookie" || !store.isInstanceOperator(who.name)) return refuse(response, who, 403, "An instance operator sets budgets.", "/spend");
       const back = (key: "said" | "problem", words: string) => redirect(response, `/spend?${key}=${encodeURIComponent(words)}`);
-      if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return back("problem", "Enter your Standing Orders password to change a budget.");
+      if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return back("problem", "Enter your Toolroll password to change a budget.");
       const target = /^(installation|project|person|teammate):(.+)$/.exec(body.get("target") ?? "");
       if (target === null) return back("problem", "Choose what the budget is for.");
       const scope = target[1] as "installation" | "project" | "person" | "teammate", key = target[2]!;
@@ -6478,7 +6478,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         const typed = body.get("password") ?? "";
         const confirmed = who.role === "approver" ? authenticateApprover(store, who.name, typed).ok
           : typed === "" ? requestContext.getStore()?.sso?.fresh === true : authenticateAccount(store, who.name, typed).ok;
-        if (!confirmed) return back("problem", "Enter your Standing Orders password to make a token.");
+        if (!confirmed) return back("problem", "Enter your Toolroll password to make a token.");
         const minted = mintApiToken();
         const expiresAt = new Date(now.getTime() + days * 86_400_000).toISOString();
         store.createApiToken({ id: minted.id, account: who.name, name, secretHash: minted.hash, access, expiresAt, by: who.name }, now);
@@ -6498,7 +6498,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         const found = await providerFor(before.issuer);
         return found.ok ? back("said", `${before.label} answers: it's ready for people to sign in.`) : back("problem", found.said);
       }
-      if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return back("problem", "Enter your Standing Orders password to change sign-in.");
+      if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return back("problem", "Enter your Toolroll password to change sign-in.");
       if (action === "remove") {
         removeSsoSettings(options.configDir);
         ssoProvider = null;
@@ -6521,7 +6521,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (url.pathname === "/settings/retention") {
       if (who.via !== "cookie" || !store.isInstanceOperator(who.name)) return refuse(response, who, 403, "An instance operator sets retention.", "/settings");
       const back = (key: "said" | "problem", words: string) => redirect(response, `/settings/retention?${key}=${encodeURIComponent(words)}`);
-      if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return back("problem", "Enter your Standing Orders password to change retention.");
+      if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return back("problem", "Enter your Toolroll password to change retention.");
       const before = store.retentionPeriods();
       const chosen = RETENTION_KINDS.map(({ kind }) => ({ kind, days: body.has(kind) ? parsePeriod(body.get(kind) ?? "") : before[kind] }));
       if (chosen.some(one => one.days === undefined)) return back("problem", "Choose a period for each kind of data.");
@@ -6541,7 +6541,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const databaseFile = store.databaseFile();
       if (who.via !== "cookie" || !store.isInstanceOperator(who.name) || databaseFile === null) return refuse(response, who, 403, "An instance operator looks after backups.", "/settings");
       const back = (key: "said" | "problem", words: string) => redirect(response, `/settings/backups?${key}=${encodeURIComponent(words)}`);
-      if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return back("problem", "Enter your Standing Orders password to change backups.");
+      if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return back("problem", "Enter your Toolroll password to change backups.");
       const every = body.get("every") ?? "";
       const hours = Number(every);
       if (every !== "off" && !(BACKUP_EVERY_HOURS as readonly number[]).includes(hours)) return back("problem", "Choose how often to back up.");
@@ -6561,7 +6561,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (url.pathname === "/settings/data") {
       if (who.via !== "cookie" || !store.isInstanceOperator(who.name)) return refuse(response, who, 403, "An instance operator exports data.", "/settings");
       if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) {
-        return redirect(response, `/settings/data?problem=${encodeURIComponent("Enter your Standing Orders password to download the export.")}`);
+        return redirect(response, `/settings/data?problem=${encodeURIComponent("Enter your Toolroll password to download the export.")}`);
       }
       store.recordAction({ at: now.toISOString(), actor: who.name, repo: null, taskId: null, runId: null, action: "everything exported", outcome: "exported", source: "access", detail: "downloaded as a .zip" });
       const exported = buildExport(store, { who: who.name, now, evidenceRoot, configDir: options.configDir ?? null });
@@ -6574,9 +6574,9 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (url.pathname === "/settings/monitoring") {
       if (who.via !== "cookie" || !store.isInstanceOperator(who.name) || !options.configDir) return refuse(response, who, 403, "An instance operator sets up monitoring.", "/settings");
       const back = (key: "said" | "problem", words: string) => redirect(response, `/settings/monitoring?${key}=${encodeURIComponent(words)}`);
-      if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return back("problem", "Enter your Standing Orders password to change monitoring.");
+      if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return back("problem", "Enter your Toolroll password to change monitoring.");
       const before = readMonitoring(options.configDir);
-      // Never into Standing Orders' own folder, a project or the build checkouts: an agent could read the stream there.
+      // Never into Toolroll's own folder, a project or the build checkouts: an agent could read the stream there.
       const saved = saveMonitoring(options.configDir, { webhook: body.get("webhook") ?? "", folder: body.get("folder") ?? "", tracesEndpoint: body.get("traces") ?? "",
         headerName: body.get("header-name") ?? "", headerValue: body.get("header-value") ?? "", rotate: body.get("rotate") === "1" }, before,
         [...new Set([...managedRepos(), ...store.knownRepos(), ...(options.poolRoot === undefined ? [] : [options.poolRoot])])]);
@@ -6600,7 +6600,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const kit = kitOf(body.get("kit") ?? "")?.id ?? null;
       const back = (words: string) => redirect(response, `/settings/tools?repo=${encodeURIComponent(repo)}${kit === null ? "" : `&kit=${kit}`}${service === null ? "" : `&connect=${service.id}`}&problem=${encodeURIComponent(words)}#connect`);
       if (service === null) return back("Choose a service to connect.");
-      if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return back("Enter your Standing Orders password to connect a tool.");
+      if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return back("Enter your Toolroll password to connect a tool.");
       const origin = consoleOrigin(request.headers.host);
       if (origin === null) return back("Connect tools from this computer (localhost) or from your https address.");
       const started = await startConnect({ service: service.id, repo, by: who.name, origin, kit }, options.connectFetch ?? fetch);
@@ -6618,7 +6618,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const name = body.get("name") ?? "";
       // Anything that adds what a build can run or reach, or a secret, needs the password.
       if (["add-catalog", "add-custom", "import", "secret"].includes(action) && !authenticateApprover(store, who.name, body.get("password") ?? "").ok) {
-        return back("problem", "Enter your Standing Orders password to change this project's tools.");
+        return back("problem", "Enter your Toolroll password to change this project's tools.");
       }
       const now = clock();
       const finish = (added: { ok: true; spec: ToolSpec } | { ok: false; message: string }, label: string) => {
@@ -6846,7 +6846,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         if(!credentials || !state.bindings(credentials.installation).some(one=>state.live(one))) return show("Pair your Slack account first.",409);
         savePrimary(dir,"slack");return redirect(response,"/settings/slack");
       }
-      if(!authenticateApprover(store,who.name,body.get("password")??"").ok) return show("Enter your Standing Orders password to change Slack access.",403);
+      if(!authenticateApprover(store,who.name,body.get("password")??"").ok) return show("Enter your Toolroll password to change Slack access.",403);
       const generation=store.accountOf(who.name)!.generation;
       if(action==="connect") {
         try {
@@ -6883,7 +6883,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (body.getAll("password").length > 1) return show("Submit one value for each field.");
       if (botId === null) return show("Connect the Telegram bot first.", 409);
       const pairingIdentity = authenticateAccount(store, who.name, body.get("password") ?? "");
-      if (!pairingIdentity.ok || pairingIdentity.role !== "approver" || pairingIdentity.generation !== who.session.generation) return show("Enter your Standing Orders password to change your phone pairing.", 403);
+      if (!pairingIdentity.ok || pairingIdentity.role !== "approver" || pairingIdentity.generation !== who.session.generation) return show("Enter your Toolroll password to change your phone pairing.", 403);
       if (url.pathname.endsWith("/unpair")) {
         store.unpairTelegram(botId, who.name, now);
         return redirect(response, "/settings/telegram");
@@ -6904,7 +6904,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (!credentials || !state.bindings(credentials.installation).some(one => state.live(one))) return show("Pair your Teams account first.", 409);
         savePrimary(dir, "teams"); return redirect(response, "/settings/teams");
       }
-      if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return show("Enter your Standing Orders password to change Teams access.", 403);
+      if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return show("Enter your Toolroll password to change Teams access.", 403);
       const generation = store.accountOf(who.name)!.generation;
       if (action === "connect") {
         try {
@@ -6941,7 +6941,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         if(!credentials || !state.bindings(credentials.installation).some(one=>state.live(one))) return show("Pair your Discord account first.",409);
         savePrimary(dir,"discord");return redirect(response,"/settings/discord");
       }
-      if(!authenticateApprover(store,who.name,body.get("password")??"").ok) return show("Enter your Standing Orders password to change Discord access.",403);
+      if(!authenticateApprover(store,who.name,body.get("password")??"").ok) return show("Enter your Toolroll password to change Discord access.",403);
       const generation=store.accountOf(who.name)!.generation;
       if(action==="connect") {
         try {
@@ -7108,7 +7108,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const account = await sendingAccount(options.configDir, options.googleFetch ?? fetch);
       if (!account.ok) return said(account.said === "Email isn't set up yet. Add your mail server in Settings → Email." ? "Set up email first." : account.said);
       const settings = account.settings;
-      const sent = await (options.mailSender ?? sendThroughServer)(settings, { from: settings.from, to: [settings.from], subject: "Standing Orders: test email", text: "This is a test from Standing Orders. Send email steps in your flows will come from this address." });
+      const sent = await (options.mailSender ?? sendThroughServer)(settings, { from: settings.from, to: [settings.from], subject: "Toolroll: test email", text: "This is a test from Toolroll. Send email steps in your flows will come from this address." });
       return said(sent.ok ? `Sent a test email to ${settings.from}.` : sent.said);
     }
 
@@ -8829,7 +8829,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     inputs: { minutes: number; turns: number; budgetMicrousd: number; expiry?: string; parent?: number; followup?: string; model?: string; posture?: string },
     now: Date,
   ): Promise<{ ok: true; terms: AttendedTerms } | { ok: false; problem: string }> {
-    if (options.attended === undefined) return { ok: false, problem: "this console cannot hold a session — start it with `standing-orders up`" };
+    if (options.attended === undefined) return { ok: false, problem: "this console cannot hold a session — start it with `toolroll up`" };
     const ref = store.lookupRef(taskId);
     if (ref === null) return { ok: false, problem: "no such task" };
     const scope = store.getScope(taskId);
@@ -10604,7 +10604,7 @@ function goOutside(response: ServerResponse, to: string, words: string, bind: { 
   response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer", "x-content-type-options": "nosniff", "x-frame-options": "DENY",
     "set-cookie": `${SIGN_IN_COOKIE}=${bind.state}; Path=${bind.path}; Max-Age=900; HttpOnly; SameSite=Lax${bind.secure ? "; Secure" : ""}`,
     "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'" });
-  response.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="0;url=${escape(to)}"><title>Standing Orders</title>${HANDOFF_STYLE}<p>${escape(words)} <a href="${escape(to)}">Continue</a></p>`);
+  response.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="0;url=${escape(to)}"><title>Toolroll</title>${HANDOFF_STYLE}<p>${escape(words)} <a href="${escape(to)}">Continue</a></p>`);
 }
 
 function redirect(response: ServerResponse, to: string): void {
@@ -13304,7 +13304,7 @@ ${THEME_DARK}
     border: 0; background: transparent;
   }
   .thread .msg.mate::before {
-    content: "s·o"; position: absolute; top: .7rem; left: .1rem; width: 2.35rem; height: 2.35rem;
+    content: "T"; position: absolute; top: .7rem; left: .1rem; width: 2.35rem; height: 2.35rem;
     display: grid; place-items: center; border: 1px solid var(--glass-border); border-radius: .8rem;
     background: var(--glass-strong);
     color: var(--foreground); font: 600 .6875rem/1 var(--font-mono); letter-spacing: -.04em;
@@ -13357,7 +13357,7 @@ ${THEME_DARK}
   .proposal .refused { color: var(--danger); }
   .chat-empty { margin: auto; padding: clamp(3rem, 9vh, 6rem) 1rem 3rem; text-align: center; }
   .chat-empty::before {
-    content: "s·o"; display: grid; place-items: center; width: 3.5rem; height: 3.5rem; margin: 0 auto 1.1rem;
+    content: "T"; display: grid; place-items: center; width: 3.5rem; height: 3.5rem; margin: 0 auto 1.1rem;
     border: 1px solid var(--glass-border); border-radius: 1.15rem;
     background: var(--glass-strong);
     box-shadow: var(--so-pill-shadow);
@@ -13595,7 +13595,7 @@ ${THEME_DARK}
   main:has(.mate-mint) > h1 { margin-top: .5rem; font-size: 1.7rem; letter-spacing: -.04em; }
   .mate-mint { position: relative; max-width: 46rem; margin-top: 1.5rem; padding: 1.5rem; border-radius: calc(var(--radius) + 4px); }
   .mate-mint::before {
-    content: "s·o"; position: absolute; top: 1.4rem; left: 1.4rem; width: 3rem; height: 3rem;
+    content: "T"; position: absolute; top: 1.4rem; left: 1.4rem; width: 3rem; height: 3rem;
     display: grid; place-items: center; border: 1px solid var(--glass-border); border-radius: 1rem;
     background: var(--glass-strong);
     box-shadow: var(--so-pill-shadow);
@@ -14445,7 +14445,7 @@ function shell(
     `${count !== undefined && count > 0 ? ` <span class="count badge badge-open">${count}${chrome.inboxSaturated ? "+" : ""}</span>` : ""}</a>`;
   const side = [
     `<aside class="side">`,
-    `<div class="side-head"><a class="brand" href="${chrome.chat === true ? "/chat" : "/work"}"><span class="brand-long">standing<span class="dot">·</span>orders</span><span class="brand-short">s·o</span></a>`,
+    `<div class="side-head"><a class="brand" href="${chrome.chat === true ? "/chat" : "/work"}"><span class="brand-long">Toolroll</span><span class="brand-short">T</span></a>`,
     ...(options.sidebarToggle === true
       ? [`<button type="button" class="side-toggle" aria-label="collapse sidebar" aria-expanded="true" title="collapse sidebar">${strokeIcon(`<path d="m15 18-6-6 6-6"/>`)}</button>`]
       : []),
@@ -14495,7 +14495,7 @@ function shell(
   // these only below 760px; desktop keeps the sidebar untouched.
   const mobileTop = [
     `<header class="mobile-top">`,
-    `<a class="brand-mini" href="${chrome.chat === true ? "/chat" : "/work"}">s·o</a>`,
+    `<a class="brand-mini" href="${chrome.chat === true ? "/chat" : "/work"}">T</a>`,
     // On a phone the pill IS the scope row (mobile pass): the project's
     // name, its three counts, and the one /projects link at that
     // breakpoint — the scope bar hides below 760px so the header is one
@@ -14552,7 +14552,7 @@ function personChip(name: string): string {
 /** The invite's front door: cookie-free, script-free, sensitive by shape.
  * Rendered only for a LIVE token — everything dead gets joinDeadPage. */
 function joinFormPage(token: string, problem: string | null, name: string): string {
-  return shell("Join Standing Orders", [
+  return shell("Join Toolroll", [
     `<div class="login-viewport"><div class="login-shell">`,
     `<h1 class="so-wordmark login-brand">${BRAND_HTML}</h1>`,
     `<p class="meta hint">You were invited. Pick a name and a password to sign in.</p>`,
@@ -14571,7 +14571,7 @@ function joinFormPage(token: string, problem: string | null, name: string): stri
 
 /** Unknown, expired, revoked, consumed, attempts spent: ONE page (D6). */
 function joinDeadPage(): string {
-  return shell("Join Standing Orders", [
+  return shell("Join Toolroll", [
     `<div class="login-viewport"><div class="login-shell">`,
     `<h1 class="so-wordmark login-brand">${BRAND_HTML}</h1>`,
     `<div class="login-card">`,
@@ -14602,7 +14602,7 @@ export function ssoStepUps(html: string, sso: { label: string; fresh: boolean },
 }
 
 /** The brand, as the workspace sidebar shows it. */
-const BRAND_HTML = `<span class="so-brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>Standing Orders`;
+const BRAND_HTML = `<span class="so-brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>Toolroll`;
 
 /** A page on its own, in the workspace's look but with no script: the brand, then the page. */
 function focusDocument(title: string, body: string): string {
@@ -14612,7 +14612,7 @@ function focusDocument(title: string, body: string): string {
 function loginPage(problem: string | null, returnTo = "/", sso: { label: string; operatorsOnly: boolean } | null = null): string {
   // v100: with an identity provider, its button comes first and passwords wait behind "Use a password".
   const provider = sso === null ? "" : `<a class="button-link login-sso" href="/login/sso${returnTo === "/" ? "" : `?return=${encodeURIComponent(returnTo)}`}">Sign in with ${escape(sso.label)}</a>`;
-  return shell("Standing Orders", [
+  return shell("Toolroll", [
     `<div class="login-viewport"><div class="login-shell">`,
     `<h1 class="so-wordmark login-brand">${BRAND_HTML}</h1>`,
     problem === null || sso === null ? "" : `<div class="problem" role="alert">${escape(problem)}</div>`,
@@ -14628,19 +14628,19 @@ function loginPage(problem: string | null, returnTo = "/", sso: { label: string;
     "</form>",
     `</div>`,
     sso === null ? "" : `</details>`,
-    `<p class="login-foot">${sso === null ? "Your login was shown when Standing Orders first started, and saved beside its database as <code>up-login.txt</code>.<br>" : ""}No account? Ask whoever runs it for an invite link.</p>`,
+    `<p class="login-foot">${sso === null ? "Your login was shown when Toolroll first started, and saved beside its database as <code>up-login.txt</code>.<br>" : ""}No account? Ask whoever runs it for an invite link.</p>`,
     `</div></div>`,
   ].join("\n"), { nav: false });
 }
 
 /** The first-account page (setup review): shown only while no approver exists. */
 function signupPage(problem: string | null, attemptsLeft: number): string {
-  return shell("Standing Orders", [
+  return shell("Toolroll", [
     `<div class="login-viewport"><div class="login-shell">`,
     `<h1 class="so-wordmark login-brand">${BRAND_HTML}</h1>`,
     `<div class="login-card">`,
     `<p><strong>Create the first account</strong></p>`,
-    `<p class="meta">There are no accounts yet. The terminal that started Standing Orders printed a setup code; enter it here with the username and password you want.</p>`,
+    `<p class="meta">There are no accounts yet. The terminal that started Toolroll printed a setup code; enter it here with the username and password you want.</p>`,
     problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
     attemptsLeft <= 0
       ? ""
@@ -14799,7 +14799,7 @@ function inboxPage(chrome: Chrome, data: {
       ? ""
       : `<div class="card">` +
         `<p><strong>Getting started</strong> <span class="meta">\u2014 disappears after the first successful run</span></p>` +
-        `<p class="meta">Keep <span class="mono">standing-orders up</span> running on this machine \u2014 it opens the app and reconnects every saved project's builder.</p>` +
+        `<p class="meta">Keep <span class="mono">toolroll up</span> running on this machine \u2014 it opens the app and reconnects every saved project's builder.</p>` +
         data.wizard
           .map(
             step =>
@@ -14814,7 +14814,7 @@ function inboxPage(chrome: Chrome, data: {
             ? `<a href="/routines?template=${escape(one.name)}">${escape(one.name)}</a>`
             : one.kind === "task"
               ? `<a href="/tasks?template=${escape(one.name)}">${escape(one.name)}</a>`
-              : `<span title="a recipe \u2014 walk it in the terminal: standing-orders template show ${escape(one.name)}">${escape(one.name)} (recipe)</span>`,
+              : `<span title="a recipe \u2014 walk it in the terminal: toolroll template show ${escape(one.name)}">${escape(one.name)} (recipe)</span>`,
         ).join(" \u00b7 ") +
         `</p></div>`;
 
@@ -14823,8 +14823,8 @@ function inboxPage(chrome: Chrome, data: {
       ? ""
       : `<div class="card builder-notice" data-builder-status="${data.worker.registered === 0 ? "not-connected" : "disconnected"}">` +
         (data.worker.registered === 0
-          ? `<strong>No builder is connected yet.</strong> Standing Orders is open, but no machine is connected to do project work. On the machine where the project lives, open that folder and run <span class="mono">standing-orders up</span>. Keep Standing Orders running; approved work starts automatically.`
-          : `<strong>Builder disconnected.</strong> ${data.worker.registered} builder${data.worker.registered === 1 ? " is" : "s are"} configured, last checked in ${data.worker.lastHeard === null ? "never" : escape(when(data.worker.lastHeard))}. Reopen Standing Orders on that machine. Queued work starts automatically when a builder reconnects.`) +
+          ? `<strong>No builder is connected yet.</strong> Toolroll is open, but no machine is connected to do project work. On the machine where the project lives, open that folder and run <span class="mono">toolroll up</span>. Keep Toolroll running; approved work starts automatically.`
+          : `<strong>Builder disconnected.</strong> ${data.worker.registered} builder${data.worker.registered === 1 ? " is" : "s are"} configured, last checked in ${data.worker.lastHeard === null ? "never" : escape(when(data.worker.lastHeard))}. Reopen Toolroll on that machine. Queued work starts automatically when a builder reconnects.`) +
         `</div>`;
 
   return screen("inbox", [
@@ -14899,7 +14899,7 @@ function systemPage(chrome: Chrome, data: {
       const sessions = data.heldSessions?.get(one.name) ?? 0;
       return (
         `<div class="stat-card"><span class="k"><span class="dot ${dot}"></span>${escape(one.name)}</span>` +
-        `<span class="v">builder \u00b7 ${said} \u00b7 ${busy}/${one.capacity} building${sessions > 0 ? ` \u00b7 ${sessions} attended session${sessions === 1 ? "" : "s"} (uncapped by standing-orders — each is an agent + a supervisor process; OS limits apply)` : ""}</span></div>`
+        `<span class="v">builder \u00b7 ${said} \u00b7 ${busy}/${one.capacity} building${sessions > 0 ? ` \u00b7 ${sessions} attended session${sessions === 1 ? "" : "s"} (uncapped by Toolroll — each is an agent + a supervisor process; OS limits apply)` : ""}</span></div>`
       );
     });
   const worktreeCards = data.worktrees.map(tree => {
@@ -14915,7 +14915,7 @@ function systemPage(chrome: Chrome, data: {
   const watchCard =
     data.episode === null
       ? ""
-      : `<div class="stat-card"><span class="k"><span class="dot ${data.episode.endedAt === null ? "dot-ok pulse" : "dot-off"}"></span>Standing Orders</span>` +
+      : `<div class="stat-card"><span class="k"><span class="dot ${data.episode.endedAt === null ? "dot-ok pulse" : "dot-off"}"></span>Toolroll</span>` +
         `<span class="v">${
           data.episode.endedAt === null
             ? `running since ${escape(when(data.episode.startedAt))}`
@@ -14950,7 +14950,7 @@ function systemPage(chrome: Chrome, data: {
     .join("\n");
   const agentsCard =
     `<h2>agents</h2>` +
-    `<p class="meta">which AI provider runs each phase — changed from the terminal with your credentials (<code>standing-orders config</code>), never by a browser click</p>` +
+    `<p class="meta">which AI provider runs each phase — changed from the terminal with your credentials (<code>toolroll config</code>), never by a browser click</p>` +
     `<div class="card">${agentLines}` +
     `<p class="meta">repair always stays on the provider that built — only its model can differ. A routine pins its agent the moment it fires; nothing after that can re-route it.</p>` +
     `</div>`;
@@ -14960,7 +14960,7 @@ function systemPage(chrome: Chrome, data: {
     `<p class="hint">builders execute tasks in isolated temporary copies of each project</p>`,
     agentsCard,
     cards.length === 0
-      ? `<p class="meta">No builder is connected yet. On the machine where the project lives, open that folder and run <code>standing-orders up</code>.</p>`
+      ? `<p class="meta">No builder is connected yet. On the machine where the project lives, open that folder and run <code>toolroll up</code>.</p>`
       : `<div class="cards">${cards.join("")}</div>`,
     data.outboxPending > 0 ? `<p class="meta">notifications: ${data.outboxPending} pending delivery</p>` : "",
     (data.externalWork ?? []).length === 0
@@ -14971,7 +14971,7 @@ function systemPage(chrome: Chrome, data: {
             one =>
               `<p class="row"><span class="mono">${escape(one.remoteRepo)}</span> ` +
               (one.blocked !== null
-                ? `<span class="badge badge-failed">dispatch blocked</span> <span class="meta">the tracker connection needs repair — \`standing-orders sync\` says why</span>`
+                ? `<span class="badge badge-failed">dispatch blocked</span> <span class="meta">the tracker connection needs repair — \`toolroll sync\` says why</span>`
                 : one.openEpisode !== null
                   ? `<span class="badge badge-failed">sync failing</span> <span class="meta">${escape(one.openEpisode)}</span>`
                   : `<span class="meta">syncing normally</span>`) +
@@ -16107,7 +16107,7 @@ function chatPage(chrome: Chrome, data: {
       `<label>daily turns <span class="meta">(default 50)</span>` +
         `<input type="text" name="daily-turns" inputmode="numeric" style="width:8rem" value="${current === null ? "" : String(current.dailyTurns)}"></label>`,
       currentSubscription
-        ? `<p class="meta">Authenticate on this machine first with ${current?.provider === "codex-subscription" ? `<span class="mono">codex login</span>` : `the <span class="mono">claude</span> CLI`}. Standing Orders reuses that cached login and never stores it.</p>`
+        ? `<p class="meta">Authenticate on this machine first with ${current?.provider === "codex-subscription" ? `<span class="mono">codex login</span>` : `the <span class="mono">claude</span> CLI`}. Toolroll reuses that cached login and never stores it.</p>`
         : `<label>API key <span class="meta">(${data.keyFacts
           .map(one =>
             one.state === "none"
@@ -16123,7 +16123,7 @@ function chatPage(chrome: Chrome, data: {
       `<button type="submit">${current === null ? "turn chat on" : "save"}</button>`,
       `</form>`,
       currentSubscription
-        ? `<p class="meta">The membership provider runs without repository tools in a temporary directory; Standing Orders remains the only layer that can turn a proposed action into a confirmation card.</p>`
+        ? `<p class="meta">The membership provider runs without repository tools in a temporary directory; Toolroll remains the only layer that can turn a proposed action into a confirmation card.</p>`
         : `<p class="meta">a pasted key is written once to a mode-0600 file beside the database — never INTO the database, never shown again beyond its last characters; an environment variable (` +
           `<span class="mono">ANTHROPIC_API_KEY</span> / <span class="mono">OPENROUTER_API_KEY</span>) always wins when set</p>`,
     ].join("\n");
@@ -16141,7 +16141,7 @@ function chatPage(chrome: Chrome, data: {
     // subscription-backed plane, never a seeded transcript (v48 authority repair).
     parts.push(
       code === "demo"
-        ? `<div class="card" id="latest"><p><strong>Chat isn’t available in demo mode</strong></p><p class="meta">Demo data never contacts an external model. Start Standing Orders with a real project to use chat.</p></div>`
+        ? `<div class="card" id="latest"><p><strong>Chat isn’t available in demo mode</strong></p><p class="meta">Demo data never contacts an external model. Start Toolroll with a real project to use chat.</p></div>`
         : `<div class="card" id="latest"><p><strong>chat is off.</strong></p><p class="meta">${escape(data.enabled.why)}</p></div>`,
     );
     // The ceiling refusals need a restart to fix; configuration does not —
@@ -16902,7 +16902,7 @@ function routinesPage(
         ].join("\n");
   const list =
     tracks.length === 0
-      ? `<p class="meta">No standing orders${chrome.project === null ? " — open a project to file one" : " in this project yet — file one below; nothing fires until you approve it"}.</p>`
+      ? `<p class="meta">No routines${chrome.project === null ? " — open a project to file one" : " in this project yet — file one below; nothing fires until you approve it"}.</p>`
       : tracks.map(track => trackRow(track, chrome.project === null)).join("\n");
   return screen("routines", [
     `<h1>Routines</h1>`,
@@ -17159,7 +17159,7 @@ function homePage(chrome: Chrome, data: {
       const sessions = data.heldSessions?.get(one.name) ?? 0;
       return (
         `<div class="stat-card"><span class="k"><span class="dot ${dot}"></span>${escape(one.name)}</span>` +
-        `<span class="v">builder \u00b7 ${said} \u00b7 ${busy}/${one.capacity} building${sessions > 0 ? ` \u00b7 ${sessions} attended session${sessions === 1 ? "" : "s"} (uncapped by standing-orders — each is an agent + a supervisor process; OS limits apply)` : ""}</span></div>`
+        `<span class="v">builder \u00b7 ${said} \u00b7 ${busy}/${one.capacity} building${sessions > 0 ? ` \u00b7 ${sessions} attended session${sessions === 1 ? "" : "s"} (uncapped by Toolroll — each is an agent + a supervisor process; OS limits apply)` : ""}</span></div>`
       );
     });
   const worktreeCards = data.worktrees.map(tree => {
@@ -17175,7 +17175,7 @@ function homePage(chrome: Chrome, data: {
   const watchCard =
     data.episode === null
       ? ""
-      : `<div class="stat-card"><span class="k"><span class="dot ${data.episode.endedAt === null ? "dot-ok pulse" : "dot-off"}"></span>Standing Orders</span>` +
+      : `<div class="stat-card"><span class="k"><span class="dot ${data.episode.endedAt === null ? "dot-ok pulse" : "dot-off"}"></span>Toolroll</span>` +
         `<span class="v">${
           data.episode.endedAt === null
             ? `running since ${escape(when(data.episode.startedAt))}`
@@ -17184,7 +17184,7 @@ function homePage(chrome: Chrome, data: {
   const fleetCards = [...runnerCards, watchCard, ...worktreeCards].filter(one => one !== "");
   const fleet =
     fleetCards.length === 0
-      ? `<h2>system status</h2><p class="hint">No builder is connected yet. On the machine where the project lives, open that folder and run <code>standing-orders up</code>.</p>`
+      ? `<h2>system status</h2><p class="hint">No builder is connected yet. On the machine where the project lives, open that folder and run <code>toolroll up</code>.</p>`
       : `<h2>system status</h2><p class="hint">builders execute tasks in isolated temporary copies of each project</p><div class="cards">${fleetCards.join("")}</div>`;
 
   const startHere =
@@ -17194,7 +17194,7 @@ function homePage(chrome: Chrome, data: {
           `<p><strong>Nothing is queued yet — here is the whole loop:</strong></p>`,
           `<p>1. <a href="/tasks">Add a task</a> — plain words for work you want done${data.repo === null ? "" : ` in <span class="mono">${escape(data.repo)}</span>`}.</p>`,
           `<p>2. Open it and write its scope — the goal, and what it must not become. Approve exactly that.</p>`,
-          `<p>3. Keep Standing Orders running on the builder machine. Approved tasks build unattended, each on its own branch.</p>`,
+          `<p>3. Keep Toolroll running on the builder machine. Approved tasks build unattended, each on its own branch.</p>`,
           `<p class="meta">When an agent is unsure it stops and asks — those questions land here, under \u201cwaiting on you\u201d.</p>`,
           `</div>`,
         ].join("\n")
@@ -18419,7 +18419,7 @@ function projectsPage(
   const addForms = [
     browsable || onboard !== null && !onboard.enabled && onboard.why.includes('--project-root')
       ? ""
-      : `<p class="meta">Choose a projects folder once with <code>standing-orders up --project-root &lt;dir&gt;</code>. Standing Orders remembers it after that.</p>`,
+      : `<p class="meta">Choose a projects folder once with <code>toolroll up --project-root &lt;dir&gt;</code>. Toolroll remembers it after that.</p>`,
     onboardCard === "" ? "" : `<div style="margin-top:.5rem">${onboardCard}</div>`,
     `<details class="project-add-more"><summary>Enter an exact path instead</summary>`,
     `<form method="post" action="/projects/open" class="card">`,
@@ -19497,11 +19497,11 @@ function taskBodyParts(data: {
           return (
             `<details class="dispatch-recovery" open><summary>${escape(dispatchActionLabel(diagnosis))}</summary><div class="dispatch-recovery-body">` +
             (firstConnection
-              ? `<p>Standing Orders is open, but this project has not been connected to a builder yet.</p><p>On the machine where the project lives, open that folder and run:</p>`
-              : `<p>Standing Orders is open, but this project's builder stopped checking in. Reopen Standing Orders on the machine where the project lives.</p><p>If you normally start it from a terminal, open the project folder and run:</p>`) +
-            `<code class="dispatch-recovery-command">standing-orders up</code>` +
+              ? `<p>Toolroll is open, but this project has not been connected to a builder yet.</p><p>On the machine where the project lives, open that folder and run:</p>`
+              : `<p>Toolroll is open, but this project's builder stopped checking in. Reopen Toolroll on the machine where the project lives.</p><p>If you normally start it from a terminal, open the project folder and run:</p>`) +
+            `<code class="dispatch-recovery-command">toolroll up</code>` +
             (firstConnection
-              ? `<p class="meta">This is the normal start command: it opens the app, connects the project, and starts its builder. Keep Standing Orders running; approved tasks begin automatically.</p>`
+              ? `<p class="meta">This is the normal start command: it opens the app, connects the project, and starts its builder. Keep Toolroll running; approved tasks begin automatically.</p>`
               : `<p class="meta">This task resumes automatically when the builder reconnects. You do not need to file or approve it again.</p>`) +
             `<p><a href="/system">See connection status →</a></p></div></details>`
           );
@@ -19623,7 +19623,7 @@ function taskBodyParts(data: {
           "ok",
           resultStatus.label,
           (recovered
-            ? `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished. <span data-automatic-recovery="succeeded">Standing Orders ran the approved setup automatically, then the project check passed.</span>`
+            ? `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished. <span data-automatic-recovery="succeeded">Toolroll ran the approved setup automatically, then the project check passed.</span>`
             : `<a href="/r/${proof.runId}">Build #${proof.runId}</a> finished as ${escape(proof.outcome ?? "terminal")}, and the repository's approved verification command passed against it.`) + publicationWords,
           dispatchStatusToken("verified"),
         ) + proofDetails);
@@ -20943,7 +20943,7 @@ function verificationExplanation(verdict: ProofVerdict | null, reasons: readonly
       reason === "the approved verification command passed after the approved setup command ran"
       || reason === "the approved verification command passed after the approved setup command restored project dependencies"
     ) {
-      return "Standing Orders ran the approved setup automatically, then the project check passed.";
+      return "Toolroll ran the approved setup automatically, then the project check passed.";
     }
     if (
       reason === "the approved verification command could not start because a required project executable was unavailable and no approved recovery was enabled"
@@ -20971,10 +20971,10 @@ function verificationExplanation(verdict: ProofVerdict | null, reasons: readonly
       return "Automatic recovery stopped because files changed after the build was saved. Review those changes before retrying.";
     }
     if (reason === "automatic recovery stopped because the checkout moved away from the built commit") {
-      return "Automatic recovery stopped because Standing Orders found a different project version than the one it built. Review the build log before retrying.";
+      return "Automatic recovery stopped because Toolroll found a different project version than the one it built. Review the build log before retrying.";
     }
-    if (reason === "automatic recovery stopped because Standing Orders could not confirm that the built checkout was unchanged") {
-      return "Automatic recovery stopped because Standing Orders couldn't confirm that no files changed after the build was saved. Review the build log, then try again.";
+    if (reason === "automatic recovery stopped because Toolroll could not confirm that the built checkout was unchanged") {
+      return "Automatic recovery stopped because Toolroll couldn't confirm that no files changed after the build was saved. Review the build log, then try again.";
     }
     if (
       reason === "the required project executable was still unavailable after replaying the approved setup command"
@@ -20986,13 +20986,13 @@ function verificationExplanation(verdict: ProofVerdict | null, reasons: readonly
       return "Automatic recovery ran the approved setup, but the retried project check timed out.";
     }
     if (reason === "the retried verification command could not be started after automatic recovery") {
-      return "Automatic recovery ran the approved setup, but Standing Orders still couldn't start the project check.";
+      return "Automatic recovery ran the approved setup, but Toolroll still couldn't start the project check.";
     }
     if (reason === "automatic recovery stopped because this worker no longer owned the build") {
       return "Automatic recovery stopped because this worker no longer owned the build. A current worker can retry safely.";
     }
     if (reason === "the approved verification command could not be run") {
-      return "Standing Orders couldn't run the project check.";
+      return "Toolroll couldn't run the project check.";
     }
     const recoveredFailure = /^the repository's approved verification command exited (-?[0-9]+) after the approved setup command was replayed$/.exec(reason);
     if (recoveredFailure !== null) {
@@ -21002,7 +21002,7 @@ function verificationExplanation(verdict: ProofVerdict | null, reasons: readonly
     if (exit !== null) {
       const code = Number(exit[1]);
       return code === 127
-        ? "Standing Orders couldn't run the project check because a required command wasn't available."
+        ? "Toolroll couldn't run the project check because a required command wasn't available."
         : `The project check failed (exit ${code}).`;
     }
     if (reason === "the sealed diff is unavailable or truncated; the claimed changed paths cannot be verified against it") {
@@ -21012,7 +21012,7 @@ function verificationExplanation(verdict: ProofVerdict | null, reasons: readonly
     return sentence === "" ? "" : `${sentence[0]?.toUpperCase() ?? ""}${sentence.slice(1)}${/[.!?]$/.test(sentence) ? "" : "."}`;
   }).filter(Boolean);
   if (plain.length > 0) return plain.join(" ");
-  if (verdict === "verified") return "Standing Orders independently verified this result.";
+  if (verdict === "verified") return "Toolroll independently verified this result.";
   if (verdict === "attested") return "The agent supplied evidence, but no independent project check was available.";
   if (verdict === "short") return "Some approved requirements still need evidence.";
   if (verdict === "refuted") return "Recorded evidence conflicts with this result.";
@@ -21275,7 +21275,7 @@ function reviewNextActionOf(view: ReviewCockpitView, csrf: string): { kind: stri
     return card("compare-contest", `Compare the ${contestNoun(view.contest.kind)}`, `${view.contest.agents} agents finished — compare their results side by side and pick one.`, `<a class="button-link" href="/contest/${view.contest.id}">Compare results</a>`);
   }
   if (detail.ciFailing && csrf !== "") {
-    return card("draft-repair", "CI is failing on its pull request", "Standing Orders confirmed the failure. Draft one repair task, then approve it before it runs.", `<form method="post" action="/r/${run.id}/draft-repair"><input type="hidden" name="csrf" value="${escape(csrf)}"><button type="submit">Draft a repair task</button></form>`);
+    return card("draft-repair", "CI is failing on its pull request", "Toolroll confirmed the failure. Draft one repair task, then approve it before it runs.", `<form method="post" action="/r/${run.id}/draft-repair"><input type="hidden" name="csrf" value="${escape(csrf)}"><button type="submit">Draft a repair task</button></form>`);
   }
   if (detail.comments.length > 0 && csrf !== "") {
     return card("revise", `${detail.comments.length} note${detail.comments.length === 1 ? "" : "s"} ready`, "Create one revision from these notes. You approve it before it runs.", `<form method="post" action="/r/${run.id}/revise"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="return" value="${escape(reviewHref(view.taskId))}">${revisionSealFields(detail.comments, detail.sourceDigest)}<button type="submit">Revise</button></form>`);
@@ -23226,12 +23226,12 @@ function capsPage(chrome: Chrome, caps: Capability[] | null, gaps: Gap[], repo: 
   ].join("\n"), { chrome });
 }
 
-/** v98: how the bot's messages reach Standing Orders, in words: pushed to the public address, or asked for. */
+/** v98: how the bot's messages reach Toolroll, in words: pushed to the public address, or asked for. */
 function telegramDeliveryWords(store: Store, bot: TokenSource | null): string | null {
   if (bot === null) return null;
   const state = store.telegramPush(bot.botId);
   if (state?.url) return `Telegram pushes new messages to ${state.url}${state.problem === null ? "." : `, but ${state.problem.charAt(0).toLowerCase()}${state.problem.slice(1)}.`}`;
-  return `Standing Orders asks Telegram for new messages every few seconds${state?.problem ? ` (${state.problem})` : ""}.`;
+  return `Toolroll asks Telegram for new messages every few seconds${state?.problem ? ` (${state.problem})` : ""}.`;
 }
 
 function settingsPage(
@@ -23522,7 +23522,7 @@ function workersCard(workers: NonNullable<BrowserSettingsView["workers"]> | null
   if (workers === null) return "";
   return `<section id="workers" aria-labelledby="workers-title"><h2 id="workers-title">Workers</h2>` +
     (workers.length === 0
-      ? `<p class="meta">No worker is connected. Run <code>standing-orders up</code> on the computer with your projects.</p>`
+      ? `<p class="meta">No worker is connected. Run <code>toolroll up</code> on the computer with your projects.</p>`
       : workers.map(one =>
           `<div class="card" data-worker="${escape(one.name)}"><p class="row"><strong>${escape(one.name)}</strong> <span class="meta">${escape(one.state)}</span>` +
           `<span class="right">${one.busy} of ${one.capacity} running</span></p>` +
@@ -23530,7 +23530,7 @@ function workersCard(workers: NonNullable<BrowserSettingsView["workers"]> | null
             ? `<p class="meta">Nothing running.</p>`
             : `<ul>${one.running.map(task => `<li><a href="${escape(task.href)}">${escape(task.title)}</a>${task.project === null ? "" : ` <span class="meta">${escape(task.project)}</span>`}</li>`).join("")}</ul>`) +
           `</div>`).join("") +
-        `<p class="meta">To change how many a worker runs at once: <code>standing-orders runner capacity &lt;name&gt; &lt;n&gt;</code></p>`) +
+        `<p class="meta">To change how many a worker runs at once: <code>toolroll runner capacity &lt;name&gt; &lt;n&gt;</code></p>`) +
     `</section>`;
 }
 

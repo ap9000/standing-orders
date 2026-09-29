@@ -123,7 +123,7 @@ test("billing follows what the CLI did: a key source, a cloud model or Codex's k
   store.recordUsage(keyed.run, { costUsd: 3 });
   store.stampTerminalClass(keyed.run, "subscription", "unknown");
   expect(store.handle.prepare("SELECT microusd, source, billing FROM run_spend WHERE run = ?").get(keyed.run)).toEqual({ microusd: 3_000_000, source: "reported", billing: "api-key" });
-  // Codex seen on a key account bills its key, though Standing Orders is set to its plan.
+  // Codex seen on a key account bills its key, though Toolroll is set to its plan.
   expect(billingOf("codex", store.handle)).toBe("subscription");
   store.recordProviderLimits({ provider: "codex", plan: null, windows: [], partial: true, billing: "api-key" }, NOW);
   expect(billingOf("codex", store.handle)).toBe("api-key");

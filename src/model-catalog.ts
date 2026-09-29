@@ -313,7 +313,7 @@ export async function checkRuntimes(store: Store, now: Date, seams: CatalogSeams
 export async function updateRuntime(store: Store, tool: RuntimeTool, by: string, now: Date, seams: CatalogSeams = {}): Promise<{ ok: boolean; message: string }> {
   const state = runtimeStates(store).find(one => one.tool === tool);
   if (state === undefined) return { ok: false, message: `${RUNTIME_TOOLS[tool].name} is not installed on this computer.` };
-  if (state.updateCommand === null) return { ok: false, message: `${state.name} was installed in a way Standing Orders cannot update. Update it the way you installed it.` };
+  if (state.updateCommand === null) return { ok: false, message: `${state.name} was installed in a way Toolroll cannot update. Update it the way you installed it.` };
   const work = activeUpdateWork(store.handle);
   const busy = Object.values(work).reduce((sum, n) => sum + n, 0);
   if (busy > 0) return { ok: false, message: `Work is running (${busy} item${busy === 1 ? "" : "s"}). Update ${state.name} when it finishes.` };

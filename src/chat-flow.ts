@@ -8,7 +8,7 @@
  *   as the paired person, for exactly the visit the notice was about, then
  *   repaints the notice with what happened and no buttons.
  * - Edit and Send back open a prompt: the person's next message in their
- *   chat with Standing Orders is the new draft (which comes back with fresh
+ *   chat with Toolroll is the new draft (which comes back with fresh
  *   buttons) or the note. "cancel" leaves it, and a prompt lapses after
  *   30 minutes. Chat apps can't all name the message a reply answers, so
  *   the prompt says plainly what the next message does.
@@ -161,7 +161,7 @@ export function answerChatFlowPrompt(options: { store: Store; state: ChatState; 
     if (said === "") { say(mode === "edit" ? "Send the text itself, or “cancel”." : "Say what should change, or send “cancel”."); return true; }
     // A long message arrives cut short (the chat keeps its first 2,000 characters): never take part of one as the draft.
     const limit = (input.originalLength ?? 0) > input.text.length ? MATE_MESSAGE_MAX_CHARS : DRAFT_LIMIT;
-    if ((input.originalLength ?? 0) > input.text.length || said.length > DRAFT_LIMIT) { say(`That's too long to take from here. Keep it under ${limit.toLocaleString("en-US")} characters, or change it in Standing Orders.`); return true; }
+    if ((input.originalLength ?? 0) > input.text.length || said.length > DRAFT_LIMIT) { say(`That's too long to take from here. Keep it under ${limit.toLocaleString("en-US")} characters, or change it in Toolroll.`); return true; }
     if (!verifyApproverStanding(store, binding.approver, binding.generation, repos).ok) { close(); state.finish(event.id, true); return true; }
     if (mode === "edit") {
       if (waiting.draft === null) { close(); say("This decision has no draft to edit."); return true; }

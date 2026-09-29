@@ -48,7 +48,7 @@ away. `$FLOW_LAST_RUN` says when it last ran.
 ## Safety
 
 Card text reaches a script only as data, never as part of a command. Scripts
-run inside the same fence as agents, so they can't read Standing Orders' own
+run inside the same fence as agents, so they can't read Toolroll's own
 database or keys. They run with a plain environment rather than yours, and
 stop at their time limit (1 to 60 minutes). Python scripts need `python3`
-installed; Node scripts use the Node that runs Standing Orders.
+installed; Node scripts use the Node that runs Toolroll.

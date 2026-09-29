@@ -16,16 +16,16 @@ export type TeamCliOptions = {
   sleep?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
 };
 export const TEAM_CLI_ACTIONS = ['connect', 'lead list', 'lead create', 'lead update', 'lead member', 'lead transfer', 'conversation list', 'conversation create', 'conversation show', 'conversation member', 'conversation edit', 'conversation withdraw', 'conversation read', 'conversation follow', 'conversation stop'] as const;
-const HELP = `standing-orders connect <HTTPS-origin> --as <account> --token-stdin
+const HELP = `toolroll connect <HTTPS-origin> --as <account> --token-stdin
   Use --token-file <private-file> or --local-login for your existing local sign-in.
   Optional: --profile <name> (saved as the active profile).
-standing-orders lead list|create|update|member|transfer [--profile <name>] [--json]
+toolroll lead list|create|update|member|transfer [--profile <name>] [--json]
   create: --name <name> --instructions <text> --project <server-path> (repeatable)
   update: --lead <id> --revision <number> with --name, --instructions or --status
   member: --lead <id> --account <name> --role viewer|contributor|manager
           --active true|false --revision <lead-revision>
   transfer: --task <id> --lead <id> --revision <number>
-standing-orders conversation list|create|show|member|edit|withdraw|read|follow|stop
+toolroll conversation list|create|show|member|edit|withdraw|read|follow|stop
   list: [--lead <id>]
   create: --lead <id> --title <title> --visibility private|team --project <server-path>
   member: --conversation <id> --account <name> --role viewer|contributor|manager
@@ -33,12 +33,12 @@ standing-orders conversation list|create|show|member|edit|withdraw|read|follow|s
   edit/withdraw: --conversation <id> --message <id> --revision <message-revision> [--text <text>]
   read/stop: --conversation <id> --message <id>
   follow: --conversation <id> --enabled true|false (automatic summaries within authorized limits)
-standing-orders chat --lead <id> --conversation <id> [--say <text>] [--follow] [--json]
+toolroll chat --lead <id> --conversation <id> [--say <text>] [--follow] [--json]
   Without --say, a terminal opens interactive chat. --follow only reads updates.
   Enable paid chat with --authorize --terms-digest <digest> after reviewing its terms.
   --request-id <32-hex-id> identifies one message; after a lost response, inspect it
   with brief --conversation <id> --request-id <id>, without sending it again.
-standing-orders brief --lead <id> --conversation <id> [--json]
+toolroll brief --lead <id> --conversation <id> [--json]
 
 Saved profiles select the central service for chat and brief. Use --local for the
 existing local commands. Credentials stay in a private file, never in URLs or arguments.

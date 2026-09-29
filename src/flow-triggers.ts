@@ -198,7 +198,7 @@ export function validateTriggerConfig(raw: unknown, context: { store: Store; flo
       return { kind: "webhook", title: words(input, "title", 120, false) ?? "Webhook", titleField: words(input, "titleField", 80, false), bodyField: words(input, "bodyField", 80, false), zone };
     case "chat":
       // Connecting a channel proves it's one the person is in: it happens in the channel, not here.
-      throw new Error(`Connect a chat channel from the channel itself: where Standing Orders is in Slack, Discord, Teams or a Telegram group, send “flow ${context.flow.id}”.`);
+      throw new Error(`Connect a chat channel from the channel itself: where Toolroll is in Slack, Discord, Teams or a Telegram group, send “flow ${context.flow.id}”.`);
     case "email": {
       const folder = words(input, "folder", 100, false) ?? "INBOX";
       const sender = words(input, "sender", 300, false);

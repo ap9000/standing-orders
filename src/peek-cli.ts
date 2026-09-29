@@ -1,5 +1,5 @@
 /**
- * `standing-orders peek` — the terminal multiplexer over live agents.
+ * `toolroll peek` — the terminal multiplexer over live agents.
  *
  * One pane per open run: its task, worker, role, stage word, elapsed
  * clock, and the tail of its live transcript (the same per-run file the
@@ -230,7 +230,7 @@ export async function openInTmux(
 ): Promise<{ ok: true; windows: number } | { ok: false; message: string }> {
   if (panes.length === 0) return { ok: false, message: "no run is open — nothing to open a window for" };
   const probe = await run("tmux", ["-V"]);
-  if (probe.code !== 0) return { ok: false, message: "tmux is not installed (or not on PATH) — `standing-orders peek` without --tmux needs nothing" };
+  if (probe.code !== 0) return { ok: false, message: "tmux is not installed (or not on PATH) — `toolroll peek` without --tmux needs nothing" };
   const shellWord = (part: string): string => `'${part.replace(/'/g, "'\\''")}'`;
   const commandFor = (runId: number): string => [...command, "peek", String(runId)].map(shellWord).join(" ");
   const [first, ...rest] = panes;

@@ -1,5 +1,5 @@
 /**
- * Settings → Monitoring (v104): where Standing Orders sends what it does, for
+ * Settings → Monitoring (v104): where Toolroll sends what it does, for
  * the tools a company already watches. Kept in `monitoring.json` beside the
  * database (0600, the agent fence keeps agents out), never in the database:
  * the webhook's signing secret and a collector's header value are secrets.
@@ -24,7 +24,7 @@ export type MonitoringSettings = {
 };
 export const NO_MONITORING: MonitoringSettings = { webhook: null, folder: null, traces: null };
 
-/** An address Standing Orders may send to: https anywhere, http only to this machine (a collector beside it). */
+/** An address Toolroll may send to: https anywhere, http only to this machine (a collector beside it). */
 export function sendableAddress(value: string): string | null {
   let url: URL;
   try { url = new URL(value.trim()); } catch { return null; }
@@ -102,9 +102,9 @@ export function saveMonitoring(dir: string, form: MonitoringForm, previous: Moni
   if (form.folder.trim() !== "") {
     const path = form.folder.trim();
     if (!isAbsolute(path) || path.length > 500 || /[\u0000-\u001f]/.test(path)) return { ok: false, said: "The folder is a full path, like /var/log/standing-orders." };
-    // Never where an agent works or Standing Orders keeps its own state: an agent could read the whole stream there.
+    // Never where an agent works or Toolroll keeps its own state: an agent could read the whole stream there.
     const real = realish(path);
-    if ([dir, ...forbidden].some(one => within(real, realish(one)) || within(realish(one), real))) return { ok: false, said: "Choose a folder outside Standing Orders' own folder and your projects, like /var/log/standing-orders." };
+    if ([dir, ...forbidden].some(one => within(real, realish(one)) || within(realish(one), real))) return { ok: false, said: "Choose a folder outside Toolroll's own folder and your projects, like /var/log/standing-orders." };
     folder = { path };
   }
   let traces: MonitoringSettings["traces"] = null;

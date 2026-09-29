@@ -210,13 +210,13 @@ export function discordCard(
   buttons: Record<string, unknown>[] = [],
 ): Record<string, unknown> {
   const lines = text.split("\n"),
-    first = lines[0] ?? "Standing Orders",
+    first = lines[0] ?? "Toolroll",
     title =
       discordPlain(first).length <= 256 &&
       first.length <= 150 &&
       lines.length > 1
         ? first
-        : "Standing Orders",
+        : "Toolroll",
     detail = title === first ? lines.slice(1).join("\n").trim() : text;
   // Long answers were split before this point; approval controls only appear when full terms fit.
   return {
@@ -365,9 +365,9 @@ export async function deliverDiscordPart(
               path: "/chat",
             },
           );
-          text = "Review the full action in Standing Orders before confirming.";
+          text = "Review the full action in Toolroll before confirming.";
           if (!buttons.length)
-            text += " Open Standing Orders on your computer.";
+            text += " Open Toolroll on your computer.";
         }
       }
     } else if (!content.image)

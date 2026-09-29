@@ -50,6 +50,6 @@ export function approvalRulesHtml(view: ApprovalRulesView, csrf: string, notice:
     radio("paths", "Only these paths", "Tasks that touch them, or don't say what they touch, need two people.") +
     `<div class="paths"><label>Protected paths, one per line<textarea name="paths" spellcheck="false" placeholder="infra/**&#10;migrations/**">${e(view.rules.protectedPaths.join("\n"))}</textarea></label></div>` +
     few + `</fieldset>` +
-    `<div class="step-up"><label>Your Standing Orders password<input type="password" name="password" autocomplete="current-password"></label></div>` +
+    `<div class="step-up"><label>Your Toolroll password<input type="password" name="password" autocomplete="current-password"></label></div>` +
     `<button type="submit">Save rules</button></form></section>`;
 }

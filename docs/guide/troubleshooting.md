@@ -21,11 +21,11 @@ doesn't mention an email address; ask for one in the form that makes it.
 didn't answer. It tries twice more (5 and 15 minutes), then takes the
 failure path. **Insights** has the run's log.
 
-**The builder is disconnected.** Start `standing-orders up` again on the
+**The builder is disconnected.** Start `toolroll up` again on the
 computer where your projects are; queued work resumes.
 
 **"Too many wrong passwords. Try again in 15 minutes."** Five wrong
-passwords in a row lock a name. Wait, or restart Standing Orders to clear
+passwords in a row lock a name. Wait, or restart Toolroll to clear
 it. **Action ledger** (filter Sign-ins) shows the attempts.
 
 **"database is locked" from the command line.** The app was writing at that

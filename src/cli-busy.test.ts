@@ -127,7 +127,7 @@ describe("CLI database contention", () => {
       ok: false,
       command: "task",
       reason: "database-busy",
-      message: `The database ${file} stayed busy for 15 seconds. Wait for the other Standing Orders process to finish, then try again.`,
+      message: `The database ${file} stayed busy for 15 seconds. Wait for the other Toolroll process to finish, then try again.`,
     });
     expect(elapsed).toBeGreaterThanOrEqual(CONCURRENT_WRITER_WAIT_MS);
     expect(elapsed).toBeLessThan(CONCURRENT_WRITER_WAIT_MS + 5_000);

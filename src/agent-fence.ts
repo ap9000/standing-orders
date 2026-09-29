@@ -43,7 +43,7 @@ function inside(child: string, parent: string): boolean {
 }
 
 /**
- * Every path an agent must not reach: the Standing Orders state folder
+ * Every path an agent must not reach: the Toolroll state folder
  * beside the database (all of it, except the folder that holds this run's
  * own worktree), the database itself with its journal files, and
  * `~/.standing-orders` (provider keys and project tool secrets). When the
@@ -58,8 +58,8 @@ export function agentFence(options: { databaseFile: string | null; worktree: str
     const database = real(options.databaseFile);
     const state = dirname(database);
     for (const suffix of ["", "-wal", "-shm", "-journal"]) if (existsSync(database + suffix)) fence.add(database + suffix);
-    // Only a folder that is Standing Orders' own (~/.config/standing-orders,
-    // the desktop app's "Standing Orders") is fenced whole: a database kept
+    // Only a folder that is Toolroll's own (~/.config/standing-orders,
+    // the desktop app's "Toolroll") is fenced whole: a database kept
     // in a shared folder (a projects folder, a test's temp folder) must not
     // fence its neighbours, the repositories agents build among them.
     const dedicated = state !== home && state !== sep && !existsSync(join(state, ".git")) && /standing[\s_-]?orders/i.test(basename(state));

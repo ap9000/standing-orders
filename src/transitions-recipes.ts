@@ -1,5 +1,5 @@
 // Selected portable recipes from https://github.com/Jakubantalik/transitions.dev
-// Keep recipe CSS intact; Standing Orders overrides and wiring live separately.
+// Keep recipe CSS intact; Toolroll overrides and wiring live separately.
 export const TRANSITIONS_CSS = `
 /* Transitions.dev — 05-menu-dropdown.md */
 :root {

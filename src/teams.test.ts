@@ -143,7 +143,7 @@ describe("Teams shared chat", () => {
     const code = state.pairing(credentials.installation, "alex", store.accountOf("alex")!.generation, now);
     expect(receive(activity(DM_ALEX, ALEX, `pair ${code}`))).toBe(true);
     await processTeamsEvent(options); await drain();
-    expect(lastText()).toContain("Connected to Standing Orders");
+    expect(lastText()).toContain("Connected to Toolroll");
     expect(sends().at(-1)?.path).toBe(`/v3/conversations/${encodeURIComponent(DM_ALEX)}/activities`);
     expect(pairAs("sam", SAM, DM_SAM)).not.toBeNull();
     expect(state.bindings(credentials.installation).map(one => one.approver)).toEqual(["alex", "sam"]);
@@ -195,12 +195,12 @@ describe("Teams shared chat", () => {
     const conversation = (made.result as { conversationId: string }).conversationId, thread = (made.result as { threadId: number }).threadId;
     expect(domain.execute(actor("alex"), { operation: "member", args: { conversationId: conversation, account: "sam", role: "contributor", active: true, expectedRevision: 1, joinLead: true, expectedLeadRevision: 1 } }, now).ok).toBe(true);
     for (const name of ["alex", "sam"]) store.mintTeamMateSession({ approver: name, approverGeneration: actor(name).generation, thread, credentialKey: "fixture", ceilingMicrousd: 0, ceilingDigest: ceilingDigestOf(projects), termsDigest: "t".repeat(64) }, now);
-    expect(receive(activity(CHANNEL, ALEX, "<at>Standing Orders</at> hello?"))).toBe(false);
-    expect(receive(activity(CHANNEL, ALEX, "<at>Standing Orders</at> team 1"))).toBe(true);
+    expect(receive(activity(CHANNEL, ALEX, "<at>Toolroll</at> hello?"))).toBe(false);
+    expect(receive(activity(CHANNEL, ALEX, "<at>Toolroll</at> team 1"))).toBe(true);
     await processTeamsEvent(options); await drain();
     expect(sends().at(-1)?.path).toBe(`/v3/conversations/${encodeURIComponent(CHANNEL)}/activities`);
     expect(lastText()).toContain("This room now follows Website launch (lead Engineering)");
-    expect(receive(activity(CHANNEL, SAM, "<at>Standing Orders</at> Add a criterion for the footer"))).toBe(true);
+    expect(receive(activity(CHANNEL, SAM, "<at>Toolroll</at> Add a criterion for the footer"))).toBe(true);
     await processTeamsEvent(options); await drain();
     const queued = store.handle.prepare("SELECT q.author, q.request_id, m.text FROM team_message q JOIN mate_message m ON m.id = q.message WHERE q.conversation = ? ORDER BY q.message").all(conversation);
     expect(queued).toEqual([{ author: "sam", request_id: expect.stringMatching(/^teams:19:/), text: "Add a criterion for the footer" }]);
@@ -209,7 +209,7 @@ describe("Teams shared chat", () => {
     await planTeamsRooms(options); await drain();
     expect(sends().at(-1)?.path).toBe(`/v3/conversations/${encodeURIComponent(CHANNEL)}/activities`);
     expect(lastText()).toBe("Added: the footer must show the current year.");
-    expect(receive(activity(CHANNEL, ALEX, "<at>Standing Orders</at> team off"))).toBe(true);
+    expect(receive(activity(CHANNEL, ALEX, "<at>Toolroll</at> team off"))).toBe(true);
     await processTeamsEvent(options); await drain();
     expect(state.room(credentials.installation, CHANNEL)).toBeNull();
   });
@@ -220,11 +220,11 @@ describe("Teams shared chat", () => {
     const flow = store.createFlow({ repo, name: "Requests", by: "alex", definitionJson: JSON.stringify(flowFromSteps([{ title: "Inbox", kind: "inbox" }], null)) }, now);
     const OTHER = "29:1other-user-id-zzzzzzzzzzzzzz";
     const post = (id: string) => `${CHANNEL};messageid=${id}`;
-    expect(receive({ ...activity(post("1001"), OTHER, "<at>Standing Orders</at> Need a new laptop"), id: "1001", conversation: { id: post("1001"), conversationType: "channel", tenantId: TENANT } })).toBe(false);
-    expect(receive({ ...activity(post("1002"), ALEX, `<at>Standing Orders</at> flow ${flow}`), id: "1002", conversation: { id: post("1002"), conversationType: "channel", tenantId: TENANT } })).toBe(true);
+    expect(receive({ ...activity(post("1001"), OTHER, "<at>Toolroll</at> Need a new laptop"), id: "1001", conversation: { id: post("1001"), conversationType: "channel", tenantId: TENANT } })).toBe(false);
+    expect(receive({ ...activity(post("1002"), ALEX, `<at>Toolroll</at> flow ${flow}`), id: "1002", conversation: { id: post("1002"), conversationType: "channel", tenantId: TENANT } })).toBe(true);
     await processTeamsEvent(options); await drain();
     expect(lastText()).toContain("This channel now feeds Requests");
-    expect(receive({ ...activity(post("1003"), OTHER, "<at>Standing Orders</at> Need a new laptop"), id: "1003", conversation: { id: post("1003"), conversationType: "channel", tenantId: TENANT } })).toBe(true);
+    expect(receive({ ...activity(post("1003"), OTHER, "<at>Toolroll</at> Need a new laptop"), id: "1003", conversation: { id: post("1003"), conversationType: "channel", tenantId: TENANT } })).toBe(true);
     await processTeamsEvent(options); await drain();
     const card = store.flowCards(flow, true)[0]!;
     expect(card).toMatchObject({ title: "Need a new laptop", createdBy: "Teams", source: { chat: { app: "teams", chat: CHANNEL, conversation: post("1003"), thread: "1003" } } });
@@ -232,7 +232,7 @@ describe("Teams shared chat", () => {
     expect(sends().at(-1)!.path).toBe(`/v3/conversations/${encodeURIComponent(post("1003"))}/activities`);
     expect(lastText()).toContain("Added to Requests as a card.");
     // A reply in the thread (a mention on the same post) joins the card's discussion.
-    expect(receive({ ...activity(post("1003"), OTHER, "<at>Standing Orders</at> It's the Dell."), id: "1004", conversation: { id: post("1003"), conversationType: "channel", tenantId: TENANT } })).toBe(true);
+    expect(receive({ ...activity(post("1003"), OTHER, "<at>Toolroll</at> It's the Dell."), id: "1004", conversation: { id: post("1003"), conversationType: "channel", tenantId: TENANT } })).toBe(true);
     await processTeamsEvent(options); await drain();
     expect(store.flowComments(card.id).map(one => one.body)).toEqual(["It's the Dell."]);
   });

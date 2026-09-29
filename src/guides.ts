@@ -13,7 +13,7 @@
 
 /** Every guide opens with this: the manual defers to the machine. */
 export const AUTHORITY_LINE =
-  "**Live `standing-orders --help` (and `standing-orders task --help`) is\n" +
+  "**Live `toolroll --help` (and `toolroll task --help`) is\n" +
   "authoritative over anything written here.** Probe it rather than guessing.";
 
 export type Guide = {
@@ -27,9 +27,9 @@ const operating: Guide = {
   name: "operating",
   title: "Operating the queue",
   oneLiner: "the machine contract: envelopes, reasons, exit codes, what you may and may never do",
-  content: `# standing-orders
+  content: `# Toolroll
 
-This repository's coding-agent work runs through \`standing-orders\`, a
+This repository's coding-agent work runs through \`toolroll\`, a
 control plane for unattended agents. You interact with it as a CLI.
 
 ${AUTHORITY_LINE}
@@ -40,7 +40,7 @@ ${AUTHORITY_LINE}
   \`{ envelopeVersion, ok, command, ... }\`; failures add a stable
   \`reason\` token and a human \`message\`. Branch on \`reason\`, never on
   prose. Ignore keys you do not recognize.
-- \`standing-orders contract --json\` lists capability tokens you can
+- \`toolroll contract --json\` lists capability tokens you can
   feature-detect on; \`contract --commands --json\` dumps the declared
   command guide (documentation with a stable shape, not authority).
 - Exit codes: 0 ok · 1 broke · 2 usage · 3 ran fine, the answer is no.
@@ -54,13 +54,13 @@ ${AUTHORITY_LINE}
 
 ## Ask the binary
 
-- \`standing-orders skills list\` names the guides this exact version
-  serves; \`standing-orders skills get <name>\` prints one. Prefer these
+- \`toolroll skills list\` names the guides this exact version
+  serves; \`toolroll skills get <name>\` prints one. Prefer these
   over any installed snapshot — they cannot be stale.
 
 ## What you may do
 
-- Queue work: \`standing-orders task add "<title>" --id <id> --json\`
+- Queue work: \`toolroll task add "<title>" --id <id> --json\`
 - Chain and order it: \`task block <id> --on <blocker>\` / \`task unblock\`,
   \`task next <id>\` (front of ITS queue; \`--undo\` restores filing order),
   \`task assign <id> --runner <name> | --anyone\` (reserve for one worker).
@@ -86,7 +86,7 @@ ${AUTHORITY_LINE}
   - \`external\` (with \`detail\`: \`stale-mirror\`, \`external-closed\`,
     \`dispatch-revoked\`, \`plane-blocked\`): this task mirrors a tracker
     item (e.g. a GitHub issue) and is not dispatchable right now — the
-    detail says why; \`standing-orders sync\` refreshes trackers.
+    detail says why; \`toolroll sync\` refreshes trackers.
   - \`contest-open\`: a tournament is running on the task; a person picks.
 
 ## What you may never do
@@ -184,7 +184,7 @@ The mirror follows the tracker; local ceremonies still govern building.
 - The \`external\` refusal carries a \`detail\` that says exactly why the
   task is not dispatchable right now:
   - \`stale-mirror\`: the tracker has moved since the mirror was last
-    seen — \`standing-orders sync\` refreshes it.
+    seen — \`toolroll sync\` refreshes it.
   - \`external-closed\`: the tracker closed the item; the mirror is done
     unless a person reopens it (\`task reopen\` is an operator act).
   - \`dispatch-revoked\`: the grant that admitted this work was revoked.
@@ -252,12 +252,12 @@ ${AUTHORITY_LINE}
   password at most once and remember it on that machine.
 - From a phone over a tailnet: add \`--host 0.0.0.0 --allow-host
   <name>:4180\`.
-- Console only, no worker: \`standing-orders serve --repo .\`. With no
+- Console only, no worker: \`toolroll serve --repo .\`. With no
   account it prints a six-digit setup code and the login page offers
   "create the first account". A second person joins by an invite link
   from the people page — never another setup code.
 - If the inbox shows "Nothing will build: no worker is answering", tell
-  them to run \`standing-orders up\` on the machine that should build.
+  them to run \`toolroll up\` on the machine that should build.
 
 ## The console's screens (what each one is for)
 
@@ -297,19 +297,19 @@ ${AUTHORITY_LINE}
 
 ## The terminal's verbs worth naming to a person
 
-- \`standing-orders peek\`: one pane per live agent (digits focus, \`q\`
+- \`toolroll peek\`: one pane per live agent (digits focus, \`q\`
   leaves); \`peek <run>\` follows one; \`peek --tmux\` opens a tmux window
   per run.
-- \`standing-orders chat\`: the mate in the terminal (\`--say "…"\` for one
-  turn); \`standing-orders proposals\` lists and confirms coordinator
+- \`toolroll chat\`: the mate in the terminal (\`--say "…"\` for one
+  turn); \`toolroll proposals\` lists and confirms coordinator
   proposals.
-- \`standing-orders task add "<title>" --report\`: a SCOUT task — a
+- \`toolroll task add "<title>" --report\`: a SCOUT task — a
   read-only investigation whose deliverable is a report, never a branch.
   Approve its scope like any other; the report lands on the task page.
-- \`standing-orders bridge telegram digest --every 2h | --off\`: hold
+- \`toolroll bridge telegram digest --every 2h | --off\`: hold
   routine facts and send them as one digest; decisions and anything that
   needs a person now still page at once.
-- \`standing-orders decide <id> --choose <option>\`, \`task approve <id>
+- \`toolroll decide <id> --choose <option>\`, \`task approve <id>
   --digest <d> --yes\`: the operator's own ceremonies — you may name them,
   never run them.
 
@@ -346,7 +346,7 @@ and crew agent reads from it before working:
 
 ## Read and search
 
-- \`standing-orders memory search "<words>" --repo PATH\` finds decisions,
+- \`toolroll memory search "<words>" --repo PATH\` finds decisions,
   instructions, references, lessons and the conversations you may read.
 - \`memory decisions --repo PATH\` lists active decisions (\`--all\` adds
   history); \`memory show <id>\` prints one with its reason and history.

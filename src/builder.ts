@@ -605,7 +605,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
       : {
           ok: false,
           reason: "unapproved",
-          message: `${taskId} has no approved scope — \`standing-orders task scope\` then \`task approve\``,
+          message: `${taskId} has no approved scope — \`toolroll task scope\` then \`task approve\``,
         };
   }
   // The mode belt at the LAST gate before money (Codex people round 2,
@@ -889,7 +889,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
   }
 
   // What the task needs, the machine must verifiably have — checked here as
-  // well as at dispatch, because `standing-orders build` reaches this function
+  // well as at dispatch, because `toolroll build` reaches this function
   // without passing through tick's gate, and a gate one road bypasses is a
   // suggestion. Recorded statuses only: probes ran at the checkpoint, and a
   // requirement nobody recorded fails closed.
@@ -898,7 +898,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
     return {
       ok: false,
       reason: "capability",
-      message: `${taskId} ${requirement} — \`standing-orders cap probe\` after supplying it`,
+      message: `${taskId} ${requirement} — \`toolroll cap probe\` after supplying it`,
     };
   }
 
@@ -1503,7 +1503,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
         verification: [],
         followUps: [],
       }, null, 2), { mode: 0o600 });
-      store.addRunNote(request.runId, "Standing Orders", `Prepared candidate ${prepared} checked out; no agent ran.`, clock());
+      store.addRunNote(request.runId, "Toolroll", `Prepared candidate ${prepared} checked out; no agent ran.`, clock());
       const captured: CapturedBuild = {
         store, request, agent, git, worktree, branch, baseRevision, taskId, taskRef,
         runner, provider, scope, effective, answers, timeoutMs, root, mailbox, done, proof, rubric,

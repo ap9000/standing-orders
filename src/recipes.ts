@@ -172,14 +172,14 @@ export function starterRecipes(): Recipe[] {
   const recipes: Recipe[] = TEMPLATES.filter(one => one.kind !== "recipe").map(one => {
     const document = parseRecipe({ format: "standing-orders-recipe", version: 1, name: titles[one.name] ?? one.name, description: one.purpose, goal: one.goal, outOfScope: one.outOfScope, touches: one.touches, acceptance: one.acceptance,
       planning: "skip", deliverable: "branch", schedule: one.kind === "routine" ? one.schedule : null, costCeilingUsd: null });
-    return { id: one.name, revision: 1, repo: null, document, digest: recipeDigest(document), author: "Standing Orders" };
+    return { id: one.name, revision: 1, repo: null, document, digest: recipeDigest(document), author: "Toolroll" };
   });
   for (const [id, document] of [
     ["small-feature", { name: "Ship a small feature", description: "Turn one clear outcome into a plan, a reviewed change, and evidence.", goal: "Implement one small feature. Describe the desired behavior here, including who uses it and what success looks like.", outOfScope: "No unrelated refactoring, dependency upgrades, deployment, or changes to existing public behavior.", planning: "required", deliverable: "branch", acceptance: [{ id: "c1", statement: "The requested behavior works and relevant regression tests pass.", how: null, evidence: ["check", "changed-path"] }] }],
     ["project-tour", { name: "Understand this project", description: "A useful first run: get a source-backed report before changing anything.", goal: "Map the project's entry points, major components, build and test commands, and one bounded improvement worth doing next. Cite the source paths behind each claim and distinguish confirmed facts from unknowns.", outOfScope: "No code or configuration changes, dependency installation, or publication.", planning: "skip", deliverable: "report", acceptance: [{ id: "c1", statement: "The report explains the entry points, components, build/test commands, and next improvement with source references and explicit unknowns.", how: null, evidence: ["manual-review"] }] }],
   ] as const) {
     const parsed = parseRecipe({ format: "standing-orders-recipe", version: 1, ...document, touches: [], schedule: null, costCeilingUsd: null });
-    recipes.unshift({ id, revision: 1, repo: null, document: parsed, digest: recipeDigest(parsed), author: "Standing Orders" });
+    recipes.unshift({ id, revision: 1, repo: null, document: parsed, digest: recipeDigest(parsed), author: "Toolroll" });
   }
   return recipes;
 }

@@ -256,7 +256,7 @@ function renderWithheld(
   return [
     "",
     `Not checked for pull requests or issues: ${names}.`,
-    "The network budget ran out. `standing-orders pulls` reads them without one.",
+    "The network budget ran out. `toolroll pulls` reads them without one.",
   ];
 }
 
@@ -352,8 +352,8 @@ function renderEmpty(roots: readonly string[]): string {
   return [
     `No git repositories found${where}.`,
     "",
-    "Point it somewhere else with `standing-orders <path>`, or go deeper with",
-    "`standing-orders --depth 8`. Nothing has been written or configured.",
+    "Point it somewhere else with `toolroll <path>`, or go deeper with",
+    "`toolroll --depth 8`. Nothing has been written or configured.",
   ].join("\n");
 }
 
@@ -630,7 +630,7 @@ export function renderGraph(
     return [
       "No work graph found in your repositories.",
       "",
-      "Standing Orders looked for `.beads/`, `backlog.md`, and open GitHub Issues.",
+      "Toolroll looked for `.beads/`, `backlog.md`, and open GitHub Issues.",
       "Nothing was installed or created — a tracker is yours to set up.",
     ].join("\n");
   }
@@ -687,7 +687,7 @@ function renderSetup(): string[] {
   }
 
   lines.push("");
-  lines.push("Standing Orders runs none of these. Re-run `standing-orders graph` afterwards.");
+  lines.push("Toolroll runs none of these. Re-run `toolroll graph` afterwards.");
   return lines;
 }
 
@@ -736,7 +736,7 @@ function describeChoice(choice: ReturnType<typeof chooseBackend>): string[] {
   if (choice.action === "recommend" && choice.why === "already enrolled") {
     // An enrolled backend is not a suggestion, and must not read like one.
     lines.push(`Enrolled: ${GRAPH_LABELS[choice.kind]}. Write access has been granted.`);
-    lines.push("`standing-orders grants` shows exactly what, and `revoke` takes it back.");
+    lines.push("`toolroll grants` shows exactly what, and `revoke` takes it back.");
     return lines;
   }
 

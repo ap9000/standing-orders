@@ -16,10 +16,10 @@ export function sessionCliFlags(spec: SessionDescriptor): Record<string, 'value'
   return { ...commonFlags, ...Object.fromEntries(Object.keys(spec.flags).map(name => [name, 'value' as const])), ...(spec.operation === 'start' || spec.operation === 'send' ? { file: 'value', stdin: 'flag' } : {}) };
 }
 function help(spec?: SessionDescriptor): string {
-  if (!spec) return `standing-orders session <operation>\n\n${SESSION_DESCRIPTORS.map(one => `  ${one.operation.padEnd(12)} ${one.synopsis}`).join('\n')}\n  capabilities  Show this client's schemas and authority requirements\n\nUse session <operation> --help for required flags. Session controls require operator credentials. Chat is the separate coordinator conversation.`;
+  if (!spec) return `toolroll session <operation>\n\n${SESSION_DESCRIPTORS.map(one => `  ${one.operation.padEnd(12)} ${one.synopsis}`).join('\n')}\n  capabilities  Show this client's schemas and authority requirements\n\nUse session <operation> --help for required flags. Session controls require operator credentials. Chat is the separate coordinator conversation.`;
   const fields = spec.inputSchema.required.filter(one => !['version', 'sessionId', 'prompt'].includes(one));
   const required = fields.map(field => Object.entries(spec.flags).find(([, value]) => value.field === field)?.[0]).filter(Boolean);
-  return `standing-orders session ${spec.operation}${'sessionId' in spec.inputSchema.properties ? ' <session-id>' : ''}\n${spec.synopsis}.\n\nRequired: --url <service-origin> --as <operator>\n  --token-env <variable-name> or --token-file <path>\n${required.map(name => `  --${name} <value>`).join('\n')}${'prompt' in spec.inputSchema.properties ? '\n  --file <path> or --stdin (complete prompt, up to 64 KB)' : ''}\n${'expectedRevision' in spec.inputSchema.properties ? '\nUse the revision, nativeThreadId and turnId from session show. Use none for a null thread or turn.\n' : ''}\nOptions: ${Object.keys(sessionCliFlags(spec)).map(name => `--${name}`).join(' ')}\nCredentials are sent only to the named HTTPS service or loopback HTTP. Redirects and automatic mutation retries are disabled.`;
+  return `toolroll session ${spec.operation}${'sessionId' in spec.inputSchema.properties ? ' <session-id>' : ''}\n${spec.synopsis}.\n\nRequired: --url <service-origin> --as <operator>\n  --token-env <variable-name> or --token-file <path>\n${required.map(name => `  --${name} <value>`).join('\n')}${'prompt' in spec.inputSchema.properties ? '\n  --file <path> or --stdin (complete prompt, up to 64 KB)' : ''}\n${'expectedRevision' in spec.inputSchema.properties ? '\nUse the revision, nativeThreadId and turnId from session show. Use none for a null thread or turn.\n' : ''}\nOptions: ${Object.keys(sessionCliFlags(spec)).map(name => `--${name}`).join(' ')}\nCredentials are sent only to the named HTTPS service or loopback HTTP. Redirects and automatic mutation retries are disabled.`;
 }
 
 type Parsed = { spec: SessionDescriptor; request: SessionRequest; url: string; account: string; token: string };
@@ -156,7 +156,7 @@ function render(response: SessionResponse): string {
   for (const request of result?.requests ?? []) lines.push(`\n${request.title}\n${request.detail}`);
   if (result?.changes) lines.push(result.changes.status, result.changes.diff, ...(result.changes.truncated ? ['Changes were truncated. Open the workspace for the full diff.'] : []));
   if (result?.truncated) lines.push('The response is shortened. Open the workspace for complete activity.');
-  for (const action of response.nextActions) lines.push(`${action.label}: ${action.operation === 'open-ui' ? 'open the coding workspace' : `standing-orders session ${action.operation}${action.sessionId ? ` ${action.sessionId}` : ''}`}`);
+  for (const action of response.nextActions) lines.push(`${action.label}: ${action.operation === 'open-ui' ? 'open the coding workspace' : `toolroll session ${action.operation}${action.sessionId ? ` ${action.sessionId}` : ''}`}`);
   return terminalText(lines.join('\n'));
 }
 

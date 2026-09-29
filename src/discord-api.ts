@@ -169,7 +169,7 @@ export async function checkDiscordCredentials(
     botToken,
     app: app.id,
     bot: user.id,
-    workspace: typeof app.name === "string" ? app.name : "Standing Orders",
+    workspace: typeof app.name === "string" ? app.name : "Toolroll",
     installation: chatHash(`discord:${app.id}:${user.id}`),
   };
 }

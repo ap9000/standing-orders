@@ -217,7 +217,7 @@ test("settings: https only (http only to this machine), secrets kept in a 0600 f
   if (!keyed.ok) throw new Error(keyed.said);
   expect(saveMonitoring(dir, { webhook: "", folder: "", tracesEndpoint: "https://attacker.example", headerName: "x-honeycomb-team", headerValue: "", rotate: false }, keyed.settings)).toMatchObject({ ok: false });
   expect(readMonitoring(dir).traces?.endpoint).toBe("https://api.honeycomb.io");
-  // Never a folder inside Standing Orders' own folder or a project.
+  // Never a folder inside Toolroll's own folder or a project.
   expect(saveMonitoring(dir, { webhook: "", folder: join(dir, "logs"), tracesEndpoint: "", headerName: "", headerValue: "", rotate: false }, NO_MONITORING)).toMatchObject({ ok: false });
   mkdirSync(join(dir, "project"));
   expect(saveMonitoring(join(dir, "state"), { webhook: "", folder: join(dir, "project", "logs"), tracesEndpoint: "", headerName: "", headerValue: "", rotate: false }, NO_MONITORING, [join(dir, "project")])).toMatchObject({ ok: false });

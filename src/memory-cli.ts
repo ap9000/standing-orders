@@ -1,4 +1,4 @@
-/** `standing-orders memory …`: the project's decisions and one search over its
+/** `toolroll memory …`: the project's decisions and one search over its
  * memory, from the terminal. Reads use the remembered local login; writes
  * record who did them. Nothing here starts a model. */
 import { envelopeJson } from './envelope.js';
@@ -14,7 +14,7 @@ const flags = [
   { name: 'source', takesValue: true, meaning: 'where the decision came from (conversation, task, result)' },
   { name: 'all', takesValue: false, meaning: 'include superseded and retired decisions' },
   { name: 'json', takesValue: false, meaning: 'versioned structured response' },
-  { name: 'db', takesValue: true, meaning: 'local Standing Orders database' },
+  { name: 'db', takesValue: true, meaning: 'local Toolroll database' },
   { name: 'decision', takesValue: true, meaning: 'accept or reject, for memory apply' },
   { name: 'sessions', takesValue: true, meaning: 'at most this many newest sessions for one pass (default 100)' },
   { name: 'no-local', takesValue: false, meaning: 'read only the plane\'s own transcripts, not local Claude Code or Codex session files' },

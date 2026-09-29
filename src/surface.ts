@@ -29,7 +29,7 @@ export type CommandFlag = {
 };
 
 export type CommandRow = {
-  /** What you type after `standing-orders` (subcommands included). */
+  /** What you type after `toolroll` (subcommands included). */
   readonly invocation: string;
   /** The `command` field the envelope answers with, where it differs
    * from the invocation (the no-verb report answers as "scan"). */
@@ -131,7 +131,7 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
     flags: [jsonFlag], notableReasons: ["unknown-skill", "usage"] },
   {
     invocation: "skills install",
-    synopsis: "install or refresh this binary's Standing Orders guides for Claude Code; without --claude-code, write the repository-local Agent Skills entry",
+    synopsis: "install or refresh this binary's Toolroll guides for Claude Code; without --claude-code, write the repository-local Agent Skills entry",
     audience: "operator",
     agentMayInvoke: false,
     mutation: "identity-idempotent",
@@ -143,7 +143,7 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
       { name: "write-context", takesValue: false, meaning: "also add the managed AGENTS.md block for a project-local install" }],
     notableReasons: ["unconfirmed", "foreign-file", "usage"],
   },
-  operator("link", "put standing-orders on PATH"),
+  operator("link", "put toolroll on PATH"),
   operator("unlink", "take it off PATH"),
   operator("demo", "a seeded throwaway sandbox"),
   { invocation: 'session capabilities', synopsis: 'Show executable session schemas and operator authority requirements; no credentials needed', audience: 'agent', agentMayInvoke: true, mutation: 'none', flags: [jsonFlag] },
@@ -316,7 +316,7 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
   { invocation: "cap list", synopsis: "recorded capabilities", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag, dbFlag, repoFlag] },
   { invocation: "outbox list", synopsis: "queued notifications", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag, dbFlag] },
   { invocation: "incident list", synopsis: "open incidents", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag, dbFlag] },
-  { invocation: "routine list", synopsis: "standing orders (scheduled routines)", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag, dbFlag] },
+  { invocation: "routine list", synopsis: "scheduled routines", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag, dbFlag] },
   { invocation: "routine show", synopsis: "one routine in full", audience: "agent", agentMayInvoke: true, mutation: "none",
     positionals: [{ name: "id", required: true, meaning: "the routine" }], flags: [jsonFlag, dbFlag] },
   { invocation: "config show", synopsis: "phase and spend configuration", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag, dbFlag, repoFlag] },

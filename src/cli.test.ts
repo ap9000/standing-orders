@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeAll, afterAll } from "vitest";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -153,7 +153,7 @@ describe("missing paths", () => {
     expect(lines.join("\n")).not.toContain("if you meant a command");
   });
 
-  test("`standing-orders help` prints help instead of scanning a folder named help", async () => {
+  test("`toolroll help` prints help instead of scanning a folder named help", async () => {
     const lines: string[] = [];
 
     const code = await main(["help"], line => lines.push(line));
@@ -174,6 +174,14 @@ describe("isDirectInvocation", () => {
     );
 
     expect(resolved).toBe(true);
+  });
+
+  test("runs the same way under the toolroll name and the older standing-orders name", () => {
+    const bin = (JSON.parse(readFileSync(resolve("package.json"), "utf8")) as { bin: Record<string, string> }).bin;
+    expect(bin).toEqual({ toolroll: "dist/bin.js", "standing-orders": "dist/bin.js" });
+    for (const name of Object.keys(bin)) {
+      expect(isDirectInvocation(MODULE, `/home/me/.local/bin/${name}`, () => "/pkg/dist/cli.js")).toBe(true);
+    }
   });
 
   test("recognises a direct path invocation", () => {

@@ -27,7 +27,7 @@ export function phoneCommand(text: string): PhoneCommand | null {
 }
 
 export const PHONE_HELP = [
-  "Standing Orders in chat",
+  "Toolroll in chat",
   "",
   "Say what you want in plain words: ask how something is going, ask for a change, or describe new work. The lead answers here and shows a card before anything changes; nothing changes until you act.",
   "",
@@ -40,7 +40,7 @@ export const PHONE_HELP = [
   "/team — team conversations; /team <number> to talk in one, /team off to leave",
   "/help — this message",
   "",
-  "To answer an agent's question, tap its buttons; reply to the question to add a note. Approvals that need your password, cancelling and publishing finish in the Standing Orders console, and a console button only takes you there. The computer must be awake and connected to reply.",
+  "To answer an agent's question, tap its buttons; reply to the question to add a note. Approvals that need your password, cancelling and publishing finish in the Toolroll console, and a console button only takes you there. The computer must be awake and connected to reply.",
 ].join("\n");
 
 /** A third-party transport receives a small display copy, not logs, paths,
@@ -76,17 +76,17 @@ function nextStep(d: DispatchDiagnosis): string {
     case "inspect-hold": return "Open this task in the console to see what must change before it can continue.";
     case "repair-dependency": return "Open this task in the console. Retry the required task, choose a different task to wait for, or explicitly stop waiting for it.";
     case "repair-capability": return "Open this task's requirements in the console and fix the named setup issue.";
-    case "start-worker": return "Reopen Standing Orders on the computer and finish any project-access setup. Approved work can resume when the builder reconnects.";
+    case "start-worker": return "Reopen Toolroll on the computer and finish any project-access setup. Approved work can resume when the builder reconnects.";
     case "retry-review": return "Open the saved result in the console. Nothing reruns a review; mark the result complete or request changes.";
     case "resume-run": return "Open this task in the console and choose Resume after its stopped attempt has finished stopping.";
-    case null: return d.condition === "running" ? "No action needed from you right now." : d.code === "cancelled" ? "Nothing else will run for this task." : "Standing Orders can reconsider this task when its waiting condition clears.";
+    case null: return d.condition === "running" ? "No action needed from you right now." : d.code === "cancelled" ? "Nothing else will run for this task." : "Toolroll can reconsider this task when its waiting condition clears.";
   }
 }
 
 /** repos is the transport's explicit enrollment ceiling, never opened-project
  * history. This snapshot is intentionally bounded and advertises that bound. */
 export function phoneStatus(store: Store, repos: readonly string[], now: Date, focused: string | null = null): string {
-  if (repos.length === 0) return "No connected projects are available to this bridge. Add a project in Standing Orders, then send /status again.";
+  if (repos.length === 0) return "No connected projects are available to this bridge. Add a project in Toolroll, then send /status again.";
   return store.transact(() => {
     const snapshot = withDispatchDiagnoses(store, store.chatSnapshot(repos, now), now);
     const lines = [...(focused === null ? [] : [`Talking about: ${focused} · /lead to switch back`, ""]), "Recent work", `As of ${now.toISOString().replace("T", " ").slice(0, 19)} UTC · ${repos.length} project(s)`, ""];
@@ -240,7 +240,7 @@ export function phoneTaskView(store: Store, repos: readonly string[], id: string
       const proof = store.proofVerdictFor(result.id);
       link = taskLinkFor(id, d, { run: result.id, verdict: proof !== null });
       const accepted = store.proofAcceptance(result.id) !== null;
-      const proofWords = { verified: "Checks passed at completion", attested: "Checks reported by the agent, not run by Standing Orders", short: "Required saved material is missing", refuted: "The saved result conflicts with the approved scope" };
+      const proofWords = { verified: "Checks passed at completion", attested: "Checks reported by the agent, not run by Toolroll", short: "Required saved material is missing", refuted: "The saved result conflicts with the approved scope" };
       lines.push(`Checks: ${proof === null ? "No completion record saved" : manualReviewOnly(proof) ? accepted ? "Accepted by a person; the recorded checks are unchanged" : "A person must inspect this result; no recorded check failed" : proofWords[proof.verdict]}.`);
       if (manualReviewOnly(proof) && !accepted) lines.push('Reply “Send the result summary” for the checks, notes and screenshots.');
       if (proof !== null && proof.matrix.length > 0) lines.push(`Requirements: ${proof.matrix.filter(row => row.state === "pass").length}/${proof.matrix.length} satisfied in the saved record.`);

@@ -413,7 +413,7 @@ describe("the builder's gates", () => {
   });
 
   test("will not build a task whose requirement nobody verified", async () => {
-    // tick's gate is one road here; `standing-orders build` is another, and a
+    // tick's gate is one road here; `toolroll build` is another, and a
     // gate one road bypasses is a suggestion.
     claimIt();
     approveScope();
@@ -3744,7 +3744,7 @@ describe("the proof (Priority 2): a missing or malformed proof never destroys co
     expect(verifyCalls).toBe(1);
     expect(store.proofVerdictFor(req.runId as number)).toMatchObject({
       verdict: "short",
-      reasons: ["automatic recovery stopped because Standing Orders could not confirm that the built checkout was unchanged"],
+      reasons: ["automatic recovery stopped because Toolroll could not confirm that the built checkout was unchanged"],
     });
     const log = checkLogFor(req.runId as number);
     expect(log).not.toContain("Automatic recovery · approved project setup");

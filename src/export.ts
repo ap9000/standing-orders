@@ -1,5 +1,5 @@
 /**
- * Full export (v105): everything Standing Orders knows, for an instance
+ * Full export (v105): everything Toolroll knows, for an instance
  * operator to take away — every table of the database as JSON Lines, grouped
  * by what it's about (projects, tasks, runs, the ledger, chats, flows,
  * teammates, people, settings), an evidence pack per task, the settings kept
@@ -208,7 +208,7 @@ function fileSettings(dir: string | null): Record<string, unknown> {
 }
 
 function readme(now: Date, who: string): string {
-  return `# Standing Orders export
+  return `# Toolroll export
 
 Everything this installation knew on ${now.toISOString().slice(0, 16).replace("T", " ")} UTC, exported by ${who}.
 

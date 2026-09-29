@@ -1,7 +1,7 @@
 /**
  * Backups (sprint 8): scheduled online backups that keep the newest N and
  * record how each went; `backup now|list` and Settings → Backups; and a
- * restore that refuses while Standing Orders runs, checks the schema version
+ * restore that refuses while Toolroll runs, checks the schema version
  * and the ledger chain, keeps the current database first, and dry-runs.
  */
 import { afterEach, beforeEach, expect, test } from "vitest";
@@ -221,7 +221,7 @@ test("restore refuses, changing nothing: while the console or a worker runs, a n
   expect(store.holdBackupLease("console-1", at(1), at(1.05))).toBe(true);
   expect(await refusal(backup)).toEqual(["running"]);
   const words = (await restoreDatabase({ databaseFile: file, file: backup, dryRun: true, now: at(1) })).refusals[0]!.words;
-  expect(words).toContain("Standing Orders is running (the console)");
+  expect(words).toContain("Toolroll is running (the console)");
   store.releaseBackupLease("console-1");
   // A worker's watch loop holds a lease, or a worker heartbeat just now.
   store.handle.prepare("INSERT INTO watch_lease (runner, repo, owner, generation, started_at, expires_at, heartbeat_at) VALUES ('b1', '/repo', 'o', 1, ?, ?, ?)").run(at(1).toISOString(), at(1.1).toISOString(), at(1).toISOString());
@@ -323,7 +323,7 @@ test("Settings → Backups is an instance operator's: the last backup and its re
   }
 });
 
-test("restore refuses a backup that is sound and the right version but doesn't open as a Standing Orders database; the live one is untouched", async () => {
+test("restore refuses a backup that is sound and the right version but doesn't open as a Toolroll database; the live one is untouched", async () => {
   const backup = await aBackup();
   store.close();
   // No table the store opens with: every earlier check passes, opening it doesn't.
@@ -331,7 +331,7 @@ test("restore refuses a backup that is sound and the right version but doesn't o
   for (const dryRun of [true, false]) {
     const tried = await restoreDatabase({ databaseFile: file, file: broken, dryRun, now: at(1) });
     expect(tried.ok).toBe(false);
-    expect(tried.refusals).toEqual([expect.objectContaining({ reason: "schema", words: expect.stringContaining("doesn't open as a Standing Orders database") })]);
+    expect(tried.refusals).toEqual([expect.objectContaining({ reason: "schema", words: expect.stringContaining("doesn't open as a Toolroll database") })]);
     expect(tried.savedAs).toBeNull();
   }
   expect(tasksIn(file)).toEqual(["kept", "later"]);

@@ -19,7 +19,7 @@ export function teamsSettingsHtml(store: Store, dir: string, csrf: string, optio
   const now = options.now ?? new Date();
   const live = runtime && typeof runtime.lease_until === "string" && runtime.lease_until > now.toISOString() && runtime.connected;
   const hidden = `<input type="hidden" name="csrf" value="${escape(csrf)}">`;
-  const password = '<label>Your Standing Orders password<input style="min-height:44px" type="password" name="password" autocomplete="current-password" required></label>';
+  const password = '<label>Your Toolroll password<input style="min-height:44px" type="password" name="password" autocomplete="current-password" required></label>';
   const post = (action: string, content: string) => `<form method="post" action="/settings/teams/${action}" class="card">${hidden}${content}</form>`;
   const endpoint = options.publicUrl ? `${options.publicUrl.replace(/\/$/, "")}${TEAMS_MESSAGES_PATH}` : null;
   let content = "";
@@ -38,9 +38,9 @@ export function teamsSettingsHtml(store: Store, dir: string, csrf: string, optio
     content = `<p><strong>Microsoft Teams</strong> · ${live ? "Signed in" : "Waiting for sign-in"}</p>`;
     if (endpoint !== null) content += `<p class="meta">Messaging endpoint: <code>${escape(endpoint)}</code> — must be reachable from the internet.</p>`;
     if (runtime?.problem) content += `<p role="status">${escape(String(runtime.problem))}</p>`;
-    if (!live && !runtime?.problem) content += "<p>Keep the Standing Orders worker running to answer Teams messages.</p>";
+    if (!live && !runtime?.problem) content += "<p>Keep the Toolroll worker running to answer Teams messages.</p>";
     if (options.code) {
-      content += "<h2>Pair your account</h2><p>Send this to the Standing Orders bot in a personal Teams chat. It expires in 10 minutes.</p>" +
+      content += "<h2>Pair your account</h2><p>Send this to the Toolroll bot in a personal Teams chat. It expires in 10 minutes.</p>" +
         `<label>Pairing message<input type="text" readonly value="pair ${escape(options.code)}" autocomplete="off" style="width:100%;max-width:100%;font-size:14px;min-height:44px"></label>` +
         '<a class="button-link" style="min-height:44px;white-space:nowrap" href="/settings/teams">Check connection</a>';
     } else if (binding && state.live(binding)) {
@@ -50,7 +50,7 @@ export function teamsSettingsHtml(store: Store, dir: string, csrf: string, optio
         (loadPrimary(process.env, dir) === "teams" ? "<p>Task updates are sent here.</p>" : post("alerts", '<button type="submit">Send task updates here</button>')) +
         post("unpair", password + '<p class="meta">Unpairing ends every open button in your chat. Teammates are unaffected.</p><button type="submit">Unpair my account</button>');
     } else {
-      content += post("pair", "<h2>Pair your account</h2><p>Your paired Teams account can read your connected projects and confirm proposed changes. Password approvals still open in Standing Orders." +
+      content += post("pair", "<h2>Pair your account</h2><p>Your paired Teams account can read your connected projects and confirm proposed changes. Password approvals still open in Toolroll." +
         (others ? ` ${others} teammate${others === 1 ? " is" : "s are"} already paired.` : "") + "</p>" + password + '<button type="submit">Create pairing code</button>');
     }
     content += "<details><summary>Connection settings</summary>" + post("disconnect", password + '<button type="submit">Disconnect Teams</button>') + "</details>";

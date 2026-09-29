@@ -1,5 +1,5 @@
 /**
- * The agent fence: Standing Orders' own secrets (the state folder beside the
+ * The agent fence: Toolroll's own secrets (the state folder beside the
  * database, except the build's worktree, and ~/.standing-orders) are out of
  * every agent's reach. What it covers, how each provider receives it, and —
  * on macOS — that the sandbox really refuses a read from a child process.

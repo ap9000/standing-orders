@@ -11,7 +11,7 @@ const flags = [
   { name: 'repo', takesValue: true, meaning: 'admitted project checkout root' },
   { name: 'base', takesValue: true, meaning: 'exact committed task base; defaults to current HEAD' },
   { name: 'json', takesValue: false, meaning: 'versioned structured response' },
-  { name: 'db', takesValue: true, meaning: 'local Standing Orders database' },
+  { name: 'db', takesValue: true, meaning: 'local Toolroll database' },
   { name: 'token-file', takesValue: true, meaning: 'explicit scoped coordinator credential file' },
   { name: 'token-env', takesValue: true, meaning: 'environment variable containing a scoped coordinator token' },
 ] as const;

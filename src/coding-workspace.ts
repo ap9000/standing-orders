@@ -74,7 +74,7 @@ export class CodingWorkspace {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const prior = this.db.prepare('SELECT * FROM coding_owner WHERE singleton=1').get();
-      if (prior && prior['token'] !== '' && processMayBeAlive(Number(prior['pid']), false)) throw Error('Another Standing Orders server owns the coding workspace. Use that server or stop it first.');
+      if (prior && prior['token'] !== '' && processMayBeAlive(Number(prior['pid']), false)) throw Error('Another Toolroll server owns the coding workspace. Use that server or stop it first.');
       const clean = !prior || prior['clean'] === 1;
       this.recoveryRequired = !clean;
       this.db.prepare('INSERT OR REPLACE INTO coding_owner VALUES(1,?,?,?,?)').run(this.owner, process.pid, prior?.['native_pid'] as number ?? null, clean ? 1 : 0);
@@ -99,7 +99,7 @@ export class CodingWorkspace {
 
   private admit(): void {
     if (this.closed || this.closing || this.persistenceFailed) throw new CodingActionError('The coding server is closing or cannot save activity. Reopen it after recovery.', 'rejected');
-    if (this.options.admissionPaused?.()) throw new CodingActionError('Standing Orders is preparing an update. Finish or stop current work; new coding turns can start after the update.', 'rejected');
+    if (this.options.admissionPaused?.()) throw new CodingActionError('Toolroll is preparing an update. Finish or stop current work; new coding turns can start after the update.', 'rejected');
   }
 
   private releaseOperation(id: string): void {

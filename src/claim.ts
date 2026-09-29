@@ -1030,7 +1030,7 @@ export function finalizeParkHeld(
         dedupeKey: `decision:${decisionId}`,
         kind: "decision",
         subject: `${taskId} asked a question mid-session`,
-        body: `${oneLine(decision.question, 200)}\n\`standing-orders decide ${decisionId}\``,
+        body: `${oneLine(decision.question, 200)}\n\`toolroll decide ${decisionId}\``,
         pushClass: "decision",
         link: `/d/${decisionId}`,
       },
@@ -1165,7 +1165,7 @@ export function finalizeParkFenced(
         dedupeKey: `decision:${decisionId}`,
         kind: "decision",
         subject: `${taskId} parked a decision`,
-        body: `${oneLine(decision.question, 200)}\n\`standing-orders decide ${decisionId}\``,
+        body: `${oneLine(decision.question, 200)}\n\`toolroll decide ${decisionId}\``,
         // The push stamp (arc 3): class + machine-minted link, at enqueue
         // or never. Fixed phrases ride the push service; this subject does not.
         pushClass: "decision",
@@ -1435,7 +1435,7 @@ export function finalizeFailureFenced(
           pushClass: "attention",
           link: `/r/${runId}`,
           subject: `${taskId}: the commit itself failed`,
-          body: `${oneLine(message, 200)}\nThe work is preserved, uncommitted, in ${args.worktree}. Prove it and \`standing-orders task requeue ${taskId}\`.`,
+          body: `${oneLine(message, 200)}\nThe work is preserved, uncommitted, in ${args.worktree}. Prove it and \`toolroll task requeue ${taskId}\`.`,
         },
         now,
       );
@@ -1468,7 +1468,7 @@ export function finalizeFailureFenced(
           pushClass: "attention",
           link: `/r/${runId}`,
           subject: `${taskId} stalled after ${strikes} straight failures`,
-          body: `Last failure (${failureClass}): ${oneLine(message, 200)}\nIt will not be retried. Read the runs, then \`standing-orders task requeue ${taskId}\`.`,
+          body: `Last failure (${failureClass}): ${oneLine(message, 200)}\nIt will not be retried. Read the runs, then \`toolroll task requeue ${taskId}\`.`,
         },
         now,
       );
@@ -2236,7 +2236,7 @@ export function finalizeScoutFailureFenced(
           pushClass: "attention",
           link: `/r/${runId}`,
           subject: `${taskId} stalled after ${strikes} straight scouting failures`,
-          body: `Last failure: ${oneLine(message, 200)}\nIt will not be retried. Read the runs, then \`standing-orders task requeue ${taskId}\`.`,
+          body: `Last failure: ${oneLine(message, 200)}\nIt will not be retried. Read the runs, then \`toolroll task requeue ${taskId}\`.`,
         },
         now,
       );

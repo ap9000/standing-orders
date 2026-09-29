@@ -68,7 +68,7 @@ export function addressedTo(text: string): { name: string; said: string } | null
 }
 
 /**
- * A message in someone's chat with Standing Orders, addressed to a teammate
+ * A message in someone's chat with Toolroll, addressed to a teammate
  * by name, becomes a card on its desk; null when it isn't addressed to one of
  * the teammates in their projects (it goes to the lead as usual).
  */

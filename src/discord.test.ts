@@ -380,7 +380,7 @@ test("pairing is one use, hashed, private and bound to the current account", asy
   ).not.toContain(code);
   await processDiscordEvent(options);
   await drain();
-  expect(sentText()).toContain("Connected to Standing Orders");
+  expect(sentText()).toContain("Connected to Toolroll");
   expect(state.pair(ID, chatHash(code), MEMBER, CHANNEL, now)).toBeNull();
   for (const extra of [
     { guild_id: snow() },
@@ -924,7 +924,7 @@ test("punctuation-heavy headings fit Discord without losing any approval text", 
     card.embeds as Array<{ title: string; description: string }>
   )[0]!;
   expect(embed.title.length).toBeLessThanOrEqual(256);
-  expect(embed.title).toBe("Standing Orders");
+  expect(embed.title).toBe("Toolroll");
   expect(embed.description).toContain("\\".repeat(300));
   expect(embed.description).toContain("Review the exact result");
 });
@@ -958,7 +958,7 @@ test("teammates pair their own Discord accounts, and status, task and help answe
   await processDiscordEvent(options);
   await drain();
   expect(sends().at(-1)?.path).toContain(`/channels/${DSAM}/messages`);
-  expect(sentText()).toContain("Standing Orders in chat");
+  expect(sentText()).toContain("Toolroll in chat");
   expect(options.subscriptionRunner).not.toHaveBeenCalled();
   state.revokeBinding(state.bindingFor(ID.installation, SAM)!, now);
   expect(state.bindings(ID.installation).map(one => one.approver)).toEqual(["alex"]);

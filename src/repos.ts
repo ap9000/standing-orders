@@ -56,7 +56,7 @@ export async function loadProjectRegistry(file: string): Promise<RegistryLoadRes
 
   const registry = readProjectRegistry(parsed);
   if (registry === null) {
-    return { error: `${file} does not look like a Standing Orders config — fix or delete it` };
+    return { error: `${file} does not look like a Toolroll config — fix or delete it` };
   }
   return { repos: sortUnique(registry.repos), roots: sortUnique(registry.roots) };
 }
@@ -218,7 +218,7 @@ export async function updateProjectRegistry(
       }
       const registry = readProjectRegistryStrict(parsed);
       if (registry === null) {
-        return { ok: false, reason: "registry", message: `${file} does not look like a Standing Orders config — refusing to replace it` };
+        return { ok: false, reason: "registry", message: `${file} does not look like a Toolroll config — refusing to replace it` };
       }
       current = registry;
     }

@@ -1,5 +1,5 @@
 /**
- * Settings → Project: what Standing Orders holds for a project, and deleting
+ * Settings → Project: what Toolroll holds for a project, and deleting
  * it. An instance operator deletes in two steps: type the project's name,
  * then read exactly what goes and confirm with their password (or a fresh
  * sign-in with the identity provider). The repository itself stays.
@@ -20,14 +20,14 @@ export type ProjectSettingsView = { repo: string; name: string; holdings: Projec
 const note = (notice: { said?: string | null; problem?: string | null }) =>
   notice.problem ? `<p class="problem" role="alert">${e(notice.problem)}</p>` : notice.said ? `<p role="status">${e(notice.said)}</p>` : "";
 
-/** The project's page: its path, what Standing Orders holds for it, and (for an instance operator) Delete project. */
+/** The project's page: its path, what Toolroll holds for it, and (for an instance operator) Delete project. */
 export function projectSettingsHtml(view: ProjectSettingsView, csrf: string, notice: { said?: string | null; problem?: string | null }): string {
-  const held = `<p>Standing Orders holds ${e(holdingsWords(view.holdings))} for <strong>${e(view.name)}</strong>.</p>`;
+  const held = `<p>Toolroll holds ${e(holdingsWords(view.holdings))} for <strong>${e(view.name)}</strong>.</p>`;
   const head = `<section class="project-settings">${note(notice)}<p class="path">${e(view.repo)}</p>${held}`;
   if (!view.canDelete) return `${head}<p class="meta">An instance operator can delete a project.</p></section>`;
   const body = view.running.length > 0
     ? `<p class="problem">Its work is running: ${e(view.running.join(", "))}. Stop it before deleting the project.</p>`
-    : `<p>Removes everything Standing Orders holds for ${e(view.name)}. The repository and its own branches stay. There's no undo.</p>` +
+    : `<p>Removes everything Toolroll holds for ${e(view.name)}. The repository and its own branches stay. There's no undo.</p>` +
       `<form method="post" action="/settings/project/delete"><input type="hidden" name="csrf" value="${e(csrf)}"><input type="hidden" name="repo" value="${e(view.repo)}">` +
       `<label><span>Type <strong>${e(view.name)}</strong> to continue</span><input name="name" autocomplete="off" autocapitalize="off" spellcheck="false" required></label>` +
       `<button type="submit">Continue</button></form>`;
@@ -40,7 +40,7 @@ export function projectDeleteConfirmHtml(view: ProjectSettingsView, csrf: string
   const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
   const items = [
     `${count(h.tasks, "task")}${h.versions > 0 ? ` and ${count(h.versions, "version")}` : ""}, with ${count(h.runs, "run")} and their evidence`,
-    "The checkouts and branches Standing Orders made",
+    "The checkouts and branches Toolroll made",
     ...(h.chats > 0 ? [count(h.chats, "chat")] : []),
     ...(h.flows > 0 ? [`${count(h.flows, "flow")} and ${count(h.cards, "card")}`] : []),
     ...(h.teammates > 0 ? [count(h.teammates, "teammate")] : []),
@@ -50,6 +50,6 @@ export function projectDeleteConfirmHtml(view: ProjectSettingsView, csrf: string
     `<p>This removes:</p><ul class="removes">${items.map(one => `<li>${e(one)}</li>`).join("")}</ul>` +
     `<p>The repository at <span class="path">${e(view.repo)}</span> and its own branches stay. The ledger keeps its history. There's no undo.</p>` +
     `<form method="post" action="/settings/project/delete"><input type="hidden" name="csrf" value="${e(csrf)}"><input type="hidden" name="repo" value="${e(view.repo)}"><input type="hidden" name="name" value="${e(view.name)}"><input type="hidden" name="step" value="delete">` +
-    `<label>Your Standing Orders password<input type="password" name="password" autocomplete="current-password"></label>` +
+    `<label>Your Toolroll password<input type="password" name="password" autocomplete="current-password"></label>` +
     `<div class="actions"><button type="submit" class="danger">Delete project</button><a href="/settings/project?repo=${e(encodeURIComponent(view.repo))}">Cancel</a></div></form></section>`;
 }

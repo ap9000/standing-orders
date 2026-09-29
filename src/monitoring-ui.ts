@@ -1,5 +1,5 @@
 /**
- * Settings → Monitoring (v104): an instance operator points Standing Orders at
+ * Settings → Monitoring (v104): an instance operator points Toolroll at
  * the company's tools. One form, the status of each destination beside it,
  * and how Prometheus reads `/metrics`. The signing secret is shown once.
  */
@@ -49,7 +49,7 @@ export function monitoringHtml(view: MonitoringView, csrf: string, notice: { sai
     statusLine(view, "traces", s.traces?.endpoint ?? null) +
     `<label>Header name (optional)<input type="text" name="header-name" value="${e(s.traces?.header?.name ?? "")}" placeholder="x-honeycomb-team" spellcheck="false"></label>` +
     `<label>Header value<input type="password" name="header-value" autocomplete="off" placeholder="${s.traces?.header ? "Saved; leave blank to keep" : "API key"}"></label></fieldset>` +
-    `<div class="step-up"><label>Your Standing Orders password<input type="password" name="password" autocomplete="current-password"></label></div>` +
+    `<div class="step-up"><label>Your Toolroll password<input type="password" name="password" autocomplete="current-password"></label></div>` +
     `<button type="submit">Save</button></form>` +
     `<fieldset><legend>Metrics</legend><p class="meta">Prometheus reads <code>${e(metrics)}</code> with an instance operator's API token (<a href="/settings/sessions">Sessions &amp; tokens</a>).</p>` +
     `<details><summary>Example</summary><pre>curl -H "Authorization: Bearer so_…" ${e(metrics)}</pre></details></fieldset></section>`;

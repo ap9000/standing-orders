@@ -92,7 +92,7 @@ final class DesktopApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
 
     func makeWindow() {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 850), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = development ? "Standing Orders Development" : "Standing Orders"
+        window.title = development ? "Toolroll Development" : "Toolroll"
         window.subtitle = "Your local control console"
         window.minSize = NSSize(width: 760, height: 560)
         window.isReleasedWhenClosed = false
@@ -138,9 +138,9 @@ final class DesktopApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
         let menu = NSMenu()
         let appItem = NSMenuItem(); menu.addItem(appItem)
         let appMenu = NSMenu(); appItem.submenu = appMenu
-        appMenu.addItem(withTitle: "About Standing Orders", action: #selector(about), keyEquivalent: "").target = self
+        appMenu.addItem(withTitle: "About Toolroll", action: #selector(about), keyEquivalent: "").target = self
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Quit Standing Orders", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(withTitle: "Quit Toolroll", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let fileItem = NSMenuItem(); menu.addItem(fileItem)
         let file = NSMenu(title: "File"); fileItem.submenu = file
         for (title, action, key) in [("Overview", #selector(openOverview), "1"), ("Add projects…", #selector(chooseRepository), "o"), ("Project setup", #selector(openControl), ","), ("Check project access", #selector(recheckAccess), ""), ("Check installation", #selector(checkInstallation), ""), ("Refresh", #selector(refresh), "r"), ("Sign in…", #selector(signIn), "l"), ("Open service logs", #selector(openLogs), ""), ("Start background service", #selector(startService), ""), ("Stop background service…", #selector(stopService), "")] {
@@ -207,7 +207,7 @@ final class DesktopApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
         let query = keychainQuery()
         let updated = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
         if updated == errSecItemNotFound {
-            var add = query; add[kSecValueData as String] = data; add[kSecAttrLabel as String] = "Standing Orders local sign-in"
+            var add = query; add[kSecValueData as String] = data; add[kSecAttrLabel as String] = "Toolroll local sign-in"
             let result = SecItemAdd(add as CFDictionary, nil)
             if result != errSecSuccess { throw keychainError(result) }
         } else if updated != errSecSuccess { throw keychainError(updated) }
@@ -226,7 +226,7 @@ final class DesktopApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
         do {
             settings = try await inspect()
             let first = settings!.names.isEmpty
-            let alert = NSAlert(); alert.messageText = first ? "Create your local operator account" : "Sign in to Standing Orders"
+            let alert = NSAlert(); alert.messageText = first ? "Create your local operator account" : "Sign in to Toolroll"
             alert.informativeText = "Your sign-in is saved in macOS Keychain. The background controller also keeps its existing private login file so it can restart. Approval buttons ask you to review the exact action."
             alert.addButton(withTitle: first ? "Create account" : "Sign in"); alert.addButton(withTitle: "Cancel")
             let fields = NSStackView(); fields.orientation = .vertical; fields.alignment = .leading; fields.spacing = 8
@@ -358,14 +358,14 @@ final class DesktopApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
     @objc func openLogs() { NSWorkspace.shared.open(stateDir) }
     @objc func installUpdate() { Task {
         let panel = NSOpenPanel(); panel.canChooseFiles = true; panel.canChooseDirectories = false; panel.allowsMultipleSelection = false; panel.allowedContentTypes = [.applicationBundle]
-        panel.message = "Choose the new Standing Orders app. You will review it before anything changes."
+        panel.message = "Choose the new Toolroll app. You will review it before anything changes."
         panel.prompt = "Review update"
         guard panel.runModal() == .OK, let candidate = panel.url else { return }
         let arguments = ["--installed", Bundle.main.bundleURL.path, "--candidate", candidate.path, "--label", label]
         do {
             status.stringValue = "Checking the update’s signature and compatibility…"
             let preview = try JSONDecoder().decode(UpdatePreview.self, from: await command("update-preview", extra: arguments))
-            let alert = NSAlert(); alert.messageText = "Install Standing Orders \(preview.next.version)?"
+            let alert = NSAlert(); alert.messageText = "Install Toolroll \(preview.next.version)?"
             alert.informativeText = "Current build: \(preview.old.buildId.prefix(8))\nNew build: \(preview.next.buildId.prefix(8))\n\n" + preview.message + "\n\nThe update can continue if you close this window. Your previous service state will be preserved."
             alert.addButton(withTitle: "Install update"); alert.addButton(withTitle: "Not now")
             guard alert.runModal() == .alertFirstButtonReturn else { status.stringValue = "Update not started."; return }
@@ -433,7 +433,7 @@ final class DesktopApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
         } catch { showError(fallback ?? error.localizedDescription) }
     }
     @objc func about() {
-        let alert = NSAlert(); alert.messageText = "Standing Orders"; alert.informativeText = "A local console for approved coding work. The background service runs independently of this window. Project setup shares the same approval and execution controls as the web console."; alert.runModal()
+        let alert = NSAlert(); alert.messageText = "Toolroll"; alert.informativeText = "A local console for approved coding work. The background service runs independently of this window. Project setup shares the same approval and execution controls as the web console."; alert.runModal()
     }
     @objc func stopService() { Task { await stopServiceFlow() } }
     func stopServiceFlow() async {
@@ -447,7 +447,7 @@ final class DesktopApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
         do { _ = try await command("service-stop", extra: serviceArguments); connectionGeneration += 1; consoleConnected = false; status.stringValue = "Background service stopped and disabled. File → Start background service to return." }
         catch { showError(error.localizedDescription) }
     }
-    func showError(_ text: String) { if status != nil { status.stringValue = "Needs attention: \(text.prefix(180))" }; let alert = NSAlert(); alert.messageText = "Standing Orders needs attention"; alert.informativeText = text; alert.runModal() }
+    func showError(_ text: String) { if status != nil { status.stringValue = "Needs attention: \(text.prefix(180))" }; let alert = NSAlert(); alert.messageText = "Toolroll needs attention"; alert.informativeText = text; alert.runModal() }
 
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         if isConsole(action.request.url) || action.request.url?.absoluteString == "about:blank" { decisionHandler(.allow); return }

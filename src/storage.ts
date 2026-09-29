@@ -1,5 +1,5 @@
 /**
- * Where Standing Orders' disk goes (`standing-orders storage`): the folder
+ * Where Toolroll's disk goes (`toolroll storage`): the folder
  * beside the database, by kind, and what storage retention takes care of.
  * Build checkouts and staged releases are the big ones; the worker removes a
  * finished task's clean checkout two days after it was let go, and a deploy

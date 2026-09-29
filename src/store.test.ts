@@ -561,7 +561,7 @@ describe("a task and its reference are created together", () => {
     store.close();
   });
 
-  test("a task standing-orders created is recorded as ours", () => {
+  test("a task Toolroll created is recorded as ours", () => {
     const store = openStore(":memory:");
     store.createTask({ id: "t-1", title: "ours" }, T0);
 

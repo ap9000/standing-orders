@@ -7,7 +7,7 @@ full and approved before anything is built, and the approval is bound to
 exactly those terms. Results wait for a person to accept them. Releases pass
 the project's own check command before they can be deployed.
 
-## Agents can't read Standing Orders' secrets
+## Agents can't read Toolroll's secrets
 
 Agents run as your own user, so without a fence they could read your saved
 login, keys or the database and approve their own work. The fence closes that
@@ -24,7 +24,7 @@ held back only by its own file-tool rules; install it.
 
 ## Sign in with your identity provider
 
-**Settings → Sign-in** (instance operators) connects Standing Orders to
+**Settings → Sign-in** (instance operators) connects Toolroll to
 your organisation's identity provider: Okta, Microsoft Entra, Google,
 Auth0, Keycloak or anything else that speaks OpenID Connect.
 
@@ -53,7 +53,7 @@ access change and settings change is in the action ledger.
 
 **Settings → Sessions & tokens** shows where you're signed in (the browser,
 the address, when it was last active) and signs out any one of them, or
-everywhere else at once. Sessions survive a restart of Standing Orders;
+everywhere else at once. Sessions survive a restart of Toolroll;
 only a hash of each session's cookie is kept. Instance operators can see and
 end everyone's.
 
@@ -74,7 +74,7 @@ Five wrong passwords in a row lock that name for 15 minutes, doubling with
 each further lock up to a day; the right password waits too. Every place a
 password is typed counts: signing in, a request that carries one, and each
 password step-up inside the console. One address trying many names runs out
-of tries on its own. Locks are kept in memory, so restarting Standing Orders
+of tries on its own. Locks are kept in memory, so restarting Toolroll
 clears them.
 
 ## Everything is on the record

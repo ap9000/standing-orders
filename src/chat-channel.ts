@@ -89,7 +89,7 @@ export function resolveChannelMate(
     return {
       ok: false,
       reason: "unconfigured",
-      said: "Chat isn't set up yet. Choose a chat provider in Standing Orders settings on the computer, then message again. Nothing was changed.",
+      said: "Chat isn't set up yet. Choose a chat provider in Toolroll settings on the computer, then message again. Nothing was changed.",
     };
   }
   if (isDirectChatProvider(config.provider)) {
@@ -103,7 +103,7 @@ export function resolveChannelMate(
     return {
       ok: false,
       reason: "no-projects",
-      said: "No connected projects are available to this phone. Add a project in Standing Orders on the computer, then message again.",
+      said: "No connected projects are available to this phone. Add a project in Toolroll on the computer, then message again.",
     };
   }
   const verified = verifyApproverStanding(
@@ -204,13 +204,13 @@ export function focusContextFor(taskId: string): string {
 }
 
 /** A step the phone cannot take itself: said once; the button (or its absence) says where. */
-const HANDOFF = "This step finishes in Standing Orders.";
+const HANDOFF = "This step finishes in Toolroll.";
 /** No trusted https origin is configured: one honest line, no localhost, no promise. */
 export const NO_PHONE_LINK =
-  "Phone access isn't configured. Open Standing Orders on your computer.";
+  "Phone access isn't configured. Open Toolroll on your computer.";
 /** An origin exists but the card's task is not one this phone may reach now: said as that, never as missing setup. */
 export const NO_TASK_LINK =
-  "No phone link: this task is outside your connected projects now, so open Standing Orders on the computer.";
+  "No phone link: this task is outside your connected projects now, so open Toolroll on the computer.";
 
 /** A fixed console destination beside its button label. The path is one of chat-controls' own; the origin joins it only at send time. */
 export type PhoneLink = { label: string; path: string };
@@ -862,7 +862,7 @@ export function confirmedCardText(
   const next = resume
     ? "Nothing has resumed yet: the password step on the task finishes it."
     : approval && note !== null
-      ? "Approve it in Standing Orders on the computer."
+      ? "Approve it in Toolroll on the computer."
       : "";
   const setup = (approval || resume) && note !== null ? note : "";
   return [`✓ ${words}`, ...[next, setup].filter((one) => one !== "")].join(

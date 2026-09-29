@@ -536,7 +536,7 @@ describe("adjudicate", () => {
     ["dependency-still-missing", "the required project executable was still unavailable after replaying the approved setup command"],
     ["setup-changed-files", "automatic recovery stopped because the setup command changed tracked files after the build"],
     ["checkout-moved", "automatic recovery stopped because the checkout moved away from the built commit"],
-    ["cleanliness-unavailable", "automatic recovery stopped because Standing Orders could not confirm that the built checkout was unchanged"],
+    ["cleanliness-unavailable", "automatic recovery stopped because Toolroll could not confirm that the built checkout was unchanged"],
     ["custody-lost", "automatic recovery stopped because this worker no longer owned the build"],
   ] as const)("automatic recovery failure %s stays short", (failure, reason) => {
     const result = adjudicate({

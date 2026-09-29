@@ -52,7 +52,7 @@ export function readAcceptanceEvidence(store: Store, who: VerifiedApprover, root
   // Full statements, caveats and references remain on the authenticated screen.
   const brief = (text: string | null | undefined, cap = 600) => {
     if (text == null) return null;
-    if (scanForSecrets(text).length > 0 || /\b\d{5,}:[A-Za-z0-9_-]{20,}\b/.test(text)) return "[Sensitive text hidden; inspect the original result in Standing Orders]";
+    if (scanForSecrets(text).length > 0 || /\b\d{5,}:[A-Za-z0-9_-]{20,}\b/.test(text)) return "[Sensitive text hidden; inspect the original result in Toolroll]";
     const clean = text.replace(/(?:[A-Za-z]:[\\/]|\\\\)[^\s"'<>]+/g, "[path]").replace(/(^|[\s"'`(<[=:,])\/(?:[A-Za-z0-9._~-]+\/)*[A-Za-z0-9._~-]+/g, "$1[path]");
     return clean.length <= cap ? clean : `${clean.slice(0, cap)}… [shortened; open the result for the full text]`;
   };

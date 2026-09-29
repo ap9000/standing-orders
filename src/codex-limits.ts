@@ -90,7 +90,7 @@ export function readCodexLimits(options: { command?: string; timeoutMs?: number;
   });
 }
 
-/** The loop beside the console: Codex's limits and account every five minutes while Standing Orders runs Codex on its
+/** The loop beside the console: Codex's limits and account every five minutes while Toolroll runs Codex on its
  * plan. Never in tests, the demo, or the end-to-end harness (which runs with the person's own sign-in), and never while
  * a Codex build is running (both would refresh the same sign-in). One read at a time: the next waits for the last
  * process to end. */

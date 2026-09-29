@@ -1,5 +1,5 @@
 /**
- * Deleting a project: everything Standing Orders holds for it goes (tasks and
+ * Deleting a project: everything Toolroll holds for it goes (tasks and
  * their versions, runs, evidence, checkouts and the branches it made, chats,
  * flows and cards, teammates, budgets, settings), never while its work runs,
  * never the repository or branches it didn't make, never another project's
@@ -35,7 +35,7 @@ beforeEach(() => {
   writeFileSync(join(repo, "README.md"), "shop\n");
   git("add", "README.md");
   git("commit", "-q", "-m", "first");
-  // A branch of the project's own, and one Standing Orders made with a commit only it has.
+  // A branch of the project's own, and one Toolroll made with a commit only it has.
   git("branch", "feature/login");
   store = openStore(file);
 });
@@ -100,7 +100,7 @@ function mentions(where: string): string[] {
 }
 const count = (sql: string, ...params: unknown[]) => Number(store.handle.prepare(sql).get(...params)!["n"]);
 
-test("deleting a project removes what Standing Orders holds for it and keeps everything else", async () => {
+test("deleting a project removes what Toolroll holds for it and keeps everything else", async () => {
   const shop = populate(repo);
   const other = populate(OTHER);
   const before = { main: git("rev-parse", "main"), feature: git("rev-parse", "feature/login"), head: git("symbolic-ref", "HEAD"), status: git("status", "--porcelain") };
@@ -133,7 +133,7 @@ test("deleting a project removes what Standing Orders holds for it and keeps eve
   // The history guards are back: the other project's knowledge still refuses a delete.
   expect(() => store.handle.prepare("DELETE FROM knowledge_change WHERE repo = ?").run(OTHER)).toThrow(/immutable/);
 
-  // The repository: its own branches, HEAD and working copy exactly as they were; Standing Orders' branches and checkouts gone.
+  // The repository: its own branches, HEAD and working copy exactly as they were; Toolroll's branches and checkouts gone.
   expect({ main: git("rev-parse", "main"), feature: git("rev-parse", "feature/login"), head: git("symbolic-ref", "HEAD"), status: git("status", "--porcelain") }).toEqual(before);
   expect(readFileSync(join(repo, "README.md"), "utf8")).toBe("shop\n");
   expect(git("branch", "--list", "standing-orders/*")).toBe("");
@@ -236,7 +236,7 @@ test("the command line previews, then deletes with --yes for an instance operato
   expect(store.ledgerChain({ full: true }).ok).toBe(true);
 });
 
-test("a checkout Standing Orders made that someone switched to a branch of their own is theirs: it stays, with its work", async () => {
+test("a checkout Toolroll made that someone switched to a branch of their own is theirs: it stays, with its work", async () => {
   const shop = populate(repo);
   const mine = join(pool, `shop-${shop.first.id}`);
   execFileSync("git", ["switch", "-q", "-c", "feature/customer-work"], { cwd: mine });
@@ -244,7 +244,7 @@ test("a checkout Standing Orders made that someone switched to a branch of their
   const done = await deleteProject(store, repo, { actor: "alex", via: "command line", now: NOW, evidenceRoot: evidence, poolRoot: pool });
   expect(done.ok).toBe(true);
   if (!done.ok) return;
-  expect(done.left).toEqual([expect.stringContaining("feature/customer-work, not a Standing Orders branch")]);
+  expect(done.left).toEqual([expect.stringContaining("feature/customer-work, not a Toolroll branch")]);
   expect(readFileSync(join(mine, "unsaved.txt"), "utf8")).toBe("work in progress\n");
   expect(git("branch", "--list", "feature/customer-work")).toContain("feature/customer-work");
 });

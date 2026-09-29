@@ -1,7 +1,7 @@
 /**
  * Putting the command on PATH, as an explicit act.
  *
- * Standing Orders refuses to install things on an operator's behalf — it prints
+ * Toolroll refuses to install things on an operator's behalf — it prints
  * the command and its side effects and lets them run it. A tool that applied
  * that rule to `bd init` and then quietly edited PATH during its own install
  * would not deserve to be believed, so this is a command you run, it shows

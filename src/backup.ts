@@ -8,7 +8,7 @@
  * Only the database is copied. Provider keys, sign-in files and other secrets
  * live in their own files beside it and are never part of a backup.
  *
- * `restore` puts a backup back, only with Standing Orders stopped: it checks
+ * `restore` puts a backup back, only with Toolroll stopped: it checks
  * the backup's schema version and walks its ledger chain first, keeps the
  * current database as a copy, and with --dry-run changes nothing.
  */
@@ -125,7 +125,7 @@ export function pruneBackups(folder: string, keep: number, owner: BackupOwner): 
 /** A failure in plain words: the common file-system ones by name, anything else as SQLite or Node said it. */
 function failureWords(error: unknown, folder: string): string {
   const code = (error as NodeJS.ErrnoException | null)?.code;
-  if (code === "EACCES" || code === "EPERM" || code === "EROFS") return `Standing Orders isn't allowed to write to ${folder}.`;
+  if (code === "EACCES" || code === "EPERM" || code === "EROFS") return `Toolroll isn't allowed to write to ${folder}.`;
   if (code === "ENOSPC" || code === "EDQUOT") return `The disk holding ${folder} is full.`;
   if (code === "ENOTDIR" || code === "EEXIST") return `${folder} isn't a folder.`;
   return message(error);
@@ -229,8 +229,8 @@ export type RestoreReport = {
 };
 
 /**
- * Put a backup back in place of the database. Refuses while Standing Orders is running, when the backup isn't a
- * Standing Orders database this build can read (its schema version), or when its ledger chain doesn't verify. The
+ * Put a backup back in place of the database. Refuses while Toolroll is running, when the backup isn't a
+ * Toolroll database this build can read (its schema version), or when its ledger chain doesn't verify. The
  * backup is copied beside the database first and every check runs on that copy, so what was checked is what goes in.
  */
 export async function restoreDatabase(options: { databaseFile: string; file: string; dryRun: boolean; now: Date; actor?: string }): Promise<RestoreReport> {
@@ -249,7 +249,7 @@ export async function restoreDatabase(options: { databaseFile: string; file: str
     const store = openStore(databaseFile);
     try {
       const running = runningNow(store, now);
-      if (running.length > 0) refuse("running", `Standing Orders is running (${running.join(" and ")}). Stop it first, then restore. If it has just stopped, wait a few minutes.`);
+      if (running.length > 0) refuse("running", `Toolroll is running (${running.join(" and ")}). Stop it first, then restore. If it has just stopped, wait a few minutes.`);
       folder = backupFolderOf(store.backupSettings(), databaseFile);
     } finally { store.close(); }
   }
@@ -263,7 +263,7 @@ export async function restoreDatabase(options: { databaseFile: string; file: str
       return refuse("unreadable", "That backup still has changes in its -wal file beside it. Open it once with sqlite3 to fold them in, or choose another backup.");
     }
     let db: DatabaseSync;
-    try { db = connect(staged); } catch { return refuse("unreadable", "That file isn't a database Standing Orders can open."); }
+    try { db = connect(staged); } catch { return refuse("unreadable", "That file isn't a database Toolroll can open."); }
     try {
       let check: string;
       try { check = String(db.prepare("PRAGMA quick_check").get()?.["quick_check"] ?? ""); } catch { check = "not a database"; }
@@ -271,21 +271,21 @@ export async function restoreDatabase(options: { databaseFile: string; file: str
       const version = readSchemaVersion(db as unknown as Database);
       const schema = version.ok ? version.version : null;
       report.schemaVersion = schema;
-      if (schema === null) return refuse("schema", "That file isn't a Standing Orders database: it has no schema version.");
-      if (schema > SCHEMA_VERSION) return refuse("schema", `That backup was made by a newer Standing Orders (schema ${schema}; this one reads up to ${SCHEMA_VERSION}). Restore it with that version.`);
-      if (schema < OLDEST_RESTORABLE) return refuse("schema", `That backup is from schema ${schema}, before the ledger had a hash chain to check. Restore it with the Standing Orders that made it.`);
+      if (schema === null) return refuse("schema", "That file isn't a Toolroll database: it has no schema version.");
+      if (schema > SCHEMA_VERSION) return refuse("schema", `That backup was made by a newer Toolroll (schema ${schema}; this one reads up to ${SCHEMA_VERSION}). Restore it with that version.`);
+      if (schema < OLDEST_RESTORABLE) return refuse("schema", `That backup is from schema ${schema}, before the ledger had a hash chain to check. Restore it with the Toolroll that made it.`);
       const chain = verifyLedgerChain(db as unknown as Database);
       report.ledger = { entries: chain.entries, through: chain.through };
       if (!chain.ok) return refuse("ledger", `That backup's ledger chain doesn't verify: ${chain.problem?.what ?? "it breaks"}.`);
       db.exec("PRAGMA journal_mode = DELETE");
     } finally { db.close(); }
     // It must open as this build's database (every table it needs, every step up to this schema) before it may replace
-    // the live one: a sound file with the right version can still be missing what Standing Orders reads.
+    // the live one: a sound file with the right version can still be missing what Toolroll reads.
     if (report.refusals.length === 0) {
       const probe = `${staged}.probe`;
       try {
         copyFileSync(staged, probe);
-        try { openStore(probe).close(); } catch (error) { refuse("schema", `That backup doesn't open as a Standing Orders database (${firstLine(error)}).`); }
+        try { openStore(probe).close(); } catch (error) { refuse("schema", `That backup doesn't open as a Toolroll database (${firstLine(error)}).`); }
       } finally { for (const suffix of ["", "-wal", "-shm", "-journal"]) rmSync(`${probe}${suffix}`, { force: true }); }
     }
     if (report.refusals.length > 0 || dryRun) { report.ok = report.refusals.length === 0; return report; }
@@ -301,7 +301,7 @@ export async function restoreDatabase(options: { databaseFile: string; file: str
     const store = openStore(databaseFile);
     try {
       const running = runningNow(store, new Date());
-      if (running.length > 0) return refuse("running", `Standing Orders started (${running.join(" and ")}). Stop it first, then restore. The database is unchanged.`);
+      if (running.length > 0) return refuse("running", `Toolroll started (${running.join(" and ")}). Stop it first, then restore. The database is unchanged.`);
     } finally { store.close(); }
     // Fold the write-ahead log in and drop it, so nothing of the old database is left beside the new one.
     const live = connect(databaseFile);

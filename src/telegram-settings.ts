@@ -21,7 +21,7 @@ export function telegramSettingsHtml(
 ): string {
   const hidden = `<input type="hidden" name="csrf" value="${escape(csrf)}">`;
   const password =
-    '<label>Your Standing Orders password<input style="min-height:44px" type="password" name="password" autocomplete="current-password" required></label>';
+    '<label>Your Toolroll password<input style="min-height:44px" type="password" name="password" autocomplete="current-password" required></label>';
   const post = (action: string, content: string) =>
     `<form method="post" action="/settings/telegram/${action}" class="card">${hidden}${content}</form>`;
   let content = "";
