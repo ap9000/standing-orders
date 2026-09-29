@@ -4,7 +4,7 @@ import { rulesSummary } from "./approval-rules-ui.js";
 import { evidencePack, exportDay, ledgerExportChunks, standaloneEvidenceHtml, type LedgerExport } from "./evidence-pack.js";
 import { matchesOutsideCheckpoint } from "./ledger-chain.js";
 import { bytesWords, storageReport } from "./storage.js";
-import { budgetHoldWords, budgetLabel, budgetStates, monthNamed, monthOf, spendItems, teammateNames, usd as spendUsd, type BudgetAgent, type BudgetHold } from "./spend.js";
+import { billingOf, budgetHoldWords, budgetLabel, budgetStates, monthNamed, monthOf, spendItems, teammateNames, usd as spendUsd, type BudgetAgent, type BudgetHold } from "./spend.js";
 import { spendCsv } from "./spend-ui.js";
 import { startBudgetAlerts } from "./budget-alerts.js";
 import { pushLimitSink } from "./provider-limits.js";
@@ -2000,10 +2000,11 @@ async function buildCommand(
     return fail(write, json, "build", "auth-mode", `${id}: ${standaloneMode.problem}`, EXIT.refused);
   }
   // v105: a used-up budget holds this road too, when the work is billed to an API key.
-  const standaloneBudget = standaloneMode.mode === "api-key" ? store.budgetGate(now)(store.budgetSubject(ref.id)).over : null;
-  if (standaloneBudget !== null) {
+  const standaloneProvider = authority === null ? "claude" : authority.stamp.provider;
+  const standaloneHold = store.budgetGate(now)({ ...store.budgetSubject(ref.id), agents: [{ provider: standaloneProvider, billing: standaloneMode.mode === "api-key" ? "api-key" : billingOf(standaloneProvider, store.handle) }] });
+  if (standaloneHold.over !== null) {
     await worktrees.release(leased.worktree.path, now);
-    return fail(write, json, "build", "budget", `${id}: ${budgetLabel(standaloneBudget)} budget is used up for ${monthOf(now).name}`, EXIT.refused);
+    return fail(write, json, "build", "budget", `${id}: ${budgetHoldWords(standaloneHold, monthOf(now).name)}`, EXIT.refused);
   }
   let runId: number;
   try {
@@ -2984,7 +2985,7 @@ async function tickCommand(
     // budget is raised (the 100% alert went out; the task page and the spend page say why).
     // Budgets are dollars: work that runs only on subscriptions passes (see Store.budgetGate).
     // A chain's base entry says how it bills (a pinned key); otherwise each provider as it bills now.
-    const chainBase = store.approvedChainOf(id)?.[0];
+    const chainBase = wantsPlan || wantsScout ? undefined : store.approvedChainOf(id)?.[0];
     const budgeted = budgetHold(ref.id, chainBase !== undefined ? [{ provider: chainBase.profile.provider, billing: chainBase.authMode }] : store.agentsFor([spec.provider, ...skipProviders]));
     if (budgeted.over !== null) {
       dispatched.push({ id, outcome: "skipped", reason: "budget", detail: budgetWords(budgeted) });

@@ -30,7 +30,8 @@ import { run, type ExecResult } from "./exec.js";
 import { claudeStreamReader } from "./mate-progress.js";
 import { ALL_CREDENTIAL_ENV } from "./provider.js";
 import type { SubscriptionChatProviderId } from "./store.js";
-import { claudeAccountOf, claudeLimitsOf, noteLimits } from "./provider-limits.js";
+import { claudeLimitsOf, noteLimits } from "./provider-limits.js";
+import { claudeBillingFrom } from "./spend.js";
 
 export type SubscriptionMateRequest = {
   provider: SubscriptionChatProviderId;
@@ -249,12 +250,24 @@ export async function performSubscriptionMateRequest(
     });
     if (result.timedOut) return { ok: false, problem: "timeout" };
     if (result.notFound) return { ok: false, problem: "not-found" };
-    // v105: a streamed Claude turn says its plan's usage windows too.
+    // v105: a streamed Claude turn says its plan's usage windows, and (once it answered) how this computer's Claude bills
+    // with no key from us: the chat ran with every key left out.
     if (command === "claude" && streaming) {
+      const seen = { keySource: null as string | null, model: null as string | null, planWindows: false };
+      let answered = false;
       for (const line of result.stdout.split("\n")) {
-        if (!line.includes('"rate_limit_event"') && !line.includes('"apiKeySource"')) continue;
-        try { const event: unknown = JSON.parse(line); noteLimits(claudeLimitsOf(event) ?? claudeAccountOf(event)); } catch { /* not a reading */ }
+        if (!line.includes('"rate_limit_event"') && !line.includes('"apiKeySource"') && !line.includes('"type":"result"')) continue;
+        let event: Record<string, unknown>;
+        try { event = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
+        const reading = claudeLimitsOf(event);
+        if (reading !== null) { seen.planWindows = true; noteLimits(reading); }
+        else if (event["type"] === "system" && event["subtype"] === "init") {
+          seen.keySource = typeof event["apiKeySource"] === "string" ? event["apiKeySource"] : null;
+          seen.model = typeof event["model"] === "string" ? event["model"] : null;
+        } else if (event["type"] === "result") answered = true;
       }
+      const billing = answered ? claudeBillingFrom(seen) : null;
+      if (billing !== null) noteLimits({ provider: "claude", plan: null, windows: [], partial: true, billing });
     }
     if (result.code !== 0) return { ok: false, problem: `status-${result.code}` };
     const output = request.provider === "codex-subscription" ? codexOutput(result.stdout) : claudeOutput(streaming ? lastResultLine(result.stdout) : result.stdout);

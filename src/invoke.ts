@@ -21,7 +21,7 @@ import { adapterFor, auditOf, type AgentSpec, type Invocation, type ProviderRunn
 import { readProviderKey, readAuthModeStrict, PROVIDER_KEY_ENV, OWN_KEY_ENV } from "./keys.js";
 import { classifyTerminal } from "./exhaustion.js";
 import { attestProvider, type VersionProbe } from "./attest.js";
-import { runOwnerTag, startClaudeHeldSession } from "./exec.js";
+import { run as runCommand, runOwnerTag, startClaudeHeldSession } from "./exec.js";
 import { currentContainment } from "./containment.js";
 import type { Store } from "./store.js";
 import type { RunOptions } from "./exec.js";
@@ -31,7 +31,7 @@ import { CHILD_DATABASE_ENV as AGENT_DATABASE_ENV, isolatedChildDatabase, remove
 import { noToolsArgs, prepareRunTools, type ToolLaunchArgs } from "./project-tools.js";
 import { realpathSync } from "node:fs";
 import { agentFence, claudeFenceSettings, linuxFenceAvailable, macosFenceAvailable, type FenceMethod } from "./agent-fence.js";
-import { billingOf, claudeBillingFrom } from "./spend.js";
+import { billingOf, claudeBillingFrom, seenBilling, type Billing } from "./spend.js";
 
 export type { ProviderRunner } from "./provider.js";
 
@@ -396,7 +396,12 @@ export async function invokeAgent(
   const launchArgv = tools === null ? argv : adapter.argv({ ...resolvedInvocation, toolArgv: tools.argv, fence });
   const fenced = fenceLaunch(spec.provider, fence);
   if (invocation.phase !== "review") store.recordRunFence(runId, { method: fenced.method, paths: fence.length }, clock());
-  const billingSeen: { keySource: string | null; model: string | null; planWindows: boolean } = { keySource: null, model: null, planWindows: false };
+  const billingSeen: { keySource: string | null; model: string | null; planWindows: boolean; answered: boolean } = { keySource: null, model: null, planWindows: false, answered: false };
+  // v105: a Codex run on its sign-in bills as Codex says it's signed in (a ChatGPT plan, or a saved key, or Bedrock),
+  // read right before it runs. Never with an injected runner: tests don't start a real Codex.
+  const codexLogin = spec.provider === "codex" && authMode === "subscription" && runner === undefined
+    ? await codexLoginBilling(attested !== null ? attested.executable : adapter.binary, [...(runOptions.omitEnv ?? []), ...adapter.extraOmitEnv, ...ownKeyEnv])
+    : null;
   let result: Awaited<ReturnType<typeof spawn>>;
   try {
     // Under the stop watch (v52): the run's stop row is re-read while the
@@ -413,6 +418,8 @@ export async function invokeAgent(
           if (typeof event["model"] === "string") billingSeen.model = event["model"].slice(0, 200);
         } else if (event["type"] === "rate_limit_event") {
           billingSeen.planWindows = true;
+        } else if (event["type"] === "result") {
+          billingSeen.answered = true;
         }
         runOptions.onStreamEvent?.(event);
       },
@@ -468,8 +475,14 @@ export async function invokeAgent(
 
   // v105: the run's billing, fixed from evidence before its usage is priced: a key it was given is a key; otherwise
   // what the CLI said (Claude's stream) or was last seen doing (Codex's account), and the setting only when neither.
-  const evidence = spec.provider === "claude" ? claudeBillingFrom(billingSeen) : null;
-  if (evidence !== null) store.recordProviderBilling("claude", evidence, new Date());
+  const evidence = spec.provider === "claude" ? claudeBillingFrom(billingSeen)
+    // Codex signed in with ChatGPT is its plan, unless its plan is itself billed by use (seen by the console's probe).
+    : codexLogin === "subscription" ? seenBilling(store.handle, "codex") ?? "subscription" : codexLogin;
+  // What this computer's Claude does with no key from us (teammates and drafts bill the same way): learnt only from a
+  // run we gave no key that got as far as an answer.
+  if (spec.provider === "claude" && managedKey === null && authMode === "subscription" && billingSeen.answered && evidence !== null) {
+    store.recordProviderBilling("claude", evidence, new Date());
+  }
   store.fixRunBilling(runId, authMode === "api-key" ? "api-key" : evidence ?? billingOf(spec.provider, store.handle), new Date());
 
   const envelope = adapter.parse(result.stdout);
@@ -711,6 +724,9 @@ export async function invokeHeldAgent(
 
   const heldKey =
     heldMode === "api-key" ? readProviderKey("claude", keyHome) ?? (process.env[PROVIDER_KEY_ENV.claude] || null) : null;
+  const heldSeen = { keySource: null as string | null, model: null as string | null, planWindows: false };
+  // A session given a key bills the key from its first byte.
+  if (heldMode === "api-key") store.fixRunBilling(runId, "api-key", clock());
   const start = starter ?? startClaudeHeldSession;
   const isolatedDb = isolatedAgentDatabase(runId);
   // The project's tools (v80), as for every build: exactly its MCP servers;
@@ -781,6 +797,23 @@ export async function invokeHeldAgent(
       ...(readyTimeoutMs === undefined ? {} : { readyTimeoutMs }),
       events: {
         ...events,
+        // v105: the session's billing from its own stream, each turn (a later turn can only make it a key).
+        onStreamEvent: event => {
+          if (event["type"] === "system" && event["subtype"] === "init") {
+            if (typeof event["apiKeySource"] === "string") heldSeen.keySource = event["apiKeySource"].slice(0, 80);
+            if (typeof event["model"] === "string") heldSeen.model = event["model"].slice(0, 200);
+          } else if (event["type"] === "rate_limit_event") {
+            heldSeen.planWindows = true;
+          } else if (event["type"] === "result") {
+            const billing = heldMode === "api-key" ? "api-key" : claudeBillingFrom(heldSeen);
+            if (billing !== null) {
+              store.fixRunBilling(runId, billing, new Date());
+              if (heldMode === "subscription" && heldKey === null) store.recordProviderBilling("claude", billing, new Date());
+            }
+            heldSeen.planWindows = false;
+          }
+          events?.onStreamEvent?.(event);
+        },
         onSessionId: id => {
           const normalized = transportSessionId(id);
           if (normalized === null) return;
@@ -840,5 +873,17 @@ function runTools(store: Store, runId: number, spec: AgentSpec, keyHome: string 
     return prepareRunTools(store, runId, spec.provider, { ...(keyHome === undefined ? {} : { home: keyHome }), now: clock(), includeModel: spec.model === null });
   } catch {
     return noToolsArgs(spec.provider, spec.model === null);
+  }
+}
+
+/** How Codex says it's signed in (`codex login status`): a ChatGPT sign-in is its plan; a key or Bedrock is a key;
+ * null when it says neither (not signed in, or it didn't answer). */
+async function codexLoginBilling(binary: string, omitEnv: readonly string[]): Promise<Billing | null> {
+  try {
+    const status = await runCommand(binary, ["login", "status"], { timeoutMs: 15_000, omitEnv, processGroup: true });
+    const said = `${status.stdout}\n${status.stderr}`;
+    return /using chatgpt/i.test(said) ? "subscription" : /api key|bedrock/i.test(said) ? "api-key" : null;
+  } catch {
+    return null;
   }
 }

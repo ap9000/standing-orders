@@ -95,7 +95,7 @@ import { LEDGER_SCHEMA, LEDGER_TABLE, LEDGER_V54_COLUMNS, LEDGER_V54_TABLE, inst
 import { PLAN_AUTO_SCHEMA } from "./plan-auto.js";
 import { RECIPE_SCHEMA } from "./recipes.js";
 import type { LimitReading, LimitWindow } from "./provider-limits.js";
-import { SPEND_SCHEMA, billingOf, budgetStates, canPrice, countsToward, filersOf, monthOf, priceWork, spendItems, teammateFilers, usd, type Billing, type Budget, type BudgetAgent, type BudgetHold, type BudgetScope, type BudgetState, type SpendItem } from "./spend.js";
+import { SPEND_SCHEMA, billingOf, budgetStates, canPrice, claudeMachineBilling, countsToward, filersOf, monthOf, priceWork, seenBilling as seenBillingOf, spendItems, teammateFilers, usd, type Billing, type Budget, type BudgetAgent, type BudgetHold, type BudgetScope, type BudgetState, type SpendItem } from "./spend.js";
 import { IN_RANGE, LEDGER_CHAIN_SCHEMA, safeWhole, sealLedger, verifyLedgerChain, type LedgerChainReport, type VerifiedHead } from "./ledger-chain.js";
 import { NO_RULES, filerFor, isProtectedWork, protectedChanges, rulesWords, type ApprovalGate, type ApprovalRules, type ApproverKind, type Filer, type FilerKind } from "./approval-policy.js";
 
@@ -4825,6 +4825,8 @@ function initializeStore(db: Database, file: string): Store {
   db.exec(MONITORING_SCHEMA);
   db.exec(SPEND_SCHEMA);
   addColumn(db, "monitoring_status", "target", "TEXT");
+  // v105: how a teammate's turn was billed (this computer's Claude sign-in, as last seen).
+  addColumn(db, "teammate_turn", "billing", "TEXT");
   migrate(db, preflight === null ? null : Math.abs(preflight));
   addColumn(db, "flow_card", "source_json", "TEXT");
   addColumn(db, "flow_card", "owner", "TEXT");
@@ -16983,6 +16985,7 @@ export class Store {
     },
     now: Date,
   ): boolean {
+    this.spendCache = null; // its spend counts toward the next budget check
     const changed = this.db
       .prepare(
         `UPDATE chat_turn SET state = ?, failure_reason = ?, tokens_in = ?, tokens_out = ?,
@@ -19152,9 +19155,10 @@ export class Store {
 
   /** v105: how a provider's CLI was seen billing (a Claude stream's key source, Codex's account mode). */
   recordProviderBilling(provider: string, billing: Billing, now: Date): void {
+    const before = seenBillingOf(this.db, provider);
     this.db.prepare(`INSERT INTO provider_account (provider, billing, observed_at) VALUES (?, ?, ?)
       ON CONFLICT(provider) DO UPDATE SET billing = excluded.billing, observed_at = excluded.observed_at`).run(provider, billing, now.toISOString());
-    this.spendCache = null;
+    if (before !== billing) this.spendCache = null;
   }
 
   /** How a run was billed: its evidence, or the mode it was admitted under (a pinned chain entry's); null when unknown. */
@@ -19166,8 +19170,10 @@ export class Store {
 
   /** v105: how a run was really billed, from its own evidence, fixed before its usage is priced. */
   fixRunBilling(id: number, billing: Billing, now: Date): void {
-    this.db.prepare(`INSERT INTO run_spend (run, microusd, source, billing, priced_at) VALUES (?, NULL, 'unpriced', ?, ?)
-      ON CONFLICT(run) DO UPDATE SET billing = excluded.billing`).run(id, billing, now.toISOString());
+    // The first evidence sets it; a later turn of the same run (a resumed session) can only make it a key.
+    this.db.prepare(`INSERT INTO run_spend (run, microusd, source, billing, billing_fixed, priced_at) VALUES (?, NULL, 'unpriced', ?, 1, ?)
+      ON CONFLICT(run) DO UPDATE SET billing = CASE WHEN run_spend.billing_fixed = 1 AND run_spend.billing = 'api-key' THEN 'api-key' ELSE excluded.billing END, billing_fixed = 1`)
+      .run(id, billing, now.toISOString());
     this.settleRunSpend(id, now);
   }
 
@@ -22523,8 +22529,14 @@ export class Store {
 
   /** v97: one model turn a teammate took, with what it cost. */
   addTeammateTurn(turn: { teammate: number; card: number | null; model: string; ok: boolean; ms: number; costUsd?: number | null; tokensIn?: number | null; tokensOut?: number | null }, now: Date): void {
-    this.db.prepare("INSERT INTO teammate_turn (teammate, card, model, ok, ms, cost_usd, tokens_in, tokens_out, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .run(turn.teammate, turn.card, turn.model, turn.ok ? 1 : 0, Math.round(turn.ms), turn.costUsd ?? null, turn.tokensIn ?? null, turn.tokensOut ?? null, now.toISOString());
+    this.db.prepare("INSERT INTO teammate_turn (teammate, card, model, ok, ms, cost_usd, tokens_in, tokens_out, at, billing) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(turn.teammate, turn.card, turn.model, turn.ok ? 1 : 0, Math.round(turn.ms), turn.costUsd ?? null, turn.tokensIn ?? null, turn.tokensOut ?? null, now.toISOString(), claudeMachineBilling(this.db));
+  }
+
+  /** v105: a flow's Claude draft, with what the CLI said it cost, billed as the sign-in was. */
+  recordDraftSpend(draft: { repo: string | null; model: string | null; costUsd: number | null }, now: Date): void {
+    this.db.prepare("INSERT INTO side_spend (kind, repo, provider, model, cost_usd, billing, at) VALUES ('draft', ?, 'claude', ?, ?, ?, ?)")
+      .run(draft.repo, draft.model, draft.costUsd, claudeMachineBilling(this.db), now.toISOString());
   }
 
   teammateTurns(teammate: number, since: string): TeammateTurnRow[] {
@@ -23189,6 +23201,7 @@ export class Store {
     },
     now: Date,
   ): boolean {
+    this.spendCache = null; // its spend counts toward the next budget check
     return this.transact(() => {
       const before = this.db.prepare("SELECT reserved_microusd AS reserved, session, thread FROM mate_turn WHERE id = ? AND generation = ? AND state IN ('queued','running')").get(id, generation);
       if (before === undefined) return false;

@@ -7,17 +7,23 @@ import { codexLimitsOf, record, type LimitReading } from "./provider-limits.js";
 import { billingOf, type Billing } from "./spend.js";
 import type { Store } from "./store.js";
 
-/** How Codex says its account bills (`account/read`'s account.type): a ChatGPT sign-in is its plan; a key is a key. */
-const accountBilling = (mode: unknown): Billing | undefined =>
-  typeof mode !== "string" ? undefined : mode.toLowerCase() === "chatgpt" ? "subscription" : /api.?key/i.test(mode) ? "api-key" : undefined;
+/** How Codex says its account bills (`account/read`'s account): a ChatGPT sign-in is its plan unless the plan itself is
+ * billed by use; a key or Amazon Bedrock is a key. */
+function accountBilling(account: Record<string, unknown> | null): Billing | undefined {
+  const type = account?.["type"];
+  if (typeof type !== "string") return undefined;
+  if (type.toLowerCase() === "chatgpt") return typeof account!["planType"] === "string" && /usage.?based/i.test(account!["planType"]) ? "api-key" : "subscription";
+  return /api.?key|bedrock/i.test(type) ? "api-key" : undefined;
+}
 
 /** End the app server and everything it started: its process group, then a kill after a grace period. */
 function end(child: ChildProcess, graceMs: number): Promise<void> {
   return new Promise(done => {
-    if (child.exitCode !== null || child.signalCode !== null) return done();
     const signal = (name: NodeJS.Signals) => {
       try { if (child.pid !== undefined && process.platform !== "win32") process.kill(-child.pid, name); else child.kill(name); } catch { /* gone */ }
     };
+    // The leader may be gone while something it started lives on: the group hears it either way.
+    if (child.exitCode !== null || child.signalCode !== null) { signal("SIGKILL"); return done(); }
     const hard = setTimeout(() => { signal("SIGKILL"); setTimeout(done, 1_000).unref?.(); }, graceMs);
     hard.unref?.();
     child.once("exit", () => { clearTimeout(hard); done(); });
@@ -75,7 +81,7 @@ export function readCodexLimits(options: { command?: string; timeoutMs?: number;
           limits = message["error"] === undefined ? codexLimitsOf(message["result"]) : null;
         } else if (message?.["id"] === 3) {
           accountRead = true;
-          billing = accountBilling(record(record(message["result"])?.["account"])?.["type"]);
+          billing = accountBilling(record(record(message["result"])?.["account"]));
         }
         if (limits !== undefined && accountRead) finish(limits);
       }
@@ -93,7 +99,9 @@ export function startCodexLimits(store: Store, everyMs = 5 * 60_000): () => void
   let stopped = false, busy = false;
   const pass = async () => {
     if (stopped || busy || billingOf("codex") !== "subscription") return;
-    if (store.handle.prepare("SELECT 1 AS live FROM run WHERE provider = 'codex' AND outcome IS NULL LIMIT 1").get() !== undefined) return;
+    // A Codex run started in the last few hours and not finished: let it have the sign-in to itself.
+    const recent = new Date(Date.now() - 6 * 3_600_000).toISOString();
+    if (store.handle.prepare("SELECT 1 AS live FROM run WHERE provider = 'codex' AND outcome IS NULL AND started_at > ? LIMIT 1").get(recent) !== undefined) return;
     busy = true;
     try {
       const reading = await readCodexLimits();

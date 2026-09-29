@@ -8122,7 +8122,7 @@ export function createDecisionServer(options: ServeOptions): Server {
               : opened.reason === "daily-cap"
                 ? "the daily turn cap is reached"
                 : opened.reason === "monthly-budget"
-                  ? "a monthly budget this counts toward is used up (the Spend page says which)"
+                  ? "a monthly budget this counts toward holds it: used up, or its cost can't be priced yet (the Spend page says which)"
                   : "the weekly spend ceiling would be exceeded";
         return redirect(response, `/chat?said=${encodeURIComponent(said)}`);
       }

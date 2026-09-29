@@ -37,14 +37,21 @@ export function seenBilling(db: Database, provider: string): Billing | null {
   return row?.["billing"] === "api-key" || row?.["billing"] === "subscription" ? row["billing"] : null;
 }
 
-/** How a Claude turn was really billed, from its own stream: a key source other than its sign-in ("none"), or a cloud
- * model id (Bedrock, Vertex), is a key; the plan's windows reported, or its sign-in, is the plan. Null when the stream
- * said neither. */
+/** How a Claude turn was really billed, from its own stream. Only a plan reports its usage windows (Claude Code 2.1
+ * does on every turn), so that is the one sign of the plan; a named key source or a cloud model id (Bedrock, Vertex)
+ * is a key, and so is "none" without windows (a gateway's bearer token or a cloud provider says "none" too). Null when
+ * the stream said nothing. */
 export function claudeBillingFrom(seen: { keySource: string | null; model: string | null; planWindows: boolean }): Billing | null {
   if (seen.keySource !== null && seen.keySource !== "none") return "api-key";
   if (seen.model !== null && /^arn:|(^|\.)anthropic\.|@/.test(seen.model)) return "api-key";
-  if (seen.planWindows || seen.keySource === "none") return "subscription";
-  return null;
+  if (seen.planWindows) return "subscription";
+  return seen.keySource === "none" ? "api-key" : null;
+}
+
+/** How Claude bills on this computer when Standing Orders gives it no key (teammate turns, drafts): as its keyless runs
+ * were last seen, and its plan until one has been. */
+export function claudeMachineBilling(db: Database): Billing {
+  return seenBilling(db, "claude") ?? "subscription";
 }
 
 /** Providers whose own output says what a turn cost (Claude's total_cost_usd; OpenRouter's usage.cost). */
@@ -105,6 +112,8 @@ CREATE TABLE IF NOT EXISTS run_spend (
   microusd    INTEGER,
   source      TEXT NOT NULL CHECK (source IN ('reported', 'estimated', 'unpriced', 'subscription')),
   billing     TEXT NOT NULL CHECK (billing IN ('subscription', 'api-key')),
+  -- 1 once the run's own evidence set it (a key it was given, what its CLI said); a later turn can only make it a key.
+  billing_fixed INTEGER NOT NULL DEFAULT 0,
   price_model TEXT,
   input_usd   REAL,
   output_usd  REAL,
@@ -135,6 +144,18 @@ CREATE TABLE IF NOT EXISTS provider_limit (
   observed_at    TEXT NOT NULL,
   PRIMARY KEY (provider, window)
 );
+-- Spend that isn't a run, a teammate turn or a chat: a flow's Claude draft.
+CREATE TABLE IF NOT EXISTS side_spend (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind      TEXT NOT NULL CHECK (kind IN ('draft')),
+  repo      TEXT,
+  provider  TEXT NOT NULL,
+  model     TEXT,
+  cost_usd  REAL,
+  billing   TEXT NOT NULL CHECK (billing IN ('subscription', 'api-key')),
+  at        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS side_spend_at ON side_spend (at);
 CREATE TABLE IF NOT EXISTS provider_account (
   provider    TEXT PRIMARY KEY,
   billing     TEXT NOT NULL CHECK (billing IN ('subscription', 'api-key')),
@@ -150,7 +171,7 @@ export type Budget = { id: number; scope: BudgetScope; key: string; limitMicrous
 
 /** One piece of spend, whatever made it, with what it counts toward. */
 export type SpendItem = {
-  at: string; kind: "run" | "teammate" | "chat" | "sort"; microusd: number | null; source: PriceSource;
+  at: string; kind: "run" | "teammate" | "chat" | "sort" | "draft"; microusd: number | null; source: PriceSource;
   project: string | null; person: string | null; teammate: number | null; provider: string; model: string | null;
   tokensIn: number | null; tokensOut: number | null; taskId: string | null; runId: number | null; authMode: string | null;
 };
@@ -243,10 +264,11 @@ export function spendItems(db: Database, from: string, to: string, modeOf: (prov
       taskId: String(row["task"]), runId: Number(row["id"]), authMode: billing,
     };
   });
-  // A teammate's own turns run on this computer's Claude sign-in, never a key (teammates.ts claudeTurnRunner).
-  for (const row of db.prepare(`SELECT t.at, t.teammate, t.model, t.cost_usd, t.tokens_in, t.tokens_out, m.repo FROM teammate_turn t JOIN teammate m ON m.id = t.teammate
+  // A teammate's own turns get no key from Standing Orders (teammates.ts claudeTurnRunner): they bill as this computer's
+  // Claude sign-in was seen billing when the turn ran (a plan, or a Console login, key helper or gateway).
+  for (const row of db.prepare(`SELECT t.at, t.teammate, t.model, t.cost_usd, t.tokens_in, t.tokens_out, t.billing, m.repo FROM teammate_turn t JOIN teammate m ON m.id = t.teammate
       WHERE t.at >= ? AND t.at < ? ORDER BY t.id`).all(from, to)) {
-    const billing: Billing = "subscription";
+    const billing: Billing = row["billing"] === "api-key" ? "api-key" : "subscription";
     const priced = priceWork(db, { provider: "claude", model: text(row["model"]), costUsd: count(row["cost_usd"]), tokensIn: count(row["tokens_in"]), tokensOut: count(row["tokens_out"]), billing });
     items.push({ at: String(row["at"]), kind: "teammate", microusd: priced.microusd, source: priced.source, project: String(row["repo"]), person: null,
       teammate: Number(row["teammate"]), provider: "claude", model: text(row["model"]),
@@ -266,6 +288,13 @@ export function spendItems(db: Database, from: string, to: string, modeOf: (prov
     items.push({ at: String(row["at"]), kind: "chat", microusd: subscription ? 0 : settled, source: subscription ? "subscription" : settled === null ? "unpriced" : "reported",
       project: text(row["project"]), person: text(row["approver"]), teammate: null, provider, model: text(row["model"]),
       tokensIn: count(row["tokens_in"]), tokensOut: count(row["tokens_out"]), taskId: null, runId: null, authMode: subscription ? "subscription" : "api-key" });
+  }
+  // A flow's Claude drafts: like a teammate's turns, billed as the sign-in was.
+  for (const row of db.prepare("SELECT at, kind, repo, provider, model, cost_usd, billing FROM side_spend WHERE at >= ? AND at < ? ORDER BY id").all(from, to)) {
+    const billing: Billing = row["billing"] === "api-key" ? "api-key" : "subscription";
+    const priced = priceWork(db, { provider: String(row["provider"]), model: text(row["model"]), costUsd: count(row["cost_usd"]), tokensIn: null, tokensOut: null, billing });
+    items.push({ at: String(row["at"]), kind: "draft", microusd: priced.microusd, source: priced.source, project: text(row["repo"]), person: null, teammate: null,
+      provider: String(row["provider"]), model: text(row["model"]), tokensIn: null, tokensOut: null, taskId: null, runId: null, authMode: billing });
   }
   // A flow's Sort zone asks Jev on OpenRouter (the key's credit): what it cost is kept with its answer.
   for (const row of db.prepare(`SELECT fs.started_at AS at, json_extract(fs.decision_json, '$.cost') AS cost, json_extract(fs.decision_json, '$.model') AS model, f.repo

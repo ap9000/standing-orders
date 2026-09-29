@@ -7,7 +7,7 @@
  * nothing). The latest reading of each window is kept; the Tasks page shows
  * them beside the monthly budgets.
  */
-import { claudeBillingFrom, type Billing } from "./spend.js";
+import type { Billing } from "./spend.js";
 
 export type LimitWindow = { window: string; usedPercent: number; windowMinutes: number | null; resetsAt: string | null; reached: boolean };
 /** A provider's reading: its windows (all of them, or `partial` when it named only one), and how it was seen billing. */
@@ -70,14 +70,6 @@ export function codexLimitsOf(result: unknown): LimitReading | null {
   if (reachedType !== null && windows.length > 0) windows.reduce((fullest, one) => one.usedPercent > fullest.usedPercent ? one : fullest).reached = true;
   const plan = typeof limits["planType"] === "string" && /^[a-z0-9_-]{1,40}$/i.test(limits["planType"]) ? limits["planType"] : null;
   return windows.length === 0 ? null : { provider: "codex", plan, windows };
-}
-
-/** How a Claude stream's first line says it's billed: its key source and model (see spend.claudeBillingFrom). */
-export function claudeAccountOf(event: unknown): LimitReading | null {
-  const body = record(event);
-  if (body === null || body["type"] !== "system" || body["subtype"] !== "init" || typeof body["apiKeySource"] !== "string") return null;
-  const billing = claudeBillingFrom({ keySource: body["apiKeySource"], model: typeof body["model"] === "string" ? body["model"] : null, planWindows: false });
-  return billing === null ? null : { provider: "claude", plan: null, windows: [], partial: true, billing };
 }
 
 /** Where readings go: the store, in any process that runs Claude. The latest one set wins; one that's done removes

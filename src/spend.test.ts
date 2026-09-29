@@ -18,7 +18,7 @@ import { budgetAlertPass } from "./budget-alerts.js";
 import { teammateReady } from "./teammate-work.js";
 import { runOperate } from "./operate.js";
 import { setAuthMode } from "./keys.js";
-import { claudeAccountOf, claudeLimitsOf, codexLimitsOf, noteLimits, pushLimitSink } from "./provider-limits.js";
+import { claudeLimitsOf, codexLimitsOf, noteLimits, pushLimitSink } from "./provider-limits.js";
 import { limitsView } from "./limits-ui.js";
 import { runClaudeStreamJsonl } from "./exec.js";
 
@@ -115,6 +115,8 @@ test("billing follows what the CLI did: a key source, a cloud model or Codex's k
   expect(claudeBillingFrom({ keySource: "none", model: "us.anthropic.claude-sonnet-5-v1:0", planWindows: false })).toBe("api-key");
   expect(claudeBillingFrom({ keySource: "none", model: "claude-sonnet-5@20260101", planWindows: false })).toBe("api-key");
   expect(claudeBillingFrom({ keySource: null, model: null, planWindows: false })).toBeNull();
+  // "none" is a sign-in, a gateway's bearer token or a cloud provider: only the plan's windows prove the plan.
+  expect(claudeBillingFrom({ keySource: "none", model: "claude-sonnet-5", planWindows: false })).toBe("api-key");
   // A run's own evidence is fixed before its usage is priced, and wins over the mode stamped after it.
   const keyed = work({ name: "alex", kind: "person" }, {});
   store.fixRunBilling(keyed.run, "api-key", NOW);
@@ -126,8 +128,6 @@ test("billing follows what the CLI did: a key source, a cloud model or Codex's k
   store.recordProviderLimits({ provider: "codex", plan: null, windows: [], partial: true, billing: "api-key" }, NOW);
   expect(billingOf("codex", store.handle)).toBe("api-key");
   expect(billingOf("codex")).toBe("subscription");
-  // A Claude stream's first line says how it bills.
-  expect(claudeAccountOf({ type: "system", subtype: "init", apiKeySource: "apiKeyHelper", model: "claude-sonnet-5" })).toMatchObject({ provider: "claude", billing: "api-key", windows: [] });
   // Gemini on a key with no catalogue prices can't be priced: a covering budget holds it rather than count it free.
   store.setBudget({ scope: "person", key: "alex", limitMicrousd: 100_000_000, hardStop: true }, "alex", NOW);
   const subject = { project: REPO, person: "alex", teammate: null };
@@ -196,6 +196,16 @@ test("a hard-stop budget used up holds new work (tasks, teammates, chats); an al
   store.createTeammate({ repo: REPO, handle: "maya", soul: "---\nname: Maya\nrole: Support\n---\n## Who you are\nHelpful.\n", model: null, manager: "alex", by: "alex" }, NOW);
   const mate = store.teammates([REPO])[0]!;
   expect(teammateReady(store, mate, NOW)).toEqual({ ok: true });
+  // Unless this computer's Claude bills a key (a Console login, a key helper, a gateway): then its turns and drafts
+  // cost what they cost, count, and wait like any key work.
+  store.recordProviderBilling("claude", "api-key", NOW);
+  expect(teammateReady(store, mate, NOW)).toEqual({ ok: false, why: "a monthly budget its work counts toward is used up" });
+  store.addTeammateTurn({ teammate: mate.id, card: null, model: "sonnet", ok: true, ms: 10, costUsd: 0.25 }, NOW);
+  store.recordDraftSpend({ repo: REPO, model: null, costUsd: 0.5 }, NOW);
+  const month = monthOf(NOW);
+  const extra = spendItems(store.handle, month.from, month.to).filter(item => item.kind === "teammate" || item.kind === "draft");
+  expect(extra.map(item => [item.kind, item.microusd, item.project])).toEqual([["teammate", 250_000, REPO], ["draft", 500_000, REPO]]);
+  store.recordProviderBilling("claude", "subscription", NOW);
   // Alerts only: work carries on.
   store.setBudget({ scope: "project", key: REPO, limitMicrousd: 10_000_000, hardStop: false }, "alex", NOW);
   expect(store.budgetGate(NOW)(subject).over).toBeNull();

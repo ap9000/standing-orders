@@ -138,7 +138,7 @@ export const MATE_REFUSAL_COPY: Record<MateRefusal, string> = {
   "session-exhausted": "this mate session's spend ceiling would be exceeded — mint a new one to continue",
   "session-ended": "this mate session has ended — mint a new one to continue",
   "over-budget": "the weekly chat spend ceiling would be exceeded",
-  "monthly-budget": "a monthly budget this counts toward is used up (the Spend page says which)",
+  "monthly-budget": "a monthly budget this counts toward holds it: used up, or its cost can't be priced yet (the Spend page says which)",
   "invalid-request": "This message could not be identified. Reload the conversation before sending it.",
   "request-changed": "That send was already received with different text or task context. Reload the conversation before sending a new message.",
   channel: "this conversation's connection changed — reconnect it before sending again",

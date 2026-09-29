@@ -23,7 +23,8 @@ export const DRAFT_CHARS = 4000;
 
 export type DraftCard = { title: string; description: string | null; note: string | null; outputs: Record<string, string>; source: { label: string } | null };
 export type DraftRequest = { model: string; prompt: string; timeoutMs: number };
-export type DraftAnswer = { ok: true; text: string; ms: number } | { ok: false; said: string };
+/** v105: `costUsd` is what the CLI said the draft cost (a plan covers it; a key pays it). */
+export type DraftAnswer = { ok: true; text: string; ms: number; costUsd?: number } | { ok: false; said: string };
 /** Runs one draft; injectable so tests never spend a subscription turn. */
 export type DraftRunner = (request: DraftRequest) => Promise<DraftAnswer>;
 
@@ -80,7 +81,8 @@ export function claudeDraftRunner(runner: CommandRunner = run): DraftRunner {
       if (result.code !== 0 || body === null || body["is_error"] === true || body["subtype"] !== "success" || typeof body["result"] !== "string") {
         return { ok: false, said: /not logged in|login|authenticat/i.test(`${result.stdout}${result.stderr}`) ? "Claude isn't signed in on this computer." : "Claude couldn't write the draft." };
       }
-      return { ok: true, text: body["result"], ms: Date.now() - started };
+      const cost = body["total_cost_usd"];
+      return { ok: true, text: body["result"], ms: Date.now() - started, ...(typeof cost === "number" && Number.isFinite(cost) && cost >= 0 ? { costUsd: cost } : {}) };
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
