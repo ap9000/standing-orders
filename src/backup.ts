@@ -55,7 +55,8 @@ function connect(file: string): DatabaseSync {
  * writers carry on meanwhile), then make the copy one self-contained file and check it. */
 export async function onlineCopy(sourceFile: string, target: string): Promise<{ bytes: number; schemaVersion: number | null }> {
   const source = connect(sourceFile);
-  try { await sqlite().backup(source, target, { rate: -1 }); } finally { source.close(); }
+  // Every page in one step (SQLite's -1 means that too, but newer Node builds take only a positive rate).
+  try { await sqlite().backup(source, target, { rate: 1_000_000 }); } finally { source.close(); }
   chmodSync(target, 0o600);
   const copy = connect(target);
   let schemaVersion: number | null;
