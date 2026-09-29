@@ -47,6 +47,11 @@ export class Skip extends Error {}
  * sam), a registered runner, Claude as every phase, `npm test` as the
  * project's check; the console and the worker started; alex signed in.
  */
+/** A cross-page fade the browser skipped mid-navigation (it reports the skip as an InvalidStateError). It is cosmetic:
+ * the page itself loaded, and the shell settles these where it can (browser-shell.ts, app.tsx; serve.ts explains why a
+ * page can't always). Every other browser error still fails "No browser errors on any page". */
+export const SKIPPED_FADE = /Transition was aborted because of invalid state/;
+
 export async function world(name, { seed, env = {} } = {}) {
   const BIN = join(here, "dist/bin.js");
   if (!existsSync(BIN)) throw new Error("Build first: npm run build");
@@ -150,8 +155,8 @@ export async function world(name, { seed, env = {} } = {}) {
     const context = await browser.newContext({ viewport, deviceScaleFactor: 1, colorScheme });
     const page = await context.newPage();
     const where = () => { try { return new URL(page.url()).pathname; } catch { return page.url(); } };
-    page.on("pageerror", error => problems.push(`${who} on ${where()}: ${String(error)}`));
-    page.on("console", message => { if (message.type() === "error" && !/Failed to load resource/.test(message.text())) problems.push(`${who} on ${where()}: ${message.text()}`); });
+    page.on("pageerror", error => { if (!SKIPPED_FADE.test(String(error))) problems.push(`${who} on ${where()}: ${String(error)}`); });
+    page.on("console", message => { if (message.type() === "error" && !/Failed to load resource/.test(message.text()) && !SKIPPED_FADE.test(message.text())) problems.push(`${who} on ${where()}: ${message.text()}`); });
     await page.goto(`${base}/login`);
     await page.fill('input[name="name"]', who);
     await page.fill('input[name="token"]', passwords[who]);
