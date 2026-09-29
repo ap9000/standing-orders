@@ -184,6 +184,9 @@ async function addCard(title, details) {
   await page.fill('input[aria-label="Title"]', title);
   if (details) await page.fill('textarea[aria-label="Details"]', details);
   await page.click('button:has-text("Add card")');
+  // The card is on the canvas before anything else happens: the canvas re-renders live as a teammate moves cards, and a
+  // click in the middle of that re-render can miss (gate run 2059: the second of three cards in a row).
+  await page.locator("[data-card]", { hasText: title }).first().waitFor({ timeout: 30_000 });
 }
 
 // ------------------------------------------------------------------ the console itself
