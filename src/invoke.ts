@@ -418,7 +418,7 @@ export async function invokeAgent(
           if (typeof event["model"] === "string") billingSeen.model = event["model"].slice(0, 200);
         } else if (event["type"] === "rate_limit_event") {
           billingSeen.planWindows = true;
-        } else if (event["type"] === "result") {
+        } else if (event["type"] === "result" && event["is_error"] !== true && event["subtype"] === "success") {
           billingSeen.answered = true;
         }
         runOptions.onStreamEvent?.(event);
@@ -806,7 +806,8 @@ export async function invokeHeldAgent(
             if (typeof event["model"] === "string") heldSeen.model = event["model"].slice(0, 200);
           } else if (event["type"] === "rate_limit_event") {
             heldSeen.planWindows = true;
-          } else if (event["type"] === "result") {
+          } else if (event["type"] === "result" && event["is_error"] !== true && event["subtype"] === "success") {
+            // Only an answer decides: a failure before the first answer (a startup or sign-in error) says nothing yet.
             const billing = heldMode === "api-key" ? "api-key"
               : !heldSeen.decided ? claudeBillingFrom(heldSeen)
               : claudeBillingFrom({ ...heldSeen, keySource: heldSeen.keySource === "none" ? null : heldSeen.keySource, planWindows: false }) === "api-key" ? "api-key" : null;
