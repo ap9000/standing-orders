@@ -22,7 +22,7 @@ import { randomUUID, createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { homedir, tmpdir, userInfo } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { loadCodingDeploymentRuntime, observeCodingDeployment, backupCodingDeployment, verifyCodingDeploymentBackup, assertCodingDeploymentStopped } from "./deploy-coding.mjs";
 
 // Every direct connection waits at the same bounded lock boundary as Store.
@@ -451,30 +451,40 @@ async function finish() {
 
 /** Keep storage in check: once a deploy is healthy, older staged releases go (with the database backups they
  * hold). Kept: the one it installed, the one it replaced (the deployment record's, the way back), the three
- * newest, any a launchd service or the `standing-orders` on PATH runs from, and any whose deploy didn't finish
- * (its record isn't "deployed"). Only this script's own `browser-*` stages are touched. */
+ * newest, and any a launchd service or a `standing-orders` command (on PATH or under any nvm version) runs from.
+ * A stage whose deploy didn't finish (no record, or one that isn't "deployed") goes once it's a week old. Only
+ * this script's own `browser-*` stages are touched. */
 function pruneStaged(keep) {
-  const root = join(stateDir, "staged-upgrades");
-  const stageOf = path => { let at = resolve(path ?? "/"); while (dirname(at) !== root && dirname(at) !== at) at = dirname(at); return dirname(at) === root ? at : null; };
   const real = path => { try { return realpathSync(path); } catch { return path; } };
+  const root = join(stateDir, "staged-upgrades"), realRoot = real(root);
+  const stageOf = path => {
+    for (const base of new Set([root, realRoot])) {
+      let at = resolve(path ?? "/");
+      while (dirname(at) !== base && dirname(at) !== at) at = dirname(at);
+      if (dirname(at) === base) return join(realRoot, basename(at));
+    }
+    return null;
+  };
   const inUse = [...keep];
   const agents = join(homedir(), "Library", "LaunchAgents");
   try {
     for (const name of readdirSync(agents).filter(one => one.startsWith("com.standing-orders."))) {
-      for (const match of readFileSync(join(agents, name), "utf8").matchAll(/<string>([^<]*staged-upgrades[^<]*)<\/string>/g)) inUse.push(real(match[1]));
+      for (const match of readFileSync(join(agents, name), "utf8").matchAll(/<string>([^<]*staged-upgrades[^<]*)<\/string>/g)) inUse.push(match[1], real(match[1]));
     }
   } catch { /* no launch agents here */ }
-  for (const dir of (process.env.PATH ?? "").split(":")) if (dir !== "" && existsSync(join(dir, "standing-orders"))) inUse.push(real(join(dir, "standing-orders")));
-  const kept = new Set(inUse.map(stageOf).filter(Boolean));
+  const commands = (process.env.PATH ?? "").split(":").filter(Boolean).map(dir => join(dir, "standing-orders"));
+  try { for (const version of readdirSync(join(homedir(), ".nvm", "versions", "node"))) commands.push(join(homedir(), ".nvm", "versions", "node", version, "bin", "standing-orders")); } catch { /* no nvm */ }
+  for (const command of commands) if (existsSync(command)) inUse.push(real(command));
+  const kept = new Set(inUse.flatMap(path => [stageOf(path), stageOf(real(path ?? "/"))]).filter(Boolean));
   let stages = [];
-  try { stages = readdirSync(root).filter(name => name.startsWith("browser-")).map(name => ({ path: join(root, name), at: lstatSync(join(root, name)).mtimeMs })); } catch { return []; }
+  try { stages = readdirSync(realRoot).filter(name => name.startsWith("browser-")).map(name => ({ path: join(realRoot, name), at: lstatSync(join(realRoot, name)).mtimeMs })); } catch { return []; }
   stages.sort((a, b) => b.at - a.at).slice(0, 3).forEach(one => kept.add(one.path));
   const removed = [];
   for (const one of stages) {
-    if (kept.has(one.path) || kept.has(real(one.path))) continue;
+    if (kept.has(one.path)) continue;
     let phase = null;
     try { phase = JSON.parse(readFileSync(join(one.path, "deployment.json"), "utf8")).phase ?? null; } catch { phase = null; }
-    if (phase !== "deployed") continue;
+    if (phase !== "deployed" && Date.now() - one.at < 7 * 86_400_000) continue;
     try { rmSync(one.path, { recursive: true, force: true }); removed.push(one.path); } catch { /* the next deploy tries again */ }
   }
   return removed;

@@ -282,10 +282,10 @@ export type Write = (line: string) => void;
  */
 export const EXIT = { ok: 0, failed: 1, usage: 2, refused: 3 } as const;
 
-/** Storage retention: how long a finished task's clean checkout is kept after it was let go, and a done release
- * candidate's (its checkout holds the verified build a deploy installs). */
+/** Storage retention: how long a finished task's clean checkout is kept after it was let go, and a result marked
+ * complete's or a release candidate's after it was (its checkout holds the build a deploy installs). */
 export const CHECKOUT_KEEP_MS = 2 * 24 * 60 * 60_000;
-export const CANDIDATE_KEEP_MS = 14 * 24 * 60 * 60_000;
+export const RESULT_KEEP_MS = 7 * 24 * 60 * 60_000;
 
 export type OperateOptions = {
   /** Native-shell proof key, passed in memory rather than command-line arguments. */
@@ -4498,8 +4498,8 @@ async function reconcileCommand(
   }
 
   // Storage retention: finished work's clean checkouts go two days after they were let go (their branches stay); a
-  // release candidate's two weeks after it was done (a deploy installs the build in it).
-  const pruned = await worktrees.prune(repo, clock(), CHECKOUT_KEEP_MS, () => store.keptBranches(repo, clock(), CANDIDATE_KEEP_MS));
+  // result marked complete, or a release candidate, a week after (a deploy installs the build in its checkout).
+  const pruned = await worktrees.prune(repo, clock(), CHECKOUT_KEEP_MS, () => store.keptBranches(repo, clock(), RESULT_KEEP_MS));
   for (const row of pruned.removed) {
     store.recordAction({ at: clock().toISOString(), actor: "worker", repo, taskId: row.taskRef === null ? null : store.externalIdFor(row.taskRef), runId: null,
       action: "checkout removed", outcome: "removed", source: "work", detail: `${basename(row.path)} (released ${row.releasedAt?.slice(0, 10) ?? "?"})` });

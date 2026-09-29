@@ -5,8 +5,8 @@
 - **Storage kept in check.** Standing Orders used to keep every build
   checkout and every staged release forever (78 GB here after a week). Now
   the worker removes a finished task's clean checkout two days after it was
-  let go (a release candidate's two weeks after it was done, since a deploy
-  installs the build in it). Its branch and commits stay; a checkout with
+  let go (a result marked complete, or a release candidate, a week after,
+  since a deploy installs the build in its checkout). Its branch and commits stay; a checkout with
   anybody's changes, or commits on no branch, is never touched, nor is
   anything an unfinished or unplaced task works on. Each removal is in the
   action ledger. A deploy keeps the release it installed, the one before,

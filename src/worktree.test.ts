@@ -686,7 +686,7 @@ describe("the pool, against real git", () => {
     expect(store.getWorktree(made.worktree.path)).toBeNull();
   });
 
-  test("retention keeps what unfinished, unplaced and recently released tasks work on", () => {
+  test("retention keeps what unfinished and unplaced tasks work on, and recent results a deploy installs from", () => {
     const now = later(20 * 86_400_000);
     store.createTask({ id: "shipped", title: "done" }, T0);
     store.createTask({ id: "broken", title: "failed" }, T0);
@@ -699,8 +699,13 @@ describe("the pool, against real git", () => {
     store.setTaskState("broken", "failed", T0);
     store.handle.prepare("INSERT INTO task_scope (task_id, goal, touches, proposed_at, digest, candidate) VALUES ('release', 'ship', '[]', ?, 'd', ?)").run(T0.toISOString(), "a".repeat(40));
     store.setTaskState("release", "done", later(19 * 86_400_000));
-    expect(store.keptBranches(repo, now, 14 * 86_400_000).sort()).toEqual(["standing-orders/anywhere", "standing-orders/broken", "standing-orders/release", "standing-orders/waiting"]);
-    // Two weeks after a release candidate was done, its checkout can go too.
-    expect(store.keptBranches(repo, later(40 * 86_400_000), 14 * 86_400_000)).not.toContain("standing-orders/release");
+    // A result marked complete is deployable from its checkout too.
+    store.createTask({ id: "deployable", title: "a builder result marked complete" }, T0);
+    store.placeTask(store.refFor("built-in", "deployable").id, repo);
+    store.setTaskState("deployable", "done", T0);
+    store.recordAction({ at: later(18 * 86_400_000).toISOString(), actor: "operator:alex", repo, taskId: "deployable", runId: null, action: "assignment handoff checked", outcome: "checked", source: "work" });
+    expect(store.keptBranches(repo, now, 7 * 86_400_000).sort()).toEqual(["standing-orders/anywhere", "standing-orders/broken", "standing-orders/deployable", "standing-orders/release", "standing-orders/waiting"]);
+    // A week after, their checkouts can go too.
+    expect(store.keptBranches(repo, later(40 * 86_400_000), 7 * 86_400_000).sort()).toEqual(["standing-orders/anywhere", "standing-orders/broken", "standing-orders/waiting"]);
   });
 });

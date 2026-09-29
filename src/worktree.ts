@@ -702,8 +702,11 @@ export class WorktreePool {
       try {
         // A lease, or a task coming back, since the listing wins: look again right before removing.
         if (!idle(this.store.getWorktree(row.path), row.releasedAt) || kept_(keep(), row)) continue;
+        // Held while it goes: another process's lease sees this process in it (the busy map is this process's only).
+        const note = join(row.path, MARKER);
+        try { writeFileSync(note, `${process.pid} storage-retention removing ${currentBootId() ?? "unknown"} ${hostname()}\n`, "utf8"); } catch { continue; }
         const gone = await this.git(repo, ["worktree", "remove", "--force", row.path]);
-        if (gone.code !== 0) { kept.push({ path: row.path, why: "git refused" }); continue; }
+        if (gone.code !== 0) { rmSync(note, { force: true }); kept.push({ path: row.path, why: "git refused" }); continue; }
         this.store.transact(() => {
           const still = this.store.getWorktree(row.path);
           if (still !== null && still.runner === null && still.releasedAt === row.releasedAt) this.store.forgetWorktree(row.path);
