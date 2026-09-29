@@ -1244,6 +1244,14 @@ export function createDemoSandbox(now: Date): {
   const evidenceRoot = join(sandbox, "evidence");
   mkdirSync(evidenceRoot, { recursive: true });
   const seed = seedDemo(store, repos, evidenceRoot, now);
+  // v105: the plans' windows as Claude and Codex last said them, and a project budget (Tasks shows them as tiles).
+  const later = (hours: number) => new Date(now.getTime() + hours * 3_600_000).toISOString();
+  store.recordProviderLimits({ provider: "claude", plan: null, windows: [
+    { window: "five_hour", usedPercent: 48, windowMinutes: 300, resetsAt: later(2.2), reached: false },
+    { window: "seven_day", usedPercent: 83, windowMinutes: 10_080, resetsAt: later(62), reached: false },
+  ] }, now);
+  store.recordProviderLimits({ provider: "codex", plan: "pro", windows: [{ window: "seven_day", usedPercent: 12, windowMinutes: 10_080, resetsAt: later(130), reached: false }] }, now);
+  store.setBudget({ scope: "project", key: repos.web, limitMicrousd: 25_000_000, hardStop: true }, seed.login.name, now);
   const passwordFile = join(sandbox, "demo-login.txt");
   writeFileSync(passwordFile, `name: ${seed.login.name}\npassword: ${seed.login.password}\n`, { mode: 0o600 });
   return { sandbox, store, seed, evidenceRoot, passwordFile };

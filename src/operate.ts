@@ -4,9 +4,12 @@ import { rulesSummary } from "./approval-rules-ui.js";
 import { evidencePack, exportDay, ledgerExportChunks, standaloneEvidenceHtml, type LedgerExport } from "./evidence-pack.js";
 import { matchesOutsideCheckpoint } from "./ledger-chain.js";
 import { bytesWords, storageReport } from "./storage.js";
-import { budgetLabel, budgetStates, monthNamed, monthOf, spendItems, usd as spendUsd } from "./spend.js";
+import { budgetLabel, budgetStates, monthNamed, monthOf, spendItems, teammateNames, usd as spendUsd, type BudgetState } from "./spend.js";
 import { spendCsv } from "./spend-ui.js";
 import { startBudgetAlerts } from "./budget-alerts.js";
+import { setLimitSink } from "./provider-limits.js";
+import { limitsView } from "./limits-ui.js";
+import { startCodexLimits } from "./codex-limits.js";
 import { packageVersion, startMonitoring, targetOf } from "./monitoring.js";
 import { origin, readMonitoring } from "./monitoring-settings.js";
 import { logEvent } from "./log.js";
@@ -808,6 +811,8 @@ export async function runOperate(
   } catch (error) {
     return fail(write, json, command, "database", describe(error), EXIT.failed);
   }
+  // v105: a Claude turn anywhere in this command says its plan's usage windows; keep the latest.
+  setLimitSink(reading => store.recordProviderLimits(reading, new Date()));
 
   // One `Date` per command is fine for a lookup and wrong for a pass that
   // runs an agent for half an hour: leases granted, extended, and released
@@ -848,6 +853,7 @@ export async function runOperate(
   } catch (error) {
     return fail(write, json, command, "failed", describe(error), EXIT.failed);
   } finally {
+    setLimitSink(null);
     store.close();
   }
 }
@@ -1993,6 +1999,12 @@ async function buildCommand(
     await worktrees.release(leased.worktree.path, now);
     return fail(write, json, "build", "auth-mode", `${id}: ${standaloneMode.problem}`, EXIT.refused);
   }
+  // v105: a used-up budget holds this road too, when the work is billed to an API key.
+  const standaloneBudget = standaloneMode.mode === "api-key" ? store.budgetGate(now)(store.budgetSubject(ref.id)).over : null;
+  if (standaloneBudget !== null) {
+    await worktrees.release(leased.worktree.path, now);
+    return fail(write, json, "build", "budget", `${id}: ${budgetLabel(standaloneBudget)} budget is used up for ${monthOf(now).name}`, EXIT.refused);
+  }
   let runId: number;
   try {
     runId = store.startRun({
@@ -2312,6 +2324,11 @@ async function tickCommand(
   await sweepContestCleanup(store, path => worktrees.release(path, clock()), runner, clock());
   escalateOverdueContests(store, clock());
   const resumed: TickOutcome[] = [];
+  // v105: monthly budgets, read when first needed and again after any build (its spend counts): a used-up hard-stop
+  // budget holds back new work billed to an API key, on every road below.
+  let budgetGate: ReturnType<Store["budgetGate"]> | null = null;
+  const budgetHold = (taskRef: number, providers: readonly string[]) => (budgetGate ??= store.budgetGate(clock()))({ ...store.budgetSubject(taskRef), providers });
+  const budgetWords = (over: BudgetState) => `${budgetLabel(over)} budget is used up for ${monthOf(clock()).name}`;
   for (const waiting of store.contestsInStates(["decision-wait"])) {
     if (context.shouldStop?.() === true || context.shouldPauseAdmission?.() === true) break;
     // D1 belt-and-braces (external dispatch, finding 41): a mirror and a
@@ -2349,6 +2366,12 @@ async function tickCommand(
       const taskId = store.externalIdFor(waiting.taskRef);
       if (custody === null || custody.runner !== runner || taskId === null) {
         backToParked();
+        continue;
+      }
+      const laneBudget = budgetHold(waiting.taskRef, [racer.provider]);
+      if (laneBudget.over !== null) {
+        backToParked();
+        resumed.push({ id: taskId, outcome: "skipped", reason: "budget", detail: budgetWords(laneBudget.over) });
         continue;
       }
       // Legacy comparison lanes carried an absolute clock. New profiles use
@@ -2445,6 +2468,7 @@ async function tickCommand(
       // there — no release-then-claim window exists any more.
       const afterClaim = store.getContestant(racer.id);
       if (afterClaim !== null) store.casContestantState(racer.id, ["ready"], "building", afterClaim.generation);
+      budgetGate = null; // this build's spend counts toward the next check
       const resumeResult = await build(store, {
         taskId,
         taskRef: waiting.taskRef,
@@ -2462,7 +2486,7 @@ async function tickCommand(
         // proof holds the lane to it (model, limits, permissions), so no
         // flag-shaped overrides ride along.
         contestProfile: racer.profile ?? contestantProfileOf(racer.provider, racer.model, racer.repairModel),
-        ...(remaining === null ? {} : { maxBudgetUsd: remaining / 1_000_000 }),
+        ...(remaining === null ? {} : { maxBudgetUsd: Math.min(remaining, laneBudget.remainingMicrousd ?? Infinity) / 1_000_000 }),
         onProviderSpawn: (pid: number) => {
           worktrees.recordProviderOccupancy(leased.worktree.path, runner, pid, leased.worktree.leaseEpoch);
           if (resumeSlot !== undefined) {
@@ -2614,9 +2638,6 @@ async function tickCommand(
   // gateway re-checks freshly at spawn; this cache only keeps a skipped
   // queue from probing once per task.
   const attestedThisPass = new Map<ProviderId, AttestOutcome | null>();
-  // v105: monthly budgets, read once a pass (a used-up hard-stop budget holds new work back).
-  let budgetGate: ReturnType<Store["budgetGate"]> | null = null;
-
   for (const ref of ready) {
     // The build budget governs UNATTENDED admissions (round-1 finding 4):
     // once it is spent, the pass keeps SCANNING for attended
@@ -2959,12 +2980,12 @@ async function tickCommand(
       continue;
     }
 
-    // v105: a monthly budget that stops new work, used up: the task waits in the queue until the month turns or the
+    // v105: a monthly budget that stops new API work, used up: the task waits in the queue until the month turns or the
     // budget is raised (the 100% alert went out; the task page and the spend page say why).
-    budgetGate ??= store.budgetGate(clock());
-    const budgeted = budgetGate(store.budgetSubject(ref.id));
+    // Budgets are dollars: work that runs only on subscriptions passes (see Store.budgetGate).
+    const budgeted = budgetHold(ref.id, [...new Set([spec.provider, ...skipProviders])]);
     if (budgeted.over !== null) {
-      dispatched.push({ id, outcome: "skipped", reason: "budget", detail: `${budgetLabel(budgeted.over)} budget is used up for ${monthOf(clock()).name}` });
+      dispatched.push({ id, outcome: "skipped", reason: "budget", detail: budgetWords(budgeted.over) });
       continue;
     }
 
@@ -3825,6 +3846,7 @@ async function tickCommand(
       dispatched.push({ id, outcome: "skipped", reason: "budget-unenforceable" });
       continue;
     }
+    budgetGate = null; // this build's spend counts toward the next check
     const result = await build(store, {
       taskId: id,
       taskRef: ref.id,
@@ -3987,6 +4009,13 @@ async function tickCommand(
   for (const pending of store.pendingChainAdmissions(repo)) {
     if (context.shouldStop?.() === true || context.shouldPauseAdmission?.() === true) break;
     if (built >= max) break;
+    // v105: a fallback billed to an API key spends dollars: a used-up budget holds it like any new work.
+    const chainEntry = store.approvedChainOf(pending.taskId)?.[pending.cursor];
+    const chainBudget = chainEntry?.authMode === "api-key" ? budgetHold(pending.taskRef, [chainEntry.profile.provider]) : { over: null, remainingMicrousd: null };
+    if (chainBudget.over !== null) {
+      dispatched.push({ id: pending.taskId, outcome: "skipped", reason: "budget", detail: budgetWords(chainBudget.over) });
+      continue;
+    }
     const railed = store.reserveModeRail(repo, 1, clock());
     if (!railed.ok) {
       dispatched.push({ id: pending.taskId, outcome: "skipped", reason: railed.rail, detail: railed.detail });
@@ -4077,8 +4106,9 @@ async function tickCommand(
     // refusal the run is FINISHED and its cycle resolved, never abandoned.
     const scopeBudgetNow = store.getScope(pending.taskId)?.budgetMicrousd ?? null;
     const backstopNow = store.getSpendDefaults()?.buildPerRunMicrousd ?? null;
-    const capNow =
-      scopeBudgetNow === null ? backstopNow : backstopNow === null ? scopeBudgetNow : Math.min(scopeBudgetNow, backstopNow);
+    const budgetNow = chainEntry?.authMode === "api-key" ? budgetHold(pending.taskRef, [admitted.provider]).remainingMicrousd : null;
+    const capNow = [scopeBudgetNow, backstopNow, budgetNow === null ? null : Math.max(1, budgetNow)]
+      .reduce<number | null>((least, one) => one === null ? least : least === null ? one : Math.min(least, one), null);
     if (capNow !== null && MONEY_CAPABILITIES[admitted.provider as ProviderId].nativeDollarCapFlag === null) {
       store.finishRun(admitted.runId, { outcome: "refused", reason: "budget-unenforceable", now: clock() });
       store.resolveChainOnRunEnd(pending.taskRef, admitted.taskId, repo, admitted.runId, clock());
@@ -4087,6 +4117,7 @@ async function tickCommand(
       dispatched.push({ id: pending.taskId, outcome: "skipped", reason: "budget-unenforceable" });
       continue;
     }
+    budgetGate = null; // this build's spend counts toward the next check
     const result = await build(store, {
       taskId: pending.taskId,
       taskRef: pending.taskRef,
@@ -4195,6 +4226,11 @@ async function tickCommand(
         dispatched.push({ id: taskId, outcome: "skipped", reason: "attended-only", detail: "the continuation's pinned profile cannot be read" });
         continue;
       }
+      const continuationBudget = budgetHold(parent.taskRef, [pinned.provider]);
+      if (continuationBudget.over !== null) {
+        dispatched.push({ id: taskId, outcome: "skipped", reason: "budget", detail: budgetWords(continuationBudget.over) });
+        continue;
+      }
 
       const claimed = acquireContinuation(store, continuation, runner, { now: clock(), token, ttlMs: leaseTtlMs });
       if (!claimed.ok) {
@@ -4281,6 +4317,7 @@ async function tickCommand(
         continue;
       }
       const runId = admittedContinuation.runId;
+      budgetGate = null; // this build's spend counts toward the next check
       const result = await build(store, {
         taskId,
         taskRef: parent.taskRef,
@@ -5016,6 +5053,7 @@ async function startConsole(options: {
   server.on("close", stopMonitoring);
   // v105: budget alerts at 50/80/100 %, a pass a minute.
   server.on("close", startBudgetAlerts(context.store));
+  server.on("close", startCodexLimits(context.store));
   const bound = server.address();
   const port = typeof bound === "object" && bound !== null ? bound.port : options.port;
   // A bind-everywhere address is not a place a browser can go: the URL
@@ -11836,15 +11874,19 @@ function spendCommand(flags: Map<string, string | true>, context: Context): numb
   const month = text(flags, "month") === undefined ? monthOf(context.clock()) : monthNamed(text(flags, "month") ?? null);
   if (month === null) return fail(context.write, context.json, command, "usage", "Use spend --month YYYY-MM.", EXIT.usage);
   const items = spendItems(context.store.handle, month.from, month.to);
-  const names = new Map(context.store.handle.prepare("SELECT id, handle FROM teammate").all().map(row => [Number(row["id"]), String(row["handle"])]));
+  const names = teammateNames(context.store.handle);
   if (flags.has("csv")) { context.write(spendCsv(items, names).replace(/^\ufeff/, "").trimEnd()); return EXIT.ok; }
   const budgets = budgetStates(context.store.budgets(), items);
   const total = items.reduce((sum, item) => sum + (item.microusd ?? 0), 0);
   const unpriced = items.filter(item => item.microusd === null && (item.tokensIn !== null || item.kind !== "run")).length;
   const byProject = new Map<string, number>();
   for (const item of items) if (item.project !== null) byProject.set(item.project, (byProject.get(item.project) ?? 0) + (item.microusd ?? 0));
-  return succeed(context.write, context.json, command, { month: month.name, totalMicrousd: total, unpriced, items: items.length, budgets }, () => [
-    `${month.name}: ${spendUsd(total)} (${items.length} pieces of work${unpriced > 0 ? `, ${unpriced} unpriced` : ""})`,
+  // v105: subscription work is $0; what binds it is its plan's windows, as the provider last said.
+  const limits = context.store.providerLimits();
+  const windows = limitsView(limits, [], { project: repo => basename(repo), teammate: id => String(id) }, context.clock())?.tiles ?? [];
+  return succeed(context.write, context.json, command, { month: month.name, totalMicrousd: total, unpriced, items: items.length, budgets, limits }, () => [
+    `${month.name}: ${spendUsd(total)} (${items.length} pieces of work${unpriced > 0 ? `, ${unpriced} unpriced` : ""}; subscription work is $0)`,
+    ...windows.map(tile => `  ${`${tile.name} ${tile.window}`.padEnd(24)} ${tile.value}% · ${tile.detail}`),
     ...[...byProject.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([repo, microusd]) => `  ${basename(repo).padEnd(24)} ${spendUsd(microusd)}`),
     ...budgets.map(one => `  budget ${budgetLabel(one, names.get(Number(one.key))).replace(/'s$/, "").padEnd(24)} ${spendUsd(one.spentMicrousd)} of ${spendUsd(one.limitMicrousd)} (${one.percent}%)${one.hardStop ? "" : " alerts only"}`),
   ]);
@@ -11858,7 +11900,7 @@ async function budgetCommand(positional: readonly string[], flags: Map<string, s
   if (action === undefined || action === "list") {
     const budgets = store.monthSpend(context.clock()).budgets;
     return succeed(context.write, context.json, command, { budgets }, () => budgets.length === 0 ? ["No budgets. `budget set --all|--project <path>|--person <name>|--teammate <id> --usd <n>` makes one."]
-      : budgets.map(one => `#${one.id} ${budgetLabel(one).replace(/'s$/, "")}: ${spendUsd(one.spentMicrousd)} of ${spendUsd(one.limitMicrousd)} this month (${one.percent}%)${one.hardStop ? ", stops new work at 100%" : ", alerts only"}`));
+      : budgets.map(one => `#${one.id} ${budgetLabel(one).replace(/'s$/, "")}: ${spendUsd(one.spentMicrousd)} of ${spendUsd(one.limitMicrousd)} this month (${one.percent}%)${one.hardStop ? ", stops API work at 100%" : ", alerts only"}`));
   }
   if (action !== "set" && action !== "remove") return fail(context.write, context.json, command, "usage", "Use budget list, budget set or budget remove.", EXIT.usage);
   const allowed = new Set(["all", "project", "person", "teammate", "usd", "alerts-only", "as", "token", "token-file", "token-env", "db", "json"]);
@@ -11886,7 +11928,7 @@ async function budgetCommand(positional: readonly string[], flags: Map<string, s
   const dollars = Number(text(flags, "usd") ?? "");
   if (!Number.isFinite(dollars) || dollars < 1 || dollars > 10_000_000) return fail(context.write, context.json, command, "usage", "--usd is a whole number of dollars, at least 1.", EXIT.usage);
   const saved = store.setBudget({ scope: target.scope, key: target.key, limitMicrousd: Math.round(dollars) * 1_000_000, hardStop: !flags.has("alerts-only") }, acting.name, context.clock());
-  return succeed(context.write, context.json, command, { budget: saved }, () => [`${budgetLabel(saved).replace(/'s$/, "")}: ${spendUsd(saved.limitMicrousd)} a month${saved.hardStop ? ", new work stops at 100%" : ", alerts only"}.`]);
+  return succeed(context.write, context.json, command, { budget: saved }, () => [`${budgetLabel(saved).replace(/'s$/, "")}: ${spendUsd(saved.limitMicrousd)} a month${saved.hardStop ? ", API work stops at 100%" : ", alerts only"}.`]);
 }
 
 /** `task evidence <id>`: everything an auditor asks about one task (v103). Read locally; needs no login. */

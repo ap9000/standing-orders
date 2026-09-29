@@ -1,8 +1,10 @@
 /**
- * Cost guardrails (v105): every run priced (reported, or tokens at the
- * catalogue price, or honestly unpriced), spend attributed to projects,
- * people and teammates, monthly budgets that alert at 50/80/100 % and stop
- * new work at 100 %, and a Spend page with CSV.
+ * Cost guardrails (v105): subscription work at $0 (its plan's windows are
+ * what bind it, shown on Tasks); API work priced (reported, or tokens at the
+ * catalogue price, or the provider's highest listed price, or honestly
+ * unpriced), spend attributed to projects, people and teammates, monthly
+ * budgets that alert at 50/80/100 % and stop API work at 100 %, and a Spend
+ * page with CSV.
  */
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -15,14 +17,23 @@ import { priceFor, spendItems, monthOf } from "./spend.js";
 import { budgetAlertPass } from "./budget-alerts.js";
 import { teammateReady } from "./teammate-work.js";
 import { runOperate } from "./operate.js";
+import { setAuthMode } from "./keys.js";
+import { claudeLimitsOf, codexLimitsOf, noteLimits, setLimitSink } from "./provider-limits.js";
+import { limitsView } from "./limits-ui.js";
+import { runClaudeStreamJsonl } from "./exec.js";
 
-let dir: string, file: string, store: Store;
+let dir: string, file: string, store: Store, home: string | undefined;
 const NOW = new Date("2026-09-20T12:00:00.000Z");
 const REPO = "/repo/shop";
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "so-spend-"));
   file = join(dir, "orders.db");
+  // How each provider bills comes from its auth-mode file: these tests bill Claude and Codex to keys unless they say.
+  home = process.env["HOME"];
+  process.env["HOME"] = dir;
+  setAuthMode("claude", "api-key");
+  setAuthMode("codex", "api-key");
   store = openStore(file);
   const seen = store.handle.prepare(`INSERT INTO model_seen (source, id, name, input_usd, output_usd, context, tools, released_at, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?, 0, 1, ?, ?, ?)`);
   const at = "2026-09-01T00:00:00.000Z";
@@ -30,7 +41,7 @@ beforeEach(() => {
   seen.run("claude", "claude-sonnet-5", "Claude Sonnet 5", 3, 15, "2026-05-01T00:00:00.000Z", at, at);
   seen.run("claude", "claude-sonnet-5-5", "Claude Sonnet 5.5", 2, 10, "2026-08-01T00:00:00.000Z", at, at);
 });
-afterEach(() => { store.close(); rmSync(dir, { recursive: true, force: true }); });
+afterEach(() => { setLimitSink(null); store.close(); process.env["HOME"] = home; rmSync(dir, { recursive: true, force: true }); });
 
 const legacy = { routeDigest: "legacy", phase: "build" as const, provider: "claude", model: null, chosen: "legacy" as const };
 let serial = 0;
@@ -48,7 +59,7 @@ function work(filer: { name: string | null; kind: "person" | "coordinator" | "te
 }
 const spendOf = (run: number) => store.handle.prepare("SELECT microusd, source, price_model FROM run_spend WHERE run = ?").get(run);
 
-test("every run is priced: what the provider reported, or its tokens at the catalogue price, or honestly unpriced", () => {
+test("API work is priced: what the provider reported, or its tokens at the catalogue price, or the provider's highest listed price, or honestly unpriced", () => {
   const reported = work({ name: "alex", kind: "person" }, { costUsd: 1.25, tokensIn: 1, tokensOut: 1 });
   expect(spendOf(reported.run)).toMatchObject({ microusd: 1_250_000, source: "reported" });
   // Codex reports no cost: 100k tokens in at $10/M and 10k out at $50/M is $1.50.
@@ -56,11 +67,40 @@ test("every run is priced: what the provider reported, or its tokens at the cata
   expect(spendOf(estimated.run)).toMatchObject({ microusd: 1_500_000, source: "estimated", price_model: "gpt-6-astra" });
   // A Claude short name is priced as the newest of its family.
   expect(priceFor(store.handle, "claude", "sonnet")).toMatchObject({ model: "claude-sonnet-5-5", inputUsd: 2 });
-  const unknown = work({ name: "alex", kind: "person" }, { provider: "codex", model: "gpt-unlisted", tokensIn: 5, tokensOut: 5 });
+  // A model the catalogue doesn't list (or the CLI's default) is never free under a budget: the provider's highest price.
+  const unlisted = work({ name: "alex", kind: "person" }, { provider: "codex", model: "gpt-unlisted", tokensIn: 5, tokensOut: 5 });
+  expect(spendOf(unlisted.run)).toMatchObject({ microusd: 300, source: "estimated", price_model: "highest listed price" });
+  const defaulted = work({ name: "alex", kind: "person" }, { provider: "codex", model: null, tokensIn: 1_000, tokensOut: 0 });
+  expect(spendOf(defaulted.run)).toMatchObject({ microusd: 10_000, source: "estimated" });
+  // A provider with no catalogue at all is said to be unpriced.
+  const unknown = work({ name: "alex", kind: "person" }, { provider: "gemini", model: "gemini-x", tokensIn: 5, tokensOut: 5 });
   expect(spendOf(unknown.run)).toMatchObject({ microusd: null, source: "unpriced" });
   // A price is frozen when the work is settled: a later price change doesn't rewrite last month's spend.
   store.handle.prepare("UPDATE model_seen SET input_usd = 100 WHERE id = 'gpt-6-astra'").run();
   expect(spendOf(estimated.run)).toMatchObject({ microusd: 1_500_000 });
+});
+
+test("subscription work is $0 and never waits on a budget; how a run was billed is fixed when it's first priced", () => {
+  setAuthMode("claude", "subscription");
+  const plan = work({ name: "alex", kind: "person" }, { costUsd: 5, tokensIn: 1_000_000, tokensOut: 1_000_000 });
+  expect(store.handle.prepare("SELECT microusd, source, billing FROM run_spend WHERE run = ?").get(plan.run)).toEqual({ microusd: 0, source: "subscription", billing: "subscription" });
+  const keyed = work({ name: "alex", kind: "person" }, { provider: "codex", model: "gpt-6-astra", tokensIn: 1_000_000, tokensOut: 0 });
+  expect(spendOf(keyed.run)).toMatchObject({ microusd: 10_000_000, source: "estimated" });
+  store.setBudget({ scope: "installation", key: "*", limitMicrousd: 5_000_000, hardStop: true }, "alex", NOW);
+  const subject = store.budgetSubject(store.lookupRef(plan.id)!.id);
+  const gate = store.budgetGate(NOW);
+  expect(gate({ ...subject, providers: ["claude"] }).over).toBeNull();
+  expect(gate({ ...subject, providers: ["codex"] }).over).toMatchObject({ scope: "installation", percent: 200 });
+  expect(gate({ ...subject, providers: ["claude", "codex"] }).over).not.toBeNull();
+  // A chat on the plan starts; one on a key waits.
+  const chat = (provider: "claude-subscription" | "openrouter-api") =>
+    store.openChatTurn({ approver: "alex", credentialKey: provider, provider, model: "m", reservedMicrousd: 1, dailyTurns: 99, weeklyCeilingMicrousd: 99_000_000, deadlineMs: 1000 }, NOW);
+  expect(chat("openrouter-api")).toEqual({ ok: false, reason: "monthly-budget" });
+  expect(chat("claude-subscription")).toMatchObject({ ok: true });
+  // Switching Claude to a key later doesn't reprice what already ran on the plan.
+  setAuthMode("claude", "api-key");
+  store.recordUsage(plan.run, { costUsd: 6 });
+  expect(spendOf(plan.run)).toMatchObject({ microusd: 0, source: "subscription" });
 });
 
 test("spend counts toward the project, the person who filed it (or the person behind a coordinator), and a teammate that filed it", () => {
@@ -68,22 +108,46 @@ test("spend counts toward the project, the person who filed it (or the person be
   const mate = Number(store.handle.prepare("SELECT id FROM teammate WHERE handle = 'maya'").get()!["id"]);
   work({ name: "alex", kind: "person" }, { costUsd: 1 });
   work({ name: "sam", kind: "coordinator" }, { costUsd: 2 });
-  work({ name: "maya (AI)", kind: "teammate" }, { costUsd: 4 });
+  // A teammate files as its name ("Maya (AI)"), not its handle.
+  const filed = work({ name: "Maya (AI)", kind: "teammate" }, { costUsd: 4 });
+  expect(store.budgetSubject(store.lookupRef(filed.id)!.id)).toEqual({ project: REPO, person: null, teammate: mate });
   work({ name: null, kind: "automation" }, { costUsd: 8 });
+  // Its own turns run on this computer's Claude sign-in: $0 whatever the CLI estimates.
   store.addTeammateTurn({ teammate: mate, card: null, model: "sonnet", ok: true, ms: 10, costUsd: 0.5 }, NOW);
   store.handle.prepare(`INSERT INTO chat_turn (approver, credential_key, provider, model, state, created_at, deadline_at, reserved_microusd, settled_microusd) VALUES ('alex', 'k', 'openrouter-api', 'x', 'answered', ?, ?, 300000, 250000)`)
     .run(NOW.toISOString(), NOW.toISOString());
   const month = monthOf(NOW);
   const items = spendItems(store.handle, month.from, month.to);
   const sum = (pick: (item: (typeof items)[number]) => boolean) => items.filter(pick).reduce((total, item) => total + (item.microusd ?? 0), 0);
-  expect(sum(item => item.project === REPO)).toBe(15_500_000);
+  expect(sum(item => item.project === REPO)).toBe(15_000_000);
   expect(sum(item => item.person === "alex")).toBe(1_250_000);
   expect(sum(item => item.person === "sam")).toBe(2_000_000);
-  expect(sum(item => item.teammate === mate)).toBe(4_500_000);
-  expect(sum(() => true)).toBe(15_750_000);
+  expect(sum(item => item.teammate === mate)).toBe(4_000_000);
+  expect(sum(() => true)).toBe(15_250_000);
   // Last month's work isn't this month's.
   work({ name: "alex", kind: "person" }, { costUsd: 99 }, new Date("2026-08-31T23:59:59.000Z"));
-  expect(spendItems(store.handle, month.from, month.to).reduce((total, item) => total + (item.microusd ?? 0), 0)).toBe(15_750_000);
+  expect(spendItems(store.handle, month.from, month.to).reduce((total, item) => total + (item.microusd ?? 0), 0)).toBe(15_250_000);
+});
+
+test("an automatic repair counts as its source's filer; a task's chat as the task's project; a Sort zone's OpenRouter cost as its flow's project", () => {
+  const source = work({ name: "alex", kind: "person" }, { costUsd: 1 });
+  const repair = work({ name: null, kind: "automation" }, { costUsd: 2 });
+  store.handle.prepare("UPDATE task_ref SET revision_of = ? WHERE external_id = ?").run(source.id, repair.id);
+  expect(store.budgetSubject(store.lookupRef(repair.id)!.id)).toEqual({ project: REPO, person: "alex", teammate: null });
+  const session = Number(store.handle.prepare(`INSERT INTO mate_session (approver, approver_generation, credential_key, ceiling_microusd, ceiling_digest, terms_digest, minted_at) VALUES ('sam', 1, 'k', 1000000, 'c', 't', ?)`)
+    .run(NOW.toISOString()).lastInsertRowid);
+  const thread = Number(store.handle.prepare(`INSERT INTO mate_thread (approver, ceiling_digest, opened_at, scope_kind, scope_key) VALUES ('sam', 'c', ?, 'task', ?)`).run(NOW.toISOString(), source.id).lastInsertRowid);
+  store.handle.prepare(`INSERT INTO mate_turn (approver, session, thread, credential_key, state, created_at, deadline_at, reserved_microusd, settled_microusd) VALUES ('sam', ?, ?, 'k', 'answered', ?, ?, 1, 700000)`)
+    .run(session, thread, NOW.toISOString(), NOW.toISOString());
+  const flow = store.createFlow({ repo: "/repo/desk", name: "Inbox", definitionJson: "{}", by: "alex" }, NOW);
+  const card = store.addFlowCard({ flow, title: "A note", description: null, stage: "sort", by: "alex" }, NOW);
+  store.handle.prepare(`INSERT INTO flow_step_run (card, entry, stage, kind, state, started_at, decision_json) VALUES (?, 1, 'sort', 'sort', 'passed', ?, ?)`)
+    .run(card, NOW.toISOString(), JSON.stringify({ model: "jev", cost: 0.0042 }));
+  const month = monthOf(NOW);
+  const items = spendItems(store.handle, month.from, month.to);
+  expect(items.filter(item => item.person === "alex").reduce((total, item) => total + (item.microusd ?? 0), 0)).toBe(3_000_000);
+  expect(items.find(item => item.kind === "chat")).toMatchObject({ project: REPO, person: "sam", microusd: 700_000 });
+  expect(items.find(item => item.kind === "sort")).toMatchObject({ project: "/repo/desk", microusd: 4_200, source: "reported" });
 });
 
 test("a hard-stop budget used up holds new work (tasks, teammates, chats); an alerts-only one never does; the ledger keeps every change", () => {
@@ -94,10 +158,10 @@ test("a hard-stop budget used up holds new work (tasks, teammates, chats); an al
   expect(store.budgetGate(NOW)(subject)).toMatchObject({ over: null, remainingMicrousd: 4_000_000 });
   work({ name: "sam", kind: "person" }, { costUsd: 5 });
   expect(store.budgetGate(NOW)(subject).over).toMatchObject({ scope: "project", percent: 110 });
-  // A teammate in the project can't take a turn; a chat about the project can't start.
+  // A teammate's own turns cost nothing extra (its sign-in), so a budget never stops them.
   store.createTeammate({ repo: REPO, handle: "maya", soul: "---\nname: Maya\nrole: Support\n---\n## Who you are\nHelpful.\n", model: null, manager: "alex", by: "alex" }, NOW);
   const mate = store.teammates([REPO])[0]!;
-  expect(teammateReady(store, mate, NOW)).toEqual({ ok: false, why: "a monthly budget its work counts toward is used up" });
+  expect(teammateReady(store, mate, NOW)).toEqual({ ok: true });
   // Alerts only: work carries on.
   store.setBudget({ scope: "project", key: REPO, limitMicrousd: 10_000_000, hardStop: false }, "alex", NOW);
   expect(store.budgetGate(NOW)(subject).over).toBeNull();
@@ -106,7 +170,7 @@ test("a hard-stop budget used up holds new work (tasks, teammates, chats); an al
   expect(store.openChatTurn({ approver: "alex", credentialKey: "k", provider: "openrouter", model: "m", reservedMicrousd: 1, dailyTurns: 99, weeklyCeilingMicrousd: 99_000_000, deadlineMs: 1000 }, NOW))
     .toEqual({ ok: false, reason: "monthly-budget" });
   const changes = store.actionLedger({ repos: null, instance: true, limit: 20 }).filter(one => one.action.startsWith("budget set")).map(one => one.detail);
-  expect(changes).toEqual(expect.arrayContaining(["none → $10 a month, stops new work", "$10 a month, stops new work → $10 a month, alerts only"]));
+  expect(changes).toEqual(expect.arrayContaining(["none → $10 a month, stops API work", "$10 a month, stops API work → $10 a month, alerts only"]));
   expect(store.removeBudget(store.budgets().find(one => one.scope === "person")!.id, "alex", NOW)).toBe(true);
   expect(store.budgets().map(one => one.scope)).toEqual(["project"]);
 });
@@ -128,6 +192,9 @@ test("alerts go out at 50, 80 and 100 %, once each a month, only the highest mar
     { subject: "alex's budget: 100% used", recipient: "alex", push_class: "attention" },
   ]);
   expect(store.actionLedger({ repos: null, instance: true, limit: 20 }).find(one => one.action === "budget 100% used: alex")).toMatchObject({ outcome: "stopped", detail: "$11 of $10 in 2026-09" });
+  // Raised, the budget alerts afresh at its new marks.
+  store.setBudget({ scope: "person", key: "alex", limitMicrousd: 20_000_000, hardStop: true }, "alex", NOW);
+  expect(budgetAlertPass(store, NOW).sent.map(one => one.mark)).toEqual([50]);
 });
 
 test("the Spend page, its CSV and budgets are an instance operator's; the task page says when a budget holds a task", async () => {
@@ -165,6 +232,12 @@ test("the Spend page, its CSV and budgets are an instance operator's; the task p
     expect(await (await fetch(`${base}/t/waiting`, { headers: { cookie } })).text()).toContain("monthly budget is used up");
     const samCookie = await signIn("sam", sam.token);
     expect((await fetch(`${base}/spend`, { headers: { cookie: samCookie }, redirect: "manual" })).status).toBe(403);
+    // Tasks shows the plan's windows and the budgets to whoever runs the installation, and to no one else.
+    store.recordProviderLimits({ provider: "claude", plan: null, windows: [{ window: "five_hour", usedPercent: 48, windowMinutes: 300, resetsAt: new Date(Date.now() + 3_600_000).toISOString(), reached: false }] }, new Date());
+    const tasks = await (await fetch(`${base}/work`, { headers: { cookie } })).text();
+    expect(tasks).toContain('data-limit="claude:five_hour"');
+    expect(tasks).toContain(`data-limit="budget:${store.budgets()[0]!.id}"`);
+    expect(await (await fetch(`${base}/work`, { headers: { cookie: samCookie } })).text()).not.toContain("data-limit=");
   } finally {
     await new Promise<void>(resolve => server.close(() => resolve()));
   }
@@ -180,10 +253,50 @@ test("the command line shows the month and sets budgets for an instance operator
   try {
     expect(JSON.parse((await run("spend", ["--json"])).out)).toMatchObject({ ok: true, totalMicrousd: 2_000_000 });
     expect((await run("budget", ["set", "--person", "alex", "--usd", "50", "--json"])).code).toBe(3);
-    expect((await run("budget", ["set", "--person", "alex", "--usd", "50", "--as", "alex", "--token", alex.token])).out).toContain("alex: $50 a month, new work stops at 100%.");
+    expect((await run("budget", ["set", "--person", "alex", "--usd", "50", "--as", "alex", "--token", alex.token])).out).toContain("alex: $50 a month, API work stops at 100%.");
     expect((await run("budget", ["list"])).out).toContain("alex: $2.00 of $50 this month (4%)");
     expect((await run("spend", ["--csv"])).out.split(/\r?\n/)[0]).toBe("time_utc,kind,project,person,teammate,task,run,provider,model,tokens_in,tokens_out,cost_usd,priced_by,billing");
   } finally {
     store = openStore(file);
   }
+});
+
+test("a plan's windows: Claude says them each turn, Codex when asked; the latest reading is kept and shown as tiles", async () => {
+  // As Claude Code 2.1 writes it (captured 2026-09-28).
+  const event = { type: "rate_limit_event", rate_limit_info: { status: "allowed", resetsAt: 1790655000, rateLimitType: "five_hour", overageStatus: "rejected", isUsingOverage: false,
+    unifiedWindows: { five_hour: { utilization: 0.48, resetsAt: 1790655000 }, seven_day: { utilization: 0.4, resetsAt: 1791010800 } } } };
+  expect(claudeLimitsOf(event)).toEqual({ provider: "claude", plan: null, windows: [
+    { window: "five_hour", usedPercent: 48, windowMinutes: 300, resetsAt: "2026-09-29T04:10:00.000Z", reached: false },
+    { window: "seven_day", usedPercent: 40, windowMinutes: 10080, resetsAt: "2026-10-03T07:00:00.000Z", reached: false },
+  ] });
+  expect(claudeLimitsOf({ type: "assistant" })).toBeNull();
+  expect(claudeLimitsOf({ type: "rate_limit_event", rate_limit_info: { status: "rejected", rateLimitType: "five_hour", resetsAt: 1790655000 } })?.windows[0]).toMatchObject({ usedPercent: 100, reached: true });
+  // As Codex 0.156's app server answers `account/rateLimits/read`.
+  expect(codexLimitsOf({ rateLimits: { primary: { usedPercent: 12, windowDurationMins: 10080, resetsAt: 1791129619 }, secondary: null, planType: "pro", rateLimitReachedType: null } }))
+    .toEqual({ provider: "codex", plan: "pro", windows: [{ window: "seven_day", usedPercent: 12, windowMinutes: 10080, resetsAt: "2026-10-04T16:00:19.000Z", reached: false }] });
+
+  // A real Claude stream reaches the store through the sink the command line sets.
+  const read = new Date("2026-09-28T23:00:00.000Z");
+  setLimitSink(reading => store.recordProviderLimits(reading, read));
+  const line = JSON.stringify(event);
+  await runClaudeStreamJsonl(process.execPath, ["-e", `process.stdout.write(${JSON.stringify(line)} + "\\n" + JSON.stringify({ type: "result", subtype: "success", result: "ok", session_id: "s" }) + "\\n")`], { timeoutMs: 15_000 });
+  noteLimits(codexLimitsOf({ rateLimits: { primary: { usedPercent: 85, windowDurationMins: 10080, resetsAt: 1791129619 }, planType: "pro" } }));
+  expect(store.providerLimits().map(one => `${one.provider}:${one.window}:${one.usedPercent}`)).toEqual(["claude:five_hour:48", "claude:seven_day:40", "codex:seven_day:85"]);
+  // A window no longer reported is dropped.
+  store.recordProviderLimits({ provider: "claude", plan: null, windows: [{ window: "five_hour", usedPercent: 50, windowMinutes: 300, resetsAt: "2026-09-29T02:50:00.000Z", reached: false }] }, read);
+  expect(store.providerLimits().filter(one => one.provider === "claude").map(one => one.window)).toEqual(["five_hour"]);
+
+  store.setBudget({ scope: "project", key: REPO, limitMicrousd: 10_000_000, hardStop: true }, "alex", NOW);
+  work({ name: "alex", kind: "person" }, { costUsd: 9 });
+  const at = new Date("2026-09-28T23:40:00.000Z");
+  const view = limitsView(store.providerLimits(), store.monthSpend(NOW).budgets, { project: repo => repo.split("/").pop()!, teammate: String }, at)!;
+  expect(view.tiles.map(tile => [tile.name, tile.window, tile.value, tile.unit, tile.tone, tile.detail])).toEqual([
+    ["Claude", "5-hour", "50", "%", "neutral", "Resets in 3 h 10 min · read 40m ago"],
+    ["Codex Pro", "Weekly", "85", "%", "warning", expect.stringMatching(/^Resets \w{3} \d+ (AM|PM) · read 40m ago$/)],
+    ["shop", "Budget", "$9.00", "of $10", "warning", "Stops API work at 100%"],
+  ]);
+  // A window that has turned over since the reading starts again.
+  const later = limitsView(store.providerLimits(), [], { project: String, teammate: String }, new Date("2026-09-29T03:00:00.000Z"))!;
+  expect(later.tiles[0]).toMatchObject({ value: "0", detail: "New window" });
+  expect(limitsView([], [], { project: String, teammate: String }, NOW)).toBeNull();
 });

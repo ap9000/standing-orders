@@ -269,6 +269,7 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
         dailyTurns: config.dailyTurns,
         weeklyCeilingMicrousd: config.weeklyCeilingMicrousd,
         deadlineMs: TURN_WALL_CLOCK_MS + 10_000,
+        provider: config.provider,
       },
       now,
     );

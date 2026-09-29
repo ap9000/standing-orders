@@ -94,7 +94,8 @@ import { normalizeProjectAccess, projectAccessAllows, readProjectAccess, type Pr
 import { LEDGER_SCHEMA, LEDGER_TABLE, LEDGER_V54_COLUMNS, LEDGER_V54_TABLE, installLedgerTriggers, type LedgerEntry } from "./action-ledger.js";
 import { PLAN_AUTO_SCHEMA } from "./plan-auto.js";
 import { RECIPE_SCHEMA } from "./recipes.js";
-import { SPEND_SCHEMA, budgetStates, countsToward, monthOf, priceWork, spendItems, usd, type Budget, type BudgetScope, type BudgetState, type SpendItem } from "./spend.js";
+import type { LimitReading, LimitWindow } from "./provider-limits.js";
+import { SPEND_SCHEMA, billingOf, budgetStates, countsToward, filersOf, monthOf, priceWork, spendItems, teammateFilers, usd, type Billing, type Budget, type BudgetScope, type BudgetState, type SpendItem } from "./spend.js";
 import { IN_RANGE, LEDGER_CHAIN_SCHEMA, safeWhole, sealLedger, verifyLedgerChain, type LedgerChainReport, type VerifiedHead } from "./ledger-chain.js";
 import { NO_RULES, filerFor, isProtectedWork, protectedChanges, rulesWords, type ApprovalGate, type ApprovalRules, type ApproverKind, type Filer, type FilerKind } from "./approval-policy.js";
 
@@ -16923,8 +16924,8 @@ export class Store {
         .prepare("SELECT 1 AS hit FROM chat_turn WHERE credential_key = ? AND unknown_spend = 1 AND acknowledged_at IS NULL LIMIT 1")
         .get(args.credentialKey);
       if (latched !== undefined) return { ok: false as const, reason: "latched" as const };
-      // v105: a monthly budget this person's spend counts toward, used up.
-      if (this.budgetGate(now)({ project: null, person: args.approver, teammate: null }).over !== null) return { ok: false as const, reason: "monthly-budget" as const };
+      // v105: a monthly budget this person's spend counts toward, used up (a subscription chat costs nothing extra).
+      if (this.budgetGate(now)({ project: null, person: args.approver, teammate: null, providers: [args.provider] }).over !== null) return { ok: false as const, reason: "monthly-budget" as const };
       const live = this.db
         .prepare("SELECT 1 AS hit FROM chat_turn WHERE approver = ? AND state IN ('queued','running') LIMIT 1")
         .get(args.approver);
@@ -19022,13 +19023,16 @@ export class Store {
   /** v105: price a run as it stands (reported cost, or tokens at the catalogue price, or unpriced), frozen at the
    * price of the moment it's settled. Settled again whenever its usage changes. */
   settleRunSpend(id: number, now: Date): void {
-    const row = this.db.prepare("SELECT provider, model, cost_usd, tokens_in, tokens_out FROM run WHERE id = ?").get(id);
+    const row = this.db.prepare("SELECT run.provider, run.model, run.cost_usd, run.tokens_in, run.tokens_out, run.auth_mode, s.billing FROM run LEFT JOIN run_spend s ON s.run = run.id WHERE run.id = ?").get(id);
     if (row === undefined) return;
-    const priced = priceWork(this.db, { provider: String(row["provider"]), model: row["model"] == null ? null : String(row["model"]),
+    // How the run is billed is fixed the first time it's settled (its chain entry's, or the provider's login or key).
+    const billing: Billing = row["billing"] === "subscription" || row["billing"] === "api-key" ? row["billing"]
+      : row["auth_mode"] === "subscription" || row["auth_mode"] === "api-key" ? row["auth_mode"] : billingOf(String(row["provider"]));
+    const priced = priceWork(this.db, { provider: String(row["provider"]), model: row["model"] == null ? null : String(row["model"]), billing,
       costUsd: row["cost_usd"] == null ? null : Number(row["cost_usd"]), tokensIn: row["tokens_in"] == null ? null : Number(row["tokens_in"]), tokensOut: row["tokens_out"] == null ? null : Number(row["tokens_out"]) });
-    this.db.prepare(`INSERT INTO run_spend (run, microusd, source, price_model, input_usd, output_usd, priced_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+    this.db.prepare(`INSERT INTO run_spend (run, microusd, source, billing, price_model, input_usd, output_usd, priced_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(run) DO UPDATE SET microusd = excluded.microusd, source = excluded.source, price_model = excluded.price_model, input_usd = excluded.input_usd, output_usd = excluded.output_usd, priced_at = excluded.priced_at`)
-      .run(id, priced.microusd, priced.source, priced.price?.model ?? null, priced.price?.inputUsd ?? null, priced.price?.outputUsd ?? null, now.toISOString());
+      .run(id, priced.microusd, priced.source, billing, priced.price?.model ?? null, priced.price?.inputUsd ?? null, priced.price?.outputUsd ?? null, now.toISOString());
   }
 
   // ---- Budgets (v105) -------------------------------------------------------
@@ -19053,7 +19057,7 @@ export class Store {
       } else {
         this.db.prepare("UPDATE budget SET limit_microusd = ?, hard_stop = ?, updated_by = ?, updated_at = ? WHERE id = ?").run(budget.limitMicrousd, budget.hardStop ? 1 : 0, by, stamp, before.id);
       }
-      const words = (one: Pick<Budget, "limitMicrousd" | "hardStop"> | null) => one === null ? "none" : `${usd(one.limitMicrousd)} a month${one.hardStop ? ", stops new work" : ", alerts only"}`;
+      const words = (one: Pick<Budget, "limitMicrousd" | "hardStop"> | null) => one === null ? "none" : `${usd(one.limitMicrousd)} a month${one.hardStop ? ", stops API work" : ", alerts only"}`;
       this.recordPolicy(by, budget.scope === "project" ? key : null, `budget set: ${budgetName(budget.scope, key)}`, words(before), words(budget), now);
       return this.budgets().find(one => one.scope === budget.scope && one.key === key)!;
     });
@@ -19069,6 +19073,27 @@ export class Store {
     });
   }
 
+  /** v105: keep a provider's latest reading of its plan's usage windows (a window it no longer reports is dropped). */
+  recordProviderLimits(reading: LimitReading, now: Date): void {
+    this.transact(() => {
+      const names = reading.windows.map(one => one.window);
+      this.db.prepare(`DELETE FROM provider_limit WHERE provider = ? AND window NOT IN (${names.map(() => "?").join(", ")})`).run(reading.provider, ...names);
+      const put = this.db.prepare(`INSERT INTO provider_limit (provider, window, used_percent, window_minutes, resets_at, reached, plan, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(provider, window) DO UPDATE SET used_percent = excluded.used_percent, window_minutes = excluded.window_minutes, resets_at = excluded.resets_at,
+          reached = excluded.reached, plan = COALESCE(excluded.plan, provider_limit.plan), observed_at = excluded.observed_at`);
+      for (const one of reading.windows) put.run(reading.provider, one.window, one.usedPercent, one.windowMinutes, one.resetsAt, one.reached ? 1 : 0, reading.plan, now.toISOString());
+    });
+  }
+
+  /** The latest reading of every provider's plan windows, shortest window first. */
+  providerLimits(): (LimitWindow & { provider: string; plan: string | null; observedAt: string })[] {
+    return this.db.prepare("SELECT * FROM provider_limit ORDER BY provider, COALESCE(window_minutes, 1e9), window").all().map(row => ({
+      provider: String(row["provider"]), window: String(row["window"]), usedPercent: Number(row["used_percent"]),
+      windowMinutes: row["window_minutes"] == null ? null : Number(row["window_minutes"]), resetsAt: row["resets_at"] == null ? null : String(row["resets_at"]),
+      reached: Number(row["reached"]) === 1, plan: row["plan"] == null ? null : String(row["plan"]), observedAt: String(row["observed_at"]),
+    }));
+  }
+
   /** This month's spend, and each budget's state. */
   monthSpend(now: Date): { month: string; items: SpendItem[]; budgets: BudgetState[] } {
     const month = monthOf(now);
@@ -19077,13 +19102,16 @@ export class Store {
   }
 
   /** A gate for this moment: given what a piece of new work would count toward, the first hard-stop budget it's over,
-   * or null. Built once and asked many times (a tick asks for every task). */
-  budgetGate(now: Date): (work: { project: string | null; person: string | null; teammate: number | null }) => { over: BudgetState | null; remainingMicrousd: number | null } {
+   * or null. Built once and asked many times (a tick asks for every task). Budgets are dollars, so only work billed to
+   * an API key is held: with `providers` given, work that runs only on subscriptions (a login costs nothing extra)
+   * passes. */
+  budgetGate(now: Date): (work: { project: string | null; person: string | null; teammate: number | null; providers?: readonly string[] }) => { over: BudgetState | null; remainingMicrousd: number | null } {
     const hard = this.budgets().filter(one => one.hardStop);
     if (hard.length === 0) return () => ({ over: null, remainingMicrousd: null });
     const states = this.monthSpend(now).budgets.filter(one => one.hardStop);
     return work => {
-      const item: SpendItem = { ...work, kind: "run", at: "", microusd: 0, source: "reported", provider: "", model: null, tokensIn: null, tokensOut: null, taskId: null, runId: null, authMode: null };
+      if (work.providers !== undefined && work.providers.every(provider => billingOf(provider) === "subscription")) return { over: null, remainingMicrousd: null };
+      const item: SpendItem = { project: work.project, person: work.person, teammate: work.teammate, kind: "run", at: "", microusd: 0, source: "reported", provider: "", model: null, tokensIn: null, tokensOut: null, taskId: null, runId: null, authMode: null };
       const mine = states.filter(budget => countsToward(item, budget));
       const over = mine.find(budget => budget.spentMicrousd >= budget.limitMicrousd) ?? null;
       const remaining = mine.length === 0 ? null : Math.min(...mine.map(budget => budget.limitMicrousd - budget.spentMicrousd));
@@ -19092,15 +19120,11 @@ export class Store {
   }
 
   /** What a task's new work counts toward: its project, its filer (a person, or the person behind a coordinator), and
-   * the teammate that filed it. */
+   * the teammate that filed it. A revision (an automatic repair included) counts as its source task's. */
   budgetSubject(taskRef: number): { project: string | null; person: string | null; teammate: number | null } {
-    const row = this.db.prepare(`SELECT r.repo, r.filed_by, r.filed_by_kind,
-        (SELECT m.id FROM teammate m WHERE m.repo = r.repo AND r.filed_by_kind = 'teammate' AND r.filed_by = m.handle || ' (AI)' ORDER BY m.id DESC LIMIT 1) AS teammate
-      FROM task_ref r WHERE r.id = ?`).get(taskRef);
-    if (row === undefined) return { project: null, person: null, teammate: null };
-    const kind = row["filed_by_kind"] == null ? null : String(row["filed_by_kind"]);
-    return { project: row["repo"] == null ? null : String(row["repo"]), person: (kind === "person" || kind === "coordinator") && row["filed_by"] != null ? String(row["filed_by"]) : null,
-      teammate: row["teammate"] == null ? null : Number(row["teammate"]) };
+    const filer = filersOf(this.db)(taskRef);
+    return { project: filer.repo, person: (filer.kind === "person" || filer.kind === "coordinator") && filer.filedBy !== null ? filer.filedBy : null,
+      teammate: teammateFilers(this.db)(filer.repo, filer.filedBy, filer.kind) };
   }
 
   /**
@@ -22997,7 +23021,7 @@ export class Store {
    * approver serializes the console and the CLI.
    */
   openMateTurn(
-    args: { approver: string; session: number; thread: number; credentialKey: string; reservedMicrousd: number; dailyTurns: number; weeklyCeilingMicrousd: number; deadlineMs: number },
+    args: { approver: string; session: number; thread: number; credentialKey: string; reservedMicrousd: number; dailyTurns: number; weeklyCeilingMicrousd: number; deadlineMs: number; provider?: string },
     now: Date,
   ): { ok: true; id: number } | { ok: false; reason: "latched" | "concurrent" | "daily-cap" | "session-exhausted" | "session-ended" | "not-yours" | "thread-closed" | "over-budget" | "monthly-budget" } {
     return this.transact(() => {
@@ -23012,9 +23036,13 @@ export class Store {
         return { ok: false as const, reason: "not-yours" as const };
       }
       if (thread.closedAt !== null || (!teamBinding && thread.ceilingDigest !== session.ceilingDigest)) return { ok: false as const, reason: "thread-closed" as const };
-      // v105: a monthly budget this turn counts toward (the person's, the thread's project's, everything), used up.
-      const threadProject = this.db.prepare("SELECT scope_kind, scope_key FROM mate_thread WHERE id = ?").get(args.thread);
-      if (this.budgetGate(now)({ project: threadProject?.["scope_kind"] === "project" && threadProject["scope_key"] != null ? String(threadProject["scope_key"]) : null, person: args.approver, teammate: null }).over !== null) {
+      // v105: a monthly budget this turn counts toward (the person's, the thread's project's or task's project's,
+      // everything), used up; a subscription chat costs nothing extra.
+      const threadScope = this.db.prepare(`SELECT CASE th.scope_kind WHEN 'project' THEN th.scope_key
+          WHEN 'task' THEN (SELECT r.repo FROM task_ref r WHERE r.external_id = th.scope_key ORDER BY r.id DESC LIMIT 1) END AS project
+        FROM mate_thread th WHERE th.id = ?`).get(args.thread);
+      if (this.budgetGate(now)({ project: threadScope?.["project"] == null ? null : String(threadScope["project"]), person: args.approver, teammate: null,
+        ...(args.provider === undefined ? {} : { providers: [args.provider] }) }).over !== null) {
         return { ok: false as const, reason: "monthly-budget" as const };
       }
       const latched = this.db
@@ -25356,7 +25384,8 @@ export class Store {
     if (current === undefined || current["resolved_at"] !== null) return TELEGRAM_HOLD_REASONS.resolved;
     if (row.scope === "unknown") return TELEGRAM_HOLD_REASONS.provenance;
     if (row.scope === "installation") {
-      if (!this.isInstanceOperator(binding.approver)) return TELEGRAM_HOLD_REASONS.installation;
+      // One addressed to this person (their own budget, v105) reaches them; the rest of the installation's are an operator's.
+      if (!this.isInstanceOperator(binding.approver) && current["recipient"] !== binding.approver) return TELEGRAM_HOLD_REASONS.installation;
     } else {
       if (row.project === null || !projects.includes(row.project) || !this.accountCanAccess(binding.approver, row.project)) return TELEGRAM_HOLD_REASONS.project;
       if (row.scope === "task") {

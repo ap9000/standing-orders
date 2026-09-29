@@ -60,7 +60,15 @@ export type BrowserTasksView = {
   pages: { first: string | null; next: string | null };
   tools: BrowserLink[];
   newTask: BrowserLink;
+  /** v105: subscription windows and monthly budgets, one tile each (an instance operator's; null when there are none). */
+  limits: BrowserLimits | null;
 };
+/** One limit: a plan's usage window ("Claude · 5-hour, 48%") or a monthly budget ("shop · Budget, $4.20 of $10"). */
+export type BrowserLimitTile = {
+  key: string; name: string; window: string; value: string; unit: string; percent: number;
+  detail: string; tone: 'neutral' | 'warning' | 'danger'; marks: number[]; title: string | null; href: string | null;
+};
+export type BrowserLimits = { tiles: BrowserLimitTile[] };
 export type BrowserSettingsView = {
   kind: 'settings';
   said: string | null;

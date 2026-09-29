@@ -30,6 +30,7 @@ import { run, type ExecResult } from "./exec.js";
 import { claudeStreamReader } from "./mate-progress.js";
 import { ALL_CREDENTIAL_ENV } from "./provider.js";
 import type { SubscriptionChatProviderId } from "./store.js";
+import { claudeLimitsOf, noteLimits } from "./provider-limits.js";
 
 export type SubscriptionMateRequest = {
   provider: SubscriptionChatProviderId;
@@ -248,6 +249,13 @@ export async function performSubscriptionMateRequest(
     });
     if (result.timedOut) return { ok: false, problem: "timeout" };
     if (result.notFound) return { ok: false, problem: "not-found" };
+    // v105: a streamed Claude turn says its plan's usage windows too.
+    if (command === "claude" && streaming) {
+      for (const line of result.stdout.split("\n")) {
+        if (!line.includes('"rate_limit_event"')) continue;
+        try { noteLimits(claudeLimitsOf(JSON.parse(line))); } catch { /* not a reading */ }
+      }
+    }
     if (result.code !== 0) return { ok: false, problem: `status-${result.code}` };
     const output = request.provider === "codex-subscription" ? codexOutput(result.stdout) : claudeOutput(streaming ? lastResultLine(result.stdout) : result.stdout);
     if (output.text === null) return { ok: false, problem: "malformed-reply" };

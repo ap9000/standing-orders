@@ -15,6 +15,7 @@ import { observeProcessTree, stopProcessTree, readProcessObservationFailure, typ
 import { jsonlDiscriminants } from "./jsonl-discriminants.js";
 import { createContainer, currentContainment, type AttachOutcome, type Container, type ContainmentBackendId } from "./containment.js";
 import type { Store } from "./store.js";
+import { claudeLimitsOf, noteLimits } from "./provider-limits.js";
 
 export type ExecResult = {
   /** Process exit code, or one of the synthetic codes below. */
@@ -1590,6 +1591,9 @@ export function runClaudeStreamJsonl(
         // words prove nothing about the main prompt.
         const parent = event["parent_tool_use_id"];
         if (parent === undefined || parent === null) fireReceipt();
+      } else if (type === "rate_limit_event") {
+        // v105: the plan's usage windows, as Claude says them each turn (the Tasks page's limits).
+        noteLimits(claudeLimitsOf(event));
       } else if (type === "result" && resultLine === null && primaryResultOrigin(event)) {
         resultLine = line;
         // Fallback receipt (finding 11): a SUCCESSFUL main-query completion
@@ -1926,6 +1930,8 @@ export function startClaudeHeldSession(
         } catch {
           // Observational.
         }
+      } else if (type === "rate_limit_event") {
+        noteLimits(claudeLimitsOf(event));
       } else if (type === "result" && primaryResultOrigin(event)) {
         resultSeq += 1;
         try {

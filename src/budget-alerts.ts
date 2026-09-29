@@ -3,27 +3,30 @@
  * month, a notification goes out (to everyone's usual places; a person's
  * budget to that person) and the ledger keeps it. Only the highest mark newly
  * reached is sent: a budget that jumps past three marks at once says so once.
+ * Budgets are dollars: only work billed to an API key counts (a subscription
+ * costs nothing extra).
  */
 import type { Store } from "./store.js";
-import { budgetLabel, usd, type BudgetState } from "./spend.js";
+import { budgetLabel, teammateNames, usd, type BudgetState } from "./spend.js";
 
 const MARKS = [100, 80, 50] as const;
 
 export function budgetAlertPass(store: Store, now: Date): { sent: { budget: number; mark: number }[] } {
   const { month, budgets } = store.monthSpend(now);
   const sent: { budget: number; mark: number }[] = [];
-  const names = new Map(store.handle.prepare("SELECT id, handle FROM teammate").all().map(row => [String(row["id"]), String(row["handle"])]));
+  const names = teammateNames(store.handle);
   for (const budget of budgets) {
     const mark = MARKS.find(one => budget.percent >= one);
     if (mark === undefined) continue;
-    const key = (one: number) => `budget:${budget.id}:${month}:${one}`;
+    // Keyed by the limit too: a budget raised (or lowered) this month alerts afresh at its new marks.
+    const key = (one: number) => `budget:${budget.id}:${budget.limitMicrousd}:${month}:${one}`;
     // A higher mark already sent this month covers this one.
     if (MARKS.filter(one => one >= mark).some(one => store.handle.prepare("SELECT 1 AS hit FROM notification WHERE dedupe_key = ?").get(key(one)) !== undefined)) continue;
-    const label = budgetLabel(budget, budget.scope === "teammate" ? names.get(budget.key) : undefined);
+    const label = budgetLabel(budget, budget.scope === "teammate" ? names.get(Number(budget.key)) : undefined);
     const fresh = store.enqueueNotification({
       dedupeKey: key(mark), kind: "budget-alert", pushClass: "attention", link: `/spend?month=${month}`,
       subject: `${label} budget: ${mark}% used`,
-      body: `${usd(budget.spentMicrousd)} of ${usd(budget.limitMicrousd)} in ${month}.${mark >= 100 ? budget.hardStop ? " New work waits until next month or a higher budget." : " It only alerts; work carries on." : ""}`,
+      body: `${usd(budget.spentMicrousd)} of ${usd(budget.limitMicrousd)} in ${month}.${mark >= 100 ? budget.hardStop ? " New API work waits until next month or a higher budget." : " It only alerts; work carries on." : ""}`,
       source: budget.scope === "project" ? { project: budget.key } : { installation: true },
       ...(budget.scope === "person" ? { recipient: budget.key } : {}),
     }, now);

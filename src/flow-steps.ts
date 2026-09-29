@@ -42,6 +42,7 @@ import { recordSent, threadOf } from "./flow-replies.js";
 import { ASKED, teammateReady, teammateTurn, type TeammateOutcome } from "./teammate-work.js";
 import type { TurnRunner } from "./teammates.js";
 import type { ToolLister } from "./teammate-tools.js";
+import { budgetLabel } from "./spend.js";
 
 export type StepIo = {
   /** `gh` for GitHub; git and the check's shell, both without a model. */
@@ -112,6 +113,13 @@ export async function runFlowSteps(store: Store, repo: string, now: Date, io: St
     const key = stage.kind === "sort" ? (io.openRouterKey ?? (() => readProviderKey("openrouter")))() : null;
     if (stage.kind === "sort" && key === null) {
       const waiting = "Sorting needs an OpenRouter key. Add one in Settings → AI providers.";
+      if (card.waiting !== waiting) store.updateFlowCard(card.id, { waiting }, now);
+      continue;
+    }
+    // v105: sorting spends the key's credit: a used-up budget for this project (or everything) holds it.
+    const overBudget = stage.kind === "sort" ? store.budgetGate(now)({ project: repo, person: null, teammate: null, providers: ["openrouter"] }).over : null;
+    if (overBudget !== null) {
+      const waiting = `${budgetLabel(overBudget)} budget is used up this month. Raise it on Spend to sort again.`;
       if (card.waiting !== waiting) store.updateFlowCard(card.id, { waiting }, now);
       continue;
     }

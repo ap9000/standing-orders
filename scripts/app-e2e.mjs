@@ -393,6 +393,12 @@ await check("Spend: the month's cost shows by project and person; a budget set o
   await page.setViewportSize({ width: 1440, height: 900 });
   const csv = await page.request.get(`${base}/spend?format=csv`);
   if (csv.status() !== 200 || !(await csv.text()).includes("time_utc,kind,project,person")) throw new Error(`the CSV: ${csv.status()}`);
+  // Tasks shows the budget as a tile, and, once Claude has run here, the plan's windows as Claude said them.
+  await page.goto(`${base}/work`);
+  await page.locator('[data-limit^="budget:"]').first().waitFor({ timeout: 15_000 });
+  const claudeRan = rows("SELECT 1 FROM run WHERE provider = 'claude' AND tokens_in IS NOT NULL LIMIT 1").length > 0;
+  if (claudeRan && await page.locator('[data-limit^="claude:"]').count() === 0) throw new Error(`Claude ran but Tasks shows no Claude window: ${JSON.stringify(rows("SELECT * FROM provider_limit"))}`);
+  await shot("limits");
   // Leave nothing that could hold later checks' work back.
   cli(["budget", "remove", "--all", ...auth]);
   return { budget: "$500 a month" };

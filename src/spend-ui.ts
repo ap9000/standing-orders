@@ -51,8 +51,8 @@ export function spendHtml(view: SpendView, notice: { said?: string | null; probl
   const note = notice.problem ? `<p class="problem" role="alert">${e(notice.problem)}</p>` : notice.said ? `<p role="status">${e(notice.said)}</p>` : "";
   const total = view.items.reduce((sum, item) => sum + (item.microusd ?? 0), 0);
   const unpriced = view.items.filter(item => item.microusd === null && (item.tokensIn !== null || item.kind !== "run")).length;
-  const counts = { run: view.items.filter(item => item.kind === "run").length, teammate: view.items.filter(item => item.kind === "teammate").length, chat: view.items.filter(item => item.kind === "chat").length };
-  const parts = [`${counts.run} ${counts.run === 1 ? "run" : "runs"}`, ...(counts.teammate > 0 ? [`${counts.teammate} teammate turns`] : []), ...(counts.chat > 0 ? [`${counts.chat} chat turns`] : [])];
+  const counts = { run: view.items.filter(item => item.kind === "run").length, teammate: view.items.filter(item => item.kind === "teammate").length, chat: view.items.filter(item => item.kind === "chat").length, sort: view.items.filter(item => item.kind === "sort").length };
+  const parts = [`${counts.run} ${counts.run === 1 ? "run" : "runs"}`, ...(counts.teammate > 0 ? [`${counts.teammate} teammate turns`] : []), ...(counts.chat > 0 ? [`${counts.chat} chat turns`] : []), ...(counts.sort > 0 ? [`${counts.sort} ${counts.sort === 1 ? "sort" : "sorts"}`] : [])];
   const nameOfTeammate = (key: string) => view.teammateNames.get(Number(key)) ?? `Teammate ${key}`;
   const budgets = view.budgets.map(budget => {
     const width = Math.min(100, Math.max(0, budget.percent));
@@ -61,7 +61,7 @@ export function spendHtml(view: SpendView, notice: { said?: string | null; probl
     return `<div class="budget${over ? " over" : ""}" data-budget="${budget.id}"><span class="name">${e(label)}</span>` +
       `<span class="figures">${usd(budget.spentMicrousd)} of ${usd(budget.limitMicrousd)} · ${budget.percent}%</span>` +
       `<span class="bar" aria-hidden="true"><span style="width:${width}%"></span></span>` +
-      `<span class="meta">${over && budget.hardStop ? "Used up: new work waits until next month or a higher budget." : budget.hardStop ? "Stops new work at 100%." : "Alerts only."}${budget.unpriced > 0 ? ` ${budget.unpriced} unpriced` : ""}</span>` +
+      `<span class="meta">${over && budget.hardStop ? "Used up: new API work waits until next month or a higher budget." : budget.hardStop ? "Stops API work at 100%." : "Alerts only."}${budget.unpriced > 0 ? ` ${budget.unpriced} unpriced` : ""}</span>` +
       `<details><summary>Change</summary><form method="post" action="/spend/budget" class="budget-form"><input type="hidden" name="csrf" value="${e(view.csrf)}"><input type="hidden" name="target" value="${e(`${budget.scope}:${budget.key}`)}">` +
       `<label>Monthly limit (US dollars)<input type="number" name="usd" min="1" step="1" value="${Math.round(budget.limitMicrousd / 1_000_000)}" required></label>` +
       `<label class="choice"><input type="checkbox" name="stop" value="1"${budget.hardStop ? " checked" : ""}> Stop new work at 100%</label>` +
@@ -89,7 +89,7 @@ export function spendHtml(view: SpendView, notice: { said?: string | null; probl
     table("By person", breakdown(view.items, item => item.person), key => key) +
     table("By teammate", breakdown(view.items, item => item.teammate === null ? null : String(item.teammate)), nameOfTeammate) +
     table("By model", breakdown(view.items, item => `${item.provider}${item.model === null ? "" : ` · ${item.model}`}`), key => key) +
-    `</div><p class="meta">Costs are what a provider reported, or tokens at the model's price in Settings → Models. Subscription runs count at their API-price equivalent.</p></article>`;
+    `</div><p class="meta">Subscription work is $0; its limits are on Tasks. API work is what the provider reported, or its tokens at the prices in Settings → Models.</p></article>`;
 }
 
 /** One row per piece of spend, for a spreadsheet. */
