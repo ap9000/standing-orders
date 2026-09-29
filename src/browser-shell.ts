@@ -49,8 +49,9 @@ export function browserWorkspaceDocument(html: string, workspace: BrowserWorkspa
   // first frame (the app's own listener arrives too late when a page is revealed before the bundle runs).
   const settleFades = `(function(){function s(e){var f=e.viewTransition;if(f)[f.finished,f.ready,f.updateCallbackDone].forEach(function(p){if(p)p.catch(function(){})})}addEventListener('pageswap',s);addEventListener('pagereveal',s)})();`;
   return html
-    // A page showing a password keeps to its one script (the sensitivity contract), so it goes without.
-    .replace('</head>', `<link rel="stylesheet" href="/assets/workspace.css">${workspace.sensitive ? "" : `<script nonce="${nonce}">${settleFades}</script>`}</head>`)
+    // A page showing a password keeps to its one script (the sensitivity contract), so it can't settle a fade's
+    // promises: it takes no cross-page fade at all (a style, not a script), and leaving it never leaves one unsettled.
+    .replace('</head>', `<link rel="stylesheet" href="/assets/workspace.css">${workspace.sensitive ? "<style>@view-transition{navigation:none}</style>" : `<script nonce="${nonce}">${settleFades}</script>`}</head>`)
     .replace('<body>', '<body><div id="standing-orders-workspace">')
     .replace('</body>', `</div><script type="application/json" id="standing-orders-workspace-data" nonce="${nonce}">${serializeBrowserWorkspace(workspace)}</script><script nonce="${nonce}">${initialize}</script><script type="module" src="/assets/workspace.js" nonce="${nonce}"></script></body>`);
 }
