@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **Stream it out.** Settings → Monitoring sends what Standing Orders does
+  to the tools a company already watches. The audit stream delivers every
+  sealed ledger entry, in order and at least once (retried, never skipped),
+  to a webhook, each request signed with a secret shown once
+  (`x-standing-orders-signature: t=…,v1=<HMAC-SHA256 of "t.body">`), and/or
+  a folder of JSON Lines files; each batch carries the chain head, so the
+  receiver keeps its own copy of the checkpoints. Traces send each run as an
+  OpenTelemetry span (OTLP over HTTP) under its task's trace: timings,
+  model, tokens and cost, never a prompt or code. `/metrics` serves
+  Prometheus metrics to an instance operator's API token.
+  `standing-orders monitoring` shows how each destination is doing.
+  Schema 104.
+
 - **Storage kept in check.** Standing Orders used to keep every build
   checkout and every staged release forever (78 GB here after a week). Now
   the worker removes a finished task's clean checkout two days after it was

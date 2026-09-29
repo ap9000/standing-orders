@@ -48,6 +48,14 @@ user. What it promises:
   who filed it, the approved terms and approvers, the rules in force, the
   agents and their cost, the changed files, the checks, completion and
   publication, and its ledger entries with their seals.
+- **Monitoring sends only what it says** (Settings → Monitoring). The audit
+  stream carries ledger entries (who, what, when, the project and task, a
+  short detail line; never a secret, prompt or body) to the webhook or folder
+  an instance operator sets, each webhook request signed. Traces carry run
+  timings, model, tokens and cost, never a prompt, diff or file. The signing
+  secret and a collector's header value live in `monitoring.json` (0600,
+  fenced from agents), never in the database or the ledger; `/metrics` needs
+  an instance operator. Addresses are https (http only to this machine).
 - **Secrets stay out of the database, URLs and logs,** in 0600 files.
 - **Reviews** run with no tools, confined to their sealed files.
 

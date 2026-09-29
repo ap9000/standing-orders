@@ -135,12 +135,33 @@ import { NO_RULES, filerFor, isProtectedWork, protectedChanges, rulesWords, type
 // v100 lets people sign in with the organisation's identity provider: each provider identity is linked to one account.
 // v101 adds API tokens (scoped, expiring, hashed), keeps browser sessions across restarts (listed and revocable), and lets coordinator credentials expire.
 // v102 records who filed each task and adds per-project approval rules: the requester can't approve, and protected work needs two approvers.
+/** v104: each monitoring destination's progress. `target` names the destination it's for (a digest of its
+ * address), `through` is a cursor (the last ledger entry sent); `holder` and `held_until` make sure one process
+ * sends at a time. A delivery lands only if the target and the cursor are still what it started from. */
+const MONITORING_SCHEMA = `
+CREATE TABLE IF NOT EXISTS monitoring_status (
+  sink        TEXT PRIMARY KEY,
+  target      TEXT,
+  through     INTEGER NOT NULL DEFAULT 0,
+  sent        INTEGER NOT NULL DEFAULT 0,
+  last_ok_at  TEXT,
+  last_error  TEXT,
+  last_error_at TEXT,
+  failures    INTEGER NOT NULL DEFAULT 0,
+  next_try_at TEXT,
+  holder      TEXT,
+  held_until  TEXT
+);
+`;
+export type MonitoringStatus = { sink: string; target: string | null; through: number; sent: number; lastOkAt: string | null; lastError: string | null; lastErrorAt: string | null; failures: number; nextTryAt: string | null };
+
 /** The detail on a task's registration written again at its filing (v103), over a ref an earlier lookup made. */
 const REGISTERED_AT_FILING = "again, as it was filed";
 /** A ledger entry with its seal (v103); null until the next pass seals it. */
 export type SealedLedgerEntry = LedgerEntry & { seal: { prev: string; hash: string } | null };
 // v103 chains the action ledger (every entry sealed with the one before it), keeps checkpoints of the chain, and records teammate tool calls (from the store) and minted coordinators (by trigger) in it.
-export const SCHEMA_VERSION = 103;
+// v104 keeps where each monitoring destination (the audit stream to a webhook or a folder, traces to an OpenTelemetry collector) has delivered to, and who is sending.
+export const SCHEMA_VERSION = 104;
 
 /** v102: a project's approval rules, and each person's approval of an exact scope (two are needed for protected work). */
 const APPROVAL_SCHEMA = `
@@ -4793,6 +4814,8 @@ function initializeStore(db: Database, file: string): Store {
   db.exec(CREDENTIALS_SCHEMA);
   db.exec(APPROVAL_SCHEMA);
   db.exec(LEDGER_CHAIN_SCHEMA);
+  db.exec(MONITORING_SCHEMA);
+  addColumn(db, "monitoring_status", "target", "TEXT");
   migrate(db, preflight === null ? null : Math.abs(preflight));
   addColumn(db, "flow_card", "source_json", "TEXT");
   addColumn(db, "flow_card", "owner", "TEXT");
@@ -10767,6 +10790,59 @@ export class Store {
   ledgerCheckpoints(limit = 20): { through: number; hash: string; at: string; by: string }[] {
     return this.db.prepare(`SELECT through, hash, at, by FROM ledger_checkpoint WHERE typeof(through) = 'integer' AND through ${IN_RANGE} ORDER BY id DESC LIMIT ?`).all(limit)
       .map(row => ({ through: Number(row["through"]), hash: String(row["hash"]), at: String(row["at"]), by: String(row["by"]) }));
+  }
+
+  // ---- Monitoring (v104) ---------------------------------------------------
+
+  /** Sealed ledger entries after `after`, oldest first: what a stream sends next (unsealed ones wait for their seal). */
+  sealedAfter(after: number, limit: number): SealedLedgerEntry[] {
+    this.sealIfFree();
+    return this.sealedRows(`l.id > ? AND s.hash IS NOT NULL ORDER BY l.id LIMIT ?`, [after, limit]);
+  }
+
+  /** Every destination's progress, or one's. */
+  monitoringStatus(sink?: string): MonitoringStatus[] {
+    return (sink === undefined ? this.db.prepare("SELECT * FROM monitoring_status ORDER BY sink").all() : this.db.prepare("SELECT * FROM monitoring_status WHERE sink = ?").all(sink)).map(row => ({
+      sink: String(row["sink"]), target: row["target"] == null ? null : String(row["target"]), through: Number(row["through"]), sent: Number(row["sent"]), lastOkAt: row["last_ok_at"] == null ? null : String(row["last_ok_at"]),
+      lastError: row["last_error"] == null ? null : String(row["last_error"]), lastErrorAt: row["last_error_at"] == null ? null : String(row["last_error_at"]),
+      failures: Number(row["failures"]), nextTryAt: row["next_try_at"] == null ? null : String(row["next_try_at"]),
+    }));
+  }
+
+  /** Take (or keep) the right to send to `sink` until `until`; false when another process holds it. */
+  holdMonitoring(sink: string, holder: string, now: Date, until: Date): boolean {
+    return this.transact(() => {
+      this.db.prepare("INSERT OR IGNORE INTO monitoring_status (sink) VALUES (?)").run(sink);
+      return Number(this.db.prepare("UPDATE monitoring_status SET holder = ?, held_until = ? WHERE sink = ? AND (holder IS NULL OR holder = ? OR held_until IS NULL OR held_until < ?)")
+        .run(holder, until.toISOString(), sink, holder, now.toISOString()).changes) === 1;
+    });
+  }
+
+  /** A delivery landed: move the cursor from `from` to `to`, only for the holder, and only if the destination and the
+   * cursor are still what the delivery started from (a destination changed meanwhile starts over; nothing's skipped). */
+  monitoringDelivered(sink: string, holder: string, target: string, from: number, to: number, count: number, now: Date): boolean {
+    return Number(this.db.prepare(`UPDATE monitoring_status SET through = ?, sent = sent + ?, last_ok_at = ?, failures = 0, next_try_at = NULL
+      WHERE sink = ? AND holder = ? AND target = ? AND through = ?`).run(to, count, now.toISOString(), sink, holder, target, from).changes) === 1;
+  }
+
+  /** A delivery failed: say why (in words, never a secret) and when to try again (for the destination it was for). */
+  monitoringFailed(sink: string, holder: string, target: string, error: string, now: Date, nextTry: Date): void {
+    this.db.prepare(`UPDATE monitoring_status SET last_error = ?, last_error_at = ?, failures = failures + 1, next_try_at = ? WHERE sink = ? AND holder = ? AND target = ?`)
+      .run(error.replace(/[\u0000-\u001f\u007f]+/g, " ").slice(0, 300), now.toISOString(), nextTry.toISOString(), sink, holder, target);
+  }
+
+  /** A destination is new, or now points elsewhere: it starts from `through` (0: the whole history), with no failures. */
+  resetMonitoring(sink: string, target: string, through: number): void {
+    this.transact(() => {
+      this.db.prepare("INSERT OR IGNORE INTO monitoring_status (sink) VALUES (?)").run(sink);
+      this.db.prepare("UPDATE monitoring_status SET target = ?, through = ?, sent = 0, last_ok_at = NULL, last_error = NULL, last_error_at = NULL, failures = 0, next_try_at = NULL WHERE sink = ?")
+        .run(target, through, sink);
+    });
+  }
+
+  /** The newest ledger entry id (0 when empty): where a stream that starts "from now" begins. */
+  ledgerHeadId(): number {
+    return Number(this.db.prepare(`SELECT MAX(id) AS id FROM action_ledger WHERE id ${IN_RANGE}`).get()?.["id"] ?? 0);
   }
 
   /** Ledger entries in [from, to) within `repos` (as `actionLedger` reads them), with their seals, oldest first,

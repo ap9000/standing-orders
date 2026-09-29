@@ -270,6 +270,10 @@ import { authenticateAccount, freshIdentitySignIn, hasFreshIdentitySignIn, hashP
 import { DEFAULT_GUARD_POLICY, passwordGuardOf, SourceBudget } from "./sign-in-guard.js";
 import { accessFromGroups, accountNameFor, discoverOidc, exchangeOidcCode, newOidcVisit, oidcAuthorizeUrl, verifyIdToken, type OidcClaims, type OidcProvider, type OidcVisit } from "./oidc.js";
 import { readSsoSettings, removeSsoSettings, saveSsoSettings, SSO_CALLBACK, ssoChangeWords } from "./sso-settings.js";
+import { monitoringChange, readMonitoring, saveMonitoring } from "./monitoring-settings.js";
+import { MONITORING_CSS, monitoringHtml, signingSecretHtml } from "./monitoring-ui.js";
+import { prometheusMetrics } from "./metrics.js";
+import { targetOf } from "./monitoring.js";
 import { SSO_CSS, ssoSettingsHtml } from "./sso-ui.js";
 import { mintApiToken, parseApiToken, secretMatches, TOKEN_DAYS } from "./api-tokens.js";
 import { CREDENTIALS_CSS, credentialsHtml, tokenShownHtml } from "./credentials-ui.js";
@@ -1773,7 +1777,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       url.pathname !== "/fleet" &&
       url.pathname !== "/chat" && url.pathname !== "/chat/mate/status" && url.pathname !== "/chat/task-status" && url.pathname !== "/chat/stream" &&
       !/^\/chat\/action\/[0-9]{1,15}$/.test(url.pathname) &&
-      !url.pathname.startsWith("/settings") && url.pathname !== "/logout" && url.pathname !== "/people" && url.pathname !== "/ledger" && url.pathname !== "/ledger/export" &&
+      !url.pathname.startsWith("/settings") && url.pathname !== "/logout" && url.pathname !== "/people" && url.pathname !== "/ledger" && url.pathname !== "/ledger/export" && url.pathname !== "/metrics" &&
       !(url.pathname === "/board" && url.searchParams.get("scope") === "all");
     if (needsProject) return redirect(response, `/projects?return=${encodeURIComponent(safeReturn(url.pathname + url.search))}`);
 
@@ -3708,6 +3712,25 @@ export function createDecisionServer(options: ServeOptions): Server {
         sessions: store.webSessions(everyone ? null : who.name).map(one => ({ ...one, here: one.idHash === here })), tokens: store.apiTokens(everyone ? null : who.name) };
       return sendScreen(response, 200, screen("Sessions & tokens", `<p><a href="/settings">Settings</a></p><h1>Sessions &amp; tokens</h1>${credentialsHtml(view, who.session.csrf, { said: url.searchParams.get("said"), problem: url.searchParams.get("problem") })}`,
         { chrome: chromeFor(project, "settings") }));
+    }
+    // v104: Settings → Monitoring, where the audit stream and traces go. An instance operator's page.
+    if (url.pathname === "/settings/monitoring") {
+      if (who.via !== "cookie" || !store.isInstanceOperator(who.name) || !options.configDir) return refuse(response, who, 403, "An instance operator sets up monitoring.", "/settings");
+      const view = { settings: readMonitoring(options.configDir), status: store.monitoringStatus(), head: store.ledgerHeadId(), origin: consoleOrigin(request.headers.host) };
+      return sendScreen(response, 200, screen("Monitoring", `<p><a href="/settings">Settings</a></p><h1>Monitoring</h1>${monitoringHtml(view, who.session.csrf, { said: url.searchParams.get("said"), problem: url.searchParams.get("problem") })}`,
+        { chrome: chromeFor(project, "settings") }));
+    }
+    // v104: Prometheus metrics, for an instance operator (a scraper sends one's API token).
+    if (url.pathname === "/metrics") {
+      if (!store.isInstanceOperator(who.name)) return refuse(response, who, 403, "An instance operator reads metrics.", "/");
+      response.writeHead(200, { "content-type": "text/plain; version=0.0.4; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
+      const set = options.configDir === undefined ? null : readMonitoring(options.configDir);
+      const destinations = new Map<string, string>([
+        ...(set?.webhook ? [["webhook", targetOf(set.webhook.url)] as [string, string]] : []),
+        ...(set?.folder ? [["folder", targetOf(set.folder.path)] as [string, string]] : []),
+        ...(set?.traces ? [["traces", targetOf(set.traces.endpoint)] as [string, string]] : []),
+      ]);
+      return void response.end(prometheusMetrics(store, now, admissionList(), destinations));
     }
     // v100: Settings → Sign-in, the identity provider people sign in with. An instance operator's page.
     if (url.pathname === "/settings/sign-in") {
@@ -6306,6 +6329,28 @@ export function createDecisionServer(options: ServeOptions): Server {
       const found = await providerFor(saved.settings.issuer);
       store.recordAction({ at: now.toISOString(), actor: who.name, repo: null, taskId: null, runId: null, action: before === null ? "sign-in with a provider turned on" : "sign-in with a provider changed", outcome: "changed", source: "policy", detail: ssoChangeWords(before, saved.settings) });
       return found.ok ? back("said", `Saved. People can sign in with ${saved.settings.label}.`) : back("problem", `Saved, but ${saved.settings.label} didn't answer: ${found.said}`);
+    }
+    // v104: change where monitoring goes. A step-up; the ledger keeps before → after (addresses, never secrets).
+    if (url.pathname === "/settings/monitoring") {
+      if (who.via !== "cookie" || !store.isInstanceOperator(who.name) || !options.configDir) return refuse(response, who, 403, "An instance operator sets up monitoring.", "/settings");
+      const back = (key: "said" | "problem", words: string) => redirect(response, `/settings/monitoring?${key}=${encodeURIComponent(words)}`);
+      if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return back("problem", "Enter your Standing Orders password to change monitoring.");
+      const before = readMonitoring(options.configDir);
+      // Never into Standing Orders' own folder, a project or the build checkouts: an agent could read the stream there.
+      const saved = saveMonitoring(options.configDir, { webhook: body.get("webhook") ?? "", folder: body.get("folder") ?? "", tracesEndpoint: body.get("traces") ?? "",
+        headerName: body.get("header-name") ?? "", headerValue: body.get("header-value") ?? "", rotate: body.get("rotate") === "1" }, before,
+        [...new Set([...managedRepos(), ...store.knownRepos(), ...(options.poolRoot === undefined ? [] : [options.poolRoot])])]);
+      if (!saved.ok) return back("problem", saved.said);
+      const after = saved.settings;
+      // A destination that's new or points elsewhere starts over on the monitoring loop's next pass.
+      const change = monitoringChange(before, after, saved.secret !== null);
+      if (change !== null) {
+        store.recordAction({ at: now.toISOString(), actor: who.name, repo: null, taskId: null, runId: null, action: "monitoring changed", outcome: "changed", source: "policy", detail: change });
+      }
+      if (saved.secret !== null && after.webhook !== null) {
+        return sendScreen(response, 200, screen("Signing secret", signingSecretHtml(after.webhook.url, saved.secret), { chrome: chromeFor(projectOf(who, request) ?? null, "settings"), forceSensitive: true }));
+      }
+      return back("said", "Saved. Deliveries start within a few seconds.");
     }
     if (url.pathname === "/settings/tools/connect") {
       if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "Sign in as an approver to connect tools.", "/settings/tools");
@@ -13643,7 +13688,7 @@ button.pick-file { min-height: 1.75rem; padding: 0 .55rem; font-size: .75rem; }
 
 /** Appearance: a three-way segmented switch, one tap per choice. */
 const THEME_CONTROLS_CSS = `.task-repo select{width:100%;min-height:2.75rem;font-size:1rem}.task-repo-add{margin:.35rem .1rem .5rem}.task-repo-add a{display:inline-flex;align-items:center;min-height:2.25rem}details.result-request-open.result-request-form>summary{border:0;background:transparent;padding:.5rem 0;min-height:2.75rem;font-weight:600;display:list-item;list-style:revert}details.result-request-open.result-request-form>summary::-webkit-details-marker{display:revert}form.js-autosave button[type=submit]{display:none}.provider-row{border-bottom:1px solid var(--so-line);padding:.35rem 0}.provider-row:first-of-type{border-top:1px solid var(--so-line)}.provider-head{display:flex;align-items:center;gap:.75rem;margin:.4rem 0 0}.provider-status{display:inline-flex;align-items:center;gap:.4rem;color:var(--so-muted);font-size:.875rem}.provider-status i{width:.5rem;height:.5rem;border-radius:50%;background:var(--so-muted)}.provider-status--ok i{background:var(--so-success)}.provider-status--warn i{background:var(--so-attention)}.provider-status--off i{background:transparent;border:1.5px solid var(--so-muted)}details.provider-manage>summary{cursor:pointer;color:var(--so-accent-text);font-size:.875rem;min-height:2.5rem;display:list-item;padding-block:.5rem}.card.props .row{display:grid;gap:.1rem;margin:0 0 .75rem}.card.props .row>.meta{display:block;font-size:.75rem}.card.props .row>.meta::first-letter{text-transform:uppercase}.card.props .row>.mono{font-family:var(--font-sans);font-size:.875rem}.card.props .row>.mono .seal{font-family:var(--font-mono);font-size:.8125rem}details.evidence-files{margin:1rem 0}details.evidence-files>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:600}details.evidence-files ul{list-style:none;margin:0;padding:0}details.evidence-files li{display:flex;justify-content:space-between;gap:1rem;padding:.5rem 0;border-bottom:1px solid var(--so-line)}.result-action .result-feedback-link{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;text-decoration:none}.result-action .result-feedback-link:hover{background:var(--so-raised)}.so-sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}.verdict{margin:.5rem 0 .75rem}.verdict-chips{display:flex;flex-wrap:wrap;gap:.4rem;list-style:none;padding:0;margin:0}.verdict-chip{display:inline-flex;align-items:center;gap:.3rem;min-height:1.75rem;padding:.2rem .65rem;border-radius:999px;font-size:.8125rem;font-weight:600;background:var(--so-neutral-soft);color:var(--so-neutral-ink)}.verdict-chip svg{width:.9rem;height:.9rem}.verdict-chip--success{background:var(--so-success-soft);color:var(--so-success)}.verdict-chip--danger{background:var(--so-danger-soft);color:var(--so-danger)}.verdict-chip--warning{background:var(--so-warning-soft);color:var(--so-warning)}.verdict-chip--info{background:var(--so-info-soft);color:var(--so-info)}.verdict-by{margin:.4rem 0 0}details.result-request-open{margin:.5rem 0}details.result-request-open>summary{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;cursor:pointer;list-style:none}details.result-request-open>summary::-webkit-details-marker{display:none}details.result-request-open[open]>summary{margin-bottom:.75rem}.settings-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(8.5rem,1fr));gap:.5rem;margin:0 0 2rem}.settings-tiles a{display:flex;align-items:center;gap:.6rem;min-height:3rem;padding:.65rem .8rem;border:1px solid var(--so-line);border-radius:.625rem;background:var(--so-paper);color:var(--so-ink);text-decoration:none;font-weight:550;font-size:.875rem}.settings-tiles a:hover{border-color:var(--so-input-line);background:var(--so-raised)}.settings-tiles svg{width:1.1rem;height:1.1rem;flex-shrink:0;color:var(--so-accent-text)}details.settings-more{margin:.25rem 0 1.25rem}details.settings-more>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:550}details.settings-more>summary .meta{font-weight:400;margin-left:.35rem}.settings-changed{margin-top:-.25rem}.appearance{margin:0 0 28px}.appearance h2{margin:0 0 10px}.theme-switch{display:inline-flex;flex-wrap:nowrap;max-width:100%;gap:4px;padding:4px;margin:0;border:1px solid var(--so-line);border-radius:10px;background:var(--so-raised)}.theme-switch .theme-choice,.so-native-region .theme-switch .theme-choice{flex:1 1 0;width:auto;white-space:nowrap;min-height:40px;padding:8px 16px;border:0;border-radius:7px;background:transparent;color:var(--so-muted);font:inherit;font-weight:550;box-shadow:none;cursor:pointer}.theme-switch .theme-choice:hover{color:var(--so-ink)}.theme-switch .theme-choice[aria-pressed="true"]{background:var(--so-paper);color:var(--so-ink);box-shadow:0 1px 2px rgb(0 0 0 / .1)}.appearance .meta{margin:8px 0 0}@media(max-width:600px){.theme-switch .theme-choice{min-height:44px}}`;
-const WORKSPACE_STYLE = styleAsset(STYLE + APPROVAL_RULES_CSS + EVIDENCE_PACK_CSS + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KITS_CSS + SSO_CSS + CREDENTIALS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
+const WORKSPACE_STYLE = styleAsset(STYLE + APPROVAL_RULES_CSS + MONITORING_CSS + EVIDENCE_PACK_CSS + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KITS_CSS + SSO_CSS + CREDENTIALS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
@@ -23190,6 +23235,7 @@ const SETTINGS_TILE_ICONS: [string, string, string][] = [
     ["/settings/sign-in", "Sign-in", `<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>`],
     ["/settings/sessions", "Sessions & tokens", `<circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/>`],
     ["/settings/approval", "Approval rules", `<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/>`],
+    ["/settings/monitoring", "Monitoring", `<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>`],
 ];
 const SETTINGS_TILES = SETTINGS_TILE_ICONS.map(([href, label]) => [href, label] as const);
 
