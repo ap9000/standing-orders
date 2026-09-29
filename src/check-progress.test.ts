@@ -206,8 +206,16 @@ describe("saved and delivered progress", () => {
     expect(store.checkProgress(run)).toMatchObject({ run, line: final.line, final: true, notifiedAt: T0.toISOString() });
     expect(store.runCheckFor(run + 50)).toBeNull();
     expect(store.handle.prepare("SELECT run, release FROM run_check").all()).toEqual([{ run, release: 1 }]);
-    expect(store.handle.prepare("SELECT name FROM sqlite_master WHERE name IN ('check_progress', 'run_check_next')").all()).toEqual([]);
+    expect(store.handle.prepare("SELECT name FROM sqlite_master WHERE name = 'run_check_next'").all()).toEqual([]);
     expect(store.handle.prepare("SELECT name FROM sqlite_master WHERE name = 'run_check_release'").get()).toEqual({ name: "run_check_release" });
+    // The old table keeps its rows (a deploy refuses a migration that loses them) …
+    expect(store.handle.prepare("SELECT run, line FROM check_progress").all()).toEqual([{ run, line: final.line }]);
+    // … and never overwrites newer progress when the file opens again.
+    const first = samples()[0]!;
+    store.saveCheckProgress(run, first, later(5_000));
     store.close();
+    const again = openStore(file);
+    expect(again.checkProgress(run)).toMatchObject({ run, line: first.line, final: first.final });
+    again.close();
   });
 });

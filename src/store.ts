@@ -230,29 +230,26 @@ CREATE INDEX IF NOT EXISTS run_check_release ON run_check (run DESC) WHERE relea
 
 /** A file from before the merge keeps a result-only run_check (status
  * required) and a separate check_progress. Move both into the one record,
- * in one transaction, and drop the old tables. Rows for a run that no
- * longer exists are left behind with them. Idempotent: a merged file with
- * no check_progress is untouched. */
+ * in one transaction. Rows for a run that no longer exists are left behind.
+ * The old check_progress stays as it was: a deploy refuses a migration that
+ * loses a table's historical rows. Runs once: a merged file is untouched, so
+ * the old progress never overwrites newer. */
 function mergeCheckTables(db: Database): void {
-  const merged = hasColumn(db, "run_check", "snapshot");
+  if (hasColumn(db, "run_check", "snapshot")) return;
   const progress = tableExists(db, "check_progress");
-  if (merged && !progress) return;
   db.exec("BEGIN IMMEDIATE");
   try {
-    if (!merged) {
-      db.exec(RUN_CHECK_TABLE("run_check_next"));
-      db.exec(`INSERT INTO run_check_next (run, status, exit_code, suites_json, release, recorded_at)
-        SELECT run, status, exit_code, suites_json, release, recorded_at FROM run_check WHERE run IN (SELECT id FROM run)`);
-      db.exec("DROP TABLE run_check");
-      db.exec("ALTER TABLE run_check_next RENAME TO run_check");
-      db.exec("CREATE INDEX IF NOT EXISTS run_check_release ON run_check (run DESC) WHERE release = 1");
-    }
+    db.exec(RUN_CHECK_TABLE("run_check_next"));
+    db.exec(`INSERT INTO run_check_next (run, status, exit_code, suites_json, release, recorded_at)
+      SELECT run, status, exit_code, suites_json, release, recorded_at FROM run_check WHERE run IN (SELECT id FROM run)`);
+    db.exec("DROP TABLE run_check");
+    db.exec("ALTER TABLE run_check_next RENAME TO run_check");
+    db.exec("CREATE INDEX IF NOT EXISTS run_check_release ON run_check (run DESC) WHERE release = 1");
     if (progress) {
       db.exec(`INSERT INTO run_check (run, snapshot, line, final, updated_at, notified_at)
         SELECT run, snapshot, line, final, updated_at, notified_at FROM check_progress WHERE run IN (SELECT id FROM run)
         ON CONFLICT(run) DO UPDATE SET snapshot = excluded.snapshot, line = excluded.line,
           final = excluded.final, updated_at = excluded.updated_at, notified_at = excluded.notified_at`);
-      db.exec("DROP TABLE check_progress");
     }
     db.exec("COMMIT");
   } catch (error) {
