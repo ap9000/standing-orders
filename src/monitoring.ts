@@ -16,7 +16,7 @@
  *   tokens, cost and timings; never a prompt, a diff or a file.
  */
 import { createHash, createHmac, randomUUID } from "node:crypto";
-import { closeSync, constants, fsyncSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
+import { closeSync, constants, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
 import { basename, join } from "node:path";
 import type { SealedLedgerEntry, Store } from "./store.js";
@@ -51,28 +51,36 @@ export type MonitoringDeps = { fetch?: typeof fetch; now?: () => Date; holder: s
 /** One pass over every destination that's set up. Returns what it sent, per destination. */
 export async function monitoringPass(store: Store, settings: MonitoringSettings, deps: MonitoringDeps): Promise<Partial<Record<Sink, number>>> {
   const sent: Partial<Record<Sink, number>> = {};
-  if (settings.webhook !== null) sent.webhook = await deliver(store, "webhook", deps, entries => postSigned(settings.webhook!, entries, store, deps));
-  if (settings.folder !== null) sent.folder = await deliver(store, "folder", deps, async entries => { appendFolder(settings.folder!.path, entries, deps.instance); return entries.length; });
-  if (settings.traces !== null) sent.traces = await deliver(store, "traces", deps, entries => postTraces(settings.traces!, entries, store, deps));
+  // A new destination gets the whole audit history; traces start from now.
+  if (settings.webhook !== null) sent.webhook = await deliver(store, "webhook", targetOf(settings.webhook.url), () => 0, deps, entries => postSigned(settings.webhook!, entries, store, deps));
+  if (settings.folder !== null) sent.folder = await deliver(store, "folder", targetOf(settings.folder.path), () => 0, deps, async entries => { appendFolder(settings.folder!.path, entries, deps.instance); return entries.length; });
+  if (settings.traces !== null) sent.traces = await deliver(store, "traces", targetOf(settings.traces.endpoint), () => store.ledgerHeadId(), deps, entries => postTraces(settings.traces!, entries, store, deps));
   return sent;
 }
 
-/** Send what's due to one destination: hold it, read after its cursor, hand the batch over, and move the cursor only when it landed. */
-async function deliver(store: Store, sink: Sink, deps: MonitoringDeps, send: (entries: SealedLedgerEntry[]) => Promise<number>): Promise<number> {
+/** A destination's name in its status row: a digest of its address (the address itself may carry a key). */
+export const targetOf = (address: string) => hex(`standing-orders/monitoring/${address}`, 16);
+
+/** Send what's due to one destination: hold it, start it over if it now points elsewhere, read after its cursor,
+ * hand the batch over, and move the cursor only when it landed and nothing changed meanwhile. */
+async function deliver(store: Store, sink: Sink, target: string, start: () => number, deps: MonitoringDeps, send: (entries: SealedLedgerEntry[]) => Promise<number>): Promise<number> {
   const now = deps.now ?? (() => new Date());
   const at = now();
-  const status = store.monitoringStatus(sink)[0];
-  if (status?.nextTryAt != null && Date.parse(status.nextTryAt) > at.getTime()) return 0;
   if (!store.holdMonitoring(sink, deps.holder, at, new Date(at.getTime() + LEASE_MS))) return 0;
-  const entries = store.sealedAfter(store.monitoringStatus(sink)[0]?.through ?? 0, BATCH);
+  let status = store.monitoringStatus(sink)[0];
+  if (status === undefined || status.target !== target) {
+    store.resetMonitoring(sink, target, start());
+    status = store.monitoringStatus(sink)[0]!;
+  }
+  if (status.nextTryAt != null && Date.parse(status.nextTryAt) > at.getTime()) return 0;
+  const from = status.through;
+  const entries = store.sealedAfter(from, BATCH);
   if (entries.length === 0) return 0;
   try {
     const count = await send(entries);
-    store.monitoringDelivered(sink, deps.holder, entries[entries.length - 1]!.id, count, now());
-    return count;
+    return store.monitoringDelivered(sink, deps.holder, target, from, entries[entries.length - 1]!.id, count, now()) ? count : 0;
   } catch (error) {
-    const failures = (store.monitoringStatus(sink)[0]?.failures ?? 0) + 1;
-    store.monitoringFailed(sink, deps.holder, error instanceof Error ? error.message : String(error), now(), new Date(now().getTime() + backoff(failures)));
+    store.monitoringFailed(sink, deps.holder, target, error instanceof Error ? error.message : String(error), now(), new Date(now().getTime() + backoff(status.failures + 1)));
     return 0;
   }
 }
@@ -94,9 +102,15 @@ async function postSigned(webhook: NonNullable<MonitoringSettings["webhook"]>, e
   return entries.length;
 }
 
-/** Append events to the day's file (by each entry's own day), made readable by its owner only. */
+/** Append events to the day's file (by each entry's own day), made readable by its owner only. The folder must be
+ * a real folder of this user's that nobody else can write to (a link, or a shared folder, could send the stream
+ * somewhere else). */
 function appendFolder(folder: string, entries: SealedLedgerEntry[], instance: string): void {
   mkdirSync(folder, { recursive: true, mode: 0o700 });
+  const stat = lstatSync(folder);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error("the folder is a link, not a folder");
+  if (typeof process.getuid === "function" && stat.uid !== process.getuid()) throw new Error("the folder belongs to someone else");
+  if ((stat.mode & 0o022) !== 0) throw new Error("others can write to the folder");
   const byDay = new Map<string, string[]>();
   for (const entry of entries) {
     const day = /^\d{4}-\d{2}-\d{2}/.test(entry.at) ? entry.at.slice(0, 10) : "undated";
@@ -110,6 +124,7 @@ function appendFolder(folder: string, entries: SealedLedgerEntry[], instance: st
 }
 
 type Attribute = { key: string; value: { stringValue: string } | { intValue: string } | { doubleValue: number } };
+const money = (key: string, value: number | null) => value === null ? [] : [{ key, value: { doubleValue: value } }];
 const attr = (key: string, value: string | number | null | undefined): Attribute[] =>
   value === null || value === undefined ? [] : [{ key, value: typeof value === "string" ? { stringValue: value } : Number.isInteger(value) ? { intValue: String(value) } : { doubleValue: value } }];
 
@@ -133,9 +148,10 @@ export function spansFor(store: Store, entries: SealedLedgerEntry[]): Record<str
           ...attr("standing_orders.task.id", taskId), ...attr("standing_orders.task.root", root), ...attr("standing_orders.project", ref?.repo == null ? null : basename(ref.repo)),
           ...attr("standing_orders.run.id", run.id), ...attr("standing_orders.run.role", run.role), ...attr("standing_orders.run.outcome", run.outcome),
           ...attr("gen_ai.system", run.provider), ...attr("gen_ai.request.model", run.model), ...attr("gen_ai.usage.input_tokens", run.tokensIn),
-          ...attr("gen_ai.usage.output_tokens", run.tokensOut), ...attr("standing_orders.cost_usd", run.costUsd),
+          ...attr("gen_ai.usage.output_tokens", run.tokensOut), ...money("standing_orders.cost_usd", run.costUsd),
         ],
-        status: failed ? { code: 2, message: run.reason ?? run.outcome ?? "failed" } : { code: 1 },
+        // The outcome's word only: a run's reason is free text (a path, a provider's message).
+        status: failed ? { code: 2, message: run.outcome ?? "failed" } : { code: 1 },
       });
     } else if (entry.action === COMPLETION_ACTION && entry.taskId !== null) {
       const root = rootOf(entry.taskId);

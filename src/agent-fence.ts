@@ -30,7 +30,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 export type FenceMethod = "codex-profile" | "macos-sandbox" | "linux-bubblewrap" | "claude-rules" | "none";
 
 /** Names that are secrets wherever the database lives (used when its folder is shared with other things). */
-const SENSITIVE_NAME = /(^up-login\.txt$|token|secret|login|password|credential|vapid|keys?\b|\.pem$|\.key$|^backups$|^evidence$|^remote$)/i;
+const SENSITIVE_NAME = /(^up-login\.txt$|token|secret|login|password|credential|vapid|keys?\b|\.pem$|\.key$|^backups$|^evidence$|^remote$|^sign-in\.json$|^monitoring\.json$)/i;
 
 function real(path: string): string {
   try { return realpathSync(path); } catch { return resolve(path); }

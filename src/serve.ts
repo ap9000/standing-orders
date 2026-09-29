@@ -270,7 +270,7 @@ import { authenticateAccount, freshIdentitySignIn, hasFreshIdentitySignIn, hashP
 import { DEFAULT_GUARD_POLICY, passwordGuardOf, SourceBudget } from "./sign-in-guard.js";
 import { accessFromGroups, accountNameFor, discoverOidc, exchangeOidcCode, newOidcVisit, oidcAuthorizeUrl, verifyIdToken, type OidcClaims, type OidcProvider, type OidcVisit } from "./oidc.js";
 import { readSsoSettings, removeSsoSettings, saveSsoSettings, SSO_CALLBACK, ssoChangeWords } from "./sso-settings.js";
-import { monitoringWords, readMonitoring, saveMonitoring } from "./monitoring-settings.js";
+import { monitoringChange, readMonitoring, saveMonitoring } from "./monitoring-settings.js";
 import { MONITORING_CSS, monitoringHtml, signingSecretHtml } from "./monitoring-ui.js";
 import { prometheusMetrics } from "./metrics.js";
 import { SSO_CSS, ssoSettingsHtml } from "./sso-ui.js";
@@ -3723,7 +3723,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (url.pathname === "/metrics") {
       if (!store.isInstanceOperator(who.name)) return refuse(response, who, 403, "An instance operator reads metrics.", "/");
       response.writeHead(200, { "content-type": "text/plain; version=0.0.4; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
-      return void response.end(prometheusMetrics(store, now));
+      return void response.end(prometheusMetrics(store, now, admissionList()));
     }
     // v100: Settings → Sign-in, the identity provider people sign in with. An instance operator's page.
     if (url.pathname === "/settings/sign-in") {
@@ -6329,18 +6329,16 @@ export function createDecisionServer(options: ServeOptions): Server {
       const back = (key: "said" | "problem", words: string) => redirect(response, `/settings/monitoring?${key}=${encodeURIComponent(words)}`);
       if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return back("problem", "Enter your Standing Orders password to change monitoring.");
       const before = readMonitoring(options.configDir);
+      // Never into Standing Orders' own folder, a project or the build checkouts: an agent could read the stream there.
       const saved = saveMonitoring(options.configDir, { webhook: body.get("webhook") ?? "", folder: body.get("folder") ?? "", tracesEndpoint: body.get("traces") ?? "",
-        headerName: body.get("header-name") ?? "", headerValue: body.get("header-value") ?? "", rotate: body.get("rotate") === "1" }, before);
+        headerName: body.get("header-name") ?? "", headerValue: body.get("header-value") ?? "", rotate: body.get("rotate") === "1" }, before,
+        [...new Set([...managedRepos(), ...store.knownRepos(), ...(options.poolRoot === undefined ? [] : [options.poolRoot])])]);
       if (!saved.ok) return back("problem", saved.said);
       const after = saved.settings;
-      // A new destination gets the whole history (the audit stream) or starts now (traces); one that moved starts over.
-      if (after.webhook !== null && after.webhook.url !== before.webhook?.url) store.resetMonitoring("webhook", 0);
-      if (after.folder !== null && after.folder.path !== before.folder?.path) store.resetMonitoring("folder", 0);
-      if (after.traces !== null && after.traces.endpoint !== before.traces?.endpoint) store.resetMonitoring("traces", store.ledgerHeadId());
-      const words = { before: monitoringWords(before), after: monitoringWords(after) };
-      if (words.before !== words.after || saved.secret !== null) {
-        store.recordAction({ at: now.toISOString(), actor: who.name, repo: null, taskId: null, runId: null, action: "monitoring changed", outcome: "changed", source: "policy",
-          detail: `${words.before} → ${words.after}${saved.secret !== null && before.webhook?.url === after.webhook?.url ? " (new signing secret)" : ""}` });
+      // A destination that's new or points elsewhere starts over on the monitoring loop's next pass.
+      const change = monitoringChange(before, after, saved.secret !== null);
+      if (change !== null) {
+        store.recordAction({ at: now.toISOString(), actor: who.name, repo: null, taskId: null, runId: null, action: "monitoring changed", outcome: "changed", source: "policy", detail: change });
       }
       if (saved.secret !== null && after.webhook !== null) {
         return sendScreen(response, 200, screen("Signing secret", signingSecretHtml(after.webhook.url, saved.secret), { chrome: chromeFor(projectOf(who, request) ?? null, "settings"), forceSensitive: true }));

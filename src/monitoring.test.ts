@@ -15,7 +15,10 @@ import { openStore, type Store } from "./store.js";
 import { addApprover } from "./scope.js";
 import { createDecisionServer } from "./serve.js";
 import { monitoringPass, SIGNATURE_HEADER } from "./monitoring.js";
-import { readMonitoring, saveMonitoring, NO_MONITORING, type MonitoringSettings } from "./monitoring-settings.js";
+import { monitoringChange, readMonitoring, saveMonitoring, NO_MONITORING, type MonitoringSettings } from "./monitoring-settings.js";
+import { agentFence } from "./agent-fence.js";
+import { prometheusMetrics } from "./metrics.js";
+import { mkdirSync } from "node:fs";
 import { mintApiToken } from "./api-tokens.js";
 import { COMPLETION_ACTION } from "./result-completion.js";
 
@@ -85,6 +88,25 @@ test("a failed delivery is retried later from the same place: nothing skipped, n
   expect(store.monitoringStatus("webhook")[0]).toMatchObject({ failures: 0, sent: 2 });
 });
 
+test("a destination changed while a delivery is in flight gets everything; the old one's late success moves nothing", async () => {
+  act("one"); act("two"); act("three");
+  let release: () => void = () => {};
+  const slow: typeof fetch = async (url, init) => {
+    if (String(url).includes("/old")) await new Promise<void>(resolve => { release = resolve; });
+    return fetch(url, init);
+  };
+  const old: MonitoringSettings = { ...NO_MONITORING, webhook: { url: `${receiverUrl}/old`, secret: "whsec_" + "o".repeat(43) } };
+  const moved: MonitoringSettings = { ...NO_MONITORING, webhook: { url: `${receiverUrl}/new`, secret: "whsec_" + "n".repeat(43) } };
+  const inFlight = monitoringPass(store, old, { ...deps(), fetch: slow });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(await monitoringPass(store, moved, { ...deps(), fetch: slow })).toEqual({ webhook: 3 });
+  release();
+  expect(await inFlight).toEqual({ webhook: 0 });
+  expect(store.monitoringStatus("webhook")[0]).toMatchObject({ through: 3 });
+  const toNew = received.filter(one => one.url === "/new").flatMap(one => (JSON.parse(one.body) as { events: { action: string }[] }).events.map(event => event.action));
+  expect(toNew).toEqual(["one", "two", "three"]);
+});
+
 test("one process sends at a time", async () => {
   act("one");
   const now = new Date();
@@ -111,9 +133,18 @@ test("the folder gets the same events as JSON Lines, a file per day, readable by
   expect(await monitoringPass(store, { ...NO_MONITORING, folder: { path: folder } }, deps())).toEqual({ folder: 0 });
   expect(readFileSync(elsewhere, "utf8")).toBe("keep\n");
   expect(store.monitoringStatus("folder")[0]).toMatchObject({ failures: 1 });
+  // Nor through a folder that is itself a link.
+  const linked = join(dir, "linked-logs");
+  symlinkSync(folder, linked);
+  act("through a link");
+  expect(await monitoringPass(store, { ...NO_MONITORING, folder: { path: linked } }, deps())).toEqual({ folder: 0 });
+  expect(store.monitoringStatus("folder")[0]).toMatchObject({ lastError: "the folder is a link, not a folder" });
 });
 
 test("traces: a finished run is a span under its task's trace, and a completed task is the root; never a prompt or code", async () => {
+  const settings: MonitoringSettings = { ...NO_MONITORING, traces: { endpoint: receiverUrl, header: { name: "x-honeycomb-team", value: "key-123" } } };
+  // Set up first: traces start from now.
+  expect(await monitoringPass(store, settings, deps())).toEqual({ traces: 0 });
   store.createTask({ id: "fix-login", title: "Fix the login bug" }, new Date());
   const ref = store.refFor("built-in", "fix-login").id;
   store.placeTask(ref, "/repo/shop");
@@ -122,7 +153,6 @@ test("traces: a finished run is a span under its task's trace, and a completed t
   store.recordUsage(run, { tokensIn: 1000, tokensOut: 200, costUsd: 0.25 });
   store.finishRun(run, { outcome: "built", committed: true, now: new Date() });
   store.recordAction({ at: new Date().toISOString(), actor: "operator:alex", repo: "/repo/shop", taskId: "fix-login", runId: run, action: COMPLETION_ACTION, outcome: "checked", source: "work" });
-  const settings: MonitoringSettings = { ...NO_MONITORING, traces: { endpoint: receiverUrl, header: { name: "x-honeycomb-team", value: "key-123" } } };
   expect(await monitoringPass(store, settings, deps())).toEqual({ traces: 2 });
   expect(received[0]!.url).toBe("/v1/traces");
   expect(received[0]!.headers["x-honeycomb-team"]).toBe("key-123");
@@ -134,6 +164,37 @@ test("traces: a finished run is a span under its task's trace, and a completed t
   expect(runSpan!.parentSpanId).toBe(root!.spanId);
   expect(runSpan!.attributes.map(one => one.key)).toEqual(expect.arrayContaining(["gen_ai.usage.input_tokens", "standing_orders.cost_usd", "standing_orders.project"]));
   expect(received[0]!.body).not.toContain("Fix the login bug");
+  const cost = runSpan!.attributes.find(one => one.key === "standing_orders.cost_usd") as unknown as { value: { doubleValue?: number } };
+  expect(cost.value.doubleValue).toBe(0.25);
+});
+
+test("a failed run's span says only its outcome, never the free-text reason", async () => {
+  store.createTask({ id: "t", title: "t" }, new Date());
+  const ref = store.refFor("built-in", "t").id;
+  const run = store.startRun({ taskRef: ref, leaseId: "l1", runner: "b1", branch: "b", worktree: "/w", route: { routeDigest: "legacy", phase: "build", provider: "claude", model: null, chosen: "legacy" }, now: new Date() });
+  store.finishRun(run, { outcome: "failed", reason: "/Users/someone/.config/standing-orders/worktrees/secret-path exploded", now: new Date() });
+  await monitoringPass(store, { ...NO_MONITORING, traces: { endpoint: receiverUrl, header: null } }, deps());
+  // Traces start from now: nothing earlier went. The next run finishing does.
+  const later = store.startRun({ taskRef: ref, leaseId: "l2", runner: "b1", branch: "b", worktree: "/w", route: { routeDigest: "legacy", phase: "build", provider: "claude", model: null, chosen: "legacy" }, now: new Date() });
+  store.finishRun(later, { outcome: "failed", reason: "/Users/someone/private/path broke", now: new Date() });
+  await monitoringPass(store, { ...NO_MONITORING, traces: { endpoint: receiverUrl, header: null } }, deps());
+  expect(received).toHaveLength(1);
+  expect(received[0]!.body).not.toContain("/Users/someone");
+  expect(received[0]!.body).toContain('"message":"failed"');
+});
+
+test("/metrics counts each series once, and only this console's projects", () => {
+  store.createTask({ id: "a", title: "a" }, new Date());
+  const ref = store.refFor("built-in", "a").id;
+  store.placeTask(ref, "/repo/shop");
+  for (const outcome of ["built", "failed"] as const) {
+    const run = store.startRun({ taskRef: ref, leaseId: `l-${outcome}`, runner: "b1", branch: "b", worktree: "/w", route: { routeDigest: "legacy", phase: "build", provider: "claude", model: null, chosen: "legacy" }, now: new Date() });
+    store.recordUsage(run, { tokensIn: 100, tokensOut: 10 });
+    store.finishRun(run, { outcome, now: new Date() });
+  }
+  const text = prometheusMetrics(store, new Date());
+  expect(text.match(/^standing_orders_tokens_total\{role="builder",provider="claude",direction="in"\} 200$/m)).not.toBeNull();
+  expect(prometheusMetrics(store, new Date(), ["/repo/elsewhere"])).not.toMatch(/standing_orders_runs_total\{/);
 });
 
 test("settings: https only (http only to this machine), secrets kept in a 0600 file, a new webhook gets a new secret shown once", () => {
@@ -151,6 +212,27 @@ test("settings: https only (http only to this machine), secrets kept in a 0600 f
   expect(rotated.ok && rotated.secret !== null && rotated.secret !== saved.secret).toBe(true);
   expect(saveMonitoring(dir, { webhook: "", folder: "relative/path", tracesEndpoint: "", headerName: "", headerValue: "", rotate: false }, NO_MONITORING).ok).toBe(false);
   expect(saveMonitoring(dir, { webhook: "", folder: "", tracesEndpoint: "https://otel.example.com", headerName: "Host", headerValue: "x", rotate: false }, NO_MONITORING).ok).toBe(false);
+  // A saved key never follows the collector to another address.
+  const keyed = saveMonitoring(dir, { webhook: "", folder: "", tracesEndpoint: "https://api.honeycomb.io", headerName: "x-honeycomb-team", headerValue: "REAL-KEY", rotate: false }, NO_MONITORING);
+  if (!keyed.ok) throw new Error(keyed.said);
+  expect(saveMonitoring(dir, { webhook: "", folder: "", tracesEndpoint: "https://attacker.example", headerName: "x-honeycomb-team", headerValue: "", rotate: false }, keyed.settings)).toMatchObject({ ok: false });
+  expect(readMonitoring(dir).traces?.endpoint).toBe("https://api.honeycomb.io");
+  // Never a folder inside Standing Orders' own folder or a project.
+  expect(saveMonitoring(dir, { webhook: "", folder: join(dir, "logs"), tracesEndpoint: "", headerName: "", headerValue: "", rotate: false }, NO_MONITORING)).toMatchObject({ ok: false });
+  mkdirSync(join(dir, "project"));
+  expect(saveMonitoring(join(dir, "state"), { webhook: "", folder: join(dir, "project", "logs"), tracesEndpoint: "", headerName: "", headerValue: "", rotate: false }, NO_MONITORING, [join(dir, "project")])).toMatchObject({ ok: false });
+  // The ledger hears of every change, never a value.
+  const before: MonitoringSettings = { ...NO_MONITORING, traces: { endpoint: "https://otel.example.com/a", header: { name: "k", value: "one" } } };
+  expect(monitoringChange(before, { ...NO_MONITORING, traces: { endpoint: "https://otel.example.com/b", header: { name: "k", value: "two" } } }, false))
+    .toBe("traces https://otel.example.com (k) → traces https://otel.example.com (k) (collector address changed, new header value)");
+  expect(monitoringChange(before, before, false)).toBeNull();
+});
+
+test("the settings file is fenced from agents wherever the database lives", () => {
+  const shared = join(dir, "projects");
+  mkdirSync(shared);
+  saveMonitoring(shared, { webhook: "https://logs.example.com/x", folder: "", tracesEndpoint: "", headerName: "", headerValue: "", rotate: false }, NO_MONITORING);
+  expect(agentFence({ databaseFile: join(shared, "orders.db"), worktree: null })).toContain(join(shared, "monitoring.json"));
 });
 
 test("the Monitoring page takes a step-up, shows the secret once, keeps each change in the ledger without secrets; /metrics is an operator's", async () => {

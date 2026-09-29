@@ -9,10 +9,13 @@
  * - Traces: each finished run as an OpenTelemetry span, to a collector.
  */
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { closeSync, constants, existsSync, fsyncSync, openSync, readFileSync, realpathSync, renameSync, writeSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 
 const FILE = "monitoring.json";
+
+/** Where an address points, without its path or query (a webhook may carry a key in either). */
+export const origin = (address: string) => { try { return new URL(address).origin; } catch { return "?"; } };
 
 export type MonitoringSettings = {
   webhook: { url: string; secret: string } | null;
@@ -56,9 +59,10 @@ export function readMonitoring(dir: string | null | undefined): MonitoringSettin
 
 function write(dir: string, settings: MonitoringSettings): void {
   const file = join(dir, FILE);
-  const next = `${file}.${process.pid}.tmp`;
-  writeFileSync(next, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
-  chmodSync(next, 0o600);
+  // A fresh name, made here (never a file or link already there), readable by its owner only, then swapped in.
+  const next = `${file}.${randomBytes(8).toString("hex")}.tmp`;
+  const handle = openSync(next, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  try { writeSync(handle, `${JSON.stringify(settings, null, 2)}\n`); fsyncSync(handle); } finally { closeSync(handle); }
   renameSync(next, file);
 }
 
@@ -73,7 +77,15 @@ export type MonitoringForm = { webhook: string; folder: string; tracesEndpoint: 
  * Save what the form sent. A blank field turns that destination off; a header value left blank keeps the one
  * saved. A new webhook address, or `rotate`, makes a new signing secret, handed back once as `secret`.
  */
-export function saveMonitoring(dir: string, form: MonitoringForm, previous: MonitoringSettings):
+/** A path as it really is: its nearest existing folder resolved (so /tmp and /private/tmp are one). */
+function realish(path: string): string {
+  let at = resolve(path), rest = "";
+  while (!existsSync(at) && dirname(at) !== at) { rest = join(at.slice(dirname(at).length + 1), rest); at = dirname(at); }
+  try { return join(realpathSync(at), rest); } catch { return resolve(path); }
+}
+const within = (path: string, folder: string) => path === folder || path.startsWith(`${folder}/`);
+
+export function saveMonitoring(dir: string, form: MonitoringForm, previous: MonitoringSettings, forbidden: readonly string[] = []):
   { ok: true; settings: MonitoringSettings; secret: string | null } | { ok: false; said: string } {
   let webhook: MonitoringSettings["webhook"] = null, secret: string | null = null;
   if (form.webhook.trim() !== "") {
@@ -87,6 +99,9 @@ export function saveMonitoring(dir: string, form: MonitoringForm, previous: Moni
   if (form.folder.trim() !== "") {
     const path = form.folder.trim();
     if (!isAbsolute(path) || path.length > 500 || /[\u0000-\u001f]/.test(path)) return { ok: false, said: "The folder is a full path, like /var/log/standing-orders." };
+    // Never where an agent works or Standing Orders keeps its own state: an agent could read the whole stream there.
+    const real = realish(path);
+    if ([dir, ...forbidden].some(one => within(real, realish(one)) || within(realish(one), real))) return { ok: false, said: "Choose a folder outside Standing Orders' own folder and your projects, like /var/log/standing-orders." };
     folder = { path };
   }
   let traces: MonitoringSettings["traces"] = null;
@@ -97,7 +112,9 @@ export function saveMonitoring(dir: string, form: MonitoringForm, previous: Moni
     let header: { name: string; value: string } | null = null;
     if (name !== "") {
       if (!HEADER_NAME.test(name) || RESERVED_HEADERS.has(name.toLowerCase())) return { ok: false, said: "The header name is letters, digits and dashes, like x-honeycomb-team." };
-      const value = form.headerValue.trim() !== "" ? form.headerValue.trim() : previous.traces?.header?.name === name ? previous.traces.header.value : "";
+      // A saved key stays only with the same collector (origin) and header: it never follows the address elsewhere.
+      const sameCollector = previous.traces !== null && origin(previous.traces.endpoint) === origin(endpoint) && previous.traces.header?.name === name;
+      const value = form.headerValue.trim() !== "" ? form.headerValue.trim() : sameCollector ? previous.traces!.header!.value : "";
       if (value === "" || value.length > 2000 || /[\u0000-\u001f]/.test(value)) return { ok: false, said: "Enter the header's value (the collector's API key)." };
       header = { name, value };
     }
@@ -108,8 +125,6 @@ export function saveMonitoring(dir: string, form: MonitoringForm, previous: Moni
   return { ok: true, settings, secret };
 }
 
-/** Where an address points, without its path or query (a webhook may carry a key in either). */
-const origin = (address: string) => { try { return new URL(address).origin; } catch { return "?"; } };
 
 /** The change in words for the ledger: where things go and header names, never a secret or a full address. */
 export function monitoringWords(settings: MonitoringSettings): string {
@@ -119,4 +134,17 @@ export function monitoringWords(settings: MonitoringSettings): string {
     settings.traces === null ? null : `traces ${origin(settings.traces.endpoint)}${settings.traces.header === null ? "" : ` (${settings.traces.header.name})`}`,
   ].filter((one): one is string => one !== null);
   return parts.length === 0 ? "off" : parts.join("; ");
+}
+
+/** A change for the ledger: before → after, and what changed that the words alone don't show (never the values). */
+export function monitoringChange(before: MonitoringSettings, after: MonitoringSettings, newSecret: boolean): string | null {
+  const notes = [
+    before.webhook !== null && after.webhook !== null && before.webhook.url !== after.webhook.url && origin(before.webhook.url) === origin(after.webhook.url) ? "webhook address changed" : null,
+    newSecret && before.webhook !== null && after.webhook !== null && before.webhook.url === after.webhook.url ? "new signing secret" : null,
+    before.traces !== null && after.traces !== null && before.traces.endpoint !== after.traces.endpoint && origin(before.traces.endpoint) === origin(after.traces.endpoint) ? "collector address changed" : null,
+    before.traces?.header != null && after.traces?.header != null && before.traces.header.name === after.traces.header.name && before.traces.header.value !== after.traces.header.value ? "new header value" : null,
+  ].filter((one): one is string => one !== null);
+  const words = { before: monitoringWords(before), after: monitoringWords(after) };
+  if (words.before === words.after && notes.length === 0) return null;
+  return `${words.before} → ${words.after}${notes.length === 0 ? "" : ` (${notes.join(", ")})`}`;
 }

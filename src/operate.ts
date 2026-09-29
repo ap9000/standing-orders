@@ -5,7 +5,7 @@ import { evidencePack, exportDay, ledgerExportChunks, standaloneEvidenceHtml, ty
 import { matchesOutsideCheckpoint } from "./ledger-chain.js";
 import { bytesWords, storageReport } from "./storage.js";
 import { packageVersion, startMonitoring } from "./monitoring.js";
-import { readMonitoring } from "./monitoring-settings.js";
+import { origin, readMonitoring } from "./monitoring-settings.js";
 import { logEvent } from "./log.js";
 import { advanceFlows } from "./flow-engine.js";
 import { readHooksBase, runFlowTriggers, type TriggerIo } from "./flow-triggers.js";
@@ -985,10 +985,11 @@ async function dispatch(
       // Where the audit stream and traces go, and how each destination is doing. Settings → Monitoring changes it.
       const settings = readMonitoring(dirname(context.databaseFile));
       const head = context.store.ledgerHeadId();
+      // Origins only: an address's path or query may carry a key.
       const destinations = [
-        ...(settings.webhook === null ? [] : [{ sink: "webhook", to: settings.webhook.url }]),
+        ...(settings.webhook === null ? [] : [{ sink: "webhook", to: origin(settings.webhook.url) }]),
         ...(settings.folder === null ? [] : [{ sink: "folder", to: settings.folder.path }]),
-        ...(settings.traces === null ? [] : [{ sink: "traces", to: settings.traces.endpoint }]),
+        ...(settings.traces === null ? [] : [{ sink: "traces", to: origin(settings.traces.endpoint) }]),
       ].map(one => ({ ...one, status: context.store.monitoringStatus(one.sink)[0] ?? null }));
       return succeed(context.write, context.json, "monitoring", { destinations, ledgerHead: head }, () => destinations.length === 0 ? ["Monitoring is off. Settings → Monitoring sets it up."] :
         destinations.map(one => `${one.sink.padEnd(8)} ${one.to} — ${one.status === null ? "starting" : one.status.failures > 0 ? `failing: ${one.status.lastError ?? "?"}` : `sent through #${one.status.through}${one.sink === "traces" ? "" : ` (${Math.max(0, head - one.status.through)} to go)`}`}`));
