@@ -13,12 +13,12 @@ import { join } from "node:path";
 import { openStore, type Store } from "./store.js";
 import { addApprover } from "./scope.js";
 import { createDecisionServer } from "./serve.js";
-import { priceFor, spendItems, monthOf } from "./spend.js";
+import { billingOf, claudeBillingFrom, priceFor, spendItems, monthOf } from "./spend.js";
 import { budgetAlertPass } from "./budget-alerts.js";
 import { teammateReady } from "./teammate-work.js";
 import { runOperate } from "./operate.js";
 import { setAuthMode } from "./keys.js";
-import { claudeLimitsOf, codexLimitsOf, noteLimits, setLimitSink } from "./provider-limits.js";
+import { claudeAccountOf, claudeLimitsOf, codexLimitsOf, noteLimits, pushLimitSink } from "./provider-limits.js";
 import { limitsView } from "./limits-ui.js";
 import { runClaudeStreamJsonl } from "./exec.js";
 
@@ -41,7 +41,8 @@ beforeEach(() => {
   seen.run("claude", "claude-sonnet-5", "Claude Sonnet 5", 3, 15, "2026-05-01T00:00:00.000Z", at, at);
   seen.run("claude", "claude-sonnet-5-5", "Claude Sonnet 5.5", 2, 10, "2026-08-01T00:00:00.000Z", at, at);
 });
-afterEach(() => { setLimitSink(null); store.close(); process.env["HOME"] = home; rmSync(dir, { recursive: true, force: true }); });
+let dropSink = () => {};
+afterEach(() => { dropSink(); store.close(); process.env["HOME"] = home; rmSync(dir, { recursive: true, force: true }); });
 
 const legacy = { routeDigest: "legacy", phase: "build" as const, provider: "claude", model: null, chosen: "legacy" as const };
 let serial = 0;
@@ -89,9 +90,11 @@ test("subscription work is $0 and never waits on a budget; how a run was billed 
   store.setBudget({ scope: "installation", key: "*", limitMicrousd: 5_000_000, hardStop: true }, "alex", NOW);
   const subject = store.budgetSubject(store.lookupRef(plan.id)!.id);
   const gate = store.budgetGate(NOW);
-  expect(gate({ ...subject, providers: ["claude"] }).over).toBeNull();
-  expect(gate({ ...subject, providers: ["codex"] }).over).toMatchObject({ scope: "installation", percent: 200 });
-  expect(gate({ ...subject, providers: ["claude", "codex"] }).over).not.toBeNull();
+  expect(gate({ ...subject, agents: store.agentsFor(["claude"]) }).over).toBeNull();
+  expect(gate({ ...subject, agents: store.agentsFor(["codex"]) })).toMatchObject({ why: "used-up", over: { scope: "installation", percent: 200 } });
+  expect(gate({ ...subject, agents: store.agentsFor(["claude", "codex"]) }).over).not.toBeNull();
+  // A fallback pinned to a key is a key, whatever the setting says.
+  expect(gate({ ...subject, agents: [{ provider: "claude", billing: "api-key" }] })).toMatchObject({ why: "used-up" });
   // A chat on the plan starts; one on a key waits.
   const chat = (provider: "claude-subscription" | "openrouter-api") =>
     store.openChatTurn({ approver: "alex", credentialKey: provider, provider, model: "m", reservedMicrousd: 1, dailyTurns: 99, weeklyCeilingMicrousd: 99_000_000, deadlineMs: 1000 }, NOW);
@@ -101,6 +104,37 @@ test("subscription work is $0 and never waits on a budget; how a run was billed 
   setAuthMode("claude", "api-key");
   store.recordUsage(plan.run, { costUsd: 6 });
   expect(spendOf(plan.run)).toMatchObject({ microusd: 0, source: "subscription" });
+});
+
+test("billing follows what the CLI did: a key source, a cloud model or Codex's key account is a key; key work that can't be priced waits", () => {
+  setAuthMode("claude", "subscription");
+  setAuthMode("codex", "subscription");
+  expect(claudeBillingFrom({ keySource: "none", model: "claude-sonnet-5", planWindows: true })).toBe("subscription");
+  expect(claudeBillingFrom({ keySource: "ANTHROPIC_API_KEY", model: null, planWindows: false })).toBe("api-key");
+  expect(claudeBillingFrom({ keySource: "apiKeyHelper", model: null, planWindows: true })).toBe("api-key");
+  expect(claudeBillingFrom({ keySource: "none", model: "us.anthropic.claude-sonnet-5-v1:0", planWindows: false })).toBe("api-key");
+  expect(claudeBillingFrom({ keySource: "none", model: "claude-sonnet-5@20260101", planWindows: false })).toBe("api-key");
+  expect(claudeBillingFrom({ keySource: null, model: null, planWindows: false })).toBeNull();
+  // A run's own evidence is fixed before its usage is priced, and wins over the mode stamped after it.
+  const keyed = work({ name: "alex", kind: "person" }, {});
+  store.fixRunBilling(keyed.run, "api-key", NOW);
+  store.recordUsage(keyed.run, { costUsd: 3 });
+  store.stampTerminalClass(keyed.run, "subscription", "unknown");
+  expect(store.handle.prepare("SELECT microusd, source, billing FROM run_spend WHERE run = ?").get(keyed.run)).toEqual({ microusd: 3_000_000, source: "reported", billing: "api-key" });
+  // Codex seen on a key account bills its key, though Standing Orders is set to its plan.
+  expect(billingOf("codex", store.handle)).toBe("subscription");
+  store.recordProviderLimits({ provider: "codex", plan: null, windows: [], partial: true, billing: "api-key" }, NOW);
+  expect(billingOf("codex", store.handle)).toBe("api-key");
+  expect(billingOf("codex")).toBe("subscription");
+  // A Claude stream's first line says how it bills.
+  expect(claudeAccountOf({ type: "system", subtype: "init", apiKeySource: "apiKeyHelper", model: "claude-sonnet-5" })).toMatchObject({ provider: "claude", billing: "api-key", windows: [] });
+  // Gemini on a key with no catalogue prices can't be priced: a covering budget holds it rather than count it free.
+  store.setBudget({ scope: "person", key: "alex", limitMicrousd: 100_000_000, hardStop: true }, "alex", NOW);
+  const subject = { project: REPO, person: "alex", teammate: null };
+  expect(store.budgetGate(NOW)({ ...subject, agents: [{ provider: "gemini", billing: "api-key" }] })).toMatchObject({ why: "unpriced", unpricedProvider: "gemini" });
+  expect(store.budgetGate(NOW)({ ...subject, agents: [{ provider: "claude", billing: "api-key" }] }).over).toBeNull();
+  expect(store.budgetGate(NOW)({ ...subject, agents: [{ provider: "gemini", billing: "subscription" }] }).over).toBeNull();
+  expect(store.budgetGate(NOW)({ project: "/elsewhere", person: "sam", teammate: null, agents: [{ provider: "gemini", billing: "api-key" }] }).over).toBeNull();
 });
 
 test("spend counts toward the project, the person who filed it (or the person behind a coordinator), and a teammate that filed it", () => {
@@ -268,7 +302,7 @@ test("a plan's windows: Claude says them each turn, Codex when asked; the latest
   expect(claudeLimitsOf(event)).toEqual({ provider: "claude", plan: null, windows: [
     { window: "five_hour", usedPercent: 48, windowMinutes: 300, resetsAt: "2026-09-29T04:10:00.000Z", reached: false },
     { window: "seven_day", usedPercent: 40, windowMinutes: 10080, resetsAt: "2026-10-03T07:00:00.000Z", reached: false },
-  ] });
+  ], billing: "subscription" });
   expect(claudeLimitsOf({ type: "assistant" })).toBeNull();
   expect(claudeLimitsOf({ type: "rate_limit_event", rate_limit_info: { status: "rejected", rateLimitType: "five_hour", resetsAt: 1790655000 } })?.windows[0]).toMatchObject({ usedPercent: 100, reached: true });
   // As Codex 0.156's app server answers `account/rateLimits/read`.
@@ -277,7 +311,7 @@ test("a plan's windows: Claude says them each turn, Codex when asked; the latest
 
   // A real Claude stream reaches the store through the sink the command line sets.
   const read = new Date("2026-09-28T23:00:00.000Z");
-  setLimitSink(reading => store.recordProviderLimits(reading, read));
+  dropSink = pushLimitSink(reading => store.recordProviderLimits(reading, read));
   const line = JSON.stringify(event);
   await runClaudeStreamJsonl(process.execPath, ["-e", `process.stdout.write(${JSON.stringify(line)} + "\\n" + JSON.stringify({ type: "result", subtype: "success", result: "ok", session_id: "s" }) + "\\n")`], { timeoutMs: 15_000 });
   noteLimits(codexLimitsOf({ rateLimits: { primary: { usedPercent: 85, windowDurationMins: 10080, resetsAt: 1791129619 }, planType: "pro" } }));
@@ -299,4 +333,24 @@ test("a plan's windows: Claude says them each turn, Codex when asked; the latest
   const later = limitsView(store.providerLimits(), [], { project: String, teammate: String }, new Date("2026-09-29T03:00:00.000Z"))!;
   expect(later.tiles[0]).toMatchObject({ value: "0", detail: "New window" });
   expect(limitsView([], [], { project: String, teammate: String }, NOW)).toBeNull();
+
+  // Odd lines: a window named like an object's own property still reads; a bare "rejected" names one window and
+  // leaves the others; Codex's reached reason marks its fullest window; an internal plan name isn't shown.
+  expect(claudeLimitsOf({ type: "rate_limit_event", rate_limit_info: { unifiedWindows: { constructor: { utilization: 0.1 } } } })?.windows[0]).toMatchObject({ window: "constructor", windowMinutes: null });
+  store.recordProviderLimits(claudeLimitsOf({ type: "rate_limit_event", rate_limit_info: { unifiedWindows: { five_hour: { utilization: 0.2 }, seven_day: { utilization: 0.3 } } } })!, read);
+  store.recordProviderLimits(claudeLimitsOf({ type: "rate_limit_event", rate_limit_info: { status: "rejected", rateLimitType: "five_hour" } })!, read);
+  expect(store.providerLimits().filter(one => one.provider === "claude").map(one => `${one.window}:${one.usedPercent}`)).toEqual(["five_hour:100", "seven_day:30"]);
+  const codex = codexLimitsOf({ rateLimits: { primary: { usedPercent: 99, windowDurationMins: 300 }, secondary: { usedPercent: 40, windowDurationMins: 10080 }, rateLimitReachedType: "rate_limit_reached", planType: "self_serve_business_usage_based" } })!;
+  expect(codex.windows.map(one => one.reached)).toEqual([true, false]);
+  expect(limitsView(codex.windows.map(one => ({ ...one, provider: "codex", plan: codex.plan, observedAt: NOW.toISOString() })), [], { project: String, teammate: String }, NOW)!.tiles[0]!.name).toBe("Codex");
+  // A command that ends inside a longer one leaves the longer one's sink in place.
+  const seen: string[] = [];
+  const outer = pushLimitSink(reading => seen.push(`outer:${reading.provider}`));
+  const inner = pushLimitSink(reading => seen.push(`inner:${reading.provider}`));
+  noteLimits(codex);
+  inner();
+  noteLimits(codex);
+  outer();
+  noteLimits(codex);
+  expect(seen).toEqual(["inner:codex", "outer:codex"]);
 });

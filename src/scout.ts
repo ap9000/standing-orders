@@ -47,6 +47,8 @@ const DEFAULT_SCOUT_TURNS = CLAUDE_LIMITS.maxTurns;
 const DEFAULT_PULSE_MS = 60_000;
 
 export type ScoutRequest = {
+  /** v105: what's left of a monthly budget this API-key work counts toward (the CLI's own cap), when one does. */
+  maxBudgetUsd?: number;
   taskId: string;
   taskTitle: string;
   /** The approved scope's goal — the question the scout answers. */
@@ -251,6 +253,7 @@ export async function scout(store: Store, request: ScoutRequest): Promise<ScoutO
         permissionMode: request.permissionMode ?? "plan",
         skipPermissions: false,
         resumeSession: null,
+        ...(request.maxBudgetUsd === undefined ? {} : { maxBudgetUsd: request.maxBudgetUsd }),
         ...(auditOf(request.provider ?? "claude").sessionIdentity === "minted" ? { startSessionId: randomUUID() } : {}),
       },
       {

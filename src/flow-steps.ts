@@ -88,6 +88,9 @@ const LOG_CHARS = 64_000;
 
 /** Run every due check and update in one project, then move each card on. */
 export async function runFlowSteps(store: Store, repo: string, now: Date, io: StepIo): Promise<StepPass> {
+  // v105: one budget gate a pass, built only if a Sort card is waiting.
+  let gate: ReturnType<Store["budgetGate"]> | null = null;
+  const budgetGate: ReturnType<Store["budgetGate"]> = work => (gate ??= store.budgetGate(now))(work);
   const pass: StepPass = { ran: 0, problems: [] };
   // A step left running long past any time limit had its worker stop: it may try again.
   for (const stale of store.staleFlowSteps(new Date(now.getTime() - 75 * 60_000))) store.finishFlowStep(stale.card, stale.entry, { state: "waiting", result: "Interrupted; trying again.", nextAt: now.toISOString() }, now);
@@ -117,7 +120,7 @@ export async function runFlowSteps(store: Store, repo: string, now: Date, io: St
       continue;
     }
     // v105: sorting spends the key's credit: a used-up budget for this project (or everything) holds it.
-    const overBudget = stage.kind === "sort" ? store.budgetGate(now)({ project: repo, person: null, teammate: null, providers: ["openrouter"] }).over : null;
+    const overBudget = stage.kind === "sort" ? budgetGate({ project: repo, person: null, teammate: null, agents: [{ provider: "openrouter", billing: "api-key" }] }).over : null;
     if (overBudget !== null) {
       const waiting = `${budgetLabel(overBudget)} budget is used up this month. Raise it on Spend to sort again.`;
       if (card.waiting !== waiting) store.updateFlowCard(card.id, { waiting }, now);

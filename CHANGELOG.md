@@ -6,10 +6,13 @@
   counts as $0: what binds it is the plan's usage windows, which Tasks now
   shows as tiles (Claude's 5-hour and weekly windows as Claude reports them
   on every turn, Codex's as its app server answers every five minutes), each
-  with when it resets, amber from 80 % and red when used up. Work billed to
-  an API key is priced: what the provider reported, or its tokens at the
-  model's price in Settings → Models (the provider's highest listed price
-  when the model isn't listed), frozen when the run settles. The Spend page
+  with when it resets, amber from 80 % and red when used up. How work is
+  billed follows what the CLI actually did (Claude's key source on each run,
+  Codex's account), not only the setting. Work billed to an API key is
+  priced: what the provider reported, or its tokens at the model's price in
+  Settings → Models (the provider's highest listed price when the model
+  isn't listed), frozen when the run settles; key work that can't be priced
+  at all waits under a budget until prices are loaded. The Spend page
   (and `standing-orders spend`) shows each month by project, person,
   teammate and model, with a CSV. Monthly budgets for the whole
   installation, a project, a person or an AI teammate alert at 50, 80 and

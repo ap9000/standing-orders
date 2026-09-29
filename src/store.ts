@@ -95,7 +95,7 @@ import { LEDGER_SCHEMA, LEDGER_TABLE, LEDGER_V54_COLUMNS, LEDGER_V54_TABLE, inst
 import { PLAN_AUTO_SCHEMA } from "./plan-auto.js";
 import { RECIPE_SCHEMA } from "./recipes.js";
 import type { LimitReading, LimitWindow } from "./provider-limits.js";
-import { SPEND_SCHEMA, billingOf, budgetStates, countsToward, filersOf, monthOf, priceWork, spendItems, teammateFilers, usd, type Billing, type Budget, type BudgetScope, type BudgetState, type SpendItem } from "./spend.js";
+import { SPEND_SCHEMA, billingOf, budgetStates, canPrice, countsToward, filersOf, monthOf, priceWork, spendItems, teammateFilers, usd, type Billing, type Budget, type BudgetAgent, type BudgetHold, type BudgetScope, type BudgetState, type SpendItem } from "./spend.js";
 import { IN_RANGE, LEDGER_CHAIN_SCHEMA, safeWhole, sealLedger, verifyLedgerChain, type LedgerChainReport, type VerifiedHead } from "./ledger-chain.js";
 import { NO_RULES, filerFor, isProtectedWork, protectedChanges, rulesWords, type ApprovalGate, type ApprovalRules, type ApproverKind, type Filer, type FilerKind } from "./approval-policy.js";
 
@@ -16925,7 +16925,7 @@ export class Store {
         .get(args.credentialKey);
       if (latched !== undefined) return { ok: false as const, reason: "latched" as const };
       // v105: a monthly budget this person's spend counts toward, used up (a subscription chat costs nothing extra).
-      if (this.budgetGate(now)({ project: null, person: args.approver, teammate: null, providers: [args.provider] }).over !== null) return { ok: false as const, reason: "monthly-budget" as const };
+      if (this.budgetGate(now)({ project: null, person: args.approver, teammate: null, agents: this.agentsFor([args.provider]) }).over !== null) return { ok: false as const, reason: "monthly-budget" as const };
       const live = this.db
         .prepare("SELECT 1 AS hit FROM chat_turn WHERE approver = ? AND state IN ('queued','running') LIMIT 1")
         .get(args.approver);
@@ -19027,12 +19027,12 @@ export class Store {
     if (row === undefined) return;
     // How the run is billed is fixed the first time it's settled (its chain entry's, or the provider's login or key).
     const billing: Billing = row["billing"] === "subscription" || row["billing"] === "api-key" ? row["billing"]
-      : row["auth_mode"] === "subscription" || row["auth_mode"] === "api-key" ? row["auth_mode"] : billingOf(String(row["provider"]));
+      : row["auth_mode"] === "subscription" || row["auth_mode"] === "api-key" ? row["auth_mode"] : billingOf(String(row["provider"]), this.db);
     const priced = priceWork(this.db, { provider: String(row["provider"]), model: row["model"] == null ? null : String(row["model"]), billing,
       costUsd: row["cost_usd"] == null ? null : Number(row["cost_usd"]), tokensIn: row["tokens_in"] == null ? null : Number(row["tokens_in"]), tokensOut: row["tokens_out"] == null ? null : Number(row["tokens_out"]) });
     this.db.prepare(`INSERT INTO run_spend (run, microusd, source, billing, price_model, input_usd, output_usd, priced_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(run) DO UPDATE SET microusd = excluded.microusd, source = excluded.source, price_model = excluded.price_model, input_usd = excluded.input_usd, output_usd = excluded.output_usd, priced_at = excluded.priced_at`)
-      .run(id, priced.microusd, priced.source, billing, priced.price?.model ?? null, priced.price?.inputUsd ?? null, priced.price?.outputUsd ?? null, now.toISOString());
+      .run(id, priced.microusd, priced.source, billing, priced.price?.model ?? null, priced.price?.inputUsd ?? null, priced.price?.outputUsd ?? null, now.toISOString());    this.spendCache = null;
   }
 
   // ---- Budgets (v105) -------------------------------------------------------
@@ -19047,6 +19047,7 @@ export class Store {
 
   /** Set a monthly budget (replacing the one for that scope); the ledger keeps before → after. */
   setBudget(budget: { scope: BudgetScope; key: string; limitMicrousd: number; hardStop: boolean }, by: string, now: Date): Budget {
+    this.spendCache = null;
     return this.transact(() => {
       const key = budget.scope === "installation" ? "*" : budget.key;
       const before = this.budgets().find(one => one.scope === budget.scope && one.key === key) ?? null;
@@ -19064,6 +19065,7 @@ export class Store {
   }
 
   removeBudget(id: number, by: string, now: Date): boolean {
+    this.spendCache = null;
     return this.transact(() => {
       const before = this.budgets().find(one => one.id === id);
       if (before === undefined) return false;
@@ -19076,8 +19078,10 @@ export class Store {
   /** v105: keep a provider's latest reading of its plan's usage windows (a window it no longer reports is dropped). */
   recordProviderLimits(reading: LimitReading, now: Date): void {
     this.transact(() => {
+      if (reading.billing !== undefined) this.recordProviderBilling(reading.provider, reading.billing, now);
+      if (reading.windows.length === 0) return;
       const names = reading.windows.map(one => one.window);
-      this.db.prepare(`DELETE FROM provider_limit WHERE provider = ? AND window NOT IN (${names.map(() => "?").join(", ")})`).run(reading.provider, ...names);
+      if (reading.partial !== true) this.db.prepare(`DELETE FROM provider_limit WHERE provider = ? AND window NOT IN (${names.map(() => "?").join(", ")})`).run(reading.provider, ...names);
       const put = this.db.prepare(`INSERT INTO provider_limit (provider, window, used_percent, window_minutes, resets_at, reached, plan, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(provider, window) DO UPDATE SET used_percent = excluded.used_percent, window_minutes = excluded.window_minutes, resets_at = excluded.resets_at,
           reached = excluded.reached, plan = COALESCE(excluded.plan, provider_limit.plan), observed_at = excluded.observed_at`);
@@ -19101,22 +19105,70 @@ export class Store {
     return { month: month.name, items, budgets: budgetStates(this.budgets(), items) };
   }
 
-  /** A gate for this moment: given what a piece of new work would count toward, the first hard-stop budget it's over,
-   * or null. Built once and asked many times (a tick asks for every task). Budgets are dollars, so only work billed to
-   * an API key is held: with `providers` given, work that runs only on subscriptions (a login costs nothing extra)
-   * passes. */
-  budgetGate(now: Date): (work: { project: string | null; person: string | null; teammate: number | null; providers?: readonly string[] }) => { over: BudgetState | null; remainingMicrousd: number | null } {
+  /** The month's spend as a gate reads it: kept for a few seconds (a run's settling clears it), so a chat turn or a
+   * tick asking again doesn't re-read the month. */
+  private spendCache: { month: string; at: number; value: { month: string; items: SpendItem[]; budgets: BudgetState[] } } | null = null;
+  monthSpendCached(now: Date): { month: string; items: SpendItem[]; budgets: BudgetState[] } {
+    const month = monthOf(now).name;
+    const cached = this.spendCache;
+    if (cached !== null && cached.month === month && Math.abs(Date.now() - cached.at) < 5_000) return cached.value;
+    const value = this.monthSpend(now);
+    this.spendCache = { month, at: Date.now(), value };
+    return value;
+  }
+
+  /** A gate for this moment: given what a piece of new work would count toward (and, with `agents`, which providers
+   * it runs on, billed how), the hard-stop budget that holds it, or none. Budgets are dollars: work that runs only on
+   * plans passes; API work waits when a covering budget is used up, or when it can't be priced at all (never free).
+   * Built once and asked many times; the month's spend behind it is cached for a few seconds. */
+  budgetGate(now: Date): (work: { project: string | null; person: string | null; teammate: number | null; agents?: readonly BudgetAgent[] }) => BudgetHold {
+    const none: BudgetHold = { over: null, why: null, unpricedProvider: null, remainingMicrousd: null };
     const hard = this.budgets().filter(one => one.hardStop);
-    if (hard.length === 0) return () => ({ over: null, remainingMicrousd: null });
-    const states = this.monthSpend(now).budgets.filter(one => one.hardStop);
+    if (hard.length === 0) return () => none;
+    const states = this.monthSpendCached(now).budgets.filter(one => one.hardStop);
+    const priceable = new Map<string, boolean>();
     return work => {
-      if (work.providers !== undefined && work.providers.every(provider => billingOf(provider) === "subscription")) return { over: null, remainingMicrousd: null };
+      const keyed = work.agents?.filter(agent => agent.billing === "api-key");
+      if (keyed !== undefined && keyed.length === 0) return none;
       const item: SpendItem = { project: work.project, person: work.person, teammate: work.teammate, kind: "run", at: "", microusd: 0, source: "reported", provider: "", model: null, tokensIn: null, tokensOut: null, taskId: null, runId: null, authMode: null };
       const mine = states.filter(budget => countsToward(item, budget));
+      if (mine.length === 0) return none;
+      const remaining = Math.min(...mine.map(budget => budget.limitMicrousd - budget.spentMicrousd));
       const over = mine.find(budget => budget.spentMicrousd >= budget.limitMicrousd) ?? null;
-      const remaining = mine.length === 0 ? null : Math.min(...mine.map(budget => budget.limitMicrousd - budget.spentMicrousd));
-      return { over, remainingMicrousd: remaining };
+      if (over !== null) return { over, why: "used-up", unpricedProvider: null, remainingMicrousd: remaining };
+      const blind = keyed?.find(agent => {
+        if (!priceable.has(agent.provider)) priceable.set(agent.provider, canPrice(this.db, agent.provider));
+        return !priceable.get(agent.provider);
+      });
+      if (blind !== undefined) return { over: mine[0]!, why: "unpriced", unpricedProvider: blind.provider, remainingMicrousd: remaining };
+      return { ...none, remainingMicrousd: remaining };
     };
+  }
+
+  /** How each provider would bill new work now (see spend.billingOf). */
+  agentsFor(providers: readonly string[]): BudgetAgent[] {
+    return [...new Set(providers)].map(provider => ({ provider, billing: billingOf(provider, this.db) }));
+  }
+
+  /** v105: how a provider's CLI was seen billing (a Claude stream's key source, Codex's account mode). */
+  recordProviderBilling(provider: string, billing: Billing, now: Date): void {
+    this.db.prepare(`INSERT INTO provider_account (provider, billing, observed_at) VALUES (?, ?, ?)
+      ON CONFLICT(provider) DO UPDATE SET billing = excluded.billing, observed_at = excluded.observed_at`).run(provider, billing, now.toISOString());
+    this.spendCache = null;
+  }
+
+  /** How a run was billed: its evidence, or the mode it was admitted under (a pinned chain entry's); null when unknown. */
+  runBilling(id: number): Billing | null {
+    const row = this.db.prepare("SELECT s.billing, run.auth_mode FROM run LEFT JOIN run_spend s ON s.run = run.id WHERE run.id = ?").get(id);
+    const one = row?.["billing"] ?? row?.["auth_mode"];
+    return one === "subscription" || one === "api-key" ? one : null;
+  }
+
+  /** v105: how a run was really billed, from its own evidence, fixed before its usage is priced. */
+  fixRunBilling(id: number, billing: Billing, now: Date): void {
+    this.db.prepare(`INSERT INTO run_spend (run, microusd, source, billing, priced_at) VALUES (?, NULL, 'unpriced', ?, ?)
+      ON CONFLICT(run) DO UPDATE SET billing = excluded.billing`).run(id, billing, now.toISOString());
+    this.settleRunSpend(id, now);
   }
 
   /** What a task's new work counts toward: its project, its filer (a person, or the person behind a coordinator), and
@@ -23042,7 +23094,7 @@ export class Store {
           WHEN 'task' THEN (SELECT r.repo FROM task_ref r WHERE r.external_id = th.scope_key ORDER BY r.id DESC LIMIT 1) END AS project
         FROM mate_thread th WHERE th.id = ?`).get(args.thread);
       if (this.budgetGate(now)({ project: threadScope?.["project"] == null ? null : String(threadScope["project"]), person: args.approver, teammate: null,
-        ...(args.provider === undefined ? {} : { providers: [args.provider] }) }).over !== null) {
+        ...(args.provider === undefined ? {} : { agents: this.agentsFor([args.provider]) }) }).over !== null) {
         return { ok: false as const, reason: "monthly-budget" as const };
       }
       const latched = this.db

@@ -19,11 +19,39 @@ import type { ProviderId } from "./provider.js";
 export type PriceSource = "reported" | "estimated" | "unpriced" | "subscription";
 export type Billing = "subscription" | "api-key";
 
-/** How a provider's work is billed right now: its login (a subscription) or an API key. */
-export function billingOf(provider: string): Billing {
-  if (provider.endsWith("-subscription")) return "subscription";
+/** How a provider's work is billed right now: an API key when Standing Orders is set to use one, or when the CLI
+ * itself was last seen billing a key (a key helper, a Console login, Bedrock or Vertex, `codex login --with-api-key`);
+ * otherwise its plan. `db` supplies what was seen (provider_account); without it, the setting alone. */
+export function billingOf(provider: string, db?: Database): Billing {
+  const base = provider.replace(/-(subscription|api)$/, "");
   if (provider.endsWith("-api")) return "api-key";
-  return Object.hasOwn(SUBSCRIPTION_CAPABLE, provider) ? readAuthMode(provider as ProviderId) : "api-key";
+  const setting: Billing = provider.endsWith("-subscription") ? "subscription"
+    : Object.hasOwn(SUBSCRIPTION_CAPABLE, provider) ? readAuthMode(provider as ProviderId) : "api-key";
+  if (setting === "api-key" || db === undefined) return setting;
+  return seenBilling(db, base) ?? setting;
+}
+
+/** How a provider's CLI was last seen billing (provider_account), or null. */
+export function seenBilling(db: Database, provider: string): Billing | null {
+  const row = db.prepare("SELECT billing FROM provider_account WHERE provider = ?").get(provider);
+  return row?.["billing"] === "api-key" || row?.["billing"] === "subscription" ? row["billing"] : null;
+}
+
+/** How a Claude turn was really billed, from its own stream: a key source other than its sign-in ("none"), or a cloud
+ * model id (Bedrock, Vertex), is a key; the plan's windows reported, or its sign-in, is the plan. Null when the stream
+ * said neither. */
+export function claudeBillingFrom(seen: { keySource: string | null; model: string | null; planWindows: boolean }): Billing | null {
+  if (seen.keySource !== null && seen.keySource !== "none") return "api-key";
+  if (seen.model !== null && /^arn:|(^|\.)anthropic\.|@/.test(seen.model)) return "api-key";
+  if (seen.planWindows || seen.keySource === "none") return "subscription";
+  return null;
+}
+
+/** Providers whose own output says what a turn cost (Claude's total_cost_usd; OpenRouter's usage.cost). */
+const REPORTS_COST = new Set(["claude", "openrouter", "anthropic-api", "openrouter-api"]);
+/** Whether API work on this provider can be priced: it reports its cost, or the catalogue has its prices. */
+export function canPrice(db: Database, provider: string): boolean {
+  return REPORTS_COST.has(provider) || ceilingPriceFor(db, provider) !== null;
 }
 export type Price = { inputUsd: number; outputUsd: number; model: string };
 
@@ -107,6 +135,11 @@ CREATE TABLE IF NOT EXISTS provider_limit (
   observed_at    TEXT NOT NULL,
   PRIMARY KEY (provider, window)
 );
+CREATE TABLE IF NOT EXISTS provider_account (
+  provider    TEXT PRIMARY KEY,
+  billing     TEXT NOT NULL CHECK (billing IN ('subscription', 'api-key')),
+  observed_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS chat_turn_created ON chat_turn (created_at);
 CREATE INDEX IF NOT EXISTS mate_turn_created ON mate_turn (created_at);
 CREATE INDEX IF NOT EXISTS teammate_turn_at ON teammate_turn (at);
@@ -181,13 +214,13 @@ export function filersOf(db: Database): (taskRef: number) => { repo: string | nu
 
 /** Every piece of spend in [from, to): runs (by when they started), teammate turns and chat turns. `modeOf` says how
  * a provider bills when a record doesn't (older rows): its current login or key. */
-export function spendItems(db: Database, from: string, to: string, modeOf: (provider: string) => Billing = billingOf): SpendItem[] {
+export function spendItems(db: Database, from: string, to: string, modeOf: (provider: string) => Billing = provider => billingOf(provider, db)): SpendItem[] {
   const teammateOf = teammateFilers(db);
   const filerOf = filersOf(db);
   const text = (value: unknown) => value == null ? null : String(value);
   const count = (value: unknown) => value == null ? null : Number(value);
   const runs = db.prepare(`SELECT run.id, run.task_ref, run.provider, run.model, run.cost_usd, run.tokens_in, run.tokens_out, run.started_at, run.auth_mode,
-      r.external_id AS task, r.repo, s.microusd, s.source, s.billing
+      r.external_id AS task, r.repo, r.filed_by, r.filed_by_kind, r.revision_of, s.microusd, s.source, s.billing
     FROM run JOIN task_ref r ON r.id = run.task_ref LEFT JOIN run_spend s ON s.run = run.id
     WHERE run.started_at >= ? AND run.started_at < ? ORDER BY run.id`).all(from, to);
   const items: SpendItem[] = runs.map(row => {
@@ -196,7 +229,9 @@ export function spendItems(db: Database, from: string, to: string, modeOf: (prov
       : row["auth_mode"] === "subscription" || row["auth_mode"] === "api-key" ? row["auth_mode"] : modeOf(provider);
     const settled = row["source"] != null;
     const priced = settled ? null : priceWork(db, { provider, model: text(row["model"]), costUsd: count(row["cost_usd"]), tokensIn: count(row["tokens_in"]), tokensOut: count(row["tokens_out"]), billing });
-    const filer = filerOf(Number(row["task_ref"]));
+    // Most tasks name their filer; only an automation-filed revision walks to its source's.
+    const filer = row["filed_by"] == null && row["revision_of"] != null ? filerOf(Number(row["task_ref"]))
+      : { repo: text(row["repo"]), filedBy: text(row["filed_by"]), kind: text(row["filed_by_kind"]) };
     const kind = filer.kind;
     return {
       at: String(row["started_at"]), kind: "run", microusd: settled ? count(row["microusd"]) : priced!.microusd,
@@ -226,7 +261,7 @@ export function spendItems(db: Database, from: string, to: string, modeOf: (prov
         CASE th.scope_kind WHEN 'project' THEN th.scope_key WHEN 'task' THEN (SELECT r.repo FROM task_ref r WHERE r.external_id = th.scope_key ORDER BY r.id DESC LIMIT 1) END
       FROM mate_turn t LEFT JOIN mate_thread th ON th.id = t.thread WHERE t.created_at >= ? AND t.created_at < ?`).all(from, to, from, to)) {
     const provider = String(row["provider"]);
-    const subscription = provider.endsWith("-subscription");
+    const subscription = provider.endsWith("-subscription") && modeOf(provider) === "subscription";
     const settled = count(row["settled_microusd"]);
     items.push({ at: String(row["at"]), kind: "chat", microusd: subscription ? 0 : settled, source: subscription ? "subscription" : settled === null ? "unpriced" : "reported",
       project: text(row["project"]), person: text(row["approver"]), teammate: null, provider, model: text(row["model"]),
@@ -252,6 +287,22 @@ export function countsToward(item: SpendItem, budget: Pick<Budget, "scope" | "ke
 }
 
 export type BudgetState = Budget & { spentMicrousd: number; unpriced: number; percent: number };
+
+/** A piece of work's agents as a budget sees them: which provider, billed how. */
+export type BudgetAgent = { provider: string; billing: Billing };
+/** What a budget gate says: nothing holds it, or the budget it's over (used up), or the budget that covers API work it
+ * can't price (no reported cost, no catalogue prices yet: never counted as free). */
+export type BudgetHold = { over: BudgetState | null; why: "used-up" | "unpriced" | null; unpricedProvider: string | null; remainingMicrousd: number | null };
+
+const PROVIDER_WORDS: Record<string, string> = { claude: "Claude", codex: "Codex", gemini: "Gemini", openrouter: "OpenRouter" };
+/** Why work waits on a budget, in words. */
+export function budgetHoldWords(hold: BudgetHold, month: string, teammateName?: string): string {
+  if (hold.over === null) return "";
+  const label = budgetLabel(hold.over, teammateName);
+  return hold.why === "unpriced"
+    ? `${label} budget can't price ${PROVIDER_WORDS[hold.unpricedProvider ?? ""] ?? hold.unpricedProvider} work on a key yet. Open Settings → Models to load prices`
+    : `${label} budget is used up for ${month}`;
+}
 
 /** Each budget's month so far: what counted toward it, and how many pieces of work had no price. */
 export function budgetStates(budgets: readonly Budget[], items: readonly SpendItem[]): BudgetState[] {

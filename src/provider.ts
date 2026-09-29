@@ -840,8 +840,8 @@ export function safeDiagnostic(text: string): string | null {
  * what inheritance makes true by construction — an agent's shell reads its
  * process env, so a foreign key in that env is a foreign key disclosed. */
 const CREDENTIAL_ENV: Record<ProviderId, readonly string[]> = {
-  claude: ["ANTHROPIC_API_KEY"],
-  codex: ["OPENAI_API_KEY"],
+  claude: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
+  codex: ["OPENAI_API_KEY", "CODEX_API_KEY"],
   openrouter: [OPENROUTER_ENV_KEY],
   gemini: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
 };

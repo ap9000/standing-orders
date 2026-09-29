@@ -31,6 +31,7 @@ import { CHILD_DATABASE_ENV as AGENT_DATABASE_ENV, isolatedChildDatabase, remove
 import { noToolsArgs, prepareRunTools, type ToolLaunchArgs } from "./project-tools.js";
 import { realpathSync } from "node:fs";
 import { agentFence, claudeFenceSettings, linuxFenceAvailable, macosFenceAvailable, type FenceMethod } from "./agent-fence.js";
+import { billingOf, claudeBillingFrom } from "./spend.js";
 
 export type { ProviderRunner } from "./provider.js";
 
@@ -395,6 +396,7 @@ export async function invokeAgent(
   const launchArgv = tools === null ? argv : adapter.argv({ ...resolvedInvocation, toolArgv: tools.argv, fence });
   const fenced = fenceLaunch(spec.provider, fence);
   if (invocation.phase !== "review") store.recordRunFence(runId, { method: fenced.method, paths: fence.length }, clock());
+  const billingSeen: { keySource: string | null; model: string | null; planWindows: boolean } = { keySource: null, model: null, planWindows: false };
   let result: Awaited<ReturnType<typeof spawn>>;
   try {
     // Under the stop watch (v52): the run's stop row is re-read while the
@@ -404,6 +406,16 @@ export async function invokeAgent(
     result = await underStopWatch(store, runId, () => spawn(attested !== null ? attested.executable : adapter.binary, launchArgv, {
       ...(fenced.wrap.length === 0 ? {} : { fence: fenced.wrap }),
       ...runOptions,
+      // v105: how the CLI really billed this turn (its key source, its plan's windows), read off its own stream.
+      onStreamEvent: event => {
+        if (event["type"] === "system" && event["subtype"] === "init") {
+          if (typeof event["apiKeySource"] === "string") billingSeen.keySource = event["apiKeySource"].slice(0, 80);
+          if (typeof event["model"] === "string") billingSeen.model = event["model"].slice(0, 200);
+        } else if (event["type"] === "rate_limit_event") {
+          billingSeen.planWindows = true;
+        }
+        runOptions.onStreamEvent?.(event);
+      },
       owner: runOwnerTag(store, runId),
       beforeSpawn: () => store.applicableStopFor(runId) === null && store.getRun(runId)?.outcome === null,
       onSpawn: pid => {
@@ -453,6 +465,12 @@ export async function invokeAgent(
     removeAgentDatabase(isolatedDb.dir);
     tools?.cleanup();
   }
+
+  // v105: the run's billing, fixed from evidence before its usage is priced: a key it was given is a key; otherwise
+  // what the CLI said (Claude's stream) or was last seen doing (Codex's account), and the setting only when neither.
+  const evidence = spec.provider === "claude" ? claudeBillingFrom(billingSeen) : null;
+  if (evidence !== null) store.recordProviderBilling("claude", evidence, new Date());
+  store.fixRunBilling(runId, authMode === "api-key" ? "api-key" : evidence ?? billingOf(spec.provider, store.handle), new Date());
 
   const envelope = adapter.parse(result.stdout);
   // The callback is the crash-safe early stamp; the parsed envelope is the

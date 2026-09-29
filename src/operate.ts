@@ -4,10 +4,10 @@ import { rulesSummary } from "./approval-rules-ui.js";
 import { evidencePack, exportDay, ledgerExportChunks, standaloneEvidenceHtml, type LedgerExport } from "./evidence-pack.js";
 import { matchesOutsideCheckpoint } from "./ledger-chain.js";
 import { bytesWords, storageReport } from "./storage.js";
-import { budgetLabel, budgetStates, monthNamed, monthOf, spendItems, teammateNames, usd as spendUsd, type BudgetState } from "./spend.js";
+import { budgetHoldWords, budgetLabel, budgetStates, monthNamed, monthOf, spendItems, teammateNames, usd as spendUsd, type BudgetAgent, type BudgetHold } from "./spend.js";
 import { spendCsv } from "./spend-ui.js";
 import { startBudgetAlerts } from "./budget-alerts.js";
-import { setLimitSink } from "./provider-limits.js";
+import { pushLimitSink } from "./provider-limits.js";
 import { limitsView } from "./limits-ui.js";
 import { startCodexLimits } from "./codex-limits.js";
 import { packageVersion, startMonitoring, targetOf } from "./monitoring.js";
@@ -812,7 +812,7 @@ export async function runOperate(
     return fail(write, json, command, "database", describe(error), EXIT.failed);
   }
   // v105: a Claude turn anywhere in this command says its plan's usage windows; keep the latest.
-  setLimitSink(reading => store.recordProviderLimits(reading, new Date()));
+  const dropLimitSink = pushLimitSink(reading => store.recordProviderLimits(reading, new Date()));
 
   // One `Date` per command is fine for a lookup and wrong for a pass that
   // runs an agent for half an hour: leases granted, extended, and released
@@ -853,7 +853,7 @@ export async function runOperate(
   } catch (error) {
     return fail(write, json, command, "failed", describe(error), EXIT.failed);
   } finally {
-    setLimitSink(null);
+    dropLimitSink();
     store.close();
   }
 }
@@ -2327,8 +2327,8 @@ async function tickCommand(
   // v105: monthly budgets, read when first needed and again after any build (its spend counts): a used-up hard-stop
   // budget holds back new work billed to an API key, on every road below.
   let budgetGate: ReturnType<Store["budgetGate"]> | null = null;
-  const budgetHold = (taskRef: number, providers: readonly string[]) => (budgetGate ??= store.budgetGate(clock()))({ ...store.budgetSubject(taskRef), providers });
-  const budgetWords = (over: BudgetState) => `${budgetLabel(over)} budget is used up for ${monthOf(clock()).name}`;
+  const budgetHold = (taskRef: number, agents: readonly BudgetAgent[]) => (budgetGate ??= store.budgetGate(clock()))({ ...store.budgetSubject(taskRef), agents });
+  const budgetWords = (hold: BudgetHold) => budgetHoldWords(hold, monthOf(clock()).name);
   for (const waiting of store.contestsInStates(["decision-wait"])) {
     if (context.shouldStop?.() === true || context.shouldPauseAdmission?.() === true) break;
     // D1 belt-and-braces (external dispatch, finding 41): a mirror and a
@@ -2368,10 +2368,10 @@ async function tickCommand(
         backToParked();
         continue;
       }
-      const laneBudget = budgetHold(waiting.taskRef, [racer.provider]);
+      const laneBudget = budgetHold(waiting.taskRef, store.agentsFor([racer.provider]));
       if (laneBudget.over !== null) {
         backToParked();
-        resumed.push({ id: taskId, outcome: "skipped", reason: "budget", detail: budgetWords(laneBudget.over) });
+        resumed.push({ id: taskId, outcome: "skipped", reason: "budget", detail: budgetWords(laneBudget) });
         continue;
       }
       // Legacy comparison lanes carried an absolute clock. New profiles use
@@ -2983,9 +2983,11 @@ async function tickCommand(
     // v105: a monthly budget that stops new API work, used up: the task waits in the queue until the month turns or the
     // budget is raised (the 100% alert went out; the task page and the spend page say why).
     // Budgets are dollars: work that runs only on subscriptions passes (see Store.budgetGate).
-    const budgeted = budgetHold(ref.id, [...new Set([spec.provider, ...skipProviders])]);
+    // A chain's base entry says how it bills (a pinned key); otherwise each provider as it bills now.
+    const chainBase = store.approvedChainOf(id)?.[0];
+    const budgeted = budgetHold(ref.id, chainBase !== undefined ? [{ provider: chainBase.profile.provider, billing: chainBase.authMode }] : store.agentsFor([spec.provider, ...skipProviders]));
     if (budgeted.over !== null) {
-      dispatched.push({ id, outcome: "skipped", reason: "budget", detail: budgetWords(budgeted.over) });
+      dispatched.push({ id, outcome: "skipped", reason: "budget", detail: budgetWords(budgeted) });
       continue;
     }
 
@@ -3164,6 +3166,9 @@ async function tickCommand(
       }
       // Every agent is READY and nothing has spawned: cross into racing and
       // spend. The builds run concurrently; the stop fence stops them all.
+      budgetGate = null; // the race's spend counts toward the next check
+      // v105: the lanes run at once, so they share what's left of a monthly budget.
+      const laneShare = budgeted.remainingMicrousd === null ? null : Math.max(1, Math.floor(budgeted.remainingMicrousd / Math.max(1, prepared.length)));
       const settled = await Promise.allSettled(
         prepared.map(async entry => {
           const agent = store.getContestant(entry.contestantId);
@@ -3184,7 +3189,7 @@ async function tickCommand(
             contestProfile: contestantProfileOf(agent.provider, agent.model, agent.repairModel),
             // A comparison lane has no dollar cap — the sealed clock is the
             // bound; only race lanes carry the harness stop (E1).
-            ...(agent.budgetMicrousd > 0 ? { maxBudgetUsd: agent.budgetMicrousd / 1_000_000 } : {}),
+            ...(agent.budgetMicrousd > 0 ? { maxBudgetUsd: Math.min(agent.budgetMicrousd, laneShare ?? Infinity) / 1_000_000 } : {}),
             onProviderSpawn: pid => {
               worktrees.recordProviderOccupancy(entry.worktree, runner, pid, entry.leaseEpoch);
               const facts = { run: entry.runId, contestant: entry.contestantId, incarnation: text(flags, "incarnation") ?? null, processGroup: pid };
@@ -3394,7 +3399,9 @@ async function tickCommand(
         continue;
       }
       store.stampRun(planRunId, { scopeDigest: sourced.source.contract.scope?.digest ?? "" });
+      budgetGate = null; // this planner's spend counts toward the next check
       const outcome = await planTask(store, {
+        ...(budgeted.remainingMicrousd === null ? {} : { maxBudgetUsd: Math.max(1, budgeted.remainingMicrousd) / 1_000_000 }),
         taskId: id,
         taskTitle: store.getTask(id)?.title ?? id,
         taskRef: ref.id,
@@ -3547,7 +3554,9 @@ async function tickCommand(
       const scoutAnswers = store
         .answeredDecisionsFor(id, 6)
         .map(one => ({ question: one.question, choice: one.choice ?? "", note: one.note }));
+      budgetGate = null; // this scout's spend counts toward the next check
       const scouted = await scoutTask(store, {
+        ...(budgeted.remainingMicrousd === null ? {} : { maxBudgetUsd: Math.max(1, budgeted.remainingMicrousd) / 1_000_000 }),
         taskId: id,
         taskTitle: store.getTask(id)?.title ?? id,
         goal: scopeRow?.goal ?? "",
@@ -4011,9 +4020,10 @@ async function tickCommand(
     if (built >= max) break;
     // v105: a fallback billed to an API key spends dollars: a used-up budget holds it like any new work.
     const chainEntry = store.approvedChainOf(pending.taskId)?.[pending.cursor];
-    const chainBudget = chainEntry?.authMode === "api-key" ? budgetHold(pending.taskRef, [chainEntry.profile.provider]) : { over: null, remainingMicrousd: null };
+    const chainAgents = chainEntry === undefined ? [] : [{ provider: chainEntry.profile.provider, billing: chainEntry.authMode }];
+    const chainBudget = budgetHold(pending.taskRef, chainAgents);
     if (chainBudget.over !== null) {
-      dispatched.push({ id: pending.taskId, outcome: "skipped", reason: "budget", detail: budgetWords(chainBudget.over) });
+      dispatched.push({ id: pending.taskId, outcome: "skipped", reason: "budget", detail: budgetWords(chainBudget) });
       continue;
     }
     const railed = store.reserveModeRail(repo, 1, clock());
@@ -4106,7 +4116,7 @@ async function tickCommand(
     // refusal the run is FINISHED and its cycle resolved, never abandoned.
     const scopeBudgetNow = store.getScope(pending.taskId)?.budgetMicrousd ?? null;
     const backstopNow = store.getSpendDefaults()?.buildPerRunMicrousd ?? null;
-    const budgetNow = chainEntry?.authMode === "api-key" ? budgetHold(pending.taskRef, [admitted.provider]).remainingMicrousd : null;
+    const budgetNow = chainEntry?.authMode === "api-key" ? budgetHold(pending.taskRef, chainAgents).remainingMicrousd : null;
     const capNow = [scopeBudgetNow, backstopNow, budgetNow === null ? null : Math.max(1, budgetNow)]
       .reduce<number | null>((least, one) => one === null ? least : least === null ? one : Math.min(least, one), null);
     if (capNow !== null && MONEY_CAPABILITIES[admitted.provider as ProviderId].nativeDollarCapFlag === null) {
@@ -4226,9 +4236,9 @@ async function tickCommand(
         dispatched.push({ id: taskId, outcome: "skipped", reason: "attended-only", detail: "the continuation's pinned profile cannot be read" });
         continue;
       }
-      const continuationBudget = budgetHold(parent.taskRef, [pinned.provider]);
+      const continuationBudget = budgetHold(parent.taskRef, store.agentsFor([pinned.provider]));
       if (continuationBudget.over !== null) {
-        dispatched.push({ id: taskId, outcome: "skipped", reason: "budget", detail: budgetWords(continuationBudget.over) });
+        dispatched.push({ id: taskId, outcome: "skipped", reason: "budget", detail: budgetWords(continuationBudget) });
         continue;
       }
 

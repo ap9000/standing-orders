@@ -9,6 +9,8 @@ import { windowLabel } from "./provider-limits.js";
 import { usd, type BudgetState } from "./spend.js";
 
 const PROVIDER_NAMES: Record<string, string> = { claude: "Claude", codex: "Codex", gemini: "Gemini" };
+/** Plan names worth showing; anything else (an internal billing name) is left off. */
+const PLAN_NAMES: Record<string, string> = { free: "Free", plus: "Plus", pro: "Pro", max: "Max", team: "Team", business: "Business", enterprise: "Enterprise", edu: "Edu" };
 
 /** "in 25 min", "in 2 h 10 min", or a day and hour ("Fri 11 PM") beyond a day. */
 export function resetWords(resetsAt: string, now: Date): string {
@@ -39,7 +41,7 @@ export function limitsView(
     const reached = !turned && one.reached;
     const stale = now.getTime() - Date.parse(one.observedAt) > 30 * 60_000;
     const provider = PROVIDER_NAMES[one.provider] ?? one.provider;
-    const plan = one.plan === null ? "" : ` ${one.plan.charAt(0).toUpperCase()}${one.plan.slice(1)}`;
+    const plan = one.plan === null ? "" : Object.hasOwn(PLAN_NAMES, one.plan.toLowerCase()) ? ` ${PLAN_NAMES[one.plan.toLowerCase()]}` : "";
     tiles.push({
       key: `${one.provider}:${one.window}`, name: `${provider}${plan}`, window: windowLabel(one.window, one.windowMinutes),
       value: String(Math.round(percent)), unit: "%", percent, tone: toneOf(percent, reached), marks: [], href: null,

@@ -275,7 +275,7 @@ import { MONITORING_CSS, monitoringHtml, signingSecretHtml } from "./monitoring-
 import { prometheusMetrics } from "./metrics.js";
 import { SPEND_CSS, spendCsv, spendHtml } from "./spend-ui.js";
 import { LIMITS_CSS, limitsHtml, limitsView } from "./limits-ui.js";
-import { budgetLabel, budgetStates, monthNamed, monthOf, spendItems, teammateNames as teammateNamesOf, usd as spendUsd } from "./spend.js";
+import { budgetHoldWords, budgetLabel, budgetStates, monthNamed, monthOf, spendItems, teammateNames as teammateNamesOf, usd as spendUsd } from "./spend.js";
 import { targetOf } from "./monitoring.js";
 import { SSO_CSS, ssoSettingsHtml } from "./sso-ui.js";
 import { mintApiToken, parseApiToken, secretMatches, TOKEN_DAYS } from "./api-tokens.js";
@@ -2015,7 +2015,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         now,
         // v105: subscription windows and monthly budgets, for whoever runs the installation.
         limits: store.isInstanceOperator(who.name)
-          ? limitsView(store.providerLimits(), store.monthSpend(now).budgets, { project: projectName, teammate: id => teammateNamesOf(store.handle).get(id) ?? `Teammate ${id}` }, now)
+          ? limitsView(store.providerLimits(), store.budgets().length === 0 ? [] : store.monthSpendCached(now).budgets, { project: projectName, teammate: id => teammateNamesOf(store.handle).get(id) ?? `Teammate ${id}` }, now)
           : null,
       });
       // One project's Tasks dock that project's own conversation (v77).
@@ -5092,8 +5092,12 @@ export function createDecisionServer(options: ServeOptions): Server {
         budgetHold: (() => {
           if (ref === null || found.state !== "queued") return null;
           // Only work billed to an API key waits on a budget (its approved agent's, or Claude's by default).
-          const over = store.budgetGate(now)({ ...store.budgetSubject(ref.id), providers: [store.getScope(taskId)?.approvedProfile?.provider ?? "claude"] }).over;
-          return over === null ? null : `${budgetLabel(over)} monthly budget is used up, so this waits until next month or a higher budget`;
+          const base = store.approvedChainOf(taskId)?.[0];
+          const hold = store.budgetGate(now)({ ...store.budgetSubject(ref.id),
+            agents: base !== undefined ? [{ provider: base.profile.provider, billing: base.authMode }] : store.agentsFor([store.getScope(taskId)?.approvedProfile?.provider ?? "claude"]) });
+          if (hold.over === null) return null;
+          return hold.why === "unpriced" ? `${budgetHoldWords(hold, monthOf(now).name)}; this waits until then`
+            : `${budgetLabel(hold.over)} monthly budget is used up, so this waits until next month or a higher budget`;
         })(),
         approvalRules: (() => {
           const repo = ref?.repo ?? null;

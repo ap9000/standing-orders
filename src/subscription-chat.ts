@@ -30,7 +30,7 @@ import { run, type ExecResult } from "./exec.js";
 import { claudeStreamReader } from "./mate-progress.js";
 import { ALL_CREDENTIAL_ENV } from "./provider.js";
 import type { SubscriptionChatProviderId } from "./store.js";
-import { claudeLimitsOf, noteLimits } from "./provider-limits.js";
+import { claudeAccountOf, claudeLimitsOf, noteLimits } from "./provider-limits.js";
 
 export type SubscriptionMateRequest = {
   provider: SubscriptionChatProviderId;
@@ -252,8 +252,8 @@ export async function performSubscriptionMateRequest(
     // v105: a streamed Claude turn says its plan's usage windows too.
     if (command === "claude" && streaming) {
       for (const line of result.stdout.split("\n")) {
-        if (!line.includes('"rate_limit_event"')) continue;
-        try { noteLimits(claudeLimitsOf(JSON.parse(line))); } catch { /* not a reading */ }
+        if (!line.includes('"rate_limit_event"') && !line.includes('"apiKeySource"')) continue;
+        try { const event: unknown = JSON.parse(line); noteLimits(claudeLimitsOf(event) ?? claudeAccountOf(event)); } catch { /* not a reading */ }
       }
     }
     if (result.code !== 0) return { ok: false, problem: `status-${result.code}` };

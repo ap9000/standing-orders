@@ -32,8 +32,9 @@ export const PROVIDER_KEY_ENV: Record<ProviderId, string> = {
  * mode STRIPS so an ambient key cannot override the login. gemini reads
  * two; the rest read one. */
 export const OWN_KEY_ENV: Record<ProviderId, readonly string[]> = {
-  claude: ["ANTHROPIC_API_KEY"],
-  codex: ["OPENAI_API_KEY"],
+  // v105: the bearer-token and Codex-specific aliases bill a key just the same, so a sign-in run sheds them too.
+  claude: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
+  codex: ["OPENAI_API_KEY", "CODEX_API_KEY"],
   openrouter: ["OPENROUTER_API_KEY"],
   gemini: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
 };

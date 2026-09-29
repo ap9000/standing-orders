@@ -15,7 +15,7 @@ import { observeProcessTree, stopProcessTree, readProcessObservationFailure, typ
 import { jsonlDiscriminants } from "./jsonl-discriminants.js";
 import { createContainer, currentContainment, type AttachOutcome, type Container, type ContainmentBackendId } from "./containment.js";
 import type { Store } from "./store.js";
-import { claudeLimitsOf, noteLimits } from "./provider-limits.js";
+import { claudeAccountOf, claudeLimitsOf, noteLimits } from "./provider-limits.js";
 
 export type ExecResult = {
   /** Process exit code, or one of the synthetic codes below. */
@@ -1566,6 +1566,7 @@ export function runClaudeStreamJsonl(
       const type = String(event["type"] ?? "");
       if (type === "system" && String(event["subtype"] ?? "") === "init") {
         if (initLine === null) initLine = line;
+        noteLimits(claudeAccountOf(event));
         const id = transportSessionId(event["session_id"]);
         let identityWitness = false;
         if (id !== null) {
@@ -1914,6 +1915,7 @@ export function startClaudeHeldSession(
       const type = String(event["type"] ?? "");
       if (type === "system" && String(event["subtype"] ?? "") === "init") {
         initSeq += 1;
+        noteLimits(claudeAccountOf(event));
         if (!sessionSeen && events.onSessionId !== undefined) {
           const id = transportSessionId(event["session_id"]);
           if (id !== null) {
