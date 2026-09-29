@@ -81,6 +81,48 @@ describe("the invocation gateway", () => {
 
   afterEach(() => store.close());
 
+  test("v105: a run's billing comes from its own stream, and only a keyless run that answered teaches what this computer's Claude does", async () => {
+    const home = mkdtempSync(join(tmpdir(), "so-billing-"));
+    const keys = join(home, ".standing-orders", "keys");
+    mkdirSync(keys, { recursive: true });
+    const result = JSON.stringify({ type: "result", subtype: "success", result: "ok", total_cost_usd: 1.5, usage: { input_tokens: 10, output_tokens: 5 } });
+    const streaming = (init: Record<string, unknown>, windows: boolean) => async (_file: string, _args: readonly string[], options: { onStreamEvent?: (event: Record<string, unknown>) => void } = {}) => {
+      options.onStreamEvent?.({ type: "system", subtype: "init", ...init });
+      if (windows) options.onStreamEvent?.({ type: "rate_limit_event", rate_limit_info: { status: "allowed", unifiedWindows: { five_hour: { utilization: 0.1 } } } });
+      options.onStreamEvent?.(JSON.parse(result));
+      return { ...OK, stdout: `${result}\n` };
+    };
+    const spend = () => store.handle.prepare("SELECT microusd, billing FROM run_spend WHERE run = ?").get(runId);
+    const seen = () => store.handle.prepare("SELECT billing FROM provider_account WHERE provider = 'claude'").get()?.["billing"] ?? null;
+    const fresh = (id: string) => {
+      store.finishRun(runId, { outcome: "built", now: T0 });
+      store.createTask({ id, title: id }, T0);
+      runId = store.startRun({ taskRef: claimTask(store, id, `lease-${id}`), leaseId: `lease-${id}`, runner: RUNNER, branch: id, worktree: `/w/${id}`, ...bareLegacy("build", "claude", null), now: T0 });
+    };
+    try {
+      writeFileSync(join(keys, "claude.auth"), "subscription");
+      // On the plan: its windows prove it; $0, and the computer's Claude is its plan.
+      await invokeRan(store, runId, CLAUDE, ASK, { runner: streaming({ apiKeySource: "none", model: "claude-sonnet-5" }, true), keyHome: home });
+      expect(spend()).toEqual({ microusd: 0, billing: "subscription" });
+      expect(seen()).toBe("subscription");
+      // "none" without windows (a gateway's token): a key, and now the computer's Claude bills one.
+      fresh("t-gateway");
+      await invokeRan(store, runId, CLAUDE, ASK, { runner: streaming({ apiKeySource: "none", model: "claude-sonnet-5" }, false), keyHome: home });
+      expect(spend()).toEqual({ microusd: 1_500_000, billing: "api-key" });
+      expect(seen()).toBe("api-key");
+      // A key we gave it bills the key, and teaches nothing about the computer's own Claude.
+      store.handle.prepare("UPDATE provider_account SET billing = 'subscription'").run();
+      writeFileSync(join(keys, "claude.auth"), "api-key");
+      writeFileSync(join(keys, "claude"), `sk-ant-${"x".repeat(24)}`);
+      fresh("t-keyed");
+      await invokeRan(store, runId, CLAUDE, ASK, { runner: streaming({ apiKeySource: "ANTHROPIC_API_KEY", model: "claude-sonnet-5" }, false), keyHome: home });
+      expect(spend()).toEqual({ microusd: 1_500_000, billing: "api-key" });
+      expect(seen()).toBe("subscription");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test("nothing spends without an open run", async () => {
     await expect(
       invokeRan(store, 999, CLAUDE, ASK, { runner: async () => OK }),
@@ -132,6 +174,36 @@ describe("the invocation gateway", () => {
 
     expect(childDb).toBeDefined();
     expect(existsSync(dirname(childDb!))).toBe(false);
+  });
+
+  test("v105: a held session on the plan stays on the plan when a later turn reports no windows (they come only when they move)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "so-held-billing-"));
+    mkdirSync(join(home, ".standing-orders", "keys"), { recursive: true });
+    writeFileSync(join(home, ".standing-orders", "keys", "claude.auth"), "subscription");
+    let stream: ((event: Record<string, unknown>) => void) | undefined;
+    try {
+      const started = await invokeHeldAgent(store, runId, CLAUDE, ["--held"], {
+        socketPath: "/tmp/standing-orders-held-billing.sock", cookie: "cookie", keyHome: home,
+        starter: async (_file, _args, options) => {
+          stream = options.events?.onStreamEvent;
+          return { ok: true, handle: { supervisorPid: 1, agentPgid: 2, writeTurn: () => true, endInput: () => {}, terminate: () => {}, killHard: () => {}, exited: new Promise(() => {}) } };
+        },
+      });
+      expect(started.ok).toBe(true);
+      const init = { type: "system", subtype: "init", apiKeySource: "none", model: "claude-sonnet-5" };
+      const windows = { type: "rate_limit_event", rate_limit_info: { status: "allowed", unifiedWindows: { five_hour: { utilization: 0.2 } } } };
+      const result = { type: "result", subtype: "success", result: "ok", total_cost_usd: 8 };
+      for (const event of [init, windows, result, init, result, init, windows, result]) stream!(event);
+      store.recordUsage(runId, { costUsd: 8 });
+      expect(store.handle.prepare("SELECT microusd, billing FROM run_spend WHERE run = ?").get(runId)).toEqual({ microusd: 0, billing: "subscription" });
+      expect(store.handle.prepare("SELECT billing FROM provider_account WHERE provider = 'claude'").get()?.["billing"]).toBe("subscription");
+      // A named key source later in the session does make it a key.
+      stream!({ ...init, apiKeySource: "apiKeyHelper" });
+      stream!(result);
+      expect(store.handle.prepare("SELECT billing FROM run_spend WHERE run = ?").get(runId)?.["billing"]).toBe("api-key");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   test("a held provider keeps its disposable database only until the session exits", async () => {

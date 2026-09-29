@@ -5,7 +5,7 @@
  * work. */
 import { ArrowRight, ChevronDown, Inbox, LayoutGrid, ListTodo, Plus, Repeat, Sparkles, Code2, ListOrdered, Briefcase } from "lucide-react";
 import type { ReactNode } from "react";
-import type { BrowserTasksView } from "../../browser-workspace.js";
+import type { BrowserLimits, BrowserLimitTile, BrowserTasksView } from "../../browser-workspace.js";
 import { Badge, Button, Card, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, cn } from "../components/ui/index.js";
 import { toneOf } from "./tone.js";
 
@@ -14,9 +14,46 @@ const TOOL_ICONS: Record<string, ReactNode> = {
   "/tasks": <ListTodo />, "/recipes": <Sparkles />, "/routines": <Repeat />, "/workbench": <Briefcase />,
 };
 
+const LIMIT_FILL: Record<BrowserLimitTile["tone"], string> = { neutral: "bg-foreground", warning: "bg-warning", danger: "bg-destructive" };
+
+/** One limit: whose and which window, the figure, a bar (with the 50/80 % alert marks on a budget), and when it resets. */
+function LimitTile({ tile }: { tile: BrowserLimitTile }) {
+  const body = <>
+    <p className="flex min-w-0 items-baseline gap-1.5 text-[12px] leading-4">
+      <span className="truncate font-medium text-foreground">{tile.name}</span>
+      <span className="shrink-0 text-muted-foreground">{tile.window}</span>
+    </p>
+    <p className={cn("mt-2.5 flex items-baseline tabular-nums", tile.unit === "%" ? "gap-px" : "gap-1")}>
+      <span className={cn("text-[22px] font-semibold leading-none tracking-[-0.02em]", tile.tone === "danger" && "text-destructive")}>{tile.value}</span>
+      <span className="text-[12px] text-muted-foreground">{tile.unit}</span>
+    </p>
+    <div className="relative mt-3 h-1.5 overflow-hidden rounded-full bg-muted" role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(Math.min(100, tile.percent))}
+      aria-label={`${tile.name} ${tile.window}`}>
+      <div className={cn("h-full rounded-full motion-safe:transition-[width] motion-safe:duration-500 motion-safe:ease-out", LIMIT_FILL[tile.tone])} style={{ width: `${Math.min(100, Math.max(0, tile.percent))}%` }} />
+      {tile.marks.map(mark => <span key={mark} aria-hidden="true" className="absolute inset-y-0 w-0.5 bg-card" style={{ left: `calc(${mark}% - 1px)` }} />)}
+    </div>
+    <p className={cn("mt-2 truncate text-[11.5px] leading-4", tile.tone === "neutral" ? "text-muted-foreground" : tile.tone === "warning" ? "text-warning" : "text-destructive")}>{tile.detail}</p>
+  </>;
+  const frame = "block min-w-0 rounded-[10px] border border-border bg-card px-3.5 py-3 max-sm:w-[168px] max-sm:shrink-0 max-sm:snap-start";
+  return <li data-limit={tile.key} title={tile.title ?? undefined} className="min-w-0 max-sm:shrink-0">
+    {tile.href === null ? <div className={frame}>{body}</div>
+      : <a href={tile.href} className={cn(frame, "transition-colors hover:border-input hover:bg-[var(--so-raised)]")}>{body}</a>}
+  </li>;
+}
+
+/** Plans' usage windows and monthly budgets: one row of tiles, scrolling sideways on a phone. */
+function Limits({ limits }: { limits: BrowserLimits }) {
+  return <section aria-label="Limits">
+    <ul className="grid grid-cols-[repeat(auto-fill,minmax(176px,1fr))] gap-2 max-sm:-mx-4 max-sm:flex max-sm:snap-x max-sm:snap-mandatory max-sm:scroll-px-4 max-sm:overflow-x-auto max-sm:px-4 max-sm:pb-1 max-sm:[scrollbar-width:none]">
+      {limits.tiles.map(tile => <LimitTile key={tile.key} tile={tile} />)}
+    </ul>
+  </section>;
+}
+
 export function TasksView({ view }: { view: BrowserTasksView }) {
   return <div className="flex w-full flex-col gap-5">
     <h1 className="sr-only">Tasks</h1>
+    {view.limits && <Limits limits={view.limits} />}
     <div className="flex flex-wrap items-center gap-3">
       <nav aria-label="Task views" className="-mx-1 min-w-0 max-w-full overflow-x-auto px-1 max-sm:-mr-4 max-sm:max-w-none max-sm:pr-4">
         <ul className="inline-flex h-8 items-center gap-0.5 rounded-lg bg-muted p-0.5 max-sm:h-11">

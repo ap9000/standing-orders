@@ -71,7 +71,7 @@ const own = (object: Record<string, unknown>, key: string): boolean => Object.pr
 const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 const requestId = (value: unknown): value is number | string => typeof value === "string" || (typeof value === "number" && Number.isSafeInteger(value));
 
-function codingEnvironment(): NodeJS.ProcessEnv {
+export function codingEnvironment(): NodeJS.ProcessEnv {
   const env = { ...process.env };
   const invokingSession = new Set([
     "CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "CODEX_SESSION_ID", "CODEX_THREAD_ID",

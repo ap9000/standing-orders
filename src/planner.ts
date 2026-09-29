@@ -65,6 +65,8 @@ const DEFAULT_PLAN_TURNS = CLAUDE_LIMITS.maxTurns;
 const DEFAULT_PULSE_MS = 60_000;
 
 export type PlanRequest = {
+  /** v105: what's left of a monthly budget this API-key work counts toward (the CLI's own cap), when one does. */
+  maxBudgetUsd?: number;
   taskId: string;
   taskTitle: string;
   taskRef: number;
@@ -901,6 +903,7 @@ export async function plan(store: Store, request: PlanRequest): Promise<PlanOutc
         skipPermissions: false,
         resumeSession: null,
         ...(auditOf(provider).sessionIdentity === "minted" ? { startSessionId: randomUUID() } : {}),
+        ...(request.maxBudgetUsd === undefined ? {} : { maxBudgetUsd: request.maxBudgetUsd }),
       },
       {
         cwd: worktree,
@@ -1057,6 +1060,7 @@ export async function plan(store: Store, request: PlanRequest): Promise<PlanOutc
             permissionMode: request.permissionMode ?? "acceptEdits",
             skipPermissions: false,
             resumeSession: sessionId,
+            ...(request.maxBudgetUsd === undefined ? {} : { maxBudgetUsd: request.maxBudgetUsd }),
           },
           {
             cwd: worktree,

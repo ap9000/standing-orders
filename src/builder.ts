@@ -2907,6 +2907,9 @@ async function ingestPark(args: {
       if (!alive.ok) return { fenced: true };
     }
 
+    // v105: a repair turn spends too — a budget used up since the build began stops further turns (billed to a key).
+    // It bills as the attempt it mends did (a pinned chain entry's key included).
+    if (store.budgetGate(clock())({ ...store.budgetSubject(request.taskRef), agents: [{ provider: repairProvider, billing: store.runBilling(request.runId) ?? store.agentsFor([repairProvider])[0]!.billing }] }).over !== null) break;
     const admitted = admitProtocolRepair(store, request, args.profile, sessionId, clock);
     if (!admitted.ok) return admitted;
     const repairRun = admitted.runId;

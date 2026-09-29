@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { SKIPPED_FADE } from "./e2e-kit.mjs";
 /**
  * Flows, end to end. A throwaway Standing Orders instance — the real CLI,
  * the real console (`serve`) and the real worker loop (`watch`) — against a
@@ -149,8 +150,8 @@ async function signIn(name, password, viewport = { width: 1440, height: 900 }) {
   const context = await browser.newContext({ viewport, deviceScaleFactor: 1 });
   const page = await context.newPage();
   const problems = [];
-  page.on("pageerror", error => problems.push(String(error)));
-  page.on("console", message => { if (message.type() === "error" && !/Failed to load resource/.test(message.text())) problems.push(message.text()); });
+  page.on("pageerror", error => { if (!SKIPPED_FADE.test(String(error))) problems.push(String(error)); });
+  page.on("console", message => { if (message.type() === "error" && !/Failed to load resource/.test(message.text()) && !SKIPPED_FADE.test(message.text())) problems.push(message.text()); });
   await page.goto(`${base}/login`);
   await page.fill('input[name="name"]', name);
   await page.fill('input[name="token"]', password);

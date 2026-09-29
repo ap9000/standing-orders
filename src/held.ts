@@ -223,8 +223,10 @@ export class HeldSessionCoordinator {
       captured.answers.map(one => one.decision.id),
     );
 
-    const remainingMicrousd =
-      args.authorization.budgetMicrousd - store.authorizationSpendMicrousd(args.authorization.id);
+    // v105: and no more than what's left of a monthly budget this work counts toward, when it bills a key.
+    const monthly = store.budgetGate(new Date())({ ...store.budgetSubject(args.captured.taskRef), agents: store.agentsFor([captured.effective.profile.provider]) }).remainingMicrousd;
+    const remainingMicrousd = Math.min(
+      args.authorization.budgetMicrousd - store.authorizationSpendMicrousd(args.authorization.id), monthly ?? Infinity);
     const argv = claudeHeldArgv({
       phase: "build",
       model: captured.effective.model,

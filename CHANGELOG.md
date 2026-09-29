@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- **Cost guardrails.** Work on a subscription (a Claude or Codex sign-in)
+  counts as $0: what binds it is the plan's usage windows, which Tasks now
+  shows as tiles (Claude's 5-hour and weekly windows as Claude reports them
+  on every turn, Codex's as its app server answers every five minutes), each
+  with when it resets, amber from 80 % and red when used up. How work is
+  billed follows what the CLI actually did (Claude's key source on each run,
+  Codex's account), not only the setting. Work billed to an API key is
+  priced: what the provider reported, or its tokens at the model's price in
+  Settings → Models (the provider's highest listed price when the model
+  isn't listed), frozen when the run settles; key work that can't be priced
+  at all waits under a budget until prices are loaded. The Spend page
+  (and `standing-orders spend`) shows each month by project, person,
+  teammate and model, with a CSV. Monthly budgets for the whole
+  installation, a project, a person or an AI teammate alert at 50, 80 and
+  100 % (once each, again after a change; a person's budget to that person,
+  on Telegram too) and, unless set to alert only, stop API work at 100 %:
+  queued tasks, fallbacks, resumed races, continuations, repair turns, key
+  chats and flow sorts wait (the task page says why), and a Claude run's cap
+  shrinks to what's left. Budgets and their limits also show as tiles on
+  Tasks, are set on the Spend page or with `standing-orders budget`, with a
+  step-up, and every change is in the ledger. Schema 105.
+
 - **Stream it out.** Settings → Monitoring sends what Standing Orders does
   to the tools a company already watches. The audit stream delivers every
   sealed ledger entry, in order and at least once (retried, never skipped),

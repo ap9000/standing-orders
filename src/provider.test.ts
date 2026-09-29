@@ -739,8 +739,8 @@ describe("the gemini dialect (Phase 3, attested at 0.57.0)", () => {
 
   test("S4: the full matrix — every adapter sheds every OTHER provider's credential env, keeps only its own", () => {
     const OWN: Record<"claude" | "codex" | "openrouter" | "gemini", string[]> = {
-      claude: ["ANTHROPIC_API_KEY"],
-      codex: ["OPENAI_API_KEY"],
+      claude: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
+      codex: ["OPENAI_API_KEY", "CODEX_API_KEY"],
       openrouter: ["OPENROUTER_API_KEY"],
       gemini: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
     };

@@ -42,6 +42,7 @@ import { recordSent, threadOf } from "./flow-replies.js";
 import { ASKED, teammateReady, teammateTurn, type TeammateOutcome } from "./teammate-work.js";
 import type { TurnRunner } from "./teammates.js";
 import type { ToolLister } from "./teammate-tools.js";
+import { budgetHoldWords, claudeMachineBilling, monthOf } from "./spend.js";
 
 export type StepIo = {
   /** `gh` for GitHub; git and the check's shell, both without a model. */
@@ -87,6 +88,9 @@ const LOG_CHARS = 64_000;
 
 /** Run every due check and update in one project, then move each card on. */
 export async function runFlowSteps(store: Store, repo: string, now: Date, io: StepIo): Promise<StepPass> {
+  // v105: one budget gate a pass, built only if a Sort card is waiting.
+  let gate: ReturnType<Store["budgetGate"]> | null = null;
+  const budgetGate: ReturnType<Store["budgetGate"]> = work => (gate ??= store.budgetGate(now))(work);
   const pass: StepPass = { ran: 0, problems: [] };
   // A step left running long past any time limit had its worker stop: it may try again.
   for (const stale of store.staleFlowSteps(new Date(now.getTime() - 75 * 60_000))) store.finishFlowStep(stale.card, stale.entry, { state: "waiting", result: "Interrupted; trying again.", nextAt: now.toISOString() }, now);
@@ -115,6 +119,16 @@ export async function runFlowSteps(store: Store, repo: string, now: Date, io: St
       if (card.waiting !== waiting) store.updateFlowCard(card.id, { waiting }, now);
       continue;
     }
+    // v105: sorting spends the key's credit, and a draft whatever this computer's Claude bills: a budget for this project
+    // (or everything) that holds key work holds them.
+    const agents = stage.kind === "sort" ? [{ provider: "openrouter", billing: "api-key" as const }]
+      : stage.kind === "draft" ? [{ provider: "claude", billing: claudeMachineBilling(store.handle) }] : null;
+    const held = agents === null ? null : budgetGate({ project: repo, person: null, teammate: null, agents });
+    if (held !== null && held.over !== null) {
+      const waiting = `${budgetHoldWords(held, monthOf(now).name)}. Raise it on Spend to go on.`;
+      if (card.waiting !== waiting) store.updateFlowCard(card.id, { waiting }, now);
+      continue;
+    }
     const script = stage.kind === "check" && stage.script !== null ? store.flowScript(repo, stage.script) : null;
     if (stage.kind === "check" && script === null) {
       const waiting = `There's no script called ${stage.script ?? "(none)"} in this project. Make it on the flow's Scripts panel.`;
@@ -136,7 +150,7 @@ export async function runFlowSteps(store: Store, repo: string, now: Date, io: St
     try {
       outcome = stage.kind === "check" ? await runCheck(store, known.flow, stage, script!, card, now, io)
         : stage.kind === "sort" ? await sortCard(known.definition!, stage, card, key!, io)
-        : stage.kind === "draft" ? await draftCard(store, known.definition!, stage, card, io)
+        : stage.kind === "draft" ? await draftCard(store, known.definition!, stage, card, io, repo, now)
         : stage.kind === "request" ? await runRequest(stage, card, repo, io)
         : stage.kind === "email" ? await sendEmail(stage, card, io, threadOf(store, card))
         : stage.kind === "tool" ? await useTool(store, stage, card, repo, io)
@@ -245,11 +259,13 @@ function tail(text: string): string {
 }
 
 /** A draft: Claude writes what the zone asks, from the card, with the lead chat's Claude model; the text stays on the card. */
-async function draftCard(store: Store, definition: FlowDefinition, stage: FlowStage, card: FlowCardRow, io: StepIo): Promise<Outcome> {
+async function draftCard(store: Store, definition: FlowDefinition, stage: FlowStage, card: FlowCardRow, io: StepIo, repo: string, now: Date): Promise<Outcome> {
   const config = store.getChatConfig();
   const model = config?.provider === "claude-subscription" ? config.model : "default";
   const answer = await (io.draft ?? claudeDraftRunner())({ model, prompt: draftPrompt(stage, card, definition), timeoutMs: DRAFT_TIMEOUT });
   if (!answer.ok) return { state: "retry", said: answer.said };
+  // v105: what it cost, billed as this computer's Claude does (a plan's is $0).
+  store.recordDraftSpend({ repo, model: model === "default" ? null : model, costUsd: answer.costUsd ?? null }, now);
   const text = keptDraft(answer.text);
   if (text === "") return { state: "retry", said: "Claude's draft came back empty." };
   const words = text.split(/\s+/).filter(Boolean).length;

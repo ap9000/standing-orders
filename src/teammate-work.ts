@@ -27,6 +27,7 @@ import { claudeTurnRunner, parseSoul, readTurn, teammateActor, teammateLabel, TU
 import { callName, callOutcome, callWords, inputProblem, makeCall, offeredTools, refreshGrants, ruleFor, type OfferedTool, type ToolIo } from "./teammate-tools.js";
 import { answerSuggestion, considerSuggestion, memoriesFor, remember } from "./teammate-memory.js";
 import { replyToAsker } from "./teammate-desk.js";
+import { claudeMachineBilling } from "./spend.js";
 
 /** A question waits for its answer this long before the step is due again on its own: never, in practice. */
 export const ASKED = "9999-12-31T00:00:00.000Z";
@@ -48,6 +49,9 @@ export function teammateReady(store: Store, mate: TeammateRow | null, now: Date)
   if (mate.state !== "active") return { ok: false, why: "paused" };
   if (!parseSoul(mate.soul).ok) return { ok: false, why: "its soul file can't be read" };
   if (store.teammateTurnsSince(mate.id, startOfDay(now)) >= mate.dailyTurns) return { ok: false, why: `it reached today's limit of ${mate.dailyTurns} turns` };
+  // v105: its turns bill as this computer's Claude does with no key from us; billed to a key, a budget holds them.
+  const held = store.budgetGate(now)({ project: mate.repo, person: null, teammate: mate.id, agents: [{ provider: "claude", billing: claudeMachineBilling(store.handle) }] });
+  if (held.over !== null) return { ok: false, why: held.why === "used-up" ? "a monthly budget its work counts toward is used up" : "a monthly budget can't price its work yet" };
   return { ok: true };
 }
 
