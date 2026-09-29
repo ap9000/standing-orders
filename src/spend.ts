@@ -19,7 +19,7 @@ import type { ProviderId } from "./provider.js";
 export type PriceSource = "reported" | "estimated" | "unpriced" | "subscription";
 export type Billing = "subscription" | "api-key";
 
-/** How a provider's work is billed right now: an API key when Standing Orders is set to use one, or when the CLI
+/** How a provider's work is billed right now: an API key when Toolroll is set to use one, or when the CLI
  * itself was last seen billing a key (a key helper, a Console login, Bedrock or Vertex, `codex login --with-api-key`);
  * otherwise its plan. `db` supplies what was seen (provider_account); without it, the setting alone. */
 export function billingOf(provider: string, db?: Database): Billing {
@@ -48,7 +48,7 @@ export function claudeBillingFrom(seen: { keySource: string | null; model: strin
   return seen.keySource === "none" ? "api-key" : null;
 }
 
-/** How Claude bills on this computer when Standing Orders gives it no key (teammate turns, drafts): as its keyless runs
+/** How Claude bills on this computer when Toolroll gives it no key (teammate turns, drafts): as its keyless runs
  * were last seen, and its plan until one has been. */
 export function claudeMachineBilling(db: Database): Billing {
   return seenBilling(db, "claude") ?? "subscription";
@@ -264,7 +264,7 @@ export function spendItems(db: Database, from: string, to: string, modeOf: (prov
       taskId: String(row["task"]), runId: Number(row["id"]), authMode: billing,
     };
   });
-  // A teammate's own turns get no key from Standing Orders (teammates.ts claudeTurnRunner): they bill as this computer's
+  // A teammate's own turns get no key from Toolroll (teammates.ts claudeTurnRunner): they bill as this computer's
   // Claude sign-in was seen billing when the turn ran (a plan, or a Console login, key helper or gateway).
   for (const row of db.prepare(`SELECT t.at, t.teammate, t.model, t.cost_usd, t.tokens_in, t.tokens_out, t.billing, m.repo FROM teammate_turn t JOIN teammate m ON m.id = t.teammate
       WHERE t.at >= ? AND t.at < ? ORDER BY t.id`).all(from, to)) {

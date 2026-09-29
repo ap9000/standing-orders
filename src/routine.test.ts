@@ -909,7 +909,7 @@ describe("firing, inside one proving transaction", () => {
     });
   });
 
-  test("two standing orders cannot share a name", () => {
+  test("two routines cannot share a name", () => {
     expect(store.createRoutine({ name: "deps", ...TERMS, digest: routineDigestOf(TERMS, V24_PROFILE, V48_ROUTE), profile: V24_PROFILE, route: V48_ROUTE }, T0)).toMatchObject({
       ok: false,
       reason: "duplicate",

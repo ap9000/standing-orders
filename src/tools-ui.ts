@@ -22,7 +22,7 @@ export type ToolsView = {
   found: FoundTool[];
 };
 
-const password = '<label>Your Standing Orders password<input type="password" name="password" autocomplete="current-password" required></label>';
+const password = '<label>Your Toolroll password<input type="password" name="password" autocomplete="current-password" required></label>';
 
 function toolCard(one: { tool: ProjectTool; secretsSet: string[] }, base: Record<string, string>, manage: boolean): string {
   const { tool, secretsSet } = one;

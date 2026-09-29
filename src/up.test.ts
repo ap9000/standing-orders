@@ -1,5 +1,5 @@
 /**
- * `standing-orders up` — one command to a working cockpit, proven over the
+ * `toolroll up` — one command to a working cockpit, proven over the
  * real machinery: real git, a real bind, real watch loops bounded by --for.
  * The ordering guarantees (nothing mints before the port), the credential
  * file's discipline, and the runner lifecycle are each their own proof.
@@ -50,7 +50,7 @@ const up = (extra: string[] = [], port = PORT) =>
 
 const envelope = (): Record<string, unknown> => JSON.parse(lines.join("\n")) as Record<string, unknown>;
 
-describe("standing-orders up", () => {
+describe("toolroll up", () => {
   test("cold start: mints the login durably, registers a worker, watches, retires cleanly", async () => {
     const code = await up();
     expect(code).toBe(0);

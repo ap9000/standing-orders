@@ -1,5 +1,5 @@
 /**
- * Full export (v105): one folder or .zip with everything Standing Orders
+ * Full export (v105): one folder or .zip with everything Toolroll
  * knows, a manifest of SHA-256 hashes and a README; never a secret. From the
  * command line and from Settings → Data (behind the password), and recorded
  * in the action ledger.

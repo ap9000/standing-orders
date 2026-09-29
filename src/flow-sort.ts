@@ -76,7 +76,7 @@ export async function askJev(fetcher: typeof fetch, key: string, request: JevReq
   try {
     response = await fetcher(JEV_URL, {
       method: "POST",
-      headers: { authorization: `Bearer ${key}`, "content-type": "application/json", "x-title": "Standing Orders" },
+      headers: { authorization: `Bearer ${key}`, "content-type": "application/json", "x-title": "Toolroll" },
       body: JSON.stringify(request), signal: AbortSignal.timeout(20_000),
     });
   } catch {

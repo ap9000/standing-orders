@@ -411,7 +411,7 @@ describe('native coding workspace', () => {
     const check = new DatabaseSync(db); expect(check.prepare('SELECT clean,native_pid FROM coding_owner').get()).toMatchObject({ clean: 0, native_pid: 2147483647 }); check.close();
   });
 
-  test('a second server cannot acquire a live coding catalog', () => { expect(() => open()).toThrow('Another Standing Orders server'); });
+  test('a second server cannot acquire a live coding catalog', () => { expect(() => open()).toThrow('Another Toolroll server'); });
 
   test('new files appear in the diff without following symlinks outside the checkout', async () => {
     const session = await start();

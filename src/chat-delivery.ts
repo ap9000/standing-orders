@@ -162,7 +162,7 @@ export async function processChatEvent(
         event.id,
         [
           {
-            text: "Connected to Standing Orders. Ask about a project, review a result, or describe what you want done. I’ll show any proposed change before you confirm it.",
+            text: "Connected to Toolroll. Ask about a project, review a result, or describe what you want done. I’ll show any proposed change before you confirm it.",
           },
         ],
         nowOf(options),
@@ -193,7 +193,7 @@ export async function processChatEvent(
     // A flow decision asked for this person's next message (Edit, Send back): it is the draft or the note.
     if (answerChatFlowPrompt({ store, state, label: options.label }, event, binding,
       { text, ...(typeof input.originalLength === "number" ? { originalLength: input.originalLength } : {}) }, repos, nowOf(options))) return true;
-    // A message to a teammate by name (v96), in someone's own chat with Standing Orders: a card on its desk.
+    // A message to a teammate by name (v96), in someone's own chat with Toolroll: a card on its desk.
     if (event.channel === binding.channel) {
       const handed = messageTeammate(store, { who: binding.approver, repos, via: CHAT_APP_NAMES[state.channel] ?? "Chat" }, text, nowOf(options));
       if (handed !== null) {
@@ -614,7 +614,7 @@ export function applyChatAction(
       !preview.buttons ||
       preview.text.length > (options.maxProposal ?? 10_000)
     )
-      content = { ...content, text: "Review this action in Standing Orders." };
+      content = { ...content, text: "Review this action in Toolroll." };
     else if (phase === "cancel") {
       state.tokens(
         Number(action.part),

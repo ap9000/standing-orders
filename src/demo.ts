@@ -1,5 +1,5 @@
 /**
- * `standing-orders demo` (adoption track, step 4) — a seeded, throwaway
+ * `toolroll demo` (adoption track, step 4) — a seeded, throwaway
  * sandbox: ninety seconds from npx to seeing the product mid-flight, with
  * zero real repos, zero agents, zero spend.
  *

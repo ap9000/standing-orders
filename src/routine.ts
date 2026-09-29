@@ -485,7 +485,7 @@ function fireRoutineInTransaction(store: Store, routineId: number, now: Date, ma
         state === "unreadable"
           ? `The agents this standing order's approval froze cannot be read back. Open it, refresh its agents from today's configuration, read them, and approve it again; until then its firings wait.`
           : state === "unfrozen"
-            ? `This standing order was approved before Standing Orders froze which agents plan, build, repair, and review each firing. Open it, refresh its agents, read the agents it now names, and approve it again; until then its firings wait.`
+            ? `This standing order was approved before Toolroll froze which agents plan, build, repair, and review each firing. Open it, refresh its agents, read the agents it now names, and approve it again; until then its firings wait.`
             : `The agents this standing order's approval froze do not verify (${integrity.liveProblem ?? "the frozen snapshot is not whole"}). Open it, refresh its agents from today's configuration, read them, and approve it again; until then its firings wait.`;
       // A snapshot never taken (approved before routing froze) is a real
       // state a person must act on, and it pages once at the edge. A

@@ -1,5 +1,5 @@
 /**
- * How much evidence work a task asks Standing Orders to do after the
+ * How much evidence work a task asks Toolroll to do after the
  * builder finishes. This is deliberately separate from operating modes
  * (authority/autonomy) and unattended permissions (provider sandboxing).
  */

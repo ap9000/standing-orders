@@ -186,6 +186,6 @@ export function reuseObservationVerification(store: Store, root: string, runId: 
   storeEvidence(store, root, runId, "check-log", "check-log.txt", read.content, `Reused unchanged passing checks from run #${brief.sourceRun}; no full command executed in this attempt`, now,
     { captureStatus: "ok", redacted: log.redacted, sourceBytesOriginal: log.bytesOriginal });
   sealVerificationReceipt(store, root, runId, brief.head, receipt.command, receipt.result, now, { run: brief.sourceRun, digest: brief.gateDigest });
-  store.addRunNote(runId, "Standing Orders", `Reused the passing project checks from run #${brief.sourceRun} for the unchanged candidate. This attempt collected only the missing focused observations.`, now);
+  store.addRunNote(runId, "Toolroll", `Reused the passing project checks from run #${brief.sourceRun} for the unchanged candidate. This attempt collected only the missing focused observations.`, now);
   return receipt.result as VerifyCommandFacts;
 }

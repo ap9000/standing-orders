@@ -1,6 +1,6 @@
-# Standing Orders guides
+# Toolroll guides
 
-Standing Orders runs coding agents and business processes on your own
+Toolroll runs coding agents and business processes on your own
 computer, with a person in charge of every decision that matters.
 
 - [Getting started](getting-started.md): install, sign in, first project, starter kits, first flow

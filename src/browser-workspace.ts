@@ -88,7 +88,7 @@ export type BrowserSettingsView = {
   push: { available: boolean; devices: { id: number; words: string; state: string; removable: boolean }[] } | null;
   digest: { every: string; held: string | null } | null;
   telegram: { state: string; current: string;
-    /** v98: how the bot's messages reach Standing Orders (pushed, or asked for), in words. */
+    /** v98: how the bot's messages reach Toolroll (pushed, or asked for), in words. */
     delivery?: string | null };
   /** Each worker: how many tasks it runs at once, and what it is running now. */
   workers?: { name: string; tone: 'ok' | 'warn' | 'off'; state: string; capacity: number; busy: number;

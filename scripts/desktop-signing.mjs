@@ -28,7 +28,7 @@ export function desktopBuildOptions(argv, env, home, artifactRoot = resolve('out
   }
   return { destination: destination ?? join(artifactRoot, randomUUID(), 'Standing Orders.app'), development, identity: development ? '-' : identity, notaryProfile,
     upgradeFrom: development ? undefined : upgradeFrom ?? join(home, 'Applications', 'Standing Orders.app'), explicitUpgradeFrom: upgradeFrom !== undefined,
-    bundleId: development ? DEVELOPMENT_ID : RELEASE_ID, name: development ? 'Standing Orders Development' : 'Standing Orders' };
+    bundleId: development ? DEVELOPMENT_ID : RELEASE_ID, name: development ? 'Toolroll Development' : 'Toolroll' };
 }
 
 export function resolveReleaseIdentity(requested, listing) {

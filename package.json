@@ -56,6 +56,7 @@
   },
   "homepage": "https://github.com/ap9000/standing-orders#readme",
   "bin": {
+    "toolroll": "dist/bin.js",
     "standing-orders": "dist/bin.js"
   },
   "engines": {

@@ -1,19 +1,19 @@
 #!/bin/sh
-# Standing Orders, in one command (macOS and Linux):
+# Toolroll, in one command (macOS and Linux):
 #
 #   curl -fsSL https://raw.githubusercontent.com/ap9000/standing-orders/main/install.sh | sh
 #
 # It checks what it needs (Node.js 22.13 or newer, git), installs the
-# `standing-orders` command with npm, and starts it with your projects in
-# ~/Projects. Nothing runs as root, and nothing is installed but the one npm
+# `toolroll` command with npm (`standing-orders`, the older name, still
+# works), and starts it with your projects in ~/Projects. Nothing runs as root, and nothing is installed but the one npm
 # package. Settings:
 #   SO_PROJECTS=/path/to/projects   where your repositories live (default ~/Projects)
 #   SO_VERSION=0.5.0                a particular release (default: the latest)
-#   SO_NO_START=1                   install only; start later with `standing-orders up`
+#   SO_NO_START=1                   install only; start later with `toolroll up`
 set -eu
 
 say() { printf '%s\n' "$*"; }
-stop() { printf '\nStanding Orders: %s\n' "$*" >&2; exit 1; }
+stop() { printf '\nToolroll: %s\n' "$*" >&2; exit 1; }
 
 case "$(uname -s)" in
   Darwin|Linux) ;;
@@ -43,7 +43,10 @@ say "Installing $package …"
 if ! npm install -g "$package" --no-fund --no-audit --loglevel=error; then
   stop "npm couldn't install it. If it said permission denied, give npm a folder you own: https://docs.npmjs.com/resolving-eacces-permissions-errors-when-installing-packages-globally"
 fi
-say "Installed $(standing-orders --version 2>/dev/null || echo standing-orders)."
+# Releases before the rename only have the older `standing-orders` name.
+cli="toolroll"
+command -v toolroll >/dev/null 2>&1 || cli="standing-orders"
+say "Installed $("$cli" --version 2>/dev/null || echo "$cli")."
 
 if [ -z "$agents" ]; then
   say ""
@@ -53,17 +56,17 @@ fi
 if [ "$(uname -s)" = "Linux" ] && ! command -v bwrap >/dev/null 2>&1; then
   say ""
   say "Tip: install bubblewrap (apt install bubblewrap) so Claude and Gemini agents can't read"
-  say "Standing Orders' own secrets on this computer. Codex is fenced without it."
+  say "Toolroll's own secrets on this computer. Codex is fenced without it."
 fi
 
 if [ "${SO_NO_START:-}" = "1" ]; then
   say ""
-  say "Start it with: standing-orders up --project-root \"${SO_PROJECTS:-$HOME/Projects}\""
+  say "Start it with: $cli up --project-root \"${SO_PROJECTS:-$HOME/Projects}\""
   exit 0
 fi
 
 projects="${SO_PROJECTS:-$HOME/Projects}"
 mkdir -p "$projects"
 say ""
-say "Starting Standing Orders with your projects in $projects …"
-exec standing-orders up --project-root "$projects"
+say "Starting Toolroll with your projects in $projects …"
+exec "$cli" up --project-root "$projects"

@@ -36,7 +36,7 @@ export function discordSettingsHtml(
       runtime.connected;
   const hidden = `<input type="hidden" name="csrf" value="${escape(csrf)}">`;
   const password =
-    '<label>Your Standing Orders password<input style="min-height:44px" type="password" name="password" autocomplete="current-password" required></label>';
+    '<label>Your Toolroll password<input style="min-height:44px" type="password" name="password" autocomplete="current-password" required></label>';
   const post = (action: string, content: string) =>
     `<form method="post" action="/settings/discord/${action}" class="card">${hidden}${content}</form>`;
   let content = "";
@@ -56,10 +56,10 @@ export function discordSettingsHtml(
       content += `<p role="status">${escape(String(runtime.problem))}</p>`;
     if (!live && !runtime?.problem)
       content +=
-        "<p>Keep the Standing Orders worker running to receive Discord messages.</p>";
+        "<p>Keep the Toolroll worker running to receive Discord messages.</p>";
     if (options.code) {
       content +=
-        "<h2>Pair your account</h2><p>Send this in a direct message to your Standing Orders Discord app. It expires in 10 minutes.</p>" +
+        "<h2>Pair your account</h2><p>Send this in a direct message to your Toolroll Discord app. It expires in 10 minutes.</p>" +
         `<label>Pairing message<input type="text" readonly value="pair ${escape(options.code)}" autocomplete="off" style="width:100%;max-width:100%;font-size:14px;min-height:44px"></label>` +
         '<a class="button-link" style="min-height:44px;white-space:nowrap" href="/settings/discord">Check connection</a>';
     } else if (binding && state.live(binding)) {
@@ -90,7 +90,7 @@ export function discordSettingsHtml(
     } else {
       content += post(
         "pair",
-        "<h2>Pair your account</h2><p>Your paired Discord account can read your connected projects and confirm proposed changes. Password approvals still open in Standing Orders." +
+        "<h2>Pair your account</h2><p>Your paired Discord account can read your connected projects and confirm proposed changes. Password approvals still open in Toolroll." +
           (others ? ` ${others} teammate${others === 1 ? " is" : "s are"} already paired.` : "") + "</p>" +
           password +
           '<button type="submit">Create pairing code</button>',
@@ -109,5 +109,5 @@ export function discordSettingsHtml(
       ) +
       "</details>";
   }
-  return `<section style="max-width:42rem;overflow-wrap:anywhere"><p><a href="/settings">Settings</a></p><h1>Discord</h1>${options.problem ? `<p class="problem" role="alert">${escape(options.problem)}</p>` : ""}${content}<details><summary>Access and setup</summary><p>Private messages and replies use your Standing Orders permissions. Shared channels are not supported. Secure review links use this installation’s configured HTTPS console address.</p><p>The worker connects out to Discord. It does not need a public webhook or a Tailscale account.</p></details></section>`;
+  return `<section style="max-width:42rem;overflow-wrap:anywhere"><p><a href="/settings">Settings</a></p><h1>Discord</h1>${options.problem ? `<p class="problem" role="alert">${escape(options.problem)}</p>` : ""}${content}<details><summary>Access and setup</summary><p>Private messages and replies use your Toolroll permissions. Shared channels are not supported. Secure review links use this installation’s configured HTTPS console address.</p><p>The worker connects out to Discord. It does not need a public webhook or a Tailscale account.</p></details></section>`;
 }

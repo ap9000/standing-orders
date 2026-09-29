@@ -65,7 +65,7 @@ export function spendHtml(view: SpendView, notice: { said?: string | null; probl
       `<details><summary>Change</summary><form method="post" action="/spend/budget" class="budget-form"><input type="hidden" name="csrf" value="${e(view.csrf)}"><input type="hidden" name="target" value="${e(`${budget.scope}:${budget.key}`)}">` +
       `<label>Monthly limit (US dollars)<input type="number" name="usd" min="1" step="1" value="${Math.round(budget.limitMicrousd / 1_000_000)}" required></label>` +
       `<label class="choice"><input type="checkbox" name="stop" value="1"${budget.hardStop ? " checked" : ""}> Stop new work at 100%</label>` +
-      `<label>Your Standing Orders password<input type="password" name="password" autocomplete="current-password"></label>` +
+      `<label>Your Toolroll password<input type="password" name="password" autocomplete="current-password"></label>` +
       `<button type="submit" name="action" value="save">Save</button> <button type="submit" name="action" value="remove">Remove</button></form></details></div>`;
   }).join("");
   const groups = ["Everything", "Projects", "People", "Teammates"] as const;
@@ -77,7 +77,7 @@ export function spendHtml(view: SpendView, notice: { said?: string | null; probl
     `<label>For<select name="target" required>${options}</select></label>` +
     `<label>Monthly limit (US dollars)<input type="number" name="usd" min="1" step="1" required></label>` +
     `<label class="choice"><input type="checkbox" name="stop" value="1" checked> Stop new work at 100%</label>` +
-    `<label>Your Standing Orders password<input type="password" name="password" autocomplete="current-password"></label>` +
+    `<label>Your Toolroll password<input type="password" name="password" autocomplete="current-password"></label>` +
     `<button type="submit" name="action" value="save">Add budget</button></form></details>`;
   const csv = `/spend?month=${e(view.month)}&amp;format=csv`;
   return `<article class="spend">` +

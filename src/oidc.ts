@@ -23,7 +23,7 @@ export type OidcSettings = {
   /** The ID token claim that lists a person's groups. */
   groupsClaim: string;
   rules: GroupRule[];
-  /** Who may still sign in with a Standing Orders password once sign-in with the provider is on. */
+  /** Who may still sign in with a Toolroll password once sign-in with the provider is on. */
   passwords: "everyone" | "operators";
 };
 export type OidcProvider = { issuer: string; authorize: string; token: string; jwks: string };

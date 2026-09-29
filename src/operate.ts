@@ -294,8 +294,8 @@ export type Write = (line: string) => void;
 /**
  * 0 done · 1 broke · 2 bad usage · 3 ran fine, the answer is no.
  *
- * 3 is the one that matters. `standing-orders claim` losing a race and
- * `standing-orders claim` failing to open the database must not look the same to a
+ * 3 is the one that matters. `toolroll claim` losing a race and
+ * `toolroll claim` failing to open the database must not look the same to a
  * caller deciding whether to try the next task or wake somebody up.
  */
 export const EXIT = { ok: 0, failed: 1, usage: 2, refused: 3 } as const;
@@ -346,134 +346,134 @@ export type OperateOptions = {
 
 const STATES: readonly TaskState[] = ["queued", "running", "done", "failed", "cancelled"];
 
-export const OPERATE_HELP = `standing-orders — operating the queue
+export const OPERATE_HELP = `toolroll — operating the queue
 
-  standing-orders status                    running, queued, ready results, release check and plan windows
-  standing-orders ready                     what could be dispatched right now
-  standing-orders task add <title>          queue work
-  standing-orders task list [--view <v>] [--limit <n>] [--cursor <c>]   paginated saved task status
-  standing-orders task show <id>
-  standing-orders task wait <id> [--timeout <seconds>]
+  toolroll status                    running, queued, ready results, release check and plan windows
+  toolroll ready                     what could be dispatched right now
+  toolroll task add <title>          queue work
+  toolroll task list [--view <v>] [--limit <n>] [--cursor <c>]   paginated saved task status
+  toolroll task show <id>
+  toolroll task wait <id> [--timeout <seconds>]
                                         wait for this attempt to finish or need a person
-  standing-orders project use <path>        remember a saved project (optional --token-file)
-  standing-orders project show              show the current project and credential reference
-  standing-orders project rules --repo <p>  a project's approval rules; an instance operator changes them with
+  toolroll project use <path>        remember a saved project (optional --token-file)
+  toolroll project show              show the current project and credential reference
+  toolroll project rules --repo <p>  a project's approval rules; an instance operator changes them with
                                         --not-requester on|off, --protect none|project, --protect-paths "a/**,b/**"
-  standing-orders task evidence <id>        the task's evidence pack as JSON (--html for a printable page; --out <file>)
-  standing-orders storage                   where the disk goes: database, build checkouts, releases, evidence
-  standing-orders monitoring                where the audit stream and traces go, and how each destination is doing
-  standing-orders check-progress <run>      current or final approved check progress
-  standing-orders spend [--month YYYY-MM] [--csv]   what agent work cost, by project, person, teammate and model
-  standing-orders export --out <path> [--zip]   everything Standing Orders knows, in a folder or .zip (no secrets)
-  standing-orders budget list|set|remove    monthly budgets (--all | --project <p> | --person <name> | --teammate <id>) --usd <n> [--alerts-only]
-  standing-orders retention show|preview    how long evidence, checkout records, chat and notifications are kept; what the daily sweep would remove
-  standing-orders retention set <kind> <period>   evidence|checkouts|chat|notifications, 30d|1y|forever (instance operator)
-  standing-orders backup now|list          back the database up now; list backups and how the last ones went
-  standing-orders restore <file> [--dry-run]  put a backup back (Standing Orders stopped; the current database is kept)
-  standing-orders policy show|set          the organisation policy; an instance operator sets it with --providers claude,codex|any,
+  toolroll task evidence <id>        the task's evidence pack as JSON (--html for a printable page; --out <file>)
+  toolroll storage                   where the disk goes: database, build checkouts, releases, evidence
+  toolroll monitoring                where the audit stream and traces go, and how each destination is doing
+  toolroll check-progress <run>      current or final approved check progress
+  toolroll spend [--month YYYY-MM] [--csv]   what agent work cost, by project, person, teammate and model
+  toolroll export --out <path> [--zip]   everything Toolroll knows, in a folder or .zip (no secrets)
+  toolroll budget list|set|remove    monthly budgets (--all | --project <p> | --person <name> | --teammate <id>) --usd <n> [--alerts-only]
+  toolroll retention show|preview    how long evidence, checkout records, chat and notifications are kept; what the daily sweep would remove
+  toolroll retention set <kind> <period>   evidence|checkouts|chat|notifications, 30d|1y|forever (instance operator)
+  toolroll backup now|list          back the database up now; list backups and how the last ones went
+  toolroll restore <file> [--dry-run]  put a backup back (Toolroll stopped; the current database is kept)
+  toolroll policy show|set          the organisation policy; an instance operator sets it with --providers claude,codex|any,
                                         --models <m,…>|any, --tools <t,…>|any, --ceiling safe|standard|escalated
-  standing-orders ledger verify             check the action ledger's hash chain (--checkpoint <n:hash> to compare a copied head)
-  standing-orders ledger checkpoint         record the chain's head to copy off this machine (instance operator)
-  standing-orders ledger export --from <YYYY-MM-DD> --to <YYYY-MM-DD> [--out <file>]
+  toolroll ledger verify             check the action ledger's hash chain (--checkpoint <n:hash> to compare a copied head)
+  toolroll ledger checkpoint         record the chain's head to copy off this machine (instance operator)
+  toolroll ledger export --from <YYYY-MM-DD> --to <YYYY-MM-DD> [--out <file>]
                                         every sealed entry in the range, with an evidence pack per task
-  standing-orders task complete <id>        mark the current result complete (--digest for JSON/agents)
-  standing-orders task revise <id> --feedback "requested change"
-  standing-orders assignment show <task>    root, current work and exact handoff
-  standing-orders assignment updates        durable updates (--after <cursor>)
-  standing-orders assignment brief          catch up from the local database
-  standing-orders assignment inbox --consumer <name>  receive saved status changes
-  standing-orders assignment ack --consumer <name> --batch <id>  acknowledge delivery
-  standing-orders assignment claim <task>   record your lead ownership
-  standing-orders assignment check <task> --digest <receipt>
+  toolroll task complete <id>        mark the current result complete (--digest for JSON/agents)
+  toolroll task revise <id> --feedback "requested change"
+  toolroll assignment show <task>    root, current work and exact handoff
+  toolroll assignment updates        durable updates (--after <cursor>)
+  toolroll assignment brief          catch up from the local database
+  toolroll assignment inbox --consumer <name>  receive saved status changes
+  toolroll assignment ack --consumer <name> --batch <id>  acknowledge delivery
+  toolroll assignment claim <task>   record your lead ownership
+  toolroll assignment check <task> --digest <receipt>
       claim/check use --token-env NAME or --token-file PATH for a coordinator;
       checking a receipt never approves work, accepts proof or deploys it
-  standing-orders task state <id> <state> [--reason <text>]   queued|running|done|failed|cancelled
-  standing-orders task block <id> --on <id> <id> waits for <on>
-  standing-orders task unblock <id> --on <id>  stop waiting for <on>
-  standing-orders task next <id> [--undo]   move it to the front of ITS
+  toolroll task state <id> <state> [--reason <text>]   queued|running|done|failed|cancelled
+  toolroll task block <id> --on <id> <id> waits for <on>
+  toolroll task unblock <id> --on <id>  stop waiting for <on>
+  toolroll task next <id> [--undo]   move it to the front of ITS
                                         queue (scheduling only — approval
                                         is still required); --undo puts it
                                         back in filing order
-  standing-orders task steer <id> --note "..."
+  toolroll task steer <id> --note "..."
                                         guidance for the next attempt — it
                                         reads the note before starting; a
                                         running agent is not interrupted
-  standing-orders task assign <id> --runner <name> | --anyone
+  toolroll task assign <id> --runner <name> | --anyone
                                         reserve it for one worker (it joins
                                         the back of that worker's queue) or
                                         return it to the shared queue
-  standing-orders task reopen <id> --as <you> --token <t>
+  toolroll task reopen <id> --as <you> --token <t>
                                         resume external work its tracker
                                         closed and has been SEEN open again
 
 External trackers — build what a tracker nominates, under local approvals
-  standing-orders enroll <repo> --backend github-issues --github <owner/name>
+  toolroll enroll <repo> --backend github-issues --github <owner/name>
       --allow-dispatch [--selector ours|all] --yes
                                         the dispatch grant: its own explicit
                                         yes, never in any default; writes a
                                         plane marker label to the repository
-  standing-orders publish grant --github <owner/name> --allow-merge
+  toolroll publish grant --github <owner/name> --allow-merge
       --merge-method squash|merge|rebase [--merge-delete-branch] --yes
                                         auto-merge this plane's own PRs —
                                         ONLY after CI was OBSERVED green on
                                         the exact head commit; drafts,
                                         merge queues, and unreadable
                                         protection refuse, typed and paged
-  standing-orders publish unblock <pr> --as <you> --token <t>
+  toolroll publish unblock <pr> --as <you> --token <t>
                                         lift a repair's merge hold
-  standing-orders publish rearm <pr> --as <you> --token <t>
+  toolroll publish rearm <pr> --as <you> --token <t>
                                         re-arm a refused merge after you
                                         fixed the named cause
-  standing-orders sync [--repo <path>]      pull nominated work in as ordinary
+  toolroll sync [--repo <path>]      pull nominated work in as ordinary
                                         local tasks (titles only, validated;
                                         bodies never), refresh every mirror
                                         INDIVIDUALLY, verify the marker, and
                                         deliver write-backs — zero tokens,
                                         fail closed; runs with reconcile and
                                         under watch automatically
-  standing-orders task hold <id> --reason <why> [--until <iso>]
-  standing-orders task unhold <id>
+  toolroll task hold <id> --reason <why> [--until <iso>]
+  toolroll task unhold <id>
 
-  standing-orders approver add <name> [--password <p>]
+  toolroll approver add <name> [--password <p>]
                                         mint the credential that lets a
                                         person say yes; the bootstrap for
                                         every approving act
-  standing-orders approver list
-  standing-orders task scope <id> --goal <what success is>
+  toolroll approver list
+  toolroll task scope <id> --goal <what success is>
       [--not <text>] [--touches a,b] [--budget-usd <n>]
       [--race provider:model[,provider:model…]] [--race-count 2..4]
       [--race-per-usd <n>] [--race-total-usd <n>]
       [--compare provider:model[,provider:model…]]  (labeled comparison — no dollar caps; needs a lane no budget can bound)
                                         a tournament races 2-4 agents on the
                                         task; you compare and pick one
-  standing-orders task approve <id>         the yes — interactive, or
+  toolroll task approve <id>         the yes — interactive, or
       --yes --digest <d> --as <you> --token <t> for scripts; a tournament
       approves both documents with one yes, on the joint fingerprint
-  standing-orders task requeue <id> --as <you> --token <t>
+  toolroll task requeue <id> --as <you> --token <t>
                                         exit a stall: incidents resolved,
                                         strikes cleared, queued again
-  standing-orders task regate <id> --as <you> --token <t>
+  toolroll task regate <id> --as <you> --token <t>
                                         run the approved check again on the
                                         last attempt's exact commit — a new
                                         attempt, no agent, saved result
-  standing-orders config set budgets [--build-usd <n>] [--race-per-usd <n>]
+  toolroll config set budgets [--build-usd <n>] [--race-per-usd <n>]
       [--race-total-usd <n>] [--race-agents 2..4] --as <you> --token <t>
                                         spend defaults new filings pre-fill
                                         from; config clear budgets resets
 
-  standing-orders claim <id> --runner <name> [--ttl <seconds>]
-  standing-orders heartbeat <lease>         still working; extends the lease
-  standing-orders release <lease>           done with it; fenced if superseded
-  standing-orders reap                      release every lease that ran out
+  toolroll claim <id> --runner <name> [--ttl <seconds>]
+  toolroll heartbeat <lease>         still working; extends the lease
+  toolroll release <lease>           done with it; fenced if superseded
+  toolroll reap                      release every lease that ran out
 
-  standing-orders tick --runner <name> --token <t> --repo <path>
+  toolroll tick --runner <name> --token <t> --repo <path>
                                         one unattended pass: claim what is
                                         ready and approved, build it in a
                                         leased worktree, commit to a branch.
                                         [--max <n>] tasks (default 1),
                                         [--base <ref>] for first attempts.
                                         Never pushes.
-  standing-orders up [--project-root <dir>] one command to a working cockpit:
+  toolroll up [--project-root <dir>] one command to a working cockpit:
                                         app + builder + browser. Mints
                                         your login on first run (saved to
                                         up-login.txt beside the database),
@@ -502,101 +502,101 @@ External trackers — build what a tracker nominates, under local approvals
                                         (macOS) instead of downgrading.
                                         Also read by watch, tick and
                                         daemon install.
-  standing-orders reconcile --repo <path>   the morning sweep: recover dead
+  toolroll reconcile --repo <path>   the morning sweep: recover dead
                                         runners, reap expired leases, adopt
                                         or forget orphaned worktrees. Run it
                                         before tick.
 
 Capabilities — what the work needs, recorded and probed, never valued
-  standing-orders cap add <name> [--kind env|cli|mcp|ci|other] [--probe <cmd>]
+  toolroll cap add <name> [--kind env|cli|mcp|ci|other] [--probe <cmd>]
                                         env kind synthesizes test -n "$NAME"
-  standing-orders cap list [--repo <path>]
-  standing-orders cap probe [<kind:name>…]  ask the environment; exit 0 all
+  toolroll cap list [--repo <path>]
+  toolroll cap probe [<kind:name>…]  ask the environment; exit 0 all
                                         verified, 3 any gap
-  standing-orders task require <id> --cap <kind:name>[,…]
+  toolroll task require <id> --cap <kind:name>[,…]
                                         nothing dispatches it until every
                                         one is verified (--cap none clears)
-  standing-orders gaps [--repo <path>]      what is missing, ranked by how many
+  toolroll gaps [--repo <path>]      what is missing, ranked by how many
                                         tasks filling it would start
 
-  standing-orders task plan <id> --as <you> --token <t>
+  toolroll task plan <id> --as <you> --token <t>
                                         plan before building: an agent reads
                                         the repo, asks you questions, and
                                         proposes a scope you approve
-  standing-orders task route <id> [--risk routine|elevated|high]
+  toolroll task route <id> [--risk routine|elevated|high]
       [--phase plan|build|repair --provider <p> [--model <m>] | --clear-phase <phase>]
       --as <you> --token <t>            which agent plans, builds, and repairs
                                         this task, with the reason for
                                         each; declare its risk or override a
                                         phase — approval seals the route
 
-Routines — standing orders that fire on a schedule, each instance isolated
-  standing-orders template list             common standing orders, shipped
-  standing-orders template show <name>      the full prefill + what to edit
-  standing-orders template apply <name> --repo <path> [--file]
+Routines — tasks that fire on a schedule, each instance isolated
+  toolroll template list             common routines, shipped
+  toolroll template show <name>      the full prefill + what to edit
+  toolroll template apply <name> --repo <path> [--file]
       previews the exact filing; --file files it UNAPPROVED through the
       same door as a manual filing — a template carries no authority
 
-  standing-orders routine add <name> --repo <path> --goal <text>
+  toolroll routine add <name> --repo <path> --goal <text>
       --schedule every:<min>|daily:<HH:MM>[@Zone]|weekly:<0-6>:<HH:MM>[@Zone] (UTC by default)
       [--not <text>] [--touches a,b] [--require kind:name,…] [--ceiling <usd>]
       [--budget-usd <n>]                    what each firing may spend
-  standing-orders routine approve <name>    the step-up: approving means each
+  toolroll routine approve <name>    the step-up: approving means each
                                         firing builds WITHOUT asking, inside
                                         exactly the stated terms; editing any
                                         term voids the approval
-  standing-orders routine list | show <name>
-  standing-orders routine refresh <name>    re-resolve the agents it freezes from
+  toolroll routine list | show <name>
+  toolroll routine refresh <name>    re-resolve the agents it freezes from
                                         today's configuration; approve again
                                         afterwards — nothing fires until then
-  standing-orders routine pause|resume <name>
-  standing-orders routine run-now <name> --as <you> --token <t>
+  toolroll routine pause|resume <name>
+  toolroll routine run-now <name> --as <you> --token <t>
 
 Agents — which provider and model each phase runs on
-  standing-orders providers                 what is installed, logged in, and
+  toolroll providers                 what is installed, logged in, and
                                         configured on this machine — without
                                         spending anything to find out
-  standing-orders providers --report --runner <name> --token <t>
+  toolroll providers --report --runner <name> --token <t>
                                         record this machine's readiness per
                                         provider under its runner name
-  standing-orders config set chat --provider claude-subscription|codex-subscription|anthropic-api|openrouter-api
+  toolroll config set chat --provider claude-subscription|codex-subscription|anthropic-api|openrouter-api
       [--model <m>] [--weekly-usd <n>] [--daily-turns <n>] --as <you> --token <t>
       membership providers reuse a logged-in local harness with no dollar
       maximum; direct API providers require a key and weekly dollar ceiling
-  standing-orders chat --as <you> [--repo <path>…] [--say "…"] [--end]
+  toolroll chat --as <you> [--repo <path>…] [--say "…"] [--end]
       [--ceiling-usd <n>] [--json]                 (password at the prompt;
       --token <t> only for scripts — it lands in shell history)
       the mate: one conversation across your projects, the same thread the
       console shows; the password mints a spending session once; it reads
       and proposes, you confirm cards (confirm N / dismiss N / open N;
       confirm N yes for an irreversible answer)
-  standing-orders proposals [list [--all]] | confirm <id> [--yes] | dismiss <id>
+  toolroll proposals [list [--all]] | confirm <id> [--yes] | dismiss <id>
       what coordinators proposed over the MCP gateway; confirming runs the
       same door the console runs, under your password
-  standing-orders config show [--repo <path>]
-  standing-orders config set <phase> --provider claude|codex|openrouter
+  toolroll config show [--repo <path>]
+  toolroll config set <phase> --provider claude|codex|openrouter
       [--model <m>] [--repo <path>] --as <you> --token <t>
                                         phases: plan | build | repair. The
                                         repo form is a project override;
                                         without it, installation-wide.
                                         Repair's PROVIDER always inherits
                                         the build it mends.
-  standing-orders config set <phase> --tier strong --provider <p> --model <m>
+  toolroll config set <phase> --tier strong --provider <p> --model <m>
       [--repo <path>] --as <you> --token <t>
                                         the STRONG agent high-risk, strict,
                                         screenshot-proof, and automerge
                                         routes reach for; never inferred
-  standing-orders config clear <phase> [--repo <path>] --as <you> --token <t>
+  toolroll config clear <phase> [--repo <path>] --as <you> --token <t>
 
-  standing-orders setup show --repo <path>  what a fresh checkout runs first
-  standing-orders setup set --repo <path> --command "npm ci"
+  toolroll setup show --repo <path>  what a fresh checkout runs first
+  toolroll setup set --repo <path> --command "npm ci"
       [--timeout-seconds <n>] --as <you> --token <t> [--yes]
                                         approve the command every fresh
                                         worktree runs before any agent —
                                         a failed setup blocks the build
-  standing-orders setup clear --repo <path> --as <you> --token <t>
-  standing-orders verify show --repo <path> what re-runs after each build
-  standing-orders verify set --repo <path> --command "npm test"
+  toolroll setup clear --repo <path> --as <you> --token <t>
+  toolroll verify show --repo <path> what re-runs after each build
+  toolroll verify set --repo <path> --command "npm test"
       [--timeout-seconds <n>] [--self-heal [--setup-digest <shown>]]
       --as <you> --token <t> [--yes]
                                         --self-heal may replay the exact
@@ -604,54 +604,54 @@ Agents — which provider and model each phase runs on
                                         executable is missing, then retry
                                         this check once; approval requires
                                         its previewed setup digest
-  standing-orders verify clear --repo <path> --as <you> --token <t>
+  toolroll verify clear --repo <path> --as <you> --token <t>
   Pass flags still win for one pass: --provider/--model,
   --plan-provider/--plan-model, --repair-model. A routine instance is
   pinned at fire time and ignores all of them.
-  standing-orders peek [<run-id>] [--tmux]  watch live agents: one pane per
+  toolroll peek [<run-id>] [--tmux]  watch live agents: one pane per
                                         open run — stage, clock, and what
                                         the agent is saying; digits focus,
                                         q leaves; --tmux opens a window per
                                         run in a real tmux session
-  standing-orders brief [--repo <path>] [--local] [--since <iso>]
+  toolroll brief [--repo <path>] [--local] [--since <iso>]
                                         the report: recent runs, gaps,
                                         PRs (--local skips the network and
                                         says REVIEW was not read)
 
 The outbox — facts that want a person, durably
-  standing-orders webhook set slack|discord <url>
+  toolroll webhook set slack|discord <url>
                                         UI-only chat mirrors: every page a
                                         message with a console link; acting
                                         stays in the console. Delivers when
                                         Telegram is not configured.
-  standing-orders webhook set console-url <http://host:port>
-  standing-orders webhook primary telegram|slack|discord
+  toolroll webhook set console-url <http://host:port>
+  toolroll webhook primary telegram|slack|discord
                                         which service receives alerts when
                                         several are connected (asked once,
                                         the first time you add a second)
-  standing-orders webhook status | test | clear slack|discord
-  standing-orders outbox list [--all]
-  standing-orders outbox deliver --cmd <c>  runs once per pending row, reading
+  toolroll webhook status | test | clear slack|discord
+  toolroll outbox list [--all]
+  toolroll outbox deliver --cmd <c>  runs once per pending row, reading
                                         $STANDING_ORDERS_KIND / _SUBJECT / _BODY;
                                         exit 0 delivered receipts, 1 any fail
 
 Runners — the machines that may be given work
-  standing-orders runner register <name> [--capacity <n>] [--token-file <path>]
+  toolroll runner register <name> [--capacity <n>] [--token-file <path>]
                                         mints a token, shown once
-  standing-orders runner list               who is registered, and answering
-  standing-orders runner heartbeat <name> --token <token>
-  standing-orders runner reap               take back what a dead runner held
-  standing-orders runner retire <name>
-  standing-orders runner capacity <name> <n> --as <you> --token <t>
+  toolroll runner list               who is registered, and answering
+  toolroll runner heartbeat <name> --token <token>
+  toolroll runner reap               take back what a dead runner held
+  toolroll runner retire <name>
+  toolroll runner capacity <name> <n> --as <you> --token <t>
                                         how many tasks it runs at once (1–64);
                                         running work carries on, the new
                                         number applies at the next claim
 
 Write access — discovery stays read-only until you grant it
-  standing-orders enroll [repo] --backend <name> --paths <p>[,<p>]
+  toolroll enroll [repo] --backend <name> --paths <p>[,<p>]
                                         show what it would grant; --yes agrees
-  standing-orders grants                    what has been granted, and to what
-  standing-orders revoke [repo] --backend <name>
+  toolroll grants                    what has been granted, and to what
+  toolroll revoke [repo] --backend <name>
 
   --allow <a,b>     mutation classes (default: ${DEFAULT_MUTATIONS.join(",")})
   --selector ours|all   which tasks (default: ours — never a whole backlog)
@@ -1307,7 +1307,7 @@ function claimCommand(
   const id = positional[0];
   const runner = text(flags, "runner");
 
-  if (id === undefined) return fail(write, json, "claim", "usage", "which task? `standing-orders claim <id> --runner <name> --token <token>`", EXIT.usage);
+  if (id === undefined) return fail(write, json, "claim", "usage", "which task? `toolroll claim <id> --runner <name> --token <token>`", EXIT.usage);
   if (runner === undefined) return fail(write, json, "claim", "usage", "--runner names who is taking it", EXIT.usage);
 
   // Taking work requires proving who you are. Accepting a runner *name* alone
@@ -1379,7 +1379,7 @@ function claimCommand(
     }
     if (result.reason === "external") {
       const said: Record<string, string> = {
-        "stale-mirror": "this tracker item has not been seen recently — run `standing-orders sync` first",
+        "stale-mirror": "this tracker item has not been seen recently — run `toolroll sync` first",
         "external-closed": "the tracker closed this — reopen it first, or leave it be",
         "dispatch-revoked": "this tracker's building permission was revoked or narrowed",
         "plane-blocked": "this tracker's plane marker could not be verified — building is paused",
@@ -1485,7 +1485,7 @@ function leaseCommand(
 ): number {
   const { store, write, json, now } = context;
   const lease = positional[0];
-  if (lease === undefined) return fail(write, json, command, "usage", `which lease? \`standing-orders ${command} <lease>\``, EXIT.usage);
+  if (lease === undefined) return fail(write, json, command, "usage", `which lease? \`toolroll ${command} <lease>\``, EXIT.usage);
 
   const ttl = readTtl(flags);
   if (ttl === null) return fail(write, json, command, "usage", "--ttl takes whole seconds", EXIT.usage);
@@ -1558,7 +1558,7 @@ async function runnerCommand(
     }
     if (runners.length === 0) {
       write("No runners registered.");
-      write("  standing-orders runner register <name>");
+      write("  toolroll runner register <name>");
       return EXIT.ok;
     }
     for (const one of runners) {
@@ -1622,7 +1622,7 @@ async function runnerCommand(
       "",
       ...(tokenFile === undefined
         ? [`  token  ${token}`, "", "That token is shown once and is not stored — only a hash of it is."]
-        : [`  token written to ${tokenFile} (owner-only) — \`standing-orders watch --runner ${runner.name} --token-file ${tokenFile} --repo <path>\` uses it.`, "", "The token is not stored anywhere else — only a hash of it is."]),
+        : [`  token written to ${tokenFile} (owner-only) — \`toolroll watch --runner ${runner.name} --token-file ${tokenFile} --repo <path>\` uses it.`, "", "The token is not stored anywhere else — only a hash of it is."]),
       "If it is lost, register again to mint a new one.",
       // Taking work back from the previous holder of this name is a side
       // effect somebody should hear about, not one they discover later from a
@@ -1790,7 +1790,7 @@ async function coordinatorCommand(
       return EXIT.ok;
     }
     if (rows.length === 0) {
-      write("No coordinators. `standing-orders coordinator mint <name> --repo <path> --as <you> --token <t>`");
+      write("No coordinators. `toolroll coordinator mint <name> --repo <path> --as <you> --token <t>`");
       return EXIT.ok;
     }
     for (const one of rows) {
@@ -1873,7 +1873,7 @@ async function coordinatorCommand(
 }
 
 /**
- * `standing-orders mcp` (MCP gateway spec v6): stdio server, coordinator
+ * `toolroll mcp` (MCP gateway spec v6): stdio server, coordinator
  * credential from a 0600 token file XOR the environment, non-migrating
  * store open, demo refusal, startup death on a dead credential. stdout
  * is protocol bytes only; everything human goes to stderr.
@@ -2023,7 +2023,7 @@ async function buildCommand(
   const branch = text(flags, "branch");
 
   if (id === undefined || runner === undefined || token === undefined || branch === undefined) {
-    return fail(write, json, "build", "usage", "`standing-orders build <id> --runner <name> --token <t> --branch <b> --repo <path>`", EXIT.usage);
+    return fail(write, json, "build", "usage", "`toolroll build <id> --runner <name> --token <t> --branch <b> --repo <path>`", EXIT.usage);
   }
 
   const auth = authenticate(store, runner, token);
@@ -2167,7 +2167,7 @@ async function buildCommand(
       { parked: true, decision: disposition.decisionId, worktree: leased.worktree.path },
       () => [
         `${id} parked a decision instead of guessing.`,
-        `  decision  ${disposition.decisionId} — \`standing-orders decide ${disposition.decisionId}\``,
+        `  decision  ${disposition.decisionId} — \`toolroll decide ${disposition.decisionId}\``,
         `  worktree  ${leased.worktree.path} (work in progress preserved)`,
       ],
     );
@@ -2263,7 +2263,7 @@ async function tickCommand(
   const token = text(flags, "token");
 
   if (runner === undefined || token === undefined) {
-    return fail(write, json, "tick", "usage", "`standing-orders tick --runner <name> --token <t> --repo <path> [--max <n>] [--base <ref>]`", EXIT.usage);
+    return fail(write, json, "tick", "usage", "`toolroll tick --runner <name> --token <t> --repo <path> [--max <n>] [--base <ref>]`", EXIT.usage);
   }
 
   // Heartbeat rather than bare auth: a pass that is about to hold leases for
@@ -2641,7 +2641,7 @@ async function tickCommand(
             dedupeKey: `decision:${racerDecision}`,
             kind: "decision",
             subject: `${taskId} parked a decision (${contestNoun(waiting.kind)} agent)`,
-            body: `\`standing-orders decide ${racerDecision}\``,
+            body: `\`toolroll decide ${racerDecision}\``,
             pushClass: "decision",
             link: `/d/${racerDecision}`,
           },
@@ -2720,8 +2720,8 @@ async function tickCommand(
   // kept out of ready are REPORTED here, typed, with a paged episode —
   // an undispatakable tracker item is a 9am fact, not a silent absence.
   const MIRROR_WORDS: Record<string, string> = {
-    "stale-mirror": "its tracker has not been synced recently — `standing-orders sync` restores freshness",
-    "external-closed": "the tracker closed it — reopen it there, then `standing-orders task reopen`",
+    "stale-mirror": "its tracker has not been synced recently — `toolroll sync` restores freshness",
+    "external-closed": "the tracker closed it — reopen it there, then `toolroll task reopen`",
     "dispatch-revoked": "the tracker's building permission was revoked or narrowed",
     "plane-blocked": "the tracker's plane marker could not be verified — building is paused",
   };
@@ -3160,7 +3160,7 @@ async function tickCommand(
               pushClass: "attention",
               link: "/caps",
               subject: `${key} blocks work in ${home}`,
-              body: `${id} (and possibly others) cannot dispatch: ${claimed.message}. \`standing-orders gaps --repo ${home}\``,
+              body: `${id} (and possibly others) cannot dispatch: ${claimed.message}. \`toolroll gaps --repo ${home}\``,
             },
             clock(),
           );
@@ -3361,7 +3361,7 @@ async function tickCommand(
                 dedupeKey: `decision:${contestantDecision}`,
                 kind: "decision",
                 subject: `${id} parked a decision (${contestNoun(admittedKind)} agent)`,
-                body: `\`standing-orders decide ${contestantDecision}\``,
+                body: `\`toolroll decide ${contestantDecision}\``,
                 pushClass: "decision",
                 link: `/d/${contestantDecision}`,
               },
@@ -3704,7 +3704,7 @@ async function tickCommand(
       await worktrees.release(scoutLeased.worktree.path, clock());
       const discarded = await worktrees.discard(scoutLeased.worktree.path, clock());
       // A checkout that could not be discarded is SAID on the outcome —
-      // never silently kept; `standing-orders worktrees` lists it.
+      // never silently kept; `toolroll worktrees` lists it.
       const leftover = discarded.ok ? {} : { detail: `checkout kept: ${discarded.message}` };
 
       if (scouted.ok && "parked" in scouted) {
@@ -3950,7 +3950,7 @@ async function tickCommand(
     if (leased.resumedFromRun !== undefined) {
       store.addRunNote(
         runId,
-        "Standing Orders",
+        "Toolroll",
         `Recovered the ${leased.recoveryKind === "completed" ? "completed source draft" : "work-in-progress draft"} from interrupted attempt #${leased.resumedFromRun}. This fresh attempt is reviewing and verifying it; the safety patch is retained.`,
         clock(),
       );
@@ -4231,7 +4231,7 @@ async function tickCommand(
     if (leased.resumedFromRun !== undefined) {
       store.addRunNote(
         admitted.runId,
-        "Standing Orders",
+        "Toolroll",
         `Recovered the ${leased.recoveryKind === "completed" ? "completed source draft" : "work-in-progress draft"} from interrupted attempt #${leased.resumedFromRun}. This fresh attempt is reviewing and verifying it; the safety patch is retained.`,
         clock(),
       );
@@ -4557,7 +4557,7 @@ async function tickCommand(
             ? `committed to ${entry.branch}`
             : "no changes reported; see the result's proof status"
           : entry.outcome === "parked"
-            ? `${entry.reason} — \`standing-orders decide\``
+            ? `${entry.reason} — \`toolroll decide\``
             : entry.reason ?? "";
       lines.push(`  ${entry.id.padEnd(24)} ${entry.outcome}  ${detail}`.trimEnd());
     }
@@ -4565,7 +4565,7 @@ async function tickCommand(
       lines.push("", "Nothing has been pushed. Look at the branches before they go anywhere.");
     }
     if (parked > 0) {
-      lines.push("", `${parked} decision${parked === 1 ? "" : "s"} waiting — \`standing-orders decide\`, or \`standing-orders brief\`.`);
+      lines.push("", `${parked} decision${parked === 1 ? "" : "s"} waiting — \`toolroll decide\`, or \`toolroll brief\`.`);
     }
     return lines;
   };
@@ -4774,7 +4774,7 @@ async function reconcileCommand(
 // The computation lives in gaps.ts, shared with the web console; the CLI
 // keeps only its own presentation.
 
-/** `standing-orders gaps` — the BLOCKED section of the morning, standalone. */
+/** `toolroll gaps` — the BLOCKED section of the morning, standalone. */
 function gapsCommand(flags: Map<string, string | true>, context: Context): number {
   const { store, write, json, clock } = context;
   const repo = repoFrom(flags);
@@ -4806,7 +4806,7 @@ function gapsCommand(flags: Map<string, string | true>, context: Context): numbe
 // ---- the report -----------------------------------------------------------
 
 /**
- * `standing-orders brief` — one ritual (§6). The recent runs from the run table,
+ * `toolroll brief` — one ritual (§6). The recent runs from the run table,
  * the blocked gaps ranked by what filling them frees, the PRs waiting on a
  * person, and where decisions will go when M3 gives them a shape.
  *
@@ -4829,7 +4829,7 @@ async function briefCommand(
   // 24 hours" — which can mix two windows, or none.
   const episode = flags.has("latest-watch") ? store.latestWatchEpisode(repo) : null;
   if (flags.has("latest-watch") && episode === null) {
-    return fail(write, json, "brief", "no-watch", "no watch episode recorded for this repo yet — run `standing-orders watch` first", EXIT.refused);
+    return fail(write, json, "brief", "no-watch", "no watch episode recorded for this repo yet — run `toolroll watch` first", EXIT.refused);
   }
   const since =
     episode?.startedAt ??
@@ -4909,7 +4909,7 @@ async function briefCommand(
     return EXIT.ok;
   }
 
-  const lines: string[] = [`standing-orders — the report ─ ${repo}`];
+  const lines: string[] = [`toolroll — the report ─ ${repo}`];
   if (episode !== null) {
     lines.push(
       `  episode      watch #${episode.id} on ${episode.runner} · ${episode.startedAt} → ${
@@ -4949,7 +4949,7 @@ async function briefCommand(
     for (const gap of gaps) {
       lines.push(`      ${gap.key.padEnd(28)} ${gap.state}`);
     }
-    lines.push(`      → standing-orders gaps --repo ${repo}`);
+    lines.push(`      → toolroll gaps --repo ${repo}`);
   }
 
   lines.push(
@@ -4962,13 +4962,13 @@ async function briefCommand(
   }
 
   if (pending.length > 0) {
-    lines.push(`  ▸ OUTBOX     ${pending.length} undelivered — standing-orders outbox deliver --cmd …`);
+    lines.push(`  ▸ OUTBOX     ${pending.length} undelivered — toolroll outbox deliver --cmd …`);
   }
 
   if (decisions.length > 0) {
     const overdue = decisions.filter(one => one.state === "expired").length;
     lines.push(
-      `  ▸ DECIDE     ${decisions.length} waiting${overdue > 0 ? ` (${overdue} overdue)` : ""} — standing-orders decide`,
+      `  ▸ DECIDE     ${decisions.length} waiting${overdue > 0 ? ` (${overdue} overdue)` : ""} — toolroll decide`,
     );
     for (const one of decisions) {
       lines.push(`      ${String(one.id).padEnd(4)} ${one.taskId.padEnd(20)} ${one.question}`);
@@ -4980,7 +4980,7 @@ async function briefCommand(
   if (stranded.length > 0) {
     lines.push(`  ▸ STRANDED   ${stranded.length} task(s) behind failed blockers — they will never become ready on their own`);
     for (const one of stranded) {
-      lines.push(`      ${one.id.padEnd(20)} waits on ${one.blockedBy.join(", ")} — \`standing-orders task requeue ${one.blockedBy[0]}\``);
+      lines.push(`      ${one.id.padEnd(20)} waits on ${one.blockedBy.join(", ")} — \`toolroll task requeue ${one.blockedBy[0]}\``);
     }
   }
 
@@ -4988,7 +4988,7 @@ async function briefCommand(
     lines.push(`  ▸ INCIDENTS  ${incidents.length} unresolved — these do not age out`);
     for (const incident of incidents) {
       lines.push(
-        `      ${incident.taskId.padEnd(20)} ${incident.kind} since ${incident.createdAt} — read run ${incident.run}'s evidence, then \`standing-orders incident resolve ${incident.id}\``,
+        `      ${incident.taskId.padEnd(20)} ${incident.kind} since ${incident.createdAt} — read run ${incident.run}'s evidence, then \`toolroll incident resolve ${incident.id}\``,
       );
     }
   }
@@ -5000,7 +5000,7 @@ async function briefCommand(
 // ---- decisions ------------------------------------------------------------
 
 /**
- * `standing-orders decide` — the attention surface, in the terminal.
+ * `toolroll decide` — the attention surface, in the terminal.
  *
  *   decide                          what waits, oldest first
  *   decide <id>                     one decision, whole, with its evidence
@@ -5038,14 +5038,14 @@ async function decideCommand(
       write(`       options: ${one.options.map(option => option.id).join(" · ")}   recommended: ${one.recommendation}`);
     }
     write("");
-    write("  → standing-orders decide <id>       the whole screen");
-    write("  → standing-orders decide <id> --choose <option> --as <you> --token <t>");
+    write("  → toolroll decide <id>       the whole screen");
+    write("  → toolroll decide <id> --choose <option> --as <you> --token <t>");
     return EXIT.refused;
   }
 
   const id = Number(idText);
   if (!Number.isInteger(id) || id <= 0) {
-    return fail(write, json, "decide", "usage", "`standing-orders decide [<id>] [--choose <option>]`", EXIT.usage);
+    return fail(write, json, "decide", "usage", "`toolroll decide [<id>] [--choose <option>]`", EXIT.usage);
   }
   const decision = store.getDecision(id);
   if (decision === null) {
@@ -5088,7 +5088,7 @@ async function decideCommand(
       }
     }
     write("");
-    write(`  → standing-orders decide ${id} --choose <option> --as <you> --token <t>`);
+    write(`  → toolroll decide ${id} --choose <option> --as <you> --token <t>`);
     return EXIT.ok;
   }
 
@@ -5118,7 +5118,7 @@ async function decideCommand(
   if (!answered.ok) {
     const why =
       answered.reason === "bad-option"
-        ? `"${choice}" is not one of this decision's options — \`standing-orders decide ${id}\` shows them`
+        ? `"${choice}" is not one of this decision's options — \`toolroll decide ${id}\` shows them`
         : answered.reason === "already-answered"
           ? `decision ${id} was already answered differently — "decided" is not negotiable; park a new task if the answer must change`
           : answered.reason === "bad-note"
@@ -5138,7 +5138,7 @@ async function decideCommand(
 }
 
 /**
- * `standing-orders serve [--port N] [--host H] [--allow-host name:port …]` —
+ * `toolroll serve [--port N] [--host H] [--allow-host name:port …]` —
  * the decision view, on a phone. Signing in takes the approver credential;
  * there is no unauthenticated bind, localhost included. Plain HTTP: put a
  * TLS proxy in front for anything beyond a trusted network — Tailscale is
@@ -5294,7 +5294,7 @@ async function serveCommand(
 }
 
 /**
- * `standing-orders task requeue <id>` — the authenticated way back from a stall.
+ * `toolroll task requeue <id>` — the authenticated way back from a stall.
  * Resolves the task's open incidents (their holds lift with them), clears
  * strikes and backoff, and returns the task to the queue in one
  * transaction. Nothing else moves a stalled task: retrying by hand-editing
@@ -5308,7 +5308,7 @@ async function requeueTask(
   const { store, write, json, clock } = context;
   const [id] = positional;
   if (id === undefined) {
-    return fail(write, json, "task requeue", "usage", "`standing-orders task requeue <id> --as <you> --token <t>`", EXIT.usage);
+    return fail(write, json, "task requeue", "usage", "`toolroll task requeue <id> --as <you> --token <t>`", EXIT.usage);
   }
   const racingGuard = refuseWhileRacing(context, "task requeue", id);
   if (racingGuard !== null) return racingGuard;
@@ -5341,7 +5341,7 @@ async function requeueTask(
 }
 
 /**
- * `standing-orders task regate <id>` — the approved check again on the last
+ * `toolroll task regate <id>` — the approved check again on the last
  * attempt's exact commit (v70). A new attempt whose prepared candidate is
  * that commit: no agent, a fresh receipt and proof, the ordinary review.
  * The operator's yes seals the rerun scope; who asked is recorded.
@@ -5354,7 +5354,7 @@ async function regateTaskCommand(
   const { store, write, json, clock } = context;
   const [id] = positional;
   if (id === undefined) {
-    return fail(write, json, "task regate", "usage", "`standing-orders task regate <id> --as <you> --token <t>`", EXIT.usage);
+    return fail(write, json, "task regate", "usage", "`toolroll task regate <id> --as <you> --token <t>`", EXIT.usage);
   }
   const acting = await askCredentials(flags, context);
   if (acting === null) {
@@ -5372,7 +5372,7 @@ async function regateTaskCommand(
 }
 
 /**
- * `standing-orders task plan <id>` — ask for a plan before any promise exists.
+ * `toolroll task plan <id>` — ask for a plan before any promise exists.
  * Authenticated like every act that spends money on the operator's behalf:
  * a planner agent will read the repository and interrogate you over the
  * decision surface, and who asked for that is recorded, not asserted.
@@ -5385,7 +5385,7 @@ async function planTaskCommand(
   const { store, write, json, clock } = context;
   const [id] = positional;
   if (id === undefined) {
-    return fail(write, json, "task plan", "usage", "`standing-orders task plan <id> --as <you> --token <t>`", EXIT.usage);
+    return fail(write, json, "task plan", "usage", "`toolroll task plan <id> --as <you> --token <t>`", EXIT.usage);
   }
   const acting = await askCredentials(flags, context);
   if (acting === null) {
@@ -5442,7 +5442,7 @@ async function reviewTaskCommand(
   const [runText] = positional;
   const runId = Number(runText ?? "");
   if (runText === undefined || !Number.isInteger(runId) || runId < 1) {
-    return fail(write, json, "task review", "usage", "`standing-orders task review <run-id>`", EXIT.usage);
+    return fail(write, json, "task review", "usage", "`toolroll task review <run-id>`", EXIT.usage);
   }
   return fail(write, json, "task review", "model-review-retired",
     `Separate model review has been removed. Inspect run ${runId}'s saved work and checks, then give feedback or request a revision.`, EXIT.refused);
@@ -5450,7 +5450,7 @@ async function reviewTaskCommand(
 }
 
 /**
- * `standing-orders incident list|resolve <id>` — the parks that never became
+ * `toolroll incident list|resolve <id>` — the parks that never became
  * decisions. Resolving is an authenticated human act, the same credential as
  * approving and deciding, and it is the only thing that lifts the
  * incident's hold: `task unhold` deliberately cannot, because an operator
@@ -5478,16 +5478,16 @@ async function incidentCommand(
       write(`  ${String(incident.id).padEnd(4)} ${incident.taskId.padEnd(20)} ${incident.kind}  since ${incident.createdAt}  run ${incident.run}`);
     }
     write("");
-    write("  → standing-orders incident resolve <id> --as <you> --token <t>");
+    write("  → toolroll incident resolve <id> --as <you> --token <t>");
     return EXIT.refused;
   }
 
   if (action !== "resolve") {
-    return fail(write, json, "incident", "usage", "`standing-orders incident [list|resolve <id>]`", EXIT.usage);
+    return fail(write, json, "incident", "usage", "`toolroll incident [list|resolve <id>]`", EXIT.usage);
   }
   const id = Number(idText);
   if (!Number.isInteger(id) || id <= 0) {
-    return fail(write, json, "incident resolve", "usage", "`standing-orders incident resolve <id> --as <you> --token <t>`", EXIT.usage);
+    return fail(write, json, "incident resolve", "usage", "`toolroll incident resolve <id> --as <you> --token <t>`", EXIT.usage);
   }
   const acting = await askCredentials(flags, context);
   if (acting === null) {
@@ -5509,7 +5509,7 @@ async function incidentCommand(
 }
 
 /**
- * `standing-orders webhook …` — Slack and Discord as UI-ONLY mirrors: every
+ * `toolroll webhook …` — Slack and Discord as UI-ONLY mirrors: every
  * page is a message with a console link; acting stays in the console
  * behind its own authentication. The URL is a credential: 0600 file
  * beside the database, or the environment, never anywhere else.
@@ -5539,13 +5539,13 @@ async function webhookCommand(
     }
     if (primary.implicit && primary.channel !== null) {
       write(`  ! several services are connected and none was chosen — ${primary.channel} receives alerts by default.`);
-      write(`    Choose: standing-orders webhook primary telegram|slack|discord`);
+      write(`    Choose: toolroll webhook primary telegram|slack|discord`);
     }
-    write(`  links    ${consoleUrl ?? "NOT SET — messages will carry no console link; standing-orders webhook set console-url http://host:port"}`);
+    write(`  links    ${consoleUrl ?? "NOT SET — messages will carry no console link; toolroll webhook set console-url http://host:port"}`);
     if (targets.length === 0) {
       write("");
-      write("  standing-orders webhook set slack https://hooks.slack.com/services/…");
-      write("  standing-orders webhook set discord https://discord.com/api/webhooks/…");
+      write("  toolroll webhook set slack https://hooks.slack.com/services/…");
+      write("  toolroll webhook set discord https://discord.com/api/webhooks/…");
       write(`  (or export ${SLACK_ENV} / ${DISCORD_ENV})`);
     }
     write("");
@@ -5557,10 +5557,10 @@ async function webhookCommand(
   if (action === "test") {
     const targets = loadWebhookTargets(process.env, dir);
     if (targets.length === 0) {
-      return fail(write, json, "webhook test", "unconfigured", "no webhook configured — `standing-orders webhook set slack|discord <url>`", EXIT.refused);
+      return fail(write, json, "webhook test", "unconfigured", "no webhook configured — `toolroll webhook set slack|discord <url>`", EXIT.refused);
     }
     store.enqueueNotification(
-      { source: { installation: true }, dedupeKey: `webhook-test:${clock().getTime()}`, kind: "test", subject: "standing-orders webhook test", body: "If you can read this, the mirror works. Acting happens in the console." },
+      { source: { installation: true }, dedupeKey: `webhook-test:${clock().getTime()}`, kind: "test", subject: "toolroll webhook test", body: "If you can read this, the mirror works. Acting happens in the console." },
       clock(),
     );
     const report = await webhookPass(store, { targets, consoleUrl: loadConsoleUrl(process.env, dir), clock });
@@ -5590,7 +5590,7 @@ async function webhookCommand(
   }
 
   if (action !== "set" || which === undefined || value === undefined) {
-    return fail(write, json, "webhook", "usage", "`standing-orders webhook [status|test|set slack|discord|console-url <value>|clear slack|discord]`", EXIT.usage);
+    return fail(write, json, "webhook", "usage", "`toolroll webhook [status|test|set slack|discord|console-url <value>|clear slack|discord]`", EXIT.usage);
   }
   if (which === "console-url") {
     const saved = saveConsoleUrl(dir, value);
@@ -5614,19 +5614,19 @@ async function webhookCommand(
       savePrimary(dir, answer);
       chosen = answer;
     } else {
-      write(`Left unchosen — ${after.channel} receives alerts by default. Decide any time: standing-orders webhook primary <service>`);
+      write(`Left unchosen — ${after.channel} receives alerts by default. Decide any time: toolroll webhook primary <service>`);
     }
   }
   return succeed(write, json, "webhook set", { which, ...(chosen === null ? {} : { primary: chosen }) }, () => [
     `${which} mirror configured — the URL lives in a private file beside the database.`,
     ...(chosen === null ? [] : [`${chosen} carries the pages.`]),
-    ...(after.implicit && chosen === null && !interactive() ? [`Several services are configured — choose the pager: standing-orders webhook primary <service>`] : []),
-    `Send yourself a proof: standing-orders webhook test`,
+    ...(after.implicit && chosen === null && !interactive() ? [`Several services are configured — choose the pager: toolroll webhook primary <service>`] : []),
+    `Send yourself a proof: toolroll webhook test`,
   ]);
 }
 
 /**
- * `standing-orders providers` — identification, never integration theater.
+ * `toolroll providers` — identification, never integration theater.
  *
  * Four different claims, kept apart on purpose (Codex provider review):
  * INSTALLED (the binary answered --version), CONFIGURED (a phase names
@@ -5731,7 +5731,7 @@ async function providersCommand(
     const runnerName = text(flags, "runner");
     const runnerToken = text(flags, "token");
     if (runnerName === undefined || runnerToken === undefined) {
-      return fail(write, json, "providers", "usage", "`standing-orders providers --report --runner <name> --token <t>` records readiness under that runner", EXIT.usage);
+      return fail(write, json, "providers", "usage", "`toolroll providers --report --runner <name> --token <t>` records readiness under that runner", EXIT.usage);
     }
     const observed = await observeProviderReadiness((file, args, options) => probe(file, args, { timeoutMs: options?.timeoutMs ?? 5_000, ...(options?.omitEnv === undefined ? {} : { omitEnv: options.omitEnv }) }));
     const reported = reportProviderReadinessAuthed(store, { name: runnerName, token: runnerToken, observations: observed }, context.clock());
@@ -5800,12 +5800,12 @@ async function providersCommand(
     write(`  config surface ${audit.configSurface.join("; ")}`);
     write("");
   }
-  write("  \u2192 standing-orders config show    which provider each phase actually resolves to");
+  write("  \u2192 toolroll config show    which provider each phase actually resolves to");
   return EXIT.ok;
 }
 
 /**
- * \`standing-orders config …\` — which provider and model each phase runs on.
+ * \`toolroll config …\` — which provider and model each phase runs on.
  *
  * Two scopes: the installation, and one project's override. Mutations are
  * AUTHENTICATED and AUDITED — spend routing is authority, not preference
@@ -5814,7 +5814,7 @@ async function providersCommand(
  * complete pairs; `show` prints what each phase actually resolves to.
  */
 /**
- * `standing-orders keys …` — provider API keys as managed files, never
+ * `toolroll keys …` — provider API keys as managed files, never
  * ambient environment. The value NEVER rides an argv (visible in ps):
  * `set` reads it from --key-file or stdin. Authority is the filesystem's
  * own — these are 0600 files under the operator's home, and whoever can
@@ -5879,7 +5879,7 @@ async function keysCommand(
   if (action === "auth") {
     const [wanted] = rest;
     if (wanted !== "subscription" && wanted !== "api-key") {
-      return fail(write, json, "keys auth", "usage", `\`standing-orders keys auth ${provider} subscription|api-key\``, EXIT.usage);
+      return fail(write, json, "keys auth", "usage", `\`toolroll keys auth ${provider} subscription|api-key\``, EXIT.usage);
     }
     const set = setAuthMode(provider, wanted as AuthMode);
     if (!set.ok) {
@@ -5901,7 +5901,7 @@ async function keysCommand(
     }
   } else {
     if (process.stdin.isTTY) {
-      return fail(write, json, "keys set", "usage", "pipe the key in (\`standing-orders keys set gemini < key.txt\` or via --key-file) — a key on an argv is visible to every process list", EXIT.usage);
+      return fail(write, json, "keys set", "usage", "pipe the key in (\`toolroll keys set gemini < key.txt\` or via --key-file) — a key on an argv is visible to every process list", EXIT.usage);
     }
     const chunks: Buffer[] = [];
     for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
@@ -5922,7 +5922,7 @@ async function keysCommand(
 }
 
 /**
- * `standing-orders people …` — who can sign in, and the doors in (v29,
+ * `toolroll people …` — who can sign in, and the doors in (v29,
  * U2/U3/D7). `invite` mints the single-use join link (approver-only, no
  * escalation road exists: the role is pinned at mint); `revoke` is the
  * severing act — sessions, invites, and the modes they signed all end,
@@ -5947,7 +5947,7 @@ async function peopleCommand(
       return EXIT.ok;
     }
     if (accounts.length === 0) {
-      write("Nobody yet — `standing-orders approver add <name>` bootstraps the first.");
+      write("Nobody yet — `toolroll approver add <name>` bootstraps the first.");
       return EXIT.ok;
     }
     for (const one of accounts) {
@@ -5962,7 +5962,7 @@ async function peopleCommand(
 
   const acting = await askCredentials(flags, context);
   if (acting === null) {
-    return fail(write, json, `people ${action}`, "usage", `\`standing-orders people ${action} … --as <you> --token <t>\``, EXIT.usage);
+    return fail(write, json, `people ${action}`, "usage", `\`toolroll people ${action} … --as <you> --token <t>\``, EXIT.usage);
   }
   const authenticated = authenticateApprover(store, acting.name, acting.token);
   if (!authenticated.ok) {
@@ -6000,7 +6000,7 @@ async function peopleCommand(
 
   const [name] = rest;
   if (name === undefined || name.trim() === "") {
-    return fail(write, json, "people revoke", "usage", "`standing-orders people revoke <name> --as <you> --token <t>`", EXIT.usage);
+    return fail(write, json, "people revoke", "usage", "`toolroll people revoke <name> --as <you> --token <t>`", EXIT.usage);
   }
   const severed = store.revokeAccount(name.trim(), acting.name, clock());
   if (!severed.ok) {
@@ -6159,7 +6159,7 @@ async function configCommand(
     for (const one of strong) {
       write(`  ${one.phase.padEnd(8)} ${one.strong === null ? "none configured — such routes keep the default above and say so" : `${one.strong.provider}${one.strong.model === null ? " (harness default model)" : ` · ${one.strong.model}`}  [${one.strong.source}]`}`);
     }
-    write("  set one with: standing-orders config set <phase> --tier strong --provider <p> --model <m> --as <you> --token <t>");
+    write("  set one with: toolroll config set <phase> --tier strong --provider <p> --model <m> --as <you> --token <t>");
     write("");
     write("  repair note: the repair PROVIDER always inherits the build it mends — only its model is configurable.");
     if (fallback.length > 0) {
@@ -6172,13 +6172,13 @@ async function configCommand(
     }
     if (installation.length === 0 && project.length === 0) {
       write("  nothing configured — every phase runs the default (claude).");
-      write("  standing-orders config set build --provider claude --model sonnet --as <you> --token <t>");
+      write("  toolroll config set build --provider claude --model sonnet --as <you> --token <t>");
     }
     return EXIT.ok;
   }
 
   if (action !== "set" && action !== "clear") {
-    return fail(write, json, "config", "usage", "`standing-orders config [show|set <phase> --provider <p> [--model <m>]|clear <phase>] [--repo <path>] --as <you> --token <t>`", EXIT.usage);
+    return fail(write, json, "config", "usage", "`toolroll config [show|set <phase> --provider <p> [--model <m>]|clear <phase>] [--repo <path>] --as <you> --token <t>`", EXIT.usage);
   }
 
   // Global dollar thresholds (v15, operator request): defaults for filings
@@ -6317,7 +6317,7 @@ async function configCommand(
     return succeed(write, json, "config set", { repo: scope, fallback: entries }, () => [
       `${scope}: fallback chain set — NEW approvals bind it; existing approvals are untouched.`,
       ...entries.map((one, i) => `  ${i + 1}. ${one.provider} (${one.model}) — ${one.authMode === "subscription" ? "its subscription login" : "your API key"}`),
-      "  it fires only when a signed mode allows the paid fallback: `standing-orders mode set --allow-paid-fallback …`",
+      "  it fires only when a signed mode allows the paid fallback: `toolroll mode set --allow-paid-fallback …`",
     ]);
   }
 
@@ -6354,7 +6354,7 @@ async function configCommand(
     }
     const priced = isDirectChatProvider(provider) ? livePin(store, provider, model) ?? priceOf(model) : null;
     if (isDirectChatProvider(provider) && priced === null) {
-      return fail(write, json, "config set", "unpriced-model", `chat reserves worst-case spend up front, so the model needs a price — run "standing-orders models check" to load live prices, or pick one priced today: ${PRICED_MODELS.join(", ")}`, EXIT.refused);
+      return fail(write, json, "config set", "unpriced-model", `chat reserves worst-case spend up front, so the model needs a price — run "toolroll models check" to load live prices, or pick one priced today: ${PRICED_MODELS.join(", ")}`, EXIT.refused);
     }
     const weekly = Number(weeklyUsd);
     if (isDirectChatProvider(provider) && (weeklyUsd === undefined || !Number.isFinite(weekly) || weekly <= 0)) {
@@ -6471,7 +6471,7 @@ async function configCommand(
 }
 
 /**
- * `standing-orders setup …` — the per-repo worktree setup (M5.7). What a
+ * `toolroll setup …` — the per-repo worktree setup (M5.7). What a
  * fresh checkout runs before any agent spawns in it: dependencies, .env
  * copies, generated code. Approval is authority (an approved command runs
  * unattended in every future worktree), so `set` and `clear` take the
@@ -6507,7 +6507,7 @@ async function setupCommand(
   }
 
   if (action !== "set" && action !== "clear") {
-    return fail(write, json, "setup", "usage", "`standing-orders setup [show|set --command <cmd> [--timeout-seconds <n>] --yes|clear] --repo <path> --as <you> --token <t>`", EXIT.usage);
+    return fail(write, json, "setup", "usage", "`toolroll setup [show|set --command <cmd> [--timeout-seconds <n>] --yes|clear] --repo <path> --as <you> --token <t>`", EXIT.usage);
   }
   if (repo === undefined) {
     return fail(write, json, `setup ${action}`, "usage", "which repo? --repo <path>", EXIT.usage);
@@ -6582,7 +6582,7 @@ async function setupCommand(
 }
 
 /**
- * `standing-orders verify [show|set|clear]` (Priority 2): the ONE shell
+ * `toolroll verify [show|set|clear]` (Priority 2): the ONE shell
  * command the plane re-runs, unattended, in a leased worktree after a
  * build commits — cloned from `setupCommand` line for line, because
  * approving this is the same authority under a different name: a
@@ -6617,7 +6617,7 @@ async function verifyCommand(
   }
 
   if (action !== "set" && action !== "clear") {
-    return fail(write, json, "verify", "usage", "`standing-orders verify [show|set --command <cmd> [--timeout-seconds <n>] [--self-heal --setup-digest <shown>] --yes|clear] --repo <path> --as <you> --token <t>`", EXIT.usage);
+    return fail(write, json, "verify", "usage", "`toolroll verify [show|set --command <cmd> [--timeout-seconds <n>] [--self-heal --setup-digest <shown>] --yes|clear] --repo <path> --as <you> --token <t>`", EXIT.usage);
   }
   if (repo === undefined) {
     return fail(write, json, `verify ${action}`, "usage", "which repo? --repo <path>", EXIT.usage);
@@ -6704,7 +6704,7 @@ async function verifyCommand(
         : [
             ``,
             `Self-healing, exactly: if this check cannot start because a`,
-            `required project executable is unavailable, Standing Orders may replay`,
+            `required project executable is unavailable, Toolroll may replay`,
             `the approved setup \`${recoverySetup.command}\` (digest ${recoverySetup.digest}) once,`,
             `then retry this exact check once. It stops if custody changes,`,
             `setup fails, or setup changes tracked files after the commit.`,
@@ -6768,7 +6768,7 @@ function intakeTaskId(github: string, issueNumber: number): string {
 }
 
 /**
- * `standing-orders intake …` (M8.16) — labeled GitHub issues become LOCAL
+ * `toolroll intake …` (M8.16) — labeled GitHub issues become LOCAL
  * UNAPPROVED task proposals, preview-first, under an explicit grant.
  *
  * Detection is not authorization: enrolling a repo with four hundred open
@@ -6852,7 +6852,7 @@ async function intakeCommand(
         `  pr comments  ${reviewers === null || reviewers.length === 0 ? "nobody's — PR-comment intake stays off" : `from ${reviewers.join(", ")} only`}`,
         ``,
         `Open issues carrying exactly this label become LOCAL, UNAPPROVED task`,
-        `proposals when \`standing-orders intake run\` passes. Nothing builds`,
+        `proposals when \`toolroll intake run\` passes. Nothing builds`,
         `without a scope you approve; nothing on GitHub is ever written to.`,
         `Re-run with --yes to grant.`,
       ]) {
@@ -6867,12 +6867,12 @@ async function intakeCommand(
   }
 
   if (action !== "preview" && action !== "run" && action !== "pr-comments") {
-    return fail(write, json, "intake", "usage", "`standing-orders intake [show|grant|clear|preview|run|pr-comments] --repo <path> …`", EXIT.usage);
+    return fail(write, json, "intake", "usage", "`toolroll intake [show|grant|clear|preview|run|pr-comments] --repo <path> …`", EXIT.usage);
   }
 
   const grant = store.liveIntakeGrant(repo);
   if (grant === null) {
-    return fail(write, json, `intake ${action}`, "no-grant", `no intake grant for ${repo} — \`standing-orders intake grant\` states the terms`, EXIT.refused);
+    return fail(write, json, `intake ${action}`, "no-grant", `no intake grant for ${repo} — \`toolroll intake grant\` states the terms`, EXIT.refused);
   }
 
   if (action === "pr-comments") {
@@ -7009,7 +7009,7 @@ async function intakeCommand(
     for (const one of candidates) {
       write(`  #${one.number}  ${one.exists ? "already here as" : one.clean ? "→" : "REFUSED (title carries control characters)"} ${one.id}${one.clean ? ` — ${one.title}` : ""}`);
     }
-    write(`Nothing was created. \`standing-orders intake run\` makes the proposals.`);
+    write(`Nothing was created. \`toolroll intake run\` makes the proposals.`);
     return EXIT.ok;
   }
 
@@ -7070,7 +7070,7 @@ async function intakeCommand(
 
 
 /**
- * `standing-orders contest …` — the tournament from the terminal: `show`
+ * `toolroll contest …` — the tournament from the terminal: `show`
  * for the machine-readable state, `exclude` to stop a racing agent whose
  * question you will not answer (authenticated: it cancels paid-for work
  * and un-sticks the race). The pick itself stays a console ceremony.
@@ -7110,7 +7110,7 @@ function contestCommand(
       const contest = store.getContest(Number(idGiven));
       const ordinal = Number(ordinalGiven);
       if (contest === null || !Number.isInteger(ordinal)) {
-        return fail(write, json, "contest exclude", "usage", "`standing-orders contest exclude <tournament-id> <agent-number> --as <you> --token <t>`", EXIT.usage);
+        return fail(write, json, "contest exclude", "usage", "`toolroll contest exclude <tournament-id> <agent-number> --as <you> --token <t>`", EXIT.usage);
       }
       const acting = await askCredentials(flags, context);
       if (acting === null) {
@@ -7138,11 +7138,11 @@ function contestCommand(
       ]);
     })();
   }
-  return fail(write, json, "contest", "usage", "`standing-orders contest show <id> | exclude <id> <agent-number>`", EXIT.usage);
+  return fail(write, json, "contest", "usage", "`toolroll contest show <id> | exclude <id> <agent-number>`", EXIT.usage);
 }
 
 /**
- * `standing-orders template …` — the shipped library of common standing
+ * `toolroll template …` — the shipped library of common standing
  * orders (adoption track, step 2). A template is a pre-filled form:
  * `apply` PREVIEWS by default and files only under `--file`, through the
  * same one door as every manual filing, landing UNAPPROVED. Recipes
@@ -7167,26 +7167,26 @@ function templateCommand(
       }));
       return EXIT.ok;
     }
-    write("Templates — common standing orders you edit to fit. Nothing a template");
+    write("Templates — common routines you edit to fit. Nothing a template");
     write("files is approved; recipes only show existing ceremonies.");
     write("");
     for (const one of TEMPLATES) {
       write(`  ${one.name.padEnd(16)} ${one.kind.padEnd(9)} ${one.purpose}`);
     }
     write("");
-    write("`standing-orders template show <name>` · `template apply <name> --repo <path>`");
+    write("`toolroll template show <name>` · `template apply <name> --repo <path>`");
     return EXIT.ok;
   }
 
   if (action !== "show" && action !== "apply") {
-    return fail(write, json, `template ${action}`, "usage", "`standing-orders template list | show <name> | apply <name> --repo <path> [--file]`", EXIT.usage);
+    return fail(write, json, `template ${action}`, "usage", "`toolroll template list | show <name> | apply <name> --repo <path> [--file]`", EXIT.usage);
   }
   if (name === undefined) {
-    return fail(write, json, `template ${action}`, "usage", "which template? `standing-orders template list` names them", EXIT.usage);
+    return fail(write, json, `template ${action}`, "usage", "which template? `toolroll template list` names them", EXIT.usage);
   }
   const template = templateByName(name);
   if (template === null) {
-    return fail(write, json, `template ${action}`, "unknown", `no template named ${name} — \`standing-orders template list\``, EXIT.refused);
+    return fail(write, json, `template ${action}`, "unknown", `no template named ${name} — \`toolroll template list\``, EXIT.refused);
   }
 
   if (action === "show") {
@@ -7221,7 +7221,7 @@ function templateCommand(
     write("You will probably edit:");
     for (const hint of template.edit) write(`  - ${hint}`);
     write("");
-    write(`\`standing-orders template apply ${template.name} --repo <path>\` previews the exact filing.`);
+    write(`\`toolroll template apply ${template.name} --repo <path>\` previews the exact filing.`);
     return EXIT.ok;
   }
 
@@ -7232,7 +7232,7 @@ function templateCommand(
       json,
       "template apply",
       "recipe",
-      `${template.name} cannot be applied: ${template.why} \`standing-orders template show ${template.name}\` walks the ceremonies.`,
+      `${template.name} cannot be applied: ${template.why} \`toolroll template show ${template.name}\` walks the ceremonies.`,
       EXIT.refused,
     );
   }
@@ -7290,7 +7290,7 @@ function templateCommand(
         `Filed ${made.id} from template ${template.name}.`,
         "",
         "UNAPPROVED — NO AUTHORITY GRANTED. It builds only after you approve its scope:",
-        `  standing-orders task show ${made.id}`,
+        `  toolroll task show ${made.id}`,
         ...(filedLink === null ? [] : [`  ${filedLink}`]),
       ],
     );
@@ -7352,12 +7352,12 @@ function templateCommand(
     `Filed routine ${routineName} from template ${template.name}.`,
     "",
     "UNAPPROVED — NO AUTHORITY GRANTED. It cannot fire until you approve the standing order:",
-    `  standing-orders routine approve ${routineName}`,
+    `  toolroll routine approve ${routineName}`,
   ]);
 }
 
 /**
- * `standing-orders routine …` — standing orders. Filing one is cheap; the
+ * `toolroll routine …` — standing orders. Filing one is cheap; the
  * expensive act is the approval, which restates every term including "each
  * firing builds without asking" and takes the approver's credential, same
  * as a scope. Pausing needs no ceremony because stopping spend never does.
@@ -7383,7 +7383,7 @@ async function routineCommand(
       return EXIT.ok;
     }
     if (routines.length === 0) {
-      write("No standing orders. `standing-orders routine add <name> --repo <path> --goal <text> --schedule every:60` files one.");
+      write("No routines. `toolroll routine add <name> --repo <path> --goal <text> --schedule every:60` files one.");
       return EXIT.ok;
     }
     for (const routine of routines) {
@@ -7402,7 +7402,7 @@ async function routineCommand(
     const goal = text(flags, "goal");
     const schedule = text(flags, "schedule");
     if (repoGiven === undefined || goal === undefined || schedule === undefined) {
-      return fail(write, json, "routine add", "usage", "`standing-orders routine add <name> --repo <path> --goal <text> --schedule every:<min>|daily:<HH:MM>[@Zone]|weekly:<0-6>:<HH:MM>[@Zone] --acceptance <rubric> [--not <text>] [--touches a,b] [--require kind:name,…] [--ceiling <usd>] [--budget-usd <n>]`", EXIT.usage);
+      return fail(write, json, "routine add", "usage", "`toolroll routine add <name> --repo <path> --goal <text> --schedule every:<min>|daily:<HH:MM>[@Zone]|weekly:<0-6>:<HH:MM>[@Zone] --acceptance <rubric> [--not <text>] [--touches a,b] [--require kind:name,…] [--ceiling <usd>] [--budget-usd <n>]`", EXIT.usage);
     }
     const acceptanceGiven = text(flags, "acceptance");
     if (acceptanceGiven === undefined) {
@@ -7448,7 +7448,7 @@ async function routineCommand(
       `Filed ${name}. Nothing fires until somebody approves the standing order:`,
       ...(routine === null ? [] : describeRoutine(routine)),
       "",
-      `  standing-orders routine approve ${name}`,
+      `  toolroll routine approve ${name}`,
     ]);
   }
 
@@ -7516,7 +7516,7 @@ async function routineCommand(
         for (const line of describeRoutine(routine)) write(line);
         write("");
         write("Nothing has been approved. Agree to exactly this with:");
-        write(`  standing-orders routine approve ${name} --yes --digest ${routine.digest} --as <you> --token <your password>`);
+        write(`  toolroll routine approve ${name} --yes --digest ${routine.digest} --as <you> --token <your password>`);
         // A preview reached by omitting --yes is the answer "no, not yet" —
         // exit 3 in both modes, matching the JSON path (round-4 finding 10).
         return EXIT.refused;
@@ -7527,7 +7527,7 @@ async function routineCommand(
       }
       return succeed(write, json, "routine approve", { routine: approved.routine }, () => [
         `Approved. ${name} fires on its schedule from now on; first at ${approved.routine.nextFireAt}.`,
-        `Pause it any time: standing-orders routine pause ${name}`,
+        `Pause it any time: toolroll routine pause ${name}`,
       ]);
     }
     case "refresh": {
@@ -7545,7 +7545,7 @@ async function routineCommand(
           : `${name} already names exactly these agents; nothing changed.`,
         ...describeRoutine(refreshed.routine),
         "",
-        `  standing-orders routine approve ${name}`,
+        `  toolroll routine approve ${name}`,
       ]);
     }
     case "pause":
@@ -7575,7 +7575,7 @@ async function routineCommand(
       ]);
     }
     default:
-      return fail(write, json, "routine", "usage", "`standing-orders routine [add|list|show|approve|refresh|pause|resume|run-now]`", EXIT.usage);
+      return fail(write, json, "routine", "usage", "`toolroll routine [add|list|show|approve|refresh|pause|resume|run-now]`", EXIT.usage);
   }
 }
 
@@ -7593,9 +7593,9 @@ function readTokenFile(path: string | undefined): string | undefined {
 // ---- the daemon ------------------------------------------------------------
 
 /**
- * `standing-orders daemon install|status|uninstall|logs` — the loop as a
+ * `toolroll daemon install|status|uninstall|logs` — the loop as a
  * service, no crontab. Writes the platform's own supervision unit (launchd
- * on macOS, systemd --user on Linux) pointed at `standing-orders watch`, with
+ * on macOS, systemd --user on Linux) pointed at `toolroll watch`, with
  * the runner token in a 0600 file beside the database rather than inside
  * the unit. The OS restarts it across crashes and reboots, and watch's
  * incarnation recovery is what makes those restarts safe.
@@ -7621,7 +7621,7 @@ async function daemonCommand(
       ...(binFlag === undefined ? {} : { explicitBin: resolve(binFlag) }),
     });
     if (direct !== null) return direct;
-    const found = await supervise("sh", ["-lc", "command -v standing-orders"]);
+    const found = await supervise("sh", ["-lc", "command -v toolroll || command -v standing-orders"]);
     if (found.code === 0 && found.stdout.trim() !== "") {
       // Even the PATH fallback is run by this process's absolute Node binary:
       // npm's package bin is a JS symlink whose env-node shebang is precisely
@@ -7640,7 +7640,7 @@ async function daemonCommand(
     }
     const token = inlineToken ?? readTokenFile(tokenPath);
     if (runnerName === undefined || token === undefined) {
-      return fail(write, json, "daemon install", "usage", "`standing-orders daemon install --runner <name> (--token <t> | --token-file <path>) --repo <path>` (plus any watch flags to bake in)", EXIT.usage);
+      return fail(write, json, "daemon install", "usage", "`toolroll daemon install --runner <name> (--token <t> | --token-file <path>) --repo <path>` (plus any watch flags to bake in)", EXIT.usage);
     }
     const auth = authenticate(store, runnerName, token);
     if (!auth.ok) {
@@ -7654,7 +7654,7 @@ async function daemonCommand(
         json,
         "daemon install",
         "no-bin",
-        "`standing-orders` is not on the PATH the service would use — run `standing-orders link` first, or pass --bin <absolute path>",
+        "`toolroll` is not on the PATH the service would use — run `toolroll link` first, or pass --bin <absolute path>",
         EXIT.refused,
       );
     }
@@ -7715,7 +7715,7 @@ async function daemonCommand(
     const liveRunner = fresh.ok ? store.getRunner(runnerName)?.runner ?? null : null;
     if (liveRunner === null) {
       const macHint = process.platform === "darwin" && repo.startsWith(join(homedir(), "Documents"))
-        ? " macOS may be blocking background access to Documents; grant the Node executable Full Disk Access, move the repository outside a protected folder, or keep `standing-orders up` running from your terminal."
+        ? " macOS may be blocking background access to Documents; grant the Node executable Full Disk Access, move the repository outside a protected folder, or keep `toolroll up` running from your terminal."
         : "";
       return fail(
         write,
@@ -7735,7 +7735,7 @@ async function daemonCommand(
       `  logs    ${plan.logPath}`,
       "",
       "It survives reboots and restarts itself after crashes; watch's",
-      "incarnation recovery makes those restarts safe. `standing-orders daemon",
+      "incarnation recovery makes those restarts safe. `toolroll daemon",
       "status` to check on it, `daemon uninstall` to take it back off.",
     ]);
   }
@@ -7762,8 +7762,8 @@ async function daemonCommand(
     write(`${plan.label}: ${state.detail}`);
     write(`  logs  ${plan.logPath}`);
     write(`  ${describeContainment(containment)}`);
-    if (state.state === "not-installed") write("  → standing-orders daemon install --runner <name> --token <t> --repo <path>");
-    if (state.state === "disabled") write("  → the service is disabled: `standing-orders daemon install` re-enables and loads it");
+    if (state.state === "not-installed") write("  → toolroll daemon install --runner <name> --token <t> --repo <path>");
+    if (state.state === "disabled") write("  → the service is disabled: `toolroll daemon install` re-enables and loads it");
     return state.state === "running" ? EXIT.ok : EXIT.refused;
   }
 
@@ -7781,7 +7781,7 @@ async function daemonCommand(
     ]);
   }
 
-  return fail(write, json, "daemon", "usage", "`standing-orders daemon [install|status|uninstall|logs]`", EXIT.usage);
+  return fail(write, json, "daemon", "usage", "`toolroll daemon [install|status|uninstall|logs]`", EXIT.usage);
 }
 
 // ---- the watch loop --------------------------------------------------------
@@ -7790,7 +7790,7 @@ const WATCH_LEASE_MS = 90_000;
 const WATCH_HEARTBEAT_MS = 30_000;
 
 /**
- * `standing-orders watch` — the loop (§5, §6): the cron chain as one
+ * `toolroll watch` — the loop (§5, §6): the cron chain as one
  * work-conserving process, still spending zero tokens while idle.
  *
  * Composition, not new semantics: every pass it runs — tick, reconcile, the
@@ -8216,7 +8216,7 @@ async function watchCommand(
   const runner = text(flags, "runner");
   const token = text(flags, "token") ?? readTokenFile(text(flags, "token-file"));
   if (runner === undefined || token === undefined) {
-    return fail(write, json, "watch", "usage", "`standing-orders watch --runner <name> --token <t>|--token-file <path> --repo <path> [--for <ms>]`", EXIT.usage);
+    return fail(write, json, "watch", "usage", "`toolroll watch --runner <name> --token <t>|--token-file <path> --repo <path> [--for <ms>]`", EXIT.usage);
   }
   // Passes built from these flags authenticate with the resolved token.
   flags.set("token", token);
@@ -8298,7 +8298,7 @@ async function watchCommand(
 // ---- one command to a working cockpit (arc 2) ------------------------------
 
 /**
- * `standing-orders up` — cold start to an open, working cockpit.
+ * `toolroll up` — cold start to an open, working cockpit.
  *
  * COMPOSITION ONLY: identities mint through the atomic doors (a first
  * approver only while none exists; a runner only while its name is idle),
@@ -8584,7 +8584,7 @@ async function upCommand(
           json,
           "up",
           "not-a-repository",
-          `${input} is not inside a git repository — choose a repository, set a projects folder once with \`--project-root <dir>\`, or try the sandbox with \`standing-orders demo\``,
+          `${input} is not inside a git repository — choose a repository, set a projects folder once with \`--project-root <dir>\`, or try the sandbox with \`toolroll demo\``,
           EXIT.refused,
         );
       }
@@ -8600,7 +8600,7 @@ async function upCommand(
       json,
       "up",
       "no-projects",
-      "choose where your projects live once: `standing-orders up --project-root <dir>`",
+      "choose where your projects live once: `toolroll up --project-root <dir>`",
       EXIT.refused,
     );
   }
@@ -8983,7 +8983,7 @@ async function upCommand(
       );
       if (projectRoots.length > 0) write(`  projects  new repositories under ${projectRoots.length === 1 ? projectRoots[0] : `${projectRoots.length} saved folders`} connect automatically`);
       write("  The inbox checklist shows what remains before approved work builds unattended.");
-      write("  Ctrl-C stops Standing Orders on this machine.");
+      write("  Ctrl-C stops Toolroll on this machine.");
     }
     if (!json && !flags.has("no-open") && process.stdout.isTTY === true) openBrowser(url);
   }
@@ -9011,7 +9011,7 @@ async function upCommand(
           dedupeKey: `held-shutdown-unsettled:${runId}`,
           kind: "attended-unsettled",
           subject: `an attended session did not settle before shutdown (run #${runId})`,
-          body: `The shutdown deadline passed before run #${runId}'s session finished fencing. The next \`standing-orders up\` will fence and settle it; its worktree is preserved.`,
+          body: `The shutdown deadline passed before run #${runId}'s session finished fencing. The next \`toolroll up\` will fence and settle it; its worktree is preserved.`,
         },
         clock(),
       );
@@ -9028,14 +9028,14 @@ async function upCommand(
   }
   const ticks = results.reduce((sum, one) => sum + one.result.ticks, 0);
   const built = results.reduce((sum, one) => sum + one.result.built, 0);
-  progress(`up: stopped cleanly — ${ticks} pass(es), ${built} with work. Run \`standing-orders up\` anywhere on this machine to reconnect every saved project.`);
+  progress(`up: stopped cleanly — ${ticks} pass(es), ${built} with work. Run \`toolroll up\` anywhere on this machine to reconnect every saved project.`);
   return EXIT.ok;
 }
 
 // ---- the telegram bridge ---------------------------------------------------
 
 /**
- * `standing-orders bridge telegram …` — decisions out, answers back, no LLM in
+ * `toolroll bridge telegram …` — decisions out, answers back, no LLM in
  * the path.
  *
  *   bridge telegram                      one pass: send pending, apply taps
@@ -9065,7 +9065,7 @@ async function bridgeCommand(
   if (demoFence !== null) return demoFence;
   const [channel, action] = positional;
   if (channel !== "telegram") {
-    return fail(write, json, "bridge", "usage", "`standing-orders bridge telegram [pair|unpair|token|status|digest]`", EXIT.usage);
+    return fail(write, json, "bridge", "usage", "`toolroll bridge telegram [pair|unpair|token|status|digest]`", EXIT.usage);
   }
 
   if (action === "token") {
@@ -9082,7 +9082,7 @@ async function bridgeCommand(
         json,
         "bridge token",
         "usage",
-        "`standing-orders bridge telegram token <bot-token>` (from @BotFather), or --clear",
+        "`toolroll bridge telegram token <bot-token>` (from @BotFather), or --clear",
         EXIT.usage,
       );
     }
@@ -9152,7 +9152,7 @@ async function bridgeCommand(
       return EXIT.ok;
     }
     write(source === null
-      ? `No bot token. Set ${TOKEN_ENV}, run \`standing-orders bridge telegram token <t>\`, or use the serve settings card.`
+      ? `No bot token. Set ${TOKEN_ENV}, run \`toolroll bridge telegram token <t>\`, or use the serve settings card.`
       : `Token ${redactToken(source.token)} (${source.source}), bot ${source.botId}.`);
     write(binding === null ? "No chat is paired." : `Paired: ${bindings.length === 1 ? `chat answers as ${binding.approver}` : `${bindings.length} chats answer as ${bindings.map(one => one.approver).join(", ")}`}.`);
     write(`Outbox pending: ${pending}.`);
@@ -9199,7 +9199,7 @@ async function bridgeCommand(
   }
 
   if (action !== undefined) {
-    return fail(write, json, "bridge", "usage", "`standing-orders bridge telegram [pair|unpair|token|status]`", EXIT.usage);
+    return fail(write, json, "bridge", "usage", "`toolroll bridge telegram [pair|unpair|token|status]`", EXIT.usage);
   }
 
   // The pass.
@@ -9209,7 +9209,7 @@ async function bridgeCommand(
       json,
       "bridge",
       "no-token",
-      `no bot token — set ${TOKEN_ENV}, run \`standing-orders bridge telegram token <t>\`, or use the serve settings card`,
+      `no bot token — set ${TOKEN_ENV}, run \`toolroll bridge telegram token <t>\`, or use the serve settings card`,
       EXIT.refused,
     );
   }
@@ -9294,7 +9294,7 @@ async function bridgeCommand(
 // ---- publication -----------------------------------------------------------
 
 /**
- * `standing-orders publish …` — built work to a pushed branch and a PR, under a
+ * `toolroll publish …` — built work to a pushed branch and a PR, under a
  * grant whose terms were shown before the yes.
  *
  *   publish                              one pass: push intents, open/adopt PRs
@@ -9397,7 +9397,7 @@ async function publishCommand(
     return succeed(write, json, "publish grant", { granted: true, grant: spec }, () => [
       `Granted by ${asWho}:`,
       ...describePublicationGrant(spec),
-      "Revoke any time: `standing-orders publish revoke --as <you> --token <t>`.",
+      "Revoke any time: `toolroll publish revoke --as <you> --token <t>`.",
     ]);
   }
 
@@ -9436,7 +9436,7 @@ async function publishCommand(
     const prGiven = positional[1];
     const pr = Number(prGiven);
     if (prGiven === undefined || !Number.isInteger(pr) || pr <= 0) {
-      return fail(write, json, `publish ${action}`, "usage", `\`standing-orders publish ${action} <pr> --as <you> --token <t>\``, EXIT.usage);
+      return fail(write, json, `publish ${action}`, "usage", `\`toolroll publish ${action} <pr> --as <you> --token <t>\``, EXIT.usage);
     }
     const acting = await askCredentials(flags, context);
     if (acting === null) {
@@ -9494,7 +9494,7 @@ async function publishCommand(
     const prGiven = positional[1];
     const pr = Number(prGiven);
     if (prGiven === undefined || !Number.isInteger(pr) || pr <= 0) {
-      return fail(write, json, `publish ${action}`, "usage", `\`standing-orders publish ${action} <pr> --as <you> --token <t>\``, EXIT.usage);
+      return fail(write, json, `publish ${action}`, "usage", `\`toolroll publish ${action} <pr> --as <you> --token <t>\``, EXIT.usage);
     }
     const acting = await askCredentials(flags, context);
     if (acting === null) {
@@ -9527,7 +9527,7 @@ async function publishCommand(
   }
 
   if (action !== undefined) {
-    return fail(write, json, "publish", "usage", "`standing-orders publish [grant|revoke|status|unblock|rearm]`", EXIT.usage);
+    return fail(write, json, "publish", "usage", "`toolroll publish [grant|revoke|status|unblock|rearm]`", EXIT.usage);
   }
 
   // The pass.
@@ -9564,19 +9564,19 @@ async function publishCommand(
 // ---- the outbox -----------------------------------------------------------
 
 /**
- * `standing-orders outbox list|deliver` — reading and draining the durable
+ * `toolroll outbox list|deliver` — reading and draining the durable
  * outbox. Delivery runs an operator-supplied command once per pending row;
  * the notification's text reaches it as environment variables, never
  * substituted into the command line, because subjects and bodies quote
  * things agents and repositories said and a shell must not meet those.
  *
- *   standing-orders outbox deliver --cmd 'curl -d "$STANDING_ORDERS_SUBJECT" ntfy.sh/mine'
+ *   toolroll outbox deliver --cmd 'curl -d "$STANDING_ORDERS_SUBJECT" ntfy.sh/mine'
  *
  * Exit 0 when everything pending delivered (or nothing was pending);
  * 1 when any delivery failed — a broken channel is breakage, not a "no".
  */
 /**
- * `standing-orders peek [<run>] [--tmux] [--lines <n>]` — watch live agents
+ * `toolroll peek [<run>] [--tmux] [--lines <n>]` — watch live agents
  * in the terminal: one pane per open run with its stage and transcript
  * tail; a run id follows that one until it finishes; --tmux opens a real
  * tmux session with a window per run. Outside a TTY or under --json: one
@@ -9591,7 +9591,7 @@ async function peekCommand(
   const [given] = positional;
   let runId: number | undefined;
   if (given !== undefined) {
-    if (!/^[1-9][0-9]{0,14}$/.test(given)) return fail(write, json, "peek", "usage", "`standing-orders peek [<run-id>] [--tmux]`", EXIT.usage);
+    if (!/^[1-9][0-9]{0,14}$/.test(given)) return fail(write, json, "peek", "usage", "`toolroll peek [<run-id>] [--tmux]`", EXIT.usage);
     runId = Number(given);
     if (store.getRun(runId) === null) return fail(write, json, "peek", "unknown-run", `no run #${runId}`, EXIT.refused);
   }
@@ -9843,12 +9843,12 @@ async function enrollCommand(
   }
 
   return succeed(write, json, "enroll", { grant }, () => [
-    `Granted. Standing Orders may now write to ${backend} in ${repo}.`,
+    `Granted. Toolroll may now write to ${backend} in ${repo}.`,
     ...describeGrant(grant),
     ...describeWithheld(grant),
-    ...(wantsDispatch ? ["", `External dispatch is ON for ${dispatchRepo} — \`standing-orders sync\` pulls its nominated work.`] : []),
+    ...(wantsDispatch ? ["", `External dispatch is ON for ${dispatchRepo} — \`toolroll sync\` pulls its nominated work.`] : []),
     "",
-    "Take it back with `standing-orders revoke`.",
+    "Take it back with `toolroll revoke`.",
   ]);
 }
 
@@ -9862,7 +9862,7 @@ function grantsCommand(context: Context): number {
   }
   if (grants.length === 0) {
     write("Nothing is enrolled. Discovery is read-only until something is.");
-    write("  standing-orders enroll <repo> --backend <name> --paths <path>");
+    write("  toolroll enroll <repo> --backend <name> --paths <path>");
     return EXIT.ok;
   }
   for (const grant of grants) {
@@ -9949,7 +9949,7 @@ function statusCommand(
   for (const name of flags.keys()) {
     if (!allowed.has(name)) return fail(context.write, context.json, command, "usage", `--${name} is not a status option.`, EXIT.usage);
   }
-  if (positional.length > 0) return fail(context.write, context.json, command, "usage", "Use `standing-orders status [--json]`.", EXIT.usage);
+  if (positional.length > 0) return fail(context.write, context.json, command, "usage", "Use `toolroll status [--json]`.", EXIT.usage);
   const status = installationStatus(context.store, context.clock());
   return succeed(context.write, context.json, command, { ...status }, () => renderInstallationStatus(status));
 }
@@ -9965,7 +9965,7 @@ async function waitTask(
     if (!allowed.has(name)) return fail(context.write, context.json, command, "usage", `--${name} is not a task wait option.`, EXIT.usage);
   }
   if (positional.length !== 1) {
-    return fail(context.write, context.json, command, "usage", "Use `standing-orders task wait <id> [--timeout <seconds>]`.", EXIT.usage);
+    return fail(context.write, context.json, command, "usage", "Use `toolroll task wait <id> [--timeout <seconds>]`.", EXIT.usage);
   }
   const givenTimeout = text(flags, "timeout");
   const timeoutSeconds = givenTimeout === undefined ? null : Number(givenTimeout);
@@ -10128,7 +10128,7 @@ async function addTask(
       return fail(write, json, "task add", created.reason, created.message, code);
     }
 
-    // Created through Standing Orders, so it is ours — recorded here rather than
+    // Created through Toolroll, so it is ours — recorded here rather than
     // asserted later, which is what the grant's default selector rests on.
     store.refFor(backendName, created.value, "ours");
     // With a dispatch grant standing, the created item ALSO becomes a local
@@ -10231,7 +10231,7 @@ function requireTask(
   const id = positional[0];
   const given = text(flags, "cap");
   if (id === undefined || given === undefined) {
-    return fail(write, json, "task require", "usage", "`standing-orders task require <id> --cap <kind:name>[,<kind:name>]` — or --cap none to clear", EXIT.usage);
+    return fail(write, json, "task require", "usage", "`toolroll task require <id> --cap <kind:name>[,<kind:name>]` — or --cap none to clear", EXIT.usage);
   }
   if (store.getTask(id) === null) {
     return fail(write, json, "task require", "unknown-task", `no task \`${id}\``, EXIT.refused);
@@ -10274,7 +10274,7 @@ async function capCommand(
 
   if (action === "add") {
     if (name === undefined) {
-      return fail(write, json, "cap add", "usage", "`standing-orders cap add <name> [--kind env|cli|mcp|ci|other] [--probe <cmd>] [--expires <iso>]`", EXIT.usage);
+      return fail(write, json, "cap add", "usage", "`toolroll cap add <name> [--kind env|cli|mcp|ci|other] [--probe <cmd>] [--expires <iso>]`", EXIT.usage);
     }
     const kind = (text(flags, "kind") ?? "env") as CapabilityKind;
     if (!["env", "cli", "mcp", "ci", "other"].includes(kind)) {
@@ -10314,7 +10314,7 @@ async function capCommand(
       probe === null
         ? "No probe — nothing can verify it, so it will stand as a gap until it has one."
         : `Probe: ${probe}`,
-      "Nothing is verified yet: `standing-orders cap probe`.",
+      "Nothing is verified yet: `toolroll cap probe`.",
     ]);
   }
 
@@ -10325,7 +10325,7 @@ async function capCommand(
       return EXIT.ok;
     }
     if (capabilities.length === 0) {
-      write(`No capabilities recorded for ${repo}. \`standing-orders cap add\` or \`cap scan\`.`);
+      write(`No capabilities recorded for ${repo}. \`toolroll cap add\` or \`cap scan\`.`);
       return EXIT.ok;
     }
     for (const one of capabilities) {
@@ -10372,7 +10372,7 @@ async function capCommand(
       write(`  rejected ${bad.name} from ${bad.source} — not a valid identifier`);
     }
     write("");
-    write(`${recorded} new, ${report.found.length - recorded} already recorded. Nothing is verified: \`standing-orders cap probe\`.`);
+    write(`${recorded} new, ${report.found.length - recorded} already recorded. Nothing is verified: \`toolroll cap probe\`.`);
     return EXIT.ok;
   }
 
@@ -10617,7 +10617,7 @@ async function acceptTaskProof(
 ): Promise<number> {
   const { store, write, json, now } = context;
   const id = positional[0];
-  if (id === undefined) return fail(write, json, "task accept", "usage", "`standing-orders task accept <id> [--note <text>] --as <you> --token <t>`", EXIT.usage);
+  if (id === undefined) return fail(write, json, "task accept", "usage", "`toolroll task accept <id> [--note <text>] --as <you> --token <t>`", EXIT.usage);
 
   const task = store.getTask(id);
   if (task === null) return fail(write, json, "task accept", "unknown-task", `no task \`${id}\``, EXIT.refused);
@@ -10668,7 +10668,7 @@ async function repairTaskCommand(
   const [runText] = positional;
   const runId = Number(runText ?? "");
   if (runText === undefined || !Number.isInteger(runId) || runId < 1) {
-    return fail(write, json, "task repair", "usage", "`standing-orders task repair <run-id> [--yes] --as <you> --token <t>`", EXIT.usage);
+    return fail(write, json, "task repair", "usage", "`toolroll task repair <run-id> [--yes] --as <you> --token <t>`", EXIT.usage);
   }
   let chain = store.repairChainFor(runId);
   if (chain === null && flags.get("yes") === true) {
@@ -10734,7 +10734,7 @@ async function stateTask(
   const { store, write, json, now } = context;
   const [id, state] = positional;
   if (id === undefined || state === undefined) {
-    return fail(write, json, "task state", "usage", "`standing-orders task state <id> <state>`", EXIT.usage);
+    return fail(write, json, "task state", "usage", "`toolroll task state <id> <state>`", EXIT.usage);
   }
   if (!STATES.includes(state as TaskState)) {
     return fail(write, json, "task state", "usage", `state is one of ${STATES.join(", ")}`, EXIT.usage);
@@ -10783,7 +10783,7 @@ function blockTask(
   const id = positional[0];
   const on = text(flags, "on");
   if (id === undefined || on === undefined) {
-    return fail(write, json, "task block", "usage", "`standing-orders task block <id> --on <id>`", EXIT.usage);
+    return fail(write, json, "task block", "usage", "`toolroll task block <id> --on <id>`", EXIT.usage);
   }
   for (const each of [id, on]) {
     if (store.getTask(each) === null) {
@@ -10815,7 +10815,7 @@ async function steerTask(
   const id = positional[0];
   const note = text(flags, "note");
   if (id === undefined || note === undefined) {
-    return fail(write, json, "task steer", "usage", "`standing-orders task steer <id> --note \"...\" --as <you> --token <t>` — steering speaks with the operator's voice, so it takes your credential; the note reaches the next attempt's brief, fenced, inside the approved scope", EXIT.usage);
+    return fail(write, json, "task steer", "usage", "`toolroll task steer <id> --note \"...\" --as <you> --token <t>` — steering speaks with the operator's voice, so it takes your credential; the note reaches the next attempt's brief, fenced, inside the approved scope", EXIT.usage);
   }
   // Ruling 11: authorship derives from a VERIFIED principal, never a flag.
   // Missing credentials are usage (the invocation is incomplete); present
@@ -10855,7 +10855,7 @@ function unblockTask(
   const id = positional[0];
   const on = text(flags, "on");
   if (id === undefined || on === undefined) {
-    return fail(write, json, "task unblock", "usage", "`standing-orders task unblock <id> --on <id>`", EXIT.usage);
+    return fail(write, json, "task unblock", "usage", "`toolroll task unblock <id> --on <id>`", EXIT.usage);
   }
   if (store.getTask(id) === null) {
     return fail(write, json, "task unblock", "unknown-task", `no task \`${id}\``, EXIT.refused);
@@ -10885,7 +10885,7 @@ function nextTask(
   const { store, write, json } = context;
   const id = positional[0];
   if (id === undefined) {
-    return fail(write, json, "task next", "usage", "`standing-orders task next <id> [--undo]`", EXIT.usage);
+    return fail(write, json, "task next", "usage", "`toolroll task next <id> [--undo]`", EXIT.usage);
   }
   if (flags.has("undo")) {
     const cleared = store.clearTaskPriority(id, mutationFrom(flags, context.now));
@@ -10928,7 +10928,7 @@ function assignTask(
   const runner = text(flags, "runner");
   const anyone = flags.has("anyone");
   if (id === undefined || (runner === undefined && !anyone) || (runner !== undefined && anyone)) {
-    return fail(write, json, "task assign", "usage", "`standing-orders task assign <id> --runner <name> | --anyone`", EXIT.usage);
+    return fail(write, json, "task assign", "usage", "`toolroll task assign <id> --runner <name> | --anyone`", EXIT.usage);
   }
   const moved = store.moveTask(
     { taskId: id, toRunner: runner ?? null, beforeTaskId: null },
@@ -10946,7 +10946,7 @@ function assignTask(
             : moved.reason === "contest-open"
               ? "a tournament is running on this task — let it finish, then pick or abandon it from the tournament screen in the console (the task's page links to it)"
               : moved.reason === "no-such-worker"
-                ? `no worker named \`${runner}\` — \`standing-orders runner list\` names them`
+                ? `no worker named \`${runner}\` — \`toolroll runner list\` names them`
                 : moved.reason === "worker-retired"
                   ? `${runner} is retired — register the name again, or reserve for another worker`
                   : "the queue did not accept the move";
@@ -10972,7 +10972,7 @@ async function reopenTask(
   const { store, write, json } = context;
   const id = positional[0];
   if (id === undefined) {
-    return fail(write, json, "task reopen", "usage", "`standing-orders task reopen <id> --as <you> --token <t>`", EXIT.usage);
+    return fail(write, json, "task reopen", "usage", "`toolroll task reopen <id> --as <you> --token <t>`", EXIT.usage);
   }
   const acting = await askCredentials(flags, context);
   if (acting === null) {
@@ -10983,7 +10983,7 @@ async function reopenTask(
     const said: Record<string, string> = {
       "unknown-task": `no external task \`${id}\``,
       "not-latched": `${id} was never closed on its tracker — there is nothing to reopen`,
-      "not-seen-open": "the tracker has not been SEEN open again since the close — reopen it there, then `standing-orders sync`",
+      "not-seen-open": "the tracker has not been SEEN open again since the close — reopen it there, then `toolroll sync`",
       claimed: `${id} is being built right now`,
       "contest-open": "a tournament is open on this task — decide it first",
       held: "a hold stands — lift it first (`task unhold`, or wait out the timer)",
@@ -11012,7 +11012,7 @@ async function syncCommand(flags: Map<string, string | true>, context: Context):
     .filter(grant => grant.dispatch === true && grant.remoteRepo != null)
     .filter(grant => only === undefined || grant.repo === resolve(only));
   if (grants.length === 0) {
-    return fail(write, json, "sync", "no-grant", "no tracker has a dispatch grant — `standing-orders enroll <repo> --backend github-issues --github <owner/name> --allow-dispatch` states the terms", EXIT.refused);
+    return fail(write, json, "sync", "no-grant", "no tracker has a dispatch grant — `toolroll enroll <repo> --backend github-issues --github <owner/name> --allow-dispatch` states the terms", EXIT.refused);
   }
   const adapter = ghDispatchAdapter();
   const reports = [];
@@ -11054,7 +11054,7 @@ function scopeTask(
   const id = positional[0];
   const goal = text(flags, "goal");
   if (id === undefined || goal === undefined) {
-    return fail(write, json, "task scope", "usage", "`standing-orders task scope <id> --goal <what success is> --acceptance <rubric> [--not <text>] [--touches a,b] [--candidate <commit>] [--budget-usd <n>] [--race provider:model[,provider:model…]] [--race-count 2..4] [--race-per-usd <n>] [--race-total-usd <n>]`", EXIT.usage);
+    return fail(write, json, "task scope", "usage", "`toolroll task scope <id> --goal <what success is> --acceptance <rubric> [--not <text>] [--touches a,b] [--candidate <commit>] [--budget-usd <n>] [--race provider:model[,provider:model…]] [--race-count 2..4] [--race-per-usd <n>] [--race-total-usd <n>]`", EXIT.usage);
   }
   if (store.getTask(id) === null) {
     return fail(write, json, "task scope", "unknown-task", `no task \`${id}\``, EXIT.refused);
@@ -11143,10 +11143,10 @@ function scopeTask(
     // named as the missing flag here, before planTournament's generic
     // positive-amount backstop turns it into a riddle (round-4 finding 11).
     if (text(flags, "race-per-usd") === undefined && defaults?.racePerAgentMicrousd == null) {
-      return fail(write, json, "task scope", "bad-budget", "--race-per-usd is missing and no default is set — pass it, or set one with `standing-orders config set budgets --race-per-usd <n>`", EXIT.usage);
+      return fail(write, json, "task scope", "bad-budget", "--race-per-usd is missing and no default is set — pass it, or set one with `toolroll config set budgets --race-per-usd <n>`", EXIT.usage);
     }
     if (text(flags, "race-total-usd") === undefined && defaults?.raceTotalMicrousd == null) {
-      return fail(write, json, "task scope", "bad-budget", "--race-total-usd is missing and no default is set — pass it, or set one with `standing-orders config set budgets --race-total-usd <n>`", EXIT.usage);
+      return fail(write, json, "task scope", "bad-budget", "--race-total-usd is missing and no default is set — pass it, or set one with `toolroll config set budgets --race-total-usd <n>`", EXIT.usage);
     }
     const perUsd = Number(text(flags, "race-per-usd") ?? (defaults?.racePerAgentMicrousd == null ? Number.NaN : defaults.racePerAgentMicrousd / 1_000_000));
     const totalUsd = Number(text(flags, "race-total-usd") ?? (defaults?.raceTotalMicrousd == null ? Number.NaN : defaults.raceTotalMicrousd / 1_000_000));
@@ -11345,7 +11345,7 @@ function scopeTask(
       "  no dollar caps exist on a comparison — each agent runs until it finishes or stops making progress;",
       "  spend lands measured only where the harness reports dollars",
       "",
-      `  standing-orders task approve ${id} --yes`,
+      `  toolroll task approve ${id} --yes`,
     ]);
   }
 
@@ -11360,7 +11360,7 @@ function scopeTask(
       `  each agent may spend $${(plan.perAgentBudgetMicrousd / 1_000_000).toFixed(2)}, plus its stated overrun reserve;` +
         ` worst case $${(worst / 1_000_000).toFixed(2)} total`,
       "",
-      `  standing-orders task approve ${id} --yes`,
+      `  toolroll task approve ${id} --yes`,
     ]);
   }
 
@@ -11368,7 +11368,7 @@ function scopeTask(
     `Scope written for ${id}. Nothing will build it until somebody approves it.`,
     ...describeScope(scope),
     "",
-    `  standing-orders task approve ${id} --yes`,
+    `  toolroll task approve ${id} --yes`,
   ]);
 }
 
@@ -11381,7 +11381,7 @@ function scopeTask(
  * entirely.
  */
 /**
- * `standing-orders task route <id>` (v47): the explainable phase route —
+ * `toolroll task route <id>` (v47): the explainable phase route —
  * shown from the ONE projection every surface renders, and edited only by
  * an approver: `--risk <routine|elevated|high>` declares the task's risk;
  * `--phase <p> --provider <p> --model <m>` records a per-phase override
@@ -11402,7 +11402,7 @@ async function routeTaskCommand(
   const { store, write, json, clock } = context;
   const id = positional[0];
   if (id === undefined) {
-    return fail(write, json, "task route", "usage", "`standing-orders task route <id> [--risk <level>] [--phase <p> --provider <p> --model <m> | --clear-phase <p>] [--digest <d>] --as <you> --token <t>`", EXIT.usage);
+    return fail(write, json, "task route", "usage", "`toolroll task route <id> [--risk <level>] [--phase <p> --provider <p> --model <m> | --clear-phase <p>] [--digest <d>] --as <you> --token <t>`", EXIT.usage);
   }
   if (store.getTask(id) === null) {
     return fail(write, json, "task route", "unknown-task", `no task \`${id}\``, EXIT.refused);
@@ -11595,7 +11595,7 @@ async function approveTask(
     }
     write("Nothing has been approved. Agree to this exact scope with:");
     write(
-      `  standing-orders task approve ${id} --yes --digest ${
+      `  toolroll task approve ${id} --yes --digest ${
         previewRace === null ? scope.digest : jointApprovalDigest(scope.digest, previewRace.raceDigest)
       } --as <you> --token <your password>`,
     );
@@ -11660,9 +11660,9 @@ function describeApproveFailure(reason: string, id: string): string {
   // v102: the project's approval rules.
   if (reason === "requester") return `you filed ${id}, and this project needs someone else to approve it`;
   if (reason === "person-required") return `${id} is protected work: a person has to approve it, not an operating mode, a routine or an AI teammate`;
-  if (reason === "second-approver") return `your approval of ${id} is recorded; it is protected work, so a second person needs to approve it (standing-orders task approve ${id} as them)`;
+  if (reason === "second-approver") return `your approval of ${id} is recorded; it is protected work, so a second person needs to approve it (toolroll task approve ${id} as them)`;
   if (reason === "no-approvers") {
-    return "nobody can approve anything yet — `standing-orders approver add <you>` mints the credential that lets a person say yes";
+    return "nobody can approve anything yet — `toolroll approver add <you>` mints the credential that lets a person say yes";
   }
   if (reason === "not-an-approver") return "that is not an approver, or the token does not match";
   if (reason === "unrouted") return `${id} was filed before agent routing and its old approval no longer stands — an approval now names exactly which agent plans, builds, repairs, and reviews: file the scope again (\`task scope ${id} …\`) so it is routed under today's agents, then approve it`;
@@ -11686,7 +11686,7 @@ function describeApproveFailure(reason: string, id: string): string {
 export const PROPOSALS_ACTIONS = ["list", "confirm", "dismiss"] as const;
 
 /**
- * `standing-orders proposals` (mate arc v3): what coordinators proposed
+ * `toolroll proposals` (mate arc v3): what coordinators proposed
  * over the gateway, and the doors that confirm or dismiss one — the same
  * doors the console runs, under a password-minted principal whose ceiling
  * is the `--repo` list or the enrolled registry.
@@ -11726,14 +11726,14 @@ async function proposalsCommand(positional: readonly string[], flags: Map<string
                         ? `release ${t("task")} from its hold`
                         : one.kind === "scope"
                           ? `rewrite the scope of ${t("task")}`
-                          : `cancel ${t("task")}: ${t("reason")} (arm it yourself: standing-orders task cancel ${t("task")})`;
+                          : `cancel ${t("task")}: ${t("reason")} (arm it yourself: toolroll task cancel ${t("task")})`;
             const head = `  #${one.id} ${what} — by ${one.name} in ${projectName(one.repo)} [${one.state}]`;
             return one.kind === "answer" ? [head, ...answerContextLines(store, one.payload)].join("\n") : head;
           }),
     );
   }
   const id = Number(idGiven);
-  if (idGiven === undefined || !Number.isInteger(id) || id < 1) return fail(write, json, `proposals ${action}`, "usage", `which proposal? standing-orders proposals ${action} <id>`, EXIT.usage);
+  if (idGiven === undefined || !Number.isInteger(id) || id < 1) return fail(write, json, `proposals ${action}`, "usage", `which proposal? toolroll proposals ${action} <id>`, EXIT.usage);
   const acting = await askCredentials(flags, context);
   if (acting === null) return fail(write, json, `proposals ${action}`, "usage", "confirming or dismissing takes your name and password — `--as <you>` and the hidden prompt", EXIT.usage);
   const admitted = repos.length === 0 ? [] : repos;
@@ -11756,12 +11756,12 @@ async function proposalsCommand(positional: readonly string[], flags: Map<string
   if (!outcome.ok) return fail(write, json, "proposals confirm", outcome.reason, outcome.reason === "needs-confirm" ? `${outcome.said} — read the consequences above, then pass --yes` : outcome.said, EXIT.refused);
   return succeed(write, json, "proposals confirm", { proposal: id, kind: outcome.kind, said: outcome.said, ...(outcome.taskId === null ? {} : { task: outcome.taskId }) }, () => [
     outcome.said,
-    ...(outcome.kind === "scope" && outcome.taskId !== null ? [`approve it with your password: standing-orders task approve ${outcome.taskId}`] : []),
+    ...(outcome.kind === "scope" && outcome.taskId !== null ? [`approve it with your password: toolroll task approve ${outcome.taskId}`] : []),
   ]);
 }
 
 /**
- * `standing-orders chat` (mate arc §6): the console's thread from a
+ * `toolroll chat` (mate arc §6): the console's thread from a
  * terminal. The password mints the session once; the REPL runs turns and
  * confirms cards through the same doors the console uses.
  */
@@ -11855,7 +11855,7 @@ async function approverCommand(
     }
     if (approvers.length === 0) {
       write("Nobody can approve a scope yet, so nothing can be built.");
-      write("  standing-orders approver add <your name>");
+      write("  toolroll approver add <your name>");
       return EXIT.ok;
     }
     for (const one of approvers) write(`  ${one.name}  since ${one.addedAt}`);
@@ -11932,7 +11932,7 @@ function holdTask(
   const id = positional[0];
   const reason = text(flags, "reason");
   if (id === undefined || reason === undefined) {
-    return fail(write, json, "task hold", "usage", "`standing-orders task hold <id> --reason <why>`", EXIT.usage);
+    return fail(write, json, "task hold", "usage", "`toolroll task hold <id> --reason <why>`", EXIT.usage);
   }
   if (store.getTask(id) === null) {
     return fail(write, json, "task hold", "unknown-task", `no task \`${id}\``, EXIT.refused);
@@ -11971,7 +11971,7 @@ function unholdTask(
 }
 
 /**
- * `standing-orders task stop <id> --run <n> --as <you> --token <t>` (v52):
+ * `toolroll task stop <id> --run <n> --as <you> --token <t>` (v52):
  * the authenticated stop of ONE exact active attempt. The answer is "stop
  * requested" — the request is durable before any process is signalled;
  * settlement is reported by `task show` once the attempt's own processes
@@ -11989,7 +11989,7 @@ async function stopTaskCommand(
   const runText = text(flags, "run");
   const runId = Number(runText ?? "");
   if (id === undefined || runText === undefined || !Number.isInteger(runId) || runId < 1) {
-    return fail(write, json, "task stop", "usage", "`standing-orders task stop <id> --run <run-id> --as <you> --token <t>` — the stop names one exact attempt", EXIT.usage);
+    return fail(write, json, "task stop", "usage", "`toolroll task stop <id> --run <run-id> --as <you> --token <t>` — the stop names one exact attempt", EXIT.usage);
   }
   if (store.getTask(id) === null) return fail(write, json, "task stop", "unknown-task", `no task \`${id}\``, EXIT.refused);
   const acting = await askCredentials(flags, context);
@@ -12015,7 +12015,7 @@ async function stopTaskCommand(
 }
 
 /**
- * `standing-orders task resume <id> --run <n> --as <you> --token <t>` (v52):
+ * `toolroll task resume <id> --run <n> --as <you> --token <t>` (v52):
  * resume the exact stopped attempt the operator reviewed. Refuses until it
  * is quiescent; lifts only the hold that stop owns; approves nothing — the
  * next pass re-proves the signed scope and takes a fresh claim. The gate
@@ -12032,7 +12032,7 @@ async function resumeTaskCommand(
   const runText = text(flags, "run");
   const runId = Number(runText ?? "");
   if (id === undefined || runText === undefined || !Number.isInteger(runId) || runId < 1) {
-    return fail(write, json, "task resume", "usage", "`standing-orders task resume <id> --run <run-id> --as <you> --token <t>` — the resume names the exact stopped attempt", EXIT.usage);
+    return fail(write, json, "task resume", "usage", "`toolroll task resume <id> --run <run-id> --as <you> --token <t>` — the resume names the exact stopped attempt", EXIT.usage);
   }
   if (store.getTask(id) === null) return fail(write, json, "task resume", "unknown-task", `no task \`${id}\``, EXIT.refused);
   const acting = await askCredentials(flags, context);
@@ -12079,7 +12079,7 @@ async function projectRulesCommand(positional: readonly string[], flags: Map<str
   const registered = await loadRepos(registryPathOf(context)).catch(() => ({ error: "unreadable" }));
   const known = [...new Set([...context.store.knownRepos(), ...("error" in registered ? [] : registered.repos)])];
   const repo = known.find(one => one === repoFlag || one === resolve(repoFlag));
-  if (repo === undefined) return fail(context.write, context.json, command, "not-found", "That isn't a project Standing Orders knows.", EXIT.refused);
+  if (repo === undefined) return fail(context.write, context.json, command, "not-found", "That isn't a project Toolroll knows.", EXIT.refused);
   const current = context.store.approvalRules(repo);
   const changing = ["not-requester", "protect", "protect-paths"].some(name => flags.has(name));
   if (!changing) {
@@ -12117,7 +12117,7 @@ function writeOut(context: Context, command: string, out: string | undefined, co
   return succeed(context.write, context.json, command, { ...summary, out: resolve(out) }, () => [`${line} Saved to ${resolve(out)}.`]);
 }
 
-/** `project delete --repo <path> [--yes]`: without --yes, what would go; with it, everything Standing Orders holds for the
+/** `project delete --repo <path> [--yes]`: without --yes, what would go; with it, everything Toolroll holds for the
  * project goes (never its repository or branches it didn't make). An instance operator; refused while its work runs. */
 async function projectDeleteCommand(positional: readonly string[], flags: Map<string, string | true>, context: Parameters<typeof taskCommand>[2]): Promise<number> {
   const command = "project delete";
@@ -12129,7 +12129,7 @@ async function projectDeleteCommand(positional: readonly string[], flags: Map<st
   const registered = await loadRepos(registryFile).catch(() => ({ error: "unreadable" }));
   const known = [...new Set([...context.store.knownRepos(), ...context.store.listProjects().map(one => one.path), ...("error" in registered ? [] : registered.repos)])];
   const repo = known.find(one => one === repoFlag || one === resolve(repoFlag));
-  if (repo === undefined) return fail(context.write, context.json, command, "not-found", "That isn't a project Standing Orders knows.", EXIT.refused);
+  if (repo === undefined) return fail(context.write, context.json, command, "not-found", "That isn't a project Toolroll knows.", EXIT.refused);
   const store = context.store;
   const acting = await askCredentials(flags, context);
   const verified = acting === null ? null : authenticateApprover(store, acting.name, acting.token);
@@ -12141,7 +12141,7 @@ async function projectDeleteCommand(positional: readonly string[], flags: Map<st
   if (running.length > 0) return fail(context.write, context.json, command, "running", `Nothing was deleted: ${running.join(", ")}. Stop it, then try again.`, EXIT.refused);
   if (!flags.has("yes")) {
     return succeed(context.write, context.json, command, { repo, deleted: false, holdings }, () => [
-      `${repo}: Standing Orders holds ${holdingsWords(holdings)} for it, and the checkouts and standing-orders/ branches it made.`,
+      `${repo}: Toolroll holds ${holdingsWords(holdings)} for it, and the checkouts and standing-orders/ branches it made.`,
       "Deleting removes all of it; the repository and its own branches stay. There's no undo. Add --yes to delete.",
     ]);
   }
@@ -12204,7 +12204,7 @@ async function backupCommand(positional: readonly string[], flags: Map<string, s
   ]);
 }
 
-/** `restore <file> [--dry-run]` (sprint 8): put a backup back. Refuses while Standing Orders is running; checks the
+/** `restore <file> [--dry-run]` (sprint 8): put a backup back. Refuses while Toolroll is running; checks the
  * backup's schema version and ledger chain; keeps the current database as a copy first. */
 async function restoreCommand(file: string, positional: readonly string[], flags: Map<string, string | true>, write: Write, json: boolean, now: Date): Promise<number> {
   const command = "restore";
@@ -12224,7 +12224,7 @@ async function restoreCommand(file: string, positional: readonly string[], flags
     : [`Restored ${report.file} (${checked}).`, `The database as it was is kept at ${report.savedAs}.`]);
 }
 
-/** `export --out <path> [--zip]` (v105): everything Standing Orders knows, in a new folder or .zip, without secrets. */
+/** `export --out <path> [--zip]` (v105): everything Toolroll knows, in a new folder or .zip, without secrets. */
 function exportCommand(positional: readonly string[], flags: Map<string, string | true>, context: Context): number {
   const command = "export";
   for (const name of flags.keys()) if (!["out", "zip", "db", "json"].includes(name)) return fail(context.write, context.json, command, "usage", `--${name} is not an export option.`, EXIT.usage);
@@ -12568,7 +12568,7 @@ function databaseFailure(
     json,
     command,
     "database-busy",
-    `The database ${file} stayed busy for ${CONCURRENT_WRITER_WAIT_MS / 1_000} seconds. Wait for the other Standing Orders process to finish, then try again.`,
+    `The database ${file} stayed busy for ${CONCURRENT_WRITER_WAIT_MS / 1_000} seconds. Wait for the other Toolroll process to finish, then try again.`,
     EXIT.failed,
   );
 }

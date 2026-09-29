@@ -73,7 +73,7 @@ function branchHead(repo: string, branch: string): string | null {
 function actorGeneration(store: Store, actor: string, repo: string): number {
   const account = store.accountOf(actor);
   if (!store.schemaCurrent() || !account || !store.isInstanceOperator(actor) || !store.accountCanAccess(actor, repo)) throw Error('An installation operator must review this coding result.');
-  if (updateAdmissionPaused(store.handle)) throw Error('Standing Orders is updating. Create the review task after the update finishes.');
+  if (updateAdmissionPaused(store.handle)) throw Error('Toolroll is updating. Create the review task after the update finishes.');
   return account.generation;
 }
 function sessionFor(db: DatabaseSync, store: Store, sessionId: string, actor: string): CodingSession {
@@ -187,7 +187,7 @@ export function createCodingHandoff(store: Store, input: CodingHandoffInput): Ha
       return existing;
     }
     const current = branchHead(input.repo, receipt.branch);
-    const refMessage = `Standing Orders coding handoff ${sha}`;
+    const refMessage = `Toolroll coding handoff ${sha}`;
     if (current === null) git(input.repo, ['update-ref', '--create-reflog', '-m', refMessage, `refs/heads/${receipt.branch}`, input.base, '0'.repeat(40)]);
     else if (!reserved || current !== input.base || git(input.repo, ['reflog', 'show', '-1', '--format=%gs', `refs/heads/${receipt.branch}`]) !== refMessage) throw Error('The reserved review branch changed. It has been preserved; create a new handoff.');
     // No checked-out/leased branch is adopted, even if its HEAD happens to match.

@@ -1,5 +1,5 @@
 /**
- * Retention (v105): how long Standing Orders keeps run evidence and logs,
+ * Retention (v105): how long Toolroll keeps run evidence and logs,
  * finished checkouts' records, chat messages and notifications. Each kind
  * keeps everything ("forever") until an instance operator chooses a period;
  * a daily sweep then deletes what is older than it and writes one action

@@ -28,7 +28,7 @@ export function readDesktopBundle(path: string): DesktopBundle {
   if (manifest.updateProtocol !== 1) throw Error("This app predates controlled updates. Complete the documented first installation before using this updater.");
   if (manifest.node !== "runtime/node" || !/^[a-f0-9-]{36}$/.test(manifest.buildId) || !/^\d+\.\d+\.\d+$/.test(manifest.version) || !Number.isSafeInteger(manifest.schemaVersion)) throw Error("The update manifest is invalid.");
   const development = manifest.bundleId === "com.standing-orders.desktop.development";
-  if (!development && manifest.bundleId !== "com.standing-orders.desktop") throw Error("This is not a Standing Orders app identity.");
+  if (!development && manifest.bundleId !== "com.standing-orders.desktop") throw Error("This is not a Toolroll app identity.");
   if (manifest.development !== development || typeof manifest.providerBin !== "string") throw Error("The update runtime identity is inconsistent.");
   for (const file of ["runtime/node", "runtime/bundle-swap", "dist/desktop-host.js"]) if (!lstatSync(join(resources, file)).isFile()) throw Error("The app is missing an update helper.");
   return { path: canonical, hash: bundleHash(canonical), buildId: manifest.buildId, version: manifest.version, bundleId: manifest.bundleId, schemaVersion: manifest.schemaVersion, development, providerBin: manifest.providerBin, ...(manifest.recoveryProtocol === 1 ? { recoveryProtocol: 1 } : {}) };

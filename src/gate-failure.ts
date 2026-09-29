@@ -81,7 +81,7 @@ export function gateFailureSummary(failure: Exclude<GateFailureClass, { kind: "r
 /** Plain words for the person who has to act. */
 export function describeGateFailure(failure: Exclude<GateFailureClass, { kind: "repairable" }>, taskId: string): string {
   const next = failure.kind === "gate-timed-out"
-    ? `Raise the check's time limit or shorten the suite, then run \`standing-orders task regate ${taskId}\` to check the same commit again.`
-    : `Run \`standing-orders task regate ${taskId}\` to check the same commit again, or fix the slow test outside this task first.`;
+    ? `Raise the check's time limit or shorten the suite, then run \`toolroll task regate ${taskId}\` to check the same commit again.`
+    : `Run \`toolroll task regate ${taskId}\` to check the same commit again, or fix the slow test outside this task first.`;
   return `${gateFailureSummary(failure)} No repair task was filed. ${next}`;
 }

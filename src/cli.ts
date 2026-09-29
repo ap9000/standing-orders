@@ -2,7 +2,7 @@
 /**
  * The command.
  *
- * `standing-orders` with no arguments reads the repositories below the working
+ * `toolroll` with no arguments reads the repositories below the working
  * directory and prints what is in flight. It writes nothing, starts nothing,
  * and asks nothing. Everything it knows comes from git and from the operator's
  * own filesystem.
@@ -81,60 +81,60 @@ type Write = (line: string) => void;
 
 const USAGE_EXIT = 2;
 
-export const HELP = `standing-orders — a control plane for unattended coding agents
+export const HELP = `toolroll — a control plane for unattended coding agents
 
 Usage
-  standing-orders [path...]        report what is in flight
-  standing-orders pulls            report what is waiting on a person
-  standing-orders graph            report which work graph is already here
-  standing-orders repos            list connected repositories, and how to adjust
-  standing-orders repos add <path> connect one (no path: the repo you are in)
-  standing-orders repos remove <path>
-  standing-orders repos add-from-github <owner/name> --root <dir>
+  toolroll [path...]        report what is in flight
+  toolroll pulls            report what is waiting on a person
+  toolroll graph            report which work graph is already here
+  toolroll repos            list connected repositories, and how to adjust
+  toolroll repos add <path> connect one (no path: the repo you are in)
+  toolroll repos remove <path>
+  toolroll repos add-from-github <owner/name> --root <dir>
                                    preview, then clone and connect (--yes)
-  standing-orders link             put \`standing-orders\` on your PATH
-  standing-orders unlink           take it off again
-  standing-orders contract         the machine contract: envelope version + capabilities
+  toolroll link             put \`standing-orders\` on your PATH
+  toolroll unlink           take it off again
+  toolroll contract         the machine contract: envelope version + capabilities
                                    (--commands dumps the declared command guide)
-  standing-orders skills install --claude-code [--dir <path>]
+  toolroll skills install --claude-code [--dir <path>]
                                    install this binary's guides for Claude Code (preview first)
-  standing-orders skills install   teach a repo's agents this queue exists (preview first)
-  standing-orders skills list      the guides this exact binary serves
-  standing-orders skills get <name>  print one guide (version-matched, never stale)
-  standing-orders demo             a seeded throwaway sandbox — see it working in 90 seconds
-  standing-orders up               app + builder for every saved project — the normal start
-  standing-orders status           running, queued, ready results, release check and plan windows
-  standing-orders session          native coding sessions through the running service
-  standing-orders connect          save a private connection to your central service
-  standing-orders lead             named leads on the connected service
-  standing-orders conversation     shared and private conversations on that service
-  standing-orders chat --lead <id> --conversation <id>  central chat (use --local for local chat)
+  toolroll skills install   teach a repo's agents this queue exists (preview first)
+  toolroll skills list      the guides this exact binary serves
+  toolroll skills get <name>  print one guide (version-matched, never stale)
+  toolroll demo             a seeded throwaway sandbox — see it working in 90 seconds
+  toolroll up               app + builder for every saved project — the normal start
+  toolroll status           running, queued, ready results, release check and plan windows
+  toolroll session          native coding sessions through the running service
+  toolroll connect          save a private connection to your central service
+  toolroll lead             named leads on the connected service
+  toolroll conversation     shared and private conversations on that service
+  toolroll chat --lead <id> --conversation <id>  central chat (use --local for local chat)
 
-Operating the queue — \`standing-orders task\` prints the whole surface,
+Operating the queue — \`toolroll task\` prints the whole surface,
 and any queue command + --help prints it too
-  standing-orders approver add <name>
+  toolroll approver add <name>
                                mint the credential that lets a person say yes
-  standing-orders ready            what could be dispatched right now
-  standing-orders check-progress <run>  current or final approved check progress
-  standing-orders task wait <id> [--timeout <seconds>]
+  toolroll ready            what could be dispatched right now
+  toolroll check-progress <run>  current or final approved check progress
+  toolroll task wait <id> [--timeout <seconds>]
                                wait for this attempt to finish or need a person
-  standing-orders task add <title> queue work
-  standing-orders task scope <id> --goal <text>
+  toolroll task add <title> queue work
+  toolroll task scope <id> --goal <text>
                                state what success is; approval binds to it
-  standing-orders task approve <id>
+  toolroll task approve <id>
                                the yes — nothing builds without one
-  standing-orders claim <id> --runner <name>
-  standing-orders heartbeat <lease> / release <lease> / reap
-  standing-orders tick --runner <name> --token <t> --repo <path>
+  toolroll claim <id> --runner <name>
+  toolroll heartbeat <lease> / release <lease> / reap
+  toolroll tick --runner <name> --token <t> --repo <path>
                                one unattended pass over the ready set
-  standing-orders chat --as <you> --token <t>
+  toolroll chat --as <you> --token <t>
                                talk to the mate: one conversation across every
                                project; it proposes, you confirm (--say "…" for one turn)
-  standing-orders serve --repo <path>  advanced: run only the console
+  toolroll serve --repo <path>  advanced: run only the console
                                (--editor vscode with --runner: file links
                                open in VS Code on the device you browse from)
-  standing-orders watch / daemon install   advanced: run only the builder
-  standing-orders reconcile        recover what the last stretch left behind
+  toolroll watch / daemon install   advanced: run only the builder
+  toolroll reconcile        recover what the last stretch left behind
 
 With nothing connected it reports everything it can find below the working
 directory. Once you connect repositories it reports those instead.
@@ -199,7 +199,7 @@ export function parseArgs(argv: readonly string[]): ParseResult {
       }
       options.maxDepth = depth;
     } else if (argument.startsWith("-")) {
-      return { error: `unknown option ${argument} — try \`standing-orders --help\`` };
+      return { error: `unknown option ${argument} — try \`toolroll --help\`` };
     } else {
       roots.push(resolve(argument));
       rawRoots.push(argument);
@@ -549,7 +549,7 @@ async function reportEnrolled(
 
   if (missing.length > 0) {
     for (const repo of missing) write(`${repo} is enrolled but is no longer there.`);
-    write(`Drop it with \`standing-orders repos remove ${missing[0]}\`.`);
+    write(`Drop it with \`toolroll repos remove ${missing[0]}\`.`);
     write("");
   }
   write(
@@ -590,7 +590,7 @@ function describeMissing(missing: readonly string[], rawRoots: readonly string[]
   return missing
     .map(root =>
       bareWord(rawOf.get(root))
-        ? `${root} does not exist — if you meant a command, \`standing-orders --help\` lists them; to scan a folder, give a path that exists.`
+        ? `${root} does not exist — if you meant a command, \`toolroll --help\` lists them; to scan a folder, give a path that exists.`
         : `${root} does not exist — check the path.`,
     )
     .join("\n");
@@ -676,21 +676,21 @@ async function runReposCommand(argv: readonly string[], write: Write, onboard?: 
 
 function listRepos(repos: readonly string[], file: string, write: Write): number {
   if (repos.length === 0) {
-    write("No repositories connected. Standing Orders reports on everything it can find.");
+    write("No repositories connected. Toolroll reports on everything it can find.");
     write("");
     write("Connect the ones you actually work in:");
-    write("  standing-orders repos add ~/code/thing");
-    write("  standing-orders repos add            # the repo you are standing in");
+    write("  toolroll repos add ~/code/thing");
+    write("  toolroll repos add            # the repo you are standing in");
     return 0;
   }
 
   write(`${repos.length === 1 ? "1 repository" : `${repos.length} repositories`} connected:`);
   for (const repo of repos) write(`  ${repo}${existsSync(repo) ? "" : "   (missing)"}`);
   write("");
-  write("  standing-orders repos add <path>      connect another");
-  write("  standing-orders repos remove <path>   disconnect one");
-  write("  standing-orders repos add-from-github <owner/name> --root <dir>   clone from GitHub and connect");
-  write("  standing-orders --all                 report everything, ignoring this list");
+  write("  toolroll repos add <path>      connect another");
+  write("  toolroll repos remove <path>   disconnect one");
+  write("  toolroll repos add-from-github <owner/name> --root <dir>   clone from GitHub and connect");
+  write("  toolroll --all                 report everything, ignoring this list");
   write(`  ${file}`);
   return 0;
 }
@@ -727,7 +727,7 @@ async function addToRepos(
   }
   for (const path of added) write(`Connected ${path}`);
   write("");
-  write("`standing-orders` now reports these. `standing-orders --all` still shows everything.");
+  write("`toolroll` now reports these. `toolroll --all` still shows everything.");
   return 0;
 }
 
@@ -768,7 +768,7 @@ async function addFromGithubCommand(argv: readonly string[], json: boolean, file
     write(json ? envelopeJson({ ok: false, command, reason, message, ...extra }) : message);
     return code;
   };
-  const usage = "`standing-orders repos add-from-github <owner/name | github.com link> --root <dir> [--large-ok] [--yes] [--json]`";
+  const usage = "`toolroll repos add-from-github <owner/name | github.com link> --root <dir> [--large-ok] [--yes] [--json]`";
   let spec: string | undefined;
   let rootGiven: string | undefined;
   let yes = false;
@@ -1002,7 +1002,7 @@ export function parseLinkArgs(argv: readonly string[]): { args: LinkArgs } | { e
       if (dir === undefined) return { error: "--to needs a directory" };
       args.to = dir;
     } else {
-      return { error: `unknown option ${argument} — try \`standing-orders --help\`` };
+      return { error: `unknown option ${argument} — try \`toolroll --help\`` };
     }
   }
 
@@ -1171,7 +1171,7 @@ function runSkillsCommand(argv: readonly string[], write: Write): number {
     return USAGE_EXIT;
   };
   if (action === undefined || !(SKILLS_ACTIONS as readonly string[]).includes(action)) {
-    return usage("`standing-orders skills install --claude-code [--dir <path>] [--yes]` · `skills install [--repo <path>] [--write-context] [--yes]` · `skills list` · `skills get <name>` — all take --json");
+    return usage("`toolroll skills install --claude-code [--dir <path>] [--yes]` · `skills install [--repo <path>] [--write-context] [--yes]` · `skills list` · `skills get <name>` — all take --json");
   }
 
   // Exact per-action vocabularies (arc-5 review, finding 5): an unknown
@@ -1186,7 +1186,7 @@ function runSkillsCommand(argv: readonly string[], write: Write): number {
       continue;
     }
     const name = argument.replace(/^--?/, "");
-    if (name === "h" || name === "help") return usage(`\`standing-orders skills ${action}\` — flags: ${Object.keys(allowed).map(one => `--${one}`).join(" ")}`);
+    if (name === "h" || name === "help") return usage(`\`toolroll skills ${action}\` — flags: ${Object.keys(allowed).map(one => `--${one}`).join(" ")}`);
     const arity = allowed[name as keyof typeof allowed] as "value" | "flag" | undefined;
     if (arity === undefined) return usage(`unknown option --${name} for \`skills ${action}\``);
     if (arity === "value") {
@@ -1202,14 +1202,14 @@ function runSkillsCommand(argv: readonly string[], write: Write): number {
       write(envelopeJson({ ok: true, command: "skills list", guides: GUIDES.map(one => ({ name: one.name, title: one.title, oneLiner: one.oneLiner })) }));
       return 0;
     }
-    write("Guides this exact binary serves — `standing-orders skills get <name>`:");
+    write("Guides this exact binary serves — `toolroll skills get <name>`:");
     for (const guide of GUIDES) write(`  ${guide.name.padEnd(14)} ${guide.oneLiner}`);
     return 0;
   }
 
   if (action === "get") {
     const name = positionals[1];
-    if (name === undefined || positionals.length > 2) return usage("`standing-orders skills get <name>` — one guide name from `skills list`");
+    if (name === undefined || positionals.length > 2) return usage("`toolroll skills get <name>` — one guide name from `skills list`");
     const guide = guideNamed(name);
     if (guide === null) {
       // The command was valid and the named guide is absent: exit 3, the
@@ -1281,7 +1281,7 @@ function runSkillsCommand(argv: readonly string[], write: Write): number {
       return 0;
     }
     for (const file of result.wrote) write(`wrote ${file}`);
-    write("Claude Code will use the refreshed Standing Orders guides in its next session.");
+    write("Claude Code will use the refreshed Toolroll guides in its next session.");
     return 0;
   }
 
@@ -1330,7 +1330,7 @@ function runSkillsCommand(argv: readonly string[], write: Write): number {
 }
 
 /**
- * `standing-orders demo` (adoption track, step 4): a seeded throwaway
+ * `toolroll demo` (adoption track, step 4): a seeded throwaway
  * sandbox served on localhost — ninety seconds from npx to seeing the
  * product mid-flight. Everything under one temp directory; the database
  * is stamped `demo` before any row exists, so every spending or
@@ -1344,7 +1344,7 @@ async function runDemoCommand(argv: readonly string[], write: Write): Promise<nu
   const portIndex = argv.indexOf("--port");
   const portGiven = portIndex === -1 ? "0" : (argv[portIndex + 1] ?? "");
   const port = Number(portGiven);
-  const DEMO_USAGE = "`standing-orders demo [--port <n>] [--host <addr>] [--allow-host name:port,…] [--keep]` — the port is a number under 65536; absent, a free one is picked";
+  const DEMO_USAGE = "`toolroll demo [--port <n>] [--host <addr>] [--allow-host name:port,…] [--keep]` — the port is a number under 65536; absent, a free one is picked";
   // Asking how it works never starts a sandbox.
   if (argv.includes("--help") || argv.includes("-h")) {
     write(json ? envelopeJson({ ok: true, command: "demo", usage: DEMO_USAGE }) : `${DEMO_USAGE}\n\nA throwaway sandbox with a seeded fleet and flows mid-flight. It never spends and never reaches outside; Ctrl-C removes it unless --keep.`);
@@ -1424,8 +1424,8 @@ async function runDemoCommand(argv: readonly string[], write: Write): Promise<nu
     rmSync(sandbox, { recursive: true, force: true });
     if (!json) write("Sandbox deleted.");
   } else if (!json) {
-    write(`Sandbox kept at ${sandbox} — reopen it any time: standing-orders serve --db ${join(sandbox, "orders.db")}`);
-    write("Ready for your own repository? `standing-orders up --repo <path>` starts the real thing.");
+    write(`Sandbox kept at ${sandbox} — reopen it any time: toolroll serve --db ${join(sandbox, "orders.db")}`);
+    write("Ready for your own repository? `toolroll up --repo <path>` starts the real thing.");
   }
   return 0;
 }
@@ -1448,9 +1448,9 @@ function runContractCommand(argv: readonly string[], write: Write): number {
       write(json ? envelopeJson({ ok: false, command: "contract", reason: "usage", message }) : message);
       return USAGE_EXIT;
     };
-    if (!argument.startsWith("-")) return bad(`\`standing-orders contract\` takes no arguments — flags: ${CONTRACT_FLAGS.map(one => `--${one}`).join(" ")}`);
+    if (!argument.startsWith("-")) return bad(`\`toolroll contract\` takes no arguments — flags: ${CONTRACT_FLAGS.map(one => `--${one}`).join(" ")}`);
     const name = argument.replace(/^--?/, "");
-    if (name === "h" || name === "help") return bad(`\`standing-orders contract [--commands] [--json]\``);
+    if (name === "h" || name === "help") return bad(`\`toolroll contract [--commands] [--json]\``);
     if (!(CONTRACT_FLAGS as readonly string[]).includes(name)) return bad(`unknown option ${argument} for \`contract\``);
   }
   const commands = argv.includes("--commands");
@@ -1466,7 +1466,7 @@ function runContractCommand(argv: readonly string[], write: Write): number {
       }));
       return 0;
     }
-    write(`standing-orders declared command guide — schema v${SURFACE_SCHEMA_VERSION}`);
+    write(`toolroll declared command guide — schema v${SURFACE_SCHEMA_VERSION}`);
     write("");
     write(`authority: ${SURFACE_NOTES.authority}`);
     write(`flags: ${SURFACE_NOTES.flags}`);
@@ -1497,7 +1497,7 @@ function runContractCommand(argv: readonly string[], write: Write): number {
     write(envelopeJson({ ok: true, command: "contract", capabilities: [...CAPABILITIES] }));
     return 0;
   }
-  write(`standing-orders machine contract — envelope v${ENVELOPE_VERSION}`);
+  write(`toolroll machine contract — envelope v${ENVELOPE_VERSION}`);
   write("");
   write("Every --json answer is one envelope on stdout: { envelopeVersion, ok,");
   write("command, ... } — failures add a stable `reason` token and a human");
@@ -1556,7 +1556,7 @@ function renderJson(
  * Whether this module is the program being run, rather than an import.
  *
  * Node resolves a module to its real path while argv[1] keeps whatever name it
- * was invoked by, so a symlinked `standing-orders` on PATH compares unequal to
+ * was invoked by, so a symlinked `toolroll` on PATH compares unequal to
  * itself unless both sides are resolved. Getting this wrong is silent: the
  * command runs, prints nothing, and exits 0.
  */

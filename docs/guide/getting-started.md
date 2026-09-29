@@ -8,8 +8,9 @@ On macOS or Linux, with Node.js 22.13 or newer and git:
 curl -fsSL https://raw.githubusercontent.com/ap9000/standing-orders/main/install.sh | sh
 ```
 
-It installs the `standing-orders` command and starts it with your projects in
-`~/Projects`. You can also run it without installing: `npx standing-orders up`.
+It installs the `toolroll` command and starts it with your projects in
+`~/Projects`. `standing-orders`, the older name, still works. You can also run
+it without installing: `npx standing-orders up`.
 
 The first start prints your login and saves it in
 `~/.config/standing-orders/up-login.txt`, then opens the console at

@@ -6,7 +6,7 @@ export { channelRepos as telegramConversationRepos, resolveChannelMate as resolv
  *
  * Transport only. An ordinary private Telegram message becomes a mate turn
  * through `runMateTurn` — the same saved thread, proposal rows, confirm
- * doors and result actions the console and `standing-orders chat` use —
+ * doors and result actions the console and `toolroll chat` use —
  * and every act is still a card the operator confirms. This module owns
  * what is specific to the wire: proving the pairing (chat AND immutable
  * sender AND approver generation AND the enrolled ceiling) before any

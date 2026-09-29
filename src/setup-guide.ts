@@ -61,7 +61,7 @@ export function previewProjectInstructions(repo: string) {
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   }
   const plan = planInstall(repo, false);
-  if (plan.skillAction === "refuse-foreign") return { ok: false as const, message: "This project already has custom Standing Orders instructions. They will be kept. You can continue setup without replacing them." };
+  if (plan.skillAction === "refuse-foreign") return { ok: false as const, message: "This project already has custom Toolroll instructions. They will be kept. You can continue setup without replacing them." };
   const content = skillContent();
   const current = existsSync(plan.skillPath) ? readFileSync(plan.skillPath, "utf8") : null;
   const fingerprint = createHash("sha256").update(JSON.stringify({ repo, current, content })).digest("hex");

@@ -19,15 +19,15 @@ Settings → Telegram: paste a bot token from @BotFather, then send the bot the
 - You can talk to the lead from the chat, and reply to a task's messages
   to talk about that task.
 
-**How your messages reach Standing Orders.** With a public hooks address set
+**How your messages reach Toolroll.** With a public hooks address set
 (the one webhook triggers use, like a Tailscale Funnel on `/hooks`), Telegram
 pushes each message and tap to `…/hooks/telegram` the moment you send it.
-Telegram signs every push with a secret only Standing Orders knows.
-Otherwise, Standing Orders asks Telegram for new messages every few seconds.
+Telegram signs every push with a secret only Toolroll knows.
+Otherwise, Toolroll asks Telegram for new messages every few seconds.
 Settings → Telegram bot token says which one is happening.
 
 While Telegram pushes, no other program can ask for your bot's messages, so
-none can go astray. If pushes stop arriving for five minutes, Standing Orders
+none can go astray. If pushes stop arriving for five minutes, Toolroll
 asks for messages itself for a while, then tries pushes again. Nothing is
 lost meanwhile: Telegram keeps undelivered messages for a day.
 
@@ -47,5 +47,5 @@ lapses after 30 minutes.
 
 The console works on a phone browser. Add it to your Home Screen (iPhone) to
 get notifications from Settings → Notifications → This device. To reach it
-away from home, put it on your tailnet: `standing-orders up --host 0.0.0.0
+away from home, put it on your tailnet: `toolroll up --host 0.0.0.0
 --allow-host <your-machine>.ts.net:4180`.

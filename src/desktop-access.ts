@@ -25,8 +25,8 @@ export function probeDesktopProject(repo: string): DesktopProjectAccess {
     const common = execFileSync("git", ["-C", repo, "rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8", timeout: 4000, stdio: ["ignore", "pipe", "pipe"] }).trim();
     scratch = mkdtempSync(join(realpathSync(common), "standing-orders-access-"));
     const file = join(scratch, "check");
-    writeFileSync(file, "Standing Orders access check\n", { flag: "wx", mode: 0o600 });
-    if (readFileSync(file, "utf8") !== "Standing Orders access check\n") throw Error("Read-back failed");
+    writeFileSync(file, "Toolroll access check\n", { flag: "wx", mode: 0o600 });
+    if (readFileSync(file, "utf8") !== "Toolroll access check\n") throw Error("Read-back failed");
     unlinkSync(file); rmdirSync(scratch); scratch = undefined;
     return { repo, state: "ready", message: "The worker can read this project and write its Git metadata." };
   } catch (error) {

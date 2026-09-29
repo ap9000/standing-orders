@@ -19,21 +19,21 @@ sudo apt install bubblewrap      # Debian, Ubuntu
 sudo dnf install bubblewrap      # Fedora
 ```
 
-With it, Claude and Gemini agents run in a sandbox where Standing Orders'
+With it, Claude and Gemini agents run in a sandbox where Toolroll's
 own secrets don't exist. See [Security](security.md).
 
 ## Keep it running
 
-`standing-orders up` runs until you stop it. To keep it running after you log
+`toolroll up` runs until you stop it. To keep it running after you log
 out, run it as a user service. Save this as
 `~/.config/systemd/user/standing-orders.service`:
 
 ```ini
 [Unit]
-Description=Standing Orders
+Description=Toolroll
 
 [Service]
-ExecStart=/usr/bin/env standing-orders up --project-root %h/Projects --no-open
+ExecStart=/usr/bin/env toolroll up --project-root %h/Projects --no-open
 Restart=on-failure
 
 [Install]
@@ -49,11 +49,11 @@ loginctl enable-linger "$USER"     # keep it running when you're logged out
 journalctl --user -u standing-orders -f   # what it's doing
 ```
 
-If `standing-orders` isn't on the service's PATH, use the full path from
-`command -v standing-orders` in `ExecStart`.
+If `toolroll` isn't on the service's PATH, use the full path from
+`command -v toolroll` in `ExecStart`.
 
 ## Reaching it from elsewhere
 
-On a server, put it on your tailnet: `standing-orders up --host 0.0.0.0
+On a server, put it on your tailnet: `toolroll up --host 0.0.0.0
 --allow-host <machine>.ts.net:4180`, and open `http://<machine>.ts.net:4180`
 from your laptop or phone.

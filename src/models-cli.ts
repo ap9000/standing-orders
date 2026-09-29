@@ -1,4 +1,4 @@
-/** `standing-orders models …`: what each CLI can run, whether the CLIs are
+/** `toolroll models …`: what each CLI can run, whether the CLIs are
  * current, and the automatic check. The same saved catalog as Settings → Models. */
 import { envelopeJson } from "./envelope.js";
 import { checkModels, isNewModel, modelOptions, priceWords, RUNTIME_TOOLS, runtimeStates, seenModels, setWatch, updateRuntime, watchState, type CatalogSeams, type RuntimeTool } from "./model-catalog.js";
@@ -8,7 +8,7 @@ import type { Store } from "./store.js";
 const flags = [
   { name: "provider", takesValue: true, meaning: "claude, codex, gemini or openrouter, for models list" },
   { name: "json", takesValue: false, meaning: "versioned structured response" },
-  { name: "db", takesValue: true, meaning: "local Standing Orders database" },
+  { name: "db", takesValue: true, meaning: "local Toolroll database" },
 ] as const;
 export const MODELS_DESCRIPTORS = [
   { action: "status", synopsis: "installed CLI versions, available updates, new models and the automatic check", mutation: "none", takesQuery: false, flags },
@@ -31,7 +31,7 @@ export async function runModelsCommand(positional: readonly string[], options: M
     const runtimes = runtimeStates(store), watch = watchState(store);
     const fresh = (["claude", "codex", "gemini"] as const).flatMap(source => seenModels(store, source)).filter(model => isNewModel(model, now));
     return ok({ runtimes, watch, newModels: fresh }, [
-      ...(runtimes.length === 0 ? ["No CLI versions checked yet. Run: standing-orders models check"] : runtimes.map(one => `${one.name} ${one.installed ?? "?"}${one.behind ? ` · ${one.latest} available${one.updateCommand === null ? "" : ` (standing-orders models update ${one.tool})`}` : " · up to date"}`)),
+      ...(runtimes.length === 0 ? ["No CLI versions checked yet. Run: toolroll models check"] : runtimes.map(one => `${one.name} ${one.installed ?? "?"}${one.behind ? ` · ${one.latest} available${one.updateCommand === null ? "" : ` (toolroll models update ${one.tool})`}` : " · up to date"}`)),
       ...fresh.map(model => `New: ${model.name} · ${priceWords(model)}`),
       `Automatic checks: ${watch.enabled ? "on" : "off"} · last checked ${watch.checkedAt ?? "never"}`,
     ]);
@@ -40,7 +40,7 @@ export async function runModelsCommand(positional: readonly string[], options: M
     const provider = options.get("provider");
     if (typeof provider !== "string" || !isProviderId(provider)) return fail("usage", "Use --provider claude, codex, gemini or openrouter.");
     const models = modelOptions(store, provider, now);
-    return ok({ provider, models }, models.length === 0 ? ["No models saved yet. Run: standing-orders models check"] : models.map(one => `${one.value}  ${one.label}`));
+    return ok({ provider, models }, models.length === 0 ? ["No models saved yet. Run: toolroll models check"] : models.map(one => `${one.value}  ${one.label}`));
   }
   if (action === "check") {
     const checked = await checkModels(store, now, context.seams);

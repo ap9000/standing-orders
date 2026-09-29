@@ -79,7 +79,7 @@ actions then has one rule:
 
 Actions that only read start as **Do it**; everything else starts as **Ask
 first**. The teammate never calls a tool itself: it asks for a call on its
-turn, Standing Orders checks the rule and makes it (or asks you), and the
+turn, Toolroll checks the rule and makes it (or asks you), and the
 teammate reads the answer before it decides. Every call, made or not, is a
 receipt: under **Tool calls** on the card, and in **What it did** on its page.
 A visit to a card allows up to 12 calls; after that it decides with what it
@@ -115,7 +115,7 @@ approvals.
 
 Each teammate has a desk: its own flow, made the first time it's needed.
 
-- **Message it by name** in your chat with Standing Orders on Telegram, Slack,
+- **Message it by name** in your chat with Toolroll on Telegram, Slack,
   Discord or Teams: start with `@maya` or `Maya,` ("@maya where's order
   2201?"). It lands on Maya's desk as a card. Maya works it within its rules
   and tools, and its answer comes back to you there. A message that only

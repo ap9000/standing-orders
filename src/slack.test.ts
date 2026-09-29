@@ -383,7 +383,7 @@ describe("Slack shared chat", () => {
     await processSlackEvent(options);
     expect(state.binding(ID.installation)?.member).toBe(MEMBER);
     await drain();
-    expect(sends().at(-1)?.args.text).toContain("Connected to Standing Orders");
+    expect(sends().at(-1)?.args.text).toContain("Connected to Toolroll");
     expect(receive("private projects", { user: "UOTHER" })).toBe(false);
     expect(
       receiveSlack(
@@ -934,7 +934,7 @@ describe("Slack shared chat", () => {
     await processSlackEvent(options);
     await drain();
     expect(String(sends().at(-1)?.args["channel"])).toBe("DSAM");
-    expect(String(sends().at(-1)?.args["text"])).toContain("Standing Orders in chat");
+    expect(String(sends().at(-1)?.args["text"])).toContain("Toolroll in chat");
     expect(runner).not.toHaveBeenCalled();
     // Unpairing sam leaves alex's binding live.
     state.revokeBinding(state.bindingFor(ID.installation, "USAM")!, now);

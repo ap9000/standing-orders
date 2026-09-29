@@ -8,9 +8,9 @@
  * or hand it to a person), or a "Teammate handles it" zone where it picks
  * where the card goes and writes what the next zones send. It never acts
  * itself: each turn answers with one decision as JSON, through Claude with no
- * tools, no repository and no MCP servers, and Standing Orders carries it out
+ * tools, no repository and no MCP servers, and Toolroll carries it out
  * within the zone's choices. The card is data, never instructions. (v94: it
- * may ask for a project tool call on its turn; Standing Orders makes it, or
+ * may ask for a project tool call on its turn; Toolroll makes it, or
  * asks a person first, by the rules in teammate-tools.ts.)
  *
  * Teammates do flow work only: they never approve a code task, a merge or

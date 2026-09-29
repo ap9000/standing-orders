@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Standing Orders, end to end: every main feature a person uses, through
+ * Toolroll, end to end: every main feature a person uses, through
  * the real console, the real worker and real Claude, in a throwaway world
  * (scripts/e2e-kit.mjs). Flows have their own run (scripts/flows-e2e.mjs);
  * this one covers the rest, and the newer flow features on top.
@@ -58,7 +58,7 @@ if (docker) {
 }
 
 // A stand-in for Stripe's MCP server and its sign-in, on this computer: it says where to sign in, lets
-// Standing Orders register itself, asks the person to allow it, trades the code (PKCE checked) for a
+// Toolroll registers itself, asks the person to allow it, trades the code (PKCE checked) for a
 // two-minute token the worker has to renew, and answers MCP only with a current token.
 const stand = { port: await freePort(), codes: new Map(), live: new Set(), refresh: new Map(), grants: [], registered: [] };
 const standBase = `http://127.0.0.1:${stand.port}`;
@@ -83,7 +83,7 @@ const standIn = createHttpServer(async (request, response) => {
   if (url.pathname === "/register") { const body = JSON.parse(raw); stand.registered.push(body); return send(201, { client_id: `client-${stand.registered.length}`, redirect_uris: body.redirect_uris }); }
   if (url.pathname === "/authorize") {
     response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-    return response.end(`<!doctype html><title>Stripe</title><h1>Allow Standing Orders to use your Stripe account?</h1><form method="get" action="/allow">${[...url.searchParams].map(([k, v]) => `<input type="hidden" name="${k}" value="${v.replace(/"/g, "&quot;")}">`).join("")}<button>Allow</button></form>`);
+    return response.end(`<!doctype html><title>Stripe</title><h1>Allow Toolroll to use your Stripe account?</h1><form method="get" action="/allow">${[...url.searchParams].map(([k, v]) => `<input type="hidden" name="${k}" value="${v.replace(/"/g, "&quot;")}">`).join("")}<button>Allow</button></form>`);
   }
   if (url.pathname === "/allow") {
     const code = randomBytes(12).toString("hex");
@@ -448,6 +448,7 @@ await journey("console", "The command line answers: the task list, the approvers
   if (!JSON.stringify(people).includes("sam")) throw new Error(`the approvers: ${JSON.stringify(people).slice(0, 200)}`);
   if (!/npm test/.test(verify)) throw new Error(`the project's check: ${verify.slice(0, 200)}`);
   if (!/task/.test(help)) throw new Error("help doesn't mention tasks");
+  if (!/^toolroll — /.test(help) || !/toolroll task add/.test(help)) throw new Error(`help doesn't name the toolroll command: ${help.slice(0, 200)}`);
 });
 
 // ------------------------------------------------------------------ a task, from an idea to an accepted result
@@ -1518,7 +1519,7 @@ await journey("console", "Sign-in with an identity provider: turned on in Settin
     await Promise.all([priya.waitForURL(/\/authorize/), priya.click("a.login-sso")]);
     await Promise.all([priya.waitForLoadState("load"), priya.click('a:has-text("Sign in as sam")')]);
     await priya.waitForSelector(".problem");
-    if (!/isn.t in a group that may use Standing Orders/.test(await priya.locator(".problem").innerText())) throw new Error("the sales group got in");
+    if (!/isn.t in a group that may use Toolroll/.test(await priya.locator(".problem").innerText())) throw new Error("the sales group got in");
   } finally {
     await context.close();
     // Off again: the other checks sign in with passwords on the plain sign-in page.
@@ -1587,7 +1588,7 @@ await journey("console", "Signing out ends the session: pages ask to sign in aga
 });
 
 standIn.close(); standIn.closeAllConnections(); idpServer.close(); idpServer.closeAllConnections();
-await w.finish(group === null ? "Standing Orders end to end" : `Standing Orders end to end: ${group}`);
+await w.finish(group === null ? "Toolroll end to end" : `Toolroll end to end: ${group}`);
 for (const [name, one] of Object.entries(GROUPS)) {
   const counted = [...placed.values()].filter(each => each === name).length;
   if (counted !== one.journeys) { console.error(`Group ${name} has ${counted} journeys, not the ${one.journeys} GROUPS lists`); process.exitCode = 1; }

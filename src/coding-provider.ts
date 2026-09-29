@@ -304,7 +304,7 @@ export function createCodexCodingProvider(options: { cwd?: string; command?: str
       if (!attached.ok) throw new CodingProviderRequestError(-32000, "Codex could not enter the required process container.");
     }
     await send("initialize", {
-      clientInfo: { name: "standing_orders", title: "Standing Orders", version: "0.4.3" },
+      clientInfo: { name: "standing_orders", title: "Toolroll", version: "0.4.3" },
       capabilities: { experimentalApi: true },
     });
     write({ method: "initialized", params: {} });

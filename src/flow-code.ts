@@ -11,7 +11,7 @@
  *   goes to next, from the zone's answers.
  * - Secrets the zone names come from the flow's saved secrets as
  *   environment variables; their values never reach the output or the log.
- * - It runs inside the same fence as agents (Standing Orders' own state and
+ * - It runs inside the same fence as agents (Toolroll's own state and
  *   keys are out of reach), under a time limit, with the setup's plain
  *   environment rather than this process's.
  */

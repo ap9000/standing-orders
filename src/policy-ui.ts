@@ -54,6 +54,6 @@ export function policyHtml(view: PolicyView, csrf: string, notice: { said?: stri
     `<fieldset><legend><label for="policy-tools">Project tools</label></legend><textarea id="policy-tools" name="tools" spellcheck="false" placeholder="Any tool" aria-describedby="policy-tools-hint">${e((view.policy.tools ?? []).join("\n"))}</textarea>` +
     `<span class="hint" id="policy-tools-hint">One per line. Blank allows any.${e(toolHint)}</span></fieldset>` +
     `<fieldset><legend>Permission ceiling</legend>${levels}</fieldset>` +
-    `<div class="step-up"><label>Your Standing Orders password<input type="password" name="password" autocomplete="current-password" required></label></div>` +
+    `<div class="step-up"><label>Your Toolroll password<input type="password" name="password" autocomplete="current-password" required></label></div>` +
     `<button type="submit">Save policy</button></form>${history}</section>`;
 }

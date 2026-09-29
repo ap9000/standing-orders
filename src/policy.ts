@@ -1,6 +1,6 @@
 /**
  * Organisation policy (sprint 8): one policy for the whole installation, set
- * by an instance operator on Settings → Policy or with `standing-orders policy
+ * by an instance operator on Settings → Policy or with `toolroll policy
  * set`. It says which providers and models may run, which project tools
  * (MCP servers) agents may use, and the highest permission level any task,
  * project or mode may run with.

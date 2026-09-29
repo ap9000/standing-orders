@@ -1,4 +1,4 @@
-# Standing Orders: simple, elegant UI
+# Toolroll: simple, elegant UI
 
 Every UI change and UI review must include a simplicity pass before sign-off.
 
@@ -13,7 +13,7 @@ Before finishing, ask: Can a first-time user understand the current state and ne
 
 Example: show **Plan ready**, a short outcome, and **Review plan**. Omit **Your next step**, **approve to start**, and a second sentence explaining the same action. Keep password and approval instructions inside the expanded review.
 
-Carry this check into Standing Orders task acceptance criteria and review feedback for UI work. Do not claim future agents followed it until their output has been inspected.
+Carry this check into Toolroll task acceptance criteria and review feedback for UI work. Do not claim future agents followed it until their output has been inspected.
 
 ## Chat and UI consistency
 
@@ -29,13 +29,13 @@ Carry this check into Standing Orders task acceptance criteria and review feedba
 - During implementation, run typecheck and tests for the affected behavior. Add a small regression for each reproduced bug; reuse existing tests instead of adding overlapping suites.
 - For UI work, use one end-to-end journey at desktop and one phone viewport: open the result, inspect changes, leave feedback, and create a revision. Include affected empty, long-content, and failure states. Add other viewport checks only for a concrete risk or explicit acceptance requirement.
 - After a small copy or CSS repair, rerun the affected visual checks, not every browser script. Behavioral changes also require their focused tests.
-- Let Standing Orders run the unchanged approved full verification command once at the final machine gate for the candidate. Do not duplicate that full suite in the builder or lead inspection. A failed gate or changed candidate still needs fresh verification; never delete tests, add skips, or waive execution approvals or machine checks to save time.
+- Let Toolroll run the unchanged approved full verification command once at the final machine gate for the candidate. Do not duplicate that full suite in the builder or lead inspection. A failed gate or changed candidate still needs fresh verification; never delete tests, add skips, or waive execution approvals or machine checks to save time.
 - Reuse valid evidence for unchanged code and the same agent session where already supported. Do not build new orchestration just to reduce test overhead. No new agent time limits.
 - Report the checks actually run, the exact candidate they cover, and any remaining gaps. Broaden checks only for a specific uncovered risk; say why.
 
 ## Keep the installed tool current
 
-- Always use the latest verified Standing Orders build for new live work. Check the running UI, background worker and resolved CLI before dispatch; deploy an available newer verified build first. If the update is blocked, resolve the update instead of continuing ordinary tasks on the old runtime. A source commit, passing build or merge does not count as deployment.
+- Always use the latest verified Toolroll build for new live work. Check the running UI, background worker and resolved CLI before dispatch; deploy an available newer verified build first. If the update is blocked, resolve the update instead of continuing ordinary tasks on the old runtime. A source commit, passing build or merge does not count as deployment.
 - Deployment means the running UI and background worker use the same verified build and compatible database format, not merely that source was merged or a package was built.
 - Check running build identity before real end-to-end work. Report version drift and update through the normal drain, backup, compatibility and health checks; never replace a runtime underneath active work.
 - Prefer the latest verified candidate. Never bypass signing, approvals, process-exit checks or the passing native machine check to install a newer build. Report a blocked update plainly instead of claiming the installation is current.

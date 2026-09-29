@@ -14,7 +14,7 @@
  * colour; the page uses the readable one.
  *
  * Preset names are Pantone LLC's; the hex values are the published screen
- * approximations. Pantone is not affiliated with Standing Orders.
+ * approximations. Pantone is not affiliated with Toolroll.
  */
 
 export type AccentTokens = { signal: string; hover: string; on: string; soft: string; selection: string };

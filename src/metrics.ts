@@ -1,5 +1,5 @@
 /**
- * `/metrics` (v104): Standing Orders in the Prometheus text format, for the
+ * `/metrics` (v104): Toolroll in the Prometheus text format, for the
  * dashboards and alerts a company already runs. Labels are small, fixed
  * sets (state, role, outcome, provider, project, destination), never a task
  * id, a person or a path, so a scrape stays cheap and says nothing private.

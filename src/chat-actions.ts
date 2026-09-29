@@ -490,7 +490,7 @@ export function prepareSharedAction(
         state = { rules: "" };
         title = `Let ${name} use ${tool}`;
         terms.push(...actions.map(one => `${one}: ${defaultRule({ name: one, readOnly: false }).use === "free" ? "does it" : "asks you first"}`),
-          `${name} asks for each call on its turn; Standing Orders makes it by these rules, and every call is kept on the card. Change a rule any time.`);
+          `${name} asks for each call on its turn; Toolroll makes it by these rules, and every call is kept on the card. Change a rule any time.`);
       } else if (change === "revoke") {
         if (grant === null) throw Error(`${name} doesn't use a tool called ${tool}.${uses}`);
         state = { rules: JSON.stringify(grant.rules) };

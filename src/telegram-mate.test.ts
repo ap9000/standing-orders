@@ -295,7 +295,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     const pending = store.listMateProposals(opened.thread.id, ["pending"]);
     expect(pending).toHaveLength(1);
     expect(pending[0]).toMatchObject({ kind: "task", state: "pending" });
-    // The terminal's view: `standing-orders chat` lists the phone's card on the same session (no new mint).
+    // The terminal's view: `toolroll chat` lists the phone's card on the same session (no new mint).
     const lines: string[] = [];
     const cli = await runMateCli({ store, databaseFile: file, write: line => lines.push(line), json: false, credentials: { name: "alex", token }, repos: [repo], say: undefined, end: false, ceilingUsd: undefined, seams: { lines: ["proposals", "quit"], clock: () => now } });
     expect(cli.code).toBe(0);
@@ -313,7 +313,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     expect(store.lookupRef(filed)?.repo).toBe(repo);
     expect(script.acks().at(-1)).toBe("✓ done");
     // No trusted origin: one next action in words, one honest line about the missing setup, no localhost.
-    expect(script.edits().at(-1)).toBe(`✓ filed ${filed} — review and approve its scope to start work\n\nApprove it in Standing Orders on the computer.\n\n${NO_PHONE_LINK}`);
+    expect(script.edits().at(-1)).toBe(`✓ filed ${filed} — review and approve its scope to start work\n\nApprove it in Toolroll on the computer.\n\n${NO_PHONE_LINK}`);
     expect(script.edits().at(-1)).not.toMatch(/localhost|127\.0\.0\.1/);
     expect(urlButtons(lastEdit())).toEqual([]);
     // /task reads the filed task on the same view.
@@ -1054,7 +1054,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       expect(await tapPass(agents.confirm, agents.messageId)).toMatchObject({ ok: true, report: { chatConfirmed: 1 } });
       expect(store.refForId(store.lookupRef("f")!.id)?.routeOverrides).toEqual([expect.objectContaining({ phase: "build", provider: "codex", model: "gpt-5-codex" })]);
       // The route change staled f's approval: the recorded scope waits again, and the card says so once, unlinked here.
-      expect(script.edits().at(-1)).toBe(`✓ Agents changed for work f: the builder is now codex · gpt-5-codex\n\nApprove it in Standing Orders on the computer.\n\n${NO_PHONE_LINK}`);
+      expect(script.edits().at(-1)).toBe(`✓ Agents changed for work f: the builder is now codex · gpt-5-codex\n\nApprove it in Toolroll on the computer.\n\n${NO_PHONE_LINK}`);
       expect(store.getScope("f")?.approvedDigest ?? null).not.toBe(store.getScope("f")?.digest);
       expect(urlButtons(lastEdit())).toEqual([]);
       // Scope: rewritten through the guarded proposal; approval is the password ceremony, reached by one precise button under a trusted origin.
@@ -1230,7 +1230,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       const cancel = card("cancel", { task: "z", taskTitle: "work z", reason: "no longer needed" });
       expect(cancel.preview).toMatchObject({ buttons: false });
       expect(cancel.preview.text).toContain("Cancelling is armed on the task itself, never from a card.");
-      expect(cancel.preview.text).toContain("This step finishes in Standing Orders.");
+      expect(cancel.preview.text).toContain("This step finishes in Toolroll.");
       expect(cancel.preview.text).not.toMatch(/http|localhost|\//);
       const control = card("control", { control: "publish", task: "z", taskTitle: "work z" });
       expect(control.preview).toMatchObject({ buttons: false });
@@ -1271,7 +1271,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       expect(cards.every(one => (one.params["reply_markup"] as { inline_keyboard: { callback_data?: string }[][] }).inline_keyboard.flat().every(button => button.callback_data === undefined))).toBe(true);
       expect(store.handle.prepare("SELECT COUNT(*) AS n FROM telegram_proposal_action").get()!["n"]).toBe(0);
       for (const one of cards) {
-        expect(String(one.params["text"])).toContain("This step finishes in Standing Orders.");
+        expect(String(one.params["text"])).toContain("This step finishes in Toolroll.");
         expect(String(one.params["text"])).not.toContain("No phone link");
       }
       // A forged tap (a callback that names no token) on the linked card: acknowledged, nothing done, the card repainted with its current link.

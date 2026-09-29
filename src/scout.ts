@@ -236,7 +236,7 @@ export async function scout(store: Store, request: ScoutRequest): Promise<ScoutO
   }
 
   // The live window (peek): the same transcript file the builder keeps,
-  // so `standing-orders peek` and the run page can watch this session too.
+  // so `toolroll peek` and the run page can watch this session too.
   const liveLog = openLiveLog(root, request.runId);
   let invoked;
   try {

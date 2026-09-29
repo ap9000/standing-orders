@@ -241,7 +241,7 @@ export async function postWebhook(
           text: [
             `*${notification.subject}*`,
             notification.body,
-            ...(link === null ? [] : [`<${link}|open in standing-orders>`]),
+            ...(link === null ? [] : [`<${link}|open in Toolroll>`]),
           ].join("\n"),
         }
       : {

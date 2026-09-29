@@ -4,7 +4,7 @@
  * a sign-in and nothing else: no developer app to create, no key to paste.
  *
  * Connect finds the server's sign-in (its protected-resource metadata, or the
- * authorization server at its origin), registers Standing Orders as a client
+ * authorization server at its origin), registers Toolroll as a client
  * with this console's callback, and sends the person to the service to sign
  * in. The callback trades the code for tokens, which live in the tool's own
  * secrets file (never the database, never a log), and the tool joins the
@@ -38,7 +38,7 @@ export const ONE_CLICK: readonly { id: string; label: string; url: string; about
 const loopback = (value: string) => { try { const url = new URL(value); return url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname); } catch { return false; } };
 /**
  * The list, with one service standing in on this computer when the person
- * running Standing Orders says so ("stripe|Stripe|http://127.0.0.1:5123/mcp"
+ * running Toolroll says so ("stripe|Stripe|http://127.0.0.1:5123/mcp"
  * in STANDING_ORDERS_TEST_CONNECT): how the end-to-end check signs in for
  * real without a real account. Only a loopback address is taken.
  */
@@ -127,9 +127,9 @@ export async function startConnect(input: { service: string; repo: string; by: s
   let clientId: string, clientSecret: string | null;
   try {
     const registered = await fetcher(server.register, { method: "POST", headers: { "content-type": "application/json", accept: "application/json" }, signal: AbortSignal.timeout(10_000),
-      body: JSON.stringify({ client_name: "Standing Orders", redirect_uris: [redirect], grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], token_endpoint_auth_method: "none" }) });
+      body: JSON.stringify({ client_name: "Toolroll", redirect_uris: [redirect], grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], token_endpoint_auth_method: "none" }) });
     const body = await registered.json() as { client_id?: unknown; client_secret?: unknown };
-    if (!registered.ok || typeof body.client_id !== "string") return { ok: false, said: `${service.label} didn't let Standing Orders register (HTTP ${registered.status}).` };
+    if (!registered.ok || typeof body.client_id !== "string") return { ok: false, said: `${service.label} didn't let Toolroll register (HTTP ${registered.status}).` };
     clientId = body.client_id;
     clientSecret = typeof body.client_secret === "string" ? body.client_secret : null;
   } catch {

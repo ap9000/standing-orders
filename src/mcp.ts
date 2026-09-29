@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path';
 import { repositoryContextRead } from './repository-context.js';
 import { ASSIGNMENT_TOOLS, assignmentForCoordinator } from "./assignment-adapters.js";
 /**
- * `standing-orders mcp` — the MCP stdio server (MCP gateway spec v6).
+ * `toolroll mcp` — the MCP stdio server (MCP gateway spec v6).
  *
  * Zero-dep JSON-RPC 2.0 over stdio, newline-delimited; stdout carries
  * protocol bytes ONLY (logs go to stderr); clean EOF is clean shutdown.
@@ -104,7 +104,7 @@ type Tool = {
 };
 
 const CONTRACT_GUIDE = [
-  "standing-orders MCP contract.",
+  "Toolroll MCP contract.",
   "You hold a coordinator credential: you may read inside your repo allowlist, file proposals, and record assignment ownership and receipt checks. Ownership and receipt checks grant no execution or approval authority.",
   "A filed proposal is an ordinary unapproved task: it is quarantined from planning, claiming, and running until the operator signs its scope in a password ceremony that shows them who asked. Modes never auto-admit coordinator filings.",
   "file_proposal requires an idempotency_key (8-64 printable chars, unique per request): replaying the same key+request returns the original task; the same key with a different request refuses. deliverable 'report' files a scout task: a read-only investigation whose only output is a report on the task page, never a branch.",

@@ -225,7 +225,7 @@ export function slackBlocks(
   buttons: Record<string, unknown>[] = [],
 ): Record<string, unknown>[] {
   const lines = text.split("\n"),
-    title = lines[0] ?? "Standing Orders";
+    title = lines[0] ?? "Toolroll";
   const blocks: Record<string, unknown>[] = [];
   if (title.length <= 150 && lines.length > 1) {
     blocks.push({
@@ -492,10 +492,10 @@ export async function deliverSlackPart(
           buttons = linkButton(options.origin(), link);
           if (!buttons.length)
             text +=
-              "\n\nOpen Standing Orders on your computer to review this action.";
+              "\n\nOpen Toolroll on your computer to review this action.";
           if (text.length > 10_000)
             text =
-              "Review the full action in Standing Orders before confirming.";
+              "Review the full action in Toolroll before confirming.";
         }
       }
     } else

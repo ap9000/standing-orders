@@ -668,7 +668,7 @@ async function deliverOutbox(
     // Routine progress facts are not a problem to fix: a first pairing
     // starts from now and settles them as history. Anything else pending
     // is named, once per pass, as before.
-    if (store.listNotifications("pending").some(row => !isLifecycleNotification(row))) report.problems.push("outbox rows are pending but no chat is paired — `standing-orders bridge telegram pair`");
+    if (store.listNotifications("pending").some(row => !isLifecycleNotification(row))) report.problems.push("outbox rows are pending but no chat is paired — `toolroll bridge telegram pair`");
     return;
   }
   const digest = store.telegramDigest();
@@ -1599,7 +1599,7 @@ function applyPhoneRead(context: Context, update: Update, effects: Effect[]): bo
       } catch {
         // No registry paths, SQLite errors, credentials, or stale snapshots
         // leave on the failure road. A new request can try again.
-        response = "I couldn't read the current project status. No tasks were changed. Try /status again; if it persists, check Standing Orders on the computer.";
+        response = "I couldn't read the current project status. No tasks were changed. Try /status again; if it persists, check Toolroll on the computer.";
         report.problems.push("phone status could not read the current project records");
       }
     }
@@ -1868,7 +1868,7 @@ function applyCallback(context: Context, update: Update, effects: Effect[]): voi
     (action.messageId !== null && action.messageId !== String(message.message_id))
   ) {
     // Bound person, dead or foreign button: acknowledged, not acted on.
-    ack("that button is stale — standing-orders decide shows what still waits");
+    ack("that button is stale — toolroll decide shows what still waits");
     report.ignored++;
     return;
   }

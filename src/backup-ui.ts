@@ -62,9 +62,9 @@ export function backupHtml(view: BackupView, notice: { said?: string | null; pro
     `<div class="pair"><label>Back up<select name="every">${choices}</select></label>` +
     `<label>Keep the newest<input type="number" name="keep" min="1" max="${MAX_KEEP}" step="1" value="${s.keep}" required></label></div>` +
     `<label>Folder<input type="text" name="folder" value="${e(s.folder ?? "")}" placeholder="${e(view.defaultFolder)}" spellcheck="false"></label>` +
-    `<label>Your Standing Orders password<input type="password" name="password" autocomplete="current-password"></label>` +
+    `<label>Your Toolroll password<input type="password" name="password" autocomplete="current-password"></label>` +
     `</fieldset><button type="submit">Save</button></form>` +
     `<details><summary>Recent backups${view.runs.length === 0 ? "" : ` (${view.runs.length})`}</summary>${runs === "" ? `<p class="meta">None yet.</p>` : `<ol>${runs}</ol>`}<p class="meta">In <span class="mono">${e(view.folder)}</span>. Only the database is copied: provider keys and sign-in files stay out.</p></details>` +
-    `<details><summary>Restore a backup</summary><p>Stop Standing Orders, then run:</p><pre><code>standing-orders restore &lt;file&gt; --dry-run</code></pre>` +
+    `<details><summary>Restore a backup</summary><p>Stop Toolroll, then run:</p><pre><code>toolroll restore &lt;file&gt; --dry-run</code></pre>` +
     `<p class="meta">The dry run checks the backup (its version and ledger chain) and changes nothing. Run it again without <code>--dry-run</code> to restore; the current database is kept as a copy first.</p></details></section>`;
 }

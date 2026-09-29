@@ -1,6 +1,6 @@
 import { configureLeadFollow, leadFollowStatus } from './lead-follow.js';
 /**
- * `standing-orders chat` (mate arc §6): the same thread the console shows,
+ * `toolroll chat` (mate arc §6): the same thread the console shows,
  * driven from a terminal. The password is typed once — it mints the mate
  * session, the one ceremony a conversation gets — and every later turn
  * debits that session without asking again. Confirming a card runs the
@@ -119,8 +119,8 @@ export function proposalLines(proposals: readonly MateProposal[], repos: readonl
                 : one.kind === "answer"
                   ? `answer decision #${String(payload["decision"])} on ${t("task")} with "${t("optionLabel")}"${payload["reversible"] === false ? " (irreversible — confirm N yes)" : ""}: ${t("rationale")}`
                   : one.kind === "scope"
-                  ? `rewrite the scope of ${t("task")} (then approve it: standing-orders task approve ${t("task")})`
-                  : `cancel ${t("task")}: ${t("reason")} (arm it yourself: standing-orders task cancel ${t("task")})`;
+                  ? `rewrite the scope of ${t("task")} (then approve it: toolroll task approve ${t("task")})`
+                  : `cancel ${t("task")}: ${t("reason")} (arm it yourself: toolroll task cancel ${t("task")})`;
     const state = one.state === "pending" ? "" : ` [${one.state}${one.outcome !== null && typeof (one.outcome as { said?: unknown }).said === "string" ? `: ${(one.outcome as { said: string }).said}` : ""}]`;
     return `  ${number}. ${what}${state}`;
   });
@@ -172,7 +172,7 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
 
   if (store.isDemo()) return refuse("demo", "this is a demo database — chat cannot contact an external model");
   const config = store.getChatConfig();
-  if (config === null) return refuse("unconfigured", "chat is not configured — choose a membership or direct API provider with standing-orders config set chat");
+  if (config === null) return refuse("unconfigured", "chat is not configured — choose a membership or direct API provider with toolroll config set chat");
   const directProvider = isDirectChatProvider(config.provider) ? config.provider : null;
   const subscriptionProvider = directProvider === null ? config.provider as SubscriptionChatProviderId : null;
   const direct = directProvider !== null;
@@ -332,7 +332,7 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
         const outcome = confirmMateProposal(store, who, proposal.id, now, { confirm: act[3] !== undefined, via: "cli", ...(input.evidenceRoot === undefined ? {} : { evidenceRoot: input.evidenceRoot }) });
         emit({ ok: outcome.ok, act: "confirm", proposal: proposal.id, ...(outcome.ok ? { said: outcome.said, taskId: outcome.taskId } : { reason: outcome.reason, said: outcome.said }) });
         say(outcome.ok ? outcome.said : outcome.reason === "needs-confirm" ? `${outcome.said}: confirm ${act[2]} yes` : `refused: ${outcome.said}`);
-        if (outcome.ok && outcome.kind === "scope" && outcome.taskId !== null) say(`approve it with your password: standing-orders task approve ${outcome.taskId}`);
+        if (outcome.ok && outcome.kind === "scope" && outcome.taskId !== null) say(`approve it with your password: toolroll task approve ${outcome.taskId}`);
       }
       continue;
     }

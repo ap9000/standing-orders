@@ -2,7 +2,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/ap9000/standing-orders/main/docs/media/wordmark-dark.svg">
-  <img src="https://raw.githubusercontent.com/ap9000/standing-orders/main/docs/media/wordmark-light.svg" alt="standing·orders — a control plane for unattended coding agents" width="480">
+  <img src="https://raw.githubusercontent.com/ap9000/standing-orders/main/docs/media/wordmark-light.svg" alt="Toolroll — a control plane for unattended coding agents" width="480">
 </picture>
 
 **Queue twelve tasks, walk away, come back to pull requests —
@@ -15,7 +15,7 @@ interrupted only for decisions that genuinely need a human.**
 
 [Guides](docs/guide/README.md) · [Design](docs/DESIGN.md) · [Never Stuck contract](docs/NEVER_STUCK.md) · [Priorities](docs/PRIORITIES.md) · [Ledger](docs/PROGRESS.md) · [Contributing](CONTRIBUTING.md) · [Issues](https://github.com/ap9000/standing-orders/issues) · [npm](https://www.npmjs.com/package/standing-orders)
 
-<img src="https://raw.githubusercontent.com/ap9000/standing-orders/main/docs/media/ui/unified-chat.png" alt="Standing Orders unified chat showing a live portfolio overview across projects, active builds, decisions, and proposed next actions." width="920">
+<img src="https://raw.githubusercontent.com/ap9000/standing-orders/main/docs/media/ui/unified-chat.png" alt="Toolroll unified chat showing a live portfolio overview across projects, active builds, decisions, and proposed next actions." width="920">
 
 <sub>One conversation across every project, backed by durable tasks—not a chat-only copy of the work.</sub>
 
@@ -34,7 +34,7 @@ and [Security](docs/guide/security.md).
 
 ## One command center, the whole loop
 
-Tell Standing Orders what outcome you want. Its planner reads the repository,
+Tell Toolroll what outcome you want. Its planner reads the repository,
 drafts the scope and proof rubric, and asks only when an answer would materially
 change the work. You approve the exact contract once; long-running agents can
 build it while the control plane handles queues, dependencies,
@@ -64,13 +64,13 @@ specific revision of the same task. Actual checks remain visible; there is no
 separate model reviewer or automatic evidence resubmission loop. Deployment is
 reported separately and still requires the exact passing native machine check.
 
-Enable **Automatic crew updates** in a conversation, or use `standing-orders chat
+Enable **Automatic crew updates** in a conversation, or use `toolroll chat
 --follow`. Meaningful updates reach the same lead within its saved permissions
 and limits. Idle scanning uses no model. Restart recovery reuses saved responses;
 a failed response does not rerun a task. `--no-follow` pauses automatic responses.
-This wakes Standing Orders' own lead, not an unrelated external agent session.
+This wakes Toolroll's own lead, not an unrelated external agent session.
 
-`standing-orders brief` reads the local database. `knowledge search`, `knowledge
+`toolroll brief` reads the local database. `knowledge search`, `knowledge
 impact`, and `knowledge refresh` add bounded source retrieval; see
 [repository context](docs/REPOSITORY_CONTEXT.md). Curated knowledge stays in the
 database, and crew context stays attached to its original run.
@@ -78,12 +78,12 @@ database, and crew context stays attached to its original run.
 Select a saved checkout once, then use the same task records from the terminal:
 
 ```sh
-standing-orders project use /path/to/project
-standing-orders project show
-standing-orders brief
-standing-orders assignment show <task>
-standing-orders task complete <task>
-standing-orders task revise <task> --feedback "Keep the filter selected after reload."
+toolroll project use /path/to/project
+toolroll project show
+toolroll brief
+toolroll assignment show <task>
+toolroll task complete <task>
+toolroll task revise <task> --feedback "Keep the filter selected after reload."
 ```
 
 Completion and revisions use the local sign-in already saved by `up`. Completion
@@ -219,7 +219,7 @@ failed when a result is marked complete.
   absent optional historical assessments do not block completion.
 
 <div align="center">
-  <img src="https://raw.githubusercontent.com/ap9000/standing-orders/main/docs/media/ui/verified-result.png" alt="A verified Standing Orders result card with checks, follow-up notes, and evidence-backed completion details." width="720">
+  <img src="https://raw.githubusercontent.com/ap9000/standing-orders/main/docs/media/ui/verified-result.png" alt="A verified Toolroll result card with checks, follow-up notes, and evidence-backed completion details." width="720">
   <br>
   <sub>Inspect the saved result and actual checks, then mark Complete or request changes.</sub>
 </div>
@@ -235,24 +235,25 @@ npx standing-orders up --project-root ~/Projects    # or: bunx standing-orders u
 That is the install and the setup. It needs Node 22.13 or newer on the
 machine (Bun's runtime has no `node:sqlite`; `bunx` hands the shebang to
 Node, so it works too). `npm install -g standing-orders` gives you the
-bare `standing-orders` command for later.
+bare `toolroll` command for later (`standing-orders`, the older name, still
+works).
 
 `up` prints your login once (and saves it beside the database as
 `up-login.txt`), opens the app in your browser, and connects this machine as
 the builder. Add an existing folder or a GitHub repository from **Projects**;
 the builder and unified chat pick it up while the app keeps running. The
 projects folder and every added repository are remembered. Later,
-`standing-orders up` can be run from any directory and reconnects all of them.
+`toolroll up` can be run from any directory and reconnects all of them.
 
 To reach it from your phone over a tailnet:
-`standing-orders up --host 0.0.0.0 --allow-host <your-machine>.ts.net:4180`.
+`toolroll up --host 0.0.0.0 --allow-host <your-machine>.ts.net:4180`.
 
-If the inbox says **Builder disconnected**, reopen Standing Orders on the
+If the inbox says **Builder disconnected**, reopen Toolroll on the
 machine where the projects live; queued work resumes automatically. You do not
 run `up` separately in each project.
 
 Advanced deployments can start the console alone with
-`standing-orders serve --repo .`: with no account yet it
+`toolroll serve --repo .`: with no account yet it
 prints a six-digit setup code, and the login page offers **create the
 first account** — enter the code, pick a username and password, and you are
 in. A second person joins by invite link from the people page, never by
@@ -265,7 +266,7 @@ npx standing-orders                    # what's in flight across your repos — 
 
 ## Getting started
 
-There is one normal road: keep one `standing-orders up` running on the machine.
+There is one normal road: keep one `toolroll up` running on the machine.
 It is the app and the builder for every saved project. The separate console,
 worker, and OS service commands documented later are advanced deployment tools
 for people splitting those parts across machines.
@@ -307,11 +308,11 @@ for people splitting those parts across machines.
    its own approved grant; task completion alone never publishes or deploys.
 
    Verification can recover one common environment failure without hiding it.
-   Run `standing-orders verify set ... --self-heal` without `--yes` first. The
+   Run `toolroll verify set ... --self-heal` without `--yes` first. The
    preview shows the exact approved setup and its digest; confirm only that
    preview by rerunning with `--setup-digest <shown> --yes`. If the project
    check cannot start because a required project executable is missing,
-   Standing Orders may run that setup once and retry the exact check once. It
+   Toolroll may run that setup once and retry the exact check once. It
    does not recover ordinary test failures, timeouts, or an executable that
    exists but cannot run. Every step stays in the check log. Recovery stops if
    the setup or project check changes, setup fails, files change, the checkout
@@ -323,7 +324,7 @@ for people splitting those parts across machines.
    mandatory review step. Older results retain their own links.
 
 Specialized views remain in **Tools** and **Settings**: the activity ledger, the review cockpit,
-routines (standing orders that file themselves on a schedule), the fleet,
+routines (tasks that file themselves on a schedule), the fleet,
 people (invite a second approver), the operating mode (a signed, expiring
 envelope that pre-approves your own filings), and **chat** — the mate, one
 conversation across every project, which only ever proposes.
@@ -331,23 +332,23 @@ conversation across every project, which only ever proposes.
 ### In the terminal
 
 ```sh
-standing-orders task add "Give outbound webhooks a bounded retry policy" --id retries --repo .
-standing-orders task scope retries --goal "Exponential backoff, dead-letter after 24h, no payload changes" \
+toolroll task add "Give outbound webhooks a bounded retry policy" --id retries --repo .
+toolroll task scope retries --goal "Exponential backoff, dead-letter after 24h, no payload changes" \
   --acceptance "A failing webhook retries with exponential backoff and dead-letters after 24h.|check"
-standing-orders task show retries --json          # the scope's digest is what you sign
-standing-orders task approve retries --as you --digest <digest> --yes   # asks for your password
+toolroll task show retries --json          # the scope's digest is what you sign
+toolroll task approve retries --as you --digest <digest> --yes   # asks for your password
 
-standing-orders peek                               # one pane per live agent; q leaves
-standing-orders decide <id> --choose <option>      # answer a parked decision
-standing-orders task show retries                  # attempts, outcome, where the branch is
+toolroll peek                               # one pane per live agent; q leaves
+toolroll decide <id> --choose <option>      # answer a parked decision
+toolroll task show retries                  # attempts, outcome, where the branch is
 
-standing-orders task add "Why does the login test flake?" --id flaky --report   # a scout
-standing-orders chat --say "what is waiting on me across every project?"       # the mate
+toolroll task add "Why does the login test flake?" --id flaky --report   # a scout
+toolroll chat --say "what is waiting on me across every project?"       # the mate
 ```
 
 Every command takes `--json` and answers with one envelope; every mutation
-takes `--key` so a retry never files twice. `standing-orders --help` and
-`standing-orders skills get console` are the live references — the second
+takes `--key` so a retry never files twice. `toolroll --help` and
+`toolroll skills get console` are the live references — the second
 is what your coding agent reads when you ask it how something works.
 
 An agent that hits a judgement call **parks a typed decision instead of
@@ -367,7 +368,7 @@ do not loosen when you leave the room:
 | touch a default branch | builds land on `standing-orders/<task>` in a leased worktree; push + PR happen only under a publication grant naming the exact repo, branch prefix, and base |
 | approve its own work | approval nonces are minted only on screens that restate the digest-bound terms, and require your approver token typed again — **no LLM sits in any approval path** — and the [agent fence](#what-an-agent-can-reach) keeps your remembered login, runner tokens and the database out of the agent's reach |
 | act on an irreversible option | `reversible` is a schema field; irreversible choices never auto-apply, and answering one from a phone takes a second minted confirmation tap |
-| see Standing Orders' secrets | the [agent fence](#what-an-agent-can-reach) blocks your login, runner and bot tokens, stored provider keys and project tool secrets at the operating system; other providers' keys are stripped from each agent's environment; secrets live in 0600 files, never in the database, URLs, or logs |
+| see Toolroll's secrets | the [agent fence](#what-an-agent-can-reach) blocks your login, runner and bot tokens, stored provider keys and project tool secrets at the operating system; other providers' keys are stripped from each agent's environment; secrets live in 0600 files, never in the database, URLs, or logs |
 | spend while idle | **an LLM never polls** — the daemon does every no-judgement chore at zero token cost and wakes an agent only on a real event |
 | spend without being counted | every provider spawn is stamped *before* it spends, so cost is measured, never asserted |
 | guess at a judgement call | it parks a typed decision — recap, options with reversibility, recommendation, evidence — and the other eleven tasks keep going |
@@ -378,7 +379,7 @@ walks away, and comes back to pull requests.
 
 The name comes from a captain's night orders — the written standing instructions left for the officer of the watch: *proceed on this course without me, and wake me under exactly these conditions.* That is the product, and it is not about the hour: it is for **long-running work that outlasts your attention** — an afternoon of errands, a weekend, or yes, a night.
 
-Standing Orders is a control plane for coding agents, optimized for the stretch where **nobody is watching**. It owns the scheduler, the attention surface — the typed queue of things waiting on a human — and an append-only event log.
+Toolroll is a control plane for coding agents, optimized for the stretch where **nobody is watching**. It owns the scheduler, the attention surface — the typed queue of things waiting on a human — and an append-only event log.
 
 It owns a deliberately small local task store, adapts richer trackers when they are already there, and owns no worktree pool, no review gate, and no agents. Those are adapters over [`beads`](https://github.com/gastownhall/beads), [`treehouse`](https://github.com/kunchenguid/treehouse), [`no-mistakes`](https://github.com/kunchenguid/no-mistakes), `claude`, and `codex`.
 
@@ -408,7 +409,7 @@ No agent has run. Nothing has been configured, written, or installed. Every othe
 
 Reads are priced before they are made. Listing refs is O(refs) and finishes in milliseconds; `git status` is O(working tree) and was measured at over two minutes on a real repo, so it is off by default behind `--dirty`. Computing ahead/behind walks history — 22s cold on a 304MB repo — so it is bounded at 5s and degrades to a branch list that says what it withheld. Every call goes through `--no-optional-locks`, so a scan never takes the index lock from an editor you have open.
 
-`standing-orders pulls` answers the narrower question of what is waiting on a person, and `standing-orders graph` says which work graph is already here:
+`toolroll pulls` answers the narrower question of what is waiting on a person, and `toolroll graph` says which work graph is already here:
 
 ```
 Work graph — detected in your repos
@@ -422,21 +423,21 @@ Nothing is enrolled, and detection grants nothing.
 
 Backends are chosen by looking rather than asking, but **detection is not authorization** — finding a populated tracker says it exists, not that anyone wants an agent scheduling or closing what is in it. Data and runtime are detected separately, so a tracker whose binary is missing is reported as real work this machine cannot dispatch, which is a visible gap at 9am instead of a dead loop at 3am. Two populated trackers means neither is chosen: task count is not authority, and the biggest one may be the abandoned one. Where a fact is not established — Backlog.md's dependency edges, for instance — it is marked unverified and **fails closed**, because a private dependency graph other tools cannot see is shadow data.
 
-**Nothing is ever installed for you.** `bd init` stages files, edits agent integrations, and can create a commit, so Standing Orders prints the command and its side effects and lets you run it.
+**Nothing is ever installed for you.** `bd init` stages files, edits agent integrations, and can create a commit, so Toolroll prints the command and its side effects and lets you run it.
 
 ## Queueing work, and taking it
 
 The built-in store is the fallback backend, and the commands over it are written for an agent first — because the agent is what runs them ten thousand times while you are away.
 
 ```sh
-standing-orders task add "migrate the payouts schema" --id schema
-standing-orders task add "wire the payouts API" --id api
-standing-orders task block api --on schema     # api waits for schema
+toolroll task add "migrate the payouts schema" --id schema
+toolroll task add "wire the payouts API" --id api
+toolroll task block api --on schema     # api waits for schema
 
-standing-orders ready --json                   # what could be dispatched now
-standing-orders claim schema --runner builder-1 --key dispatch-schema
-standing-orders heartbeat <lease>              # still working
-standing-orders release <lease>                # done holding it
+toolroll ready --json                   # what could be dispatched now
+toolroll claim schema --runner builder-1 --key dispatch-schema
+toolroll heartbeat <lease>              # still working
+toolroll release <lease>                # done holding it
 ```
 
 Four properties make that loop safe to run unattended.
@@ -451,10 +452,10 @@ Four properties make that loop safe to run unattended.
 
 ## The unattended pass
 
-`standing-orders tick` is the loop above with nobody typing it, once per invocation:
+`toolroll tick` is the loop above with nobody typing it, once per invocation:
 
 ```sh
-standing-orders tick --runner builder-1 --token <t> --repo ~/code/thing --max 1
+toolroll tick --runner builder-1 --token <t> --repo ~/code/thing --max 1
 ```
 
 One pass: take the ready set, skip what nobody approved, claim what is left — re-proving readiness inside the same transaction as the claim, because the world moves between a list and a take — build each task in a leased worktree on `standing-orders/<task-id>`, and commit. **Tick itself never pushes** and cannot touch the default branch; pushing and opening the pull request happen only under a publication grant whose exact repository, branch prefix, and base you approved — and merging stays yours, on GitHub.
@@ -463,7 +464,7 @@ It is deliberately a pass and not a daemon: point cron at it and the fences make
 
 ## Advanced: a separate background builder
 
-Normal local use does not require this section: `standing-orders up` is the
+Normal local use does not require this section: `toolroll up` is the
 product command. For a remote or split deployment, the builder loop can manage
 itself as an OS service — launchd on macOS, systemd on
 Linux, Task Scheduler on Windows, chosen automatically — so "set it
@@ -471,10 +472,10 @@ running" is one command, and reboots and crashes are the supervisor's
 problem:
 
 ```sh
-standing-orders daemon install --runner builder-1 --token <runner-token> --repo ~/code/thing
-standing-orders daemon status      # running, as which pid, logs where
-standing-orders daemon logs        # the file to tail
-standing-orders daemon uninstall   # take it back off
+toolroll daemon install --runner builder-1 --token <runner-token> --repo ~/code/thing
+toolroll daemon status      # running, as which pid, logs where
+toolroll daemon logs        # the file to tail
+toolroll daemon uninstall   # take it back off
 ```
 
 The service restarts after a crash and after an unexpected clean exit alike
@@ -489,7 +490,7 @@ native equivalent; the status says so and names the Linux route). The
 contract and boundaries are in
 [docs/PROCESS_CONTAINMENT.md](docs/PROCESS_CONTAINMENT.md).
 
-Under the hood it runs `standing-orders watch`: a work-conserving loop that
+Under the hood it runs `toolroll watch`: a work-conserving loop that
 composes the same passes cron would call — but wakes on events (a decision
 answered from your phone dispatches the next build in seconds), recovers
 its own predecessor's mid-flight work after a crash, and spends zero tokens
@@ -522,7 +523,7 @@ Use Full access only for repositories and setup commands you trust.
 
 ### What an agent can reach
 
-Agents run as your own user, so Standing Orders fences its own secrets off
+Agents run as your own user, so Toolroll fences its own secrets off
 from them at the operating system, in every permission mode. The fence covers
 the state folder beside the database (your remembered login `up-login.txt`,
 runner and coordinator tokens, chat bot tokens, the database and its backups,
@@ -568,11 +569,11 @@ high-risk, strict, screenshot-proof, and automerge routes reach for. With no
 strong row, a demanding task keeps the default and says so.
 
 ```
-standing-orders task scope <id> --goal … --acceptance … --risk high
-standing-orders task route <id>                     # every leg, its reason, its readiness
-standing-orders task route <id> --phase build --provider codex --model gpt-5-codex --as you --token <t>
-standing-orders task route <id> --clear-phase build --as you --token <t>
-standing-orders providers --report --runner <name> --token <t>   # this machine's readiness
+toolroll task scope <id> --goal … --acceptance … --risk high
+toolroll task route <id>                     # every leg, its reason, its readiness
+toolroll task route <id> --phase build --provider codex --model gpt-5-codex --as you --token <t>
+toolroll task route <id> --clear-phase build --as you --token <t>
+toolroll providers --report --runner <name> --token <t>   # this machine's readiness
 ```
 
 Every leg is **exact**: approvals bind a provider *and* a model id for the
@@ -660,7 +661,7 @@ states no leg problem, and agrees with the sealed profile's build and repair
 pairs. A routine approved before agents were frozen (an upgrade from before
 v48), one whose snapshot cannot be read, or one whose snapshot no longer
 verifies fires nothing and pages once; its page and `routine show` say so and
-offer the one road: `standing-orders routine refresh <name>` (or the page's
+offer the one road: `toolroll routine refresh <name>` (or the page's
 **Refresh agents** button) re-resolves the agents from today's configuration,
 withdraws an approval that is not live even when the working agents are
 unchanged, and approves nothing — you read the exact agents it now names and
@@ -706,27 +707,27 @@ Setup, once:
 
 1. In Telegram, message **@BotFather**: `/newbot`, pick a name and a
    username. Copy the token it hands you.
-2. `standing-orders bridge telegram token <that-token>` — stored in a 0600 file
+2. `toolroll bridge telegram token <that-token>` — stored in a 0600 file
    beside the database (or set `STANDING_ORDERS_TELEGRAM_TOKEN`, which wins;
    or paste it into `serve`'s settings card from your phone).
-3. `standing-orders approver add you --password <yours>` if you have no
+3. `toolroll approver add you --password <yours>` if you have no
    sign-in yet — that name and password are the login for the console and
    every approving act. (Omit `--password` and a high-entropy one is
    minted and printed once instead — better for API/bearer use.)
-4. `standing-orders bridge telegram pair --as you --token <approver-token>` —
+4. `toolroll bridge telegram pair --as you --token <approver-token>` —
    prints a one-time code, good for ten minutes.
 5. From your phone, open your bot's chat, press Start, send
-   `/pair <that-code>`, then run `standing-orders bridge telegram` once to
+   `/pair <that-code>`, then run `toolroll bridge telegram` once to
    complete it. The bot replies with who the chat now answers as.
 
 Then cron the pass next to `tick`:
 
 ```sh
-standing-orders bridge telegram        # sends pending, applies taps, exits
+toolroll bridge telegram        # sends pending, applies taps, exits
 ```
 
 Once paired, an ordinary message in that chat talks to the same assistant
-as the console's chat page and `standing-orders chat`: the same saved
+as the console's chat page and `toolroll chat`: the same saved
 thread, the same proposal cards (Confirm or Dismiss under each one), the
 same confirm doors, with the phone recorded as the source. `/status`,
 `/task <id>` and `/help` stay cheap, model-free reads. Reply to a result
@@ -737,14 +738,14 @@ configuration is never spent from Telegram.
 
 `bridge telegram status` shows the token source, the binding, and what is
 waiting. For answers in seconds instead of at the next cron firing,
-`standing-orders bridge telegram --follow` stays on the wire — one long-poll
+`toolroll bridge telegram --follow` stays on the wire — one long-poll
 actor holding the same poll lease, so a cron pass overlapping it simply
-loses the race. `standing-orders watch` embeds the same follower automatically
+loses the race. `toolroll watch` embeds the same follower automatically
 when a bot token is configured: a tap on your phone answers the decision,
 the answer wakes the loop, and the freed task resumes — phone to build,
 no timer in between.
 
-**Away mode.** `standing-orders bridge telegram digest --every 2h` (or
+**Away mode.** `toolroll bridge telegram digest --every 2h` (or
 `--off`, or the console's settings card) holds routine facts — merges,
 reports, retries, plans ready — and sends them as one digest on that
 cadence. A decision, and anything that needs a person now (a stalled
@@ -774,9 +775,9 @@ agent's environment.
 ## Peeking at the agents
 
 ```sh
-standing-orders peek            # one pane per live run: stage, clock, what the agent is saying
-standing-orders peek 42         # follow one run until it finishes
-standing-orders peek --tmux     # a real tmux session, one window per run
+toolroll peek            # one pane per live run: stage, clock, what the agent is saying
+toolroll peek 42         # follow one run until it finishes
+toolroll peek --tmux     # a real tmux session, one window per run
 ```
 
 The panes tail each run's live transcript, the same file the console's
@@ -788,7 +789,7 @@ terminal, or with `--json`, it prints one snapshot and exits.
 
 ## The mate, and the gateway
 
-`/chat` in the console (or `standing-orders chat` in the terminal) is one
+`/chat` in the console (or `toolroll chat` in the terminal) is one
 conversation across every project you serve. The mate reads the fleet
 and **only proposes**: file a task (or a scout), move one to the front,
 reserve it for a worker, hold it, rewrite a scope, retry/replace/unlink a
@@ -802,7 +803,7 @@ admitted project beside that shared thread, with one-click fleet questions
 and a direct road to each project's board.
 
 Every task has an **Overview / Ask** switch. **Ask** opens a focused companion
-to that task without creating another conversation: Standing Orders attaches
+to that task without creating another conversation: Toolroll attaches
 the current task to each new message, keeps the live status beside the thread,
 and offers plain-language starters for status, scope revision, steering, and
 result inspection. Proposed guidance is inert until you confirm its card, then it
@@ -829,8 +830,8 @@ a separate, optional act that seals the exact annotation batch into one scoped
 task for approval; ordinary result review never requires it.
 
 The chat setup screen defaults to **Codex membership · default model**.
-Run `codex login` once on the machine serving Standing Orders, choose that
-provider, and there is no Standing Orders dollar maximum. The conversation
+Run `codex login` once on the machine serving Toolroll, choose that
+provider, and there is no Toolroll dollar maximum. The conversation
 stays live until you end it; the daily turn limit and your plan's own upstream
 limits still apply. Anthropic
 membership works the same way after signing in with the `claude` CLI. Direct
@@ -839,21 +840,21 @@ ask for weekly and per-conversation dollar ceilings.
 
 ```sh
 codex login
-standing-orders config set chat --provider codex-subscription --as you --token <password>
-standing-orders serve --repo /path/to/project-a --repo /path/to/project-b
+toolroll config set chat --provider codex-subscription --as you --token <password>
+toolroll serve --repo /path/to/project-a --repo /path/to/project-b
 # Open /chat, type your password once to start the conversation, then talk.
 ```
 
 Coding agents you run elsewhere reach the same plane through the MCP
-gateway: `standing-orders mcp` serves a coordinator credential you mint,
+gateway: `toolroll mcp` serves a coordinator credential you mint,
 bound to named repositories, that can read the fleet, file quarantined
-proposals, and propose the same guarded acts — `standing-orders proposals`
+proposals, and propose the same guarded acts — `toolroll proposals`
 and the task page are where you confirm them. Both roads keep the one
 rule: the plane never acts on a model's word.
 
 ## The console
 
-`standing-orders serve --repo <path>` is no longer just the decision view — it
+`toolroll serve --repo <path>` is no longer just the decision view — it
 is the whole built-in queue, operable from a phone: an inbox of everything
 waiting on you, a live activity report (run counts, measured spend,
 decisions, incidents, stranded work, gaps), every task with its scope, holds, runs, decisions and
@@ -984,20 +985,20 @@ Everything below ships in 0.4.0:
 Detection tells you what is there; a grant is what lets anything be written to it.
 
 ```sh
-standing-orders enroll . --backend github-issues --paths owner/name   # shows the terms
-standing-orders enroll . --backend github-issues --paths owner/name --yes
-standing-orders grants          # what has been granted, and to what
-standing-orders revoke .        # take it back
+toolroll enroll . --backend github-issues --paths owner/name   # shows the terms
+toolroll enroll . --backend github-issues --paths owner/name --yes
+toolroll grants          # what has been granted, and to what
+toolroll revoke .        # take it back
 
-standing-orders ready --backend github-issues     # reads need no grant
-standing-orders task add "..." --backend beads    # writes do
+toolroll ready --backend github-issues     # reads need no grant
+toolroll task add "..." --backend beads    # writes do
 ```
 
-The grant is not a boolean. It records which paths or repositories may be touched, which mutation classes are allowed, which tasks are covered, which credential scope applies, and whether the writes will turn up in `git status` — that last one asked of `git check-ignore` rather than assumed. Two defaults carry weight: only tasks Standing Orders created or was given, because enrolling a repo with four hundred open issues is not volunteering all four hundred; and `close` is withheld, because closing what somebody else filed is not the same act as transitioning your own task.
+The grant is not a boolean. It records which paths or repositories may be touched, which mutation classes are allowed, which tasks are covered, which credential scope applies, and whether the writes will turn up in `git status` — that last one asked of `git check-ignore` rather than assumed. Two defaults carry weight: only tasks Toolroll created or was given, because enrolling a repo with four hundred open issues is not volunteering all four hundred; and `close` is withheld, because closing what somebody else filed is not the same act as transitioning your own task.
 
 Every backend goes through the same contract, and the authorization wraps it rather than living inside each adapter — an adapter written later inherits the check instead of having to remember it.
 
-**Edges are never emulated.** beads has native dependencies and they are used. This GitHub adapter has not confirmed the dependency endpoint against a live repository, so `addEdge` refuses rather than storing a graph only Standing Orders can see — one that would read as ready to every human on the repo. That is the design's rule, and the refusal says so.
+**Edges are never emulated.** beads has native dependencies and they are used. This GitHub adapter has not confirmed the dependency endpoint against a live repository, so `addEdge` refuses rather than storing a graph only Toolroll can see — one that would read as ready to every human on the repo. That is the design's rule, and the refusal says so.
 
 The beads adapter is built to beads' own documentation and exercised against a stubbed runner; it has never run against a real installation, because `bd` was not present on the machine it was written on. Commands whose flags could not be established — a general status update, in particular — refuse rather than guess.
 
@@ -1041,7 +1042,7 @@ for its permissions, history coverage, and migration behavior.
 Earlier arcs shipped behind their own adversarial review rounds;
 docs/PROGRESS.md records those findings.
 
-**M4 built.** The whole loop runs: `standing-orders watch` (or `daemon
+**M4 built.** The whole loop runs: `toolroll watch` (or `daemon
 install` — no crontab) dispatches approved work, spends nothing while idle,
 survives crashes by recovering exactly its own predecessor's claims, and
 stops taking work on the first signal. Failures are typed — strikes,

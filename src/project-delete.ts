@@ -1,10 +1,10 @@
 /**
- * Deleting a project: everything Standing Orders holds for it goes, and
+ * Deleting a project: everything Toolroll holds for it goes, and
  * nothing else. Its tasks and their versions, runs and their evidence, the
- * checkouts and branches Standing Orders made, its chats and threads, flows
+ * checkouts and branches Toolroll made, its chats and threads, flows
  * and cards, teammates, budgets and settings. Never while any of its work is
  * running. The project's own repository, its working copy and every branch
- * Standing Orders didn't make stay exactly as they are. The action ledger
+ * Toolroll didn't make stay exactly as they are. The action ledger
  * keeps every entry (its hash chain still verifies) and gains one: who
  * deleted the project and what went.
  *
@@ -19,7 +19,7 @@ import { BUILT_IN, type Database, type Store } from "./store.js";
 
 /** The tables whose history is the audit record itself: never touched. */
 const KEPT = new Set(["action_ledger", "ledger_seal", "ledger_checkpoint"]);
-/** What Standing Orders names the branches it makes. */
+/** What Toolroll names the branches it makes. */
 export const OWN_BRANCH = "standing-orders/";
 
 export type ProjectHoldings = {
@@ -65,7 +65,7 @@ const SETTINGS: [table: string, column: string][] = [
   ["project_decision", "repo"], ["flow_script", "repo"], ["workflow_recipe", "repo"], ["team_lead_project", "project"],
 ];
 
-/** What Standing Orders holds for a project, counted. */
+/** What Toolroll holds for a project, counted. */
 export function projectHoldings(store: Store, repo: string): ProjectHoldings {
   const db = store.handle;
   const d = doomed(db, repo);
@@ -125,7 +125,7 @@ const defaultGit: GitRunner = (args, cwd) => run("git", ["--no-optional-locks", 
 const inside = (root: string, path: string) => { const rel = relative(resolve(root), resolve(path)); return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel); };
 
 /**
- * Remove the checkouts and branches Standing Orders made for the project: only
+ * Remove the checkouts and branches Toolroll made for the project: only
  * branches named standing-orders/… that its tasks, runs, checkouts, races or
  * pull requests used, and only checkouts of those branches or ones it
  * recorded. Git itself refuses to delete a branch that is checked out
@@ -145,7 +145,7 @@ async function removeCheckoutsAndBranches(store: Store, repo: string, d: Doomed,
   let checkouts = 0, branches = 0;
   const isRepo = existsSync(repo) && (await git(["rev-parse", "--git-dir"], repo)).code === 0;
   if (!isRepo) {
-    // No repository to ask: only checkouts in Standing Orders' own folder go.
+    // No repository to ask: only checkouts in Toolroll's own folder go.
     for (const row of recorded) {
       if (poolRoot === null || !inside(poolRoot, row.path) || !existsSync(row.path)) continue;
       rmSync(row.path, { recursive: true, force: true });
@@ -165,13 +165,13 @@ async function removeCheckoutsAndBranches(store: Store, repo: string, d: Doomed,
   }
   const main = trees[0]?.path ?? null;
   const targets = new Set<string>();
-  // A checkout goes only while it's on one of our branches, or on no branch at all (a detached checkout Standing Orders
+  // A checkout goes only while it's on one of our branches, or on no branch at all (a detached checkout Toolroll
   // made). One we recorded that someone has since switched to a branch of their own is theirs now: it stays, and is said.
   for (const tree of trees.slice(1)) {
     const recordedHere = recorded.some(row => resolve(row.path) === resolve(tree.path));
     if (tree.branch !== null && ours.has(tree.branch)) targets.add(tree.path);
     else if (recordedHere && tree.branch === null) targets.add(tree.path);
-    else if (recordedHere) left.push(`checkout ${tree.path}: it's on ${tree.branch}, not a Standing Orders branch, so it was left alone`);
+    else if (recordedHere) left.push(`checkout ${tree.path}: it's on ${tree.branch}, not a Toolroll branch, so it was left alone`);
   }
   for (const path of targets) {
     if (main !== null && resolve(path) === resolve(main)) continue;

@@ -750,7 +750,7 @@ export async function plan(store: Store, request: PlanRequest): Promise<PlanOutc
   }
 
   // The live window (peek): the same transcript file the builder keeps,
-  // so `standing-orders peek` and the run page can watch this session too.
+  // so `toolroll peek` and the run page can watch this session too.
   const liveLog = openLiveLog(root, request.runId);
   // The durable run row, not a caller's duplicate options, is the route
   // every correction inherits.

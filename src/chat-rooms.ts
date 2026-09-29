@@ -26,7 +26,7 @@ export function roomCommand(text: string): RoomCommand | null {
   return /^\/team(?:@\w+)?(?:\s|$)/i.test(trimmed) ? { kind: "list" } : null;
 }
 
-export const PAIR_FIRST = "Pair your account first: open Settings in Standing Orders, choose this chat service, and send the code here in a private chat.";
+export const PAIR_FIRST = "Pair your account first: open Settings in Toolroll, choose this chat service, and send the code here in a private chat.";
 
 /** A room is a grant from one exact pairing (`binding`): its delivery and its
  * sends are rechecked against that person's current membership. */
@@ -91,7 +91,7 @@ function managerOf(domain: TeamLeads, actor: TeamActor, conversationId: string):
 }
 
 function privateListing(rows: { conversation: TeamConversation; leadName: string }[], current: string | null): string {
-  if (rows.length === 0) return "You are not in any team conversation yet. Join one in Standing Orders under Chat → Team chat, then send /team again.";
+  if (rows.length === 0) return "You are not in any team conversation yet. Join one in Toolroll under Chat → Team chat, then send /team again.";
   const lines = ["Your conversations", ""];
   rows.forEach((row, index) => {
     lines.push(`${index + 1}. ${phoneText(row.conversation.title, 80)} — ${row.conversation.visibility === "team" ? "Team" : "Private"} · lead ${phoneText(row.leadName, 40)}${row.conversation.id === current ? " (current)" : ""}`);
@@ -101,7 +101,7 @@ function privateListing(rows: { conversation: TeamConversation; leadName: string
 }
 
 function groupListing(rows: { conversation: TeamConversation; leadName: string }[], current: string | null): string {
-  if (rows.length === 0) return "No team conversation you manage is available to this room. Create one in Standing Orders under Chat → Team chat, then send /team again.";
+  if (rows.length === 0) return "No team conversation you manage is available to this room. Create one in Toolroll under Chat → Team chat, then send /team again.";
   const lines = [current === null ? "Choose the conversation this room follows" : "This room follows a conversation", ""];
   rows.forEach((row, index) => {
     lines.push(`${index + 1}. ${phoneText(row.conversation.title, 80)} — lead ${phoneText(row.leadName, 40)}${row.conversation.id === current ? " (current)" : ""}`);
@@ -175,7 +175,7 @@ export function applyRoomInbound(input: RoomInbound): boolean {
   // message is saved: an unconsented message must not sit in the shared queue.
   const session = store.teamMateSession(actor.name, row.thread);
   if (session === null || session.approverGeneration !== actor.generation || session.endedAt !== null) {
-    say(`${phoneText(row.title, 80)}: enable chat for yourself in Standing Orders first (it shows the provider and limits), then send again.`,
+    say(`${phoneText(row.title, 80)}: enable chat for yourself in Toolroll first (it shows the provider and limits), then send again.`,
       { label: "Enable chat", path: `/chat?conversation=${encodeURIComponent(row.conversation)}` });
     report.chatRefused = (report.chatRefused ?? 0) + 1;
     return true;

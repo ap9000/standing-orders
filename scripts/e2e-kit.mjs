@@ -1,5 +1,5 @@
 /**
- * The shared world for end-to-end runs: a throwaway Standing Orders — the
+ * The shared world for end-to-end runs: a throwaway Toolroll — the
  * real CLI, the real console (`serve`) and the real worker loop (`watch`) —
  * against a real git repository, driven through a real browser. Nothing is
  * stubbed; the database is read only as the oracle.

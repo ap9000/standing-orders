@@ -132,7 +132,7 @@ describe("Telegram team chats", () => {
     // sam has not enabled chat for this conversation: told, with the link, and nothing is saved.
     script.updates.push([textUpdate(7, group, SAM.user, "Add a criterion for the footer")]);
     expect(await pass(script)).toMatchObject({ ok: true, report: { chatRefused: 1 } });
-    expect(script.texts(GROUP).at(-1)).toContain("enable chat for yourself in Standing Orders first");
+    expect(script.texts(GROUP).at(-1)).toContain("enable chat for yourself in Toolroll first");
     expect(script.sends().at(-1)!.params["reply_markup"]).toEqual({ inline_keyboard: [[{ text: "Enable chat", url: `https://console.example/chat?conversation=${conversation}` }]] });
     expect(queued()).toEqual([]);
     // With consent the message is saved once under its update identity, as sam.

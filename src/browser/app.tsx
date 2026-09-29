@@ -281,7 +281,7 @@ function Navigation({ workspace }: { workspace: BrowserWorkspace }) {
     || new URL(workspace.path, window.location.origin).searchParams.get("repo") === project.path
     || workspace.crew.find(task => task.id === workspace.focus?.id)?.project === project.path);
   return <div className="so-navigation-content">
-    <a href="/chat" className="so-wordmark"><span className="so-brand-mark" aria-hidden="true"><i /><i /><i /></span>Standing Orders</a>
+    <a href="/chat" className="so-wordmark"><span className="so-brand-mark" aria-hidden="true"><i /><i /><i /></span>Toolroll</a>
     <a href="/tasks/new" className="so-new-task"><Icon name="plus" />New task</a>
     {workspace.projects.length > 0 && <div className="so-project-switch">
       <Label htmlFor={projectId}>Project</Label>

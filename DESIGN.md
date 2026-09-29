@@ -1,6 +1,6 @@
 ---
 name: Signal
-description: "The Standing Orders control plane: a neutral grey frame with paper sheets inset into it, ink for every act, and one chart magenta for what waits on a person."
+description: "The Toolroll control plane: a neutral grey frame with paper sheets inset into it, ink for every act, and one chart magenta for what waits on a person."
 colors:
   signal: "#c0267e"
   signal-hover: "#a81f6d"
@@ -309,7 +309,7 @@ components:
 
 **Creative North Star: "The Chart Light"**
 
-A nautical chart is printed in quiet greys and black, and the few things a navigator must act on (lights, cautions) are printed in magenta. Signal works the same way. Standing Orders is a control plane for unattended coding agents, and most of what it shows needs nobody: builds running, results filed, queues moving. That material is grey and black on paper. The one colour on the screen is chart magenta, and it appears only where a person is needed: the needs-you count, the badge on a waiting task, and the one verb that settles it. A person should be able to glance at the screen, see the magenta, open the one thing that needs them, act, and leave.
+A nautical chart is printed in quiet greys and black, and the few things a navigator must act on (lights, cautions) are printed in magenta. Signal works the same way. Toolroll is a control plane for unattended coding agents, and most of what it shows needs nobody: builds running, results filed, queues moving. That material is grey and black on paper. The one colour on the screen is chart magenta, and it appears only where a person is needed: the needs-you count, the badge on a waiting task, and the one verb that settles it. A person should be able to glance at the screen, see the magenta, open the one thing that needs them, act, and leave.
 
 The surface is the Raycast and Arc canon, played straight. A neutral grey frame holds the sidebar directly, and the work sits on white paper sheets inset 8px into that frame: the main sheet, and beside it the Crew sheet. Density is Raycast-compact, with 13px rows and 32px controls at a desk. Depth comes from the contrast between frame and paper, one soft sheet shadow, and 1px hairlines inside the sheets. Words are set in Geist and machine facts in Geist Mono. Every act a person can take is ink: a black button in light mode, a near-white one in dark.
 

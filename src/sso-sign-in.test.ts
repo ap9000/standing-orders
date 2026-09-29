@@ -119,7 +119,7 @@ test("a person signs in with the provider: an account from their groups, set aga
   person = { sub: "00u-sales", email: "sam@acme.com", groups: ["sales"] };
   const refused = await providerSignIn();
   expect(refused.status).toBe(403);
-  expect(await refused.text()).toContain("Your Okta account isn&#39;t in a group that may use Standing Orders.");
+  expect(await refused.text()).toContain("Your Okta account isn&#39;t in a group that may use Toolroll.");
   expect(store.accountOf("sam")).toBeNull();
   expect(store.actionLedger({ repos: null, source: "sign-in" }).map(one => [one.actor, one.action, one.outcome]).reverse()).toEqual(expect.arrayContaining([
     ["priya", "signed in", "Okta"], ["unknown account", "sign-in refused", "no matching group"]]));
@@ -205,7 +205,7 @@ test("the hand-off to finish is the starting browser's alone", async () => {
 });
 
 test("only step-up password fields become the provider's check; a secret field stays", () => {
-  const html = '<label>Your Standing Orders password<input type="password" name="password" autocomplete="current-password" required></label>' +
+  const html = '<label>Your Toolroll password<input type="password" name="password" autocomplete="current-password" required></label>' +
     '<input type="password" name="token" autocomplete="current-password" class="inline">' +
     '<label>Token from @BotFather<input type="password" name="token" autocomplete="off"></label>';
   const fresh = ssoStepUps(html, { label: "Okta", fresh: true }, "/x");

@@ -1,6 +1,6 @@
 # Steps that reach outside
 
-These zones send a card's details to something outside Standing Orders. Put
+These zones send a card's details to something outside Toolroll. Put
 a **Person decides** zone before any of them that sends what a model wrote
 or what an outsider typed.
 
@@ -75,11 +75,11 @@ path.
 Settings → Tools → **Connect with one click** lists services whose tools you
 connect by signing in: Stripe, Notion, Linear, Sentry, Jira and Confluence,
 Intercom, Attio, Zapier, Square, PayPal, Klaviyo, Webflow, Wix, Canva, Vercel
-and Cloudflare. Enter your Standing Orders password, pick the service, and
-allow Standing Orders on the service's own page. You never copy a key.
+and Cloudflare. Enter your Toolroll password, pick the service, and
+allow Toolroll on the service's own page. You never copy a key.
 
 The sign-in is kept in the tool's secrets file on this computer, never in the
-database, and Standing Orders renews it before it runs out. If a service
+database, and Toolroll renews it before it runs out. If a service
 stops accepting it (you removed the app on the service's side, say), the log
 says so and the tool's test fails; click the service again to sign in again.
 Connecting from a starter kit's checklist also lets the kit's teammate use

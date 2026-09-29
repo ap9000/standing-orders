@@ -27,7 +27,7 @@ export function teamCommand(text: string): TeamCommand | null {
   return /^\/team(?:@\w+)?(?:\s|$)/.test(trimmed) ? { kind: "list" } : null;
 }
 
-export const PAIR_FIRST = "Pair your phone first: open Settings → Telegram in Standing Orders, then send the code here in a private chat.";
+export const PAIR_FIRST = "Pair your phone first: open Settings → Telegram in Toolroll, then send the code here in a private chat.";
 
 type Counts = { ignored: number; chatQueued?: number; chatRefused?: number; statusReplies?: number; problems: string[] };
 
@@ -89,7 +89,7 @@ function audience(conversation: TeamConversation): string {
 
 /** The `/team` listing for a private chat: everything the person can talk in, the current choice marked. */
 function privateListing(rows: { conversation: TeamConversation; leadName: string }[], current: string | null): string {
-  if (rows.length === 0) return "You are not in any team conversation yet. Join one in Standing Orders under Chat → Team chat, then send /team again.";
+  if (rows.length === 0) return "You are not in any team conversation yet. Join one in Toolroll under Chat → Team chat, then send /team again.";
   const lines = ["Your conversations", ""];
   rows.forEach((row, index) => {
     lines.push(`${index + 1}. ${phoneText(row.conversation.title, 80)} — ${audience(row.conversation)} · lead ${phoneText(row.leadName, 40)}${row.conversation.id === current ? " (current)" : ""}`);
@@ -99,7 +99,7 @@ function privateListing(rows: { conversation: TeamConversation; leadName: string
 }
 
 function groupListing(rows: { conversation: TeamConversation; leadName: string }[], current: string | null): string {
-  if (rows.length === 0) return "No team conversation you manage is available to this group. Create one in Standing Orders under Chat → Team chat, then send /team again.";
+  if (rows.length === 0) return "No team conversation you manage is available to this group. Create one in Toolroll under Chat → Team chat, then send /team again.";
   const lines = [current === null ? "Choose the conversation this group follows" : "This group follows a conversation", ""];
   rows.forEach((row, index) => {
     lines.push(`${index + 1}. ${phoneText(row.conversation.title, 80)} — lead ${phoneText(row.leadName, 40)}${row.conversation.id === current ? " (current)" : ""}`);
@@ -200,7 +200,7 @@ export function applyTeamInbound(input: TeamInbound): boolean {
   if (session === null || session.approverGeneration !== actor.generation || session.endedAt !== null) {
     const origin = input.phoneOrigin?.() ?? null;
     const link = phoneLinkButton(origin, { label: "Enable chat", path: `/chat?conversation=${encodeURIComponent(row.conversation)}` });
-    say(chatId, `${phoneText(row.title, 80)}: enable chat for yourself in Standing Orders first (it shows the provider and limits), then send again.`, link === null ? undefined : [link]);
+    say(chatId, `${phoneText(row.title, 80)}: enable chat for yourself in Toolroll first (it shows the provider and limits), then send again.`, link === null ? undefined : [link]);
     report.chatRefused = (report.chatRefused ?? 0) + 1;
     return true;
   }
@@ -280,7 +280,7 @@ export async function deliverTeamChats(
             const minted = mintCardTokens(store, cardBinding, proposal.id, clock(), undefined, chat.chatId);
             keyboard.push(...minted.keyboard); tokens = minted.tokens;
           }
-          const link = preview.buttons ? null : phoneLinkButton(phoneOrigin?.() ?? null, { label: "Open in Standing Orders", path: `/chat?conversation=${encodeURIComponent(row.conversation)}&proposal=${proposal.id}` });
+          const link = preview.buttons ? null : phoneLinkButton(phoneOrigin?.() ?? null, { label: "Open in Toolroll", path: `/chat?conversation=${encodeURIComponent(row.conversation)}&proposal=${proposal.id}` });
           if (link !== null) keyboard.push(link);
           const problem = await sendParts(store, transport, chat.chatId, preview.text, `${prefix}proposal:${proposal.id}`, clock, access, report, keyboard.length === 0 ? undefined : keyboard, tokens);
           if (problem !== null) {

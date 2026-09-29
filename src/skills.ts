@@ -1,5 +1,5 @@
 /**
- * `standing-orders skills install` (M7.13) — how a repository tells its
+ * `toolroll skills install` (M7.13) — how a repository tells its
  * agents this queue exists.
  *
  * Two artifacts, both operator-invoked, previewed by default, and marked
@@ -40,7 +40,7 @@ export function skillContent(): string {
   if (operating === null) throw new Error("the operating guide is missing from the build");
   return `---
 name: standing-orders
-description: Operate this repository's unattended work queue via the standing-orders CLI, and explain its console. Use when asked to file or inspect tasks (including scout tasks that deliver a report), check what is ready or blocked, peek at live agents, read run results and briefs, see what awaits a human decision, or tell the operator which screen or command does what. Not for pushing, merging, or approving anything — approvals are the operator's, always.
+description: Operate this repository's unattended work queue via the toolroll CLI, and explain its console. Use when asked to file or inspect tasks (including scout tasks that deliver a report), check what is ready or blocked, peek at live agents, read run results and briefs, see what awaits a human decision, or tell the operator which screen or command does what. Not for pushing, merging, or approving anything — approvals are the operator's, always.
 ---
 
 <!-- ${MANAGED_MARK} -->
@@ -53,18 +53,18 @@ ${operating.content}
 /** The AGENTS.md block, marker-fenced so reinstalls replace only themselves. */
 export function contextBlock(): string {
   return `${CONTEXT_BEGIN}
-This repository's unattended work runs through the \`standing-orders\` CLI
+This repository's unattended work runs through the \`toolroll\` CLI
 (work queue, decisions, runs). Machine answers: add \`--json\` — one
 envelope per command, stable \`reason\` tokens, exit 3 means "no" not
 "broken", every mutation takes an idempotency \`--key\`. Refusals like
 \`held\`, \`fenced\`, \`reserved\`, \`unapproved\`, and \`external\` are
 answers to branch on, not errors to retry. Details:
-\`.claude/skills/standing-orders/SKILL.md\`, or \`standing-orders --help\`,
-which is authoritative — and \`standing-orders skills get <name>\` serves
+\`.claude/skills/standing-orders/SKILL.md\`, or \`toolroll --help\`,
+which is authoritative — and \`toolroll skills get <name>\` serves
 version-matched guides straight from the binary (\`skills list\` names
 them). Project memory (instructions, references, lessons, decisions) lives
 in the plane: read \`skills get knowledge\`, search it with
-\`standing-orders memory search\`, and record settled choices with
+\`toolroll memory search\`, and record settled choices with
 \`memory decide\` instead of editing this file. Never approve, push, or
 merge anything yourself.
 ${CONTEXT_END}`;
@@ -157,7 +157,7 @@ export function applyInstall(repo: string, writeContext: boolean): InstallResult
 /**
  * The user-level Claude Code skill is separate from the repository-local
  * skill above. The former teaches one Claude Code installation how to use
- * this exact Standing Orders binary; the latter remains part of the shared
+ * this exact Toolroll binary; the latter remains part of the shared
  * project setup flow.
  */
 export const CLAUDE_CODE_MANAGED_MARK = "<!-- standing-orders:claude-code-skill:v1 -->";
@@ -187,14 +187,14 @@ export function defaultClaudeCodeSkillDir(home = homedir()): string {
 export function claudeCodeSkillContent(): string {
   return `---
 name: standing-orders
-description: Use this machine's Standing Orders installation from Claude Code. Use when the user asks about its console, tasks, approvals, results, or runner workflow.
+description: Use this machine's Toolroll installation from Claude Code. Use when the user asks about its console, tasks, approvals, results, or runner workflow.
 ---
 
 ${CLAUDE_CODE_MANAGED_MARK}
 
-# Standing Orders
+# Toolroll
 
-Use the installed \`standing-orders\` command. Its live help is authoritative.
+Use the installed \`toolroll\` command. Its live help is authoritative.
 
 - [Console guide](console.md) — where a person can review and act.
 - [Operating guide](operating.md) — the command contract and safe workflow.

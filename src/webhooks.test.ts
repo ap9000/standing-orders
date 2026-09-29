@@ -71,7 +71,7 @@ describe("the mirrors", () => {
     expect(report.sent).toBe(2);
     // Two notifications × two mirrors; slack wears mrkdwn links, discord content.
     expect(posts).toHaveLength(4);
-    expect(posts.some(one => one.body.includes("<http://host:4180/d/7|open in standing-orders>"))).toBe(true);
+    expect(posts.some(one => one.body.includes("<http://host:4180/d/7|open in Toolroll>"))).toBe(true);
     expect(posts.some(one => one.body.includes('"content"'))).toBe(true);
     // Delivered rows do not re-send on the next pass.
     const again = await webhookPass(store, {

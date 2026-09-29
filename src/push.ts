@@ -214,11 +214,11 @@ export function validatePushEndpoint(raw: string): { ok: true; url: URL } | { ok
 
 /** Fixed words, except for one validated machine-only suite/count line. */
 export const PUSH_WORDS: Record<NonNullable<Notification["pushClass"]>, { title: string; body: string }> = {
-  decision: { title: "standing orders", body: "a decision needs you" },
-  pick: { title: "standing orders", body: "agents finished — pick a winner" },
-  merge: { title: "standing orders", body: "a pull request needs a person" },
-  attention: { title: "standing orders", body: "the plane needs attention" },
-  progress: { title: "standing orders", body: "checks in progress" },
+  decision: { title: "Toolroll", body: "a decision needs you" },
+  pick: { title: "Toolroll", body: "agents finished — pick a winner" },
+  merge: { title: "Toolroll", body: "a pull request needs a person" },
+  attention: { title: "Toolroll", body: "the plane needs attention" },
+  progress: { title: "Toolroll", body: "checks in progress" },
 };
 
 const LINK_SHAPES = [/^\/next$/, /^\/review$/, /^\/system$/, /^\/routines$/, /^\/routines\/[0-9]{1,15}$/, /^\/d\/[0-9]{1,15}$/, /^\/contest\/[0-9]{1,15}$/, /^\/r\/[0-9]{1,15}$/];

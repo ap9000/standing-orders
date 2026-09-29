@@ -140,12 +140,12 @@ export const TEMPLATES: readonly Template[] = [
     steps: [
       {
         say: "Grant intake for one repo + label (authenticated; restates its terms):",
-        run: "standing-orders intake grant --repo <path> --github owner/name --label agent-ok --as <you> --token <t>",
+        run: "toolroll intake grant --repo <path> --github owner/name --label agent-ok --as <you> --token <t>",
       },
-      { say: "See what would be imported, creating nothing:", run: "standing-orders intake preview --repo <path>" },
+      { say: "See what would be imported, creating nothing:", run: "toolroll intake preview --repo <path>" },
       {
         say: "Create the missing proposals — local, unapproved, deduped; bodies are never imported:",
-        run: "standing-orders intake run --repo <path>",
+        run: "toolroll intake run --repo <path>",
       },
     ],
   },
@@ -156,7 +156,7 @@ export const TEMPLATES: readonly Template[] = [
     why:
       "CI repair is deliberately a BUTTON on the run page while an observed red episode is open — one unapproved draft per PR, never an autonomous loop. A template cannot arm it.",
     steps: [
-      { say: "Publication status and observed check states:", run: "standing-orders publish status --repo <path>" },
+      { say: "Publication status and observed check states:", run: "toolroll publish status --repo <path>" },
       { say: "The ranked review queue (console): observed-passing first, silence labeled as silence:", run: "open /review" },
       {
         say: "When a PR's checks are observed red, the run page offers 'draft repair task' — one click files ONE unapproved draft bound to the failing head.",

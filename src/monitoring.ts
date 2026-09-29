@@ -1,5 +1,5 @@
 /**
- * Monitoring (v104): what Standing Orders does, sent to the tools a company
+ * Monitoring (v104): what Toolroll does, sent to the tools a company
  * already watches. One loop in `up` makes a pass every few seconds; each
  * destination is sent to by one process at a time (a lease in
  * `monitoring_status`), in ledger order, at least once: its cursor moves only

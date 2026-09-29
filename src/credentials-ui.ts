@@ -55,7 +55,7 @@ export function credentialsHtml(view: CredentialsView, csrf: string, notice: { s
     `<label>Name<input type="text" name="name" maxlength="60" required placeholder="for example: CI"></label>` +
     `<label>It can<select name="access"><option value="read">Read (tasks, results, the ledger)</option><option value="act">Act as you (file and manage work; never approve)</option></select></label>` +
     `<label>Expires in<select name="days">${TOKEN_DAYS.map(days => `<option value="${days}"${days === 90 ? " selected" : ""}>${days} days</option>`).join("")}</select></label>` +
-    `<label>Your Standing Orders password<input type="password" name="password" autocomplete="current-password" required></label><button>Make the token</button></form></details>`;
+    `<label>Your Toolroll password<input type="password" name="password" autocomplete="current-password" required></label><button>Make the token</button></form></details>`;
   return `<section class="credentials">${note}${toggle}<h2>Signed in</h2>${sessions}${endOthers}<h2 style="margin-top:1.5rem">API tokens</h2>` +
     `<p class="meta">For scripts and CI: send <code>Authorization: Bearer &lt;token&gt;</code>. A token can't approve anything.</p>${tokens}${view.everyone ? "" : create}</section>`;
 }

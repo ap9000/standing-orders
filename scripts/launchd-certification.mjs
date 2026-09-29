@@ -18,7 +18,7 @@
  *   4. observation beyond ThrottleInterval (at least 60 s in total).
  * It then boots the disposable label out, re-enables it (leaving no
  * disabled record behind) and removes its plist. Nothing here touches an
- * installed Standing Orders service, a database, or another label.
+ * installed Toolroll service, a database, or another label.
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";

@@ -44,7 +44,7 @@ export const PROVIDER_BINARY = "claude";
  * must never mean "open the database that launched me": a migration from the
  * candidate checkout would change the live schema underneath the older
  * supervisor, and even a read can contend with its watch transaction. Every
- * provider process therefore sees a unique disposable Standing Orders
+ * provider process therefore sees a unique disposable Toolroll
  * database while retaining its normal HOME/XDG environment for subscriptions
  * and unrelated developer tools.
  */
@@ -387,7 +387,7 @@ export async function invokeAgent(
   // The project's tools (v80): exactly its MCP servers, and none of the
   // operator's global or a repository's own. A review keeps its isolation.
   const tools = invocation.phase === "review" ? null : runTools(store, runId, spec, options.keyHome, clock);
-  // The agent fence: Standing Orders' own secrets, database and other runs'
+  // The agent fence: Toolroll's own secrets, database and other runs'
   // evidence stay out of reach, whatever the permission mode. A review is
   // already confined to its sealed files.
   const baseFence = invocation.phase === "review" ? [] : runFence(store, runId, options.keyHome);
@@ -730,7 +730,7 @@ export async function invokeHeldAgent(
   const start = starter ?? startClaudeHeldSession;
   const isolatedDb = isolatedAgentDatabase(runId);
   // The project's tools (v80), as for every build: exactly its MCP servers;
-  // and the agent fence around Standing Orders' own secrets.
+  // and the agent fence around Toolroll's own secrets.
   const heldTools = runTools(store, runId, spec, keyHome, clock);
   const heldFence = runFence(store, runId, keyHome);
   argv = [...argv, ...heldTools.argv, ...(heldFence.length > 0 ? ["--settings", claudeFenceSettings(heldFence)] : [])];

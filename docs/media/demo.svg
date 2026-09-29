@@ -44,16 +44,16 @@
   <circle cx="24" cy="22" r="6" fill="#ff5f57"/>
   <circle cx="44" cy="22" r="6" fill="#febc2e"/>
   <circle cx="64" cy="22" r="6" fill="#28c840"/>
-  <text x="380" y="26" text-anchor="middle" class="t">standing·orders — the unattended stretch</text>
+  <text x="380" y="26" text-anchor="middle" class="t">toolroll — the unattended stretch</text>
   <line x1="0" y1="40" x2="760" y2="40" stroke="#21262d"/>
 
-  <g class="l1"><text x="28" y="68"><tspan class="p">$ </tspan><tspan class="c">standing-orders task add "migrate the payouts schema" --id schema</tspan></text></g>
+  <g class="l1"><text x="28" y="68"><tspan class="p">$ </tspan><tspan class="c">toolroll task add "migrate the payouts schema" --id schema</tspan></text></g>
   <g class="l2"><text x="28" y="92" class="o">  queued   schema</text></g>
-  <g class="l3"><text x="28" y="116"><tspan class="p">$ </tspan><tspan class="c">standing-orders task add "wire the payouts API" --id api</tspan></text></g>
+  <g class="l3"><text x="28" y="116"><tspan class="p">$ </tspan><tspan class="c">toolroll task add "wire the payouts API" --id api</tspan></text></g>
   <g class="l4"><text x="28" y="140" class="o">  queued   api</text></g>
-  <g class="l5"><text x="28" y="164"><tspan class="p">$ </tspan><tspan class="c">standing-orders task block api --on schema</tspan></text></g>
+  <g class="l5"><text x="28" y="164"><tspan class="p">$ </tspan><tspan class="c">toolroll task block api --on schema</tspan></text></g>
   <g class="l6"><text x="28" y="188" class="o">  held     api — waits for schema</text></g>
-  <g class="l7"><text x="28" y="212"><tspan class="p">$ </tspan><tspan class="c">standing-orders daemon install --runner builder-1 --repo ~/code/payouts</tspan></text></g>
+  <g class="l7"><text x="28" y="212"><tspan class="p">$ </tspan><tspan class="c">toolroll daemon install --runner builder-1 --repo ~/code/payouts</tspan></text></g>
   <g class="l8"><text x="28" y="236" class="o">  watching — wakes on events, spends nothing while idle</text></g>
 
   <g class="l9"><text x="380" y="272" text-anchor="middle" class="o">·  ·  ·   you leave   ·  ·  ·</text></g>
