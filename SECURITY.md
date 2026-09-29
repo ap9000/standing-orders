@@ -18,7 +18,7 @@ user. What it promises:
   screen that restates the exact terms, and the agent fence keeps your
   remembered login, runner tokens and the database out of agents' reach.
 - **The agent fence.** Standing Orders' own secrets (the state folder beside
-  the database, except the build's worktree, and `~/.standing-orders`) are
+  the database, except the build's worktree, and `~/.toolroll`) are
   denied to agents by the operating system: Codex through its own sandbox on
   every platform; Claude and Gemini through a sandbox on macOS. On Linux and
   Windows, Claude's file tools are fenced but its shell is not yet, and Gemini
@@ -36,7 +36,7 @@ user. What it promises:
   operator changes the rules, with a step-up, and the action ledger keeps
   every change and every approval.
 - **An audit trail you can check.** Every action ledger entry is sealed
-  with a hash of the entry before it, and `standing-orders ledger verify`
+  with a hash of the entry before it, and `toolroll ledger verify`
   (or the ledger page) walks the chain and names the first entry that was
   changed, removed or added. What that proves: history before a
   checkpoint you copied off the machine wasn't touched (an instance

@@ -43,7 +43,7 @@ Structure (round-1 rulings, round-2 corrections folded):
 
 ## One paragraph
 
-`standing-orders mcp` serves MCP over **stdio**, zero-dep, against the
+`toolroll mcp` serves MCP over **stdio**, zero-dep, against the
 same SQLite database. ALL tools — reads included — require the
 **coordinator** credential (DESIGN.md §9b): minted by an operator
 password ceremony, hashed at rest, plaintext shown once, repo-scoped,
@@ -95,7 +95,7 @@ credential cannot express them. The password never transits MCP.
 
 ## Token handling (fail closed, no degrade)
 
-- `--token-file <path>` XOR `STANDING_ORDERS_COORDINATOR` env; both →
+- `--token-file <path>` XOR `TOOLROLL_COORDINATOR` env; both →
   refuse; neither → refuse (no unauthenticated mode).
 - Token file read through the fd: open `O_NOFOLLOW | O_NONBLOCK` (a
   FIFO must not hang the open — round 3 f7) → fstat → regular file
@@ -308,7 +308,7 @@ behavior.
 
 ## Demo mode
 
-`standing-orders mcp` against a demo db refuses at startup. No partial
+`toolroll mcp` against a demo db refuses at startup. No partial
 mode.
 
 ## Console surfaces

@@ -338,7 +338,7 @@ describe("planning mode, against real git", () => {
 
     // The builder's branch is its own — the planner's disposable branch is
     // not an ancestor and the smoke-test file never existed there.
-    const log = await git(["log", "--oneline", "standing-orders/limiter"]);
+    const log = await git(["log", "--oneline", "toolroll/limiter"]);
     expect(log.stdout).toContain("limiter");
 
     // Route provenance (v47): every phase's run names the route it spent

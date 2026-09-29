@@ -260,7 +260,7 @@ describe("main", () => {
     const code = await main(["--help"], line => lines.push(line));
 
     expect(code).toBe(0);
-    expect(lines.join("\n")).toContain("standing-orders");
+    expect(lines.join("\n")).toContain("toolroll");
   });
 
   test("exits with a usage code on a bad flag", async () => {
@@ -448,7 +448,7 @@ describe("repos add-from-github — behavior through injected gh halves", () => 
     const root = realpathSync(mkdtempSync(join(tmpdir(), "so-afg-root-")));
     const env = process.env["XDG_CONFIG_HOME"];
     process.env["XDG_CONFIG_HOME"] = home;
-    const registry = join(home, "standing-orders", "repos.json");
+    const registry = join(home, "toolroll", "repos.json");
     try {
       const onboard = { preview: preview(512), clone: cloneInto };
       // preview: exit 3, nothing written
@@ -489,7 +489,7 @@ describe("repos add-from-github — behavior through injected gh halves", () => 
     const root = realpathSync(mkdtempSync(join(tmpdir(), "so-afg-root2-")));
     const env = process.env["XDG_CONFIG_HOME"];
     process.env["XDG_CONFIG_HOME"] = home;
-    const registry = join(home, "standing-orders", "repos.json");
+    const registry = join(home, "toolroll", "repos.json");
     try {
       const liar = async () => ({ ok: true as const, target: "/somewhere/else" });
       lines = [];

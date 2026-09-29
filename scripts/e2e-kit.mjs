@@ -137,7 +137,7 @@ export async function world(name, { seed, env = {} } = {}) {
   process.on("exit", () => { for (const child of children) child.kill("SIGTERM"); });
   process.on("SIGINT", () => process.exit(130));
   const start = (label, argv) => {
-    const child = spawn(process.execPath, [BIN, ...argv, "--db", db], { env: { ...process.env, NODE_OPTIONS: "", STANDING_ORDERS_MATE_TRACE: "1", STANDING_ORDERS_NO_PLAN_PROBE: "1", ...env }, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, [BIN, ...argv, "--db", db], { env: { ...process.env, NODE_OPTIONS: "", TOOLROLL_MATE_TRACE: "1", STANDING_ORDERS_MATE_TRACE: "1", TOOLROLL_NO_PLAN_PROBE: "1", STANDING_ORDERS_NO_PLAN_PROBE: "1", ...env }, stdio: ["ignore", "pipe", "pipe"] });
     child.stdout.pipe(logs[label]); child.stderr.pipe(logs[label]);
     children.push(child);
     return child;

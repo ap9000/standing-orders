@@ -1,7 +1,7 @@
 /**
  * Provider API keys, managed instead of ambient (the gap the gemini
  * live-auth work exposed): one 0600 file per provider under
- * ~/.standing-orders/keys/, written from the settings card or piped into
+ * ~/.toolroll/keys/ (or an older ~/.standing-orders/keys/), written from the settings card or piped into
  * the CLI — never typed into an argv, never rendered back, never stored
  * in the database a backup might carry.
  *
@@ -18,6 +18,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, write
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ProviderId } from "./provider.js";
+import { namedPath } from "./names.js";
 
 /** The ONE env name each provider's own harness reads its key from —
  * where a managed key is INJECTED. */
@@ -40,7 +41,7 @@ export const OWN_KEY_ENV: Record<ProviderId, readonly string[]> = {
 };
 
 export function keysDir(home: string = homedir()): string {
-  return join(home, ".standing-orders", "keys");
+  return namedPath(home, ["keys"], { dot: true });
 }
 
 /**

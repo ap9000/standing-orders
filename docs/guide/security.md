@@ -93,7 +93,7 @@ box.
 
 `/healthz` answers `{"status":"ok"}` (or 503) for a load balancer or
 orchestrator, from any address, and says nothing else. Errors are always
-logged; set `STANDING_ORDERS_LOG_FORMAT=json` for one JSON object per line.
+logged; set `TOOLROLL_LOG_FORMAT=json` for one JSON object per line.
 Key-shaped text is blanked from log lines.
 
 ## Secrets never travel

@@ -49,7 +49,8 @@ function task(where: string, revisionOf?: string): { id: string; ref: number; ru
   const ref = store.refFor("built-in", id).id;
   store.placeTask(ref, where);
   if (revisionOf !== undefined) store.handle.prepare("UPDATE task_ref SET revision_of = ? WHERE id = ?").run(revisionOf, ref);
-  const branch = `standing-orders/${id}`;
+  // New tasks build on toolroll/<id>; ones from before the rename on standing-orders/<id>. Both are Toolroll's own.
+  const branch = `${serial % 2 === 1 ? "toolroll" : "standing-orders"}/${id}`;
   const worktree = join(pool, `shop-${id}`);
   if (where === repo) {
     git("worktree", "add", "-q", "-b", branch, worktree, "main");
@@ -136,7 +137,7 @@ test("deleting a project removes what Toolroll holds for it and keeps everything
   // The repository: its own branches, HEAD and working copy exactly as they were; Toolroll's branches and checkouts gone.
   expect({ main: git("rev-parse", "main"), feature: git("rev-parse", "feature/login"), head: git("symbolic-ref", "HEAD"), status: git("status", "--porcelain") }).toEqual(before);
   expect(readFileSync(join(repo, "README.md"), "utf8")).toBe("shop\n");
-  expect(git("branch", "--list", "standing-orders/*")).toBe("");
+  expect(git("branch", "--list", "toolroll/*", "standing-orders/*")).toBe("");
   expect(git("worktree", "list", "--porcelain").split("\n").filter(line => line.startsWith("worktree "))).toEqual([`worktree ${repo}`]);
   expect(existsSync(join(pool, `shop-${shop.first.id}`))).toBe(false);
 
@@ -158,7 +159,7 @@ test("nothing is deleted while the project's work is running", async () => {
   const refused = await deleteProject(store, repo, { actor: "alex", via: "console", now: NOW, evidenceRoot: evidence, poolRoot: pool });
   expect(refused).toMatchObject({ ok: false, reason: "running", said: "Nothing was deleted: 1 task is being built. Stop it, then try again." });
   expect(projectHoldings(store, repo)).toEqual(held);
-  expect(git("branch", "--list", "standing-orders/*").split("\n")).toHaveLength(2);
+  expect(git("branch", "--list", "toolroll/*", "standing-orders/*").split("\n")).toHaveLength(2);
   expect(existsSync(join(evidence, String(shop.first.run)))).toBe(true);
   expect(count("SELECT COUNT(*) AS n FROM hold WHERE owner_id LIKE 'project-delete:%'")).toBe(0);
   // A chat answering holds it too; once all of it has stopped, it goes.
@@ -228,7 +229,7 @@ test("the command line previews, then deletes with --yes for an instance operato
     const done = await run(["delete", "--repo", repo, "--yes", "--as", "alex", "--token", alex.token, "--json"]);
     expect(done.code).toBe(0);
     expect(JSON.parse(done.out)).toMatchObject({ ok: true, deleted: true, removed: { tasks: 1, runs: 2, branches: 2 } });
-    expect(git("branch", "--list", "standing-orders/*")).toBe("");
+    expect(git("branch", "--list", "toolroll/*", "standing-orders/*")).toBe("");
     expect((await run(["delete", "--repo", repo, "--as", "alex", "--token", alex.token])).code).toBe(3);
   } finally {
     store = openStore(file);

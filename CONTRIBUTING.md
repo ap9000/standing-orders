@@ -53,8 +53,8 @@ architecture rule that keeps spawning confined to `src/invoke.ts`. Copy the
 
 ## Reporting bugs
 
-`standing-orders --json` output, the command you ran, and what you expected
-are usually enough. For daemon issues, `standing-orders daemon logs` names
+`toolroll --json` output, the command you ran, and what you expected
+are usually enough. For daemon issues, `toolroll daemon logs` names
 the file to attach. Never include an approver token, bot token, or webhook
 URL in an issue — rotate anything you pasted by accident.
 

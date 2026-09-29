@@ -9,11 +9,11 @@
 interrupted only for decisions that genuinely need a human.**
 
 [![CI](https://github.com/ap9000/standing-orders/actions/workflows/ci.yml/badge.svg)](https://github.com/ap9000/standing-orders/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/standing-orders)](https://www.npmjs.com/package/standing-orders)
+[![npm](https://img.shields.io/npm/v/toolroll)](https://www.npmjs.com/package/toolroll)
 ![node](https://img.shields.io/badge/node-%E2%89%A5%2022.13-brightgreen)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-[Guides](docs/guide/README.md) · [Design](docs/DESIGN.md) · [Never Stuck contract](docs/NEVER_STUCK.md) · [Priorities](docs/PRIORITIES.md) · [Ledger](docs/PROGRESS.md) · [Contributing](CONTRIBUTING.md) · [Issues](https://github.com/ap9000/standing-orders/issues) · [npm](https://www.npmjs.com/package/standing-orders)
+[Guides](docs/guide/README.md) · [Design](docs/DESIGN.md) · [Never Stuck contract](docs/NEVER_STUCK.md) · [Priorities](docs/PRIORITIES.md) · [Ledger](docs/PROGRESS.md) · [Contributing](CONTRIBUTING.md) · [Issues](https://github.com/ap9000/standing-orders/issues) · [npm](https://www.npmjs.com/package/toolroll)
 
 <img src="https://raw.githubusercontent.com/ap9000/standing-orders/main/docs/media/ui/unified-chat.png" alt="Toolroll unified chat showing a live portfolio overview across projects, active builds, decisions, and proposed next actions." width="920">
 
@@ -28,7 +28,7 @@ curl -fsSL https://raw.githubusercontent.com/ap9000/standing-orders/main/install
 ```
 
 macOS or Linux, with Node.js 22.13+ and git. It installs the command and opens
-the console; `npx standing-orders demo` shows a seeded sandbox first. Then read
+the console; `npx toolroll demo` shows a seeded sandbox first. Then read
 [Getting started](docs/guide/getting-started.md), [Flows](docs/guide/flows.md)
 and [Security](docs/guide/security.md).
 
@@ -229,12 +229,12 @@ failed when a result is marked complete.
 Choose your projects folder the first time:
 
 ```sh
-npx standing-orders up --project-root ~/Projects    # or: bunx standing-orders up
+npx toolroll up --project-root ~/Projects    # or: bunx toolroll up
 ```
 
 That is the install and the setup. It needs Node 22.13 or newer on the
 machine (Bun's runtime has no `node:sqlite`; `bunx` hands the shebang to
-Node, so it works too). `npm install -g standing-orders` gives you the
+Node, so it works too). `npm install -g toolroll` gives you the
 bare `toolroll` command for later (`standing-orders`, the older name, still
 works).
 
@@ -260,8 +260,8 @@ in. A second person joins by invite link from the people page, never by
 another setup code.
 
 ```sh
-npx standing-orders demo               # a seeded sandbox — see it working in 90 seconds, zero spend
-npx standing-orders                    # what's in flight across your repos — read-only, zero config
+npx toolroll demo               # a seeded sandbox — see it working in 90 seconds, zero spend
+npx toolroll                    # what's in flight across your repos — read-only, zero config
 ```
 
 ## Getting started
@@ -365,7 +365,7 @@ do not loosen when you leave the room:
 
 | An agent here can never | Enforced by |
 |---|---|
-| touch a default branch | builds land on `standing-orders/<task>` in a leased worktree; push + PR happen only under a publication grant naming the exact repo, branch prefix, and base |
+| touch a default branch | builds land on `toolroll/<task>` in a leased worktree; push + PR happen only under a publication grant naming the exact repo, branch prefix, and base |
 | approve its own work | approval nonces are minted only on screens that restate the digest-bound terms, and require your approver token typed again — **no LLM sits in any approval path** — and the [agent fence](#what-an-agent-can-reach) keeps your remembered login, runner tokens and the database out of the agent's reach |
 | act on an irreversible option | `reversible` is a schema field; irreversible choices never auto-apply, and answering one from a phone takes a second minted confirmation tap |
 | see Toolroll's secrets | the [agent fence](#what-an-agent-can-reach) blocks your login, runner and bot tokens, stored provider keys and project tool secrets at the operating system; other providers' keys are stripped from each agent's environment; secrets live in 0600 files, never in the database, URLs, or logs |
@@ -388,7 +388,7 @@ It owns a deliberately small local task store, adapts richer trackers when they 
 **Sixty seconds to first value.** No init, no daemon start, no wizard, no OAuth app.
 
 ```sh
-npx standing-orders ~/code     # or: git clone … && npm install && npm run dev -- ~/code
+npx toolroll ~/code     # or: git clone … && npm install && npm run dev -- ~/code
 ```
 
 It walks the filesystem for `.git` and reads every repo through the `git` credentials already on your machine, then shows what is in flight:
@@ -458,7 +458,7 @@ Four properties make that loop safe to run unattended.
 toolroll tick --runner builder-1 --token <t> --repo ~/code/thing --max 1
 ```
 
-One pass: take the ready set, skip what nobody approved, claim what is left — re-proving readiness inside the same transaction as the claim, because the world moves between a list and a take — build each task in a leased worktree on `standing-orders/<task-id>`, and commit. **Tick itself never pushes** and cannot touch the default branch; pushing and opening the pull request happen only under a publication grant whose exact repository, branch prefix, and base you approved — and merging stays yours, on GitHub.
+One pass: take the ready set, skip what nobody approved, claim what is left — re-proving readiness inside the same transaction as the claim, because the world moves between a list and a take — build each task in a leased worktree on `toolroll/<task-id>`, and commit. **Tick itself never pushes** and cannot touch the default branch; pushing and opening the pull request happen only under a publication grant whose exact repository, branch prefix, and base you approved — and merging stays yours, on GitHub.
 
 It is deliberately a pass and not a daemon: point cron at it and the fences make repetition safe — a second pass finds the first's work done and converges to `empty` (exit 3) instead of building anything twice. A broken build marks its task `failed` and the pass exits 1 even if other tasks succeeded, because exit 0 has to mean "nothing needs you". Refusals that are really a person's pending decision — a scope nobody approved, or one that changed after approval — leave the task queued and untouched.
 
@@ -528,7 +528,7 @@ from them at the operating system, in every permission mode. The fence covers
 the state folder beside the database (your remembered login `up-login.txt`,
 runner and coordinator tokens, chat bot tokens, the database and its backups,
 other runs' evidence) — everything there except the build's own worktree —
-and `~/.standing-orders` (stored provider keys and project tool secrets).
+and `~/.toolroll` (stored provider keys and project tool secrets).
 
 | | Auto | Full access |
 |---|---|---|
@@ -708,7 +708,7 @@ Setup, once:
 1. In Telegram, message **@BotFather**: `/newbot`, pick a name and a
    username. Copy the token it hands you.
 2. `toolroll bridge telegram token <that-token>` — stored in a 0600 file
-   beside the database (or set `STANDING_ORDERS_TELEGRAM_TOKEN`, which wins;
+   beside the database (or set `TOOLROLL_TELEGRAM_TOKEN`, which wins;
    or paste it into `serve`'s settings card from your phone).
 3. `toolroll approver add you --password <yours>` if you have no
    sign-in yet — that name and password are the login for the console and
@@ -1058,7 +1058,7 @@ the item-by-item ledger: [`docs/PROGRESS.md`](docs/PROGRESS.md).
 
 | | | |
 |---|---|---|
-| M0 | discovery, graph adapters, leases, CLI | `npx standing-orders` shows what is in flight — **useful before it is autonomous** |
+| M0 | discovery, graph adapters, leases, CLI | `npx toolroll` shows what is in flight — **useful before it is autonomous** |
 | M1 | runners, worktrees, first builder | one task goes queued → branch → commit unattended |
 | M2 | capability probes, secrets, briefing | fill one gap, three tasks start |
 | M3 | decisions, evidence, web view | a park renders as one screen, answerable on a phone — **and it does, executably** |

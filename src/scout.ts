@@ -23,7 +23,7 @@ import { heartbeat as runnerHeartbeat } from "./runner.js";
 import { parseDecision, type ParsedDecision, type Problem } from "./decision.js";
 import { parseReport, REPORT_LIMITS, type ParsedReport, type ReportProblem } from "./scout-report.js";
 import { invokeAgent } from "./invoke.js";
-import { TOKEN_ENV as TELEGRAM_TOKEN_ENV } from "./telegram.js";
+import { TOKEN_ENVS as TELEGRAM_TOKEN_ENVS } from "./telegram.js";
 import {
   evidenceRoot,
   mailboxName,
@@ -41,7 +41,7 @@ import { redactSecretLines, scanForSecrets } from "./evidence.js";
 import { CLAUDE_LIMITS } from "./scope.js";
 
 const GIT = "git";
-const AGENT_ENV_DENYLIST: readonly string[] = [TELEGRAM_TOKEN_ENV];
+const AGENT_ENV_DENYLIST: readonly string[] = [...TELEGRAM_TOKEN_ENVS];
 const DEFAULT_SCOUT_TIMEOUT_MS = 20 * 60_000;
 const DEFAULT_SCOUT_TURNS = CLAUDE_LIMITS.maxTurns;
 const DEFAULT_PULSE_MS = 60_000;

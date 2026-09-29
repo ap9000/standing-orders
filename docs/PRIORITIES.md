@@ -115,7 +115,7 @@ Done means:
 - an end-to-end check files, approves, runs, and reaches a terminal outcome.
 
 The first bounded self-healing path is intentionally smaller than a general
-repair agent. `standing-orders verify set --self-heal` previews the exact
+repair agent. `toolroll verify set --self-heal` previews the exact
 approved setup and its digest; confirmation must echo it with
 `--setup-digest <shown> --yes`. When a project check cannot start because a
 required project executable is missing, the worker may run that setup once and
@@ -154,7 +154,7 @@ blocking the next product priority:
 2. Automatic provider fallback stays fail-closed until a real exhausted
    subscription response is captured and reviewed for each exact CLI version.
    A successful normal canary cannot prove that terminal. Readiness remains
-   visible through `standing-orders providers`.
+   visible through `toolroll providers`.
 
 ## 2. Verified Done
 
@@ -353,7 +353,7 @@ focused chat, derived from that same diagnosis and routed to the nearest
 existing guarded repair. The builder-liveness path distinguishes a project
 that has never been connected from a known builder that disconnected:
 first-time setup teaches the single normal lifecycle command
-(`standing-orders up`), while reconnection says to reopen Standing Orders and
+(`toolroll up`), while reconnection says to reopen Standing Orders and
 that the existing task resumes automatically. Split console, worker, and OS
 service commands stay advanced plumbing rather than normal UI choices. A
 real-Git successor certification now proves that a stale
@@ -378,7 +378,7 @@ caveats, and screenshot paths for UI-facing work — alongside its terminal
 handoff. The plane validates every claimed screenshot as a bounded PNG or
 JPEG by signature, validates claimed changed paths against the sealed
 diff, and re-runs one operator-approved per-repository verification
-command (`standing-orders verify set`) in the leased worktree, never a
+command (`toolroll verify set`) in the leased worktree, never a
 model-authored one. From this it computes one closed verdict — *verified*,
 *attested*, *short*, or *refuted* — once, at completion, and every surface
 (task, run, done, builds, board, `task show`, `brief`) speaks the same
@@ -448,7 +448,7 @@ integrity stop (a refutation that is a lie about the signed terms, not a
 gap, is never handed back to the same machine unattended), and the
 existing spend and run rails — the chain closes the instant any attempt
 reaches *verified* or *attested*, and the operator's own act
-(`standing-orders task repair <run-id> --yes`, or the console) is still
+(`toolroll task repair <run-id> --yes`, or the console) is still
 the only road to unattended-cap-free approval.
 
 ### Control-app integration (2026-09-12 UTC)

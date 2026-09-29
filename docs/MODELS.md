@@ -19,7 +19,7 @@ For Claude, `opus`, `sonnet` and `haiku` always run the newest model in that fam
 
 ## Default agents
 
-Planner, Builder, Reviewer and Repair set the installation defaults, the same rows as `standing-orders config set <phase>`. New tasks use them. Approved tasks keep the agents they were approved with.
+Planner, Builder, Reviewer and Repair set the installation defaults, the same rows as `toolroll config set <phase>`. New tasks use them. Approved tasks keep the agents they were approved with.
 
 A few rules still apply:
 
@@ -32,7 +32,7 @@ The page compares `claude --version`, `codex --version` and `gemini --version` w
 
 ## Automatic checks and notices
 
-Checks are off until an approver turns them on (Models page → Automatic checks, or `standing-orders models watch on`). While on, the service checks every 6 hours and sends one message per event through your usual channel (Telegram, Slack, Discord or Teams):
+Checks are off until an approver turns them on (Models page → Automatic checks, or `toolroll models watch on`). While on, the service checks every 6 hours and sends one message per event through your usual channel (Telegram, Slack, Discord or Teams):
 
 - **New model:** e.g. "Claude Opus 5.5 ($4 / $20 per 1M tokens). Agents set to "opus" use it from now on." Each model is announced once. The first check only records the current list and announces nothing.
 - **CLI update:** e.g. "Codex 0.156.0 is available". Each version is announced once.
@@ -48,9 +48,9 @@ Leads can read all of this with the `get_models` tool: each default agent and th
 ## Terminal
 
 ```
-standing-orders models status          # CLI versions, updates, new models, automatic checks
-standing-orders models list --provider claude|codex|gemini|openrouter
-standing-orders models check           # fetch the lists and check versions now
-standing-orders models update codex    # only while nothing is running
-standing-orders models watch on|off
+toolroll models status          # CLI versions, updates, new models, automatic checks
+toolroll models list --provider claude|codex|gemini|openrouter
+toolroll models check           # fetch the lists and check versions now
+toolroll models update codex    # only while nothing is running
+toolroll models watch on|off
 ```

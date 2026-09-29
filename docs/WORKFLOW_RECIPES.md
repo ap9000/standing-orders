@@ -143,8 +143,8 @@ base, runs the approved gate and asks for the review. No agent is dispatched
 and nothing is spent on one.
 
 ```
-standing-orders task scope <id> --repo <path> --goal "Install commit <sha>: …" --candidate <sha> --acceptance "…"
-standing-orders task approve <id> --yes --digest <shown> --as <you>
+toolroll task scope <id> --repo <path> --goal "Install commit <sha>: …" --candidate <sha> --acceptance "…"
+toolroll task approve <id> --yes --digest <shown> --as <you>
 ```
 
 The commit must be reachable in the repository (fetch it first) and must
@@ -156,7 +156,7 @@ commit and requeue; the branch keeps the earlier attempt underneath.
 A gate that failed on a flaky or unrelated test does not need a rebuild:
 
 ```
-standing-orders task regate <id> --as <you>
+toolroll task regate <id> --as <you>
 ```
 
 The machine files a new attempt whose prepared candidate is the last
@@ -174,9 +174,9 @@ it, and requeue: the next attempt continues on the task's own branch, and the
 sealed diff still spans from the original base.
 
 ```
-standing-orders task scope <id> --repo <path> --goal "Bring the tree to commit <sha> …" --acceptance "…"
-standing-orders task approve <id> --yes --digest <shown> --as <you>
-standing-orders task requeue <id> --as <you>
+toolroll task scope <id> --repo <path> --goal "Bring the tree to commit <sha> …" --acceptance "…"
+toolroll task approve <id> --yes --digest <shown> --as <you>
+toolroll task requeue <id> --as <you>
 ```
 
 Write the goal for a continuing branch: "make the tree equal commit <sha>",
@@ -195,7 +195,7 @@ node scripts/deploy-browser.mjs --run <builder run id> --yes  # drain, back up, 
 ```
 
 The script refuses anything less than that evidence, journals each phase in
-`~/.config/standing-orders/staged-upgrades/browser-<sha>-<id>/deployment.json`,
+`~/.config/toolroll/staged-upgrades/browser-<sha>-<id>/deployment.json`,
 restores the previous service definition if the new one does not come up,
 and resumes with `--stage <dir> --phase <name>`. Open the console and look at
 a result page afterwards; the script checks that it answers, not how it looks.

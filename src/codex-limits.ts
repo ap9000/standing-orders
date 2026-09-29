@@ -6,6 +6,7 @@ import { codingEnvironment } from "./coding-provider.js";
 import { codexLimitsOf, record, type LimitReading } from "./provider-limits.js";
 import { billingOf, type Billing } from "./spend.js";
 import type { Store } from "./store.js";
+import { envValue } from "./names.js";
 
 /** How Codex says its account bills (`account/read`'s account): a ChatGPT sign-in is its plan unless the plan itself is
  * billed by use; a key or Amazon Bedrock is a key. */
@@ -86,7 +87,7 @@ export function readCodexLimits(options: { command?: string; timeoutMs?: number;
         if (limits !== undefined && accountRead) finish(limits);
       }
     });
-    child.stdin?.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { clientInfo: { name: "standing-orders", version: "1" } } })}\n`);
+    child.stdin?.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { clientInfo: { name: "toolroll", version: "1" } } })}\n`);
   });
 }
 
@@ -95,7 +96,7 @@ export function readCodexLimits(options: { command?: string; timeoutMs?: number;
  * a Codex build is running (both would refresh the same sign-in). One read at a time: the next waits for the last
  * process to end. */
 export function startCodexLimits(store: Store, everyMs = 5 * 60_000): () => void {
-  if (process.env["VITEST"] !== undefined || process.env["STANDING_ORDERS_NO_PLAN_PROBE"] !== undefined || store.isDemo()) return () => {};
+  if (process.env["VITEST"] !== undefined || envValue(process.env, "NO_PLAN_PROBE") !== undefined || store.isDemo()) return () => {};
   let stopped = false, busy = false;
   const pass = async () => {
     if (stopped || busy || billingOf("codex") !== "subscription") return;

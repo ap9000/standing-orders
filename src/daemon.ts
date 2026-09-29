@@ -44,6 +44,7 @@ import { dirname, join } from "node:path";
 import type { ExecResult, RunOptions } from "./exec.js";
 import { isAlive } from "./runner.js";
 import type { Store } from "./store.js";
+import { envTwins } from "./names.js";
 
 export type SupervisorRunner = (
   file: string,
@@ -118,12 +119,21 @@ export function daemonLaunchCommand(args: {
 
 /** One service per repo, named so two repos' watches never collide. */
 export function labelFor(repo: string): string {
+  return `com.toolroll.watch.${watchSlug(repo)}`;
+}
+
+/** The label a watch installed before the rename to Toolroll runs under: still found, stopped and uninstalled. */
+export function legacyLabelFor(repo: string): string {
+  return `com.standing-orders.watch.${watchSlug(repo)}`;
+}
+
+function watchSlug(repo: string): string {
   const slug = repo
     .replace(/[^A-Za-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .toLowerCase()
     .slice(-40);
-  return `com.standing-orders.watch.${slug === "" ? "root" : slug}`;
+  return slug === "" ? "root" : slug;
 }
 
 /** The uid launchd's gui domain is keyed by. */
@@ -152,7 +162,7 @@ export function launchdPlist(args: { label: string; command: readonly string[]; 
   if (entry?.endsWith(".js")) {
     try { for (const file of readdirSync(dirname(entry)).filter(name => /\.(js|ps1)$/.test(name)).sort()) digest.update(file).update(readFileSync(join(dirname(entry), file))); } catch { digest.update("unreadable-package"); }
   }
-  const environment = Object.entries({ PATH: args.pathEnv, ...(args.environment ?? {}), STANDING_ORDERS_SERVICE_DIGEST: digest.digest("hex") })
+  const environment = Object.entries({ PATH: args.pathEnv, ...(args.environment ?? {}), ...envTwins("SERVICE_DIGEST", digest.digest("hex")) })
     .map(([key, value]) => `    <key>${xml(key)}</key>\n    <string>${xml(value)}</string>`)
     .join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -205,6 +215,8 @@ export function planDaemon(args: {
   /** The interactive installer's executable search path, pinned into the
    * service so logged-in provider CLIs remain discoverable after reboot. */
   pathEnv?: string;
+  /** Defaults to labelFor(repo). */
+  label?: string;
 }): DaemonPlan | { error: string } {
   const { platform, bin, binArgs, runner, repo, configDir, watchFlags } = args;
   const home = args.home ?? homedir();
@@ -215,7 +227,7 @@ export function planDaemon(args: {
     };
   }
 
-  const label = labelFor(repo);
+  const label = args.label ?? labelFor(repo);
   const logDir = join(configDir, "logs");
   const logPath = join(logDir, `${label}.log`);
   const tokenFile = join(configDir, "runner-token");
@@ -370,8 +382,9 @@ export type ServiceStart = { ok: true; changed: boolean; action: "bootstrapped" 
 
 /** The file on disk does not identify the definition launchd has loaded. */
 function loadedLaunchdMatches(unit: string, status: string): boolean {
-  const wanted = /<key>STANDING_ORDERS_SERVICE_DIGEST<\/key>\s*<string>([a-f0-9]{64})<\/string>/.exec(unit)?.[1];
-  const actual = /STANDING_ORDERS_SERVICE_DIGEST\s*=>\s*([a-f0-9]{64})/.exec(status)?.[1];
+  // Either name: a unit written before the rename carries only the older one.
+  const wanted = /<key>(?:TOOLROLL|STANDING_ORDERS)_SERVICE_DIGEST<\/key>\s*<string>([a-f0-9]{64})<\/string>/.exec(unit)?.[1];
+  const actual = /(?:TOOLROLL|STANDING_ORDERS)_SERVICE_DIGEST\s*=>\s*([a-f0-9]{64})/.exec(status)?.[1];
   return wanted !== undefined && actual === wanted;
 }
 
@@ -434,6 +447,16 @@ export async function stopLaunchdService(definition: ServiceDefinition, run: Sup
   if (modern.code !== 0) await run("launchctl", ["unload", definition.unitPath]);
   if (!(await waitForLaunchdBootout(run, service))) return { ok: false, message: `launchctl did not stop ${definition.label}; the service is still loaded` };
   return { ok: true, wasLoaded: modern.code === 0 };
+}
+
+/**
+ * The same repo's watch as installed under the label it had before the
+ * rename to Toolroll, when its unit is still on disk; null otherwise.
+ * Installing the new one stops and removes it, so two watches never run.
+ */
+export function installedLegacyDaemon(args: Parameters<typeof planDaemon>[0]): DaemonPlan | null {
+  const legacy = planDaemon({ ...args, label: legacyLabelFor(args.repo) });
+  return "error" in legacy || !existsSync(legacy.unitPath) ? null : legacy;
 }
 
 /** Write the token 0600 and the unit, then hand the unit to the supervisor. */

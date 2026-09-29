@@ -205,7 +205,7 @@ remain separate gates.
 
 A successful canary proves that a provider is installed, authenticated, and
 can complete this workflow now. It does not prove that the provider's real
-subscription-exhaustion terminal is recognizable. `standing-orders providers`
+subscription-exhaustion terminal is recognizable. `toolroll providers`
 reports `auto fallback` separately and currently says **not armed** for Claude
 and Codex. The state machine fails closed until a real exhausted-account
 terminal is captured, reviewed for its exact CLI version, and that version is
@@ -219,9 +219,9 @@ recovery wave ([PROCESS_CONTAINMENT.md](PROCESS_CONTAINMENT.md)):
 ```sh
 npm run test:native-containment                       # kernel-backed cgroup2 tests; explicit skip where the facility is missing
 SO_EXPECT_NATIVE_CONTAINMENT=1 npm run test:native-containment   # a skip is a failure (what CI's delegated-cgroup job runs)
-npm run certify:restart -- baseline --db ~/.config/standing-orders/orders.db --label com.standing-orders.watch.<slug> --runner <existing-runner> --task <must-complete-task>
+npm run certify:restart -- baseline --db ~/.config/toolroll/orders.db --label com.toolroll.watch.<slug> --runner <existing-runner> --task <must-complete-task>
 #   … log out and in, or reboot — the tool never does — then:
-npm run certify:restart -- verify --db ~/.config/standing-orders/orders.db --baseline output/certification/restart-baseline.json --expect reboot
+npm run certify:restart -- verify --db ~/.config/toolroll/orders.db --baseline output/certification/restart-baseline.json --expect reboot
 npm run certify:launchd                               # tests actual OS relaunch; can fail when launchd defers it
 node scripts/desktop-recovery-canary.mjs --app <bundle> # tests controller recovery under an activated disposable service
 ```

@@ -94,7 +94,7 @@ describe("the MCP stdio server", () => {
     expect(discover["resultType"]).toBe("complete");
     expect(discover["ttlMs"]).toBe(0);
     expect(discover["cacheScope"]).toBe("private");
-    expect((discover["_meta"] as Record<string, unknown>)["io.modelcontextprotocol/serverInfo"]).toMatchObject({ name: "standing-orders" });
+    expect((discover["_meta"] as Record<string, unknown>)["io.modelcontextprotocol/serverInfo"]).toMatchObject({ name: "toolroll" });
     h.send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: { _meta: modernMeta } });
     const listed = h.last()["result"] as Record<string, unknown>;
     expect(listed["resultType"]).toBe("complete");
@@ -591,7 +591,7 @@ describe("the MCP stdio server", () => {
         result: {
           protocolVersion: LEGACY,
           capabilities: { tools: {} },
-          serverInfo: { name: "standing-orders", version: PACKAGE_VERSION },
+          serverInfo: { name: "toolroll", version: PACKAGE_VERSION },
         },
       }),
     );
@@ -618,7 +618,7 @@ describe("the MCP stdio server", () => {
           protocolVersion: MODERN,
           supportedVersions: [MODERN, LEGACY],
           capabilities: { tools: {} },
-          _meta: { "io.modelcontextprotocol/serverInfo": { name: "standing-orders", version: PACKAGE_VERSION } },
+          _meta: { "io.modelcontextprotocol/serverInfo": { name: "toolroll", version: PACKAGE_VERSION } },
           tools,
           resultType: "complete",
           ttlMs: 0,

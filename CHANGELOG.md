@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- **Toolroll under the hood.** The internal names follow the product name;
+  every existing install, database, branch and integration keeps working, and
+  nothing is moved. The npm package is `toolroll` (both the `toolroll` and
+  `standing-orders` commands remain). A fresh install keeps its state in
+  `~/.config/toolroll`, `~/.toolroll` and `~/.cache/toolroll`; a folder that
+  already exists under `standing-orders` (or `nightorders`) keeps being used
+  until one exists under the new name. Every `STANDING_ORDERS_*` variable has
+  a `TOOLROLL_*` twin that wins when both are set; the old name still works
+  alone, and processes Toolroll starts get both. New task branches are
+  `toolroll/<id>`; `standing-orders/<id>` branches stay the plane's own (a
+  retry reuses one, project delete, races, publication grants and coding
+  handoffs recognise both). Watches install as `com.toolroll.watch.*`, and
+  installing, stopping or removing one also finds, stops and removes the same
+  repo's `com.standing-orders.watch.*` job. The skill folder is
+  `.claude/skills/toolroll`; a managed `standing-orders` copy is replaced on
+  install. Slack buttons send `toolroll_*` action ids and still accept
+  `standing_orders_*` ones on older messages. Hash and digest inputs, the
+  ledger genesis and stored format ids are unchanged, so existing data
+  verifies.
+  **Breaking for monitoring:** Prometheus metrics are renamed from
+  `standing_orders_*` to `toolroll_*` (for example
+  `toolroll_ledger_chain_ok`), and OTLP traces report `service.name` and the
+  instrumentation scope as `toolroll`; the monitoring webhook `user-agent` is
+  `toolroll/<version>`, and the MCP server and client name is `toolroll`.
+  Update dashboards, alerts and collector filters. Span attribute keys
+  (`standing_orders.*`) and the audit webhook's signature header are unchanged.
+
 - **Retention settings.** An instance operator chooses how long run
   evidence and logs, finished checkout records, chat messages and
   notifications are kept (forever until chosen), on Settings → Retention or

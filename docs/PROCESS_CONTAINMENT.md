@@ -6,7 +6,7 @@ an operator turns it on, and the boundaries nobody should read past.
 
 ## The policy, and what each machine really gets
 
-`--containment observed|preferred|required` (or `STANDING_ORDERS_CONTAINMENT`)
+`--containment observed|preferred|required` (or `TOOLROLL_CONTAINMENT`)
 is read ONCE per controller process — `up`, `watch`, `daemon install` bakes
 it into the unit — and pinned. A corrupt value refuses to start; a pinned
 `required` cannot be weakened by a later flag; nothing a child process
@@ -19,7 +19,7 @@ behaviour every existing installation had.
 | `preferred` | native cgroup2                     | native Job Object                 | observed, **reported as a downgrade**                |
 | `required`  | native cgroup2                     | native Job Object                 | **every provider/setup/check spawn refuses** before any target executes |
 
-`standing-orders daemon status`, the `watch`/`up` opening line, the desktop
+`toolroll daemon status`, the `watch`/`up` opening line, the desktop
 `service-status` verb and the restart certificate all print the same
 effective status (`containment: native cgroup2 (required) — …`,
 `containment: observed (preferred native, cgroup2 unavailable) — …`,

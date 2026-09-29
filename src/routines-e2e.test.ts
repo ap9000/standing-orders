@@ -148,7 +148,7 @@ describe("routines, against real git", () => {
     expect(after.getTask("notes-20260813-2300")?.state).toBe("done");
     expect(after.refFor("built-in", "notes-20260813-2300").routineId).toBe(created.id);
     after.close();
-    const log = await git(["log", "--oneline", "standing-orders/notes-20260813-2300"]);
+    const log = await git(["log", "--oneline", "toolroll/notes-20260813-2300"]);
     expect(log.stdout).toContain("notes");
 
     // Next slot: the track repeats — a second instance, same terms.

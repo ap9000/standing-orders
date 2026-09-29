@@ -183,7 +183,7 @@ describe("native coding transport", () => {
     expect(await Promise.all([test.provider.request("slow", {}), test.provider.request("fast", {})])).toEqual([{ name: "slow" }, { name: "fast" }]);
     const messages = test.messages();
     expect(messages.map(one => one.method)).toEqual(["initialize", "initialized", "slow", "fast"]);
-    expect(messages[0]).toMatchObject({ params: { clientInfo: { name: "standing_orders" }, capabilities: { experimentalApi: true } } });
+    expect(messages[0]).toMatchObject({ params: { clientInfo: { name: "toolroll" }, capabilities: { experimentalApi: true } } });
     expect(test.provider.processId()).toBeGreaterThan(0);
     unsubscribe();
     const pid = test.provider.processId();

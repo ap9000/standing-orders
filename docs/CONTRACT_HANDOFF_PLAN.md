@@ -173,8 +173,8 @@ the merge did not rerun the real-provider release pilot.
 
 | Remaining separate branch | Disposition |
 | --- | --- |
-| `standing-orders/explainable-risk-aware-phase-routing-v1` (`c701b7f`) | Superseded by the integrated revision `1d0fc90`, whose commit records applying all seven comments to that implementation, and subsequent authority fixes. Do not merge the earlier implementation again. |
-| `standing-orders/nightly-deps-20260812-1534` (`f2f0985`) | Only adds `docs/DEPS.md`. Its upstream claims were explicitly not checked against a registry. Retain as historical notes; regenerate from current manifests and primary sources if dependency review becomes a priority. |
+| `toolroll/explainable-risk-aware-phase-routing-v1` (`c701b7f`) | Superseded by the integrated revision `1d0fc90`, whose commit records applying all seven comments to that implementation, and subsequent authority fixes. Do not merge the earlier implementation again. |
+| `toolroll/nightly-deps-20260812-1534` (`f2f0985`) | Only adds `docs/DEPS.md`. Its upstream claims were explicitly not checked against a registry. Retain as historical notes; regenerate from current manifests and primary sources if dependency review becomes a priority. |
 | `origin/codex/control-app` (`15a1d9c`) | Assessed and selectively integrated over current main. Native shell, setup, provider/model discovery, and calendar schedules are adapted; superseded engines are omitted. See [the full disposition and remaining forward ports](CONTROL_APP_INTEGRATION.md). |
 
 No branches or worktrees were deleted. Main through `7b9bebe` is on GitHub.

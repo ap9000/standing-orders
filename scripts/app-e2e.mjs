@@ -141,7 +141,7 @@ const idpServer = createHttpServer(async (request, response) => {
 await new Promise(done => idpServer.listen(idp.port, "127.0.0.1", done));
 
 const w = await world(group === null ? "app" : `app-${group}`, {
-  env: { STANDING_ORDERS_TEST_CONNECT: `stripe|Stripe|${standBase}/mcp`, ...(mailCert === null ? {} : { NODE_EXTRA_CA_CERTS: mailCert }) },
+  env: { TOOLROLL_TEST_CONNECT: `stripe|Stripe|${standBase}/mcp`, ...(mailCert === null ? {} : { NODE_EXTRA_CA_CERTS: mailCert }) },
   seed: repo => {
     mkdirSync(join(repo, "scripts"), { recursive: true });
     writeFileSync(join(repo, "scripts", "size.py"), "import json, sys\ncard = json.load(sys.stdin)['card']\nprint(f\"{card['title']} looks {'big' if 'Acme' in card['title'] else 'small'}\")\nprint('goto: Big' if 'Acme' in card['title'] else 'goto: Small')\n");
@@ -396,7 +396,7 @@ await journey("console", "Monitoring: a webhook set in Settings gets the audit s
     await page.setViewportSize({ width: 1440, height: 900 });
     const metrics = await page.request.get(`${base}/metrics`);
     const text = await metrics.text();
-    if (metrics.status() !== 200 || !/standing_orders_ledger_chain_ok 1/.test(text) || !/standing_orders_monitoring_lag_entries\{destination="webhook"\}/.test(text)) throw new Error(`/metrics: ${metrics.status()} ${text.slice(0, 300)}`);
+    if (metrics.status() !== 200 || !/toolroll_ledger_chain_ok 1/.test(text) || !/toolroll_monitoring_lag_entries\{destination="webhook"\}/.test(text)) throw new Error(`/metrics: ${metrics.status()} ${text.slice(0, 300)}`);
     if (rows("SELECT 1 FROM action_ledger WHERE action = 'monitoring changed'").length !== 1) throw new Error("the change isn't in the ledger");
     return { events: events.length };
   } finally {

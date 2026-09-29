@@ -10,7 +10,7 @@
  *
  * Secret values (API keys, tokens, any env value) never enter the
  * database, a chat, a card or a log: they live in one 0600 file per tool
- * under ~/.standing-orders/tool-secrets/, are written only from the
+ * under ~/.toolroll/tool-secrets/ (or an older ~/.standing-orders/), are written only from the
  * console's password-gated screen, and reach exactly that project's
  * server processes at launch.
  */
@@ -23,6 +23,7 @@ import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { scanForSecrets } from "./evidence.js";
 import type { Store, ToolActionInfo } from "./store.js";
+import { namedPath } from "./names.js";
 
 /** One secret a tool needs: an env name for a local server, or the value behind an http header. */
 export type ToolSecret = { name: string; optional: boolean };
@@ -186,7 +187,7 @@ export function toolCommandLine(spec: ToolSpec): string {
 // ---- secrets -----------------------------------------------------------------
 
 export function toolSecretsDir(home: string = homedir()): string {
-  return join(home, ".standing-orders", "tool-secrets");
+  return namedPath(home, ["tool-secrets"], { dot: true });
 }
 
 function secretFile(repo: string, tool: string, home: string): string {
@@ -351,7 +352,7 @@ export function discoverTools(repo: string, codexServers: unknown[] | null, home
 // ---- the Test button --------------------------------------------------------------
 
 const PROTOCOL = "2025-06-18";
-const initialize = (id: number) => ({ jsonrpc: "2.0", id, method: "initialize", params: { protocolVersion: PROTOCOL, capabilities: {}, clientInfo: { name: "standing-orders", version: "1" } } });
+const initialize = (id: number) => ({ jsonrpc: "2.0", id, method: "initialize", params: { protocolVersion: PROTOCOL, capabilities: {}, clientInfo: { name: "toolroll", version: "1" } } });
 
 function toolNames(result: unknown): string[] {
   const tools = (result as { tools?: unknown } | null)?.tools;

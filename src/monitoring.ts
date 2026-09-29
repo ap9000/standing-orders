@@ -88,7 +88,7 @@ async function deliver(store: Store, sink: Sink, target: string, start: () => nu
 async function post(url: string, body: string, headers: Record<string, string>, deps: MonitoringDeps): Promise<void> {
   const response = await (deps.fetch ?? fetch)(url, {
     method: "POST", body, redirect: "manual", signal: AbortSignal.timeout(TIMEOUT_MS),
-    headers: { "content-type": "application/json", "user-agent": `standing-orders/${deps.version}`, ...headers },
+    headers: { "content-type": "application/json", "user-agent": `toolroll/${deps.version}`, ...headers },
   });
   await response.body?.cancel().catch(() => {});
   if (response.status < 200 || response.status > 299) throw new Error(`${new URL(url).host} answered ${response.status}`);
@@ -173,8 +173,8 @@ async function postTraces(traces: NonNullable<MonitoringSettings["traces"]>, ent
   const spans = spansFor(store, entries);
   if (spans.length === 0) return 0;
   const body = JSON.stringify({ resourceSpans: [{
-    resource: { attributes: [...attr("service.name", "standing-orders"), ...attr("service.version", deps.version), ...attr("service.instance.id", deps.instance)] },
-    scopeSpans: [{ scope: { name: "standing-orders", version: deps.version }, spans }],
+    resource: { attributes: [...attr("service.name", "toolroll"), ...attr("service.version", deps.version), ...attr("service.instance.id", deps.instance)] },
+    scopeSpans: [{ scope: { name: "toolroll", version: deps.version }, spans }],
   }] });
   const url = traces.endpoint.endsWith("/v1/traces") ? traces.endpoint : `${traces.endpoint}/v1/traces`;
   await post(url, body, traces.header === null ? {} : { [traces.header.name]: traces.header.value }, deps);

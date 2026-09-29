@@ -8,6 +8,7 @@ import { envelopeJson } from './envelope.js';
 import { sessionServiceOrigin } from './session-cli.js';
 import { databasePath } from './store.js';
 import type { TeamChatAuthorization, TeamMessage, TeamOperation, TeamRequest, TeamResponse, TeamSnapshot } from './team-contract.js';
+import { configBase, namedPath } from './names.js';
 
 export type TeamCliOptions = {
   fetch?: typeof fetch; env?: NodeJS.ProcessEnv; home?: string; profileFile?: string;
@@ -56,7 +57,7 @@ const record = (input: unknown): input is Record<string, unknown> => !!input && 
 const strings = (input: unknown): input is string[] => Array.isArray(input) && input.every(one => typeof one === 'string');
 const accountValid = (input: string): boolean => !!input && input.length <= 200 && !/[\s:\x00-\x1f\x7f]/.test(input);
 const tokenValid = (input: string): boolean => !!input && input.length <= 8192 && !/[\s\x00-\x1f\x7f]/.test(input);
-const profilePath = (options: TeamCliOptions): string => options.profileFile ?? join((options.env ?? process.env).XDG_CONFIG_HOME || join(options.home ?? homedir(), '.config'), 'standing-orders', 'remote', 'profiles.json');
+const profilePath = (options: TeamCliOptions): string => options.profileFile ?? namedPath(configBase(options.env ?? process.env, options.home ?? homedir()), ['remote', 'profiles.json']);
 
 /** Open the file itself without following a symlink; nonblocking also rejects FIFOs safely. */
 function privateFile(path: string, limit: number): string {

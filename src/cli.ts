@@ -92,7 +92,7 @@ Usage
   toolroll repos remove <path>
   toolroll repos add-from-github <owner/name> --root <dir>
                                    preview, then clone and connect (--yes)
-  toolroll link             put \`standing-orders\` on your PATH
+  toolroll link             put \`toolroll\` on your PATH
   toolroll unlink           take it off again
   toolroll contract         the machine contract: envelope version + capabilities
                                    (--commands dumps the declared command guide)
@@ -1264,6 +1264,7 @@ function runSkillsCommand(argv: readonly string[], write: Write): number {
           : file.action;
         write(`  ${file.path}  (${action})`);
       }
+      for (const path of plan.legacyFiles) write(`  ${path}  (remove — replaced by the new copy)`);
       write("");
       write(message);
       return 3;
@@ -1281,6 +1282,7 @@ function runSkillsCommand(argv: readonly string[], write: Write): number {
       return 0;
     }
     for (const file of result.wrote) write(`wrote ${file}`);
+    for (const path of result.plan.legacyFiles) write(`removed ${path}`);
     write("Claude Code will use the refreshed Toolroll guides in its next session.");
     return 0;
   }
@@ -1303,6 +1305,7 @@ function runSkillsCommand(argv: readonly string[], write: Write): number {
     }
     write(`Would write, exactly:`);
     write(`  ${plan.skillPath}  (${plan.skillAction === "refuse-foreign" ? "REFUSED — a skill this installer did not write is already there" : plan.skillAction})`);
+    if (plan.legacySkillPath !== null) write(`  ${plan.legacySkillPath}  (remove — replaced by the new copy)`);
     if (plan.contextPath !== null) {
       write(`  ${plan.contextPath}  (${plan.contextAction} — only the marked block is ever touched)`);
     } else {
@@ -1325,6 +1328,7 @@ function runSkillsCommand(argv: readonly string[], write: Write): number {
     return 0;
   }
   for (const file of result.wrote) write(`wrote ${file}`);
+  if (result.plan.legacySkillPath !== null) write(`removed ${result.plan.legacySkillPath}`);
   write("Agents that read Agent Skills (claude, codex, gemini, opencode) will discover the queue on their next session here.");
   return 0;
 }

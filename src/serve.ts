@@ -307,6 +307,7 @@ import { verifyApproverByPassword, verifyApproverStanding, type VerifiedApprover
 import { runMateTurn, MATE_MESSAGE_MAX_CHARS } from "./mate.js";
 import type { SubscriptionMateRunner } from "./subscription-chat.js";
 import { confirmCoordinatorProposal, confirmMateProposal, dismissCoordinatorProposal, dismissMateProposal } from "./mate-doors.js";
+import { envValue } from "./names.js";
 
 export type ServeOptions = {
   /** Native coding workspace injection for isolated integration tests. */
@@ -378,7 +379,7 @@ export type ServeOptions = {
   subscriptionChatRunner?: SubscriptionMateRunner;
   /** Tests: stands in for `codex mcp list --json` in the project (the Tools page's "Found on this computer"). */
   codexToolList?: (cwd: string) => Promise<string | null>;
-  /** Tests: the home whose ~/.standing-orders/tool-secrets and ~/.claude.json the Tools page uses. */
+  /** Tests: the home whose ~/.toolroll (or older ~/.standing-orders) tool-secrets and ~/.claude.json the Tools page uses. */
   toolHome?: string;
   /** v87: sends Send email steps' mail and the settings test (tests inject one). */
   mailSender?: MailSender;
@@ -494,7 +495,7 @@ self.addEventListener("push", function (event) {
   var data = {};
   try { data = event.data ? event.data.json() : {}; } catch (e) {}
   var body = typeof data.body === "string" ? data.body : "the console needs you";
-  var tag = typeof data.tag === "string" ? data.tag : "standing-orders";
+  var tag = typeof data.tag === "string" ? data.tag : "toolroll";
   var url = typeof data.url === "string" && SHAPES.some(function (s) { return s.test(data.url); }) ? data.url : "/next";
   if (typeof data.waiting === "number" && data.waiting >= 0 && self.registration.setAppBadge) {
     // A count, never content. Honest no-op where unsupported.
@@ -881,7 +882,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     void handle(request, response).catch(error => {
       // Every unhandled error is logged (v99): the path and the message, never the request's body or query.
       logEvent("error", "serve.error", { method: request.method, path: new URL(request.url ?? "/", "http://placeholder").pathname, error: error instanceof Error ? error.message : String(error) });
-      if (process.env["STANDING_ORDERS_SERVE_DEBUG"] === "1") console.error("SERVE ERROR:", error);
+      if (envValue(process.env, "SERVE_DEBUG") === "1") console.error("SERVE ERROR:", error);
       if (!response.headersSent) {
         const updating = error instanceof Error && error.message.includes(UPDATE_PAUSED);
         if (updating) response.setHeader("Retry-After", "5");
@@ -3915,7 +3916,7 @@ export function createDecisionServer(options: ServeOptions): Server {
 
     if (url.pathname === "/settings" && options.telegramTokenFile !== undefined) {
       const existing = loadBotToken({}, options.telegramTokenFile);
-      const hasEnv = process.env[TOKEN_ENV] !== undefined && process.env[TOKEN_ENV] !== "";
+      const hasEnv = (envValue(process.env, "TELEGRAM_TOKEN") ?? "") !== "";
       const csrf = who.via === "cookie" ? who.session.csrf : "";
       const messaging =
         options.configDir === undefined
@@ -4016,7 +4017,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     const repos = admissionList() ?? [];
     const setupDone = repos.filter(one => store.liveWorktreeSetup(one) !== null).length;
     const skillDone = repos.filter(one =>
-      existsSync(join(one, ".claude", "skills", "standing-orders", "SKILL.md")),
+      ["toolroll", "standing-orders"].some(name => existsSync(join(one, ".claude", "skills", name, "SKILL.md"))),
     ).length;
     const counted = (done: number): string =>
       repos.length <= 1 ? "" : ` (${done} of ${repos.length} repos)`;
@@ -7081,7 +7082,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const saved = saveBotToken(options.telegramTokenFile, value);
       if (!saved.ok) {
         const existing = loadBotToken({}, options.telegramTokenFile);
-        const hasEnv = process.env[TOKEN_ENV] !== undefined && process.env[TOKEN_ENV] !== "";
+        const hasEnv = (envValue(process.env, "TELEGRAM_TOKEN") ?? "") !== "";
         const csrf = who.via === "cookie" ? who.session.csrf : "";
         return sendScreen(response, 400, settingsPage(chromeFor(who.via === "cookie" ? who.session.project : defaultProject, "settings"), existing, hasEnv, csrf, saved.message, null, null, null, null, {
           ...store.permissionDefault(),

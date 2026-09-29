@@ -28,6 +28,7 @@ import { join } from "node:path";
 import { run as execRun, type ExecResult, type RunOptions } from "./exec.js";
 import { summarizeChecks } from "./pulls.js";
 import type { Publication, PublicationGrant, Store } from "./store.js";
+import { headWithin } from "./names.js";
 
 export const BODY_TEMPLATE_VERSION = 2;
 /** After this many failed attempts a publication stops retrying and pages instead. */
@@ -217,7 +218,7 @@ export function permitsPublication(
   if (grant.githubRepo !== publication.githubRepo || grant.remote !== publication.remote || grant.base !== publication.base) {
     return { ok: false, message: "the intent's terms no longer match the live grant" };
   }
-  if (!publication.head.startsWith(grant.headPrefix)) {
+  if (!headWithin(publication.head, grant.headPrefix)) {
     return { ok: false, message: `head ${publication.head} is outside the granted prefix ${grant.headPrefix}` };
   }
   const needs = publication.state === "intended" ? "push-branch" : "open-pr";

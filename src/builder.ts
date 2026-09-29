@@ -55,7 +55,7 @@ import { MARKER as LEASE_MARKER } from "./worktree.js";
 import { parseDecision, parseHandoff, repairPrompt, HANDOFF_CONCLUSION_CAP, HANDOFF_ITEM_CAP, HANDOFF_LIST_CAP, HANDOFF_PAYLOAD_CAP, type ParsedDecision, type Problem } from "./decision.js";
 import { createHash, randomUUID } from "node:crypto";
 import { invokeAgent, type AgentOutcome, type InvokeResult } from "./invoke.js";
-import { TOKEN_ENV as TELEGRAM_TOKEN_ENV } from "./telegram.js";
+import { TELEGRAM_TOKEN_ENVS } from "./names.js";
 import { OPENROUTER_ENV_KEY, auditOf, ALL_CREDENTIAL_ENV } from "./provider.js";
 import { openLiveLog } from "./live.js";
 import { CheckProgressTracker } from "./check-progress.js";
@@ -208,7 +208,7 @@ export type BuildRequest = {
   /** Fires with the provider's process-group id the moment it exists —
    * the worker-process ledger records it (v14). */
   onProviderSpawn?: (pid: number) => void;
-  /** Where evidence files live. Defaults to ~/.standing-orders/evidence. */
+  /** Where evidence files live. Defaults to ~/.toolroll/evidence (or an older ~/.standing-orders/evidence). */
   evidenceRoot?: string;
   /** A draft preserved from an interrupted predecessor. The fresh attempt
    * still reviews it and writes its own nonce-bound handoff. */
@@ -372,7 +372,7 @@ const GIT = "git";
  * from every agent invocation, repair turns included; an operator who
  * exported it globally is exactly who this protects.
  */
-const AGENT_ENV_DENYLIST: readonly string[] = [TELEGRAM_TOKEN_ENV];
+const AGENT_ENV_DENYLIST: readonly string[] = [...TELEGRAM_TOKEN_ENVS];
 
 /**
  * Setup shells run under an ALLOWLIST, not the operator's shell minus two
@@ -390,7 +390,7 @@ export const SETUP_ENV_ALLOWLIST: readonly string[] = [
 ];
 
 /** Belt over the allowlist's suspenders: even if these ever appear in `env`, they die here. */
-export const SETUP_ENV_DENYLIST: readonly string[] = [TELEGRAM_TOKEN_ENV, OPENROUTER_ENV_KEY];
+export const SETUP_ENV_DENYLIST: readonly string[] = [...TELEGRAM_TOKEN_ENVS, OPENROUTER_ENV_KEY];
 
 /**
  * A bounded, redacted diagnostic from untrusted tool output (audit IV-5):

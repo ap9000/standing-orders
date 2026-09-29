@@ -68,7 +68,7 @@ Agor optimizes for a team steering agents *live*. firstmate optimizes for one co
 The wedge. Read-only, using credentials that already exist — `git` and `gh` are authenticated, so there is **no OAuth app, no client secret, no callback server, no token to store.**
 
 ```sh
-npx standing-orders            # no init, no daemon start, no wizard
+npx toolroll            # no init, no daemon start, no wizard
 ```
 
 First run walks the filesystem for `.git`, then per repo:
@@ -580,7 +580,7 @@ subset is a different comparison than the one that was signed.
 
 | | Scope | Ships when |
 |---|---|---|
-| **M0** | Zero-config discovery · **graph-backend detection + adapters (beads, GitHub Issues, built-in SQLite)** · overlay records · **Claim/lease with fencing** · idempotency · AXI CLI. No agents run. | `npx standing-orders` shows every branch, PR, and issue in flight. **Useful before it is autonomous.** |
+| **M0** | Zero-config discovery · **graph-backend detection + adapters (beads, GitHub Issues, built-in SQLite)** · overlay records · **Claim/lease with fencing** · idempotency · AXI CLI. No agents run. | `npx toolroll` shows every branch, PR, and issue in flight. **Useful before it is autonomous.** |
 | **M1** | Runner registration **with auth from the first commit** · heartbeat · treehouse adapter · claude builder · reconciliation for dead runner / orphaned worktree / duplicate completion. | one task goes queued → branch → commit unattended |
 | **M2** | Capability probes · SetupRequest · secrets-on-runner · morning briefing · notification outbox. | fill one gap, three tasks start |
 | **M3** | Decision schema · validation · bounded repair · driver role · evidence artifacts · web decision view. | a park renders as one screen, answerable on a phone |

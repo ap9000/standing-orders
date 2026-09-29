@@ -2,12 +2,18 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExecResult, RunOptions } from "./exec.js";
+import { envTwins } from "./names.js";
 
-export const CHILD_DATABASE_ENV = "STANDING_ORDERS_DB";
+export const CHILD_DATABASE_ENV = "TOOLROLL_DB";
+
+/** Both names, so neither an ambient TOOLROLL_DB nor an older tool reading STANDING_ORDERS_DB reaches the live store. */
+export function childDatabaseEnv(file: string): Record<string, string> {
+  return envTwins("DB", file);
+}
 
 /** Self-hosted agents and project commands must not open their supervisor's store. */
 export function isolatedChildDatabase(label: string): { dir: string; file: string } {
-  const dir = mkdtempSync(join(tmpdir(), `standing-orders-${label}-`));
+  const dir = mkdtempSync(join(tmpdir(), `toolroll-${label}-`));
   return { dir, file: join(dir, "orders.db") };
 }
 
@@ -26,7 +32,7 @@ export async function runWithIsolatedDatabase(
   try {
     return await runner(file, args, {
       ...options,
-      env: { ...options.env, [CHILD_DATABASE_ENV]: isolated.file },
+      env: { ...options.env, ...childDatabaseEnv(isolated.file) },
     });
   } finally {
     removeChildDatabase(isolated.dir);

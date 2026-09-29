@@ -14,7 +14,7 @@ import {
 } from "./slack-chat.js";
 
 /** The bot and socket tokens must belong to the same app, including after reconnect. */
-export class StandingOrdersSlackSocket extends SocketModeClient {
+export class ToolrollSlackSocket extends SocketModeClient {
   expectedApp = "";
   wrongApp: () => void = () => {};
   protected override async onWebSocketMessage(
@@ -86,7 +86,7 @@ export async function followSlack(
         )
         .run(text, credentials.installation, owner);
     // SDK log output can include envelopes/tokens. Only fixed status phrases are saved.
-    const client = new StandingOrdersSlackSocket({
+    const client = new ToolrollSlackSocket({
       appToken: credentials.appToken,
       autoReconnectEnabled: true,
       clientOptions: { retryConfig: { retries: 2 }, timeout: 15_000 },

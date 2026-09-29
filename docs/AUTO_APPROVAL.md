@@ -35,8 +35,8 @@ Expiry, revocation, access changes, mode renewal, source drift, missing or tampe
 CLI example, using the existing credential prompt:
 
 ```sh
-standing-orders mode set --repo /path/to/project --name standard --auto-approve true --plan-auto --days 1 --as owner
-standing-orders task plan task-id --as owner
+toolroll mode set --repo /path/to/project --name standard --auto-approve true --plan-auto --days 1 --as owner
+toolroll task plan task-id --as owner
 ```
 
 Schema v55 adds the pending plan-authorization record. Migration preserves existing mode bytes and project grants; older binaries must not open the upgraded database. This source change does not enable a policy or migrate the running desktop installation automatically.

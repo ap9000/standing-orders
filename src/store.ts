@@ -29,7 +29,7 @@ import { scanForSecrets } from "./evidence.js";
  * history survives.
  *
  * SQLite via `node:sqlite`, so there is no runtime dependency and no native
- * build step — `npx standing-orders` has to still work on a machine with no
+ * build step — `npx toolroll` has to still work on a machine with no
  * compiler, and a task store is not worth breaking that promise for.
  *
  * Deliberately absent: `workspace_id`. §4 lists it, but multiplayer and RBAC
@@ -101,6 +101,7 @@ import { SPEND_SCHEMA, billingOf, budgetStates, canPrice, claudeMachineBilling, 
 import { FOREVER, RETENTION_SCHEMA, periodWords, type RetentionKind, type RetentionPeriods } from "./retention.js";
 import { IN_RANGE, LEDGER_CHAIN_SCHEMA, safeWhole, sealLedger, verifyLedgerChain, type LedgerChainReport, type VerifiedHead } from "./ledger-chain.js";
 import { NO_RULES, filerFor, isProtectedWork, protectedChanges, rulesWords, type ApprovalGate, type ApprovalRules, type ApproverKind, type Filer, type FilerKind } from "./approval-policy.js";
+import { BRANCH_PREFIXES, configBase, envValue, namedPath } from "./names.js";
 
 // v60 fenced older readers before the chat action cards; v61 adds notification
 // provenance and Telegram destination receipts, and readers below v61 refuse it.
@@ -4669,17 +4670,13 @@ export function databasePath(env: Record<string, string | undefined>, home: stri
   // the override database-specific avoids changing XDG_CONFIG_HOME for every
   // other tool an agent may need while ensuring a self-hosting task cannot
   // migrate or lock the control plane that launched it.
-  const isolated = env["STANDING_ORDERS_DB"];
+  const isolated = envValue(env, "DB");
   if (isolated !== undefined && isolated !== "") return isolated;
-  const xdg = env["XDG_CONFIG_HOME"];
-  const base = xdg !== undefined && xdg !== "" ? xdg : join(home, ".config");
-  const renamed = join(base, "standing-orders", "orders.db");
-  // The rename (nightorders → standing-orders, 2026-08-13) must not orphan
-  // an installation: a database that already lives under the old name keeps
-  // being found there until one exists under the new one.
-  const legacy = join(base, "nightorders", "orders.db");
-  if (!existsSync(renamed) && existsSync(legacy)) return legacy;
-  return renamed;
+  // Each rename (nightorders → standing-orders, 2026-08-13; → toolroll,
+  // 2026-09-29) must not orphan an installation: a database that already
+  // lives under an older name keeps being found there until one exists
+  // under the new one. A fresh install gets ~/.config/toolroll.
+  return namedPath(configBase(env, home), ["orders.db"]);
 }
 
 export type OpenOptions = {
@@ -11787,7 +11784,7 @@ export class Store {
       WHERE (r.repo = ? OR r.repo IS NULL) AND (t.state NOT IN ('done', 'cancelled') OR (t.state = 'done' AND (
         (s.candidate IS NOT NULL AND t.updated_at >= ?) OR EXISTS (SELECT 1 FROM action_ledger l JOIN run ON run.id = l.run_id
           WHERE run.task_ref = r.id AND l.action = 'assignment handoff checked' AND l.at >= ?))))`;
-    const own = this.db.prepare(tasks).all(repo, since, since).map(row => `standing-orders/${String(row["id"])}`);
+    const own = this.db.prepare(tasks).all(repo, since, since).flatMap(row => BRANCH_PREFIXES.map(prefix => `${prefix}${String(row["id"])}`));
     const used = this.db.prepare(`SELECT DISTINCT run.branch AS branch FROM run WHERE run.branch IS NOT NULL AND run.task_ref IN (SELECT ref FROM (${tasks}))`).all(repo, since, since)
       .map(row => String(row["branch"]));
     return [...new Set([...own, ...used])];

@@ -15,7 +15,7 @@ what we should not copy.
 | Idea | firstmate | Standing Orders |
 |---|---|---|
 | Zero-token supervision | bash watcher + harness turn-end guards; `state/.wake-queue` | `tick`/`watch` passes, leases with fencing, dead-runner reconcile — the daemon never spends |
-| Isolated work | pooled git worktrees (treehouse/Orca) per crewmate | leased worktrees per run (treehouse adapter), builds on `standing-orders/<task>` |
+| Isolated work | pooled git worktrees (treehouse/Orca) per crewmate | leased worktrees per run (treehouse adapter), builds on `toolroll/<task>` |
 | Only real decisions reach the human | watcher classifies wakes; away-mode digests | typed decisions with options, consequences, reversibility; the attention budget |
 | Explicit delivery authority | project modes: `no-mistakes`, `direct-PR`, `local-only`, `+yolo` | publication grants (push / open-PR / merge as independent fields), operating modes (automerge on green under a grant), no-mistakes as a gate adapter |
 | Restart-proof state | tmux/herdr sessions + append-only status logs + `data/` | SQLite, append-only events, fenced completion, reconcile on start |

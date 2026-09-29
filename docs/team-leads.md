@@ -19,11 +19,11 @@ Previous private chat stays private and remains available from Conversations. Cr
 On the installation host, reuse the existing local sign-in without putting its password in shell history:
 
 ```sh
-standing-orders connect https://your-server --local-login
-standing-orders lead list --json
-standing-orders conversation list --lead LEAD_ID --json
-standing-orders brief --conversation CONVERSATION_ID --json
-standing-orders chat --conversation CONVERSATION_ID --follow
+toolroll connect https://your-server --local-login
+toolroll lead list --json
+toolroll conversation list --lead LEAD_ID --json
+toolroll brief --conversation CONVERSATION_ID --json
+toolroll chat --conversation CONVERSATION_ID --follow
 ```
 
 On another machine, use `connect ... --as ACCOUNT --token-stdin` or a private `--token-file`. Profiles are saved privately. The connection is HTTPS; credentials never travel in URLs. A saved profile makes `chat` and `brief` use the central service. Existing administrative commands remain local; `--local` explicitly selects the previous local chat or brief.
@@ -44,7 +44,7 @@ The same rules apply in Slack and Discord: each teammate pairs their own account
 
 ## Telegram on your phone
 
-Each teammate pairs their own private chat with the installation's bot: open Settings → Telegram, enter your password, and send the one-time `/pair` code to the bot within 10 minutes. The chat then answers as you, under your own project access and spending consent, and **Unpair my phone** ends it without touching anyone else's pairing. The installation operator still saves the bot token once on the settings page, or with `standing-orders bridge telegram token`.
+Each teammate pairs their own private chat with the installation's bot: open Settings → Telegram, enter your password, and send the one-time `/pair` code to the bot within 10 minutes. The chat then answers as you, under your own project access and spending consent, and **Unpair my phone** ends it without touching anyone else's pairing. The installation operator still saves the bot token once on the settings page, or with `toolroll bridge telegram token`.
 
 Send `/team` in your private chat to list the conversations you are in and `/team <number>` to talk in one; the chat then saves your messages to that conversation as you, and the lead's replies and teammates' messages come back to you. `/team off` returns to your private assistant. Your private history is never copied into a team conversation.
 

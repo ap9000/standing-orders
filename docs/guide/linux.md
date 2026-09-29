@@ -26,7 +26,7 @@ own secrets don't exist. See [Security](security.md).
 
 `toolroll up` runs until you stop it. To keep it running after you log
 out, run it as a user service. Save this as
-`~/.config/systemd/user/standing-orders.service`:
+`~/.config/systemd/user/toolroll.service`:
 
 ```ini
 [Unit]
@@ -44,9 +44,9 @@ Then:
 
 ```sh
 systemctl --user daemon-reload
-systemctl --user enable --now standing-orders
+systemctl --user enable --now toolroll
 loginctl enable-linger "$USER"     # keep it running when you're logged out
-journalctl --user -u standing-orders -f   # what it's doing
+journalctl --user -u toolroll -f   # what it's doing
 ```
 
 If `toolroll` isn't on the service's PATH, use the full path from

@@ -9,9 +9,9 @@ explicit private token file or environment variable. Claim an assignment once
 to receive its changes. Tasks filed by that coordinator already carry its owner.
 
 ```sh
-standing-orders assignment claim TASK --token-file /private/lead-token --json
-standing-orders assignment brief --token-file /private/lead-token --json
-standing-orders assignment inbox --consumer codex-main --token-file /private/lead-token --json
+toolroll assignment claim TASK --token-file /private/lead-token --json
+toolroll assignment brief --token-file /private/lead-token --json
+toolroll assignment inbox --consumer codex-main --token-file /private/lead-token --json
 ```
 
 The brief reads current assignments, saved goals, decisions, agent reports,
@@ -25,8 +25,8 @@ the same credential and consumer name to receive that batch again. After
 handling all its events, acknowledge the exact returned batch ID:
 
 ```sh
-standing-orders assignment show TASK --token-file /private/lead-token --json
-standing-orders assignment ack --consumer codex-main --batch BATCH_ID --token-file /private/lead-token --json
+toolroll assignment show TASK --token-file /private/lead-token --json
+toolroll assignment ack --consumer codex-main --batch BATCH_ID --token-file /private/lead-token --json
 ```
 
 Delivery acknowledgment advances only that consumer's cursor. It does not mark

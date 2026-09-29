@@ -15,7 +15,7 @@
  *   node scripts/natural-instructions-smoke.mjs run --scope run-1527 --model gpt-6-astra --out result.json
  *
  * Everything is isolated: the control-plane database is a fresh file in a
- * temporary directory (STANDING_ORDERS_DB and XDG_CONFIG_HOME are pointed
+ * temporary directory (TOOLROLL_DB and XDG_CONFIG_HOME are pointed
  * there before dist is imported), the fixture repository is a temporary
  * git init on the task's branch, and the model runs under Codex's
  * workspace-write sandbox with network disabled. Nothing here opens the
@@ -42,7 +42,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 // The isolation boundary, before any dist module can read the environment.
 const state = mkdtempSync(join(tmpdir(), "so-natural-smoke-"));
-process.env.STANDING_ORDERS_DB = join(state, "control", "orders.db");
+process.env.TOOLROLL_DB = process.env.STANDING_ORDERS_DB = join(state, "control", "orders.db");
 process.env.XDG_CONFIG_HOME = join(state, "config");
 mkdirSync(join(state, "control"), { recursive: true });
 

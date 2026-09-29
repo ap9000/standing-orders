@@ -5,6 +5,7 @@ import { currentBootId } from "./boot-identity.js";
 import { createContainer, currentContainment, type Container } from "./containment.js";
 import { processMayBeAlive } from "./process-liveness.js";
 import { observeProcessTree, sampleProcessTree, stopProcessTree, type ProcessObservationFailure } from "./process-tree.js";
+import { isOwnEnv } from "./names.js";
 
 /** Read-only recovery witnesses, never authority to signal historical PIDs.
  * macOS ancestry is observational; a missed/failed observation stays fenced.
@@ -82,7 +83,7 @@ export function codingEnvironment(): NodeJS.ProcessEnv {
     // A parent desktop session's control pipe and identity do not belong to
     // this independent native client. Keep install/runtime paths such as
     // CODEX_MCP_NODE_PATH. Service credentials stay with the web service.
-    if (/^STANDING_ORDERS_/i.test(key) || /^(TELEGRAM|SLACK|DISCORD)_.*(TOKEN|SECRET|KEY)$/i.test(key) || /^CODEX_APP_TOOLS_/.test(key) || invokingSession.has(key) || key === "NODE_OPTIONS" || key === "NODE_PATH") delete env[key];
+    if (isOwnEnv(key) || /^(TELEGRAM|SLACK|DISCORD)_.*(TOKEN|SECRET|KEY)$/i.test(key) || /^CODEX_APP_TOOLS_/.test(key) || invokingSession.has(key) || key === "NODE_OPTIONS" || key === "NODE_PATH") delete env[key];
   }
   return env;
 }
@@ -304,7 +305,7 @@ export function createCodexCodingProvider(options: { cwd?: string; command?: str
       if (!attached.ok) throw new CodingProviderRequestError(-32000, "Codex could not enter the required process container.");
     }
     await send("initialize", {
-      clientInfo: { name: "standing_orders", title: "Toolroll", version: "0.4.3" },
+      clientInfo: { name: "toolroll", title: "Toolroll", version: "0.4.3" },
       capabilities: { experimentalApi: true },
     });
     write({ method: "initialized", params: {} });

@@ -16,11 +16,13 @@ import { existsSync, lstatSync, rmSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import { run, type ExecResult } from "./exec.js";
 import { BUILT_IN, type Database, type Store } from "./store.js";
+import { BRANCH_PREFIX, BRANCH_PREFIXES, isOwnBranch } from "./names.js";
 
 /** The tables whose history is the audit record itself: never touched. */
 const KEPT = new Set(["action_ledger", "ledger_seal", "ledger_checkpoint"]);
-/** What Toolroll names the branches it makes. */
-export const OWN_BRANCH = "standing-orders/";
+/** What Toolroll names the branches it makes: toolroll/…, and standing-orders/… from before the rename. */
+export const OWN_BRANCH = BRANCH_PREFIX;
+export const OWN_BRANCHES = BRANCH_PREFIXES;
 
 export type ProjectHoldings = {
   tasks: number; versions: number; runs: number; evidence: number; checkouts: number;
@@ -126,7 +128,7 @@ const inside = (root: string, path: string) => { const rel = relative(resolve(ro
 
 /**
  * Remove the checkouts and branches Toolroll made for the project: only
- * branches named standing-orders/… that its tasks, runs, checkouts, races or
+ * branches named toolroll/… or standing-orders/… that its tasks, runs, checkouts, races or
  * pull requests used, and only checkouts of those branches or ones it
  * recorded. Git itself refuses to delete a branch that is checked out
  * somewhere; that one stays and is said. Nothing else in the repository moves.
@@ -135,11 +137,11 @@ async function removeCheckoutsAndBranches(store: Store, repo: string, d: Doomed,
   const db = store.handle;
   const recorded = db.prepare("SELECT path, branch FROM worktree WHERE repo = ?").all(repo).map(row => ({ path: String(row["path"]), branch: String(row["branch"]) }));
   const named = [
-    ...d.tasks.map(id => `${OWN_BRANCH}${id}`), ...recorded.map(row => row.branch),
+    ...d.tasks.flatMap(id => OWN_BRANCHES.map(prefix => `${prefix}${id}`)), ...recorded.map(row => row.branch),
     ...list(db, "SELECT DISTINCT branch FROM run WHERE branch IS NOT NULL AND id IN (SELECT value FROM json_each(?))", json(d.runs)),
     ...list(db, "SELECT DISTINCT c.branch FROM contestant c JOIN contest k ON k.id = c.contest WHERE c.branch IS NOT NULL AND k.task_ref IN (SELECT value FROM json_each(?))", json(d.refs)),
     ...list(db, "SELECT DISTINCT head FROM publication WHERE head IS NOT NULL AND task_ref IN (SELECT value FROM json_each(?))", json(d.refs)),
-  ].map(String).filter(branch => branch.startsWith(OWN_BRANCH));
+  ].map(String).filter(isOwnBranch);
   const ours = new Set(named);
   const left: string[] = [];
   let checkouts = 0, branches = 0;
@@ -188,7 +190,7 @@ async function removeCheckoutsAndBranches(store: Store, repo: string, d: Doomed,
     checkouts++;
   }
   await git(["worktree", "prune"], repo);
-  const existing = await git(["for-each-ref", "--format=%(refname:short)", `refs/heads/${OWN_BRANCH}`], repo);
+  const existing = await git(["for-each-ref", "--format=%(refname:short)", ...OWN_BRANCHES.map(prefix => `refs/heads/${prefix}`)], repo);
   for (const branch of existing.code === 0 ? existing.stdout.split("\n").map(one => one.trim()).filter(Boolean) : []) {
     if (!ours.has(branch)) continue;
     const gone = await git(["branch", "-D", "--", branch], repo);

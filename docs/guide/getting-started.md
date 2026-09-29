@@ -10,13 +10,13 @@ curl -fsSL https://raw.githubusercontent.com/ap9000/standing-orders/main/install
 
 It installs the `toolroll` command and starts it with your projects in
 `~/Projects`. `standing-orders`, the older name, still works. You can also run
-it without installing: `npx standing-orders up`.
+it without installing: `npx toolroll up`.
 
 The first start prints your login and saves it in
-`~/.config/standing-orders/up-login.txt`, then opens the console at
+`~/.config/toolroll/up-login.txt`, then opens the console at
 http://127.0.0.1:4180.
 
-To look around first, `npx standing-orders demo` opens a throwaway sandbox
+To look around first, `npx toolroll demo` opens a throwaway sandbox
 with tasks and two flows already mid-flight. It never spends and never
 reaches outside.
 
@@ -70,6 +70,6 @@ See [Chat and your phone](chat-and-phone.md).
 
 ## Updating
 
-`npm install -g standing-orders@latest`, then start it again. Your database
+`npm install -g toolroll@latest`, then start it again. Your database
 upgrades itself on the first start; back it up first if you like:
-`sqlite3 ~/.config/standing-orders/orders.db ".backup orders-backup.db"`.
+`sqlite3 ~/.config/toolroll/orders.db ".backup orders-backup.db"`.
