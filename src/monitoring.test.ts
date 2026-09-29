@@ -193,8 +193,8 @@ test("/metrics counts each series once, and only this console's projects", () =>
     store.finishRun(run, { outcome, now: new Date() });
   }
   const text = prometheusMetrics(store, new Date());
-  expect(text.match(/^standing_orders_tokens_total\{role="builder",provider="claude",direction="in"\} 200$/m)).not.toBeNull();
-  expect(prometheusMetrics(store, new Date(), ["/repo/elsewhere"])).not.toMatch(/standing_orders_runs_total\{/);
+  expect(text.match(/^toolroll_tokens_total\{role="builder",provider="claude",direction="in"\} 200$/m)).not.toBeNull();
+  expect(prometheusMetrics(store, new Date(), ["/repo/elsewhere"])).not.toMatch(/toolroll_runs_total\{/);
 });
 
 test("settings: https only (http only to this machine), secrets kept in a 0600 file, a new webhook gets a new secret shown once", () => {
@@ -278,8 +278,8 @@ test("the Monitoring page takes a step-up, shows the secret once, keeps each cha
     expect(metrics.status).toBe(200);
     expect(metrics.headers.get("content-type")).toContain("text/plain; version=0.0.4");
     const text = await metrics.text();
-    expect(text).toContain("# TYPE standing_orders_runs_total counter");
-    expect(text).toContain("standing_orders_ledger_chain_ok 1");
+    expect(text).toContain("# TYPE toolroll_runs_total counter");
+    expect(text).toContain("toolroll_ledger_chain_ok 1");
     expect(text).not.toContain("/repo/shop");
     expect((await fetch(`${base}/metrics`, { headers: { authorization: `Bearer ${minted("sam")}` }, redirect: "manual" })).status).toBe(403);
     expect((await fetch(`${base}/metrics`, { redirect: "manual" })).status).not.toBe(200);

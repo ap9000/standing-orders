@@ -6,6 +6,7 @@ import { authenticateCoordinator } from './coordinator.js';
 import { envelopeJson } from './envelope.js';
 import { repositoryContext, type RepositoryContext } from './repository-context.js';
 import type { Store } from './store.js';
+import { namedPath } from './names.js';
 
 const flags = [
   { name: 'repo', takesValue: true, meaning: 'admitted project checkout root' },
@@ -62,7 +63,7 @@ export async function runKnowledgeCommand(positional: readonly string[], options
     if (!auth.who.repos.includes(resolve(repo))) return fail('not-found', 'That project is unavailable to this coordinator.');
     admittedToken = token;
   }
-  const cacheRoot = context.evidenceRoot ? join(dirname(context.evidenceRoot), 'repository-context') : join(homedir(), '.cache', 'standing-orders', 'repository-context');
+  const cacheRoot = context.evidenceRoot ? join(dirname(context.evidenceRoot), 'repository-context') : namedPath(join(homedir(), '.cache'), ['repository-context']);
   const result = await repositoryContext({ repo: resolve(repo), query, mode: spec.action === 'impact' ? 'impact' : 'search', refresh: spec.action === 'refresh', cacheRoot, ...(typeof base === 'string' ? { baseRevision: base } : {}) });
   if (admittedToken) {
     const current = authenticateCoordinator(context.store, admittedToken);

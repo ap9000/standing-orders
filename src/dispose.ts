@@ -33,6 +33,7 @@ import { type ProofVerdict, type VerifyCommandFacts } from "./proof.js";
 import { verificationEvidence, failedVerificationEvidence } from "./verification-evidence.js";
 import { classifyGateFailure, describeGateFailure, gateFailureSummary, type GateFailureClass } from "./gate-failure.js";
 import { propose, approve } from "./scope.js";
+import { headWithin } from "./names.js";
 
 /**
  * Which road is disposing. 'tick' = the unattended loop: full task
@@ -201,7 +202,7 @@ function disposeBuildOutcomeLocked(context: DisposeContext, result: BuildResult)
           if (
             grant !== null &&
             headSha !== null &&
-            branch.startsWith(grant.headPrefix) &&
+            headWithin(branch, grant.headPrefix) &&
             (grant.selector === "all" || origin === "ours")
           ) {
             const intentId = store.createPublicationIntent(
@@ -277,7 +278,7 @@ function disposeBuildOutcomeLocked(context: DisposeContext, result: BuildResult)
         if (
           grant !== null &&
           headSha !== null &&
-          branch.startsWith(grant.headPrefix) &&
+          headWithin(branch, grant.headPrefix) &&
           (grant.selector === "all" || origin === "ours")
         ) {
           const intentId = store.createPublicationIntent(

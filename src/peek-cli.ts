@@ -226,7 +226,7 @@ export async function openInTmux(
   panes: readonly PeekPane[],
   command: readonly string[],
   run: (file: string, args: readonly string[]) => Promise<{ code: number; stderr: string }>,
-  session = "standing-orders",
+  session = "toolroll",
 ): Promise<{ ok: true; windows: number } | { ok: false; message: string }> {
   if (panes.length === 0) return { ok: false, message: "no run is open — nothing to open a window for" };
   const probe = await run("tmux", ["-V"]);
@@ -243,7 +243,7 @@ export async function openInTmux(
 }
 
 /** Hand the terminal to tmux and wait for it to come back. */
-export function attachTmux(session = "standing-orders"): Promise<number> {
+export function attachTmux(session = "toolroll"): Promise<number> {
   return new Promise(resolve => {
     const child = spawn("tmux", ["attach", "-t", session], { stdio: "inherit" });
     child.on("exit", code => resolve(code ?? 0));

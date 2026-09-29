@@ -343,7 +343,7 @@ export class CodingWorkspace {
       const root = (await this.git(repo, ['rev-parse', '--show-toplevel'])).trim();
       if (realpathSync(root) !== repo) throw Error('Choose the root of a Git project.');
       const base = (await this.git(repo, ['rev-parse', '--verify', 'HEAD^{commit}'])).trim();
-      const branch = `standing-orders/code-${id}`, worktree = join(this.options.worktreeRoot, id);
+      const branch = `toolroll/code-${id}`, worktree = join(this.options.worktreeRoot, id);
       session = { id, owner: actor.name, generation: actor.generation, repo, title, provider: 'codex', model: input.model, branch, base, worktree, nativeThreadId: null, turnId: null, status: 'starting', error: null, createdAt: now(), updatedAt: now(), initialRequest: { requestId: input.requestId, prompt: input.prompt } };
       this.authorize(actor, repo);
       const context = this.options.context?.({ repo, actor: actor.name, baseRevision: base, prompt: input.prompt });

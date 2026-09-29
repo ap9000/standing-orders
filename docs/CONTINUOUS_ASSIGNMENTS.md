@@ -10,10 +10,10 @@ Use an operator-minted, project-scoped coordinator credential. Keep the token in
 an environment variable, never a prompt or command argument:
 
 ```sh
-standing-orders assignment claim task-id --token-env SO_COORDINATOR --json
-standing-orders assignment updates --after 0 --token-env SO_COORDINATOR --json
-standing-orders assignment show task-id --token-env SO_COORDINATOR --json
-standing-orders assignment check task-id --digest RECEIPT_DIGEST --token-env SO_COORDINATOR --json
+toolroll assignment claim task-id --token-env SO_COORDINATOR --json
+toolroll assignment updates --after 0 --token-env SO_COORDINATOR --json
+toolroll assignment show task-id --token-env SO_COORDINATOR --json
+toolroll assignment check task-id --digest RECEIPT_DIGEST --token-env SO_COORDINATOR --json
 ```
 
 Process a page before saving its `nextCursor`; continue while `hasMore` is true.

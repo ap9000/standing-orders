@@ -39,12 +39,13 @@ import { captureCgroupIdentity, cgroupEmptiness, containerEmptiness } from "./co
 import { createServer, type Server } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { envValue } from "./names.js";
 
 export const CONTAINMENT_POLICIES = ["observed", "preferred", "required"] as const;
 export type ContainmentPolicy = (typeof CONTAINMENT_POLICIES)[number];
 export type ContainmentBackendId = "cgroup2" | "job-object";
 /** The environment name the controller reads when no flag names a policy. */
-export const CONTAINMENT_ENV = "STANDING_ORDERS_CONTAINMENT";
+export const CONTAINMENT_ENV = "TOOLROLL_CONTAINMENT";
 
 export type PolicyParse =
   | { ok: true; policy: ContainmentPolicy; source: "default" | "explicit" }
@@ -271,7 +272,7 @@ function rank(policy: ContainmentPolicy): number {
  * default: the caller reports `problem` and exits.
  */
 export function resolveContainment(flagWord: string | undefined, env: NodeJS.ProcessEnv = process.env): { ok: true; effective: EffectiveContainment } | { ok: false; problem: string } {
-  const parsed = parseContainmentPolicy(flagWord ?? env[CONTAINMENT_ENV]);
+  const parsed = parseContainmentPolicy(flagWord ?? envValue(env, "CONTAINMENT"));
   if (!parsed.ok) return parsed;
   return { ok: true, effective: pinContainment(effectiveContainment(parsed.policy, probeContainmentCapability())) };
 }

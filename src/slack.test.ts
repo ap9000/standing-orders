@@ -47,7 +47,7 @@ import { telegramProgressCard } from "./telegram-progress.js";
 import { slackSettingsHtml } from "./slack-settings.js";
 import { effectivePrimary, savePrimary } from "./webhooks.js";
 import { createDecisionServer } from "./serve.js";
-import { StandingOrdersSlackSocket } from "./slack.js";
+import { ToolrollSlackSocket } from "./slack.js";
 import { flowFromSteps } from "./flows.js";
 import { advanceFlows } from "./flow-engine.js";
 import { runFlowSteps } from "./flow-steps.js";
@@ -1125,7 +1125,7 @@ describe("Slack shared chat", () => {
     await planSlackNotifications(options);
     await drain();
     const words = buttonsOf(sends().at(-1)!).find(one => one.text.text === "Answer in words")!;
-    expect(words.action_id).toBe("standing_orders_question_words");
+    expect(words.action_id).toBe("toolroll_question_words");
     await press("standing_orders_question_words", words.value!, partTs());
     expect(String(sends().at(-1)!.args.text)).toContain("Your next message here is your answer");
     receive("Refund $50 and send a coupon for the rest.");
@@ -1239,7 +1239,7 @@ describe("Slack shared chat", () => {
 });
 
 test("Socket Mode validates the app on every hello and preserves Slack's real envelope shape", async () => {
-  class Inspectable extends StandingOrdersSlackSocket {
+  class Inspectable extends ToolrollSlackSocket {
     receive(packet: unknown) {
       return this.onWebSocketMessage(JSON.stringify(packet), false);
     }

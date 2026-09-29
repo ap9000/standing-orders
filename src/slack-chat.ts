@@ -138,7 +138,8 @@ export function receiveSlack(
     const action = object(actions[0]),
       container = object(body.container);
     if (
-      !/^standing_orders_(confirm|dismiss|yes|cancel|flow_approve|flow_edit|flow_send_back|question_choice|question_words)$/.test(
+      // toolroll_* since the rename; standing_orders_* buttons on older messages still work.
+      !/^(?:toolroll|standing_orders)_(confirm|dismiss|yes|cancel|flow_approve|flow_edit|flow_send_back|question_choice|question_words)$/.test(
         String(action.action_id),
       ) ||
       typeof action.value !== "string" ||
@@ -268,7 +269,7 @@ function linkButton(
         type: "button",
         text: { type: "plain_text", text: link.label },
         url: `${url.origin}${link.path}`,
-        action_id: "standing_orders_link",
+        action_id: "toolroll_link",
       },
     ];
   } catch {
@@ -474,7 +475,7 @@ export async function deliverSlackPart(
                       ? "Dismiss"
                       : "Confirm",
             },
-            action_id: `standing_orders_${action.phase}`,
+            action_id: `toolroll_${action.phase}`,
             value: String(action.token),
             ...(action.phase === "confirm"
               ? { style: "primary" }
@@ -505,7 +506,7 @@ export async function deliverSlackPart(
           ? chatFlowButtons(state, row.id, now).map((one) => ({
               type: "button",
               text: { type: "plain_text", text: one.label },
-              action_id: `standing_orders_flow_${one.action.replace("-", "_")}`,
+              action_id: `toolroll_flow_${one.action.replace("-", "_")}`,
               value: one.token,
               ...(one.action === "approve" ? { style: "primary" } : {}),
             }))
@@ -515,7 +516,7 @@ export async function deliverSlackPart(
           ? chatQuestionButtons(state, row.id, now).map((one) => ({
               type: "button",
               text: { type: "plain_text", text: one.label },
-              action_id: one.words ? "standing_orders_question_words" : "standing_orders_question_choice",
+              action_id: one.words ? "toolroll_question_words" : "toolroll_question_choice",
               value: one.token,
             }))
           : []),

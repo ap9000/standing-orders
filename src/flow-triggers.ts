@@ -35,6 +35,7 @@ import type { CodeResult } from "./flow-code.js";
 import { readFlowSecrets } from "./flow-secrets.js";
 import { tmpdir } from "node:os";
 import type { FlowCardSource, FlowRow, FlowTriggerRow, Store } from "./store.js";
+import { envValue } from "./names.js";
 
 export const FLOW_TRIGGER_KINDS = ["button", "schedule", "github", "linear", "flow", "webhook", "email", "chat"] as const;
 export type FlowTriggerKind = (typeof FLOW_TRIGGER_KINDS)[number];
@@ -295,10 +296,10 @@ export function readHookSecret(dir: string, trigger: number): string | null {
 function dropHookSecret(dir: string, trigger: number): void { rmSync(secretFile(dir, trigger), { force: true }); }
 
 const LINEAR_FILE = "linear-key";
-export const LINEAR_ENV = "STANDING_ORDERS_LINEAR_KEY";
+export const LINEAR_ENV = "TOOLROLL_LINEAR_KEY";
 /** The Linear API key the worker checks Linear with: the environment, or a 0600 file beside the database. */
 export function readLinearKey(dir: string | null): string | null {
-  const env = process.env[LINEAR_ENV]?.trim();
+  const env = envValue(process.env, "LINEAR_KEY")?.trim();
   if (env) return env;
   if (dir === null) return null;
   try { const key = readFileSync(join(dir, LINEAR_FILE), "utf8").trim(); return key === "" ? null : key; } catch { return null; }

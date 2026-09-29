@@ -31,6 +31,7 @@
 import { profileDigestOf, type UnattendedPermissionMode } from "./scope.js";
 import { contestantProfileOf } from "./store.js";
 import { createHash } from "node:crypto";
+import { headWithin, taskBranch } from "./names.js";
 import { release } from "./claim.js";
 import { buildPriceOf, oneCallTailMicrousd, BUILD_PRICE_VERSION } from "./pricing.js";
 import { MONEY_CAPABILITIES, isProviderId, reportsCost, validateSpec } from "./provider.js";
@@ -267,7 +268,7 @@ export function planTournament(input: {
 
 /** Unique per tournament — retained loser branches never collide. */
 export function contestBranch(taskId: string, contestId: number, ordinal: number): string {
-  return `standing-orders/${taskId}/contest-${contestId}/c${ordinal}`;
+  return `${taskBranch(taskId)}/contest-${contestId}/c${ordinal}`;
 }
 
 // ---------------------------------------------------------------- admission
@@ -732,7 +733,7 @@ export function computePickPlan(
     grant !== null &&
     run.headRevision !== null &&
     run.branch !== null &&
-    run.branch.startsWith(grant.headPrefix) &&
+    headWithin(run.branch, grant.headPrefix) &&
     (grant.selector === "all" || refOrigin === "ours");
   const digest = pickTupleDigest(
     view,

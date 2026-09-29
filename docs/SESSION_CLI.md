@@ -7,8 +7,8 @@ remains the coordinator conversation that reads work and proposes actions.
 Inspect this client's exact schemas without credentials:
 
 ```sh
-standing-orders session capabilities --json
-standing-orders session send --help
+toolroll session capabilities --json
+toolroll session send --help
 ```
 
 Client capabilities do not establish that the installed service supports them.
@@ -25,11 +25,11 @@ for every request. Redirects are never followed.
 With your credential already in a private token file:
 
 ```sh
-standing-orders session list \
+toolroll session list \
   --url http://127.0.0.1:7788 --as alice --token-file /private/operator-token \
   --json
 
-standing-orders session start --project /path/to/project \
+toolroll session start --project /path/to/project \
   --title 'Improve session continuity' --file /path/to/request.txt \
   --key request_0123456789 \
   --url http://127.0.0.1:7788 --as alice --token-file /private/operator-token \
@@ -55,7 +55,7 @@ For `send`, `stop`, `resume` and `recover`, copy the identity from the latest
 `show` response:
 
 ```sh
-standing-orders session send <session-id> --file /path/to/follow-up.txt \
+toolroll session send <session-id> --file /path/to/follow-up.txt \
   --revision 4 --thread <native-thread-id> --turn none \
   --key followup_0123456789 \
   --url http://127.0.0.1:7788 --as alice --token-file /private/operator-token \

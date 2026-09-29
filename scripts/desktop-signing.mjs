@@ -6,8 +6,8 @@ export const DEVELOPMENT_ID = RELEASE_ID + '.development';
 
 /** Release builds never silently fall back to Sign to Run Locally. */
 export function desktopBuildOptions(argv, env, home, artifactRoot = resolve('output', 'desktop')) {
-  let destination, development = false, identity = env.STANDING_ORDERS_SIGN_IDENTITY;
-  let notaryProfile = env.STANDING_ORDERS_NOTARY_PROFILE, upgradeFrom;
+  let destination, development = false, identity = env.TOOLROLL_SIGN_IDENTITY ?? env.STANDING_ORDERS_SIGN_IDENTITY;
+  let notaryProfile = env.TOOLROLL_NOTARY_PROFILE ?? env.STANDING_ORDERS_NOTARY_PROFILE, upgradeFrom;
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
     if (arg === '--development') development = true;
@@ -24,7 +24,7 @@ export function desktopBuildOptions(argv, env, home, artifactRoot = resolve('out
     if (!destination) throw Error('--development needs an explicit preview destination; it never defaults to the installed app.');
     if (identity || notaryProfile || upgradeFrom) throw Error('Choose a development preview or a signed release, not both.');
   } else if (!identity || identity === '-') {
-    throw Error('A release needs --sign-identity "Developer ID Application: …" (or STANDING_ORDERS_SIGN_IDENTITY). No valid identity? Use --development with a separate preview destination. Ad-hoc signing can reset macOS access grants.');
+    throw Error('A release needs --sign-identity "Developer ID Application: …" (or TOOLROLL_SIGN_IDENTITY). No valid identity? Use --development with a separate preview destination. Ad-hoc signing can reset macOS access grants.');
   }
   return { destination: destination ?? join(artifactRoot, randomUUID(), 'Standing Orders.app'), development, identity: development ? '-' : identity, notaryProfile,
     upgradeFrom: development ? undefined : upgradeFrom ?? join(home, 'Applications', 'Standing Orders.app'), explicitUpgradeFrom: upgradeFrom !== undefined,

@@ -26,6 +26,7 @@ import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "n
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { readMonitoring } from "./monitoring-settings.js";
+import { existingFolders } from "./names.js";
 
 /** How a launch was fenced, as recorded on the run and said on the task. */
 export type FenceMethod = "codex-profile" | "macos-sandbox" | "linux-bubblewrap" | "claude-rules" | "none";
@@ -46,7 +47,7 @@ function inside(child: string, parent: string): boolean {
  * Every path an agent must not reach: the Toolroll state folder
  * beside the database (all of it, except the folder that holds this run's
  * own worktree), the database itself with its journal files, and
- * `~/.standing-orders` (provider keys and project tool secrets). When the
+ * `~/.toolroll` or an older `~/.standing-orders` (provider keys and project tool secrets). When the
  * database sits anywhere else (a shared folder), only the database and
  * secret-looking entries there are fenced.
  */
@@ -58,11 +59,11 @@ export function agentFence(options: { databaseFile: string | null; worktree: str
     const database = real(options.databaseFile);
     const state = dirname(database);
     for (const suffix of ["", "-wal", "-shm", "-journal"]) if (existsSync(database + suffix)) fence.add(database + suffix);
-    // Only a folder that is Toolroll's own (~/.config/standing-orders,
+    // Only a folder that is Toolroll's own (~/.config/toolroll or an older name,
     // the desktop app's "Toolroll") is fenced whole: a database kept
     // in a shared folder (a projects folder, a test's temp folder) must not
     // fence its neighbours, the repositories agents build among them.
-    const dedicated = state !== home && state !== sep && !existsSync(join(state, ".git")) && /standing[\s_-]?orders/i.test(basename(state));
+    const dedicated = state !== home && state !== sep && !existsSync(join(state, ".git")) && /standing[\s_-]?orders|toolroll|nightorders/i.test(basename(state));
     // The entries this run's worktree needs stay reachable: the one it lives
     // under, and the repository its git metadata belongs to.
     const keep = new Set<string>();
@@ -77,8 +78,7 @@ export function agentFence(options: { databaseFile: string | null; worktree: str
       if (dedicated || SENSITIVE_NAME.test(entry)) fence.add(join(state, entry));
     }
   }
-  const secrets = join(home, ".standing-orders");
-  if (existsSync(secrets)) fence.add(secrets);
+  for (const secrets of existingFolders(home, { dot: true })) fence.add(secrets);
   // v104: the folder the audit stream writes to holds the whole instance's history.
   if (options.databaseFile !== null && options.databaseFile !== "" && options.databaseFile !== ":memory:") {
     const stream = readMonitoring(dirname(real(options.databaseFile))).folder?.path;

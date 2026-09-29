@@ -43,6 +43,7 @@ import { MATE_MAX_PROPOSALS_PER_TURN, MATE_TOOL_SCHEMAS, executeMateTool, isMate
 import type { ReviewSnapshot } from "./chat-review.js";
 import { composeSubscriptionMatePrompt, performSubscriptionMateRequest, type SubscriptionMateRunner } from "./subscription-chat.js";
 import { leadContext } from './lead-context.js';
+import { envValue } from "./names.js";
 
 export const MATE_MESSAGE_MAX_CHARS = 2_000;
 /** The thread's recent history the model sees, most recent first until the cap. */
@@ -476,7 +477,7 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
       const outcome = executeMateTool({ store, who, now: clock(), draft, selectEvidence, step: steps, readDecisions, readResults, ...(input.evidenceRoot === undefined ? {} : { evidenceRoot: input.evidenceRoot }), ...(input.mediaDelivery === undefined ? {} : { mediaDelivery: input.mediaDelivery }) }, call.name, call.args, view);
       if (READ_TOOLS.has(call.name)) reads++;
       // Opt-in, local diagnostics for end-to-end runs: what the lead asked of each tool and what came back, keys blanked.
-      if (process.env["STANDING_ORDERS_MATE_TRACE"] === "1") {
+      if (envValue(process.env, "MATE_TRACE") === "1") {
         const blanked = (_: string, value: unknown) => typeof value === "string" ? redactSecretAssignments(redactSecretLines(value, scanForSecrets(value))) : value;
         process.stderr.write(`mate-trace ${JSON.stringify({ turn: turnId, step: steps, tool: call.name, args: call.args, ok: outcome.ok, ...(outcome.ok ? {} : { message: outcome.message }) }, blanked).slice(0, 4000)}\n`);
       }

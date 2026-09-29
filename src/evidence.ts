@@ -29,6 +29,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, sep } from "node:path";
+import { namedPath } from "./names.js";
 import { LIMITS } from "./decision.js";
 import { PLAN_LIMITS } from "./plan.js";
 import { parseReport, REPORT_LIMITS, type ParsedReport } from "./scout-report.js";
@@ -118,12 +119,9 @@ export const EVIDENCE_CAPS: Record<Artifact["kind"], number> = {
 };
 
 export function evidenceRoot(home: string): string {
-  const renamed = join(home, ".standing-orders", "evidence");
-  // Same continuity rule as the database: evidence recorded under the old
+  // Same continuity rule as the database: evidence recorded under an older
   // name keeps verifying until a new-name root exists.
-  const legacy = join(home, ".nightorders", "evidence");
-  if (!existsSync(renamed) && existsSync(legacy)) return legacy;
-  return renamed;
+  return namedPath(home, ["evidence"], { dot: true });
 }
 
 /**

@@ -137,7 +137,7 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
     mutation: "identity-idempotent",
     flags: [jsonFlag,
       { name: "claude-code", takesValue: false, meaning: "install the user-level Claude Code skill" },
-      { name: "dir", takesValue: true, meaning: "skill directory (default: ~/.claude/skills/standing-orders)" },
+      { name: "dir", takesValue: true, meaning: "skill directory (default: ~/.claude/skills/toolroll)" },
       { name: "yes", takesValue: false, meaning: "write the previewed files" },
       { name: "repo", takesValue: true, meaning: "repository for the existing project-local install" },
       { name: "write-context", takesValue: false, meaning: "also add the managed AGENTS.md block for a project-local install" }],

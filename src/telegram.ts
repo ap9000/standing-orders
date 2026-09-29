@@ -36,6 +36,7 @@ import { connectChannel, FLOW_WORDS, takeChannelMessage, watchedChannel } from "
 import { focusContextFor, taskInCeiling } from "./chat-channel.js";
 import { phoneCommand, phoneStatus, phoneTaskView, PHONE_CONSOLE_FOOTER, PHONE_HELP, notificationIdentity, phoneTaskChoices, resolvePhoneTask, phoneFocusText, phoneTaskListText, phoneText, PHONE_NO_MATCH, PHONE_BACK_TO_LEAD, type PhoneTaskChoice } from "./telegram-status.js";
 import { MATE_MESSAGE_MAX_CHARS } from "./mate.js";
+import { envValue } from "./names.js";
 import {
   applyProposalTap,
   processTelegramConversations,
@@ -53,8 +54,8 @@ import {
  * never an implicit all-database ceiling. Shared by pass and embedded follower. */
 export type TelegramReadProjects = () => Promise<readonly string[]>;
 
-/** The environment name — and therefore the name the builder strips from agents. */
-export const TOKEN_ENV = "STANDING_ORDERS_TELEGRAM_TOKEN";
+/** The environment name — and therefore the name the builder strips from agents (both names; see names.ts). */
+export { TELEGRAM_TOKEN_ENV as TOKEN_ENV, TELEGRAM_TOKEN_ENVS as TOKEN_ENVS } from "./names.js";
 
 /** BotFather's shape: numeric bot id, colon, secret. */
 const TOKEN_SHAPE = /^(\d+):[A-Za-z0-9_-]{20,}$/;
@@ -126,7 +127,7 @@ export function loadBotToken(
   env: Record<string, string | undefined>,
   file: string,
 ): TokenSource | null {
-  const fromEnv = env[TOKEN_ENV];
+  const fromEnv = envValue(env, "TELEGRAM_TOKEN");
   if (fromEnv !== undefined && fromEnv.trim() !== "") {
     const parsed = TOKEN_SHAPE.exec(fromEnv.trim());
     return parsed === null ? null : { token: fromEnv.trim(), botId: parsed[1] as string, source: "env" };

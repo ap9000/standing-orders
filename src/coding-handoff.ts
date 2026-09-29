@@ -13,6 +13,7 @@ import { PROOF_LIMITS } from './proof.js';
 import { readPreparedEvidence } from './prepared-evidence.js';
 import type { CodingSession } from './coding-types.js';
 import type { Store } from './store.js';
+import { BRANCH_PREFIXES, taskBranch } from './names.js';
 
 const PREFIX = 'coding:';
 const SHA = /^[a-f0-9]{40}$/;
@@ -114,7 +115,7 @@ export function codingHandoffPreview(store: Store, input: { sessionId: string; a
 
 function makeReceipt(terms: ReceiptTerms): CodingHandoffReceipt {
   const id = learningSha(JSON.stringify(terms)).slice(0, 32), taskId = `coding-review-${id}`;
-  return { ...terms, id, taskId, branch: `standing-orders/${taskId}` };
+  return { ...terms, id, taskId, branch: taskBranch(taskId) };
 }
 function parseReceipt(row: Record<string, unknown>): CodingHandoffReceipt {
   const payload = String(row['payload']);
@@ -122,7 +123,7 @@ function parseReceipt(row: Record<string, unknown>): CodingHandoffReceipt {
   const receipt = JSON.parse(payload) as CodingHandoffReceipt;
   const { id, taskId, branch, ...terms } = receipt;
   const expected = makeReceipt(terms);
-  if (receipt.version !== 1 || row['id'] !== id || id !== expected.id || taskId !== expected.taskId || branch !== expected.branch || !SHA.test(receipt.base) || !SHA.test(receipt.candidate)) throw Error('The coding handoff receipt identity could not be verified.');
+  if (receipt.version !== 1 || row['id'] !== id || id !== expected.id || taskId !== expected.taskId || !BRANCH_PREFIXES.some(prefix => branch === `${prefix}${taskId}`) || !SHA.test(receipt.base) || !SHA.test(receipt.candidate)) throw Error('The coding handoff receipt identity could not be verified.');
   return receipt;
 }
 function sealPayload(receipt: CodingHandoffReceipt, scopeDigest: string): string {

@@ -15,6 +15,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { addToolTo, projectToolsOf, readToolSecrets, setToolSecrets, testToolOf, type ToolSpec } from "./project-tools.js";
 import type { Store } from "./store.js";
+import { envValue } from "./names.js";
 
 /** Services verified to connect this way (their servers speak streamable HTTP and register clients on the spot). */
 export const ONE_CLICK: readonly { id: string; label: string; url: string; about: string }[] = [
@@ -39,11 +40,11 @@ const loopback = (value: string) => { try { const url = new URL(value); return u
 /**
  * The list, with one service standing in on this computer when the person
  * running Toolroll says so ("stripe|Stripe|http://127.0.0.1:5123/mcp"
- * in STANDING_ORDERS_TEST_CONNECT): how the end-to-end check signs in for
+ * in TOOLROLL_TEST_CONNECT): how the end-to-end check signs in for
  * real without a real account. Only a loopback address is taken.
  */
 export function oneClickServices(environment: NodeJS.ProcessEnv = process.env): typeof ONE_CLICK {
-  const [id = "", label = "", url = ""] = (environment["STANDING_ORDERS_TEST_CONNECT"] ?? "").split("|");
+  const [id = "", label = "", url = ""] = (envValue(environment, "TEST_CONNECT") ?? "").split("|");
   if (!/^[a-z0-9-]{1,40}$/.test(id) || label === "" || !loopback(url)) return ONE_CLICK;
   const standIn = { id, label, url, about: ONE_CLICK.find(one => one.id === id)?.about ?? "A service on this computer." };
   return ONE_CLICK.some(one => one.id === id) ? ONE_CLICK.map(one => one.id === id ? standIn : one) : [...ONE_CLICK, standIn];
@@ -91,7 +92,7 @@ export async function discoverSignIn(mcpUrl: string, fetcher: Fetch = fetch): Pr
   let pointer: string | null = null;
   try {
     const probe = await fetcher(mcpUrl, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "standing-orders", version: "1" } } }), signal: AbortSignal.timeout(10_000) });
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "toolroll", version: "1" } } }), signal: AbortSignal.timeout(10_000) });
     pointer = /resource_metadata="([^"]+)"/.exec(probe.headers.get("www-authenticate") ?? "")?.[1] ?? null;
     await probe.body?.cancel();
   } catch { pointer = null; }

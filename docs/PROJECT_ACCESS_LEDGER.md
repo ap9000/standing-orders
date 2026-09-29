@@ -17,11 +17,11 @@ Open **Workflows → Action ledger**. Filter by project, person/worker, event ca
 CLI examples (use the existing credential input mechanism):
 
 ```sh
-standing-orders people invite --role viewer --repo /path/to/project --as owner
-standing-orders people projects casey --repo /path/to/project --as owner
-standing-orders people projects casey --no-projects --as owner
-standing-orders people projects casey --all-projects --as owner
-standing-orders people list
+toolroll people invite --role viewer --repo /path/to/project --as owner
+toolroll people projects casey --repo /path/to/project --as owner
+toolroll people projects casey --no-projects --as owner
+toolroll people projects casey --all-projects --as owner
+toolroll people list
 ```
 
 The People screen supports multiple projects at once. The CLI's `--repo` is one project; changing access replaces the selection rather than adding an implicit grant.

@@ -15,11 +15,12 @@ import { loadSlackCredentials } from "./slack-api.js";
 import { readFileSync, writeFileSync, chmodSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { Notification, Store } from "./store.js";
+import { envValue } from "./names.js";
 
-export const SLACK_ENV = "STANDING_ORDERS_SLACK_WEBHOOK";
-export const DISCORD_ENV = "STANDING_ORDERS_DISCORD_WEBHOOK";
-export const CONSOLE_URL_ENV = "STANDING_ORDERS_CONSOLE_URL";
-export const PRIMARY_ENV = "STANDING_ORDERS_MESSAGING_PRIMARY";
+export const SLACK_ENV = "TOOLROLL_SLACK_WEBHOOK";
+export const DISCORD_ENV = "TOOLROLL_DISCORD_WEBHOOK";
+export const CONSOLE_URL_ENV = "TOOLROLL_CONSOLE_URL";
+export const PRIMARY_ENV = "TOOLROLL_MESSAGING_PRIMARY";
 
 export type WebhookKind = "slack" | "discord";
 
@@ -104,8 +105,8 @@ function readTrimmed(path: string): string | null {
 /** Every configured mirror. Environment wins over files, like the bot token. */
 export function loadWebhookTargets(env: Record<string, string | undefined>, dir: string): WebhookTarget[] {
   const targets: WebhookTarget[] = [];
-  const slack = env[SLACK_ENV] ?? readTrimmed(join(dir, FILE_OF.slack));
-  const discord = env[DISCORD_ENV] ?? readTrimmed(join(dir, FILE_OF.discord));
+  const slack = envValue(env, "SLACK_WEBHOOK") ?? readTrimmed(join(dir, FILE_OF.slack));
+  const discord = envValue(env, "DISCORD_WEBHOOK") ?? readTrimmed(join(dir, FILE_OF.discord));
   if (slack !== null && slack !== undefined && slack !== "") targets.push({ kind: "slack", url: slack });
   if (discord !== null && discord !== undefined && discord !== "") targets.push({ kind: "discord", url: discord });
   return targets;
@@ -117,7 +118,7 @@ export function savePrimary(dir: string, channel: MessagingChannel): void {
 }
 
 export function loadPrimary(env: Record<string, string | undefined>, dir: string): MessagingChannel | null {
-  const configured = env[PRIMARY_ENV] ?? readTrimmed(join(dir, PRIMARY_FILE));
+  const configured = envValue(env, "MESSAGING_PRIMARY") ?? readTrimmed(join(dir, PRIMARY_FILE));
   return configured !== undefined && configured !== null && isMessagingChannel(configured) ? configured : null;
 }
 
@@ -152,7 +153,7 @@ export function effectivePrimary(
 }
 
 export function loadConsoleUrl(env: Record<string, string | undefined>, dir: string): string | null {
-  const configured = env[CONSOLE_URL_ENV] ?? readTrimmed(join(dir, CONSOLE_FILE));
+  const configured = envValue(env, "CONSOLE_URL") ?? readTrimmed(join(dir, CONSOLE_FILE));
   return configured === undefined || configured === null || configured === "" ? null : configured.replace(/\/+$/, "");
 }
 

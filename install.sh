@@ -17,7 +17,7 @@ stop() { printf '\nToolroll: %s\n' "$*" >&2; exit 1; }
 
 case "$(uname -s)" in
   Darwin|Linux) ;;
-  *) stop "this installer is for macOS and Linux. On Windows, use WSL, or run: npx standing-orders up" ;;
+  *) stop "this installer is for macOS and Linux. On Windows, use WSL, or run: npx toolroll up" ;;
 esac
 
 if ! command -v node >/dev/null 2>&1; then
@@ -38,9 +38,14 @@ for one in claude codex gemini; do
   if command -v "$one" >/dev/null 2>&1; then agents="$agents $one"; fi
 done
 
-package="${SO_PACKAGE:-standing-orders@${SO_VERSION:-latest}}"
+package="${SO_PACKAGE:-toolroll@${SO_VERSION:-latest}}"
 say "Installing $package …"
-if ! npm install -g "$package" --no-fund --no-audit --loglevel=error; then
+# The toolroll package also provides the `standing-orders` command, which npm
+# won't link over the older standing-orders package's copy without --force.
+# The old package's files stay, so a service installed from them keeps running.
+force=""
+if npm ls -g standing-orders --depth=0 >/dev/null 2>&1; then force="--force"; fi
+if ! npm install -g "$package" $force --no-fund --no-audit --loglevel=error; then
   stop "npm couldn't install it. If it said permission denied, give npm a folder you own: https://docs.npmjs.com/resolving-eacces-permissions-errors-when-installing-packages-globally"
 fi
 # Releases before the rename only have the older `standing-orders` name.

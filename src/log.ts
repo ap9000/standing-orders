@@ -1,12 +1,13 @@
 /**
  * One line per event on stderr (v99), where the service manager keeps the
  * log. Plain by default ("2026-09-27T17:00:00.000Z error serve.error path=/x
- * error=…"); with STANDING_ORDERS_LOG_FORMAT=json, one JSON object per line
+ * error=…"); with TOOLROLL_LOG_FORMAT=json, one JSON object per line
  * for a log shipper. Fields are facts about the event, never a request body,
  * a password or a token; values are cut to 500 characters and key-shaped text
  * is blanked.
  */
 import { scanForSecrets } from "./evidence.js";
+import { envValue } from "./names.js";
 
 export type LogLevel = "info" | "warn" | "error";
 export type LogFields = Record<string, string | number | boolean | null | undefined>;
@@ -24,6 +25,6 @@ export function formatLogLine(level: LogLevel, event: string, fields: LogFields,
 }
 
 export function logEvent(level: LogLevel, event: string, fields: LogFields = {}, options: { now?: Date; write?: (line: string) => void } = {}): void {
-  const line = formatLogLine(level, event, fields, options.now ?? new Date(), process.env["STANDING_ORDERS_LOG_FORMAT"] === "json");
+  const line = formatLogLine(level, event, fields, options.now ?? new Date(), envValue(process.env, "LOG_FORMAT") === "json");
   (options.write ?? (text => process.stderr.write(text)))(`${line}\n`);
 }

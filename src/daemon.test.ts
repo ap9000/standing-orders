@@ -18,7 +18,9 @@ import {
   definitionDigest,
   installDaemon,
   installLaunchdService,
+  installedLegacyDaemon,
   labelFor,
+  legacyLabelFor,
   planDaemon,
   planDesktopService,
   runtimeProblems,
@@ -78,7 +80,7 @@ describe("the daemon plan", () => {
   };
 
   test("labels are one per repo, and never collide on punctuation", () => {
-    expect(labelFor("/Users/alex/code/thing")).toBe("com.standing-orders.watch.users-alex-code-thing");
+    expect(labelFor("/Users/alex/code/thing")).toBe("com.toolroll.watch.users-alex-code-thing");
     expect(labelFor("/Users/alex/code thing!")).not.toContain(" ");
     expect(labelFor("/a")).not.toBe(labelFor("/b"));
   });
@@ -329,6 +331,35 @@ describe("the daemon plan", () => {
     expect(() => statSync(made.unitPath)).toThrow();
     // The token file survives — it is the database's neighbor, not the unit's.
     expectPrivateMode(made.tokenFile);
+  });
+
+  test("a watch installed under the label from before the rename is found, stopped and uninstalled", async () => {
+    const args = { platform: "darwin" as const, bin: process.execPath, binArgs: [], runner: "builder-1", repo: "/Users/alex/code/thing", configDir: dir, watchFlags: [], home: dir, pathEnv: "/usr/bin" };
+    expect(labelFor(args.repo)).toBe("com.toolroll.watch.users-alex-code-thing");
+    expect(installedLegacyDaemon(args)).toBeNull();
+    // What an install before the rename left on disk.
+    const old = planDaemon({ ...args, label: legacyLabelFor(args.repo) });
+    if ("error" in old) throw new Error(old.error);
+    const setup = scripted({ "launchctl print": { code: 113 }, launchctl: { code: 0 } });
+    await installDaemon(old, "t", setup.run);
+
+    const found = installedLegacyDaemon(args);
+    expect(found).toMatchObject({ label: "com.standing-orders.watch.users-alex-code-thing", unitPath: old.unitPath });
+    const script = scripted({ "launchctl print": { code: 113 }, launchctl: { code: 0 } });
+    expect(await uninstallDaemon(found!, script.run)).toMatchObject({ ok: true, existed: true });
+    expect(script.calls.map(call => call.args.slice(0, 2).join(" "))).toEqual([`disable gui/${uid}/${old.label}`, `bootout gui/${uid}/${old.label}`, `print gui/${uid}/${old.label}`]);
+    expect(installedLegacyDaemon(args)).toBeNull();
+  });
+
+  test("a loaded job reporting the service digest under either name is the current generation", async () => {
+    const made = plan("darwin");
+    const digest = /<key>TOOLROLL_SERVICE_DIGEST<\/key>\s*<string>([a-f0-9]{64})/.exec(made.unitContent)?.[1];
+    expect(digest).toMatch(/^[a-f0-9]{64}$/);
+    expect(made.unitContent).toContain(`<key>STANDING_ORDERS_SERVICE_DIGEST</key>\n    <string>${digest}</string>`);
+    for (const name of ["TOOLROLL", "STANDING_ORDERS"]) {
+      const loaded = scripted({ "launchctl print gui": { code: 0, stdout: `state = running\n\tpid = 7\n${name}_SERVICE_DIGEST => ${digest}\n` } });
+      expect(await daemonStatus(made, loaded.run)).toMatchObject({ state: "running", stale: false });
+    }
   });
 
   test("the desktop service shares the launchd contract: same generator, KeepAlive=true, private log, pinned runtime", () => {

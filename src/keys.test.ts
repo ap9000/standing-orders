@@ -164,12 +164,12 @@ describe("auth mode: subscription first, key as fallback", () => {
     expect(readAuthModeStrict("gemini", home)).toEqual({ ok: true, mode: "api-key" });
     expect(setAuthMode("claude", "api-key", home)).toEqual({ ok: true });
     expect(readAuthModeStrict("claude", home)).toEqual({ ok: true, mode: "api-key" });
-    writeFileSync(join(home, ".standing-orders", "keys", "claude.auth"), "bogus\n");
+    writeFileSync(join(home, ".toolroll", "keys", "claude.auth"), "bogus\n");
     // The lenient reader coerces; the strict one refuses in words.
     expect(readAuthMode("claude", home)).toBe("subscription");
     expect(readAuthModeStrict("claude", home)).toMatchObject({ ok: false, problem: expect.stringContaining('says "bogus", not subscription or api-key') });
     // A provider with no subscription login is the key whatever the file says.
-    writeFileSync(join(home, ".standing-orders", "keys", "openrouter.auth"), "subscription");
+    writeFileSync(join(home, ".toolroll", "keys", "openrouter.auth"), "subscription");
     expect(readAuthModeStrict("openrouter", home)).toEqual({ ok: true, mode: "api-key" });
   });
 

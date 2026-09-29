@@ -542,13 +542,13 @@ describe("tick, against real git", () => {
       ok: true,
       command: "tick",
       considered: 1,
-      dispatched: [{ id: "t-1", outcome: "built", committed: true, branch: "standing-orders/t-1" }],
+      dispatched: [{ id: "t-1", outcome: "built", committed: true, branch: "toolroll/t-1" }],
     });
     expect(code).toBe(EXIT.ok);
     expect(agentRan).toHaveLength(1);
 
     // The commit is real, on the task's branch, containing the agent's work…
-    const shown = await git(["show", "--stat", "--oneline", "standing-orders/t-1"]);
+    const shown = await git(["show", "--stat", "--oneline", "toolroll/t-1"]);
     expect(shown.code).toBe(0);
     expect(shown.stdout).toContain("guard.ts");
     // …and main never moved.
@@ -564,7 +564,7 @@ describe("tick, against real git", () => {
     expect(payload().runs[0]).toMatchObject({
       outcome: "built",
       committed: true,
-      branch: "standing-orders/t-1",
+      branch: "toolroll/t-1",
       runner: "builder-1",
     });
     expect(payload().runs[0].finishedAt).not.toBeNull();
@@ -712,10 +712,10 @@ describe("tick, against real git", () => {
     // The intent was written with the completion — the exact accepted SHA.
     await run(["publish", "status", "--repo", repo, "--json"]);
     expect(payload().pending).toHaveLength(1);
-    const head = await git(["rev-parse", "standing-orders/t-1"]);
+    const head = await git(["rev-parse", "toolroll/t-1"]);
     expect(payload().pending[0]).toMatchObject({
       state: "intended",
-      head: "standing-orders/t-1",
+      head: "toolroll/t-1",
       headSha: head.stdout.trim(),
       githubRepo: "alex/thing",
     });
@@ -740,7 +740,7 @@ describe("tick, against real git", () => {
     expect(payload().report).toMatchObject({ pushed: 1, opened: 1 });
     expect(calls[0]).toMatchObject({
       file: "git",
-      args: ["push", "origin", `${head.stdout.trim()}:refs/heads/standing-orders/t-1`],
+      args: ["push", "origin", `${head.stdout.trim()}:refs/heads/toolroll/t-1`],
     });
     await run(["publish", "status", "--repo", repo, "--json"]);
     expect(payload().pending).toHaveLength(0);
@@ -1100,7 +1100,7 @@ describe("fill one gap, three tasks start — the M2 sentence, executable", () =
 
     // Three real branches, three real commits, and main never moved.
     for (const id of ["t-1", "t-2", "t-3"]) {
-      const shown = await git(["show", "--stat", "--oneline", `standing-orders/${id}`]);
+      const shown = await git(["show", "--stat", "--oneline", `toolroll/${id}`]);
       expect(shown.code).toBe(0);
       expect(shown.stdout).toContain("guard.ts");
     }
@@ -1577,7 +1577,7 @@ describe("the park, end to end — a judgement call survives the night", () => {
     // main never moved, and no commit landed on the task branch.
     const main = await git(["log", "--oneline", "main"]);
     expect(main.stdout.trim().split("\n")).toHaveLength(1);
-    const branch = await git(["log", "--oneline", "standing-orders/t-1"]);
+    const branch = await git(["log", "--oneline", "toolroll/t-1"]);
     expect(branch.stdout.trim().split("\n")).toHaveLength(1);
   });
 

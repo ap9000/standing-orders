@@ -222,7 +222,7 @@ describe("the database path", () => {
 
   test("an empty isolation path falls back to the normal operator database", () => {
     expect(databasePath({ STANDING_ORDERS_DB: "", XDG_CONFIG_HOME: "/operator/config" }, "/operator/home")).toBe(
-      "/operator/config/standing-orders/orders.db",
+      "/operator/config/toolroll/orders.db",
     );
   });
 });

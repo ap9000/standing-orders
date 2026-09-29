@@ -50,11 +50,15 @@ const flag = (name, fallback = undefined) => { const at = args.indexOf(`--${name
 const has = name => args.includes(`--${name}`);
 const runId = Number(flag("run"));
 const phaseWanted = flag("phase", "all");
-const stateDir = flag("state", join(homedir(), ".config", "standing-orders"));
+// New names first; an install made under the older name keeps being found (nothing is moved).
+const named = (paths) => paths.find(one => existsSync(one)) ?? paths[0];
+const stateDir = flag("state", named(["toolroll", "standing-orders"].map(name => join(homedir(), ".config", name))));
 const database = flag("db", join(stateDir, "orders.db"));
-const label = flag("label", "com.standing-orders.browser");
+const label = flag("label", basename(named(["com.toolroll.browser", "com.standing-orders.browser"].map(one => join(homedir(), "Library", "LaunchAgents", `${one}.plist`))), ".plist"));
 const plist = flag("plist", join(homedir(), "Library", "LaunchAgents", `${label}.plist`));
 const source = resolve(flag("source", dirname(dirname(fileURLToPath(import.meta.url)))));
+// The staged runtime installs the candidate under its own package name (toolroll; standing-orders before the rename).
+const packageName = JSON.parse(readFileSync(join(source, "package.json"), "utf8")).name;
 const uid = userInfo().uid;
 const sha = bytes => createHash("sha256").update(bytes).digest("hex");
 const quote = s => '"' + s.replaceAll('"', '""') + '"';
@@ -75,7 +79,7 @@ const candidateHead = execFileSync("git", ["-C", source, "rev-parse", "HEAD"], {
 const short = candidateHead.slice(0, 7);
 const stageDir = flag("stage") ?? join(stateDir, "staged-upgrades", `browser-${short}-${randomUUID().slice(0, 6)}`);
 const journalFile = join(stageDir, "deployment.json");
-const nextDist = join(stageDir, "runtime", "node_modules", "standing-orders", "dist");
+const nextDist = join(stageDir, "runtime", "node_modules", packageName, "dist");
 const evidenceRoot = join(dirname(database), "evidence");
 const readJournal = () => JSON.parse(readFileSync(journalFile, "utf8"));
 const save = (r, phase) => { r.phase = phase; r.updatedAt = new Date().toISOString(); oldRt.update.durableJson(journalFile, r); say(`• ${phase}`); };
@@ -153,12 +157,12 @@ function stage() {
   // the worktree's mutable node_modules.
   const packed = execFileSync("npm", ["pack", "--silent", "--pack-destination", stageDir], { cwd: source, encoding: "utf8" }).trim().split("\n").pop();
   const runtime = join(stageDir, "runtime");
-  const self = join(runtime, "node_modules", "standing-orders");
+  const self = join(runtime, "node_modules", packageName);
   mkdirSync(self, { recursive: true });
   execFileSync("tar", ["-xzf", join(stageDir, packed), "--strip-components=1", "-C", self]);
   // npm pack normalises package.json; the runtime carries the checkout's exact bytes.
   copyFileSync(join(source, "package.json"), join(self, "package.json"));
-  writeFileSync(join(runtime, "package.json"), JSON.stringify({ name: "standing-orders-installed", private: true, candidate: candidateHead, dependencies: { "standing-orders": `file:../${packed}` } }, null, 2));
+  writeFileSync(join(runtime, "package.json"), JSON.stringify({ name: `${packageName}-installed`, private: true, candidate: candidateHead, dependencies: { [packageName]: `file:../${packed}` } }, null, 2));
   const built = cleanBuildOf(candidateHead);
   for (const dep of built.dependencies) cpSync(join(built.scratch, dep), join(runtime, dep), { recursive: true, dereference: true, errorOnExist: false });
   const proof = proveStaged();
@@ -231,7 +235,7 @@ function stagedPackages(dir, prefix) {
  * later phase (once per process). */
 function proveStaged() {
   requireTrue(existsSync(nextDist), `No staged runtime at ${nextDist}.`);
-  const runtime = join(stageDir, "runtime"), self = join(runtime, "node_modules", "standing-orders");
+  const runtime = join(stageDir, "runtime"), self = join(runtime, "node_modules", packageName);
   requireTrue(JSON.parse(readFileSync(join(runtime, "package.json"), "utf8")).candidate === candidateHead, "The staged runtime was built for a different candidate.");
   const built = cleanBuildOf(candidateHead);
   requireTrue(JSON.stringify(built.files) === JSON.stringify(list(nextDist)), "Staged dist inventory differs from a clean build of the candidate commit.");
@@ -240,7 +244,7 @@ function proveStaged() {
     const blob = spawnSync("git", ["-C", source, "show", `${candidateHead}:${f}`], { maxBuffer: 64 * 1024 * 1024 });
     requireTrue(blob.status === 0 && blob.stdout.equals(readFileSync(join(self, f))), `Packed file differs from the candidate commit: ${f}`);
   }
-  const staged = stagedPackages(join(runtime, "node_modules"), "node_modules").filter(dep => dep !== "node_modules/standing-orders").sort();
+  const staged = stagedPackages(join(runtime, "node_modules"), "node_modules").filter(dep => dep !== `node_modules/${packageName}`).sort();
   requireTrue(JSON.stringify(staged) === JSON.stringify(built.dependencies), `Staged dependency inventory differs from the lockfile install: ${JSON.stringify({ staged: staged.length, lockfile: built.dependencies.length })}`);
   for (const dep of staged) {
     const clean = join(built.scratch, dep), installed = join(runtime, dep), depFiles = list(clean);
@@ -466,7 +470,7 @@ async function finish() {
 
 /** Keep storage in check: once a deploy is healthy, older staged releases go (with the database backups they
  * hold). Kept: the one it installed, the one it replaced (the deployment record's, the way back), the three
- * newest, and any a launchd service or a `standing-orders` command (on PATH or under any nvm version) runs from.
+ * newest, and any a launchd service or a `toolroll` (or older `standing-orders`) command (on PATH or under any nvm version) runs from.
  * A stage whose deploy didn't finish (no record, or one that isn't "deployed") goes once it's a week old. Only
  * this script's own `browser-*` stages are touched. */
 function pruneStaged(keep) {
@@ -483,12 +487,12 @@ function pruneStaged(keep) {
   const inUse = [...keep];
   const agents = join(homedir(), "Library", "LaunchAgents");
   try {
-    for (const name of readdirSync(agents).filter(one => one.startsWith("com.standing-orders."))) {
+    for (const name of readdirSync(agents).filter(one => one.startsWith("com.toolroll.") || one.startsWith("com.standing-orders."))) {
       for (const match of readFileSync(join(agents, name), "utf8").matchAll(/<string>([^<]*staged-upgrades[^<]*)<\/string>/g)) inUse.push(match[1], real(match[1]));
     }
   } catch { /* no launch agents here */ }
-  const commands = (process.env.PATH ?? "").split(":").filter(Boolean).map(dir => join(dir, "standing-orders"));
-  try { for (const version of readdirSync(join(homedir(), ".nvm", "versions", "node"))) commands.push(join(homedir(), ".nvm", "versions", "node", version, "bin", "standing-orders")); } catch { /* no nvm */ }
+  const commands = (process.env.PATH ?? "").split(":").filter(Boolean).flatMap(dir => ["toolroll", "standing-orders"].map(bin => join(dir, bin)));
+  try { for (const version of readdirSync(join(homedir(), ".nvm", "versions", "node"))) for (const bin of ["toolroll", "standing-orders"]) commands.push(join(homedir(), ".nvm", "versions", "node", version, "bin", bin)); } catch { /* no nvm */ }
   for (const command of commands) if (existsSync(command)) inUse.push(real(command));
   const kept = new Set(inUse.flatMap(path => [stageOf(path), stageOf(real(path ?? "/"))]).filter(Boolean));
   let stages = [];

@@ -3,9 +3,9 @@
 The lead and task crews can read a bounded selection of repository source alongside saved project knowledge. The database still owns goals, instructions, decisions and task status. The repository map is a disposable aid to finding code; it grants no authority, completes no work and does not change the required verification command.
 
 ```sh
-standing-orders knowledge search "save session" --repo /absolute/project --json
-standing-orders knowledge refresh --repo /absolute/project --json
-standing-orders knowledge impact src/session.ts --repo /absolute/project --json
+toolroll knowledge search "save session" --repo /absolute/project --json
+toolroll knowledge refresh --repo /absolute/project --json
+toolroll knowledge impact src/session.ts --repo /absolute/project --json
 ```
 
 Search works before indexing. Refresh explicitly builds a local TypeScript/JavaScript symbol and import map. Impact follows reverse imports for up to two steps and returns source locations. Results explain whether they came from the map or ordinary source search. An ambiguous symbol requires an exact file path; it does not invent an impact path.

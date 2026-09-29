@@ -19,6 +19,7 @@ import { superviseController } from "./controller-supervisor.js";
 import { normalizeRunnerName, validRunnerName } from "./runner.js";
 import { checkDesktopProjects, currentDesktopAccess, type DesktopAccessReport } from "./desktop-access.js";
 import { updateAdmissionPaused, updateGateOwned, UPDATE_PAUSED } from "./desktop-update-gate.js";
+import { envTwins, envValue } from "./names.js";
 
 export type DesktopConfig = { version: 1; databaseFile: string; repos: string[]; port: number; identity: string; runnerName?: string; containment?: ContainmentPolicy; databaseInitialized?: boolean };
 export function readDesktopConfig(stateDir: string): DesktopConfig {
@@ -158,7 +159,7 @@ export function desktopServiceDefinition(stateDir: string, args: { node: string;
     label: args.label,
     associatedBundleId: args.bundleId ?? "com.standing-orders.desktop",
     home,
-    environment: { STANDING_ORDERS_CONTAINMENT: args.containment ?? "observed", ...(args.buildId ? { STANDING_ORDERS_DESKTOP_BUILD: args.buildId } : {}) },
+    environment: { ...envTwins("CONTAINMENT", args.containment ?? "observed"), ...(args.buildId ? envTwins("DESKTOP_BUILD", args.buildId) : {}) },
     pathEnv: [runtimeDir, ...(args.providerBin ? [args.providerBin] : []), join(home, ".local", "bin"), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"].join(":"),
   });
 }
@@ -188,7 +189,7 @@ export async function desktopServiceCommand(verb: string, stateDir: string, conf
     if (value === undefined || value.startsWith("--")) throw new Error(`${verb} needs --${name}.`);
     return value;
   };
-  const parsed = parseContainmentPolicy(config.containment ?? process.env["STANDING_ORDERS_CONTAINMENT"]);
+  const parsed = parseContainmentPolicy(config.containment ?? envValue(process.env, "CONTAINMENT"));
   if (!parsed.ok) throw new Error(parsed.problem);
   const providerAt = argv.indexOf("--provider-bin");
   const bundleAt = argv.indexOf("--bundle-id");
@@ -290,7 +291,7 @@ export async function desktopMain(argv: string[], supervise: SupervisorRunner = 
         onState: state => {
           const path = join(stateDir, "controller-supervisor.json");
           const temp = `${path}.${process.pid}.tmp`;
-          writeFileSync(temp, JSON.stringify({ version: 1, supervisorPid: process.pid, buildId: process.env["STANDING_ORDERS_DESKTOP_BUILD"] ?? null, updatedAt: new Date().toISOString(), ...state }), { mode: 0o600 });
+          writeFileSync(temp, JSON.stringify({ version: 1, supervisorPid: process.pid, buildId: envValue(process.env, "DESKTOP_BUILD") ?? null, updatedAt: new Date().toISOString(), ...state }), { mode: 0o600 });
           renameSync(temp, path);
           if (state.phase === "backoff") console.error(`Controller exited (${state.exit?.signal ?? state.exit?.code ?? "unknown"}); restart in ${state.retryMs} ms.`);
         },
@@ -347,7 +348,7 @@ export async function desktopMain(argv: string[], supervise: SupervisorRunner = 
       const latest = readDesktopConfig(stateDir);
       if (latest.runnerName === undefined) latest.runnerName = normalizeRunnerName(hostname());
       if (latest.containment === undefined) {
-        const parsed = parseContainmentPolicy(process.env["STANDING_ORDERS_CONTAINMENT"]);
+        const parsed = parseContainmentPolicy(envValue(process.env, "CONTAINMENT"));
         if (!parsed.ok) throw new Error(parsed.problem);
         latest.containment = parsed.policy;
       }

@@ -27,7 +27,7 @@ import type { Store } from "./store.js";
 import type { RunOptions } from "./exec.js";
 import { witnessedRunner, recordProcessObservationFailure, preserveObservedProcesses } from "./process-custody.js";
 import { underStopWatch } from "./task-control.js";
-import { CHILD_DATABASE_ENV as AGENT_DATABASE_ENV, isolatedChildDatabase, removeChildDatabase as removeAgentDatabase } from "./child-database.js";
+import { childDatabaseEnv, isolatedChildDatabase, removeChildDatabase as removeAgentDatabase } from "./child-database.js";
 import { noToolsArgs, prepareRunTools, type ToolLaunchArgs } from "./project-tools.js";
 import { realpathSync } from "node:fs";
 import { agentFence, claudeFenceSettings, linuxFenceAvailable, macosFenceAvailable, type FenceMethod } from "./agent-fence.js";
@@ -439,7 +439,7 @@ export async function invokeAgent(
         ...(managedKey === null ? {} : { [PROVIDER_KEY_ENV[spec.provider]]: managedKey }),
         // This key is deliberately last: no caller may point an agent back at
         // the live control database through a generic RunOptions override.
-        [AGENT_DATABASE_ENV]: isolatedDb.file,
+        ...childDatabaseEnv(isolatedDb.file),
       },
       omitEnv: [
         ...(runOptions.omitEnv ?? []),
@@ -784,7 +784,7 @@ export async function invokeHeldAgent(
         ...(runOptions.env ?? {}),
         ...heldTools.env,
         ...(heldKey === null ? {} : { [PROVIDER_KEY_ENV.claude]: heldKey }),
-        [AGENT_DATABASE_ENV]: isolatedDb.file,
+        ...childDatabaseEnv(isolatedDb.file),
       },
       omitEnv: [
         ...(runOptions.omitEnv ?? []),
@@ -848,7 +848,7 @@ export async function invokeHeldAgent(
   return started;
 }
 
-/** The paths this run's agent may not reach: the state folder around the live database (but not its own worktree) and ~/.standing-orders. */
+/** The paths this run's agent may not reach: the state folder around the live database (but not its own worktree) and ~/.toolroll (or its older name). */
 function runFence(store: Store, runId: number, keyHome: string | undefined): string[] {
   try {
     // A plane always has a database file; an in-memory store (a test) has nothing to fence.

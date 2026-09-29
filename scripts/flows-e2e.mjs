@@ -133,7 +133,7 @@ const children = [];
 process.on("exit", () => { for (const child of children) child.kill("SIGTERM"); });
 process.on("SIGINT", () => process.exit(130));
 function start(name, argv) {
-  const child = spawn(process.execPath, [BIN, ...argv, "--db", db], { env: { ...process.env, NODE_OPTIONS: "", STANDING_ORDERS_MATE_TRACE: "1" }, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(process.execPath, [BIN, ...argv, "--db", db], { env: { ...process.env, NODE_OPTIONS: "", TOOLROLL_MATE_TRACE: "1", STANDING_ORDERS_MATE_TRACE: "1" }, stdio: ["ignore", "pipe", "pipe"] });
   child.stdout.pipe(logs[name]); child.stderr.pipe(logs[name]);
   children.push(child);
   return child;

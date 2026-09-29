@@ -88,6 +88,7 @@ import { configPath, addRepos, removeRepos, updateRepos, loadRepos, loadProjectR
 import { deleteProject, holdingsWords, projectHoldings, projectRunning } from "./project-delete.js";
 import { pushPass } from "./push.js";
 import { chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, openSync, readFileSync, readSync, realpathSync, unlinkSync, writeSync, writeFileSync, mkdirSync } from "node:fs";
+import { BRANCH_PREFIX, envTwins, envValue, existingOrFirst, namedPath, taskBranches } from "./names.js";
 import { createServer as createNetServer } from "node:net";
 import { spawn as spawnChild } from "node:child_process";
 import { envelopeJson } from "./envelope.js";
@@ -139,6 +140,7 @@ import {
   daemonLaunchCommand,
   daemonStatus,
   installDaemon,
+  installedLegacyDaemon,
   planDaemon,
   uninstallDaemon,
   type SupervisorRunner,
@@ -493,7 +495,7 @@ External trackers — build what a tracker nominates, under local approvals
                                         from (turn on per device, in the
                                         build page's review section).
                                         --containment observed|preferred|required
-                                        (or STANDING_ORDERS_CONTAINMENT)
+                                        (or TOOLROLL_CONTAINMENT)
                                         bounds every provider, setup and
                                         check process in a native OS object
                                         (delegated cgroup v2 on Linux, a
@@ -632,7 +634,7 @@ The outbox — facts that want a person, durably
   toolroll webhook status | test | clear slack|discord
   toolroll outbox list [--all]
   toolroll outbox deliver --cmd <c>  runs once per pending row, reading
-                                        $STANDING_ORDERS_KIND / _SUBJECT / _BODY;
+                                        $TOOLROLL_KIND / _SUBJECT / _BODY;
                                         exit 0 delivered receipts, 1 any fail
 
 Runners — the machines that may be given work
@@ -803,7 +805,7 @@ export async function runOperate(
   const json = flags.has("json");
 
   // Help answers BEFORE the database opens: asking what the commands are
-  // must not create ~/.config/standing-orders/orders.db as a side effect,
+  // must not create ~/.config/toolroll/orders.db as a side effect,
   // and `serve --help` must print help, never start a server (round-4
   // findings 2/7).
   if (flags.has("help")) {
@@ -822,7 +824,7 @@ export async function runOperate(
 
   // THE CONTAINMENT POLICY, pinned for this process before any database
   // opens (OS containment plan): `--containment observed|preferred|required`,
-  // else STANDING_ORDERS_CONTAINMENT, else observed. A word that is none of
+  // else TOOLROLL_CONTAINMENT (or STANDING_ORDERS_CONTAINMENT), else observed. A word that is none of
   // the three refuses here — nothing is assumed from a corrupt value, and a
   // pinned requirement is never weakened by a later flag.
   try {
@@ -956,7 +958,7 @@ type Context = {
  * The enrolled-project registry lives beside the database — the same rule
  * as evidence and the bot token — so an isolated installation (`--db` in a
  * sandbox, a test's temp dir) never enrolls into the person's real
- * ~/.config/standing-orders/repos.json (2026-09-03: `up` tests had left
+ * ~/.config/toolroll/repos.json (2026-09-03: `up` tests had left
  * 888 dead temp paths there).
  */
 function registryPathOf(context: { databaseFile: string }): string {
@@ -1845,7 +1847,7 @@ async function coordinatorCommand(
       "",
       `It expires in ${days ?? 90} days: mint a new one before then.`,
       "That token is shown once and is not stored — only a hash of it is.",
-      "Give it to the MCP server via a 0600 token file or STANDING_ORDERS_COORDINATOR.",
+      "Give it to the MCP server via a 0600 token file or TOOLROLL_COORDINATOR.",
     ]);
   }
 
@@ -1894,9 +1896,9 @@ async function mcpCommand(
   };
 
   const fromFile = text(flags, "token-file");
-  const fromEnv = process.env["STANDING_ORDERS_COORDINATOR"];
+  const fromEnv = envValue(process.env, "COORDINATOR");
   if (fromFile !== undefined && fromEnv !== undefined && fromEnv !== "") {
-    return said("both --token-file and STANDING_ORDERS_COORDINATOR are set — pick one");
+    return said("both --token-file and TOOLROLL_COORDINATOR are set — pick one");
   }
   let token: string;
   if (fromFile !== undefined) {
@@ -1923,7 +1925,7 @@ async function mcpCommand(
   } else if (fromEnv !== undefined && fromEnv !== "") {
     token = fromEnv.trim();
   } else {
-    return said("no credential — pass --token-file <path> (0600) or set STANDING_ORDERS_COORDINATOR");
+    return said("no credential — pass --token-file <path> (0600) or set TOOLROLL_COORDINATOR");
   }
 
   // WAL/SHM are recreated by ANY writer, this server included: nothing
@@ -3445,7 +3447,7 @@ async function tickCommand(
       // its own — never the builder's, so a later build starts from base
       // with nothing a planning session could have left as an ancestor
       // (Codex planning review, finding 1).
-      const planBranch = `standing-orders-plan/${id}`;
+      const planBranch = await existingOrFirst([`toolroll-plan/${id}`, `standing-orders-plan/${id}`], async one => (await git("git", ["rev-parse", "--verify", "--quiet", `refs/heads/${one}`], { cwd: repo })).code === 0);
       // A revision is planned on the work it revises: the verified head its build will start from.
       const revised = ref.revisionOf === null ? null : revisionSourceHead(store, context.evidenceRoot, ref.id, ref.revisionOf);
       if (revised !== null && !revised.ok) {
@@ -3625,7 +3627,7 @@ async function tickCommand(
       // One branch per ATTEMPT (v4 review, finding 3): a fresh checkout
       // from base every time, and the checkout discarded after — a parked
       // scout resumes against today's base, not the tree it parked on.
-      const scoutBranch = `standing-orders-scout/${id}/${randomBytes(4).toString("hex")}`;
+      const scoutBranch = `toolroll-scout/${id}/${randomBytes(4).toString("hex")}`;
       const scopeRow = store.getScope(id);
       // Approvals bind exact routing for a scout exactly as for a build:
       // the pinned profile is proved BEFORE the workspace is leased.
@@ -3764,11 +3766,11 @@ async function tickCommand(
       continue;
     }
 
-    const branch = `standing-orders/${id}`;
-
-    // A retry of this task reuses its branch; a first attempt creates it from
+    // A retry of this task reuses its branch (a standing-orders/<id> one from
+    // before the rename included); a first attempt creates toolroll/<id> from
     // base. Suffixing instead would scatter one logical attempt across
     // branches nobody asked for.
+    const branch = await existingOrFirst(taskBranches(id), async one => (await git("git", ["rev-parse", "--verify", "--quiet", `refs/heads/${one}`], { cwd: repo })).code === 0);
     const exists = await git(
       "git",
       ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`],
@@ -4200,7 +4202,7 @@ async function tickCommand(
       continue;
     }
     const lease = claimed.claim.leaseId;
-    const branch = `standing-orders/${pending.taskId}`;
+    const branch = await existingOrFirst(taskBranches(pending.taskId), async one => (await git("git", ["rev-parse", "--verify", "--quiet", `refs/heads/${one}`], { cwd: repo })).code === 0);
     const exists = await git("git", ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: repo });
     const leased = await worktrees.lease({
       repo,
@@ -7676,20 +7678,30 @@ async function daemonCommand(
       watchFlags,
     });
     if ("error" in plan) return fail(write, json, "daemon install", "unsupported", plan.error, EXIT.refused);
+    // A watch installed under the label from before the rename is replaced, never left running beside this one.
+    const legacy = installedLegacyDaemon({ platform: process.platform, bin: located.bin, binArgs: located.binArgs, runner: runnerName, repo, configDir, watchFlags });
 
     if (flags.has("dry-run")) {
       if (json) {
-        write(envelopeJson({ ok: true, command: "daemon install", dryRun: true, plan }));
+        write(envelopeJson({ ok: true, command: "daemon install", dryRun: true, plan, replaces: legacy?.label ?? null }));
         return EXIT.ok;
       }
       write(`Would write ${plan.unitPath}:`);
       write("");
       write(plan.unitContent);
       write(`Token (0600): ${plan.tokenFile} · logs: ${plan.logPath}`);
+      if (legacy !== null) write(`Would stop and remove ${legacy.label} (${legacy.unitPath}), the same watch under its older name.`);
       write("Nothing was written. Re-run without --dry-run to install.");
       return EXIT.ok;
     }
 
+    if (legacy !== null) {
+      try {
+        await uninstallDaemon(legacy, supervise);
+      } catch (error) {
+        return fail(write, json, "daemon install", "supervisor", `could not stop ${legacy.label}, the same watch under its older name: ${(error as Error).message}`, EXIT.failed);
+      }
+    }
     const installed = await installDaemon(plan, token, supervise);
     if (!installed.ok) {
       return fail(write, json, "daemon install", "supervisor", installed.message, EXIT.failed);
@@ -7726,8 +7738,9 @@ async function daemonCommand(
         EXIT.failed,
       );
     }
-    return succeed(write, json, "daemon install", { label: plan.label, unit: plan.unitPath, logs: plan.logPath, state: started.state, pid: started.pid, heartbeatAt: liveRunner.heartbeatAt, action: installed.action, changed: installed.changed, containment: containmentStatus(currentContainment()) }, () => [
+    return succeed(write, json, "daemon install", { label: plan.label, unit: plan.unitPath, logs: plan.logPath, state: started.state, pid: started.pid, heartbeatAt: liveRunner.heartbeatAt, action: installed.action, changed: installed.changed, replaced: legacy?.label ?? null, containment: containmentStatus(currentContainment()) }, () => [
       installed.action === "running" ? `${plan.label} was already running under this exact definition; left alone.` : installed.action === "reloaded" ? `Reloaded ${plan.label} under its changed definition.` : `Installed and started ${plan.label}.`,
+      ...(legacy === null ? [] : [`  replaced ${legacy.label} (stopped and removed)`]),
       `  verified ${started.detail}`,
       `  worker   ${runnerName} answered at ${liveRunner.heartbeatAt}`,
       `  unit    ${plan.unitPath}`,
@@ -7741,16 +7754,20 @@ async function daemonCommand(
   }
 
   // status / uninstall / logs share the computed plan; the bin is cosmetic there.
-  const plan = planDaemon({
+  const planArgs = {
     platform: process.platform,
-    bin: binFlag ?? "standing-orders",
+    bin: binFlag ?? "toolroll",
     binArgs: [],
     runner: text(flags, "runner") ?? "runner",
     repo,
     configDir,
     watchFlags: [],
-  });
-  if ("error" in plan) return fail(write, json, `daemon ${action}`, "unsupported", plan.error, EXIT.refused);
+  };
+  const current = planDaemon(planArgs);
+  if ("error" in current) return fail(write, json, `daemon ${action}`, "unsupported", current.error, EXIT.refused);
+  // Until it is reinstalled, a watch installed before the rename is found under its older label.
+  const legacy = installedLegacyDaemon(planArgs);
+  const plan = legacy !== null && !existsSync(current.unitPath) ? legacy : current;
 
   if (action === "status") {
     const state = await daemonStatus(plan, supervise);
@@ -7768,9 +7785,11 @@ async function daemonCommand(
   }
 
   if (action === "uninstall") {
-    const gone = await uninstallDaemon(plan, supervise);
-    return succeed(write, json, "daemon uninstall", { removed: gone.existed }, () => [
-      gone.existed ? `Stopped and removed ${plan.label}.` : `${plan.label} was not installed; nothing to remove.`,
+    const gone = await uninstallDaemon(current, supervise);
+    const legacyGone = legacy === null ? null : await uninstallDaemon(legacy, supervise);
+    return succeed(write, json, "daemon uninstall", { removed: gone.existed || legacyGone?.existed === true }, () => [
+      ...(gone.existed || legacyGone === null ? [gone.existed ? `Stopped and removed ${current.label}.` : `${current.label} was not installed; nothing to remove.`] : []),
+      ...(legacyGone === null ? [] : [`Stopped and removed ${legacy!.label}.`]),
     ]);
   }
 
@@ -8230,8 +8249,8 @@ async function watchCommand(
   // C-1): in --json mode every progress line goes to stderr, and stdout
   // receives exactly the final envelope.
   const progress = (line: string): void => {
-    // v99: with STANDING_ORDERS_LOG_FORMAT=json, each line is one JSON event on stderr for a log shipper.
-    if (process.env["STANDING_ORDERS_LOG_FORMAT"] === "json") return logEvent(/\b(fail|failed|died|stopped|error|red)\b/i.test(line) ? "warn" : "info", "worker", { message: line });
+    // v99: with TOOLROLL_LOG_FORMAT=json, each line is one JSON event on stderr for a log shipper.
+    if (envValue(process.env, "LOG_FORMAT") === "json") return logEvent(/\b(fail|failed|died|stopped|error|red)\b/i.test(line) ? "warn" : "info", "worker", { message: line });
     if (json) process.stderr.write(`${line}\n`);
     else write(line);
   };
@@ -8521,8 +8540,8 @@ async function upCommand(
   const allowFlag = text(flags, "allow-host");
 
   const progress = (line: string): void => {
-    // v99: with STANDING_ORDERS_LOG_FORMAT=json, each line is one JSON event on stderr for a log shipper.
-    if (process.env["STANDING_ORDERS_LOG_FORMAT"] === "json") return logEvent(/\b(fail|failed|died|stopped|error|red)\b/i.test(line) ? "warn" : "info", "worker", { message: line });
+    // v99: with TOOLROLL_LOG_FORMAT=json, each line is one JSON event on stderr for a log shipper.
+    if (envValue(process.env, "LOG_FORMAT") === "json") return logEvent(/\b(fail|failed|died|stopped|error|red)\b/i.test(line) ? "warn" : "info", "worker", { message: line });
     if (json) process.stderr.write(`${line}\n`);
     else write(line);
   };
@@ -8725,7 +8744,7 @@ async function upCommand(
   // 6b. The held-session coordinator (Phase 2): one per up process, shared
   // by the console and every watch loop through the context. Its socket
   // directory is deliberately SHORT and flat — sun_path is unforgiving.
-  const heldDir = join(homedir(), ".standing-orders", "held");
+  const heldDir = namedPath(homedir(), ["held"], { dot: true });
   try {
     mkdirSync(heldDir, { recursive: true, mode: 0o700 });
   } catch {
@@ -9299,7 +9318,7 @@ async function bridgeCommand(
  *
  *   publish                              one pass: push intents, open/adopt PRs
  *   publish grant --github <owner/name> [--base main] [--remote origin]
- *                 [--head-prefix standing-orders/] [--all-tasks] [--ready]
+ *                 [--head-prefix toolroll/] [--all-tasks] [--ready]
  *                 --as <you> --token <approver-token> [--yes]
  *   publish revoke --as <you> --token <approver-token>
  *   publish status
@@ -9338,7 +9357,7 @@ async function publishCommand(
       repo,
       githubRepo: github,
       remote: text(flags, "remote") ?? "origin",
-      headPrefix: text(flags, "head-prefix") ?? "standing-orders/",
+      headPrefix: text(flags, "head-prefix") ?? BRANCH_PREFIX,
       base: text(flags, "base") ?? "main",
       capabilities: ["push-branch", "open-pr"] as ("push-branch" | "open-pr")[],
       selector: (flags.has("all-tasks") ? "all" : "ours") as "all" | "ours",
@@ -9570,7 +9589,7 @@ async function publishCommand(
  * substituted into the command line, because subjects and bodies quote
  * things agents and repositories said and a shell must not meet those.
  *
- *   toolroll outbox deliver --cmd 'curl -d "$STANDING_ORDERS_SUBJECT" ntfy.sh/mine'
+ *   toolroll outbox deliver --cmd 'curl -d "$TOOLROLL_SUBJECT" ntfy.sh/mine'
  *
  * Exit 0 when everything pending delivered (or nothing was pending);
  * 1 when any delivery failed — a broken channel is breakage, not a "no".
@@ -9605,7 +9624,7 @@ async function peekCommand(
   if (flags.has("tmux")) {
     if (!interactive) return fail(write, json, "peek", "usage", "--tmux needs a terminal", EXIT.usage);
     const panes = snapshotLiveRuns(store, context.evidenceRoot, clock());
-    const opened = await openInTmux(panes, [process.execPath, process.argv[1] ?? "standing-orders", ...(text(flags, "db") === undefined ? [] : ["--db", text(flags, "db") as string])], async (file, args) => {
+    const opened = await openInTmux(panes, [process.execPath, process.argv[1] ?? "toolroll", ...(text(flags, "db") === undefined ? [] : ["--db", text(flags, "db") as string])], async (file, args) => {
       const answer = await execRun(file, args);
       return { code: answer.code, stderr: answer.stderr };
     });
@@ -9666,7 +9685,7 @@ async function outboxCommand(
     if (demoFence !== null) return demoFence;
     const command = text(flags, "cmd");
     if (command === undefined) {
-      return fail(write, json, "outbox deliver", "usage", "--cmd says how: it runs once per notification, reading $STANDING_ORDERS_KIND, $STANDING_ORDERS_SUBJECT, $STANDING_ORDERS_BODY", EXIT.usage);
+      return fail(write, json, "outbox deliver", "usage", "--cmd says how: it runs once per notification, reading $TOOLROLL_KIND, $TOOLROLL_SUBJECT, $TOOLROLL_BODY", EXIT.usage);
     }
 
     // Claimed, not merely listed: the Telegram bridge drains this same
@@ -9696,10 +9715,10 @@ async function outboxCommand(
       const sent = await run("sh", ["-lc", command], {
         timeoutMs: 30_000,
         env: {
-          STANDING_ORDERS_KIND: one.kind,
-          STANDING_ORDERS_SUBJECT: one.subject,
-          STANDING_ORDERS_BODY: one.body,
-          STANDING_ORDERS_DEDUPE_KEY: one.dedupeKey,
+          ...envTwins("KIND", one.kind),
+          ...envTwins("SUBJECT", one.subject),
+          ...envTwins("BODY", one.body),
+          ...envTwins("DEDUPE_KEY", one.dedupeKey),
         },
       });
       if (sent.code === 0) {
@@ -12141,7 +12160,7 @@ async function projectDeleteCommand(positional: readonly string[], flags: Map<st
   if (running.length > 0) return fail(context.write, context.json, command, "running", `Nothing was deleted: ${running.join(", ")}. Stop it, then try again.`, EXIT.refused);
   if (!flags.has("yes")) {
     return succeed(context.write, context.json, command, { repo, deleted: false, holdings }, () => [
-      `${repo}: Toolroll holds ${holdingsWords(holdings)} for it, and the checkouts and standing-orders/ branches it made.`,
+      `${repo}: Toolroll holds ${holdingsWords(holdings)} for it, and the checkouts and toolroll/ (or older standing-orders/) branches it made.`,
       "Deleting removes all of it; the repository and its own branches stay. There's no undo. Add --yes to delete.",
     ]);
   }

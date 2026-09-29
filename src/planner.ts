@@ -27,7 +27,7 @@ import { heartbeat as runnerHeartbeat } from "./runner.js";
 import { parseDecision, type ParsedDecision, type Problem } from "./decision.js";
 import { parsePlan, PLAN_LIMITS, type ParsedPlan, type PlanProblem } from "./plan.js";
 import { invokeAgent } from "./invoke.js";
-import { TOKEN_ENV as TELEGRAM_TOKEN_ENV } from "./telegram.js";
+import { TOKEN_ENVS as TELEGRAM_TOKEN_ENVS } from "./telegram.js";
 import {
   evidenceRoot,
   mailboxName,
@@ -59,7 +59,7 @@ import {
 } from "./planner-source.js";
 
 const GIT = "git";
-const AGENT_ENV_DENYLIST: readonly string[] = [TELEGRAM_TOKEN_ENV];
+const AGENT_ENV_DENYLIST: readonly string[] = [...TELEGRAM_TOKEN_ENVS];
 const DEFAULT_PLAN_TIMEOUT_MS = 20 * 60_000;
 const DEFAULT_PLAN_TURNS = CLAUDE_LIMITS.maxTurns;
 const DEFAULT_PULSE_MS = 60_000;

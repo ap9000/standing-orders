@@ -5,7 +5,7 @@
  * Two artifacts, both operator-invoked, previewed by default, and marked
  * as managed so nothing here ever overwrites a file it does not own:
  *
- *   - `.claude/skills/standing-orders/SKILL.md` — the Agent Skills entry
+ *   - `.claude/skills/toolroll/SKILL.md` — the Agent Skills entry
  *     (the cross-vendor layout Claude Code, Codex, Gemini CLI, and
  *     opencode all read). Router-style: the description says when to
  *     reach for the CLI; the body carries the operating contract and
@@ -19,14 +19,20 @@
  * touches nothing without --yes.
  */
 
-import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { guideNamed } from "./guides.js";
 
-export const SKILL_DIR = join(".claude", "skills", "standing-orders");
+export const SKILL_DIR = join(".claude", "skills", "toolroll");
+/** Where installs before the rename to Toolroll put the skill: still found, and replaced by the new one. */
+export const LEGACY_SKILL_DIR = join(".claude", "skills", "standing-orders");
 export const SKILL_FILE = "SKILL.md";
-export const MANAGED_MARK = "managed by standing-orders — edits outside the markers survive reinstalls";
+export const MANAGED_MARK = "managed by toolroll — edits outside the markers survive reinstalls";
+const LEGACY_MANAGED_MARK = "managed by standing-orders — edits outside the markers survive reinstalls";
+/** Frontmatter a skill of ours starts with, under either name. */
+const OWN_HEADERS = ["---\nname: toolroll\n", "---\nname: standing-orders\n"];
+const ownHeader = (content: string) => OWN_HEADERS.some(header => content.startsWith(header));
 export const CONTEXT_BEGIN = "<!-- standing-orders:begin -->";
 export const CONTEXT_END = "<!-- standing-orders:end -->";
 
@@ -39,7 +45,7 @@ export function skillContent(): string {
   const operating = guideNamed("operating");
   if (operating === null) throw new Error("the operating guide is missing from the build");
   return `---
-name: standing-orders
+name: toolroll
 description: Operate this repository's unattended work queue via the toolroll CLI, and explain its console. Use when asked to file or inspect tasks (including scout tasks that deliver a report), check what is ready or blocked, peek at live agents, read run results and briefs, see what awaits a human decision, or tell the operator which screen or command does what. Not for pushing, merging, or approving anything — approvals are the operator's, always.
 ---
 
@@ -59,7 +65,7 @@ envelope per command, stable \`reason\` tokens, exit 3 means "no" not
 "broken", every mutation takes an idempotency \`--key\`. Refusals like
 \`held\`, \`fenced\`, \`reserved\`, \`unapproved\`, and \`external\` are
 answers to branch on, not errors to retry. Details:
-\`.claude/skills/standing-orders/SKILL.md\`, or \`toolroll --help\`,
+\`.claude/skills/toolroll/SKILL.md\`, or \`toolroll --help\`,
 which is authoritative — and \`toolroll skills get <name>\` serves
 version-matched guides straight from the binary (\`skills list\` names
 them). Project memory (instructions, references, lessons, decisions) lives
@@ -73,6 +79,8 @@ ${CONTEXT_END}`;
 export type InstallPlan = {
   skillPath: string;
   skillAction: "create" | "replace" | "refuse-foreign";
+  /** A skill of ours under the old folder name, removed once the new one is written. */
+  legacySkillPath: string | null;
   contextPath: string | null;
   contextAction: "create" | "insert" | "replace" | "skip";
 };
@@ -89,9 +97,11 @@ export function planInstall(repo: string, writeContext: boolean): InstallPlan {
     const current = readFileSync(skillPath, "utf8");
     // Ownership is the exact header AND the managed mark — a foreign file
     // that merely quotes the mark somewhere is not ours (audit C-10).
-    const ours = current.startsWith("---\nname: standing-orders\n") && current.includes(MANAGED_MARK);
+    const ours = ownHeader(current) && (current.includes(MANAGED_MARK) || current.includes(LEGACY_MANAGED_MARK));
     skillAction = ours ? "replace" : "refuse-foreign";
   }
+  const legacy = join(repo, LEGACY_SKILL_DIR, SKILL_FILE);
+  const legacySkillPath = realFolder(join(repo, ".claude")) && realFolder(join(repo, ".claude", "skills")) && realFolder(join(repo, LEGACY_SKILL_DIR)) && isOwnFile(legacy, current => ownHeader(current) && (current.includes(MANAGED_MARK) || current.includes(LEGACY_MANAGED_MARK))) ? legacy : null;
 
   const contextPath = writeContext ? join(repo, "AGENTS.md") : null;
   let contextAction: InstallPlan["contextAction"] = "skip";
@@ -102,7 +112,7 @@ export function planInstall(repo: string, writeContext: boolean): InstallPlan {
       contextAction = current.includes(CONTEXT_BEGIN) ? "replace" : "insert";
     }
   }
-  return { skillPath, skillAction, contextPath, contextAction };
+  return { skillPath, skillAction, legacySkillPath, contextPath, contextAction };
 }
 
 /** Apply the plan. Refuses a foreign skill file rather than eating it. */
@@ -146,6 +156,7 @@ export function applyInstall(repo: string, writeContext: boolean): InstallResult
   mkdirSync(dirname(plan.skillPath), { recursive: true });
   writeFileSync(plan.skillPath, skillContent());
   wrote.push(plan.skillPath);
+  if (plan.legacySkillPath !== null) removeOwn([plan.legacySkillPath]);
 
   if (plan.contextPath !== null) {
     writeFileSync(plan.contextPath, contextNext ?? `${contextBlock()}\n`);
@@ -173,6 +184,8 @@ export type ClaudeCodeInstallPlan = {
   directory: string;
   directoryAction: "create" | "use" | "refuse-foreign";
   files: ClaudeCodeSkillFile[];
+  /** Managed files left under the old folder name, removed once the new ones are written. */
+  legacyFiles: string[];
 };
 
 export type ClaudeCodeInstallResult =
@@ -180,13 +193,37 @@ export type ClaudeCodeInstallResult =
   | { ok: false; reason: "foreign-file"; message: string; plan: ClaudeCodeInstallPlan };
 
 export function defaultClaudeCodeSkillDir(home = homedir()): string {
+  return join(home, ".claude", "skills", "toolroll");
+}
+
+/** Where installs before the rename put the Claude Code skill. */
+export function legacyClaudeCodeSkillDir(home = homedir()): string {
   return join(home, ".claude", "skills", "standing-orders");
+}
+
+/** A regular file (not a link) whose text says it is ours. */
+function isOwnFile(path: string, ours: (content: string) => boolean): boolean {
+  if (!existsSync(path)) return false;
+  const entry = lstatSync(path);
+  return !entry.isSymbolicLink() && entry.isFile() && entry.size <= 2_000_000 && ours(readFileSync(path, "utf8"));
+}
+
+/** A folder that is itself, not a link to somewhere else. */
+function realFolder(path: string): boolean {
+  try { const entry = lstatSync(path); return entry.isDirectory() && !entry.isSymbolicLink(); } catch { return false; }
+}
+
+/** Remove files of ours, then their folder only if nothing else is left in it. */
+function removeOwn(paths: readonly string[]): void {
+  for (const path of paths) unlinkSync(path);
+  const folders = new Set(paths.map(path => dirname(path)));
+  for (const folder of folders) if (readdirSync(folder).length === 0) rmdirSync(folder);
 }
 
 /** SKILL.md links to the full guides instead of copying their detail. */
 export function claudeCodeSkillContent(): string {
   return `---
-name: standing-orders
+name: toolroll
 description: Use this machine's Toolroll installation from Claude Code. Use when the user asks about its console, tasks, approvals, results, or runner workflow.
 ---
 
@@ -222,13 +259,13 @@ function claudeCodeFiles(directory: string): { name: string; path: string; conte
 
 function isClaudeCodeManaged(name: string, content: string): boolean {
   if (name === "SKILL.md") {
-    return content.startsWith("---\nname: standing-orders\n") && content.includes(`\n${CLAUDE_CODE_MANAGED_MARK}\n`);
+    return ownHeader(content) && content.includes(`\n${CLAUDE_CODE_MANAGED_MARK}\n`);
   }
   return content.startsWith(`${CLAUDE_CODE_MANAGED_MARK}\n\n`);
 }
 
 /** Compute the complete write set without changing the filesystem. */
-export function planClaudeCodeInstall(directory = defaultClaudeCodeSkillDir()): ClaudeCodeInstallPlan {
+export function planClaudeCodeInstall(directory = defaultClaudeCodeSkillDir(), legacyDirectory: string | null = directory === defaultClaudeCodeSkillDir() ? legacyClaudeCodeSkillDir() : null): ClaudeCodeInstallPlan {
   let directoryAction: ClaudeCodeInstallPlan["directoryAction"] = "create";
   if (existsSync(directory)) {
     const entry = lstatSync(directory);
@@ -249,12 +286,15 @@ export function planClaudeCodeInstall(directory = defaultClaudeCodeSkillDir()): 
     return { name, path, action: isClaudeCodeManaged(name, current) ? "replace" : "refuse-foreign" };
   });
 
-  return { directory, directoryAction, files };
+  const legacyFiles = legacyDirectory === null || legacyDirectory === directory || !realFolder(legacyDirectory)
+    ? []
+    : claudeCodeFiles(legacyDirectory).filter(({ name, path }) => isOwnFile(path, content => isClaudeCodeManaged(name, content))).map(({ path }) => path);
+  return { directory, directoryAction, files, legacyFiles };
 }
 
 /** Refresh every managed file, after validating the whole set first. */
-export function applyClaudeCodeInstall(directory = defaultClaudeCodeSkillDir()): ClaudeCodeInstallResult {
-  const plan = planClaudeCodeInstall(directory);
+export function applyClaudeCodeInstall(directory = defaultClaudeCodeSkillDir(), legacyDirectory: string | null = directory === defaultClaudeCodeSkillDir() ? legacyClaudeCodeSkillDir() : null): ClaudeCodeInstallResult {
+  const plan = planClaudeCodeInstall(directory, legacyDirectory);
   const refused = plan.files.find(file => file.action === "refuse-foreign");
   if (refused !== undefined) {
     const message = plan.directoryAction === "refuse-foreign"
@@ -269,5 +309,6 @@ export function applyClaudeCodeInstall(directory = defaultClaudeCodeSkillDir()):
     writeFileSync(file.path, file.content);
     wrote.push(file.path);
   }
+  if (plan.legacyFiles.length > 0) removeOwn(plan.legacyFiles);
   return { ok: true, plan, wrote };
 }

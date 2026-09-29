@@ -627,7 +627,7 @@ export function serveMcp(
       respond(id, "legacy", {
         protocolVersion: LEGACY,
         capabilities: { tools: {} },
-        serverInfo: { name: "standing-orders", version: PACKAGE_VERSION },
+        serverInfo: { name: "toolroll", version: PACKAGE_VERSION },
       }, false);
       return;
     }
@@ -647,7 +647,7 @@ export function serveMcp(
         protocolVersion: MODERN,
         supportedVersions: [MODERN, LEGACY],
         capabilities: { tools: {} },
-        _meta: { [META_SERVER]: { name: "standing-orders", version: PACKAGE_VERSION } },
+        _meta: { [META_SERVER]: { name: "toolroll", version: PACKAGE_VERSION } },
         ...(toolsPayload() as Record<string, Json>),
       }, true);
       return;

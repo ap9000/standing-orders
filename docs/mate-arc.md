@@ -381,7 +381,7 @@ form-free fragment: proposals render inert until the turn ends).
 
 ## 6. The CLI
 
-**As landed (slice 3, 2026-09-02).** `standing-orders chat --as <you>
+**As landed (slice 3, 2026-09-02).** `toolroll chat --as <you>
 --token <t> [--repo <path>…] [--say "…"] [--end] [--ceiling-usd <n>]
 [--json]` in `src/mate-cli.ts`, dispatched from `src/operate.ts`. The password
 mints a persistent session (the direct-API spend ceiling defaults to $5 and
@@ -396,7 +396,7 @@ cards print their CLI ceremony. `--json` emits one envelope per turn or
 act. Tests: `src/mate-cli.test.ts` through `runOperate` with injected
 fetch, key environment, and stdin lines.
 
-`standing-orders chat [--as <you> --token <t>] [--end]`: a REPL over the
+`toolroll chat [--as <you> --token <t>] [--end]`: a REPL over the
 same thread. First run mints the mate session (the same restated terms,
 the password typed once); turns print the assistant's text, tool activity
 dimmed, and proposals numbered — `confirm 2`, `dismiss 2`, `open 2` (prints
@@ -466,7 +466,7 @@ credential expires its pending rows.
 **Who confirms.** Any approver whose ceiling admits the row's repo, from
 the console — cards under "proposed by coordinators" on `/chat` (both
 modes) and on the task's own page, `POST /proposals/:id/confirm|dismiss`
-with csrf — or the CLI (`standing-orders proposals`, `proposals confirm
+with csrf — or the CLI (`toolroll proposals`, `proposals confirm
 <id> [--yes]`, `proposals dismiss <id>`). The door is
 `confirmCoordinatorProposal`: one transaction, standing re-proved inside,
 the repo re-checked against the confirmer's ceiling, `pending →

@@ -1,15 +1,22 @@
 import { afterEach, describe, expect, test } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { main } from "./cli.js";
 import { guideNamed } from "./guides.js";
 import {
   applyClaudeCodeInstall,
+  applyInstall,
   CLAUDE_CODE_MANAGED_MARK,
   claudeCodeGuideContent,
+  claudeCodeSkillContent,
   defaultClaudeCodeSkillDir,
+  LEGACY_SKILL_DIR,
+  legacyClaudeCodeSkillDir,
   planClaudeCodeInstall,
+  planInstall,
+  SKILL_DIR,
+  SKILL_FILE,
 } from "./skills.js";
 
 describe("Claude Code skill install", () => {
@@ -25,7 +32,8 @@ describe("Claude Code skill install", () => {
   });
 
   test("uses Claude Code's user skill location by default", () => {
-    expect(defaultClaudeCodeSkillDir("/home/alex")).toBe(join("/home/alex", ".claude", "skills", "standing-orders"));
+    expect(defaultClaudeCodeSkillDir("/home/alex")).toBe(join("/home/alex", ".claude", "skills", "toolroll"));
+    expect(legacyClaudeCodeSkillDir("/home/alex")).toBe(join("/home/alex", ".claude", "skills", "standing-orders"));
   });
 
   test("publishes the Claude Code mode in help and the command contract", async () => {
@@ -77,7 +85,7 @@ describe("Claude Code skill install", () => {
 
     expect(code).toBe(0);
     const skill = readFileSync(join(directory, "SKILL.md"), "utf8");
-    expect(skill).toContain("name: standing-orders");
+    expect(skill).toContain("name: toolroll");
     for (const name of ["console", "operating", "runner"] as const) {
       expect(skill).toContain(`(${name}.md)`);
       expect(readFileSync(join(directory, `${name}.md`), "utf8")).toBe(claudeCodeGuideContent(name));
@@ -140,5 +148,68 @@ describe("Claude Code skill install", () => {
     const code = await main(["skills", "install", "--dir", fresh(), "--json"], line => lines.push(line));
     expect(code).toBe(2);
     expect(JSON.parse(lines.join("\n"))).toMatchObject({ ok: false, reason: "usage" });
+  });
+});
+
+describe("a skill installed under the name before Toolroll", () => {
+  const roots: string[] = [];
+  const root = () => {
+    const made = mkdtempSync(join(tmpdir(), "toolroll-legacy-skill-"));
+    roots.push(made);
+    return made;
+  };
+  /** What an install before the rename wrote: the same files under the old name. */
+  const oldCopy = (content: string) => content.replace("name: toolroll", "name: standing-orders").replace("managed by toolroll", "managed by standing-orders");
+
+  afterEach(() => {
+    for (const one of roots.splice(0)) rmSync(one, { recursive: true, force: true });
+  });
+
+  test("a repository's managed .claude/skills/standing-orders copy is found and replaced by .claude/skills/toolroll", () => {
+    const repo = root();
+    const legacy = join(repo, LEGACY_SKILL_DIR);
+    expect(applyInstall(repo, false)).toMatchObject({ ok: true });
+    const current = readFileSync(join(repo, SKILL_DIR, SKILL_FILE), "utf8");
+    rmSync(join(repo, SKILL_DIR), { recursive: true });
+    mkdirSync(legacy, { recursive: true });
+    writeFileSync(join(legacy, SKILL_FILE), oldCopy(current));
+
+    const plan = planInstall(repo, false);
+    expect(plan).toMatchObject({ skillPath: join(repo, SKILL_DIR, SKILL_FILE), skillAction: "create", legacySkillPath: join(legacy, SKILL_FILE) });
+    expect(applyInstall(repo, false)).toMatchObject({ ok: true });
+    expect(readFileSync(join(repo, SKILL_DIR, SKILL_FILE), "utf8")).toContain("name: toolroll");
+    expect(existsSync(legacy)).toBe(false);
+  });
+
+  test("a foreign file under the old folder name is left alone", () => {
+    const repo = root();
+    const legacy = join(repo, LEGACY_SKILL_DIR);
+    mkdirSync(legacy, { recursive: true });
+    writeFileSync(join(legacy, SKILL_FILE), "---\nname: standing-orders\n---\nmy own notes\n");
+
+    expect(planInstall(repo, false).legacySkillPath).toBeNull();
+    expect(applyInstall(repo, false)).toMatchObject({ ok: true });
+    expect(readFileSync(join(legacy, SKILL_FILE), "utf8")).toContain("my own notes");
+  });
+
+  test("the Claude Code skill's old folder is found; its managed files are replaced and anything else stays", () => {
+    const home = root();
+    const directory = join(home, ".claude", "skills", "toolroll"), legacy = join(home, ".claude", "skills", "standing-orders");
+    mkdirSync(legacy, { recursive: true });
+    writeFileSync(join(legacy, "SKILL.md"), oldCopy(claudeCodeSkillContent()));
+    for (const name of ["console", "operating", "runner"] as const) writeFileSync(join(legacy, `${name}.md`), claudeCodeGuideContent(name));
+    writeFileSync(join(legacy, "my-notes.md"), "keep\n");
+
+    const plan = planClaudeCodeInstall(directory, legacy);
+    expect(plan.legacyFiles.sort()).toEqual(["SKILL.md", "console.md", "operating.md", "runner.md"].map(name => join(legacy, name)).sort());
+    expect(applyClaudeCodeInstall(directory, legacy)).toMatchObject({ ok: true });
+    expect(readFileSync(join(directory, "SKILL.md"), "utf8")).toContain("name: toolroll");
+    expect(existsSync(join(legacy, "SKILL.md"))).toBe(false);
+    expect(readFileSync(join(legacy, "my-notes.md"), "utf8")).toBe("keep\n");
+
+    rmSync(join(legacy, "my-notes.md"));
+    writeFileSync(join(legacy, "SKILL.md"), oldCopy(claudeCodeSkillContent()));
+    expect(applyClaudeCodeInstall(directory, legacy)).toMatchObject({ ok: true });
+    expect(existsSync(legacy)).toBe(false);
   });
 });

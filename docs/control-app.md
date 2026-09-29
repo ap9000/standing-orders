@@ -23,8 +23,8 @@ Use the controlled update flow below before replacing an installation.
 The bundle includes the compiled controller and a standalone official Node
 binary, preserving Node's original signature and license. Releases require a
 valid **Developer ID Application** identity from the signing keychain; there
-is no automatic ad-hoc fallback. `STANDING_ORDERS_SIGN_IDENTITY` can supply the
-same identity. `--notary-profile` (or `STANDING_ORDERS_NOTARY_PROFILE`) uses
+is no automatic ad-hoc fallback. `TOOLROLL_SIGN_IDENTITY` can supply the
+same identity. `--notary-profile` (or `TOOLROLL_NOTARY_PROFILE`) uses
 credentials already stored with Apple's `notarytool`, waits for acceptance,
 then staples and validates the ticket. Without that option the result is
 explicitly **signed, not notarized**, and is not ready for distribution.

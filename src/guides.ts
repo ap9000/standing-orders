@@ -244,8 +244,8 @@ ${AUTHORITY_LINE}
 
 ## Install and sign-in
 
-- One command, inside the repository: \`npx standing-orders up\` (or
-  \`bunx standing-orders up\`; Node 22.13+ must be installed — Bun's own
+- One command, inside the repository: \`npx toolroll up\` (or
+  \`bunx toolroll up\`; Node 22.13+ must be installed — Bun's own
   runtime cannot host it). \`up\` mints the first login and prints it (saved
   beside the database as \`up-login.txt\`), registers the machine as a
   worker, runs the console, opens the browser. Later starts ask for the
