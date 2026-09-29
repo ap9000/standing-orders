@@ -177,6 +177,21 @@ const productionDependencies = root => execFileSync("npm", ["ls", "--omit=dev", 
  * again before every later phase, once per process. */
 let cleanBuild = null;
 process.on("exit", () => { if (cleanBuild?.scratch) rmSync(cleanBuild.scratch, { recursive: true, force: true }); });
+// A refusal after new work was paused but before the swap stopped anything (a rehearsal that
+// fails, a backup that doesn't verify) must not leave the plane paused: lift this deployment's
+// own pause and retire its journal, so the next deploy starts afresh.
+process.on("exit", code => {
+  if (code === 0 || !existsSync(journalFile)) return;
+  let r;
+  try { r = readJournal(); } catch { return; }
+  if (!["admission-paused", "frozen", "backup-verified", "rehearsed"].includes(r.phase)) return;
+  try {
+    const db = openDeploymentDatabase(database);
+    try { if (oldRt.gate.updateGateOwned(db, r.id)) oldRt.gate.removeUpdateGate(db, r.id); } finally { db.close(); }
+    r.phase = "released"; r.updatedAt = new Date().toISOString(); oldRt.update.durableJson(journalFile, r);
+    console.error("New work resumed: the deployment stopped before the swap and lifted its pause.");
+  } catch (error) { console.error(`✗ New work is still paused (update ${r.id}): ${error.message}`); }
+});
 /** A clean checkout of the commit, its dependencies installed from the
  * committed lockfile (npm verifies every package against the lockfile's
  * integrity hash), and dist built there. Nothing from the worktree's
