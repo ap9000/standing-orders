@@ -703,7 +703,10 @@ describe("the pool, against real git", () => {
     store.createTask({ id: "deployable", title: "a builder result marked complete" }, T0);
     store.placeTask(store.refFor("built-in", "deployable").id, repo);
     store.setTaskState("deployable", "done", T0);
-    store.recordAction({ at: later(18 * 86_400_000).toISOString(), actor: "operator:alex", repo, taskId: "deployable", runId: null, action: "assignment handoff checked", outcome: "checked", source: "work" });
+    // The completion names the family's root (here another task); its run names the version whose checkout holds the build.
+    const built = store.startRun({ taskRef: store.lookupRef("deployable")!.id, leaseId: "l-deploy", runner: "builder-1", branch: "standing-orders/deployable", worktree: "/w/deployable",
+      route: { routeDigest: "legacy", phase: "build", provider: "claude", model: null, chosen: "legacy" }, now: T0 });
+    store.recordAction({ at: later(18 * 86_400_000).toISOString(), actor: "operator:alex", repo, taskId: "shipped", runId: built, action: "assignment handoff checked", outcome: "checked", source: "work" });
     expect(store.keptBranches(repo, now, 7 * 86_400_000).sort()).toEqual(["standing-orders/anywhere", "standing-orders/broken", "standing-orders/deployable", "standing-orders/release", "standing-orders/waiting"]);
     // A week after, their checkouts can go too.
     expect(store.keptBranches(repo, later(40 * 86_400_000), 7 * 86_400_000).sort()).toEqual(["standing-orders/anywhere", "standing-orders/broken", "standing-orders/waiting"]);
