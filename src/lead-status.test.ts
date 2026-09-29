@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { renderTaskWait, taskWaitSnapshot } from "./lead-status.js";
 import { runOperate } from "./operate.js";
 import { BUILT_IN, openStore, type Store } from "./store.js";
 
@@ -67,6 +68,61 @@ describe("lead status commands", () => {
     expect(code).toBe(0);
     expect(lines).toHaveLength(1);
     expect(lines[0]).toBe(`Ready | run #${runId} | checks passed (exit 0) | next: Review result`);
+  });
+
+  test("task wait follows a retry that lands between polls and reports the retry's own outcome", async () => {
+    const seed = openStore(db);
+    const ref = create(seed, "retried-while-waiting", "running");
+    const firstRun = run(seed, ref, { phase: "agent-running" });
+    seed.close();
+
+    let retryRun = 0;
+    let settled = false;
+    const lines: string[] = [];
+    const code = await runOperate("task", ["wait", "retried-while-waiting", "--timeout", "1", "--json"], line => lines.push(line), {
+      databaseFile: db,
+      waitSleep: async () => {
+        if (settled) return;
+        settled = true;
+        const update = openStore(db);
+        update.handle.prepare("UPDATE run SET outcome = 'failed', reason = 'agent-failed', finished_at = ? WHERE id = ?").run(LATER.toISOString(), firstRun);
+        retryRun = run(update, ref, { outcome: "built" });
+        update.recordRunCheck(retryRun, { status: "passed", exitCode: 0, suites: [{ name: "Tests", status: "passed", exitCode: 0 }] });
+        expect(update.setTaskState("retried-while-waiting", "done", LATER)).toEqual({ ok: true });
+        update.close();
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(retryRun).toBeGreaterThan(firstRun);
+    expect(JSON.parse(lines.join("\n"))).toMatchObject({ ok: true, outcome: "Ready", run: retryRun, replacedRun: firstRun, check: { status: "passed" } });
+
+    const reader = openStore(db);
+    try {
+      const snapshot = taskWaitSnapshot(reader, "retried-while-waiting", LATER, firstRun);
+      expect(snapshot).not.toBeNull();
+      expect(renderTaskWait(snapshot!)).toBe(`Ready | run #${retryRun}, a retry that replaced run #${firstRun} | checks passed (exit 0) | next: Review result`);
+    } finally {
+      reader.close();
+    }
+  });
+
+  test("task wait reports a failed retry as failed even when the task has moved on", async () => {
+    const seed = openStore(db);
+    const ref = create(seed, "retry-failed", "running");
+    const firstRun = run(seed, ref, { outcome: "built" });
+    const retryRun = run(seed, ref, { outcome: "failed" });
+    seed.close();
+
+    const reader = openStore(db);
+    try {
+      const snapshot = taskWaitSnapshot(reader, "retry-failed", LATER, firstRun);
+      expect(snapshot).toMatchObject({ outcome: "Failed", run: retryRun, replacedRun: firstRun, exitCode: 1, terminal: true });
+      const same = taskWaitSnapshot(reader, "retry-failed", LATER, retryRun);
+      expect(same).toMatchObject({ outcome: "Failed", run: retryRun, replacedRun: null, exitCode: 1 });
+    } finally {
+      reader.close();
+    }
   });
 
   test("task wait returns 1 for failure and when a person is needed", async () => {

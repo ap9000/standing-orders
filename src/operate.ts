@@ -10,7 +10,7 @@ import { billingOf, budgetHoldWords, budgetLabel, budgetStates, monthNamed, mont
 import { spendCsv } from "./spend-ui.js";
 import { buildExport, exportSummary, exportZip, writeExportFolder } from "./export.js";
 import { startBudgetAlerts } from "./budget-alerts.js";
-import { backupFiles, backupFolderOf, backupNow, restoreDatabase, startBackups } from "./backup.js";
+import { backupFiles, backupFolderOf, backupOwner, backupNow, restoreDatabase, startBackups } from "./backup.js";
 import { pushLimitSink } from "./provider-limits.js";
 import { limitsView } from "./limits-ui.js";
 import { startCodexLimits } from "./codex-limits.js";
@@ -9986,6 +9986,7 @@ async function waitTask(
       task: snapshot.task,
       outcome: snapshot.outcome,
       run: snapshot.run,
+      replacedRun: snapshot.replacedRun,
       phase: snapshot.phase,
       check: snapshot.check,
       next: snapshot.next,
@@ -12193,13 +12194,13 @@ async function backupCommand(positional: readonly string[], flags: Map<string, s
   }
   const settings = store.backupSettings();
   const folder = backupFolderOf(settings, context.databaseFile);
-  const files = backupFiles(folder);
+  const files = backupFiles(folder, backupOwner(store, context.databaseFile));
   const runs = store.backupRuns(10);
   const last = runs[0] ?? null;
   return succeed(context.write, context.json, command, { settings, folder, files, runs }, () => [
     settings.enabled ? `Every ${settings.everyHours === 1 ? "hour" : `${settings.everyHours} hours`}, keeping the newest ${settings.keep}, in ${folder}.` : `Scheduled backups are off. Backups are kept in ${folder}.`,
     last === null ? "No backup has run yet." : last.ok === true ? `Last backup ${last.startedAt.slice(0, 16).replace("T", " ")} UTC: succeeded.` : last.ok === false ? `Last backup ${last.startedAt.slice(0, 16).replace("T", " ")} UTC: FAILED (${last.error ?? "no reason recorded"}).` : `A backup started ${last.startedAt.slice(0, 16).replace("T", " ")} UTC is still running.`,
-    ...(files.length === 0 ? ["No backups in the folder."] : files.map(one => `  ${one.name}  ${bytesWords(one.bytes)}`)),
+    ...(files.length === 0 ? ["No backups of this database in the folder."] : files.map(one => `  ${one.name}  ${bytesWords(one.bytes)}`)),
   ]);
 }
 

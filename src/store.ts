@@ -200,23 +200,66 @@ export function backupSettingsWords(settings: BackupSettings): string {
   if (!settings.enabled) return `off, keep ${settings.keep}, ${settings.folder ?? "the default folder"}`;
   return `every ${settings.everyHours === 1 ? "hour" : `${settings.everyHours} hours`}, keep ${settings.keep}, ${settings.folder ?? "the default folder"}`;
 }
-/** The small, machine-owned summary of a run's approved project check, one
- * row per run, so `status` and `task wait` report the real result without
- * opening retained logs. The sealed receipt stays the evidence. `release` is
- * copied from the run's Strict mode at recording time so the newest release
- * check is one indexed read. A run without a row is history from before
- * summaries were recorded. The run table itself is unchanged. */
-const RUN_CHECK_SCHEMA = `
-CREATE TABLE IF NOT EXISTS run_check (
-  run         INTEGER PRIMARY KEY,
-  status      TEXT NOT NULL CHECK (status IN ('passed', 'failed', 'not-run')),
+/** One row per run for its approved project check: the live progress while
+ * it runs and the machine-owned result once it finishes, so the task page,
+ * lifecycle updates, `status` and `task wait` all read the same record
+ * without opening retained logs. The sealed receipt stays the evidence.
+ * `status` is empty until the result is recorded; `snapshot` is empty until
+ * the check's output shows progress. `release` is copied from the run's
+ * Strict mode when the result is recorded, so the newest release check is
+ * one indexed read. A run without a result is history from before results
+ * were recorded, or a check still running. The run table itself is
+ * unchanged. (This table absorbed the separate v106 check_progress table.) */
+const RUN_CHECK_TABLE = (name: string) => `
+CREATE TABLE IF NOT EXISTS ${name} (
+  run         INTEGER PRIMARY KEY REFERENCES run(id) ON DELETE CASCADE,
+  status      TEXT CHECK (status IS NULL OR status IN ('passed', 'failed', 'not-run')),
   exit_code   INTEGER,
   suites_json TEXT NOT NULL DEFAULT '[]',
   release     INTEGER NOT NULL DEFAULT 0 CHECK (release IN (0, 1)),
-  recorded_at TEXT NOT NULL
-);
+  recorded_at TEXT,
+  snapshot    TEXT,
+  line        TEXT,
+  final       INTEGER NOT NULL DEFAULT 0 CHECK (final IN (0, 1)),
+  updated_at  TEXT,
+  notified_at TEXT
+);`;
+const RUN_CHECK_SCHEMA = `${RUN_CHECK_TABLE("run_check")}
 CREATE INDEX IF NOT EXISTS run_check_release ON run_check (run DESC) WHERE release = 1;
 `;
+
+/** A file from before the merge keeps a result-only run_check (status
+ * required) and a separate check_progress. Move both into the one record,
+ * in one transaction, and drop the old tables. Rows for a run that no
+ * longer exists are left behind with them. Idempotent: a merged file with
+ * no check_progress is untouched. */
+function mergeCheckTables(db: Database): void {
+  const merged = hasColumn(db, "run_check", "snapshot");
+  const progress = tableExists(db, "check_progress");
+  if (merged && !progress) return;
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    if (!merged) {
+      db.exec(RUN_CHECK_TABLE("run_check_next"));
+      db.exec(`INSERT INTO run_check_next (run, status, exit_code, suites_json, release, recorded_at)
+        SELECT run, status, exit_code, suites_json, release, recorded_at FROM run_check WHERE run IN (SELECT id FROM run)`);
+      db.exec("DROP TABLE run_check");
+      db.exec("ALTER TABLE run_check_next RENAME TO run_check");
+      db.exec("CREATE INDEX IF NOT EXISTS run_check_release ON run_check (run DESC) WHERE release = 1");
+    }
+    if (progress) {
+      db.exec(`INSERT INTO run_check (run, snapshot, line, final, updated_at, notified_at)
+        SELECT run, snapshot, line, final, updated_at, notified_at FROM check_progress WHERE run IN (SELECT id FROM run)
+        ON CONFLICT(run) DO UPDATE SET snapshot = excluded.snapshot, line = excluded.line,
+          final = excluded.final, updated_at = excluded.updated_at, notified_at = excluded.notified_at`);
+      db.exec("DROP TABLE check_progress");
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
 
 export type RunCheckSuite = {
   name: string;
@@ -246,18 +289,6 @@ export function checkSuitesOf(value: unknown): RunCheckSuite[] {
 
 export type MonitoringStatus = { sink: string; target: string | null; through: number; sent: number; lastOkAt: string | null; lastError: string | null; lastErrorAt: string | null; failures: number; nextTryAt: string | null };
 
-/** Live approved-check state is additive in v105; older readers may ignore it. */
-const CHECK_PROGRESS_SCHEMA = `
-CREATE TABLE IF NOT EXISTS check_progress (
-  run         INTEGER PRIMARY KEY REFERENCES run(id) ON DELETE CASCADE,
-  snapshot    TEXT NOT NULL,
-  line        TEXT NOT NULL,
-  final       INTEGER NOT NULL DEFAULT 0 CHECK (final IN (0,1)),
-  updated_at  TEXT NOT NULL,
-  notified_at TEXT
-);
-`;
-
 export type CheckProgress = CheckProgressSnapshot & { run: number; updatedAt: string; notifiedAt: string | null };
 
 /** The detail on a task's registration written again at its filing (v103), over a ref an earlier lookup made. */
@@ -268,7 +299,8 @@ export type SealedLedgerEntry = LedgerEntry & { seal: { prev: string; hash: stri
 // v104 keeps where each monitoring destination (the audit stream to a webhook or a folder, traces to an OpenTelemetry collector) has delivered to, and who is sending.
 // v105 prices every run (reported, or tokens at the catalogue price) and keeps monthly budgets per project, person, teammate and installation.
 // v106 keeps the organisation policy, retention periods, backup settings and runs, check progress, and runner capacity changes.
-export const SCHEMA_VERSION = 106;
+// v107 keeps a check's progress and result in one record (run_check absorbs check_progress).
+export const SCHEMA_VERSION = 107;
 
 /** v102: a project's approval rules, and each person's approval of an exact scope (two are needed for protected work). */
 const APPROVAL_SCHEMA = `
@@ -4929,8 +4961,8 @@ function initializeStore(db: Database, file: string): Store {
   db.exec(BACKUP_SCHEMA);
   // Sprint 8: the organisation policy (one row, or none: nothing restricted).
   db.exec(POLICY_SCHEMA);
-  db.exec(CHECK_PROGRESS_SCHEMA);
   db.exec(RUN_CHECK_SCHEMA);
+  mergeCheckTables(db);
   addColumn(db, "monitoring_status", "target", "TEXT");
   // v105: how a teammate's turn was billed (this computer's Claude sign-in, as last seen).
   addColumn(db, "teammate_turn", "billing", "TEXT");
@@ -17686,7 +17718,7 @@ export class Store {
 
   /** The latest saved line for one approved check. Corrupt rows stay absent. */
   checkProgress(run: number): CheckProgress | null {
-    const row = this.db.prepare("SELECT * FROM check_progress WHERE run = ?").get(run);
+    const row = this.db.prepare("SELECT snapshot, line, final, updated_at, notified_at FROM run_check WHERE run = ? AND snapshot IS NOT NULL").get(run);
     if (row === undefined) return null;
     const snapshot = parseCheckProgressSnapshot(String(row["snapshot"]));
     if (snapshot === null || snapshot.line !== String(row["line"]) || snapshot.final !== (Number(row["final"]) === 1)) return null;
@@ -17708,7 +17740,7 @@ export class Store {
     return this.transact(() => {
       const source = this.getRun(run);
       if (source === null) return { changed: false, notified: false };
-      const prior = this.db.prepare("SELECT * FROM check_progress WHERE run = ?").get(run);
+      const prior = this.db.prepare("SELECT snapshot, notified_at FROM run_check WHERE run = ? AND snapshot IS NOT NULL").get(run);
       const priorSnapshot = prior === undefined ? null : parseCheckProgressSnapshot(String(prior["snapshot"]));
       if (priorSnapshot !== null && JSON.stringify(priorSnapshot) === JSON.stringify(validated)) return { changed: false, notified: false };
 
@@ -17716,7 +17748,7 @@ export class Store {
       const due = validated.final
         ? priorSnapshot?.final !== true
         : priorNotified === null || !Number.isFinite(Date.parse(priorNotified)) || now.getTime() - Date.parse(priorNotified) >= 60_000;
-      this.db.prepare(`INSERT INTO check_progress (run, snapshot, line, final, updated_at, notified_at)
+      this.db.prepare(`INSERT INTO run_check (run, snapshot, line, final, updated_at, notified_at)
         VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(run) DO UPDATE SET snapshot = excluded.snapshot, line = excluded.line,
           final = excluded.final, updated_at = excluded.updated_at, notified_at = excluded.notified_at`)
@@ -17731,7 +17763,7 @@ export class Store {
         body: validated.line,
         link: `/r/${run}`,
       }, now);
-      if (notified) this.db.prepare("UPDATE check_progress SET notified_at = ? WHERE run = ?").run(now.toISOString(), run);
+      if (notified) this.db.prepare("UPDATE run_check SET notified_at = ? WHERE run = ?").run(now.toISOString(), run);
       return { changed: true, notified };
     });
   }
@@ -19581,7 +19613,8 @@ export class Store {
 
   /** Save the small, machine-owned projection of a run's approved project
    * check. The sealed receipt remains the evidence; this is only the status
-   * index and first write wins so a later read cannot rewrite history. */
+   * index and first write wins so a later read cannot rewrite history. The
+   * check's saved progress on the same row is kept. */
   recordRunCheck(
     id: number,
     check: { status: "passed" | "failed" | "not-run"; exitCode: number | null; suites: readonly RunCheckSuite[] },
@@ -19596,13 +19629,15 @@ export class Store {
     }
     this.db.prepare(`INSERT INTO run_check (run, status, exit_code, suites_json, release, recorded_at)
       SELECT id, ?, ?, ?, CASE WHEN quality_mode = 'strict' THEN 1 ELSE 0 END, ? FROM run WHERE id = ?
-      ON CONFLICT(run) DO NOTHING`)
+      ON CONFLICT(run) DO UPDATE SET status = excluded.status, exit_code = excluded.exit_code,
+        suites_json = excluded.suites_json, release = excluded.release, recorded_at = excluded.recorded_at
+      WHERE run_check.status IS NULL`)
       .run(check.status, check.exitCode, JSON.stringify(check.suites), at.toISOString(), id);
   }
 
   /** A run's recorded check summary, or null for a run recorded before summaries existed. */
   runCheckFor(id: number): RunCheck | null {
-    const row = this.db.prepare("SELECT status, exit_code, suites_json FROM run_check WHERE run = ?").get(id);
+    const row = this.db.prepare("SELECT status, exit_code, suites_json FROM run_check WHERE run = ? AND status IS NOT NULL").get(id);
     if (row === undefined) return null;
     return {
       status: String(row["status"]) as RunCheck["status"],

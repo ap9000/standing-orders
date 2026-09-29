@@ -14,6 +14,8 @@ export type TaskWaitSnapshot = {
   task: string;
   outcome: "Running" | "Queued" | "Ready" | "Complete" | "Failed" | "Needs a person";
   run: number | null;
+  /** The attempt `wait` started watching, when a later retry replaced it. */
+  replacedRun: number | null;
   phase: string | null;
   check: CheckSummary;
   next: string;
@@ -87,14 +89,17 @@ function latestAttempt(store: Store, taskRef: number): Record<string, unknown> |
     WHERE run.task_ref = ? AND run.finished_at IS NOT NULL ORDER BY run.id DESC LIMIT 1`).get(taskRef);
 }
 
-function attemptNamed(store: Store, taskRef: number, run: number): Record<string, unknown> | undefined {
+function newestAttemptSince(store: Store, taskRef: number, run: number): Record<string, unknown> | undefined {
   return store.handle.prepare(`SELECT run.id, run.role, run.outcome, run.reason, run.phase, run.finished_at, ${CHECK_COLUMNS}
-    FROM run LEFT JOIN run_check AS rc ON rc.run = run.id WHERE run.task_ref = ? AND run.id = ?`).get(taskRef, run);
+    FROM run INDEXED BY lead_status_task_run LEFT JOIN run_check AS rc ON rc.run = run.id
+    WHERE run.task_ref = ? AND run.id >= ? ORDER BY run.id DESC LIMIT 1`).get(taskRef, run);
 }
 
-/** One indexed observation for `task wait`. `watchedRun` pins the attempt the
- * caller first saw, so a fast successor cannot replace the outcome it waited
- * for. Undefined means no attempt has been observed yet. */
+/** One indexed observation for `task wait`. `watchedRun` is the attempt the
+ * caller first saw. Each poll follows the task's newest attempt from there, so
+ * a retry that lands between polls is reported with its own run and outcome,
+ * and `replacedRun` says which attempt it replaced. Undefined means no attempt
+ * has been observed yet. */
 export function taskWaitSnapshot(store: Store, taskId: string, now: Date, watchedRun?: number): TaskWaitSnapshot | null {
   const task = store.handle.prepare(`SELECT task.id, task.state, ref.id AS task_ref, ref.plan, ref.strikes
     FROM task INDEXED BY sqlite_autoindex_task_1
@@ -103,7 +108,9 @@ export function taskWaitSnapshot(store: Store, taskId: string, now: Date, watche
   if (task === undefined) return null;
   const taskRef = Number(task["task_ref"]);
   const state = String(task["state"]);
-  const attempt = watchedRun === undefined ? unfinishedAttempt(store, taskRef) : attemptNamed(store, taskRef, watchedRun);
+  const attempt = watchedRun === undefined ? unfinishedAttempt(store, taskRef) : newestAttemptSince(store, taskRef, watchedRun);
+  const followed = maybeNumber(attempt?.["id"]);
+  const replacedRun = watchedRun !== undefined && followed !== null && followed !== watchedRun ? watchedRun : null;
   const result = state === "done" ? latestResult(store, taskRef) : undefined;
   const terminalAttempt = state === "failed" || state === "cancelled" ? latestAttempt(store, taskRef) : undefined;
   const shown = attempt ?? result ?? terminalAttempt;
@@ -111,22 +118,22 @@ export function taskWaitSnapshot(store: Store, taskId: string, now: Date, watche
   const check = checkOf(shown);
   const phase = shown === undefined ? null : phaseWords(phaseOf(shown));
   const answer = (outcome: TaskWaitSnapshot["outcome"], next: string, terminal: boolean, exitCode: 0 | 1 | null, reason: TaskWaitSnapshot["reason"]): TaskWaitSnapshot =>
-    ({ task: taskId, outcome, run, phase, check, next, terminal, exitCode, reason });
+    ({ task: taskId, outcome, run, replacedRun, phase, check, next, terminal, exitCode, reason });
+
+  // The followed attempt's own failure is the answer, even if the task's state
+  // has already moved on; a task-level success must not stand in for it.
+  if (watchedRun !== undefined && attempt !== undefined && attempt["outcome"] !== null && state !== "failed" && state !== "cancelled") {
+    const outcome = String(attempt["outcome"]);
+    if (outcome === "parked") return answer("Needs a person", "Answer the task's question", true, 1, "needs-person");
+    if (outcome !== "built" && outcome !== "no-change") return answer("Failed", "Inspect attempt", true, 1, "failed");
+    if (state !== "done") return answer("Ready", "Review result", true, 0, "ready");
+  }
 
   const completion = result === undefined ? undefined : store.handle.prepare(`SELECT 1 AS hit FROM action_ledger INDEXED BY work_completion
     WHERE task_id = ? AND action = ? AND source = 'work' AND run_id = ? LIMIT 1`).get(taskId, COMPLETION_ACTION, Number(result["id"]));
   if (state === "done" && completion !== undefined) return answer("Complete", "No action needed", true, 0, "complete");
   if (state === "done") return answer("Ready", "Review result", true, 0, "ready");
   if (state === "failed" || state === "cancelled") return answer("Failed", state === "cancelled" ? "Review cancellation" : "Inspect failure", true, 1, "failed");
-
-  if (watchedRun !== undefined && attempt !== undefined && attempt["outcome"] !== null) {
-    const outcome = String(attempt["outcome"]);
-    if (outcome === "built" || outcome === "no-change") {
-      return answer("Ready", "Review result", true, 0, "ready");
-    }
-    if (outcome === "parked") return answer("Needs a person", "Answer the task's question", true, 1, "needs-person");
-    return answer("Failed", "Inspect attempt", true, 1, "failed");
-  }
 
   const decision = store.handle.prepare(`SELECT decision.id FROM run INDEXED BY lead_status_task_run
     JOIN decision INDEXED BY work_open_decision ON decision.run = run.id
@@ -299,5 +306,6 @@ export function renderInstallationStatus(status: InstallationStatus): string[] {
 
 export function renderTaskWait(snapshot: TaskWaitSnapshot, outcome: string = snapshot.outcome): string {
   const check = snapshot.check.status === "unknown" ? "checks unknown" : snapshot.check.status === "not-run" ? "checks not run" : `checks ${snapshot.check.status}${snapshot.check.exitCode === null ? "" : ` (exit ${snapshot.check.exitCode})`}`;
-  return `${outcome} | ${snapshot.run === null ? "no run" : `run #${snapshot.run}`} | ${check} | next: ${snapshot.next}`;
+  const run = snapshot.run === null ? "no run" : snapshot.replacedRun === null ? `run #${snapshot.run}` : `run #${snapshot.run}, a retry that replaced run #${snapshot.replacedRun}`;
+  return `${outcome} | ${run} | ${check} | next: ${snapshot.next}`;
 }
