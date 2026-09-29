@@ -130,6 +130,7 @@ describe("the machine envelope", () => {
       task: ["list", "--json"],
       ledger: ["verify", "--json"],
       storage: ["--json"],
+      monitoring: ["--json"],
       assignment: ["show", "no-such-task", "--json"],
       claim: ["--json"],
       heartbeat: ["--json"],

@@ -328,6 +328,52 @@ await check("Audit: the ledger chain verifies, a checkpoint made on the ledger p
   return { checkpoint: checkpoint.split(":")[0], entries: json.ledger.entries.length };
 });
 
+await check("Monitoring: a webhook set in Settings gets the audit stream, signed with the secret shown once; /metrics answers an operator", [], async () => {
+  const got = [];
+  const receiver = createHttpServer((request, response) => {
+    let body = "";
+    request.on("data", chunk => { body += chunk; });
+    request.on("end", () => { got.push({ signature: String(request.headers["x-standing-orders-signature"] ?? ""), body }); response.end(); });
+  });
+  const port = await freePort();
+  await new Promise(resolve => receiver.listen(port, "127.0.0.1", resolve));
+  try {
+    await page.goto(`${base}/settings/monitoring`);
+    await page.fill('.monitoring input[name="webhook"]', `http://127.0.0.1:${port}/audit`);
+    await page.fill('.monitoring input[name="password"]', w.passwords.alex);
+    await Promise.all([page.waitForNavigation(), page.locator('.monitoring button[type="submit"]').click()]);
+    if ((await page.locator("script").count()) !== 0) throw new Error("the page showing the signing secret carries a script");
+    const secret = (await page.locator(".secret-value").innerText()).trim();
+    if (!/^whsec_[A-Za-z0-9_-]{43}$/.test(secret)) throw new Error(`the signing secret: ${secret.slice(0, 12)}…`);
+    await until("the webhook to receive the audit stream", () => got.length > 0, { timeoutMs: 30_000 });
+    const [first] = got;
+    const [t, v1] = first.signature.split(",").map(part => part.split("=")[1]);
+    const expected = (await import("node:crypto")).createHmac("sha256", secret).update(`${t}.${first.body}`).digest("hex");
+    if (v1 !== expected) throw new Error("the delivery's signature doesn't match the secret shown");
+    const events = JSON.parse(first.body).events;
+    if (!Array.isArray(events) || events.length === 0 || !events.every(one => one.seal?.hash?.length === 64)) throw new Error(`the events: ${first.body.slice(0, 200)}`);
+    await page.goto(`${base}/settings/monitoring`);
+    await page.locator('[data-monitoring="webhook"][data-state="ok"]').waitFor({ timeout: 15_000 });
+    await shot("monitoring");
+    await page.setViewportSize({ width: 390, height: 844 });
+    if (await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1)) throw new Error("the Monitoring page scrolls sideways on a phone");
+    await shot("monitoring-phone");
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const metrics = await page.request.get(`${base}/metrics`);
+    const text = await metrics.text();
+    if (metrics.status() !== 200 || !/standing_orders_ledger_chain_ok 1/.test(text) || !/standing_orders_monitoring_lag_entries\{destination="webhook"\}/.test(text)) throw new Error(`/metrics: ${metrics.status()} ${text.slice(0, 300)}`);
+    if (rows("SELECT 1 FROM action_ledger WHERE action = 'monitoring changed'").length !== 1) throw new Error("the change isn't in the ledger");
+    return { events: events.length };
+  } finally {
+    // Turn it off again, so later checks don't stream.
+    await page.goto(`${base}/settings/monitoring`);
+    await page.fill('.monitoring input[name="webhook"]', "");
+    await page.fill('.monitoring input[name="password"]', w.passwords.alex);
+    await Promise.all([page.waitForNavigation(), page.locator('.monitoring button[type="submit"]').click()]);
+    await new Promise(resolve => receiver.close(resolve));
+  }
+});
+
 await check("The command line answers: the task list, the approvers, the project's check, and help", [], async () => {
   const list = cli(["task", "list"]);
   const people = cli(["approver", "list"]);
