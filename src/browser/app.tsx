@@ -566,7 +566,14 @@ export function WorkspaceApp({ initial }: { initial: BrowserWorkspace }) {
         {isChat && <Button variant="secondary" size="sm" className="so-phone-work-button" onClick={() => setPhoneView("work")}>{hasWork ? "Open work" : "Crew"}</Button>}
         {docked && <Button variant="secondary" size="sm" className="so-phone-work-button" onClick={() => { setPanelTab("chat"); setPhoneView("work"); }}><Icon name="chat" />Ask</Button>}
       </header>
-      {workspace.notices.length > 0 && <div className="so-workspace-notices">{workspace.notices.map((notice, index) => <Alert key={index}>{notice}</Alert>)}</div>}
+      {(workspace.notices.length > 0 || (workspace.signIn?.length ?? 0) > 0) && <div className="so-workspace-notices">
+        {workspace.signIn?.map(item => <Alert key={item.provider} className="so-sign-in" data-sign-in={item.provider}>
+          <p className="so-sign-in-title">{item.title}</p>
+          <p className="so-sign-in-detail">Run <code>{item.command}</code> on this computer, then resume.{item.detail === "" ? "" : ` ${item.detail}`}</p>
+          <form method="post" action={item.resumeHref}><input type="hidden" name="csrf" value={workspace.csrf} /><Button size="sm" type="submit">{item.resumeLabel}</Button></form>
+        </Alert>)}
+        {workspace.notices.map((notice, index) => <Alert key={index}>{notice}</Alert>)}
+      </div>}
       <main id="workspace-main" className="so-main-content" tabIndex={-1}>
         {workspace.team ? <TeamChat initial={workspace.team} user={workspace.user} csrf={workspace.csrf} onSnapshot={setTeamSnapshot} /> : workspace.conversation && !docked ? <LeadChat controller={controller} /> : <div className="so-page-content" data-workspace-page>{workspace.view ? <ViewHost view={workspace.view} csrf={workspace.csrf} /> : <GuardedHtml html={initial.pageHtml ?? ""} immutable />}</div>}
       </main>

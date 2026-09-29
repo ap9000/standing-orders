@@ -97,6 +97,7 @@ const TICK_FAILURE_REASONS = new Set([
   "agent",
   "agent-reported",
   "no-op",
+  "no-handoff",
   "moved-head",
   "moved-branch",
   "timeout",
@@ -119,6 +120,7 @@ const STANDALONE_BROKE_REASONS = new Set([
   "agent",
   "agent-reported",
   "no-op",
+  "no-handoff",
   "moved-head",
   "timeout",
   "git",
@@ -429,7 +431,9 @@ function disposeBuildOutcomeLocked(context: DisposeContext, result: BuildResult)
     const failureClass: FailureClass =
       result.reason === "agent-reported"
         ? "agent-reported"
-        : result.reason === "no-op" || result.reason === "moved-head" || result.reason === "moved-branch"
+        : result.reason === "no-handoff"
+          ? "no-handoff"
+          : result.reason === "no-op" || result.reason === "moved-head" || result.reason === "moved-branch"
           ? "no-op"
           : result.reason === "timeout" || result.reason === "git" || result.reason === "provider-init" || result.reason === "setup" || result.reason === "stopped" || result.reason === "provider-unattested" || result.reason === "provider-protocol"
             ? "retryable-infra"

@@ -97,6 +97,7 @@ import { PLAN_AUTO_SCHEMA } from "./plan-auto.js";
 import { RECIPE_SCHEMA } from "./recipes.js";
 import type { LimitReading, LimitWindow } from "./provider-limits.js";
 import { POLICY_SCHEMA, agentRefusal, approvalRefusal, attendedRefusal, policyParts, readPolicy, underCeiling, sessionCeilingRefusal, type OrgPolicy, type SavedPolicy } from "./policy.js";
+import { PROVIDER_AUTH_SCHEMA } from "./provider-auth.js";
 import { SPEND_SCHEMA, billingOf, budgetStates, canPrice, claudeMachineBilling, countsToward, filersOf, monthOf, priceWork, seenBilling as seenBillingOf, spendItems, teammateFilers, usd, type Billing, type Budget, type BudgetAgent, type BudgetHold, type BudgetScope, type BudgetState, type SpendItem } from "./spend.js";
 import { FOREVER, RETENTION_SCHEMA, periodWords, type RetentionKind, type RetentionPeriods } from "./retention.js";
 import { IN_RANGE, LEDGER_CHAIN_SCHEMA, safeWhole, sealLedger, verifyLedgerChain, type LedgerChainReport, type VerifiedHead } from "./ledger-chain.js";
@@ -298,7 +299,8 @@ export type SealedLedgerEntry = LedgerEntry & { seal: { prev: string; hash: stri
 // v105 prices every run (reported, or tokens at the catalogue price) and keeps monthly budgets per project, person, teammate and installation.
 // v106 keeps the organisation policy, retention periods, backup settings and runs, check progress, and runner capacity changes.
 // v107 keeps a check's progress and result in one record (run_check absorbs check_progress).
-export const SCHEMA_VERSION = 107;
+// v108 keeps sign-in pauses: one incident per provider whose sign-in stopped working (provider_auth_pause).
+export const SCHEMA_VERSION = 108;
 
 /** v102: a project's approval rules, and each person's approval of an exact scope (two are needed for protected work). */
 const APPROVAL_SCHEMA = `
@@ -4951,6 +4953,8 @@ function initializeStore(db: Database, file: string): Store {
   db.exec(LEDGER_CHAIN_SCHEMA);
   db.exec(MONITORING_SCHEMA);
   db.exec(SPEND_SCHEMA);
+  // Sign-in pauses: one row per incident of a provider's sign-in no longer working.
+  db.exec(PROVIDER_AUTH_SCHEMA);
   db.exec(RETENTION_SCHEMA);
   db.exec(BACKUP_SCHEMA);
   // Sprint 8: the organisation policy (one row, or none: nothing restricted).
@@ -11757,7 +11761,7 @@ export class Store {
       .prepare(
         `SELECT id FROM run
           WHERE worktree = ?
-            AND (outcome IS NULL OR reason = 'interrupted' OR parent_run IS NOT NULL)
+            AND (outcome IS NULL OR reason IN ('interrupted', 'no-handoff') OR parent_run IS NOT NULL)
           ORDER BY id DESC LIMIT 1`,
       )
       .get(path) as { id: number } | undefined;

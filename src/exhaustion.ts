@@ -20,6 +20,10 @@
  *   class. Exit code, bare rate-limit prose, timeout, notFound, stderr,
  *   and zero tokens NEVER independently establish exhaustion.
  * - Everything unmatched is `unknown` — the ordinary failure road.
+ * - A sign-in that no longer works (`auth-expired`) is recognized FIRST,
+ *   for every provider and version: an expired or revoked login is not a
+ *   property of a CLI version, and retrying it only burns attempts. It is
+ *   never fallback-eligible — a lapsed login must not reach a paid key.
  */
 
 import type { ProviderId } from "./provider.js";
@@ -31,6 +35,9 @@ export type TerminalClass =
   | "credits-depleted"
   /** Temporary throttling NOT tied to the usage cap — backoff, NEVER paid fallback. */
   | "transient-throttle"
+  /** The provider's sign-in or API key no longer works — NO retry, NO
+   * fallback: dispatch for that provider pauses until someone signs in. */
+  | "auth-expired"
   /** A definite non-exhaustion terminal (ordinary failure). */
   | "not-exhausted"
   /** No structural signal matched — the ordinary failure/strike road. */
@@ -161,8 +168,17 @@ export function classifyTerminal(args: {
   version: string | null;
   authMode: "subscription" | "api-key";
   terminal: StructuralTerminal | null;
+  /** What a run that failed within seconds, having produced nothing, said
+   * on its way out (stderr and unstructured stdout) — read ONLY for the
+   * sign-in signal: a CLI that is not logged in often exits before its
+   * structured stream begins. */
+  earlyExit?: string | null;
 }): TerminalClass {
   const { provider, version, authMode, terminal } = args;
+  // A sign-in that no longer works, before anything else and for any
+  // provider or version: no fixture is needed to know a login is gone.
+  if (terminal !== null && terminal.failed === true && isAuthFailure(`${terminal.code ?? ""}\n${terminal.text ?? ""}`)) return "auth-expired";
+  if (typeof args.earlyExit === "string" && isAuthFailure(args.earlyExit)) return "auth-expired";
   if (terminal === null) return "unknown";
   // The classifier's contract permits failed:false, but a non-failure
   // terminal is never exhaustion (Codex foundation review, finding 4):
@@ -187,4 +203,31 @@ export function classifyTerminal(args: {
   // non-exhaustion terminal (a non-failure terminal already returned
   // unknown above).
   return "not-exhausted";
+}
+
+/**
+ * The sign-in signals, provider-neutral: Claude's expired or unrefreshable
+ * OAuth session and its "Please run /login", an API key the provider calls
+ * invalid or revoked, Codex's and Gemini's "not logged in", and an HTTP 401
+ * the harness reports as its terminal. Ordinary failures (a test that
+ * failed, a timeout, a usage limit) match none of these.
+ */
+const AUTH_FAILURE: readonly RegExp[] = [
+  // Provider-specific phrasings only: a build's own output (a login feature's
+  // tests, an HTTP 401 in a log) must never read as the agent's sign-in.
+  /\bOAuth (?:session|token)\b[^\n]{0,80}\b(?:expired|could not be refreshed|revoked|invalid)/i,
+  /\bFailed to authenticate\b[^\n]{0,40}\b(?:OAuth|token|session|credentials|API key)/i,
+  /\bPlease run \/login\b/i,
+  /\binvalid[ _-](?:x-)?api[ _-]?key\b/i,
+  /\binvalid bearer token\b/i,
+  /\bapi[ _-]?key\b[^\n]{0,40}\b(?:is )?(?:invalid|revoked|expired|not valid)\b/i,
+  /"type"\s*:\s*"authentication_error"/i,
+  /\bMissing bearer (?:or basic )?authentication\b/i,
+  /^Not logged in\b/m,
+];
+
+/** Whether a provider's own words say its sign-in or key no longer works. */
+export function isAuthFailure(text: string): boolean {
+  const bounded = text.slice(0, 8192);
+  return AUTH_FAILURE.some(re => re.test(bounded));
 }

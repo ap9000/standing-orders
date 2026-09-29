@@ -1,7 +1,7 @@
 import { repositoryContext, repositoryContextRead } from './repository-context.js';
 import { repositoryContextHtml } from './repository-context-ui.js';
 import { browserAssetsAvailable, browserWorkspaceDocument, serveBrowserAsset } from './browser-shell.js';
-import { browserCrewOf, browserCrewFromIndex, browserWorkActionHref, browserProjectsOf, browserNavigationOf, type BrowserWorkspace, type BrowserChatLink, type BrowserTasksView, type BrowserLimits, type BrowserSettingsView, type BrowserTaskView, type BrowserTaskFact, type BrowserTaskSection, type BrowserProjectsView, type BrowserProjectRow, type BrowserResultChip, type BrowserResultPanel, type BrowserResultView, type BrowserActionCard } from './browser-workspace.js';
+import { browserCrewOf, browserCrewFromIndex, browserWorkActionHref, browserProjectsOf, browserNavigationOf, type BrowserWorkspace, type BrowserChatLink, type BrowserTasksView, type BrowserLimits, type BrowserSettingsView, type BrowserTaskView, type BrowserTaskFact, type BrowserTaskSection, type BrowserProjectsView, type BrowserProjectRow, type BrowserResultChip, type BrowserResultPanel, type BrowserResultView, type BrowserActionCard, type BrowserSignIn } from './browser-workspace.js';
 import { configureLeadFollow, leadFollowStatus, runLeadFollowPass } from './lead-follow.js';
 import { startMaintenance } from './maintenance.js';
 import { codingHandoffPreview, createCodingHandoff } from './coding-handoff.js';
@@ -122,6 +122,7 @@ import { projectAuthority } from "./project-access.js";
  */
 
 import { createConnectionChecker, type ProviderConnection } from "./provider-connection.js";
+import { liftAuthPause, noteSignInProbe, signInNotices } from "./provider-auth.js";
 import { openRouterModelsCache, openRouterPickerScript } from "./openrouter-models.js";
 import { checkModels, isNewModel, livePin, modelOptions, modelWords, RUNTIME_TOOLS, runtimeStates, seenModels, setWatch, updateRuntime, watchState, type CatalogSeams, type RuntimeTool, type VersionRunner } from "./model-catalog.js";
 import { MODELS_CSS, modelsHtml, modelsScript, type RoleView } from "./models-ui.js";
@@ -650,7 +651,13 @@ export function createDecisionServer(options: ServeOptions): Server {
   const workspaceIncarnation = randomBytes(16).toString('hex');
   const workspaceValidators = new WorkspaceValidatorCache();
   const providerHome = options.connectionHome ?? homedir();
-  const connectionCheck = createConnectionChecker({ home: providerHome, clock, ...(options.connectionProbe === undefined ? {} : { probe: options.connectionProbe }) });
+  const checkConnection = createConnectionChecker({ home: providerHome, clock, ...(options.connectionProbe === undefined ? {} : { probe: options.connectionProbe }) });
+  // Every sign-in check the console makes also answers a sign-in pause.
+  const connectionCheck = async (provider: ProviderId, fresh?: boolean): Promise<ProviderConnection> => {
+    const value = await checkConnection(provider, fresh);
+    try { noteSignInProbe(store, provider, value.state, clock()); } catch { /* the pause keeps its own state */ }
+    return value;
+  };
   const modelCatalog = openRouterModelsCache(options.modelCatalogFetcher);
   const modelSeams: CatalogSeams = {
     home: providerHome,
@@ -4628,6 +4635,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         navigation: [...browserNavigationOf(currentPath, s.chrome.project, needsYou), { label: 'Workspace tools', href: '/menu', active: path.pathname === '/menu' }],
         chats,
         ...(s.refreshSeconds === undefined ? {} : { refreshSeconds: Math.max(5, Math.floor(s.refreshSeconds)) }),
+        ...(s.chrome.signIn === undefined ? {} : { signIn: s.chrome.signIn }),
       };
       if (requestFacts.workspaceRead) {
         const validator = requestFacts.workspaceValidator;
@@ -4746,6 +4754,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       inboxSaturated: badge.saturated,
       settings: true,
       ...(store.isDemo() ? { demo: true } : {}),
+      ...(() => { const signIn = signInNotices(store); return signIn.length === 0 ? {} : { signIn }; })(),
       ...(liveMode === null || liveModeTerms === null
         ? {}
         : {
@@ -5989,6 +5998,16 @@ export function createDecisionServer(options: ServeOptions): Server {
 
     const denied = authorizeMutation(request, who, body);
     if (denied !== null) return refuse(response, who, denied.status, denied.message);
+    // A person says a provider's sign-in works again: its sign-in pause
+    // lifts, its tasks may start, and one short message says so.
+    const resumeProvider = /^\/providers\/([a-z]+)\/resume$/.exec(url.pathname);
+    if (resumeProvider !== null) {
+      const provider = resumeProvider[1]!;
+      if (!isProviderId(provider)) return refuse(response, who, 400, "unknown provider", "/work");
+      if (who.role !== "approver") return refuse(response, who, 403, "Only an operator can resume an agent's work.", "/work");
+      liftAuthPause(store, provider, "person", who.name, clock());
+      return redirect(response, "/work");
+    }
     if (url.pathname === '/code' || url.pathname.startsWith('/code/')) {
       const wantsJson = request.headers.accept?.includes('application/json') === true;
       const fail = (status: number, message: string, delivery: 'rejected' | 'pending' | 'unknown' = 'rejected', sessionId?: string): void => wantsJson
@@ -12237,6 +12256,7 @@ ${THEME_DARK}
   }
   .banner .badge { margin-right: .5rem; }
   .banner a { color: var(--muted-foreground); }
+  .sign-in-banner form { display: inline; margin: 0 0 0 .5rem; padding: 0; border: 0; background: transparent; }
 
   .split { display: grid; grid-template-columns: minmax(250px, 320px) minmax(0, 1fr); min-height: 100vh; }
   .list-pane {
@@ -13973,6 +13993,8 @@ type Chrome = {
   /** The active operating mode's banner (M1): rides every page scoped to
    * a repo with a live mode — a signed posture is never invisible. */
   modeBanner?: { words: string; name: string };
+  /** Providers whose sign-in stopped working: every page says so, once. */
+  signIn?: BrowserSignIn[];
   /** The chat tab renders only where chat could ever be allowed. */
   chat?: boolean;
   code?: boolean;
@@ -14478,7 +14500,9 @@ function shell(
       : "") +
     (chrome.modeBanner === undefined
       ? ""
-      : `<div class="banner"><span class="badge badge-running">mode</span>${escape(chrome.modeBanner.words)} \u00b7 <a href="/mode">the terms \u00b7 end it</a></div>`);
+      : `<div class="banner"><span class="badge badge-running">mode</span>${escape(chrome.modeBanner.words)} \u00b7 <a href="/mode">the terms \u00b7 end it</a></div>`) +
+    (chrome.signIn ?? []).map(one => `<div class="banner sign-in-banner" data-sign-in="${escape(one.provider)}"><strong>${escape(one.title)}</strong> \u00b7 run <code>${escape(one.command)}</code> on this computer, then resume.${one.detail === "" ? "" : ` ${escape(one.detail)}`}` +
+      `<form method="post" action="${escape(one.resumeHref)}" class="inline"><input type="hidden" name="csrf" value="${escape(chrome.csrf ?? "")}"><button type="submit">${escape(one.resumeLabel)}</button></form></div>`).join("");
   // The scope bar sits between the banners and the main/split body, so it
   // can never disappear with a responsive pane (portfolio arc §1).
   const content =
@@ -21305,6 +21329,7 @@ const REASON_WORDS: Record<string, string> = {
   agent: "the agent failed",
   "agent-reported": "the agent reported it could not finish",
   "no-op": "nothing changed when something should have",
+  "no-handoff": "the agent stopped before handing off; its work was kept and it is being resumed",
   "moved-head": "the branch moved underneath the build",
   "moved-branch": "the branch moved underneath the build",
   timeout: "ran out of time",

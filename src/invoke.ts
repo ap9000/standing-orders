@@ -20,6 +20,7 @@
 import { adapterFor, auditOf, type AgentSpec, type Invocation, type ProviderRunner, type AgentEnding } from "./provider.js";
 import { readProviderKey, readAuthModeStrict, PROVIDER_KEY_ENV, OWN_KEY_ENV } from "./keys.js";
 import { classifyTerminal } from "./exhaustion.js";
+import { liftAuthPause } from "./provider-auth.js";
 import { attestProvider, type VersionProbe } from "./attest.js";
 import { run as runCommand, runOwnerTag, startClaudeHeldSession } from "./exec.js";
 import { currentContainment } from "./containment.js";
@@ -38,6 +39,10 @@ export type { ProviderRunner } from "./provider.js";
 /** The claude binary name — kept for the legacy quota rows and tests that
  * describe history; new code carries a resolved AgentSpec instead. */
 export const PROVIDER_BINARY = "claude";
+
+/** "Within seconds": how soon a silent failed run must end for its stderr to
+ * be read for the sign-in signal. */
+const AUTH_EARLY_EXIT_MS = 30_000;
 
 /**
  * A provider can run the repository's own CLI. In a self-hosting build that
@@ -403,6 +408,7 @@ export async function invokeAgent(
     ? await codexLoginBilling(attested !== null ? attested.executable : adapter.binary, [...(runOptions.omitEnv ?? []), ...adapter.extraOmitEnv, ...ownKeyEnv])
     : null;
   let result: Awaited<ReturnType<typeof spawn>>;
+  const spawnedAt = Date.now();
   try {
     // Under the stop watch (v52): the run's stop row is re-read while the
     // provider runs, and a stop kills THIS run's process group through the
@@ -529,11 +535,21 @@ export async function invokeAgent(
   // no version here yet (attested === null), so they classify fail-closed
   // until their exhaustion fixture — and the version proving it needs — is
   // captured and reviewed.
+  // A run that failed within seconds having produced nothing is read for
+  // the sign-in signal too: a CLI that is not logged in often says so on
+  // stderr before its structured stream starts.
+  const quietEarlyExit =
+    result.code !== 0 && !result.timedOut && !result.notFound &&
+    Date.now() - spawnedAt <= AUTH_EARLY_EXIT_MS &&
+    envelope.promptConsumed !== true && (envelope.tokensOut ?? 0) === 0;
   const terminalClass = classifyTerminal({
     provider: spec.provider,
     version: attested === null ? null : attested.version,
     authMode,
     terminal: envelope.structuralTerminal,
+    // stderr and plain stdout only: a JSON event line can carry the agent's
+    // own command output (codex aggregated_output), never its sign-in.
+    earlyExit: quietEarlyExit ? `${result.stderr.slice(-4096)}\n${plainLines(result.stdout).slice(-4096)}` : null,
   });
   store.stampTerminalClass(runId, authMode, terminalClass);
 
@@ -620,6 +636,12 @@ export async function invokeAgent(
           : "the harness exited 0 without ever initializing"),
       finalMessage: envelope.finalMessage,
     };
+  }
+
+  // A run that worked proves its provider's sign-in works: a sign-in pause
+  // on it lifts, and its waiting tasks may start again.
+  if (result.code === 0 && envelope.structuralTerminal === null && envelope.promptConsumed !== false) {
+    try { liftAuthPause(store, spec.provider, "run", `run #${runId}`, clock(), new Date(spawnedAt)); } catch { /* the pause stays until the next proof */ }
   }
 
   return {
@@ -891,4 +913,9 @@ async function codexLoginBilling(binary: string, omitEnv: readonly string[]): Pr
   } catch {
     return null;
   }
+}
+
+/** The lines of a harness's stdout that are not JSON events. */
+function plainLines(stdout: string): string {
+  return stdout.split("\n").filter(line => !line.trimStart().startsWith("{")).join("\n");
 }

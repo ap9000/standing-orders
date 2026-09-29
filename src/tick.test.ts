@@ -27,6 +27,8 @@ import { WorktreePool } from "./worktree.js";
 import { canonicalProfileJson, profileDigestOf, type ExecutionProfile } from "./scope.js";
 import type { Runner } from "./builder.js";
 import { bridgePass, hashPairingCode, mintPairingCode, PAIRING_TTL_MS, type TelegramTransport } from "./telegram.js";
+import { authPauseOf, pauseForAuth } from "./provider-auth.js";
+import { workIndexPage } from "./work-index.js";
 
 
 /** The exact route authority a fixture PRESENTS at admission (v48 authority repair): the
@@ -799,6 +801,91 @@ describe("tick, against real git", () => {
     expect(payload().runs[0]).toMatchObject({ outcome: "failed", reason: "unknown" });
     await run(["ready", "--json"]);
     expect((payload().tasks ?? []).map((t: { id: string }) => t.id)).toEqual([]);
+  });
+
+  // An agent whose sign-in expired: the harness comes up, then the turn fails
+  // to authenticate — the 2026-09-29 incident's exact words.
+  const signedOutAgent: Runner = async (_file, _args, options) => {
+    agentRan.push(options?.cwd ?? "");
+    return { ...OK, code: 1, stdout: [
+      JSON.stringify({ type: "system", subtype: "init" }),
+      JSON.stringify({ type: "result", subtype: "success", is_error: true, result: "Failed to authenticate: OAuth session expired and could not be refreshed" }),
+    ].join("\n") };
+  };
+
+  test("an expired sign-in takes no strike and no retry, requeues the task, pauses Claude only, and resumes when a person says so", async () => {
+    const { runnerToken, approverToken } = await credentials();
+    await queueApproved("t-1", approverToken);
+    await queueApproved("t-2", approverToken);
+
+    await tick(runnerToken, [], signedOutAgent);
+    // One attempt, no strike: the second task is not even tried on a sign-in that is gone.
+    expect(agentRan).toHaveLength(1);
+    expect(payload().dispatched).toEqual(expect.arrayContaining([
+      expect.objectContaining({ outcome: "failed", reason: "auth-expired — requeued, sign-in needed" }),
+      expect.objectContaining({ outcome: "skipped", reason: "signed-out", detail: expect.stringContaining("Claude needs you to sign in again") }),
+    ]));
+    const failedId = (payload().dispatched as { id: string; outcome: string }[]).find(one => one.outcome === "failed")!.id;
+    await run(["task", "show", failedId, "--json"]);
+    expect(payload().task.state).toBe("queued");
+    expect(payload().hold).toBeNull();
+    expect(payload().runs[0]).toMatchObject({ outcome: "failed", reason: "auth-expired" });
+    expect(payload().dispatch).toMatchObject({ code: "signed-out", summary: "Claude needs you to sign in again" });
+    await run(["task", "show", failedId]);
+    expect(lines.join("\n")).toContain("dispatch: Claude needs you to sign in again — This task starts again on its own once Claude works.");
+    const store = openStore(db);
+    try {
+      expect(store.lookupRef(failedId)?.strikes).toBe(0);
+      // The console's task list says the same, not "Ready to run" (the attempted task's scripted
+      // runner leaves no process record here, so only the untried one is asserted).
+      const untried = failedId === "t-1" ? "t-2" : "t-1";
+      expect(workIndexPage(store, T0, { principal: "operator", repos: null, includeUnplaced: true }).items.find(one => one.activeTaskId === untried)?.status.label)
+        .toBe("Claude needs you to sign in again");
+    } finally { store.close(); }
+
+    // status and ready say it plainly, first.
+    await run(["status"]);
+    expect(lines.join("\n").split("\n")[0]).toBe("Claude needs you to sign in again — run `claude /login`. Its tasks wait until then.");
+    expect(lines.join("\n")).toContain("t-1 (Claude needs you to sign in again)");
+    await run(["ready"]);
+    expect(lines.join("\n").split("\n")[0]).toContain("Claude needs you to sign in again. Run `claude /login` on this computer");
+    await run(["ready", "--json"]);
+    expect(payload().signIn).toMatchObject([{ provider: "claude" }]);
+    expect((payload().tasks as { id: string }[]).map(one => one.id).sort()).toEqual(["t-1", "t-2"]);
+
+    // Another pass spends nothing: no retry while the sign-in is gone.
+    await tick(runnerToken);
+    expect(agentRan).toHaveLength(1);
+    expect(payload().dispatched.every((one: { reason?: string }) => one.reason === "signed-out")).toBe(true);
+
+    // A person resumes it: both tasks build, and one short message says so.
+    await run(["providers", "resume", "claude", "--json"]);
+    expect(payload()).toMatchObject({ ok: true, provider: "claude", resumed: 1 });
+    const built: string[] = [];
+    for (let pass = 0; pass < 2; pass++) {
+      await tick(runnerToken);
+      built.push(...(payload().dispatched as { id: string; outcome: string }[]).filter(one => one.outcome === "built").map(one => one.id));
+    }
+    expect(built.sort()).toEqual(["t-1", "t-2"]);
+    const after = openStore(db);
+    try {
+      expect(after.handle.prepare("SELECT subject FROM notification WHERE kind IN ('auth-expired', 'auth-restored') ORDER BY id").all().map(one => one["subject"]))
+        .toEqual(["Claude needs you to sign in again", "Claude is signed in again, 1 task resumed"]);
+    } finally { after.close(); }
+  });
+
+  test("a sign-in pause on one provider never holds another provider's work", async () => {
+    const { runnerToken, approverToken } = await credentials();
+    await queueApproved("t-1", approverToken);
+    const store = openStore(db);
+    try {
+      store.createTask({ id: "elsewhere", title: "a codex task" }, T0);
+      const ref = store.refFor("built-in", "elsewhere").id;
+      pauseForAuth(store, { provider: "codex", authMode: "subscription", runId: 0, taskRef: ref, now: T0 });
+      expect(authPauseOf(store, "codex")).not.toBeNull();
+    } finally { store.close(); }
+    await tick(runnerToken);
+    expect(payload().dispatched).toMatchObject([{ id: "t-1", outcome: "built" }]);
   });
 
   test("three straight failures stall the task with an incident, not a fourth attempt", async () => {

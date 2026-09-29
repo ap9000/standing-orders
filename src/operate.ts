@@ -10,6 +10,8 @@ import { billingOf, budgetHoldWords, budgetLabel, budgetStates, monthNamed, mont
 import { spendCsv } from "./spend-ui.js";
 import { buildExport, exportSummary, exportZip, writeExportFolder } from "./export.js";
 import { startBudgetAlerts } from "./budget-alerts.js";
+import { authPauseOf, claimAuthTrial, liftAuthPause, openAuthPauses, signInWords, startSignInProbes } from "./provider-auth.js";
+import { createConnectionChecker } from "./provider-connection.js";
 import { backupFiles, backupFolderOf, backupOwner, backupNow, restoreDatabase, startBackups } from "./backup.js";
 import { pushLimitSink } from "./provider-limits.js";
 import { limitsView } from "./limits-ui.js";
@@ -561,6 +563,8 @@ Agents — which provider and model each phase runs on
   toolroll providers --report --runner <name> --token <t>
                                         record this machine's readiness per
                                         provider under its runner name
+  toolroll providers resume <provider> after signing in again, start its
+                                        paused tasks now
   toolroll config set chat --provider claude-subscription|codex-subscription|anthropic-api|openrouter-api
       [--model <m>] [--weekly-usd <n>] [--daily-turns <n>] --as <you> --token <t>
       membership providers reuse a logged-in local harness with no dollar
@@ -1143,6 +1147,7 @@ async function dispatch(
     case "intake":
       return intakeCommand(positional, flags, context);
     case "providers":
+      if (positional[0] === "resume") return resumeProviderCommand(positional.slice(1), flags, context);
       return providersCommand(flags, context);
     case "template":
       return templateCommand(positional, flags, context);
@@ -1252,6 +1257,7 @@ async function readyCommand(
 
   const described = ready.map(ref => describeRef(store, ref, now));
   const dispatchableCount = described.filter(one => diagnosisIsDispatchable(one.dispatch)).length;
+  const pauses = openAuthPauses(store);
 
   if (json) {
     write(envelopeJson({
@@ -1260,11 +1266,14 @@ async function readyCommand(
       ...(ready.length > 0 ? {} : { reason: "empty", message: "nothing is task-locally ready" }),
       count: ready.length,
       dispatchableCount,
+      signIn: pauses.map(one => ({ provider: one.provider, message: signInWords(one), since: one.openedAt })),
       tasks: described,
     }));
     return ready.length > 0 ? EXIT.ok : EXIT.refused;
   }
 
+  // A paused provider first: nothing on it runs until someone signs in.
+  for (const one of pauses) write(signInWords(one));
   if (ready.length === 0) {
     write("Nothing is ready to dispatch.");
     return EXIT.refused;
@@ -1274,7 +1283,7 @@ async function readyCommand(
   for (const ref of ready) {
     const task = store.getTask(ref.externalId);
     const diagnosis = diagnoseTaskDispatch(store, ref.externalId, now);
-    write(`  ${ref.externalId}  ${task === null ? "" : task.title}${ref.assignedRunner === null ? "" : `  (reserved for ${ref.assignedRunner})`}${diagnosis === null ? "" : ` — ${diagnosis.summary.toLowerCase()}`}`);
+    write(`  ${ref.externalId}  ${task === null ? "" : task.title}${ref.assignedRunner === null ? "" : `  (reserved for ${ref.assignedRunner})`}${diagnosis === null ? "" : ` — ${diagnosis.code === "signed-out" ? diagnosis.summary : diagnosis.summary.toLowerCase()}`}`);
   }
   return EXIT.ok;
 }
@@ -2184,6 +2193,7 @@ async function buildCommand(
       result.reason === "agent" ||
       result.reason === "agent-reported" ||
       result.reason === "no-op" ||
+      result.reason === "no-handoff" ||
       result.reason === "moved-head" ||
       result.reason === "timeout" ||
       result.reason === "git" ||
@@ -2963,6 +2973,18 @@ async function tickCommand(
     const brokenMode = [...new Set(modeProviders)].map(one => readAuthModeStrict(one)).find(one => !one.ok);
     if (brokenMode !== undefined && !brokenMode.ok) {
       dispatched.push({ id, outcome: "skipped", reason: "auth-mode", detail: brokenMode.problem });
+      continue;
+    }
+    // THE SIGN-IN PAUSE: a provider whose sign-in stopped working takes no
+    // new work — no claim, no run, never a substitute (a lapsed login must not
+    // reach a paid fallback) — until a run or check on it works again or a
+    // person resumes it. Other providers keep working.
+    const signedOut = [...new Set(modeProviders)].map(one => authPauseOf(store, one)).find(one => one !== null);
+    // One task every AUTH_TRIAL_MS goes ahead as the trial: a sign-in check
+    // can say "logged in" for a session that cannot refresh, so a real run
+    // decides — it lifts the pause, or fails into the same incident.
+    if (signedOut !== undefined && signedOut !== null && !claimAuthTrial(store, signedOut, clock())) {
+      dispatched.push({ id, outcome: "skipped", reason: "signed-out", detail: signInWords(signedOut) });
       continue;
     }
     // The leg is the authority: what resolved must BE the leg, exactly —
@@ -4109,7 +4131,9 @@ async function tickCommand(
           id,
           outcome: "failed",
           reason: disposition.sealed
-            ? `${disposition.failureClass}${disposition.disposition === "backoff" ? ` — retry ${disposition.strikes}/3` : disposition.disposition === "stalled" ? " — stalled" : ""}`
+            ? disposition.disposition === "auth-expired"
+              ? "auth-expired — requeued, sign-in needed"
+              : `${disposition.failureClass}${disposition.disposition === "backoff" ? ` — retry ${disposition.strikes}/3` : disposition.disposition === "stalled" ? " — stalled" : ""}`
             : "fenced",
           ...(result.ok ? {} : { detail: result.message.slice(0, 200) }),
           worktree: leased.worktree.path,
@@ -5206,6 +5230,8 @@ async function startConsole(options: {
   server.on("close", stopMonitoring);
   // v105: budget alerts at 50/80/100 %, a pass a minute.
   server.on("close", startBudgetAlerts(context.store));
+  // A paused provider's sign-in is checked every two minutes (no model, nothing spent); the pause lifts when it works.
+  server.on("close", startSignInProbes(context.store, createConnectionChecker()));
   // Sprint 8: scheduled backups, a pass a minute; its lease also tells a restore that the console is running.
   server.on("close", startBackups(context.store, context.databaseFile));
   server.on("close", startCodexLimits(context.store));
@@ -5624,6 +5650,31 @@ async function webhookCommand(
     ...(chosen === null ? [] : [`${chosen} carries the pages.`]),
     ...(after.implicit && chosen === null && !interactive() ? [`Several services are configured — choose the pager: toolroll webhook primary <service>`] : []),
     `Send yourself a proof: toolroll webhook test`,
+  ]);
+}
+
+/**
+ * `toolroll providers resume <provider>` — a person says the sign-in works
+ * again (after `claude /login`, say): the provider's sign-in pause lifts, its
+ * tasks may start, and one short message says how many resumed. A pause that
+ * lifted by itself answers so; nothing is paused twice.
+ */
+function resumeProviderCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): number {
+  const { store, write, json } = context;
+  const command = "providers resume";
+  const provider = positional[0];
+  if (provider === undefined || !isProviderId(provider) || positional.length > 1) {
+    return fail(write, json, command, "usage", `Use \`toolroll providers resume <${PROVIDER_IDS.join("|")}>\`.`, EXIT.usage);
+  }
+  const who = text(flags, "as") ?? process.env["USER"] ?? "operator";
+  const lifted = liftAuthPause(store, provider, "person", who, context.clock());
+  if (lifted === null) return succeed(write, json, command, { provider, resumed: 0, paused: false }, () => [`${provider} is not paused.`]);
+  return succeed(write, json, command, { provider, resumed: lifted.resumed, paused: false }, () => [
+    `${provider} resumed — ${lifted.resumed} ${lifted.resumed === 1 ? "task" : "tasks"} can start again.`,
   ]);
 }
 

@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- **An expired sign-in pauses that agent instead of burning retries.** A run
+  that fails because its sign-in or API key no longer works (Claude's expired
+  OAuth session or "Please run /login", a revoked key, Codex or Gemini not
+  logged in, a 401) is `auth-expired`: no strike, no retry, never a paid
+  fallback. Its task goes back to the queue and new work for that provider
+  waits while the others keep running. `status`, `ready`, `task show` and the
+  console say "Claude needs you to sign in again" and what to run, and every
+  connected channel gets one message per incident. The pause lifts when a run
+  or sign-in check on that provider works, or with **Resume** in the console
+  or `toolroll providers resume <provider>`; one short message says how many
+  tasks resumed.
+- **An agent that stops before its handoff keeps its work.** Every builder,
+  revision and repair prompt now says the agent runs headless (foreground
+  commands only, no background-and-wait, wakeups or loops; hand off before
+  stopping), and claude runs start with `--disallowedTools
+  ScheduleWakeup,CronCreate,Monitor`. When an attempt ends with changes but no
+  handoff, its own session is resumed in the same worktree with a short turn
+  to finish and hand off. Its changes are saved as a patch in the run's
+  evidence folder first; when the session cannot be resumed they become a
+  work-in-progress commit on the branch the next attempt continues from, and
+  a retry never resets that work. The failure reads "The agent stopped before
+  handing off; its work was kept and it is being resumed". A handoff and a
+  passing check are still required for success.
 - **Toolroll under the hood.** The internal names follow the product name;
   every existing install, database, branch and integration keeps working, and
   nothing is moved. The npm package is `toolroll` (both the `toolroll` and

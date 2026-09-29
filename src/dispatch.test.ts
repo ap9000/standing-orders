@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { acquireIfReady } from "./claim.js";
+import { acquireIfReady, finalizeFailureFenced } from "./claim.js";
 import {
   diagnoseTaskDispatch,
   diagnosisIsDispatchable,
@@ -241,6 +241,30 @@ describe("Never Stuck dispatch diagnosis", () => {
       code: "retry-scheduled",
       nextAt: next.toISOString(),
       action: null,
+    });
+  });
+
+  test("an attempt that stopped before its handoff is named in plain words (run 2085)", () => {
+    const ref = file(store, "t-handoff");
+    enroll(store);
+    const claimed = acquireIfReady(store, ref, "worker", { token: TOKEN, repo: REPO, now: T0 });
+    if (!claimed.ok) throw new Error(claimed.message);
+    const authority = store.routeAuthorityFor(ref, "builder", null, { provider: "claude", model: null });
+    const runId = store.startRun({
+      taskRef: ref, leaseId: claimed.claim.leaseId, runner: "worker", branch: "feat/handoff", worktree: "/tmp/wt-handoff", now: T0,
+      ...(authority === null || !authority.ok ? {} : { route: authority.stamp }),
+    });
+    const sealed = finalizeFailureFenced(store, {
+      leaseId: claimed.claim.leaseId, runId, taskId: "t-handoff", failureClass: "no-handoff",
+      message: "The agent stopped before handing off; its work was kept and it is being resumed.", worktree: "/tmp/wt-handoff", now: T0,
+    });
+    expect(sealed).toMatchObject({ ok: true, disposition: "backoff" });
+    expect(store.getRun(runId)?.reason).toBe("no-handoff");
+    // task show prints both the hold and the dispatch line; the console reads the same diagnosis.
+    expect(store.activeHold(ref, T0)?.reason).toMatch(/^The agent stopped before handing off; its work was kept and it is being resumed/);
+    expect(diagnoseTaskDispatch(store, "t-handoff", T0)).toMatchObject({
+      code: "retry-scheduled",
+      detail: expect.stringMatching(/^The agent stopped before handing off; its work was kept and it is being resumed\. The next attempt is eligible at /),
     });
   });
 

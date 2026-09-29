@@ -318,7 +318,13 @@ export type BrowserWorkspace = {
   view?: BrowserView | null;
   /** A live page (Inbox, System…) reads itself again this often; forms being edited are kept. */
   refreshSeconds?: number;
+  /** Providers whose sign-in stopped working: their work waits (one per provider). */
+  signIn?: BrowserSignIn[];
 };
+
+/** A provider's sign-in pause, as the console shows it: the plain reason,
+ * what to run, and the one action that resumes its work. */
+export type BrowserSignIn = { provider: string; title: string; command: string; detail: string; resumeLabel: string; resumeHref: string };
 
 /** Safe inside a script[type=application/json] element. JSON escaping alone
  * does not stop the HTML parser from closing that element at </script>. */

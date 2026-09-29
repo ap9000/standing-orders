@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { openStore, type Store } from "./store.js";
 import { register } from "./runner.js";
-import { WorktreePool, worktreePath, type Runner } from "./worktree.js";
+import { saveWorkPatch, WorktreePool, worktreePath, type Runner } from "./worktree.js";
 import { run } from "./exec.js";
 
 /** A task with no scope presents the bare word `legacy` for the exact pair
@@ -557,6 +557,50 @@ describe("the pool, against real git", () => {
     expect(resumed).toMatchObject({ ok: true, resumedFromRun: runId, recoveryKind: "partial" });
     if (!resumed.ok) return;
     expect(existsSync(join(resumed.worktree.path, "partial.ts"))).toBe(true);
+  });
+
+  test("work left by an attempt that stopped before its handoff is saved to evidence and never reset (run 2085)", async () => {
+    const pool = new WorktreePool(store, { root: join(base, "pool") });
+    const evidence = join(base, "evidence");
+    store.createTask({ id: "t-handoff", title: "keep unhanded work" }, T0);
+    const ref = store.refFor("built-in", "t-handoff").id;
+    const first = await pool.lease({ repo, branch: "feat/handoff", base: "main", runner: "builder-1", taskRef: ref, now: T0 });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const runId = store.startRun({ taskRef: ref, leaseId: "gone-lease", runner: "builder-1", branch: "feat/handoff", worktree: first.worktree.path, ...bareLegacy("build", "claude", null), now: T0 });
+    await writeFile(join(first.worktree.path, "README.md"), "hello\nrenamed eighty-five files\n");
+    await writeFile(join(first.worktree.path, "renamed.ts"), "export const toolroll = true;\n");
+    store.finishRun(runId, { outcome: "failed", reason: "no-handoff", now: later(1_000) });
+    expect(await pool.release(first.worktree.path, later(2_000))).toMatchObject({ ok: false, reason: "dirty" });
+
+    const retry = await pool.lease({ repo, branch: "feat/handoff", runner: "builder-1", taskRef: ref, now: later(3_000), reclaim: { evidenceRoot: evidence } });
+    expect(retry).toMatchObject({ ok: true, resumedFromRun: runId, recoveryKind: "partial" });
+    if (!retry.ok) return;
+    // Saved first: tracked diff and the untracked file, in the evidence folder.
+    const patch = await import("node:fs/promises").then(fs => fs.readFile(retry.reclaimed as string, "utf8"));
+    expect(retry.reclaimed).toContain(evidence);
+    expect(patch).toContain("renamed eighty-five files");
+    expect(patch).toContain("export const toolroll = true;");
+    // And never reset: the retry continues from the same work.
+    expect(await import("node:fs/promises").then(fs => fs.readFile(join(retry.worktree.path, "README.md"), "utf8"))).toContain("renamed eighty-five files");
+    expect(existsSync(join(retry.worktree.path, "renamed.ts"))).toBe(true);
+  });
+
+  test("saveWorkPatch writes tracked changes and untracked files without touching the tree", async () => {
+    const pool = new WorktreePool(store, { root: join(base, "pool") });
+    const leased = await pool.lease({ repo, branch: "feat/patch", base: "main", runner: "builder-1", now: T0 });
+    expect(leased.ok).toBe(true);
+    if (!leased.ok) return;
+    await writeFile(join(leased.worktree.path, "README.md"), "hello\nedited\n");
+    await writeFile(join(leased.worktree.path, "fresh.ts"), "export const fresh = 1;\n");
+    const file = join(base, "evidence", "7", "unhanded-work.patch");
+    expect(await saveWorkPatch(run, leased.worktree.path, file, "# header\n")).toEqual({ ok: true, file });
+    const patch = await import("node:fs/promises").then(fs => fs.readFile(file, "utf8"));
+    expect(patch.startsWith("# header\n")).toBe(true);
+    expect(patch).toContain("+edited");
+    expect(patch).toContain("+export const fresh = 1;");
+    expect(patch).not.toContain(".standing-orders-lease");
+    expect(existsSync(join(leased.worktree.path, "fresh.ts"))).toBe(true);
   });
 
   test("provider occupancy replaces the console pid and is fenced to the live lease", async () => {

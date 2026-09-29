@@ -2,6 +2,7 @@
  * this module never opens a repository, retained evidence, or a live log. */
 import { COMPLETION_ACTION } from "./result-completion.js";
 import { windowLabel, type LimitWindow } from "./provider-limits.js";
+import { openAuthPauses, signInCommand, signInReason } from "./provider-auth.js";
 import { BUILT_IN, checkSuitesOf, type RunCheckSuite, type Store } from "./store.js";
 
 export type CheckSummary = {
@@ -35,6 +36,8 @@ export type InstallationStatus = {
   waitingForReview: { count: number; results: { task: string; run: number; check: CheckSummary }[] };
   releaseCheck: { task: string; run: number; finishedAt: string | null; check: CheckSummary } | null;
   planWindows: (LimitWindow & { provider: string; plan: string | null; observedAt: string })[];
+  /** Providers whose sign-in stopped working: their dispatch is paused. */
+  signIn: { provider: string; reason: string; command: string; since: string }[];
 };
 
 const maybeNumber = (value: unknown): number | null => value === null || value === undefined || !Number.isInteger(Number(value)) ? null : Number(value);
@@ -216,8 +219,15 @@ export function installationStatus(store: Store, now: Date): InstallationStatus 
     WHERE task.state = 'queued'`).all(now.toISOString(), BUILT_IN);
   const reasons = new Map<string, number>();
   const queuedTasks: { task: string; reason: string }[] = [];
+  const pauses = openAuthPauses(store);
   for (const row of queuedRows) {
-    const reason = queueReason(row);
+    let reason = queueReason(row);
+    if (reason === "ready for a worker" && pauses.length > 0) {
+      const scope = store.getScope(String(row["id"]));
+      const provider = scope?.approvedProfile?.provider ?? scope?.profile?.provider;
+      const paused = pauses.find(one => one.provider === provider);
+      if (paused !== undefined) reason = signInReason(paused);
+    }
     reasons.set(reason, (reasons.get(reason) ?? 0) + 1);
     if (queuedTasks.length < 8) queuedTasks.push({ task: String(row["id"]), reason });
   }
@@ -269,11 +279,14 @@ export function installationStatus(store: Store, now: Date): InstallationStatus 
         reached: Number(row["reached"]) === 1,
         observedAt: String(row["observed_at"]),
       })),
+    signIn: pauses.map(one => ({ provider: one.provider, reason: signInReason(one), command: signInCommand(one), since: one.openedAt })),
   };
 }
 
 export function renderInstallationStatus(status: InstallationStatus): string[] {
   const lines: string[] = [];
+  // A paused provider comes first: it is the one thing a person must do.
+  for (const one of status.signIn) lines.push(`${one.reason} — run \`${one.command}\`. Its tasks wait until then.`);
   lines.push(status.running.count === 0 ? "Running: none" : `Running: ${status.running.count} — ${status.running.tasks.map(one => `${one.task} (#${one.run}, ${one.phase})`).join(", ")}${status.running.count > status.running.tasks.length ? ", …" : ""}`);
   lines.push(status.queued.count === 0 ? "Queued: none" : `Queued: ${status.queued.count} — ${status.queued.tasks.map(one => `${one.task} (${one.reason})`).join(", ")}${status.queued.count > status.queued.tasks.length ? ", …" : ""}`);
   lines.push(status.waitingForReview.count === 0 ? "Ready for review: none" : `Ready for review: ${status.waitingForReview.count} — ${status.waitingForReview.results.map(one => `${one.task} (#${one.run})`).join(", ")}${status.waitingForReview.count > status.waitingForReview.results.length ? ", …" : ""}`);
@@ -301,7 +314,7 @@ export function renderInstallationStatus(status: InstallationStatus): string[] {
       lines.push(`Plan windows: ${provider} — ${detail}`);
     }
   }
-  return lines.slice(0, 12);
+  return lines.slice(0, 12 + status.signIn.length);
 }
 
 export function renderTaskWait(snapshot: TaskWaitSnapshot, outcome: string = snapshot.outcome): string {

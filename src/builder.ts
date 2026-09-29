@@ -36,14 +36,14 @@ import { PREPARED_EVIDENCE_FILE, PREPARED_EVIDENCE_GIT, preparedScreenshotMatche
  * repair remains narrowly time-bounded because its job is narrowly scoped.
  */
 
-import { unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { run, runOwnerTag, type ExecResult, type RunOptions } from "./exec.js";
 import { stopRequestedFor, stopWords, underStopWatch } from "./task-control.js";
 import { witnessedRunner } from "./process-custody.js";
 import { runWithIsolatedDatabase } from "./child-database.js";
-import { recordWorktreeProcess } from "./worktree.js";
+import { recordWorktreeProcess, saveWorkPatch } from "./worktree.js";
 import type { Decision, RunCheckSuite, SteerNote, Store } from "./store.js";
 import { approvalOf, digestOf, profileDigestOf, chainDigestOf, entryDigestOf, routeParityProblem, type ExecutionProfile, type Scope, profileFromJson } from "./scope.js";
 import { legOf, routeDigestOf, routeFromJson, type RouteStamp } from "./phase-routing.js";
@@ -52,7 +52,7 @@ import { currentClaim, finalizeRevisionFenced, heartbeat, SYNC_MAX_AGE_MS } from
 import { missingCapability } from "./dispatch.js";
 import { heartbeat as runnerHeartbeat } from "./runner.js";
 import { MARKER as LEASE_MARKER } from "./worktree.js";
-import { parseDecision, parseHandoff, repairPrompt, HANDOFF_CONCLUSION_CAP, HANDOFF_ITEM_CAP, HANDOFF_LIST_CAP, HANDOFF_PAYLOAD_CAP, type ParsedDecision, type Problem } from "./decision.js";
+import { parseDecision, parseHandoff, repairPrompt, HEADLESS_RULE, HANDOFF_CONCLUSION_CAP, HANDOFF_ITEM_CAP, HANDOFF_LIST_CAP, HANDOFF_PAYLOAD_CAP, type ParsedDecision, type Problem } from "./decision.js";
 import { createHash, randomUUID } from "node:crypto";
 import { invokeAgent, type AgentOutcome, type InvokeResult } from "./invoke.js";
 import { TELEGRAM_TOKEN_ENVS } from "./names.js";
@@ -297,6 +297,8 @@ export type BuildRefusal =
   | "agent"
   | "agent-reported"
   | "no-op"
+  /** Run 2085: the agent stopped before its handoff; its work was kept for the retry. */
+  | "no-handoff"
   | "moved-head"
   | "timeout"
   | "git"
@@ -1915,6 +1917,13 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
     store.stampRun(request.runId, { sessionId: result.sessionId });
   }
 
+  // The unfinished handoff (run 2085): the agent ended its turn with work in
+  // the tree and no handoff, park or proposal. Its own session is resumed in
+  // this same worktree for a short turn to finish and hand off, before the
+  // ordinary settlement below reads whatever that turn produced.
+  const resumed = await resumeUnhandedWork(captured, result.sessionId ?? undefined);
+  if (resumed !== null) return resumed;
+
   // The adaptive-execution-plan settlement, checked at exactly the point
   // park is: both are "stop without committing" endings, and both must be
   // decided before the handoff is required of the agent at all.
@@ -2005,6 +2014,10 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
   } catch {
     // Missing or unremovable — either way the sweep and the commit-path
     // exclusions keep it out of anybody's repository.
+  }
+  if (!spoken.ok && spoken.missing) {
+    const kept = await keepUnhandedWork(captured, result.sessionId ?? undefined);
+    if (kept !== null) return kept;
   }
   if (!spoken.ok) {
     return {
@@ -2836,6 +2849,135 @@ function screenshotFileTag(path: string): string {
  * bytes leave the worktree either way — ingested once, then removed, so no
  * later attempt can mistake them for its own agent's voice.
  */
+/** What a person reads when an attempt stopped before its handoff (run 2085). */
+export const NO_HANDOFF_WORDS = "The agent stopped before handing off; its work was kept and it is being resumed.";
+
+/** The short turn a stopped agent's own session is resumed with. */
+export function handoffResumePrompt(done: string): string {
+  return [
+    `Your last turn ended before the handoff. Finish the task and write ${done}.`,
+    "Every rule from the original brief still applies.",
+    ...HEADLESS_RULE,
+  ].join("\n");
+}
+
+/** The agent's work in the tree: protocol files and the lease note aside. Null when git cannot say. */
+async function unhandedChanges(git: Runner, worktree: string): Promise<string[] | null> {
+  const status = await git(GIT, ["--no-optional-locks", "status", "--porcelain"], { cwd: worktree });
+  if (status.code !== 0) return null;
+  return status.stdout
+    .split("\n")
+    .filter(
+      line =>
+        line.trim() !== "" &&
+        !line.trimEnd().endsWith(LEASE_MARKER) &&
+        !(line.startsWith("?? ") && looksLikeProtocolFile(line.slice(3))),
+    );
+}
+
+/** Whether this attempt's own session can be resumed in place. */
+function canResumeSession(captured: CapturedBuild, sessionId: string | undefined): sessionId is string {
+  return sessionId !== undefined && sessionId.trim() !== "" && auditOf(captured.request.provider ?? "claude").resume === "native";
+}
+
+/**
+ * Resume the agent's own session when it ended its turn with changes but no
+ * handoff, park or plan proposal (run 2085: tests left running in the
+ * background, a wakeup scheduled, the headless process gone). Each turn is a
+ * repair-role child run under the same admission and budget as a park
+ * repair, in the same worktree, with the build's own limits: finishing the
+ * task can need a full check run. Nothing here reads or accepts a handoff —
+ * the ordinary settlement does that afterwards, unweakened.
+ */
+async function resumeUnhandedWork(captured: CapturedBuild, sessionId: string | undefined): Promise<BuildResult | null> {
+  const { store, request, agent, git, worktree, mailbox, done, effective, clock, taskId } = captured;
+  const waiting = (): boolean =>
+    !existsSync(join(worktree, done)) &&
+    !existsSync(join(worktree, mailbox)) &&
+    (captured.plan === undefined || !existsSync(join(worktree, captured.plan.proposal)));
+  // A watched (attended) session has an operator; nothing resumes it headless.
+  if (request.attended !== undefined || !waiting() || !canResumeSession(captured, sessionId)) return null;
+  const changes = await unhandedChanges(git, worktree);
+  if (changes === null || changes.length === 0) return null;
+
+  const provider = request.provider ?? "claude";
+  const model = repairModelOf(effective.profile, request);
+  for (let turn = 0; turn < REPAIR_TURNS && waiting(); turn++) {
+    if (stopRequestedFor(store, request.runId, request.shouldStop)) return null;
+    if (request.leaseId !== undefined && !heartbeat(store, request.leaseId, clock()).ok) {
+      return { ok: false, reason: "fenced", message: `${taskId}'s lease did not survive the resumed turn — the work is still in ${worktree}` };
+    }
+    if (store.budgetGate(clock())({ ...store.budgetSubject(request.taskRef), agents: [{ provider, billing: store.runBilling(request.runId) ?? store.agentsFor([provider])[0]!.billing }] }).over !== null) break;
+    if (store.agentPolicyRefusal(provider, model ?? null) !== null) break;
+    const admitted = admitProtocolRepair(store, request, effective.profile, sessionId, clock);
+    if (!admitted.ok) break;
+    const spoken = await invokeAgent(
+      store,
+      admitted.runId,
+      { provider, model },
+      {
+        phase: "build",
+        brief: handoffResumePrompt(done),
+        maxTurns: effective.maxTurns ?? request.maxTurns ?? DEFAULT_MAX_TURNS,
+        permissionMode:
+          effective.profile.provider === "claude" && effective.profile.permissionArgv !== "bypassPermissions"
+            ? effective.profile.permissionArgv
+            : (request.permissionMode ?? "auto"),
+        skipPermissions: effective.skipPermissions,
+        resumeSession: sessionId,
+        // The build's own spend cap holds for the turn that finishes it.
+        ...(request.maxBudgetUsd === undefined ? {} : { maxBudgetUsd: request.maxBudgetUsd }),
+      },
+      {
+        cwd: worktree,
+        ...(effective.profile.timeoutKind === "idle" ? { idleTimeoutMs: effective.timeoutMs } : { timeoutMs: effective.timeoutMs }),
+        omitEnv: AGENT_ENV_DENYLIST,
+        ...(agent === undefined ? {} : { runner: agent }),
+        ...(request.onProviderSpawn === undefined ? {} : { onSpawn: request.onProviderSpawn }),
+        clock,
+      },
+    );
+    const handedOff = !waiting();
+    const ran = spoken.kind === "ran" && !spoken.outcome.timedOut && spoken.outcome.code === 0 && !spoken.outcome.initFailed;
+    store.finishRun(admitted.runId, {
+      outcome: handedOff && ran ? "built" : "failed",
+      reason: spoken.kind === "refused" ? spoken.reason : handedOff ? "resumed-handoff" : ran ? "no-handoff" : spoken.outcome.timedOut ? "timeout" : "agent",
+      now: clock(),
+    });
+    if (request.leaseId !== undefined && !heartbeat(store, request.leaseId, clock()).ok) {
+      return { ok: false, reason: "fenced", message: `${taskId}'s lease did not survive the resumed turn — the work is still in ${worktree}` };
+    }
+  }
+  return null;
+}
+
+/**
+ * The attempt ended without a handoff, even after any resumed turn. When it
+ * left changes, they are never discarded: first saved as a patch in this
+ * run's evidence folder, then — when its session cannot be resumed — kept as
+ * a work-in-progress commit on the branch the next attempt continues from.
+ * Otherwise they stay in place, and the next lease keeps them for the retry.
+ * Null when there was nothing to keep: the ordinary no-op words apply.
+ */
+async function keepUnhandedWork(captured: CapturedBuild, sessionId: string | undefined): Promise<BuildResult | null> {
+  const { store, request, git, worktree, branch, taskId, scope, root, clock } = captured;
+  const changes = await unhandedChanges(git, worktree);
+  if (changes === null || changes.length === 0) return null;
+  const saved = await saveWorkPatch(git, worktree, join(root, String(request.runId), "unhanded-work.patch"),
+    `# work left without a handoff in ${worktree}\n# kept ${clock().toISOString()}\n`);
+  if (!saved.ok) {
+    return { ok: false, reason: "no-handoff", message: `${NO_HANDOFF_WORDS} Its changes stay uncommitted in ${worktree}; ${saved.message}.` };
+  }
+  if (request.attended === undefined && !canResumeSession(captured, sessionId) && scope !== null && !stopRequestedFor(store, request.runId, request.shouldStop)) {
+    const made = await commit(git, worktree, branch, taskId, scope as Scope,
+      "Work in progress: the agent stopped before handing off. Kept so the next attempt continues from it.");
+    if (made.ok && "committed" in made && made.committed) {
+      return { ok: false, reason: "no-handoff", message: `${NO_HANDOFF_WORDS} It was saved as a work-in-progress commit on ${branch}.` };
+    }
+  }
+  return { ok: false, reason: "no-handoff", message: NO_HANDOFF_WORDS };
+}
+
 async function ingestPark(args: {
   store: Store;
   request: BuildRequest;
@@ -3402,6 +3544,7 @@ function brief(
     `- You are on branch ${branch}. Do not switch branches, and never commit to main.`,
     "- Do not push, open a pull request, or run any network write.",
     "- Stay inside this worktree.",
+    ...HEADLESS_RULE,
     ...(revisionBrief === null ? [] : [
       "- If the sealed revision kind is evidence-observation, collect observations only.",
       "  Keep every repository file and HEAD unchanged; do not run the full suite.",
