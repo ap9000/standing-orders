@@ -612,4 +612,57 @@ describe("the pool, against real git", () => {
     if (!resumed.ok) return;
     expect(existsSync(join(resumed.worktree.path, "late.ts"))).toBe(true);
   });
+
+  test("storage retention removes finished, clean checkouts let go long enough ago, and nothing else", async () => {
+    const pool = new WorktreePool(store, { root: join(base, "pool") });
+    const DAY = 86_400_000;
+    // Build output the project ignores isn't work.
+    await writeFile(join(repo, ".gitignore"), "dist/\n");
+    await run("git", ["add", ".gitignore"], { cwd: repo });
+    await run("git", ["commit", "-qm", "ignore build output"], { cwd: repo });
+    const make = async (branch: string) => {
+      const leased = await pool.lease({ repo, branch, base: "main", runner: "builder-1", now: T0 });
+      if (!leased.ok) throw new Error(leased.message);
+      return leased.worktree.path;
+    };
+    const old = await make("standing-orders/done-task");
+    const recent = await make("standing-orders/recent-task");
+    const dirty = await make("standing-orders/dirty-task");
+    const unfinished = await make("standing-orders/failed-task");
+    const leased = await make("standing-orders/running-task");
+    for (const path of [old, dirty, unfinished]) expect((await pool.release(path, T0)).ok).toBe(true);
+    expect((await pool.release(recent, later(2 * DAY))).ok).toBe(true);
+    // Somebody's work, and build output that .gitignore hides.
+    await writeFile(join(dirty, "notes.txt"), "keep me\n");
+    await mkdir(join(old, "dist"), { recursive: true });
+    await writeFile(join(old, "dist", "out.js"), "built\n");
+
+    const pruned = await pool.prune(repo, later(2 * DAY + 1), 2 * DAY, ["standing-orders/failed-task"]);
+    expect(pruned.removed.map(row => row.path)).toEqual([old]);
+    expect(pruned.kept).toEqual([{ path: dirty, why: "has changes" }]);
+    expect(existsSync(old)).toBe(false);
+    expect(store.getWorktree(old)).toBeNull();
+    for (const path of [recent, dirty, unfinished, leased]) {
+      expect(existsSync(path)).toBe(true);
+      expect(store.getWorktree(path)).not.toBeNull();
+    }
+    // The branch, and so its commits, stays; leasing it again makes a fresh checkout.
+    expect((await run("git", ["branch", "--list", "standing-orders/done-task"], { cwd: repo })).stdout).toContain("done-task");
+    const again = await pool.lease({ repo, branch: "standing-orders/done-task", base: "main", runner: "builder-1", now: later(3 * DAY) });
+    expect(again).toMatchObject({ ok: true, created: true });
+    // A checkout protected under another root's name (the same branch) is kept too.
+    expect((await pool.release(unfinished, T0)).ok).toBe(true);
+    const elsewhere = new WorktreePool(store, { root: join(base, "other-root") });
+    expect((await elsewhere.prune(repo, later(9 * DAY), 2 * DAY, ["standing-orders/failed-task"])).removed.map(row => row.path)).not.toContain(unfinished);
+  });
+
+  test("a repository's unfinished tasks name the branches retention keeps", () => {
+    store.createTask({ id: "shipped", title: "done" }, T0);
+    store.createTask({ id: "broken", title: "failed" }, T0);
+    store.createTask({ id: "waiting", title: "queued" }, T0);
+    for (const id of ["shipped", "broken", "waiting"]) store.placeTask(store.refFor("built-in", id).id, repo);
+    store.setTaskState("shipped", "done", T0);
+    store.setTaskState("broken", "failed", T0);
+    expect(store.unfinishedBranches(repo).sort()).toEqual(["standing-orders/broken", "standing-orders/waiting"]);
+  });
 });

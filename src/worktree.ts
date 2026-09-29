@@ -26,7 +26,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync, rmSync, realpathSync, mkdirSync, readdirSync } from "node:fs";
 import { hostname } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { run, type ExecResult, type RunOptions } from "./exec.js";
 import { currentBootId, provenDeadByBootChange } from "./boot-identity.js";
 import type { Store, WorktreeRow } from "./store.js";
@@ -322,12 +322,17 @@ export class WorktreePool {
 
     const created = existing === null;
     if (created) {
+      // A branch that already exists (its checkout removed by storage retention) is checked out as it stands, just
+      // as its kept checkout would have been reused; `base` only starts a branch that doesn't exist yet.
+      const branchExists = request.base !== undefined &&
+        (await this.git(request.repo, ["rev-parse", "--verify", "--quiet", `refs/heads/${request.branch}`], READ_ONLY)).code === 0;
+      const fromBase = request.base !== undefined && !branchExists;
       const add = await this.git(request.repo, [
         "worktree",
         "add",
-        ...(request.base === undefined ? [] : ["-b", request.branch]),
+        ...(fromBase ? ["-b", request.branch] : []),
         path,
-        ...(request.base === undefined ? [request.branch] : [request.base]),
+        ...(fromBase ? [request.base as string] : [request.branch]),
       ]);
       if (add.code !== 0) {
         return { ok: false, reason: "git", message: firstLine(add.stderr) };
@@ -645,6 +650,41 @@ export class WorktreePool {
       }
       return { ok: true as const, adopted, forgotten };
     });
+  }
+
+  /**
+   * Keep storage in check: remove the working copies nobody needs any more.
+   * A checkout goes when it was released `keepMs` ago or longer, nothing
+   * holds it, it is clean (build output that .gitignore hides is not work),
+   * and it isn't the checkout of one of `keepBranches` (the branches unfinished
+   * tasks work on or would come back to), by its branch or by the name a lease
+   * of that branch would give it under any root. Only the working copy goes: its branch, and so
+   * every commit, stays, and a later lease of the same branch makes a new one.
+   * A checkout with anybody's changes in it is kept and named, never cleaned.
+   */
+  async prune(repo: string, now: Date, keepMs: number, keepBranches: readonly string[]): Promise<{ removed: WorktreeRow[]; kept: { path: string; why: "has changes" | "unreadable" | "git refused" }[] }> {
+    const removed: WorktreeRow[] = [];
+    const kept: { path: string; why: "has changes" | "unreadable" | "git refused" }[] = [];
+    const idle = (row: WorktreeRow | null, releasedAt: string) =>
+      row !== null && row.runner === null && row.releasedAt === releasedAt && !this.inUse(row.path).held;
+    const branches = new Set(keepBranches);
+    const leaves = new Set(keepBranches.map(branch => basename(worktreePath("/", repo, branch))));
+    for (const row of this.store.listWorktrees().filter(one => one.repo === repo)) {
+      if (row.releasedAt === null || row.runner !== null || branches.has(row.branch) || leaves.has(basename(row.path))) continue;
+      if (now.getTime() - Date.parse(row.releasedAt) < keepMs || !existsSync(row.path) || !idle(row, row.releasedAt)) continue;
+      const dirty = await this.isDirty(row.path);
+      if (dirty !== false) { kept.push({ path: row.path, why: dirty === null ? "unreadable" : "has changes" }); continue; }
+      // A lease since the listing wins: look again right before removing.
+      if (!idle(this.store.getWorktree(row.path), row.releasedAt)) continue;
+      const gone = await this.git(repo, ["worktree", "remove", "--force", row.path]);
+      if (gone.code !== 0) { kept.push({ path: row.path, why: "git refused" }); continue; }
+      this.store.transact(() => {
+        const still = this.store.getWorktree(row.path);
+        if (still !== null && still.runner === null && still.releasedAt === row.releasedAt) this.store.forgetWorktree(row.path);
+      });
+      removed.push(row);
+    }
+    return { removed, kept };
   }
 
   /**

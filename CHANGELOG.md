@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Storage kept in check.** Standing Orders used to keep every build
+  checkout and every staged release forever (78 GB here after a week). Now
+  the worker removes a finished task's clean checkout two days after it was
+  let go (its branch and commits stay; a checkout with anybody's changes is
+  never touched, and nothing an unfinished task works on is), each removal
+  is in the action ledger, and a deploy keeps the release it installed, the
+  one before and the newest few. `standing-orders storage` shows where the
+  disk goes.
+
 - **Audit you can prove.** The action ledger is now a hash chain: each entry
   is sealed with the one before it, and the ledger page (or `ledger verify`)
   says whether it still verifies, or the first entry that was changed,

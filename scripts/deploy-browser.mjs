@@ -445,7 +445,26 @@ async function finish() {
     verifyCodingBackup(coding, r);
     save(r, "healthy"); oldRt.gate.removeUpdateGate(db, r.id); r.deployedAt = new Date().toISOString(); save(r, "deployed");
   } finally { db.close(); }
-  say({ deployed: candidateHead, runtime: nextDist, at: r.deployedAt, projects: r.leases.length, remote });
+  const stagedRemoved = pruneStaged([nextDist, priorDist]);
+  say({ deployed: candidateHead, runtime: nextDist, at: r.deployedAt, projects: r.leases.length, remote, stagedRemoved: stagedRemoved.length });
+}
+
+/** Keep storage in check: once a deploy is healthy, staged releases go except the one it installed, the one it
+ * replaced (the way back) and the three newest (a resumed phase reads the new release as the installed one).
+ * Only this script's own `browser-*` stages are touched. */
+function pruneStaged(keep) {
+  const root = join(stateDir, "staged-upgrades");
+  const stageOf = dist => { let at = resolve(dist ?? "/"); while (dirname(at) !== root && dirname(at) !== at) at = dirname(at); return dirname(at) === root ? at : null; };
+  const kept = new Set(keep.map(stageOf).filter(Boolean));
+  let stages = [];
+  try { stages = readdirSync(root).filter(name => name.startsWith("browser-")).map(name => ({ path: join(root, name), at: lstatSync(join(root, name)).mtimeMs })); } catch { return []; }
+  stages.sort((a, b) => b.at - a.at).slice(0, 3).forEach(one => kept.add(one.path));
+  const removed = [];
+  for (const one of stages) {
+    if (kept.has(one.path)) continue;
+    try { rmSync(one.path, { recursive: true, force: true }); removed.push(one.path); } catch { /* the next deploy tries again */ }
+  }
+  return removed;
 }
 
 // Every entry point — the whole run or one resumed phase — proves the
