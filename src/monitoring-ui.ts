@@ -13,14 +13,15 @@ const when = (at: string) => `${e(at.slice(0, 16).replace("T", " "))} UTC`;
 export const MONITORING_CSS = `.monitoring{max-width:720px;min-width:0}.monitoring fieldset{border:0;padding:0;margin:20px 0 0;min-width:0}` +
   `.monitoring legend{font-weight:600;font-size:.9375rem;margin-bottom:6px}.monitoring label{display:grid;gap:4px;margin:10px 0 0;font-size:.875rem}` +
   `.monitoring input[type=text],.monitoring input[type=url],.monitoring input[type=password]{width:100%;box-sizing:border-box}.monitoring .choice{display:flex;gap:8px;align-items:center}` +
-  `.monitoring .status{margin:0;font-size:.8125rem}.monitoring .status.problem{color:var(--danger)}.monitoring .step-up{margin-top:18px}.monitoring button[type=submit]{margin-top:14px}` +
+  `.monitoring .status{margin:4px 0 0;font-size:.8125rem}.monitoring .status.problem{color:var(--danger)}.monitoring .step-up{margin-top:18px}.monitoring button[type=submit]{margin-top:14px}` +
   `.monitoring pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:.75rem}.monitoring details{margin-top:6px}`;
 
 export type MonitoringView = { settings: MonitoringSettings; status: MonitoringStatus[]; head: number; origin: string | null };
 
 /** How a destination is doing, in one line. */
 function statusLine(view: MonitoringView, sink: string, address: string | null): string {
-  if (address === null) return `<p class="status meta">Off.</p>`;
+  // An empty field already says it's off.
+  if (address === null) return "";
   // A status for another address (it just changed) says nothing about this one yet.
   const one = view.status.find(row => row.sink === sink && row.target === targetOf(address));
   if (one === undefined || (one.lastOkAt === null && one.lastError === null)) return `<p class="status meta" data-monitoring="${sink}" data-state="starting">Starting: the first delivery goes out within a few seconds.</p>`;
@@ -38,14 +39,14 @@ export function monitoringHtml(view: MonitoringView, csrf: string, notice: { sai
   return `<section class="monitoring">${note}` +
     `<form method="post" action="/settings/monitoring"><input type="hidden" name="csrf" value="${e(csrf)}">` +
     `<fieldset><legend>Audit stream</legend><p class="meta">Every ledger entry with its seal, as it happens, to your log system.</p>` +
-    statusLine(view, "webhook", s.webhook?.url ?? null) +
     `<label>Webhook<input type="url" name="webhook" value="${e(s.webhook?.url ?? "")}" placeholder="https://logs.example.com/standing-orders" spellcheck="false"></label>` +
+    statusLine(view, "webhook", s.webhook?.url ?? null) +
     (s.webhook === null ? "" : `<label class="choice"><input type="checkbox" name="rotate" value="1"> Make a new signing secret</label>`) +
-    statusLine(view, "folder", s.folder?.path ?? null) +
-    `<label>Folder (JSON Lines, a file per day)<input type="text" name="folder" value="${e(s.folder?.path ?? "")}" placeholder="/var/log/standing-orders" spellcheck="false"></label></fieldset>` +
+    `<label>Folder (JSON Lines, a file per day)<input type="text" name="folder" value="${e(s.folder?.path ?? "")}" placeholder="/var/log/standing-orders" spellcheck="false"></label>` +
+    statusLine(view, "folder", s.folder?.path ?? null) + `</fieldset>` +
     `<fieldset><legend>Traces</legend><p class="meta">Each run as an OpenTelemetry span: timings, model, tokens and cost. Never a prompt or code.</p>` +
-    statusLine(view, "traces", s.traces?.endpoint ?? null) +
     `<label>Collector (OTLP over HTTP)<input type="url" name="traces" value="${e(s.traces?.endpoint ?? "")}" placeholder="https://otel.example.com:4318" spellcheck="false"></label>` +
+    statusLine(view, "traces", s.traces?.endpoint ?? null) +
     `<label>Header name (optional)<input type="text" name="header-name" value="${e(s.traces?.header?.name ?? "")}" placeholder="x-honeycomb-team" spellcheck="false"></label>` +
     `<label>Header value<input type="password" name="header-value" autocomplete="off" placeholder="${s.traces?.header ? "Saved; leave blank to keep" : "API key"}"></label></fieldset>` +
     `<div class="step-up"><label>Your Standing Orders password<input type="password" name="password" autocomplete="current-password"></label></div>` +
