@@ -65,7 +65,6 @@ const REVIEWED_COLUMNS = new Set([
   "flow_trigger_event.key", "installation_fact.key", "mcp_idempotency.key", "memory_gap.key", "mutation.idempotency_key", "notification.dedupe_key",
   "service_cursor.key", "ledger_checkpoint.hash", "ledger_seal.hash", "merge_intent.grant_terms_hash", "plan_revision.parent_hash",
   "publication.body_hash", "publication.pr_url", "team_message.payload_hash", "team_request.payload_hash", "backend_grant.credential_scope",
-  "telegram_conversation_part.keyboard_json",
 ]);
 /** Token counts are usage, not tokens. */
 const USAGE_COLUMN = /(^|_)tokens(_|$)|output_tokens/;
@@ -94,9 +93,11 @@ const EXTRA_SHAPES: RegExp[] = [
   /\bsk-[A-Za-z0-9_-]{20,}/g,
   /\bxapp-[A-Za-z0-9-]{10,}/g,
   /\blin_(?:api|wh)_[A-Za-z0-9]{20,}/g,
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
 ];
-const SHAPES: RegExp[] = [...SECRET_PATTERNS.map(({ pattern }) => new RegExp(pattern.source, pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`)), ...EXTRA_SHAPES];
+/** A whole private key, header to footer (or to the end of the text): it goes first, before the scanner's header-only
+ * shape can take the header and leave the key's body behind. */
+const PRIVATE_KEY_BLOCK = /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g;
+const SHAPES: RegExp[] = [PRIVATE_KEY_BLOCK, ...SECRET_PATTERNS.map(({ pattern }) => new RegExp(pattern.source, pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`)), ...EXTRA_SHAPES];
 
 /** Every key- or token-shaped run in `text` replaced by "[redacted]". */
 export function redactKeyShapes(text: string): string {

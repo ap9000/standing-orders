@@ -253,3 +253,12 @@ test("Settings → Data downloads the .zip behind the password, for an instance 
     await new Promise<void>(resolve => server.close(() => resolve()));
   }
 });
+
+test("a private key goes whole: header, body and footer, and a Telegram keyboard's callback tokens aren't exported", async () => {
+  const { redactKeyShapes } = await import("./export.js");
+  const body = ["MIIEvQIBADANBgkqhkiG9w0BAQEFAASC", "BKcwggSjAgEAAoIBAQC7o4qne60TB3wo"].join("\n");
+  const pem = [k("-----BEGIN ", "PRIVATE KEY-----"), body, k("-----END ", "PRIVATE KEY-----")].join("\n");
+  const out = redactKeyShapes(`here it is:\n${pem}\nthanks`);
+  expect(out).toBe("here it is:\n[redacted]\nthanks");
+  expect(out).not.toContain("MIIEvQ");
+});

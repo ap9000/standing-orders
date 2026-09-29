@@ -165,7 +165,14 @@ async function removeCheckoutsAndBranches(store: Store, repo: string, d: Doomed,
   }
   const main = trees[0]?.path ?? null;
   const targets = new Set<string>();
-  for (const tree of trees.slice(1)) if ((tree.branch !== null && ours.has(tree.branch)) || recorded.some(row => resolve(row.path) === resolve(tree.path))) targets.add(tree.path);
+  // A checkout goes only while it's on one of our branches, or on no branch at all (a detached checkout Standing Orders
+  // made). One we recorded that someone has since switched to a branch of their own is theirs now: it stays, and is said.
+  for (const tree of trees.slice(1)) {
+    const recordedHere = recorded.some(row => resolve(row.path) === resolve(tree.path));
+    if (tree.branch !== null && ours.has(tree.branch)) targets.add(tree.path);
+    else if (recordedHere && tree.branch === null) targets.add(tree.path);
+    else if (recordedHere) left.push(`checkout ${tree.path}: it's on ${tree.branch}, not a Standing Orders branch, so it was left alone`);
+  }
   for (const path of targets) {
     if (main !== null && resolve(path) === resolve(main)) continue;
     const gone = await git(["worktree", "remove", "--force", path], repo);
@@ -175,6 +182,8 @@ async function removeCheckoutsAndBranches(store: Store, repo: string, d: Doomed,
   // A recorded checkout git no longer knows, still on disk in our folder.
   for (const row of recorded) {
     if (targets.has(row.path) || poolRoot === null || !inside(poolRoot, row.path) || !existsSync(row.path)) continue;
+    // Only one git has forgotten: a checkout git still lists was either removed above or left alone on purpose.
+    if (trees.some(tree => resolve(tree.path) === resolve(row.path))) continue;
     rmSync(row.path, { recursive: true, force: true });
     checkouts++;
   }

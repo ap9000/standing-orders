@@ -235,3 +235,16 @@ test("the command line previews, then deletes with --yes for an instance operato
   }
   expect(store.ledgerChain({ full: true }).ok).toBe(true);
 });
+
+test("a checkout Standing Orders made that someone switched to a branch of their own is theirs: it stays, with its work", async () => {
+  const shop = populate(repo);
+  const mine = join(pool, `shop-${shop.first.id}`);
+  execFileSync("git", ["switch", "-q", "-c", "feature/customer-work"], { cwd: mine });
+  writeFileSync(join(mine, "unsaved.txt"), "work in progress\n");
+  const done = await deleteProject(store, repo, { actor: "alex", via: "command line", now: NOW, evidenceRoot: evidence, poolRoot: pool });
+  expect(done.ok).toBe(true);
+  if (!done.ok) return;
+  expect(done.left).toEqual([expect.stringContaining("feature/customer-work, not a Standing Orders branch")]);
+  expect(readFileSync(join(mine, "unsaved.txt"), "utf8")).toBe("work in progress\n");
+  expect(git("branch", "--list", "feature/customer-work")).toContain("feature/customer-work");
+});

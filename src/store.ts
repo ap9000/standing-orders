@@ -96,7 +96,7 @@ import { LEDGER_SCHEMA, LEDGER_TABLE, LEDGER_V54_COLUMNS, LEDGER_V54_TABLE, inst
 import { PLAN_AUTO_SCHEMA } from "./plan-auto.js";
 import { RECIPE_SCHEMA } from "./recipes.js";
 import type { LimitReading, LimitWindow } from "./provider-limits.js";
-import { POLICY_SCHEMA, agentRefusal, approvalRefusal, attendedRefusal, policyParts, readPolicy, underCeiling, type OrgPolicy, type SavedPolicy } from "./policy.js";
+import { POLICY_SCHEMA, agentRefusal, approvalRefusal, attendedRefusal, policyParts, readPolicy, underCeiling, sessionCeilingRefusal, type OrgPolicy, type SavedPolicy } from "./policy.js";
 import { SPEND_SCHEMA, billingOf, budgetStates, canPrice, claudeMachineBilling, countsToward, filersOf, monthOf, priceWork, seenBilling as seenBillingOf, spendItems, teammateFilers, usd, type Billing, type Budget, type BudgetAgent, type BudgetHold, type BudgetScope, type BudgetState, type SpendItem } from "./spend.js";
 import { FOREVER, RETENTION_SCHEMA, periodWords, type RetentionKind, type RetentionPeriods } from "./retention.js";
 import { IN_RANGE, LEDGER_CHAIN_SCHEMA, safeWhole, sealLedger, verifyLedgerChain, type LedgerChainReport, type VerifiedHead } from "./ledger-chain.js";
@@ -19353,6 +19353,12 @@ export class Store {
   /** Why the policy stops an agent on a provider and model now, or null (chats, teammates, flow steps). */
   agentPolicyRefusal(provider: string, model: string | null): string | null {
     return agentRefusal(this.orgPolicy(), provider, model);
+  }
+
+  /** Why the policy stops a planner, scout or native coding session (no profile to lower) on a provider and model, or null. */
+  sessionPolicyRefusal(provider: string, model: string | null, what: string): string | null {
+    const policy = this.orgPolicy();
+    return agentRefusal(policy, provider, model) ?? sessionCeilingRefusal(policy, provider, what);
   }
 
   /** Why the policy stops an attended session's signed profile, or null (it is never lowered: see policy.attendedRefusal). */

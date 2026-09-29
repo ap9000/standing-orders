@@ -2417,7 +2417,7 @@ async function tickCommand(
   // Sprint 8: the organisation policy, asked before any claim on every road below: a provider or model it doesn't
   // allow never starts (the task waits, saying which rule and where to change it); terms above its permission ceiling
   // start and run lowered (build() lowers them and says so), except an attended session's, signed at exactly those.
-  const policyHold = (agents: readonly ({ profile: ExecutionProfile; attended?: boolean } | { provider: string; model: string | null })[]): string | null => {
+  const policyHold = (agents: readonly ({ profile: ExecutionProfile; attended?: boolean } | { provider: string; model: string | null; session?: string })[]): string | null => {
     for (const agent of agents) {
       if ("profile" in agent) {
         const refused = agent.attended === true ? store.attendedPolicyRefusal(agent.profile) : null;
@@ -2425,7 +2425,8 @@ async function tickCommand(
         const verdict = store.runPolicy(agent.profile);
         if (!verdict.ok) return verdict.message;
       } else {
-        const refused = store.agentPolicyRefusal(agent.provider, agent.model);
+        // A planner or scout has no profile to lower: the ceiling stops one whose provider can't run that low.
+        const refused = agent.session !== undefined ? store.sessionPolicyRefusal(agent.provider, agent.model, agent.session) : store.agentPolicyRefusal(agent.provider, agent.model);
         if (refused !== null) return refused;
       }
     }
@@ -3092,7 +3093,8 @@ async function tickCommand(
     {
       const sealed = wantsPlan || wantsScout ? null : store.approvedChainOf(id)?.[0]?.profile ?? store.getScope(id)?.approvedProfile ?? null;
       const refused = racedAhead !== null ? policyHold(racedAhead.agents.map(agent => ({ provider: agent.provider, model: agent.model })))
-        : policyHold([attendedSpec !== null ? { profile: attendedSpec.profile, attended: true } : sealed !== null ? { profile: sealed } : { provider: spec.provider, model: spec.model }]);
+        : policyHold([attendedSpec !== null ? { profile: attendedSpec.profile, attended: true } : sealed !== null ? { profile: sealed }
+          : { provider: spec.provider, model: spec.model, ...(wantsPlan ? { session: "planning" } : wantsScout ? { session: "scouting" } : {}) }]);
       if (refused !== null) {
         dispatched.push({ id, outcome: "skipped", reason: "policy", detail: refused });
         continue;

@@ -192,6 +192,16 @@ export function underCeiling(policy: OrgPolicy, profile: ExecutionProfile): Ceil
   return { ok: false, message: `The organisation policy's permission ceiling is ${ceiling}, and ${providerName(profile.provider)} can't run that low. ${WHERE}` };
 }
 
+/** Why the ceiling stops a planner, scout or native coding session on this provider, or null. They carry no sealed
+ * profile to lower: on Claude and Gemini they edit only (Safe); on Codex and OpenRouter they run in the workspace
+ * sandbox (Standard), those providers' lowest. */
+export function sessionCeilingRefusal(policy: OrgPolicy, provider: string, what: string): string | null {
+  const known = policyProvider(provider);
+  const level: PermissionLevel = known === "claude" || known === "gemini" ? "safe" : "standard";
+  if (!levelAbove(level, policy.ceiling)) return null;
+  return `The organisation policy's permission ceiling is ${LEVEL_NAMES[policy.ceiling]}, and ${providerName(provider)} ${what} can't run that low. ${WHERE}`;
+}
+
 /** Everything the policy says about a profile before it runs: refused (words), or what runs and any lowering. */
 export function profileVerdict(policy: OrgPolicy, profile: ExecutionProfile): CeilingVerdict {
   const agent = agentRefusal(policy, profile.provider, profile.model);

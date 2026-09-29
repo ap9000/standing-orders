@@ -269,3 +269,19 @@ test("Settings → Backups is an instance operator's: the last backup and its re
     await new Promise<void>(resolve => server.close(() => resolve()));
   }
 });
+
+test("restore refuses a backup that is sound and the right version but doesn't open as a Standing Orders database; the live one is untouched", async () => {
+  const backup = await aBackup();
+  store.close();
+  // No table the store opens with: every earlier check passes, opening it doesn't.
+  const broken = altered(backup, "missing-table.db", db => db.exec("DROP TABLE service_cursor"));
+  for (const dryRun of [true, false]) {
+    const tried = await restoreDatabase({ databaseFile: file, file: broken, dryRun, now: at(1) });
+    expect(tried.ok).toBe(false);
+    expect(tried.refusals).toEqual([expect.objectContaining({ reason: "schema", words: expect.stringContaining("doesn't open as a Standing Orders database") })]);
+    expect(tried.savedAs).toBeNull();
+  }
+  expect(tasksIn(file)).toEqual(["kept", "later"]);
+  expect(readdirSync(dir).filter(name => name.startsWith(".restore-"))).toEqual([]);
+  store = openStore(file);
+});

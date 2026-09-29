@@ -257,6 +257,15 @@ export async function restoreDatabase(options: { databaseFile: string; file: str
       if (!chain.ok) return refuse("ledger", `That backup's ledger chain doesn't verify: ${chain.problem?.what ?? "it breaks"}.`);
       db.exec("PRAGMA journal_mode = DELETE");
     } finally { db.close(); }
+    // It must open as this build's database (every table it needs, every step up to this schema) before it may replace
+    // the live one: a sound file with the right version can still be missing what Standing Orders reads.
+    if (report.refusals.length === 0) {
+      const probe = `${staged}.probe`;
+      try {
+        copyFileSync(staged, probe);
+        try { openStore(probe).close(); } catch (error) { refuse("schema", `That backup doesn't open as a Standing Orders database (${firstLine(error)}).`); }
+      } finally { for (const suffix of ["", "-wal", "-shm", "-journal"]) rmSync(`${probe}${suffix}`, { force: true }); }
+    }
     if (report.refusals.length > 0 || dryRun) { report.ok = report.refusals.length === 0; return report; }
 
     // Keep the database as it is now, checked like any backup, before anything replaces it.
@@ -279,8 +288,18 @@ export async function restoreDatabase(options: { databaseFile: string; file: str
     renameSync(staged, databaseFile);
     keepStaged = true;
 
-    // The restored database brought up to this build, and the restore in its ledger.
-    const restored = openStore(databaseFile);
+    // The restored database brought up to this build, and the restore in its ledger. Should it still not open, the
+    // database it replaced goes back, and the restore says so.
+    let restored: Store;
+    try {
+      restored = openStore(databaseFile);
+    } catch (error) {
+      for (const suffix of ["", "-wal", "-shm", "-journal"]) rmSync(`${databaseFile}${suffix}`, { force: true });
+      copyFileSync(saved, databaseFile);
+      chmodSync(databaseFile, 0o600);
+      report.savedAs = null;
+      return refuse("unreadable", `The restored database didn't open (${firstLine(error)}), so the one it replaced was put back as it was.`);
+    }
     try {
       restored.recordAction({ at: now.toISOString(), actor: options.actor ?? "command line", repo: null, taskId: null, runId: null, action: "database restored", outcome: "restored", source: "policy",
         detail: `from ${basename(file)} (schema ${report.schemaVersion}); the database before it was kept as ${basename(saved)}` });
@@ -290,4 +309,9 @@ export async function restoreDatabase(options: { databaseFile: string; file: str
   } finally {
     if (!keepStaged) rmSync(staged, { force: true });
   }
+}
+
+/** An error's first line, for a sentence. */
+function firstLine(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).split("\n")[0]!.slice(0, 200);
 }

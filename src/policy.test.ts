@@ -113,6 +113,18 @@ describe("in the store", () => {
     return store.getScope(id)!;
   };
 
+  test("planners, scouts and native coding sessions have no profile to lower: under a Safe ceiling Codex can't run them, Claude can", () => {
+    store.setOrgPolicy(policy({ ceiling: "safe" }), "alex", T0);
+    expect(store.sessionPolicyRefusal("codex", null, "planning")).toMatch(/ceiling is Safe, and Codex planning can't run that low/);
+    expect(store.sessionPolicyRefusal("codex", null, "coding sessions")).toMatch(/Codex coding sessions can't run that low/);
+    expect(store.sessionPolicyRefusal("claude", "claude-sonnet-5", "planning")).toBeNull();
+    store.setOrgPolicy(policy({ ceiling: "standard" }), "alex", T0);
+    expect(store.sessionPolicyRefusal("codex", null, "coding sessions")).toBeNull();
+    // A provider the policy doesn't allow is stopped whatever the ceiling.
+    store.setOrgPolicy(policy({ providers: ["claude"] }), "alex", T0);
+    expect(store.sessionPolicyRefusal("codex", null, "coding sessions")).not.toBeNull();
+  });
+
   test("saving keeps each changed rule in the ledger, before → after, and nothing when nothing changed", () => {
     expect(store.orgPolicy()).toMatchObject({ ...OPEN_POLICY, updatedBy: null });
     store.setOrgPolicy(policy({ providers: ["claude", "codex"], ceiling: "standard" }), "alex", T0);

@@ -87,14 +87,20 @@ type RetentionItems = {
 };
 
 /** Tasks that no longer need anything kept: cancelled, or done with their result marked complete; not on hold, not
- * running, not a release candidate, not the source of an unfinished revision. `r` is the task_ref alias. */
+ * running, not a release candidate, and no revision below it (at any depth) still unfinished — cancelled or completed,
+ * not merely Ready: a revision's review reads its ancestors' evidence. `r` is the task_ref alias. */
 function finishedTask(r: string): string {
   return `EXISTS (SELECT 1 FROM task t WHERE t.id = ${r}.external_id AND ${r}.backend = 'built-in' AND (t.state = 'cancelled' OR (t.state = 'done' AND EXISTS (
       SELECT 1 FROM action_ledger a WHERE a.action = '${COMPLETION_ACTION}' AND (a.task_id = ${r}.external_id OR a.run_id IN (SELECT id FROM run WHERE task_ref = ${r}.id))))))
     AND NOT EXISTS (SELECT 1 FROM hold h WHERE h.task_ref = ${r}.id)
     AND NOT EXISTS (SELECT 1 FROM run live WHERE live.task_ref = ${r}.id AND live.finished_at IS NULL)
     AND NOT EXISTS (SELECT 1 FROM task_scope s WHERE s.task_id = ${r}.external_id AND s.candidate IS NOT NULL)
-    AND NOT EXISTS (SELECT 1 FROM task_ref rv JOIN task tv ON tv.id = rv.external_id WHERE rv.revision_of = ${r}.external_id AND tv.state NOT IN ('done', 'cancelled'))`;
+    AND NOT EXISTS (WITH RECURSIVE family(ext) AS (
+        SELECT rv.external_id FROM task_ref rv WHERE rv.revision_of = ${r}.external_id
+        UNION SELECT rv.external_id FROM task_ref rv JOIN family ON rv.revision_of = family.ext)
+      SELECT 1 FROM family JOIN task tv ON tv.id = family.ext
+      WHERE NOT (tv.state = 'cancelled' OR (tv.state = 'done' AND EXISTS (SELECT 1 FROM action_ledger a WHERE a.action = '${COMPLETION_ACTION}'
+        AND (a.task_id = family.ext OR a.run_id IN (SELECT run.id FROM run JOIN task_ref x ON x.id = run.task_ref WHERE x.external_id = family.ext))))))`;
 }
 
 function cutoff(now: Date, days: number): string {

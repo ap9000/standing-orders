@@ -252,3 +252,18 @@ test("Settings → Retention is an instance operator's; saving takes the passwor
     await new Promise<void>(resolve => server.close(() => resolve()));
   }
 });
+
+test("a completed task's evidence stays while any revision below it is unfinished (Ready included), at any depth", () => {
+  const parent = work("completed");
+  const child = work("completed");
+  const grandchild = work("ready");
+  store.handle.prepare("UPDATE task_ref SET revision_of = ? WHERE id = ?").run(parent.id, child.ref);
+  store.handle.prepare("UPDATE task_ref SET revision_of = ? WHERE id = ?").run(child.id, grandchild.ref);
+  const lone = work("completed");
+  store.setRetentionPeriod("evidence", 30, "alex", NOW);
+  // The Ready grandchild's review still reads its ancestors' evidence: neither ancestor's goes, nor its own.
+  expect(retentionPlan(store, root, NOW).items.evidence.map(one => one.run)).toEqual([lone.run]);
+  // Once it's completed too, the whole family's can go.
+  store.recordAction({ at: NOW.toISOString(), actor: "operator:alex", repo: REPO, taskId: grandchild.id, runId: grandchild.run, action: COMPLETION_ACTION, outcome: "b".repeat(64), source: "work" });
+  expect(retentionPlan(store, root, NOW).items.evidence.map(one => one.run).sort((a, b) => a - b)).toEqual([parent.run, child.run, grandchild.run, lone.run].sort((a, b) => a - b));
+});

@@ -5998,6 +5998,13 @@ export function createDecisionServer(options: ServeOptions): Server {
       if ([...new Set(body.keys())].some(key => body.getAll(key).length !== 1)) return fail(400, 'Submit one value for each field.');
       const actor = { name: who.name, generation: who.session.generation };
       const permitted = (repo: string): boolean => visible(repo) && codingProjectAllowed(repo);
+      // Sprint 8: a coding session is Codex taking turns: the organisation policy decides whether it may (provider,
+      // model, and a ceiling Codex can't run under), when it starts and on every action that makes it take another turn.
+      const turnAction = /^\/code\/[a-f0-9]{32}\/(send|resume|recover|continue|answer)$/.test(url.pathname);
+      if (url.pathname === '/code/start' || turnAction) {
+        const stopped = store.sessionPolicyRefusal('codex', url.pathname === '/code/start' ? body.get('model')?.trim() || null : null, 'coding sessions');
+        if (stopped !== null) return fail(403, stopped);
+      }
       try {
         let id: string;
         if (url.pathname === '/code/start') {
