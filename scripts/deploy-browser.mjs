@@ -17,7 +17,7 @@
 // the service.
 import { DatabaseSync, backup } from "node:sqlite";
 import { deploymentCandidate } from "./deploy-candidate.mjs";
-import { chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, openSync, closeSync, fsyncSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, openSync, closeSync, fsyncSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { randomUUID, createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -445,23 +445,36 @@ async function finish() {
     verifyCodingBackup(coding, r);
     save(r, "healthy"); oldRt.gate.removeUpdateGate(db, r.id); r.deployedAt = new Date().toISOString(); save(r, "deployed");
   } finally { db.close(); }
-  const stagedRemoved = pruneStaged([nextDist, priorDist]);
+  const stagedRemoved = pruneStaged([nextDist, priorDist, r.priorRuntime]);
   say({ deployed: candidateHead, runtime: nextDist, at: r.deployedAt, projects: r.leases.length, remote, stagedRemoved: stagedRemoved.length });
 }
 
-/** Keep storage in check: once a deploy is healthy, staged releases go except the one it installed, the one it
- * replaced (the way back) and the three newest (a resumed phase reads the new release as the installed one).
- * Only this script's own `browser-*` stages are touched. */
+/** Keep storage in check: once a deploy is healthy, older staged releases go (with the database backups they
+ * hold). Kept: the one it installed, the one it replaced (the deployment record's, the way back), the three
+ * newest, any a launchd service or the `standing-orders` on PATH runs from, and any whose deploy didn't finish
+ * (its record isn't "deployed"). Only this script's own `browser-*` stages are touched. */
 function pruneStaged(keep) {
   const root = join(stateDir, "staged-upgrades");
-  const stageOf = dist => { let at = resolve(dist ?? "/"); while (dirname(at) !== root && dirname(at) !== at) at = dirname(at); return dirname(at) === root ? at : null; };
-  const kept = new Set(keep.map(stageOf).filter(Boolean));
+  const stageOf = path => { let at = resolve(path ?? "/"); while (dirname(at) !== root && dirname(at) !== at) at = dirname(at); return dirname(at) === root ? at : null; };
+  const real = path => { try { return realpathSync(path); } catch { return path; } };
+  const inUse = [...keep];
+  const agents = join(homedir(), "Library", "LaunchAgents");
+  try {
+    for (const name of readdirSync(agents).filter(one => one.startsWith("com.standing-orders."))) {
+      for (const match of readFileSync(join(agents, name), "utf8").matchAll(/<string>([^<]*staged-upgrades[^<]*)<\/string>/g)) inUse.push(real(match[1]));
+    }
+  } catch { /* no launch agents here */ }
+  for (const dir of (process.env.PATH ?? "").split(":")) if (dir !== "" && existsSync(join(dir, "standing-orders"))) inUse.push(real(join(dir, "standing-orders")));
+  const kept = new Set(inUse.map(stageOf).filter(Boolean));
   let stages = [];
   try { stages = readdirSync(root).filter(name => name.startsWith("browser-")).map(name => ({ path: join(root, name), at: lstatSync(join(root, name)).mtimeMs })); } catch { return []; }
   stages.sort((a, b) => b.at - a.at).slice(0, 3).forEach(one => kept.add(one.path));
   const removed = [];
   for (const one of stages) {
-    if (kept.has(one.path)) continue;
+    if (kept.has(one.path) || kept.has(real(one.path))) continue;
+    let phase = null;
+    try { phase = JSON.parse(readFileSync(join(one.path, "deployment.json"), "utf8")).phase ?? null; } catch { phase = null; }
+    if (phase !== "deployed") continue;
     try { rmSync(one.path, { recursive: true, force: true }); removed.push(one.path); } catch { /* the next deploy tries again */ }
   }
   return removed;

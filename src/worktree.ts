@@ -61,6 +61,10 @@ export type LeaseRequest = {
    * failed attempt's half-edit blocks every retry forever.
    */
   reclaim?: { evidenceRoot: string };
+  /** With `base`: a branch that already exists (its checkout removed by storage retention) is checked out as it
+   * stands, as its kept checkout would have been reused. Without it, `base` always starts a new branch (and an
+   * existing one refuses). */
+  reuseBranch?: boolean;
 };
 
 export type LeaseResult =
@@ -76,6 +80,9 @@ export type LeaseResult =
 
 export type LeaseFailure = "held" | "dirty" | "git" | "unverified" | "unknown-runner" | "in-use";
 
+/** Why storage retention left a checkout in place. */
+export type KeptWhy = "has changes" | "has commits" | "unreadable" | "git refused";
+
 /**
  * The note a lease leaves in the checkout, naming the process holding it.
  *
@@ -84,6 +91,9 @@ export type LeaseFailure = "held" | "dirty" | "git" | "unverified" | "unknown-ru
  * something is in there.
  */
 export const MARKER = ".standing-orders-lease";
+
+/** Checkouts this process is leasing or removing right now: a lease and storage retention never overlap on one. */
+const busy = new Map<string, "leasing" | "removing">();
 
 /** Creating a worktree copies a tree; it is local work but not instant. */
 export const WORKTREE_TIMEOUT_MS = 60_000;
@@ -238,6 +248,14 @@ export class WorktreePool {
   }
 
   async lease(request: LeaseRequest): Promise<LeaseResult> {
+    const target = worktreePath(this.options.root, request.repo, request.branch);
+    if (busy.get(target) === "removing") return { ok: false, reason: "in-use", message: `${target} is being removed; try again in a moment` };
+    const mine = !busy.has(target);
+    if (mine) busy.set(target, "leasing");
+    try { return await this.leaseNow(request); } finally { if (mine) busy.delete(target); }
+  }
+
+  private async leaseNow(request: LeaseRequest): Promise<LeaseResult> {
     // A worktree leased to a runner nobody registered cannot be heartbeated
     // and cannot be recovered — it would be a checkout that never comes back.
     // The database enforces this too; catching it here is what turns a foreign
@@ -324,7 +342,7 @@ export class WorktreePool {
     if (created) {
       // A branch that already exists (its checkout removed by storage retention) is checked out as it stands, just
       // as its kept checkout would have been reused; `base` only starts a branch that doesn't exist yet.
-      const branchExists = request.base !== undefined &&
+      const branchExists = request.base !== undefined && request.reuseBranch === true &&
         (await this.git(request.repo, ["rev-parse", "--verify", "--quiet", `refs/heads/${request.branch}`], READ_ONLY)).code === 0;
       const fromBase = request.base !== undefined && !branchExists;
       const add = await this.git(request.repo, [
@@ -656,33 +674,42 @@ export class WorktreePool {
    * Keep storage in check: remove the working copies nobody needs any more.
    * A checkout goes when it was released `keepMs` ago or longer, nothing
    * holds it, it is clean (build output that .gitignore hides is not work),
-   * and it isn't the checkout of one of `keepBranches` (the branches unfinished
-   * tasks work on or would come back to), by its branch or by the name a lease
-   * of that branch would give it under any root. Only the working copy goes: its branch, and so
-   * every commit, stays, and a later lease of the same branch makes a new one.
-   * A checkout with anybody's changes in it is kept and named, never cleaned.
+   * everything its HEAD reaches is on a branch, tag or remote, and it isn't the
+   * checkout of one of `keep()`'s branches (those unfinished tasks work on or
+   * would come back to, read afresh before each removal), by its branch or by
+   * the name a lease of that branch would give it under any root. Only the
+   * working copy goes: its branch, and so every commit, stays, and a later
+   * lease of the same branch makes a new one. At most `max` go per pass.
    */
-  async prune(repo: string, now: Date, keepMs: number, keepBranches: readonly string[]): Promise<{ removed: WorktreeRow[]; kept: { path: string; why: "has changes" | "unreadable" | "git refused" }[] }> {
+  async prune(repo: string, now: Date, keepMs: number, keep: () => readonly string[], max = 20): Promise<{ removed: WorktreeRow[]; kept: { path: string; why: KeptWhy }[] }> {
     const removed: WorktreeRow[] = [];
-    const kept: { path: string; why: "has changes" | "unreadable" | "git refused" }[] = [];
+    const kept: { path: string; why: KeptWhy }[] = [];
     const idle = (row: WorktreeRow | null, releasedAt: string) =>
       row !== null && row.runner === null && row.releasedAt === releasedAt && !this.inUse(row.path).held;
-    const branches = new Set(keepBranches);
-    const leaves = new Set(keepBranches.map(branch => basename(worktreePath("/", repo, branch))));
+    const kept_ = (branches: readonly string[], row: WorktreeRow) =>
+      branches.includes(row.branch) || branches.some(branch => basename(worktreePath("/", repo, branch)) === basename(row.path));
     for (const row of this.store.listWorktrees().filter(one => one.repo === repo)) {
-      if (row.releasedAt === null || row.runner !== null || branches.has(row.branch) || leaves.has(basename(row.path))) continue;
+      if (removed.length >= max) break;
+      if (row.releasedAt === null || row.runner !== null || busy.has(row.path) || kept_(keep(), row)) continue;
       if (now.getTime() - Date.parse(row.releasedAt) < keepMs || !existsSync(row.path) || !idle(row, row.releasedAt)) continue;
       const dirty = await this.isDirty(row.path);
       if (dirty !== false) { kept.push({ path: row.path, why: dirty === null ? "unreadable" : "has changes" }); continue; }
-      // A lease since the listing wins: look again right before removing.
-      if (!idle(this.store.getWorktree(row.path), row.releasedAt)) continue;
-      const gone = await this.git(repo, ["worktree", "remove", "--force", row.path]);
-      if (gone.code !== 0) { kept.push({ path: row.path, why: "git refused" }); continue; }
-      this.store.transact(() => {
-        const still = this.store.getWorktree(row.path);
-        if (still !== null && still.runner === null && still.releasedAt === row.releasedAt) this.store.forgetWorktree(row.path);
-      });
-      removed.push(row);
+      // Commits only this checkout's HEAD reaches (a detached HEAD moved on) exist nowhere else.
+      const own = await this.runner(GIT, [...READ_ONLY, "rev-list", "-1", "HEAD", "--not", "--branches", "--tags", "--remotes"], { cwd: row.path, timeoutMs: WORKTREE_TIMEOUT_MS });
+      if (own.code !== 0 || own.stdout.trim() !== "") { kept.push({ path: row.path, why: own.code !== 0 ? "unreadable" : "has commits" }); continue; }
+      if (busy.has(row.path)) continue;
+      busy.set(row.path, "removing");
+      try {
+        // A lease, or a task coming back, since the listing wins: look again right before removing.
+        if (!idle(this.store.getWorktree(row.path), row.releasedAt) || kept_(keep(), row)) continue;
+        const gone = await this.git(repo, ["worktree", "remove", "--force", row.path]);
+        if (gone.code !== 0) { kept.push({ path: row.path, why: "git refused" }); continue; }
+        this.store.transact(() => {
+          const still = this.store.getWorktree(row.path);
+          if (still !== null && still.runner === null && still.releasedAt === row.releasedAt) this.store.forgetWorktree(row.path);
+        });
+        removed.push(row);
+      } finally { busy.delete(row.path); }
     }
     return { removed, kept };
   }

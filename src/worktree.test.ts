@@ -629,40 +629,78 @@ describe("the pool, against real git", () => {
     const recent = await make("standing-orders/recent-task");
     const dirty = await make("standing-orders/dirty-task");
     const unfinished = await make("standing-orders/failed-task");
+    const detached = await make("standing-orders/detached-task");
     const leased = await make("standing-orders/running-task");
-    for (const path of [old, dirty, unfinished]) expect((await pool.release(path, T0)).ok).toBe(true);
+    // Commits a detached HEAD moved on to are on no branch: they exist only in that checkout.
+    await run("git", ["checkout", "-q", "--detach"], { cwd: detached });
+    await writeFile(join(detached, "late.txt"), "committed after detaching\n");
+    await run("git", ["add", "late.txt"], { cwd: detached });
+    await run("git", ["-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-qm", "detached work"], { cwd: detached });
+    for (const path of [old, dirty, unfinished, detached]) expect((await pool.release(path, T0)).ok).toBe(true);
     expect((await pool.release(recent, later(2 * DAY))).ok).toBe(true);
-    // Somebody's work, and build output that .gitignore hides.
     await writeFile(join(dirty, "notes.txt"), "keep me\n");
     await mkdir(join(old, "dist"), { recursive: true });
     await writeFile(join(old, "dist", "out.js"), "built\n");
 
-    const pruned = await pool.prune(repo, later(2 * DAY + 1), 2 * DAY, ["standing-orders/failed-task"]);
+    const pruned = await pool.prune(repo, later(2 * DAY + 1), 2 * DAY, () => ["standing-orders/failed-task"]);
     expect(pruned.removed.map(row => row.path)).toEqual([old]);
-    expect(pruned.kept).toEqual([{ path: dirty, why: "has changes" }]);
+    expect(pruned.kept.sort((a, b) => a.path.localeCompare(b.path))).toEqual([{ path: detached, why: "has commits" }, { path: dirty, why: "has changes" }].sort((a, b) => a.path.localeCompare(b.path)));
     expect(existsSync(old)).toBe(false);
     expect(store.getWorktree(old)).toBeNull();
-    for (const path of [recent, dirty, unfinished, leased]) {
+    for (const path of [recent, dirty, unfinished, detached, leased]) {
       expect(existsSync(path)).toBe(true);
       expect(store.getWorktree(path)).not.toBeNull();
     }
-    // The branch, and so its commits, stays; leasing it again makes a fresh checkout.
+    // The branch, and so its commits, stays. A lease that starts a branch from `base` still refuses an existing one;
+    // one that may reuse it (a plan) checks it out as it stands.
     expect((await run("git", ["branch", "--list", "standing-orders/done-task"], { cwd: repo })).stdout).toContain("done-task");
-    const again = await pool.lease({ repo, branch: "standing-orders/done-task", base: "main", runner: "builder-1", now: later(3 * DAY) });
-    expect(again).toMatchObject({ ok: true, created: true });
-    // A checkout protected under another root's name (the same branch) is kept too.
-    expect((await pool.release(unfinished, T0)).ok).toBe(true);
-    const elsewhere = new WorktreePool(store, { root: join(base, "other-root") });
-    expect((await elsewhere.prune(repo, later(9 * DAY), 2 * DAY, ["standing-orders/failed-task"])).removed.map(row => row.path)).not.toContain(unfinished);
+    expect(await pool.lease({ repo, branch: "standing-orders/done-task", base: "main", runner: "builder-1", now: later(3 * DAY) })).toMatchObject({ ok: false, reason: "git" });
+    expect(await pool.lease({ repo, branch: "standing-orders/done-task", base: "main", reuseBranch: true, runner: "builder-1", now: later(3 * DAY) })).toMatchObject({ ok: true, created: true });
   });
 
-  test("a repository's unfinished tasks name the branches retention keeps", () => {
+  test("a checkout nothing names but its path (adopted, branch unknown) is kept when a kept branch would lease it there", async () => {
+    const pool = new WorktreePool(store, { root: join(base, "pool") });
+    const made = await pool.lease({ repo, branch: "standing-orders/comes-back", base: "main", runner: "builder-1", now: T0 });
+    if (!made.ok) throw new Error(made.message);
+    expect((await pool.release(made.worktree.path, T0)).ok).toBe(true);
+    store.saveWorktree({ ...store.getWorktree(made.worktree.path)!, branch: "unknown", taskRef: null });
+    expect((await pool.prune(repo, later(9 * 86_400_000), 86_400_000, () => ["standing-orders/comes-back"])).removed).toEqual([]);
+    expect((await pool.prune(repo, later(9 * 86_400_000), 86_400_000, () => [])).removed.map(row => row.path)).toEqual([made.worktree.path]);
+  });
+
+  test("a lease that arrives while a checkout is being removed waits; it never gets a directory that's going", async () => {
+    let lateLease: Promise<unknown> | null = null;
+    const slow: typeof run = async (file, args, options) => {
+      if (args.includes("remove") && lateLease === null) {
+        lateLease = pool.lease({ repo, branch: "standing-orders/slow", base: "main", reuseBranch: true, runner: "builder-1", now: later(5 * 86_400_000) });
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      return run(file, args, options);
+    };
+    const pool = new WorktreePool(store, { root: join(base, "pool"), runner: slow });
+    const made = await pool.lease({ repo, branch: "standing-orders/slow", base: "main", runner: "builder-1", now: T0 });
+    if (!made.ok) throw new Error(made.message);
+    expect((await pool.release(made.worktree.path, T0)).ok).toBe(true);
+    expect((await pool.prune(repo, later(3 * 86_400_000), 86_400_000, () => [])).removed).toHaveLength(1);
+    expect(await lateLease).toMatchObject({ ok: false, reason: "in-use" });
+    expect(store.getWorktree(made.worktree.path)).toBeNull();
+  });
+
+  test("retention keeps what unfinished, unplaced and recently released tasks work on", () => {
+    const now = later(20 * 86_400_000);
     store.createTask({ id: "shipped", title: "done" }, T0);
     store.createTask({ id: "broken", title: "failed" }, T0);
     store.createTask({ id: "waiting", title: "queued" }, T0);
-    for (const id of ["shipped", "broken", "waiting"]) store.placeTask(store.refFor("built-in", id).id, repo);
+    store.createTask({ id: "anywhere", title: "unplaced" }, T0);
+    store.createTask({ id: "release", title: "a release candidate" }, T0);
+    for (const id of ["shipped", "broken", "waiting", "release"]) store.placeTask(store.refFor("built-in", id).id, repo);
+    store.refFor("built-in", "anywhere");
     store.setTaskState("shipped", "done", T0);
     store.setTaskState("broken", "failed", T0);
-    expect(store.unfinishedBranches(repo).sort()).toEqual(["standing-orders/broken", "standing-orders/waiting"]);
+    store.handle.prepare("INSERT INTO task_scope (task_id, goal, touches, proposed_at, digest, candidate) VALUES ('release', 'ship', '[]', ?, 'd', ?)").run(T0.toISOString(), "a".repeat(40));
+    store.setTaskState("release", "done", later(19 * 86_400_000));
+    expect(store.keptBranches(repo, now, 14 * 86_400_000).sort()).toEqual(["standing-orders/anywhere", "standing-orders/broken", "standing-orders/release", "standing-orders/waiting"]);
+    // Two weeks after a release candidate was done, its checkout can go too.
+    expect(store.keptBranches(repo, later(40 * 86_400_000), 14 * 86_400_000)).not.toContain("standing-orders/release");
   });
 });

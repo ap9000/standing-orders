@@ -11508,14 +11508,17 @@ export class Store {
     this.db.prepare("DELETE FROM worktree WHERE path = ?").run(path);
   }
 
-  /** The branches a repository's unfinished tasks work on or would come back to (anything not done or cancelled,
-   * a failed task included: it can be requeued): each task's own and every branch its runs used. Storage retention
-   * never removes their checkouts. */
-  unfinishedBranches(repo: string): string[] {
-    const own = this.db.prepare(`SELECT r.external_id AS id FROM task_ref r JOIN task t ON t.id = r.external_id WHERE r.repo = ? AND t.state NOT IN ('done', 'cancelled')`).all(repo)
-      .map(row => `standing-orders/${String(row["id"])}`);
-    const used = this.db.prepare(`SELECT DISTINCT run.branch AS branch FROM run JOIN task_ref r ON r.id = run.task_ref JOIN task t ON t.id = r.external_id
-      WHERE r.repo = ? AND t.state NOT IN ('done', 'cancelled') AND run.branch IS NOT NULL`).all(repo).map(row => String(row["branch"]));
+  /** The branches storage retention keeps a repository's checkouts of: every task not done or cancelled (a failed
+   * one included: it can be requeued), and unplaced ones (they're dispatched anywhere); and a release candidate done
+   * within `candidateMs` (its checkout holds the verified build a deploy installs). Each task's own branch and every
+   * branch its runs used. */
+  keptBranches(repo: string, now: Date, candidateMs: number): string[] {
+    const since = new Date(now.getTime() - candidateMs).toISOString();
+    const tasks = `SELECT r.id AS ref, r.external_id AS id FROM task_ref r JOIN task t ON t.id = r.external_id LEFT JOIN task_scope s ON s.task_id = t.id
+      WHERE (r.repo = ? OR r.repo IS NULL) AND (t.state NOT IN ('done', 'cancelled') OR (t.state = 'done' AND s.candidate IS NOT NULL AND t.updated_at >= ?))`;
+    const own = this.db.prepare(tasks).all(repo, since).map(row => `standing-orders/${String(row["id"])}`);
+    const used = this.db.prepare(`SELECT DISTINCT run.branch AS branch FROM run WHERE run.branch IS NOT NULL AND run.task_ref IN (SELECT ref FROM (${tasks}))`).all(repo, since)
+      .map(row => String(row["branch"]));
     return [...new Set([...own, ...used])];
   }
 
