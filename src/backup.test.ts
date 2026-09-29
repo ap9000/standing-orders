@@ -94,16 +94,16 @@ test("two databases backing up into one folder each keep their own newest N and 
   } finally { other.close(); }
 });
 
-test("backups made before they were tagged: this database's history claims its own; the rest are its own only when no other database shares the folder", async () => {
+test("backups made before they were tagged: this database's history claims its own; any other untagged backup is never its own, so never pruned", async () => {
   const shared = folder();
   mkdirSync(shared);
   const legacy = (stamp: string) => { const path = join(shared, `standing-orders-${stamp}.db`); writeFileSync(path, "old"); return path; };
   const ours = legacy("2026-09-01-000000");
   const unknown = legacy("2026-09-02-000000");
   store.handle.prepare("INSERT INTO backup_run (trigger, started_at, finished_at, ok, file) VALUES ('scheduled', ?, ?, 1, ?)").run(NOW.toISOString(), NOW.toISOString(), ours);
-  // Alone in the folder, every untagged backup is this database's, oldest pruned first.
-  expect(backupFiles(shared, backupOwner(store, file)).map(one => one.path)).toEqual([unknown, ours]);
-  // Once another database's tagged backup is there, an untagged one this database never made may be the other's.
+  // Even alone in the folder, an untagged backup its history doesn't record may be another database's (one that hasn't
+  // tagged a backup yet): it isn't this database's to prune.
+  expect(backupFiles(shared, backupOwner(store, file)).map(one => one.path)).toEqual([ours]);
   const otherTag = databaseTag(join(dir, "other.db"));
   writeFileSync(join(shared, `standing-orders-${otherTag}-2026-09-03-000000.db`), "theirs");
   expect(backupFiles(shared, backupOwner(store, file)).map(one => one.path)).toEqual([ours]);

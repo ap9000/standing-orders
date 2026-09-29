@@ -98,15 +98,14 @@ export function backupOwner(store: Store, databaseFile: string): BackupOwner {
 }
 
 /** This database's backups in a folder, made on a schedule or by `backup now`, newest first. A backup tagged for
- * another database is never this one's. An untagged one (made before backups were tagged) is this one's when its
- * history records making it, or when no other database has put tagged backups in the folder. */
+ * another database is never this one's. An untagged one (made before backups were tagged) is this one's only when its
+ * own history records making it: pruning deletes, so what can't be proved ours is left alone. */
 export function backupFiles(folder: string, owner: BackupOwner): { name: string; path: string; bytes: number }[] {
   let names: string[];
   try { names = readdirSync(folder); } catch { return []; }
   const named = names.flatMap(name => { const m = BACKUP_NAME.exec(name); return m === null ? [] : [{ name, tag: m[1] ?? null, order: `${m[2]}-${(m[3] ?? "1").padStart(6, "0")}` }]; });
-  const shared = named.some(one => one.tag !== null && one.tag !== owner.tag);
   return named
-    .filter(one => one.tag === owner.tag || (one.tag === null && (!shared || owner.made.has(resolve(folder, one.name)))))
+    .filter(one => one.tag === owner.tag || (one.tag === null && owner.made.has(resolve(folder, one.name))))
     .sort((a, b) => a.order < b.order ? 1 : a.order > b.order ? -1 : a.name < b.name ? 1 : -1)
     .flatMap(({ name }) => {
       const path = join(folder, name);
