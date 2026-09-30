@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.9.4 — 2026-10-01
+
+- **Flow steps act exactly once.** However many workers advance a
+  project's flows at the same time, a card files its task, runs its script
+  and posts its update once; a retried card takes the same guarded path.
+- **Pull requests from the terminal.** `toolroll task complete <id>
+  --pull-request` completes a result and opens its pull request, and
+  `toolroll task merge <id>` merges it once checks pass, behind your password.
+
 ## 0.9.3 — 2026-10-01
 
 - **Flows never get stuck on a long step output.** A research or build step's

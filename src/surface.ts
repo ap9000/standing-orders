@@ -203,10 +203,16 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
     flags: [jsonFlag, dbFlag,
       { name: 'token-env', takesValue: true, meaning: 'scoped coordinator credential environment variable' },
       { name: 'token-file', takesValue: true, meaning: 'scoped coordinator credential file; defaults to selected project reference' },
-      ...(action === 'complete' ? [{ name: 'digest', takesValue: true, meaning: 'exact receipt from assignment show; required for JSON or scoped agents' }]
+      ...(action === 'complete' ? [{ name: 'digest', takesValue: true, meaning: 'exact receipt from assignment show; required for JSON or scoped agents' },
+        { name: 'pull-request', takesValue: false, meaning: "also open the result's pull request from that commit, as the console's Complete does; an approver's sign-in (--as/--token), never a scoped credential; refuses with pull-requests-off and the setup command" }]
         : [{ name: 'feedback', takesValue: true, meaning: 'specific requested change' }, { name: 'run', takesValue: true, meaning: 'exact result run; defaults to current result' }, { name: 'source', takesValue: true, meaning: 'exact scope digest; defaults to current terms' }, { name: 'key', takesValue: true, meaning: '32 hexadecimal characters for exact replay; defaults to a stable feedback identity' }]),
     ],
   })),
+  { invocation: "task merge", synopsis: "merge the task's pull request once its checks pass — the console's Merge, behind the approver's password; the project's method (squash by default), branch deleted, recorded in the ledger",
+    audience: "operator", agentMayInvoke: false, mutation: "identity-idempotent",
+    positionals: [{ name: "task", required: true, meaning: "any version of the task" }],
+    flags: [jsonFlag, dbFlag, { name: "as", takesValue: true, meaning: "the approver merging" }, { name: "token", takesValue: true, meaning: "their password" }],
+    notableReasons: ["usage", "not-an-approver"] },
   ...(["show", "updates", "claim", "check", "brief", "inbox", "ack"] as const).map(action => ({
     invocation: `assignment ${action}`,
     synopsis: action === "show" ? "read the root, current work, owner and exact receipt"

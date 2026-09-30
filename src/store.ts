@@ -22741,17 +22741,20 @@ export class Store {
   }
 
   /** What a card's current zone is doing: its task, the card's main work, what it waits on, what zones reported. */
+  /** Read and written in one transaction, so a pass changing one field never writes back another pass's older task or waiting. */
   updateFlowCard(id: number, change: { task?: string | null; primaryTask?: string; waiting?: string | null; outputs?: Record<string, string>; state?: "done" | "cancelled" }, now: Date): void {
-    const card = this.getFlowCard(id);
-    if (card === null) return;
-    this.db.prepare("UPDATE flow_card SET task = ?, primary_task = ?, waiting = ?, outputs_json = ?, state = ?, updated_at = ? WHERE id = ?").run(
-      change.task === undefined ? card.task : change.task,
-      change.primaryTask ?? card.primaryTask,
-      change.waiting === undefined ? card.waiting : change.waiting,
-      JSON.stringify(change.outputs ?? card.outputs),
-      change.state ?? card.state,
-      now.toISOString(), id,
-    );
+    this.transact(() => {
+      const card = this.getFlowCard(id);
+      if (card === null) return;
+      this.db.prepare("UPDATE flow_card SET task = ?, primary_task = ?, waiting = ?, outputs_json = ?, state = ?, updated_at = ? WHERE id = ?").run(
+        change.task === undefined ? card.task : change.task,
+        change.primaryTask ?? card.primaryTask,
+        change.waiting === undefined ? card.waiting : change.waiting,
+        JSON.stringify(change.outputs ?? card.outputs),
+        change.state ?? card.state,
+        now.toISOString(), id,
+      );
+    });
   }
 
   flowEvents(card: number): { fromStage: string | null; toStage: string; outcome: FlowEventOutcome; actor: string; note: string | null; at: string }[] {

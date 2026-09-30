@@ -89,6 +89,23 @@ ${AUTHORITY_LINE}
     detail says why; \`toolroll sync\` refreshes trackers.
   - \`contest-open\`: a tournament is running on the task; a person picks.
 
+## Complete, pull request, merge
+
+The console's Complete and Merge, from a terminal. Both are a person's
+acts behind their sign-in (\`--as <you> --token <t>\`, or the remembered
+login); run them only when the person asked for exactly that.
+
+- \`task complete <id> --digest <receipt> --pull-request\` marks the exact
+  inspected result complete and opens its pull request from that commit
+  under the project's publishing setup. \`pull-requests-off\` names the
+  setup command (\`publish setup --repo <path> --yes\`).
+- CI is watched on GitHub. \`task show <id> --json\` carries
+  \`pullRequest\`: \`prUrl\`, \`state\` (opening, waiting, running, ready,
+  failing, merged, closed, failed) and \`mergeCommit\`.
+- \`task merge <id>\` merges it once checks pass, by the project's method
+  (squash by default), deletes the branch and records who merged.
+  \`checks\` means they are running or failing; the message says which.
+
 ## Flows
 
 A flow is a process cards move through, drawn as zones. The terminal

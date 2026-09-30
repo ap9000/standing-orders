@@ -4,9 +4,12 @@ import { assignmentOf, checkAssignmentAsOperator } from './assignment.js';
 import { assignmentForCoordinator, coordinatorToken } from './assignment-adapters.js';
 import { authenticateCoordinator } from './coordinator.js';
 import { reproveApprover, type VerifiedApprover } from './principal.js';
+import { authenticateApprover } from './scope.js';
 import { requestResultChanges } from './result-actions.js';
 import { commentSourceKey, revisionSourceOf } from './result-review.js';
 import { envelopeJson } from './envelope.js';
+import { completeAndOpenPullRequest, mergeAsPerson, newestPullRequestOf, publishingOf, pullRequestViewOf, type PullRequestView } from './pull-request-flow.js';
+import type { PublishExec } from './publish.js';
 import type { Store } from './store.js';
 
 export async function runTaskOutcomeCommand(action: 'complete' | 'revise', positional: readonly string[], flags: Map<string, string | true>, context: {
@@ -14,18 +17,20 @@ export async function runTaskOutcomeCommand(action: 'complete' | 'revise', posit
   operator: () => Promise<VerifiedApprover | null>;
 }): Promise<number> {
   const command = `task ${action}`;
-  const emit = (result: { ok: boolean; reason?: string; message?: string; result?: unknown }, lines?: string[]) => {
+  const emit = (result: { ok: boolean; reason?: string; message?: string; result?: unknown; pullRequest?: unknown }, lines?: string[]) => {
     context.write(context.json ? envelopeJson({ ...result, command }) : result.ok ? (lines ?? []).join('\n') : result.message ?? 'The action was refused.');
     return result.ok ? 0 : result.reason === 'usage' ? 2 : 3;
   };
   const fail = (reason: string, message: string) => emit({ ok: false, reason, message });
-  const allowed = new Set(['json', 'db', 'as', 'token', 'token-env', 'token-file', ...(action === 'complete' ? ['digest'] : ['feedback', 'run', 'source', 'key'])]);
+  const allowed = new Set(['json', 'db', 'as', 'token', 'token-env', 'token-file', ...(action === 'complete' ? ['digest', 'pull-request'] : ['feedback', 'run', 'source', 'key'])]);
   for (const key of flags.keys()) if (!allowed.has(key)) return fail('usage', `--${key} is not a task ${action} option.`);
   const task = positional[0];
-  if (positional.length !== 1 || !task || task.length > 64 || /[\x00-\x1f]/.test(task)) return fail('usage', `Use task ${action} <task>${action === 'complete' ? ' --digest <receipt>' : ' --feedback "requested change"'}.`);
+  if (positional.length !== 1 || !task || task.length > 64 || /[\x00-\x1f]/.test(task)) return fail('usage', `Use task ${action} <task>${action === 'complete' ? ' --digest <receipt> [--pull-request]' : ' --feedback "requested change"'}.`);
+  const pullRequest = flags.has('pull-request');
   const credential = coordinatorToken(flags, process.env);
   if ('ok' in credential) return emit(credential);
   if (credential.token !== null && (flags.has('as') || flags.has('token'))) return fail('usage', 'Choose a scoped credential or your operator sign-in.');
+  if (credential.token !== null && pullRequest) return fail('unauthenticated', 'Opening a pull request is an approver\'s act. Use your operator sign-in (--as and --token), not a scoped credential.');
   const operator = credential.token === null ? await context.operator() : null;
   if (credential.token === null && operator === null) return fail('unauthenticated', 'Sign in with up, or supply --as and --token. Agents can use --token-file or --token-env with a scoped credential.');
   const { store, now, evidenceRoot } = context;
@@ -42,6 +47,24 @@ export async function runTaskOutcomeCommand(action: 'complete' | 'revise', posit
       if (supplied === undefined && (context.json || coordinator !== null)) return fail('usage', 'Read assignment show <task>, then pass its exact --digest to mark that result complete.');
       const digest = typeof supplied === 'string' ? supplied : current.receipt?.digest;
       if (!digest) return fail('not-ready', 'This task has no finished result to mark complete.');
+      if (pullRequest) {
+        // The console's "Complete and open a pull request": the same exact-receipt completion and owed PR, one transaction.
+        const repo = store.lookupRef(current.activeTaskId)?.repo ?? null;
+        const publishing = publishingOf(store, repo);
+        if (!publishing.on) return fail('pull-requests-off', `Pull requests aren't set up for this project. Turn them on with: toolroll publish setup --repo ${repo ?? '<path>'} --yes`);
+        if (publishing.legacy) return fail('pull-requests-off', 'This project opens a pull request for every build. Complete without --pull-request.');
+        const runId = current.receipt?.runId;
+        if (runId === undefined) return fail('not-ready', 'This task has no finished result to mark complete.');
+        const opened = completeAndOpenPullRequest(store, { taskId: task, digest, runId, who: operator!, root: evidenceRoot }, now);
+        if (!opened.ok) return emit(opened);
+        const link = opened.publication.prUrl;
+        return emit({ ok: true, result: assignmentOf(store, task, now, { principal: 'operator', repos }, evidenceRoot), pullRequest: pullRequestViewOf(store, runId) }, [
+          `${current.rootId} · Complete`,
+          `Result: ${current.activeTaskId} · run ${runId} · ${opened.publication.headSha}`,
+          link === null ? `Pull request: opening from ${opened.publication.headSha.slice(0, 12)} into ${publishing.githubRepo} ${publishing.base}. toolroll task show ${current.rootId} prints its link.` : `Pull request: ${link}`,
+          `Next: CI is watched on GitHub. Merge when green: toolroll task merge ${current.rootId}`,
+        ]);
+      }
       const changed = credential.token !== null
         ? assignmentForCoordinator(store, credential.token, 'check', { ref: task, digest }, now, evidenceRoot)
         : checkAssignmentAsOperator(store, task, digest, operator!, now, evidenceRoot);
@@ -75,4 +98,45 @@ export async function runTaskOutcomeCommand(action: 'complete' | 'revise', posit
     return emit({ ok: true, result: { id: revised.id, rootId: current.rootId, sourceRun: run.id, source, key, approved, planning } },
       [`${current.rootId} · Revision created`, `Execution: ${revised.id}`, approved ? 'Covered by your existing operating mode.' : planning ? 'Updating the plan with your notes; approve it when it is ready.' : 'The revision is waiting for approval.']);
   });
+}
+
+/** `task merge <task>`: the console's Merge — the newest pull request any version of the task opened through
+ * Complete, merged behind the approver's password once a fresh read shows its checks passing. */
+export async function runTaskMergeCommand(positional: readonly string[], flags: Map<string, string | true>, context: {
+  store: Store; json: boolean; write: (line: string) => void; clock: () => Date; exec?: PublishExec; demo: boolean;
+  credentials: () => Promise<{ name: string; token: string } | null>;
+}): Promise<number> {
+  const command = 'task merge';
+  const emit = (result: { ok: boolean; reason?: string; message?: string; [key: string]: unknown }, lines?: string[]) => {
+    context.write(context.json ? envelopeJson({ ...result, command }) : result.ok ? (lines ?? []).join('\n') : result.message ?? 'The merge was refused.');
+    return result.ok ? 0 : result.reason === 'usage' ? 2 : 3;
+  };
+  const fail = (reason: string, message: string) => emit({ ok: false, reason, message });
+  const allowed = new Set(['json', 'db', 'as', 'token']);
+  for (const key of flags.keys()) if (!allowed.has(key)) return fail('usage', `--${key} is not a task merge option.`);
+  const task = positional[0];
+  if (positional.length !== 1 || !task || task.length > 64 || /[\x00-\x1f]/.test(task)) return fail('usage', 'Use task merge <task> --as <you> --token <password>.');
+  if (context.demo) return fail('demo', 'The demo merges nothing.');
+  const acting = await context.credentials();
+  if (acting === null) return fail('unauthenticated', 'Merging takes your password: --as <you> --token <password>.');
+  const { store } = context;
+  if (!authenticateApprover(store, acting.name, acting.token).ok) return fail('not-an-approver', 'That password didn\'t work, or you can\'t merge.');
+  const family = store.taskFamilyOf(task, store.knownRepos().filter(repo => store.accountCanAccess(acting.name, repo)), false);
+  if (family === null) return fail('not-found', 'That task is unavailable in your projects.');
+  const view = newestPullRequestOf(store, family.versions.map(one => one.id));
+  if (view === null) return fail('no-pr', 'This task has no pull request. Open one with task complete --pull-request.');
+  const merged = await mergeAsPerson(store, { runId: view.runId, name: acting.name, password: acting.token, ...(context.exec === undefined ? {} : { exec: context.exec }), clock: context.clock });
+  if (!merged.ok) return emit({ ...merged, reason: merged.reason === 'password' ? 'not-an-approver' : merged.reason, pullRequest: view });
+  const after = newestPullRequestOf(store, family.versions.map(one => one.id));
+  return emit({ ok: true, pullRequest: after }, [
+    `${family.root.id} · Merged`,
+    `Pull request: ${after?.prUrl ?? view.prUrl ?? `#${view.prNumber}`}`,
+    `Merge commit: ${merged.commit ?? 'recorded by GitHub'} (${after?.mergeMethod ?? view.mergeMethod}, branch deleted)`,
+  ]);
+}
+
+/** The lines `task show` prints for a task's pull request. */
+export function pullRequestLines(view: PullRequestView | null): string[] {
+  if (view === null) return [];
+  return [`  pull request: ${view.prUrl ?? 'opening'} · ${view.label}`, `    ${view.detail}`, ...(view.mergeCommit === null ? [] : [`    merge commit: ${view.mergeCommit}`])];
 }
