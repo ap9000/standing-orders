@@ -7,7 +7,7 @@ Contributions that fit that shape are very welcome.
 ## Getting set up
 
 ```sh
-git clone https://github.com/ap9000/standing-orders && cd standing-orders
+git clone https://github.com/ap9000/toolroll && cd standing-orders
 npm install
 npm test              # the whole suite, ~800 tests
 npm run typecheck

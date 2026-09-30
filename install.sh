@@ -1,7 +1,7 @@
 #!/bin/sh
 # Toolroll, in one command (macOS and Linux):
 #
-#   curl -fsSL https://raw.githubusercontent.com/ap9000/standing-orders/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/ap9000/toolroll/main/install.sh | sh
 #
 # It checks what it needs (Node.js 22.13 or newer, git), installs the
 # `toolroll` command with npm (`standing-orders`, the older name, still

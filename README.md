@@ -1,36 +1,55 @@
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/ap9000/standing-orders/main/docs/media/wordmark-dark.svg">
-  <img src="https://raw.githubusercontent.com/ap9000/standing-orders/main/docs/media/wordmark-light.svg" alt="Toolroll — a control plane for unattended coding agents" width="480">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/wordmark-dark.svg">
+  <img src="docs/media/wordmark-light.svg" alt="Toolroll — a control plane for unattended coding agents" width="440">
 </picture>
 
-**Queue twelve tasks, walk away, come back to pull requests —
-interrupted only for decisions that genuinely need a human.**
+### Your agents build. You decide.
 
-[![CI](https://github.com/ap9000/standing-orders/actions/workflows/ci.yml/badge.svg)](https://github.com/ap9000/standing-orders/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/toolroll)](https://www.npmjs.com/package/toolroll)
-![node](https://img.shields.io/badge/node-%E2%89%A5%2022.13-brightgreen)
-[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+Queue the work, approve the exact terms once, and come back to results that
+prove themselves — interrupted only for decisions that need a person.
 
-[Guides](docs/guide/README.md) · [Design](docs/DESIGN.md) · [Never Stuck contract](docs/NEVER_STUCK.md) · [Priorities](docs/PRIORITIES.md) · [Ledger](docs/PROGRESS.md) · [Contributing](CONTRIBUTING.md) · [Issues](https://github.com/ap9000/standing-orders/issues) · [npm](https://www.npmjs.com/package/toolroll)
+[![CI](https://github.com/ap9000/toolroll/actions/workflows/ci.yml/badge.svg)](https://github.com/ap9000/toolroll/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/toolroll?color=c0267e)](https://www.npmjs.com/package/toolroll)
+[![Homebrew](https://img.shields.io/badge/homebrew-ap9000%2Ftoolroll-c0267e)](https://github.com/ap9000/homebrew-toolroll)
+![node](https://img.shields.io/badge/node-%E2%89%A5%2022.13-171717)
+[![license](https://img.shields.io/badge/license-MIT-171717)](LICENSE)
 
-<img src="https://raw.githubusercontent.com/ap9000/standing-orders/main/docs/media/ui/unified-chat.png" alt="Toolroll unified chat showing a live portfolio overview across projects, active builds, decisions, and proposed next actions." width="920">
+**[Website](https://toolroll.dev)** · [Install](https://toolroll.dev/install) · [Use cases](https://toolroll.dev/use-cases) · [Integrations](https://toolroll.dev/integrations) · [Guides](docs/guide/README.md) · [Contributing](CONTRIBUTING.md)
 
-<sub>One conversation across every project, backed by durable tasks—not a chat-only copy of the work.</sub>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/ui/tasks-dark.png">
+  <img src="docs/media/ui/tasks-light.png" alt="The Toolroll console's Tasks view: plan windows and budget at the top, then every task with what it needs from you and the one action that settles it." width="920">
+</picture>
+
+<sub>Tasks across every project: what's building, what's Ready, and the one thing each needs from you. (Demo workspace.)</sub>
 
 </div>
 
 ## Quick start
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ap9000/standing-orders/main/install.sh | sh
+npx toolroll up
 ```
 
-macOS or Linux, with Node.js 22.13+ and git. It installs the command and opens
-the console; `npx toolroll demo` shows a seeded sandbox first. Then read
-[Getting started](docs/guide/getting-started.md), [Flows](docs/guide/flows.md)
-and [Security](docs/guide/security.md).
+That starts the app and a builder for your projects, then opens the console
+at http://127.0.0.1:4180. Runs on macOS or Linux with Node.js 22.13+ and git.
+Try the seeded sandbox first with `npx toolroll demo` — it never spends and
+never reaches outside.
+
+| Install with | Command |
+|---|---|
+| npm | `npm install -g toolroll` |
+| Homebrew | `brew install ap9000/toolroll/toolroll` |
+| bun | `bun add -g toolroll` |
+| pnpm | `pnpm add -g toolroll` |
+| yarn | `yarn global add toolroll` |
+| script | `curl -fsSL https://raw.githubusercontent.com/ap9000/toolroll/main/install.sh \| sh` |
+
+Then read [Getting started](docs/guide/getting-started.md), [Flows](docs/guide/flows.md)
+and [Security](docs/guide/security.md). Coming from Standing Orders? It's the
+same product renamed; the `standing-orders` command and your data keep working.
 
 ## One command center, the whole loop
 
@@ -48,9 +67,9 @@ you open them. Before execution, the approval card restates the goal,
 boundaries, evidence requirements, model, and permissions.
 
 <div align="center">
-  <img src="https://raw.githubusercontent.com/ap9000/standing-orders/main/docs/media/ui/task-handoff-mobile.png" alt="Mobile chat-first task composer with one outcome prompt and progressive details." width="260">
+  <img src="docs/media/ui/tasks-mobile.png" alt="The Tasks view on a phone: each task with its status and the one action that settles it." width="260">
   &nbsp;
-  <img src="https://raw.githubusercontent.com/ap9000/standing-orders/main/docs/media/ui/scope-approval.png" alt="Desktop scope approval card showing the goal, boundaries, evidence requirement, model, permissions, and approval action." width="640">
+  <img src="docs/media/ui/scope-approval.png" alt="The scope you approve: goal, what is out of bounds, the files it may touch, acceptance criteria with their evidence, quality, permissions and the agents that will build it." width="640">
 </div>
 
 ### One lead, durable crew work
@@ -218,11 +237,6 @@ failed when a result is marked complete.
   The lead or user marks Complete after inspection. Failed checks stay failed;
   absent optional historical assessments do not block completion.
 
-<div align="center">
-  <img src="https://raw.githubusercontent.com/ap9000/standing-orders/main/docs/media/ui/verified-result.png" alt="A verified Toolroll result card with checks, follow-up notes, and evidence-backed completion details." width="720">
-  <br>
-  <sub>Inspect the saved result and actual checks, then mark Complete or request changes.</sub>
-</div>
 
 ## Install
 
@@ -507,7 +521,7 @@ Windows' native command shell. The scheduled-task definition follows the Task
 Scheduler XML schema and every `schtasks` interaction is covered by scripted
 tests. A physical Windows install has not yet been certified; the exact
 real-provider and post-reboot checklist is in the
-[Never Stuck release certification](https://github.com/ap9000/standing-orders/blob/main/docs/CERTIFICATION.md).
+[Never Stuck release certification](https://github.com/ap9000/toolroll/blob/main/docs/CERTIFICATION.md).
 
 ### Unattended permissions
 
