@@ -5,7 +5,7 @@
 On macOS or Linux, with Node.js 22.13 or newer and git:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ap9000/standing-orders/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/ap9000/toolroll/main/install.sh | sh
 ```
 
 It installs the `toolroll` command and starts it with your projects in
