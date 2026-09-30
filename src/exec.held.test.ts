@@ -82,6 +82,22 @@ const turn = (text: string): string =>
 const alive = (pid: number): boolean => {
   try { process.kill(pid, 0); return true; } catch { return false; }
 };
+/** Poll until `ready` returns a value, or fail naming what never happened. */
+const waitFor = async <T>(what: string, ms: number, ready: () => T | undefined): Promise<T> => {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const value = ready();
+    if (value !== undefined) return value;
+    if (Date.now() >= deadline) throw new Error(`gave up after ${ms} ms waiting for ${what}`);
+    await new Promise(pass => setTimeout(pass, 20));
+  }
+};
+/** The PID a tool fixture wrote. The file exists before its bytes land, so
+ * an empty read is "not yet", never PID 0 (which kill() takes as our group). */
+const checkpointPid = (checkpoint: string): number | undefined => {
+  const pid = existsSync(checkpoint) ? Number(readFileSync(checkpoint, "utf8")) : NaN;
+  return Number.isInteger(pid) && pid > 0 ? pid : undefined;
+};
 /** End every tool fixture that wrote a checkpoint, whether or not the product
  * fenced it. Runs after each test, pass or fail, so no fixture outlives it. */
 const releaseFixtures = async (): Promise<void> => {
@@ -264,10 +280,7 @@ describe("the held-session transport under the real supervisor", () => {
     expect(start.ok).toBe(true);
     if (!start.ok) return;
     try {
-      const deadline = Date.now() + 3000;
-      while (!existsSync(checkpoint) && Date.now() < deadline) await new Promise(pass => setTimeout(pass, 20));
-      expect(existsSync(checkpoint)).toBe(true);
-      const pid = Number(readFileSync(checkpoint, "utf8"));
+      const pid = await waitFor(`the ${mode} tool to write its PID to ${checkpoint}`, 15_000, () => checkpointPid(checkpoint));
       start.handle.terminate();
       const exited = await start.handle.exited;
       if (mode === "inherited") expect(exited.code).toBe(0);
@@ -332,33 +345,29 @@ describe("the tool fixture never outlives the suite", () => {
     // is orphaned once the agent dies, just as when a real fence fails.
     const agent = spawn(process.execPath, [agentPath, "detached", checkpoint], { stdio: ["pipe", "ignore", "ignore"] });
     try {
-      const deadline = Date.now() + 3000;
-      while (!existsSync(checkpoint) && Date.now() < deadline) await new Promise(pass => setTimeout(pass, 20));
-      expect(existsSync(checkpoint)).toBe(true);
-      return Number(readFileSync(checkpoint, "utf8"));
+      return await waitFor(`the detached tool to write its PID to ${checkpoint}`, 15_000, () => checkpointPid(checkpoint));
     } finally {
       agent.kill("SIGKILL");
       await new Promise(pass => { if (agent.exitCode !== null || agent.signalCode !== null) pass(null); else agent.once("exit", pass); });
     }
   };
-  const gone = async (pid: number): Promise<boolean> => {
-    const deadline = Date.now() + 3000;
-    while (alive(pid) && Date.now() < deadline) await new Promise(pass => setTimeout(pass, 20));
-    return !alive(pid);
-  };
+  // Well inside the fixture's own one-minute limit, so ending in time proves
+  // the path under test rather than that fallback.
+  const gone = async (pid: number, after: string): Promise<boolean> =>
+    waitFor(`tool ${pid} to end ${after}`, 15_000, () => (alive(pid) ? undefined : true));
 
   test("the cleanup after each test ends a tool that escaped every fence", async () => {
     const pid = await orphan(join(dir, "orphan-pid"));
     expect(alive(pid)).toBe(true);
     await releaseFixtures();
-    expect(await gone(pid)).toBe(true);
+    expect(await gone(pid, "after the cleanup")).toBe(true);
   });
 
   test("a tool ends itself once its checkpoint is removed", async () => {
     const checkpoint = join(dir, "self-ending-pid");
     const pid = await orphan(checkpoint);
     rmSync(checkpoint);
-    expect(await gone(pid)).toBe(true);
+    expect(await gone(pid, "once its checkpoint was removed")).toBe(true);
   });
 });
 

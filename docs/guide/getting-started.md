@@ -20,6 +20,21 @@ To look around first, `npx toolroll demo` opens a throwaway sandbox
 with tasks and two flows already mid-flight. It never spends and never
 reaches outside.
 
+## Install with your agent
+
+Paste this into Claude Code or Codex:
+
+> Install Toolroll with `npm install -g toolroll` and start `toolroll up` in
+> the background; it keeps running. Then run `toolroll onboard` in this
+> repository, and run it again with `--yes` to install Toolroll's skill for
+> you. Tell me the console address, where my login is saved (not the
+> password), how to pair my phone, and what I can ask you next.
+
+`toolroll onboard` adds the repository as a project, says which agent CLIs are
+signed in, and prints the line that adds Toolroll as tools
+(`claude mcp add toolroll -- toolroll mcp`) without running it.
+`toolroll onboard --remove --yes` takes the skill out again.
+
 ## Your first project
 
 Open **Projects** and add a folder or a GitHub repository. Any repository you

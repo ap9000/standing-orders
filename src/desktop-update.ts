@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, chmodSync, copyFileSync, cpSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { backup, DatabaseSync } from "node:sqlite";
+import type { backup, DatabaseSync } from "node:sqlite";
+import { createRequire } from "node:module";
 import { bundleHash, readDesktopBundle, verifyDesktopUpdateBundles, type DesktopBundle } from "./desktop-bundle.js";
 import { readDesktopConfig, desktopServiceCommand, desktopServiceDefinition, verifyDesktopLiveness, type DesktopConfig } from "./desktop-host.js";
 import { daemonStatus } from "./daemon.js";
@@ -10,6 +11,13 @@ import { readSchemaVersion, SCHEMA_VERSION, Store } from "./store.js";
 import { activeUpdateWork, freezeUpdateGate, installUpdateGate, removeUpdateGate, updateAdmissionPaused } from "./desktop-update-gate.js";
 import { currentDesktopAccess } from "./desktop-access.js";
 import { assertCodingUpdateStopped, backupCodingCatalog, codingCatalogExists } from "./coding-update.js";
+
+/** Loaded on first use (as backup.ts and store.ts do), so modules that only import this one (the console,
+ * and tests that load it in a browser-like environment) never need `node:sqlite` itself. */
+function sqlite(): typeof import("node:sqlite") {
+  return createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
+}
+
 
 type Phase = "prepared" | "draining" | "backing-up" | "stopping" | "installing" | "verifying" | "rolling-back" | "releasing" | "complete" | "restored" | "cancelled" | "needs-attention";
 export type UpdateJournal = {
@@ -85,7 +93,7 @@ export function readUpdateJournal(stateDir: string, retainedReceipt?: string): U
 }
 function connect(file: string, readOnly = false): DatabaseSync {
   if (!existsSync(file) || lstatSync(file).isSymbolicLink()) throw Error("The task database is missing or linked. It was not recreated.");
-  const db = new DatabaseSync(file, { readOnly }); db.exec("PRAGMA busy_timeout=1000");
+  const db = new (sqlite().DatabaseSync)(file, { readOnly }); db.exec("PRAGMA busy_timeout=1000");
   const schema = readSchemaVersion(db);
   if (!schema.ok || schema.version !== SCHEMA_VERSION) { db.close(); throw Error("This update needs the current database schema. Use the separate verified migration procedure; the installed app is unchanged."); }
   return db;
@@ -122,7 +130,7 @@ async function otherControllers(app: DesktopBundle, stateDir: string): Promise<b
   const command = `${join(resources(app), "runtime", "node")} ${join(resources(app), "dist", "desktop-host.js")} serve --state `;
   return result.stdout.split("\n").some(line => line.trim().startsWith(command) && line.trim() !== command + resolve(stateDir));
 }
-function lingeringWork(db: DatabaseSync): string | null {
+export function lingeringWork(db: DatabaseSync): string | null {
   const store = new Store(db);
   for (const row of db.prepare("SELECT DISTINCT run FROM run_process WHERE exited_at IS NULL").all()) {
     const problem = store.stopQuiescenceProblem(Number(row.run));
@@ -183,7 +191,7 @@ export async function prepareDesktopUpdate(stateDir: string, installed: string, 
 
 export function sqliteLock(file: string, busyTimeoutMs = 0): DatabaseSync | null {
   if (existsSync(file)) privateFile(file);
-  const db = new DatabaseSync(file); chmodSync(file, 0o600);
+  const db = new (sqlite().DatabaseSync)(file); chmodSync(file, 0o600);
   try { db.exec(`PRAGMA busy_timeout=${busyTimeoutMs}; BEGIN EXCLUSIVE`); return db; }
   catch (error) { db.close(); if (String(error).includes("locked") || [5, 6].includes((error as { errcode?: number }).errcode ?? 0)) return null; throw error; }
 }
@@ -260,22 +268,9 @@ async function verifiedBackup(j: UpdateJournal): Promise<void> {
   }
   // A crashed partial attempt gets a fresh filename; no backup is overwritten.
   const backupPath = existsSync(file) ? join(j.workDir, `orders.backup.${randomUUID()}.db`) : file;
-  const db = connect(j.databaseFile);
-  try {
-    db.exec("BEGIN IMMEDIATE");
-    // The write reservation prevents a concurrent writer; a separate read
-    // connection is required because SQLite cannot back up a write transaction.
-    const source = connect(j.databaseFile, true);
-    let before: string;
-    try { before = snapshot(source); await backup(source, backupPath); } finally { source.close(); }
-    chmodSync(backupPath, 0o600);
-    const copied = connect(backupPath);
-    try {
-      if (copied.prepare("PRAGMA integrity_check").get()?.integrity_check !== "ok" || copied.prepare("PRAGMA foreign_key_check").all().length !== 0 || snapshot(copied) !== before) throw Error("Backup verification failed. The installed app is unchanged.");
-      removeUpdateGate(copied, j.id);
-    } finally { copied.close(); }
+  const backupHash = await verifiedDatabaseBackup(j.databaseFile, backupPath, j.id, async () => {
     await verifiedCodingBackup(j);
-    db.exec("COMMIT");
+  }, () => {
     for (const [source, name] of [[join(j.stateDir, "desktop.json"), "desktop.json"], [join(dirname(j.databaseFile), "repos.json"), "repos.json"], [join(dirname(j.databaseFile), "up-login.txt"), "up-login.txt"]]) {
       if (source && name && existsSync(source)) {
         if (!lstatSync(source).isFile() || lstatSync(source).isSymbolicLink()) throw Error("A saved configuration file is linked or not a regular file. Nothing was replaced.");
@@ -283,9 +278,35 @@ async function verifiedBackup(j: UpdateJournal): Promise<void> {
         copyFileSync(source, join(j.workDir, name)); chmodSync(join(j.workDir, name), 0o600);
       }
     }
+  });
+  j.backupPath = backupPath; j.backupHash = backupHash;
+  save(j, "backing-up", "Private database backups verified; saved tasks, evidence and coding sessions match.");
+}
+
+/** A private, verified copy of the task database, made under a write
+ * reservation so no writer slips in between the snapshot and the copy. The
+ * copy drops the update's own admission pause. `inside` runs before the
+ * reservation is released, `after` once it is; returns the copy's hash. */
+export async function verifiedDatabaseBackup(databaseFile: string, backupPath: string, gateId: string, inside: () => Promise<void> = async () => {}, after: () => void = () => {}): Promise<string> {
+  const db = connect(databaseFile);
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    // The write reservation prevents a concurrent writer; a separate read
+    // connection is required because SQLite cannot back up a write transaction.
+    const source = connect(databaseFile, true);
+    let before: string;
+    try { before = snapshot(source); await sqlite().backup(source, backupPath); } finally { source.close(); }
+    chmodSync(backupPath, 0o600);
+    const copied = connect(backupPath);
+    try {
+      if (copied.prepare("PRAGMA integrity_check").get()?.integrity_check !== "ok" || copied.prepare("PRAGMA foreign_key_check").all().length !== 0 || snapshot(copied) !== before) throw Error("Backup verification failed. The installed app is unchanged.");
+      removeUpdateGate(copied, gateId);
+    } finally { copied.close(); }
+    await inside();
+    db.exec("COMMIT");
+    after();
     const fd = openSync(backupPath, "r"); try { fsyncSync(fd); } finally { closeSync(fd); }
-    j.backupPath = backupPath; j.backupHash = fileHash(backupPath);
-    save(j, "backing-up", "Private database backups verified; saved tasks, evidence and coding sessions match.");
+    return fileHash(backupPath);
   } finally { db.close(); }
 }
 

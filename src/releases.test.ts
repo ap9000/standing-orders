@@ -261,13 +261,13 @@ describe("c4 (behaviour): Settings → Updates and the console notice", () => {
     expect(older.update?.version).toBe(newer);
 
     // The switch turns the daily check off: the file beside the database says so, and nothing is shown.
-    const off = await fetch(`${base}/settings/updates`, { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf }), redirect: "manual" });
+    const off = await fetch(`${base}/settings/updates/checks`, { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf }), redirect: "manual" });
     expect(off.status).toBe(303);
     expect(updateChecksOff({}, dir)).toEqual({ off: true, byEnv: false });
     const quiet = await (await fetch(`${base}/settings?format=workspace`, { headers: { cookie } })).json() as import("./browser-workspace.js").BrowserWorkspace;
     expect(quiet.update).toBeUndefined();
     expect(quiet.view).toMatchObject({ updates: { latest: null, check: { on: false } } });
-    await fetch(`${base}/settings/updates`, { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf, check: "on" }), redirect: "manual" });
+    await fetch(`${base}/settings/updates/checks`, { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf, check: "on" }), redirect: "manual" });
     expect(updateChecksOff({}, dir).off).toBe(false);
   });
 });

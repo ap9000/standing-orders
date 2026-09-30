@@ -50,7 +50,9 @@ export function browserWorkspaceDocument(html: string, workspace: BrowserWorkspa
   const settleFades = `(function(){function s(e){var f=e.viewTransition;if(f)[f.finished,f.ready,f.updateCallbackDone].forEach(function(p){if(p)p.catch(function(){})})}addEventListener('pageswap',s);addEventListener('pagereveal',s)})();`;
   return html
     // A page showing a password keeps to its one script (the sensitivity contract), so it goes without.
-    .replace('</head>', `<link rel="stylesheet" href="/assets/workspace.css">${workspace.sensitive ? "" : `<script nonce="${nonce}">${settleFades}</script>`}</head>`)
-    .replace('<body>', '<body><div id="standing-orders-workspace">')
-    .replace('</body>', `</div><script type="application/json" id="standing-orders-workspace-data" nonce="${nonce}">${serializeBrowserWorkspace(workspace)}</script><script nonce="${nonce}">${initialize}</script><script type="module" src="/assets/workspace.js" nonce="${nonce}"></script></body>`);
+    // Replacer functions, never strings: a `$\`` or `$'` in the page's data (an issue title, a TODO) would
+    // otherwise paste part of the page into the data block and close it early.
+    .replace('</head>', () => `<link rel="stylesheet" href="/assets/workspace.css">${workspace.sensitive ? "" : `<script nonce="${nonce}">${settleFades}</script>`}</head>`)
+    .replace('<body>', () => '<body><div id="standing-orders-workspace">')
+    .replace('</body>', () => `</div><script type="application/json" id="standing-orders-workspace-data" nonce="${nonce}">${serializeBrowserWorkspace(workspace)}</script><script nonce="${nonce}">${initialize}</script><script type="module" src="/assets/workspace.js" nonce="${nonce}"></script></body>`);
 }

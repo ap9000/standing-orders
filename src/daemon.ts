@@ -36,8 +36,8 @@
  * and never touch the machine's real supervision.
  */
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -148,7 +148,7 @@ function launchdUid(): number {
  * controller exits independently. Login/OS-service recovery requires the
  * physical certification, not just a valid plist.
  */
-export function launchdPlist(args: { label: string; command: readonly string[]; workingDirectory: string; pathEnv: string; logPath: string; environment?: Record<string, string>; associatedBundleId?: string; keepAlive?: boolean; startInterval?: number }): string {
+export function launchdPlist(args: { label: string; command: readonly string[]; workingDirectory: string; pathEnv: string; logPath: string; environment?: Record<string, string>; associatedBundleId?: string; keepAlive?: boolean; startInterval?: number; runAtLoad?: boolean }): string {
   if (args.startInterval !== undefined && (!Number.isSafeInteger(args.startInterval) || args.startInterval < 1)) throw Error("Invalid launchd start interval.");
   if (args.associatedBundleId !== undefined && !/^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/.test(args.associatedBundleId)) throw new Error("Invalid associated app bundle identifier.");
   const escaped = args.command.map(part => `    <string>${xml(part)}</string>`).join("\n");
@@ -183,7 +183,7 @@ ${escaped}
 ${environment}
   </dict>
   <key>RunAtLoad</key>
-  <true/>
+  <${args.runAtLoad === false ? "false" : "true"}/>
   <key>KeepAlive</key>
   <${args.keepAlive === false ? "false" : "true"}/>${args.startInterval === undefined ? "" : `\n  <key>StartInterval</key>\n  <integer>${args.startInterval}</integer>`}
   <key>ThrottleInterval</key>
@@ -403,7 +403,7 @@ export async function installLaunchdService(definition: ServiceDefinition, run: 
   let changed = before !== definition.unitContent;
   mkdirSync(join(definition.logPath, ".."), { recursive: true });
   mkdirSync(join(definition.unitPath, ".."), { recursive: true });
-  writeFileSync(definition.unitPath, definition.unitContent, { mode: 0o644 });
+  writeFileDurably(definition.unitPath, definition.unitContent, 0o644);
 
   const status = await run("launchctl", ["print", service]);
   const loaded = status.code === 0;
@@ -436,6 +436,17 @@ export async function installLaunchdService(definition: ServiceDefinition, run: 
   const legacy = await run("launchctl", ["load", "-w", definition.unitPath]);
   if (legacy.code === 0) return { ok: true, changed, action: loaded ? "reloaded" : "bootstrapped" };
   return { ok: false, message: `launchctl refused the unit: ${firstLine(modern.stderr) || firstLine(legacy.stderr) || `exit ${legacy.code}`}` };
+}
+
+/** Replace a file whole: a flushed temporary beside it, renamed over it, and the directory flushed, so a crash
+ * leaves the old text or the new, never a torn one. */
+export function writeFileDurably(file: string, content: string | Uint8Array, mode = 0o600): void {
+  const temp = join(dirname(file), `.${file.slice(dirname(file).length + 1)}.${randomUUID().slice(0, 8)}.tmp`);
+  const fd = openSync(temp, "wx", mode);
+  try { writeFileSync(fd, content); fsyncSync(fd); } finally { closeSync(fd); }
+  chmodSync(temp, mode);
+  renameSync(temp, file);
+  if (process.platform !== "win32") { const directory = openSync(dirname(file), "r"); try { fsyncSync(directory); } finally { closeSync(directory); } }
 }
 
 /** Explicit stop: unload AND disable, so nothing relaunches it until a person installs again. */

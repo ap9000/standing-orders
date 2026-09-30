@@ -1,7 +1,7 @@
 import { repositoryContext, repositoryContextRead } from './repository-context.js';
 import { repositoryContextHtml } from './repository-context-ui.js';
 import { browserAssetsAvailable, browserWorkspaceDocument, serveBrowserAsset } from './browser-shell.js';
-import { browserCrewOf, browserCrewFromIndex, browserWorkActionHref, browserProjectsOf, browserNavigationOf, type BrowserWorkspace, type BrowserChatLink, type BrowserTasksView, type BrowserLimits, type BrowserSettingsView, type BrowserTaskView, type BrowserTaskFact, type BrowserTaskSection, type BrowserProjectsView, type BrowserProjectRow, type BrowserResultChip, type BrowserResultPanel, type BrowserResultView, type BrowserActionCard, type BrowserSignIn, type BrowserUpdateNotice, type BrowserUpdates } from './browser-workspace.js';
+import { browserCrewOf, browserCrewFromIndex, browserWorkActionHref, browserProjectsOf, browserNavigationOf, type BrowserWorkspace, type BrowserChatLink, type BrowserTasksView, type BrowserLimits, type BrowserSettingsView, type BrowserTaskView, type BrowserTaskFact, type BrowserTaskSection, type BrowserProjectsView, type BrowserProjectRow, type BrowserResultChip, type BrowserResultPanel, type BrowserResultView, type BrowserActionCard, type BrowserSignIn, type BrowserUpdateNotice, type BrowserUpdates, type BrowserFirstRun } from './browser-workspace.js';
 import { configureLeadFollow, leadFollowStatus, runLeadFollowPass } from './lead-follow.js';
 import { startMaintenance } from './maintenance.js';
 import { codingHandoffPreview, createCodingHandoff } from './coding-handoff.js';
@@ -127,7 +127,6 @@ import { openRouterModelsCache, openRouterPickerScript } from "./openrouter-mode
 import { checkModels, isNewModel, livePin, modelOptions, modelWords, RUNTIME_TOOLS, runtimeStates, seenModels, setWatch, updateRuntime, watchState, type CatalogSeams, type RuntimeTool, type VersionRunner } from "./model-catalog.js";
 import { MODELS_CSS, modelsHtml, modelsScript, type RoleView } from "./models-ui.js";
 import { ASSISTANTS, modelChoices, detectPreparation, previewProjectInstructions, addProjectInstructions } from "./setup-guide.js";
-import { projectSkillInstalled } from "./skills.js";
 import { previewSetup, approveSetup, type SetupInputs } from "./control-setup.js";
 import { controlSetupHtml, setupPreviewHtml, connectionHtml, connectionWords, hiddenFields } from "./control-ui.js";
 import { composerSchedule, scheduleEditorHtml, scheduleEditorScript } from "./task-composer.js";
@@ -237,6 +236,7 @@ import { verifiedAuthor, LEAD_THREAD, type MateThreadScope } from "./store.js";
 import type { MateProgress } from "./mate-progress.js";
 import { updateRepos, addRepos, removeRepos } from "./repos.js";
 import { run as execRun } from "./exec.js";
+import { findFirstTasks, firstResultWords, firstRunSteps, firstTaskSuggestions, SANDBOX_COMMAND, type FirstRunStep, type FirstTaskSuggestion } from "./first-run.js";
 
 /** A user agent, reduced to safe display words — never echoed raw. */
 function oneLineUa(raw: string | string[] | undefined): string {
@@ -280,6 +280,9 @@ import { BACKUP_EVERY_HOURS, MAX_KEEP, backupFolderOf, backupNow, checkBackupFol
 import { prometheusMetrics } from "./metrics.js";
 import { SPEND_CSS, spendCsv, spendHtml } from "./spend-ui.js";
 import { RETENTION_CSS, retentionHtml } from "./retention-ui.js";
+import { UPDATES_CSS, newerThan, updateStepsHtml, updatesHtml, updatesScript } from "./toolroll-update-ui.js";
+import { abandonRuntimeUpdate, launchRuntimeUpdate, markWhatsNewSeen, prepareRuntimeUpdate, requestRuntimeUpdateCancel, runningWorkWords, runtimeUpdateStatus, runtimeUpdateTerminal, currentRuntime, type When } from "./toolroll-update.js";
+import { latestVersionNow } from "./releases.js";
 import { RETENTION_KINDS, lastSweepAt, parsePeriod, retentionPlan } from "./retention.js";
 import { EXPORT_CSS, dataExportHtml } from "./export-ui.js";
 import { buildExport, exportZip } from "./export.js";
@@ -311,7 +314,7 @@ import type { SubscriptionMateRunner } from "./subscription-chat.js";
 import { confirmCoordinatorProposal, confirmMateProposal, dismissCoordinatorProposal, dismissMateProposal } from "./mate-doors.js";
 import { envValue } from "./names.js";
 import { cachedRelease, isNewer, runnerVersions, setUpdateChecks, updateChecksOff, type Release } from "./releases.js";
-import { installMethod } from "./install-method.js";
+import { installMethod, type InstallMethod } from "./install-method.js";
 import { PACKAGE_VERSION } from "./version.js";
 import { updateNoticeWords } from "./update-notice.js";
 
@@ -355,6 +358,10 @@ export type ServeOptions = {
   configDir?: string;
   /** Test seam for the Slack setup handshake. */
   slackFetcher?: typeof fetch;
+  /** Settings → Updates seams: the latest release, how this Toolroll was
+   * installed, its version, and how the updater job starts. Tests and
+   * screenshots inject these; production reads the registry and launchd. */
+  updates?: { latest?: () => Promise<{ version: string }>; method?: InstallMethod; current?: string; dist?: string; launch?: typeof launchRuntimeUpdate };
   discordFetcher?: typeof fetch;
   /** Injected by tests: Microsoft sign-in, key metadata and Teams conversation calls. */
   teamsFetcher?: typeof fetch;
@@ -409,6 +416,8 @@ export type ServeOptions = {
   additionalProjectRepos?: () => readonly string[];
   connectionProbe?: typeof execRun;
   connectionHome?: string;
+  /** Test seam for Chat's first tasks: the `gh` and `git grep` reads. */
+  firstTaskRunner?: typeof execRun;
   modelCatalogFetcher?: typeof fetch;
   /** Test seams for Settings → Models: CLI version probes and the PATH they search. */
   modelRunner?: VersionRunner;
@@ -2024,7 +2033,7 @@ export function createDecisionServer(options: ServeOptions): Server {
             })),
           cancelledBlockers: cancelled,
           gaps: project === null ? [] : computeGaps(store, project, now).filter(gap => gap.unblocks.length > 0).slice(0, 10),
-          wizard: wizardSteps(now),
+          wizard: await firstRunStepsNow(now),
           worker: (() => {
             // The one fact the inbox must never hide (install review): with
             // no worker answering, nothing here will ever build, and every
@@ -3603,13 +3612,16 @@ export function createDecisionServer(options: ServeOptions): Server {
           // A failed briefing query must not make the conversation vanish.
         }
       }
+      // The first run belongs to the lead conversation, for someone who can act on it.
+      const firstRun = focusTask === null && who.role === "approver" ? await chatFirstRun(now, chatProject) : undefined;
+      const withFirstRun = (shown: Screen): Screen => firstRun === undefined ? shown : { ...shown, workspace: { ...shown.workspace, firstRun } };
       if (enabled.ok && mateSession !== null && principal !== null && !ceilingStale) {
         {
           const said = takeMateNote(who.session.csrf, mateSession.id);
           return sendScreen(
             response,
             200,
-            matePage(chromeFor(null, "chat", undefined, "all"), {
+            withFirstRun(matePage(chromeFor(null, "chat", undefined, "all"), {
               session: mateSession,
               ...mateConversationRows(who, principal, focusTask, now, chatProject),
               chatProject,
@@ -3627,14 +3639,14 @@ export function createDecisionServer(options: ServeOptions): Server {
               now,
               resultPanel,
               resultRunId: resultRun?.id ?? null,
-            }),
+            })),
           );
         }
       }
       return sendScreen(
         response,
         200,
-        chatPage(chromeFor(null, "chat", undefined, "all"), {
+        withFirstRun(chatPage(chromeFor(null, "chat", undefined, "all"), {
           settingsOpen: settingsView,
           enabled,
           pending,
@@ -3668,7 +3680,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           resultPanel,
           ...(enabled.ok && who.role === "approver" ? { mateMint: mateMintCard(who.session.csrf, enabled, focusTask === null ? "/chat" : taskChatHref(focusTask.id)) } : {}),
           ...(who.role === "approver" ? { coordinatorProposals: coordinatorProposalsSection(coordinatorRows, decisionsFor(store, coordinatorRows), who.session.csrf, now, true, focusTask === null ? null : taskChatHref(focusTask.id)) } : {}),
-        }),
+        })),
       );
     }
 
@@ -3838,6 +3850,20 @@ export function createDecisionServer(options: ServeOptions): Server {
       return sendScreen(response, 200, screen("Monitoring", `<p><a href="/settings">Settings</a></p><h1>Monitoring</h1>${monitoringHtml(view, who.session.csrf, { said: url.searchParams.get("said"), problem: url.searchParams.get("problem") })}`,
         { chrome: chromeFor(project, "settings") }));
     }
+    // Settings → Updates: the installed version, three ways to update, the update's steps live, then What's new. An instance operator's page.
+    if (url.pathname === "/settings/updates") {
+      const databaseFile = store.databaseFile();
+      if (who.via !== "cookie" || !store.isInstanceOperator(who.name) || databaseFile === null) return refuse(response, who, 403, "An instance operator updates Toolroll.", "/settings");
+      const status = runtimeUpdateStatus(dirname(databaseFile));
+      if (url.searchParams.get("fragment") === "steps") return respond(response, 200, "text/html; charset=utf-8", status.journal ? updateStepsHtml(status.journal, status.running) : `<div id="update-live" data-done="1"></div>`);
+      const active = status.journal !== null && !runtimeUpdateTerminal(status.journal.phase);
+      const current = options.updates?.current ?? PACKAGE_VERSION;
+      // While update checks are off the page asks npm nothing until Check now.
+      const checksOff = updateChecksOff(process.env, options.configDir ?? dirname(databaseFile)).off && url.searchParams.get("check") !== "now";
+      const view = { current, latest: active ? { version: current } : checksOff ? { off: true as const } : await latestReleaseFor(options.updates?.latest), method: options.updates?.method ?? installMethod(), journal: status.journal, running: status.running, whatsNew: status.whatsNew, csrf: who.session.csrf };
+      return sendScreen(response, 200, screen("Updates", `<p><a href="/settings">Settings</a></p><h1>Updates</h1>${updatesHtml(view, { said: url.searchParams.get("said"), problem: url.searchParams.get("problem") })}`,
+        { chrome: chromeFor(project, "settings"), ...(active ? { functional: { script: updatesScript(), fetches: true } } : {}) }));
+    }
     // v105: Settings → Retention, how long each kind of data is kept. An instance operator's page.
     if (url.pathname === "/settings/retention") {
       if (who.via !== "cookie" || !store.isInstanceOperator(who.name)) return refuse(response, who, 403, "An instance operator sets retention.", "/settings");
@@ -4001,7 +4027,11 @@ export function createDecisionServer(options: ServeOptions): Server {
           const googleView = { connected: googleConnected(options.configDir ?? null)?.address ?? null, clientId: google?.clientId ?? "", redirect: origin === null ? null : `${origin}${GOOGLE_CALLBACK}` };
           return email === null ? { set: false, host: "", port: 587, secure: false, user: "", from: "", imapHost: "", imapPort: 993, google: googleView }
             : { set: true, host: email.host, port: email.port, secure: email.secure, user: email.user, from: email.from, imapHost: email.imap?.host ?? "", imapPort: email.imap?.port ?? 993, google: googleView };
-        })() : null, telegramDeliveryWords(store, loadBotToken(process.env, options.telegramTokenFile)), settingsWorkers(store, now), settingsUpdates(who.name, csrf)),
+        })() : null, telegramDeliveryWords(store, loadBotToken(process.env, options.telegramTokenFile)), settingsWorkers(store, now), settingsUpdates(who.name, csrf), (() => {
+          // The installation fact: when the first Ready result arrived, measured from the first account.
+          const at = store.firstSuccessAt(now), since = store.installationStartedAt();
+          return at === null || since === null ? null : firstResultWords(since, at);
+        })()),
       );
     }
 
@@ -4044,64 +4074,43 @@ export function createDecisionServer(options: ServeOptions): Server {
   }
 
   /**
-   * The first-run checklist (adoption track, step 3) — derived from live
-   * state on every render, never a stored cursor, and retired PERMANENTLY
-   * by the first-success installation fact (Codex adoption review,
-   * finding 14). Every step is either something this console already has
-   * authority for, or the exact command where the CLI owns the act — the
-   * checklist instructs, it never gains authority (finding e).
+   * The first run (adoption track, step 3): three plain steps derived from
+   * live state on every render, never a stored cursor, and retired
+   * PERMANENTLY by the first-success installation fact (Codex adoption
+   * review, finding 14). Each step is either something this console can do,
+   * or the exact command where only the CLI can (finding e).
    */
-  function wizardSteps(now: Date): { done: boolean; title: string; detail: string }[] | null {
-    if (restricted() || store.firstSuccessAt(now) !== null) return null;
-    const repos = admissionList() ?? [];
-    const setupDone = repos.filter(one => store.liveWorktreeSetup(one) !== null).length;
-    const skillDone = repos.filter(projectSkillInstalled).length;
-    const counted = (done: number): string =>
-      repos.length <= 1 ? "" : ` (${done} of ${repos.length} repos)`;
-    return [
-      {
-        done: !unscopedMode,
-        title: "name what this console may see",
-        detail: unscopedMode
-          ? `no ceiling is configured — this server currently shows everything. Restart it naming the repos: <code>toolroll serve --repo &lt;path&gt; --port …</code>`
-          : repos.length === 0
-            ? `the ceiling is configured but empty — no repository is visible here`
-            : `ceiling: ${repos.map(one => escape(projectName(one))).join(", ")}`,
-      },
-      {
-        // A fact about THIS DATABASE only: binaries and authentication live
-        // on the worker's machine, which may not be this one — the console
-        // never claims to have checked them (finding 15).
-        done: store.hasPhaseConfig(),
-        title: "route the spend to a provider",
-        detail: store.hasPhaseConfig()
-          ? `spend routing is configured in this database. Binary and authentication facts stay machine-side: run <code>toolroll providers</code> where the workers run`
-          : `nothing routes builds to a provider yet: <code>toolroll config set build --provider claude --as &lt;you&gt; --token &lt;t&gt;</code> — then check <code>toolroll providers</code> on the worker's machine (installed, configured, historically-successful, and authenticated are four separate facts there)`,
-      },
-      {
-        done: repos.length > 0 && setupDone === repos.length,
-        title: "say how a fresh checkout gets ready",
-        detail:
-          setupDone > 0
-            ? `setup command set${counted(setupDone)}`
-            : `agents build in throwaway workspaces; give them the preparation step: <code>toolroll setup set --repo &lt;path&gt; --command "npm ci"</code>`,
-      },
-      {
-        done: repos.length > 0 && skillDone === repos.length,
-        title: "teach the repo's agents this queue exists",
-        detail:
-          skillDone > 0
-            ? `skill installed${counted(skillDone)}`
-            : `<code>toolroll skills install --repo &lt;path&gt;</code> previews; add <code>--yes</code> to write the skill file`,
-      },
-      {
-        done: store.hasAnyWork(),
-        title: "file the first standing order",
-        detail: store.hasAnyWork()
-          ? `work is filed — approve its scope and the machine takes it from there`
-          : `start from a template below, capture a one-off task underneath, or browse <a href="/routines">routines</a>`,
-      },
-    ];
+  async function firstRunStepsNow(now: Date): Promise<FirstRunStep[] | null> {
+    if (restricted() || store.isDemo() || store.firstSuccessAt(now) !== null) return null;
+    return firstRunSteps({ agentSignedIn: await agentSignedIn(), projects: managedRepos().length, hasTask: store.hasAnyWork(), firstResultAt: null });
+  }
+  /** Whether any coding agent on this computer is signed in: the same
+   * non-spending checks Settings makes, cached briefly. */
+  async function agentSignedIn(): Promise<boolean> {
+    const states = await Promise.all((["claude", "codex"] as const).map(one => connectionCheck(one).then(value => value.state, () => "unverified")));
+    return states.some(state => state === "connected" || state === "key-works" || state === "key-present");
+  }
+  /** First tasks per project, read at most every ten minutes: a `gh`
+   * round trip and a `git grep` never run on every render. */
+  const firstTasks = new Map<string, { until: number; value: Promise<FirstTaskSuggestion[]> }>();
+  function firstTasksFor(repo: string): Promise<FirstTaskSuggestion[]> {
+    const at = Date.now(), hit = firstTasks.get(repo);
+    if (hit !== undefined && hit.until > at) return hit.value;
+    const value = findFirstTasks(repo, options.firstTaskRunner ?? execRun).catch(() => firstTaskSuggestions({ issues: [], todos: [] }));
+    firstTasks.set(repo, { until: at + 10 * 60_000, value });
+    return value;
+  }
+  /** Chat's first run: the steps, first tasks until the first task exists, and the sandbox while no agent is signed in. */
+  async function chatFirstRun(now: Date, project: string | null): Promise<BrowserFirstRun | undefined> {
+    const steps = await firstRunStepsNow(now);
+    if (steps === null) return undefined;
+    const taskFiled = steps.find(one => one.key === "task")?.done ?? true;
+    const repo = project ?? managedRepos()[0] ?? null;
+    return {
+      steps,
+      suggestions: taskFiled || repo === null ? [] : await firstTasksFor(repo),
+      sandbox: steps.find(one => one.key === "agent")?.done === false ? SANDBOX_COMMAND : null,
+    };
   }
 
 
@@ -4667,6 +4676,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         ...(s.refreshSeconds === undefined ? {} : { refreshSeconds: Math.max(5, Math.floor(s.refreshSeconds)) }),
         ...(s.chrome.signIn === undefined ? {} : { signIn: s.chrome.signIn }),
         ...(s.chrome.update === undefined ? {} : { update: s.chrome.update }),
+        ...(extras.firstRun === undefined ? {} : { firstRun: extras.firstRun }),
       };
       if (requestFacts.workspaceRead) {
         const validator = requestFacts.workspaceValidator;
@@ -6054,8 +6064,8 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (body.get("quiet") === "1") { response.writeHead(204); response.end(); return; }
       return redirect(response, safeReturn(body.get("return") ?? "/settings#updates"));
     }
-    // The daily check's switch: an installation setting, so an operator's.
-    if (url.pathname === "/settings/updates") {
+    // The daily check's switch: an installation setting, so an operator's. (Its own address: POST /settings/updates starts an update.)
+    if (url.pathname === "/settings/updates/checks") {
       if (options.configDir === undefined) return refuse(response, who, 404, "Updates are not set up on this console.", "/settings");
       if (!store.isInstanceOperator(who.name)) return refuse(response, who, 403, "Only an operator can change update checks.", "/settings#updates");
       const on = body.get("check") === "on";
@@ -6590,6 +6600,38 @@ export function createDecisionServer(options: ServeOptions): Server {
       const found = await providerFor(saved.settings.issuer);
       store.recordAction({ at: now.toISOString(), actor: who.name, repo: null, taskId: null, runId: null, action: before === null ? "sign-in with a provider turned on" : "sign-in with a provider changed", outcome: "changed", source: "policy", detail: ssoChangeWords(before, saved.settings) });
       return found.ok ? back("said", `Saved. People can sign in with ${saved.settings.label}.`) : back("problem", `Saved, but ${saved.settings.label} didn't answer: ${found.said}`);
+    }
+    // Settings → Updates: start the `toolroll update` job. A step-up; the job writes the ledger entries.
+    if (url.pathname === "/settings/updates" || url.pathname === "/settings/updates/seen" || url.pathname === "/settings/updates/cancel") {
+      const databaseFile = store.databaseFile();
+      if (who.via !== "cookie" || !store.isInstanceOperator(who.name) || databaseFile === null) return refuse(response, who, 403, "An instance operator updates Toolroll.", "/settings");
+      const stateDir = dirname(databaseFile);
+      const back = (key: "said" | "problem", words: string) => redirect(response, `/settings/updates?${key}=${encodeURIComponent(words)}`);
+      if (url.pathname === "/settings/updates/seen") { markWhatsNewSeen(stateDir); return redirect(response, "/settings/updates"); }
+      if (url.pathname === "/settings/updates/cancel") return back("said", requestRuntimeUpdateCancel(stateDir));
+      if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return back("problem", "Enter your Toolroll password to update.");
+      const version = body.get("version") ?? "";
+      const when: When | null = ({ now: "now", "when-idle": "when-idle", tonight: "at" } as Record<string, When>)[body.get("when") ?? ""] ?? null;
+      if (!/^\d+\.\d+\.\d+$/.test(version) || when === null) return back("problem", "Choose when to update.");
+      const current = options.updates?.current ?? PACKAGE_VERSION;
+      if (!newerThan(version, current)) return back("problem", `Toolroll ${version} is not newer than ${current}. To go back, run toolroll update --rollback.`);
+      const method = options.updates?.method ?? installMethod();
+      if (method.kind === "npx" || method.kind === "source") return back("problem", method.kind === "npx" ? "npx runs the latest release each time; there is nothing to update." : "This runs from a source checkout. Update it with git.");
+      const before = runtimeUpdateStatus(stateDir).journal;
+      if (before !== null && !runtimeUpdateTerminal(before.phase)) return back("problem", "An update is already under way.");
+      if (when === "now") {
+        const running = runningWorkWords(store.raw() as unknown as Parameters<typeof runningWorkWords>[0]);
+        if (running !== null) return back("problem", `Work is running: ${running}. Choose When idle to update once it finishes.`);
+      }
+      const prepared = prepareRuntimeUpdate({ stateDir, databaseFile, current: { version: current, dist: options.updates?.dist ?? currentRuntime(current).dist }, actor: who.name, version, when, at: "03:00" }, clock());
+      if ("refused" in prepared) return back("problem", prepared.refused);
+      try { await (options.updates?.launch ?? launchRuntimeUpdate)({ databaseFile, id: prepared.id }); }
+      catch (error) {
+        abandonRuntimeUpdate(stateDir, prepared.id, `The update could not start: ${(error as Error).message}`, clock());
+        return back("problem", `The update could not start: ${(error as Error).message}`);
+      }
+      // The job records its first step within moments; show it rather than the old page.
+      return back("said", when === "at" ? `Update to ${version} scheduled for 03:00.` : `Updating to ${version}.`);
     }
     // v105: change how long each kind of data is kept. A step-up; the ledger keeps before → after for each kind.
     if (url.pathname === "/settings/retention") {
@@ -14040,7 +14082,7 @@ button.pick-file { min-height: 1.75rem; padding: 0 .55rem; font-size: .75rem; }
 const THEME_CONTROLS_CSS = `.task-repo select{width:100%;min-height:2.75rem;font-size:1rem}.task-repo-add{margin:.35rem .1rem .5rem}.task-repo-add a{display:inline-flex;align-items:center;min-height:2.25rem}details.result-request-open.result-request-form>summary{border:0;background:transparent;padding:.5rem 0;min-height:2.75rem;font-weight:600;display:list-item;list-style:revert}details.result-request-open.result-request-form>summary::-webkit-details-marker{display:revert}form.js-autosave button[type=submit]{display:none}.provider-row{border-bottom:1px solid var(--so-line);padding:.35rem 0}.provider-row:first-of-type{border-top:1px solid var(--so-line)}.provider-head{display:flex;align-items:center;gap:.75rem;margin:.4rem 0 0}.provider-status{display:inline-flex;align-items:center;gap:.4rem;color:var(--so-muted);font-size:.875rem}.provider-status i{width:.5rem;height:.5rem;border-radius:50%;background:var(--so-muted)}.provider-status--ok i{background:var(--so-success)}.provider-status--warn i{background:var(--so-attention)}.provider-status--off i{background:transparent;border:1.5px solid var(--so-muted)}details.provider-manage>summary{cursor:pointer;color:var(--so-accent-text);font-size:.875rem;min-height:2.5rem;display:list-item;padding-block:.5rem}.card.props .row{display:grid;gap:.1rem;margin:0 0 .75rem}.card.props .row>.meta{display:block;font-size:.75rem}.card.props .row>.meta::first-letter{text-transform:uppercase}.card.props .row>.mono{font-family:var(--font-sans);font-size:.875rem}.card.props .row>.mono .seal{font-family:var(--font-mono);font-size:.8125rem}details.evidence-files{margin:1rem 0}details.evidence-files>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:600}details.evidence-files ul{list-style:none;margin:0;padding:0}details.evidence-files li{display:flex;justify-content:space-between;gap:1rem;padding:.5rem 0;border-bottom:1px solid var(--so-line)}.result-action .result-feedback-link{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;text-decoration:none}@media(hover:hover) and (pointer:fine){.result-action .result-feedback-link:hover{background:var(--so-raised)}}.so-sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}.verdict{margin:.5rem 0 .75rem}.verdict-chips{display:flex;flex-wrap:wrap;gap:.4rem;list-style:none;padding:0;margin:0}.verdict-chip{display:inline-flex;align-items:center;gap:.3rem;min-height:1.75rem;padding:.2rem .65rem;border-radius:999px;font-size:.8125rem;font-weight:600;background:var(--so-neutral-soft);color:var(--so-neutral-ink)}.verdict-chip svg{width:.9rem;height:.9rem}.verdict-chip--success{background:var(--so-success-soft);color:var(--so-success)}.verdict-chip--danger{background:var(--so-danger-soft);color:var(--so-danger)}.verdict-chip--warning{background:var(--so-warning-soft);color:var(--so-warning)}.verdict-chip--info{background:var(--so-info-soft);color:var(--so-info)}.verdict-by{margin:.4rem 0 0}details.result-request-open{margin:.5rem 0}details.result-request-open>summary{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;cursor:pointer;list-style:none}details.result-request-open>summary::-webkit-details-marker{display:none}details.result-request-open[open]>summary{margin-bottom:.75rem}.settings-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(8.5rem,1fr));gap:.5rem;margin:0 0 2rem}.settings-tiles a{display:flex;align-items:center;gap:.6rem;min-height:3rem;padding:.65rem .8rem;border:1px solid var(--so-line);border-radius:.625rem;background:var(--so-paper);color:var(--so-ink);text-decoration:none;font-weight:550;font-size:.875rem}@media(hover:hover) and (pointer:fine){.settings-tiles a:hover{border-color:var(--so-input-line);background:var(--so-raised)}}.settings-tiles svg{width:1.1rem;height:1.1rem;flex-shrink:0;color:var(--so-accent-text)}details.settings-more{margin:.25rem 0 1.25rem}details.settings-more>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:550}details.settings-more>summary .meta{font-weight:400;margin-left:.35rem}.settings-changed{margin-top:-.25rem}.appearance{margin:0 0 28px}.appearance h2{margin:0 0 10px}.theme-switch{display:inline-flex;flex-wrap:nowrap;max-width:100%;gap:4px;padding:4px;margin:0;border:1px solid var(--so-line);border-radius:10px;background:var(--so-raised)}.theme-switch .theme-choice,.so-native-region .theme-switch .theme-choice{flex:1 1 0;width:auto;white-space:nowrap;min-height:40px;padding:8px 16px;border:0;border-radius:7px;background:transparent;color:var(--so-muted);font:inherit;font-weight:550;box-shadow:none;cursor:pointer}@media(hover:hover) and (pointer:fine){.theme-switch .theme-choice:hover{color:var(--so-ink)}}.theme-switch .theme-choice[aria-pressed="true"]{background:var(--so-paper);color:var(--so-ink);box-shadow:0 1px 2px rgb(0 0 0 / .1)}.appearance .meta{margin:8px 0 0}@media(max-width:600px){.theme-switch .theme-choice{min-height:44px}}.update-notes{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;max-height:18rem;overflow:auto}`;
 /** The page CSS this module writes itself (not the imported modules'), for the stylesheet contract tests. */
 export const PAGE_CSS = STYLE + THEME_CONTROLS_CSS;
-const WORKSPACE_STYLE = styleAsset(STYLE + APPROVAL_RULES_CSS + SPEND_CSS + RETENTION_CSS + LIMITS_CSS + MONITORING_CSS + BACKUP_CSS + EXPORT_CSS + PROJECT_DELETE_CSS + POLICY_CSS + EVIDENCE_PACK_CSS + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KITS_CSS + SSO_CSS + CREDENTIALS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
+const WORKSPACE_STYLE = styleAsset(STYLE + APPROVAL_RULES_CSS + SPEND_CSS + RETENTION_CSS + UPDATES_CSS + LIMITS_CSS + MONITORING_CSS + BACKUP_CSS + EXPORT_CSS + PROJECT_DELETE_CSS + POLICY_CSS + EVIDENCE_PACK_CSS + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KITS_CSS + SSO_CSS + CREDENTIALS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
@@ -14347,7 +14389,7 @@ type Screen = {
    * secrets and judgment calls the classifier cannot see. */
   forceSensitive?: boolean;
   /** Structured conversation; complex guarded forms stay native islands. */
-  workspace?: Partial<Pick<BrowserWorkspace, 'conversation' | 'team' | 'focus' | 'result' | 'catchUpHtml' | 'controlsHtml' | 'notices' | 'pageHtml' | 'view'>>;
+  workspace?: Partial<Pick<BrowserWorkspace, 'conversation' | 'team' | 'focus' | 'result' | 'catchUpHtml' | 'controlsHtml' | 'notices' | 'pageHtml' | 'view' | 'firstRun'>>;
 };
 
 const ROLE_TITLES: Record<"plan" | "build" | "review" | "repair", string> = { plan: "Planner", build: "Builder", review: "Reviewer", repair: "Repair" };
@@ -14782,8 +14824,8 @@ function inboxPage(chrome: Chrome, data: {
    * (Priority 2) — reads "needs verification" here too, never silently
    * "done" just because the inbox does not otherwise look at finished work. */
   needsVerification: { taskId: string; title: string; verdict: "short" | "refuted"; repo?: string | null; matrix?: CriterionMatrixRow[]; repairChain?: RepairChainRow | null }[];
-  /** The first-run checklist; null once the installation has succeeded once. */
-  wizard: { done: boolean; title: string; detail: string }[] | null;
+  /** The first-run steps; null once the installation has had its first Ready result. */
+  wizard: FirstRunStep[] | null;
   /** Whether any worker is answering right now — said at the top when none is. */
   worker: { answering: number; registered: number; lastHeard: string | null };
   now: Date;
@@ -14891,32 +14933,24 @@ function inboxPage(chrome: Chrome, data: {
           )
           .join("\n");
 
-  // The first-run checklist replaces the empty-queue card while the
-  // installation has never succeeded; each step is live state, and the
-  // whole card retires permanently on the first successful run.
+  // The first-run steps, until the first Ready result: each is done or
+  // shows the one action that does it.
   const wizard =
     data.wizard === null
       ? ""
-      : `<div class="card">` +
-        `<p><strong>Getting started</strong> <span class="meta">\u2014 disappears after the first successful run</span></p>` +
-        `<p class="meta">Keep <span class="mono">toolroll up</span> running on this machine \u2014 it opens the app and reconnects every saved project's builder.</p>` +
+      : `<div class="card" data-first-run>` +
+        `<p><strong>Get to your first result</strong></p>` +
         data.wizard
           .map(
             step =>
-              `<p class="row"><span class="mono">${step.done ? "\u2713" : "\u25cb"}</span> <strong>${escape(step.title)}</strong><br>` +
-              `<span class="meta">${step.detail}</span></p>`,
+              `<p class="row" data-step="${step.key}"><span class="mono" aria-hidden="true">${step.done ? "\u2713" : "\u25cb"}</span> <strong>${escape(step.title)}</strong>` +
+              (step.action === null ? ` <span class="meta">done</span>`
+                : step.action.kind === "link" ? ` <a href="${escape(step.action.href)}">${escape(step.action.label)}</a>`
+                : ` <code>${escape(step.action.command)}</code>`) +
+              `</p>`,
           )
           .join("\n") +
-        `<p><a class="new-task" href="/recipes">Start with a guided recipe →</a></p>` +
-        `<p class="meta">templates \u2014 edit, then approve; nothing a template files carries authority: ` +
-        TEMPLATES.map(one =>
-          one.kind === "routine"
-            ? `<a href="/routines?template=${escape(one.name)}">${escape(one.name)}</a>`
-            : one.kind === "task"
-              ? `<a href="/tasks?template=${escape(one.name)}">${escape(one.name)}</a>`
-              : `<span title="a recipe \u2014 walk it in the terminal: toolroll template show ${escape(one.name)}">${escape(one.name)} (recipe)</span>`,
-        ).join(" \u00b7 ") +
-        `</p></div>`;
+        `</div>`;
 
   const noWorker =
     data.worker.answering > 0
@@ -23351,6 +23385,7 @@ function settingsPage(
   telegramDelivery: string | null = null,
   workers: NonNullable<BrowserSettingsView["workers"]> | null = null,
   updates: BrowserUpdates | null = null,
+  firstResult: string | null = null,
 ): Screen {
   const permissionCard =
     permissionDefault === null
@@ -23571,6 +23606,7 @@ function settingsPage(
     email,
     workers,
     updates,
+    firstResult,
   };
   return screen("Settings", [
     "<h1>Settings</h1>",
@@ -23581,6 +23617,7 @@ function settingsPage(
     keysCard,
     workersCard(workers),
     updatesCard(updates, csrf),
+    firstResult === null ? "" : `<p class="meta" data-first-result>${escape(firstResult)}</p>`,
     pushCard === "" && messagingCard === "" && digestCard === "" ? "" : `<h2>Notifications</h2>`,
     messagingCard,
     pushCard,
@@ -23650,7 +23687,7 @@ function updatesCard(updates: BrowserUpdates | null, csrf: string): string {
         (latest.notes === "" ? "" : `<details class="settings-more"><summary>What's new in ${escape(latest.version)}</summary><pre class="update-notes">${escape(latest.notes)}</pre></details>`)
       : "") +
     (updates.check.canManage && !updates.check.byEnv
-      ? `<form method="post" action="/settings/updates" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="check" value="${updates.check.on ? "off" : "on"}"><button type="submit">${updates.check.on ? "Turn off daily check" : "Turn on daily check"}</button></form>`
+      ? `<form method="post" action="/settings/updates/checks" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="check" value="${updates.check.on ? "off" : "on"}"><button type="submit">${updates.check.on ? "Turn off daily check" : "Turn on daily check"}</button></form>`
       : updates.check.byEnv ? `<p class="meta">Off by TOOLROLL_NO_UPDATE_CHECK.</p>` : "") +
     (updates.workers.length === 0 ? "" : `<ul>${updates.workers.map(one => `<li data-worker-version="${escape(one.name)}">${escape(one.name)} <span class="mono">${escape(one.version ?? "unknown")}</span>${one.older ? " \u00b7 older" : ""}</li>`).join("")}</ul>`) +
     `</section>`;
@@ -23659,6 +23696,16 @@ function updatesCard(updates: BrowserUpdates | null, csrf: string): string {
 /** Choices save the moment they change; without the script the Save
  * button stays and the form works the same. */
 const SETTINGS_AUTOSAVE_SCRIPT = `(function(){document.querySelectorAll('form[data-autosave]').forEach(function(form){form.classList.add('js-autosave');form.addEventListener('change',function(ev){var t=ev.target;if(t&&(t.type==='radio'||t.tagName==='SELECT')){if(form.requestSubmit)form.requestSubmit();else form.submit();}});});})();`;
+
+/** The newest release, remembered for a while so the page stays quick. */
+let latestSeen: { at: number; value: { version: string } | { problem: string } } | null = null;
+async function latestReleaseFor(latest: (() => Promise<{ version: string }>) | undefined): Promise<{ version: string } | { problem: string }> {
+  if (latest === undefined && latestSeen !== null && Date.now() - latestSeen.at < ("problem" in latestSeen.value ? 60_000 : 900_000)) return latestSeen.value;
+  let value: { version: string } | { problem: string };
+  try { value = { version: (await (latest ?? latestVersionNow)()).version }; } catch (error) { value = { problem: (error as Error).message }; }
+  if (latest === undefined) latestSeen = { at: Date.now(), value };
+  return value;
+}
 
 /** Settings destinations as a scannable grid: an icon and a name each. */
 function settingsTiles(): string {
@@ -23682,6 +23729,7 @@ const SETTINGS_TILE_ICONS: [string, string, string][] = [
     ["/settings/approval", "Approval rules", `<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/>`],
     ["/settings/monitoring", "Monitoring", `<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>`],
     ["/settings/retention", "Retention", `<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>`],
+    ["/settings/updates", "Updates", `<path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/>`],
     ["/settings/backups", "Backups", `<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3"/>`],
     ["/settings/data", "Data", `<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>`],
 ];

@@ -12,6 +12,7 @@ import { buildExport, exportSummary, exportZip, writeExportFolder } from "./expo
 import { startBudgetAlerts } from "./budget-alerts.js";
 import { liftAuthPause, openAuthPauses, signInGate, signInWords, startSignInProbes, type SignInGate } from "./provider-auth.js";
 import { createConnectionChecker } from "./provider-connection.js";
+import { buildHandoff, handoffLines, loginAccount, runOnboard, type OnboardIo } from "./agent-onboard.js";
 import { backupFiles, backupFolderOf, backupOwner, backupNow, restoreDatabase, startBackups } from "./backup.js";
 import { pushLimitSink } from "./provider-limits.js";
 import { limitsView } from "./limits-ui.js";
@@ -353,7 +354,13 @@ export type OperateOptions = {
   heldCoordinator?: import("./held.js").HeldSessionCoordinator;
   /** Test seam for the short indexed wait loop. */
   waitSleep?: (milliseconds: number) => Promise<void>;
+  /** Injected by tests: `onboard`'s home folder, terminal and probes. */
+  onboardSeams?: OnboardSeams;
+  /** Injected by tests: whether `up` has a person at a terminal, and how it opens a browser. */
+  upSeams?: { terminal?: boolean; openBrowser?: (url: string) => void };
 };
+
+export type OnboardSeams = Partial<Pick<OnboardIo, "home" | "env" | "cwd" | "interactive" | "confirm" | "findRepo" | "checkConnection">>;
 
 const STATES: readonly TaskState[] = ["queued", "running", "done", "failed", "cancelled"];
 
@@ -736,13 +743,13 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "command", "timeout-seconds", "setup-digest", "stop-grace", "title", "name", "every", "lines",
   "label", "reviewers", "limit", "role", "key-file", "weekly-usd", "daily-turns", "per-hour", "token-file", "race", "compare", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd", "sync-max-age", "merge-method",
   "phase", "risk", "tier", "clear-phase",
-  "run", "containment",
+  "run", "containment", "agent",
   "token-env", "after", "repair-max-attempts", "consumer", "batch", "feedback", "source", "view", "cursor", "why", "supersedes", "decision", "sessions", "timeout",
 ]);
 export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "json", "yes", "all", "local", "history", "latest-watch", "dry-run", "file", "allow-paid-fallback",
   "clear", "follow", "ready", "all-tasks", "inbound-only", "help", "undo", "anyone", "allow-dispatch", "allow-merge", "merge-delete-branch",
-  "no-open", "no-verify", "no-follow", "end", "report", "off", "tmux",
+  "no-open", "remove", "no-verify", "no-follow", "end", "report", "off", "tmux",
   "self-heal", "plan-auto", "repair-auto", "review-retry-auto", "no-local",
   "html", "csv", "alerts-only",
   // v105: the full export.
@@ -902,6 +909,8 @@ export async function runOperate(
       ...(options.waitSleep === undefined ? {} : { waitSleep: options.waitSleep }),
       ...(options.releaseIo === undefined ? {} : { releaseIo: options.releaseIo }),
       ...(options.installBin === undefined ? {} : { installBin: options.installBin }),
+      ...(options.onboardSeams === undefined ? {} : { onboardSeams: options.onboardSeams }),
+      ...(options.upSeams === undefined ? {} : { upSeams: options.upSeams }),
     });
   } catch (error) {
     if (isDatabaseBusy(error)) return databaseFailure(write, json, command, file, error);
@@ -966,6 +975,8 @@ type Context = {
   waitSleep?: (milliseconds: number) => Promise<void>;
   releaseIo?: ReleaseIo;
   installBin?: string;
+  onboardSeams?: OnboardSeams;
+  upSeams?: { terminal?: boolean; openBrowser?: (url: string) => void };
 };
 
 
@@ -1174,6 +1185,8 @@ async function dispatch(
       return watchCommand(flags, context);
     case "up":
       return upCommand(flags, context);
+    case "onboard":
+      return onboardCommand(flags, context);
     case "daemon":
       return daemonCommand(positional, flags, context);
     case "bridge":
@@ -8593,6 +8606,54 @@ function openBrowser(url: string): void {
   }
 }
 
+/**
+ * `onboard`: the agent that installed Toolroll becomes its lead. The work
+ * lives in agent-onboard.ts; this wires it to the installation: the same
+ * registry and project row Projects → add writes, and the same sign-in
+ * checks Settings → AI providers makes.
+ */
+async function onboardCommand(flags: Map<string, string | true>, context: Context): Promise<number> {
+  const { store, write, json, clock } = context;
+  const seams = context.onboardSeams ?? {};
+  const portGiven = text(flags, "port");
+  const port = Number(portGiven ?? 4180);
+  if (portGiven !== undefined && (!Number.isInteger(port) || port < 1 || port >= 65536)) {
+    return fail(write, json, "onboard", "usage", "--port is a whole number under 65536", EXIT.usage);
+  }
+  const home = seams.home ?? homedir();
+  const env = seams.env ?? process.env;
+  const gitRun = context.gitRunner ?? ((file: string, args: readonly string[], opts?: { cwd?: string }) => run(file, [...args], { ...(opts?.cwd === undefined ? {} : { cwd: opts.cwd }), timeoutMs: 10_000 }));
+  const registryPath = registryPathOf(context);
+  const checker = createConnectionChecker({ home, env });
+  return runOnboard({
+    write,
+    json,
+    yes: flag(flags, "yes"),
+    remove: flag(flags, "remove"),
+    agentFlag: text(flags, "agent"),
+    url: `http://127.0.0.1:${port}`,
+    loginFile: join(dirname(context.databaseFile), UP_LOGIN_FILE),
+    home,
+    env,
+    version: PACKAGE_VERSION,
+    cwd: seams.cwd ?? process.cwd(),
+    interactive: seams.interactive ?? interactive(),
+    confirm: seams.confirm ?? (async question => /^y(es)?$/i.test(await ask(`${question} `))),
+    findRepo: seams.findRepo ?? (async cwd => {
+      const top = await gitRun("git", ["rev-parse", "--show-toplevel"], { cwd });
+      return top.code === 0 ? canonicalProject(top.stdout.trim()) : null;
+    }),
+    enroll: async repo => {
+      const before = await loadProjectRegistry(registryPath);
+      const enrolled = await updateRepos(registryPath, repos => addRepos(repos, [repo]));
+      if (!enrolled.ok) return { ok: false, message: enrolled.message };
+      store.upsertProject(repo, projectName(repo), clock());
+      return { ok: true, added: "error" in before || !before.repos.includes(repo) };
+    },
+    checkConnection: seams.checkConnection ?? (agent => checker(agent)),
+  });
+}
+
 async function upCommand(
   flags: Map<string, string | true>,
   context: Context,
@@ -9061,6 +9122,8 @@ async function upCommand(
   // 9. Readiness, then the ONE startup envelope / greeting (finding 11/20).
   const approverPlan2 = approver as UpApprover;
   const url = console_.url;
+  const terminal = context.upSeams?.terminal ?? process.stdout.isTTY === true;
+  const upHandoff = buildHandoff({ url, loginFile: approverPlan2.passwordFile, account: approverPlan2.passwordFile === null ? approverPlan2.approver : loginAccount(approverPlan2.passwordFile) ?? approverPlan2.approver });
   if (fatal === null) {
     if (json) {
       write(
@@ -9074,8 +9137,15 @@ async function upCommand(
           approvers: approverPlan2.approvers,
           approverVerified: approverPlan2.verified,
           ...(approverPlan2.passwordFile === null ? {} : { passwordFile: approverPlan2.passwordFile }),
+          handoff: upHandoff,
         }),
       );
+    } else if (!terminal) {
+      // No person at a terminal: an agent started this. It gets the
+      // handoff to relay, never the password, and no browser opens.
+      write("");
+      for (const line of handoffLines(upHandoff)) write(line);
+      write("Run `toolroll onboard` inside a repository to add it and install the Toolroll skill for your agent.");
     } else {
       write("");
       write(`The console is on ${url}`);
@@ -9098,7 +9168,7 @@ async function upCommand(
       write("  The inbox checklist shows what remains before approved work builds unattended.");
       write("  Ctrl-C stops Toolroll on this machine.");
     }
-    if (!json && !flags.has("no-open") && process.stdout.isTTY === true) openBrowser(url);
+    if (!json && !flags.has("no-open") && terminal) (context.upSeams?.openBrowser ?? openBrowser)(url);
   }
 
   // 10. Supervise to the end.

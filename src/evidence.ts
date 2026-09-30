@@ -778,6 +778,103 @@ export function scanForSecrets(text: string): SecretHit[] {
   return hits;
 }
 
+/** Hosts the DNS standards reserve for examples and loopback (RFC 2606,
+ * RFC 6761): a URL with a password on one of these reaches nothing real. */
+function reservedHost(host: string): boolean {
+  const name = host.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  if (name === "127.0.0.1" || name === "::1") return true;
+  if (/(?:^|\.)example\.(?:com|net|org)$/.test(name)) return true;
+  return /(?:^|\.)(?:example|test|invalid|localhost)$/.test(name);
+}
+
+/** Mostly one character, e.g. "sk-" and forty a's: a fixture, not a key. */
+function repeatedFiller(value: string): boolean {
+  const longest = value.split(/[^A-Za-z0-9]+/).reduce((best, part) => (part.length > best.length ? part : best), "");
+  if (longest.length < 8) return false;
+  const counts = new Map<string, number>();
+  for (const char of longest) counts.set(char, (counts.get(char) ?? 0) + 1);
+  return Math.max(...counts.values()) * 2 > longest.length;
+}
+
+/**
+ * Whether one matched secret shape is a documented or reserved placeholder:
+ * anything spelling EXAMPLE (AWS's own AKIAIOSFODNN7EXAMPLE), a password on
+ * a reserved example host, or a value that is mostly one repeated character.
+ */
+export function isPlaceholderSecret(name: string, line: string, match: RegExpExecArray): boolean {
+  if (name === "private-key") return false;
+  if (/example/i.test(match[0])) return true;
+  if (name !== "password-in-url") return repeatedFiller(match[0]);
+  const host = /^(\[[^\]\s]*\]|[^\s/:?#'"`]+)/.exec(line.slice(match.index + match[0].length - 1))?.[1] ?? "";
+  const password = /:([^\s:@/]+)@[^@]*$/.exec(match[0])?.[1] ?? "";
+  return reservedHost(host) || repeatedFiller(password);
+}
+
+/** The first secret shape on a line that is not a placeholder, if any. */
+function realSecretShape(line: string): string | null {
+  for (const { name, pattern } of SECRET_PATTERNS) {
+    for (const match of line.matchAll(new RegExp(pattern.source, `${pattern.flags}g`))) {
+      if (!isPlaceholderSecret(name, line, match)) return name;
+    }
+  }
+  return null;
+}
+
+/** A secret shape the diff ADDS, with the patch line (for redaction) and
+ * the file and line it lands on at the new head (for the alert). */
+export type PatchSecretHit = SecretHit & { file: string; fileLine: number };
+
+/**
+ * Scan a unified diff for secrets it commits: only added lines count —
+ * removing a line cannot commit a secret, and context lines were already
+ * there — and documented or reserved placeholders are not secrets.
+ */
+export function scanPatchForSecrets(patch: string): PatchSecretHit[] {
+  const hits: PatchSecretHit[] = [];
+  const lines = patch.split("\n");
+  let file = "";
+  let inHunk = false;
+  let next = 0;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] as string;
+    if (line.startsWith("diff --git ")) {
+      inHunk = false;
+      file = /^diff --git a\/.* b\/(.*)$/.exec(line)?.[1] ?? "";
+      continue;
+    }
+    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+    if (hunk !== null) {
+      inHunk = true;
+      next = Number(hunk[1]);
+      continue;
+    }
+    if (!inHunk) {
+      if (line.startsWith("+++ ")) file = line.slice(4).replace(/^b\//, "");
+      continue;
+    }
+    if (line.startsWith("+")) {
+      const name = realSecretShape(line.slice(1));
+      if (name !== null) hits.push({ name, line: index + 1, file, fileLine: next });
+      next += 1;
+    } else if (line.startsWith(" ")) next += 1;
+  }
+  return hits;
+}
+
+/** The alert for a candidate head with a flagged added line: where each
+ * hit is and what to do, without repeating the value. */
+export function secretAlert(hits: readonly PatchSecretHit[], runId: number): { subject: string; body: string } {
+  const shown = hits.slice(0, 5).map(hit => `${hit.file}:${hit.fileLine} (${hit.name})`);
+  const more = hits.length > shown.length ? `, and ${hits.length - shown.length} more` : "";
+  return {
+    subject: `Run #${runId} adds what looks like a key`,
+    body:
+      `${hits.length === 1 ? "An added line looks" : `${hits.length} added lines look`} like a real key: ${shown.join(", ")}${more}. ` +
+      `This run won't be published and the saved diff hides ${hits.length === 1 ? "that line" : "those lines"}. ` +
+      `If this is a real key, rotate it and rewrite the branch. If it's a test value, assemble it at run time.`,
+  };
+}
+
 /** Replace every hit line with a marker naming what was found — the display copy holds no secret. */
 export function redactSecretLines(text: string, hits: readonly SecretHit[]): string {
   const flagged = new Map(hits.map(hit => [hit.line, hit.name]));
@@ -839,8 +936,10 @@ export async function captureTerminalDiff(
   // SECOND durable, console-served copy. Hit lines are redacted in the
   // stored artifact, the row says redacted, a page names the branch — and
   // the publication gate refuses to push a redacted run's branch anywhere.
+  // Only lines the diff adds count, and the alert is one per candidate head:
+  // every gate over the same head would otherwise repeat it.
   const rawPatch = patch.code === 0 ? patch.stdout : patch.stderr;
-  const hits = patch.code === 0 ? scanForSecrets(rawPatch) : [];
+  const hits = patch.code === 0 ? scanPatchForSecrets(rawPatch) : [];
   const patchContent = Buffer.from(hits.length > 0 ? redactSecretLines(rawPatch, hits) : rawPatch, "utf8");
   const diffId = storeEvidence(store, root, runId, "terminal-diff", "terminal-diff.patch", patchContent, patchCommand, now, {
     redacted: hits.length > 0,
@@ -850,14 +949,11 @@ export async function captureTerminalDiff(
     store.enqueueNotification(
       {
         source: { run: runId },
-        dedupeKey: `secret:${runId}`,
+        dedupeKey: `secret:${head}`,
         kind: "secret-detected",
         pushClass: "attention",
         link: `/r/${runId}`,
-        subject: `possible committed secret: run #${runId}`,
-        body:
-          `${hits.length} high-confidence secret shape(s) in the accepted diff (${[...new Set(hits.map(one => one.name))].join(", ")}). ` +
-          `The branch holds the real bytes — rewrite it before anything merges. Publication of this run is blocked.`,
+        ...secretAlert(hits, runId),
       },
       now,
     );

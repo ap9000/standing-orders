@@ -9,7 +9,7 @@ import { appendFileSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseNumstat, readMailbox, readVerifiedArtifact, redactSecretLines, scanForSecrets, writeEvidenceFile, sniffImageKind, validateScreenshotBytes, SCREENSHOT_BYTE_CAP } from "./evidence.js";
+import { parseNumstat, readMailbox, readVerifiedArtifact, redactSecretLines, scanForSecrets, scanPatchForSecrets, secretAlert, writeEvidenceFile, sniffImageKind, validateScreenshotBytes, SCREENSHOT_BYTE_CAP } from "./evidence.js";
 import type { Artifact } from "./store.js";
 
 describe("reading evidence back, believing nothing", () => {
@@ -211,6 +211,84 @@ describe("the secret scan (audit IV-7) — high confidence only", () => {
   test("clean text produces no hits and no changes", () => {
     const clean = "diff --git a/x b/x\n+export const guarded = true;\n";
     expect(scanForSecrets(clean)).toEqual([]);
+  });
+});
+
+describe("the diff secret scan: only real secrets on added lines", () => {
+  // Key-shaped values are assembled here, never written out whole.
+  const awsDocs = ["AKIA", "IOSFODNN7", "EXAMPLE"].join("");
+  const awsFake = ["AKIA", "ABCDEFGHIJKLMNOP"].join("");
+  const awsReal = ["AKIA", "Q7ZC4M2XWB9KT3LP"].join("");
+  const anthropicFiller = ["sk-ant-api03-", "A".repeat(58)].join("");
+  const openaiReal = ["sk-", "proj-", "p3Xq9LmZ2vR7tY4wK8sN1bH6cF0jD5gU"].join("");
+  const url = (user: string, pass: string, host: string) => ["https://", user, ":", pass, "@", host].join("");
+  const patchOf = (file: string, body: string[], start = 10) => [
+    `diff --git a/${file} b/${file}`,
+    `index 1111111..2222222 100644`,
+    `--- a/${file}`,
+    `+++ b/${file}`,
+    `@@ -${start},${body.length} +${start},${body.length} @@`,
+    ...body,
+  ].join("\n");
+
+  test("the 2026-09-30 false alarms produce no hit", () => {
+    // Most sat on removed lines of a stale-base diff; the rest were
+    // documented examples, reserved hosts and repeated-character fixtures.
+    const patch = [
+      patchOf("src/review-context.test.ts", [
+        ` const unchanged = "${awsFake}";`,
+        `-    guardSource: \`// token: ${awsFake}\\n\`,`,
+        `-      stdout: JSON.stringify({ result: "${anthropicFiller}" }),`,
+        `-  put("src/secret.ts", 'const key = "${["AKIA", "1234567890ABCDEF"].join("")}";');`,
+        `-  const db = "${url("app", "s3cret-pw", "db.internal/app")}";`,
+      ]),
+      patchOf("src/scout.test.ts", [
+        `+      "+AWS_KEY=${awsDocs}",`,
+        `+    stdout: JSON.stringify({ result: "${anthropicFiller}" }),`,
+        `+  it.each(["${url("alex", "secret", "console.example.test")}"])`,
+        `+  test.each(["${url("alice", "password", "example.test")}", "${url("u", "hunter22", "[::1]:8080")}"])`,
+      ]),
+    ].join("\n");
+    expect(scanForSecrets(patch).length).toBeGreaterThanOrEqual(8);
+    expect(scanPatchForSecrets(patch)).toEqual([]);
+  });
+
+  test.each([
+    ["example.com", "api.example.org", "svc.example", "db.test", "x.invalid", "localhost", "127.0.0.1:5432"],
+  ])("a password on reserved host %s is a placeholder", (...hosts) => {
+    for (const host of hosts) expect(scanPatchForSecrets(patchOf("a.ts", [`+const u = "${url("u", "Zq8vN3pL", host)}";`]))).toEqual([]);
+  });
+
+  test("a realistic added key in a source file is flagged with its file and line", () => {
+    const patch = [
+      patchOf("src/removed.ts", [`-const old = "${awsReal}";`]),
+      patchOf("src/pay.ts", [" const a = 1;", `-const key = process.env.KEY;`, `+const key = "${awsReal}";`, `+const ai = "${openaiReal}";`, `+const db = "${url("app", "Zq8vN3pL", "db.prod.internal")}";`], 40),
+    ].join("\n");
+    const hits = scanPatchForSecrets(patch);
+    expect(hits).toEqual([
+      { name: "aws-access-key", line: 14, file: "src/pay.ts", fileLine: 41 },
+      { name: "openai-key", line: 15, file: "src/pay.ts", fileLine: 42 },
+      { name: "password-in-url", line: 16, file: "src/pay.ts", fileLine: 43 },
+    ]);
+    const redacted = redactSecretLines(patch, hits);
+    expect(redacted).not.toContain(`+const key = "${awsReal}";`);
+    expect(redacted).not.toContain(openaiReal);
+    expect(redacted).toContain("[redacted: aws-access-key detected on this line]");
+    // The removed line is not a new commit of anything: left as it was.
+    expect(redacted).toContain(`-const old = "${awsReal}";`);
+  });
+
+  test("a placeholder on a line does not hide a real key beside it", () => {
+    expect(scanPatchForSecrets(patchOf("a.ts", [`+const both = ["${awsDocs}", "${awsReal}"];`]))).toMatchObject([{ name: "aws-access-key", file: "a.ts", fileLine: 10 }]);
+  });
+
+  test("the alert names file and line and says what to do, without the value", () => {
+    const hits = scanPatchForSecrets(patchOf("src/pay.ts", [" a", `+const key = "${awsReal}";`], 7));
+    const alert = secretAlert(hits, 42);
+    expect(alert.subject).toBe("Run #42 adds what looks like a key");
+    expect(alert.body).toContain("src/pay.ts:8 (aws-access-key)");
+    expect(alert.body).toContain("If this is a real key, rotate it and rewrite the branch.");
+    expect(alert.body).not.toContain(awsReal);
   });
 });
 
