@@ -12,7 +12,7 @@ import { buildExport, exportSummary, exportZip, writeExportFolder } from "./expo
 import { startBudgetAlerts } from "./budget-alerts.js";
 import { liftAuthPause, openAuthPauses, signInGate, signInWords, startSignInProbes, type SignInGate } from "./provider-auth.js";
 import { createConnectionChecker } from "./provider-connection.js";
-import { buildHandoff, handoffLines, loginAccount, runOnboard, type OnboardIo } from "./agent-onboard.js";
+import { buildHandoff, handoffLines, loginAccount, runOnboard, type HandoffLogin, type OnboardIo } from "./agent-onboard.js";
 import { backupFiles, backupFolderOf, backupOwner, backupNow, restoreDatabase, startBackups } from "./backup.js";
 import { pushLimitSink } from "./provider-limits.js";
 import { limitsView } from "./limits-ui.js";
@@ -90,7 +90,7 @@ import { sweepLiveLogs } from "./live.js";
 import { configPath, addRepos, removeRepos, updateRepos, loadRepos, loadProjectRegistry, updateProjectRegistry } from "./repos.js";
 import { deleteProject, holdingsWords, projectHoldings, projectRunning } from "./project-delete.js";
 import { pushPass } from "./push.js";
-import { chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, openSync, readFileSync, readSync, realpathSync, unlinkSync, writeSync, writeFileSync, mkdirSync } from "node:fs";
+import { chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, openSync, readFileSync, readSync, realpathSync, renameSync, unlinkSync, writeSync, writeFileSync, mkdirSync } from "node:fs";
 import { BRANCH_PREFIX, envTwins, envValue, existingOrFirst, namedPath, taskBranches } from "./names.js";
 import { createServer as createNetServer } from "node:net";
 import { spawn as spawnChild } from "node:child_process";
@@ -169,7 +169,7 @@ import {
 import type { TelegramConversationOptions } from "./telegram-mate.js";
 import { scanRepo } from "./capscan.js";
 import { computeGaps, describeCapability, type Gap } from "./gaps.js";
-import { ask, askHidden, confirm, interactive } from "./prompt.js";
+import { ask, askHidden, confirm, interactive, underAgent } from "./prompt.js";
 import { runMateCli, answerContextLines, type MateCliSeams } from "./mate-cli.js";
 import { confirmCoordinatorProposal, dismissCoordinatorProposal } from "./mate-doors.js";
 import { verifyApproverByPassword } from "./principal.js";
@@ -357,7 +357,7 @@ export type OperateOptions = {
   /** Injected by tests: `onboard`'s home folder, terminal and probes. */
   onboardSeams?: OnboardSeams;
   /** Injected by tests: whether `up` has a person at a terminal, and how it opens a browser. */
-  upSeams?: { terminal?: boolean; openBrowser?: (url: string) => void };
+  upSeams?: { terminal?: boolean; env?: Record<string, string | undefined>; openBrowser?: (url: string) => void };
 };
 
 export type OnboardSeams = Partial<Pick<OnboardIo, "home" | "env" | "cwd" | "interactive" | "confirm" | "findRepo" | "checkConnection">>;
@@ -976,7 +976,7 @@ type Context = {
   releaseIo?: ReleaseIo;
   installBin?: string;
   onboardSeams?: OnboardSeams;
-  upSeams?: { terminal?: boolean; openBrowser?: (url: string) => void };
+  upSeams?: { terminal?: boolean; env?: Record<string, string | undefined>; openBrowser?: (url: string) => void };
 };
 
 
@@ -8606,6 +8606,38 @@ function openBrowser(url: string): void {
   }
 }
 
+/** Where `up` last served its console, kept beside the database so `onboard` names the same address. */
+const UP_CONSOLE_FILE = "up-console.json";
+
+function recordUpConsoleUrl(dir: string, url: string, now: Date): void {
+  try {
+    const file = join(dir, UP_CONSOLE_FILE), temporary = `${file}.${process.pid}.tmp`;
+    writeFileSync(temporary, `${JSON.stringify({ url, at: now.toISOString() })}\n`, { mode: 0o600 });
+    renameSync(temporary, file);
+  } catch {
+    // A display fact: a failed write only leaves onboard on the default port.
+  }
+}
+
+export function readUpConsoleUrl(dir: string): string | null {
+  try {
+    const parsed = JSON.parse(readFileSync(join(dir, UP_CONSOLE_FILE), "utf8")) as { url?: unknown };
+    return typeof parsed.url === "string" && /^https?:\/\/[^\s]+$/.test(parsed.url) ? parsed.url.replace(/\/+$/, "") : null;
+  } catch {
+    return null;
+  }
+}
+
+/** How onboard says to sign in: the saved login file only while it still works (as `up` advertises it), else the
+ * account and its password; null only when there is no account yet. Never the password itself. */
+function onboardLogin(store: Store, loginFile: string): HandoffLogin | null {
+  const names = store.listApprovers().map(one => one.name);
+  const saved = readLoginFile(loginFile);
+  if (names.length === 0) return saved === null ? null : { account: saved.name, file: loginFile }; // the next `up` adopts it
+  if (saved !== null && authenticateApprover(store, saved.name, saved.password).ok) return { account: saved.name, file: loginFile };
+  return { account: names.length === 1 ? (names[0] as string) : null, file: null };
+}
+
 /**
  * `onboard`: the agent that installed Toolroll becomes its lead. The work
  * lives in agent-onboard.ts; this wires it to the installation: the same
@@ -8620,8 +8652,11 @@ async function onboardCommand(flags: Map<string, string | true>, context: Contex
   if (portGiven !== undefined && (!Number.isInteger(port) || port < 1 || port >= 65536)) {
     return fail(write, json, "onboard", "usage", "--port is a whole number under 65536", EXIT.usage);
   }
+  // The console where `up` last served, unless --port says otherwise.
+  const served = portGiven === undefined ? readUpConsoleUrl(dirname(context.databaseFile)) : null;
   const home = seams.home ?? homedir();
   const env = seams.env ?? process.env;
+  const loginFile = join(dirname(context.databaseFile), UP_LOGIN_FILE);
   const gitRun = context.gitRunner ?? ((file: string, args: readonly string[], opts?: { cwd?: string }) => run(file, [...args], { ...(opts?.cwd === undefined ? {} : { cwd: opts.cwd }), timeoutMs: 10_000 }));
   const registryPath = registryPathOf(context);
   const checker = createConnectionChecker({ home, env });
@@ -8631,18 +8666,30 @@ async function onboardCommand(flags: Map<string, string | true>, context: Contex
     yes: flag(flags, "yes"),
     remove: flag(flags, "remove"),
     agentFlag: text(flags, "agent"),
-    url: `http://127.0.0.1:${port}`,
-    loginFile: join(dirname(context.databaseFile), UP_LOGIN_FILE),
+    url: served ?? `http://127.0.0.1:${port}`,
+    login: onboardLogin(store, loginFile),
     home,
+    worktrees: join(dirname(context.databaseFile), "worktrees"),
     env,
     version: PACKAGE_VERSION,
     cwd: seams.cwd ?? process.cwd(),
-    interactive: seams.interactive ?? interactive(),
+    // An agent's shell may be a terminal, but nobody answers y/N there.
+    interactive: seams.interactive ?? (interactive() && !underAgent(env)),
     confirm: seams.confirm ?? (async question => /^y(es)?$/i.test(await ask(`${question} `))),
     findRepo: seams.findRepo ?? (async cwd => {
       const top = await gitRun("git", ["rev-parse", "--show-toplevel"], { cwd });
-      return top.code === 0 ? canonicalProject(top.stdout.trim()) : null;
+      const topPath = top.code === 0 ? canonicalProject(top.stdout.trim()) : null;
+      if (topPath === null) return null;
+      // A linked worktree's project is its main checkout: the folder whose .git is the common one.
+      const common = await gitRun("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd });
+      const commonDir = common.code === 0 ? common.stdout.trim() : "";
+      const main = basename(commonDir) === ".git" ? canonicalProject(dirname(commonDir)) : null;
+      return { top: topPath, main: main ?? topPath };
     }),
+    enrolled: async repo => {
+      const registry = await loadProjectRegistry(registryPath);
+      return !("error" in registry) && registry.repos.includes(repo);
+    },
     enroll: async repo => {
       const before = await loadProjectRegistry(registryPath);
       const enrolled = await updateRepos(registryPath, repos => addRepos(repos, [repo]));
@@ -8798,7 +8845,10 @@ async function upCommand(
     );
   }
 
-  const canPrompt = !json && process.stdin.isTTY === true && process.stdout.isTTY === true;
+  // Under a coding agent nothing is asked and no secret is printed, even in a real terminal: what is shown lands in
+  // its transcript.
+  const agentRunning = underAgent(context.upSeams?.env ?? process.env);
+  const canPrompt = !json && !agentRunning && process.stdin.isTTY === true && process.stdout.isTTY === true;
   let runnerName = "";
   let runnerToken = "";
   let approver: UpApprover | null = null;
@@ -9122,8 +9172,12 @@ async function upCommand(
   // 9. Readiness, then the ONE startup envelope / greeting (finding 11/20).
   const approverPlan2 = approver as UpApprover;
   const url = console_.url;
-  const terminal = context.upSeams?.terminal ?? process.stdout.isTTY === true;
-  const upHandoff = buildHandoff({ url, loginFile: approverPlan2.passwordFile, account: approverPlan2.passwordFile === null ? approverPlan2.approver : loginAccount(approverPlan2.passwordFile) ?? approverPlan2.approver });
+  const terminal = !agentRunning && (context.upSeams?.terminal ?? process.stdout.isTTY === true);
+  const upHandoff = buildHandoff({
+    url,
+    login: { account: approverPlan2.passwordFile === null ? approverPlan2.approver : loginAccount(approverPlan2.passwordFile) ?? approverPlan2.approver, file: approverPlan2.passwordFile },
+  });
+  recordUpConsoleUrl(dirname(context.databaseFile), url, clock());
   if (fatal === null) {
     if (json) {
       write(

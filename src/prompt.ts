@@ -13,6 +13,20 @@ export function interactive(): boolean {
   return process.stdin.isTTY === true && process.stdout.isTTY === true;
 }
 
+/** Variables a coding agent sets for the commands it runs. CODEX_HOME and CODEX_API_KEY are a person's own settings. */
+const AGENT_VARIABLES = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "GEMINI_CLI", "CURSOR_AGENT", "OPENCODE"];
+const PERSON_CODEX_VARIABLES = new Set(["CODEX_HOME", "CODEX_API_KEY"]);
+
+/**
+ * Whether a coding agent is running this command. An agent's shell can be a
+ * real terminal, yet whatever is printed lands in its transcript and nobody
+ * types at the prompt, so it is treated like no terminal at all.
+ */
+export function underAgent(env: Record<string, string | undefined> = process.env): boolean {
+  return Object.entries(env).some(([name, value]) => value !== undefined && value !== ""
+    && (AGENT_VARIABLES.includes(name) || (name.startsWith("CODEX_") && !PERSON_CODEX_VARIABLES.has(name))));
+}
+
 export function ask(question: string): Promise<string> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   return new Promise(resolve =>

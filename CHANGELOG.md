@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## 0.8.1 — 2026-09-30
+
+- **Safer `toolroll update`.** A release is accepted only when its signing
+  certificate names ap9000/toolroll, its publish workflow and GitHub
+  Actions, checked with the Sigstore verifier npm already ships (found from
+  npm itself, so a custom npm global folder works too). A failed
+  update puts the commands back before stopping the service, stops and
+  restarts per-project watch workers with it, restores even when the live
+  database can't be copied aside, and keeps the last good update so
+  `--rollback` still works after a refused attempt, including for the update
+  that brought 0.8.1. The console's update job
+  finds pnpm, bun and npm where they are installed; the desktop app is never
+  offered npm.
+- **Safer `toolroll onboard`.** It adds the main checkout rather than a
+  temporary worktree, never adds your home folder, and asks before adding a
+  project. Run by an agent, `toolroll up` never prints the password. Login
+  advice matches how the install actually signs in, and uses the port `up`
+  serves on. A skill you have edited is left alone.
+- **Chat opens instantly.** First-run suggestions and the agent sign-in check
+  refresh in the background, so a slow network never holds up the page.
+  Tapping a suggestion adds to what you typed instead of replacing it.
+
 ## 0.8.0 — 2026-09-30
 
 - **Install with your agent.** `toolroll onboard`, run by the agent that

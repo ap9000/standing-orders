@@ -13,7 +13,8 @@
  * runtimes folder (`staged-upgrades/`, as deploy-browser stages), never over
  * the running one. npm's own signature and attestation check covers what it
  * installed, the installed bytes must be the ones downloaded and hashed, and
- * their provenance must name ap9000/toolroll and its publish workflow. The
+ * the certificate that signed their provenance must name ap9000/toolroll, its
+ * publish workflow and GitHub Actions, checked by npm's own Sigstore verifier. The
  * service is stopped, and its processes seen gone, before the final backup,
  * so nothing written before the switch is lost. A failed health check puts
  * back the previous runtime, database and coding catalog on its own, keeping
@@ -21,9 +22,9 @@
  * previous runtime and its backups. Every update, rollback, refusal and
  * failure is a ledger entry.
  */
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, verify as signatureValid, X509Certificate } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { chmodSync, closeSync, copyFileSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { accessSync, chmodSync, closeSync, constants, copyFileSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -45,6 +46,9 @@ function sqlite(): typeof import("node:sqlite") {
 
 export const PROVENANCE_REPOSITORY = "https://github.com/ap9000/toolroll";
 export const PROVENANCE_WORKFLOW = ".github/workflows/publish.yml";
+export const PROVENANCE_ISSUER = "https://token.actions.githubusercontent.com";
+/** How long a watch's `toolroll up` may take to exit once launchd stops it (controller-supervisor's shutdown). */
+const UP_EXIT_MS = 45_000;
 /** The steps a person sees, in order. */
 export const UPDATE_STEPS = ["verifying", "draining", "backing-up", "rehearsing", "switching", "restarting", "health"] as const;
 export type UpdateStep = typeof UPDATE_STEPS[number];
@@ -78,10 +82,14 @@ export type RuntimeUpdateJournal = {
   rehearsal?: { tables: number; rows: number };
   /** The background service, recorded before it is stopped: its definition and the processes that must be gone. */
   service?: { unit: string; pids: number[] };
+  /** Each repo's watch daemon that runs this version, recorded the same way: stopped, switched and restarted with the service. */
+  watches?: { unit: string; pids: number[] }[];
   /** Recorded before each change so a resumed or failed run knows what to put back. */
-  switched?: { links: { path: string; previous: string }[]; unit: { path: string; saved: string } | null; databaseRestored?: boolean };
+  switched?: { links: { path: string; previous: string }[]; unit: { path: string; saved: string } | null; watches?: { path: string; saved: string }[]; databaseRestored?: boolean };
   /** What the live database held when a failed run restored its backup: nothing written is lost. */
   keptAside?: string;
+  /** The live database could not be read, so it was moved aside whole rather than copied. */
+  keptAsideUnreadable?: boolean;
   /** The restore put the backup back: a retried restore never puts it back again (what was written since belongs to
    * the restored version and would be lost), and it keeps a fresh copy aside before every attempt until then. */
   restoredDatabase?: boolean;
@@ -105,6 +113,11 @@ export type UpdateSystem = {
   commands: (from: RuntimeRef) => string[];
   /** The background service's definition, when one runs `from`. */
   serviceUnit: (from: RuntimeRef) => string | null;
+  /** Every repo's watch daemon definition that runs `from`. */
+  watchUnits: (from: RuntimeRef) => string[];
+  /** npm's own Sigstore verifier: the bundle's certificate chains to Sigstore, its signature is in the transparency
+   * log, and the certificate names exactly this identity. */
+  sigstore: (bundle: unknown, identity: { issuer: string; identity: string }) => Promise<void>;
   /** The processes the service runs now. */
   servicePids: (unit: string) => Promise<number[]>;
   /** Unload the service; resolves once launchd no longer has it. */
@@ -125,6 +138,8 @@ export type UpdateOutcome = { ok: boolean; phase: RuntimePhase; message: string;
 const TERMINAL: readonly RuntimePhase[] = ["complete", "restored", "refused", "cancelled"];
 export const runtimeUpdateTerminal = (phase: RuntimePhase) => TERMINAL.includes(phase);
 const journalFile = (stateDir: string) => join(stateDir, "toolroll-update.json");
+/** The last completed update, kept apart from the journal: what `--rollback` returns from. */
+const lastUpdateFile = (stateDir: string) => join(stateDir, "toolroll-update.last.json");
 const cancelFile = (j: RuntimeUpdateJournal) => join(j.stageDir, "cancel-request.json");
 const sha = (bytes: Uint8Array | string, algorithm = "sha256") => createHash(algorithm).update(bytes).digest("hex");
 const fileHash = (file: string) => sha(readFileSync(file));
@@ -132,8 +147,7 @@ const quote = (s: string) => '"' + s.replaceAll('"', '""') + '"';
 const codingFile = (databaseFile: string) => `${databaseFile}.coding.sqlite`;
 class Refusal extends Error {}
 
-export function readRuntimeUpdate(stateDir: string): RuntimeUpdateJournal | null {
-  const file = journalFile(stateDir);
+export function readRuntimeUpdate(stateDir: string, file = journalFile(stateDir)): RuntimeUpdateJournal | null {
   if (!existsSync(file)) return null;
   const stat = lstatSync(file);
   if (!stat.isFile() || stat.isSymbolicLink()) throw Error("The saved update record is not a regular file. Nothing was changed.");
@@ -141,6 +155,23 @@ export function readRuntimeUpdate(stateDir: string): RuntimeUpdateJournal | null
   const real = (path: string) => { try { return realpathSync(path); } catch { return resolve(path); } };
   if (j.version !== 1 || !/^[a-f0-9-]{36}$/.test(j.id) || typeof j.stateDir !== "string" || real(j.stateDir) !== real(stateDir) || !isAbsolute(j.stageDir ?? "") || real(dirname(j.stageDir)) !== real(join(stateDir, "staged-upgrades"))) throw Error("The saved update record is invalid. Preserve it and its backups; nothing was changed.");
   return j;
+}
+
+/** The update `--rollback` returns from: the last one that completed, whatever was attempted since. */
+export function lastCompletedUpdate(stateDir: string): RuntimeUpdateJournal | null {
+  const kept = existsSync(lastUpdateFile(stateDir)) ? readRuntimeUpdate(stateDir, lastUpdateFile(stateDir)) : readRuntimeUpdate(stateDir);
+  return kept?.kind === "update" && kept.phase === "complete" ? kept : null;
+}
+
+/** Before a new attempt replaces the saved journal: a completed update is kept as what `--rollback` returns from.
+ * 0.8.0 and older never wrote `.last.json`, so the update that brought this version would otherwise be lost to the
+ * first refused or failed attempt. */
+function keepCompletedUpdate(stateDir: string): void {
+  const saved = readRuntimeUpdate(stateDir);
+  if (saved?.kind !== "update" || saved.phase !== "complete") return;
+  const kept = existsSync(lastUpdateFile(stateDir)) ? readRuntimeUpdate(stateDir, lastUpdateFile(stateDir)) : null;
+  if (kept && (kept.finishedAt ?? "") >= (saved.finishedAt ?? "")) return;
+  durableJson(lastUpdateFile(stateDir), saved);
 }
 
 function save(j: RuntimeUpdateJournal, phase: RuntimePhase, detail: string, now: Date): void {
@@ -174,25 +205,96 @@ export function runningWorkWords(db: DatabaseSync): string | null {
   return parts.join("; ");
 }
 
-/** The npm provenance statement for exactly these bytes must name the
- * Toolroll repository and its publish workflow. Anything else is refused.
- * npm's own check (UpdateSystem.install) verifies the statement's signature. */
-export function checkProvenance(attestations: unknown, version: string, sha512Hex: string): { repository: string; workflow: string } {
+/** Sigstore's certificate extensions (Fulcio's OID registry) and subjectAltName. */
+const OID = { issuerV1: "1.3.6.1.4.1.57264.1.1", repositoryV1: "1.3.6.1.4.1.57264.1.5", issuer: "1.3.6.1.4.1.57264.1.8", buildSigner: "1.3.6.1.4.1.57264.1.9", sourceRepository: "1.3.6.1.4.1.57264.1.12", subjectAltName: "2.5.29.17" } as const;
+
+/** One DER element at `at`: its tag and where its contents start and end. */
+function derAt(der: Buffer, at: number): { tag: number; start: number; end: number } {
+  let length = der[at + 1] ?? 0, start = at + 2;
+  if (length & 0x80) {
+    const bytes = length & 0x7f;
+    if (bytes < 1 || bytes > 4) throw Error("unsupported DER length");
+    length = 0; for (let i = 0; i < bytes; i++) length = length * 256 + (der[start + i] ?? 0);
+    start += bytes;
+  }
+  if (at >= der.length || start + length > der.length) throw Error("truncated DER");
+  return { tag: der[at]!, start, end: start + length };
+}
+function derChildren(der: Buffer, parent: { start: number; end: number }): { tag: number; start: number; end: number }[] {
+  const children = [];
+  for (let at = parent.start; at < parent.end;) { const child = derAt(der, at); children.push(child); at = child.end; }
+  return children;
+}
+function oidText(bytes: Buffer): string {
+  const parts = [Math.floor(bytes[0]! / 40), bytes[0]! % 40];
+  let n = 0;
+  for (const byte of bytes.subarray(1)) { n = n * 128 + (byte & 0x7f); if (!(byte & 0x80)) { parts.push(n); n = 0; } }
+  return parts.join(".");
+}
+/** A certificate's extensions by OID: each one's value octets. Node's X509Certificate does not expose them. */
+function certificateExtensions(der: Buffer): Map<string, Buffer> {
+  const tbs = derChildren(der, derAt(der, 0))[0]!;
+  const found = new Map<string, Buffer>();
+  const wrapper = derChildren(der, tbs).find(element => element.tag === 0xa3);
+  if (!wrapper) return found;
+  for (const extension of derChildren(der, derChildren(der, wrapper)[0]!)) {
+    const parts = derChildren(der, extension), oid = parts[0]!, value = parts[parts.length - 1]!;
+    if (oid.tag !== 0x06 || value.tag !== 0x04) throw Error("malformed extension");
+    found.set(oidText(der.subarray(oid.start, oid.end)), der.subarray(value.start, value.end));
+  }
+  return found;
+}
+/** The signing certificate's own words: who asked Sigstore for it (issuer), which repository and which workflow. */
+function certificateIdentity(der: Buffer): { issuer: string | null; repository: string | null; repositoryV1: string | null; signer: string | null; uris: string[] } {
+  const extensions = certificateExtensions(der);
+  const utf8 = (oid: string) => { const value = extensions.get(oid); if (!value) return null; const one = derAt(value, 0); if (one.tag !== 0x0c) throw Error("not a UTF8String"); return value.subarray(one.start, one.end).toString("utf8"); };
+  const raw = (oid: string) => extensions.get(oid)?.toString("utf8") ?? null;
+  const san = extensions.get(OID.subjectAltName);
+  const uris = san ? derChildren(san, derAt(san, 0)).filter(name => name.tag === 0x86).map(name => san.subarray(name.start, name.end).toString("ascii")) : [];
+  return { issuer: utf8(OID.issuer) ?? raw(OID.issuerV1), repository: utf8(OID.sourceRepository), repositoryV1: raw(OID.repositoryV1), signer: utf8(OID.buildSigner), uris };
+}
+
+export type Provenance = { repository: string; workflow: string; issuer: string; identity: string; bundle: unknown };
+type AttestationBundle = { verificationMaterial?: { certificate?: { rawBytes?: string }; x509CertificateChain?: { certificates?: { rawBytes?: string }[] } }; dsseEnvelope?: { payload?: string; payloadType?: string; signatures?: { sig?: string }[] } };
+
+/** The npm provenance for exactly these bytes of Toolroll itself must be signed by a certificate that names the
+ * Toolroll repository, its publish workflow and GitHub Actions as the issuer. The statement's own claims name
+ * nobody: only the certificate, whose key must have signed the statement. Sigstore's chain and transparency log are
+ * then checked by npm's own verifier (UpdateSystem.sigstore) for the identity returned here. */
+export function checkProvenance(attestations: unknown, version: string, sha512Hex: string): Provenance {
   const list = (attestations as { attestations?: unknown[] } | null)?.attestations;
   if (!Array.isArray(list) || list.length === 0) throw new Refusal(`Toolroll ${version} has no npm provenance, so it cannot be verified. Nothing was changed.`);
-  for (const one of list as { predicateType?: string; bundle?: { dsseEnvelope?: { payload?: string } } }[]) {
-    if (!String(one.predicateType ?? "").startsWith("https://slsa.dev/provenance/")) continue;
-    let statement: { subject?: { name?: string; digest?: { sha512?: string } }[]; predicate?: { buildDefinition?: { externalParameters?: { workflow?: { repository?: string; path?: string } } } } };
-    try { statement = JSON.parse(Buffer.from(String(one.bundle?.dsseEnvelope?.payload ?? ""), "base64").toString("utf8")); }
-    catch { throw new Refusal(`Toolroll ${version}'s provenance could not be read. Nothing was changed.`); }
-    const subject = statement.subject?.find(s => s.name === `pkg:npm/${NAME}@${version}`);
-    if (!subject || subject.digest?.sha512 !== sha512Hex) throw new Refusal(`Toolroll ${version}'s provenance is for different bytes than the package downloaded. Nothing was changed.`);
-    const workflow = statement.predicate?.buildDefinition?.externalParameters?.workflow;
-    const repository = String(workflow?.repository ?? "").replace(/\.git$/, "");
-    if (repository !== PROVENANCE_REPOSITORY || workflow?.path !== PROVENANCE_WORKFLOW) throw new Refusal(`Toolroll ${version} was built by ${repository || "an unnamed repository"} (${workflow?.path ?? "no workflow"}), not ${PROVENANCE_REPOSITORY.replace("https://github.com/", "")} (${PROVENANCE_WORKFLOW}). Nothing was changed.`);
-    return { repository, workflow: workflow.path };
+  const found = (list as { predicateType?: string; bundle?: AttestationBundle }[]).find(one => String(one?.predicateType ?? "").startsWith("https://slsa.dev/provenance/"));
+  if (!found) throw new Refusal(`Toolroll ${version} has no build provenance statement. Nothing was changed.`);
+  const bundle = found.bundle ?? {}, envelope = bundle.dsseEnvelope ?? {};
+  let statement: { subject?: { name?: string; digest?: { sha512?: string } }[] }, certificate: X509Certificate, who: ReturnType<typeof certificateIdentity>;
+  const payload = Buffer.from(String(envelope.payload ?? ""), "base64"), payloadType = String(envelope.payloadType ?? "");
+  try {
+    const material = bundle.verificationMaterial;
+    const der = Buffer.from(String(material?.certificate?.rawBytes ?? material?.x509CertificateChain?.certificates?.[0]?.rawBytes ?? ""), "base64");
+    certificate = new X509Certificate(der);
+    who = certificateIdentity(der);
+    statement = JSON.parse(payload.toString("utf8"));
+  } catch { throw new Refusal(`Toolroll ${version}'s provenance could not be read. Nothing was changed.`); }
+  // DSSE: the signature covers the pre-authentication encoding of the payload and its type.
+  const signed = Buffer.concat([Buffer.from(`DSSEv1 ${Buffer.byteLength(payloadType)} ${payloadType} ${payload.length} `), payload]);
+  const signatures = envelope.signatures ?? [];
+  let valid = false;
+  try { valid = signatures.length === 1 && typeof signatures[0]!.sig === "string" && signatureValid("sha256", signed, certificate.publicKey, Buffer.from(signatures[0]!.sig, "base64")); } catch { valid = false; }
+  if (!valid) throw new Refusal(`Toolroll ${version}'s provenance is not signed by the certificate it carries. Nothing was changed.`);
+  const subject = statement.subject?.find(s => s.name === `pkg:npm/${NAME}@${version}`);
+  if (!subject || subject.digest?.sha512 !== sha512Hex) throw new Refusal(`Toolroll ${version}'s provenance is for different bytes than the package downloaded. Nothing was changed.`);
+  const workflow = `${PROVENANCE_REPOSITORY}/${PROVENANCE_WORKFLOW}@`;
+  const identity = who.uris.length === 1 ? who.uris[0]! : null;
+  const repository = who.repository ?? (who.repositoryV1 === null ? null : `https://github.com/${who.repositoryV1}`);
+  const named = who.issuer === PROVENANCE_ISSUER && repository === PROVENANCE_REPOSITORY
+    && (who.repositoryV1 === null || `https://github.com/${who.repositoryV1}` === PROVENANCE_REPOSITORY)
+    && identity !== null && identity.startsWith(workflow) && (who.signer === null || who.signer.startsWith(workflow));
+  if (!named || identity === null || who.issuer === null) {
+    const by = identity ?? repository ?? "an unnamed workflow";
+    throw new Refusal(`Toolroll ${version} was built by ${by}${who.issuer === PROVENANCE_ISSUER ? "" : ` (signed in by ${who.issuer ?? "no issuer"})`}, not ${PROVENANCE_REPOSITORY.replace("https://github.com/", "")} (${PROVENANCE_WORKFLOW}) on GitHub Actions. Nothing was changed.`);
   }
-  throw new Refusal(`Toolroll ${version} has no build provenance statement. Nothing was changed.`);
+  return { repository: PROVENANCE_REPOSITORY, workflow: PROVENANCE_WORKFLOW, issuer: who.issuer, identity, bundle };
 }
 
 /** Headlines of this version's changelog section: its bold lead phrases. */
@@ -279,22 +381,45 @@ function restoreDatabase(j: RuntimeUpdateJournal, from: { path: string; hash: st
   ungateCoding(j);
 }
 
-/** A private copy of the live database before a restore replaces it: what the new version wrote is kept, and named. */
-async function keepAside(j: RuntimeUpdateJournal): Promise<string> {
-  const kept = join(j.stageDir, `orders.kept.${randomUUID().slice(0, 8)}.db`);
-  const db = new (sqlite().DatabaseSync)(j.databaseFile, { readOnly: true });
-  try { await sqlite().backup(db, kept); } finally { db.close(); }
-  chmodSync(kept, 0o600); fsyncPath(kept);
-  return kept;
+/** A private copy of the live database before a restore replaces it: what the new version wrote is kept, and named.
+ * A database that cannot be read (corrupt, unreadable) is not copied: it is moved aside whole, with its WAL, and the
+ * restore goes ahead. */
+async function keepAside(j: RuntimeUpdateJournal): Promise<void> {
+  const id = randomUUID().slice(0, 8), kept = join(j.stageDir, `orders.kept.${id}.db`);
+  try {
+    const db = new (sqlite().DatabaseSync)(j.databaseFile, { readOnly: true });
+    try { await sqlite().backup(db, kept); } finally { db.close(); }
+    chmodSync(kept, 0o600); fsyncPath(kept);
+    j.keptAside = kept; delete j.keptAsideUnreadable;
+  } catch {
+    rmSync(kept, { force: true });
+    // Already moved aside by an earlier attempt: that path stays the one named.
+    if (!existsSync(j.databaseFile)) return;
+    const unreadable = join(j.stageDir, `orders.unreadable.${id}.db`);
+    for (const suffix of ["-wal", "-shm", ""]) if (existsSync(j.databaseFile + suffix)) durableRename(j.databaseFile + suffix, unreadable + suffix);
+    j.keptAside = unreadable; j.keptAsideUnreadable = true;
+  }
 }
 
 // ---- the service: stop, and see it gone -------------------------------------
 
-/** Stop the service and wait until every process it ran has exited: only then may a file it writes be replaced. */
-async function stopService(j: RuntimeUpdateJournal, system: UpdateSystem, unit: string): Promise<void> {
-  const pids = [...new Set([...(j.service?.unit === unit ? j.service.pids : []), ...await system.servicePids(unit)])];
-  j.service = { unit, pids }; save(j, j.phase, j.detail, system.now());
-  await system.stopService(unit);
+/** The service and watch daemons this run stops, switches and restarts: once switched, the ones it switched. */
+function unitsOf(j: RuntimeUpdateJournal): { main: string | null; watches: string[] } {
+  return { main: j.switched?.unit?.path ?? j.service?.unit ?? null, watches: j.switched?.watches?.map(w => w.path) ?? j.watches?.map(w => w.unit) ?? [] };
+}
+
+/** Stop the service and every watch daemon, and wait until every process they ran has exited: only then may a file
+ * they write be replaced. */
+async function stopServices(j: RuntimeUpdateJournal, system: UpdateSystem, main: string | null, watches: readonly string[]): Promise<void> {
+  if (!main && watches.length === 0) return;
+  const pidsOf = async (unit: string, earlier: number[]) => [...new Set([...earlier, ...await system.servicePids(unit)])];
+  if (main) j.service = { unit: main, pids: await pidsOf(main, j.service?.unit === main ? j.service.pids : []) };
+  const watching: { unit: string; pids: number[] }[] = [];
+  for (const unit of watches) watching.push({ unit, pids: await pidsOf(unit, j.watches?.find(w => w.unit === unit)?.pids ?? []) });
+  if (watching.length > 0) j.watches = watching;
+  save(j, j.phase, j.detail, system.now());
+  for (const unit of [main, ...watches]) if (unit) await system.stopService(unit);
+  const pids = [...(main ? j.service!.pids : []), ...watching.flatMap(w => w.pids)];
   const deadline = system.now().getTime() + (system.exitTimeoutMs ?? 60_000);
   for (;;) {
     const alive = pids.filter(pid => system.processAlive(pid));
@@ -312,18 +437,21 @@ function pointLink(path: string, target: string): void {
 }
 
 /** What runs the current version: its service definition and every command on PATH. */
-function switchable(j: RuntimeUpdateJournal, system: UpdateSystem): { unit: string | null; links: string[] } {
-  const unit = system.serviceUnit(j.from), links = system.commands(j.from);
-  if (!unit && links.length === 0) throw new Refusal(`No background service or toolroll command runs ${j.from.version} from ${j.from.dist}, so there is nothing to switch. Nothing was changed.`);
+function switchable(j: RuntimeUpdateJournal, system: UpdateSystem): { unit: string | null; watches: string[]; links: string[] } {
+  const unit = system.serviceUnit(j.from), watches = system.watchUnits(j.from), links = system.commands(j.from);
+  if (!unit && watches.length === 0 && links.length === 0) throw new Refusal(`No background service or toolroll command runs ${j.from.version} from ${j.from.dist}, so there is nothing to switch. Nothing was changed.`);
   const real = (path: string) => { try { return realpathSync(path); } catch { return null; } };
   const root = real(dirname(j.from.dist)) ?? dirname(j.from.dist);
   for (const link of links) {
     if (!lstatSync(link).isSymbolicLink()) throw new Refusal(`${link} is not a link Toolroll can switch (a shim or a copy), so it would keep running ${j.from.version}. Remove it or reinstall with npm, then update again. Nothing was changed.`);
     const target = real(link);
     if (target === null || !target.startsWith(root + sep)) throw new Refusal(`${link} runs a different Toolroll (${target ?? "a missing file"}), not ${j.from.version}, so it cannot be switched. Remove it, then update again. Nothing was changed.`);
+    // A link is replaced by a rename beside it: its folder must take one, or the switch would stop halfway.
+    try { accessSync(dirname(link), constants.W_OK); }
+    catch { throw new Refusal(`${dirname(link)} cannot be written, so ${link} would keep running ${j.from.version}. Make that folder writable, then update again. Nothing was changed.`); }
   }
-  if (unit && !readFileSync(unit, "utf8").includes(j.from.dist)) throw new Refusal("The service definition does not name the current runtime. Nothing was changed.");
-  return { unit, links };
+  for (const one of [unit, ...watches]) if (one && !readFileSync(one, "utf8").includes(j.from.dist)) throw new Refusal("The service definition does not name the current runtime. Nothing was changed.");
+  return { unit, watches, links };
 }
 
 /** Every change is recorded before it is made; `revert` undoes exactly those.
@@ -331,24 +459,34 @@ function switchable(j: RuntimeUpdateJournal, system: UpdateSystem): { unit: stri
 async function switchRuntime(j: RuntimeUpdateJournal, system: UpdateSystem): Promise<void> {
   // A resumed switch keeps what it first recorded, so a revert still reaches the original.
   if (!j.switched) {
-    const { unit, links } = switchable(j, system);
-    j.switched = { links: links.map(path => ({ path, previous: readlinkSync(path) })), unit: null };
+    const { unit, watches, links } = switchable(j, system);
+    j.switched = { links: links.map(path => ({ path, previous: readlinkSync(path) })), unit: null, watches: [] };
     if (unit) { const saved = join(j.stageDir, "service.saved.plist"); writeFileDurably(saved, readFileSync(unit)); j.switched.unit = { path: unit, saved }; }
-    save(j, "switching", `Pointing ${unit ? "the service and " : ""}the toolroll and standing-orders commands at ${j.to.version}.`, system.now());
+    for (const [i, path] of watches.entries()) { const saved = join(j.stageDir, `watch.${i}.saved.plist`); writeFileDurably(saved, readFileSync(path)); j.switched.watches!.push({ path, saved }); }
+    save(j, "switching", `Pointing ${unit || watches.length > 0 ? "the service and " : ""}the toolroll and standing-orders commands at ${j.to.version}.`, system.now());
   }
-  const unit = j.switched.unit?.path ?? null;
+  const { main, watches } = unitsOf(j);
   if (j.restoreFrom && !j.switched.databaseRestored) {
-    if (unit) await stopService(j, system, unit);
+    await stopServices(j, system, main, watches);
+    refuseWhileWatching(j, system, true);
     restoreDatabase(j, j.restoreFrom); gate(j);
     j.switched.databaseRestored = true; save(j, "switching", j.detail, system.now());
   }
-  if (unit) writeFileDurably(unit, readFileSync(j.switched.unit!.saved, "utf8").replaceAll(j.from.dist, j.to.dist), 0o644);
+  for (const one of [j.switched.unit, ...j.switched.watches ?? []]) if (one) writeFileDurably(one.path, readFileSync(one.saved, "utf8").replaceAll(j.from.dist, j.to.dist), 0o644);
   for (const link of j.switched.links) pointLink(link.path, join(j.to.dist, "bin.js"));
 }
 
-function revertSwitch(j: RuntimeUpdateJournal): void {
-  if (j.switched?.unit && existsSync(j.switched.unit.saved)) writeFileDurably(j.switched.unit.path, readFileSync(j.switched.unit.saved), 0o644);
-  for (const link of j.switched?.links ?? []) pointLink(link.path, link.previous);
+/** Put back every definition and command it can; one it cannot write is skipped and named, so the restore goes on. */
+function revertSwitch(j: RuntimeUpdateJournal): string[] {
+  const stuck: string[] = [];
+  for (const one of [j.switched?.unit, ...j.switched?.watches ?? []]) {
+    if (!one || !existsSync(one.saved)) continue;
+    try { writeFileDurably(one.path, readFileSync(one.saved), 0o644); } catch (error) { stuck.push(`${one.path} (${(error as Error).message})`); }
+  }
+  for (const link of j.switched?.links ?? []) {
+    try { pointLink(link.path, link.previous); } catch (error) { stuck.push(`${link.path} (${(error as Error).message})`); }
+  }
+  return stuck;
 }
 
 function gate(j: RuntimeUpdateJournal): void {
@@ -366,13 +504,18 @@ function ungateCoding(j: RuntimeUpdateJournal): void {
   try { db.exec("PRAGMA busy_timeout=5000"); removeCodingUpdateGate(db, j.id); } finally { db.close(); }
 }
 
-/** A foreground `toolroll up` holds a live watch lease; the runtime under it must not be replaced. */
-function refuseWhileWatching(j: RuntimeUpdateJournal, system: UpdateSystem): void {
-  const db = new (sqlite().DatabaseSync)(j.databaseFile, { readOnly: true });
+/** A foreground `toolroll up` holds a live watch lease; the runtime or database under it must not be replaced.
+ * (A watch daemon releases its lease when it is stopped.) `restoring`: checked right before a backup is put back,
+ * where a database that cannot be read has no watch on it to protect. */
+function refuseWhileWatching(j: RuntimeUpdateJournal, system: UpdateSystem, restoring = false): void {
+  let row: Record<string, unknown> | undefined;
   try {
-    const row = db.prepare("SELECT runner, repo FROM watch_lease WHERE expires_at > ? LIMIT 1").get(system.now().toISOString());
-    if (row) throw new Refusal(`toolroll up is running for ${String(row["repo"])} (${String(row["runner"])}). Stop it first; ${j.kind === "update" ? "an update replaces the version it runs" : "a rollback replaces the database"}. Nothing was changed.`);
-  } finally { db.close(); }
+    const db = new (sqlite().DatabaseSync)(j.databaseFile, { readOnly: true });
+    try { row = db.prepare("SELECT runner, repo FROM watch_lease WHERE expires_at > ? LIMIT 1").get(system.now().toISOString()); } finally { db.close(); }
+  } catch (error) { if (!restoring) throw error; row = undefined; }
+  if (!row) return;
+  const what = `toolroll up is running for ${String(row["repo"])} (${String(row["runner"])}).`;
+  throw new Refusal(restoring ? `${what} The database was not put back under it; stop it first.` : `${what} Stop it first; ${j.kind === "update" ? "an update replaces the version it runs" : "a rollback replaces the database"}. Nothing was changed.`);
 }
 
 // ---- the journaled run ----------------------------------------------------
@@ -406,7 +549,7 @@ function assertNoneActive(stateDir: string): void {
 export function prepareRuntimeUpdate(o: StartOptions, now: Date): RuntimeUpdateJournal | { refused: string } {
   if (!/^\d+\.\d+\.\d+$/.test(o.version)) return { refused: `${o.version} is not a release version (x.y.z).` };
   if (!o.allowDowngrade && !isNewer(o.version, o.current.version)) return { refused: `Toolroll ${o.version} is not newer than ${o.current.version}. To go back to an older release, run toolroll update --version ${o.version} --allow-downgrade.` };
-  try { assertNoneActive(o.stateDir); } catch (error) { return { refused: (error as Error).message }; }
+  try { assertNoneActive(o.stateDir); keepCompletedUpdate(o.stateDir); } catch (error) { return { refused: (error as Error).message }; }
   const at = o.when === "at" ? nextAt(o.at ?? "03:00", now).toISOString() : null;
   const j = newJournal("update", { stateDir: o.stateDir, databaseFile: o.databaseFile, from: o.current, to: { version: o.version, dist: "" }, when: o.when, at, actor: o.actor }, now);
   save(j, "scheduled", at ? `Scheduled for ${at}.` : "Starting.", now);
@@ -425,8 +568,8 @@ export async function startRuntimeUpdate(o: StartOptions, system: UpdateSystem):
 /** Return to the runtime and database backup an update replaced. */
 export async function startRuntimeRollback(o: { stateDir: string; databaseFile: string; current: RuntimeRef; actor: string; when: When }, system: UpdateSystem): Promise<UpdateOutcome> {
   let last: RuntimeUpdateJournal | null;
-  try { assertNoneActive(o.stateDir); last = readRuntimeUpdate(o.stateDir); } catch (error) { return { ok: false, phase: "refused", message: (error as Error).message, journal: null }; }
-  if (!last || last.kind !== "update" || last.phase !== "complete" || !last.backupPath || !last.backupHash) return { ok: false, phase: "refused", message: "There is no completed update to roll back.", journal: null };
+  try { assertNoneActive(o.stateDir); keepCompletedUpdate(o.stateDir); last = lastCompletedUpdate(o.stateDir); } catch (error) { return { ok: false, phase: "refused", message: (error as Error).message, journal: null }; }
+  if (!last || !last.backupPath || !last.backupHash) return { ok: false, phase: "refused", message: "There is no completed update to roll back.", journal: null };
   if (!existsSync(join(last.from.dist, "bin.js")) || !existsSync(last.backupPath) || (last.codingBackupPath && !existsSync(last.codingBackupPath))) return { ok: false, phase: "refused", message: `The previous runtime (${last.from.version}) or its backup is no longer on this machine. Nothing was changed.`, journal: null };
   const now = system.now();
   const j = newJournal("rollback", { stateDir: o.stateDir, databaseFile: o.databaseFile, from: last.to, to: last.from, when: o.when, at: null, actor: o.actor }, now);
@@ -449,12 +592,22 @@ export function abandonRuntimeUpdate(stateDir: string, id: string, why: string, 
   if (j?.id === id && j.phase === "scheduled") save(j, "refused", why, now);
 }
 
-export function requestRuntimeUpdateCancel(stateDir: string): string {
+export function requestRuntimeUpdateCancel(stateDir: string, now = new Date()): string {
   const j = readRuntimeUpdate(stateDir);
   if (!j || runtimeUpdateTerminal(j.phase)) return "No update is in progress.";
   if (!["scheduled", "verifying", "draining"].includes(j.phase)) return `The update to ${j.to.version} is past the point it can be cancelled (${j.phase}); it will finish or restore on its own.`;
   durableJson(cancelFile(j), { id: j.id, action: "cancel" });
-  return `Cancelling the update to ${j.to.version}. Nothing is switched; new work resumes.`;
+  // No updater is running to see the request: cancel here, so the admission pause does not outlive it.
+  const lock = sqliteLock(join(j.stageDir, "worker.sqlite"));
+  if (!lock) return `Cancelling the update to ${j.to.version}. Nothing is switched; new work resumes.`;
+  try {
+    try { ungate(j); } catch { /* no pause yet */ }
+    if (j.kind === "update") rmSync(join(j.stageDir, "runtime"), { recursive: true, force: true });
+    const noun = j.kind === "update" ? "update" : "rollback";
+    save(j, "cancelled", `The ${noun} to ${j.to.version} was cancelled. Nothing changed; new work resumed.`, now);
+    try { ledger(j.databaseFile, now, j.actor, `toolroll ${noun} cancelled`, "cancelled", `${j.from.version} → ${j.to.version}`); } catch { /* the journal still says what happened */ }
+    return `Cancelled the ${noun} to ${j.to.version}. Nothing was switched; new work resumes.`;
+  } finally { lock.close(); }
 }
 const cancelRequested = (j: RuntimeUpdateJournal) => existsSync(cancelFile(j));
 
@@ -487,16 +640,16 @@ async function driveRuntimeUpdate(j: RuntimeUpdateJournal, system: UpdateSystem)
         if (j.kind === "update") await verify(j, system);
         else if (fileHash(j.restoreFrom!.path) !== j.restoreFrom!.hash || (j.restoreFrom!.codingPath && fileHash(j.restoreFrom!.codingPath) !== j.restoreFrom!.codingHash)) throw new Refusal("The update's backup changed since it was made. Nothing was changed.");
       }
-      const unit = switchable(j, system).unit;
-      if (!unit) refuseWhileWatching(j, system);
+      const { unit, watches } = switchable(j, system);
+      if (!unit && watches.length === 0) refuseWhileWatching(j, system);
       if (resumedAt <= at("draining")) {
         step("draining", j.when === "now" ? "Checking that no work is running, then pausing new work." : "Pausing new work and letting running work finish. Nothing is being cancelled.");
         await drain(j, system);
         if (cancelRequested(j)) { ungate(j); return finish(true, "cancelled", `The ${noun} to ${j.to.version} was cancelled. Nothing changed; new work resumed.`, `toolroll ${noun} cancelled`, "cancelled", verb); }
       }
       // The service stops before the backup, so nothing it writes afterwards can be lost by a restore.
-      step("backing-up", unit ? "Stopping the background service, then backing up the database." : "Backing up the database.");
-      if (unit) await stopService(j, system, unit);
+      step("backing-up", unit || watches.length > 0 ? "Stopping the background service, then backing up the database." : "Backing up the database.");
+      await stopServices(j, system, unit, watches);
       refuseWhileWatching(j, system);
       const db = new (sqlite().DatabaseSync)(j.databaseFile, { readOnly: true });
       try { assertCodingUpdateStopped(db); } finally { db.close(); }
@@ -511,9 +664,9 @@ async function driveRuntimeUpdate(j: RuntimeUpdateJournal, system: UpdateSystem)
       await switchRuntime(j, system);
     }
     if (resumedAt <= at("restarting")) {
-      const unit = j.switched?.unit?.path ?? null;
-      step("restarting", unit ? "Restarting the background service." : "No background service runs here; the commands now start the new version.");
-      if (unit) await system.restartService(unit);
+      const { main, watches } = unitsOf(j);
+      step("restarting", main || watches.length > 0 ? "Restarting the background service." : "No background service runs here; the commands now start the new version.");
+      for (const unit of [main, ...watches]) if (unit) await system.restartService(unit);
     }
     step("health", `Checking that ${j.to.version} is running and healthy.`);
     const deadline = system.now().getTime() + (system.healthTimeoutMs ?? 90_000);
@@ -527,6 +680,9 @@ async function driveRuntimeUpdate(j: RuntimeUpdateJournal, system: UpdateSystem)
     const done = j.kind === "update"
       ? finish(true, "complete", `Toolroll ${j.to.version} is running. Your previous version (${j.from.version}) and its backup are kept; toolroll update --rollback returns to them.`, "toolroll updated", "complete", verb)
       : finish(true, "complete", `Back on Toolroll ${j.to.version} with the database from before the update. The records made since are kept in ${basename(j.backupPath ?? "")}.`, "toolroll rolled back", "complete", verb);
+    // What --rollback returns from, kept apart from the journal a later refused or failed attempt replaces.
+    // The update is done: failing to write this must never send it back through the restore below.
+    try { if (j.kind === "update") durableJson(lastUpdateFile(j.stateDir), j); else rmSync(lastUpdateFile(j.stateDir), { force: true }); } catch { /* the journal still holds it until the next attempt */ }
     try { pruneRuntimes(j.stateDir, [j.to.dist, j.from.dist]); } catch { /* an old runtime left on disk is harmless */ }
     return done;
   } catch (error) {
@@ -537,9 +693,13 @@ async function driveRuntimeUpdate(j: RuntimeUpdateJournal, system: UpdateSystem)
       try { ungate(j); } catch { /* no gate yet, or the database is unreadable */ }
       // Nothing uses a refused download; the database backup is kept.
       if (j.kind === "update") rmSync(join(j.stageDir, "runtime"), { recursive: true, force: true });
-      // A service stopped for the backup starts again, unchanged.
+      // A service and watch daemons stopped for the backup start again, unchanged.
       let restarted = "";
-      if (j.service) { try { await system.restartService(j.service.unit); } catch (again) { restarted = ` The background service did not start again: ${(again as Error).message}`; } }
+      for (const unit of [j.service?.unit, ...(j.watches ?? []).map(w => w.unit)]) {
+        if (!unit) continue;
+        try { await system.restartService(unit); }
+        catch (again) { restarted += ` ${unit === j.service?.unit ? "The background service" : `The watch ${basename(unit, ".plist")}`} did not start again: ${(again as Error).message}`; }
+      }
       const refused = error instanceof Refusal;
       return finish(false, "refused", (refused ? message : `The ${noun} stopped before anything was switched: ${message} Nothing changed; new work resumed.`) + restarted, refused ? `toolroll ${noun} refused` : `toolroll ${noun} failed`, refused ? "refused" : "failed", `${verb}: ${message}`);
     }
@@ -564,19 +724,24 @@ async function restore(j: RuntimeUpdateJournal, system: UpdateSystem, finish: Fi
   try {
     save(j, "rolling-back", `${why} Restoring ${j.from.version} and the database backup.`, system.now());
     system.checkpoint?.("rolling-back");
-    const unit = j.switched?.unit?.path ?? j.service?.unit ?? null;
-    if (unit) await stopService(j, system, unit);
-    revertSwitch(j);
+    // The commands go back first, so a stop that fails never leaves them on the failed version.
+    const stuck = revertSwitch(j);
+    const { main, watches } = unitsOf(j);
+    await stopServices(j, system, main, watches);
     if (!j.backupPath || !j.backupHash) throw Error("No verified backup was recorded.");
     if (!j.restoredDatabase) {
+      refuseWhileWatching(j, system, true);
       // A fresh copy before EVERY attempt that is about to replace the database, not only the first: a retry
       // after a failure earlier in the restore must not overwrite writes made since without keeping them.
-      j.keptAside = await keepAside(j); save(j, "rolling-back", j.detail, system.now());
+      await keepAside(j); save(j, "rolling-back", j.detail, system.now());
       restoreDatabase(j, { path: j.backupPath, hash: j.backupHash, ...(j.codingBackupPath && j.codingBackupHash ? { codingPath: j.codingBackupPath, codingHash: j.codingBackupHash } : {}) });
       j.restoredDatabase = true; save(j, "rolling-back", j.detail, system.now());
     }
-    if (unit) await system.restartService(unit);
-    return finish(false, "restored", `${why} Toolroll ${j.from.version} and its database were restored. Anything written since the backup is kept in ${j.keptAside}.`, `toolroll ${noun} failed`, "restored", `${verb}: ${why}`.slice(0, 300));
+    for (const unit of [main, ...watches]) if (unit) await system.restartService(unit);
+    const kept = !j.keptAside ? "" : j.keptAsideUnreadable ? ` The live database could not be read, so it was left as it was at ${j.keptAside}.` : ` Anything written since the backup is kept in ${j.keptAside}.`;
+    const restored = `${why} Toolroll ${j.from.version} and its database were restored.${kept}`;
+    if (stuck.length > 0) return finish(false, "needs-attention", `${restored} ${stuck.join("; ")} could not be pointed back at ${j.from.version}. Make ${stuck.length === 1 ? "its folder" : "those folders"} writable, then run toolroll update --resume.`, `toolroll ${noun} failed`, "needs attention", `${verb}: ${why} / ${stuck.join("; ")}`.slice(0, 300));
+    return finish(false, "restored", restored, `toolroll ${noun} failed`, "restored", `${verb}: ${why}`.slice(0, 300));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return finish(false, "needs-attention", `${why} Restoring the previous version also failed: ${message} Run toolroll update --resume to try again; the backup is kept at ${j.backupPath ?? "(none)"}.`, `toolroll ${noun} failed`, "needs attention", `${verb}: ${why} / ${message}`.slice(0, 300));
@@ -587,16 +752,23 @@ async function verify(j: RuntimeUpdateJournal, system: UpdateSystem): Promise<vo
   const release = await system.release(j.to.version);
   if (release.version !== j.to.version) throw new Refusal(`The registry answered with ${release.version}, not ${j.to.version}. Nothing was changed.`);
   if (!release.attestations) throw new Refusal(`Toolroll ${j.to.version} has no npm provenance, so it cannot be verified. Nothing was changed.`);
+  if (!onRegistry(release.attestations)) throw new Refusal(`Toolroll ${j.to.version}'s provenance is not served by the npm registry (${release.attestations.slice(0, 120)}). Nothing was changed.`);
   const bytes = await system.download(release.tarball);
   const sha512 = createHash("sha512").update(bytes).digest();
   if (release.integrity !== `sha512-${sha512.toString("base64")}`) throw new Refusal(`The downloaded package does not match the registry's checksum. Nothing was changed.`);
   const provenance = checkProvenance(await system.attestations(release.attestations), j.to.version, sha512.toString("hex"));
+  await system.sigstore(provenance.bundle, { issuer: provenance.issuer, identity: provenance.identity });
   const runtime = join(j.stageDir, "runtime");
   mkdirSync(runtime, { recursive: true, mode: 0o700 });
   j.to.dist = await system.install(runtime, release);
   if (!j.to.dist.startsWith(runtime + sep) || !existsSync(join(j.to.dist, "bin.js"))) throw new Refusal("The staged runtime has no Toolroll command. Nothing was changed.");
-  j.package = { sha512: sha512.toString("hex"), ...provenance };
+  j.package = { sha512: sha512.toString("hex"), repository: provenance.repository, workflow: provenance.workflow };
   try { j.notes = releaseNotes(readFileSync(join(dirname(j.to.dist), "CHANGELOG.md"), "utf8"), j.to.version); } catch { j.notes = []; }
+}
+
+/** Served over HTTPS by the registry itself, as the package is. */
+function onRegistry(url: string): boolean {
+  try { const at = new URL(url), registry = new URL(REGISTRY); return at.protocol === "https:" && at.host === registry.host && !at.username && !at.password; } catch { return false; }
 }
 
 async function drain(j: RuntimeUpdateJournal, system: UpdateSystem): Promise<void> {
@@ -631,7 +803,9 @@ export function pruneRuntimes(stateDir: string, keep: readonly string[]): string
     .map(entry => join(root, entry.name)).sort((a, b) => started(b).localeCompare(started(a)));
   const kept = new Set(releases.filter(dir => keep.some(dist => dist !== "" && dist.startsWith(dir + sep))));
   for (const dir of releases) if (kept.size < KEEP_RUNTIMES) kept.add(dir);
-  const removed = releases.filter(dir => !kept.has(dir));
+  // A database a failed update kept aside is the only copy of what was written then: never pruned.
+  const holdsKeptAside = (dir: string) => { try { return readdirSync(dir).some(name => /^orders\.(?:kept|unreadable)\./.test(name)); } catch { return true; } };
+  const removed = releases.filter(dir => !kept.has(dir) && !holdsKeptAside(dir));
   for (const dir of removed) rmSync(dir, { recursive: true, force: true });
   return removed;
 }
@@ -660,9 +834,9 @@ export function markWhatsNewSeen(stateDir: string): void {
 
 // ---- the real machine -------------------------------------------------------
 
-type Exec = (command: string, args: string[], options?: { cwd?: string; timeout?: number }) => { status: number | null; stdout: string; stderr: string };
+type Exec = (command: string, args: string[], options?: { cwd?: string; timeout?: number; input?: string }) => { status: number | null; stdout: string; stderr: string };
 const exec: Exec = (command, args, options = {}) =>
-  spawnSync(command, args, { encoding: "utf8", timeout: options.timeout ?? 300_000, maxBuffer: 16 * 1024 * 1024, ...(options.cwd ? { cwd: options.cwd } : {}) });
+  spawnSync(command, args, { encoding: "utf8", timeout: options.timeout ?? 300_000, maxBuffer: 16 * 1024 * 1024, ...(options.cwd ? { cwd: options.cwd } : {}), ...(options.input !== undefined ? { input: options.input } : {}) });
 const LABELS = ["com.toolroll.browser", "com.standing-orders.browser"];
 
 export function currentRuntime(version: string): RuntimeRef {
@@ -679,8 +853,14 @@ function processAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
 }
 
-/** Seams for tests: npm and ps (`exec`), launchctl (`run`), and process liveness. */
-export type MachineSeams = { exec?: Exec; run?: SupervisorRunner; alive?: (pid: number) => boolean };
+/** Seams for tests: npm, node and ps (`exec`), launchctl (`run`), process liveness, and launchd's waits (`sleep`). */
+export type MachineSeams = { exec?: Exec; run?: SupervisorRunner; alive?: (pid: number) => boolean; sleep?: (ms: number) => Promise<void>; execPath?: string };
+
+/** The Sigstore verifier npm itself ships (npm install and npm audit signatures use it): no dependency of Toolroll's.
+ * It checks the certificate chain, the transparency log entry and that the certificate names this identity. */
+const SIGSTORE_SCRIPT = `const input = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
+require(input.verifier).verify(input.bundle, { certificateIssuer: input.issuer, certificateIdentityURI: input.identity })
+  .then(() => process.exit(0), error => { process.stderr.write(String(error && error.message || error)); process.exit(1); });`;
 
 export function machineSystem(home = homedir(), env: Record<string, string | undefined> = process.env, seams: MachineSeams = {}): UpdateSystem {
   const sh = seams.exec ?? exec;
@@ -718,12 +898,12 @@ export function machineSystem(home = homedir(), env: Record<string, string | und
       // tarball is not checked), and the lockfile records exactly which bytes were installed.
       writeFileSync(join(runtime, "package.json"), JSON.stringify({ name: `${NAME}-runtime`, private: true, dependencies: { [NAME]: release.version } }, null, 2));
       const registry = `--registry=${REGISTRY}/`;
-      const installed = sh("npm", ["install", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund", registry], { cwd: runtime });
+      const installed = sh("npm", ["install", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund", "--no-color", registry], { cwd: runtime });
       if (installed.status !== 0) throw new Refusal(`npm could not install Toolroll ${release.version}: ${(installed.stderr || installed.stdout).trim().slice(-400)} Nothing was changed.`);
       let locked: { integrity?: string; resolved?: string; version?: string } | undefined;
       try { locked = (JSON.parse(readFileSync(join(runtime, "package-lock.json"), "utf8")) as { packages?: Record<string, { integrity?: string; resolved?: string; version?: string }> }).packages?.[`node_modules/${NAME}`]; } catch { locked = undefined; }
       if (locked?.version !== release.version || locked.integrity !== release.integrity || !String(locked.resolved ?? "").startsWith(`${REGISTRY}/`)) throw new Refusal(`npm installed different bytes than the verified Toolroll ${release.version}. Nothing was changed.`);
-      const signatures = sh("npm", ["audit", "signatures", registry], { cwd: runtime });
+      const signatures = sh("npm", ["audit", "signatures", "--no-color", registry], { cwd: runtime });
       const output = `${signatures.stdout}\n${signatures.stderr}`;
       if (signatures.status !== 0) throw new Refusal(`npm could not verify the package signatures: ${output.trim().slice(-400)} Nothing was changed.`);
       if (!/\b[1-9]\d* packages? ha(?:s|ve) (?:a )?verified attestations?\b/.test(output)) throw new Refusal(`npm did not verify Toolroll ${release.version}'s provenance attestation. Nothing was changed.`);
@@ -744,15 +924,36 @@ export function machineSystem(home = homedir(), env: Record<string, string | und
       }
       return [...found];
     },
+    sigstore: async (bundle, identity) => {
+      const verifier = findSigstoreVerifier({
+        path: env["PATH"] ?? "", execPath: seams.execPath ?? process.execPath,
+        npmRoot: () => { const root = sh("npm", ["root", "--global", "--no-color"], { timeout: 30_000 }); return root.status === 0 ? root.stdout.trim() : null; },
+      });
+      if (!verifier) throw new Refusal("Toolroll could not find the Sigstore verifier that npm ships (npm 10 or newer), so its provenance cannot be checked. Nothing was changed.");
+      const checked = sh(process.execPath, ["--no-warnings", "-e", SIGSTORE_SCRIPT], { input: JSON.stringify({ verifier, bundle, ...identity }), timeout: 120_000 });
+      if (checked.status !== 0) throw new Refusal(`Sigstore did not verify Toolroll's provenance for ${identity.identity}: ${(checked.stderr || checked.stdout).trim().slice(-400)} Nothing was changed.`);
+    },
     serviceUnit: from => unitFor(from),
+    watchUnits: from => {
+      const dir = join(home, "Library", "LaunchAgents");
+      let names: string[] = [];
+      try { names = readdirSync(dir); } catch { return []; }
+      return names.filter(name => /^com\.(?:toolroll|standing-orders)\.watch\..+\.plist$/.test(name)).map(name => join(dir, name))
+        .filter(unit => { try { return readFileSync(unit, "utf8").includes(from.dist); } catch { return false; } });
+    },
     servicePids: async unit => {
       const printed = await supervise("launchctl", ["print", `${domain}/${labelOf(unit)}`]);
       const pid = Number(printed.stdout.match(/\n\s*pid = (\d+)/)?.[1]);
       return printed.code === 0 && pid > 1 ? [pid] : [];
     },
     stopService: async unit => {
-      const stopped = await stopLaunchdService(definition(unit), supervise);
-      if (!stopped.ok) throw Error(`${stopped.message}. Nothing was replaced.`);
+      // As long as a watch's toolroll up takes to exit.
+      const stopped = await stopLaunchdService(definition(unit), supervise, { waitMs: UP_EXIT_MS, ...(seams.sleep ? { sleep: seams.sleep } : {}) });
+      if (!stopped.ok) {
+        // The stop disabled the label: enabled again before anything kickstarts it, or it could never start.
+        await supervise("launchctl", ["enable", `${domain}/${labelOf(unit)}`]);
+        throw Error(`${stopped.message}. Nothing was replaced.`);
+      }
     },
     restartService: async unit => {
       const started = await installLaunchdService(definition(unit), supervise);
@@ -777,6 +978,29 @@ export function machineSystem(home = homedir(), env: Record<string, string | und
   };
 }
 
+/** npm's own Sigstore verifier. Found from npm itself (the `npm` on PATH, then the one beside node), never only from
+ * `npm root --global`: with a custom global prefix (npm's advice for permission errors) that folder holds the global
+ * packages, not npm. */
+export function findSigstoreVerifier(o: { path: string; execPath: string; npmRoot: () => string | null }): string | null {
+  const npmPackage = (start: string): string | null => {
+    for (let dir = dirname(start); dir !== dirname(dir); dir = dirname(dir)) {
+      try { if ((JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as { name?: string }).name === "npm") return dir; } catch { /* not the package folder yet */ }
+    }
+    return null;
+  };
+  const candidates: (() => string | null)[] = [
+    ...o.path.split(":").filter(dir => isAbsolute(dir)).map(dir => () => { try { return npmPackage(realpathSync(join(dir, "npm"))); } catch { return null; } }),
+    () => join(dirname(o.execPath), "..", "lib", "node_modules", "npm"),
+    () => { const root = o.npmRoot(); return root && isAbsolute(root) ? join(root, "npm") : null; },
+  ];
+  for (const candidate of candidates) {
+    const npm = candidate();
+    const verifier = npm ? join(npm, "node_modules", "sigstore") : null;
+    if (verifier && existsSync(join(verifier, "package.json"))) return resolve(verifier);
+  }
+  return null;
+}
+
 const jobUnit = (home: string) => join(home, "Library", "LaunchAgents", `${UPDATE_JOB_LABEL}.plist`);
 
 /** The console starts the updater for one prepared journal as its own one-off
@@ -784,7 +1008,14 @@ const jobUnit = (home: string) => join(home, "Library", "LaunchAgents", `${UPDAT
  * that id only; it does not run at login (no RunAtLoad: launchd starts it
  * with a kickstart) and removes its definition when it finishes. Elsewhere it
  * is a detached process. */
-export async function launchRuntimeUpdate(args: { databaseFile: string; id: string; dist?: string }, seams: { home?: string; run?: SupervisorRunner; platform?: NodeJS.Platform } = {}): Promise<void> {
+/** Where npm puts global commands (`npm prefix --global`/bin), or null when npm does not say. */
+function npmPrefixBin(): string | null {
+  const answered = exec("npm", ["prefix", "--global", "--no-color"], { timeout: 30_000 });
+  const prefix = answered.status === 0 ? answered.stdout.trim() : "";
+  return isAbsolute(prefix) ? join(prefix, "bin") : null;
+}
+
+export async function launchRuntimeUpdate(args: { databaseFile: string; id: string; dist?: string }, seams: { home?: string; run?: SupervisorRunner; platform?: NodeJS.Platform; npmBin?: () => string | null } = {}): Promise<void> {
   const dist = args.dist ?? dirname(fileURLToPath(import.meta.url));
   const command = [process.execPath, join(dist, "bin.js"), "update", "--resume", "--id", args.id, "--db", args.databaseFile];
   const stateDir = dirname(args.databaseFile);
@@ -792,7 +1023,10 @@ export async function launchRuntimeUpdate(args: { databaseFile: string; id: stri
   if ((seams.platform ?? process.platform) === "darwin") {
     const home = seams.home ?? homedir();
     const run = seams.run ?? (await import("./exec.js")).run;
-    const unit = launchdPlist({ label: UPDATE_JOB_LABEL, command, workingDirectory: stateDir, logPath: log, pathEnv: [dirname(process.execPath), "/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"].join(":"), keepAlive: false, runAtLoad: false });
+    // Everywhere a toolroll command is usually linked: the job switches every one it finds on this PATH.
+    const npmBin = (seams.npmBin ?? npmPrefixBin)();
+    const pathEnv = [...new Set([dirname(process.execPath), ...(npmBin ? [npmBin] : []), join(home, ".local", "bin"), join(home, "bin"), join(home, "Library", "pnpm"), "/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"])].join(":");
+    const unit = launchdPlist({ label: UPDATE_JOB_LABEL, command, workingDirectory: stateDir, logPath: log, pathEnv, keepAlive: false, runAtLoad: false });
     const started = await installLaunchdService({ platform: "darwin", label: UPDATE_JOB_LABEL, bin: process.execPath, entry: join(dist, "bin.js"), logPath: log, unitPath: jobUnit(home), unitContent: unit }, run);
     if (!started.ok) throw Error(started.message);
     return;

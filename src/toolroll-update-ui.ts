@@ -80,11 +80,12 @@ export function updatesHtml(view: UpdatesView, notice: { said?: string | null; p
   const newer = latest !== null && newerThan(latest, view.current);
   const state = view.method.kind === "npx" ? `<h2>Toolroll ${e(view.current)}</h2><p class="meta">npx runs the latest release each time, so this is current.</p>`
     : view.method.kind === "source" ? `<h2>Toolroll ${e(view.current)}</h2><p class="meta">This runs from a source checkout. Update it with git.</p>`
+    : newer && view.method.kind === "desktop" ? `<h2>Toolroll ${e(latest)} is available</h2><p class="meta">You have ${e(view.current)}. Update it from the Toolroll app.</p>`
     : newer ? `<h2>Toolroll ${e(latest)} is available</h2><p class="meta">You have ${e(view.current)}. Running work finishes first, and your current version is kept so you can go back.</p>`
     : "off" in view.latest ? `<h2>Toolroll ${e(view.current)}</h2><p class="meta">Update checks are off.</p><form method="get" action="/settings/updates" class="update-actions"><input type="hidden" name="check" value="now"><button type="submit">Check now</button></form>`
     : latest === null ? `<h2>Toolroll ${e(view.current)}</h2><p class="meta">Couldn’t check for a newer release: ${e("problem" in view.latest ? view.latest.problem : "")}</p>`
     : `<h2>Toolroll ${e(view.current)} is up to date</h2>`;
-  const form = newer && !["npx", "source"].includes(view.method.kind)
+  const form = newer && !["npx", "source", "desktop"].includes(view.method.kind)
     ? `<form method="post" action="/settings/updates">${csrf}<input type="hidden" name="version" value="${e(latest)}">` +
       `<label class="step-up">Your Toolroll password<input type="password" name="password" autocomplete="current-password" required></label>` +
       `<div class="update-actions"><button type="submit" name="when" value="now" class="primary">Update now</button>` +

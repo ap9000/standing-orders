@@ -84,11 +84,12 @@ async function waitForLaunchdBootout(
   run: SupervisorRunner,
   service: string,
   attempts = 50,
+  sleep: (ms: number) => Promise<void> = ms => new Promise(resolve => setTimeout(resolve, ms)),
 ): Promise<boolean> {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     const status = await run("launchctl", ["print", service]);
     if (status.code !== 0) return true;
-    await new Promise(resolve => setTimeout(resolve, 100));
+    await sleep(100);
   }
   return false;
 }
@@ -449,14 +450,15 @@ export function writeFileDurably(file: string, content: string | Uint8Array, mod
   if (process.platform !== "win32") { const directory = openSync(dirname(file), "r"); try { fsyncSync(directory); } finally { closeSync(directory); } }
 }
 
-/** Explicit stop: unload AND disable, so nothing relaunches it until a person installs again. */
-export async function stopLaunchdService(definition: ServiceDefinition, run: SupervisorRunner): Promise<{ ok: true; wasLoaded: boolean } | { ok: false; message: string }> {
+/** Explicit stop: unload AND disable, so nothing relaunches it until a person installs again. `waitMs` is how long
+ * the job may take to leave launchd (5 s by default; a watch's `toolroll up` can take 45 s to exit). */
+export async function stopLaunchdService(definition: ServiceDefinition, run: SupervisorRunner, wait: { waitMs?: number; sleep?: (ms: number) => Promise<void> } = {}): Promise<{ ok: true; wasLoaded: boolean } | { ok: false; message: string }> {
   const service = `gui/${launchdUid()}/${definition.label}`;
   const disabled = await run("launchctl", ["disable", service]);
   if (disabled.code !== 0) return { ok: false, message: `launchctl could not disable ${definition.label}: ${firstLine(disabled.stderr) || disabled.code}` };
   const modern = await run("launchctl", ["bootout", service]);
   if (modern.code !== 0) await run("launchctl", ["unload", definition.unitPath]);
-  if (!(await waitForLaunchdBootout(run, service))) return { ok: false, message: `launchctl did not stop ${definition.label}; the service is still loaded` };
+  if (!(await waitForLaunchdBootout(run, service, Math.ceil((wait.waitMs ?? 5000) / 100), wait.sleep))) return { ok: false, message: `launchctl did not stop ${definition.label}; the service is still loaded` };
   return { ok: true, wasLoaded: modern.code === 0 };
 }
 

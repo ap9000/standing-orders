@@ -2,7 +2,7 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { FirstRun } from "./first-run.js";
+import { FirstRun, withSuggestion } from "./first-run.js";
 import type { BrowserFirstRun } from "../browser-workspace.js";
 
 const signedOut = (): BrowserFirstRun => ({
@@ -57,4 +57,11 @@ test("a tap drafts the task in the composer and files nothing", async () => {
 test("without a composer to draft into, no suggestions are offered", async () => {
   await mount(signedOut());
   expect(document.querySelector("[data-first-tasks]")).toBeNull();
+});
+
+test("a tapped first task never replaces what the person already typed", () => {
+  expect(withSuggestion("", "Fix GitHub issue #12: Login button does nothing")).toBe("Fix GitHub issue #12: Login button does nothing");
+  expect(withSuggestion("  \n", "Fix a lint warning")).toBe("Fix a lint warning");
+  expect(withSuggestion("Also keep the old API working", "Fix a lint warning")).toBe("Also keep the old API working\nFix a lint warning");
+  expect(withSuggestion("Fix a lint warning", "Fix a lint warning")).toBe("Fix a lint warning");
 });

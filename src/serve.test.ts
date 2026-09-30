@@ -6,7 +6,7 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Server } from "node:http";
 import { openStore, type Store } from "./store.js";
@@ -3761,21 +3761,52 @@ describe("the first run: three plain steps to a first result", () => {
     expect(html).not.toMatch(/ceiling|unscoped|phase config|serve --repo|toolroll config set build/);
   });
 
-  test("a signed-in agent checks off the first step", async () => {
-    const signedIn = async (file: string) => ({ code: 0, stdout: file === "claude" ? JSON.stringify({ loggedIn: true, authMethod: "claude.ai" }) : "Not logged in\n", stderr: "", timedOut: false, notFound: false });
+  const agentStep = async (cookie: string) => /<p class="row" data-step="agent">(.*?)<\/p>/.exec(await (await fetch(url("/inbox"), { headers: { cookie } })).text())?.[1] ?? "";
+  const signedIn = async (file: string) => ({ code: 0, stdout: file === "claude" ? JSON.stringify({ loggedIn: true, authMethod: "claude.ai" }) : "Not logged in\n", stderr: "", timedOut: false, notFound: false });
+
+  test("a signed-in agent on the worker's machine checks off the first step", async () => {
+    register(store, { name: "builder-1", host: hostname(), capacity: 1, repos: ["/repo/main"], now: new Date(), newToken: () => "tok-builder-1" });
     await boot({ repo: "/repo/main", connectionProbe: signedIn });
     const cookie = await login();
-    const html = await (await fetch(url("/inbox"), { headers: { cookie } })).text();
-    expect(/<p class="row" data-step="agent">(.*?)<\/p>/.exec(html)?.[1]).not.toContain("claude auth login");
+    await vi.waitFor(async () => expect(await agentStep(cookie)).not.toContain("claude auth login"));
+  });
+
+  test("with the worker on another machine, its own report decides, never this machine's sign-in", async () => {
+    register(store, { name: "far-1", host: "elsewhere.tailnet", capacity: 1, repos: ["/repo/main"], now: new Date(), newToken: () => "tok-far-1" });
+    const probe = vi.fn(signedIn);
+    await boot({ repo: "/repo/main", connectionProbe: probe });
+    const cookie = await login();
+    expect(await agentStep(cookie)).toContain("claude auth login");
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(await agentStep(cookie)).toContain("claude auth login");
+    expect(probe).not.toHaveBeenCalled();
+    store.recordProviderReadiness("far-1", [{ provider: "codex", state: "ready", reason: "installed; logged in", probe: "identity" }], new Date());
+    expect(await agentStep(cookie)).not.toContain("claude auth login");
+  });
+
+  test("Chat and the inbox never wait on gh, git grep or a sign-in probe", async () => {
+    register(store, { name: "builder-1", host: hostname(), capacity: 1, repos: ["/repo/main"], now: new Date(), newToken: () => "tok-builder-1" });
+    const never = vi.fn(() => new Promise<never>(() => {}));
+    await boot({ repo: "/repo/main", connectionProbe: never, firstTaskRunner: never });
+    const cookie = await login();
+    const inbox = await fetch(url("/inbox"), { headers: { cookie }, signal: AbortSignal.timeout(3_000) });
+    expect(await inbox.text()).toContain("Get to your first result");
+    const chat = await (await fetch(url("/chat?format=workspace"), { headers: { cookie }, signal: AbortSignal.timeout(3_000) })).json() as import("./browser-workspace.js").BrowserWorkspace;
+    expect(chat.firstRun!.suggestions.map(one => one.source)).toEqual(["generic", "generic", "generic"]);
+    // The reads were started, in the background.
+    expect(never.mock.calls.map(([file]) => file)).toEqual(expect.arrayContaining(["claude", "gh"]));
   });
 
   test("Chat opens with the steps and three first tasks from the project's issues; the sandbox sits beside sign-in", async () => {
     const gh = vi.fn(async (file: string, args: readonly string[]) => file === "gh" && args[0] === "issue"
       ? { code: 0, stdout: JSON.stringify([{ number: 7, title: "Crash on save", state: "OPEN" }]), stderr: "", timedOut: false, notFound: false }
-      : { code: 0, stdout: "src/cart.ts:40:// TODO handle an empty cart\n", stderr: "", timedOut: false, notFound: false });
+      : { code: 0, stdout: "src/cart.ts\u000040\u0000// TODO handle an empty cart\n", stderr: "", timedOut: false, notFound: false });
     await boot({ repo: "/repo/main", firstTaskRunner: gh });
     const cookie = await login();
     const read = async () => (await fetch(url("/chat?format=workspace"), { headers: { cookie } })).json() as Promise<import("./browser-workspace.js").BrowserWorkspace>;
+    // The first render serves safe generic tasks while the project's own are read in the background.
+    expect((await read()).firstRun!.suggestions.map(one => one.source)).toEqual(["generic", "generic", "generic"]);
+    await vi.waitFor(async () => expect((await read()).firstRun!.suggestions[0]!.source).toBe("issue"));
     const first = await read();
     expect(first.firstRun!.steps.map(one => [one.title, one.done])).toEqual([["Agent signed in", false], ["Project added", true], ["Your first task", false]]);
     expect(first.firstRun!.suggestions.map(one => one.source)).toEqual(["issue", "todo", "generic"]);
@@ -3784,7 +3815,7 @@ describe("the first run: three plain steps to a first result", () => {
     // The sources are read once, not on every refresh; reading them files nothing.
     await read();
     expect(gh.mock.calls.filter(([file]) => file === "gh")).toHaveLength(1);
-    expect(gh.mock.calls.every(([file, args]) => (file === "gh" && args[0] === "issue" && args[1] === "list") || (file === "git" && args[0] === "grep"))).toBe(true);
+    expect(gh.mock.calls.every(([file, args]) => (file === "gh" && args[0] === "issue" && args[1] === "list") || (file === "git" && args.includes("grep")))).toBe(true);
     expect(store.hasAnyWork()).toBe(false);
     // Once the first task exists, the suggestions give way.
     store.createTask({ id: "w-3", title: "first task" }, T0);
@@ -3840,6 +3871,25 @@ describe("the first run: three plain steps to a first result", () => {
     // Settings shows how long the first result took, from the first account.
     const settings = await (await fetch(url("/settings?format=workspace"), { headers: { cookie } })).json() as import("./browser-workspace.js").BrowserWorkspace;
     expect((settings.view as import("./browser-workspace.js").BrowserSettingsView).firstResult).toBe("First result in 3 days");
+  });
+
+  test("a run that changed nothing is not the first result", async () => {
+    await boot({ repo: "/repo/main" });
+    const cookie = await login();
+    store.createTask({ id: "w-0", title: "nothing to do" }, T0);
+    const run = store.startRun({
+      taskRef: store.refFor("built-in", "w-0").id,
+      leaseId: "lease-0",
+      runner: "builder-1",
+      branch: "standing-orders/w-0",
+      worktree: "/pool/w-0",
+      now: T0,
+      ...presented(store, store.refFor("built-in", "w-0").id, "builder"),
+    });
+    store.finishRun(run, { outcome: "no-change", committed: false, now: new Date("2026-08-14T13:00:00.000Z") });
+    expect(store.installationFact("first-success-at")).toBeNull();
+    expect(store.firstSuccessAt(new Date())).toBeNull();
+    expect(await (await fetch(url("/inbox"), { headers: { cookie } })).text()).toContain("Get to your first result");
   });
 
   test("filing work checks the step off but keeps the list until the first Ready result", async () => {

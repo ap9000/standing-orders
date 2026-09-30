@@ -13,7 +13,7 @@ import { isNewer, latestVersionNow } from "./releases.js";
 import { databasePath } from "./store.js";
 import { PACKAGE_VERSION } from "./version.js";
 import {
-  currentRuntime, machineSystem, readRuntimeUpdate, requestRuntimeUpdateCancel, resumeRuntimeUpdate, retireUpdateJob, runtimeUpdateTerminal,
+  currentRuntime, lastCompletedUpdate, machineSystem, readRuntimeUpdate, requestRuntimeUpdateCancel, resumeRuntimeUpdate, retireUpdateJob,
   startRuntimeRollback, startRuntimeUpdate, type RuntimeRef, type UpdateSystem, type When,
 } from "./toolroll-update.js";
 
@@ -81,10 +81,11 @@ export async function runUpdateCommand(args: readonly string[], write: (line: st
   const method = deps.method ?? installMethod(join(current.dist, "bin.js"));
   if (method.kind === "npx") { write("npx runs the latest Toolroll each time, so this one is current. Nothing to update."); return 0; }
   if (method.kind === "source") { write("This Toolroll runs from a source checkout. Update it with git; toolroll update replaces installed releases only."); return 1; }
+  if (method.kind === "desktop") { write("This Toolroll is the Toolroll app, which updates as a whole app. Update it from the Toolroll app."); return 1; }
 
   if (has("rollback")) {
-    const last = readRuntimeUpdate(stateDir);
-    if (!last || last.kind !== "update" || last.phase !== "complete" || !runtimeUpdateTerminal(last.phase)) { write("There is no completed update to roll back."); return 1; }
+    const last = lastCompletedUpdate(stateDir);
+    if (!last) { write("There is no completed update to roll back."); return 1; }
     if (!has("yes")) {
       write(`Roll back ${last.to.version} → ${last.from.version}, with the database as it was before the update (${last.finishedAt?.slice(0, 16).replace("T", " ") ?? "unknown"} UTC).`);
       const since = recordsSince(databaseFile, last.finishedAt ?? last.updatedAt);

@@ -8,11 +8,12 @@
 // are the source. Build first (`npm run build`).
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { homedir, hostname, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { openStore } from '../dist/store.js';
 import { addApprover } from '../dist/scope.js';
+import { register } from '../dist/runner.js';
 import { createDecisionServer } from '../dist/serve.js';
 import { run } from '../dist/exec.js';
 
@@ -97,12 +98,19 @@ try {
     const store = openStore(':memory:');
     const login = addApprover(store, 'alex', new Date());
     store.setChatConfig({ provider: 'claude-subscription', model: 'default', dailyTurns: 50, weeklyCeilingMicrousd: 0, priceInMicrousd: 0, priceOutMicrousd: 0 }, 'alex', new Date());
+    // The worker is on this machine, so this machine's sign-in speaks for it.
+    register(store, { name: 'builder-1', host: hostname(), capacity: 1, repos: [repo], now: new Date() });
     const url = await serve(store, { connectionProbe: signedIn });
     for (const [name, viewport] of viewports) {
       const context = await browser.newContext({ viewport, reducedMotion: 'reduce' });
       const page = await context.newPage(), errors = [];
       page.on('pageerror', e => errors.push(e.message));
       await signIn(page, url, login.token);
+      // The project's own tasks are read in the background; the page never waits on them.
+      for (let tries = 0; tries < 20 && !(await page.locator('[data-first-tasks] button[data-source="todo"]').count()); tries += 1) {
+        await new Promise(done => setTimeout(done, 250));
+        await page.reload();
+      }
       await page.locator('[data-first-tasks]').waitFor();
       const labels = await page.locator('[data-first-tasks] button').allInnerTexts();
       const facts = await inspect(page);

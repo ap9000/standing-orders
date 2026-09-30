@@ -7,15 +7,18 @@
  * a thin operator skill for the person's own agent, prints the MCP line
  * without running it, and ends with a handoff the agent can relay.
  *
- * The skill is the only write outside Toolroll's own state, so it needs
- * --yes or a yes typed at a terminal. It is marked as Toolroll's, replaced
- * by the next onboard, and deleted by `onboard --remove`; a file of the
- * same name that is not ours is never touched.
+ * Adding the project and writing the skill both need --yes or one yes
+ * typed at a terminal. The project is the main checkout (never a linked
+ * worktree, the home folder, or one of Toolroll's own worktrees). The skill
+ * is replaced by the next onboard and deleted by `onboard --remove` only
+ * while it is exactly a version Toolroll wrote; a file of the same name
+ * that is not ours, or ours with the person's edits, is never touched.
  */
 
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { CLAUDE_CODE_GUIDES, CLAUDE_CODE_MANAGED_MARK, MANAGED_MARK, OPERATOR_SKILL_MARK } from "./skills.js";
+import { createHash } from "node:crypto";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { isAbsolute, join, resolve, sep } from "node:path";
+import { CLAUDE_CODE_GUIDES, CLAUDE_CODE_MANAGED_MARK, MANAGED_MARK, OPERATOR_SKILL_MARK, claudeCodeSkillContent } from "./skills.js";
 import type { ProviderConnection } from "./provider-connection.js";
 import { connectionWords } from "./control-ui.js";
 import { envelopeJson } from "./envelope.js";
@@ -24,9 +27,14 @@ export type OnboardAgent = "claude" | "codex";
 export const ONBOARD_AGENTS: readonly OnboardAgent[] = ["claude", "codex"];
 export const AGENT_NAMES: Record<OnboardAgent, string> = { claude: "Claude Code", codex: "Codex" };
 
-/** Each agent's user-level home: where its skills folder lives. */
+/** Each agent's user-level home: where its skills folder lives. A relative CODEX_HOME is under the home folder, never
+ * wherever onboard happens to run. */
 export function agentHome(agent: OnboardAgent, home: string, env: Record<string, string | undefined>): string {
-  if (agent === "codex") return env["CODEX_HOME"] !== undefined && env["CODEX_HOME"] !== "" ? env["CODEX_HOME"] : join(home, ".codex");
+  if (agent === "codex") {
+    const codexHome = env["CODEX_HOME"];
+    if (codexHome === undefined || codexHome === "") return join(home, ".codex");
+    return isAbsolute(codexHome) ? codexHome : resolve(home, codexHome);
+  }
   return join(home, ".claude");
 }
 
@@ -40,9 +48,9 @@ export function detectAgents(home: string, env: Record<string, string | undefine
   return found.length > 0 ? found : ["claude"];
 }
 
-/** The line that adds Toolroll as tools. Printed, never run. */
+/** The line that adds Toolroll as tools, for every project. Printed, never run. */
 export function mcpLine(agent: OnboardAgent): string {
-  return `${agent} mcp add toolroll -- toolroll mcp`;
+  return agent === "claude" ? "claude mcp add --scope user toolroll -- toolroll mcp" : `${agent} mcp add toolroll -- toolroll mcp`;
 }
 
 /** The thin skill: when to reach for Toolroll, and where the real guides are. */
@@ -73,12 +81,25 @@ Approving work and answering decisions belong to the person. Never read out or r
 `;
 }
 
-/** A regular file of ours: our frontmatter and one of our marks. */
-function ownSkill(path: string): boolean {
+const escapedMark = OPERATOR_SKILL_MARK.replace(/[.*+?^$()|[\]\\{}]/g, "\\$&");
+const WRITTEN_BY = new RegExp(`^(${escapedMark} · written by toolroll )(\\S+?)(\\. \`toolroll onboard)`, "m");
+
+/** A skill's fingerprint with the version it names set aside: every release writes the same words. */
+export function skillFingerprint(content: string): string {
+  return createHash("sha256").update(content.replace(WRITTEN_BY, "$1*$3")).digest("hex");
+}
+
+/** Every SKILL.md Toolroll has generated at this path: the operator skill, and `skills install --claude-code`'s. */
+const KNOWN_SKILLS = new Set([operatorSkillContent("0.0.0"), claudeCodeSkillContent()].map(skillFingerprint));
+
+/** ours: exactly a version Toolroll wrote. edited: ours, with the person's changes. foreign: not ours at all. */
+function skillOwnership(path: string): "ours" | "edited" | "foreign" {
   const entry = lstatSync(path);
-  if (entry.isSymbolicLink() || !entry.isFile() || entry.size > 2_000_000) return false;
+  if (entry.isSymbolicLink() || !entry.isFile() || entry.size > 2_000_000) return "foreign";
   const content = readFileSync(path, "utf8");
-  return content.startsWith("---\nname: toolroll\n") && [OPERATOR_SKILL_MARK, CLAUDE_CODE_MANAGED_MARK, MANAGED_MARK].some(mark => content.includes(mark));
+  const marked = content.startsWith("---\nname: toolroll\n") && [OPERATOR_SKILL_MARK, CLAUDE_CODE_MANAGED_MARK, MANAGED_MARK].some(mark => content.includes(mark));
+  if (!marked) return "foreign";
+  return KNOWN_SKILLS.has(skillFingerprint(content)) ? "ours" : "edited";
 }
 
 /** Guide copies an older `skills install --claude-code` left beside SKILL.md. */
@@ -96,8 +117,8 @@ function oldGuideCopies(folder: string): string[] {
 export type SkillStep = {
   agent: OnboardAgent;
   path: string;
-  /** create/replace/remove change the file; current and absent change nothing; not-ours refuses. */
-  action: "create" | "replace" | "current" | "remove" | "absent" | "not-ours";
+  /** create/replace/remove change the file; current and absent change nothing; not-ours and edited refuse. */
+  action: "create" | "replace" | "current" | "remove" | "absent" | "not-ours" | "edited";
   /** Old guide copies of ours that go with it. */
   alsoRemove: string[];
 };
@@ -119,7 +140,8 @@ export function planOperatorSkill(agents: readonly OnboardAgent[], options: { ho
     if (!lstatExists(path)) {
       return { agent, path, action: options.remove ? (alsoRemove.length > 0 ? "remove" : "absent") : "create", alsoRemove };
     }
-    if (!ownSkill(path)) return { agent, path, action: "not-ours", alsoRemove: [] };
+    const ownership = skillOwnership(path);
+    if (ownership !== "ours") return { agent, path, action: ownership === "edited" ? "edited" : "not-ours", alsoRemove: [] };
     if (options.remove) return { agent, path, action: "remove", alsoRemove };
     const current = readFileSync(path, "utf8") === operatorSkillContent(options.version);
     return { agent, path, action: current && alsoRemove.length === 0 ? "current" : "replace", alsoRemove };
@@ -158,23 +180,26 @@ export function applyOperatorSkill(steps: readonly SkillStep[], version: string)
   return { wrote, removed };
 }
 
+/** How to sign in: the account, and the saved login file when one still works. Never the password. */
+export type HandoffLogin = { account: string | null; file: string | null };
+
 export type Handoff = {
   console: string;
   /** How to start the console when it is not running. */
   start: string;
-  /** The saved login: the account and the file. Never the password. */
-  login: { account: string | null; file: string } | null;
+  /** null while there is no account yet. */
+  login: HandoffLogin | null;
   phone: string;
   next: readonly string[];
 };
 
 export const NEXT_THINGS = ["queue these bugs overnight", "what needs me?", "open the result"] as const;
 
-export function buildHandoff(input: { url: string; loginFile: string | null; account: string | null }): Handoff {
+export function buildHandoff(input: { url: string; login: HandoffLogin | null }): Handoff {
   return {
     console: input.url,
     start: "toolroll up",
-    login: input.loginFile === null ? null : { account: input.account, file: input.loginFile },
+    login: input.login,
     phone: "Open the console on your phone over your tailnet, or pair Telegram in Settings → Telegram with the /pair code it shows.",
     next: NEXT_THINGS,
   };
@@ -182,8 +207,10 @@ export function buildHandoff(input: { url: string; loginFile: string | null; acc
 
 export function handoffLines(handoff: Handoff): string[] {
   const login = handoff.login === null
-    ? "no saved login yet; `toolroll up` creates one"
-    : `${handoff.login.account === null ? "the account" : handoff.login.account} — the password is in ${handoff.login.file}`;
+    ? "no account yet; `toolroll up` creates one"
+    : handoff.login.file === null
+      ? `${handoff.login.account ?? "your account"} — sign in with your password`
+      : `${handoff.login.account ?? "the account"} — the password is in ${handoff.login.file}`;
   return [
     "Toolroll is ready.",
     `  console   ${handoff.console}`,
@@ -218,22 +245,55 @@ export type OnboardIo = {
   /** --agent, as typed: a comma list of claude and codex. */
   agentFlag: string | undefined;
   url: string;
-  loginFile: string;
+  login: HandoffLogin | null;
   home: string;
+  /** Where Toolroll leases its own worktrees: never a project. */
+  worktrees: string;
   env: Record<string, string | undefined>;
   version: string;
   cwd: string;
   /** A person at a terminal who can be asked y/N. */
   interactive: boolean;
   confirm: (question: string) => Promise<boolean>;
-  /** The repository top folder containing cwd, or null outside one. */
-  findRepo: (cwd: string) => Promise<string | null>;
+  /** The repository containing cwd: its top folder, and its main checkout (the same folder unless cwd is in a linked
+   * worktree). null outside one. */
+  findRepo: (cwd: string) => Promise<{ top: string; main: string } | null>;
+  /** Whether a repository is already a project. */
+  enrolled: (repo: string) => Promise<boolean>;
   /** Add a repository as a project, as Projects → add does. */
   enroll: (repo: string) => Promise<{ ok: true; added: boolean } | { ok: false; message: string }>;
   checkConnection: (agent: OnboardAgent) => Promise<ProviderConnection>;
 };
 
-type SkillAnswer = { state: "written" | "current" | "needs-yes" | "declined" | "not-ours" | "removed" | "absent"; files: SkillStep[]; wrote: string[]; removed: string[] };
+type SkillAnswer = { state: "written" | "current" | "needs-yes" | "declined" | "not-ours" | "edited" | "removed" | "absent"; files: SkillStep[]; wrote: string[]; removed: string[] };
+
+type ProjectAnswer =
+  | { state: "none" }
+  | { state: "refused"; path: string; message: string }
+  | { state: "added" | "already" | "needs-yes" | "declined"; path: string }
+  | { state: "failed"; path: string; message: string };
+
+const real = (path: string): string => {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+};
+const within = (path: string, folder: string): boolean => path === folder || path.startsWith(folder.endsWith(sep) ? folder : `${folder}${sep}`);
+
+/** Why a found repository cannot be the project, or null when it can. */
+export function projectRefusal(found: { top: string; main: string }, where: { cwd: string; home: string; worktrees: string }): string | null {
+  const worktrees = real(where.worktrees);
+  if ([where.cwd, found.top, found.main].some(path => within(real(path), worktrees))) {
+    return `${found.top} is one of Toolroll's own worktrees, not a project: run onboard inside your own checkout`;
+  }
+  const home = real(where.home);
+  if (real(found.main) === home || real(found.top) === home) {
+    return `${home} is your home folder, not a project: run onboard inside the repository you want to hand off`;
+  }
+  return null;
+}
 
 /** Returns the exit code: 0 done, 2 usage, 3 a refusal to answer. */
 export async function runOnboard(io: OnboardIo): Promise<number> {
@@ -253,41 +313,65 @@ export async function runOnboard(io: OnboardIo): Promise<number> {
     agents = detectAgents(io.home, io.env);
   }
 
-  // The skill: validate every file first, then ask once, then write.
+  // The skill: validate every file first.
   const steps = planOperatorSkill(agents, { home: io.home, env: io.env, version: io.version, remove: io.remove });
   const changes = steps.filter(step => step.action === "create" || step.action === "replace" || step.action === "remove");
-  const foreign = steps.filter(step => step.action === "not-ours");
+  const foreign = steps.filter(step => step.action === "not-ours" || step.action === "edited");
+  const skillChanges = foreign.length === 0 && changes.length > 0;
+
+  // The project: the main checkout of the repository onboard runs in, never --remove's business.
+  let project: ProjectAnswer = { state: "none" };
+  if (!io.remove) {
+    const found = await io.findRepo(io.cwd);
+    if (found !== null) {
+      const refusal = projectRefusal(found, { cwd: io.cwd, home: io.home, worktrees: io.worktrees });
+      if (refusal !== null) project = { state: "refused", path: found.main, message: refusal };
+      else project = { state: (await io.enrolled(found.main)) ? "already" : "needs-yes", path: found.main };
+    }
+  }
+  const projectChange = project.state === "needs-yes";
+
+  // Then ask once for everything that writes, then write.
+  let consent = false;
+  if (skillChanges || projectChange) {
+    const parts = [
+      ...(projectChange ? [`add ${(project as { path: string }).path} as a project`] : []),
+      ...(skillChanges ? [`${io.remove ? "remove" : "write"} ${changes.map(step => step.path).join(" and ")}`] : []),
+    ];
+    const question = `${parts.join(" and ").replace(/^./, first => first.toUpperCase())}? [y/N]`;
+    consent = io.yes || (io.interactive && !io.json && (await io.confirm(question)));
+  }
+  const unconfirmed = io.interactive && !io.json && !io.yes ? "declined" : "needs-yes";
+
   let skill: SkillAnswer;
   if (foreign.length > 0) {
-    skill = { state: "not-ours", files: steps, wrote: [], removed: [] };
-  } else if (changes.length === 0) {
+    skill = { state: foreign.some(step => step.action === "not-ours") ? "not-ours" : "edited", files: steps, wrote: [], removed: [] };
+  } else if (!skillChanges) {
     skill = { state: io.remove ? "absent" : "current", files: steps, wrote: [], removed: [] };
+  } else if (!consent) {
+    skill = { state: unconfirmed, files: steps, wrote: [], removed: [] };
   } else {
-    const paths = changes.map(step => step.path);
-    const consent = io.yes || (io.interactive && !io.json && (await io.confirm(`${io.remove ? "Remove" : "Write"} ${paths.join(" and ")}? [y/N]`)));
-    if (!consent) {
-      skill = { state: io.interactive && !io.json && !io.yes ? "declined" : "needs-yes", files: steps, wrote: [], removed: [] };
-    } else {
-      const done = applyOperatorSkill(steps, io.version);
-      skill = { state: io.remove ? "removed" : "written", files: steps, ...done };
-    }
+    const done = applyOperatorSkill(steps, io.version);
+    skill = { state: io.remove ? "removed" : "written", files: steps, ...done };
   }
   const skillLine = (): string => {
     const where = (list: readonly SkillStep[]) => list.map(step => step.path).join(", ");
+    const nothing = io.remove ? "removed" : "written";
     switch (skill.state) {
       case "written": return `skill     wrote ${skill.wrote.join(", ")}`;
       case "removed": return `skill     removed ${skill.removed.join(", ")}`;
       case "current": return `skill     up to date: ${where(steps)}`;
       case "absent": return "skill     not installed; nothing to remove";
-      case "not-ours": return `skill     ${where(foreign)} ${foreign.length === 1 ? "is" : "are"} not Toolroll's, so nothing was ${io.remove ? "removed" : "written"}`;
-      case "declined": return `skill     nothing ${io.remove ? "removed" : "written"}`;
-      case "needs-yes": return `skill     not ${io.remove ? "removed" : "written"} yet: run again with --yes to ${io.remove ? "remove" : "write"} ${where(changes)}`;
+      case "not-ours": return `skill     ${where(foreign)} ${foreign.length === 1 ? "is" : "are"} not Toolroll's, so nothing was ${nothing}`;
+      case "edited": return `skill     ${where(foreign)} ${foreign.length === 1 ? "has your edits, so it was" : "have your edits, so they were"} left as is`;
+      case "declined": return `skill     nothing ${nothing}`;
+      case "needs-yes": return `skill     not ${nothing} yet: run again with --yes to ${io.remove ? "remove" : "write"} ${where(changes)}`;
     }
   };
   const skillData = { state: skill.state, files: skill.files.map(step => ({ agent: step.agent, path: step.path, action: step.action })), wrote: skill.wrote, removed: skill.removed };
 
   if (io.remove) {
-    if (skill.state === "not-ours") return refuse("not-ours", skillLine().replace(/^skill\s+/, ""), 3, { skill: skillData });
+    if (skill.state === "not-ours" || skill.state === "edited") return refuse(skill.state, skillLine().replace(/^skill\s+/, ""), 3, { skill: skillData });
     if (skill.state === "needs-yes" || skill.state === "declined") {
       return refuse("unconfirmed", skillLine().replace(/^skill\s+/, ""), 3, { skill: skillData });
     }
@@ -295,25 +379,34 @@ export async function runOnboard(io: OnboardIo): Promise<number> {
     return 0;
   }
 
-  // The project, then who is signed in.
-  const repo = await io.findRepo(io.cwd);
-  let project: { path: string; added: boolean } | null = null;
-  let projectProblem: string | null = null;
-  if (repo !== null) {
-    const enrolled = await io.enroll(repo);
-    if (enrolled.ok) project = { path: repo, added: enrolled.added };
-    else projectProblem = enrolled.message;
+  if (project.state === "needs-yes") {
+    if (!consent) project = { state: unconfirmed, path: project.path };
+    else {
+      const enrolled = await io.enroll(project.path);
+      project = enrolled.ok ? { state: enrolled.added ? "added" : "already", path: project.path } : { state: "failed", path: project.path, message: enrolled.message };
+    }
   }
   const reports = await Promise.all(ONBOARD_AGENTS.map(async agent => agentReport(agent, await io.checkConnection(agent))));
-  const handoff = buildHandoff({ url: io.url, loginFile: existsSync(io.loginFile) ? io.loginFile : null, account: loginAccount(io.loginFile) });
+  const handoff = buildHandoff({ url: io.url, login: io.login });
   const mcp = agents.map(agent => ({ agent, command: mcpLine(agent) }));
 
+  const projectData = project.state === "added" || project.state === "already" ? { path: project.path, added: project.state === "added" } : null;
+  const projectProblem = (() => {
+    switch (project.state) {
+      case "none": return "not inside a git repository";
+      case "refused": return project.message;
+      case "failed": return `${project.path} could not be added — ${project.message}`;
+      case "needs-yes": return `not added yet: run again with --yes to add ${project.path}`;
+      case "declined": return `${project.path} not added`;
+      default: return null;
+    }
+  })();
   if (io.json) {
     io.write(envelopeJson({
       ok: true,
       command,
-      project,
-      ...(repo === null ? { projectProblem: "not inside a git repository" } : projectProblem === null ? {} : { projectProblem }),
+      project: projectData,
+      ...(projectProblem === null ? {} : { projectProblem }),
       agents: reports,
       skill: skillData,
       mcp,
@@ -321,9 +414,9 @@ export async function runOnboard(io: OnboardIo): Promise<number> {
     }));
     return 0;
   }
-  const projectLine = project !== null
-    ? `project   ${project.path} — ${project.added ? "added" : "already added"}`
-    : repo === null ? "project   none added: run onboard inside the repository you want to hand off" : `project   ${repo} could not be added — ${projectProblem}`;
+  const projectLine = projectData !== null
+    ? `project   ${projectData.path} — ${projectData.added ? "added" : "already added"}`
+    : project.state === "none" ? "project   none added: run onboard inside the repository you want to hand off" : `project   ${projectProblem}`;
   io.write([
     projectLine,
     `agents    ${reports.map(one => `${one.name}: ${[one.words, one.plan].filter(Boolean).join(" · ")}`).join("; ")}`,
