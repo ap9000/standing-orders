@@ -8,7 +8,7 @@
 import { assignmentOf } from "./assignment.js";
 import { filerFor } from "./approval-policy.js";
 import { diagnoseTaskDispatch } from "./dispatch.js";
-import { deciderOf, durationWords, fillFlowText, validateFlowDefinition, withinHours, type FlowDefinition, type FlowStage } from "./flows.js";
+import { deciderOf, durationWords, fillFlowText, fitFlowText, flowWorkTemplate, validateFlowDefinition, withinHours, type FlowDefinition, type FlowStage } from "./flows.js";
 import { reportSummaryFor } from "./report-summary.js";
 import { fileTaskProposal } from "./proposal.js";
 import { requestResultChanges } from "./result-actions.js";
@@ -23,7 +23,7 @@ export type FlowAdvance = { moved: number; filed: string[]; problems: string[] }
 
 /** The flow's drawing, or null when it can't be read (the card then says so and waits). */
 export function flowDefinitionOf(flow: FlowRow): FlowDefinition | null {
-  try { return validateFlowDefinition(JSON.parse(flow.definitionJson)); } catch { return null; }
+  try { return validateFlowDefinition(JSON.parse(flow.definitionJson), { stored: true }); } catch { return null; }
 }
 
 /** Where a card's link opens: the flow's canvas with the card selected. */
@@ -38,18 +38,6 @@ const ACCEPTANCE = {
 
 function fill(template: string, card: FlowCardRow): string {
   return fillFlowText(template, { title: card.title, description: card.description, note: card.note, outputs: card.outputs });
-}
-
-/** A work zone's goal: its words filled from the card, plus the card and any send-back note when the words leave
- * them out. "Fix the bug on the card" says nothing on its own (found in the real e2e: the builder saw only the branch name). */
-function workGoal(instructions: string, card: FlowCardRow): string {
-  const names = (key: string) => new RegExp(`\\{\\{\\s*${key.replace(".", "\\.")}\\s*\\}\\}`).test(instructions);
-  const extra = [
-    ...(names("card.title") || names("card.description") ? [] : [`The card: {{card.title}}${card.description ? "\n\n{{card.description}}" : ""}`]),
-    ...(names("card.title") && !names("card.description") && card.description ? ["Details on the card:\n{{card.description}}"] : []),
-    ...(names("note") || !card.note ? [] : ["Changes asked for: {{note}}"]),
-  ];
-  return fill([instructions, ...extra].join("\n\n"), card);
 }
 
 const titleIn = (definition: FlowDefinition, id: string) => definition.stages.find(one => one.id === id)?.title ?? id;
@@ -226,17 +214,23 @@ function advanceCard(store: Store, flow: FlowRow, definition: FlowDefinition | n
 function workStage(store: Store, flow: FlowRow, stage: FlowStage, card: FlowCardRow, now: Date, options: { evidenceRoot?: string }, outcome: FlowAdvance, onward: (result: "ok" | "fail", note?: string | null, task?: string | null) => void): void {
   if (card.task === null) {
     const report = stage.kind === "report";
+    // Waiting cards try again every pass, so a cause that's fixed (a shorter zone, a freed backlog) files the work then.
+    const wait = (why: string) => { const waiting = `Couldn't file the work: ${why} It tries again on the next pass.`; if (card.waiting !== waiting) store.updateFlowCard(card.id, { waiting }, now); };
+    // The goal fits a task: the zone's words whole, long filled-in values (a script's output) cut in the middle.
+    // The agent is given them in full (flowGoalCuts).
+    const goal = fitFlowText(flowWorkTemplate(stage.instructions ?? card.title, card), card);
+    if (goal === null) { wait(`${stage.title}'s instructions are too long for a task. Open the flow and shorten them.`); return; }
     const filed = fileTaskProposal(store, {
       title: (report ? `${stage.title}: ${card.title}` : card.title).slice(0, 200),
       repo: flow.repo,
-      goal: workGoal(stage.instructions ?? card.title, card).slice(0, 8000),
+      goal,
       filedVia: `flow:${flow.id}`, filedBy: filerFor(card.createdBy), // who made the card asked for the work (an owner can be reassigned by anyone)
       deliverable: report ? "report" : "branch",
       planning: report ? "skip" : stage.planning ?? "auto",
       acceptance: report ? ACCEPTANCE.report : ACCEPTANCE.task,
       admittedRepos: [flow.repo],
     }, now);
-    if (!filed.ok) { store.updateFlowCard(card.id, { waiting: `Couldn't file the work: ${filed.message}` }, now); return; }
+    if (!filed.ok) { wait(/[.!?]$/.test(filed.message) ? filed.message : `${filed.message}.`); return; }
     store.updateFlowCard(card.id, { task: filed.id, ...(report || card.primaryTask !== null ? {} : { primaryTask: filed.id }), waiting: "Filed as a task" }, now);
     outcome.filed.push(filed.id);
     return;
@@ -282,6 +276,33 @@ function workStage(store: Store, flow: FlowRow, stage: FlowStage, card: FlowCard
   const diagnosis = diagnoseTaskDispatch(store, current, now);
   const waiting = diagnosis?.summary ?? "Working on it";
   if (waiting !== card.waiting) store.updateFlowCard(card.id, { waiting }, now);
+}
+
+/** What a flow task's goal had to cut, whole, for the agent doing it: each value its zone fills in from the card that the
+ * goal doesn't hold in full. Empty when the task didn't come from a flow card or nothing was cut. Script output and
+ * card text can come from outside, so the brief quotes these as untrusted data. */
+export function flowGoalCuts(store: Store, taskId: string, goal: string): { label: string; text: string }[] {
+  try { return goalCuts(store, taskId, goal); } catch { return []; } // context, never a reason a build can't start
+}
+
+function goalCuts(store: Store, taskId: string, goal: string): { label: string; text: string }[] {
+  const root = store.taskFamilyOf(taskId, null, true)?.root.id ?? taskId;
+  const card = store.flowCardByTask(root);
+  const flow = card === null ? null : store.getFlow(card.flow);
+  const definition = flow === null ? null : flowDefinitionOf(flow);
+  const stage = definition?.stages.find(one => one.id === card!.stage);
+  if (card === null || definition == null || stage === undefined || (stage.kind !== "task" && stage.kind !== "report")) return [];
+  const labels: Record<string, string> = { "card.title": "The card's title", "card.description": "The card's description", note: "The note it was sent back with" };
+  const cuts: { label: string; text: string }[] = [];
+  const seen = new Set<string>();
+  for (const match of flowWorkTemplate(stage.instructions ?? card.title, card).matchAll(/\{\{\s*(card\.title|card\.description|note|stage\.([a-z0-9-]+))\s*\}\}/g)) {
+    if (seen.has(match[1]!)) continue;
+    seen.add(match[1]!);
+    const text = fillFlowText(`{{${match[1]}}}`, card);
+    if (text === "" || goal.includes(text)) continue;
+    cuts.push({ label: labels[match[1]!] ?? `What ${titleIn(definition, match[2]!)} found`, text: text.slice(0, 50_000) });
+  }
+  return cuts;
 }
 
 export type FlowAct = { ok: true; said: string; card: number } | { ok: false; message: string };

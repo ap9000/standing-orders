@@ -22715,6 +22715,12 @@ export class Store {
   }
 
   /** Every active card of every active flow in one project: what a worker's pass advances. */
+  /** The card whose zone filed this task (the newest, should one task have been filed for two). */
+  flowCardByTask(task: string): FlowCardRow | null {
+    const row = this.db.prepare("SELECT * FROM flow_card WHERE task = ? ORDER BY id DESC LIMIT 1").get(task);
+    return row === undefined ? null : readFlowCardRow(row as Record<string, unknown>);
+  }
+
   activeFlowCards(repo: string): FlowCardRow[] {
     return this.db.prepare("SELECT c.* FROM flow_card c JOIN flow f ON f.id = c.flow WHERE f.repo = ? AND f.state = 'active' AND c.state = 'active' ORDER BY c.id").all(repo).map(readFlowCardRow);
   }

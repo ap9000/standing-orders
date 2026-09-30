@@ -28,7 +28,7 @@ const REPLY_CHARS = 4000;
 
 const definitionOf = (store: Store, flow: number): FlowDefinition | null => {
   const row = store.getFlow(flow);
-  try { return row === null ? null : validateFlowDefinition(JSON.parse(row.definitionJson)); } catch { return null; }
+  try { return row === null ? null : validateFlowDefinition(JSON.parse(row.definitionJson), { stored: true }); } catch { return null; }
 };
 
 /** Everyone a card's conversation is with: whom it wrote to, who wrote back, and who sent the email it came from. */
