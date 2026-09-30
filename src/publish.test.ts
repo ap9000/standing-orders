@@ -6,10 +6,10 @@
 
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { openStore, type Store } from "./store.js";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { storeEvidence } from "./evidence.js";
+import { captureTerminalDiff, storeEvidence } from "./evidence.js";
 import { addApprover } from "./scope.js";
 import {
   bodyHashOf,
@@ -199,6 +199,48 @@ describe("publication", () => {
       store.recordAction({ at: T0.toISOString(), actor: "operator:sam", repo: REPO, taskId: "t-1", runId, action: "assignment handoff checked", outcome: "x".repeat(64), source: "work" });
       const two = await publishPass(store, { repo: REPO, clock: () => T0, exec: scripted({ "gh pr list": { code: 0, stdout: "[]" }, "gh pr create": { code: 0, stdout: "https://github.com/alex/thing/pull/8\n" } }).exec, evidenceRoot: root });
       expect(two.pushed).toBe(1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("an added real key blocks publication and alerts once per head; a removed line or placeholder does not", async () => {
+    const root = mkdtempSync(join(tmpdir(), "so-publish-secret-"));
+    try {
+      // Key-shaped values are assembled here, never written out whole.
+      const real = ["AKIA", "Q7ZC4M2XWB9KT3LP"].join("");
+      const docs = ["AKIA", "IOSFODNN7", "EXAMPLE"].join("");
+      const patchWith = (lines: string[]) => ["diff --git a/src/pay.ts b/src/pay.ts", "--- a/src/pay.ts", "+++ b/src/pay.ts", "@@ -3,2 +3,2 @@", " const a = 1;", ...lines, ""].join("\n");
+      const git = (patch: string) => async (_file: string, args: readonly string[]) => ({ ...OK, stdout: args.includes("--numstat") ? "1\t1\tsrc/pay.ts\0" : patch });
+      const alerts = () => store.listNotifications("all").filter(one => one.kind === "secret-detected");
+
+      // A stale base's removed key and a documented example: nothing to flag.
+      await captureTerminalDiff(store, git(patchWith([`-const old = "${real}";`, `+const docs = "${docs}";`])), "/pool/t-1", "base999", "abc123def", root, runId, T0);
+      expect(store.hasRedactedTerminalDiff(runId)).toBe(false);
+      expect(alerts()).toEqual([]);
+
+      // A later run on the same candidate head adds a real key.
+      const later = store.startRun({ taskRef, leaseId: "lease-2", runner: "builder-1", branch: "standing-orders/t-1", worktree: "/pool/t-1", ...bareLegacy("build", "claude", null), now: T0 });
+      const added = patchWith([`-const key = process.env.KEY;`, `+const key = "${real}";`]);
+      const { diffId } = await captureTerminalDiff(store, git(added), "/pool/t-1", "base999", "abc123def", root, later, T0);
+      const artifact = store.getArtifact(diffId)!;
+      expect(artifact.redacted).toBe(true);
+      expect(readFileSync(join(root, artifact.key), "utf8")).not.toContain(real);
+      expect(alerts()).toHaveLength(1);
+      expect(alerts()[0]!.body).toContain("src/pay.ts:4 (aws-access-key)");
+      expect(alerts()[0]!.body).toContain("rotate it and rewrite the branch");
+      // Gated again over the same head: no second alert.
+      const again = store.startRun({ taskRef, leaseId: "lease-3", runner: "builder-1", branch: "standing-orders/t-1", worktree: "/pool/t-1", ...bareLegacy("build", "claude", null), now: T0 });
+      await captureTerminalDiff(store, git(added), "/pool/t-1", "base999", "abc123def", root, again, T0);
+      expect(alerts()).toHaveLength(1);
+
+      grantIt();
+      store.createPublicationIntent({ run: later, taskRef, githubRepo: "alex/thing", remote: "origin", base: "main", head: "standing-orders/t-1", headSha: "abc123def", bodyHash: "x", draft: true }, T0);
+      const script = scripted();
+      const report = await publishPass(store, { repo: REPO, clock: () => T0, exec: script.exec, evidenceRoot: root });
+      expect(report.pushed).toBe(0);
+      expect(script.calls).toEqual([]);
+      expect(store.publicationForRun(later)?.state).toBe("failed");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

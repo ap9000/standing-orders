@@ -111,6 +111,15 @@ export function localUrl(href: string): string {
 }
 
 /** Reject incomplete reads before accepting their session identity or receipt. */
+/** Chat's first run: steps with a link that stays on this console or an exact command, and drafts as plain words. */
+function isFirstRun(value: unknown): boolean {
+  return record(value) && (value.sandbox === null || typeof value.sandbox === "string")
+    && Array.isArray(value.steps) && value.steps.every(step => record(step) && typeof step.key === "string" && typeof step.title === "string" && typeof step.done === "boolean"
+      && (step.action === null || (record(step.action) && (step.action.kind === "command" ? typeof step.action.command === "string"
+        : step.action.kind === "link" && typeof step.action.label === "string" && typeof step.action.href === "string" && step.action.href.startsWith("/")))))
+    && Array.isArray(value.suggestions) && value.suggestions.every(one => record(one) && typeof one.label === "string" && typeof one.draft === "string" && typeof one.source === "string");
+}
+
 export function isWorkspace(value: unknown): value is BrowserWorkspace {
   if (!record(value) || value.version !== 1 || typeof value.path !== "string" || typeof value.title !== "string"
     || typeof value.user !== "string" || typeof value.csrf !== "string" || typeof value.refreshUrl !== "string"
@@ -124,6 +133,7 @@ export function isWorkspace(value: unknown): value is BrowserWorkspace {
   if (value.view !== undefined && value.view !== null && !(record(value.view) && typeof value.view.kind === "string")) return false;
   if (value.signIn !== undefined && !(Array.isArray(value.signIn) && value.signIn.every(item => record(item)
     && [item.provider, item.title, item.command, item.detail, item.resumeLabel, item.resumeHref].every(part => typeof part === "string") && String(item.resumeHref).startsWith("/")))) return false;
+  if (value.firstRun !== undefined && !isFirstRun(value.firstRun)) return false;
   if (value.refreshSeconds !== undefined && !(typeof value.refreshSeconds === "number" && Number.isFinite(value.refreshSeconds) && value.refreshSeconds >= 5)) return false;
   if (value.chats !== undefined && !(Array.isArray(value.chats) && value.chats.every(item => record(item) && (item.kind === "project" || item.kind === "task")
     && typeof item.title === "string" && typeof item.href === "string" && item.href.startsWith("/") && typeof item.active === "boolean" && (item.at === null || typeof item.at === "string")))) return false;

@@ -3700,7 +3700,7 @@ describe("the roll-up inbox — every project, one ceiling, links only", () => {
   });
 });
 
-describe("the first-run checklist (adoption track, step 3)", () => {
+describe("the first run: three plain steps to a first result", () => {
   let store: Store;
   let server: Server;
   let base: string;
@@ -3719,8 +3719,11 @@ describe("the first-run checklist (adoption track, step 3)", () => {
     return (response.headers.get("set-cookie") ?? "").split(";")[0] as string;
   };
 
+  // No agent is signed in and the project has no issues or TODOs unless a test says so.
+  const signedOut = async (file: string) => ({ code: 1, stdout: file === "codex" ? "Not logged in\n" : JSON.stringify({ loggedIn: false }), stderr: "", timedOut: false, notFound: false });
+  const quietRepo = async () => ({ code: 1, stdout: "", stderr: "", timedOut: false, notFound: false });
   const boot = async (options: Record<string, unknown> = {}) => {
-    server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(), ...options });
+    server = createDecisionServer({ store, evidenceRoot, clock: () => new Date(), connectionProbe: signedOut, firstTaskRunner: quietRepo, ...options });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
     if (typeof address !== "object" || address === null) throw new Error("no address");
@@ -3741,54 +3744,80 @@ describe("the first-run checklist (adoption track, step 3)", () => {
     rmSync(evidenceRoot, { recursive: true, force: true });
   });
 
-  test("a young installation gets the checklist, derived from live state", async () => {
+  test("a young installation gets three plain steps, derived from live state", async () => {
     await boot({ repo: "/repo/main" });
     const cookie = await login();
     const html = await (await fetch(url("/inbox"), { headers: { cookie } })).text();
-    expect(html).toContain("Getting started");
-    // The empty-queue card yields to the checklist.
+    expect(html).toContain("Get to your first result");
+    // The empty-queue card yields to the steps.
     expect(html).not.toContain("Nothing needs you.");
-    // Scoped: the ceiling step is done and names the repo.
-    expect(html).toContain("name what this console may see");
-    // No spend routing yet: the exact command, and the four-facts honesty.
-    expect(html).toContain("toolroll config set build");
-    expect(html).toContain("four separate facts");
-    // No work yet: the templates are offered.
-    expect(html).toContain("/routines?template=nightly-deps");
-    expect(html).toContain("/tasks?template=lint-sweep");
+    const step = (key: string) => new RegExp(`<p class="row" data-step="${key}">(.*?)</p>`).exec(html)?.[1] ?? "";
+    // No agent signed in: the exact command. A project is added. No task yet: the button that starts one.
+    expect(step("agent")).toContain("Agent signed in");
+    expect(step("agent")).toContain("<code>claude auth login</code>");
+    expect(step("project")).toContain("Project added");
+    expect(step("project")).toContain("done");
+    expect(step("task")).toContain('<a href="/tasks/new">New task</a>');
+    expect(html).not.toMatch(/ceiling|unscoped|phase config|serve --repo|toolroll config set build/);
   });
 
-  test("a skill only in the folder from before the rename counts on the checklist, and the setup guide offers to bring it up to date", async () => {
+  test("a signed-in agent checks off the first step", async () => {
+    const signedIn = async (file: string) => ({ code: 0, stdout: file === "claude" ? JSON.stringify({ loggedIn: true, authMethod: "claude.ai" }) : "Not logged in\n", stderr: "", timedOut: false, notFound: false });
+    await boot({ repo: "/repo/main", connectionProbe: signedIn });
+    const cookie = await login();
+    const html = await (await fetch(url("/inbox"), { headers: { cookie } })).text();
+    expect(/<p class="row" data-step="agent">(.*?)<\/p>/.exec(html)?.[1]).not.toContain("claude auth login");
+  });
+
+  test("Chat opens with the steps and three first tasks from the project's issues; the sandbox sits beside sign-in", async () => {
+    const gh = vi.fn(async (file: string, args: readonly string[]) => file === "gh" && args[0] === "issue"
+      ? { code: 0, stdout: JSON.stringify([{ number: 7, title: "Crash on save", state: "OPEN" }]), stderr: "", timedOut: false, notFound: false }
+      : { code: 0, stdout: "src/cart.ts:40:// TODO handle an empty cart\n", stderr: "", timedOut: false, notFound: false });
+    await boot({ repo: "/repo/main", firstTaskRunner: gh });
+    const cookie = await login();
+    const read = async () => (await fetch(url("/chat?format=workspace"), { headers: { cookie } })).json() as Promise<import("./browser-workspace.js").BrowserWorkspace>;
+    const first = await read();
+    expect(first.firstRun!.steps.map(one => [one.title, one.done])).toEqual([["Agent signed in", false], ["Project added", true], ["Your first task", false]]);
+    expect(first.firstRun!.suggestions.map(one => one.source)).toEqual(["issue", "todo", "generic"]);
+    expect(first.firstRun!.suggestions[0]!.draft).toBe("Fix GitHub issue #7: Crash on save");
+    expect(first.firstRun!.sandbox).toBe("npx toolroll demo");
+    // The sources are read once, not on every refresh; reading them files nothing.
+    await read();
+    expect(gh.mock.calls.filter(([file]) => file === "gh")).toHaveLength(1);
+    expect(gh.mock.calls.every(([file, args]) => (file === "gh" && args[0] === "issue" && args[1] === "list") || (file === "git" && args[0] === "grep"))).toBe(true);
+    expect(store.hasAnyWork()).toBe(false);
+    // Once the first task exists, the suggestions give way.
+    store.createTask({ id: "w-3", title: "first task" }, T0);
+    const filed = await read();
+    expect(filed.firstRun!.steps.at(-1)!.done).toBe(true);
+    expect(filed.firstRun!.suggestions).toEqual([]);
+  });
+
+  test("a skill only in the folder from before the rename: the setup guide offers to bring it up to date", async () => {
     const repo = mkdtempSync(join(tmpdir(), "toolroll-wizard-legacy-skill-"));
     try {
       mkdirSync(join(repo, LEGACY_SKILL_DIR), { recursive: true });
       writeFileSync(join(repo, LEGACY_SKILL_DIR, SKILL_FILE), "---\nname: standing-orders\n---\n");
-      await boot({ repo });
-      const cookie = await login();
-      const html = await (await fetch(url("/inbox"), { headers: { cookie } })).text();
-      expect(html).toContain("skill installed");
       // The setup guide still offers Review: installing moves it into .claude/skills/toolroll with current content.
       expect(previewProjectInstructions(repo)).toMatchObject({ ok: true, installed: false });
       // Without it, both say it is missing.
       rmSync(join(repo, ".claude"), { recursive: true });
-      const bare = await (await fetch(url("/inbox"), { headers: { cookie } })).text();
-      expect(bare).not.toContain("skill installed");
       expect(previewProjectInstructions(repo)).toMatchObject({ ok: true, installed: false });
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }
   });
 
-  test("unscoped mode is named, not normalized — the step instructs the restart", async () => {
+  test("with no project yet, the step offers the button that adds one, in plain words", async () => {
     await boot();
     const cookie = await login();
     const html = await (await fetch(url("/inbox"), { headers: { cookie } })).text();
-    expect(html).toContain("no ceiling is configured");
-    expect(html).toContain("serve --repo");
+    expect(/<p class="row" data-step="project">(.*?)<\/p>/.exec(html)?.[1]).toContain('<a href="/projects">Add a project</a>');
+    expect(html).not.toMatch(/ceiling|unscoped|serve --repo/);
   });
 
   test("the first successful run retires the checklist PERMANENTLY", async () => {
-    await boot({ repo: "/repo/main" });
+    await boot({ repo: "/repo/main", telegramTokenFile: join(evidenceRoot, "telegram-token") });
     const cookie = await login();
     store.createTask({ id: "w-1", title: "the work" }, T0);
     const run = store.startRun({
@@ -3801,20 +3830,25 @@ describe("the first-run checklist (adoption track, step 3)", () => {
       ...presented(store, store.refFor("built-in", "w-1").id, "builder"),
     });
     store.finishRun(run, { outcome: "built", committed: true, now: new Date("2026-08-14T13:00:00.000Z") });
-    const html = await (await fetch(url("/inbox"), { headers: { cookie } })).text();
-    expect(html).not.toContain("Getting started");
-    // The retirement is an append-only installation fact, so pruning run
-    // history later cannot resurrect the checklist.
+    // The first Ready result is recorded the moment it lands, as an append-only
+    // installation fact, so pruning run history later cannot resurrect the list.
     expect(store.installationFact("first-success-at")).toBe("2026-08-14T13:00:00.000Z");
+    const html = await (await fetch(url("/inbox"), { headers: { cookie } })).text();
+    expect(html).not.toContain("Get to your first result");
+    const chat = await (await fetch(url("/chat?format=workspace"), { headers: { cookie } })).json() as import("./browser-workspace.js").BrowserWorkspace;
+    expect(chat.firstRun).toBeUndefined();
+    // Settings shows how long the first result took, from the first account.
+    const settings = await (await fetch(url("/settings?format=workspace"), { headers: { cookie } })).json() as import("./browser-workspace.js").BrowserWorkspace;
+    expect((settings.view as import("./browser-workspace.js").BrowserSettingsView).firstResult).toBe("First result in 3 days");
   });
 
-  test("filing work checks the step off but keeps the checklist until success", async () => {
+  test("filing work checks the step off but keeps the list until the first Ready result", async () => {
     await boot({ repo: "/repo/main" });
     const cookie = await login();
     store.createTask({ id: "w-2", title: "queued work" }, T0);
     const html = await (await fetch(url("/inbox"), { headers: { cookie } })).text();
-    expect(html).toContain("Getting started");
-    expect(html).toContain("work is filed");
+    expect(html).toContain("Get to your first result");
+    expect(/<p class="row" data-step="task">(.*?)<\/p>/.exec(html)?.[1]).toContain("done");
   });
 
   test("template prefill: the forms carry the library's exact text, editable", async () => {

@@ -47,6 +47,21 @@ never reaches outside.
 | yarn | `yarn global add toolroll` |
 | script | `curl -fsSL https://raw.githubusercontent.com/ap9000/toolroll/main/install.sh \| sh` |
 
+## Install with your agent
+
+Paste this into Claude Code or Codex:
+
+> Install Toolroll with `npm install -g toolroll` and start `toolroll up` in
+> the background; it keeps running. Then run `toolroll onboard` in this
+> repository, and run it again with `--yes` to install Toolroll's skill for
+> you. Tell me the console address, where my login is saved (not the
+> password), how to pair my phone, and what I can ask you next.
+
+`toolroll onboard` adds the repository as a project, says which agent CLIs are
+signed in, and prints the line that adds Toolroll as tools
+(`claude mcp add toolroll -- toolroll mcp`) without running it.
+`toolroll onboard --remove --yes` takes the skill out again.
+
 Then read [Getting started](docs/guide/getting-started.md), [Flows](docs/guide/flows.md)
 and [Security](docs/guide/security.md). Coming from Standing Orders? It's the
 same product renamed; the `standing-orders` command and your data keep working.

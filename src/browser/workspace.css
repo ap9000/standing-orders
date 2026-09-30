@@ -525,3 +525,32 @@ body:has(.so-workspace) { margin: 0; padding: 0; background: var(--so-ground); o
 /* v99: starter kit shortcuts under the empty chat. */
 .so-kit-links { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; margin: 4px auto 0; max-width: 36rem; font-size: 13px; color: var(--so-muted); }
 .so-kit-links a { text-decoration: none; }
+
+/* The first run in Chat: three steps to a first result, then first tasks to try. */
+.so-first-run { display: flex; flex-direction: column; gap: 14px; width: 100%; max-width: 560px; margin: 6vh 0 28px; }
+.so-first-run h2 { margin: 0; color: var(--so-ink); font-size: 26px; line-height: 1.15; font-weight: 600; letter-spacing: -.035em; text-wrap: balance; }
+.so-first-run-steps { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--so-line); }
+.so-first-run-steps > li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; min-height: 48px; padding: 8px 0; border-bottom: 1px solid var(--so-line); }
+.so-first-run-mark { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 20px; height: 20px; border: 1.5px solid var(--so-input-line); border-radius: 50%; font-size: 11px; font-weight: 600; line-height: 1; }
+.so-first-run-steps > li[data-done="true"] .so-first-run-mark { border-color: var(--so-success); background: var(--so-success); color: var(--so-paper); }
+.so-first-run-title { flex: 1; min-width: 0; font-size: 14px; font-weight: 500; color: var(--so-ink); }
+.so-first-run-steps > li[data-done="true"] .so-first-run-title { color: var(--so-muted); }
+.so-first-run-steps .ui-button { white-space: nowrap; }
+.so-first-run-command { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 2px; min-width: 0; max-width: 100%; }
+.so-first-run-command code { min-width: 0; padding: 3px 8px; border-radius: 6px; background: var(--so-raised); font: 500 12.5px/1.4 var(--so-mono); color: var(--so-ink); overflow-wrap: anywhere; }
+.so-first-run-choices { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; flex-basis: 100%; margin: 2px 0 4px 32px; }
+.so-first-run-choices > div { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; padding: 12px; border-radius: 10px; background: var(--so-raised); }
+.so-first-run-choices .so-first-run-command code { background: var(--so-paper); }
+.so-first-run-choice-title { margin: 0; font-size: 13px; font-weight: 600; color: var(--so-ink); }
+.so-first-run-choice-hint { margin: 0 0 4px; font-size: 12.5px; color: var(--so-muted); }
+.so-first-tasks { display: flex; flex-direction: column; }
+.so-first-tasks-title { margin: 0; font-size: 13px; font-weight: 500; color: var(--so-muted); }
+.so-first-tasks .so-suggestions { margin-top: 8px; }
+.so-page-content > .so-first-run { margin-top: 12px; }
+@media (max-width: 900px) {
+  .so-first-run { margin-top: 3vh; }
+  .so-first-run h2 { font-size: 22px; }
+  .so-first-run-choices { margin-left: 0; }
+  .so-first-run-choices > div { padding: 10px; }
+  .so-first-run-steps .ui-button { min-height: 44px; }
+}

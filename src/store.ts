@@ -17318,11 +17318,13 @@ export class Store {
     return when;
   }
 
-  /** Whether ANY spend routing is configured — a fact about this database,
-   * not about any machine's binaries or authentication. */
-  hasPhaseConfig(): boolean {
-    return this.db.prepare("SELECT 1 AS hit FROM phase_config LIMIT 1").get() !== undefined;
+  /** When this installation began: its first account. Accounts are never
+   * deleted (revocation is a stamp), so this never moves. */
+  installationStartedAt(): string | null {
+    const row = this.db.prepare("SELECT MIN(added_at) AS at FROM approver").get();
+    return row === undefined || row["at"] == null ? null : String(row["at"]);
   }
+
 
   /** The jump palette's food: open (queued/running/failed) tasks, admission
    * inside the query before its LIMIT, newest first. */
@@ -19130,6 +19132,9 @@ export class Store {
     // stop after an orphan or held supervisor finishes shutdown.
     this.recordRunProcessExits(id, result.now);
     this.settleRunStop(id, result.stopSettlement ?? "finished", result.now);
+    // The first Ready result is an installation fact the moment it lands,
+    // not only when something later looks for it.
+    if (result.outcome === "built" || result.outcome === "no-change") this.firstSuccessAt(result.now);
     // The park rate is *measured* — parked over concluded builder attempts —
     // and maintained where attempts conclude, because the attention budget's
     // gate reads it inside a claim transaction and must never trust a number

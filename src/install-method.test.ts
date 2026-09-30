@@ -29,6 +29,13 @@ describe("c2: installMethod", () => {
       .toEqual({ kind: "source", updateCommand: "git pull && npm install && npm run build" });
   });
 
+  test("a runtime toolroll update installed (staged-upgrades/release-* or rollback-*) updates itself", () => {
+    for (const dir of ["release-0.8.0-1a2b3c", "rollback-0.7.0-4d5e6f"]) {
+      const real = `/Users/a/.config/toolroll/staged-upgrades/${dir}/runtime/node_modules/toolroll/dist/bin.js`;
+      expect(installMethod("/Users/a/.local/bin/toolroll", probe(real))).toEqual({ kind: "managed", updateCommand: "toolroll update" });
+    }
+  });
+
   test("a git checkout is a source install", () => {
     const real = "/Users/a/code/toolroll/dist/bin.js";
     expect(installMethod("/Users/a/code/toolroll/dist/bin.js", probe(real, ["/Users/a/code/toolroll/package.json", "/Users/a/code/toolroll/.git"])))

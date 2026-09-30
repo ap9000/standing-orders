@@ -182,6 +182,8 @@ export function applyInstall(repo: string, writeContext: boolean): InstallResult
  */
 export const CLAUDE_CODE_MANAGED_MARK = "<!-- standing-orders:claude-code-skill:v1 -->";
 export const CLAUDE_CODE_GUIDES = ["console", "operating", "runner"] as const;
+/** The thin user-level skill `toolroll onboard` writes (agent-onboard.ts). */
+export const OPERATOR_SKILL_MARK = "<!-- toolroll:operator-skill:v1";
 
 export type ClaudeCodeSkillFile = {
   name: string;
@@ -268,7 +270,7 @@ function claudeCodeFiles(directory: string): { name: string; path: string; conte
 
 function isClaudeCodeManaged(name: string, content: string): boolean {
   if (name === "SKILL.md") {
-    return ownHeader(content) && content.includes(`\n${CLAUDE_CODE_MANAGED_MARK}\n`);
+    return ownHeader(content) && (content.includes(`\n${CLAUDE_CODE_MANAGED_MARK}\n`) || content.includes(`\n${OPERATOR_SKILL_MARK} `));
   }
   return content.startsWith(`${CLAUDE_CODE_MANAGED_MARK}\n\n`);
 }

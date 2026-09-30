@@ -6,7 +6,8 @@ import { homedir, hostname } from "node:os";
 import { fileURLToPath } from "node:url";
 import { createHmac } from "node:crypto";
 import { openStore, openStoreNoMigrate, databasePath, readSchemaVersion, SCHEMA_VERSION } from "./store.js";
-import { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "node:sqlite";
+import { createRequire } from "node:module";
 import { authenticateApprover, hashPassword } from "./scope.js";
 import { runOperate, writeLoginFileDurably } from "./operate.js";
 import { daemonStatus, installLaunchdService, planDesktopService, stopLaunchdService, type ServiceDefinition, type SupervisorRunner } from "./daemon.js";
@@ -102,7 +103,7 @@ export function desktopDatabaseStatus(file: string): { ready: boolean; message: 
   const result = (ready: boolean, message: string) => ({ ready, message, expectedSchema: SCHEMA_VERSION });
   try {
     // Read-only open: a missing/unreadable file must never become a new queue.
-    db = new DatabaseSync(file, { readOnly: true });
+    db = new (createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite")).DatabaseSync(file, { readOnly: true });
     db.exec("PRAGMA busy_timeout = 1000");
     const schema = readSchemaVersion(db);
     if (!schema.ok) return result(false, `This app cannot use the saved task database: ${schema.problem}. Keep the database; use a compatible release or restore a verified backup separately.`);

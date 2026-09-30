@@ -17,6 +17,7 @@ import { browserCrewFromIndex } from "../browser-crew.js";
 import type { TeamSnapshot } from "../team-contract.js";
 import { GuardedHtml, notifyWorkspaceRendered, regionIsEditing } from "./guarded-html.js";
 import { ActionCards, CHAT_COMMANDS } from "./chat-cards.js";
+import { FirstRun } from "./first-run.js";
 import { ViewHost } from "./views/index.js";
 import { Toaster } from "./components/ui/index.js";
 import { updateNoticeWords } from "../update-notice.js";
@@ -466,8 +467,9 @@ function LeadChat({ controller, docked = null }: { controller: ReturnType<typeof
   const delivery = offline ? "Offline. Your draft stays in this tab." : sending ? "Sending…" : notice;
   return <div className="so-lead-chat" data-workspace-chat>
     <Conversation className="so-conversation"><ConversationContent className="so-conversation-content">
+      {!dock && workspace.firstRun && <FirstRun firstRun={workspace.firstRun} onDraft={text => { controller.edit(text); box.current?.focus(); }} />}
       {!dock && workspace.catchUpHtml && <GuardedHtml html={workspace.catchUpHtml} className="so-catch-up" />}
-      {chat.messages.length === 0 && (dock
+      {chat.messages.length === 0 && (!dock && workspace.firstRun ? null : dock
         ? <div className="so-docked-empty"><p className="so-docked-empty-title">{dock.title}</p><p className="so-docked-empty-hint">{dock.hint}</p>
             <div className="so-suggestions">{dock.suggestions.map(one => <button key={one} type="button" className="so-suggestion" onClick={() => { controller.edit(one); box.current?.focus(); }}>{one.trim().replace(/:$/, "…")}</button>)}</div></div>
         : <><ConversationEmptyState title="What would you like to work on?" description="Plan the work with your lead. Your crew’s tasks and results stay beside the conversation." />
@@ -590,7 +592,7 @@ export function WorkspaceApp({ initial }: { initial: BrowserWorkspace }) {
         </Alert>}
       </div>}
       <main id="workspace-main" className="so-main-content" tabIndex={-1}>
-        {workspace.team ? <TeamChat initial={workspace.team} user={workspace.user} csrf={workspace.csrf} onSnapshot={setTeamSnapshot} /> : workspace.conversation && !docked ? <LeadChat controller={controller} /> : <div className="so-page-content" data-workspace-page>{workspace.view ? <ViewHost view={workspace.view} csrf={workspace.csrf} /> : <GuardedHtml html={initial.pageHtml ?? ""} immutable />}</div>}
+        {workspace.team ? <TeamChat initial={workspace.team} user={workspace.user} csrf={workspace.csrf} onSnapshot={setTeamSnapshot} /> : workspace.conversation && !docked ? <LeadChat controller={controller} /> : <div className="so-page-content" data-workspace-page>{isChat && workspace.firstRun && <FirstRun firstRun={workspace.firstRun} />}{workspace.view ? <ViewHost view={workspace.view} csrf={workspace.csrf} /> : <GuardedHtml html={initial.pageHtml ?? ""} immutable />}</div>}
       </main>
     </div>
     {docked && <aside className="so-supporting-panel so-ask-panel" data-workspace-detail aria-label="Ask">

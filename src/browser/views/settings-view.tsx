@@ -292,7 +292,7 @@ function Workers({ workers }: { workers: NonNullable<BrowserSettingsView["worker
 }
 
 /** Settings → Updates: this version, the latest and its notes, the command that updates this install, the daily check, and each worker's version. */
-function Updates({ updates, csrf }: { updates: NonNullable<BrowserSettingsView["updates"]>; csrf: string }) {
+function Updates({ updates, csrf, firstResult }: { updates: NonNullable<BrowserSettingsView["updates"]>; csrf: string; firstResult: string | null }) {
   const latest = updates.latest;
   const newer = latest !== null && latest.newer ? latest : null;
   const [copied, setCopied] = useState(false);
@@ -308,6 +308,7 @@ function Updates({ updates, csrf }: { updates: NonNullable<BrowserSettingsView["
       </span>
       {newer?.security && <Badge tone="warning">Security fixes</Badge>}
     </div>
+    {firstResult !== null && <p className="text-[13px] text-muted-foreground" data-first-result>{firstResult}</p>}
     {newer && <div className="grid gap-2 rounded-lg bg-muted p-3 max-sm:p-3" data-update-command>
       <div className="flex flex-wrap items-center gap-2">
         <code className="min-w-0 flex-1 break-words font-mono text-[12.5px]">{updates.updateCommand}</code>
@@ -325,7 +326,7 @@ function Updates({ updates, csrf }: { updates: NonNullable<BrowserSettingsView["
       </CollapsibleContent>
     </Collapsible>}
     <Separator />
-    <AutoForm action="/settings/updates" csrf={csrf} className="flex items-center justify-between gap-4">{submit => <>
+    <AutoForm action="/settings/updates/checks" csrf={csrf} className="flex items-center justify-between gap-4">{submit => <>
       <div className="grid gap-0.5">
         <Label htmlFor="update-check">Check for a newer version once a day</Label>
         <span className="text-[12.5px] text-muted-foreground">{updates.check.byEnv ? "Off by TOOLROLL_NO_UPDATE_CHECK." : "One anonymous request to npm and GitHub. Nothing about you is sent."}</span>
@@ -427,7 +428,8 @@ export function SettingsView({ view, csrf }: { view: BrowserSettingsView; csrf: 
       options={[{ value: "default", title: "Default", description: "Everyday agents and the repository check." }, { value: "strict", title: "Strict / release", description: "Strongest agents. Release approval stays separate." }]} />}
     {view.providers && <Providers providers={view.providers} csrf={csrf} />}
     {view.workers && <Workers workers={view.workers} />}
-    {view.updates && <Updates updates={view.updates} csrf={csrf} />}
+    {view.updates ? <Updates updates={view.updates} csrf={csrf} firstResult={view.firstResult ?? null} />
+      : view.firstResult && <Section title="This installation"><p className="text-sm" data-first-result>{view.firstResult}</p></Section>}
     {view.email && csrf && <Email email={view.email} csrf={csrf} />}
     <Notifications view={view} csrf={csrf} />
     {csrf && <TelegramToken view={view} csrf={csrf} />}

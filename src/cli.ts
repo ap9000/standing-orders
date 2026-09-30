@@ -42,6 +42,7 @@ import {
 } from "./graph.js";
 import { openStore, openStoreReadOnly, databasePath, type Store } from "./store.js";
 import { PACKAGE_VERSION } from "./version.js";
+import { runUpdateCommand, type UpdateCliDeps } from "./toolroll-update-cli.js";
 import type { BackendGrant } from "./grant.js";
 import { runOperate, OPERATE_HELP, type OperateOptions } from "./operate.js";
 import { renderReport, renderPulls, renderGraph, type PullGroup, type RemoteMap } from "./render.js";
@@ -94,6 +95,8 @@ Usage
                                    preview, then clone and connect (--yes)
   toolroll link             put \`toolroll\` on your PATH
   toolroll unlink           take it off again
+  toolroll update           update to the latest release: verified, drained, undoable
+                                   (preview first; --yes, --now, --at HH:MM, --rollback)
   toolroll contract         the machine contract: envelope version + capabilities
                                    (--commands dumps the declared command guide)
   toolroll skills install --claude-code [--dir <path>]
@@ -103,6 +106,7 @@ Usage
   toolroll skills get <name>  print one guide (version-matched, never stale)
   toolroll demo             a seeded throwaway sandbox — see it working in 90 seconds
   toolroll up               app + builder for every saved project — the normal start
+  toolroll onboard          make your agent Toolroll's lead: add this repo, install its skill (--yes)
   toolroll status           running, queued, ready results, release check and plan windows
   toolroll session          native coding sessions through the running service
   toolroll connect          save a private connection to your central service
@@ -223,13 +227,14 @@ export function parseArgs(argv: readonly string[]): ParseResult {
  * which answers as `scan`. */
 export const TOP_LEVEL_COMMANDS: readonly string[] = [
   "", "pulls", "graph", "repos", "repos add", "repos remove", "repos add-from-github",
-  "link", "unlink", "contract", "skills list", "skills get", "skills install", "demo",
+  "link", "unlink", "update", "contract", "skills list", "skills get", "skills install", "demo",
   ...SESSION_CLI_ACTIONS.map(action => `session ${action}`),
   ...TEAM_CLI_ACTIONS,
 ];
 
 export const OPERATE_COMMANDS = new Set([
   "up",
+  "onboard",
   "status",
   "ready",
   "task",
@@ -297,6 +302,7 @@ export type MainOptions = {
    * the verb's parsing, gating, and enrollment are what CLI tests prove;
    * gh itself is proved by onboard.test.ts. */
   onboard?: { preview?: typeof previewGithubRepo; clone?: typeof cloneGithubRepo };
+  update?: UpdateCliDeps;
 };
 
 /**
@@ -435,6 +441,7 @@ async function dispatch(
   if (first === "link" || first === "unlink") {
     return runLinkCommand(first, rest, write, mainOptions.binSource);
   }
+  if (first === "update") return runUpdateCommand(rest, write, mainOptions.update);
   if (first === "contract") return runContractCommand(rest, write);
   if (first === "session") return runSessionCommand(rest, write, mainOptions.session);
   if (first === "demo") return runDemoCommand(rest, write);

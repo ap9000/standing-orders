@@ -183,6 +183,31 @@ describe("toolroll up", () => {
     expect(envelope()).toMatchObject({ ok: false, reason: "runner-alive" });
   });
 
+  test("without a terminal it prints the handoff, points at onboard, and opens no browser", async () => {
+    const opened: string[] = [];
+    const code = await runOperate("up", ["--repo", repo, "--port", String(PORT + 14), "--for", "1200"], line => lines.push(line), {
+      databaseFile: db,
+      upSeams: { terminal: false, openBrowser: url => opened.push(url) },
+    });
+    expect(code).toBe(0);
+    const text = lines.join("\n");
+    const [account = "", password = ""] = readFileSync(join(base, "up-login.txt"), "utf8").trim().split(" ");
+    expect(text).toContain(`Toolroll is ready.\n  console   http://127.0.0.1:${PORT + 14}`);
+    expect(text).toContain(`  login     ${account} — the password is in ${join(base, "up-login.txt")}`);
+    expect(text).toContain('  say next  "queue these bugs overnight" · "what needs me?" · "open the result"');
+    expect(text).toContain("Run `toolroll onboard` inside a repository");
+    expect(text).not.toContain(password);
+    expect(text).not.toContain("Ctrl-C stops Toolroll");
+    expect(opened).toEqual([]);
+
+    lines = [];
+    expect(await runOperate("up", ["--repo", repo, "--port", String(PORT + 15), "--for", "1200"], line => lines.push(line), {
+      databaseFile: db,
+      upSeams: { terminal: true, openBrowser: url => opened.push(url) },
+    })).toBe(0);
+    expect(opened).toEqual([`http://127.0.0.1:${PORT + 15}/`]);
+  });
+
   test("the generated worker name comes from this machine's hostname, normalized", async () => {
     await up([], PORT + 4);
     const named = String(envelope()["runner"]);

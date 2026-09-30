@@ -21,7 +21,9 @@ export const UPDATE_SWITCH_FILE = "update-check";
 export const RUNNER_VERSIONS_FILE = "runner-versions.json";
 export const CHECK_EVERY_MS = 24 * 60 * 60 * 1000;
 export const CHECK_TIMEOUT_MS = 5_000;
-export const REGISTRY_URL = "https://registry.npmjs.org/toolroll/latest";
+/** The npm registry `toolroll update` downloads releases from. */
+export const REGISTRY = "https://registry.npmjs.org";
+export const REGISTRY_URL = `${REGISTRY}/toolroll/latest`;
 export const RELEASES_PAGE = "https://github.com/ap9000/toolroll/releases/tag/";
 const NOTES_API = "https://api.github.com/repos/ap9000/toolroll/releases/tags/";
 const NOTES_MAX = 20_000;
@@ -226,4 +228,14 @@ function writeAtomic(file: string, content: string): void {
   const temporary = `${file}.${process.pid}.tmp`;
   writeFileSync(temporary, content, { mode: 0o600 });
   renameSync(temporary, file);
+}
+
+/** The latest version, asked of npm now: for an explicit update (the command, Check now), not the once-a-day
+ * notice, so neither its cache nor its switch applies. Throws with npm's own reason. */
+export async function latestVersionNow(io: { fetch?: typeof fetch } = {}): Promise<{ version: string }> {
+  const answer = await (io.fetch ?? fetch)(REGISTRY_URL, { signal: AbortSignal.timeout(10_000), headers: { accept: "application/json" } });
+  if (!answer.ok) throw new Error(`npm answered ${answer.status}`);
+  const version = (await answer.json() as { version?: unknown }).version;
+  if (typeof version !== "string" || !/^\d+\.\d+\.\d+$/.test(version)) throw new Error("npm did not name a version");
+  return { version };
 }

@@ -145,6 +145,7 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
   },
   operator("link", "put toolroll on PATH"),
   operator("unlink", "take it off PATH"),
+  operator("update", "update to the latest release: verified provenance, drained work, backup, rehearsal, health check, automatic restore; --rollback undoes it"),
   operator("demo", "a seeded throwaway sandbox"),
   { invocation: 'session capabilities', synopsis: 'Show executable session schemas and operator authority requirements; no credentials needed', audience: 'agent', agentMayInvoke: true, mutation: 'none', flags: [jsonFlag] },
   ...SESSION_DESCRIPTORS.map(spec => ({
@@ -394,5 +395,6 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
   operator("serve", "the operations console (HTTP)"),
   operator("watch", "the unattended loop, kept running"),
   operator("up", "console + worker + browser, one command"),
+  operator("onboard", "add this repository, report signed-in agents, install or --remove the operator skill (--yes), and print the handoff"),
   operator("daemon", "install the loop under the OS service manager"),
 ];

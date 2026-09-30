@@ -2,6 +2,49 @@
 
 ## Unreleased
 
+## 0.8.0 — 2026-09-30
+
+- **Install with your agent.** `toolroll onboard`, run by the agent that
+  installed Toolroll, adds the repository as a project, says which agent
+  CLIs are signed in, and with `--yes` installs a small marked Toolroll
+  skill for Claude Code and Codex so the agent knows how to hand work over,
+  wait and review (`--remove` takes it out; a skill you wrote yourself is
+  never touched). It prints the MCP line rather than running it and ends
+  with a handoff for the person: the console address and where the login is
+  saved, never the password. `toolroll up` without a terminal prints that
+  handoff instead of opening a browser.
+- **A first run that leads to a first result.** Chat and the inbox show three
+  plain steps (Agent signed in, Project added, Your first task), each done or
+  with one action, until the first Ready result. Until a task exists, Chat
+  offers three first tasks: the repository's open GitHub issues, else its
+  TODO and FIXME notes, else safe generic ones. A tap only drafts the
+  message, and text from issues and notes is kept to what a person can see.
+  Settings shows how long the first result took.
+- **Calmer secret alerts.** The commit secret scan looks only at lines a
+  change adds and skips documented placeholders, so pushes no longer warn
+  about keys that were already there or never real. A real hit still blocks
+  publication; the alert names the file and line, once per commit, and says
+  what to do.
+- **`toolroll update`: verified, drained, undoable updates.** Installs the
+  new release from the npm registry beside the running one, under npm's own
+  signature and attestation check; the installed bytes must be the ones
+  downloaded and hashed, and their provenance must name ap9000/toolroll and
+  its publish workflow. It lets running work finish (`--when-idle`, the
+  default; `--now` refuses while work runs and names it; `--at 03:00`
+  waits), stops the service and waits for it to exit, backs up the database
+  and coding catalog, rehearses, switches the service and every
+  `toolroll`/`standing-orders` on PATH, restarts and health-checks. A failed
+  check restores the previous version, database and coding catalog on its
+  own, keeping what the new version wrote in a named copy;
+  `toolroll update --rollback` goes back later. It refuses while a
+  foreground `toolroll up` runs, when a command on PATH is a shim it cannot
+  switch, and to an older release without `--allow-downgrade`, and keeps two
+  release runtimes. Settings → Updates offers Update now, When idle and
+  Tonight (03:00) behind your password, shows the steps live, and a one-time
+  What's new card afterwards; while update checks are off it asks npm
+  nothing until Check now. The console's update job runs once, for that
+  update only. Every update, rollback, refusal and failure is in the ledger.
+
 ## 0.7.0 — 2026-09-30
 
 - **Know when a newer Toolroll exists.** Once a day Toolroll makes one

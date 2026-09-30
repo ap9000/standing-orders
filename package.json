@@ -1,6 +1,6 @@
 {
   "name": "toolroll",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "A control plane for unattended coding agents — queue tasks, walk away, come back to pull requests. Agents build in leased worktrees, never touch your default branch, and interrupt you only for decisions that need a human.",
   "directories": {
     "doc": "docs"
@@ -77,6 +77,7 @@
   },
   "files": [
     "dist",
+    "CHANGELOG.md",
     "scripts/provider-canary.mjs",
     "scripts/canary-assertions.mjs",
     "scripts/recovery-canary.mjs",

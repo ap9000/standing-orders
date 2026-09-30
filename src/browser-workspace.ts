@@ -10,6 +10,7 @@ import type { WorkSummaryAccess } from './work-summary.js';
 import { workIndexPage, type WorkIndexItem, type WorkIndexPage } from './work-index.js';
 import type { StatusTone } from './workspace-ui.js';
 import type { AssignmentCard } from './assignment-ui.js';
+import type { FirstRunStep, FirstTaskSuggestion } from './first-run.js';
 
 export type BrowserProject = { name: string; path: string; href: string; knowledgeHref: string };
 /** count: tasks waiting on a person, shown beside Tasks when above zero. */
@@ -97,6 +98,8 @@ export type BrowserSettingsView = {
   email?: { set: boolean; host: string; port: number; secure: boolean; user: string; from: string;
     /** v89: where Email inbox triggers read (IMAP), and a Google account connected instead of a mail server (`redirect`: the address to register with Google, when this page's address can take one). */
     imapHost: string; imapPort: number; google: { connected: string | null; clientId: string; redirect: string | null } } | null;
+  /** The installation's first Ready result, in words ("first result in 7 min"); null before it arrives. */
+  firstResult?: string | null;
   /** Settings → Updates: this version, the latest known one and its notes, how to update, the daily-check switch, and each worker's version. */
   updates?: BrowserUpdates | null;
 };
@@ -333,7 +336,12 @@ export type BrowserWorkspace = {
   signIn?: BrowserSignIn[];
   /** A newer Toolroll exists: a quiet notice for an operator, until they dismiss this version. */
   update?: BrowserUpdateNotice;
+  /** Chat's first run, until the first Ready result: the three steps and first tasks to try. */
+  firstRun?: BrowserFirstRun;
 };
+
+/** `sandbox`: the demo command, offered beside the sign-in command while no agent is signed in. */
+export type BrowserFirstRun = { steps: FirstRunStep[]; suggestions: FirstTaskSuggestion[]; sandbox: string | null };
 
 /** The console's update notice: neutral, never the accent — an update does not need a person. */
 export type BrowserUpdateNotice = { version: string; security: boolean; href: string; dismissHref: string };

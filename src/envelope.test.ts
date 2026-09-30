@@ -126,6 +126,7 @@ describe("the machine envelope", () => {
       sync: ["--json"],
       // The usage road terminates without binding a port or minting anything.
       up: ["--for", "not-a-number", "--json"],
+      onboard: ["--agent", "nope", "--json"],
       status: ["--json"],
       ready: ["--json"],
       task: ["list", "--json"],
