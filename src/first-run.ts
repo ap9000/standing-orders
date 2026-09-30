@@ -59,21 +59,25 @@ export function firstTaskSuggestions(found: { issues: readonly OpenIssue[]; todo
 
 const SKIPPED = /(^|\/)(node_modules|dist|build|vendor|third_party|\.git)\//;
 
-/** `git grep` lines ("file:line:text") to TODO or FIXME notes, one per file. */
+/** `git grep -z -n` records ("file\0line\0text\n") to TODO or FIXME notes, one per file. NUL-separated so a
+ * file name with a colon or a newline in it is still one file name. */
 export function parseTodoLines(stdout: string, limit = 3): TodoComment[] {
   const found: TodoComment[] = [];
   const seen = new Set<string>();
-  for (const line of stdout.split("\n")) {
-    const match = /^(.+?):(\d+):(.*)$/.exec(line);
-    if (match === null || SKIPPED.test(match[1]!) || seen.has(match[1]!)) continue;
+  for (const match of stdout.matchAll(/([^\0]*)\0(\d+)\0([^\n]*)(?:\n|$)/g)) {
+    const file = match[1]!;
+    if (file === "" || SKIPPED.test(file) || seen.has(file)) continue;
     const note = /\b(?:TODO|FIXME)\b(?:\([^)]*\))?[:\s-]*(.*)$/.exec(match[3]!);
     if (note === null) continue;
-    seen.add(match[1]!);
-    found.push({ file: match[1]!, line: Number(match[2]), text: clip(note[1]!.replace(/\s*(\*\/|-->)\s*$/, "").trim(), 120) });
+    seen.add(file);
+    found.push({ file, line: Number(match[2]), text: clip(note[1]!.replace(/\s*(\*\/|-->)\s*$/, "").trim(), 120) });
     if (found.length === limit) break;
   }
   return found;
 }
+
+/** The TODO search: no colour and no column whatever the person's git config says, NUL after each file name. */
+export const TODO_GREP_ARGS: readonly string[] = ["-c", "grep.column=false", "grep", "--no-color", "-z", "-n", "-I", "-w", "--max-count=1", "-E", "TODO|FIXME"];
 
 /** Read the project's own sources for suggestions: its open issues through the `gh` login, then its TODO comments. Failures fall through quietly. */
 export async function findFirstTasks(repo: string, runner: Runner = run): Promise<FirstTaskSuggestion[]> {
@@ -85,7 +89,7 @@ export async function findFirstTasks(repo: string, runner: Runner = run): Promis
   let todos: TodoComment[] = [];
   if (issues.length < 3) {
     try {
-      const result = await runner("git", ["grep", "-n", "-I", "-w", "--max-count=1", "-E", "TODO|FIXME"], { cwd: repo, timeoutMs: 5_000 });
+      const result = await runner("git", [...TODO_GREP_ARGS], { cwd: repo, timeoutMs: 5_000 });
       if (result.code === 0 || result.stdout !== "") todos = parseTodoLines(result.stdout);
     } catch { todos = []; }
   }

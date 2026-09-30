@@ -2033,7 +2033,7 @@ export function createDecisionServer(options: ServeOptions): Server {
             })),
           cancelledBlockers: cancelled,
           gaps: project === null ? [] : computeGaps(store, project, now).filter(gap => gap.unblocks.length > 0).slice(0, 10),
-          wizard: await firstRunStepsNow(now),
+          wizard: firstRunStepsNow(now),
           worker: (() => {
             // The one fact the inbox must never hide (install review): with
             // no worker answering, nothing here will ever build, and every
@@ -3613,7 +3613,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         }
       }
       // The first run belongs to the lead conversation, for someone who can act on it.
-      const firstRun = focusTask === null && who.role === "approver" ? await chatFirstRun(now, chatProject) : undefined;
+      const firstRun = focusTask === null && who.role === "approver" ? chatFirstRun(now, chatProject) : undefined;
       const withFirstRun = (shown: Screen): Screen => firstRun === undefined ? shown : { ...shown, workspace: { ...shown.workspace, firstRun } };
       if (enabled.ok && mateSession !== null && principal !== null && !ceilingStale) {
         {
@@ -4080,35 +4080,61 @@ export function createDecisionServer(options: ServeOptions): Server {
    * review, finding 14). Each step is either something this console can do,
    * or the exact command where only the CLI can (finding e).
    */
-  async function firstRunStepsNow(now: Date): Promise<FirstRunStep[] | null> {
+  function firstRunStepsNow(now: Date): FirstRunStep[] | null {
     if (restricted() || store.isDemo() || store.firstSuccessAt(now) !== null) return null;
-    return firstRunSteps({ agentSignedIn: await agentSignedIn(), projects: managedRepos().length, hasTask: store.hasAnyWork(), firstResultAt: null });
+    return firstRunSteps({ agentSignedIn: agentSignedIn(now), projects: managedRepos().length, hasTask: store.hasAnyWork(), firstResultAt: null });
   }
-  /** Whether any coding agent on this computer is signed in: the same
-   * non-spending checks Settings makes, cached briefly. */
-  async function agentSignedIn(): Promise<boolean> {
-    const states = await Promise.all((["claude", "codex"] as const).map(one => connectionCheck(one).then(value => value.state, () => "unverified")));
-    return states.some(state => state === "connected" || state === "key-works" || state === "key-present");
+  /**
+   * Whether a coding agent is signed in where the work runs. This machine's
+   * own checks (the ones Settings makes) speak only for a worker on this
+   * machine; a worker elsewhere speaks through its own readiness report, and
+   * the console never claims to have checked that machine (finding 15).
+   * Nothing here waits on a probe: this machine's answer is the last one
+   * seen, refreshed in the background.
+   */
+  function agentSignedIn(now: Date): boolean {
+    const here = hostname();
+    const workers = store.listRunners().filter(one => one.retiredAt === null && runnerAlive(one, now));
+    if ((options.localRunner !== undefined || workers.some(one => one.host === here)) && localAgentSignedIn()) return true;
+    return workers.some(one => one.host !== here && store.providerReadiness(one.name).some(seen => seen.state === "ready"));
   }
-  /** First tasks per project, read at most every ten minutes: a `gh`
-   * round trip and a `git grep` never run on every render. */
-  const firstTasks = new Map<string, { until: number; value: Promise<FirstTaskSuggestion[]> }>();
-  function firstTasksFor(repo: string): Promise<FirstTaskSuggestion[]> {
-    const at = Date.now(), hit = firstTasks.get(repo);
-    if (hit !== undefined && hit.until > at) return hit.value;
-    const value = findFirstTasks(repo, options.firstTaskRunner ?? execRun).catch(() => firstTaskSuggestions({ issues: [], todos: [] }));
-    firstTasks.set(repo, { until: at + 10 * 60_000, value });
-    return value;
+  let localSignIn: { at: number; signedIn: boolean } | null = null;
+  let localSignInChecking = false;
+  function localAgentSignedIn(): boolean {
+    if (!localSignInChecking && (localSignIn === null || Date.now() - localSignIn.at > 30_000)) {
+      localSignInChecking = true;
+      void Promise.all((["claude", "codex"] as const).map(one => connectionCheck(one).then(value => value.state, () => "unverified")))
+        .then(states => { localSignIn = { at: Date.now(), signedIn: states.some(state => state === "connected" || state === "key-works" || state === "key-present") }; })
+        .catch(() => {})
+        .finally(() => { localSignInChecking = false; });
+    }
+    return localSignIn?.signedIn ?? false;
+  }
+  /** First tasks per project: the last ones found (safe generic ones until then), re-read in the background at most
+   * every ten minutes. A render never waits on `gh` or `git grep`. */
+  const firstTasks = new Map<string, { until: number; found: FirstTaskSuggestion[] | null; reading: boolean }>();
+  function firstTasksFor(repo: string): FirstTaskSuggestion[] {
+    const at = Date.now();
+    let entry = firstTasks.get(repo);
+    if (entry === undefined || (entry.until <= at && !entry.reading)) {
+      const reading = { until: at + 10 * 60_000, found: entry?.found ?? null, reading: true };
+      firstTasks.set(repo, reading);
+      entry = reading;
+      void findFirstTasks(repo, options.firstTaskRunner ?? execRun)
+        .then(found => { reading.found = found; }, () => {})
+        .finally(() => { reading.reading = false; });
+    }
+    return entry.found ?? firstTaskSuggestions({ issues: [], todos: [] });
   }
   /** Chat's first run: the steps, first tasks until the first task exists, and the sandbox while no agent is signed in. */
-  async function chatFirstRun(now: Date, project: string | null): Promise<BrowserFirstRun | undefined> {
-    const steps = await firstRunStepsNow(now);
+  function chatFirstRun(now: Date, project: string | null): BrowserFirstRun | undefined {
+    const steps = firstRunStepsNow(now);
     if (steps === null) return undefined;
     const taskFiled = steps.find(one => one.key === "task")?.done ?? true;
     const repo = project ?? managedRepos()[0] ?? null;
     return {
       steps,
-      suggestions: taskFiled || repo === null ? [] : await firstTasksFor(repo),
+      suggestions: taskFiled || repo === null ? [] : firstTasksFor(repo),
       sandbox: steps.find(one => one.key === "agent")?.done === false ? SANDBOX_COMMAND : null,
     };
   }
@@ -6616,7 +6642,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const current = options.updates?.current ?? PACKAGE_VERSION;
       if (!newerThan(version, current)) return back("problem", `Toolroll ${version} is not newer than ${current}. To go back, run toolroll update --rollback.`);
       const method = options.updates?.method ?? installMethod();
-      if (method.kind === "npx" || method.kind === "source") return back("problem", method.kind === "npx" ? "npx runs the latest release each time; there is nothing to update." : "This runs from a source checkout. Update it with git.");
+      if (method.kind === "npx" || method.kind === "source" || method.kind === "desktop") return back("problem", method.kind === "npx" ? "npx runs the latest release each time; there is nothing to update." : method.kind === "desktop" ? "Update it from the Toolroll app." : "This runs from a source checkout. Update it with git.");
       const before = runtimeUpdateStatus(stateDir).journal;
       if (before !== null && !runtimeUpdateTerminal(before.phase)) return back("problem", "An update is already under way.");
       if (when === "now") {

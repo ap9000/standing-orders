@@ -36,6 +36,13 @@ describe("c2: installMethod", () => {
     }
   });
 
+  test("the Toolroll app is its own install kind, never offered npm", () => {
+    const real = "/Applications/Toolroll.app/Contents/Resources/dist/bin.js";
+    expect(installMethod(real, probe(real))).toEqual({ kind: "desktop", updateCommand: "Update from the Toolroll app" });
+    // Even where the app carries a node_modules of its own.
+    expect(installMethod("/usr/local/bin/toolroll", probe("/Applications/Toolroll.app/Contents/Resources/runtime/node_modules/toolroll/dist/bin.js")).kind).toBe("desktop");
+  });
+
   test("a git checkout is a source install", () => {
     const real = "/Users/a/code/toolroll/dist/bin.js";
     expect(installMethod("/Users/a/code/toolroll/dist/bin.js", probe(real, ["/Users/a/code/toolroll/package.json", "/Users/a/code/toolroll/.git"])))

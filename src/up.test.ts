@@ -16,6 +16,7 @@ import { openStore } from "./store.js";
 import { register, normalizeRunnerName } from "./runner.js";
 import { authenticateApprover } from "./scope.js";
 import { addRepos, loadProjectRegistry, updateRepos } from "./repos.js";
+import { underAgent } from "./prompt.js";
 
 const PORT = 41000 + (process.pid % 2000);
 
@@ -203,9 +204,35 @@ describe("toolroll up", () => {
     lines = [];
     expect(await runOperate("up", ["--repo", repo, "--port", String(PORT + 15), "--for", "1200"], line => lines.push(line), {
       databaseFile: db,
-      upSeams: { terminal: true, openBrowser: url => opened.push(url) },
+      upSeams: { terminal: true, env: {}, openBrowser: url => opened.push(url) },
     })).toBe(0);
     expect(opened).toEqual([`http://127.0.0.1:${PORT + 15}/`]);
+    // onboard names the console where up last served it.
+    expect(JSON.parse(readFileSync(join(base, "up-console.json"), "utf8"))).toMatchObject({ url: `http://127.0.0.1:${PORT + 15}/` });
+  });
+
+  test("a coding agent is known by its variables; a person's own CODEX_HOME is not one", () => {
+    for (const env of [{ CLAUDECODE: "1" }, { CLAUDE_CODE_ENTRYPOINT: "cli" }, { CODEX_SANDBOX: "seatbelt" }, { CODEX_THREAD_ID: "t-1" }]) expect(underAgent(env)).toBe(true);
+    for (const env of [{}, { CODEX_HOME: "/Users/alex/.codex" }, { CODEX_API_KEY: "sk-x" }, { CLAUDECODE: "" }]) expect(underAgent(env)).toBe(false);
+  });
+
+  test("under a coding agent, even at a terminal, it prints the handoff and never the password", async () => {
+    for (const env of [{ CLAUDECODE: "1" }, { CODEX_SANDBOX: "seatbelt" }]) {
+      rmSync(join(base, "up-login.txt"), { force: true });
+      for (const file of [db, `${db}-wal`, `${db}-shm`]) rmSync(file, { force: true });
+      lines = [];
+      const opened: string[] = [];
+      expect(await runOperate("up", ["--repo", repo, "--port", String(PORT + 16), "--for", "1200"], line => lines.push(line), {
+        databaseFile: db,
+        upSeams: { terminal: true, env, openBrowser: url => opened.push(url) },
+      })).toBe(0);
+      const text = lines.join("\n");
+      const [account = "", password = ""] = readFileSync(join(base, "up-login.txt"), "utf8").trim().split(" ");
+      expect(text).toContain(`  login     ${account} — the password is in ${join(base, "up-login.txt")}`);
+      expect(text).not.toContain(password);
+      expect(text).not.toContain("Ctrl-C stops Toolroll");
+      expect(opened).toEqual([]);
+    }
   });
 
   test("the generated worker name comes from this machine's hostname, normalized", async () => {

@@ -7,7 +7,7 @@
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-export type InstallKind = "npm" | "pnpm" | "bun" | "yarn" | "homebrew" | "npx" | "source" | "managed";
+export type InstallKind = "npm" | "pnpm" | "bun" | "yarn" | "homebrew" | "npx" | "source" | "managed" | "desktop";
 export type InstallMethod = { kind: InstallKind; updateCommand: string };
 
 export const UPDATE_COMMANDS: Record<InstallKind, string> = {
@@ -20,6 +20,8 @@ export const UPDATE_COMMANDS: Record<InstallKind, string> = {
   source: "git pull && npm install && npm run build",
   // A runtime `toolroll update` installed (staged-upgrades/release-* or rollback-*): it updates itself.
   managed: "toolroll update",
+  // The Toolroll app carries its own runtime and updates as a whole app, never through a package manager.
+  desktop: "Update from the Toolroll app",
 };
 
 export type InstallProbe = { realpath?: (path: string) => string; exists?: (path: string) => boolean };
@@ -42,6 +44,7 @@ function installKind(bin: string | undefined, probe: InstallProbe): InstallKind 
   // A plane deployed from a checkout by scripts/deploy-browser.mjs runs from staged-upgrades/browser-*: it updates
   // by deploying from source, never from npm.
   if (path.includes("/staged-upgrades/browser-")) return "source";
+  if (/\.app\/Contents\/Resources\//.test(path)) return "desktop";
   if (/\/staged-upgrades\/(release|rollback)-/.test(path)) return "managed";
   if (/\/Cellar\/toolroll\//i.test(path)) return "homebrew";
   if (path.includes("/_npx/")) return "npx";

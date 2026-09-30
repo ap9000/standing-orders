@@ -17300,7 +17300,7 @@ export class Store {
   }
 
   /**
-   * When this installation first finished a run successfully — the
+   * When this installation first finished a run with a change — the
    * moment the first-run checklist retires, permanently. Derived from run
    * history the first time it is observed, then stamped as an append-only
    * installation fact so later pruning of those rows cannot resurrect the
@@ -17310,7 +17310,7 @@ export class Store {
     const fact = this.installationFact("first-success-at");
     if (fact !== null) return fact;
     const row = this.db
-      .prepare("SELECT finished_at FROM run WHERE outcome IN ('built','no-change') AND finished_at IS NOT NULL ORDER BY id LIMIT 1")
+      .prepare("SELECT finished_at FROM run WHERE outcome = 'built' AND finished_at IS NOT NULL ORDER BY id LIMIT 1")
       .get();
     if (row === undefined) return null;
     const when = String(row["finished_at"]);
@@ -19133,8 +19133,9 @@ export class Store {
     this.recordRunProcessExits(id, result.now);
     this.settleRunStop(id, result.stopSettlement ?? "finished", result.now);
     // The first Ready result is an installation fact the moment it lands,
-    // not only when something later looks for it.
-    if (result.outcome === "built" || result.outcome === "no-change") this.firstSuccessAt(result.now);
+    // not only when something later looks for it. A run that changed
+    // nothing is not a first result.
+    if (result.outcome === "built") this.firstSuccessAt(result.now);
     // The park rate is *measured* — parked over concluded builder attempts —
     // and maintained where attempts conclude, because the attention budget's
     // gate reads it inside a claim transaction and must never trust a number

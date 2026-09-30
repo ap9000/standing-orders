@@ -12,6 +12,14 @@ function Command({ command }: { command: string }) {
     <Button variant="ghost" size="sm" onClick={copy} aria-label={`Copy ${command}`}>{copied ? "Copied" : "Copy"}</Button></span>;
 }
 
+/** What the composer holds after a first task is tapped: the task, added after anything the person already typed, never
+ * in place of it. */
+export function withSuggestion(typed: string, suggestion: string): string {
+  if (typed.trim() === "") return suggestion;
+  if (typed.includes(suggestion)) return typed;
+  return `${typed.trimEnd()}\n${suggestion}`;
+}
+
 export function FirstRun({ firstRun, onDraft }: { firstRun: BrowserFirstRun; onDraft?: ((text: string) => void) | undefined }) {
   const suggestions = onDraft === undefined ? [] : firstRun.suggestions;
   return <section className="so-first-run" aria-labelledby="first-run-title" data-first-run>

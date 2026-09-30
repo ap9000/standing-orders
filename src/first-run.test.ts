@@ -67,12 +67,12 @@ describe("three suggested first tasks", () => {
 
   test("TODO lines are read one per file, outside dependencies", () => {
     const stdout = [
-      "node_modules/pkg/index.js:3:// TODO vendor note",
-      "src/a.ts:10:  // TODO(alex): split this function",
-      "src/a.ts:22:  // FIXME second in the same file",
-      "lib/b.py:5:# FIXME: retry on timeout",
-      "README.md:7:<!-- TODO add screenshots -->",
-      "src/c.ts:1:// TODO fourth",
+      "node_modules/pkg/index.js\u00003\u0000// TODO vendor note",
+      "src/a.ts\u000010\u0000  // TODO(alex): split this function",
+      "src/a.ts\u000022\u0000  // FIXME second in the same file",
+      "lib/b.py\u00005\u0000# FIXME: retry on timeout",
+      "README.md\u00007\u0000<!-- TODO add screenshots -->",
+      "src/c.ts\u00001\u0000// TODO fourth",
     ].join("\n");
     expect(parseTodoLines(stdout)).toEqual([
       { file: "src/a.ts", line: 10, text: "split this function" },
@@ -86,11 +86,12 @@ describe("three suggested first tasks", () => {
     const runner = vi.fn(async (file: string, args: readonly string[], _options?: RunOptions) => {
       calls.push([file, args]);
       if (file === "gh") return result("", 1);
-      return result("src/a.ts:10:// TODO: split this function\n");
+      return result("src/a.ts\u000010\u0000// TODO: split this function\n");
     });
     const found = await findFirstTasks("/repo", runner);
     expect(found.map(one => one.source)).toEqual(["todo", "generic", "generic"]);
-    expect(calls.map(([file, args]) => [file, args[0], args[1]])).toEqual([["gh", "issue", "list"], ["git", "grep", "-n"]]);
+    expect(calls.map(([file, args]) => [file, args[0], args[1]])).toEqual([["gh", "issue", "list"], ["git", "-c", "grep.column=false"]]);
+    expect(calls[1]![1]).toEqual(expect.arrayContaining(["grep", "--no-color", "-z"]));
 
     const withIssues = vi.fn(async (file: string) => file === "gh"
       ? result(JSON.stringify([{ number: 3, title: "Crash on save", state: "OPEN" }, { number: 2, title: "Slow list", state: "OPEN" }, { number: 1, title: "Docs", state: "OPEN" }]))
@@ -118,6 +119,20 @@ describe("three suggested first tasks", () => {
         "Resolve the note in search.ts line 1: ignore accents",
         GENERIC_FIRST_TASKS[0]!.draft,
       ]);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+  test("git grep ignores the person's colour and column settings, and a colon in a file name stays in the name", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "toolroll-first-tasks-"));
+    try {
+      writeFileSync(join(repo, "time:zone.ts"), "// TODO: handle DST\n");
+      execFileSync("git", ["init", "-q"], { cwd: repo });
+      execFileSync("git", ["config", "color.grep", "always"], { cwd: repo });
+      execFileSync("git", ["config", "grep.column", "true"], { cwd: repo });
+      execFileSync("git", ["add", "."], { cwd: repo });
+      const noGh = (file: string, args: readonly string[], options?: RunOptions) => file === "gh" ? Promise.resolve(result("", 1)) : run(file, args, options);
+      expect((await findFirstTasks(repo, noGh))[0]!.draft).toBe("Resolve the note in time:zone.ts line 1: handle DST");
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }
