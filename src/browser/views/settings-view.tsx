@@ -1,18 +1,19 @@
 /** Settings, rebuilt with shadcn/ui. Every control posts to the same server
  * route as before (CSRF included); choices save the moment they change and
  * the server's confirmation arrives as a toast. */
-import { BookOpen, ChevronDown, Cpu, Hash, LineChart, MessageSquare, Monitor, Moon, Send, Sparkles, Sun, Users, Wrench } from "lucide-react";
+import { BookOpen, ChevronDown, Cpu, Hash, LineChart, MessageSquare, Monitor, Moon, Plug, Send, Sparkles, Sun, Users, Wrench } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { BrowserSettingsView } from "../../browser-workspace.js";
 import { accentNote, accentTokens, normalHex } from "../../accent-colors.js";
+import { digestTimes } from "../../digest-times.js";
 import {
   Badge, Button, Card, CardDescription, CardHeader, CardTitle, Collapsible, CollapsibleContent, CollapsibleTrigger,
   Input, Label, RadioCard, RadioGroup, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Separator, Switch, cn, toast,
 } from "../components/ui/index.js";
 
 const TILE_ICONS: Record<string, ReactNode> = {
-  "/settings/models": <Cpu />, "/settings/skills": <Sparkles />, "/settings/tools": <Wrench />, "/settings/knowledge": <BookOpen />, "/settings/telegram": <Send />,
+  "/settings/integrations": <Plug />, "/settings/models": <Cpu />, "/settings/skills": <Sparkles />, "/settings/tools": <Wrench />, "/settings/knowledge": <BookOpen />, "/settings/telegram": <Send />,
   "/settings/slack": <Hash />, "/settings/discord": <MessageSquare />, "/settings/teams": <Users />, "/settings/learning": <LineChart />,
 };
 
@@ -348,8 +349,24 @@ function Updates({ updates, csrf, firstResult }: { updates: NonNullable<BrowserS
 
 function Notifications({ view, csrf }: { view: BrowserSettingsView; csrf: string }) {
   const base = useId();
-  if (view.services === null && view.push === null && view.digest === null) return null;
-  return <Section title="Notifications">
+  if (!view.chat && view.services === null && view.push === null && view.digest === null) return null;
+  return <Section id="notifications" title="Notifications">
+    {view.chat && <AutoForm action="/settings/notifications" csrf={csrf} className="grid gap-4">{submit => <>
+      <RadioGroup name="mode" defaultValue={view.chat!.mode} onValueChange={submit} className="grid gap-2 sm:grid-cols-2" aria-label="Chat messages">
+        <RadioCard id={`${base}-quiet`} value="quiet" title="Only when I'm needed" description="One message per task, updated as it moves." />
+        <RadioCard id={`${base}-all`} value="all" title="Every step" description="A new message for each update." />
+      </RadioGroup>
+      <div className="grid gap-2">
+        <Label htmlFor={`${base}-evening`}>Evening digest</Label>
+        <Select name="digest" defaultValue={view.chat!.digestAt ?? "off"} onValueChange={submit}>
+          <SelectTrigger id={`${base}-evening`} className="sm:max-w-72"><SelectValue /></SelectTrigger>
+          <SelectContent>{digestTimes(view.chat!.digestAt).map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent>
+        </Select>
+        <p className="text-[13px] text-muted-foreground">One message: what finished, what waits, what failed.</p>
+      </div>
+      <noscript><Button type="submit">Save</Button></noscript>
+    </>}</AutoForm>}
+    {view.chat && view.services && <Separator />}
     {view.services && (view.services.configured.length === 1 && !view.services.implicit
       ? <div className="flex items-center gap-3"><span className="font-semibold capitalize">{view.services.configured[0]}</span><span className="inline-flex items-center gap-2 text-sm text-muted-foreground"><StatusDot tone="ok" />Receiving alerts</span></div>
       : <AutoForm action="/settings/messaging" csrf={csrf}>{submit => <div className="grid gap-2">

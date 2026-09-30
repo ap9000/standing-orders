@@ -86,6 +86,8 @@ describe("destination-bound authorized outbox", () => {
     const alex = addApprover(store, "alex", now);
     expect(alex.ok).toBe(true);
     alexToken = alex.ok ? alex.token : "";
+    // Every step: these journeys prove the per-step behaviour quiet chat keeps for people who choose it.
+    store.setNotificationPreference("alex", { mode: "all" }, "alex", now);
     pair();
   });
   afterEach(() => { store.close(); rmSync(dir, { recursive: true, force: true }); });
@@ -93,6 +95,7 @@ describe("destination-bound authorized outbox", () => {
   test("two paired people each receive a fact once, under their own project ceiling, and a revoked person's chat goes quiet", async () => {
     // sam: an approver limited to the second project, paired from their own chat.
     expect(addApprover(store, "sam", now, { name: "alex", token: alexToken }).ok).toBe(true);
+    store.setNotificationPreference("sam", { mode: "all" }, "sam", now);
     expect(store.setAccountProjects("sam", [OTHER], "alex", now).ok).toBe(true);
     const code = mintPairingCode();
     store.createTelegramPairing({ codeHash: hashPairingCode(code), approver: "sam", by: "sam", ttlMs: PAIRING_TTL_MS }, now);
@@ -564,6 +567,8 @@ describe("the telegram bridge", () => {
     store = openStore(":memory:");
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
+    // Every step: these journeys prove the per-step behaviour quiet chat keeps for people who choose it.
+    store.setNotificationPreference("alex", { mode: "all" }, "alex", T0);
     approverToken = added.token;
     void approverToken;
     store.createTask({ id: "t-1", title: "the work" }, T0);
@@ -939,6 +944,8 @@ describe("the follower — on the wire until told to stop", () => {
     store = openStore(":memory:");
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
+    // Every step: these journeys prove the per-step behaviour quiet chat keeps for people who choose it.
+    store.setNotificationPreference("alex", { mode: "all" }, "alex", T0);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
     store.placeTask(taskRef, REPO);
@@ -1233,6 +1240,8 @@ describe("free-text answers — a reply becomes the note, a tap remains the choi
     store = openStore(":memory:");
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
+    // Every step: these journeys prove the per-step behaviour quiet chat keeps for people who choose it.
+    store.setNotificationPreference("alex", { mode: "all" }, "alex", T0);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
     store.placeTask(taskRef, REPO);
@@ -1408,6 +1417,8 @@ describe("away mode: the digest cadence (mate arc §10)", () => {
     store = openStore(":memory:");
     const added = addApprover(store, "alex", T0);
     if (!added.ok) throw new Error("bootstrap failed");
+    // Every step: these journeys prove the per-step behaviour quiet chat keeps for people who choose it.
+    store.setNotificationPreference("alex", { mode: "all" }, "alex", T0);
     store.createTask({ id: "t-1", title: "the work" }, T0);
     taskRef = store.refFor("built-in", "t-1").id;
     store.placeTask(taskRef, REPO);

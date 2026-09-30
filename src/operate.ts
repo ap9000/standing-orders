@@ -13,6 +13,7 @@ import { buildExport, exportSummary, exportZip, writeExportFolder } from "./expo
 import { startBudgetAlerts } from "./budget-alerts.js";
 import { liftAuthPause, openAuthPauses, signInGate, signInWords, startSignInProbes, type SignInGate } from "./provider-auth.js";
 import { createConnectionChecker } from "./provider-connection.js";
+import { checkIntegrations, integrationsBrokenLine, integrationsNow, renderIntegrations, type Integration, type IntegrationIo } from "./integrations.js";
 import { buildHandoff, handoffLines, loginAccount, runOnboard, type HandoffLogin, type OnboardIo } from "./agent-onboard.js";
 import { backupFiles, backupFolderOf, backupOwner, backupNow, restoreDatabase, startBackups } from "./backup.js";
 import { pushLimitSink } from "./provider-limits.js";
@@ -79,6 +80,7 @@ import {
   parseCapabilityKey,
   verifiedAuthor,
   contestantProfileOf,
+  isDigestTime,
   type Capability,
   type ReviewRetryState,
   type Store,
@@ -185,6 +187,7 @@ import {
   type PublishExec,
   sweepMerges,
 } from "./publish.js";
+import { checkPublishing, publishingOf, savePublishing, followPullRequests } from "./pull-request-flow.js";
 
 type CapabilityKind = Capability["kind"];
 import {
@@ -342,6 +345,8 @@ export type OperateOptions = {
   flowTriggerIo?: Partial<TriggerIo>;
   /** Injected by tests: how flow check and update steps run commands and reach GitHub and Linear. */
   flowStepIo?: Partial<StepIo>;
+  /** Injected by tests: how `integrations` checks reach services (fetch, gh, sign-in checks, mail servers). */
+  integrationIo?: Partial<IntegrationIo>;
   /** Injected by tests: the mate's provider fetch, key environment, and stdin lines. */
   mateSeams?: MateCliSeams;
   /** Injected by tests: a held-session coordinator, so a `tick` exercises
@@ -356,7 +361,7 @@ export type OperateOptions = {
   upSeams?: { terminal?: boolean; env?: Record<string, string | undefined>; openBrowser?: (url: string) => void };
 };
 
-export type OnboardSeams = Partial<Pick<OnboardIo, "home" | "env" | "cwd" | "interactive" | "confirm" | "findRepo" | "checkConnection">>;
+export type OnboardSeams = Partial<Pick<OnboardIo, "home" | "env" | "cwd" | "interactive" | "confirm" | "findRepo" | "checkConnection" | "pullRequests">>;
 
 const STATES: readonly TaskState[] = ["queued", "running", "done", "failed", "cancelled"];
 
@@ -378,11 +383,14 @@ export const OPERATE_HELP = `toolroll — operating the queue
   toolroll storage clean [--yes]     preview removing finished tasks' clean checkouts (their branches stay); --yes removes them
   toolroll storage cleanup <when>    remove a finished task's clean checkout: finished|2d|7d|never (instance operator)
   toolroll storage discard <path> --yes   throw away a checkout kept for its changes; its branch stays
+  toolroll integrations [--json]     which integrations work: Connected, Not set up or Broken, and what to do (--saved: no new checks)
   toolroll monitoring                where the audit stream and traces go, and how each destination is doing
   toolroll check-progress <run>      current or final approved check progress
   toolroll spend [--month YYYY-MM] [--csv]   what agent work cost, by project, person, teammate and model
   toolroll export --out <path> [--zip]   everything Toolroll knows, in a folder or .zip (no secrets)
   toolroll budget list|set|remove    monthly budgets (--all | --project <p> | --person <name> | --teammate <id>) --usd <n> [--alerts-only]
+  toolroll notifications [quiet|all]   how chats reach you: only when you're needed (the default), or every step
+  toolroll notifications digest <HH:MM>|off   one evening message: what finished, what waits, what failed
   toolroll retention show|preview    how long evidence, checkout records, chat and notifications are kept; what the daily sweep would remove
   toolroll retention set <kind> <period>   evidence|checkouts|chat|notifications, 30d|1y|forever (instance operator)
   toolroll backup now|list          back the database up now; list backups and how the last ones went
@@ -429,6 +437,10 @@ External trackers — build what a tracker nominates, under local approvals
                                         the dispatch grant: its own explicit
                                         yes, never in any default; writes a
                                         plane marker label to the repository
+  toolroll publish setup [--repo <path>] [--merge-method squash|merge|rebase]
+      [--merge-when-green] --yes      one-step pull requests: checks gh sign-in
+                                        and push rights, then Complete offers
+                                        "Complete and open a pull request"
   toolroll publish grant --github <owner/name> --allow-merge
       --merge-method squash|merge|rebase [--merge-delete-branch] --yes
                                         auto-merge this plane's own PRs —
@@ -707,7 +719,7 @@ export const TASK_ACTIONS = [
   "reopen", "scope", "approve", "hold", "unhold", "require", "requeue", "regate", "plan",
   "review", "accept", "repair", "route", "stop", "resume", "complete", "revise",
 ] as const;
-export const PUBLISH_ACTIONS = ["grant", "revoke", "status", "unblock", "rearm", "merge", "refire"] as const;
+export const PUBLISH_ACTIONS = ["setup", "grant", "revoke", "status", "unblock", "rearm", "merge", "refire"] as const;
 export const CONFIG_ACTIONS = ["show", "set", "clear"] as const;
 export const APPROVER_ACTIONS = ["list", "add"] as const;
 export const ROUTINE_ACTIONS = ["list", "add", "show", "approve", "refresh", "pause", "resume", "run-now"] as const;
@@ -753,6 +765,8 @@ export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "html", "csv", "alerts-only",
   // v105: the full export.
   "zip",
+  // Settings → Integrations: the last checks, without checking again.
+  "saved",
 ]);
 
 export function parseOperateArgs(argv: readonly string[]): Args | { error: string } {
@@ -902,6 +916,7 @@ export async function runOperate(
       ...(options.dispatchAdapter === undefined ? {} : { dispatchAdapter: options.dispatchAdapter }),
       ...(options.flowTriggerIo === undefined ? {} : { flowTriggerIo: options.flowTriggerIo }),
       ...(options.flowStepIo === undefined ? {} : { flowStepIo: options.flowStepIo }),
+      ...(options.integrationIo === undefined ? {} : { integrationIo: options.integrationIo }),
       ...(options.shouldStop === undefined ? {} : { shouldStop: options.shouldStop }),
       ...(options.mateSeams === undefined ? {} : { mateSeams: options.mateSeams }),
       ...(options.heldCoordinator === undefined ? {} : { heldCoordinator: options.heldCoordinator }),
@@ -949,6 +964,7 @@ type Context = {
   flowTriggerIo?: Partial<TriggerIo>;
   /** Injected by tests: how flow check and update steps run commands and reach GitHub and Linear. */
   flowStepIo?: Partial<StepIo>;
+  integrationIo?: Partial<IntegrationIo>;
   /**
    * The stop fence (Codex M5-M8 audit, IV-1): set by the watch when a
    * signal lands. A pass that sees true admits NOTHING more — no routine
@@ -1063,6 +1079,8 @@ async function dispatch(
       return budgetCommand(positional, flags, context);
     case "retention":
       return retentionCommand(positional, flags, context);
+    case "notifications":
+      return notificationsCommand(positional, flags, context);
     case "backup":
       return backupCommand(positional, flags, context);
     case "export":
@@ -1071,6 +1089,8 @@ async function dispatch(
       return policyCommand(positional, flags, context);
     case "storage":
       return storageCommand(positional, flags, context);
+    case "integrations":
+      return integrationsCommand(positional, flags, context);
     case "monitoring": {
       // Where the audit stream and traces go, and how each destination is doing. Settings → Monitoring changes it.
       const settings = readMonitoring(dirname(context.databaseFile));
@@ -8146,6 +8166,12 @@ async function runWatchLoop(args: {
             ...(context.publishExec === undefined ? {} : { exec: context.publishExec }),
           });
           if (checks.failing > 0) progress(`watch: CI is red on ${checks.failing} published PR(s) — the outbox has it`);
+          const followed = await followPullRequests(store, checks.seen, {
+            evidenceRoot: context.evidenceRoot,
+            ...(context.publishExec === undefined ? {} : { exec: context.publishExec }),
+          });
+          if (followed.revisions > 0) progress(`watch: filed ${followed.revisions} CI revision(s)`);
+          if (followed.merged > 0) progress(`watch: merged ${followed.merged} pull request(s) whose checks passed`);
         } catch (error) {
           progress(`watch: CI observation failed — ${describe(error)}; retrying on its next interval`);
         }
@@ -8650,7 +8676,7 @@ async function onboardCommand(flags: Map<string, string | true>, context: Contex
   const gitRun = context.gitRunner ?? ((file: string, args: readonly string[], opts?: { cwd?: string }) => run(file, [...args], { ...(opts?.cwd === undefined ? {} : { cwd: opts.cwd }), timeoutMs: 10_000 }));
   const registryPath = registryPathOf(context);
   const checker = createConnectionChecker({ home, env });
-  return runOnboard({
+  const code = await runOnboard({
     write,
     json,
     yes: flag(flags, "yes"),
@@ -8688,7 +8714,20 @@ async function onboardCommand(flags: Map<string, string | true>, context: Contex
       return { ok: true, added: "error" in before || !before.repos.includes(repo) };
     },
     checkConnection: seams.checkConnection ?? (agent => checker(agent)),
+    pullRequests: seams.pullRequests ?? (async repo => {
+      const publishing = publishingOf(store, repo);
+      if (publishing.on) return `on for ${publishing.githubRepo} into ${publishing.base}`;
+      const checked = await checkPublishing(repo, context.publishExec === undefined ? {} : { exec: context.publishExec });
+      if (!checked.ok) return `off: ${checked.message}`;
+      return `off: turn on with toolroll publish setup --repo ${repo} --yes (asks your password), or in Settings → Projects`;
+    }),
   });
+  // One line when an integration is Broken, from the last checks only (never a new check here).
+  if (!json) {
+    const line = integrationsBrokenLine(await savedIntegrations(context).catch(() => []));
+    if (line !== null) write(line);
+  }
+  return code;
 }
 
 async function upCommand(
@@ -9551,6 +9590,41 @@ async function publishCommand(
     return fail(write, json, "publish", "usage", `unknown \`publish ${action}\` — try ${PUBLISH_ACTIONS.join(", ")}, or bare \`publish\` for the publication pass`, EXIT.usage);
   }
 
+  if (action === "setup") {
+    const mergeMethod = text(flags, "merge-method") ?? "squash";
+    if (!["squash", "merge", "rebase"].includes(mergeMethod)) {
+      return fail(write, json, "publish setup", "usage", "--merge-method is squash, merge or rebase", EXIT.usage);
+    }
+    const checked = await checkPublishing(repo, context.publishExec === undefined ? {} : { exec: context.publishExec });
+    if (!checked.ok) return fail(write, json, "publish setup", checked.reason, checked.message, EXIT.refused);
+    const settings = { mergeMethod: mergeMethod as "squash" | "merge" | "rebase", mergeWhenGreen: flags.has("merge-when-green") };
+    const plan = checked.plan;
+    const terms = [
+      `Pull requests for ${plan.githubRepo} into ${plan.base}${plan.account === null ? "" : `, as ${plan.account}`}.`,
+      "Complete will offer \"Complete and open a pull request\"; the pull request opens from the exact completed commit.",
+      `Merges ${settings.mergeMethod} and delete the branch${settings.mergeWhenGreen ? ", by themselves once checks pass" : " when a person selects Merge"}.`,
+    ];
+    if (!flags.has("yes")) {
+      if (json) {
+        write(envelopeJson({ ok: false, command: "publish setup", reason: "unconfirmed", proposed: { ...plan, ...settings } }));
+        return EXIT.refused;
+      }
+      for (const line of terms) write(line);
+      write("Nothing is set up yet. Repeat with --yes --as <you> --token <password> to turn it on.");
+      return EXIT.refused;
+    }
+    const acting = await askCredentials(flags, context);
+    if (acting === null) {
+      return fail(write, json, "publish setup", "usage", "turning on pull requests takes --as <you> --token <your password>", EXIT.usage);
+    }
+    const authenticated = authenticateApprover(store, acting.name, acting.token, repo);
+    if (!authenticated.ok) {
+      return fail(write, json, "publish setup", authenticated.reason, describeApproveFailure(authenticated.reason, acting.name), EXIT.refused);
+    }
+    savePublishing(store, plan, acting.name, settings, clock());
+    return succeed(write, json, "publish setup", { publishing: publishingOf(store, repo) }, () => ["Pull requests are on.", ...terms]);
+  }
+
   if (action === "grant") {
     const github = text(flags, "github");
     if (github === undefined || !/^[\w.-]+\/[\w.-]+$/.test(github)) {
@@ -10185,7 +10259,49 @@ async function statusCommand(
   if (release !== null) notifySecurityRelease(context.store, release, current, method.updateCommand, context.clock());
   const line = updateLine(release, current, method.updateCommand);
   const update = release === null ? {} : { update: { current, latest: release.version, security: release.security, updateCommand: method.updateCommand, url: release.url } };
-  return succeed(context.write, context.json, command, { ...status, ...update }, () => [...renderInstallationStatus(status), ...(line === null ? [] : [line])]);
+  // One line when an integration is Broken, from the last checks only: status never waits on a check.
+  const brokenIntegrations = await savedIntegrations(context).then(list => list.filter(one => one.state === "broken"), () => []);
+  const brokenLine = integrationsBrokenLine(brokenIntegrations);
+  const integrations = brokenIntegrations.length === 0 ? {} : { integrations: { broken: brokenIntegrations.map(one => ({ key: one.key, name: one.name, fix: one.action.kind === "fix" ? one.action.words : null })) } };
+  return succeed(context.write, context.json, command, { ...status, ...update, ...integrations }, () => [...renderInstallationStatus(status), ...(line === null ? [] : [line]), ...(brokenLine === null ? [] : [brokenLine])]);
+}
+
+/** Where `integrations` looks: the installation's files beside the database, and every project it knows. */
+async function integrationIoFor(context: Context): Promise<IntegrationIo> {
+  const registered = await loadProjectRegistry(registryPathOf(context)).catch(() => ({ error: "unreadable" as const }));
+  const repos = [...new Set([...("error" in registered ? [] : registered.repos), ...context.store.listProjects().map(one => one.path)])];
+  const seams = context.integrationIo ?? {};
+  return {
+    store: context.store,
+    dir: dirname(context.databaseFile),
+    telegramTokenFile: context.telegramTokenFile,
+    env: process.env,
+    repos,
+    gh: (file, args, options) => run(file, [...args], options),
+    checkConnection: createConnectionChecker(),
+    clock: context.clock,
+    ...seams,
+  };
+}
+
+/** The integrations from files and the last checks: no network, for `status` and `onboard`. */
+async function savedIntegrations(context: Context): Promise<Integration[]> {
+  return integrationsNow(await integrationIoFor(context));
+}
+
+/** `toolroll integrations [--json]`: check every integration now and say which work. `--saved` skips the checks. */
+async function integrationsCommand(positional: readonly string[], flags: Map<string, string | true>, context: Context): Promise<number> {
+  const command = "integrations";
+  const allowed = new Set(["db", "json", "saved"]);
+  for (const name of flags.keys()) {
+    if (!allowed.has(name)) return fail(context.write, context.json, command, "usage", `--${name} is not an integrations option.`, EXIT.usage);
+  }
+  if (positional.length > 0) return fail(context.write, context.json, command, "usage", "Use `toolroll integrations [--saved] [--json]`.", EXIT.usage);
+  const io = await integrationIoFor(context);
+  const list = flag(flags, "saved") ? integrationsNow(io) : await checkIntegrations(io);
+  const counts = { connected: 0, "not-set-up": 0, broken: 0 };
+  for (const one of list) counts[one.state] += 1;
+  return succeed(context.write, context.json, command, { integrations: list, counts }, () => renderIntegrations(list));
 }
 
 async function waitTask(
@@ -12519,6 +12635,33 @@ async function budgetCommand(positional: readonly string[], flags: Map<string, s
   if (!Number.isFinite(dollars) || dollars < 1 || dollars > 10_000_000) return fail(context.write, context.json, command, "usage", "--usd is a whole number of dollars, at least 1.", EXIT.usage);
   const saved = store.setBudget({ scope: target.scope, key: target.key, limitMicrousd: Math.round(dollars) * 1_000_000, hardStop: !flags.has("alerts-only") }, acting.name, context.clock());
   return succeed(context.write, context.json, command, { budget: saved }, () => [`${budgetLabel(saved).replace(/'s$/, "")}: ${spendUsd(saved.limitMicrousd)} a month${saved.hardStop ? ", API work stops at 100%" : ", alerts only"}.`]);
+}
+
+/** `notifications [quiet | all | digest <HH:MM> | digest off]`: how chats reach this person — only when they are
+ * needed (the default), every step, and an optional evening digest. Each person sets their own. */
+async function notificationsCommand(positional: readonly string[], flags: Map<string, string | true>, context: Context): Promise<number> {
+  const [action, value, ...extra] = positional;
+  const command = `notifications${action === undefined ? "" : ` ${action}`}`;
+  const store = context.store;
+  for (const name of flags.keys()) if (!["as", "token", "token-file", "token-env", "db", "json"].includes(name)) return fail(context.write, context.json, command, "usage", `--${name} is not a notifications option.`, EXIT.usage);
+  const usage = "Use notifications quiet, notifications all, or notifications digest <HH:MM>|off.";
+  if (extra.length > 0 || (action !== undefined && !["quiet", "all", "digest"].includes(action)) || (action === "digest") !== (value !== undefined)) {
+    return fail(context.write, context.json, command, "usage", usage, EXIT.usage);
+  }
+  if (action === "digest" && value !== "off" && !isDigestTime(value!)) return fail(context.write, context.json, command, "usage", "The digest time is HH:MM on a 24-hour clock, like 18:30, or off.", EXIT.usage);
+  const acting = await askCredentials(flags, context);
+  const verified = acting === null ? null : authenticateApprover(store, acting.name, acting.token);
+  if (acting === null || verified === null || !verified.ok) {
+    return fail(context.write, context.json, command, "refused", "Notifications are set per person: pass --as and --token (or use the remembered login).", EXIT.refused);
+  }
+  const now = context.clock();
+  const preference = action === "quiet" || action === "all" ? store.setNotificationPreference(acting.name, { mode: action }, acting.name, now)
+    : action === "digest" ? store.setNotificationPreference(acting.name, { digestAt: value === "off" ? null : value! }, acting.name, now)
+    : store.notificationPreference(acting.name);
+  return succeed(context.write, context.json, command, { mode: preference.mode, digestAt: preference.digestAt }, () => [
+    preference.mode === "quiet" ? "Only when you're needed: one message per task, updated as it moves, and a new one when something needs you." : "Every step: a message for each update.",
+    preference.digestAt === null ? "No evening digest." : `Evening digest at ${preference.digestAt}: what finished, what waits and what failed.`,
+  ]);
 }
 
 /** `retention show | preview | set <kind> <period>` (v105): how long each kind of data is kept, and what the daily

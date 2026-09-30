@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+## 0.9.0 — 2026-09-30
+
+- **Chat pings only when you're needed.** In Telegram, Slack, Discord and
+  Teams each task is one message, updated in place from filed to Ready (and
+  tasks filed within a minute share one). A new message arrives only when
+  something needs you: a result Ready for review, a question or approval, a
+  failure that needs a decision, a sign-in or plan-limit pause, or a security
+  alert. Choose Only when I'm needed (the default) or Every step, and an
+  optional evening digest, in Settings → Notifications or with
+  `toolroll notifications quiet|all|digest <HH:MM>|digest off`. Delivery
+  receipts and the console's activity are unchanged.
+- **Complete opens a pull request, and Merge is one step.** Turn on pull
+  requests once per project (Projects → Pull requests, or
+  `toolroll publish setup`): Toolroll checks the GitHub remote, the default
+  branch, `gh` sign-in and push rights, and says what to fix. Complete then
+  offers "Complete and open a pull request" beside "Complete only"; the pull
+  request opens from the exact completed commit. The task shows the PR link
+  and its CI. Green reads Ready to merge with one Merge (behind your
+  password; Telegram and Slack link to it), which squashes by default,
+  deletes the branch and records the merge commit in the ledger. Red files
+  one revision with the failing check's name and a fenced log excerpt, at
+  most twice per task, then asks you. "Merge when checks pass" is an
+  opt-in project setting.
+- **Settings → Integrations: what works, what's broken.** One list of
+  Telegram, Slack, Discord, Teams, GitHub, Linear, email, each project's MCP
+  tools, monitoring destinations, Claude and Codex. Each says Connected, Not
+  set up or Broken, with its last success and last error, what uses it, and
+  one action: Set up, Send test, or Fix in plain words. Checks are read-only,
+  run in the background and never hold up a page; `toolroll integrations`
+  shows the same, and `toolroll status` adds a line when something is broken.
+
 ## 0.8.2 — 2026-09-30
 
 - **Task checkouts stop using space nobody wants.** A finished task's clean

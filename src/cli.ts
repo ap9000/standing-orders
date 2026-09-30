@@ -108,6 +108,7 @@ Usage
   toolroll up               app + builder for every saved project — the normal start
   toolroll onboard          make your agent Toolroll's lead: add this repo, install its skill (--yes)
   toolroll status           running, queued, ready results, release check and plan windows
+  toolroll integrations     which integrations work, and what to do about the ones that don't (--json)
   toolroll session          native coding sessions through the running service
   toolroll connect          save a private connection to your central service
   toolroll lead             named leads on the connected service
@@ -242,10 +243,12 @@ export const OPERATE_COMMANDS = new Set([
   "ledger",
   "storage",
   "monitoring",
+  "integrations",
   "check-progress",
   "spend",
   "budget",
   "retention",
+  "notifications",
   "backup",
   "restore",
   "export",

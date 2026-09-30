@@ -623,7 +623,8 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     expect(script.texts()[0]).toContain("Nothing was sent to the assistant");
     expect(store.listTelegramConversations(BOT)).toEqual([]);
     expect(requests).toEqual([]);
-    // Two routine facts about two tasks in one digest part: a reply to it is ambiguous, never guessed.
+    // Two routine facts about two tasks in one digest part (Every step): a reply to it is ambiguous, never guessed.
+    store.setNotificationPreference("alex", { mode: "all" }, "alex", now);
     const a = task("a"), b = task("b");
     store.enqueueNotification({ dedupeKey: "a-fact", kind: "report-ready", subject: "a moved", body: "a", source: { taskRef: a } }, now);
     store.enqueueNotification({ dedupeKey: "b-fact", kind: "report-ready", subject: "b moved", body: "b", source: { taskRef: b } }, now);

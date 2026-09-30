@@ -160,6 +160,8 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
 
   // ---- the queue (agent surface) ----
   { invocation: "status", synopsis: "running work, queued reasons, results to review, the latest release check and plan windows", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag, dbFlag] },
+  { invocation: "integrations", synopsis: "every integration as Connected, Not set up or Broken, with its last success and error, what uses it and what to do; --saved skips new checks; never a secret", audience: "agent", agentMayInvoke: true, mutation: "none",
+    flags: [jsonFlag, dbFlag, { name: "saved", takesValue: false, meaning: "show the last checks without checking again" }] },
   { invocation: "ready", synopsis: "what could be dispatched right now (rows carry reservedFor)", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag, dbFlag] },
   { invocation: "brief", synopsis: "with a saved central profile, --lead <id> --conversation <id> reads messages, proposals and saved work; --request-id inspects your saved receipt without resending; --local uses local DB catch-up, where --history selects the older operational report", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag, dbFlag] },
   { invocation: "gaps", synopsis: "requirement gaps blocking dispatch", audience: "agent", agentMayInvoke: true, mutation: "none", flags: [jsonFlag, dbFlag, repoFlag] },

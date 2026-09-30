@@ -104,6 +104,7 @@ import { CHECKOUT_CLEANUP_SCHEMA, DEFAULT_CLEANUP, cleanupWords, type CheckoutCl
 import { IN_RANGE, LEDGER_CHAIN_SCHEMA, safeWhole, sealLedger, verifyLedgerChain, type LedgerChainReport, type VerifiedHead } from "./ledger-chain.js";
 import { NO_RULES, filerFor, isProtectedWork, protectedChanges, rulesWords, type ApprovalGate, type ApprovalRules, type ApproverKind, type Filer, type FilerKind } from "./approval-policy.js";
 import { configBase, envValue, namedPath } from "./names.js";
+import { PULL_REQUEST_SCHEMA } from "./pull-request-schema.js";
 
 // v60 fenced older readers before the chat action cards; v61 adds notification
 // provenance and Telegram destination receipts, and readers below v61 refuse it.
@@ -164,6 +165,55 @@ CREATE TABLE IF NOT EXISTS monitoring_status (
   next_try_at TEXT,
   holder      TEXT,
   held_until  TEXT
+);
+`;
+/** Quiet chat: each person's choice of how chats reach them — only when they are needed (the default, no row),
+ * every step, and an optional evening digest at a local HH:MM. `digest_on` is the local day the last evening
+ * digest was considered, so each day is judged once. A task's card is the one chat message a destination keeps
+ * for it (or for several tasks filed within a minute): `message` is the Telegram message id or the chat app's
+ * part id, `digest` the text last shown, so an unchanged card is never re-sent. */
+const QUIET_CHAT_SCHEMA = `
+CREATE TABLE IF NOT EXISTS notification_preference (
+  account    TEXT PRIMARY KEY,
+  mode       TEXT NOT NULL DEFAULT 'quiet' CHECK (mode IN ('quiet', 'all')),
+  digest_at  TEXT CHECK (digest_at IS NULL OR (length(digest_at) = 5 AND digest_at GLOB '[0-2][0-9]:[0-5][0-9]')),
+  digest_on  TEXT,
+  updated_at TEXT NOT NULL,
+  updated_by TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS chat_card (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  destination TEXT NOT NULL,
+  anchor_at   TEXT NOT NULL,
+  message     TEXT,
+  digest      TEXT,
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chat_card_destination ON chat_card(destination, anchor_at);
+CREATE TABLE IF NOT EXISTS chat_card_task (
+  destination TEXT NOT NULL,
+  task_ref    INTEGER NOT NULL,
+  card        INTEGER NOT NULL REFERENCES chat_card(id),
+  joined_at   TEXT NOT NULL,
+  PRIMARY KEY (destination, task_ref)
+);
+CREATE INDEX IF NOT EXISTS chat_card_task_card ON chat_card_task(card);
+`;
+
+/** Settings → Integrations (no version bump): each integration's last check. `outcome` is ok, failed, or absent (the check found
+ * nothing set up, such as no `gh` sign-in). `ok_at` and `error`/`error_at` keep the last success and the last
+ * failure across checks, so a row can say both. `account` is a display name only, never a credential. */
+export const INTEGRATIONS_SCHEMA = `
+CREATE TABLE IF NOT EXISTS integration_check (
+  key         TEXT PRIMARY KEY,
+  outcome     TEXT NOT NULL CHECK (outcome IN ('ok', 'failed', 'absent')),
+  account     TEXT,
+  detail      TEXT,
+  problem     TEXT,
+  checked_at  TEXT NOT NULL,
+  ok_at       TEXT,
+  error       TEXT,
+  error_at    TEXT
 );
 `;
 /** Sprint 8: database backups. One settings row (off, or every so many hours, keeping the newest N in a folder; no
@@ -1175,6 +1225,18 @@ export type Notification = {
 
 export type TelegramDelivery = Notification & { destination: string; claimGeneration: number };
 
+/** How chats reach one person (quiet chat): only when they are needed, or every step. */
+export type NotificationMode = "quiet" | "all";
+export type NotificationPreference = { mode: NotificationMode; digestAt: string | null; digestOn: string | null; updatedAt: string | null };
+/** Tasks filed this close together share one chat message. */
+export const QUIET_GROUP_MS = 60_000;
+export function isDigestTime(value: string): boolean {
+  return /^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/.test(value);
+}
+/** The one chat message a destination keeps for a task, or for several tasks filed together. */
+export type ChatCard = { id: number; destination: string; anchorAt: string; message: string | null; digest: string | null; tasks: number[] };
+
+
 /**
  * What one recovery walk over a gone runner's work settled (P0.1a): the run
  * ids it finished as failed/interrupted and the built-in task ids it returned
@@ -1811,6 +1873,11 @@ export type PublicationGrant = {
   merge?: boolean;
   mergeMethod?: "squash" | "merge" | "rebase" | null;
   mergeDeleteBranch?: boolean;
+  /** When a pull request is owed: every finished build ("build", the original grant), or only when a person
+   * chooses "Complete and open a pull request" ("complete", the one-step project setup). */
+  publishOn?: "build" | "complete";
+  /** The project's optional "Merge when checks pass", off by default (complete-mode grants only). */
+  mergeWhenGreen?: boolean;
 };
 
 /** One run's road to a PR, durable at every phase. */
@@ -4954,6 +5021,7 @@ function initializeStore(db: Database, file: string): Store {
   db.exec(APPROVAL_SCHEMA);
   db.exec(LEDGER_CHAIN_SCHEMA);
   db.exec(MONITORING_SCHEMA);
+  db.exec(INTEGRATIONS_SCHEMA);
   db.exec(SPEND_SCHEMA);
   // Sign-in pauses: one row per incident of a provider's sign-in no longer working.
   db.exec(PROVIDER_AUTH_SCHEMA);
@@ -4965,6 +5033,7 @@ function initializeStore(db: Database, file: string): Store {
   // Sprint 8: the organisation policy (one row, or none: nothing restricted).
   db.exec(POLICY_SCHEMA);
   db.exec(RUN_CHECK_SCHEMA);
+  db.exec(QUIET_CHAT_SCHEMA);
   mergeCheckTables(db);
   addColumn(db, "monitoring_status", "target", "TEXT");
   // v105: how a teammate's turn was billed (this computer's Claude sign-in, as last seen).
@@ -4973,6 +5042,11 @@ function initializeStore(db: Database, file: string): Store {
   addColumn(db, "run_spend", "billing", "TEXT NOT NULL DEFAULT 'subscription' CHECK (billing IN ('subscription', 'api-key'))");
   addColumn(db, "run_spend", "billing_fixed", "INTEGER NOT NULL DEFAULT 0");
   migrate(db, preflight === null ? null : Math.abs(preflight));
+  // Complete → pull request → merge: when a grant publishes, the project's "Merge when checks pass", and each
+  // followed pull request's CI revisions and merge record (no version bump: additive only).
+  addColumn(db, "publication_grant", "publish_on", "TEXT NOT NULL DEFAULT 'build' CHECK (publish_on IN ('build', 'complete'))");
+  addColumn(db, "publication_grant", "merge_when_green", "INTEGER NOT NULL DEFAULT 0 CHECK (merge_when_green IN (0, 1))");
+  db.exec(PULL_REQUEST_SCHEMA);
   addColumn(db, "flow_card", "source_json", "TEXT");
   addColumn(db, "flow_card", "owner", "TEXT");
   addColumn(db, "flow", "owner", "TEXT");
@@ -21879,6 +21953,8 @@ export class Store {
       merge?: boolean;
       mergeMethod?: "squash" | "merge" | "rebase" | null;
       mergeDeleteBranch?: boolean;
+      publishOn?: "build" | "complete";
+      mergeWhenGreen?: boolean;
     },
     now: Date,
   ): void {
@@ -21895,8 +21971,8 @@ export class Store {
         .prepare(
           `INSERT INTO publication_grant
              (repo, github_repo, remote, head_prefix, base, capabilities, selector, draft, granted_by, granted_at,
-              merge, merge_method, merge_delete_branch)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              merge, merge_method, merge_delete_branch, publish_on, merge_when_green)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           grant.repo,
@@ -21912,6 +21988,8 @@ export class Store {
           grant.merge === true ? 1 : 0,
           grant.mergeMethod ?? null,
           grant.mergeDeleteBranch === true ? 1 : 0,
+          grant.publishOn ?? "build",
+          grant.mergeWhenGreen === true ? 1 : 0,
         );
     });
   }
@@ -25925,6 +26003,12 @@ export class Store {
       .run(binding.id, binding.botId, binding.chatId, messageId, row.id, row.destination, row.project, row.taskRef, row.taskId, row.run, now.toISOString());
   }
 
+  /** The newest confirmed message this notification became at one destination, if any. */
+  telegramMessageOf(notification: number, destination: string): string | null {
+    const row = this.db.prepare("SELECT message_id FROM telegram_outbound_message WHERE notification = ? AND destination = ? ORDER BY CAST(message_id AS INTEGER) DESC LIMIT 1").get(notification, destination);
+    return row === undefined ? null : String(row["message_id"]);
+  }
+
   finalizeTelegramDelivery(row: TelegramDelivery, binding: TelegramBinding, owner: string,
     outcome: { ok: true; receipt: string | null } | { ok: false; error: string; retryAt?: string }, now: Date): boolean {
     return this.transact(() => {
@@ -26035,6 +26119,84 @@ export class Store {
     this.db
       .prepare("UPDATE telegram_digest SET every_ms = ?, set_by = ?, set_at = ?, last_sent_at = CASE WHEN ? IS NULL THEN NULL ELSE COALESCE(last_sent_at, ?) END WHERE id = 1")
       .run(everyMs, by, now.toISOString(), everyMs, now.toISOString());
+  }
+
+  // ---- quiet chat: each person's notification choice and each task's one message ----
+
+  /** How chats reach this person: only when they are needed unless they chose every step. */
+  notificationPreference(account: string): NotificationPreference {
+    const row = this.db.prepare("SELECT mode, digest_at, digest_on, updated_at FROM notification_preference WHERE account = ?").get(account);
+    return row === undefined ? { mode: "quiet", digestAt: null, digestOn: null, updatedAt: null }
+      : { mode: row["mode"] === "all" ? "all" : "quiet", digestAt: row["digest_at"] == null ? null : String(row["digest_at"]),
+        digestOn: row["digest_on"] == null ? null : String(row["digest_on"]), updatedAt: String(row["updated_at"]) };
+  }
+
+  /** Change one person's choice; a digest time is a local HH:MM, or null for no evening digest. */
+  setNotificationPreference(account: string, change: { mode?: NotificationMode; digestAt?: string | null }, by: string, now: Date): NotificationPreference {
+    if (change.digestAt != null && !isDigestTime(change.digestAt)) throw new Error("digest time must be HH:MM");
+    const current = this.notificationPreference(account);
+    const mode = change.mode ?? current.mode;
+    const digestAt = change.digestAt === undefined ? current.digestAt : change.digestAt;
+    this.db.prepare(`INSERT INTO notification_preference (account, mode, digest_at, digest_on, updated_at, updated_by) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT (account) DO UPDATE SET mode = excluded.mode, digest_at = excluded.digest_at, updated_at = excluded.updated_at, updated_by = excluded.updated_by`)
+      .run(account, mode, digestAt, current.digestOn, now.toISOString(), by);
+    return this.notificationPreference(account);
+  }
+
+  /** Everyone who asked for an evening digest, with the local day theirs was last considered. */
+  eveningDigestPeople(): { account: string; digestAt: string; digestOn: string | null }[] {
+    return this.db.prepare("SELECT account, digest_at, digest_on FROM notification_preference WHERE digest_at IS NOT NULL ORDER BY account").all()
+      .map(row => ({ account: String(row["account"]), digestAt: String(row["digest_at"]), digestOn: row["digest_on"] == null ? null : String(row["digest_on"]) }));
+  }
+
+  /** Claim one local day's digest for one person: true once, false if it was already considered. */
+  claimEveningDigestDay(account: string, day: string): boolean {
+    return Number(this.db.prepare("UPDATE notification_preference SET digest_on = ? WHERE account = ? AND digest_at IS NOT NULL AND (digest_on IS NULL OR digest_on < ?)")
+      .run(day, account, day).changes) === 1;
+  }
+
+  /** The card a destination keeps for this task. A task with none joins a card whose first task was filed within
+   * a minute of it (up to eight tasks), or starts its own. */
+  chatCardFor(destination: string, taskRef: number, filedAt: string, now: Date): ChatCard {
+    return this.transact(() => {
+      const known = this.db.prepare("SELECT card FROM chat_card_task WHERE destination = ? AND task_ref = ?").get(destination, taskRef);
+      if (known !== undefined) return this.chatCard(Number(known["card"]))!;
+      const at = Date.parse(filedAt);
+      const low = new Date(at - QUIET_GROUP_MS).toISOString(), high = new Date(at + QUIET_GROUP_MS).toISOString();
+      const together = Number.isFinite(at) ? this.db.prepare(`SELECT id FROM chat_card c WHERE destination = ? AND anchor_at BETWEEN ? AND ?
+        AND (SELECT COUNT(*) FROM chat_card_task t WHERE t.card = c.id) < 8 ORDER BY id DESC LIMIT 1`).get(destination, low, high) : undefined;
+      const card = together !== undefined ? Number(together["id"])
+        : Number(this.db.prepare("INSERT INTO chat_card (destination, anchor_at, created_at) VALUES (?, ?, ?)")
+          .run(destination, Number.isFinite(at) ? new Date(at).toISOString() : now.toISOString(), now.toISOString()).lastInsertRowid);
+      this.db.prepare("INSERT INTO chat_card_task (destination, task_ref, card, joined_at) VALUES (?, ?, ?, ?)").run(destination, taskRef, card, now.toISOString());
+      return this.chatCard(card)!;
+    });
+  }
+
+  chatCard(id: number): ChatCard | null {
+    const row = this.db.prepare("SELECT * FROM chat_card WHERE id = ?").get(id);
+    if (row === undefined) return null;
+    const tasks = this.db.prepare("SELECT task_ref FROM chat_card_task WHERE card = ? ORDER BY joined_at, task_ref").all(id).map(one => Number(one["task_ref"]));
+    return { id, destination: String(row["destination"]), anchorAt: String(row["anchor_at"]), message: row["message"] == null ? null : String(row["message"]),
+      digest: row["digest"] == null ? null : String(row["digest"]), tasks };
+  }
+
+  /** The newest lifecycle fact a task has recorded — what its card says before any attempt starts. */
+  latestTaskFact(taskRef: number): { kind: string; createdAt: string } | null {
+    const row = this.db.prepare("SELECT kind, created_at FROM notification WHERE task_ref = ? AND substr(dedupe_key, 1, ?) = ? ORDER BY id DESC LIMIT 1")
+      .get(taskRef, LIFECYCLE_KEY_PREFIX.length, LIFECYCLE_KEY_PREFIX);
+    return row === undefined ? null : { kind: String(row["kind"]), createdAt: String(row["created_at"]) };
+  }
+
+  /** Task-bound facts recorded since an instant, newest last (bounded): what an evening digest reads. */
+  taskFactsSince(since: string, limit = 2000): Notification[] {
+    return this.db.prepare("SELECT * FROM notification WHERE created_at >= ? AND task_ref IS NOT NULL AND project IS NOT NULL ORDER BY id DESC LIMIT ?")
+      .all(since, limit).map(readNotification).reverse();
+  }
+
+  /** The message now showing this card, and what it shows. */
+  setChatCardMessage(id: number, message: string, digest: string): void {
+    this.db.prepare("UPDATE chat_card SET message = ?, digest = ? WHERE id = ?").run(message, digest, id);
   }
 
   markTelegramDigestSent(now: Date): void {
@@ -26968,6 +27130,8 @@ function readPublicationGrant(row: Record<string, unknown>): PublicationGrant {
         ? null
         : (String(row["merge_method"]) as "squash" | "merge" | "rebase"),
     mergeDeleteBranch: Number(row["merge_delete_branch"] ?? 0) === 1,
+    publishOn: row["publish_on"] === "complete" ? "complete" : "build",
+    mergeWhenGreen: Number(row["merge_when_green"] ?? 0) === 1,
   };
 }
 

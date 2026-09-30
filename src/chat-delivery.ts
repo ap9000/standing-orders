@@ -33,6 +33,7 @@ import { answerChatFlowPrompt, applyChatFlowTap, flowDecisionParts } from "./cha
 import { connectChannel, FLOW_WORDS, takeChannelMessage, watchedChannel } from "./chat-inbox.js";
 import { triggerConfigOf } from "./flow-triggers.js";
 import { telegramProgressCard } from "./telegram-progress.js";
+import { enqueueEveningDigests, isTaskFact, needsPerson, quietCardView, readyPingView } from "./chat-quiet.js";
 import { phoneText, PHONE_HELP, phoneCommand, phoneStatus, phoneTaskView, phoneTaskChoices, phoneTaskListText, resolvePhoneTask, phoneFocusText, PHONE_NO_MATCH, PHONE_BACK_TO_LEAD } from "./telegram-status.js";
 import { applyRoomInbound, conversationRow, roomCardApprover, roomCommand, roomGrantAllowed, roomMessagesAfter, roomMessageText, teamDomain } from "./chat-rooms.js";
 import { isTelegramProgressNotification, proposalTaskOf, type Store } from "./store.js";
@@ -737,6 +738,30 @@ export async function planRoomMessages(options: ChatDeliveryOptions): Promise<vo
   }
 }
 
+/** Quiet mode: the task's one card (or its group's) in this person's chat, planned once and then repainted in
+ * place whenever what it says changes. */
+function planQuietCard(options: ChatDeliveryOptions, binding: ChatBinding, notification: Parameters<typeof isTaskFact>[0] & { taskRef: number | null; taskId: string | null; createdAt: string }, now: Date): void {
+  const { state, store, identity } = options;
+  if (notification.taskRef === null || notification.taskId === null) return;
+  const card = store.chatCardFor(`${state.channel}:${binding.id}`, notification.taskRef, store.getTask(notification.taskId)?.createdAt ?? notification.createdAt, now);
+  const view = quietCardView(store, card.tasks, now, options.evidenceRoot);
+  if (view === null) return;
+  const content: ChatContent = { text: view.text, link: view.link, ...(card.tasks.length === 1 ? { task: notification.taskId } : {}) };
+  const shown = chatHash(JSON.stringify(content));
+  if (card.message !== null) {
+    if (card.digest === shown) return;
+    state.prepare("UPDATE chat_part SET payload=?,state='pending',created=?,next_at=NULL WHERE id=? AND state!='dropped'").run(JSON.stringify(content), now.toISOString(), Number(card.message));
+    store.setChatCardMessage(card.id, card.message, shown);
+    return;
+  }
+  const id = chatHash(`${state.channel}:card:${binding.id}:${card.id}`);
+  state.enqueue({ id, installation: identity.installation, binding: binding.id, kind: "notice", channel: binding.channel, member: binding.member,
+    ts: "", thread: "", payload: "{}", created: now.toISOString() });
+  state.plan(id, [content], now);
+  const part = state.prepare("SELECT id FROM chat_part WHERE event=?").get(id);
+  if (part !== undefined) store.setChatCardMessage(card.id, String(part.id), shown);
+}
+
 /** One progress card per exact result; separate urgent facts retain their own review link. */
 export async function planChatNotifications(
   options: ChatDeliveryOptions,
@@ -751,6 +776,8 @@ export async function planChatNotifications(
   )
     return;
   const registry = await options.readProjects();
+  // An evening digest someone asked for is due: record it as their own notification, delivered below.
+  try { enqueueEveningDigests(store, nowOf(options), options.evidenceRoot); } catch { /* Retried on the next pass. */ }
   const cursor = Number(
     state
       .prepare("SELECT notification FROM chat_runtime WHERE installation=?")
@@ -778,7 +805,21 @@ export async function planChatNotifications(
             `${options.state.channel}:notice:${binding.id}:${notification.id}`,
           ),
           now = nowOf(options);
-        if (run && notification.taskId && notification.project !== null && isTelegramProgressNotification(notification)) {
+        // Only when I'm needed (the default): the task's one card is edited in place, and a new message
+        // follows only when this person is needed. Every step keeps the branches below unchanged.
+        const quiet = !personal && isTaskFact(notification) && store.notificationPreference(binding.approver).mode === "quiet";
+        if (quiet) {
+          planQuietCard(options, binding, notification, now);
+          if (!needsPerson(notification)) return;
+          if (notification.kind === "run-finished" && run) {
+            const ping = readyPingView(store, store.getRun(run.id)!, notification.taskId!, notification.project!, now, options.evidenceRoot);
+            state.enqueue({ id, installation: identity.installation, binding: binding.id, kind: "notice", channel: binding.channel, member: binding.member,
+              ts: "", thread: "", payload: "{}", created: now.toISOString() });
+            state.plan(id, [{ text: ping.text, task: notification.taskId!, run: run.id, link: ping.link }], now);
+            return;
+          }
+        }
+        if (!quiet && run && notification.taskId && notification.project !== null && isTelegramProgressNotification(notification)) {
           const card = telegramProgressCard(
             store,
             store.getRun(run.id)!,
@@ -850,7 +891,7 @@ export async function planChatNotifications(
           state.enqueue({ id, installation: identity.installation, binding: binding.id, kind: "notice", channel: binding.channel, member: binding.member,
             ts: "", thread: "", payload: "{}", created: now.toISOString() });
           state.plan(id, questionParts(store, notification, binding)!, now);
-        } else if (notification.pushClass !== null || personal) {
+        } else if (notification.pushClass !== null || personal || quiet) {
           state.enqueue({
             id,
             installation: identity.installation,
@@ -874,7 +915,7 @@ export async function planChatNotifications(
                 ...(notification.taskId ? { task: notification.taskId } : {}),
                 ...(run ? { run: run.id } : {}),
                 ...(notification.link
-                  ? { link: { label: personal ? "Open" : "Review", path: notification.link } }
+                  ? { link: { label: notification.kind === "pull-request-ready" ? "Merge" : personal ? "Open" : "Review", path: notification.link } }
                   : {}),
               },
             ],

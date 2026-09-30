@@ -279,6 +279,9 @@ export type OnboardIo = {
   /** Add a repository as a project, as Projects → add does. */
   enroll: (repo: string) => Promise<{ ok: true; added: boolean } | { ok: false; message: string }>;
   checkConnection: (agent: OnboardAgent) => Promise<ProviderConnection>;
+  /** Whether the project can open pull requests at Complete, in one line: on, the one command that turns it on, or
+   * what to fix first. Turning it on stays a person's password step. */
+  pullRequests?: (repo: string) => Promise<string>;
 };
 
 type SkillAnswer = { state: "written" | "current" | "needs-yes" | "declined" | "not-ours" | "edited" | "removed" | "absent"; files: SkillStep[]; wrote: string[]; removed: string[] };
@@ -407,6 +410,7 @@ export async function runOnboard(io: OnboardIo): Promise<number> {
   const mcp = agents.map(agent => ({ agent, command: mcpLine(agent) }));
 
   const projectData = project.state === "added" || project.state === "already" ? { path: project.path, added: project.state === "added" } : null;
+  const pullRequests = projectData === null || io.pullRequests === undefined ? null : await io.pullRequests(projectData.path);
   const projectProblem = (() => {
     switch (project.state) {
       case "none": return "not inside a git repository";
@@ -423,6 +427,7 @@ export async function runOnboard(io: OnboardIo): Promise<number> {
       command,
       project: projectData,
       ...(projectProblem === null ? {} : { projectProblem }),
+      ...(pullRequests === null ? {} : { pullRequests }),
       agents: reports,
       skill: skillData,
       mcp,
@@ -435,6 +440,7 @@ export async function runOnboard(io: OnboardIo): Promise<number> {
     : project.state === "none" ? "project   none added: run onboard inside the repository you want to hand off" : `project   ${projectProblem}`;
   io.write([
     projectLine,
+    ...(pullRequests === null ? [] : [`pull requests ${pullRequests}`]),
     `agents    ${reports.map(one => `${one.name}: ${[one.words, one.plan].filter(Boolean).join(" · ")}`).join("; ")}`,
     skillLine(),
     ...mcp.map((one, index) => `${index === 0 ? "tools    " : "         "} ${one.command}   (add Toolroll as tools; not run)`),

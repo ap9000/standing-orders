@@ -80,7 +80,7 @@ export function categoryOf(table: string): string {
     [/^(run|artifact|claim|worktree$|execution_slot|contest|tournament_terms|fallback_cycle|fallback_transition|held_session|session_turn|attended_authorization|criterion_review|diff_comment|proof_|review_request|repair_chain|incident|publication$|merge_|side_spend|knowledge_snapshot|learning_snapshot|skill_snapshot)/, "runs"],
     [/^(task|hold$|plan_|scope_|tool_seal|decision|external_|skill_test)/, "tasks"],
     [/^(project|approval_policy|capability|verify_command|worktree_setup|backend_grant|intake_grant|publication_grant|operating_mode|knowledge_|learning_|memory_|skill_)/, "projects"],
-    [/(_config|_default|_defaults)$|^(budget|model_|provider_|installation_fact|runtime_check|monitoring_status|quota|mode_rail|schema_version)/, "settings"],
+    [/(_config|_default|_defaults)$|^(budget|model_|provider_|installation_fact|runtime_check|monitoring_status|integration_check|quota|mode_rail|schema_version)/, "settings"],
   ];
   return rules.find(([pattern]) => pattern.test(table))?.[1] ?? "other";
 }

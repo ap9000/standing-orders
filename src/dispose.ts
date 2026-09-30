@@ -203,6 +203,7 @@ function disposeBuildOutcomeLocked(context: DisposeContext, result: BuildResult)
           const headSha = store.getRun(runId)?.headRevision ?? null;
           if (
             grant !== null &&
+            grant.publishOn !== "complete" &&
             headSha !== null &&
             headWithin(branch, grant.headPrefix) &&
             (grant.selector === "all" || origin === "ours")
@@ -279,6 +280,7 @@ function disposeBuildOutcomeLocked(context: DisposeContext, result: BuildResult)
         const headSha = store.getRun(runId)?.headRevision ?? null;
         if (
           grant !== null &&
+          grant.publishOn !== "complete" &&
           headSha !== null &&
           headWithin(branch, grant.headPrefix) &&
           (grant.selector === "all" || origin === "ours")

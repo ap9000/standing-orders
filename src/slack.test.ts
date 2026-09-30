@@ -288,6 +288,8 @@ describe("Slack shared chat", () => {
     const added = addApprover(store, "alex", now);
     if (!added.ok) throw Error("account");
     password = added.token;
+    // Every step: these journeys prove the per-step behaviour quiet chat keeps for people who choose it.
+    store.setNotificationPreference("alex", { mode: "all" }, "alex", now);
     for (const phase of ["build", "plan", "review"])
       store.setPhaseConfig(
         "installation",
@@ -913,6 +915,7 @@ describe("Slack shared chat", () => {
   test("teammates pair their own Slack accounts, and status, task and help answer from the database without a model", async () => {
     const sam = addApprover(store, "sam", now, { name: "alex", token: password });
     if (!sam.ok) throw Error("sam");
+    store.setNotificationPreference("sam", { mode: "all" }, "sam", now);
     const original = options.api;
     options = { ...options, api: vi.fn(async (method, args = {}) => {
       if (method === "users.info") return { user: { id: args.user, team_id: ID.team, deleted: false, is_bot: false } };
@@ -967,6 +970,7 @@ describe("Slack shared chat", () => {
   test("a Slack channel follows a team conversation: a manager binds it with team 1, paired members' messages enter the shared queue, and replies and cards come back to the channel", async () => {
     const sam = addApprover(store, "sam", now, { name: "alex", token: password });
     if (!sam.ok) throw Error("sam");
+    store.setNotificationPreference("sam", { mode: "all" }, "sam", now);
     const original = options.api;
     options = { ...options, api: vi.fn(async (method, args = {}) => {
       if (method === "users.info") return { user: { id: args.user, team_id: ID.team, deleted: false, is_bot: false } };

@@ -24,7 +24,7 @@ function assignmentFor(store: Store, run: Run, taskId: string, project: string, 
   }
 }
 
-export function telegramProgressCard(store: Store, run: Run, taskId: string, project: string, now = new Date(), root?: string): { text: string; entities: ProgressEntity[]; link: PhoneTaskLink } {
+export function telegramProgressCard(store: Store, run: Run, taskId: string, project: string, now = new Date(), root?: string): { text: string; entities: ProgressEntity[]; link: PhoneTaskLink; next: string } {
   const proof = store.proofVerdictFor(run.id);
   const rows = proof?.matrix ?? [];
   const direct = rows.length > 0 && rows.every(row => row.assessment !== undefined);
@@ -119,7 +119,7 @@ export function telegramProgressCard(store: Store, run: Run, taskId: string, pro
     ...(next ? ["", next] : []),
     ...(acceptance === null ? [] : [acceptance]),
     ...(delivery === null ? [] : ["", delivery]), "", `${projectLabel(project)} · #${run.id}`].join("\n");
-  return { text, entities: [{ type: "bold", offset: 0, length: title.length }, { type: "bold", offset: title.length + 1, length: heading.length }],
+  return { text, next, entities: [{ type: "bold", offset: 0, length: title.length }, { type: "bold", offset: title.length + 1, length: heading.length }],
     link: { label, path: operatorHold || accessBlocked || (!built && run.outcome !== null)
       ? chatControlHref("recovery", taskId) : built ? chatResultHref(taskId, run.id, checksFailed ? "checks" : "summary") : chatControlHref("task", taskId) } };
 }
