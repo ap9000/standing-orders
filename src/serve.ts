@@ -1,7 +1,7 @@
 import { repositoryContext, repositoryContextRead } from './repository-context.js';
 import { repositoryContextHtml } from './repository-context-ui.js';
 import { browserAssetsAvailable, browserWorkspaceDocument, serveBrowserAsset } from './browser-shell.js';
-import { browserCrewOf, browserCrewFromIndex, browserWorkActionHref, browserProjectsOf, browserNavigationOf, type BrowserWorkspace, type BrowserChatLink, type BrowserTasksView, type BrowserLimits, type BrowserSettingsView, type BrowserTaskView, type BrowserTaskFact, type BrowserTaskSection, type BrowserProjectsView, type BrowserProjectRow, type BrowserResultChip, type BrowserResultPanel, type BrowserResultView, type BrowserActionCard, type BrowserSignIn } from './browser-workspace.js';
+import { browserCrewOf, browserCrewFromIndex, browserWorkActionHref, browserProjectsOf, browserNavigationOf, type BrowserWorkspace, type BrowserChatLink, type BrowserTasksView, type BrowserLimits, type BrowserSettingsView, type BrowserTaskView, type BrowserTaskFact, type BrowserTaskSection, type BrowserProjectsView, type BrowserProjectRow, type BrowserResultChip, type BrowserResultPanel, type BrowserResultView, type BrowserActionCard, type BrowserSignIn, type BrowserUpdateNotice, type BrowserUpdates } from './browser-workspace.js';
 import { configureLeadFollow, leadFollowStatus, runLeadFollowPass } from './lead-follow.js';
 import { startMaintenance } from './maintenance.js';
 import { codingHandoffPreview, createCodingHandoff } from './coding-handoff.js';
@@ -310,8 +310,14 @@ import { runMateTurn, MATE_MESSAGE_MAX_CHARS } from "./mate.js";
 import type { SubscriptionMateRunner } from "./subscription-chat.js";
 import { confirmCoordinatorProposal, confirmMateProposal, dismissCoordinatorProposal, dismissMateProposal } from "./mate-doors.js";
 import { envValue } from "./names.js";
+import { cachedRelease, isNewer, runnerVersions, setUpdateChecks, updateChecksOff, type Release } from "./releases.js";
+import { installMethod } from "./install-method.js";
+import { PACKAGE_VERSION } from "./version.js";
+import { updateNoticeWords } from "./update-notice.js";
 
 export type ServeOptions = {
+  /** Tests: the bin whose real path says how Toolroll was installed (Settings → Updates' command). */
+  installBin?: string;
   /** Native coding workspace injection for isolated integration tests. */
   codingWorkspace?: CodingWorkspace;
   store: Store;
@@ -648,6 +654,30 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
   }
   const clock = options.clock ?? (() => new Date());
+  const install = installMethod(options.installBin);
+  /** What the last daily check found (the cache only, never the network), or nothing while checks are off. */
+  const updateFacts = (): { release: Release | null; newer: boolean; on: boolean; byEnv: boolean } | null => {
+    if (options.configDir === undefined) return null;
+    const switched = updateChecksOff(process.env, options.configDir);
+    const release = switched.off ? null : cachedRelease(options.configDir);
+    return { release, newer: release !== null && isNewer(release.version, PACKAGE_VERSION), on: !switched.off, byEnv: switched.byEnv };
+  };
+  /** Settings → Updates, for everyone who can open Settings; only an operator may flip the switch. */
+  const settingsUpdates = (actor: string, csrf: string): BrowserUpdates | null => {
+    const facts = updateFacts();
+    if (facts === null) return null;
+    const known = new Map(runnerVersions(options.configDir!).map(one => [one.runner, one.version]));
+    return {
+      current: PACKAGE_VERSION,
+      latest: facts.release === null ? null : { version: facts.release.version, newer: facts.newer, security: facts.release.security, notes: facts.release.notes, url: facts.release.url },
+      updateCommand: install.updateCommand,
+      check: { on: facts.on, byEnv: facts.byEnv, canManage: csrf !== "" && store.isInstanceOperator(actor) },
+      workers: store.listRunners().filter(one => one.retiredAt === null).map(one => {
+        const version = known.get(one.name) ?? null;
+        return { name: one.name, version, older: version !== null && isNewer(PACKAGE_VERSION, version) };
+      }),
+    };
+  };
   const workspaceRevision = prepareWorkspaceRevision(store);
   const workspaceIncarnation = randomBytes(16).toString('hex');
   const workspaceValidators = new WorkspaceValidatorCache();
@@ -1528,6 +1558,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     const requestFacts = {
       theme: pinnedTheme(request.headers.cookie),
       accent: pinnedAccent(request.headers.cookie),
+      updateSeen: /(?:^|;\s*)so-update-seen=([0-9A-Za-z.-]{1,60})(?:;|$)/.exec(request.headers.cookie ?? "")?.[1] ?? null,
       actor: who.name,
       csrf: who.via === "cookie" ? who.session.csrf : "",
       returnTo: safeReturn(url.pathname + url.search),
@@ -3970,7 +4001,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           const googleView = { connected: googleConnected(options.configDir ?? null)?.address ?? null, clientId: google?.clientId ?? "", redirect: origin === null ? null : `${origin}${GOOGLE_CALLBACK}` };
           return email === null ? { set: false, host: "", port: 587, secure: false, user: "", from: "", imapHost: "", imapPort: 993, google: googleView }
             : { set: true, host: email.host, port: email.port, secure: email.secure, user: email.user, from: email.from, imapHost: email.imap?.host ?? "", imapPort: email.imap?.port ?? 993, google: googleView };
-        })() : null, telegramDeliveryWords(store, loadBotToken(process.env, options.telegramTokenFile)), settingsWorkers(store, now)),
+        })() : null, telegramDeliveryWords(store, loadBotToken(process.env, options.telegramTokenFile)), settingsWorkers(store, now), settingsUpdates(who.name, csrf)),
       );
     }
 
@@ -4635,6 +4666,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         chats,
         ...(s.refreshSeconds === undefined ? {} : { refreshSeconds: Math.max(5, Math.floor(s.refreshSeconds)) }),
         ...(s.chrome.signIn === undefined ? {} : { signIn: s.chrome.signIn }),
+        ...(s.chrome.update === undefined ? {} : { update: s.chrome.update }),
       };
       if (requestFacts.workspaceRead) {
         const validator = requestFacts.workspaceValidator;
@@ -4754,6 +4786,13 @@ export function createDecisionServer(options: ServeOptions): Server {
       settings: true,
       ...(store.isDemo() ? { demo: true } : {}),
       ...(() => { const signIn = signInNotices(store); return signIn.length === 0 ? {} : { signIn }; })(),
+      ...(() => {
+        // Operators only (only someone at this computer can update it), and gone once this version is dismissed.
+        if (!facts?.csrf || !actor || !store.isInstanceOperator(actor)) return {};
+        const update = updateFacts();
+        if (update === null || !update.newer || update.release === null || facts.updateSeen === update.release.version) return {};
+        return { update: { version: update.release.version, security: update.release.security, href: "/settings#updates", dismissHref: "/settings/updates/dismiss" } };
+      })(),
       ...(liveMode === null || liveModeTerms === null
         ? {}
         : {
@@ -6006,6 +6045,22 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (who.role !== "approver") return refuse(response, who, 403, "Only an operator can resume an agent's work.", "/work");
       liftAuthPause(store, provider, "person", who.name, clock());
       return redirect(response, "/work");
+    }
+    // The update notice is dismissed per browser and per version: a newer release shows it again.
+    if (url.pathname === "/settings/updates/dismiss") {
+      const version = body.get("version") ?? "";
+      if (!/^[0-9A-Za-z.-]{1,60}$/.test(version)) return refuse(response, who, 400, "Choose a version to dismiss.", "/settings#updates");
+      response.setHeader("Set-Cookie", `so-update-seen=${version}; SameSite=Lax; Path=/; Max-Age=31536000`);
+      if (body.get("quiet") === "1") { response.writeHead(204); response.end(); return; }
+      return redirect(response, safeReturn(body.get("return") ?? "/settings#updates"));
+    }
+    // The daily check's switch: an installation setting, so an operator's.
+    if (url.pathname === "/settings/updates") {
+      if (options.configDir === undefined) return refuse(response, who, 404, "Updates are not set up on this console.", "/settings");
+      if (!store.isInstanceOperator(who.name)) return refuse(response, who, 403, "Only an operator can change update checks.", "/settings#updates");
+      const on = body.get("check") === "on";
+      setUpdateChecks(options.configDir, on);
+      return redirect(response, `/settings?said=${encodeURIComponent(on ? "Toolroll looks for a newer version once a day." : "Update checks are off.")}#updates`);
     }
     if (url.pathname === '/code' || url.pathname.startsWith('/code/')) {
       const wantsJson = request.headers.accept?.includes('application/json') === true;
@@ -13982,7 +14037,7 @@ button.pick-file { min-height: 1.75rem; padding: 0 .55rem; font-size: .75rem; }
 `;
 
 /** Appearance: a three-way segmented switch, one tap per choice. */
-const THEME_CONTROLS_CSS = `.task-repo select{width:100%;min-height:2.75rem;font-size:1rem}.task-repo-add{margin:.35rem .1rem .5rem}.task-repo-add a{display:inline-flex;align-items:center;min-height:2.25rem}details.result-request-open.result-request-form>summary{border:0;background:transparent;padding:.5rem 0;min-height:2.75rem;font-weight:600;display:list-item;list-style:revert}details.result-request-open.result-request-form>summary::-webkit-details-marker{display:revert}form.js-autosave button[type=submit]{display:none}.provider-row{border-bottom:1px solid var(--so-line);padding:.35rem 0}.provider-row:first-of-type{border-top:1px solid var(--so-line)}.provider-head{display:flex;align-items:center;gap:.75rem;margin:.4rem 0 0}.provider-status{display:inline-flex;align-items:center;gap:.4rem;color:var(--so-muted);font-size:.875rem}.provider-status i{width:.5rem;height:.5rem;border-radius:50%;background:var(--so-muted)}.provider-status--ok i{background:var(--so-success)}.provider-status--warn i{background:var(--so-attention)}.provider-status--off i{background:transparent;border:1.5px solid var(--so-muted)}details.provider-manage>summary{cursor:pointer;color:var(--so-accent-text);font-size:.875rem;min-height:2.5rem;display:list-item;padding-block:.5rem}.card.props .row{display:grid;gap:.1rem;margin:0 0 .75rem}.card.props .row>.meta{display:block;font-size:.75rem}.card.props .row>.meta::first-letter{text-transform:uppercase}.card.props .row>.mono{font-family:var(--font-sans);font-size:.875rem}.card.props .row>.mono .seal{font-family:var(--font-mono);font-size:.8125rem}details.evidence-files{margin:1rem 0}details.evidence-files>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:600}details.evidence-files ul{list-style:none;margin:0;padding:0}details.evidence-files li{display:flex;justify-content:space-between;gap:1rem;padding:.5rem 0;border-bottom:1px solid var(--so-line)}.result-action .result-feedback-link{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;text-decoration:none}@media(hover:hover) and (pointer:fine){.result-action .result-feedback-link:hover{background:var(--so-raised)}}.so-sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}.verdict{margin:.5rem 0 .75rem}.verdict-chips{display:flex;flex-wrap:wrap;gap:.4rem;list-style:none;padding:0;margin:0}.verdict-chip{display:inline-flex;align-items:center;gap:.3rem;min-height:1.75rem;padding:.2rem .65rem;border-radius:999px;font-size:.8125rem;font-weight:600;background:var(--so-neutral-soft);color:var(--so-neutral-ink)}.verdict-chip svg{width:.9rem;height:.9rem}.verdict-chip--success{background:var(--so-success-soft);color:var(--so-success)}.verdict-chip--danger{background:var(--so-danger-soft);color:var(--so-danger)}.verdict-chip--warning{background:var(--so-warning-soft);color:var(--so-warning)}.verdict-chip--info{background:var(--so-info-soft);color:var(--so-info)}.verdict-by{margin:.4rem 0 0}details.result-request-open{margin:.5rem 0}details.result-request-open>summary{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;cursor:pointer;list-style:none}details.result-request-open>summary::-webkit-details-marker{display:none}details.result-request-open[open]>summary{margin-bottom:.75rem}.settings-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(8.5rem,1fr));gap:.5rem;margin:0 0 2rem}.settings-tiles a{display:flex;align-items:center;gap:.6rem;min-height:3rem;padding:.65rem .8rem;border:1px solid var(--so-line);border-radius:.625rem;background:var(--so-paper);color:var(--so-ink);text-decoration:none;font-weight:550;font-size:.875rem}@media(hover:hover) and (pointer:fine){.settings-tiles a:hover{border-color:var(--so-input-line);background:var(--so-raised)}}.settings-tiles svg{width:1.1rem;height:1.1rem;flex-shrink:0;color:var(--so-accent-text)}details.settings-more{margin:.25rem 0 1.25rem}details.settings-more>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:550}details.settings-more>summary .meta{font-weight:400;margin-left:.35rem}.settings-changed{margin-top:-.25rem}.appearance{margin:0 0 28px}.appearance h2{margin:0 0 10px}.theme-switch{display:inline-flex;flex-wrap:nowrap;max-width:100%;gap:4px;padding:4px;margin:0;border:1px solid var(--so-line);border-radius:10px;background:var(--so-raised)}.theme-switch .theme-choice,.so-native-region .theme-switch .theme-choice{flex:1 1 0;width:auto;white-space:nowrap;min-height:40px;padding:8px 16px;border:0;border-radius:7px;background:transparent;color:var(--so-muted);font:inherit;font-weight:550;box-shadow:none;cursor:pointer}@media(hover:hover) and (pointer:fine){.theme-switch .theme-choice:hover{color:var(--so-ink)}}.theme-switch .theme-choice[aria-pressed="true"]{background:var(--so-paper);color:var(--so-ink);box-shadow:0 1px 2px rgb(0 0 0 / .1)}.appearance .meta{margin:8px 0 0}@media(max-width:600px){.theme-switch .theme-choice{min-height:44px}}`;
+const THEME_CONTROLS_CSS = `.task-repo select{width:100%;min-height:2.75rem;font-size:1rem}.task-repo-add{margin:.35rem .1rem .5rem}.task-repo-add a{display:inline-flex;align-items:center;min-height:2.25rem}details.result-request-open.result-request-form>summary{border:0;background:transparent;padding:.5rem 0;min-height:2.75rem;font-weight:600;display:list-item;list-style:revert}details.result-request-open.result-request-form>summary::-webkit-details-marker{display:revert}form.js-autosave button[type=submit]{display:none}.provider-row{border-bottom:1px solid var(--so-line);padding:.35rem 0}.provider-row:first-of-type{border-top:1px solid var(--so-line)}.provider-head{display:flex;align-items:center;gap:.75rem;margin:.4rem 0 0}.provider-status{display:inline-flex;align-items:center;gap:.4rem;color:var(--so-muted);font-size:.875rem}.provider-status i{width:.5rem;height:.5rem;border-radius:50%;background:var(--so-muted)}.provider-status--ok i{background:var(--so-success)}.provider-status--warn i{background:var(--so-attention)}.provider-status--off i{background:transparent;border:1.5px solid var(--so-muted)}details.provider-manage>summary{cursor:pointer;color:var(--so-accent-text);font-size:.875rem;min-height:2.5rem;display:list-item;padding-block:.5rem}.card.props .row{display:grid;gap:.1rem;margin:0 0 .75rem}.card.props .row>.meta{display:block;font-size:.75rem}.card.props .row>.meta::first-letter{text-transform:uppercase}.card.props .row>.mono{font-family:var(--font-sans);font-size:.875rem}.card.props .row>.mono .seal{font-family:var(--font-mono);font-size:.8125rem}details.evidence-files{margin:1rem 0}details.evidence-files>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:600}details.evidence-files ul{list-style:none;margin:0;padding:0}details.evidence-files li{display:flex;justify-content:space-between;gap:1rem;padding:.5rem 0;border-bottom:1px solid var(--so-line)}.result-action .result-feedback-link{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;text-decoration:none}@media(hover:hover) and (pointer:fine){.result-action .result-feedback-link:hover{background:var(--so-raised)}}.so-sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}.verdict{margin:.5rem 0 .75rem}.verdict-chips{display:flex;flex-wrap:wrap;gap:.4rem;list-style:none;padding:0;margin:0}.verdict-chip{display:inline-flex;align-items:center;gap:.3rem;min-height:1.75rem;padding:.2rem .65rem;border-radius:999px;font-size:.8125rem;font-weight:600;background:var(--so-neutral-soft);color:var(--so-neutral-ink)}.verdict-chip svg{width:.9rem;height:.9rem}.verdict-chip--success{background:var(--so-success-soft);color:var(--so-success)}.verdict-chip--danger{background:var(--so-danger-soft);color:var(--so-danger)}.verdict-chip--warning{background:var(--so-warning-soft);color:var(--so-warning)}.verdict-chip--info{background:var(--so-info-soft);color:var(--so-info)}.verdict-by{margin:.4rem 0 0}details.result-request-open{margin:.5rem 0}details.result-request-open>summary{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;cursor:pointer;list-style:none}details.result-request-open>summary::-webkit-details-marker{display:none}details.result-request-open[open]>summary{margin-bottom:.75rem}.settings-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(8.5rem,1fr));gap:.5rem;margin:0 0 2rem}.settings-tiles a{display:flex;align-items:center;gap:.6rem;min-height:3rem;padding:.65rem .8rem;border:1px solid var(--so-line);border-radius:.625rem;background:var(--so-paper);color:var(--so-ink);text-decoration:none;font-weight:550;font-size:.875rem}@media(hover:hover) and (pointer:fine){.settings-tiles a:hover{border-color:var(--so-input-line);background:var(--so-raised)}}.settings-tiles svg{width:1.1rem;height:1.1rem;flex-shrink:0;color:var(--so-accent-text)}details.settings-more{margin:.25rem 0 1.25rem}details.settings-more>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:550}details.settings-more>summary .meta{font-weight:400;margin-left:.35rem}.settings-changed{margin-top:-.25rem}.appearance{margin:0 0 28px}.appearance h2{margin:0 0 10px}.theme-switch{display:inline-flex;flex-wrap:nowrap;max-width:100%;gap:4px;padding:4px;margin:0;border:1px solid var(--so-line);border-radius:10px;background:var(--so-raised)}.theme-switch .theme-choice,.so-native-region .theme-switch .theme-choice{flex:1 1 0;width:auto;white-space:nowrap;min-height:40px;padding:8px 16px;border:0;border-radius:7px;background:transparent;color:var(--so-muted);font:inherit;font-weight:550;box-shadow:none;cursor:pointer}@media(hover:hover) and (pointer:fine){.theme-switch .theme-choice:hover{color:var(--so-ink)}}.theme-switch .theme-choice[aria-pressed="true"]{background:var(--so-paper);color:var(--so-ink);box-shadow:0 1px 2px rgb(0 0 0 / .1)}.appearance .meta{margin:8px 0 0}@media(max-width:600px){.theme-switch .theme-choice{min-height:44px}}.update-notes{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;max-height:18rem;overflow:auto}`;
 /** The page CSS this module writes itself (not the imported modules'), for the stylesheet contract tests. */
 export const PAGE_CSS = STYLE + THEME_CONTROLS_CSS;
 const WORKSPACE_STYLE = styleAsset(STYLE + APPROVAL_RULES_CSS + SPEND_CSS + RETENTION_CSS + LIMITS_CSS + MONITORING_CSS + BACKUP_CSS + EXPORT_CSS + PROJECT_DELETE_CSS + POLICY_CSS + EVIDENCE_PACK_CSS + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KITS_CSS + SSO_CSS + CREDENTIALS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
@@ -14009,6 +14064,8 @@ type Chrome = {
   modeBanner?: { words: string; name: string };
   /** Providers whose sign-in stopped working: every page says so, once. */
   signIn?: BrowserSignIn[];
+  /** A newer Toolroll: a quiet notice for an operator until they dismiss this version. */
+  update?: BrowserUpdateNotice;
   /** The chat tab renders only where chat could ever be allowed. */
   chat?: boolean;
   code?: boolean;
@@ -14516,7 +14573,11 @@ function shell(
       ? ""
       : `<div class="banner"><span class="badge badge-running">mode</span>${escape(chrome.modeBanner.words)} \u00b7 <a href="/mode">the terms \u00b7 end it</a></div>`) +
     (chrome.signIn ?? []).map(one => `<div class="banner sign-in-banner" data-sign-in="${escape(one.provider)}"><strong>${escape(one.title)}</strong> \u00b7 run <code>${escape(one.command)}</code> on this computer, then resume.${one.detail === "" ? "" : ` ${escape(one.detail)}`}` +
-      `<form method="post" action="${escape(one.resumeHref)}" class="inline"><input type="hidden" name="csrf" value="${escape(chrome.csrf ?? "")}"><button type="submit">${escape(one.resumeLabel)}</button></form></div>`).join("");
+      `<form method="post" action="${escape(one.resumeHref)}" class="inline"><input type="hidden" name="csrf" value="${escape(chrome.csrf ?? "")}"><button type="submit">${escape(one.resumeLabel)}</button></form></div>`).join("") +
+    (chrome.update === undefined
+      ? ""
+      : `<div class="banner update-banner" data-update="${escape(chrome.update.version)}">${escape(updateNoticeWords(chrome.update))} \u00b7 <a href="${escape(chrome.update.href)}">What's new</a>` +
+        `<form method="post" action="${escape(chrome.update.dismissHref)}" class="inline"><input type="hidden" name="csrf" value="${escape(chrome.csrf ?? "")}"><input type="hidden" name="version" value="${escape(chrome.update.version)}"><button type="submit">Dismiss</button></form></div>`);
   // The scope bar sits between the banners and the main/split body, so it
   // can never disappear with a responsive pane (portfolio arc §1).
   const content =
@@ -18535,7 +18596,7 @@ function accentHead(): string {
   const accent = requestContext.getStore()?.accent ?? null;
   return accent === null ? "" : `<style data-accent="${accent}">${accentStyle(accent)}</style>`;
 }
-const requestContext = new AsyncLocalStorage<{ sso?: { label: string; fresh: boolean } | undefined; refusal?: (response: ServerResponse, status: number, body: string) => void; theme?: "light" | "dark" | null; accent?: string | null; csrf: string; returnTo: string; actor?: string; createdTask?: string; browser?: boolean; workspaceRead?: boolean; workspaceRequest?: string | null; workCounts?: ReturnType<typeof workCountsByProject>; workCrew?: { project: string | null; page: WorkIndexPage }; workspaceValidator?: { key: string; revision: string; expiresAt: number; etag: string } }>();
+const requestContext = new AsyncLocalStorage<{ sso?: { label: string; fresh: boolean } | undefined; refusal?: (response: ServerResponse, status: number, body: string) => void; theme?: "light" | "dark" | null; accent?: string | null; updateSeen?: string | null; csrf: string; returnTo: string; actor?: string; createdTask?: string; browser?: boolean; workspaceRead?: boolean; workspaceRequest?: string | null; workCounts?: ReturnType<typeof workCountsByProject>; workCrew?: { project: string | null; page: WorkIndexPage }; workspaceValidator?: { key: string; revision: string; expiresAt: number; etag: string } }>();
 
 /** A same-site path or "/": never a scheme, a host, or a protocol-relative road. */
 function safeReturn(raw: string | null | undefined): string {
@@ -23289,6 +23350,7 @@ function settingsPage(
   email: NonNullable<BrowserSettingsView["email"]> | null = null,
   telegramDelivery: string | null = null,
   workers: NonNullable<BrowserSettingsView["workers"]> | null = null,
+  updates: BrowserUpdates | null = null,
 ): Screen {
   const permissionCard =
     permissionDefault === null
@@ -23508,6 +23570,7 @@ function settingsPage(
     telegram: { state: hasEnv ? "from the environment" : existing === null ? "not set" : "saved", current, delivery: telegramDelivery },
     email,
     workers,
+    updates,
   };
   return screen("Settings", [
     "<h1>Settings</h1>",
@@ -23517,6 +23580,7 @@ function settingsPage(
     qualityCard,
     keysCard,
     workersCard(workers),
+    updatesCard(updates, csrf),
     pushCard === "" && messagingCard === "" && digestCard === "" ? "" : `<h2>Notifications</h2>`,
     messagingCard,
     pushCard,
@@ -23571,6 +23635,24 @@ function workersCard(workers: NonNullable<BrowserSettingsView["workers"]> | null
             : `<ul>${one.running.map(task => `<li><a href="${escape(task.href)}">${escape(task.title)}</a>${task.project === null ? "" : ` <span class="meta">${escape(task.project)}</span>`}</li>`).join("")}</ul>`) +
           `</div>`).join("") +
         `<p class="meta">To change how many a worker runs at once: <code>toolroll runner capacity &lt;name&gt; &lt;n&gt;</code></p>`) +
+    `</section>`;
+}
+
+/** Settings → Updates, for browsers without the app script. */
+function updatesCard(updates: BrowserUpdates | null, csrf: string): string {
+  if (updates === null) return "";
+  const latest = updates.latest;
+  return `<section id="updates" aria-labelledby="updates-title"><h2 id="updates-title">Updates</h2>` +
+    `<p class="row">This version <span class="mono">${escape(updates.current)}</span> \u00b7 ${
+      !updates.check.on ? "Update checks are off" : latest === null ? "Not checked yet" : latest.newer ? `Latest <span class="mono">${escape(latest.version)}</span>` : "Up to date"}</p>` +
+    (latest !== null && latest.newer
+      ? `<p>Update with <code>${escape(updates.updateCommand)}</code> \u00b7 <a href="${escape(latest.url)}">Release notes</a></p>` +
+        (latest.notes === "" ? "" : `<details class="settings-more"><summary>What's new in ${escape(latest.version)}</summary><pre class="update-notes">${escape(latest.notes)}</pre></details>`)
+      : "") +
+    (updates.check.canManage && !updates.check.byEnv
+      ? `<form method="post" action="/settings/updates" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="check" value="${updates.check.on ? "off" : "on"}"><button type="submit">${updates.check.on ? "Turn off daily check" : "Turn on daily check"}</button></form>`
+      : updates.check.byEnv ? `<p class="meta">Off by TOOLROLL_NO_UPDATE_CHECK.</p>` : "") +
+    (updates.workers.length === 0 ? "" : `<ul>${updates.workers.map(one => `<li data-worker-version="${escape(one.name)}">${escape(one.name)} <span class="mono">${escape(one.version ?? "unknown")}</span>${one.older ? " \u00b7 older" : ""}</li>`).join("")}</ul>`) +
     `</section>`;
 }
 

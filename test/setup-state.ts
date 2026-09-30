@@ -10,11 +10,14 @@ const before = {
   TOOLROLL_DB: process.env.TOOLROLL_DB,
   STANDING_ORDERS_DB: process.env.STANDING_ORDERS_DB,
   XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+  TOOLROLL_NO_UPDATE_CHECK: process.env.TOOLROLL_NO_UPDATE_CHECK,
 };
 // Both names: the new one is read first, and neither may name the live store.
 process.env.TOOLROLL_DB = join(state, "orders.db");
 process.env.STANDING_ORDERS_DB = join(state, "orders.db");
 process.env.XDG_CONFIG_HOME = join(state, "config");
+// No test asks npm or GitHub for the latest release; the update tests script their own.
+process.env.TOOLROLL_NO_UPDATE_CHECK = "1";
 afterAll(() => {
   for (const [name, value] of Object.entries(before)) {
     if (value === undefined) delete process.env[name];

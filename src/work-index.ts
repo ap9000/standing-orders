@@ -2,7 +2,7 @@
  * not verify artifacts, inspect processes, or authorize task operations. */
 import { createHash } from 'node:crypto';
 import { readProjectAccess } from './project-access.js';
-import { providerName, signInReason } from './provider-auth.js';
+import { pauseOnTaskProviders, providerName, signInReason } from './provider-auth.js';
 import type { ProviderId } from './provider.js';
 import { scopeTermsProblem, type Store, type TaskState } from './store.js';
 import type { AssignmentSnapshot } from './assignment.js';
@@ -51,6 +51,9 @@ const s = (row: Row, key: string) => row[key] == null ? null : String(row[key]);
  * admitted child needs its parent's exact revision brief, in the same repo.
  * All subsequent reads are scalar/indexed metadata, never artifact bytes.
  * MATERIALIZED prevents counts + page selection repeating correlated reads. */
+/** A gate note counts only while its pause is on one of the task's current providers. */
+const GATE_PAUSE_ON_TASK = pauseOnTaskProviders('p', 'c.ref_id');
+
 const PROJECTION = `WITH RECURSIVE admitted AS MATERIALIZED (
   SELECT t.id, t.title, t.state, t.created_at, t.updated_at, r.id ref_id, r.repo,
     r.revision_of, r.revision_brief_artifact, r.assigned_runner, r.plan,
@@ -121,8 +124,8 @@ const PROJECTION = `WITH RECURSIVE admitted AS MATERIALIZED (
     sc.task_id scope_id,sc.digest,sc.approved_at,sc.proposed_at,sc.profile_state,
     -- The pause the dispatch gate itself left this task waiting on (the provider it resolved, pins,
     -- configuration and planners included) first; the approved terms answer before any gate has looked.
-    EXISTS(SELECT 1 FROM provider_auth_pause p WHERE p.id=c.auth_wait_pause AND p.lifted_at IS NULL) gate_signed_out,
-    COALESCE((SELECT p.provider||':'||p.auth_mode FROM provider_auth_pause p WHERE p.id=c.auth_wait_pause AND p.lifted_at IS NULL),
+    EXISTS(SELECT 1 FROM provider_auth_pause p WHERE p.id=c.auth_wait_pause AND p.lifted_at IS NULL AND ${GATE_PAUSE_ON_TASK}) gate_signed_out,
+    COALESCE((SELECT p.provider||':'||p.auth_mode FROM provider_auth_pause p WHERE p.id=c.auth_wait_pause AND p.lifted_at IS NULL AND ${GATE_PAUSE_ON_TASK}),
     (SELECT p.provider||':'||p.auth_mode FROM provider_auth_pause p WHERE p.lifted_at IS NULL AND p.provider IN (
       SELECT json_extract(sc.approved_profile_json,'$.provider') WHERE json_valid(sc.approved_profile_json)
       UNION ALL SELECT json_extract(leg.value,'$.provider') FROM json_each(CASE WHEN json_valid(sc.approved_route_json) THEN sc.approved_route_json ELSE '{}' END,'$.legs') leg

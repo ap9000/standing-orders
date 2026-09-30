@@ -97,6 +97,17 @@ export type BrowserSettingsView = {
   email?: { set: boolean; host: string; port: number; secure: boolean; user: string; from: string;
     /** v89: where Email inbox triggers read (IMAP), and a Google account connected instead of a mail server (`redirect`: the address to register with Google, when this page's address can take one). */
     imapHost: string; imapPort: number; google: { connected: string | null; clientId: string; redirect: string | null } } | null;
+  /** Settings → Updates: this version, the latest known one and its notes, how to update, the daily-check switch, and each worker's version. */
+  updates?: BrowserUpdates | null;
+};
+export type BrowserUpdates = {
+  current: string;
+  /** The latest release the last check found; null before any check has worked. */
+  latest: { version: string; newer: boolean; security: boolean; notes: string; url: string } | null;
+  updateCommand: string;
+  /** The daily check: off by TOOLROLL_NO_UPDATE_CHECK (byEnv) or by this switch; only an operator may flip it. */
+  check: { on: boolean; byEnv: boolean; canManage: boolean };
+  workers: { name: string; version: string | null; older: boolean }[];
 };
 /** A fold on the task page. Its HTML is the server's own section body, so
  * forms, ids and page scripts are unchanged. */
@@ -320,7 +331,12 @@ export type BrowserWorkspace = {
   refreshSeconds?: number;
   /** Providers whose sign-in stopped working: their work waits (one per provider). */
   signIn?: BrowserSignIn[];
+  /** A newer Toolroll exists: a quiet notice for an operator, until they dismiss this version. */
+  update?: BrowserUpdateNotice;
 };
+
+/** The console's update notice: neutral, never the accent — an update does not need a person. */
+export type BrowserUpdateNotice = { version: string; security: boolean; href: string; dismissHref: string };
 
 /** A provider's sign-in pause, as the console shows it: the plain reason,
  * what to run, and the one action that resumes its work. */

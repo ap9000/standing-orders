@@ -19,6 +19,7 @@ import { GuardedHtml, notifyWorkspaceRendered, regionIsEditing } from "./guarded
 import { ActionCards, CHAT_COMMANDS } from "./chat-cards.js";
 import { ViewHost } from "./views/index.js";
 import { Toaster } from "./components/ui/index.js";
+import { updateNoticeWords } from "../update-notice.js";
 import "./workspace.css";
 
 export { GuardedHtml, regionIsEditing };
@@ -552,6 +553,8 @@ export function WorkspaceApp({ initial }: { initial: BrowserWorkspace }) {
   // Pages that are themselves a list of work, or need the width (the board's columns, a coding session), go without the side panel.
   const pathname = new URL(workspace.path, window.location.origin).pathname;
   const hidePanel = pageOnly && !docked && !hasWork && (FULL_WIDTH_PAGES.has(pathname) || pathname.startsWith("/code/") || workspace.view?.kind === "flow");
+  const [dismissedUpdate, setDismissedUpdate] = useState<string | null>(null);
+  const update = workspace.update !== undefined && workspace.update.version !== dismissedUpdate ? workspace.update : null;
   useEffect(notifyWorkspaceRendered, []);
   useWindowStaysPut();
   return <><Toaster /><div className={`so-workspace${hidePanel ? " so-workspace--single" : ""}${docked ? " so-workspace--docked" : ""}`} data-workspace-shell data-workspace-phone-view={phoneView} data-workspace-has-result={workspace.result !== null}>
@@ -566,13 +569,25 @@ export function WorkspaceApp({ initial }: { initial: BrowserWorkspace }) {
         {isChat && <Button variant="secondary" size="sm" className="so-phone-work-button" onClick={() => setPhoneView("work")}>{hasWork ? "Open work" : "Crew"}</Button>}
         {docked && <Button variant="secondary" size="sm" className="so-phone-work-button" onClick={() => { setPanelTab("chat"); setPhoneView("work"); }}><Icon name="chat" />Ask</Button>}
       </header>
-      {(workspace.notices.length > 0 || (workspace.signIn?.length ?? 0) > 0) && <div className="so-workspace-notices">
+      {(workspace.notices.length > 0 || (workspace.signIn?.length ?? 0) > 0 || update !== null) && <div className="so-workspace-notices">
         {workspace.signIn?.map(item => <Alert key={item.provider} className="so-sign-in" data-sign-in={item.provider}>
           <p className="so-sign-in-title">{item.title}</p>
           <p className="so-sign-in-detail">Run <code>{item.command}</code> on this computer, then resume.{item.detail === "" ? "" : ` ${item.detail}`}</p>
           <form method="post" action={item.resumeHref}><input type="hidden" name="csrf" value={workspace.csrf} /><Button size="sm" type="submit">{item.resumeLabel}</Button></form>
         </Alert>)}
         {workspace.notices.map((notice, index) => <Alert key={index}>{notice}</Alert>)}
+        {update !== null && <Alert className="so-update" data-update={update.version}>
+          <p><span>{updateNoticeWords(update)}</span> · <a href={update.href}>What's new</a></p>
+          <form method="post" action={update.dismissHref} onSubmit={event => {
+            // Dismissed at once; the cookie that keeps it dismissed is saved in the background.
+            event.preventDefault();
+            setDismissedUpdate(update.version);
+            void fetch(update.dismissHref, { method: "POST", body: new URLSearchParams({ csrf: workspace.csrf, version: update.version, quiet: "1" }) }).catch(() => {});
+          }}>
+            <input type="hidden" name="csrf" value={workspace.csrf} /><input type="hidden" name="version" value={update.version} />
+            <Button variant="ghost" size="icon" type="submit" aria-label={`Dismiss the notice about ${update.version}`}><Icon name="close" /></Button>
+          </form>
+        </Alert>}
       </div>}
       <main id="workspace-main" className="so-main-content" tabIndex={-1}>
         {workspace.team ? <TeamChat initial={workspace.team} user={workspace.user} csrf={workspace.csrf} onSnapshot={setTeamSnapshot} /> : workspace.conversation && !docked ? <LeadChat controller={controller} /> : <div className="so-page-content" data-workspace-page>{workspace.view ? <ViewHost view={workspace.view} csrf={workspace.csrf} /> : <GuardedHtml html={initial.pageHtml ?? ""} immutable />}</div>}

@@ -22,6 +22,8 @@ open page when a check fails. `--only <pattern>` runs just some checks;
 them); `--group <name>` runs one. A journey that needs an earlier one is in
 that one's group. The flows run stays one world: every flow check needs its
 first-run lead chat, and its schedule check is timed across the whole run.
+A journey retried alone in a fresh world can pass when it failed from state an
+earlier journey left, so a flaky retry is a follow-up to look at, not proof.
 
 Needs: `npm run build`, `claude` signed in, `gh` signed in, git, sqlite3,
 Playwright's Chromium (`npx playwright install chromium`), Docker for the

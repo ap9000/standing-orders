@@ -27,7 +27,7 @@ import { WorktreePool } from "./worktree.js";
 import { canonicalProfileJson, profileDigestOf, type ExecutionProfile } from "./scope.js";
 import type { Runner } from "./builder.js";
 import { bridgePass, hashPairingCode, mintPairingCode, PAIRING_TTL_MS, type TelegramTransport } from "./telegram.js";
-import { authPauseOf, pauseForAuth } from "./provider-auth.js";
+import { AUTH_TRIAL_MS, authPauseOf, pauseForAuth } from "./provider-auth.js";
 import { workIndexPage } from "./work-index.js";
 
 
@@ -885,6 +885,32 @@ describe("tick, against real git", () => {
       expect(authPauseOf(store, "codex")).not.toBeNull();
     } finally { store.close(); }
     await tick(runnerToken);
+    expect(payload().dispatched).toMatchObject([{ id: "t-1", outcome: "built" }]);
+  });
+
+  test("a sign-in trial whose task is skipped before its claim is given back, so the next pass still has it", async () => {
+    const { runnerToken, approverToken } = await credentials();
+    await queueApproved("t-1", approverToken);
+    const trialTime = () => {
+      const read = openStore(db);
+      try { return read.handle.prepare("SELECT last_trial_at FROM provider_auth_pause WHERE provider = 'claude'").get()?.["last_trial_at"]; } finally { read.close(); }
+    };
+    const store = openStore(db);
+    try {
+      pauseForAuth(store, { provider: "claude", authMode: "subscription", runId: 0, taskRef: store.refFor("built-in", "t-1").id, now: T0 });
+      store.recordProviderReadiness("builder-1", [{ provider: "claude", state: "unavailable", reason: "`claude` is not installed on this runner's PATH", probe: "version" }], T0);
+    } finally { store.close(); }
+    // The trial is due and the task passes the sign-in gate, but it is skipped before it claims.
+    const due = new Date(T0.getTime() + AUTH_TRIAL_MS);
+    await run(tickArgs(runnerToken), agent, due);
+    expect(payload().dispatched).toMatchObject([{ id: "t-1", outcome: "skipped", reason: "provider-unavailable" }]);
+    expect(trialTime()).toBeNull();
+    // Seconds later the provider is back: the trial runs now, not ten minutes on.
+    const back = openStore(db);
+    try {
+      back.recordProviderReadiness("builder-1", [{ provider: "claude", state: "unknown", reason: "installed; no non-spending login check exists", probe: "version" }], due);
+    } finally { back.close(); }
+    await run(tickArgs(runnerToken), agent, new Date(due.getTime() + 5_000));
     expect(payload().dispatched).toMatchObject([{ id: "t-1", outcome: "built" }]);
   });
 

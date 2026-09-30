@@ -1,0 +1,7 @@
+$ toolroll status
+Running: none
+Queued: none
+Ready for review: none
+Release check: none recorded
+Plan windows: none recorded
+0.7.0 is available — toolroll update · brew upgrade ap9000/toolroll/toolroll · https://github.com/ap9000/toolroll/releases/tag/v0.7.0

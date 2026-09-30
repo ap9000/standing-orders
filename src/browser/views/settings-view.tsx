@@ -8,7 +8,7 @@ import type { BrowserSettingsView } from "../../browser-workspace.js";
 import { accentNote, accentTokens, normalHex } from "../../accent-colors.js";
 import {
   Badge, Button, Card, CardDescription, CardHeader, CardTitle, Collapsible, CollapsibleContent, CollapsibleTrigger,
-  Input, Label, RadioCard, RadioGroup, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Separator, cn, toast,
+  Input, Label, RadioCard, RadioGroup, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Separator, Switch, cn, toast,
 } from "../components/ui/index.js";
 
 const TILE_ICONS: Record<string, ReactNode> = {
@@ -291,6 +291,60 @@ function Workers({ workers }: { workers: NonNullable<BrowserSettingsView["worker
   </Section>;
 }
 
+/** Settings → Updates: this version, the latest and its notes, the command that updates this install, the daily check, and each worker's version. */
+function Updates({ updates, csrf }: { updates: NonNullable<BrowserSettingsView["updates"]>; csrf: string }) {
+  const latest = updates.latest;
+  const newer = latest !== null && latest.newer ? latest : null;
+  const [copied, setCopied] = useState(false);
+  const copy = () => { void navigator.clipboard?.writeText(updates.updateCommand).then(() => { setCopied(true); window.setTimeout(() => setCopied(false), 1500); }, () => {}); };
+  return <Section id="updates" title="Updates">
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1" data-updates-state={newer ? "newer" : !updates.check.on ? "off" : latest === null ? "unchecked" : "current"}>
+      <span className="text-sm">This version <span className="font-mono text-[12.5px]">{updates.current}</span></span>
+      <span className="inline-flex items-center gap-2 text-sm text-muted-foreground">
+        {newer ? <><StatusDot tone="neutral" /><span><span className="font-mono text-[12.5px] text-foreground">{newer.version}</span> is available</span></>
+          : !updates.check.on ? <><StatusDot tone="off" />Checks are off</>
+          : latest === null ? <><StatusDot tone="off" />Not checked yet</>
+          : <><StatusDot tone="ok" />Up to date</>}
+      </span>
+      {newer?.security && <Badge tone="warning">Security fixes</Badge>}
+    </div>
+    {newer && <div className="grid gap-2 rounded-lg bg-muted p-3 max-sm:p-3" data-update-command>
+      <div className="flex flex-wrap items-center gap-2">
+        <code className="min-w-0 flex-1 break-words font-mono text-[12.5px]">{updates.updateCommand}</code>
+        <Button variant="outline" size="sm" onClick={copy}>{copied ? "Copied" : "Copy"}</Button>
+      </div>
+      <p className="text-[12.5px] text-muted-foreground">Run it on this computer, then restart Toolroll.</p>
+    </div>}
+    {newer && <Collapsible>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <CollapsibleTrigger asChild><Button variant="ghost" size="sm" className="group -ml-2.5" disabled={newer.notes === ""}>What's new in {newer.version}<ChevronDown className="transition-transform group-data-[state=open]:rotate-180" /></Button></CollapsibleTrigger>
+        <a className="text-[13px] underline underline-offset-4" href={newer.url} target="_blank" rel="noreferrer">Release page</a>
+      </div>
+      <CollapsibleContent>
+        <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-border p-3 font-sans text-[13px] leading-relaxed" data-update-notes>{newer.notes}</pre>
+      </CollapsibleContent>
+    </Collapsible>}
+    <Separator />
+    <AutoForm action="/settings/updates" csrf={csrf} className="flex items-center justify-between gap-4">{submit => <>
+      <div className="grid gap-0.5">
+        <Label htmlFor="update-check">Check for a newer version once a day</Label>
+        <span className="text-[12.5px] text-muted-foreground">{updates.check.byEnv ? "Off by TOOLROLL_NO_UPDATE_CHECK." : "One anonymous request to npm and GitHub. Nothing about you is sent."}</span>
+      </div>
+      <Switch id="update-check" name="check" value="on" defaultChecked={updates.check.on} disabled={!updates.check.canManage || updates.check.byEnv} onCheckedChange={submit} />
+    </>}</AutoForm>
+    {updates.workers.length > 0 && <>
+      <Separator />
+      <ul className="-my-1 divide-y divide-border" aria-label="Worker versions">
+        {updates.workers.map(one => <li key={one.name} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2" data-worker-version={one.name}>
+          <span className="min-w-0 break-all text-sm font-medium">{one.name}</span>
+          <span className={cn("ml-auto text-muted-foreground", one.version === null ? "text-[12.5px]" : "font-mono text-[12.5px]")}>{one.version ?? "Version not reported"}</span>
+          {one.older && <Badge tone="warning">Older</Badge>}
+        </li>)}
+      </ul>
+    </>}
+  </Section>;
+}
+
 function Notifications({ view, csrf }: { view: BrowserSettingsView; csrf: string }) {
   const base = useId();
   if (view.services === null && view.push === null && view.digest === null) return null;
@@ -373,6 +427,7 @@ export function SettingsView({ view, csrf }: { view: BrowserSettingsView; csrf: 
       options={[{ value: "default", title: "Default", description: "Everyday agents and the repository check." }, { value: "strict", title: "Strict / release", description: "Strongest agents. Release approval stays separate." }]} />}
     {view.providers && <Providers providers={view.providers} csrf={csrf} />}
     {view.workers && <Workers workers={view.workers} />}
+    {view.updates && <Updates updates={view.updates} csrf={csrf} />}
     {view.email && csrf && <Email email={view.email} csrf={csrf} />}
     <Notifications view={view} csrf={csrf} />
     {csrf && <TelegramToken view={view} csrf={csrf} />}

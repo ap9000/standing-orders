@@ -106,10 +106,32 @@ export function authPauseOf(store: Store, provider: string): AuthPause | null {
   return row === undefined ? null : readPause(row);
 }
 
-/** The open pause the dispatch gate last left this task waiting on, or null. */
+/**
+ * SQL: whether the pause `pause` (a provider_auth_pause alias) is on one of
+ * the task_ref `taskRef`'s current providers — its pins, its working profile,
+ * route legs and fallback entries — so a task re-routed to another provider
+ * stops saying it waits on the old one. A task that names none yet (an
+ * unpinned planner, whose agent comes from configuration) keeps what the gate
+ * found.
+ */
+export function pauseOnTaskProviders(pause: string, taskRef: string): string {
+  const providers = `SELECT r.agent_provider provider FROM task_ref r WHERE r.id = ${taskRef}
+    UNION ALL SELECT r.plan_provider FROM task_ref r WHERE r.id = ${taskRef}
+    UNION ALL SELECT json_extract(ts.profile_json, '$.provider') FROM task_ref r JOIN task_scope ts ON ts.task_id = r.external_id
+      WHERE r.id = ${taskRef} AND json_valid(ts.profile_json)
+    UNION ALL SELECT json_extract(leg.value, '$.provider') FROM task_ref r JOIN task_scope ts ON ts.task_id = r.external_id,
+      json_each(CASE WHEN json_valid(ts.proposed_route_json) THEN ts.proposed_route_json ELSE '{}' END, '$.legs') leg WHERE r.id = ${taskRef}
+    UNION ALL SELECT json_extract(entry.value, '$.profile.provider') FROM task_ref r JOIN task_scope ts ON ts.task_id = r.external_id,
+      json_each(CASE WHEN json_valid(ts.proposed_chain_json) THEN ts.proposed_chain_json ELSE '{}' END, '$.chain') entry WHERE r.id = ${taskRef}`;
+  return `(${pause}.provider IN (SELECT provider FROM (${providers}) WHERE provider IS NOT NULL)
+    OR NOT EXISTS (SELECT 1 FROM (${providers}) WHERE provider IS NOT NULL))`;
+}
+
+/** The open pause the dispatch gate last left this task waiting on, while it
+ * is still on one of the task's providers; or null. */
 export function authWaitOf(store: Store, taskRef: number): AuthPause | null {
   const row = store.handle.prepare(`SELECT p.* FROM task_ref r JOIN provider_auth_pause p ON p.id = r.auth_wait_pause
-    WHERE r.id = ? AND p.lifted_at IS NULL`).get(taskRef);
+    WHERE r.id = ? AND p.lifted_at IS NULL AND ${pauseOnTaskProviders("p", "r.id")}`).get(taskRef);
   return row === undefined ? null : readPause(row);
 }
 
@@ -230,34 +252,62 @@ export function noteSignInProbe(store: Store, provider: string, state: string, n
 /** How often a paused provider lets one task through as a trial. */
 export const AUTH_TRIAL_MS = 10 * 60_000;
 
+/** A trial taken: the pause, when it was taken, and the trial time it replaced. */
+export type AuthTrial = { pauseId: number; takenAt: string; previous: string | null };
+
 /**
  * Whether this task may go ahead as the paused provider's trial: at most one
  * every AUTH_TRIAL_MS. A trial that works lifts the pause (its run proves the
  * sign-in); one that fails the same way only counts against the open
- * incident, so nobody is told twice.
+ * incident, so nobody is told twice. Null when no trial is due.
  */
-export function claimAuthTrial(store: Store, pause: AuthPause, now: Date): boolean {
-  const due = new Date(now.getTime() - AUTH_TRIAL_MS).toISOString();
-  const claimed = store.handle.prepare(`UPDATE provider_auth_pause SET last_trial_at = ?
-    WHERE id = ? AND lifted_at IS NULL AND COALESCE(last_trial_at, opened_at) <= ?`).run(now.toISOString(), pause.id, due);
-  return Number(claimed.changes) === 1;
+export function claimAuthTrial(store: Store, pause: AuthPause, now: Date): AuthTrial | null {
+  return store.transact(() => {
+    const due = new Date(now.getTime() - AUTH_TRIAL_MS).toISOString();
+    const row = store.handle.prepare("SELECT last_trial_at FROM provider_auth_pause WHERE id = ?").get(pause.id);
+    const previous = row?.["last_trial_at"] == null ? null : String(row["last_trial_at"]);
+    const takenAt = now.toISOString();
+    const claimed = store.handle.prepare(`UPDATE provider_auth_pause SET last_trial_at = ?
+      WHERE id = ? AND lifted_at IS NULL AND COALESCE(last_trial_at, opened_at) <= ?`).run(takenAt, pause.id, due);
+    return Number(claimed.changes) === 1 ? { pauseId: pause.id, takenAt, previous } : null;
+  });
 }
+
+/** Give a trial back when its task never started (its claim failed), so the next pass may take it. */
+export function giveBackAuthTrial(store: Store, trial: AuthTrial): void {
+  store.handle.prepare("UPDATE provider_auth_pause SET last_trial_at = ? WHERE id = ? AND last_trial_at = ? AND lifted_at IS NULL")
+    .run(trial.previous, trial.pauseId, trial.takenAt);
+}
+
+/** What the sign-in gate decided: the open pause the work waits on, or null
+ * when it may go ahead; and, when it goes ahead as a pause's trial, how to
+ * give that trial back if its claim then fails. */
+export type SignInGate = { waiting: AuthPause | null; giveBack: () => void };
 
 /**
  * The sign-in gate every road that starts an agent asks before it claims
  * anything: the tick's queue, and the roads beside it (fallback entries,
- * attended continuations, contest resumes). The open pause the work waits
- * on, or null when it may go ahead — nothing paused, or this is the pause's
- * one trial. A waiting task is noted on its task_ref, so the work index says
- * exactly what the gate decided; a task let through is un-noted.
+ * attended continuations, contest resumes). Waits when a provider is paused,
+ * unless this is the pause's one trial. A waiting task is noted on its
+ * task_ref, so the work index says exactly what the gate decided; a task let
+ * through is un-noted. A road whose claim fails after a trial calls giveBack.
  */
-export function signInGate(store: Store, providers: readonly string[], now: Date, taskRef?: number): AuthPause | null {
+export function signInGate(store: Store, providers: readonly string[], now: Date, taskRef?: number): SignInGate {
   const pause = [...new Set(providers)].map(one => authPauseOf(store, one)).find(one => one !== null) ?? null;
-  const waiting = pause !== null && !claimAuthTrial(store, pause, now) ? pause : null;
+  const trial = pause === null ? null : claimAuthTrial(store, pause, now);
+  const waiting = pause !== null && trial === null ? pause : null;
   if (taskRef !== undefined) {
     store.handle.prepare("UPDATE task_ref SET auth_wait_pause = ? WHERE id = ? AND auth_wait_pause IS NOT ?").run(waiting?.id ?? null, taskRef, waiting?.id ?? null);
   }
-  return waiting;
+  let given = false;
+  return {
+    waiting,
+    giveBack: () => {
+      if (trial === null || given) return;
+      given = true;
+      giveBackAuthTrial(store, trial);
+    },
+  };
 }
 
 /** The loop beside the console: every two minutes, probe each paused

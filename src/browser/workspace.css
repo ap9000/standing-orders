@@ -124,6 +124,13 @@ body:has(.so-workspace) { margin: 0; padding: 0; background: var(--so-ground); o
 .so-sign-in form { grid-column: 2; grid-row: 1 / span 2; margin: 0; }
 .so-sign-in .ui-button { min-height: 36px; white-space: nowrap; }
 @media (max-width: 759px) { .so-sign-in { grid-template-columns: 1fr; row-gap: 6px; } .so-sign-in form { grid-column: 1; grid-row: auto; } .so-sign-in .ui-button { min-height: 44px; } }
+/* A newer Toolroll: neutral (raised), never the accent — an update does not need a person. */
+.so-update { display: flex; align-items: center; gap: 8px; padding-block: 4px; padding-right: 4px; }
+.so-update p { margin: 0; flex: 1; min-width: 0; }
+.so-update a { font-weight: 500; }
+.so-update form { margin: 0; flex-shrink: 0; }
+.so-update .ui-button { color: var(--so-muted); }
+@media (max-width: 900px) { .so-update .ui-button { width: 44px; height: 44px; } }
 .so-workspace .so-main-content { flex: 1; min-height: 0; min-width: 0; max-width: none; width: 100%; margin: 0; padding: 0; display: flex; flex-direction: column; }
 .so-page-content { padding: 24px 28px; overflow: auto; min-height: 0; }
 .so-lead-chat { display: flex; flex-direction: column; flex: 1; min-height: 0; }
