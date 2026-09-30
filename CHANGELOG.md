@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.9.3 — 2026-10-01
+
+- **Flows never get stuck on a long step output.** A research or build step's
+  goal keeps its instructions whole and trims only what was filled in from
+  earlier steps (start and end kept, with the full text on the card and given
+  to the agent as untrusted context). Instructions too long to fit are refused
+  when the flow is saved. A card that couldn't file its work tries again on
+  the next pass.
+
 ## 0.9.2 — 2026-10-01
 
 - **Flows from a terminal.** `toolroll flows` lists and shows flows (zones

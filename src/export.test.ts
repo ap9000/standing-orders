@@ -161,7 +161,8 @@ test("no secret, token, key or password hash appears in the export", () => {
     for (const [name, value] of Object.entries(PLANTED)) expect(text.includes(value), name).toBe(false);
     expect(text).not.toContain(password);
     expect(text).not.toContain(apiToken);
-    expect(text).not.toContain(apiToken.split("_").at(-1)!);
+    // The whole secret (base64url, which can itself contain "_"): the part after "so_<id>_", never a short tail.
+    expect(text).not.toContain(apiToken.split("_").slice(2).join("_"));
     for (const hash of hashes) expect(text).not.toContain(hash);
     expect(text).not.toMatch(/scrypt\$/);
     expect(text).not.toContain("session-id-hash-planted");

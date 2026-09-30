@@ -317,7 +317,8 @@ export function deciderOf(stage: Pick<FlowStage, "approver" | "toOwner">, flow: 
 }
 
 /** A flow as drawn on the canvas, checked whole. Throws in plain words. */
-export function validateFlowDefinition(input: unknown): FlowDefinition {
+/** `stored`: reading a flow saved earlier, which keeps working under rules added since (its cards say what's wrong). */
+export function validateFlowDefinition(input: unknown, options: { stored?: boolean } = {}): FlowDefinition {
   const raw = input as { version?: unknown; start?: unknown; stages?: unknown } | null;
   if (raw === null || typeof raw !== "object" || !Array.isArray(raw.stages)) throw new Error("A flow is a list of zones.");
   if (raw.stages.length === 0 || raw.stages.length > 24) throw new Error("A flow has 1 to 24 zones.");
@@ -368,6 +369,10 @@ export function validateFlowDefinition(input: unknown): FlowDefinition {
     if (stage.routes?.some(one => one.to === stage.id)) throw new Error(`Zone ${stage.title}: an answer can't send cards back into the same zone.`);
     if (stage.sort !== null && stage.sort.answers.some(one => one.to === stage.id)) throw new Error(`Zone ${stage.title}: an answer can't send cards back into the same zone.`);
     if ((stage.kind === "task" || stage.kind === "report") && stage.instructions === null) throw new Error(`Zone ${stage.title}: say what the agent should do.`);
+    // A work zone's goal must fit a task: its own words whole, with room left for the card's details. Refused here, when the flow
+    // is saved, never when a card arrives. A flow saved before this rule is still read, and its card says why it can't file.
+    const over = !options.stored && (stage.kind === "task" || stage.kind === "report") && stage.instructions !== null ? flowGoalOverflow(stage.instructions) : 0;
+    if (over > 0) throw new Error(`Zone ${stage.title}: its instructions leave no room for the card's details. Shorten them by ${over} characters.`);
     if (stage.kind === "draft" && stage.instructions === null) throw new Error(`Zone ${stage.title}: say what Claude should write.`);
     if (stage.kind === "notify" && stage.message === null) throw new Error(`Zone ${stage.title}: write the message to post.`);
     if (stage.kind === "check" && (stage.script === null || !SCRIPT_NAME.test(stage.script))) throw new Error(`Zone ${stage.title}: choose which script it runs.`);
@@ -455,9 +460,70 @@ export function flowDigest(definition: FlowDefinition): string {
   return createHash("sha256").update(JSON.stringify({ start: definition.start, terms })).digest("hex").slice(0, 32);
 }
 
+const FILLED = /\{\{\s*(card\.title|card\.description|card\.email|note|stage\.([a-z0-9-]+))\s*\}\}/g;
+type FlowFillCard = { title: string; description: string | null; note: string | null; outputs: Record<string, string> };
+
 /** Fill a zone's text from the card: title, description, the latest note and earlier zones' reports. */
-export function fillFlowText(template: string, card: { title: string; description: string | null; note: string | null; outputs: Record<string, string> }, encode: (value: string) => string = value => value): string {
-  return template.replace(/\{\{\s*(card\.title|card\.description|card\.email|note|stage\.([a-z0-9-]+))\s*\}\}/g, (_match, key: string, stage: string | undefined) => encode(fillOne(key, stage, card))).trim();
+export function fillFlowText(template: string, card: FlowFillCard, encode: (value: string) => string = value => value): string {
+  return template.replace(FILLED, (_match, key: string, stage: string | undefined) => encode(fillOne(key, stage, card))).trim();
+}
+
+/** The task door's goal limit (task-text.ts). A work zone's goal is kept under it. */
+export const FLOW_GOAL_LIMIT = 2000;
+/** What stands in for the middle of a filled-in value the goal had no room for. */
+export const FLOW_CUT = "… (cut; the full text is on the card)";
+/** The least room each filled-in value keeps: the cut mark and 20 characters from each end. */
+const VALUE_ROOM = FLOW_CUT.length + 40;
+
+/** A work zone's words, plus the card and any send-back note when the words leave them out. "Fix the bug on the card"
+ * says nothing on its own (found in the real e2e: the builder saw only the branch name). */
+export function flowWorkTemplate(instructions: string, card: { description: string | null; note: string | null }): string {
+  const names = (key: string) => new RegExp(`\\{\\{\\s*${key.replace(".", "\\.")}\\s*\\}\\}`).test(instructions);
+  const extra = [
+    ...(names("card.title") || names("card.description") ? [] : [`The card: {{card.title}}${card.description ? "\n\n{{card.description}}" : ""}`]),
+    ...(names("card.title") && !names("card.description") && card.description ? ["Details on the card:\n{{card.description}}"] : []),
+    ...(names("note") || !card.note ? [] : ["Changes asked for: {{note}}"]),
+  ];
+  return [instructions, ...extra].join("\n\n");
+}
+
+/** Characters a work zone's instructions leave no room for, with every filled-in value kept to its least room. 0 when they fit. */
+function flowGoalOverflow(instructions: string): number {
+  const widest = flowWorkTemplate(instructions, { description: "x", note: "x" });
+  const values = [...widest.matchAll(FILLED)].length;
+  return Math.max(0, widest.replace(FILLED, "").length + values * VALUE_ROOM - (FLOW_GOAL_LIMIT - 1));
+}
+
+/** Script output can carry carriage returns, colour codes and hidden marks a task goal refuses; the goal drops them. */
+const goalSafe = (value: string) => value.replace(/\r\n?/g, "\n").replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u2028\u2029\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, "");
+
+/** A value kept to `room` characters: its start and end, with the cut mark between. */
+function cutToRoom(value: string, room: number): string {
+  if (value.length <= room) return value;
+  const keep = room - FLOW_CUT.length;
+  let head = Math.ceil(keep / 2), from = value.length - (keep - head);
+  if (/[\uD800-\uDBFF]/.test(value[head - 1] ?? "")) head--;
+  if (/[\uDC00-\uDFFF]/.test(value[from] ?? "")) from++;
+  return value.slice(0, head) + FLOW_CUT + value.slice(from);
+}
+
+/** A work zone's goal, filled from the card and kept under FLOW_GOAL_LIMIT: the zone's own words stay whole, and only the
+ * filled-in values are shortened (the longest first), each keeping its start and end. Null when the words alone leave no
+ * room, which a saved flow can't have (validateFlowDefinition). */
+export function fitFlowText(template: string, card: FlowFillCard, limit = FLOW_GOAL_LIMIT): string | null {
+  const values = [...template.matchAll(FILLED)].map(match => goalSafe(fillOne(match[1]!, match[2], card)));
+  const room = limit - 1 - template.replace(FILLED, "").length;
+  let each = Math.max(0, ...values.map(one => one.length));
+  const used = (cap: number) => values.reduce((sum, one) => sum + Math.min(one.length, cap), 0);
+  if (used(each) > room) {
+    // The widest cap every value can share: the shortest values stay whole, the longest are cut to it.
+    let low = 0, high = each;
+    while (low < high) { const mid = Math.ceil((low + high) / 2); if (used(mid) <= room) low = mid; else high = mid - 1; }
+    each = low;
+    if (each < FLOW_CUT.length + 2) return null;
+  }
+  let at = 0;
+  return template.replace(FILLED, () => cutToRoom(values[at++]!, each)).trim();
 }
 
 /** The first email address a card mentions, or "" — what {{card.email}} holds. */
