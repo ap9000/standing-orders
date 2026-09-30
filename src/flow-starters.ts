@@ -4,13 +4,15 @@
  * and its trigger, exactly as drawing them by hand would; it is on while that flow is. Each says in plain words
  * what it will do and what it never does: no starter merges or ships anything without a person.
  */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { flowDefinitionOf } from "./flow-engine.js";
 import { addFlowTriggerTo, githubRepoOf } from "./flow-triggers.js";
 import { flowFromSteps, ISSUE_LABEL, type FlowStepInput } from "./flows.js";
 import { publishingOf } from "./pull-request-flow.js";
 import type { FlowRow, Store } from "./store.js";
 
-export const STARTER_IDS = ["ci-fix", "issue-task", "overnight"] as const;
+export const STARTER_IDS = ["ci-fix", "issue-task", "overnight", "plane-review"] as const;
 export type StarterId = (typeof STARTER_IDS)[number];
 
 export type StarterFlow = {
@@ -20,11 +22,13 @@ export type StarterFlow = {
   /** One line: what it's for. */
   summary: string;
   /** What switching it on does, in order. */
-  does: (where: { github: string | null; branch: string }) => string[];
+  does: (where: { github: string | null; branch: string; own: boolean }) => string[];
   /** What it never does. */
   never: string;
   github: boolean;
   steps: FlowStepInput[];
+  /** The steps in Toolroll's own repository, when they differ: there, every fix lands in Toolroll. */
+  ownSteps?: FlowStepInput[];
   trigger: (where: { branch: string }) => Record<string, unknown>;
 };
 
@@ -70,7 +74,44 @@ export const STARTER_FLOWS: readonly StarterFlow[] = [
     ],
     trigger: () => ({ kind: "button", label: "Queue for tonight", questions: ["What needs doing?", "Details"] }),
   },
+  {
+    id: "plane-review",
+    name: "Morning plane review",
+    summary: "What went wrong in Toolroll yesterday becomes cards, researched and fixed.",
+    does: ({ own }) => [
+      "Every day at 07:30, looks at failed runs, waiting tasks, sign-ins, plan limits, chat, integrations and checks.",
+      "One card per problem; one that comes back joins its card. A clean day adds nothing.",
+      own ? "Finds the cause in Toolroll's code, builds a fix under your usual approvals, and opens a pull request."
+        : "Finds the cause. One in this project gets a fix under your usual approvals and a pull request; one in Toolroll's settings gets a note of what to change.",
+      "Anything that fails waits in “Needs a look”.",
+    ],
+    never: "Never merges or ships anything without you. Each fix waits for your approval.",
+    github: false,
+    steps: planeReviewSteps(false),
+    ownSteps: planeReviewSteps(true),
+    trigger: () => ({ kind: "plane-review", at: "07:30" }),
+  },
 ];
+
+/** The morning plane review's steps: find the cause, fix it, open a pull request; any failure waits for a person. */
+function planeReviewSteps(own: boolean): FlowStepInput[] {
+  const where = own
+    ? "This project is Toolroll itself, so the fix belongs here. Find the root cause in this code: cite the files and lines, say why it happened, and say what change fixes it."
+    : "This project uses Toolroll; it isn't Toolroll's own code. Find the root cause. If it is in this project's code, cite the files and lines and say what change fixes it. If it is in Toolroll or its settings (a sign-in, a plan limit, a chat app, an integration, the worker), say exactly what to change in Toolroll's settings, and start the report with “No build needed”.";
+  return [
+    { id: "find-cause", title: "Find the cause", kind: "report", ifFails: "needs-a-look",
+      instructions: `The morning plane review found a problem: {{card.title}}\n\n{{card.description}}\n\n${where}\n\nFeedback to address (if any): {{note}}` },
+    { id: "fix", title: "Fix it", kind: "task", ifFails: "needs-a-look",
+      instructions: `Fix the root cause of this problem, with a regression check where one fits: {{card.title}}\n\nThe report:\n{{stage.find-cause}}${own ? "" : "\n\nIf the report says “No build needed”, the cause is outside this project: change nothing and say so."}\n\nChanges asked for (if any): {{note}}` },
+    { id: "pull-request", title: "Pull request", kind: "pull-request", next: "done", ifFails: "needs-a-look" },
+    { id: "needs-a-look", title: "Needs a look", kind: "inbox", next: "done" },
+  ];
+}
+
+/** Whether a project is Toolroll's own source. */
+export function isToolrollRepo(repo: string): boolean {
+  try { return (JSON.parse(readFileSync(join(repo, "package.json"), "utf8")) as { name?: unknown }).name === "toolroll"; } catch { return false; }
+}
 
 export const starterOf = (id: string): StarterFlow | null => STARTER_FLOWS.find(one => one.id === id) ?? null;
 
@@ -88,7 +129,7 @@ export function startersFor(store: Store, repo: string): StarterView[] {
   const branch = publishing.on ? publishing.base : "main";
   return STARTER_FLOWS.map(starter => {
     const flow = starterFlowOf(store, starter, repo);
-    return { id: starter.id, name: starter.name, summary: starter.summary, does: starter.does({ github, branch }), never: starter.never,
+    return { id: starter.id, name: starter.name, summary: starter.summary, does: starter.does({ github, branch, own: isToolrollRepo(repo) }), never: starter.never,
       on: flow === null ? null : { flow: flow.id }, blocked: starter.github && github === null ? "This project isn't on GitHub, so this can't watch it." : null };
   });
 }
@@ -103,7 +144,8 @@ export function switchOnStarter(store: Store, starter: StarterFlow, repo: string
   const publishing = publishingOf(store, repo);
   try {
     const flow = store.transact(() => {
-      const id = store.createFlow({ repo, name: starter.name, definitionJson: JSON.stringify(flowFromSteps(starter.steps, null)), by }, now);
+      const steps = starter.ownSteps !== undefined && isToolrollRepo(repo) ? starter.ownSteps : starter.steps;
+      const id = store.createFlow({ repo, name: starter.name, definitionJson: JSON.stringify(flowFromSteps(steps, null)), by }, now);
       const made = store.getFlow(id)!;
       const trigger = addFlowTriggerTo(store, made, { ...starter.trigger({ branch: publishing.on ? publishing.base : "main" }), zone: flowDefinitionOf(made)!.start }, by, now, dir);
       if (!trigger.ok) throw new Error(trigger.message);

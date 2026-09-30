@@ -161,3 +161,13 @@ describe("the Linux fence (v88)", () => {
     expect(linuxFenceAvailable("win32", () => true)).toBe(false);
   });
 });
+
+describe("the macOS fence inside another sandbox", () => {
+  test.runIf(process.platform === "darwin")("a process already fenced (a flow's check zone running end-to-end journeys) doesn't nest it; any other probe failure keeps it on", () => {
+    expect(macosFenceAvailable("darwin", () => ({ status: 0, stderr: "" }))).toBe(true);
+    expect(macosFenceAvailable("darwin", () => ({ status: 71, stderr: "sandbox-exec: sandbox_apply: Operation not permitted\n" }))).toBe(false);
+    expect(macosFenceAvailable("darwin", () => ({ status: null, stderr: "" }))).toBe(true);
+    expect(macosFenceAvailable("darwin", () => { throw new Error("spawn EAGAIN"); })).toBe(true);
+    expect(macosFenceAvailable("linux", () => ({ status: 0, stderr: "" }))).toBe(false);
+  });
+});

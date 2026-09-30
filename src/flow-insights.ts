@@ -48,7 +48,10 @@ export type FlowInsights = {
   scripts: ScriptInsight[];
   sorts: SortInsight[];
   runs: StepRunInsight[];
+  /** A plane review's problems, the ones seen on the most days first: which causes keep coming back. */
+  recurring: RecurringProblem[];
 };
+export type RecurringProblem = { problem: string; title: string; days: number; lastSeen: string; card: number | null };
 
 const median = (values: number[]): number | null => {
   if (values.length === 0) return null;
@@ -111,11 +114,27 @@ export function flowInsights(store: Store, flow: FlowRow, now: Date, days = 30):
       .map(one => ({ zone: one.zone, title: one.title, problems: one.failed + one.sentBack, of: Math.max(one.entered, one.failed + one.sentBack) })),
     scripts: [...scripts].map(([script, one]) => ({ script, runs: one.runs, passed: one.passed, failed: one.failed, typicalSeconds: median(one.durations) === null ? null : Math.round(median(one.durations)!), lastFailure: one.lastFailure })),
     sorts,
+    recurring: recurringProblems(store, flow, since),
     runs: runs.slice(0, 40).map(run => ({
       card: run.card, cardTitle: run.cardTitle, entry: run.entry, zone: run.stage, zoneTitle: titleOf(run.stage), kind: run.kind, script: run.script, version: run.scriptVersion,
       state: run.state, result: run.result, exitCode: run.exitCode, durationMs: run.durationMs, at: run.finishedAt ?? run.startedAt, hasLog: run.log !== null && run.log !== "",
     })),
   };
+}
+
+/** Each problem a plane review trigger of this flow noted in the window (one note per problem a day), and on how many days. */
+function recurringProblems(store: Store, flow: FlowRow, since: Date): RecurringProblem[] {
+  const rows = store.handle.prepare(`SELECT e.key, e.card, e.at, c.title FROM flow_trigger_event e JOIN flow_trigger t ON t.id = e.trigger LEFT JOIN flow_card c ON c.id = e.card
+    WHERE t.flow = ? AND json_extract(t.config_json, '$.kind') = 'plane-review' AND substr(e.key, 1, 6) = 'plane:' AND e.at >= ? ORDER BY e.rowid`).all(flow.id, since.toISOString());
+  const problems = new Map<string, RecurringProblem>();
+  for (const row of rows) {
+    const match = /^plane:(.+):(\d{4}-\d{2}-\d{2})$/.exec(String(row["key"]));
+    if (match === null) continue;
+    const had = problems.get(match[1]!);
+    const card = row["card"] === null ? had?.card ?? null : Number(row["card"]);
+    problems.set(match[1]!, { problem: match[1]!, title: row["title"] === null ? had?.title ?? match[1]! : String(row["title"]), days: (had?.days ?? 0) + 1, lastSeen: match[2]!, card });
+  }
+  return [...problems.values()].sort((a, b) => b.days - a.days || b.lastSeen.localeCompare(a.lastSeen)).slice(0, 20);
 }
 
 const BANDS = [[90, 101], [80, 90], [70, 80], [50, 70]] as const;

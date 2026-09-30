@@ -103,7 +103,10 @@ export function readAuthModeStrict(provider: ProviderId, home: string = homedir(
   try {
     raw = readFileSync(authModeFileFor(provider, home), "utf8");
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ok: true, mode: DEFAULT_AUTH_MODE[provider] };
+    // Inside the agents' fence the keys folder is out of reach: Linux masks it (the file reads as absent), and macOS
+    // refuses it (EPERM), which reads the same way — a Toolroll a flow's check zone starts has only its CLIs' own sign-ins.
+    // Any other unreadable file (EACCES: its permissions) is still a stated problem.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" || (error as NodeJS.ErrnoException).code === "EPERM") return { ok: true, mode: DEFAULT_AUTH_MODE[provider] };
     return { ok: false, problem: `the ${provider} auth-mode file cannot be read (${(error as NodeJS.ErrnoException).code ?? "error"}) — run \`keys auth ${provider} subscription|api-key\` to restate it` };
   }
   const value = raw.trim();

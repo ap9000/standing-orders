@@ -361,7 +361,7 @@ describe("toolroll onboard offers the starter flows", () => {
     withAccountAndGithub();
     expect(await onboard(["--yes", "--json", "--starter", "ci-fix,overnight"], { pullRequests: async () => "off" })).toBe(0);
     const answer = envelope();
-    expect(answer.starters.map((one: { id: string; state: string }) => [one.id, one.state])).toEqual([["ci-fix", "switched-on"], ["issue-task", "off"], ["overnight", "switched-on"]]);
+    expect(answer.starters.map((one: { id: string; state: string }) => [one.id, one.state])).toEqual([["ci-fix", "switched-on"], ["issue-task", "off"], ["overnight", "switched-on"], ["plane-review", "off"]]);
     expect(answer.starters[1]).toMatchObject({ command: "toolroll onboard --starter issue-task", never: "Never merges or closes anything without you." });
     const store = openStore(db);
     try {
@@ -384,7 +384,19 @@ describe("toolroll onboard offers the starter flows", () => {
     try { expect(again.listFlows([repo])).toHaveLength(2); } finally { again.close(); }
     lines = [];
     expect(await onboard(["--json", "--starter", "nightly"], { pullRequests: async () => "off" })).toBe(2);
-    expect(envelope()).toMatchObject({ ok: false, reason: "usage", message: "--starter takes ci-fix, issue-task, overnight" });
+    expect(envelope()).toMatchObject({ ok: false, reason: "usage", message: "--starter takes ci-fix, issue-task, overnight, plane-review" });
+  });
+
+  test("c2: --starter plane-review switches on the Morning plane review: its daily review and its zones", async () => {
+    withAccountAndGithub();
+    expect(await onboard(["--yes", "--json", "--starter", "plane-review"], { pullRequests: async () => "off" })).toBe(0);
+    expect(envelope().starters.find((one: { id: string }) => one.id === "plane-review")).toMatchObject({ name: "Morning plane review", state: "switched-on" });
+    const store = openStore(db);
+    try {
+      const flow = store.listFlows([repo]).find(one => one.name === "Morning plane review")!;
+      expect(JSON.parse(flow.definitionJson).stages.map((one: { kind: string }) => one.kind)).toEqual(["report", "task", "pull-request", "inbox", "done"]);
+      expect(store.flowTriggers(flow.id).map(one => JSON.parse(one.configJson))).toEqual([expect.objectContaining({ kind: "plane-review", zone: "find-cause" })]);
+    } finally { store.close(); }
   });
 
   test("c3: at a terminal each starter is one yes, saying what it does and never does; --yes alone switches none on", async () => {
@@ -400,6 +412,7 @@ describe("toolroll onboard offers the starter flows", () => {
       "Switch on Fix failing CI? When CI fails on the main branch, a task to fix it is filed. Never merges or pushes to your branch. You decide what ships. [y/N]",
       "Switch on Issues become tasks? A GitHub issue labelled “toolroll” becomes a task. Never merges or closes anything without you. [y/N]",
       "Switch on Overnight queue? Cards you add during the day start after 22:00; results wait for you in the morning. Never merges or ships anything without you. [y/N]",
+      "Switch on Morning plane review? What went wrong in Toolroll yesterday becomes cards, researched and fixed. Never merges or ships anything without you. Each fix waits for your approval. [y/N]",
     ]);
     expect(lines.join("\n")).toContain("         Issues become tasks: switched on");
     store = openStore(db);

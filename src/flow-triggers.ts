@@ -13,6 +13,11 @@
  *              read-only over IMAP; optionally only from some senders or with words in the subject.
  * - chat     — messages in a Slack, Discord or Teams channel (v89), connected from the
  *              channel itself (chat-inbox.ts), never from here.
+ * - plane-review — every day at a set time (07:30 in the computer's time zone unless it says),
+ *              the plane's last 24 hours read straight from the store (plane-review.ts): one card
+ *              per distinct problem worth fixing, and the same problem on a later day joins its
+ *              card while that card is still open. A clean day makes nothing. Its row is kept as a
+ *              'schedule' (the table's kinds are fixed); its settings say what it is.
  *
  * GitHub and Linear are checked by the worker's pass — `gh` and one HTTPS
  * request, never a model — or pushed to a secret webhook address when the
@@ -37,7 +42,7 @@ import { tmpdir } from "node:os";
 import type { FlowCardSource, FlowRow, FlowTriggerRow, Store } from "./store.js";
 import { envValue } from "./names.js";
 
-export const FLOW_TRIGGER_KINDS = ["button", "schedule", "github", "linear", "flow", "webhook", "email", "chat"] as const;
+export const FLOW_TRIGGER_KINDS = ["button", "schedule", "github", "linear", "flow", "webhook", "email", "chat", "plane-review"] as const;
 export type FlowTriggerKind = (typeof FLOW_TRIGGER_KINDS)[number];
 
 export type TriggerConfig =
@@ -51,14 +56,16 @@ export type TriggerConfig =
   /** `sender`: addresses or domains, comma-separated; `subject`: words the subject must contain. */
   | { kind: "email"; folder: string; sender: string | null; subject: string | null; zone: string | null }
   /** A channel in a chat app; `binding` is the pairing of the person who connected it (whose chat answers there). */
-  | { kind: "chat"; app: ChatApp; installation: string; chat: string; binding: number; zone: string | null };
+  | { kind: "chat"; app: ChatApp; installation: string; chat: string; binding: number; zone: string | null }
+  /** `schedule`: always daily, in the routines' form ("daily:07:30@Europe/London"). */
+  | { kind: "plane-review"; schedule: string; zone: string | null };
 
 export type ChatApp = "slack" | "discord" | "teams" | "telegram";
 export const CHAT_APP_NAMES: Record<ChatApp, string> = { slack: "Slack", discord: "Discord", teams: "Teams", telegram: "Telegram" };
 
 /** What each kind is called on the canvas. */
 export const FLOW_TRIGGER_WORDS: Record<FlowTriggerKind, string> = {
-  button: "Button", schedule: "Schedule", github: "GitHub", linear: "Linear", flow: "Another flow", webhook: "Webhook", email: "Email inbox", chat: "Chat channel",
+  button: "Button", schedule: "Schedule", github: "GitHub", linear: "Linear", flow: "Another flow", webhook: "Webhook", email: "Email inbox", chat: "Chat channel", "plane-review": "Plane review",
 };
 
 /** How often the worker checks GitHub and Linear, and how it backs off when they don't answer. */
@@ -133,7 +140,7 @@ export function validateTriggerConfig(raw: unknown, context: { store: Store; flo
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Choose what starts cards.");
   const input = raw as Record<string, unknown>;
   const kind = input["kind"];
-  if (!FLOW_TRIGGER_KINDS.includes(kind as FlowTriggerKind)) throw new Error("Choose what starts cards: a button, a schedule, GitHub, Linear, another flow, a webhook, an email inbox or a chat channel.");
+  if (!FLOW_TRIGGER_KINDS.includes(kind as FlowTriggerKind)) throw new Error("Choose what starts cards: a button, a schedule, GitHub, Linear, another flow, a webhook, an email inbox, a chat channel or a plane review.");
   const named = words(input, "zone", 60, false);
   const zoneStage = named === null ? null : context.definition.stages.find(one => one.id === named || one.title.toLowerCase() === named.toLowerCase());
   if (named !== null && zoneStage === undefined) throw new Error(`This flow has no zone called ${named}.`);
@@ -200,6 +207,14 @@ export function validateTriggerConfig(raw: unknown, context: { store: Store; flo
     case "chat":
       // Connecting a channel proves it's one the person is in: it happens in the channel, not here.
       throw new Error(`Connect a chat channel from the channel itself: where Toolroll is in Slack, Discord, Teams or a Telegram group, send “flow ${context.flow.id}”.`);
+    case "plane-review": {
+      const at = words(input, "at", 5, false) ?? "07:30";
+      const clock = /^(\d{1,2}):(\d{2})$/.exec(at);
+      const zoneName = words(input, "timeZone", 60, false) ?? localTimeZone();
+      const schedule = clock === null ? null : scheduleFromWords(`daily ${clock[1]}:${clock[2]} ${zoneName}`);
+      if (schedule === null) throw new Error("Say the time it reviews the day as HH:MM, like 07:30, and a time zone like Europe/London.");
+      return { kind: "plane-review", schedule, zone };
+    }
     case "email": {
       const folder = words(input, "folder", 100, false) ?? "INBOX";
       const sender = words(input, "sender", 300, false);
@@ -207,6 +222,11 @@ export function validateTriggerConfig(raw: unknown, context: { store: Store; flo
       return { kind: "email", folder: /^inbox$/i.test(folder) ? "INBOX" : folder, sender: sender === null ? null : sendersOf(sender).join(", "), subject: words(input, "subject", 100, false), zone };
     }
   }
+}
+
+/** The computer's time zone, as the routines name one. */
+function localTimeZone(): string {
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"; } catch { return "UTC"; }
 }
 
 /** Addresses and domains from "priya@example.com, @shop.com, example.org". */
@@ -245,6 +265,10 @@ export function describeTrigger(config: TriggerConfig, store: Store): string {
     }
     case "webhook": return "Anything posted to its webhook address";
     case "chat": return `Every new message in a ${CHAT_APP_NAMES[config.app]} channel; replies in a card's thread join its discussion`;
+    case "plane-review": {
+      const schedule = parseSchedule(config.schedule);
+      return `Every day at ${schedule !== null && schedule.kind !== "every" ? schedule.hhmm : config.schedule}: reviews the last 24 hours of runs, tasks, sign-ins, chat, integrations and checks, and makes a card for each problem worth fixing`;
+    }
     case "email": return `Email arriving in ${config.folder === "INBOX" ? "the inbox" : config.folder}${config.sender === null ? "" : ` from ${config.sender}`}${config.subject === null ? "" : ` with “${config.subject}” in the subject`} (checked every 2 minutes)`;
   }
 }
@@ -266,6 +290,10 @@ export function triggerHeadline(config: TriggerConfig, store: Store): { name: st
     }
     case "webhook": return { name: "Webhook", detail: "Anything posted to its address" };
     case "chat": return { name: `${CHAT_APP_NAMES[config.app]} channel`, detail: "Each message is a card" };
+    case "plane-review": {
+      const schedule = parseSchedule(config.schedule);
+      return { name: `Plane review at ${schedule !== null && schedule.kind !== "every" ? schedule.hhmm : "a set time"}`, detail: "Problems from the last 24 hours" };
+    }
     case "email": return { name: config.folder === "INBOX" ? "New email" : `New email in ${config.folder}`, detail: config.sender !== null ? `From ${config.sender}` : config.subject !== null ? `Subject has “${config.subject}”` : "Email inbox" };
   }
 }
@@ -343,9 +371,10 @@ export function addFlowTriggerTo(store: Store, flow: FlowRow, raw: unknown, acto
   try { config = validateTriggerConfig(raw, { store, flow, definition, actor }); } catch (error) { return { ok: false, message: error instanceof Error ? error.message : "That trigger isn't valid." }; }
   if (takesDeliveries(config) && dir === null) return { ok: false, message: "Webhook addresses are set up on the console." };
   const token = takesDeliveries(config) ? randomBytes(24).toString("base64url") : null;
-  const schedule = config.kind === "schedule" ? parseSchedule(config.schedule) : null;
+  const schedule = config.kind === "schedule" || config.kind === "plane-review" ? parseSchedule(config.schedule) : null;
   const id = store.addFlowTrigger({
-    flow: flow.id, kind: config.kind, configJson: JSON.stringify(config), hookHash: token === null ? null : hookHash(token),
+    // The table's kinds were fixed before plane reviews: one is kept as the daily schedule it is.
+    flow: flow.id, kind: config.kind === "plane-review" ? "schedule" : config.kind, configJson: JSON.stringify(config), hookHash: token === null ? null : hookHash(token),
     // Only what happens from now on: never the backlog of issues, runs or finished cards.
     cursor: config.kind === "flow" ? String(store.latestFlowEvent()) : config.kind === "github" || config.kind === "linear" ? now.toISOString() : null,
     // Email: the first check notes where the mailbox stands (no cursor yet), so only mail after this becomes cards.
@@ -461,6 +490,7 @@ export async function runFlowTriggers(store: Store, repo: string, now: Date, io:
         if (!fired.ok) pass.problems.push(`trigger ${trigger.id}: ${fired.said}`);
       }
       else if (config.kind === "schedule" && trigger.nextAt !== null && Date.parse(trigger.nextAt) <= now.getTime()) pass.added += fireSchedule(store, trigger, config, now);
+      else if (config.kind === "plane-review" && trigger.nextAt !== null && Date.parse(trigger.nextAt) <= now.getTime()) pass.added += (await firePlaneReview(store, trigger, config, now, true)).added;
       else if (config.kind === "flow") pass.added += followFlow(store, trigger, config, now);
       else if (polled(config) && (trigger.nextAt === null || Date.parse(trigger.nextAt) <= now.getTime())) {
         pass.checked++;
@@ -480,7 +510,8 @@ export async function checkFlowTriggerNow(store: Store, trigger: FlowTriggerRow,
   const config = triggerConfigOf(trigger);
   // A schedule's script runs now, once; its schedule stays as it is.
   if (config?.kind === "schedule" && config.script !== undefined) { const fired = await fireScript(store, trigger, config, now, io, false); return { ok: fired.ok, said: fired.said }; }
-  if (config === null || !polled(config)) return { ok: false, said: "Only GitHub, Linear and email triggers that are checked, and schedules that run a script, can be run now." };
+  if (config?.kind === "plane-review") { const fired = await firePlaneReview(store, trigger, config, now, false); return { ok: true, said: fired.said }; }
+  if (config === null || !polled(config)) return { ok: false, said: "Only GitHub, Linear and email triggers that are checked, schedules that run a script, and plane reviews can be run now." };
   const checked = await checkTrigger(store, trigger, config, now, io);
   return { ok: checked.ok, said: checked.said };
 }
@@ -506,6 +537,65 @@ function fireSchedule(store: Store, trigger: FlowTriggerRow, config: Extract<Tri
   const made = makeCard(store, trigger, config, { key: `slot:${slot}`, title, description: config.description === null ? null : fill(config.description), source: { kind: "schedule", label: "Schedule", url: null } }, "Schedule", now);
   store.updateFlowTrigger(trigger.id, { nextAt: next, lastAt: now.toISOString(), lastOutcome: made.made === "added" ? "Added a card." : made.note ?? "Nothing new." }, now);
   return made.made === "added" ? 1 : 0;
+}
+
+/** The problem a plane review's event key names, and the day: `plane:<problem>:<YYYY-MM-DD>`. */
+const planeKey = (problem: string, day: string) => `plane:${problem}:${day}`;
+
+/** The card a plane review last made or joined for one problem, if any. */
+function planeCardOf(store: Store, trigger: number, problem: string): number | null {
+  const prefix = `plane:${problem}:`;
+  const row = store.handle.prepare("SELECT card FROM flow_trigger_event WHERE trigger = ? AND substr(key, 1, ?) = ? AND card IS NOT NULL ORDER BY rowid DESC LIMIT 1").get(trigger, prefix.length, prefix);
+  return row === undefined ? null : Number(row["card"]);
+}
+
+/**
+ * A plane review: the last 24 hours, one card per problem worth fixing. Each problem is noted once a day; a problem
+ * whose card is still open joins it (a note with the day's counts and evidence) instead of making another, and one
+ * whose card is finished starts a new card, since it came back. A clean day adds nothing and tells nobody.
+ * `scheduled` moves the trigger to its next morning; "Run now" leaves its times alone.
+ */
+export async function firePlaneReview(store: Store, trigger: FlowTriggerRow, config: Extract<TriggerConfig, { kind: "plane-review" }>, now: Date, scheduled: boolean): Promise<{ added: number; joined: number; said: string }> {
+  const schedule = parseSchedule(config.schedule);
+  const next = scheduled && schedule !== null && trigger.nextAt !== null ? nextFireAt(schedule, trigger.nextAt, now) : trigger.nextAt;
+  const flow = store.getFlow(trigger.flow);
+  const done = (said: string, added = 0, joined = 0) => {
+    store.updateFlowTrigger(trigger.id, { nextAt: next, lastAt: now.toISOString(), lastOutcome: said }, now);
+    return { added, joined, said };
+  };
+  if (flow === null || flow.state !== "active") return done("The flow isn't active.");
+  // Loaded when a review first runs: the reader reaches the integrations and task status, which reach back to these triggers.
+  const { problemCard, problemText, reviewPlane } = await import("./plane-review.js");
+  // Only the projects the flow's owner may see: a flow's cards are read by everyone on its project.
+  const owner = store.accountOf(flow.owner);
+  const problems = reviewPlane(store, now, repo => owner === null || (repo !== null && store.accountCanAccess(flow.owner, repo)) || (repo === null && owner.projects === null));
+  const timeZone = schedule !== null && schedule.kind !== "every" ? schedule.timezone ?? "UTC" : "UTC";
+  const day = new Intl.DateTimeFormat("en-CA", { year: "numeric", month: "2-digit", day: "2-digit", timeZone }).format(now);
+  const dayWords = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone }).format(now);
+  let added = 0, joined = 0;
+  const skipped: string[] = [];
+  for (const problem of problems) {
+    const key = planeKey(problem.key, day);
+    if (store.flowTriggerSaw(trigger.id, key)) continue;
+    const had = planeCardOf(store, trigger.id, problem.key);
+    const card = had === null ? null : store.getFlowCard(had);
+    if (card !== null && card.state === "active") {
+      store.transact(() => {
+        store.addFlowComment({ card: card.id, author: "Plane review", body: `Again — ${problemText(problem, dayWords)}`.slice(0, 4000), mentions: [] }, now);
+        store.recordFlowTriggerEvent(trigger.id, key, card.id, problem.summary, now);
+      });
+      joined++;
+      continue;
+    }
+    const text = problemCard(problem, dayWords);
+    const made = makeCard(store, trigger, config, { key, title: text.title, description: text.description, source: { kind: "plane-review", label: "Plane review", url: null } }, "Plane review", now);
+    if (made.made === "added") added++;
+    else if (made.note !== null) skipped.push(made.note);
+  }
+  if (problems.length === 0) return done("A clean day: nothing to fix.");
+  const parts = [added > 0 ? `Added ${plural(added, "card")}.` : null, joined > 0 ? `${plural(joined, "problem")} came back and joined ${joined === 1 ? "its card" : "their cards"}.` : null,
+    skipped.length > 0 ? `Left out ${plural(skipped.length, "problem")}: ${skipped[0]}.` : null].filter(one => one !== null);
+  return done(parts.length === 0 ? "Nothing new since this morning's review." : parts.join(" "), added, joined);
 }
 
 /** v96: a schedule (a teammate's routine) makes its card now, once per press, and keeps its own times. */

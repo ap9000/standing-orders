@@ -1,6 +1,7 @@
 import { KNOWLEDGE_DESCRIPTORS } from "./knowledge-cli.js";
 import { MEMORY_DESCRIPTORS } from "./memory-cli.js";
 import { MODELS_DESCRIPTORS } from "./models-cli.js";
+import { FLOWS_DESCRIPTORS } from "./flows-cli.js";
 /**
  * The declared command guide (arc 5): the agent-facing surface as data,
  * dumped by `contract --commands`. This is DOCUMENTATION with a stable
@@ -156,6 +157,9 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
 
   ...KNOWLEDGE_DESCRIPTORS.map(spec => ({ invocation: `knowledge ${spec.action}`, synopsis: spec.synopsis, audience: "agent" as const, agentMayInvoke: true, mutation: spec.mutation, flags: spec.flags, ...(spec.takesQuery ? { positionals: [{ name: "query", required: true, meaning: "search text or source file for impact" }] } : {}) })),
   ...MEMORY_DESCRIPTORS.map(spec => ({ invocation: `memory ${spec.action}`, synopsis: spec.synopsis, audience: "agent" as const, agentMayInvoke: true, mutation: spec.mutation, flags: spec.flags, ...(spec.takesQuery ? { positionals: [{ name: "query", required: true, meaning: "search text, a decision id, or the decision sentence" }] } : {}) })),
+  // Flow writes carry an approver's credential: an agent runs them only as the person asked, after showing the preview.
+  ...FLOWS_DESCRIPTORS.map(spec => ({ invocation: `flows ${spec.action}`, synopsis: spec.synopsis, audience: "agent" as const, agentMayInvoke: true, mutation: spec.mutation, flags: spec.flags,
+    ...("positionals" in spec ? { positionals: spec.positionals.map(name => ({ name, required: true, meaning: name === "flow" ? "a flow id from flows list" : "a trigger id from flows show, or for trigger add its settings as JSON, a JSON file, or -" })) } : {}) })),
   ...MODELS_DESCRIPTORS.map(spec => ({ invocation: `models ${spec.action}`, synopsis: spec.synopsis, audience: "agent" as const, agentMayInvoke: true, mutation: spec.mutation, flags: spec.flags, ...(spec.takesQuery ? { positionals: [{ name: "target", required: true, meaning: "the CLI to update, or on/off" }] } : {}) })),
 
   // ---- the queue (agent surface) ----

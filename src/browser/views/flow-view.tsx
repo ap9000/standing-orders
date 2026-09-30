@@ -859,6 +859,7 @@ function RevealBox({ kind, reveal, onDone }: { kind: string; reveal: Reveal; onD
 const TRIGGER_KEYS: Record<string, string[]> = {
   button: ["label", "questions"], schedule: ["schedule", "title", "description", "script", "secrets"], github: ["repo", "watch", "label", "branch", "from", "delivery"],
   linear: ["team", "state", "label", "delivery"], flow: ["flow", "when"], webhook: ["title", "titleField", "bodyField"], email: ["folder", "sender", "subject"],
+  "plane-review": ["at", "timeZone"],
 };
 
 function AddTrigger({ view, csrf, open, onResult }: { view: BrowserFlowView; csrf: string; open: boolean; onResult: (result: Said, kind: string) => void }) {
@@ -871,6 +872,7 @@ function AddTrigger({ view, csrf, open, onResult }: { view: BrowserFlowView; csr
   const defaults: Record<string, Record<string, string>> = {
     schedule: { schedule: `daily 09:00 ${timezone}` }, github: { repo: setup.githubRepo ?? "", watch: "issues", from: "team", delivery: "poll", branch: "main" },
     linear: { delivery: "poll" }, flow: { flow: String(setup.otherFlows[0]?.id ?? "") }, webhook: { title: "Webhook" }, email: { folder: "INBOX" },
+    "plane-review": { at: "07:30", timeZone: timezone },
   };
   const v = (key: string) => fields[key] ?? defaults[kind]?.[key] ?? "";
   const set = (key: string) => (event: { target: { value: string } }) => setFields(current => ({ ...current, [key]: event.target.value }));
@@ -951,6 +953,10 @@ function AddTrigger({ view, csrf, open, onResult }: { view: BrowserFlowView; csr
         <Field label="Folder"><Input value={v("folder")} onChange={set("folder")} placeholder="INBOX" maxLength={100} /></Field>
         <Field label="Only from (optional)" hint="Addresses or domains, like priya@example.com, example.com."><Input value={v("sender")} onChange={set("sender")} maxLength={300} /></Field>
         <Field label="Subject has (optional)"><Input value={v("subject")} onChange={set("subject")} placeholder="Order" maxLength={100} /></Field>
+      </>}
+      {kind === "plane-review" && <>
+        <p className="text-[12.5px] text-muted-foreground">Every morning, reads the last 24 hours and makes one card per problem worth fixing. A problem that comes back joins its card. A clean day adds nothing.</p>
+        <Field label="Time" hint={`Every day, in ${v("timeZone") || "your time zone"}.`}><Input type="time" value={v("at")} onChange={set("at")} required /></Field>
       </>}
       {kind === "webhook" && <>
         <Field label="Title field" hint="Where to find the card's title in the posted JSON, like title or data.issue.title."><Input value={v("titleField")} onChange={set("titleField")} placeholder="title" maxLength={80} /></Field>
@@ -1138,6 +1144,7 @@ type Insights = {
   scripts: { script: string; runs: number; passed: number; failed: number; typicalSeconds: number | null; lastFailure: string | null }[];
   sorts: { zone: string; title: string; sureAt: number; sorted: number; alone: number; notSure: number; corrected: number; bands: { from: number; to: number; right: number; of: number }[]; costUsd: number; suggestion: string | null }[];
   runs: { card: number; cardTitle: string; entry: number; zoneTitle: string; kind: string; script: string | null; version: number | null; state: string; result: string | null; exitCode: number | null; durationMs: number | null; at: string; hasLog: boolean }[];
+  recurring?: { problem: string; title: string; days: number; lastSeen: string; card: number | null }[];
 };
 const duration = (minutes: number | null) => minutes === null ? "—" : minutes < 1 ? "under a minute" : minutes < 90 ? `${Math.round(minutes)} min` : minutes < 2880 ? `${Math.round(minutes / 60)} h` : `${Math.round(minutes / 1440)} days`;
 
@@ -1201,6 +1208,12 @@ function InsightsPanel({ view, onClose }: { view: BrowserFlowView; onClose: () =
           {one.suggestion !== null && <p className="mt-1">{one.suggestion}</p>}
           {one.costUsd > 0 && <p className="mt-1 text-muted-foreground">Cost: {one.costUsd < 0.01 ? "under 1¢" : `$${one.costUsd.toFixed(2)}`}</p>}
         </div>)}
+      </section>}
+      {(data.recurring ?? []).length > 0 && <section className="flex flex-col gap-1.5" data-insights-recurring>
+        <h3 className="text-[13px] font-semibold">What keeps coming back</h3>
+        <ul className="flex flex-col gap-1 text-[12.5px]">{data.recurring!.map(one => <li key={one.problem} className="flex items-baseline gap-2">
+          <span className="min-w-0 flex-1 truncate">{one.card === null ? one.title : <a className="underline-offset-2 hover:underline" href={`${view.flow.href}?card=${one.card}`}>{one.title}</a>}</span>
+          <span className={cn("shrink-0 tabular-nums", one.days > 1 ? "font-semibold text-foreground" : "text-muted-foreground")}>{one.days} day{one.days === 1 ? "" : "s"}</span></li>)}</ul>
       </section>}
       <section className="flex flex-col gap-1.5">
         <h3 className="text-[13px] font-semibold">Recent runs</h3>

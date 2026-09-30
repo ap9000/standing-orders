@@ -89,6 +89,29 @@ ${AUTHORITY_LINE}
     detail says why; \`toolroll sync\` refreshes trackers.
   - \`contest-open\`: a tournament is running on the task; a person picks.
 
+## Flows
+
+A flow is a process cards move through, drawn as zones. The terminal
+applies the console's rules exactly.
+
+- Read: \`toolroll flows list [--repo PATH] --json\` (id, name, project,
+  zones, triggers, cards waiting) and \`flows show <id> --json\` (each
+  zone's \`next\` and \`ifFails\` paths, triggers, recent cards).
+- Change, as an approver (\`--as <you> --token <t>\`, or the remembered
+  login): \`flows create --repo PATH --name <n> (--template <id> |
+  --steps <file|->)\` — steps in the lead's flow-tool format, in order;
+  \`flows edit <id> --steps <file|->\`; \`flows trigger add <id> <json|file>\`;
+  \`flows trigger pause|resume|remove|check <id> <trigger>\`; \`flows script
+  save --repo PATH --name <n> (--file <path in project> | --body <file>)
+  --about "<line>"\`; \`flows card add <id> --title <t> [--zone <z>]\`;
+  \`flows archive <id>\`.
+- create, edit, archive and trigger add answer with a preview
+  (\`applied: false\`, \`terms\`) until \`--yes\`. Show the person the terms
+  and run \`--yes\` only when they asked for exactly that change.
+- Refusals: \`unknown-project\`, \`unknown-flow\`, \`invalid-steps\` (such as a
+  pull request that merges without a decision before it), \`invalid-trigger\`,
+  \`invalid-script\`, \`unauthenticated\`, \`stale\`.
+
 ## What you may never do
 
 - Never approve scopes, answer decisions, or acquire approver tokens —
