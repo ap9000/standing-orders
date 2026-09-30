@@ -2144,7 +2144,8 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
   }
 
   // completed
-  if (dirty.length === 0) {
+  const finishesKeptWork = dirty.length === 0 && await startsFromKeptWork(captured, baseRevision, pinnedBase);
+  if (dirty.length === 0 && !finishesKeptWork) {
     return {
       ok: false,
       reason: "no-op",
@@ -2162,7 +2163,11 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
     };
   }
   store.setRunPhase(request.runId, "committing");
-  const made = await commit(git, worktree, branch, taskId, scope as Scope, handoff.conclusion, request.attended === undefined ? scope?.candidate ?? null : null);
+  // Kept work that is already complete is already committed: the attempt's
+  // result is that commit, sealed below against the task's original base.
+  const made = finishesKeptWork
+    ? await keptWorkResult(captured, baseRevision, handoff.conclusion)
+    : await commit(git, worktree, branch, taskId, scope as Scope, handoff.conclusion, request.attended === undefined ? scope?.candidate ?? null : null);
   if (made.ok && made.parked === undefined && made.committed) {
     const newHead = await git(GIT, ["--no-optional-locks", "rev-parse", "HEAD"], { cwd: worktree });
     if (newHead.code === 0) {
@@ -2852,6 +2857,43 @@ function screenshotFileTag(path: string): string {
 /** What a person reads when an attempt stopped before its handoff (run 2085). */
 export const NO_HANDOFF_WORDS = "The agent stopped before handing off; its work was kept and it is being resumed.";
 
+/** The body of the work-in-progress commit an unresumable no-handoff attempt leaves on its branch. */
+export const WIP_COMMIT_WORDS = "Work in progress: the agent stopped before handing off. Kept so the next attempt continues from it.";
+
+/**
+ * Whether this attempt starts from the work-in-progress commit an earlier
+ * no-handoff attempt of this task left (keepUnhandedWork), with changes
+ * against the task's original base. That commit's changes are the unfinished
+ * work this attempt was sent to finish, so they count as its own: an agent
+ * that finds them complete and hands off `completed` with a clean tree has
+ * done the work, not claimed work it never did.
+ */
+async function startsFromKeptWork(captured: CapturedBuild, baseRevision: string, pinnedBase: string): Promise<boolean> {
+  const { store, request, git, worktree, branch } = captured;
+  if (pinnedBase === baseRevision) return false;
+  const kept = store.runsFor(request.taskRef).some(one =>
+    one.id < request.runId && one.role === "builder" && one.branch === branch && one.outcome === "failed" && one.reason === "no-handoff");
+  if (!kept) return false;
+  const message = await git(GIT, ["--no-optional-locks", "log", "-1", "--format=%B", baseRevision], { cwd: worktree });
+  if (message.code !== 0 || !message.stdout.includes(WIP_COMMIT_WORDS)) return false;
+  // --quiet exits 1 exactly when the two sides differ.
+  const changed = await git(GIT, ["--no-optional-locks", "diff", "--quiet", pinnedBase, baseRevision, "--"], { cwd: worktree });
+  return changed.code === 1;
+}
+
+/** The accepted result of an attempt that finished kept work with nothing left to change. An exact prepared candidate must still match it. */
+async function keptWorkResult(captured: CapturedBuild, head: string, summary: string): Promise<BuildResult> {
+  const { git, worktree, branch, request, scope } = captured;
+  const candidate = request.attended === undefined ? scope?.candidate ?? null : null;
+  if (candidate !== null) {
+    const exact = await git(GIT, ["--no-optional-locks", "diff", "--quiet", candidate, head, "--"], { cwd: worktree });
+    if (exact.code !== 0) return { ok: false, reason: "commit-failure", message: exact.code === 1
+      ? "The kept work-in-progress commit does not match the approved prepared candidate. The checkout is preserved."
+      : "The kept work-in-progress commit could not be checked against the approved prepared candidate. The checkout is preserved." };
+  }
+  return { ok: true, committed: true, branch, summary };
+}
+
 /** The short turn a stopped agent's own session is resumed with. */
 export function handoffResumePrompt(done: string): string {
   return [
@@ -2969,8 +3011,7 @@ async function keepUnhandedWork(captured: CapturedBuild, sessionId: string | und
     return { ok: false, reason: "no-handoff", message: `${NO_HANDOFF_WORDS} Its changes stay uncommitted in ${worktree}; ${saved.message}.` };
   }
   if (request.attended === undefined && !canResumeSession(captured, sessionId) && scope !== null && !stopRequestedFor(store, request.runId, request.shouldStop)) {
-    const made = await commit(git, worktree, branch, taskId, scope as Scope,
-      "Work in progress: the agent stopped before handing off. Kept so the next attempt continues from it.");
+    const made = await commit(git, worktree, branch, taskId, scope as Scope, WIP_COMMIT_WORDS);
     if (made.ok && "committed" in made && made.committed) {
       return { ok: false, reason: "no-handoff", message: `${NO_HANDOFF_WORDS} It was saved as a work-in-progress commit on ${branch}.` };
     }

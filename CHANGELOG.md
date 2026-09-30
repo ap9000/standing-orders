@@ -25,6 +25,15 @@
   a retry never resets that work. The failure reads "The agent stopped before
   handing off; its work was kept and it is being resumed". A handoff and a
   passing check are still required for success.
+- **Sign-in pauses and kept work, follow-ups.** Fallback entries, attended
+  continuations and resumed race lanes on a paused provider now wait (with the
+  same one-trial-every-10-minutes) instead of failing, and the Tasks list
+  shows every task the gate holds as waiting for a sign-in — planners and
+  tasks on a configured or pinned provider included. A retry now actually
+  inherits unhanded work (its admission refused it before); an attempt that
+  finds a kept work-in-progress commit already complete and hands off with a
+  clean tree succeeds; and once a later attempt fails some other way, the
+  saved tree can be reset.
 - **Toolroll under the hood.** The internal names follow the product name;
   every existing install, database, branch and integration keeps working, and
   nothing is moved. The npm package is `toolroll` (both the `toolroll` and

@@ -459,6 +459,31 @@ export function installedLegacyDaemon(args: Parameters<typeof planDaemon>[0]): D
   return "error" in legacy || !existsSync(legacy.unitPath) ? null : legacy;
 }
 
+/**
+ * Install the watch, then retire its copy from before the rename. The new
+ * job goes in first: when its install fails the legacy watch is left
+ * running, so the repo is never left without one. Only once the new job is
+ * installed is the legacy one stopped and removed; the new one is then
+ * started again, since it may have stepped aside while the legacy watch
+ * still held the repo's lease.
+ */
+export async function installReplacingLegacy(
+  plan: DaemonPlan,
+  token: string,
+  legacy: DaemonPlan | null,
+  run: SupervisorRunner,
+): Promise<ServiceStart> {
+  const installed = await installDaemon(plan, token, run);
+  if (!installed.ok || legacy === null) return installed;
+  try {
+    await uninstallDaemon(legacy, run);
+  } catch (error) {
+    return { ok: false, message: `installed ${plan.label}, but could not stop ${legacy.label}, the same watch under its older name: ${(error as Error).message}` };
+  }
+  const restarted = await installDaemon(plan, token, run);
+  return restarted.ok ? installed : restarted;
+}
+
 /** Write the token 0600 and the unit, then hand the unit to the supervisor. */
 export async function installDaemon(
   plan: DaemonPlan,

@@ -250,7 +250,8 @@ await check("The lead draws a sorting flow from plain words (real Claude turn)",
 });
 
 await check("Jev sorts real cards through OpenRouter (Exception routing template)", ["Sign in and turn the lead chat on (first-run setup)"], async () => {
-  if (!existsSync(join(homedir(), ".standing-orders", "keys", "openrouter"))) throw new Skip("needs an OpenRouter key saved in Settings → AI providers");
+  const { namedPath } = await import(new URL("../dist/names.js", import.meta.url).href);
+  if (!existsSync(join(namedPath(homedir(), ["keys"], { dot: true }), "openrouter"))) throw new Skip("needs an OpenRouter key saved in Settings → AI providers");
   await page.goto(`${base}/flows`);
   await page.evaluate(() => { for (const one of document.querySelectorAll("details")) one.open = true; });
   await page.fill('form[action="/flows/new"] input[name="name"]', "Support desk");

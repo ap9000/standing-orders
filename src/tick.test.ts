@@ -888,6 +888,65 @@ describe("tick, against real git", () => {
     expect(payload().dispatched).toMatchObject([{ id: "t-1", outcome: "built" }]);
   });
 
+  test("every task the sign-in gate skips says so in the work index, planners and configured providers included", async () => {
+    const { runnerToken, approverToken } = await credentials();
+    await queueApproved("t-built", approverToken);
+    // A planner: no approved terms name its provider; configuration does.
+    await run(["task", "add", "plan it first", "--id", "t-plan", "--repo", repo]);
+    const store = openStore(db);
+    try {
+      store.requestPlan(store.refFor("built-in", "t-plan").id, T0);
+      pauseForAuth(store, { provider: "claude", authMode: "subscription", runId: 0, taskRef: store.refFor("built-in", "t-built").id, now: T0 });
+    } finally { store.close(); }
+
+    await tick(runnerToken);
+    const skipped = (payload().dispatched as { id: string; reason?: string }[]).filter(one => one.reason === "signed-out").map(one => one.id);
+    expect(skipped.sort()).toEqual(["t-built", "t-plan"]);
+    expect(agentRan).toEqual([]);
+    const after = openStore(db);
+    try {
+      const items = workIndexPage(after, T0, { principal: "operator", repos: null, includeUnplaced: true }).items;
+      for (const id of skipped) {
+        expect(items.find(one => one.activeTaskId === id)?.status).toMatchObject({ label: "Claude needs you to sign in again", detail: "It starts again on its own once Claude works." });
+      }
+    } finally { after.close(); }
+    await run(["task", "show", "t-plan", "--json"]);
+    expect(payload().dispatch).toMatchObject({ code: "signed-out", summary: "Claude needs you to sign in again" });
+
+    // Resumed: the gate's note no longer holds anything.
+    await run(["providers", "resume", "claude", "--json"]);
+    const resumed = openStore(db);
+    try {
+      const items = workIndexPage(resumed, T0, { principal: "operator", repos: null, includeUnplaced: true }).items;
+      expect(items.find(one => one.activeTaskId === "t-plan")?.status.label).toBe("Planner ready");
+    } finally { resumed.close(); }
+  });
+
+  test("an attended continuation on a paused provider waits with its authorization open instead of failing", async () => {
+    const { runnerToken } = await credentials();
+    const seeded = openStore(db);
+    let parents: { ref: number; parent: number };
+    try {
+      const head = (await git(["rev-parse", "HEAD"])).stdout.trim();
+      parents = await seedContinuation(seeded, "t-waits", head);
+      pauseForAuth(seeded, { provider: "claude", authMode: "subscription", runId: parents.parent, taskRef: parents.ref, now: T0 });
+    } finally { seeded.close(); }
+    lines = [];
+    await runOperate("tick", ["--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool, "--json"], line => lines.push(line), {
+      databaseFile: db, now: T0, agentRunner: neverSpawns, heldCoordinator: new HeldSessionCoordinator(),
+    });
+    expect(payload().dispatched).toEqual([
+      expect.objectContaining({ id: "t-waits", outcome: "skipped", reason: "signed-out", detail: expect.stringContaining("Claude needs you to sign in again") }),
+    ]);
+    const proved = openStore(db);
+    try {
+      // Nothing opened, nothing spent, nothing closed: it starts once the sign-in works.
+      expect(proved.readAuthorization("auth-t-waits")).toMatchObject({ attemptRun: null, consumedAt: null, closedAt: null, endReason: null });
+      continuationCustodyReleased(proved, "t-waits", parents.ref, parents.parent);
+    } finally { proved.close(); }
+    expect(agentRan).toEqual([]);
+  });
+
   test("three straight failures stall the task with an incident, not a fourth attempt", async () => {
     const { runnerToken, approverToken } = await credentials();
     await queueApproved("t-1", approverToken);

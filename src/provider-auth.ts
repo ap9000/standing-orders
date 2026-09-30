@@ -106,6 +106,13 @@ export function authPauseOf(store: Store, provider: string): AuthPause | null {
   return row === undefined ? null : readPause(row);
 }
 
+/** The open pause the dispatch gate last left this task waiting on, or null. */
+export function authWaitOf(store: Store, taskRef: number): AuthPause | null {
+  const row = store.handle.prepare(`SELECT p.* FROM task_ref r JOIN provider_auth_pause p ON p.id = r.auth_wait_pause
+    WHERE r.id = ? AND p.lifted_at IS NULL`).get(taskRef);
+  return row === undefined ? null : readPause(row);
+}
+
 /** Every open pause, oldest first. */
 export function openAuthPauses(store: Store): AuthPause[] {
   return store.handle.prepare("SELECT * FROM provider_auth_pause WHERE lifted_at IS NULL ORDER BY id").all().map(readPause);
@@ -234,6 +241,23 @@ export function claimAuthTrial(store: Store, pause: AuthPause, now: Date): boole
   const claimed = store.handle.prepare(`UPDATE provider_auth_pause SET last_trial_at = ?
     WHERE id = ? AND lifted_at IS NULL AND COALESCE(last_trial_at, opened_at) <= ?`).run(now.toISOString(), pause.id, due);
   return Number(claimed.changes) === 1;
+}
+
+/**
+ * The sign-in gate every road that starts an agent asks before it claims
+ * anything: the tick's queue, and the roads beside it (fallback entries,
+ * attended continuations, contest resumes). The open pause the work waits
+ * on, or null when it may go ahead — nothing paused, or this is the pause's
+ * one trial. A waiting task is noted on its task_ref, so the work index says
+ * exactly what the gate decided; a task let through is un-noted.
+ */
+export function signInGate(store: Store, providers: readonly string[], now: Date, taskRef?: number): AuthPause | null {
+  const pause = [...new Set(providers)].map(one => authPauseOf(store, one)).find(one => one !== null) ?? null;
+  const waiting = pause !== null && !claimAuthTrial(store, pause, now) ? pause : null;
+  if (taskRef !== undefined) {
+    store.handle.prepare("UPDATE task_ref SET auth_wait_pause = ? WHERE id = ? AND auth_wait_pause IS NOT ?").run(waiting?.id ?? null, taskRef, waiting?.id ?? null);
+  }
+  return waiting;
 }
 
 /** The loop beside the console: every two minutes, probe each paused

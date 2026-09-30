@@ -13,7 +13,7 @@
  * match), --keep, --playwright <index.mjs>, --output <dir>.
  */
 import { spawn, execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync, createWriteStream } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync, createWriteStream } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir, homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -42,6 +42,38 @@ export async function loadPlaywright() {
 /** A check that can't run here (no Docker, say): skipped with the reason, never passed. */
 export class Skip extends Error {}
 
+/** Thrown from inside a wait when what it waits for can no longer happen (the planner gave up, say): it ends the wait at once. */
+export class GiveUp extends Error {}
+
+/** How long a wait on a real Claude turn may take: a slow turn, plus the worker's own retry of a failed one. */
+export const REAL_TURN_MS = 300_000;
+
+/**
+ * Wait until `test` answers something truthy, trying every `everyMs`. A wait that runs out names what it waited for and
+ * for how long, with the last error and, when `seen` is given, what it saw at the end (`seen` is read only then).
+ */
+export async function until(what, test, { timeoutMs = 120_000, everyMs = 1500, seen } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let last;
+  while (Date.now() < deadline) {
+    try { last = await test(); if (last) return last; } catch (error) { if (error instanceof GiveUp) throw new Error(`Gave up waiting for ${what}: ${error.message}`); last = error; }
+    await sleep(everyMs);
+  }
+  const saw = seen === undefined ? "" : await Promise.resolve().then(seen).then(one => ` — saw: ${one}`, error => ` — couldn't read what it saw: ${error.message}`);
+  throw new Error(`Timed out after ${Math.round(timeoutMs / 1000)} s waiting for ${what}${last instanceof Error ? ` (last error: ${last.message})` : ""}${saw}`);
+}
+
+/** A Playwright locator's wait, named: when it runs out, the failure says what it waited for and for how long, not only the selector. */
+export async function waitFor(locator, what, { timeoutMs = 30_000, state = "visible", seen } = {}) {
+  try {
+    return await locator.waitFor({ timeout: timeoutMs, state });
+  } catch (error) {
+    if (error?.name !== "TimeoutError" && !/Timeout \d+ms exceeded/.test(String(error?.message))) throw error;
+    const saw = seen === undefined ? "" : await Promise.resolve().then(seen).then(one => ` — saw: ${one}`, failed => ` — couldn't read what it saw: ${failed.message}`);
+    throw new Error(`Timed out after ${Math.round(timeoutMs / 1000)} s waiting for ${what}${saw}`);
+  }
+}
+
 /**
  * Make the world: a repository with a passing test, two approvers (alex and
  * sam), a registered runner, Claude as every phase, `npm test` as the
@@ -51,6 +83,8 @@ export class Skip extends Error {}
  * the page itself loaded, and the shell settles these where it can (browser-shell.ts, app.tsx; serve.ts explains why a
  * page can't always). Every other browser error still fails "No browser errors on any page". */
 export const SKIPPED_FADE = /Transition was aborted because of invalid state/;
+/** The check every run ends with. */
+export const BROWSER_CHECK = "No browser errors on any page";
 
 export async function world(name, { seed, env = {} } = {}) {
   const BIN = join(here, "dist/bin.js");
@@ -76,36 +110,28 @@ export async function world(name, { seed, env = {} } = {}) {
   };
   const sql = query => execFileSync("sqlite3", ["-json", db, query], { encoding: "utf8" }).trim() || "[]";
   const rows = query => JSON.parse(sql(query));
-  async function until(what, test, { timeoutMs = 120_000, everyMs = 1500 } = {}) {
-    const deadline = Date.now() + timeoutMs;
-    let last;
-    while (Date.now() < deadline) {
-      try { last = await test(); if (last) return last; } catch (error) { last = error; }
-      await sleep(everyMs);
-    }
-    throw new Error(`Timed out after ${Math.round(timeoutMs / 1000)} s waiting for ${what}${last instanceof Error ? ` (last error: ${last.message})` : ""}`);
-  }
 
   const results = [];
   const failed = new Set();
   const openPages = [];
-  async function check(title, needs, body) {
+  // Every result names what it needs, so a runner can retry just the failed journeys and what they need (e2e-parallel.mjs).
+  async function check(title, needs, body, { always = false } = {}) {
     const at = Date.now();
-    if (only !== null && !only.test(title)) { results.push({ name: title, state: "not selected" }); return null; }
+    if (!always && only !== null && !only.test(title)) { results.push({ name: title, needs, state: "not selected" }); return null; }
     const missing = needs.filter(one => failed.has(one));
-    if (missing.length > 0) { results.push({ name: title, state: "skipped", because: missing }); say(`SKIP  ${title} (needs ${missing.join(", ")})`); failed.add(title); return null; }
+    if (missing.length > 0) { results.push({ name: title, needs, state: "skipped", because: missing }); say(`SKIP  ${title} (needs ${missing.join(", ")})`); failed.add(title); return null; }
     say(`...   ${title}`);
     try {
       const detail = await body();
-      results.push({ name: title, state: "passed", seconds: Math.round((Date.now() - at) / 100) / 10, ...(detail === undefined ? {} : { detail }) });
+      results.push({ name: title, needs, state: "passed", seconds: Math.round((Date.now() - at) / 100) / 10, ...(detail === undefined ? {} : { detail }) });
       say(`PASS  ${title} (${Math.round((Date.now() - at) / 1000)} s)`);
       return detail ?? true;
     } catch (error) {
       failed.add(title);
-      if (error instanceof Skip) { results.push({ name: title, state: "skipped", because: [error.message] }); say(`SKIP  ${title} (${error.message})`); return null; }
+      if (error instanceof Skip) { results.push({ name: title, needs, state: "skipped", because: [error.message] }); say(`SKIP  ${title} (${error.message})`); return null; }
       const file = join(out, `${results.length + 1}-failed.png`);
       for (const one of openPages) await one.screenshot({ path: file.replace(".png", `-${openPages.indexOf(one)}.png`) }).catch(() => undefined);
-      results.push({ name: title, state: "failed", seconds: Math.round((Date.now() - at) / 100) / 10, error: error instanceof Error ? error.message : String(error) });
+      results.push({ name: title, needs, state: "failed", seconds: Math.round((Date.now() - at) / 100) / 10, error: error instanceof Error ? error.message : String(error) });
       say(`FAIL  ${title}: ${(error instanceof Error ? error.message : String(error)).split("\n")[0]}`);
       return null;
     }
@@ -173,28 +199,49 @@ export async function world(name, { seed, env = {} } = {}) {
   ])).catch(() => undefined);
   const shot = async name => { await settle(page); return page.screenshot({ path: join(out, `${name}.png`) }); };
 
-  /** Send the lead a message and wait for its reply; returns the reply element and its text. */
-  async function askLead(message, on = page) {
-    if (!on.url().endsWith("/chat")) await on.goto(`${base}/chat`);
+  /** The lead's tool calls the console has traced (TOOLROLL_MATE_TRACE) since `from` bytes into its log: what each asked and got back. */
+  const leadCalls = (from = 0) => {
+    const log = join(out, "serve.log");
+    if (!existsSync(log)) return [];
+    return readFileSync(log).subarray(from).toString("utf8").split("\n").filter(line => line.startsWith("mate-trace ")).flatMap(line => { try { return [JSON.parse(line.slice("mate-trace ".length))]; } catch { return []; } });
+  };
+  const logSize = () => { try { return statSync(join(out, "serve.log")).size; } catch { return 0; } };
+
+  /**
+   * Send the lead a message and wait for its reply (a real Claude turn); returns the reply element, its text, and the
+   * tools the lead called for it with what each returned. `project` asks in that project's chat.
+   */
+  async function askLead(message, on = page, { project = null } = {}) {
+    const where = project === null ? "/chat" : `/chat?project=${encodeURIComponent(project)}`;
+    if (!on.url().endsWith(where)) await on.goto(`${base}${where}`);
     await on.waitForSelector("[data-workspace-composer] textarea");
     const before = await on.locator("[data-workspace-chat] [data-message-id]").count();
+    const from = logSize();
     await on.fill("[data-workspace-composer] textarea", message);
     await on.click('[data-workspace-composer] button[type="submit"]');
-    await until("the lead's reply", async () => (await on.locator("[data-workspace-chat] [data-message-id]").count()) >= before + 2, { timeoutMs: 300_000, everyMs: 2000 });
+    await until(`the lead's reply to “${message.slice(0, 60)}”`, async () => (await on.locator("[data-workspace-chat] [data-message-id]").count()) >= before + 2,
+      { timeoutMs: REAL_TURN_MS, everyMs: 2000, seen: async () => `${(await on.locator("[data-workspace-chat] [data-message-id]").count()) - before} new messages; ${JSON.stringify(leadCalls(from).map(one => one.tool))} called` });
     await sleep(1000);
     const reply = on.locator("[data-workspace-chat] [data-message-id]").last();
-    return { reply, text: (await reply.innerText()).replace(/\s+/g, " ") };
+    return { reply, text: (await reply.innerText()).replace(/\s+/g, " "), calls: leadCalls(from) };
+  }
+  /** Wait for a pending card in the lead's reply; a reply without one fails naming the wait and quoting the reply. */
+  async function pendingCard(reply, what, { label = null, timeoutMs = 30_000 } = {}) {
+    let card = reply.locator('[data-view="chat-card"][data-card-state="pending"]');
+    if (label !== null) card = card.filter({ hasText: label });
+    await waitFor(card.first(), what, { timeoutMs, seen: async () => `the reply “${(await reply.innerText()).replace(/\s+/g, " ").slice(0, 300)}”` });
+    return card.first();
   }
   async function confirmCard(reply, label) {
-    const card = reply.locator('[data-view="chat-card"][data-card-state="pending"]').filter({ hasText: label }).first();
-    await card.waitFor({ timeout: 10_000 });
+    const card = await pendingCard(reply, `the “${label}” card in the lead's reply`, { label, timeoutMs: 10_000 });
     await card.locator("[data-card-confirm]").click();
     await until(`the “${label}” card to be confirmed`, async () => (await reply.locator('[data-view="chat-card"][data-card-state="confirmed"]').filter({ hasText: label }).count()) > 0, { timeoutMs: 30_000 });
     return reply.locator('[data-view="chat-card"][data-card-state="confirmed"]').filter({ hasText: label }).first();
   }
 
   async function finish(title) {
-    await check("No browser errors on any page", [], async () => { if (problems.length > 0) throw new Error(problems.slice(0, 5).join(" | ")); });
+    // Whatever --only picked, the pages it opened are checked.
+    await check(BROWSER_CHECK, [], async () => { if (problems.length > 0) throw new Error(problems.slice(0, 5).join(" | ")); }, { always: true });
     await browser.close();
     for (const child of children) child.kill("SIGTERM");
     await sleep(1500);
@@ -210,7 +257,7 @@ export async function world(name, { seed, env = {} } = {}) {
     process.exitCode = bad === 0 ? 0 : 1;
   }
 
-  return { root, repo, state, db, out, base, port, passwords, auth, cli, sql, rows, until, check, say, git, browser, signIn, page, json, shot, askLead, confirmCard, problems, openPages, start, finish, bin: BIN };
+  return { root, repo, state, db, out, base, port, passwords, auth, cli, sql, rows, until, check, say, git, browser, signIn, page, json, shot, askLead, leadCalls, pendingCard, confirmCard, problems, openPages, start, finish, bin: BIN };
 }
 
 /** A mail server that keeps what it's sent (SMTP, no TLS, no sign-in): the oracle for emails. */

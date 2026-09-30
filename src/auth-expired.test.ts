@@ -16,7 +16,7 @@ import { acquire, finalizeFailureFenced, finalizePlanFailureFenced } from "./cla
 import { register } from "./runner.js";
 import { invokeAgent } from "./invoke.js";
 import { addApprover } from "./scope.js";
-import { AUTH_TRIAL_MS, authPauseOf, claimAuthTrial, liftAuthPause, noteSignInProbe, openAuthPauses, pauseForAuth, signInNotices } from "./provider-auth.js";
+import { AUTH_TRIAL_MS, authPauseOf, authWaitOf, claimAuthTrial, liftAuthPause, noteSignInProbe, openAuthPauses, pauseForAuth, signInGate, signInNotices } from "./provider-auth.js";
 import { diagnoseTaskDispatch } from "./dispatch.js";
 import { installationStatus, renderInstallationStatus } from "./lead-status.js";
 import { bridgePass, hashPairingCode, mintPairingCode, PAIRING_TTL_MS, type TelegramTransport } from "./telegram.js";
@@ -231,6 +231,27 @@ describe("sign-in pauses", () => {
     // A trial that fails the same way stays inside the incident: nobody is told twice.
     failAuth("t-2", "claude", at(1_000 + 2 * AUTH_TRIAL_MS + 1_000));
     expect(authNotices().filter(one => one["kind"] === "auth-expired")).toHaveLength(1);
+  });
+
+  test("every road beside the queue asks the same gate: it waits, noted on its task, until the trial or the sign-in lets it go", () => {
+    failAuth("t-1", "claude", at(1_000));
+    store.createTask({ id: "t-review", title: "a follow-up on the same provider" }, T0);
+    const waiting = store.refFor("built-in", "t-review").id;
+    const note = () => store.handle.prepare("SELECT auth_wait_pause FROM task_ref WHERE id = ?").get(waiting)?.["auth_wait_pause"];
+    // Paused: it waits (no failure, no retry of its own), and the task says why.
+    expect(signInGate(store, ["claude"], at(2_000), waiting)).toMatchObject({ provider: "claude" });
+    expect(authWaitOf(store, waiting)).toMatchObject({ provider: "claude" });
+    // Another provider is not held.
+    expect(signInGate(store, ["codex"], at(2_000))).toBeNull();
+    // The one trial goes ahead and clears its note; the next asker waits again.
+    expect(signInGate(store, ["claude"], at(1_000 + AUTH_TRIAL_MS), waiting)).toBeNull();
+    expect(note()).toBeNull();
+    expect(signInGate(store, ["claude"], at(1_000 + AUTH_TRIAL_MS + 1_000), waiting)).not.toBeNull();
+    // A person's resume lets everything go; a note left behind names a lifted pause and says nothing.
+    liftAuthPause(store, "claude", "person", "alex", at(1_000 + AUTH_TRIAL_MS + 2_000));
+    expect(authWaitOf(store, waiting)).toBeNull();
+    expect(signInGate(store, ["claude"], at(1_000 + AUTH_TRIAL_MS + 3_000), waiting)).toBeNull();
+    expect(note()).toBeNull();
   });
 
   test("a run that started before the pause opened does not lift it", () => {

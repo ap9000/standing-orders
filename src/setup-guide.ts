@@ -65,6 +65,8 @@ export function previewProjectInstructions(repo: string) {
   const content = skillContent();
   const current = existsSync(plan.skillPath) ? readFileSync(plan.skillPath, "utf8") : null;
   const fingerprint = createHash("sha256").update(JSON.stringify({ repo, current, content })).digest("hex");
+  // Installed means the CURRENT instructions are in place: a stale copy, or one only in the folder from before the
+  // rename, still offers Review so applyInstall can bring it up to date (the first-run checklist counts either).
   return { ok: true as const, plan, content, fingerprint, installed: current === content };
 }
 export function addProjectInstructions(repo: string, fingerprint: string) {
