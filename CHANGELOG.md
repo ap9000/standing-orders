@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+## 0.6.0 — 2026-09-30
+
+- **Ink instead of magenta.** The accent for what waits on a person is ink
+  by default (#171717 light, #ededed dark), the way Vercel, Linear and
+  GitHub work: the console is black, white and grey, and colour is kept for
+  status (building, complete, warning, danger). Settings → Appearance
+  starts its presets with Ink, Violet and Chart magenta; a colour you chose
+  stays.
+
+- **The console feels right under a finger.** Hover effects apply only to a
+  mouse or trackpad (no stuck hover after a tap), no tap flash or tap delay
+  on phones, link-buttons press like buttons, and one stronger ease-out
+  curve. The phone navigation drawer slides in and out from the left,
+  dialogs and menus get short entrances and exits (menus from their
+  trigger), and everything is a plain fade under reduced motion. The ⌘K
+  palette opens instantly.
+
+- **Rename leftovers.** Deploy picks the state folder that holds the
+  database; a new watch installs before the old-named one is removed; the
+  setup guide still offers to update stale or old-folder instructions.
+
+- **Faster, stricter release checks** (for contributors). `scripts/release-check.mjs`
+  runs the unit tests related to a change and the browser journeys only
+  when something a page shows changed; `e2e-parallel` retries only failed
+  journeys (the whole group when the browser-error check failed), and a
+  retry passes only if every first-run failure passed in its report.
+
+- **Releases publish themselves.** Pushing a `v*` tag runs
+  `.github/workflows/publish.yml`, which publishes to npm through npm's
+  trusted publishing (no token, with provenance) and creates the GitHub
+  release; the Homebrew tap follows within six hours.
+
 - **An expired sign-in pauses that agent instead of burning retries.** A run
   that fails because its sign-in or API key no longer works (Claude's expired
   OAuth session or "Please run /login", a revoked key, Codex or Gemini not
@@ -13,6 +45,7 @@
   or sign-in check on that provider works, or with **Resume** in the console
   or `toolroll providers resume <provider>`; one short message says how many
   tasks resumed.
+
 - **An agent that stops before its handoff keeps its work.** Every builder,
   revision and repair prompt now says the agent runs headless (foreground
   commands only, no background-and-wait, wakeups or loops; hand off before
@@ -25,6 +58,7 @@
   a retry never resets that work. The failure reads "The agent stopped before
   handing off; its work was kept and it is being resumed". A handoff and a
   passing check are still required for success.
+
 - **Sign-in pauses and kept work, follow-ups.** Fallback entries, attended
   continuations and resumed race lanes on a paused provider now wait (with the
   same one-trial-every-10-minutes) instead of failing, and the Tasks list
@@ -34,6 +68,11 @@
   finds a kept work-in-progress commit already complete and hands off with a
   clean tree succeeds; and once a later attempt fails some other way, the
   saved tree can be reset.
+
+## 0.5.0 on npm as toolroll — 2026-09-30
+
+The first `toolroll` package, published from the rename (PR 105). It carries the 0.5.0 notes below plus:
+
 - **Toolroll under the hood.** The internal names follow the product name;
   every existing install, database, branch and integration keeps working, and
   nothing is moved. The npm package is `toolroll` (both the `toolroll` and
@@ -202,17 +241,20 @@
   invites, error pages and "not found" share the look too, and a one-time
   secret (a worker token, an invite link, a pairing code) gets a focused page
   in the same style, still with no script on it.
+
 - **Connect a service with one click.** Stripe, Notion, Linear, Sentry, Jira,
   Intercom, Attio and ten more connect by signing in on the service's own
   page: no key to copy. The sign-in stays in the tool's secrets file and is
   renewed before it runs out. A starter kit's Connect also lets its teammate
   use the tool. The lead points you to the right tile instead of asking for a
   key.
+
 - **Starter kits.** Support desk, Bug triage, Sales follow-up and Ops
   requests each set up a teammate, the flow it works and its buttons in one
   click. The kit's page lists what's left (email, the tools it uses) and
   **Try it** puts a sample card in front of the teammate so you see it work.
   The lead can set one up too.
+
 - **Smoother page changes.** Moving between pages fades the old one out
   before the new one arrives, so text never overlaps mid-change, and the
   sidebar holds still.
@@ -222,28 +264,33 @@
   signed with a secret, instead of Standing Orders asking for them. No other
   program can take your bot's messages meanwhile, and "Conflict" no longer
   fills the log when one tries.
+
 - **A weekly report per teammate, and undo.** Every Monday its manager gets the
   week: what it did, its tool calls, what its turns cost, and what you
   overrode, each linked. Name an action's opposite (remove_label for
   add_label) and its receipts get an Undo that calls it with the same input,
   as you.
+
 - **Message a teammate by name, and give it routines.** "@maya where's order
   2201?" in Telegram, Slack, Discord or Teams lands on Maya's desk, and the
   answer comes back to you there. Routines ("weekdays 09:00: look up
   yesterday's refunds") put a card on its desk on a schedule and report to
   its manager. A code change it's asked for is filed as an ordinary task
   under your approvals.
+
 - **Teammates remember, and learn from you.** Each teammate keeps a memory:
   what you tell it, and short facts it keeps from the cards it works, read
   back when a later card is about the same thing. Search, edit or forget any
   of it. Approve the same kind of call five times in a row and it suggests
   the rule that lets it act alone; one tap accepts.
+
 - **Teammates that act.** Let a teammate use your project's tools (a shop, a
   CRM, a mailbox) with a rule for each action: do it, do it up to a limit,
   ask first, or never. An ask-first call reaches you on the card and in your
   chat app exactly as it would be made; Approve makes that call, Deny doesn't.
   Every call is a receipt on the card and the teammate's page, and the lead
   can change a rule from plain words.
+
 - **AI teammates.** Agents with a soul file you write (who they are, how they
   write, what they decide alone, what they ask first, what they never do)
   decide "Person decides" zones and handle their own zones, write replies,
@@ -252,13 +299,16 @@
   button, and templates for support, sales, ops and triage. Answer a
   teammate's question with a tap, or in your own words, in Telegram, Slack,
   Discord or Teams.
+
 - **Wait for replies.** A Wait zone after a Send email zone waits for the
   person to answer. Their reply moves the card on and joins its discussion;
   with none in time, the card takes its no-reply path, like a nudge that stays
   in the same thread. Only replies from people the card wrote to count.
+
 - **Time limits.** Any zone can remind whoever a card is waiting on after a
   while, and Holding and decision zones can move it on. New templates: Reply
   and follow up, and Decisions that don't stall.
+
 - **Send-backs are planned again.** Sending a result back with a note has the
   planner update the plan with it; a note asking for more becomes a change
   you see and approve before anything builds.

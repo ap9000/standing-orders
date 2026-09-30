@@ -1,0 +1,73 @@
+# Publish a release to npm when a version tag is pushed.
+#
+# npm trusted publishing (OIDC): npm trusts THIS workflow file in THIS
+# repository, so there is no npm token anywhere and every publish carries
+# provenance. Set up once with:
+#   npm trust github toolroll --repo ap9000/toolroll --file publish.yml
+#
+# To release: bump package.json and CHANGELOG.md on main (through the release
+# check), then push the matching tag, e.g. `git tag v0.6.0 && git push origin v0.6.0`.
+name: Publish
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # the GitHub release
+  id-token: write # npm trusted publishing
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      # Trusted publishing needs npm 11.5.1 or newer.
+      - run: npm install -g npm@^11.5.1
+
+      - name: The tag names package.json's version and sits on main
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $version"; exit 1
+          fi
+          git fetch --quiet origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME is not on main; release only reviewed, merged commits"; exit 1
+          fi
+          if npm view "toolroll@$version" version >/dev/null 2>&1; then
+            echo "::error::toolroll@$version is already on npm"; exit 1
+          fi
+
+      - run: npm ci
+
+      # prepublishOnly runs the typecheck and the build.
+      - run: npm publish --access public
+
+      - name: GitHub release from the changelog
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            $0 ~ "^## " v "( |$)" { on = 1; next }
+            on && /^## / { exit }
+            on { print }
+          ' CHANGELOG.md > release-notes.md
+          {
+            echo
+            echo "Install: \`npx toolroll up\` · \`npm i -g toolroll\` · \`brew install ap9000/toolroll/toolroll\` — https://toolroll.dev/install"
+          } >> release-notes.md
+          gh release create "$GITHUB_REF_NAME" --title "Toolroll $version" --notes-file release-notes.md --verify-tag
