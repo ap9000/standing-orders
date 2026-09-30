@@ -536,6 +536,7 @@ body:has(.so-workspace) { margin: 0; padding: 0; background: var(--so-ground); o
 .so-first-run-title { flex: 1; min-width: 0; font-size: 14px; font-weight: 500; color: var(--so-ink); }
 .so-first-run-steps > li[data-done="true"] .so-first-run-title { color: var(--so-muted); }
 .so-first-run-steps .ui-button { white-space: nowrap; }
+.so-first-run-checking { font-size: 12.5px; color: var(--so-muted); }
 .so-first-run-command { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 2px; min-width: 0; max-width: 100%; }
 .so-first-run-command code { min-width: 0; padding: 3px 8px; border-radius: 6px; background: var(--so-raised); font: 500 12.5px/1.4 var(--so-mono); color: var(--so-ink); overflow-wrap: anywhere; }
 .so-first-run-choices { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; flex-basis: 100%; margin: 2px 0 4px 32px; }

@@ -1,4 +1,7 @@
 import { describe, expect, test, beforeEach, afterEach } from "vitest";
+import { copyFileSync, mkdtempSync, renameSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { openStore, type Store } from "./store.js";
 import { mintCoordinator, fileCoordinatorProposal, revokeCoordinator } from "./coordinator.js";
 import { serveMcp, MODERN, LEGACY, type McpIo } from "./mcp.js";
@@ -712,5 +715,28 @@ describe("the MCP stdio server", () => {
     expect(store.listCoordinatorProposals({ repos: [REPO] })).toEqual([]);
     expect(store.getCoordinatorProposal(1)?.state).toBe("expired");
     expect(call(5, "propose_next", { ref: second.id }).body).toContain("no longer stands");
+  });
+});
+
+describe("the MCP server and a restored database", () => {
+  test("a database replaced at its path (a restore or rollback) is never answered from: the server refuses and exits", () => {
+    const dir = mkdtempSync(join(tmpdir(), "toolroll-mcp-restore-"));
+    const file = join(dir, "orders.db");
+    const store = openStore(file);
+    try {
+      const made = mintCoordinator(store, { name: "planner-bot", repos: [REPO], by: "alex", now: T0 });
+      if (!made.ok) throw new Error("mint failed");
+      const h = harness(store, made.token);
+      const call = (id: number) => h.send({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "status", arguments: {}, _meta: modernMeta } });
+      call(1);
+      expect(h.last()["result"]).toBeDefined();
+      expect(h.exitCode()).toBeNull();
+      // As restoreFile does: a copy renamed over the live path.
+      store.raw().exec("PRAGMA wal_checkpoint(TRUNCATE)");
+      copyFileSync(file, `${file}.restore`); renameSync(`${file}.restore`, file);
+      call(2);
+      expect(h.last()["error"]).toMatchObject({ message: expect.stringContaining("the database was replaced underneath this server") });
+      expect(h.exitCode()).toBe(0);
+    } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
   });
 });

@@ -27,7 +27,8 @@ export function FirstRun({ firstRun, onDraft }: { firstRun: BrowserFirstRun; onD
     <ol className="so-first-run-steps">
       {firstRun.steps.map(step => <li key={step.key} data-step={step.key} data-done={step.done}>
         <span className="so-first-run-mark" aria-hidden="true">{step.done ? "✓" : ""}</span>
-        <span className="so-first-run-title">{step.title}<span className="so-sr-only">{step.done ? ": done" : ": not yet"}</span></span>
+        <span className="so-first-run-title">{step.title}<span className="so-sr-only">{step.done ? ": done" : step.checking ? ": checking" : ": not yet"}</span></span>
+        {step.checking && <span className="so-first-run-checking" aria-hidden="true">Checking…</span>}
         {step.action !== null && (step.key === "agent" && firstRun.sandbox !== null ? null
           : step.action.kind === "link" ? <Button asChild variant="secondary" size="sm"><a href={step.action.href}>{step.action.label}</a></Button>
           : <Command command={step.action.command} />)}

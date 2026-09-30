@@ -18,7 +18,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve, sep } from "node:path";
-import { CLAUDE_CODE_GUIDES, CLAUDE_CODE_MANAGED_MARK, MANAGED_MARK, OPERATOR_SKILL_MARK, claudeCodeSkillContent } from "./skills.js";
+import { CLAUDE_CODE_GUIDES, CLAUDE_CODE_MANAGED_MARK, MANAGED_MARK, OPERATOR_SKILL_MARK, claudeCodeGuideContent, claudeCodeSkillContent } from "./skills.js";
 import type { ProviderConnection } from "./provider-connection.js";
 import { connectionWords } from "./control-ui.js";
 import { envelopeJson } from "./envelope.js";
@@ -89,8 +89,24 @@ export function skillFingerprint(content: string): string {
   return createHash("sha256").update(content.replace(WRITTEN_BY, "$1*$3")).digest("hex");
 }
 
-/** Every SKILL.md Toolroll has generated at this path: the operator skill, and `skills install --claude-code`'s. */
-const KNOWN_SKILLS = new Set([operatorSkillContent("0.0.0"), claudeCodeSkillContent()].map(skillFingerprint));
+/** Every SKILL.md a release has generated at this path (skillFingerprint): the operator skill, and `skills install
+ * --claude-code`'s. Kept, never replaced, when the words change: a skill an earlier release wrote is still ours. A
+ * test fails until this build's own fingerprints are listed. */
+export const RELEASED_SKILLS: readonly string[] = [
+  "6ff9b4458f332636b6c5968c416bee4770564ef0190d62ec8640e84051fb7f60", // skills install --claude-code
+  "3fb6741eec6d394a0a41604cae321da05d85c74f440424b740151c131f125742", // the operator skill
+];
+const KNOWN_SKILLS = new Set([...RELEASED_SKILLS, ...[operatorSkillContent("0.0.0"), claudeCodeSkillContent()].map(skillFingerprint)]);
+
+/** SHA-256 of every guide copy (console.md, operating.md, runner.md) an earlier `skills install --claude-code` wrote
+ * beside SKILL.md, and of this build's. Only an exact one of these is removed: an edited copy is the person's. */
+const RELEASED_GUIDES: readonly string[] = [
+  "a5aa20f93d803fd49bbac2908e46353a4f90c95c2bb57993ee724770c28adb0b", "65fc1774c4d6dd99e71a7cfb245a61148ac74889765477ddd5066703cd28f55c", "01604f373b92de737ae7f75804c7f7f09dd690ed96a3e676be75f71358819f23",
+  "1e1ee5c46c84b65c931e86c005802478415ec026b6240367e7f12a8d66d608eb", "e5270e70eb09f202980a236a0ae36ac2e1c3df91840c24d40a6a8bd4c0d47fe8", "969dd5e97b63f27dc559889a551f4392bcf289f2b47ce802338868f06e05f1c9",
+  "bea301cb7b7d7711afb165b72c355ff829e6341abb75c59431c4a0a7c129b6cd",
+];
+const guideHash = (content: string) => createHash("sha256").update(content).digest("hex");
+const KNOWN_GUIDES = new Set([...RELEASED_GUIDES, ...CLAUDE_CODE_GUIDES.map(name => guideHash(claudeCodeGuideContent(name)))]);
 
 /** ours: exactly a version Toolroll wrote. edited: ours, with the person's changes. foreign: not ours at all. */
 function skillOwnership(path: string): "ours" | "edited" | "foreign" {
@@ -102,12 +118,12 @@ function skillOwnership(path: string): "ours" | "edited" | "foreign" {
   return KNOWN_SKILLS.has(skillFingerprint(content)) ? "ours" : "edited";
 }
 
-/** Guide copies an older `skills install --claude-code` left beside SKILL.md. */
+/** Guide copies an older `skills install --claude-code` left beside SKILL.md, exactly as it wrote them. */
 function oldGuideCopies(folder: string): string[] {
   return CLAUDE_CODE_GUIDES.map(name => join(folder, `${name}.md`)).filter(path => {
     try {
       const entry = lstatSync(path);
-      return !entry.isSymbolicLink() && entry.isFile() && entry.size <= 2_000_000 && readFileSync(path, "utf8").startsWith(`${CLAUDE_CODE_MANAGED_MARK}\n\n`);
+      return !entry.isSymbolicLink() && entry.isFile() && entry.size <= 2_000_000 && KNOWN_GUIDES.has(guideHash(readFileSync(path, "utf8")));
     } catch {
       return false;
     }

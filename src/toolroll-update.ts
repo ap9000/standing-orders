@@ -24,7 +24,7 @@
  */
 import { createHash, randomUUID, verify as signatureValid, X509Certificate } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { accessSync, chmodSync, closeSync, constants, copyFileSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { accessSync, chmodSync, closeSync, constants, copyFileSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statfsSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -82,14 +82,17 @@ export type RuntimeUpdateJournal = {
   rehearsal?: { tables: number; rows: number };
   /** The background service, recorded before it is stopped: its definition and the processes that must be gone. */
   service?: { unit: string; pids: number[] };
-  /** Each repo's watch daemon that runs this version, recorded the same way: stopped, switched and restarted with the service. */
-  watches?: { unit: string; pids: number[] }[];
+  /** Each repo's watch daemon that runs this version, recorded the same way: switched with the service, and stopped and
+   * restarted with it only when launchd had it loaded before the update (`loaded` absent: 0.8.1 stopped every one). */
+  watches?: { unit: string; pids: number[]; loaded?: boolean }[];
   /** Recorded before each change so a resumed or failed run knows what to put back. */
   switched?: { links: { path: string; previous: string }[]; unit: { path: string; saved: string } | null; watches?: { path: string; saved: string }[]; databaseRestored?: boolean };
-  /** What the live database held when a failed run restored its backup: nothing written is lost. */
+  /** What the live database held when a failed run restored its backup: nothing written is lost. The newest of `kept`. */
   keptAside?: string;
   /** The live database could not be read, so it was moved aside whole rather than copied. */
   keptAsideUnreadable?: boolean;
+  /** Every copy kept aside, oldest first: a retried restore adds one and never drops the pointer to an earlier one. */
+  kept?: { path: string; unreadable: boolean }[];
   /** The restore put the backup back: a retried restore never puts it back again (what was written since belongs to
    * the restored version and would be lost), and it keeps a fresh copy aside before every attempt until then. */
   restoredDatabase?: boolean;
@@ -120,6 +123,8 @@ export type UpdateSystem = {
   sigstore: (bundle: unknown, identity: { issuer: string; identity: string }) => Promise<void>;
   /** The processes the service runs now. */
   servicePids: (unit: string) => Promise<number[]>;
+  /** Whether launchd has the service loaded now. */
+  serviceLoaded: (unit: string) => Promise<boolean>;
   /** Unload the service; resolves once launchd no longer has it. */
   stopService: (unit: string) => Promise<void>;
   /** Load and start the service from its definition on disk. */
@@ -129,8 +134,11 @@ export type UpdateSystem = {
   healthTimeoutMs?: number;
   /** How long stopped service processes may take to exit. */
   exitTimeoutMs?: number;
-  /** Fault injection for state-machine tests, never selectable by a flag. */
-  checkpoint?: (phase: RuntimePhase) => void;
+  /** Bytes free for this user in the folder `dir` is on. */
+  freeBytes?: (dir: string) => number;
+  /** Fault injection for state-machine tests, never selectable by a flag. `kept-aside`: the live database was just
+   * kept aside, before the backup is put back. */
+  checkpoint?: (phase: RuntimePhase | "kept-aside") => void;
 };
 
 export type UpdateOutcome = { ok: boolean; phase: RuntimePhase; message: string; journal: RuntimeUpdateJournal | null };
@@ -185,6 +193,8 @@ function save(j: RuntimeUpdateJournal, phase: RuntimePhase, detail: string, now:
 /** Every update, rollback, refusal and failure. Plain SQL any build can run,
  * written after any database restore so the restore cannot erase it. */
 function ledger(databaseFile: string, now: Date, actor: string, action: string, outcome: string, detail: string): void {
+  // Never an empty database where the live one should be.
+  if (!existsSync(databaseFile)) throw Error("The database is not in place.");
   const db = new (sqlite().DatabaseSync)(databaseFile);
   try {
     db.exec("PRAGMA busy_timeout=5000");
@@ -365,40 +375,111 @@ async function rehearse(j: RuntimeUpdateJournal, system: UpdateSystem, source: s
   } finally { for (const suffix of ["", "-wal", "-shm"]) rmSync(copy + suffix, { force: true }); }
 }
 
-/** Put a verified backup in place of a live SQLite file. Only once the service's processes are gone. */
+/** Put a verified backup in place of a live SQLite file. Only once the service's processes are gone. The live file
+ * is replaced only by a complete copy: a copy that fails leaves it as it was. */
 function restoreFile(live: string, backup: string, hash: string, what: string): void {
   if (fileHash(backup) !== hash) throw Error(`The retained ${what} backup changed. It was not put back.`);
   const temp = `${live}.${randomUUID()}.restore`;
-  copyFileSync(backup, temp); chmodSync(temp, 0o600);
-  for (const suffix of ["-wal", "-shm"]) rmSync(live + suffix, { force: true });
-  durableRename(temp, live);
+  try {
+    copyFileSync(backup, temp); chmodSync(temp, 0o600);
+    for (const suffix of ["-wal", "-shm"]) rmSync(live + suffix, { force: true });
+    durableRename(temp, live);
+  } finally { rmSync(temp, { force: true }); }
 }
 
+type Backups = { path: string; hash: string; codingPath?: string; codingHash?: string };
+
+/** Before anything is moved or replaced: every backup is still the one recorded, and there is room for the copy
+ * kept aside and for the backups put back. */
+function assertRestorable(j: RuntimeUpdateJournal, from: Backups, system: UpdateSystem): void {
+  if (fileHash(from.path) !== from.hash) throw Error("The retained database backup changed. Nothing was put back; the live database is as it was.");
+  if (from.codingPath && fileHash(from.codingPath) !== from.codingHash) throw Error("The retained coding catalog backup changed. Nothing was put back; the live database is as it was.");
+  const size = (file: string) => { try { return statSync(file).size; } catch { return 0; } };
+  const live = size(j.databaseFile) + size(`${j.databaseFile}-wal`);
+  const needs = new Map<number, { dir: string; bytes: number }>();
+  const need = (dir: string, bytes: number) => { const dev = statSync(dir).dev; const at = needs.get(dev) ?? { dir, bytes: 0 }; at.bytes += bytes; needs.set(dev, at); };
+  need(j.stageDir, live);
+  need(dirname(j.databaseFile), size(from.path) + (from.codingPath ? size(from.codingPath) : 0));
+  const free = system.freeBytes ?? freeBytes;
+  for (const { dir, bytes } of needs.values()) {
+    const available = free(dir);
+    if (available < bytes) throw Error(`${dir} has ${megabytes(available)} free and the restore needs ${megabytes(bytes)}. Nothing was put back; the live database is as it was. Free some space, then run toolroll update --resume.`);
+  }
+}
+function freeBytes(dir: string): number {
+  const fs = statfsSync(dir);
+  return Number(fs.bavail) * Number(fs.bsize);
+}
+const megabytes = (bytes: number) => `${Math.ceil(bytes / 1_048_576)} MB`;
+
 /** The database and, when one was backed up, the coding catalog, then this run's coding gate lifted. */
-function restoreDatabase(j: RuntimeUpdateJournal, from: { path: string; hash: string; codingPath?: string; codingHash?: string }): void {
+function restoreDatabase(j: RuntimeUpdateJournal, from: Backups): void {
   restoreFile(j.databaseFile, from.path, from.hash, "database");
   if (from.codingPath && from.codingHash) restoreFile(codingFile(j.databaseFile), from.codingPath, from.codingHash, "coding catalog");
   ungateCoding(j);
 }
 
+/** SQLite's own answer for a file it cannot read as a database: corrupt, or not a database at all. Anything else
+ * (busy, a full disk, a permission) is not a reason to move the live database. */
+function unreadableDatabase(error: unknown): boolean {
+  const code = (error as { errcode?: unknown }).errcode;
+  return typeof code === "number" && [11, 26].includes(code & 0xff);
+}
+
+/** The kept-aside copies a journal names, oldest first; a journal written by 0.8.1 names only its newest. */
+function keptOf(j: RuntimeUpdateJournal): { path: string; unreadable: boolean }[] {
+  return j.kept ?? (j.keptAside ? [{ path: j.keptAside, unreadable: j.keptAsideUnreadable === true }] : []);
+}
+function recordKept(j: RuntimeUpdateJournal, path: string, unreadable: boolean): void {
+  j.kept = [...keptOf(j), { path, unreadable }];
+  j.keptAside = path;
+  if (unreadable) j.keptAsideUnreadable = true; else delete j.keptAsideUnreadable;
+}
+
+function forgetKept(j: RuntimeUpdateJournal, path: string): void {
+  j.kept = keptOf(j).filter(one => one.path !== path);
+  const newest = j.kept[j.kept.length - 1];
+  if (newest) { j.keptAside = newest.path; if (newest.unreadable) j.keptAsideUnreadable = true; else delete j.keptAsideUnreadable; }
+  else { delete j.keptAside; delete j.keptAsideUnreadable; }
+}
+
 /** A private copy of the live database before a restore replaces it: what the new version wrote is kept, and named.
- * A database that cannot be read (corrupt, unreadable) is not copied: it is moved aside whole, with its WAL, and the
- * restore goes ahead. */
-async function keepAside(j: RuntimeUpdateJournal): Promise<void> {
+ * Only a database SQLite says is corrupt or not a database is moved aside whole, with its WAL; any other failure
+ * stops the restore with the live database where it was. Returns what was moved, so a failed restore moves it back. */
+async function keepAside(j: RuntimeUpdateJournal): Promise<{ from: string; to: string }[]> {
+  // Nothing at the live path: an earlier attempt moved it aside and stopped before putting the backup back. That
+  // copy stays named in `kept`.
+  if (!existsSync(j.databaseFile)) return [];
   const id = randomUUID().slice(0, 8), kept = join(j.stageDir, `orders.kept.${id}.db`);
   try {
     const db = new (sqlite().DatabaseSync)(j.databaseFile, { readOnly: true });
     try { await sqlite().backup(db, kept); } finally { db.close(); }
     chmodSync(kept, 0o600); fsyncPath(kept);
-    j.keptAside = kept; delete j.keptAsideUnreadable;
-  } catch {
+    recordKept(j, kept, false);
+    return [];
+  } catch (error) {
     rmSync(kept, { force: true });
-    // Already moved aside by an earlier attempt: that path stays the one named.
-    if (!existsSync(j.databaseFile)) return;
-    const unreadable = join(j.stageDir, `orders.unreadable.${id}.db`);
-    for (const suffix of ["-wal", "-shm", ""]) if (existsSync(j.databaseFile + suffix)) durableRename(j.databaseFile + suffix, unreadable + suffix);
-    j.keptAside = unreadable; j.keptAsideUnreadable = true;
+    if (!unreadableDatabase(error)) throw Error(`The live database could not be copied aside before the restore (${(error as Error).message || "no reason given"}). It was left as it was, and nothing was put back.`);
   }
+  const unreadable = join(j.stageDir, `orders.unreadable.${id}.db`);
+  const moved: { from: string; to: string }[] = [];
+  try {
+    for (const suffix of ["-wal", "-shm", ""]) {
+      if (!existsSync(j.databaseFile + suffix)) continue;
+      durableRename(j.databaseFile + suffix, unreadable + suffix);
+      moved.push({ from: j.databaseFile + suffix, to: unreadable + suffix });
+    }
+  } catch (error) {
+    moveBack(moved);
+    throw Error(`The unreadable live database could not be moved aside (${(error as Error).message}). It was left as it was, and nothing was put back.`);
+  }
+  recordKept(j, unreadable, true);
+  return moved;
+}
+
+/** Undo keepAside's moves: the live database goes back where it was, never leaving the path empty. */
+function moveBack(moved: readonly { from: string; to: string }[]): void {
+  for (const one of [...moved].reverse()) if (!existsSync(one.from) && existsSync(one.to)) durableRename(one.to, one.from);
 }
 
 // ---- the service: stop, and see it gone -------------------------------------
@@ -408,17 +489,26 @@ function unitsOf(j: RuntimeUpdateJournal): { main: string | null; watches: strin
   return { main: j.switched?.unit?.path ?? j.service?.unit ?? null, watches: j.switched?.watches?.map(w => w.path) ?? j.watches?.map(w => w.unit) ?? [] };
 }
 
-/** Stop the service and every watch daemon, and wait until every process they ran has exited: only then may a file
- * they write be replaced. */
+/** The watch daemons launchd had loaded before the update: the only ones stopped and started again. One a person
+ * unloaded stays unloaded (its definition is still switched, so it starts the new version when they load it). */
+const loadedWatches = (j: RuntimeUpdateJournal, watches: readonly string[]) => watches.filter(unit => j.watches?.find(w => w.unit === unit)?.loaded !== false);
+
+/** Stop the service and every loaded watch daemon, and wait until every process they ran has exited: only then may
+ * a file they write be replaced. */
 async function stopServices(j: RuntimeUpdateJournal, system: UpdateSystem, main: string | null, watches: readonly string[]): Promise<void> {
   if (!main && watches.length === 0) return;
   const pidsOf = async (unit: string, earlier: number[]) => [...new Set([...earlier, ...await system.servicePids(unit)])];
   if (main) j.service = { unit: main, pids: await pidsOf(main, j.service?.unit === main ? j.service.pids : []) };
-  const watching: { unit: string; pids: number[] }[] = [];
-  for (const unit of watches) watching.push({ unit, pids: await pidsOf(unit, j.watches?.find(w => w.unit === unit)?.pids ?? []) });
+  const watching: { unit: string; pids: number[]; loaded: boolean }[] = [];
+  for (const unit of watches) {
+    const earlier = j.watches?.find(w => w.unit === unit);
+    // Recorded once, before the first stop: a resumed run must not read its own stop as the person's choice.
+    const loaded = earlier ? earlier.loaded !== false : await system.serviceLoaded(unit);
+    watching.push({ unit, pids: loaded ? await pidsOf(unit, earlier?.pids ?? []) : [], loaded });
+  }
   if (watching.length > 0) j.watches = watching;
   save(j, j.phase, j.detail, system.now());
-  for (const unit of [main, ...watches]) if (unit) await system.stopService(unit);
+  for (const unit of [main, ...loadedWatches(j, watches)]) if (unit) await system.stopService(unit);
   const pids = [...(main ? j.service!.pids : []), ...watching.flatMap(w => w.pids)];
   const deadline = system.now().getTime() + (system.exitTimeoutMs ?? 60_000);
   for (;;) {
@@ -469,6 +559,7 @@ async function switchRuntime(j: RuntimeUpdateJournal, system: UpdateSystem): Pro
   if (j.restoreFrom && !j.switched.databaseRestored) {
     await stopServices(j, system, main, watches);
     refuseWhileWatching(j, system, true);
+    assertRestorable(j, j.restoreFrom, system);
     restoreDatabase(j, j.restoreFrom); gate(j);
     j.switched.databaseRestored = true; save(j, "switching", j.detail, system.now());
   }
@@ -592,21 +683,33 @@ export function abandonRuntimeUpdate(stateDir: string, id: string, why: string, 
   if (j?.id === id && j.phase === "scheduled") save(j, "refused", why, now);
 }
 
-export function requestRuntimeUpdateCancel(stateDir: string, now = new Date()): string {
+const CANCELLABLE: readonly RuntimePhase[] = ["scheduled", "verifying", "draining"];
+/** `locked`: a test's seam, called once the updater's lock is held and before the journal is read again. */
+export function requestRuntimeUpdateCancel(stateDir: string, now = new Date(), seams: { locked?: () => void } = {}): string {
   const j = readRuntimeUpdate(stateDir);
   if (!j || runtimeUpdateTerminal(j.phase)) return "No update is in progress.";
-  if (!["scheduled", "verifying", "draining"].includes(j.phase)) return `The update to ${j.to.version} is past the point it can be cancelled (${j.phase}); it will finish or restore on its own.`;
-  durableJson(cancelFile(j), { id: j.id, action: "cancel" });
+  const tooLate = (at: RuntimeUpdateJournal) => `The update to ${at.to.version} is past the point it can be cancelled (${at.phase}); it will finish or restore on its own.`;
+  if (!CANCELLABLE.includes(j.phase)) return tooLate(j);
   // No updater is running to see the request: cancel here, so the admission pause does not outlive it.
   const lock = sqliteLock(join(j.stageDir, "worker.sqlite"));
-  if (!lock) return `Cancelling the update to ${j.to.version}. Nothing is switched; new work resumes.`;
+  if (!lock) {
+    durableJson(cancelFile(j), { id: j.id, action: "cancel" });
+    return `Cancelling the update to ${j.to.version}. Nothing is switched; new work resumes.`;
+  }
   try {
-    try { ungate(j); } catch { /* no pause yet */ }
-    if (j.kind === "update") rmSync(join(j.stageDir, "runtime"), { recursive: true, force: true });
-    const noun = j.kind === "update" ? "update" : "rollback";
-    save(j, "cancelled", `The ${noun} to ${j.to.version} was cancelled. Nothing changed; new work resumed.`, now);
-    try { ledger(j.databaseFile, now, j.actor, `toolroll ${noun} cancelled`, "cancelled", `${j.from.version} → ${j.to.version}`); } catch { /* the journal still says what happened */ }
-    return `Cancelled the ${noun} to ${j.to.version}. Nothing was switched; new work resumes.`;
+    seams.locked?.();
+    // An updater may have moved on, finished or been replaced between the first read and the lock.
+    const held = readRuntimeUpdate(stateDir);
+    if (!held || runtimeUpdateTerminal(held.phase)) return "No update is in progress.";
+    if (held.id !== j.id) return "A different update was saved while cancelling. Nothing was cancelled.";
+    if (!CANCELLABLE.includes(held.phase)) return tooLate(held);
+    durableJson(cancelFile(held), { id: held.id, action: "cancel" });
+    try { ungate(held); } catch { /* no pause yet */ }
+    if (held.kind === "update") rmSync(join(held.stageDir, "runtime"), { recursive: true, force: true });
+    const noun = held.kind === "update" ? "update" : "rollback";
+    save(held, "cancelled", `The ${noun} to ${held.to.version} was cancelled. Nothing changed; new work resumed.`, now);
+    try { ledger(held.databaseFile, now, held.actor, `toolroll ${noun} cancelled`, "cancelled", `${held.from.version} → ${held.to.version}`); } catch { /* the journal still says what happened */ }
+    return `Cancelled the ${noun} to ${held.to.version}. Nothing was switched; new work resumes.`;
   } finally { lock.close(); }
 }
 const cancelRequested = (j: RuntimeUpdateJournal) => existsSync(cancelFile(j));
@@ -666,7 +769,7 @@ async function driveRuntimeUpdate(j: RuntimeUpdateJournal, system: UpdateSystem)
     if (resumedAt <= at("restarting")) {
       const { main, watches } = unitsOf(j);
       step("restarting", main || watches.length > 0 ? "Restarting the background service." : "No background service runs here; the commands now start the new version.");
-      for (const unit of [main, ...watches]) if (unit) await system.restartService(unit);
+      for (const unit of [main, ...loadedWatches(j, watches)]) if (unit) await system.restartService(unit);
     }
     step("health", `Checking that ${j.to.version} is running and healthy.`);
     const deadline = system.now().getTime() + (system.healthTimeoutMs ?? 90_000);
@@ -695,7 +798,7 @@ async function driveRuntimeUpdate(j: RuntimeUpdateJournal, system: UpdateSystem)
       if (j.kind === "update") rmSync(join(j.stageDir, "runtime"), { recursive: true, force: true });
       // A service and watch daemons stopped for the backup start again, unchanged.
       let restarted = "";
-      for (const unit of [j.service?.unit, ...(j.watches ?? []).map(w => w.unit)]) {
+      for (const unit of [j.service?.unit, ...(j.watches ?? []).filter(w => w.loaded !== false).map(w => w.unit)]) {
         if (!unit) continue;
         try { await system.restartService(unit); }
         catch (again) { restarted += ` ${unit === j.service?.unit ? "The background service" : `The watch ${basename(unit, ".plist")}`} did not start again: ${(again as Error).message}`; }
@@ -731,14 +834,25 @@ async function restore(j: RuntimeUpdateJournal, system: UpdateSystem, finish: Fi
     if (!j.backupPath || !j.backupHash) throw Error("No verified backup was recorded.");
     if (!j.restoredDatabase) {
       refuseWhileWatching(j, system, true);
+      const from = { path: j.backupPath, hash: j.backupHash, ...(j.codingBackupPath && j.codingBackupHash ? { codingPath: j.codingBackupPath, codingHash: j.codingBackupHash } : {}) };
+      // Nothing moves until the backups are the ones recorded and there is room to put them back.
+      assertRestorable(j, from, system);
       // A fresh copy before EVERY attempt that is about to replace the database, not only the first: a retry
       // after a failure earlier in the restore must not overwrite writes made since without keeping them.
-      await keepAside(j); save(j, "rolling-back", j.detail, system.now());
-      restoreDatabase(j, { path: j.backupPath, hash: j.backupHash, ...(j.codingBackupPath && j.codingBackupHash ? { codingPath: j.codingBackupPath, codingHash: j.codingBackupHash } : {}) });
+      const moved = await keepAside(j); save(j, "rolling-back", j.detail, system.now());
+      try {
+        system.checkpoint?.("kept-aside");
+        restoreDatabase(j, from);
+      } catch (error) {
+        // The backup did not go in: the live database comes back to its own path, and is no longer named as kept.
+        if (moved.length > 0 && !existsSync(j.databaseFile)) { moveBack(moved); forgetKept(j, j.keptAside!); save(j, "rolling-back", j.detail, system.now()); }
+        throw error;
+      }
       j.restoredDatabase = true; save(j, "rolling-back", j.detail, system.now());
     }
-    for (const unit of [main, ...watches]) if (unit) await system.restartService(unit);
-    const kept = !j.keptAside ? "" : j.keptAsideUnreadable ? ` The live database could not be read, so it was left as it was at ${j.keptAside}.` : ` Anything written since the backup is kept in ${j.keptAside}.`;
+    for (const unit of [main, ...loadedWatches(j, watches)]) if (unit) await system.restartService(unit);
+    const copies = keptOf(j), readable = copies.filter(one => !one.unreadable).map(one => one.path), unreadable = copies.filter(one => one.unreadable).map(one => one.path);
+    const kept = (unreadable.length > 0 ? ` The live database could not be read, so it was left as it was at ${unreadable.join(" and ")}.` : "") + (readable.length > 0 ? ` Anything written since the backup is kept in ${readable.join(" and ")}.` : "");
     const restored = `${why} Toolroll ${j.from.version} and its database were restored.${kept}`;
     if (stuck.length > 0) return finish(false, "needs-attention", `${restored} ${stuck.join("; ")} could not be pointed back at ${j.from.version}. Make ${stuck.length === 1 ? "its folder" : "those folders"} writable, then run toolroll update --resume.`, `toolroll ${noun} failed`, "needs attention", `${verb}: ${why} / ${stuck.join("; ")}`.slice(0, 300));
     return finish(false, "restored", restored, `toolroll ${noun} failed`, "restored", `${verb}: ${why}`.slice(0, 300));
@@ -817,6 +931,8 @@ export type RuntimeUpdateStatus = {
   running: boolean;
   /** A completed update whose What's new card has not been dismissed. */
   whatsNew: { version: string; notes: string[] } | null;
+  /** The last completed update `--rollback` returns from, whatever was attempted since. */
+  lastUpdate: { from: string; to: string } | null;
 };
 export function runtimeUpdateStatus(stateDir: string): RuntimeUpdateStatus {
   let j: RuntimeUpdateJournal | null = null;
@@ -824,7 +940,9 @@ export function runtimeUpdateStatus(stateDir: string): RuntimeUpdateStatus {
   let running = false;
   if (j && !runtimeUpdateTerminal(j.phase)) { const lock = sqliteLock(join(j.stageDir, "worker.sqlite")); running = lock === null; lock?.close(); }
   const whatsNew = j && j.kind === "update" && j.phase === "complete" && !j.seen ? { version: j.to.version, notes: j.notes ?? [] } : null;
-  return { journal: j, running, whatsNew };
+  let last: RuntimeUpdateJournal | null = null;
+  try { last = lastCompletedUpdate(stateDir); } catch { last = null; }
+  return { journal: j, running, whatsNew, lastUpdate: last ? { from: last.from.version, to: last.to.version } : null };
 }
 export function markWhatsNewSeen(stateDir: string): void {
   const j = readRuntimeUpdate(stateDir);
@@ -941,6 +1059,7 @@ export function machineSystem(home = homedir(), env: Record<string, string | und
       return names.filter(name => /^com\.(?:toolroll|standing-orders)\.watch\..+\.plist$/.test(name)).map(name => join(dir, name))
         .filter(unit => { try { return readFileSync(unit, "utf8").includes(from.dist); } catch { return false; } });
     },
+    serviceLoaded: async unit => (await supervise("launchctl", ["print", `${domain}/${labelOf(unit)}`])).code === 0,
     servicePids: async unit => {
       const printed = await supervise("launchctl", ["print", `${domain}/${labelOf(unit)}`]);
       const pid = Number(printed.stdout.match(/\n\s*pid = (\d+)/)?.[1]);
@@ -1008,14 +1127,15 @@ const jobUnit = (home: string) => join(home, "Library", "LaunchAgents", `${UPDAT
  * that id only; it does not run at login (no RunAtLoad: launchd starts it
  * with a kickstart) and removes its definition when it finishes. Elsewhere it
  * is a detached process. */
-/** Where npm puts global commands (`npm prefix --global`/bin), or null when npm does not say. */
-function npmPrefixBin(): string | null {
-  const answered = exec("npm", ["prefix", "--global", "--no-color"], { timeout: 30_000 });
-  const prefix = answered.status === 0 ? answered.stdout.trim() : "";
+/** Where npm puts global commands (`npm prefix --global`/bin), or null when npm does not say. Asked without blocking:
+ * the console's request handler starts the job. */
+async function npmPrefixBin(run: SupervisorRunner): Promise<string | null> {
+  const answered = await run("npm", ["prefix", "--global", "--no-color"], { timeoutMs: 30_000 }).catch(() => null);
+  const prefix = answered?.code === 0 ? answered.stdout.trim() : "";
   return isAbsolute(prefix) ? join(prefix, "bin") : null;
 }
 
-export async function launchRuntimeUpdate(args: { databaseFile: string; id: string; dist?: string }, seams: { home?: string; run?: SupervisorRunner; platform?: NodeJS.Platform; npmBin?: () => string | null } = {}): Promise<void> {
+export async function launchRuntimeUpdate(args: { databaseFile: string; id: string; dist?: string }, seams: { home?: string; run?: SupervisorRunner; platform?: NodeJS.Platform; npmBin?: () => Promise<string | null> } = {}): Promise<void> {
   const dist = args.dist ?? dirname(fileURLToPath(import.meta.url));
   const command = [process.execPath, join(dist, "bin.js"), "update", "--resume", "--id", args.id, "--db", args.databaseFile];
   const stateDir = dirname(args.databaseFile);
@@ -1024,7 +1144,7 @@ export async function launchRuntimeUpdate(args: { databaseFile: string; id: stri
     const home = seams.home ?? homedir();
     const run = seams.run ?? (await import("./exec.js")).run;
     // Everywhere a toolroll command is usually linked: the job switches every one it finds on this PATH.
-    const npmBin = (seams.npmBin ?? npmPrefixBin)();
+    const npmBin = await (seams.npmBin ?? (() => npmPrefixBin(run)))();
     const pathEnv = [...new Set([dirname(process.execPath), ...(npmBin ? [npmBin] : []), join(home, ".local", "bin"), join(home, "bin"), join(home, "Library", "pnpm"), "/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"])].join(":");
     const unit = launchdPlist({ label: UPDATE_JOB_LABEL, command, workingDirectory: stateDir, logPath: log, pathEnv, keepAlive: false, runAtLoad: false });
     const started = await installLaunchdService({ platform: "darwin", label: UPDATE_JOB_LABEL, bin: process.execPath, entry: join(dist, "bin.js"), logPath: log, unitPath: jobUnit(home), unitContent: unit }, run);

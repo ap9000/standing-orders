@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 0.8.2 — 2026-09-30
+
+- **Task checkouts stop using space nobody wants.** A finished task's clean
+  checkout now goes when its task is complete or cancelled (Settings →
+  Storage or `toolroll storage cleanup` changes that to 2 days, a week or
+  never); its branch always stays. Toolroll's own progress file no longer
+  keeps a checkout forever. `toolroll storage clean` and the Clean up button
+  preview what goes, what it frees and what stays and why, then remove it;
+  a checkout kept for its changes can be discarded on purpose. Every removal
+  is in the ledger.
+- **Safer recovery.** A failed update no longer moves a healthy database aside
+  (only one that can't be read), checks the backup and free space first, and
+  puts the database back if the restore fails. `toolroll mcp` exits when its
+  database is replaced, so an agent's writes never go to a stale file.
+  Cancelling re-reads the update under its lock, `toolroll onboard` removes
+  only guide copies it wrote, more agents are recognised as agents, and the
+  console never waits on npm.
+
 ## 0.8.1 — 2026-09-30
 
 - **Safer `toolroll update`.** A release is accepted only when its signing

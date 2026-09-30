@@ -100,9 +100,10 @@ import { POLICY_SCHEMA, agentRefusal, approvalRefusal, attendedRefusal, policyPa
 import { PROVIDER_AUTH_SCHEMA } from "./provider-auth.js";
 import { SPEND_SCHEMA, billingOf, budgetStates, canPrice, claudeMachineBilling, countsToward, filersOf, monthOf, priceWork, seenBilling as seenBillingOf, spendItems, teammateFilers, usd, type Billing, type Budget, type BudgetAgent, type BudgetHold, type BudgetScope, type BudgetState, type SpendItem } from "./spend.js";
 import { FOREVER, RETENTION_SCHEMA, periodWords, type RetentionKind, type RetentionPeriods } from "./retention.js";
+import { CHECKOUT_CLEANUP_SCHEMA, DEFAULT_CLEANUP, cleanupWords, type CheckoutCleanup } from "./storage.js";
 import { IN_RANGE, LEDGER_CHAIN_SCHEMA, safeWhole, sealLedger, verifyLedgerChain, type LedgerChainReport, type VerifiedHead } from "./ledger-chain.js";
 import { NO_RULES, filerFor, isProtectedWork, protectedChanges, rulesWords, type ApprovalGate, type ApprovalRules, type ApproverKind, type Filer, type FilerKind } from "./approval-policy.js";
-import { BRANCH_PREFIXES, configBase, envValue, namedPath } from "./names.js";
+import { configBase, envValue, namedPath } from "./names.js";
 
 // v60 fenced older readers before the chat action cards; v61 adds notification
 // provenance and Telegram destination receipts, and readers below v61 refuse it.
@@ -4959,6 +4960,7 @@ function initializeStore(db: Database, file: string): Store {
   // The sign-in pause the dispatch gate last left this task waiting on (null: none), for the work index.
   addColumn(db, "task_ref", "auth_wait_pause", "INTEGER REFERENCES provider_auth_pause(id)");
   db.exec(RETENTION_SCHEMA);
+  db.exec(CHECKOUT_CLEANUP_SCHEMA);
   db.exec(BACKUP_SCHEMA);
   // Sprint 8: the organisation policy (one row, or none: nothing restricted).
   db.exec(POLICY_SCHEMA);
@@ -11779,22 +11781,6 @@ export class Store {
   /** Drop a row whose directory is gone; a lease over nothing only refuses work. */
   forgetWorktree(path: string): void {
     this.db.prepare("DELETE FROM worktree WHERE path = ?").run(path);
-  }
-
-  /** The branches storage retention keeps a repository's checkouts of: every task not done or cancelled (a failed
-   * one included: it can be requeued), and unplaced ones (they're dispatched anywhere); and a done task whose result
-   * was marked complete (the completion names its family's root; its run names the version), or a release candidate
-   * done, within `resultMs` (a deploy installs the build in its checkout). Each task's own branch and every branch its runs used. */
-  keptBranches(repo: string, now: Date, resultMs: number): string[] {
-    const since = new Date(now.getTime() - resultMs).toISOString();
-    const tasks = `SELECT r.id AS ref, r.external_id AS id FROM task_ref r JOIN task t ON t.id = r.external_id LEFT JOIN task_scope s ON s.task_id = t.id
-      WHERE (r.repo = ? OR r.repo IS NULL) AND (t.state NOT IN ('done', 'cancelled') OR (t.state = 'done' AND (
-        (s.candidate IS NOT NULL AND t.updated_at >= ?) OR EXISTS (SELECT 1 FROM action_ledger l JOIN run ON run.id = l.run_id
-          WHERE run.task_ref = r.id AND l.action = 'assignment handoff checked' AND l.at >= ?))))`;
-    const own = this.db.prepare(tasks).all(repo, since, since).flatMap(row => BRANCH_PREFIXES.map(prefix => `${prefix}${String(row["id"])}`));
-    const used = this.db.prepare(`SELECT DISTINCT run.branch AS branch FROM run WHERE run.branch IS NOT NULL AND run.task_ref IN (SELECT ref FROM (${tasks}))`).all(repo, since, since)
-      .map(row => String(row["branch"]));
-    return [...new Set([...own, ...used])];
   }
 
   // ---- worktree setup (M5.7) ---------------------------------------------
@@ -19474,6 +19460,23 @@ export class Store {
         .run(kind, days, by, now.toISOString());
       this.recordPolicy(by, null, `retention changed: ${kind}`, periodWords(before), periodWords(days), now);
       return this.retentionPeriods();
+    });
+  }
+
+  /** Settings → Storage: when a finished task's clean checkout is removed (the default until someone chooses). */
+  checkoutCleanup(): CheckoutCleanup {
+    const row = this.db.prepare("SELECT cleanup FROM checkout_cleanup_setting WHERE id = 1").get();
+    return row === undefined ? DEFAULT_CLEANUP : String(row["cleanup"]) as CheckoutCleanup;
+  }
+
+  /** Choose when a finished task's clean checkout is removed; the ledger keeps before → after. */
+  setCheckoutCleanup(cleanup: CheckoutCleanup, by: string, now: Date): CheckoutCleanup {
+    return this.transact(() => {
+      const before = this.checkoutCleanup();
+      this.db.prepare("INSERT INTO checkout_cleanup_setting (id, cleanup, updated_by, updated_at) VALUES (1, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET cleanup = excluded.cleanup, updated_by = excluded.updated_by, updated_at = excluded.updated_at")
+        .run(cleanup, by, now.toISOString());
+      this.recordPolicy(by, null, "checkout cleanup changed", cleanupWords(before), cleanupWords(cleanup), now);
+      return this.checkoutCleanup();
     });
   }
 

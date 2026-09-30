@@ -1,5 +1,6 @@
 import { TASK_SCOPE_TEXT_SCHEMA } from "./task-text.js";
 import { dirname, join } from 'node:path';
+import { statSync } from 'node:fs';
 import { repositoryContextRead } from './repository-context.js';
 import { ASSIGNMENT_TOOLS, assignmentForCoordinator } from "./assignment-adapters.js";
 /**
@@ -404,6 +405,17 @@ export type McpOutcome =
   | { ok: true }
   | { ok: false; reason: "unauthenticated" | "revoked" | "schema"; message: string };
 
+type FileIdentity = { path: string; dev: number; ino: number };
+function fileIdentity(path: string | null): FileIdentity | null {
+  if (path === null) return null;
+  try { const at = statSync(path); return { path, dev: at.dev, ino: at.ino }; } catch { return null; }
+}
+/** Still the same file at the same path: not moved aside, deleted, or replaced by a rename. */
+function sameFile(was: FileIdentity): boolean {
+  const now = fileIdentity(was.path);
+  return now !== null && now.dev === was.dev && now.ino === was.ino;
+}
+
 /** Serve until EOF. The store is already open through the non-migrating
  * door; the token was startup-verified by the caller (and dies here again
  * if it does not hold). */
@@ -417,6 +429,8 @@ export function serveMcp(
 ): McpOutcome {
   /** Per connection: which decisions this credential read in full (v3). */
   const readDecisions = new Set<number>();
+  /** The database file this server opened, by identity (null in memory). */
+  const database = fileIdentity(store.databaseFile());
   const auth = authenticateCoordinator(store, token);
   if (!auth.ok) {
     return {
@@ -464,6 +478,13 @@ export function serveMcp(
   });
 
   const callTool = (id: Json, era: "modern" | "legacy", params: Record<string, unknown>): void => {
+    // A restore or rollback puts a different file at the database's path: this server's connection still reads and
+    // writes the one it replaced, so it answers nothing more and exits (the agent starts it again on the new one).
+    if (database !== null && !sameFile(database)) {
+      error(id, -32000, "the database was replaced underneath this server (a Toolroll restore or rollback) — restart it");
+      io.exit(0);
+      return;
+    }
     // ONE snapshot per call (review finding 3): the version check, the
     // credential re-read, and every data read share a transaction, so a
     // concurrent migration cannot slip between them; filing's own

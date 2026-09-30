@@ -32,6 +32,11 @@ describe("the three first-run steps", () => {
     expect(filed.every(one => one.done && one.action === null)).toBe(true);
   });
 
+  test("until this machine's sign-in check answers, the agent step is checking: neither done nor to do", () => {
+    const [agent] = firstRunSteps({ agentSignedIn: null, projects: 0, hasTask: false, firstResultAt: null })!;
+    expect(agent).toEqual({ key: "agent", title: "Agent signed in", done: false, action: null, checking: true });
+  });
+
   test("the list retires after the first Ready result", () => {
     expect(firstRunSteps({ agentSignedIn: true, projects: 1, hasTask: true, firstResultAt: "2026-09-29T10:07:00.000Z" })).toBeNull();
     expect(firstRunSteps({ agentSignedIn: false, projects: 0, hasTask: false, firstResultAt: "2026-09-29T10:07:00.000Z" })).toBeNull();
