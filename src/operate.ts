@@ -40,7 +40,7 @@ import { runKnowledgeCommand } from "./knowledge-cli.js";
 import { FLOWS_VALUE_FLAGS, runFlowsCommand } from "./flows-cli.js";
 import { runAssignmentCommand } from "./assignment-adapters.js";
 import { applyProjectProfile, runProjectCommand } from "./project-cli.js";
-import { runTaskOutcomeCommand } from "./task-outcome-cli.js";
+import { pullRequestLines, runTaskMergeCommand, runTaskOutcomeCommand } from "./task-outcome-cli.js";
 /**
  * The commands that actually move work: authoring tasks, and the claim loop.
  *
@@ -188,7 +188,7 @@ import {
   type PublishExec,
   sweepMerges,
 } from "./publish.js";
-import { checkPublishing, publishingOf, savePublishing, followPullRequests } from "./pull-request-flow.js";
+import { checkPublishing, publishingOf, savePublishing, followPullRequests, newestPullRequestOf } from "./pull-request-flow.js";
 import { starterOf, startersFor, switchOnStarter } from "./flow-starters.js";
 
 type CapabilityKind = Capability["kind"];
@@ -403,7 +403,10 @@ export const OPERATE_HELP = `toolroll — operating the queue
   toolroll ledger checkpoint         record the chain's head to copy off this machine (instance operator)
   toolroll ledger export --from <YYYY-MM-DD> --to <YYYY-MM-DD> [--out <file>]
                                         every sealed entry in the range, with an evidence pack per task
-  toolroll task complete <id>        mark the current result complete (--digest for JSON/agents)
+  toolroll task complete <id>        mark the current result complete (--digest for JSON/agents);
+      [--pull-request]                  --pull-request also opens its pull request
+  toolroll task merge <id> --as <you> --token <t>
+                                        merge the task's pull request once checks pass
   toolroll task revise <id> --feedback "requested change"
   toolroll assignment show <task>    root, current work and exact handoff
   toolroll assignment updates        durable updates (--after <cursor>)
@@ -732,7 +735,7 @@ type Args = {
 export const TASK_ACTIONS = [
   "add", "list", "show", "wait", "state", "block", "unblock", "next", "steer", "assign",
   "reopen", "scope", "approve", "hold", "unhold", "require", "requeue", "regate", "plan",
-  "review", "accept", "repair", "route", "stop", "resume", "complete", "revise",
+  "review", "accept", "repair", "route", "stop", "resume", "complete", "revise", "merge",
 ] as const;
 export const PUBLISH_ACTIONS = ["setup", "grant", "revoke", "status", "unblock", "rearm", "merge", "refire"] as const;
 export const CONFIG_ACTIONS = ["show", "set", "clear"] as const;
@@ -786,6 +789,8 @@ export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "zip",
   // Settings → Integrations: the last checks, without checking again.
   "saved",
+  // task complete: also open the result's pull request.
+  "pull-request",
 ]);
 
 export function parseOperateArgs(argv: readonly string[], ownValues: ReadonlySet<string> = new Set()): Args | { error: string } {
@@ -10414,6 +10419,9 @@ function taskCommand(
         const authenticated = verifyApproverByPassword(context.store, acting.name, acting.token, context.store.knownRepos().filter(repo => context.store.accountCanAccess(acting.name, repo)));
         return authenticated.ok ? authenticated.who : null;
       } });
+    case "merge":
+      return runTaskMergeCommand(rest, flags, { store: context.store, json: context.json, write: context.write, clock: context.clock,
+        demo: context.store.isDemo(), credentials: () => askCredentials(flags, context), ...(context.publishExec === undefined ? {} : { exec: context.publishExec }) });
     case "add":
       return addTask(rest, flags, context);
     case "list":
@@ -10885,6 +10893,8 @@ function showTask(positional: readonly string[], context: Context): number {
     // Paused (resume), or the review-retry door — and every stop on record.
     control: taskControlOf(store, ref.id, now),
     stops: store.stopsForTask(ref.id),
+    // The pull request Complete opened (any version), with its CI state and merge commit — the console's view.
+    pullRequest: newestPullRequestOf(store, store.taskFamilyOf(id, null, true)?.versions.map(one => one.id) ?? [id]),
   };
 
   return succeed(write, json, "task show", detail, () => [
@@ -10914,6 +10924,7 @@ function showTask(positional: readonly string[], context: Context): number {
             ...detail.report.report.followUps.map((one, index) => `    follow-up ${index + 1}: ${one.title}`),
           ]
         : [`  report: ${detail.report.problem} (run ${detail.report.run})`]),
+    ...pullRequestLines(detail.pullRequest),
     ...(detail.blockedBy.length > 0 ? [`  waits for ${detail.blockedBy.join(", ")}`] : []),
     ...(detail.position === null
       ? []

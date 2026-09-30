@@ -493,3 +493,16 @@ export function pullRequestViewOf(store: Store, runId: number): PullRequestView 
   }
 }
 
+
+/** The newest pull request any version of a task opened through Complete (versions oldest first), or null. */
+export function newestPullRequestOf(store: Store, versions: readonly string[]): PullRequestView | null {
+  for (const id of [...versions].reverse()) {
+    const ref = store.lookupRef(id);
+    if (ref === null) continue;
+    for (const run of store.runsFor(ref.id)) {
+      const view = pullRequestViewOf(store, run.id);
+      if (view !== null) return view;
+    }
+  }
+  return null;
+}

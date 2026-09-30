@@ -163,7 +163,7 @@ export async function runFlowSteps(store: Store, repo: string, now: Date, io: St
       if (card.waiting !== waiting) store.updateFlowCard(card.id, { waiting }, now);
       continue;
     }
-    if (!store.claimFlowStep({ card: card.id, entry: card.entry, stage: stage.id, kind: stage.kind as FlowStepKind, script: script?.name ?? null, scriptVersion: script?.version ?? null }, now)) continue;
+    if (!claimStep(store, card, { stage: stage.id, kind: stage.kind as FlowStepKind, script: script?.name ?? null, scriptVersion: script?.version ?? null }, now)) continue;
     pass.ran++;
     store.updateFlowCard(card.id, { waiting: { check: "Running its check…", sort: "Sorting…", draft: "Writing the draft…", request: "Calling the address…", email: "Sending the email…", tool: "Using the tool…" }[stage.kind as string] ?? "Updating the issue…" }, now);
     let outcome: Outcome;
@@ -187,6 +187,16 @@ export async function runFlowSteps(store: Store, repo: string, now: Date, io: St
   return pass;
 }
 
+/** Claim this card's visit to its step zone, only while the card is still there on that visit: a pass that read the card
+ * before another pass (or a person) moved it never runs the step for a visit that's over. */
+function claimStep(store: Store, card: FlowCardRow, step: { stage: string; kind: FlowStepKind; script: string | null; scriptVersion: number | null }, now: Date): boolean {
+  return store.transact(() => {
+    const fresh = store.getFlowCard(card.id);
+    if (fresh === null || fresh.state !== "active" || fresh.entry !== card.entry || fresh.stage !== step.stage) return false;
+    return store.claimFlowStep({ card: card.id, entry: card.entry, ...step }, now);
+  });
+}
+
 /** One teammate turn, when one is due for this card: claimed like any step, retried on failure, and waiting while its question is open. */
 async function teammateStep(store: Store, flow: FlowRow, definition: FlowDefinition, stage: FlowStage, card: FlowCardRow, now: Date, io: StepIo, pass: StepPass): Promise<boolean> {
   // v102: on a protected project an AI teammate never decides an approval; the engine asks the person.
@@ -202,7 +212,7 @@ async function teammateStep(store: Store, flow: FlowRow, definition: FlowDefinit
   }
   // Waiting on a person: its own question, or (v94) a tool call they approve first.
   if (store.openTeammateQuestionOn(card.id, card.entry) !== null) return true;
-  if (!store.claimFlowStep({ card: card.id, entry: card.entry, stage: stage.id, kind: "teammate", script: null, scriptVersion: null }, now)) return true;
+  if (!claimStep(store, card, { stage: stage.id, kind: "teammate", script: null, scriptVersion: null }, now)) return true;
   pass.ran++;
   const started = Date.now();
   let outcome: TeammateOutcome;

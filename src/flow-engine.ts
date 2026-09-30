@@ -220,18 +220,26 @@ function workStage(store: Store, flow: FlowRow, stage: FlowStage, card: FlowCard
     // The agent is given them in full (flowGoalCuts).
     const goal = fitFlowText(flowWorkTemplate(stage.instructions ?? card.title, card), card);
     if (goal === null) { wait(`${stage.title}'s instructions are too long for a task. Open the flow and shorten them.`); return; }
-    const filed = fileTaskProposal(store, {
-      title: (report ? `${stage.title}: ${card.title}` : card.title).slice(0, 200),
-      repo: flow.repo,
-      goal,
-      filedVia: `flow:${flow.id}`, filedBy: filerFor(card.createdBy), // who made the card asked for the work (an owner can be reassigned by anyone)
-      deliverable: report ? "report" : "branch",
-      planning: report ? "skip" : stage.planning ?? "auto",
-      acceptance: report ? ACCEPTANCE.report : ACCEPTANCE.task,
-      admittedRepos: [flow.repo],
-    }, now);
+    // Filed exactly once however many passes advance this project: the card is claimed (still this entry, in this zone,
+    // with no task) in the same transaction that files its task, so another pass finds it claimed and leaves it.
+    const filed = store.transact(() => {
+      const fresh = store.getFlowCard(card.id);
+      if (fresh === null || fresh.state !== "active" || fresh.entry !== card.entry || fresh.stage !== stage.id || fresh.task !== null) return null;
+      const made = fileTaskProposal(store, {
+        title: (report ? `${stage.title}: ${card.title}` : card.title).slice(0, 200),
+        repo: flow.repo,
+        goal,
+        filedVia: `flow:${flow.id}`, filedBy: filerFor(card.createdBy), // who made the card asked for the work (an owner can be reassigned by anyone)
+        deliverable: report ? "report" : "branch",
+        planning: report ? "skip" : stage.planning ?? "auto",
+        acceptance: report ? ACCEPTANCE.report : ACCEPTANCE.task,
+        admittedRepos: [flow.repo],
+      }, now);
+      if (made.ok) store.updateFlowCard(card.id, { task: made.id, ...(report || fresh.primaryTask !== null ? {} : { primaryTask: made.id }), waiting: "Filed as a task" }, now);
+      return made;
+    });
+    if (filed === null) return;
     if (!filed.ok) { wait(/[.!?]$/.test(filed.message) ? filed.message : `${filed.message}.`); return; }
-    store.updateFlowCard(card.id, { task: filed.id, ...(report || card.primaryTask !== null ? {} : { primaryTask: filed.id }), waiting: "Filed as a task" }, now);
     outcome.filed.push(filed.id);
     return;
   }

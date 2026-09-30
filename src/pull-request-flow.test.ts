@@ -5,7 +5,7 @@
  * CI files one revision per failing head, at most twice per task, then asks a person.
  */
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openStore, type Store } from "./store.js";
@@ -16,11 +16,12 @@ import { verifyApproverStanding, type VerifiedApprover } from "./principal.js";
 import { assignmentOf } from "./assignment.js";
 import { observeChecks, publishPass, type PublishExec } from "./publish.js";
 import { runOperate } from "./operate.js";
+import { main } from "./cli.js";
 import { register } from "./runner.js";
 import { COMPLETION_ACTION } from "./result-completion.js";
 import {
   checkPublishing, completeAndOpenPullRequest, followPullRequests, githubRepoOf, mergeAsPerson, pullRequestViewOf,
-  publishingOf, savePublishing, MERGED_ACTION,
+  publishingOf, savePublishing, MERGED_ACTION, REQUESTED_ACTION,
 } from "./pull-request-flow.js";
 
 const T0 = new Date("2026-09-30T09:00:00.000Z");
@@ -85,9 +86,13 @@ describe("pull requests from Complete", () => {
     return { runId, digest: receipt.digest };
   };
 
+  let base: string;
   beforeEach(() => {
-    store = openStore(":memory:");
-    dir = mkdtempSync(join(tmpdir(), "so-pr-"));
+    // File-backed, with evidence where the CLI looks for it, so `task complete`/`task merge` read this same state.
+    base = mkdtempSync(join(tmpdir(), "so-pr-"));
+    dir = join(base, "evidence");
+    mkdirSync(dir);
+    store = openStore(join(base, "orders.db"));
     const alex = addApprover(store, "alex", T0);
     if (!alex.ok) throw new Error("approver");
     token = alex.token;
@@ -98,7 +103,7 @@ describe("pull requests from Complete", () => {
     if (!standing.ok) throw new Error("standing");
     who = standing.who;
   });
-  afterEach(() => { store.close(); rmSync(dir, { recursive: true, force: true }); });
+  afterEach(() => { store.close(); rmSync(base, { recursive: true, force: true }); });
 
   const setUp = async () => {
     const gh = scripted(SETUP);
@@ -303,5 +308,114 @@ describe("pull requests from Complete", () => {
     expect(followed).toMatchObject({ merged: 1, ready: 0 });
     expect(gh.ran("gh pr merge")[0]).toContain("--rebase");
     expect(pullRequestViewOf(store, runId)).toMatchObject({ state: "merged", mergeCommit: "9".repeat(40) });
+  });
+  // ---- the same acts from a terminal ----------------------------------------
+
+  const cli = async (argv: string[], exec?: PublishExec) => {
+    const lines: string[] = [];
+    const code = await runOperate("task", [...argv, "--json"], line => lines.push(line), { databaseFile: join(base, "orders.db"), now: T0, ...(exec === undefined ? {} : { publishExec: exec }) });
+    return { code, body: JSON.parse(lines.join("\n")) as Record<string, unknown> };
+  };
+
+  test("c1: task complete --pull-request completes the exact result and owes its PR through the console's path", async () => {
+    await setUp();
+    const { runId, digest } = readyResult("fix-total", HEAD);
+    const done = await cli(["complete", "fix-total", "--digest", digest, "--pull-request", "--as", "alex", "--token", token]);
+    expect(done.code).toBe(0);
+    expect(done.body).toMatchObject({ ok: true, command: "task complete", pullRequest: { runId, state: "opening", prUrl: null } });
+    expect(store.handle.prepare("SELECT actor FROM action_ledger WHERE action = ? AND run_id = ?").all(COMPLETION_ACTION, runId)).toEqual([{ actor: "operator:alex" }]);
+    expect(store.handle.prepare("SELECT actor, outcome FROM action_ledger WHERE action = ? AND run_id = ?").all(REQUESTED_ACTION, runId)).toEqual([{ actor: "alex", outcome: HEAD }]);
+    expect(store.pendingPublications()).toMatchObject([{ run: runId, headSha: HEAD, head: "toolroll/fix-total", base: "main", githubRepo: "alex/shop" }]);
+
+    // The watch process opens it; task show then carries the link, CI state and (later) the merge commit.
+    const gh = scripted([["gh pr list", { stdout: "[]" }], ["gh pr create", { stdout: "https://github.com/alex/shop/pull/12\n" }]]);
+    await publishPass(store, { repo: REPO, exec: gh.exec, clock: () => T0, evidenceRoot: dir });
+    const shown = await cli(["show", "fix-total"]);
+    expect(shown.body).toMatchObject({ ok: true, pullRequest: { prUrl: "https://github.com/alex/shop/pull/12", state: "waiting", mergeCommit: null } });
+    const lines: string[] = [];
+    await runOperate("task", ["show", "fix-total"], line => lines.push(line), { databaseFile: join(base, "orders.db"), now: T0 });
+    expect(lines.join("\n")).toContain("pull request: https://github.com/alex/shop/pull/12 · Waiting for checks");
+
+    // A repeat is the same PR, never a second one; the human answer names the link and what happens next.
+    const human: string[] = [];
+    expect(await runOperate("task", ["complete", "fix-total", "--digest", digest, "--pull-request", "--as", "alex", "--token", token], line => human.push(line), { databaseFile: join(base, "orders.db"), now: T0 })).toBe(0);
+    expect(human.join("\n")).toContain("Pull request: https://github.com/alex/shop/pull/12");
+    expect(human.join("\n")).toContain("Merge when green: toolroll task merge fix-total");
+    expect(store.handle.prepare("SELECT COUNT(*) AS n FROM publication").get()).toEqual({ n: 1 });
+  });
+
+  test("c1: task complete --pull-request refuses with the setup command when pull requests are off, and completes nothing", async () => {
+    const { runId, digest } = readyResult("fix-total", HEAD);
+    const refused = await cli(["complete", "fix-total", "--digest", digest, "--pull-request", "--as", "alex", "--token", token]);
+    expect(refused.code).toBe(3);
+    expect(refused.body).toMatchObject({ ok: false, reason: "pull-requests-off" });
+    expect(String(refused.body["message"])).toContain(`toolroll publish setup --repo ${REPO} --yes`);
+    expect(store.handle.prepare("SELECT COUNT(*) AS n FROM action_ledger WHERE action = ? AND run_id = ?").get(COMPLETION_ACTION, runId)).toEqual({ n: 0 });
+    expect(store.pendingPublications()).toEqual([]);
+    // A scoped credential never opens one.
+    await setUp();
+    process.env["SO_PR_TEST_SCOPED"] = "t".repeat(43);
+    try {
+      const scoped = await cli(["complete", "fix-total", "--digest", digest, "--pull-request", "--token-env", "SO_PR_TEST_SCOPED"]);
+      expect(scoped.body).toMatchObject({ ok: false, reason: "unauthenticated" });
+      expect(String(scoped.body["message"])).toContain("approver");
+    } finally { delete process.env["SO_PR_TEST_SCOPED"]; }
+    expect(store.pendingPublications()).toEqual([]);
+  });
+
+  const mergeGh = (checks: "SUCCESS" | "FAILURE" | "RUNNING") => {
+    let merged = false;
+    const rolled = checks === "RUNNING" ? [{ __typename: "CheckRun", name: "test", status: "IN_PROGRESS", conclusion: null }] : rollup(checks);
+    return { merged: () => merged, ...scripted([
+      ["gh pr merge", () => { merged = true; return {}; }],
+      ["gh pr view", () => ({ stdout: JSON.stringify(merged
+        ? { state: "MERGED", isDraft: false, headRefOid: HEAD, statusCheckRollup: rolled, mergeCommit: { oid: "c".repeat(40) } }
+        : { state: "OPEN", isDraft: false, headRefOid: HEAD, statusCheckRollup: rolled, mergeCommit: null }) })],
+    ]) };
+  };
+
+  test("c2: task merge squashes a green PR behind the approver's password, deletes the branch and records it", async () => {
+    await setUp();
+    const runId = await openedPr("fix-total", HEAD);
+    const withoutPassword = mergeGh("SUCCESS");
+    expect((await cli(["merge", "fix-total", "--as", "alex"], withoutPassword.exec)).body).toMatchObject({ ok: false, reason: "unauthenticated" });
+    expect((await cli(["merge", "fix-total", "--as", "alex", "--token", "not-the-password"], withoutPassword.exec)).body).toMatchObject({ ok: false, reason: "not-an-approver" });
+    expect(withoutPassword.calls).toEqual([]);
+
+    const gh = mergeGh("SUCCESS");
+    const merged = await cli(["merge", "fix-total", "--as", "alex", "--token", token], gh.exec);
+    expect(merged.code).toBe(0);
+    expect(merged.body).toMatchObject({ ok: true, command: "task merge", pullRequest: { state: "merged", mergeCommit: "c".repeat(40), mergeMethod: "squash" } });
+    expect(gh.ran("gh pr merge")).toEqual([["gh", "pr", "merge", "12", "--repo", "alex/shop", "--squash", "--match-head-commit", HEAD, "--delete-branch"]]);
+    expect(store.handle.prepare("SELECT actor, outcome FROM action_ledger WHERE action = ? AND run_id = ?").all(MERGED_ACTION, runId)).toEqual([{ actor: "alex", outcome: "c".repeat(40) }]);
+    expect((await cli(["show", "fix-total"])).body).toMatchObject({ pullRequest: { state: "merged", mergeCommit: "c".repeat(40) } });
+  });
+
+  test("c2: task merge refuses while checks are failing or running, says which, and never asks GitHub to merge", async () => {
+    await setUp();
+    const runId = await openedPr("fix-total", HEAD);
+    const red = mergeGh("FAILURE");
+    const failing = await cli(["merge", "fix-total", "--as", "alex", "--token", token], red.exec);
+    expect(failing.code).toBe(3);
+    expect(failing.body).toMatchObject({ ok: false, reason: "checks", message: "Checks are failing, so it can't merge." });
+    const running = mergeGh("RUNNING");
+    expect((await cli(["merge", "fix-total", "--as", "alex", "--token", token], running.exec)).body)
+      .toMatchObject({ ok: false, reason: "checks", message: "Checks are still running. Merge once they pass." });
+    expect([...red.ran("gh pr merge"), ...running.ran("gh pr merge")]).toEqual([]);
+    expect(store.handle.prepare("SELECT COUNT(*) AS n FROM action_ledger WHERE action = ? AND run_id = ?").get(MERGED_ACTION, runId)).toEqual({ n: 0 });
+    // A task with no pull request says so.
+    readyResult("other-task", "e".repeat(40));
+    expect((await cli(["merge", "other-task", "--as", "alex", "--token", token], red.exec)).body).toMatchObject({ ok: false, reason: "no-pr" });
+  });
+  test("the operating guide and the command contract carry both verbs", async () => {
+    const guide: string[] = [];
+    expect(await main(["skills", "get", "operating"], line => guide.push(line))).toBe(0);
+    expect(guide.join("\n")).toContain("task complete <id> --digest <receipt> --pull-request");
+    expect(guide.join("\n")).toContain("task merge <id>");
+    const lines: string[] = [];
+    expect(await main(["contract", "--commands", "--json"], line => lines.push(line))).toBe(0);
+    const commands = JSON.parse(lines.join("\n")).commands as { invocation: string; flags?: { name: string }[]; agentMayInvoke: boolean }[];
+    expect(commands.find(one => one.invocation === "task complete")?.flags?.map(one => one.name)).toContain("pull-request");
+    expect(commands.find(one => one.invocation === "task merge")).toMatchObject({ agentMayInvoke: false, flags: expect.arrayContaining([expect.objectContaining({ name: "token" })]) });
   });
 });

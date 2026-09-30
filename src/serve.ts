@@ -60,7 +60,7 @@ import { openWorkDecisionOf } from "./work-summary.js";
 import { assignmentOf, checkAssignmentAsOperator, type AssignmentSnapshot } from './assignment.js';
 import type { PublishExec } from './publish.js';
 import { pullRequestSettingsHtml, PULL_REQUEST_SETTINGS_CSS } from './pull-request-ui.js';
-import { checkPublishing, completeAndOpenPullRequest, mergeAsPerson, pullRequestBlocker, pullRequestViewOf, publishingOf, saveMergeSettings, savePublishing, MERGE_METHODS, type MergeMethod, type PullRequestView } from './pull-request-flow.js';
+import { checkPublishing, completeAndOpenPullRequest, mergeAsPerson, pullRequestBlocker, publishingOf, saveMergeSettings, savePublishing, newestPullRequestOf, MERGE_METHODS, type MergeMethod, type PullRequestView } from './pull-request-flow.js';
 import { leadBriefHtml, LEAD_CONTEXT_CSS } from './lead-context.js';
 import { assignmentCatchUp } from './assignment-brief.js';
 import { assignmentCardOf, assignmentStatusOf, assignmentSummaryHtml, assignmentWithEvidence, ASSIGNMENT_CSS } from './assignment-ui.js';
@@ -5641,18 +5641,11 @@ export function createDecisionServer(options: ServeOptions): Server {
   function taskPullRequestOf(taskId: string, who: Who): TaskPullRequest | null {
     const family = familyOf(taskId);
     const rootId = family?.root.id ?? taskId;
-    const ids = family === null ? [taskId] : [...family.versions.map(one => one.id)].reverse();
     const repo = store.lookupRef(taskId)?.repo ?? null;
     const publishing = publishingOf(store, repo);
     const target = publishing.on ? publishing.base : null;
-    for (const id of ids) {
-      const ref = store.lookupRef(id);
-      if (ref === null) continue;
-      for (const run of store.runsFor(ref.id)) {
-        const view = pullRequestViewOf(store, run.id);
-        if (view !== null) return { taskId: rootId, view: { ...view, canMerge: view.canMerge && who.role === "approver" && who.via === "cookie" }, offer: null, target };
-      }
-    }
+    const view = newestPullRequestOf(store, family === null ? [taskId] : family.versions.map(one => one.id));
+    if (view !== null) return { taskId: rootId, view: { ...view, canMerge: view.canMerge && who.role === "approver" && who.via === "cookie" }, offer: null, target };
     if (!publishing.on || who.via !== "cookie" || who.role !== "approver") return null;
     const assignment = assignmentOf(store, taskId, clock(), { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) }, evidenceRoot);
     const receipt = assignment?.receipt ?? null;

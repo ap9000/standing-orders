@@ -221,16 +221,18 @@ describe("the machine envelope", () => {
 
     // Subcommands that only answer with a login hold the same contract on
     // the road an agent hits first: no login, a usage slip.
-    const subcommandTable: [string, string[]][] = [
-      ["runner", ["capacity", "no-such-worker", "2", "--json"]],
-      ["runner", ["capacity", "no-such-worker", "zero", "--json"]],
+    const subcommandTable: [string, string[], string][] = [
+      ["runner", ["capacity", "no-such-worker", "2", "--json"], "runner capacity"],
+      ["runner", ["capacity", "no-such-worker", "zero", "--json"], "runner capacity"],
+      ["task", ["complete", "no-such-task", "--pull-request", "--json"], "task complete"],
+      ["task", ["merge", "no-such-task", "--json"], "task merge"],
     ];
-    for (const [verb, argv] of subcommandTable) {
+    for (const [verb, argv, command] of subcommandTable) {
       lines = [];
       await runOperate(verb, argv, write, { databaseFile: db, now: T0, gitRunner: quickGit });
       const body = JSON.parse(out()) as Record<string, unknown>;
       expect(body["envelopeVersion"], `${verb} ${argv.join(" ")} lacks envelopeVersion`).toBe(ENVELOPE_VERSION);
-      expect(body, `${verb} ${argv.join(" ")}`).toMatchObject({ ok: false, command: "runner capacity" });
+      expect(body, `${verb} ${argv.join(" ")}`).toMatchObject({ ok: false, command });
       expect(typeof body["reason"]).toBe("string");
     }
 
