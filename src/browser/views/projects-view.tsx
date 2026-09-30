@@ -2,7 +2,7 @@
  * what needs attention on the first line, where it lives and when it was
  * last opened on the second, Open on the right. Opening stays the server's
  * POST (the session's project changes there), so every road is a form. */
-import { BookOpen, FolderOpen, GitBranch, Plus } from "lucide-react";
+import { BookOpen, FolderOpen, GitBranch, GitPullRequest, Plus } from "lucide-react";
 import type { ReactNode } from "react";
 import type { BrowserProjectRow, BrowserProjectsView } from "../../browser-workspace.js";
 import { GuardedHtml } from "../guarded-html.js";
@@ -52,6 +52,7 @@ function Row({ row, csrf, returnTo, choosing }: { row: BrowserProjectRow; csrf: 
     </div>
     <div className="flex shrink-0 items-center gap-1.5">
       <Button asChild variant="ghost" size="sm" className="max-sm:w-11 max-sm:px-0"><a href={row.knowledgeHref} aria-label={`${row.name} knowledge`}><BookOpen /><span className="max-sm:sr-only">Knowledge</span></a></Button>
+      {row.pullRequests && <Button asChild variant="ghost" size="sm" className="max-sm:w-11 max-sm:px-0"><a href={row.pullRequests.href} aria-label={`${row.name} pull requests: ${row.pullRequests.on ? "on" : "off"}`}><GitPullRequest /><span className="max-sm:sr-only">Pull requests{row.pullRequests.on ? "" : " · Off"}</span></a></Button>}
       {row.open
         ? <Badge tone="success">Open now</Badge>
         : <OpenForm csrf={csrf} path={row.path} destination={returnTo}>

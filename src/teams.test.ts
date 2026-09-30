@@ -93,6 +93,8 @@ describe("Teams shared chat", () => {
     now = new Date("2026-09-21T21:00:00Z"); calls = []; answers = []; projects = [repo]; ids = 0;
     forgetTeamsToken(); forgetTeamsKeys();
     const alex = addApprover(store, "alex", now); if (!alex.ok) throw Error("alex"); password = alex.token;
+    // Every step: these journeys prove the per-step behaviour quiet chat keeps for people who choose it.
+    store.setNotificationPreference("alex", { mode: "all" }, "alex", now);
     for (const phase of ["build", "plan", "review"]) store.setPhaseConfig("installation", phase, "claude", "sonnet", "test", now);
     store.setChatConfig({ provider: "claude-subscription", model: "default", dailyTurns: 50, weeklyCeilingMicrousd: 0, priceInMicrousd: 0, priceOutMicrousd: 0 }, "alex", now);
     credentials = await checkTeamsCredentials(APP, TENANT, SECRET, scriptedFetch());
@@ -140,6 +142,7 @@ describe("Teams shared chat", () => {
 
   test("each teammate pairs their own Teams account, commands answer without a model, and a card confirms Mark complete behind a second tap", async () => {
     const sam = addApprover(store, "sam", now, { name: "alex", token: password }); if (!sam.ok) throw Error("sam");
+    store.setNotificationPreference("sam", { mode: "all" }, "sam", now);
     const code = state.pairing(credentials.installation, "alex", store.accountOf("alex")!.generation, now);
     expect(receive(activity(DM_ALEX, ALEX, `pair ${code}`))).toBe(true);
     await processTeamsEvent(options); await drain();
@@ -186,6 +189,7 @@ describe("Teams shared chat", () => {
 
   test("a Teams channel follows a team conversation: the manager binds it, members' mentions enter the shared queue, and replies come back", async () => {
     const sam = addApprover(store, "sam", now, { name: "alex", token: password }); if (!sam.ok) throw Error("sam");
+    store.setNotificationPreference("sam", { mode: "all" }, "sam", now);
     expect(pairAs("alex", ALEX, DM_ALEX)).not.toBeNull();
     expect(pairAs("sam", SAM, DM_SAM)).not.toBeNull();
     const domain = new TeamLeads(store, () => projects);

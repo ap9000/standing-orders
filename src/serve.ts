@@ -56,6 +56,9 @@ import { prepareWorkspaceRevision, WorkspaceValidatorCache } from "./workspace-r
 import { workIndexPage, workCountsByProject, WorkIndexCursorError, type WorkIndexPage, type WorkIndexItem } from "./work-index.js";
 import { openWorkDecisionOf } from "./work-summary.js";
 import { assignmentOf, checkAssignmentAsOperator, type AssignmentSnapshot } from './assignment.js';
+import type { PublishExec } from './publish.js';
+import { pullRequestSettingsHtml, PULL_REQUEST_SETTINGS_CSS } from './pull-request-ui.js';
+import { checkPublishing, completeAndOpenPullRequest, mergeAsPerson, pullRequestBlocker, pullRequestViewOf, publishingOf, saveMergeSettings, savePublishing, MERGE_METHODS, type MergeMethod, type PullRequestView } from './pull-request-flow.js';
 import { leadBriefHtml, LEAD_CONTEXT_CSS } from './lead-context.js';
 import { assignmentCatchUp } from './assignment-brief.js';
 import { assignmentCardOf, assignmentStatusOf, assignmentSummaryHtml, assignmentWithEvidence, ASSIGNMENT_CSS } from './assignment-ui.js';
@@ -232,7 +235,8 @@ import { dirname } from "node:path";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { loadOrCreateVapidKeys, validatePushEndpoint } from "./push.js";
 import { parseGithubRepo, previewGithubRepo, cloneGithubRepo, listGithubRepos, isLargeRepo, type ListOutcome } from "./onboard.js";
-import { verifiedAuthor, LEAD_THREAD, type MateThreadScope } from "./store.js";
+import { verifiedAuthor, LEAD_THREAD, isDigestTime, type MateThreadScope } from "./store.js";
+import { digestTimes } from "./digest-times.js";
 import type { MateProgress } from "./mate-progress.js";
 import { updateRepos, addRepos, removeRepos } from "./repos.js";
 import { run as execRun } from "./exec.js";
@@ -275,6 +279,8 @@ import { accessFromGroups, accountNameFor, discoverOidc, exchangeOidcCode, newOi
 import { readSsoSettings, removeSsoSettings, saveSsoSettings, SSO_CALLBACK, ssoChangeWords } from "./sso-settings.js";
 import { monitoringChange, readMonitoring, saveMonitoring } from "./monitoring-settings.js";
 import { MONITORING_CSS, monitoringHtml, signingSecretHtml } from "./monitoring-ui.js";
+import { INTEGRATIONS_CSS, integrationsHtml } from "./integrations-ui.js";
+import { createIntegrationMonitor, type IntegrationIo } from "./integrations.js";
 import { BACKUP_CSS, backupHtml } from "./backup-ui.js";
 import { BACKUP_EVERY_HOURS, MAX_KEEP, backupFolderOf, backupNow, checkBackupFolder, defaultBackupFolder } from "./backup.js";
 import { prometheusMetrics } from "./metrics.js";
@@ -421,6 +427,8 @@ export type ServeOptions = {
   connectionHome?: string;
   /** Test seam for Chat's first tasks: the `gh` and `git grep` reads. */
   firstTaskRunner?: typeof execRun;
+  /** Test seam for Settings → Integrations: how its checks reach services (fetch, gh, mail servers). */
+  integrationIo?: Partial<IntegrationIo>;
   modelCatalogFetcher?: typeof fetch;
   /** Test seams for Settings → Models: CLI version probes and the PATH they search. */
   modelRunner?: VersionRunner;
@@ -453,6 +461,8 @@ export type ServeOptions = {
   ghPreview?: typeof previewGithubRepo;
   ghClone?: typeof cloneGithubRepo;
   ghList?: typeof listGithubRepos;
+  /** Injected by tests: the git and gh calls pull-request setup and Merge make. */
+  publishExec?: PublishExec;
 };
 
 const SESSION_COOKIE = "standing-orders_session";
@@ -703,6 +713,19 @@ export function createDecisionServer(options: ServeOptions): Server {
     try { noteSignInProbe(store, provider, value.state, clock()); } catch { /* the pause keeps its own state */ }
     return value;
   };
+  // Settings → Integrations: checked in the background with a short cache, as the first-run suggestions are.
+  const integrations = createIntegrationMonitor(() => ({
+    store,
+    dir: options.configDir ?? null,
+    telegramTokenFile: options.telegramTokenFile ?? null,
+    env: process.env,
+    repos: managedRepos(),
+    gh: options.firstTaskRunner ?? execRun,
+    checkConnection: connectionCheck,
+    toolHome,
+    clock,
+    ...options.integrationIo,
+  }));
   const modelCatalog = openRouterModelsCache(options.modelCatalogFetcher);
   const modelSeams: CatalogSeams = {
     home: providerHome,
@@ -1721,7 +1744,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
     const read = new Set(["/settings/skills", "/settings/knowledge", "/settings", "/settings/learning", "/recipes", "/recipes/run", "/recipes/start", "/recipes/new", "/recipes/edit", "/recipes/from-task", "/recipes/preview", "/recipes/export", "/", "/inbox", "/work", "/projects", "/people", "/ledger", "/ledger/export", "/next", "/board", "/tasks", "/tasks/new", "/runs", "/review", "/done", "/routines", "/menu"]);
     const write = new Set(["/settings/skills/import", "/settings/skills/change", "/settings/skills/revise", "/settings/knowledge/change", "/settings/knowledge/refresh", "/settings/learning/change", "/recipes/prepare", "/recipes/preview", "/recipes/import", "/recipes/save", "/recipes/launch", "/projects/select", "/tasks/add", "/routines/add"]);
-    const task = matchTaskPath(path, request.method === "GET" ? "(/evidence)?$" : "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|next|reopen|steer|accept-proof|accept-revision|reject-revision|route|retry-review|complete|stop|resume-arm|resume)$");
+    const task = matchTaskPath(path, request.method === "GET" ? "(/evidence)?$" : "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|next|reopen|steer|accept-proof|accept-revision|reject-revision|route|retry-review|complete|merge|stop|resume-arm|resume)$");
     const resource = request.method === "GET"
       ? /^\/(?:r|d)\/[0-9]{1,15}(?:\/evidence\/[0-9]{1,15})?$/.test(path) || /^\/routines\/[0-9]{1,15}$/.test(path) || path === "/flows" || /^\/flows\/[0-9]{1,15}(\/insights|\/runs\/[0-9]{1,15}\/[0-9]{1,15})?$/.test(path)
       : /^\/d\/[0-9]{1,15}\/answer$/.test(path) || /^\/routines\/[0-9]{1,15}\/(approve|refresh|pause|resume|run-now)$/.test(path) || path === "/flows/new" || /^\/flows\/[0-9]{1,15}\/(save|cards|archive|scripts)$/.test(path) || /^\/flows\/[0-9]{1,15}\/cards\/[0-9]{1,15}\/(move|decide|cancel|comment|assign|watch)$/.test(path) || /^\/flows\/[0-9]{1,15}\/triggers(\/[0-9]{1,15}\/(pause|resume|remove|check|press|renew|secret|share|unshare))?$/.test(path) || /^\/r\/[0-9]{1,15}\/(note|comment|revise|draft-repair)$/.test(path);
@@ -3544,7 +3567,7 @@ export function createDecisionServer(options: ServeOptions): Server {
               back: { href: roomId ? "/chat?conversation=" + encodeURIComponent(roomId) : taskChatHref(focusTask?.id ?? ""), label: "Back to chat" },
             }) + (who.role === 'approver' && focusTask?.assignment?.state === 'ready-to-check'
               && focusTask.assignment.receipt?.runId === resultRun.id
-              ? completionForm(focusTask.assignment.receipt.taskId, resultRun.id, focusTask.assignment.receipt.digest, who.session.csrf) : '');
+              ? completionForm(focusTask.assignment.receipt.taskId, resultRun.id, focusTask.assignment.receipt.digest, who.session.csrf, pullRequestTargetOf(resultRun.id)) : '');
       const focusProblem = requestedTask !== null && focusTask === null
         ? "That task is not available in this workspace."
         : requestedResult !== null && focusTask !== null && resultRun === null
@@ -3848,6 +3871,13 @@ export function createDecisionServer(options: ServeOptions): Server {
       return sendScreen(response, 200, screen("Sessions & tokens", `<p><a href="/settings">Settings</a></p><h1>Sessions &amp; tokens</h1>${credentialsHtml(view, who.session.csrf, { said: url.searchParams.get("said"), problem: url.searchParams.get("problem") })}`,
         { chrome: chromeFor(project, "settings") }));
     }
+    // Settings → Integrations: which integrations work. The list is the last checks; a render never waits on one.
+    if (url.pathname === "/settings/integrations") {
+      if (who.via !== "cookie" || who.role !== "approver" || restricted() || !options.configDir) return refuse(response, who, 403, "An installation approver sees integrations.", "/settings");
+      const list = integrations.list();
+      return sendScreen(response, 200, screen("Integrations", `<p><a href="/settings">Settings</a></p><h1>Integrations</h1>${integrationsHtml(list, who.session.csrf, { said: url.searchParams.get("said"), problem: url.searchParams.get("problem"), checking: integrations.checking })}`,
+        { chrome: chromeFor(project, "settings") }));
+    }
     // v104: Settings → Monitoring, where the audit stream and traces go. An instance operator's page.
     if (url.pathname === "/settings/monitoring") {
       if (who.via !== "cookie" || !store.isInstanceOperator(who.name) || !options.configDir) return refuse(response, who, 403, "An instance operator sets up monitoring.", "/settings");
@@ -3884,6 +3914,19 @@ export function createDecisionServer(options: ServeOptions): Server {
       const plan = await checkoutPlan(store, storagePool(databaseFile), now, { manual: true });
       return sendScreen(response, 200, screen("Storage", `<p><a href="/settings">Settings</a></p><h1>Storage</h1>${storageHtml({ plan, csrf: who.session.csrf }, { said: url.searchParams.get("said"), problem: url.searchParams.get("problem") })}`,
         { chrome: chromeFor(project, "settings") }));
+    }
+    // Settings → Projects → Pull requests: one project's setup. Off, the checks run on open, so the page says
+    // exactly what turning on would do, or what to fix first.
+    if (url.pathname === "/settings/pull-requests") {
+      const repo = url.searchParams.get("repo") ?? "";
+      const known = [...new Set([...managedRepos(), ...store.knownRepos(), ...store.listProjects().map(one => one.path)])];
+      if (who.via !== "cookie" || !known.includes(repo) || !visible(repo)) return refuse(response, who, 404, "No such project.", "/projects");
+      const publishing = publishingOf(store, repo);
+      const canChange = who.role === "approver" && !store.isDemo();
+      const check = publishing.on || !canChange ? null : await checkPublishing(repo, options.publishExec === undefined ? {} : { exec: options.publishExec });
+      const html = pullRequestSettingsHtml({ repo, name: projectName(repo), csrf: who.session.csrf, canChange, publishing, check,
+        said: url.searchParams.get("said"), problem: url.searchParams.get("problem") });
+      return sendScreen(response, 200, screen("Pull requests", `<p><a href="/projects">Projects</a></p><h1>Pull requests</h1>${html}`, { chrome: chromeFor(project, "projects") }));
     }
     // Sprint 8: Settings → Backups, how the last backup went and the schedule. An instance operator's page.
     if (url.pathname === "/settings/backups") {
@@ -4045,6 +4088,9 @@ export function createDecisionServer(options: ServeOptions): Server {
           // The installation fact: when the first Ready result arrived, measured from the first account.
           const at = store.firstSuccessAt(now), since = store.installationStartedAt();
           return at === null || since === null ? null : firstResultWords(since, at);
+        })(), (() => {
+          const chosen = store.notificationPreference(who.name);
+          return { mode: chosen.mode, digestAt: chosen.digestAt };
         })()),
       );
     }
@@ -5115,7 +5161,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     return sendScreen(
       response,
       status,
-      projectsPage(chromeFor(open, "projects"), recent, [...candidates], open, csrf, problem, !restricted() && unscopedMode, !restricted() && (ceiling.roots.length > 0 || unscopedMode), onboardState, peeks, returnTo),
+      projectsPage(chromeFor(open, "projects"), recent, [...candidates], open, csrf, problem, !restricted() && unscopedMode, !restricted() && (ceiling.roots.length > 0 || unscopedMode), onboardState, peeks, returnTo, who.via === "cookie" ? (path: string) => publishingOf(store, path).on : undefined),
     );
   }
 
@@ -5567,6 +5613,38 @@ export function createDecisionServer(options: ServeOptions): Server {
     };
   }
 
+  /** The newest pull request any version of this task opened through Complete; else, for a result completed
+   * without one, the offer to open it (an approver's browser session only). */
+  /** Where "Complete and open a pull request" would open one for this result, or null when it isn't offered. */
+  function pullRequestTargetOf(runId: number): string | null {
+    const run = store.getRun(runId);
+    const publishing = publishingOf(store, run === null ? null : store.refById(run.taskRef)?.repo ?? null);
+    if (!publishing.on || publishing.legacy || store.publicationForRun(runId) !== null || pullRequestBlocker(store, runId) !== null) return null;
+    return `${publishing.githubRepo} into ${publishing.base}`;
+  }
+
+  function taskPullRequestOf(taskId: string, who: Who): TaskPullRequest | null {
+    const family = familyOf(taskId);
+    const rootId = family?.root.id ?? taskId;
+    const ids = family === null ? [taskId] : [...family.versions.map(one => one.id)].reverse();
+    const repo = store.lookupRef(taskId)?.repo ?? null;
+    const publishing = publishingOf(store, repo);
+    const target = publishing.on ? publishing.base : null;
+    for (const id of ids) {
+      const ref = store.lookupRef(id);
+      if (ref === null) continue;
+      for (const run of store.runsFor(ref.id)) {
+        const view = pullRequestViewOf(store, run.id);
+        if (view !== null) return { taskId: rootId, view: { ...view, canMerge: view.canMerge && who.role === "approver" && who.via === "cookie" }, offer: null, target };
+      }
+    }
+    if (!publishing.on || who.via !== "cookie" || who.role !== "approver") return null;
+    const assignment = assignmentOf(store, taskId, clock(), { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) }, evidenceRoot);
+    const receipt = assignment?.receipt ?? null;
+    if (assignment?.state !== "complete" || receipt === null || store.publicationForRun(receipt.runId) !== null || pullRequestBlocker(store, receipt.runId) !== null) return null;
+    return { taskId: rootId, view: null, offer: { taskId: receipt.taskId, runId: receipt.runId, digest: receipt.digest }, target };
+  }
+
   function taskScreen(
     response: ServerResponse,
     who: Who,
@@ -5587,6 +5665,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       versionLabel: family !== null && family.current.id !== taskId ? `Viewing ${family.versions.findIndex(one => one.id === taskId) === 0 ? "Original" : `Revision ${family.versions.findIndex(one => one.id === taskId)}`} · ${family.current.state === "running" ? "A newer revision is running" : "A newer revision is current"}` : null };
     if (scopeDraft !== undefined) presentedData.scopeDraft = scopeDraft;
     if (cancelDraft !== undefined) presentedData.cancelDraft = cancelDraft;
+    (presentedData as { pullRequest?: TaskPullRequest | null }).pullRequest = taskPullRequestOf(taskId, who);
     const paneProject = restricted() ? store.lookupRef(taskId)?.repo ?? null : who.via === "cookie" ? who.session.project : null;
     const page = taskPage(
       paneProject === null && !unscopedMode
@@ -6714,6 +6793,36 @@ export function createDecisionServer(options: ServeOptions): Server {
       const done = await discardCheckout(store, pool, body.get("path") ?? "", now, who.name);
       return done.ok ? back("said", `Discarded, about ${bytesWords(done.bytes)}. Its branch stays.`) : back("problem", done.message);
     }
+    // Pull requests for one project: turn on (the checks run again and must match what the page showed), merge
+    // settings, or turn off. Each takes the password and lands in the ledger.
+    if (url.pathname === "/settings/pull-requests") {
+      const repo = body.get("repo") ?? "";
+      const known = [...new Set([...managedRepos(), ...store.knownRepos(), ...store.listProjects().map(one => one.path)])];
+      if (who.via !== "cookie" || !known.includes(repo) || !visible(repo)) return refuse(response, who, 404, "No such project.", "/projects");
+      if (who.role !== "approver" || store.isDemo()) return refuse(response, who, 403, "An approver sets up pull requests.", "/projects");
+      const back = (key: "said" | "problem", words: string) => redirect(response, `/settings/pull-requests?repo=${encodeURIComponent(repo)}&${key}=${encodeURIComponent(words)}`);
+      const act = body.get("act");
+      if (!authenticateApprover(store, who.name, body.get("password") ?? "", repo).ok) return back("problem", "Enter your Toolroll password to change pull requests.");
+      if (act === "on") {
+        const checked = await checkPublishing(repo, options.publishExec === undefined ? {} : { exec: options.publishExec });
+        if (!checked.ok) return back("problem", checked.message);
+        if (checked.plan.githubRepo !== body.get("github") || checked.plan.base !== body.get("base")) return back("problem", "GitHub answered differently from what you saw. Check the details again.");
+        savePublishing(store, checked.plan, who.name, {}, now);
+        return back("said", "Pull requests are on.");
+      }
+      if (act === "settings") {
+        const method = body.get("method") ?? "";
+        if (!(MERGE_METHODS as readonly string[]).includes(method)) return back("problem", "Choose a merge method.");
+        const saved = saveMergeSettings(store, repo, { mergeMethod: method as MergeMethod, mergeWhenGreen: body.get("when-green") === "1" }, who.name, now);
+        return saved.ok ? back("said", "Saved.") : back("problem", saved.message);
+      }
+      if (act === "off") {
+        const revoked = store.revokePublicationGrant(repo, who.name, now);
+        if (revoked) store.recordAction({ at: now.toISOString(), actor: who.name, repo, taskId: null, runId: null, action: "pull requests turned off", outcome: "off", source: "policy" });
+        return back("said", revoked ? "Pull requests are off." : "Pull requests were already off.");
+      }
+      return back("problem", "That change isn't available.");
+    }
     // Sprint 8: back up now. An instance operator; the outcome is kept like a scheduled one's.
     if (url.pathname === "/settings/backups/now") {
       const databaseFile = store.databaseFile();
@@ -6754,6 +6863,16 @@ export function createDecisionServer(options: ServeOptions): Server {
       response.writeHead(200, { "content-type": "application/zip", "content-disposition": `attachment; filename="${exported.root}.zip"`, "content-length": String(zip.length),
         "cache-control": "no-store", "x-content-type-options": "nosniff" });
       return void response.end(zip);
+    }
+    // Settings → Integrations → Send test: one harmless read-only check of one integration, now.
+    if (url.pathname === "/settings/integrations/test") {
+      if (who.via !== "cookie" || who.role !== "approver" || restricted() || !options.configDir) return refuse(response, who, 403, "An installation approver tests integrations.", "/settings");
+      const key = body.get("key") ?? "";
+      const back = (name: "said" | "problem", words: string) => redirect(response, `/settings/integrations?${name}=${encodeURIComponent(words)}`);
+      const checked = (await integrations.check([key])).find(one => one.key === key);
+      if (checked === undefined) return back("problem", "That integration isn't here any more.");
+      return checked.state === "connected" ? back("said", `${checked.name} works${checked.account === null ? "" : ` (${checked.account})`}.`)
+        : back("problem", `${checked.name}: ${checked.action.kind === "fix" ? checked.action.words : "not set up."}`);
     }
     // v104: change where monitoring goes. A step-up; the ledger keeps before → after (addresses, never secrets).
     if (url.pathname === "/settings/monitoring") {
@@ -7195,6 +7314,19 @@ export function createDecisionServer(options: ServeOptions): Server {
             : "New tasks now use Default quality. Approved tasks keep their setting.",
         )}`,
       );
+    }
+
+    if (url.pathname === "/settings/notifications") {
+      // Each person's own choice: a closed list of modes and a 24-hour HH:MM, or off.
+      const mode = body.get("mode"), time = (body.get("digest") ?? "").trim();
+      if (mode !== null && mode !== "quiet" && mode !== "all") return refuse(response, who, 400, "choose Only when I'm needed or Every step", "/settings");
+      if (time !== "" && time !== "off" && !isDigestTime(time)) return refuse(response, who, 400, "the evening digest time is HH:MM, or off", "/settings");
+      const before = store.notificationPreference(who.name);
+      const after = store.setNotificationPreference(who.name, { ...(mode === null ? {} : { mode }), ...(time === "" ? {} : { digestAt: time === "off" ? null : time }) }, who.name, now);
+      const said = after.mode !== before.mode
+        ? after.mode === "quiet" ? "Chats now message you only when you're needed." : "Chats now message you at every step."
+        : after.digestAt === null ? "Evening digest off." : `Evening digest at ${after.digestAt}.`;
+      return redirect(response, `/settings?said=${encodeURIComponent(said)}`);
     }
 
     if (url.pathname === "/settings/telegram-digest" && options.telegramTokenFile !== undefined) {
@@ -7957,7 +8089,24 @@ export function createDecisionServer(options: ServeOptions): Server {
       return attendMutation(response, who, attendAct.taskId, attendAct.verb, body, now);
     }
 
-    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|block|unblock|repair-dependency|next|reopen|steer|follow-up|accept-proof|accept-revision|reject-revision|route|retry-review|complete|stop|resume-arm|resume)$");
+    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|block|unblock|repair-dependency|next|reopen|steer|follow-up|accept-proof|accept-revision|reject-revision|route|retry-review|complete|merge|stop|resume-arm|resume)$");
+    if (act !== null && act.verb === "merge") {
+      // Merging is a person's act behind their password, typed again: a browser session, an approver, the exact
+      // result's pull request. The flow re-reads GitHub before merging and records who merged in the ledger.
+      if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "Only an approver can merge.");
+      if (store.isDemo()) return taskScreen(response, who, act.taskId, "The demo merges nothing.", 403);
+      const ref = store.lookupRef(act.taskId);
+      if (ref === null || !visible(ref.repo)) return refuse(response, who, 404, "no such task", "/tasks");
+      const named = (body.get("run") ?? "").trim();
+      const run = /^[0-9]{1,15}$/.test(named) ? store.getRun(Number(named)) : null;
+      const runTask = run === null ? null : store.externalIdFor(run.taskRef);
+      if (run === null || runTask === null || familyOf(runTask)?.root.id !== (familyOf(act.taskId)?.root.id ?? act.taskId)) {
+        return taskScreen(response, who, act.taskId, "That pull request isn't part of this task.", 409);
+      }
+      const merged = await mergeAsPerson(store, { runId: run.id, name: who.name, password: body.get("token") ?? "", ...(options.publishExec === undefined ? {} : { exec: options.publishExec }), clock });
+      if (!merged.ok) return taskScreen(response, who, act.taskId, merged.message, merged.reason === "password" ? 403 : 409);
+      return redirect(response, `${taskHref(act.taskId)}#merge`);
+    }
     if (act !== null) {
       return taskMutation(response, who, act.taskId, act.verb, body, now);
     }
@@ -9990,6 +10139,13 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (current === null || current.receipt?.taskId !== taskId || !/^[0-9]{1,15}$/.test(namedRun) || current.receipt.runId !== Number(namedRun)) {
           return taskScreen(response, who, taskId, "This result changed. Open the current result before marking it complete.", 409);
         }
+        if (body.get("publish") === "1") {
+          // "Complete and open a pull request": the same exact-receipt completion, plus the owed PR for this
+          // exact commit in one transaction. The watch process pushes and opens it; the task shows its progress.
+          const opened = completeAndOpenPullRequest(store, { taskId, digest, runId: Number(namedRun), who: principal, root: evidenceRoot }, now);
+          if (!opened.ok) return taskScreen(response, who, taskId, opened.message, 409);
+          return redirect(response, `${taskHref(familyOf(taskId)?.root.id ?? taskId)}#merge`);
+        }
         const completed = checkAssignmentAsOperator(store, taskId, digest, principal, now, evidenceRoot);
         if (!completed.ok) return taskScreen(response, who, taskId, completed.message, 409);
         return redirect(response, reviewHref(taskId, Number(namedRun), taskRepoOf(ref.id)));
@@ -10468,6 +10624,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       proof,
       terminal,
       publication,
+      pullRequestTo: pullRequestTargetOf(run.id),
       ciFailing: publication !== null && publication.prNumber !== null && store.hasOpenCiEpisode(publication.githubRepo, publication.prNumber),
       files,
       outsideTouches: files.filter(one => one.outsideTouches).map(one => one.path),
@@ -12982,6 +13139,23 @@ ${THEME_DARK}
   .status-line[data-tone="ready"] .status-dot, .status-line[data-tone="done"] .status-dot { background: var(--success); }
   .status-line[data-tone="muted"] { color: var(--muted-foreground); font-weight: 500; }
   .status-line[data-tone="muted"] .status-dot { background: var(--border); }
+  .pull-request { display: grid; gap: .35rem; }
+  .pull-request p { margin: 0; overflow-wrap: anywhere; }
+  .pull-request-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: .25rem .75rem; }
+  .pull-request-head a, .pull-request .meta a { display: inline-flex; align-items: center; min-height: 44px; }
+  .pull-request-head strong { font-size: 1.0625rem; font-weight: 600; color: var(--foreground); display: inline-flex; align-items: center; gap: .5rem; }
+  .pull-request-head strong::before { content: ""; width: .5rem; height: .5rem; border-radius: 999px; background: var(--muted-foreground); }
+  .pull-request--ok .pull-request-head strong::before { background: var(--success, #15803d); }
+  .pull-request--problem .pull-request-head strong::before { background: var(--destructive, #b91c1c); }
+  .pull-request-act { display: flex; flex-wrap: wrap; align-items: flex-end; gap: .5rem .75rem; margin: .25rem 0 0; }
+  .pull-request-act .meta { flex: 1 1 100%; }
+  .pull-request-act label { display: grid; gap: .25rem; flex: 1 1 12rem; margin: 0; }
+  .pull-request-act label input { margin: 0; min-height: 44px; box-sizing: border-box; width: 100%; }
+  .pull-request-act button { min-height: 44px; white-space: nowrap; }
+  .result-complete-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+  .result-complete-actions button { white-space: nowrap; }
+  .result-complete-actions button[name=publish], .pull-request-act button { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); font-weight: 600; }
+  @media (max-width: 480px) { .pull-request-act button, .result-complete-actions button { flex: 1 1 100%; } }
   .receipt-publication { position: relative; z-index: 1; margin: .35rem 0 0; font-size: .8125rem; color: var(--muted-foreground); }
   /* A raw repository path in ordinary copy wraps at any point rather than
      widening the page (the phone task-list overflow, package 1). */
@@ -14151,7 +14325,7 @@ button.pick-file { min-height: 1.75rem; padding: 0 .55rem; font-size: .75rem; }
 const THEME_CONTROLS_CSS = `.task-repo select{width:100%;min-height:2.75rem;font-size:1rem}.task-repo-add{margin:.35rem .1rem .5rem}.task-repo-add a{display:inline-flex;align-items:center;min-height:2.25rem}details.result-request-open.result-request-form>summary{border:0;background:transparent;padding:.5rem 0;min-height:2.75rem;font-weight:600;display:list-item;list-style:revert}details.result-request-open.result-request-form>summary::-webkit-details-marker{display:revert}form.js-autosave button[type=submit]{display:none}.provider-row{border-bottom:1px solid var(--so-line);padding:.35rem 0}.provider-row:first-of-type{border-top:1px solid var(--so-line)}.provider-head{display:flex;align-items:center;gap:.75rem;margin:.4rem 0 0}.provider-status{display:inline-flex;align-items:center;gap:.4rem;color:var(--so-muted);font-size:.875rem}.provider-status i{width:.5rem;height:.5rem;border-radius:50%;background:var(--so-muted)}.provider-status--ok i{background:var(--so-success)}.provider-status--warn i{background:var(--so-attention)}.provider-status--off i{background:transparent;border:1.5px solid var(--so-muted)}details.provider-manage>summary{cursor:pointer;color:var(--so-accent-text);font-size:.875rem;min-height:2.5rem;display:list-item;padding-block:.5rem}.card.props .row{display:grid;gap:.1rem;margin:0 0 .75rem}.card.props .row>.meta{display:block;font-size:.75rem}.card.props .row>.meta::first-letter{text-transform:uppercase}.card.props .row>.mono{font-family:var(--font-sans);font-size:.875rem}.card.props .row>.mono .seal{font-family:var(--font-mono);font-size:.8125rem}details.evidence-files{margin:1rem 0}details.evidence-files>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:600}details.evidence-files ul{list-style:none;margin:0;padding:0}details.evidence-files li{display:flex;justify-content:space-between;gap:1rem;padding:.5rem 0;border-bottom:1px solid var(--so-line)}.result-action .result-feedback-link{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;text-decoration:none}@media(hover:hover) and (pointer:fine){.result-action .result-feedback-link:hover{background:var(--so-raised)}}.so-sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}.verdict{margin:.5rem 0 .75rem}.verdict-chips{display:flex;flex-wrap:wrap;gap:.4rem;list-style:none;padding:0;margin:0}.verdict-chip{display:inline-flex;align-items:center;gap:.3rem;min-height:1.75rem;padding:.2rem .65rem;border-radius:999px;font-size:.8125rem;font-weight:600;background:var(--so-neutral-soft);color:var(--so-neutral-ink)}.verdict-chip svg{width:.9rem;height:.9rem}.verdict-chip--success{background:var(--so-success-soft);color:var(--so-success)}.verdict-chip--danger{background:var(--so-danger-soft);color:var(--so-danger)}.verdict-chip--warning{background:var(--so-warning-soft);color:var(--so-warning)}.verdict-chip--info{background:var(--so-info-soft);color:var(--so-info)}.verdict-by{margin:.4rem 0 0}details.result-request-open{margin:.5rem 0}details.result-request-open>summary{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;cursor:pointer;list-style:none}details.result-request-open>summary::-webkit-details-marker{display:none}details.result-request-open[open]>summary{margin-bottom:.75rem}.settings-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(8.5rem,1fr));gap:.5rem;margin:0 0 2rem}.settings-tiles a{display:flex;align-items:center;gap:.6rem;min-height:3rem;padding:.65rem .8rem;border:1px solid var(--so-line);border-radius:.625rem;background:var(--so-paper);color:var(--so-ink);text-decoration:none;font-weight:550;font-size:.875rem}@media(hover:hover) and (pointer:fine){.settings-tiles a:hover{border-color:var(--so-input-line);background:var(--so-raised)}}.settings-tiles svg{width:1.1rem;height:1.1rem;flex-shrink:0;color:var(--so-accent-text)}details.settings-more{margin:.25rem 0 1.25rem}details.settings-more>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:550}details.settings-more>summary .meta{font-weight:400;margin-left:.35rem}.settings-changed{margin-top:-.25rem}.appearance{margin:0 0 28px}.appearance h2{margin:0 0 10px}.theme-switch{display:inline-flex;flex-wrap:nowrap;max-width:100%;gap:4px;padding:4px;margin:0;border:1px solid var(--so-line);border-radius:10px;background:var(--so-raised)}.theme-switch .theme-choice,.so-native-region .theme-switch .theme-choice{flex:1 1 0;width:auto;white-space:nowrap;min-height:40px;padding:8px 16px;border:0;border-radius:7px;background:transparent;color:var(--so-muted);font:inherit;font-weight:550;box-shadow:none;cursor:pointer}@media(hover:hover) and (pointer:fine){.theme-switch .theme-choice:hover{color:var(--so-ink)}}.theme-switch .theme-choice[aria-pressed="true"]{background:var(--so-paper);color:var(--so-ink);box-shadow:0 1px 2px rgb(0 0 0 / .1)}.appearance .meta{margin:8px 0 0}@media(max-width:600px){.theme-switch .theme-choice{min-height:44px}}.update-notes{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;max-height:18rem;overflow:auto}`;
 /** The page CSS this module writes itself (not the imported modules'), for the stylesheet contract tests. */
 export const PAGE_CSS = STYLE + THEME_CONTROLS_CSS;
-const WORKSPACE_STYLE = styleAsset(STYLE + APPROVAL_RULES_CSS + SPEND_CSS + RETENTION_CSS + STORAGE_CSS + UPDATES_CSS + LIMITS_CSS + MONITORING_CSS + BACKUP_CSS + EXPORT_CSS + PROJECT_DELETE_CSS + POLICY_CSS + EVIDENCE_PACK_CSS + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KITS_CSS + SSO_CSS + CREDENTIALS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
+const WORKSPACE_STYLE = styleAsset(STYLE + APPROVAL_RULES_CSS + SPEND_CSS + RETENTION_CSS + STORAGE_CSS + UPDATES_CSS + LIMITS_CSS + MONITORING_CSS + INTEGRATIONS_CSS + BACKUP_CSS + EXPORT_CSS + PROJECT_DELETE_CSS + POLICY_CSS + EVIDENCE_PACK_CSS + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KITS_CSS + SSO_CSS + CREDENTIALS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + PULL_REQUEST_SETTINGS_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
@@ -18504,6 +18678,7 @@ function projectsPage(
   onboard: OnboardCardState | null = null,
   peeks: Record<string, ProjectPeek | null> = {},
   returnTo = "/",
+  pullRequestsOn?: (path: string) => boolean,
 ): Screen {
   // The onboarding card (repo onboarding, findings 1-39): preview first,
   // then a password-confirmed clone into a configured root. Disabled
@@ -18602,6 +18777,7 @@ function projectsPage(
     return {
       name, path, shortPath: path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path, open: open !== null && open === path, openedAt,
       knowledgeHref: `/settings/knowledge?repo=${encodeURIComponent(path)}`,
+      ...(pullRequestsOn === undefined ? {} : { pullRequests: { href: `/settings/pull-requests?repo=${encodeURIComponent(path)}`, on: pullRequestsOn(path) } }),
       peek: peek === null ? null : [
         ...(peek.waiting > 0 ? [{ label: `${peek.waiting} waiting on you`, href: "/", tone: "attention" as const }] : []),
         ...(peek.running > 0 ? [{ label: `${peek.running} running`, href: "/runs", tone: "neutral" as const }] : []),
@@ -19529,6 +19705,9 @@ function taskBodyParts(data: {
   /** The publication grant the publisher would act under — from
    * publicationGrantFor(repo) only; null when none, or no project. */
   grant?: PublicationGrant | null;
+  /** The pull request opened through Complete (its state, link, CI and merge), or the offer to open one for a
+   * result already marked complete; null when neither applies. */
+  pullRequest?: TaskPullRequest | null;
   /** Degraded composition (slice 1c). "sensitive": the page carries a
    * password ceremony, so no live poller runs, the attempt panel is a
    * static line, and open decisions render link-only — decided by the page
@@ -20388,6 +20567,9 @@ function taskBodyParts(data: {
     const grant = data.grant ?? null;
     if (data.repo === null) return "no project — no publication grant can apply";
     if (grant === null) return "branch only — publishing is not set up";
+    if (grant.publishOn === "complete") {
+      return `pull requests to ${grant.githubRepo} into ${grant.base} when completed · ${grant.mergeWhenGreen === true ? "merges when checks pass" : "a person merges"} (${grant.mergeMethod ?? "squash"})`;
+    }
     return [
       grant.capabilities.includes("push-branch") ? `may push ${grant.headPrefix}* to ${grant.githubRepo}` : "cannot push",
       grant.capabilities.includes("open-pr") ? `may open a PR against ${grant.base}${grant.draft ? " (draft)" : ""}` : null,
@@ -20441,7 +20623,8 @@ function taskBodyParts(data: {
   facts.push({ label: "Audit", parts: [{ label: "Evidence pack", href: `${taskHref(task.id)}/evidence` }] });
   if (data.budgetHold != null) facts.push({ label: "Budget", parts: [`${data.budgetHold} · `, { label: "Spend", href: "/spend" }] });
   if (data.policyHold != null) facts.push({ label: "Policy", parts: [`${data.policyHold} · `, { label: "Policy", href: "/settings/policy" }] });
-  if (data.publication !== null && data.publication !== undefined) {
+  // The pull-request card already says this once, with its action.
+  if (data.publication !== null && data.publication !== undefined && data.pullRequest?.view == null) {
     const prHref = safePrUrl(data.publication.prUrl), pr = `PR #${data.publication.prNumber ?? "?"}`;
     facts.push({ label: "Published", parts: [prHref === null ? pr : { label: pr, href: prHref },
       ` · ${data.publication.state}${data.publication.remoteState !== null ? ` · ${data.publication.remoteState.toLowerCase()} on GitHub` : ""}${data.publication.lastCheckState !== null ? ` · CI ${data.publication.lastCheckState} at last observation` : " · no checks observed"}`] });
@@ -20653,7 +20836,9 @@ function taskBodyParts(data: {
             ? ""
             : ` · filed via ${escape(data.filedVia)}`
       }${data.deliverable === "report" ? ` · <span class="badge">scout</span>` : ""}</p>`;
-  const assignmentOptions = data.assignment == null ? null : { workStatus: status, hideAction: approveForm !== "" && data.dispatch?.action === "approve-scope", problem: status.tone === "problem", diagnostics: [...((status as WorkStatus).diagnostics ?? []), ...(status.tone === "problem" && status.detail !== data.assignment.detail ? [status] : [])] };
+  // A pull request that can be merged (or opened) owns the one primary action; the result stays in its section.
+  const pullRequestActs = data.csrf !== "" && (data.pullRequest?.view?.canMerge === true || (data.pullRequest?.view == null && data.pullRequest?.offer != null));
+  const assignmentOptions = data.assignment == null ? null : { workStatus: status, hideAction: (approveForm !== "" && data.dispatch?.action === "approve-scope") || pullRequestActs, problem: status.tone === "problem", diagnostics: [...((status as WorkStatus).diagnostics ?? []), ...(status.tone === "problem" && status.detail !== data.assignment.detail ? [status] : [])] };
   // The result takes over from the task status as soon as it is ready.
   const statusHtml = (data.assignment != null && assignmentOptions !== null ? assignmentSummaryHtml(data.assignment, assignmentOptions) : receiptLeads ? completionReceiptCard(data.completion!.receipt!, task.id, "task", status) : taskStatusCard(status, task.id, data.dispatch ?? null, liveRunId, approveForm !== "" && data.dispatch?.action === "approve-scope")) + checkProgressHtml(data.checkProgress ?? null);
   // The exact-run control (v52), directly under the scheduler's answer:
@@ -20807,6 +20992,7 @@ function taskBodyParts(data: {
     approval: approvalHtml,
     lead: [
       { key: "history", html: data.history ?? "" }, { key: "control", html: controlHtml }, { key: "problem", html: problemHtml },
+      { key: "pull-request", html: data.pullRequest == null ? "" : pullRequestCardHtml(data.pullRequest, data.csrf) },
       { key: "needs-scope", html: needsScopeCard }, { key: "progress", html: progressCard }, { key: "revisions", html: revisionLedgerCard },
       { key: "plan", html: planCard }, { key: "mirror", html: mirrorCard }, { key: "contest", html: contestCard }, { key: "attempt", html: attemptPanel },
     ].filter(one => one.html !== ""),
@@ -21435,7 +21621,7 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
 
   const complete = assignment?.state === "ready-to-check" && assignment.receipt !== null && canRetryReview && csrf !== ""
     ? { action: `${taskHref(view.taskId)}/complete`, receipt: assignment.receipt.digest, run: run.id } : null;
-  if (complete !== null) parts.push(completionForm(view.taskId, run.id, complete.receipt, csrf));
+  if (complete !== null) parts.push(completionForm(view.taskId, run.id, complete.receipt, csrf, view.detail?.pullRequestTo ?? null));
 
   if (view.notes.length > 0) {
     parts.push(
@@ -21454,8 +21640,44 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
   };
 }
 
-function completionForm(taskId: string, runId: number, digest: string, csrf: string): string {
-  return `<form method="post" action="${taskHref(taskId)}/complete" class="card result-complete"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="receipt" value="${escape(digest)}"><input type="hidden" name="run" value="${runId}"><p class="meta">After inspecting the work, mark this result complete. Checks stay unchanged; nothing is published or deployed.</p><button type="submit" style="min-height:44px">Mark complete</button></form>`;
+function completionForm(taskId: string, runId: number, digest: string, csrf: string, pullRequestTo: string | null = null): string {
+  const hidden = `<input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="receipt" value="${escape(digest)}"><input type="hidden" name="run" value="${runId}">`;
+  if (pullRequestTo !== null) {
+    // With pull requests set up: the PR is the primary road, a bare completion the quiet one beside it.
+    return `<form method="post" action="${taskHref(taskId)}/complete" class="card result-complete">${hidden}<p class="meta">After inspecting the work, mark this result complete. A pull request opens on ${escape(pullRequestTo)} from this exact commit.</p><div class="result-complete-actions"><button type="submit" name="publish" value="1" style="min-height:44px">Complete and open a pull request</button><button type="submit" class="secondary" style="min-height:44px">Complete only</button></div></form>`;
+  }
+  return `<form method="post" action="${taskHref(taskId)}/complete" class="card result-complete">${hidden}<p class="meta">After inspecting the work, mark this result complete. Checks stay unchanged; nothing is published or deployed.</p><button type="submit" style="min-height:44px">Mark complete</button></form>`;
+}
+
+/** What the task page shows about a result's pull request: the view, or the offer to open one. */
+type TaskPullRequest = { taskId: string; view: PullRequestView | null; offer: { taskId: string; runId: number; digest: string } | null; target: string | null };
+
+/** The pull request, in one card: its state and link, one line of detail, and the one action it needs — Merge
+ * behind the password when checks passed, or Open a pull request for a result completed without one. */
+function pullRequestCardHtml(pr: TaskPullRequest, csrf: string): string {
+  if (pr.view === null) {
+    if (pr.offer === null || csrf === "") return "";
+    return `<section class="card pull-request" id="merge" data-pull-request="none"><div class="pull-request-head"><strong>No pull request</strong></div>` +
+      `<p class="meta">This result was completed without one.</p>` +
+      `<form method="post" action="${taskHref(pr.offer.taskId)}/complete" class="pull-request-act"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="receipt" value="${escape(pr.offer.digest)}"><input type="hidden" name="run" value="${pr.offer.runId}"><input type="hidden" name="publish" value="1">` +
+      `<button type="submit" class="secondary">Open a pull request</button></form></section>`;
+  }
+  const view = pr.view;
+  const url = safePrUrl(view.prUrl);
+  const link = view.prNumber === null ? "" : url === null ? `<span class="mono">PR #${view.prNumber}</span>` : `<a href="${escape(url)}" class="mono" rel="noreferrer" target="_blank">PR #${view.prNumber}</a>`;
+  const tone = view.state === "ready" || view.state === "merged" ? "ok" : view.state === "failing" || view.state === "failed" || view.state === "closed" ? "problem" : "waiting";
+  const revision = view.revisionTask === null || view.state !== "failing" ? "" : ` <a href="${taskHref(view.revisionTask)}">Open revision</a>`;
+  const merged = view.mergeCommit === null ? "" : `<p class="meta">Merge commit <span class="mono">${escape(view.mergeCommit.slice(0, 12))}</span></p>`;
+  const target = pr.target === null ? "the base branch" : pr.target;
+  const act = !view.canMerge || csrf === "" || view.prNumber === null ? "" :
+    `<form method="post" action="${taskHref(pr.taskId)}/merge" class="pull-request-act" data-merge-form>` +
+    `<input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="run" value="${view.runId}">` +
+    `<p class="meta">${escape(view.mergeMethod === "squash" ? "Squash-merges" : view.mergeMethod === "rebase" ? "Rebase-merges" : "Merges")} PR #${view.prNumber} into ${escape(target)} and deletes its branch.</p>` +
+    `<label>Password<input type="password" name="token" autocomplete="current-password" required></label>` +
+    `<button type="submit">Merge</button></form>`;
+  return `<section class="card pull-request pull-request--${tone}" id="merge" data-pull-request="${escape(view.state)}">` +
+    `<div class="pull-request-head"><strong>${escape(view.label)}</strong>${link}</div>` +
+    `<p class="meta">${escape(view.detail)}${revision}</p>${merged}${act}</section>`;
 }
 
 /** Exactly one primary road per result, chosen from its state; the
@@ -22474,6 +22696,8 @@ const chatResultHref = (taskId: string, runId: number, tab: ResultTab = "summary
  * only in where the panel sits and which links lead away from it.
  */
 type ResultDetail = {
+  /** Where "Complete and open a pull request" opens one; null when only "Mark complete" is offered. */
+  pullRequestTo?: string | null;
   learning?: string;
   skillTest?: boolean;
   rootId?: string;
@@ -23455,6 +23679,7 @@ function settingsPage(
   workers: NonNullable<BrowserSettingsView["workers"]> | null = null,
   updates: BrowserUpdates | null = null,
   firstResult: string | null = null,
+  chatNotices: { mode: "quiet" | "all"; digestAt: string | null } | null = null,
 ): Screen {
   const permissionCard =
     permissionDefault === null
@@ -23486,8 +23711,25 @@ function settingsPage(
             ? ""
             : `<p class="meta settings-changed">Changed ${escape(when(qualityDefault.updatedAt))}${qualityDefault.updatedBy === null ? "" : ` by ${escape(qualityDefault.updatedBy)}`}</p>`,
         ].join("\n");
+  // Quiet chat: this person's own choice. The installation's Telegram cadence only bundles Every step updates.
+  const chatCard =
+    chatNotices === null || csrf === ""
+      ? ""
+      : [
+          "<h3>Chat messages</h3>",
+          `<form method="post" action="/settings/notifications" class="card" data-autosave>`,
+          `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
+          `<label><input type="radio" name="mode" value="quiet"${chatNotices.mode === "quiet" ? " checked" : ""}> Only when I'm needed <span class="meta">· one message per task, updated as it moves</span></label>`,
+          `<label><input type="radio" name="mode" value="all"${chatNotices.mode === "all" ? " checked" : ""}> Every step <span class="meta">· a new message for each update</span></label>`,
+          `<label>Evening digest<select name="digest">` +
+            digestTimes(chatNotices.digestAt).map(([value, label]) => `<option value="${value}"${value === (chatNotices.digestAt ?? "off") ? " selected" : ""}>${label}</option>`).join("") +
+            `</select></label>`,
+          `<p class="meta">One message: what finished, what waits, what failed.</p>`,
+          `<button type="submit">Save</button>`,
+          `</form>`,
+        ].join("\n");
   const digestCard =
-    digest === null || csrf === ""
+    digest === null || csrf === "" || chatNotices?.mode === "quiet"
       ? ""
       : [
           "<h3>Telegram digest</h3>",
@@ -23670,7 +23912,8 @@ function settingsPage(
     }),
     services: messaging === null || messaging.configured.length === 0 ? null : { configured: messaging.configured, channel: messaging.channel, implicit: messaging.implicit },
     push: push === null || csrf === "" ? null : { available: push.available, devices: push.devices.filter(one => one.retiredAt === null || one.retiredReason === "gone").map(one => ({ id: one.id, words: `${one.uaWords} · since ${when(one.createdAt)}`, state: one.retiredAt !== null ? "expired" : one.consecutiveFailures >= 20 ? "failing" : "ok", removable: one.retiredAt === null })) },
-    digest: digest === null || csrf === "" ? null : { every: digest.everyMs === null ? "off" : String(Math.round(digest.everyMs / 60_000)), held: digest.everyMs === null ? null : `${digest.held} routine fact(s) held` },
+    chat: chatNotices === null || csrf === "" ? null : chatNotices,
+    digest: digest === null || csrf === "" || chatNotices?.mode === "quiet" ? null : { every: digest.everyMs === null ? "off" : String(Math.round(digest.everyMs / 60_000)), held: digest.everyMs === null ? null : `${digest.held} routine fact(s) held` },
     telegram: { state: hasEnv ? "from the environment" : existing === null ? "not set" : "saved", current, delivery: telegramDelivery },
     email,
     workers,
@@ -23687,7 +23930,8 @@ function settingsPage(
     workersCard(workers),
     updatesCard(updates, csrf),
     firstResult === null ? "" : `<p class="meta" data-first-result>${escape(firstResult)}</p>`,
-    pushCard === "" && messagingCard === "" && digestCard === "" ? "" : `<h2>Notifications</h2>`,
+    pushCard === "" && messagingCard === "" && digestCard === "" && chatCard === "" ? "" : `<h2>Notifications</h2>`,
+    chatCard,
     messagingCard,
     pushCard,
     digestCard,
@@ -23782,6 +24026,7 @@ function settingsTiles(): string {
   return `<nav class="settings-tiles" aria-label="Settings sections">${tiles.map(([href, label, icon]) => `<a href="${href}">${strokeIcon(icon)}<span>${label}</span></a>`).join("")}</nav>`;
 }
 const SETTINGS_TILE_ICONS: [string, string, string][] = [
+    ["/settings/integrations", "Integrations", `<path d="M9 2v6M15 2v6"/><path d="M6 8h12v4a6 6 0 0 1-12 0z"/><path d="M12 18v4"/>`],
     ["/settings/models", "Models", `<rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/>`],
     ["/settings/skills", "Skills", `<path d="m12 3 1.9 5.8L20 10l-5 3.6L16.8 20 12 16.4 7.2 20 9 13.6 4 10l6.1-1.2z"/>`],
     ["/settings/tools", "Tools", `<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>`],

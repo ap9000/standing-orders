@@ -30,6 +30,7 @@ import { join } from "node:path";
 import { validateNote } from "./decision.js";
 import { isLifecycleNotification, isTelegramProgressNotification, TELEGRAM_HOLD_REASONS, type Store, type Decision, type Notification, type TelegramBinding, type TelegramDelivery } from "./store.js";
 import { telegramProgressCard, type ProgressEntity } from "./telegram-progress.js";
+import { enqueueEveningDigests, isTaskFact, needsPerson, quietCardView, readyPingView } from "./chat-quiet.js";
 import { applyTeamInbound, deliverTeamChats, teamCommand } from "./telegram-team.js";
 import { applyFlowReply, applyFlowTap, FLOW_DECIDE_KEY, flowButtons, flowDecisionAt } from "./telegram-flow.js";
 import { connectChannel, FLOW_WORDS, takeChannelMessage, watchedChannel } from "./chat-inbox.js";
@@ -631,13 +632,14 @@ async function processConversations(
 // ---- outbound --------------------------------------------------------------
 
 type SendResult = { ok: true; messageId: string | null } | { ok: false; error: string; retryAfter?: number };
-type OutboundSender = (text: string, keyboard?: InlineButton[][], messageRows?: readonly TelegramDelivery[], entities?: ProgressEntity[]) => Promise<SendResult>;
+type OutboundSender = (text: string, keyboard?: InlineButton[][], messageRows?: readonly TelegramDelivery[], entities?: ProgressEntity[], silent?: boolean) => Promise<SendResult>;
 
 /** The one button a plain fact may carry: its machine-minted console path
  * under the trusted origin read now — the same road `/task` uses. The label
  * names where the path goes; nothing in it comes from the fact's text. */
 function factLinkLabel(path: string): string {
   if (/^\/review\?result=[^&]+&run=\d+&tab=checks$/.test(path)) return "Inspect result";
+  if (/^\/t\/[^?#]+#merge$/.test(path)) return "Merge";
   if (/^\/chat\?task=[^&]+&result=/.test(path)) return "Open result";
   if (/^\/(?:chat\?task=|t\/)/.test(path)) return "Open task";
   if (/^\/d\//.test(path)) return "Open decision";
@@ -674,6 +676,8 @@ async function deliverOutbox(
   }
   const digest = store.telegramDigest();
   const now = clock();
+  // An evening digest someone asked for is due: record it as their own notification, delivered below.
+  try { enqueueEveningDigests(store, now, evidenceRoot); } catch { report.problems.push("evening digest could not be prepared"); }
   const digestDue = digest.everyMs === null || digest.lastSentAt === null || now.getTime() >= new Date(digest.lastSentAt).getTime() + digest.everyMs;
   // Every paired person is a destination of their own: each binding claims
   // and settles its own rows under its own ceiling, in turn.
@@ -686,14 +690,17 @@ async function deliverOutboxTo(
   readProjects?: TelegramReadProjects, canDeliver?: () => boolean, phoneOrigin?: () => string | null, evidenceRoot?: string,
 ): Promise<void> {
   const now = clock();
-  const claimed = store.claimTelegramDeliveries(binding, owner, DELIVERY_CLAIM_MS, now, digestDue ? "all" : "urgent");
+  // Only when I'm needed (the default): a task's facts edit its one card and only what needs this person makes a
+  // new message, so the installation's routine-fact cadence does not apply. Every step keeps today's behaviour.
+  const quiet = store.notificationPreference(binding.approver).mode === "quiet";
+  const claimed = store.claimTelegramDeliveries(binding, owner, DELIVERY_CLAIM_MS, now, quiet || digestDue ? "all" : "urgent");
 
   // Preserve ID order, flushing earlier routine facts before an urgent task
   // update. An earlier failed/retrying row also fences later rows for that task.
   const groups: TelegramDelivery[][] = [];
   for (const row of claimed) {
     const last = groups[groups.length - 1];
-    if (digest.everyMs !== null && !isUrgent(row) && last !== undefined && !isUrgent(last[0]!)) last.push(row);
+    if (!quiet && digest.everyMs !== null && !isUrgent(row) && last !== undefined && !isUrgent(last[0]!)) last.push(row);
     else groups.push([row]);
   }
   for (const group of groups) {
@@ -739,11 +746,11 @@ async function deliverOutboxTo(
       }
       return null;
     };
-    const sender: OutboundSender = async (text, keyboard, messageRows = rows, entities) => {
+    const sender: OutboundSender = async (text, keyboard, messageRows = rows, entities, silent) => {
       // Finish every await before the synchronous fence and transport call.
       const problem = (await readAccess()) ?? fence();
       if (problem !== null) return { ok: false, error: problem };
-      const sent = await send(transport, binding.chatId, text, keyboard, entities);
+      const sent = await send(transport, binding.chatId, text, keyboard, entities, silent);
       if (!sent.ok) {
         if (sent.retryAfter !== undefined) store.deferTelegram(botId, new Date(clock().getTime() + sent.retryAfter * 1_000).toISOString());
         return sent;
@@ -783,7 +790,7 @@ async function deliverOutboxTo(
       const after = (await readAccess()) ?? fence();
       return after === null ? { ok: true, receipt: receiptFor(botId, binding.chatId, String(messageId)) } : { ok: false, error: after };
     };
-    const batched = digest.everyMs !== null && !isUrgent(rows[0]!);
+    const batched = !quiet && digest.everyMs !== null && !isUrgent(rows[0]!);
     const row = rows[0]!;
     const progressRun = batched ? null : store.telegramProgressRun(row);
     const progress = progressRun !== null && isTelegramProgressNotification(row);
@@ -810,14 +817,65 @@ async function deliverOutboxTo(
       const after = (await readAccess()) ?? fence();
       return after === null ? edited : { ok: false, error: after };
     };
-    // A failure or decision still gets its own alert. Refresh an existing
-    // card first so it does not keep saying the build is running.
-    if (!progress && progressRun !== null) await updateProgress(true);
-    const updated = progress ? await updateProgress(false) : null;
-    const outcome = updated !== null ? updated.ok ? { ok: true as const, receipt: receiptFor(botId, binding.chatId, updated.messageId) } : updated
-      : rows[0]!.kind === "acceptance-evidence" ? await imageSender(rows[0]!) : batched
-      ? await deliverDigest(botId, binding, sender, rows, digest.lastSentAt, clock)
-      : await deliverOne(store, botId, binding, sender, rows[0]!, clock, phoneOrigin, evidenceRoot, projects);
+    /** Quiet mode: the task's one card (or its group's), created silently and then only ever edited. */
+    const updateCard = async (fact: TelegramDelivery & { taskRef: number; taskId: string }): Promise<SendResult> => {
+      const problem = (await readAccess()) ?? fence();
+      if (problem !== null) return { ok: false, error: problem };
+      const card = store.chatCardFor(fact.destination, fact.taskRef, store.getTask(fact.taskId)?.createdAt ?? fact.createdAt, clock());
+      const view = quietCardView(store, card.tasks, clock(), evidenceRoot);
+      if (view === null) return { ok: true, messageId: card.message };
+      let button: InlineButton[] | null = null;
+      try { button = phoneLinkButton(phoneOrigin?.() ?? null, view.link); } catch { /* No trusted origin. */ }
+      const keyboard = button === null ? [] : [button];
+      const shown = createHash("sha256").update(JSON.stringify([view.text, view.entities, keyboard])).digest("hex");
+      if (card.message !== null && card.digest === shown) {
+        store.recordTelegramMessage(fact, binding, card.message, clock());
+        return { ok: true, messageId: card.message };
+      }
+      if (card.message !== null) {
+        const edited = await editProgress(transport, binding.chatId, card.message, view.text, keyboard, view.entities);
+        if (edited.ok) {
+          store.setChatCardMessage(card.id, card.message, shown);
+          store.recordTelegramMessage(fact, binding, card.message, clock());
+          const after = (await readAccess()) ?? fence();
+          return after === null ? edited : { ok: false, error: after };
+        }
+        if (edited.retryAfter !== undefined) store.deferTelegram(botId, new Date(clock().getTime() + edited.retryAfter * 1000).toISOString());
+        // Only Telegram's definitive missing/uneditable answer permits a replacement card.
+        if (!edited.replace) return edited;
+      }
+      const sent = await sender(view.text, keyboard, [fact], view.entities, true);
+      // A card that reached the chat is kept even if a later fence refused the acknowledgement: never a second card.
+      const placed = sent.ok ? sent.messageId : store.telegramMessageOf(fact.id, fact.destination);
+      if (placed !== null) store.setChatCardMessage(card.id, placed, shown);
+      return sent;
+    };
+    const quietOutcome = async (fact: TelegramDelivery & { taskRef: number; taskId: string; project: string }): Promise<{ ok: true; receipt: string | null } | { ok: false; error: string }> => {
+      const card = await updateCard(fact);
+      if (!card.ok) return card;
+      if (!needsPerson(fact)) return { ok: true, receipt: receiptFor(botId, binding.chatId, card.messageId) };
+      const readyRun = fact.kind === "run-finished" ? store.telegramProgressRun(fact) : null;
+      if (readyRun !== null) {
+        const ping = readyPingView(store, store.getRun(readyRun.id)!, fact.taskId, fact.project, clock(), evidenceRoot);
+        let button: InlineButton[] | null = null;
+        try { button = phoneLinkButton(phoneOrigin?.() ?? null, ping.link); } catch { /* No trusted origin. */ }
+        const sent = await sender(ping.text, button === null ? undefined : [button], [fact], ping.entities);
+        return sent.ok ? { ok: true, receipt: receiptFor(botId, binding.chatId, sent.messageId) } : sent;
+      }
+      return fact.kind === "acceptance-evidence" ? imageSender(fact) : deliverOne(store, botId, binding, sender, fact, clock, phoneOrigin, evidenceRoot, projects);
+    };
+    let outcome: { ok: true; receipt: string | null } | { ok: false; error: string };
+    if (quiet && rows.length === 1 && isTaskFact(row)) outcome = await quietOutcome(row);
+    else {
+      // A failure or decision still gets its own alert. Refresh an existing
+      // card first so it does not keep saying the build is running.
+      if (!progress && progressRun !== null) await updateProgress(true);
+      const updated = progress ? await updateProgress(false) : null;
+      outcome = updated !== null ? updated.ok ? { ok: true as const, receipt: receiptFor(botId, binding.chatId, updated.messageId) } : updated
+        : rows[0]!.kind === "acceptance-evidence" ? await imageSender(rows[0]!) : batched
+        ? await deliverDigest(botId, binding, sender, rows, digest.lastSentAt, clock)
+        : await deliverOne(store, botId, binding, sender, rows[0]!, clock, phoneOrigin, evidenceRoot, projects);
+    }
     const finalProblem = outcome.ok ? (await readAccess()) ?? fence() : null;
     const settled = finalProblem === null ? outcome : { ok: false as const, error: finalProblem };
     // A skipped screenshot settles its row but nothing reached the phone.
@@ -1024,6 +1082,7 @@ async function send(
   text: string,
   keyboard?: InlineButton[][],
   entities?: ProgressEntity[],
+  silent?: boolean,
 ): Promise<SendResult> {
   // No markup parsing. Only machine-selected heading ranges may be bold;
   // agent text remains literal and URLs never trigger link previews.
@@ -1034,6 +1093,8 @@ async function send(
       text,
       ...(entities === undefined ? {} : { entities }),
       link_preview_options: { is_disabled: true },
+      // A new quiet card arrives without a sound; only a ping should buzz.
+      ...(silent === true ? { disable_notification: true } : {}),
       ...(keyboard === undefined ? {} : { reply_markup: { inline_keyboard: keyboard } }),
     });
   } catch { return { ok: false, error: "Telegram transport failed; delivery may be uncertain" }; }

@@ -1,0 +1,145 @@
+{
+  "synthetic": true,
+  "checks": [
+    {
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      },
+      "rows": [
+        {
+          "key": "telegram",
+          "state": "connected",
+          "action": "Send test"
+        },
+        {
+          "key": "slack",
+          "state": "not-set-up",
+          "action": "Set up"
+        },
+        {
+          "key": "discord",
+          "state": "not-set-up",
+          "action": "Set up"
+        },
+        {
+          "key": "teams",
+          "state": "not-set-up",
+          "action": "Set up"
+        },
+        {
+          "key": "github",
+          "state": "connected",
+          "action": "Send test"
+        },
+        {
+          "key": "linear",
+          "state": "broken",
+          "action": "Fix"
+        },
+        {
+          "key": "email",
+          "state": "connected",
+          "action": "Send test"
+        },
+        {
+          "key": "mcp:/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/toolroll-integrations-proof-0aiMnc/bookshelf:catalog",
+          "state": "connected",
+          "action": "Send test"
+        },
+        {
+          "key": "mcp:/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/toolroll-integrations-proof-0aiMnc/bookshelf:sentry",
+          "state": "broken",
+          "action": "Fix"
+        },
+        {
+          "key": "monitoring:webhook",
+          "state": "broken",
+          "action": "Fix"
+        },
+        {
+          "key": "agent:claude",
+          "state": "connected",
+          "action": "Send test"
+        },
+        {
+          "key": "agent:codex",
+          "state": "broken",
+          "action": "Fix"
+        }
+      ],
+      "text": "4 need fixing.\n\nChat\n\nTelegram\nConnected\n\nSend test\n\n@bookshelf_alerts_bot\n\nLast success 2026-09-30 16:39 UTC · Used by Alerts\n\nSlack\nNot set up\n\nSet up\n\nDiscord\nNot set up\n\nSet up\n\nMicrosoft Teams\nNot set up\n\nSet up\n\nCode and issues\n\nGitHub\nConnected\n\nSend test\n\nalex-reads · Can push to bookshelf-co/bookshelf\n\nLast success 2026-09-30 16:39 UTC · Used by Pull requests\n\nLinear\nBroken\n\nFix\n\nLinear d",
+      "overflow": false
+    },
+    {
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "rows": [
+        {
+          "key": "telegram",
+          "state": "connected",
+          "action": "Send test"
+        },
+        {
+          "key": "slack",
+          "state": "not-set-up",
+          "action": "Set up"
+        },
+        {
+          "key": "discord",
+          "state": "not-set-up",
+          "action": "Set up"
+        },
+        {
+          "key": "teams",
+          "state": "not-set-up",
+          "action": "Set up"
+        },
+        {
+          "key": "github",
+          "state": "connected",
+          "action": "Send test"
+        },
+        {
+          "key": "linear",
+          "state": "broken",
+          "action": "Fix"
+        },
+        {
+          "key": "email",
+          "state": "connected",
+          "action": "Send test"
+        },
+        {
+          "key": "mcp:/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/toolroll-integrations-proof-0aiMnc/bookshelf:catalog",
+          "state": "connected",
+          "action": "Send test"
+        },
+        {
+          "key": "mcp:/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/toolroll-integrations-proof-0aiMnc/bookshelf:sentry",
+          "state": "broken",
+          "action": "Fix"
+        },
+        {
+          "key": "monitoring:webhook",
+          "state": "broken",
+          "action": "Fix"
+        },
+        {
+          "key": "agent:claude",
+          "state": "connected",
+          "action": "Send test"
+        },
+        {
+          "key": "agent:codex",
+          "state": "broken",
+          "action": "Fix"
+        }
+      ],
+      "text": "4 need fixing.\n\nChat\n\nTelegram\nConnected\n\nSend test\n\n@bookshelf_alerts_bot\n\nLast success 2026-09-30 16:39 UTC · Used by Alerts\n\nSlack\nNot set up\n\nSet up\n\nDiscord\nNot set up\n\nSet up\n\nMicrosoft Teams\nNot set up\n\nSet up\n\nCode and issues\n\nGitHub\nConnected\n\nSend test\n\nalex-reads · Can push to bookshelf-co/bookshelf\n\nLast success 2026-09-30 16:39 UTC · Used by Pull requests\n\nLinear\nBroken\n\nFix\n\nLinear d",
+      "overflow": false
+    }
+  ]
+}

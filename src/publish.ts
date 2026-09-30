@@ -313,6 +313,17 @@ export type CheckReport = {
   failing: number;
   resolved: number;
   problems: string[];
+  /** Every observation that won its settle, for the pull-request follower (CI revisions, Ready to merge). */
+  seen: ObservedPullRequest[];
+};
+
+export type ObservedPullRequest = {
+  publication: Publication;
+  headOid: string;
+  state: ReturnType<typeof summarizeChecks>;
+  remoteState: "MERGED" | "CLOSED" | null;
+  rollup: unknown;
+  mergeCommit: string | null;
 };
 
 /**
@@ -329,7 +340,7 @@ export async function observeChecks(
 ): Promise<CheckReport> {
   const clock = options.clock ?? (() => new Date());
   const exec = options.exec ?? execRun;
-  const report: CheckReport = { observed: 0, failing: 0, resolved: 0, problems: [] };
+  const report: CheckReport = { observed: 0, failing: 0, resolved: 0, problems: [], seen: [] };
 
   for (const publication of store.openedPublications()) {
     if (publication.prNumber === null) continue;
@@ -343,7 +354,7 @@ export async function observeChecks(
       [
         "pr", "view", String(publication.prNumber),
         "--repo", publication.githubRepo,
-        "--json", "statusCheckRollup,headRefOid,state",
+        "--json", "statusCheckRollup,headRefOid,state,mergeCommit",
       ],
       { timeoutMs: EXEC_TIMEOUT_MS },
     );
@@ -353,7 +364,7 @@ export async function observeChecks(
       );
       continue;
     }
-    let payload: { statusCheckRollup?: unknown; headRefOid?: unknown; state?: unknown };
+    let payload: { statusCheckRollup?: unknown; headRefOid?: unknown; state?: unknown; mergeCommit?: unknown };
     try {
       payload = JSON.parse(viewed.stdout) as typeof payload;
     } catch {
@@ -372,13 +383,17 @@ export async function observeChecks(
     // remote state is recorded, its episodes resolve, and neither the
     // review queue nor the next observation pass carries it forever.
     const remoteState = typeof payload.state === "string" ? payload.state.toUpperCase() : null;
+    const mergeCommit = typeof payload.mergeCommit === "object" && payload.mergeCommit !== null && typeof (payload.mergeCommit as { oid?: unknown }).oid === "string"
+      ? (payload.mergeCommit as { oid: string }).oid : null;
     if (remoteState === "MERGED" || remoteState === "CLOSED") {
+      let won = false;
       store.transact(() => {
         const settled = store.settleObservation(
           { githubRepo: publication.githubRepo, prNumber: publication.prNumber as number, headSha: headOid, state: "none", generation },
           clock(),
         );
         if (!settled.won) return;
+        won = true;
         store.recordPublicationRemoteState(publication.id, remoteState, clock());
         report.resolved += store.resolveCiEpisodes(publication.githubRepo, publication.prNumber as number, null, clock());
         // A closed PR moots its merge blocker and supersedes its intent —
@@ -395,6 +410,7 @@ export async function observeChecks(
           });
         }
       });
+      if (won) report.seen.push({ publication, headOid, state: "none", remoteState, rollup: payload.statusCheckRollup, mergeCommit });
       continue;
     }
 
@@ -410,6 +426,7 @@ export async function observeChecks(
       continue;
     }
     store.recordPublicationCheckState(publication.id, state, clock());
+    report.seen.push({ publication, headOid, state, remoteState: null, rollup: payload.statusCheckRollup, mergeCommit });
     // The episode identity carries the REPOSITORY (audit C-2): PR #55 in
     // repo A and PR #55 in repo B are different worlds, and one's failure
     // must never light the other's repair button.

@@ -3,6 +3,9 @@
  * phone. Real HTTP against an ephemeral port; only the phone is imaginary.
  */
 
+import type { PublishExec } from "./publish.js";
+import { savePublishing } from "./pull-request-flow.js";
+import { COMPLETION_ACTION as PR_COMPLETION_ACTION } from "./result-completion.js";
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, readFileSync, writeFileSync } from "node:fs";
@@ -10551,9 +10554,32 @@ describe("scout tasks and the digest card on the console (mate arc §10)", () =>
     expect(next).toContain("a read-only session investigates this goal and delivers a report");
   });
 
-  test("the digest card sets the cadence from a closed list; the choice lands in the store and says so", async () => {
+  test("Settings → Notifications saves each person's own choice: Only when I'm needed, Every step, an evening digest", async () => {
     const cookie = await login();
     let page = await (await fetch(`${base}/settings`, { headers: { cookie } })).text();
+    expect(page).toContain("Only when I'm needed");
+    expect(page).toContain("Every step");
+    expect(page).toContain("Evening digest");
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(page)?.[1] ?? "";
+    const post = (fields: Record<string, string>) => fetch(`${base}/settings/notifications`, { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf, ...fields }), redirect: "manual" });
+    expect((await post({ mode: "loud" })).status).toBe(400);
+    expect((await post({ mode: "quiet", digest: "25:00" })).status).toBe(400);
+    expect((await post({ mode: "all", digest: "19:00" })).status).toBe(303);
+    expect(store.notificationPreference("alex")).toMatchObject({ mode: "all", digestAt: "19:00" });
+    page = await (await fetch(`${base}/settings`, { headers: { cookie } })).text();
+    expect(page).toContain('value="19:00" selected');
+    expect((await post({ mode: "quiet", digest: "off" })).status).toBe(303);
+    expect(store.notificationPreference("alex")).toMatchObject({ mode: "quiet", digestAt: null });
+    expect((await fetch(`${base}/settings/notifications`, { method: "POST", body: new URLSearchParams({ mode: "all" }) })).status).toBe(401);
+  });
+
+  test("the digest card sets the cadence from a closed list; the choice lands in the store and says so", async () => {
+    const cookie = await login();
+    // The installation's cadence bundles Every step updates only; quiet chat has no routine messages to bundle.
+    let page = await (await fetch(`${base}/settings`, { headers: { cookie } })).text();
+    expect(page).not.toContain("Telegram digest");
+    store.setNotificationPreference("alex", { mode: "all" }, "alex", T0);
+    page = await (await fetch(`${base}/settings`, { headers: { cookie } })).text();
     expect(page).toContain("Telegram digest");
     const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(page)?.[1] ?? "";
     const bad = await fetch(`${base}/settings/telegram-digest`, { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf, every: "17" }), redirect: "manual" });
@@ -12118,6 +12144,105 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
       expect(store.openReviewRequests()).toEqual([]);
       expect(store.runsFor(ref).filter(one => one.role === "reviewer")).toHaveLength(attempt);
     }
+  });
+
+  test("Settings → Projects → Pull requests checks gh and push rights, then turns on behind the password", async () => {
+    let permission = "READ";
+    const publishExec: PublishExec = async (file, args) => {
+      const key = [file, ...args].join(" ");
+      const ok = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
+      if (key.startsWith("git remote get-url")) return { ...ok, stdout: "https://github.com/alex/payouts.git\n" };
+      if (key.startsWith("gh repo view")) return { ...ok, stdout: JSON.stringify({ nameWithOwner: "alex/payouts", defaultBranchRef: { name: "main" }, viewerPermission: permission }) };
+      if (key.startsWith("gh api user")) return { ...ok, stdout: "alex\n" };
+      return ok;
+    };
+    await boot({ publishExec });
+    const cookie = await login();
+    const page = async () => (await fetch(url(`/settings/pull-requests?repo=${encodeURIComponent("/repo/main")}`), { headers: { cookie } })).text();
+    const blocked = await page();
+    expect(blocked).toContain("Can\u2019t turn on yet");
+    expect(blocked).toContain("Your GitHub account can&#39;t push to alex/payouts. Ask for write access, then try again.");
+    permission = "WRITE";
+    const offer = await page();
+    expect(offer).toContain("Ready to turn on");
+    expect(offer).toContain('Pull requests open on <span class="mono">alex/payouts</span> into <span class="mono">main</span>, as alex.');
+    const csrf = csrfOf(offer);
+    const fields = { csrf, repo: "/repo/main", act: "on", github: "alex/payouts", base: "main" };
+    const refused = await post(cookie, "/settings/pull-requests", fields);
+    expect(decodeURIComponent(refused.headers.get("location") ?? "")).toContain("problem=Enter your Toolroll password");
+    expect(store.publicationGrantFor("/repo/main")).toBeNull();
+    const turnedOn = await post(cookie, "/settings/pull-requests", { ...fields, password: approverToken });
+    expect(decodeURIComponent(turnedOn.headers.get("location") ?? "")).toContain("said=Pull requests are on.");
+    expect(store.publicationGrantFor("/repo/main")).toMatchObject({ githubRepo: "alex/payouts", base: "main", publishOn: "complete", mergeMethod: "squash", mergeWhenGreen: false });
+    const on = await page();
+    expect(on).toContain("<strong>On</strong>");
+    expect(on).toContain("Merge when checks pass");
+    await post(cookie, "/settings/pull-requests", { csrf, repo: "/repo/main", act: "settings", method: "merge", "when-green": "1", password: approverToken });
+    expect(store.publicationGrantFor("/repo/main")).toMatchObject({ mergeMethod: "merge", mergeWhenGreen: true, publishOn: "complete" });
+  });
+
+  test("with pull requests set up, Complete opens a pull request, the task shows its link and CI, and Merge takes the password", async () => {
+    const ref = seed("t-pr", "Keep the payout total accurate");
+    const run = build("t-pr", ref, { patch: "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n", handoff: { conclusion: "Saved the payout correction." }, verdict: { verdict: "verified" } });
+    const calls: string[][] = [];
+    let merged = false;
+    const publishExec: PublishExec = async (file, args) => {
+      calls.push([file, ...args]);
+      const key = [file, ...args].join(" ");
+      const ok = { code: 0, stdout: "", stderr: "", timedOut: false, notFound: false };
+      if (key.startsWith("gh pr merge")) { merged = true; return ok; }
+      if (key.startsWith("gh pr view")) {
+        return { ...ok, stdout: JSON.stringify({ state: merged ? "MERGED" : "OPEN", isDraft: false, headRefOid: "b".repeat(40),
+          statusCheckRollup: [{ name: "test", status: "COMPLETED", conclusion: "SUCCESS" }], mergeCommit: merged ? { oid: "c".repeat(40) } : null }) };
+      }
+      return ok;
+    };
+    await boot({ publishExec });
+    store.stampRun(run, { scopeDigest: store.getScope("t-pr")!.digest });
+    store.setVerifyCommand({ repo: "/repo/main", command: "npm test", timeoutMs: 300_000, approvedBy: "alex" }, new Date(T0.getTime() - 120_000));
+    storeEvidence(store, evidenceRoot, run, "check-log", "checks.txt", Buffer.from("12 payout tests passed"), "npm test", T0, { captureStatus: "ok" });
+    sealVerificationReceipt(store, evidenceRoot, run, "b".repeat(40), store.liveVerifyCommand("/repo/main")!, { configured: true, ran: true, exitCode: 0 }, T0);
+    savePublishing(store, { repo: "/repo/main", githubRepo: "alex/payouts", remote: "origin", base: "main", account: "alex" }, "alex", {}, T0);
+    const cookie = await login();
+    const chat = await (await fetch(url(`/chat?task=t-pr&result=${run}`), { headers: { cookie } })).text();
+    const form = /<form[^>]*action="\/t\/t-pr\/complete"[^>]*>[\s\S]*?<\/form>/.exec(chat)?.[0] ?? "";
+    expect(form).toContain('name="publish" value="1"');
+    expect(form).toContain("Complete and open a pull request</button>");
+    expect(form).toContain("Complete only</button>");
+    expect(form).toContain("A pull request opens on alex/payouts into main from this exact commit.");
+    const receipt = /name="receipt" value="([a-f0-9]{64})"/.exec(form)?.[1] ?? "";
+    const csrf = csrfOf(chat);
+    const done = await post(cookie, "/t/t-pr/complete", { csrf, run: String(run), receipt, publish: "1" });
+    expect(done.status).toBe(303);
+    expect(done.headers.get("location")).toBe("/t/t-pr#merge");
+    const publication = store.publicationForRun(run)!;
+    expect(publication).toMatchObject({ headSha: "b".repeat(40), head: "standing-orders/t-pr", githubRepo: "alex/payouts", base: "main", state: "intended" });
+    expect(store.handle.prepare("SELECT COUNT(*) AS n FROM action_ledger WHERE action = ? AND run_id = ?").get(PR_COMPLETION_ACTION, run)).toEqual({ n: 1 });
+
+    // The publisher opened it and CI was seen green on the accepted commit.
+    store.markPublicationPushed(publication.id, T0);
+    store.markPublicationOpened(publication.id, 7, "https://github.com/alex/payouts/pull/7", T0);
+    store.recordPublicationCheckState(publication.id, "passing", T0);
+    const page = async () => (await (await fetch(url("/t/t-pr"), { headers: { cookie } })).text()).replace(/\\u003c/g, "<").replace(/\\"/g, '"');
+    const ready = await page();
+    expect(ready).toContain('data-pull-request="ready"');
+    expect(ready).toContain("<strong>Ready to merge</strong>");
+    expect(ready).toContain('href="https://github.com/alex/payouts/pull/7"');
+    expect(ready).toContain('action="/t/t-pr/merge"');
+    expect(ready).toContain("Squash-merges PR #7 into main and deletes its branch.");
+
+    // No password, a wrong one: refused, and GitHub is never asked to merge.
+    expect((await post(cookie, "/t/t-pr/merge", { csrf, run: String(run) })).status).toBe(403);
+    expect((await post(cookie, "/t/t-pr/merge", { csrf, run: String(run), token: "not-the-password" })).status).toBe(403);
+    expect(calls.filter(call => call[1] === "pr" && call[2] === "merge")).toEqual([]);
+    const mergedResponse = await post(cookie, "/t/t-pr/merge", { csrf, run: String(run), token: approverToken });
+    expect(mergedResponse.status).toBe(303);
+    expect(calls.filter(call => call[1] === "pr" && call[2] === "merge")).toEqual([["gh", "pr", "merge", "7", "--repo", "alex/payouts", "--squash", "--match-head-commit", "b".repeat(40), "--delete-branch"]]);
+    const after = await page();
+    expect(after).toContain('data-pull-request="merged"');
+    expect(after).toContain("Merged by alex (squash). Branch deleted.");
+    expect(after).toContain("c".repeat(12));
+    expect(after).not.toContain('action="/t/t-pr/merge"');
   });
 
   test("mark complete binds the exact saved result and preserves check failures and publication authority", async () => {

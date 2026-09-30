@@ -213,6 +213,17 @@ export function summarizeChecks(rollup: unknown): ChecksState {
   return "passing";
 }
 
+/** The checks that finished and did not succeed, by the name GitHub shows, with their details page when one is given. */
+export function failingChecks(rollup: unknown): { name: string; url: string | null }[] {
+  if (!Array.isArray(rollup)) return [];
+  return rollup.filter(entry => readCheckState(entry) === "failing").map(entry => {
+    const raw = entry as Record<string, unknown>;
+    const name = readString(raw["name"]) || readString(raw["context"]) || "a check";
+    const url = readString(raw["detailsUrl"]) || readString(raw["targetUrl"]);
+    return { name, url: url === "" ? null : url };
+  });
+}
+
 function readCheckState(entry: unknown): ChecksState {
   if (typeof entry !== "object" || entry === null) return "none";
   const raw = entry as Record<string, unknown>;

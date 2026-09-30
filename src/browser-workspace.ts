@@ -87,6 +87,8 @@ export type BrowserSettingsView = {
   }[] | null;
   services: { configured: string[]; channel: string | null; implicit: boolean } | null;
   push: { available: boolean; devices: { id: number; words: string; state: string; removable: boolean }[] } | null;
+  /** Quiet chat: how chats reach this person, and their evening digest time (null: off). */
+  chat?: { mode: 'quiet' | 'all'; digestAt: string | null } | null;
   digest: { every: string; held: string | null } | null;
   telegram: { state: string; current: string;
     /** v98: how the bot's messages reach Toolroll (pushed, or asked for), in words. */
@@ -141,6 +143,8 @@ export type BrowserProjectRow = {
   /** When it was last opened here; null for a project only seen in the queue. */
   openedAt: string | null;
   knowledgeHref: string;
+  /** Settings → Projects → Pull requests for this project, and whether they are on. */
+  pullRequests?: { href: string; on: boolean };
   /** What waits, runs, queues or finished today; null when not scanned. */
   peek: { label: string; href: string; tone: 'attention' | 'info' | 'neutral' | 'success' }[] | null;
 };

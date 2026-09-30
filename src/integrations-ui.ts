@@ -1,0 +1,70 @@
+/**
+ * Settings → Integrations: which integrations work. One row each: its name
+ * and state, the account it's connected as, when it last worked and last
+ * failed, what uses it, and one action. The list comes from saved checks; a
+ * render never waits on one (see integrations.ts).
+ */
+import { STATE_WORDS, type Integration, type IntegrationGroup } from "./integrations.js";
+
+const e = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+const when = (at: string) => `${e(at.slice(0, 16).replace("T", " "))} UTC`;
+
+export const INTEGRATIONS_CSS = `.integrations{max-width:760px;min-width:0}.integrations h2{margin:24px 0 6px;font-size:.9375rem}` +
+  `.integrations .integration{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 16px;align-items:start;padding:12px 0;border-top:1px solid var(--so-line);min-width:0}` +
+  `.integrations .integration>:not(.integration-action){grid-column:1}.integrations .integration:first-of-type{border-top:0}.integrations .integration-head{margin:0;display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;min-width:0}` +
+  `.integrations .integration-head strong{overflow-wrap:anywhere}.integrations .integration p{margin:2px 0 0;min-width:0;overflow-wrap:anywhere}` +
+  `.integrations .integration-action{grid-column:2;grid-row:1 / span 3;align-self:center;margin:0}.integrations .integration-action button,.integrations .integration-action .button-link{min-height:44px;white-space:nowrap}` +
+  `.integrations .integration .integration-action button{width:auto}.integrations .integration .integration-action a.integration-quiet{background:var(--so-paper);color:var(--so-ink);border:1px solid var(--so-input-line)}` +
+  `.integrations .integration-fix{color:var(--so-danger)}.integrations code{overflow-wrap:anywhere}.integrations details{margin-top:4px;font-size:.8125rem}.integrations summary{cursor:pointer;padding:4px 0}` +
+  `.integration-state{display:inline-flex;align-items:center;gap:6px;font-size:.75rem;font-weight:500;padding:0 8px;border-radius:5px;line-height:20px;white-space:nowrap}` +
+  `.integration-state i{width:6px;height:6px;border-radius:50%;background:currentColor}` +
+  `.integration-state--connected{color:var(--so-success);background:var(--so-success-soft)}.integration-state--broken{color:var(--so-danger);background:var(--so-danger-soft)}` +
+  `.integration-state--not-set-up,.integration-state--checking{color:var(--so-muted);background:var(--so-neutral-soft)}` +
+  `@media (max-width:560px){.integrations .integration{grid-template-columns:minmax(0,1fr)}.integrations .integration-action{grid-column:1;grid-row:auto;margin-top:8px}}`;
+
+const GROUPS: [IntegrationGroup, string][] = [
+  ["chat", "Chat"], ["code", "Code and issues"], ["mail", "Email"], ["tools", "MCP tools"], ["monitoring", "Monitoring"], ["agents", "Agents"],
+];
+
+function action(one: Integration, csrf: string): string {
+  const a = one.action;
+  if (a.kind === "test") {
+    return csrf === "" ? "" : `<form method="post" action="/settings/integrations/test" class="integration-action"><input type="hidden" name="csrf" value="${e(csrf)}">` +
+      `<input type="hidden" name="key" value="${e(one.key)}"><button type="submit">Send test</button></form>`;
+  }
+  // A command is run where Toolroll runs; a page is linked. Fix and Set up both say which.
+  // Fix is the one filled action on the page; Set up stays quiet so a list of unused services doesn't shout.
+  if (a.href !== null) return `<p class="integration-action"><a class="button-link${a.kind === "setup" ? " integration-quiet" : ""}" href="${e(a.href)}">${a.label}</a></p>`;
+  return "";
+}
+
+function row(one: Integration, csrf: string): string {
+  const badge = !one.checked && one.state === "connected"
+    ? `<span class="integration-state integration-state--checking"><i aria-hidden="true"></i>Checking</span>`
+    : `<span class="integration-state integration-state--${one.state}"><i aria-hidden="true"></i>${STATE_WORDS[one.state]}</span>`;
+  const facts = [one.account, one.detail].filter(Boolean).map(e).join(" · ");
+  const command = one.action.kind !== "test" ? one.action.command : null;
+  const fix = one.action.kind === "fix" ? `<p class="integration-fix" role="status">${e(one.action.words)}</p>` : "";
+  const run = command === null || (one.action.kind === "fix" && one.action.words.includes(command)) ? "" : `<p class="meta">Run <code>${e(command)}</code> on the computer running Toolroll.</p>`;
+  const seen = [one.lastSuccessAt === null ? null : `Last success ${when(one.lastSuccessAt)}`, one.usedBy.length === 0 ? null : `Used by ${e(one.usedBy.join(", "))}`].filter(Boolean);
+  const history = one.state === "not-set-up" || seen.length === 0 ? "" : `<p class="meta">${seen.join(" · ")}</p>`;
+  const lastError = one.lastError === null || one.state === "not-set-up" ? "" : one.state === "broken" && one.action.kind === "fix" && one.action.words === one.lastError
+    ? `<p class="meta">Failed ${when(one.lastErrorAt ?? "")}</p>`
+    : `<details><summary>Last error ${one.lastErrorAt === null ? "" : when(one.lastErrorAt)}</summary><p class="meta">${e(one.lastError)}</p></details>`;
+  return `<div class="integration" data-integration="${e(one.key)}" data-state="${one.state}">` +
+    `<p class="integration-head"><strong>${e(one.name)}</strong> ${badge}</p>` +
+    action(one, csrf) +
+    (facts === "" ? "" : `<p class="meta">${facts}</p>`) + fix + run + history + lastError + `</div>`;
+}
+
+export function integrationsHtml(list: readonly Integration[], csrf: string, notice: { said?: string | null; problem?: string | null; checking?: boolean }): string {
+  const note = notice.problem ? `<p class="problem" role="alert">${e(notice.problem)}</p>` : notice.said ? `<p role="status">${e(notice.said)}</p>` : "";
+  const broken = list.filter(one => one.state === "broken").length;
+  const summary = broken > 0 ? `<p><strong>${broken} need${broken === 1 ? "s" : ""} fixing.</strong></p>`
+    : notice.checking || list.some(one => !one.checked) ? `<p class="meta" role="status">Checking in the background. Refresh in a few seconds.</p>` : "";
+  const sections = GROUPS.map(([group, title]) => {
+    const rows = list.filter(one => one.group === group);
+    return rows.length === 0 ? "" : `<h2>${title}</h2>${rows.map(one => row(one, csrf)).join("")}`;
+  }).join("");
+  return `<section class="integrations">${note}${summary}${sections}</section>`;
+}

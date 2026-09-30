@@ -322,6 +322,8 @@ describe("lifecycle facts through the Telegram transport", () => {
     const alex = addApprover(store, "alex", now);
     expect(alex.ok).toBe(true);
     token = alex.ok ? alex.token : "";
+    // Every step: these journeys prove the per-step behaviour quiet chat keeps for people who choose it.
+    store.setNotificationPreference("alex", { mode: "all" }, "alex", now);
   });
   afterEach(() => { store.close(); rmSync(dir, { recursive: true, force: true }); });
 

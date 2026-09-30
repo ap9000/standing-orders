@@ -291,6 +291,8 @@ beforeEach(() => {
   const account = addApprover(store, "alex", now);
   if (!account.ok) throw Error("account");
   password = account.token;
+  // Every step: these journeys prove the per-step behaviour quiet chat keeps for people who choose it.
+  store.setNotificationPreference("alex", { mode: "all" }, "alex", now);
   for (const phase of ["build", "plan", "review"])
     store.setPhaseConfig(
       "installation",
@@ -939,6 +941,7 @@ function ready() {
 test("teammates pair their own Discord accounts, and status, task and help answer from the database without a model", async () => {
   const sam = addApprover(store, "sam", now, { name: "alex", token: password });
   if (!sam.ok) throw Error("sam");
+  store.setNotificationPreference("sam", { mode: "all" }, "sam", now);
   const original = options.api;
   const SAM = snow(), DSAM = snow();
   options = { ...options, api: async (method, path, body = {}, file) => {
@@ -988,6 +991,7 @@ test("mark complete confirms behind a second tap in Discord and records the assi
 test("a Discord guild channel follows a team conversation: a manager binds it with team 1, paired members' messages enter the shared queue, and replies come back to the channel", async () => {
   const sam = addApprover(store, "sam", now, { name: "alex", token: password });
   if (!sam.ok) throw Error("sam");
+  store.setNotificationPreference("sam", { mode: "all" }, "sam", now);
   const original = options.api;
   const SAM = snow(), DSAM = snow(), GUILD = snow(), ROOM = snow();
   options = { ...options, api: async (method, path, body = {}, file) => {

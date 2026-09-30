@@ -1,0 +1,135 @@
+{
+ "synthetic": true,
+ "note": "Synthetic fixture: a throwaway database and a scripted git/gh seeded by capture.ts; not the live plane and not GitHub.",
+ "merges": [
+  "gh pr merge 41 --repo sam-shop/storefront --squash --match-head-commit 4f1c2e9a7b3d5e6f8091a2b3c4d5e6f708192a3b --delete-branch"
+ ],
+ "captures": [
+  {
+   "file": "desktop-complete-choice.png",
+   "viewport": {
+    "width": 1440,
+    "height": 900
+   },
+   "primary": "button[name=\"publish\"][value=\"1\"]",
+   "box": {
+    "x": 271,
+    "width": 238,
+    "height": 44
+   },
+   "overflow": 0
+  },
+  {
+   "file": "desktop-checks-running.png",
+   "viewport": {
+    "width": 1440,
+    "height": 900
+   },
+   "primary": "[data-pull-request=\"running\"]",
+   "box": {
+    "x": 252,
+    "width": 824,
+    "height": 103
+   },
+   "overflow": 0
+  },
+  {
+   "file": "desktop-ready-to-merge.png",
+   "viewport": {
+    "width": 1440,
+    "height": 900
+   },
+   "primary": "[data-merge-form] button",
+   "box": {
+    "x": 991,
+    "width": 66,
+    "height": 44
+   },
+   "overflow": 0
+  },
+  {
+   "file": "phone-ready-to-merge.png",
+   "viewport": {
+    "width": 390,
+    "height": 844
+   },
+   "primary": "[data-merge-form] button",
+   "box": {
+    "x": 35,
+    "width": 320,
+    "height": 44
+   },
+   "overflow": 0
+  },
+  {
+   "file": "phone-merge-needs-password.png",
+   "viewport": {
+    "width": 390,
+    "height": 844
+   },
+   "primary": "[data-merge-form] button",
+   "box": {
+    "x": 35,
+    "width": 320,
+    "height": 44
+   },
+   "overflow": 0
+  },
+  {
+   "file": "phone-merged.png",
+   "viewport": {
+    "width": 390,
+    "height": 844
+   },
+   "primary": "[data-pull-request=\"merged\"]",
+   "box": {
+    "x": 16,
+    "width": 358,
+    "height": 128
+   },
+   "overflow": 0
+  },
+  {
+   "file": "desktop-merged.png",
+   "viewport": {
+    "width": 1440,
+    "height": 900
+   },
+   "primary": "[data-pull-request=\"merged\"]",
+   "box": {
+    "x": 252,
+    "width": 824,
+    "height": 128
+   },
+   "overflow": 0
+  },
+  {
+   "file": "desktop-settings-turn-on.png",
+   "viewport": {
+    "width": 1440,
+    "height": 900
+   },
+   "primary": ".pr-settings button",
+   "box": {
+    "x": 271,
+    "width": 159,
+    "height": 44
+   },
+   "overflow": 0
+  },
+  {
+   "file": "phone-settings-turn-on.png",
+   "viewport": {
+    "width": 390,
+    "height": 844
+   },
+   "primary": ".pr-settings button",
+   "box": {
+    "x": 35,
+    "width": 320,
+    "height": 44
+   },
+   "overflow": 0
+  }
+ ]
+}
