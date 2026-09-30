@@ -11,8 +11,8 @@ Queue the work, approve the exact terms once, and come back to results that
 prove themselves — interrupted only for decisions that need a person.
 
 [![CI](https://github.com/ap9000/toolroll/actions/workflows/ci.yml/badge.svg)](https://github.com/ap9000/toolroll/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/toolroll?color=c0267e)](https://www.npmjs.com/package/toolroll)
-[![Homebrew](https://img.shields.io/badge/homebrew-ap9000%2Ftoolroll-c0267e)](https://github.com/ap9000/homebrew-toolroll)
+[![npm](https://img.shields.io/npm/v/toolroll?color=171717)](https://www.npmjs.com/package/toolroll)
+[![Homebrew](https://img.shields.io/badge/homebrew-ap9000%2Ftoolroll-171717)](https://github.com/ap9000/homebrew-toolroll)
 ![node](https://img.shields.io/badge/node-%E2%89%A5%2022.13-171717)
 [![license](https://img.shields.io/badge/license-MIT-171717)](LICENSE)
 

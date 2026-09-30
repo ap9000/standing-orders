@@ -1,7 +1,7 @@
 /* Toolroll workspace, "Signal" (2026-09-27): a neutral frame the
    sidebar sits on, with the work on paper sheets inset into it (Arc's
    window, Linear's canvas), at Raycast's compact density. Ink is every act
-   a person can take; magenta is only what waits on a person, plus focus and
+   a person can take; the accent (ink by default; a person can pick a colour) is only what waits on a person, plus focus and
    selection. Geist for words, Geist Mono for machine facts. */
 :root {
   /* Colors come from the shared palette (THEME_LIGHT / THEME_DARK in serve.ts). */

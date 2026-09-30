@@ -1,7 +1,10 @@
 /**
  * The accent a person can choose (Settings → Appearance): the signal colour
  * that marks what waits on a person. Any colour from the picker, with
- * Pantone's Colours of the Year as presets; chart magenta stays the default.
+ * Pantone's Colours of the Year as presets. The default is ink — no hue, like Vercel, Linear and GitHub:
+ * the page is black, white and grey, and colour is left to status (building, complete, warning, danger).
+ * Chart magenta (the default until 2026-09-30) and violet stay presets. The default's tokens are set by
+ * hand in serve.ts (ink and near-white), not derived: derivation would stop at a mid grey in dark.
  * A per-browser preference, like the theme: it lives in the person's
  * `so-accent` cookie (six hex digits) and never in the database.
  *
@@ -20,13 +23,15 @@
 export type AccentTokens = { signal: string; hover: string; on: string; soft: string; selection: string };
 export type AccentPreset = { id: string; name: string; year: number | null; hex: string };
 
-export const DEFAULT_ACCENT = "#c0267e";
+export const DEFAULT_ACCENT = "#171717";
 const PAPER_LIGHT = "#ffffff", FRAME_LIGHT = "#efefef", PAPER_DARK = "#161616", INK_DARK = "#0a0a0a";
 
-/** Chart magenta, then Pantone's colours of the year, newest first. The greys and whites (Sand Dollar 2006,
+/** Ink (the default), violet, chart magenta, then Pantone's colours of the year, newest first. The greys and whites (Sand Dollar 2006,
  * Ultimate Gray 2021, Cloud Dancer 2026) are left out: a grey can't mark what needs a person here. */
 export const ACCENT_PRESETS: AccentPreset[] = ([
-  [null, "Chart magenta", DEFAULT_ACCENT],
+  [null, "Ink", DEFAULT_ACCENT],
+  [null, "Violet", "#6e56cf"],
+  [null, "Chart magenta", "#c0267e"],
   [2025, "Mocha Mousse", "#a47864"], [2024, "Peach Fuzz", "#ffbe98"], [2023, "Viva Magenta", "#bb2649"],
   [2022, "Very Peri", "#6667ab"], [2021, "Illuminating", "#f5df4d"], [2020, "Classic Blue", "#0f4c81"],
   [2019, "Living Coral", "#ff6f61"], [2018, "Ultra Violet", "#5f4b8b"], [2017, "Greenery", "#88b04b"],

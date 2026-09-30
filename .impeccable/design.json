@@ -6,7 +6,7 @@
     "colorMeta": {
       "signal": {
         "role": "primary",
-        "displayName": "Chart Magenta",
+        "displayName": "Ink accent",
         "scheme": "light",
         "cssVar": "--so-signal",
         "tonalRamp": [
@@ -23,7 +23,7 @@
       },
       "signal-hover": {
         "role": "primary",
-        "displayName": "Chart Magenta, Pressed",
+        "displayName": "Ink accent, Pressed",
         "scheme": "light",
         "cssVar": "--so-signal-hover",
         "tonalRamp": [
@@ -40,7 +40,7 @@
       },
       "on-signal": {
         "role": "primary",
-        "displayName": "On Magenta",
+        "displayName": "On Accent",
         "scheme": "light",
         "cssVar": "--so-on-signal",
         "tonalRamp": [
@@ -57,7 +57,7 @@
       },
       "signal-soft": {
         "role": "primary",
-        "displayName": "Magenta Wash",
+        "displayName": "Accent Wash",
         "scheme": "light",
         "cssVar": "--so-signal-soft",
         "tonalRamp": [
@@ -465,7 +465,7 @@
       },
       "signal-dark": {
         "role": "primary",
-        "displayName": "Chart Magenta (dark)",
+        "displayName": "Ink accent (dark)",
         "scheme": "dark",
         "cssVar": "--so-signal",
         "tonalRamp": [
@@ -482,7 +482,7 @@
       },
       "signal-hover-dark": {
         "role": "primary",
-        "displayName": "Chart Magenta, Pressed (dark)",
+        "displayName": "Ink accent, Pressed (dark)",
         "scheme": "dark",
         "cssVar": "--so-signal-hover",
         "tonalRamp": [
@@ -499,7 +499,7 @@
       },
       "on-signal-dark": {
         "role": "primary",
-        "displayName": "On Magenta (dark)",
+        "displayName": "On Accent (dark)",
         "scheme": "dark",
         "cssVar": "--so-on-signal",
         "tonalRamp": [
@@ -516,7 +516,7 @@
       },
       "signal-soft-dark": {
         "role": "primary",
-        "displayName": "Magenta Wash (dark)",
+        "displayName": "Accent Wash (dark)",
         "scheme": "dark",
         "cssVar": "--so-signal-soft",
         "tonalRamp": [
@@ -994,7 +994,7 @@
       {
         "name": "focus-halo",
         "value": "0 0 0 3px var(--so-signal-soft)",
-        "purpose": "A focused field or the composer, with the border turned magenta."
+        "purpose": "A focused field or the composer, with the border turned accent."
       },
       {
         "name": "scrim",
@@ -1077,15 +1077,15 @@
       "refersTo": "button-primary",
       "description": "Ink fill: every ordinary act a person can take (New task, Mark complete).",
       "html": "<button class=\"ds-btn-primary\">Mark complete</button>",
-      "css": ".ds-btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 12px; border: 0; border-radius: 8px; font: 500 13px/1.2 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); white-space: nowrap; cursor: pointer; transition: background-color 120ms ease-out, color 120ms ease-out; background: var(--so-accent, #171717); color: var(--so-on-accent, #ffffff); } .ds-btn-primary:hover { background: var(--so-accent-hover, #383838); } .ds-btn-primary:focus-visible { outline: 2px solid var(--so-signal, #c0267e); outline-offset: 2px; } .ds-btn-primary:disabled { opacity: .5; cursor: not-allowed; }"
+      "css": ".ds-btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 12px; border: 0; border-radius: 8px; font: 500 13px/1.2 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); white-space: nowrap; cursor: pointer; transition: background-color 120ms ease-out, color 120ms ease-out; background: var(--so-accent, #171717); color: var(--so-on-accent, #ffffff); } .ds-btn-primary:hover { background: var(--so-accent-hover, #383838); } .ds-btn-primary:focus-visible { outline: 2px solid var(--so-signal, #171717); outline-offset: 2px; } .ds-btn-primary:disabled { opacity: .5; cursor: not-allowed; }"
     },
     {
       "name": "Signal Button",
       "kind": "button",
       "refersTo": "button-signal",
-      "description": "The one magenta verb, only when the screen waits on the person.",
+      "description": "The one accent verb, only when the screen waits on the person.",
       "html": "<button class=\"ds-btn-signal\">Inspect the result <svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M5 12h14\"/><path d=\"m12 5 7 7-7 7\"/></svg></button>",
-      "css": ".ds-btn-signal { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 12px; border: 0; border-radius: 8px; font: 500 13px/1.2 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); white-space: nowrap; cursor: pointer; transition: background-color 120ms ease-out, color 120ms ease-out; background: var(--so-signal, #c0267e); color: var(--so-on-signal, #ffffff); } .ds-btn-signal:hover { background: var(--so-signal-hover, #a81f6d); } .ds-btn-signal:focus-visible { outline: 2px solid var(--so-signal, #c0267e); outline-offset: 2px; }"
+      "css": ".ds-btn-signal { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 12px; border: 0; border-radius: 8px; font: 500 13px/1.2 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); white-space: nowrap; cursor: pointer; transition: background-color 120ms ease-out, color 120ms ease-out; background: var(--so-signal, #171717); color: var(--so-on-signal, #ffffff); } .ds-btn-signal:hover { background: var(--so-signal-hover, #383838); } .ds-btn-signal:focus-visible { outline: 2px solid var(--so-signal, #171717); outline-offset: 2px; }"
     },
     {
       "name": "Outline Button",
@@ -1093,7 +1093,7 @@
       "refersTo": "button-outline",
       "description": "A paper pill: row actions, page tools and secondary choices.",
       "html": "<button class=\"ds-btn-outline\">Review plan <svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M5 12h14\"/><path d=\"m12 5 7 7-7 7\"/></svg></button>",
-      "css": ".ds-btn-outline { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 12px; border: 0; border-radius: 8px; font: 500 13px/1.2 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); white-space: nowrap; cursor: pointer; transition: background-color 120ms ease-out, color 120ms ease-out; height: 28px; padding: 0 10px; font-size: 12.5px; background: var(--so-paper, #ffffff); color: var(--so-ink, #171717); box-shadow: var(--so-pill-shadow, 0 0 0 1px rgb(0 0 0 / .06), 0 1px 2px rgb(0 0 0 / .06)); } .ds-btn-outline:hover { background: var(--so-soft, #f2f2f2); } .ds-btn-outline:focus-visible { outline: 2px solid var(--so-signal, #c0267e); outline-offset: 2px; }"
+      "css": ".ds-btn-outline { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 12px; border: 0; border-radius: 8px; font: 500 13px/1.2 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); white-space: nowrap; cursor: pointer; transition: background-color 120ms ease-out, color 120ms ease-out; height: 28px; padding: 0 10px; font-size: 12.5px; background: var(--so-paper, #ffffff); color: var(--so-ink, #171717); box-shadow: var(--so-pill-shadow, 0 0 0 1px rgb(0 0 0 / .06), 0 1px 2px rgb(0 0 0 / .06)); } .ds-btn-outline:hover { background: var(--so-soft, #f2f2f2); } .ds-btn-outline:focus-visible { outline: 2px solid var(--so-signal, #171717); outline-offset: 2px; }"
     },
     {
       "name": "Ghost Button",
@@ -1101,39 +1101,39 @@
       "refersTo": "button-ghost",
       "description": "Muted text on nothing: toolbars and quiet links; vermilion text for a remove act far from the primary.",
       "html": "<button class=\"ds-btn-ghost\">Knowledge</button> <button class=\"ds-btn-ghost ds-btn-ghost--danger\">Remove</button>",
-      "css": ".ds-btn-ghost { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 12px; border: 0; border-radius: 8px; font: 500 13px/1.2 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); white-space: nowrap; cursor: pointer; transition: background-color 120ms ease-out, color 120ms ease-out; background: transparent; color: var(--so-muted, #666666); } .ds-btn-ghost:hover { background: var(--so-soft, #f2f2f2); color: var(--so-ink, #171717); } .ds-btn-ghost--danger, .ds-btn-ghost--danger:hover { color: var(--so-danger, #c4320a); } .ds-btn-ghost:focus-visible { outline: 2px solid var(--so-signal, #c0267e); outline-offset: 2px; }"
+      "css": ".ds-btn-ghost { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 12px; border: 0; border-radius: 8px; font: 500 13px/1.2 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); white-space: nowrap; cursor: pointer; transition: background-color 120ms ease-out, color 120ms ease-out; background: transparent; color: var(--so-muted, #666666); } .ds-btn-ghost:hover { background: var(--so-soft, #f2f2f2); color: var(--so-ink, #171717); } .ds-btn-ghost--danger, .ds-btn-ghost--danger:hover { color: var(--so-danger, #c4320a); } .ds-btn-ghost:focus-visible { outline: 2px solid var(--so-signal, #171717); outline-offset: 2px; }"
     },
     {
       "name": "Text Field",
       "kind": "input",
       "refersTo": "input",
-      "description": "Paper field, control-line border, magenta border and wash halo on focus.",
+      "description": "Paper field, control-line border, accent border and wash halo on focus.",
       "html": "<label class=\"ds-label\" for=\"ds-field\">Project name</label><input id=\"ds-field\" class=\"ds-input\" placeholder=\"web-console\">",
-      "css": ".ds-label { display: block; font: 500 12px/1.5 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); color: var(--so-ink, #171717); margin-bottom: 6px; } .ds-input { width: 100%; height: 32px; padding: 0 10px; border: 1px solid var(--so-input-line, #d4d4d4); border-radius: 8px; background: var(--so-paper, #ffffff); color: var(--so-ink, #171717); font: 400 13px/1.5 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); caret-color: var(--so-signal, #c0267e); transition: border-color 120ms ease-out, box-shadow 120ms ease-out; } .ds-input::placeholder { color: var(--so-muted, #666666); } .ds-input:hover { border-color: var(--so-muted, #666666); } .ds-input:focus-visible { outline: 0; border-color: var(--so-signal, #c0267e); box-shadow: 0 0 0 3px var(--so-signal-soft, #fbeaf3); }"
+      "css": ".ds-label { display: block; font: 500 12px/1.5 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); color: var(--so-ink, #171717); margin-bottom: 6px; } .ds-input { width: 100%; height: 32px; padding: 0 10px; border: 1px solid var(--so-input-line, #d4d4d4); border-radius: 8px; background: var(--so-paper, #ffffff); color: var(--so-ink, #171717); font: 400 13px/1.5 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); caret-color: var(--so-signal, #171717); transition: border-color 120ms ease-out, box-shadow 120ms ease-out; } .ds-input::placeholder { color: var(--so-muted, #666666); } .ds-input:hover { border-color: var(--so-muted, #666666); } .ds-input:focus-visible { outline: 0; border-color: var(--so-signal, #171717); box-shadow: 0 0 0 3px var(--so-signal-soft, #e8e8e8); }"
     },
     {
       "name": "Status Badges",
       "kind": "chip",
       "refersTo": "badge-neutral",
-      "description": "Soft-fill status words; magenta only for a wait, vermilion for failure.",
+      "description": "Soft-fill status words; accent only for a wait, vermilion for failure.",
       "html": "<span class=\"ds-badge ds-badge--attention\">Needs your decision</span> <span class=\"ds-badge\">Queued</span> <span class=\"ds-badge ds-badge--info\">Running</span> <span class=\"ds-badge ds-badge--success\">Ready</span> <span class=\"ds-badge ds-badge--warning\">Failing</span> <span class=\"ds-badge ds-badge--danger\">Failed</span>",
-      "css": ".ds-badge { display: inline-flex; align-items: center; gap: 4px; border-radius: 5px; padding: 1px 6px; font: 500 11.5px/18px var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); white-space: nowrap; background: var(--so-neutral-soft, #f0f0f0); color: var(--so-neutral-ink, #525252); } .ds-badge--attention { background: var(--so-signal-soft, #fbeaf3); color: var(--so-signal, #c0267e); } .ds-badge--info { background: var(--so-info-soft, #e6f4fe); color: var(--so-info, #0d74ce); } .ds-badge--success { background: var(--so-success-soft, #e6f6eb); color: var(--so-success, #218358); } .ds-badge--warning { background: var(--so-warning-soft, #fff4d5); color: var(--so-warning, #ab6400); } .ds-badge--danger { background: var(--so-danger-soft, #feebe7); color: var(--so-danger, #c4320a); }"
+      "css": ".ds-badge { display: inline-flex; align-items: center; gap: 4px; border-radius: 5px; padding: 1px 6px; font: 500 11.5px/18px var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); white-space: nowrap; background: var(--so-neutral-soft, #f0f0f0); color: var(--so-neutral-ink, #525252); } .ds-badge--attention { background: var(--so-signal-soft, #e8e8e8); color: var(--so-signal, #171717); } .ds-badge--info { background: var(--so-info-soft, #e6f4fe); color: var(--so-info, #0d74ce); } .ds-badge--success { background: var(--so-success-soft, #e6f6eb); color: var(--so-success, #218358); } .ds-badge--warning { background: var(--so-warning-soft, #fff4d5); color: var(--so-warning, #ab6400); } .ds-badge--danger { background: var(--so-danger-soft, #feebe7); color: var(--so-danger, #c4320a); }"
     },
     {
       "name": "Sidebar Navigation",
       "kind": "nav",
       "refersTo": "nav-item",
-      "description": "Rows on the frame; the current page is a raised paper pill; the needs-you count is a magenta pill.",
+      "description": "Rows on the frame; the current page is a raised paper pill; the needs-you count is a accent pill.",
       "html": "<nav class=\"ds-nav\" aria-label=\"Workspace\"><a class=\"ds-nav-new\" href=\"#\">+ New task</a><a class=\"ds-nav-row\" href=\"#\">Chat</a><a class=\"ds-nav-row\" href=\"#\" aria-current=\"page\">Tasks<span class=\"ds-nav-count\">9</span></a><a class=\"ds-nav-row\" href=\"#\">Projects</a><a class=\"ds-nav-row\" href=\"#\">Settings</a></nav>",
-      "css": ".ds-nav { display: flex; flex-direction: column; gap: 1px; width: 216px; padding: 12px 10px; background: var(--so-ground, #efefef); font-family: var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); } .ds-nav-new { display: flex; align-items: center; justify-content: center; height: 32px; margin-bottom: 14px; border-radius: 8px; background: var(--so-accent, #171717); color: var(--so-on-accent, #ffffff); font: 500 13px/1 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); text-decoration: none; } .ds-nav-new:hover { background: var(--so-accent-hover, #383838); } .ds-nav-row { display: flex; align-items: center; gap: 10px; min-height: 32px; padding: 6px 8px; border-radius: 8px; color: var(--so-nav-ink, #525252); font: 500 13px/1.2 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); text-decoration: none; transition: background-color 120ms ease-out, color 120ms ease-out; } .ds-nav-row:hover { background: var(--so-nav-hover, #e4e4e4); color: var(--so-ink, #171717); } .ds-nav-row[aria-current=\"page\"] { background: var(--so-nav-current, #ffffff); color: var(--so-nav-current-ink, #171717); box-shadow: var(--so-pill-shadow, 0 0 0 1px rgb(0 0 0 / .06), 0 1px 2px rgb(0 0 0 / .06)); } .ds-nav-row:focus-visible, .ds-nav-new:focus-visible { outline: 2px solid var(--so-signal, #c0267e); outline-offset: 2px; } .ds-nav-count { margin-left: auto; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; display: inline-flex; align-items: center; justify-content: center; background: var(--so-signal, #c0267e); color: var(--so-on-signal, #ffffff); font: 500 11px/1 var(--font-mono, 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace); font-variant-numeric: tabular-nums; }"
+      "css": ".ds-nav { display: flex; flex-direction: column; gap: 1px; width: 216px; padding: 12px 10px; background: var(--so-ground, #efefef); font-family: var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); } .ds-nav-new { display: flex; align-items: center; justify-content: center; height: 32px; margin-bottom: 14px; border-radius: 8px; background: var(--so-accent, #171717); color: var(--so-on-accent, #ffffff); font: 500 13px/1 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); text-decoration: none; } .ds-nav-new:hover { background: var(--so-accent-hover, #383838); } .ds-nav-row { display: flex; align-items: center; gap: 10px; min-height: 32px; padding: 6px 8px; border-radius: 8px; color: var(--so-nav-ink, #525252); font: 500 13px/1.2 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); text-decoration: none; transition: background-color 120ms ease-out, color 120ms ease-out; } .ds-nav-row:hover { background: var(--so-nav-hover, #e4e4e4); color: var(--so-ink, #171717); } .ds-nav-row[aria-current=\"page\"] { background: var(--so-nav-current, #ffffff); color: var(--so-nav-current-ink, #171717); box-shadow: var(--so-pill-shadow, 0 0 0 1px rgb(0 0 0 / .06), 0 1px 2px rgb(0 0 0 / .06)); } .ds-nav-row:focus-visible, .ds-nav-new:focus-visible { outline: 2px solid var(--so-signal, #171717); outline-offset: 2px; } .ds-nav-count { margin-left: auto; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; display: inline-flex; align-items: center; justify-content: center; background: var(--so-signal, #171717); color: var(--so-on-signal, #ffffff); font: 500 11px/1 var(--font-mono, 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace); font-variant-numeric: tabular-nums; }"
     },
     {
       "name": "Segmented Tabs",
       "kind": "nav",
       "refersTo": "tabs-list",
-      "description": "Link tabs on a raised track; only the Needs you count turns magenta.",
+      "description": "Link tabs on a raised track; only the Needs you count turns accent.",
       "html": "<ul class=\"ds-tabs\"><li><a href=\"#\" aria-current=\"page\">All <span>11</span></a></li><li><a href=\"#\">Needs you <span class=\"ds-tabs-hot\">9</span></a></li><li><a href=\"#\">Running <span>1</span></a></li></ul>",
-      "css": ".ds-tabs { display: inline-flex; align-items: center; gap: 2px; height: 32px; margin: 0; padding: 2px; list-style: none; border-radius: 12px; background: var(--so-raised, #f5f5f5); font-family: var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); } .ds-tabs li { height: 100%; } .ds-tabs a { display: inline-flex; align-items: center; gap: 6px; height: 100%; padding: 0 10px; border-radius: 8px; color: var(--so-muted, #666666); font: 500 13px/1 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); text-decoration: none; transition: color 120ms ease-out; } .ds-tabs a:hover { color: var(--so-ink, #171717); } .ds-tabs a[aria-current=\"page\"] { background: var(--so-paper, #ffffff); color: var(--so-ink, #171717); box-shadow: var(--so-pill-shadow, 0 0 0 1px rgb(0 0 0 / .06), 0 1px 2px rgb(0 0 0 / .06)); } .ds-tabs a:focus-visible { outline: 2px solid var(--so-signal, #c0267e); outline-offset: 2px; } .ds-tabs span { min-width: 18px; padding: 0 6px; border-radius: 9px; text-align: center; font: 500 11px/18px var(--font-mono, 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace); font-variant-numeric: tabular-nums; } .ds-tabs .ds-tabs-hot { background: var(--so-signal, #c0267e); color: var(--so-on-signal, #ffffff); }"
+      "css": ".ds-tabs { display: inline-flex; align-items: center; gap: 2px; height: 32px; margin: 0; padding: 2px; list-style: none; border-radius: 12px; background: var(--so-raised, #f5f5f5); font-family: var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); } .ds-tabs li { height: 100%; } .ds-tabs a { display: inline-flex; align-items: center; gap: 6px; height: 100%; padding: 0 10px; border-radius: 8px; color: var(--so-muted, #666666); font: 500 13px/1 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); text-decoration: none; transition: color 120ms ease-out; } .ds-tabs a:hover { color: var(--so-ink, #171717); } .ds-tabs a[aria-current=\"page\"] { background: var(--so-paper, #ffffff); color: var(--so-ink, #171717); box-shadow: var(--so-pill-shadow, 0 0 0 1px rgb(0 0 0 / .06), 0 1px 2px rgb(0 0 0 / .06)); } .ds-tabs a:focus-visible { outline: 2px solid var(--so-signal, #171717); outline-offset: 2px; } .ds-tabs span { min-width: 18px; padding: 0 6px; border-radius: 9px; text-align: center; font: 500 11px/18px var(--font-mono, 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace); font-variant-numeric: tabular-nums; } .ds-tabs .ds-tabs-hot { background: var(--so-signal, #171717); color: var(--so-on-signal, #ffffff); }"
     },
     {
       "name": "Task Row",
@@ -1141,23 +1141,23 @@
       "refersTo": "task-row",
       "description": "Signature: title and meta, a status column shared by every row (subgrid), one outline action; rows between hairlines.",
       "html": "<ul class=\"ds-rows\"><li class=\"ds-row\"><div><a class=\"ds-row-title\" href=\"#\">Guard the payout limiter against concurrent settlement</a><p class=\"ds-row-meta\"><span>payments-api</span> · <span>4h ago</span></p></div><span class=\"ds-badge ds-badge--attention\">Needs your decision</span><a class=\"ds-btn-outline\" href=\"#\">Review plan <svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M5 12h14\"/><path d=\"m12 5 7 7-7 7\"/></svg></a></li><li class=\"ds-row\"><div><a class=\"ds-row-title\" href=\"#\">Rotate the request-log format to JSON lines</a><p class=\"ds-row-meta\"><span>web-console</span> · <span>30h ago</span></p></div><span class=\"ds-badge\">Queued</span><span></span></li></ul>",
-      "css": ".ds-rows { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--so-line, #e6e6e6); border-bottom: 1px solid var(--so-line, #e6e6e6); font-family: var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); } .ds-row { display: grid; grid-template-columns: minmax(0, 1fr) 11rem auto; align-items: center; column-gap: 16px; padding: 12px 8px; transition: background-color 120ms ease-out; } .ds-row + .ds-row { border-top: 1px solid var(--so-line, #e6e6e6); } .ds-row:hover { background: var(--so-raised, #f5f5f5); } .ds-row-title { display: block; color: var(--so-ink, #171717); font: 500 13.5px/1.375 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); text-decoration: none; } .ds-row-title:hover { text-decoration: underline; text-underline-offset: 4px; } .ds-row-meta { margin: 2px 0 0; color: var(--so-muted, #666666); font: 400 12.5px/1.5 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); } .ds-row .ds-badge { justify-self: start; display: inline-flex; border-radius: 5px; padding: 1px 6px; font: 500 11.5px/18px var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); background: var(--so-neutral-soft, #f0f0f0); color: var(--so-neutral-ink, #525252); } .ds-row .ds-badge--attention { background: var(--so-signal-soft, #fbeaf3); color: var(--so-signal, #c0267e); } .ds-row .ds-btn-outline { justify-self: end; display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: 8px; background: var(--so-paper, #ffffff); color: var(--so-ink, #171717); box-shadow: var(--so-pill-shadow, 0 0 0 1px rgb(0 0 0 / .06), 0 1px 2px rgb(0 0 0 / .06)); font: 500 12.5px/1 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); text-decoration: none; } .ds-row .ds-btn-outline:hover { background: var(--so-soft, #f2f2f2); }"
+      "css": ".ds-rows { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--so-line, #e6e6e6); border-bottom: 1px solid var(--so-line, #e6e6e6); font-family: var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); } .ds-row { display: grid; grid-template-columns: minmax(0, 1fr) 11rem auto; align-items: center; column-gap: 16px; padding: 12px 8px; transition: background-color 120ms ease-out; } .ds-row + .ds-row { border-top: 1px solid var(--so-line, #e6e6e6); } .ds-row:hover { background: var(--so-raised, #f5f5f5); } .ds-row-title { display: block; color: var(--so-ink, #171717); font: 500 13.5px/1.375 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); text-decoration: none; } .ds-row-title:hover { text-decoration: underline; text-underline-offset: 4px; } .ds-row-meta { margin: 2px 0 0; color: var(--so-muted, #666666); font: 400 12.5px/1.5 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); } .ds-row .ds-badge { justify-self: start; display: inline-flex; border-radius: 5px; padding: 1px 6px; font: 500 11.5px/18px var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); background: var(--so-neutral-soft, #f0f0f0); color: var(--so-neutral-ink, #525252); } .ds-row .ds-badge--attention { background: var(--so-signal-soft, #e8e8e8); color: var(--so-signal, #171717); } .ds-row .ds-btn-outline { justify-self: end; display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: 8px; background: var(--so-paper, #ffffff); color: var(--so-ink, #171717); box-shadow: var(--so-pill-shadow, 0 0 0 1px rgb(0 0 0 / .06), 0 1px 2px rgb(0 0 0 / .06)); font: 500 12.5px/1 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); text-decoration: none; } .ds-row .ds-btn-outline:hover { background: var(--so-soft, #f2f2f2); }"
     },
     {
       "name": "Status Card",
       "kind": "card",
       "refersTo": "card",
-      "description": "Signature: the state, one sentence, and the one action; neutral border, magenta verb only for a wait.",
+      "description": "Signature: the state, one sentence, and the one action; neutral border, accent verb only for a wait.",
       "html": "<section class=\"ds-status\" aria-label=\"Task status\"><div class=\"ds-status-main\"><h2><span class=\"ds-status-dot\"></span>Needs your decision</h2><p>The remaining requirements need a person's inspection.</p></div><a class=\"ds-status-act\" href=\"#\">Inspect the result <svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M5 12h14\"/><path d=\"m12 5 7 7-7 7\"/></svg></a><p class=\"ds-status-note\">Criterion c1 needs manual-review evidence before this can verify.</p></section>",
-      "css": ".ds-status { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; padding: 20px; border: 1px solid var(--so-line, #e6e6e6); border-radius: 10px; background: var(--so-paper, #ffffff); color: var(--so-ink, #171717); font-family: var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); } .ds-status-main { flex: 1 1 16rem; min-width: 0; } .ds-status h2 { display: flex; align-items: center; gap: 10px; margin: 0; font: 600 18px/1.375 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); } .ds-status-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--so-signal, #c0267e); flex-shrink: 0; } .ds-status-main p { margin: 6px 0 0; color: var(--so-muted, #666666); font: 400 14px/1.5 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); } .ds-status-act { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; border-radius: 8px; background: var(--so-signal, #c0267e); color: var(--so-on-signal, #ffffff); font: 500 13px/1 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); text-decoration: none; transition: background-color 120ms ease-out; } .ds-status-act:hover { background: var(--so-signal-hover, #a81f6d); } .ds-status-act:focus-visible { outline: 2px solid var(--so-signal, #c0267e); outline-offset: 2px; } .ds-status-note { flex-basis: 100%; margin: 0; padding: 8px 12px; border-radius: 8px; background: var(--so-raised, #f5f5f5); color: var(--so-ink, #171717); font: 400 13px/1.5 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); }"
+      "css": ".ds-status { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; padding: 20px; border: 1px solid var(--so-line, #e6e6e6); border-radius: 10px; background: var(--so-paper, #ffffff); color: var(--so-ink, #171717); font-family: var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); } .ds-status-main { flex: 1 1 16rem; min-width: 0; } .ds-status h2 { display: flex; align-items: center; gap: 10px; margin: 0; font: 600 18px/1.375 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); } .ds-status-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--so-signal, #171717); flex-shrink: 0; } .ds-status-main p { margin: 6px 0 0; color: var(--so-muted, #666666); font: 400 14px/1.5 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); } .ds-status-act { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; border-radius: 8px; background: var(--so-signal, #171717); color: var(--so-on-signal, #ffffff); font: 500 13px/1 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); text-decoration: none; transition: background-color 120ms ease-out; } .ds-status-act:hover { background: var(--so-signal-hover, #383838); } .ds-status-act:focus-visible { outline: 2px solid var(--so-signal, #171717); outline-offset: 2px; } .ds-status-note { flex-basis: 100%; margin: 0; padding: 8px 12px; border-radius: 8px; background: var(--so-raised, #f5f5f5); color: var(--so-ink, #171717); font: 400 13px/1.5 var(--font-sans, 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif); }"
     }
   ],
   "narrative": {
     "northStar": "The Chart Light",
-    "overview": "A nautical chart is printed in quiet greys and black, and the few things a navigator must act on (lights, cautions) are printed in magenta. Signal works the same way. Standing Orders is a control plane for unattended coding agents, and most of what it shows needs nobody: builds running, results filed, queues moving. That material is grey and black on paper. The one colour on the screen is chart magenta, and it appears only where a person is needed: the needs-you count, the badge on a waiting task, and the one verb that settles it. A person should be able to glance at the screen, see the magenta, open the one thing that needs them, act, and leave.\n\nThe surface is the Raycast and Arc canon, played straight. A neutral grey frame holds the sidebar directly, and the work sits on white paper sheets inset 8px into that frame: the main sheet, and beside it the Crew sheet. Density is Raycast-compact, with 13px rows and 32px controls at a desk. Depth comes from the contrast between frame and paper, one soft sheet shadow, and 1px hairlines inside the sheets. Words are set in Geist and machine facts in Geist Mono. Every act a person can take is ink: a black button in light mode, a near-white one in dark.\n\nThe system rejects the dashboard default. Status does not get coloured everywhere, buttons do not all get an accent, and there is no glass, no gradients and no blur. The four status hues (vermilion, amber, blue, green) exist, but they speak quietly through soft badges and small dots. Magenta never means \"failed\".",
+    "overview": "A nautical chart is printed in quiet greys and black, and the few things a navigator must act on (lights, cautions) are printed in accent. Signal works the same way. Standing Orders is a control plane for unattended coding agents, and most of what it shows needs nobody: builds running, results filed, queues moving. That material is grey and black on paper. The one colour on the screen is the ink accent, and it appears only where a person is needed: the needs-you count, the badge on a waiting task, and the one verb that settles it. A person should be able to glance at the screen, see the accent, open the one thing that needs them, act, and leave.\n\nThe surface is the Raycast and Arc canon, played straight. A neutral grey frame holds the sidebar directly, and the work sits on white paper sheets inset 8px into that frame: the main sheet, and beside it the Crew sheet. Density is Raycast-compact, with 13px rows and 32px controls at a desk. Depth comes from the contrast between frame and paper, one soft sheet shadow, and 1px hairlines inside the sheets. Words are set in Geist and machine facts in Geist Mono. Every act a person can take is ink: a black button in light mode, a near-white one in dark.\n\nThe system rejects the dashboard default. Status does not get coloured everywhere, buttons do not all get an accent, and there is no glass, no gradients and no blur. The four status hues (vermilion, amber, blue, green) exist, but they speak quietly through soft badges and small dots. Accent never means \"failed\".",
     "keyCharacteristics": [
       "Grey frame, paper sheets, 8px inset and 12px sheet corners; the sidebar sits on the frame, not on a sheet.",
-      "Ink is the colour of every act; chart magenta is kept for \"a person is needed\", plus focus, caret and selection.",
+      "Ink is the colour of every act; the ink accent is kept for \"a person is needed\", plus focus, caret and selection.",
       "Geist for words, Geist Mono only for machine facts (ids, counts, seals, paths, shortcut keys).",
       "Compact desk density (13px body, 32px controls, 52px sheet headers) that becomes 44px touch targets on phones.",
       "Flat and hairline-first: one soft sheet shadow, a smaller pill shadow for the raised current item, a deeper one only for floating menus and dialogs.",
@@ -1166,22 +1166,22 @@
     "rules": [
       {
         "name": "The One Signal Rule",
-        "body": "Chart magenta means that a person is needed, and nothing else. Its only other jobs are focus, caret, selection and the brand mark. A screen that waits on nobody shows no magenta beyond the brand mark.",
+        "body": "The ink accent means that a person is needed, and nothing else. Its only other jobs are focus, caret, selection and the brand mark. A screen that waits on nobody shows no accent beyond the brand mark.",
         "section": "colors"
       },
       {
         "name": "The Ink Acts Rule",
-        "body": "Every act a person can take is ink (primary) or a paper pill (outline). The magenta verb is the exception. There is at most one per screen or card, and only when that screen waits on the person.",
+        "body": "Every act a person can take is ink (primary) or a paper pill (outline). The accent verb is the exception. There is at most one per screen or card, and only when that screen waits on the person.",
         "section": "colors"
       },
       {
         "name": "The Quiet List Rule",
-        "body": "In a list, the colour goes on the status badge and the row's action stays an outline button. Nine magenta buttons in a list would shout.",
+        "body": "In a list, the colour goes on the status badge and the row's action stays an outline button. Nine accent buttons in a list would shout.",
         "section": "colors"
       },
       {
         "name": "The Status Keeps Its Hue Rule",
-        "body": "Failure is vermilion, setup trouble is amber, live is blue, and done is green. Magenta is never a failure, a warning, or a card border. A problem line inside a card that has not failed is neutral (raised fill, ink text), not red.",
+        "body": "Failure is vermilion, setup trouble is amber, live is blue, and done is green. Accent is never a failure, a warning, or a card border. A problem line inside a card that has not failed is neutral (raised fill, ink text), not red.",
         "section": "colors"
       },
       {
@@ -1206,7 +1206,7 @@
       }
     ],
     "dos": [
-      "**Do** keep chart magenta for what waits on a person: the needs-you count, an attention badge, and the one verb that resolves the wait, plus focus, caret, selection and the brand mark.",
+      "**Do** keep the ink accent for what waits on a person: the needs-you count, an attention badge, and the one verb that resolves the wait, plus focus, caret, selection and the brand mark.",
       "**Do** make every other act ink (primary) or a paper pill (outline). In lists, rows' actions are outline buttons and the badge carries the colour.",
       "**Do** put work on paper sheets (12px corners, sheet shadow) inset 8px into frame grey, with the sidebar directly on the frame.",
       "**Do** separate with 1px hairlines inside a sheet. Lists sit between hairlines and facts sit under one, without being boxed in cards.",
@@ -1219,9 +1219,9 @@
       "**Do** keep motion to 120ms colour transitions and an 80ms / 140ms page fade-through, and remove all of it under `prefers-reduced-motion`."
     ],
     "donts": [
-      "**Don't** colour a card's border or a heading magenta to announce a wait. The badge and the single magenta verb already say it. (The flow canvas's decision cards still carry a magenta outline. That is a known divergence, not the rule.)",
-      "**Don't** put more than one magenta verb on a screen or card, and don't make a recommended option magenta. A recommendation is not urgency.",
-      "**Don't** use magenta, or any hue near it, for failure. Failure is vermilion.",
+      "**Don't** colour a card's border or a heading accent to announce a wait. The badge and the single accent verb already say it. (The flow canvas's decision cards still carry a accent outline. That is a known divergence, not the rule.)",
+      "**Don't** put more than one accent verb on a screen or card, and don't make a recommended option accent. A recommendation is not urgency.",
+      "**Don't** use accent, or any hue near it, for failure. Failure is vermilion.",
       "**Don't** colour a problem line red inside a card that has not failed. Render it neutral (raised fill, ink text).",
       "**Don't** use glass, backdrop blur or gradients, or a shadow on a card inside a sheet.",
       "**Don't** set headings, labels or status words in Geist Mono, and don't use uppercase, letter-spaced labels.",

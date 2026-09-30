@@ -12,7 +12,8 @@ const reads = (hex: string) => {
 };
 
 test("every preset, and any colour off the picker, resolves to readable tokens in both schemes", () => {
-  expect(ACCENT_PRESETS[0]).toMatchObject({ id: "chart-magenta", year: null, hex: DEFAULT_ACCENT });
+  expect(ACCENT_PRESETS[0]).toMatchObject({ id: "ink", year: null, hex: DEFAULT_ACCENT });
+  expect(ACCENT_PRESETS.slice(1, 3).map(one => one.id)).toEqual(["violet", "chart-magenta"]);
   for (const one of ACCENT_PRESETS) reads(one.hex);
   // Corners of the picker: white, black, pure primaries, a mid grey.
   for (const hex of ["#ffffff", "#000000", "#ff0000", "#00ff00", "#0000ff", "#ffff00", "#00ffff", "#808080"]) reads(hex);

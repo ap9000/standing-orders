@@ -6701,7 +6701,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const accentField = body.get("accent");
       if (accentField !== null) {
         const accent = normalHex(accentField);
-        if (accent === null) return refuse(response, who, 400, "Choose a colour as six hex digits, like #c0267e.", "/settings");
+        if (accent === null) return refuse(response, who, 400, "Choose a colour as six hex digits, like #6e56cf.", "/settings");
         response.setHeader("Set-Cookie", accent === DEFAULT_ACCENT
           ? "so-accent=; SameSite=Lax; Path=/; Max-Age=0"
           : `so-accent=${accent.slice(1)}; SameSite=Lax; Path=/; Max-Age=31536000`);
@@ -10605,7 +10605,7 @@ function page(response: ServerResponse, status: number, html: string, nonce?: st
  * can start a sign-in and have someone else finish it into their project.
  */
 /** A moment's page on the way to or back from another site's sign-in: no stylesheet may load there, so the palette rides inline. */
-const HANDOFF_STYLE = `<style>body{font:15px/1.5 "Geist",system-ui,sans-serif;margin:2rem;background:#efefef;color:#171717}a{color:#171717;text-decoration-color:#c0267e;text-underline-offset:3px}@media(prefers-color-scheme:dark){body{background:#0b0b0b;color:#ededed}a{color:#ededed;text-decoration-color:#ff6fb5}}</style>`;
+const HANDOFF_STYLE = `<style>body{font:15px/1.5 "Geist",system-ui,sans-serif;margin:2rem;background:#efefef;color:#171717}a{color:#171717;text-decoration-color:#8f8f8f;text-underline-offset:3px}@media(prefers-color-scheme:dark){body{background:#0b0b0b;color:#ededed}a{color:#ededed;text-decoration-color:#ff6fb5}}</style>`;
 const SIGN_IN_COOKIE = "so-sign-in";
 function startedHere(request: IncomingMessage, state: string): boolean {
   const held = new RegExp(`(?:^|;\\s*)${SIGN_IN_COOKIE}=([A-Za-z0-9_-]{16,128})`).exec(request.headers.cookie ?? "")?.[1];
@@ -11343,7 +11343,7 @@ const THEME_LIGHT = `
     --so-ink: #171717; --so-muted: #666666; --so-line: #e6e6e6; --so-input-line: #d4d4d4;
     --so-accent: #171717; --so-accent-hover: #383838; --so-accent-text: #171717; --so-on-accent: #ffffff; --so-soft: #f2f2f2;
     --so-nav-ink: #525252; --so-nav-hover: #e4e4e4; --so-nav-current: #ffffff; --so-nav-current-ink: #171717;
-    --so-signal: #c0267e; --so-signal-hover: #a81f6d; --so-on-signal: #ffffff; --so-signal-soft: #fbeaf3;
+    --so-signal: #171717; --so-signal-hover: #383838; --so-on-signal: #ffffff; --so-signal-soft: #e8e8e8;
     --so-danger: #c4320a; --so-danger-soft: #feebe7; --so-success: #218358; --so-success-soft: #e6f6eb;
     --so-warning: #ab6400; --so-warning-soft: #fff4d5; --so-info: #0d74ce; --so-info-soft: #e6f4fe;
     --so-neutral-ink: #525252; --so-neutral-soft: #f0f0f0; --so-live: #0d74ce;
@@ -11351,13 +11351,13 @@ const THEME_LIGHT = `
     --so-sheet-shadow: 0 0 0 1px rgb(0 0 0 / .06), 0 1px 2px rgb(0 0 0 / .04), 0 4px 12px -6px rgb(0 0 0 / .06);
     --so-pill-shadow: 0 0 0 1px rgb(0 0 0 / .06), 0 1px 2px rgb(0 0 0 / .06);
     --so-overlay: rgb(0 0 0 / .32); --so-shadow-overlay: 0 0 0 1px rgb(0 0 0 / .08), 0 24px 48px -12px rgb(0 0 0 / .22);
-    --so-selection: #f6d3e6; --so-scroll: #cfcfcf; --so-code-bg: #fafafa; --so-user-bubble: #f2f2f2;`;
+    --so-selection: #d4d4d4; --so-scroll: #cfcfcf; --so-code-bg: #fafafa; --so-user-bubble: #f2f2f2;`;
 const THEME_DARK = `
     --so-ground: #0b0b0b; --so-paper: #161616; --so-sidebar: #0b0b0b; --so-raised: #1c1c1c;
     --so-ink: #ededed; --so-muted: #a1a1a1; --so-line: #262626; --so-input-line: #363636;
     --so-accent: #ededed; --so-accent-hover: #ffffff; --so-accent-text: #ededed; --so-on-accent: #0a0a0a; --so-soft: #1f1f1f;
     --so-nav-ink: #a1a1a1; --so-nav-hover: #171717; --so-nav-current: #1f1f1f; --so-nav-current-ink: #ededed;
-    --so-signal: #ff6fb5; --so-signal-hover: #ff8cc4; --so-on-signal: #0a0a0a; --so-signal-soft: rgb(255 111 181 / .13);
+    --so-signal: #ededed; --so-signal-hover: #ffffff; --so-on-signal: #0a0a0a; --so-signal-soft: #2e2e2e;
     --so-danger: #ff977d; --so-danger-soft: rgb(255 151 125 / .12); --so-success: #3dd68c; --so-success-soft: rgb(61 214 140 / .12);
     --so-warning: #ffca16; --so-warning-soft: rgb(255 202 22 / .12); --so-info: #70b8ff; --so-info-soft: rgb(112 184 255 / .12);
     --so-neutral-ink: #b4b4b4; --so-neutral-soft: #1f1f1f; --so-live: #70b8ff;
@@ -11365,7 +11365,7 @@ const THEME_DARK = `
     --so-sheet-shadow: 0 0 0 1px #262626, 0 1px 2px rgb(0 0 0 / .4);
     --so-pill-shadow: 0 0 0 1px #2a2a2a, 0 1px 2px rgb(0 0 0 / .5);
     --so-overlay: rgb(0 0 0 / .6); --so-shadow-overlay: 0 0 0 1px #2e2e2e, 0 24px 48px -12px rgb(0 0 0 / .7);
-    --so-selection: #4a2138; --so-scroll: #333333; --so-code-bg: #111111; --so-user-bubble: #202020;`;
+    --so-selection: #3a3a3a; --so-scroll: #333333; --so-code-bg: #111111; --so-user-bubble: #202020;`;
 /** The console's original token names, now views onto the palette. */
 const THEME_MAPPING = `
     --background: var(--so-ground); --foreground: var(--so-ink); --card: var(--so-paper);
@@ -11385,7 +11385,7 @@ const STYLE = `
 /* The Console — the design system, v4 "Signal" (2026-09-27). A neutral
    frame with paper sheets inset into it (Arc, Linear), compact Raycast
    density, Geist for words and Geist Mono for machine facts. Ink is every
-   act a person can take; chart magenta means "waits on you" and nothing
+   act a person can take; the accent (ink by default) means "waits on you" and nothing
    else; blue means live. Flat surfaces: hairlines and one soft sheet
    shadow, no glass. Zero dependencies, zero page JS beyond the nonce'd
    chrome layer. */
@@ -11608,7 +11608,7 @@ ${THEME_DARK}
 
   /* Buttons: secondary by default (paper + hairline); a form's one
      submit is primary (ink on paper, paper on ink); the approve act is
-     magenta; danger is red and outlined. 2.125rem at a desk, 2.75rem to a thumb. */
+     the accent; danger is red and outlined. 2.125rem at a desk, 2.75rem to a thumb. */
   button {
     font: 500 0.8125rem/1.4 var(--font-sans); cursor: pointer; border-radius: calc(var(--radius) - 3px);
     border: 1px solid var(--input); background: var(--card); color: var(--foreground);
@@ -14318,8 +14318,8 @@ export const SENSITIVE_INPUT = /<input\b[^>]*[\s"']type\s*=\s*["']?password/i;
 /** The design contract every page carries (impeccable direction, 2026-09-27). */
 const DESIGN_CONTRACT = `<!-- THESIS: a control plane that stays quiet until a person is needed; it refuses the dashboard default of coloured status everywhere and an accent on every button.
 OWN-WORLD: a neutral grey frame with paper sheets inset into it (Arc, Linear), Geist for words and Geist Mono for machine facts, ink for every act a person can take, one chart magenta only for what waits on a person plus focus and selection; hairlines and one soft sheet shadow, no glass, no gradients.
-STORY: glance, see the magenta count, open the one thing that needs you, act with the one magenta verb, leave.
-FIRST VIEWPORT: sidebar on the frame (magenta mark, ink New task, the current page as a raised pill, the magenta needs-you count); the main sheet with a 52px header over compact 13px rows; the Crew sheet beside it.
+STORY: glance, see the accent count, open the one thing that needs you, act with the one accent verb, leave.
+FIRST VIEWPORT: sidebar on the frame (accent mark, ink New task, the current page as a raised pill, the accent needs-you count); the main sheet with a 52px header over compact 13px rows; the Crew sheet beside it.
 FORM: the Raycast and Arc canon, user-pinned; seed 9c849086.
 FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md -->`;
 
