@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 440 112" role="img" aria-label="Toolroll">
-  <g transform="translate(122 22) skewY(-10) scale(2.4)" fill="#ff6fb5">
+  <g transform="translate(122 22) skewY(-10) scale(2.4)" fill="#ededed">
     <rect x="0" y="3" width="3" height="12" rx="1"/>
     <rect x="5.5" y="0" width="3" height="18" rx="1"/>
     <rect x="11" y="3" width="3" height="12" rx="1"/>

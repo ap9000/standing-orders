@@ -21,14 +21,14 @@ using it again.
 - **Ink is what you can do.** Every button, link and choice a person can take
   is ink: a black button in light, a near-white one in dark. Secondary acts
   are paper pills with a one-pixel shadow ring.
-- **Magenta means one thing.** Chart magenta (`--so-signal`, which
+- **Accent means one thing.** The ink accent (`--so-signal`, which
   `--so-attention` and the console's `--brand` point to) marks what waits on a
   person: the needs-you count, a "Needs your decision" badge, and the one act
   that resolves a screen (approve, answer, inspect the result). Its only other
   jobs are focus, the caret, selection and the brand mark. Cards, frames,
   seals, headings and list actions stay neutral; a list's actions are outline
   buttons and the badge carries the colour. A recommended option is never
-  magenta, and magenta never means failed.
+  accent, and accent never means failed.
 - **Status keeps its own hue.** Failure is vermilion, setup trouble is amber,
   live is blue, done is green, each as a soft badge or a small dot, and the
   word always carries the meaning.
@@ -56,7 +56,7 @@ The full list with light and dark values, contrast and roles is in
 | `--so-ink` | `#171717` | `#ededed` | text |
 | `--so-muted` | `#666666` | `#a1a1a1` | dim text (≥4.5:1 on paper and frame) |
 | `--so-accent` | `#171717` | `#ededed` | every act (ink, by design); console `--primary` |
-| `--so-signal` | `#c0267e` | `#ff6fb5` | waits on a person; focus (`--ring`), caret, selection; a person may pick any colour in Settings → Appearance, with Pantone's colours of the year as presets (`src/accent-colors.ts`) |
+| `--so-signal` | `#171717` | `#ededed` | waits on a person; focus (`--ring`), caret, selection; a person may pick any colour in Settings → Appearance, with Pantone's colours of the year as presets (`src/accent-colors.ts`) |
 | `--so-danger` | `#c4320a` | `#ff977d` | failed; the arm-to-cancel act |
 | `--so-warning` | `#ab6400` | `#ffca16` | setup trouble, caution |
 | `--so-info` | `#0d74ce` | `#70b8ff` | live (console `--running`) |
@@ -70,20 +70,20 @@ Light is the root; dark follows the device unless the person pins a theme
 
 Type: 13px/1.5 Geist for the workspace, 14px/1.7 for reading; page titles
 22–26px semibold with tight tracking; section headers 15px semibold ink.
-Controls: 32px at a desk (28px small), 44px to a thumb. Focus: a 2px magenta
-ring at 2px offset on buttons and links; a magenta border with a 3px wash on
+Controls: 32px at a desk (28px small), 44px to a thumb. Focus: a 2px accent
+ring at 2px offset on buttons and links; a accent border with a 3px wash on
 fields and the composer. Radii nest: sheet 12, card 10, control 8, badge 5.
 
 ## 3. Components and where they live
 
 | Component | Server page (CSS in `STYLE`) | Workspace (React) | Rule |
 |---|---|---|---|
-| Status chip | `.badge` + `.badge-open` (magenta: waits on you), `-parked` (neutral), `-running`, `-done`, `-failed`; `.count.badge-open` (the needs-you count) | `Badge` with `toneOf()` | sentence case, 11.5px, soft fill; one mapping so a task reads the same everywhere |
-| Attention card | `.decide-card`, `.lane-attention .lane-card`, `.workspace-card.hot` | status card in `task-view.tsx` | neutral border; the badge and the one magenta verb say "needs you" |
+| Status chip | `.badge` + `.badge-open` (accent: waits on you), `-parked` (neutral), `-running`, `-done`, `-failed`; `.count.badge-open` (the needs-you count) | `Badge` with `toneOf()` | sentence case, 11.5px, soft fill; one mapping so a task reads the same everywhere |
+| Attention card | `.decide-card`, `.lane-attention .lane-card`, `.workspace-card.hot` | status card in `task-view.tsx` | neutral border; the badge and the one accent verb say "needs you" |
 | Row | `.row` (hairline below, hover fill) | task rows in `tasks-view.tsx` (a subgrid shared by the list) | title · meta · badge · one outline action |
 | Facts | `.facts` (`.fact > .k + .v`) | task facts under a hairline | dim key, mono value for machine facts |
 | Seal | `.seal` | — | the signed digest, mono, boxed in the hairline |
-| Acceptance rubric | `acceptanceCeremonyHtml` (`<ul class="recap acceptance-rubric">`) | — | one line per signed criterion — mono id, sans statement, its required evidence kinds after it; restated text above the seal, never a second magenta action |
+| Acceptance rubric | `acceptanceCeremonyHtml` (`<ul class="recap acceptance-rubric">`) | — | one line per signed criterion — mono id, sans statement, its required evidence kinds after it; restated text above the seal, never a second accent action |
 | Criterion matrix | `.badge-manual-review` (+ `.badge-done`/`-failed`); `criterionMatrixHtml` / `criterionMatrixSummary` | — | one row per criterion — a state badge (pass/missing/failed/manual review), mono id, statement, required evidence, and the proof's answered evidence refs; the SAME states and words on every surface and in `task show` |
 | Review judgement | reuses `.badge-done`/`-failed`/`-manual-review`; `reviewJudgementBadge` | — | a second badge beside the matrix row's own; hover title carries the reviewer's author and note |
 | Context coverage (v51) | reuses `.badge`/`-manual-review`/`-failed`; `coverageBadge`, `data-context-coverage` | — | a third badge on a revision's matrix row only; a gap is never folded into the compact view |
@@ -91,8 +91,8 @@ fields and the composer. Radii nest: sheet 12, card 10, control 8, badge 5.
 | Diff review | `.diff-review`, `.diff-file`, `.diff-line`, `.diff-modes`, `.diff-annotate` | — | View is quiet and default, Annotate reveals exact line targets; annotations only become work through the separate revision act |
 | Repair chain card | `.card.repair-chain`; `repairChainHtml` | — | one card, one chain; the shared `passFraction` helper, never a hand-rolled "N/M criteria" |
 | Card | `.card` | `Card` | paper, 1px hairline, 10px radius, no shadow; never nested |
-| Buttons | `button` (secondary), `form.card > [type=submit]` (primary, ink), `.approve-form [type=submit]` (magenta), `.danger` | `Button` (`default` ink, `attention` magenta, `outline`, `ghost`, `destructive`) | one primary per form; approve is the only magenta verb |
-| Fields | `input`, `textarea`, `select` | `Input`, `Select` | paper, control line, magenta focus |
+| Buttons | `button` (secondary), `form.card > [type=submit]` (primary, ink), `.approve-form [type=submit]` (accent), `.danger` | `Button` (`default` ink, `attention` accent, `outline`, `ghost`, `destructive`) | one primary per form; approve is the only accent verb |
+| Fields | `input`, `textarea`, `select` | `Input`, `Select` | paper, control line, accent focus |
 | Section header | `h2` (+ `.lane-count` pill) | — | 15px semibold ink in the workspace |
 | Shell | `.side` and `.mobile-top` + `.tabbar` (legacy chrome, Bearer reads and the pre-script fallback only) | `.so-workspace` in `app.tsx` | see §5 |
 
@@ -118,7 +118,7 @@ top-down and every long thing folds.
    beneath it speaks the machine's own proof verdict (Priority 2) —
    *verified*, *evidence captured*, *missing evidence*, or *conflicting
    evidence* — never re-derived from the page. Accepting the latter two is
-   an explicit, neutral *accepted with exception* disclosure, not a magenta
+   an explicit, neutral *accepted with exception* disclosure, not a accent
    approval ceremony.
 3. **Acts bar** — every verb in one row; the act that resolves the task's
    state first and primary (retry on a stalled task, plan-first with no
@@ -127,7 +127,7 @@ top-down and every long thing folds.
    stays armed at the foot of the page, far from the primary.
 4. **What waits on you** — when a scope waits for its yes, the approval
    ceremony IS the first card under the title (the consent-sheet shape:
-   the wait stated, every bound term restated, the magenta approve act in the
+   the wait stated, every bound term restated, the accent approve act in the
    first screen, "edit instead →" beside the heading); the acts bar then
    follows it with no competing primary. A scope the store cannot route
    gets the problem and a primary "edit the scope to fix it" road instead
@@ -217,10 +217,10 @@ lands as a confirmable card.
 ## 5. The shell
 
 Every signed-in page renders in the React workspace (`[data-workspace-shell]`).
-At a desk the frame is grey and the sidebar sits directly on it: the magenta
+At a desk the frame is grey and the sidebar sits directly on it: the accent
 mark, the ink New task button, the project switch, then Chat · Tasks · Flows ·
 Projects · Knowledge · Settings with the current page as a raised paper pill
-and the magenta needs-you count on Tasks. The main sheet (52px header, page
+and the accent needs-you count on Tasks. The main sheet (52px header, page
 name, ⌘K search) and the Crew sheet sit inset 8px into the frame. Full-width
 pages (the Tasks list, board, queue, workbench, code, flows) drop the Crew
 sheet because the list already is the crew. A task, result or project with its

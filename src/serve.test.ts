@@ -8612,7 +8612,7 @@ describe("the phone shell (mobile pass): one header row, drawn controls, thumb-s
     // Not a colour: refused; a stale cookie: ignored; the default: clears the cookie.
     expect((await post("not-a-colour")).status).toBe(400);
     expect(await (await fetch(url("/inbox"), { headers: { cookie: `${cookie}; so-accent=not-a-colour` } })).text()).not.toContain("data-accent");
-    expect((await post("#c0267e")).headers.get("set-cookie")).toBe("so-accent=; SameSite=Lax; Path=/; Max-Age=0");
+    expect((await post("#171717")).headers.get("set-cookie")).toBe("so-accent=; SameSite=Lax; Path=/; Max-Age=0");
   });
 
   test("the header pill names the scope: project with counts when one is open, 'all projects' on the portfolio", async () => {

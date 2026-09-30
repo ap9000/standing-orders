@@ -1,12 +1,12 @@
 ---
 name: Signal
-description: "The Toolroll control plane: a neutral grey frame with paper sheets inset into it, ink for every act, and one chart magenta for what waits on a person."
+description: "The Toolroll control plane: a neutral grey frame with paper sheets inset into it, ink for every act, and an ink accent for what waits on a person; colour is kept for status."
 colors:
-  signal: "#c0267e"
-  signal-hover: "#a81f6d"
+  signal: "#171717"
+  signal-hover: "#383838"
   on-signal: "#ffffff"
-  signal-soft: "#fbeaf3"
-  selection: "#f6d3e6"
+  signal-soft: "#e8e8e8"
+  selection: "#d4d4d4"
   ground: "#efefef"
   paper: "#ffffff"
   raised: "#f5f5f5"
@@ -29,11 +29,11 @@ colors:
   success-soft: "#e6f6eb"
   info: "#0d74ce"
   info-soft: "#e6f4fe"
-  signal-dark: "#ff6fb5"
-  signal-hover-dark: "#ff8cc4"
+  signal-dark: "#ededed"
+  signal-hover-dark: "#ffffff"
   on-signal-dark: "#0a0a0a"
-  signal-soft-dark: "rgb(255 111 181 / .13)"
-  selection-dark: "#4a2138"
+  signal-soft-dark: "#2e2e2e"
+  selection-dark: "#3a3a3a"
   ground-dark: "#0b0b0b"
   paper-dark: "#161616"
   raised-dark: "#1c1c1c"
@@ -309,15 +309,15 @@ components:
 
 **Creative North Star: "The Chart Light"**
 
-A nautical chart is printed in quiet greys and black, and the few things a navigator must act on (lights, cautions) are printed in magenta. Signal works the same way. Toolroll is a control plane for unattended coding agents, and most of what it shows needs nobody: builds running, results filed, queues moving. That material is grey and black on paper. The one colour on the screen is chart magenta, and it appears only where a person is needed: the needs-you count, the badge on a waiting task, and the one verb that settles it. A person should be able to glance at the screen, see the magenta, open the one thing that needs them, act, and leave.
+Signal is printed in quiet greys and ink, the way Vercel, Linear and GitHub are: the interface is achromatic, and colour is kept for status (building, complete, warning, danger), where it carries meaning. Toolroll is a control plane for unattended coding agents, and most of what it shows needs nobody: builds running, results filed, queues moving. That material is grey and black on paper. What waits on a person is marked by ink weight, not a hue: the needs-you count is a solid ink pill, a waiting task's badge is a strong ink chip, and the one verb that settles it is the ink button. A person should be able to glance at the screen, see the solid ink, open the one thing that needs them, act, and leave. (Until 2026-09-30 this accent was chart magenta; it remains a preset.)
 
 The surface is the Raycast and Arc canon, played straight. A neutral grey frame holds the sidebar directly, and the work sits on white paper sheets inset 8px into that frame: the main sheet, and beside it the Crew sheet. Density is Raycast-compact, with 13px rows and 32px controls at a desk. Depth comes from the contrast between frame and paper, one soft sheet shadow, and 1px hairlines inside the sheets. Words are set in Geist and machine facts in Geist Mono. Every act a person can take is ink: a black button in light mode, a near-white one in dark.
 
-The system rejects the dashboard default. Status does not get coloured everywhere, buttons do not all get an accent, and there is no glass, no gradients and no blur. The four status hues (vermilion, amber, blue, green) exist, but they speak quietly through soft badges and small dots. Magenta never means "failed".
+The system rejects the dashboard default. Status does not get coloured everywhere, buttons do not all get an accent, and there is no glass, no gradients and no blur. The four status hues (vermilion, amber, blue, green) exist, but they speak quietly through soft badges and small dots. Accent never means "failed".
 
 **Key Characteristics:**
 - Grey frame, paper sheets, 8px inset and 12px sheet corners; the sidebar sits on the frame, not on a sheet.
-- Ink is the colour of every act; chart magenta is kept for "a person is needed", plus focus, caret and selection.
+- Ink is the colour of every act; the ink accent is kept for "a person is needed", plus focus, caret and selection.
 - Geist for words, Geist Mono only for machine facts (ids, counts, seals, paths, shortcut keys).
 - Compact desk density (13px body, 32px controls, 52px sheet headers) that becomes 44px touch targets on phones.
 - Flat and hairline-first: one soft sheet shadow, a smaller pill shadow for the raised current item, a deeper one only for floating menus and dialogs.
@@ -325,13 +325,13 @@ The system rejects the dashboard default. Status does not get coloured everywher
 
 ## Colors
 
-The palette is a true neutral grey ramp with one chart magenta and four quiet status hues. Every token has a light and a dark value. The frontmatter keys ending in `-dark` are the dark-scheme values of the same roles. They are defined once, in `THEME_LIGHT` / `THEME_DARK` in `src/serve.ts`, and every surface reads them: server pages, the React workspace, and the pre-script fallback.
+The palette is a true neutral grey ramp with one the ink accent and four quiet status hues. Every token has a light and a dark value. The frontmatter keys ending in `-dark` are the dark-scheme values of the same roles. They are defined once, in `THEME_LIGHT` / `THEME_DARK` in `src/serve.ts`, and every surface reads them: server pages, the React workspace, and the pre-script fallback.
 
 ### Primary
-- **Chart Magenta** (signal, #c0267e light / #ff6fb5 dark): the only accent, used for what waits on a person. It fills the sidebar's needs-you count, the "Needs you" tab count and the Results menu count. It is the text and soft fill of an attention badge ("Needs your decision"), and the fill of the one verb that resolves a waiting screen (Approve, Inspect the result, the result page's next act). It is also the focus ring, the text caret, the tinted fill of field focus halos, and the brand mark's three bars. Its hover is a deeper magenta (#a81f6d / #ff8cc4). Text on it is white in light mode and near-black (#0a0a0a) in dark.
-- **Magenta Wash** (signal-soft, #fbeaf3 / 13% magenta): the fill behind attention badge text and the 3px focus halo around a focused field or composer.
-- **Chart Selection** (selection, #f6d3e6 / #4a2138): text selection highlight, with ink text on it.
-- **A chosen accent** (Settings → Appearance, per browser in the `so-accent` cookie as six hex digits): a person may re-pigment the signal with any colour from a compact picker (a saturation and brightness plane, a hue slider and a hex field), with Pantone's colours of the year as preset dots (`src/accent-colors.ts`). Chart magenta stays the default. Each colour keeps its hue and gives up only lightness, and chroma where sRGB requires it, until it reads: in light its text passes 4.5:1 on its own wash, and in dark 6:1 on the dark paper. The page previews the colour live and prints the derived tokens in a `<style data-accent>` after the shared stylesheet once it is saved. A colour near grey or near a status hue is labelled as such. Only the signal tokens change; every rule about where the signal may appear stays the same.
+- **Ink accent** (signal, #171717 light / #ededed dark): the default accent, used for what waits on a person. It fills the sidebar's needs-you count, the "Needs you" tab count and the Results menu count. It is the text of an attention badge ("Needs your decision") on its grey wash, and the fill of the one verb that resolves a waiting screen (Approve, Inspect the result, the result page's next act). It is also focus, caret and selection.
+- **Ink wash** (signal-soft, #e8e8e8 / #2e2e2e): the fill behind attention badge text and the 3px focus halo around a focused field or composer — one step stronger than the neutral badge fill, so a waiting badge still reads first.
+- **Selection** (selection, #d4d4d4 / #3a3a3a): text selection highlight, with ink text on it.
+- **A chosen accent** (Settings → Appearance, per browser in the `so-accent` cookie as six hex digits): a person may re-pigment the signal with any colour from a compact picker (a saturation and brightness plane, a hue slider and a hex field), with Pantone's colours of the year as preset dots (`src/accent-colors.ts`). Ink is the default; violet and chart magenta are the first presets. Each colour keeps its hue and gives up only lightness, and chroma where sRGB requires it, until it reads: in light its text passes 4.5:1 on its own wash, and in dark 6:1 on the dark paper. The page previews the colour live and prints the derived tokens in a `<style data-accent>` after the shared stylesheet once it is saved. A colour near grey or near a status hue is labelled as such. Only the signal tokens change; every rule about where the signal may appear stays the same.
 
 ### Neutral
 - **Frame Grey** (ground, #efefef / #0b0b0b): the frame the sidebar sits on, and the page background of server pages. The browser `theme-color` matches it.
@@ -346,19 +346,19 @@ The palette is a true neutral grey ramp with one chart magenta and four quiet st
 - **Neutral Badge** (neutral-soft #f0f0f0 / #1f1f1f with neutral-ink #525252 / #b4b4b4): the badge for anything that is a fact and not a claim on the person, such as queued, running or built today in a project peek, or a count in a fold.
 
 ### Status
-- **Vermilion** (danger, #c4320a / #ff977d; soft #feebe7 / 12%): failure and irreversible acts. It is used on a failed status card's border (at 50%), on problem alerts inside a failed card, on the Cancel task fold, and on Remove / Delete ghost buttons. It sits deliberately off the magenta hue so a failure can never be read as "waits on you".
+- **Vermilion** (danger, #c4320a / #ff977d; soft #feebe7 / 12%): failure and irreversible acts. It is used on a failed status card's border (at 50%), on problem alerts inside a failed card, on the Cancel task fold, and on Remove / Delete ghost buttons. It sits deliberately off the accent hue so a failure can never be read as "waits on you".
 - **Amber** (warning, #ab6400 / #ffca16; soft #fff4d5 / 12%): setup trouble and caution. It covers a failing trigger, a secret not yet saved, "several are connected and none was chosen", a lost connection, the result page's list of things worth a look, and deferred notices.
 - **Live Blue** (info, #0d74ce / #70b8ff; soft #e6f4fe / 12%): something is running right now. It appears on the live dot, a scout badge, a version notice, and a run that is still in progress.
 - **Built Green** (success, #218358 / #3dd68c; soft #e6f6eb / 12%): done and passed, used for "Checks passed", "Open now" and a finished live step.
 
 ### Named Rules
-**The One Signal Rule.** Chart magenta means that a person is needed, and nothing else. Its only other jobs are focus, caret, selection and the brand mark. A screen that waits on nobody shows no magenta beyond the brand mark.
+**The One Signal Rule.** The accent (ink by default) in its solid or attention form means that a person is needed, and nothing else. Its only other jobs are focus, caret, selection and the brand mark. A screen that waits on nobody shows no solid accent beyond the brand mark. Status hues never stand in for it.
 
-**The Ink Acts Rule.** Every act a person can take is ink (primary) or a paper pill (outline). The magenta verb is the exception. There is at most one per screen or card, and only when that screen waits on the person.
+**The Ink Acts Rule.** Every act a person can take is ink (primary) or a paper pill (outline). The accent verb is the exception (with the ink default it looks like any ink button; a chosen colour makes it stand out). There is at most one per screen or card, and only when that screen waits on the person.
 
-**The Quiet List Rule.** In a list, the colour goes on the status badge and the row's action stays an outline button. Nine magenta buttons in a list would shout.
+**The Quiet List Rule.** In a list, the colour goes on the status badge and the row's action stays an outline button. Nine accent buttons in a list would shout.
 
-**The Status Keeps Its Hue Rule.** Failure is vermilion, setup trouble is amber, live is blue, and done is green. Magenta is never a failure, a warning, or a card border. A problem line inside a card that has not failed is neutral (raised fill, ink text), not red.
+**The Status Keeps Its Hue Rule.** Failure is vermilion, setup trouble is amber, live is blue, and done is green. Accent is never a failure, a warning, or a card border. A problem line inside a card that has not failed is neutral (raised fill, ink text), not red.
 
 ## Typography
 
@@ -389,7 +389,7 @@ Both families are self-hosted as latin woff2 at weights 400, 500 and 600 from `/
 
 ## Layout
 
-**The frame (desk, above 1150px).** Frame grey fills the viewport (100dvh, minimum 440px) with 8px padding on the top, right and bottom and none on the left, so the sidebar sits flush on the frame. It is a three-column grid with 8px gaps: the sidebar (216px), the main sheet (`minmax(0, 1fr)`), and the Crew sheet (320px). The first viewport reads, left to right: the magenta mark and wordmark, the ink New task button, the project switch, nav rows with the current page as a raised pill and the magenta needs-you count, then the main sheet with its 52px header over compact rows, and the Crew sheet beside it.
+**The frame (desk, above 1150px).** Frame grey fills the viewport (100dvh, minimum 440px) with 8px padding on the top, right and bottom and none on the left, so the sidebar sits flush on the frame. It is a three-column grid with 8px gaps: the sidebar (216px), the main sheet (`minmax(0, 1fr)`), and the Crew sheet (320px). The first viewport reads, left to right: the accent mark and wordmark, the ink New task button, the project switch, nav rows with the current page as a raised pill and the accent needs-you count, then the main sheet with its 52px header over compact rows, and the Crew sheet beside it.
 
 **Frame variants.**
 - *Detail:* a task opened beside the list uses 196px | `minmax(330px, 1fr)` | `minmax(400px, 1.12fr)`.
@@ -421,7 +421,7 @@ Signal is flat by construction. Depth comes from three layers of material rather
 - **Sheet** (`box-shadow: 0 0 0 1px rgb(0 0 0 / .06), 0 1px 2px rgb(0 0 0 / .04), 0 4px 12px -6px rgb(0 0 0 / .06)`; dark `0 0 0 1px #262626, 0 1px 2px rgb(0 0 0 / .4)`): the main sheet, the Crew sheet and the Ask sheet. Nothing else rests at this height.
 - **Pill** (`box-shadow: 0 0 0 1px rgb(0 0 0 / .06), 0 1px 2px rgb(0 0 0 / .06)`; dark `0 0 0 1px #2a2a2a, 0 1px 2px rgb(0 0 0 / .5)`): the current nav pill, the active segmented tab, outline buttons, the project switch and chat suggestions. These are paper pills on a grey track or frame.
 - **Overlay** (`box-shadow: 0 0 0 1px rgb(0 0 0 / .08), 0 24px 48px -12px rgb(0 0 0 / .22)`; dark `0 0 0 1px #2e2e2e, 0 24px 48px -12px rgb(0 0 0 / .7)`): dialogs, the command menu, dropdown menus, the slash menu and the scroll-to-latest button. Dialogs sit over a scrim of `rgb(0 0 0 / .32)` (`.6` in dark).
-- **Focus halo** (`box-shadow: 0 0 0 3px` magenta wash, with the border turned magenta): a focused field or the composer. Buttons and links take a 2px magenta outline at a 2px offset instead.
+- **Focus halo** (`box-shadow: 0 0 0 3px` ink wash, with the border turned accent): a focused field or the composer. Buttons and links take a 2px accent outline at a 2px offset instead.
 
 ### Named Rules
 **The Hairline First Rule.** Separate things with a 1px line before you reach for a shadow. A new surface inside a sheet gets a hairline or a raised fill and never its own shadow.
@@ -434,7 +434,7 @@ The corners nest: the further in a surface sits, the smaller its radius. Sheets,
 
 Borders are always 1px. Hairline is used for separation and cards, control line for field boundaries, and a status hue at reduced strength only on a failed card (vermilion at 50%) or the Cancel fold (vermilion at 30%). A coloured left stripe is never used as an accent. Callouts are a soft fill with a full hairline or no border at all.
 
-The brand mark is three 3.5px bars skewed −10°, with the middle bar taller (20px against 13px), filled in chart magenta. It sits beside a 13.5px / 600 wordmark with −0.02em tracking.
+The brand mark is three 3.5px bars skewed −10°, with the middle bar taller (20px against 13px), filled in the ink accent. It sits beside a 13.5px / 600 wordmark with −0.02em tracking.
 
 ## Components
 
@@ -442,58 +442,58 @@ The brand mark is three 3.5px bars skewed −10°, with the middle bar taller (2
 Quiet, compact, and ink by default. The colour is saved for the one verb that settles a wait.
 - **Shape:** gently rounded (8px). The label is 13px / 500 with a 14px icon on the trailing side for "go" acts (→).
 - **Primary:** ink fill with paper text (on-ink), 32px tall and 12px of side padding. It is used for the New task button, Mark complete, and a status card's action when the state is not a wait.
-- **Signal (attention):** magenta fill with on-signal text, the same geometry. There is at most one per screen or card, and only when the screen waits on the person: Inspect the result, Approve, the result page's next act.
+- **Signal (attention):** accent fill with on-signal text, the same geometry. There is at most one per screen or card, and only when the screen waits on the person: Inspect the result, Approve, the result page's next act.
 - **Outline:** a paper pill with the pill shadow, ink text, and a soft fill on hover. It is the default for every row action, page tool and secondary choice (Request changes, Open, Work tools, Next page).
 - **Ghost:** muted text on nothing, with a soft fill and ink text on hover. It is used for toolbars, knowledge links, and destructive text buttons (with vermilion text) that sit far from the primary act.
 - **Danger:** vermilion text on the vermilion wash, used for a confirmed destructive act (Remove key) behind a disclosure.
-- **Hover / Focus:** colour transitions run 120ms ease-out. Focus is a 2px magenta ring at a 2px offset, in the shell, on server pages and on the rebuilt shadcn controls (`--color-ring` maps to the signal). Disabled buttons drop to 48 to 50% opacity and show a not-allowed cursor.
+- **Hover / Focus:** colour transitions run 120ms ease-out. Focus is a 2px accent ring at a 2px offset, in the shell, on server pages and on the rebuilt shadcn controls (`--color-ring` maps to the signal). Disabled buttons drop to 48 to 50% opacity and show a not-allowed cursor.
 - **Sizes:** default 32px, small 28px (12.5px text), icon 32px square. All of them become 44px below the phone breakpoint.
 
 ### Badges (status chips)
 - **Style:** 5px corners, 1px by 6px padding, 11.5px / 500 on an 18px line, in sentence case. The text is the hue and the fill is its soft wash. There is no border.
-- **Tones:** neutral (the default, for any fact), attention (magenta, a person is needed), danger, warning, info and success. A status's tone comes from one mapping (`toneOf`), so a task reads the same in the list, in the Crew sheet and on its own page.
+- **Tones:** neutral (the default, for any fact), attention (accent, a person is needed), danger, warning, info and success. A status's tone comes from one mapping (`toneOf`), so a task reads the same in the list, in the Crew sheet and on its own page.
 - **Peek chips:** on the Projects page, only "N waiting on you" takes colour (attention). Running, queued and built today are neutral facts.
 
 ### Cards / Containers
 - **Corner Style:** 10px.
 - **Background:** paper, on a paper sheet, so a card is defined by its hairline border and not by its fill.
 - **Shadow Strategy:** none. See Elevation.
-- **Border:** a 1px hairline. A failed status card takes vermilion at 50% and nothing else changes colour. A waiting card keeps a neutral border, and its badge and single magenta verb carry the wait.
+- **Border:** a 1px hairline. A failed status card takes vermilion at 50% and nothing else changes colour. A waiting card keeps a neutral border, and its badge and single accent verb carry the wait.
 - **Internal Padding:** 20px (16px on phones), with a 16px gap between blocks. Grouped folds (task details, Manage) are one card with zero padding, divided by hairlines, each fold with a 15px / 600 summary and a rotating chevron.
 
 ### Inputs / Fields
 - **Style:** a paper fill, a 1px control-line border, 8px corners, 32px tall, 10px side padding and 13px text. Placeholders are muted.
-- **Focus:** the border turns magenta with a 3px magenta-wash halo (shell and server fields, the composer). The shadcn inputs and selects show a 2px magenta ring. The caret is magenta everywhere.
+- **Focus:** the border turns accent with a 3px accent-wash halo (shell and server fields, the composer). The shadcn inputs and selects show a 2px accent ring. The caret is accent everywhere.
 - **Error / Disabled:** an error is a vermilion alert (a vermilion wash fill, 8px corners, 13px text), never a red border alone. Disabled controls are dimmed with a not-allowed cursor.
 - **Touch:** 44px tall with 16px text below the phone breakpoint.
 
 ### Navigation (the sidebar)
 - **Style:** it sits directly on frame grey, with no sheet and no border. Top to bottom: the brand mark and wordmark, the ink New task button (full width, 32px), the project switch (a paper pill select), the primary rows (Chat, Tasks, Flows, Projects, Knowledge, Settings), then Workspace tools and the account at the foot, above a hairline.
 - **Rows:** 32px, with 6px by 8px padding, 8px corners, a 16px drawn icon at 85% opacity, and 13px / 500 text in nav ink.
-- **States:** hover fills with nav hover and ink text. The current page is a **raised pill**: a paper fill, ink text, the pill shadow and a full-opacity icon. The needs-you count sits at the row's right edge as a filled magenta pill (18px, Geist Mono 11px, tabular).
+- **States:** hover fills with nav hover and ink text. The current page is a **raised pill**: a paper fill, ink text, the pill shadow and a full-opacity icon. The needs-you count sits at the row's right edge as a filled accent pill (18px, Geist Mono 11px, tabular).
 - **Mobile:** the sidebar becomes a left drawer from the header's menu button. Rows grow to 44px and 14px text.
 
 ### Segmented tabs
-- **Style:** a raised track (12px corners, 2px inset, 32px tall) holding 8px-cornered triggers in muted 13px / 500. The active trigger is a paper pill with ink text and the pill shadow. The tab counts next to the labels are Geist Mono 11px. The "Needs you" count becomes a filled magenta pill when it is above zero, and every other count stays muted.
+- **Style:** a raised track (12px corners, 2px inset, 32px tall) holding 8px-cornered triggers in muted 13px / 500. The active trigger is a paper pill with ink text and the pill shadow. The tab counts next to the labels are Geist Mono 11px. The "Needs you" count becomes a filled accent pill when it is above zero, and every other count stays muted.
 - **Link tabs:** filters stay real URLs (the Tasks views, a task's Overview / Ask), so Back and bookmarks work.
 
 ### Task row (signature)
 The row is the unit of the control plane. It has three columns and one colour at most. The first column holds the title (13.5px / 500, underlined on hover) and a muted meta line under it (the project, a centred dot, the age in tabular figures), plus any detail line. The second holds the status badge in a column shared by the whole list (a subgrid), so badges line up down the list. The third holds a single outline action with a trailing arrow. A problem line inside a row is vermilion 12.5px text. Rows are divided by hairlines and fill with raised on hover.
 
 ### Status card (signature)
-This is the first block on a task or result page. It shows the state as a Headline with a 10px state dot, one muted sentence of outcome, and the one action on the right (full width on phones). The action is magenta only when the state is a wait, and ink otherwise. Problems inside it are neutral unless the card has failed, in which case they become vermilion alerts and the card's border turns vermilion at 50%. "Checks passed" appears as a success badge. Attempts and notices fold beneath a hairline as quiet disclosures.
+This is the first block on a task or result page. It shows the state as a Headline with a 10px state dot, one muted sentence of outcome, and the one action on the right (full width on phones). The action is accent only when the state is a wait, and ink otherwise. Problems inside it are neutral unless the card has failed, in which case they become vermilion alerts and the card's border turns vermilion at 50%. "Checks passed" appears as a success badge. Attempts and notices fold beneath a hairline as quiet disclosures.
 
 ### Command menu and slash menu
-- **Command menu:** a 480px dialog on paper with 12px corners and the overlay shadow over the scrim. It has a search input with a magenta focus halo and result rows that are 36px tall, 8px-cornered and filled soft on hover or focus, each with a muted 11px hint on the right. It opens from the header trigger or ⌘K / Ctrl K.
+- **Command menu:** a 480px dialog on paper with 12px corners and the overlay shadow over the scrim. It has a search input with a accent focus halo and result rows that are 36px tall, 8px-cornered and filled soft on hover or focus, each with a muted 11px hint on the right. It opens from the header trigger or ⌘K / Ctrl K.
 - **Slash menu:** it floats 6px above the composer on paper with 10px corners and the overlay shadow. Items are 36px tall (44px on phones), with the command in Geist Mono 12.5px / 500 and a muted hint.
 
 ### Composer
-A paper box with a control-line border and 12px corners, a hairline-faint 1px shadow, and 10px padding. On focus the border turns magenta with a 3px wash halo. The textarea inside is borderless at 14px / 1.6 (16px on phones) and grows from 52px to 180px. The send button and a muted, tabular character count sit on one line below it.
+A paper box with a control-line border and 12px corners, a hairline-faint 1px shadow, and 10px padding. On focus the border turns accent with a 3px wash halo. The textarea inside is borderless at 14px / 1.6 (16px on phones) and grows from 52px to 180px. The send button and a muted, tabular character count sit on one line below it.
 
 ## Do's and Don'ts
 
 ### Do:
-- **Do** keep chart magenta for what waits on a person: the needs-you count, an attention badge, and the one verb that resolves the wait, plus focus, caret, selection and the brand mark.
+- **Do** keep the ink accent for what waits on a person: the needs-you count, an attention badge, and the one verb that resolves the wait, plus focus, caret, selection and the brand mark.
 - **Do** make every other act ink (primary) or a paper pill (outline). In lists, rows' actions are outline buttons and the badge carries the colour.
 - **Do** put work on paper sheets (12px corners, sheet shadow) inset 8px into frame grey, with the sidebar directly on the frame.
 - **Do** separate with 1px hairlines inside a sheet. Lists sit between hairlines and facts sit under one, without being boxed in cards.
@@ -506,9 +506,9 @@ A paper box with a control-line border and 12px corners, a hairline-faint 1px sh
 - **Do** keep motion to 120ms colour transitions and an 80ms / 140ms page fade-through, and remove all of it under `prefers-reduced-motion`.
 
 ### Don't:
-- **Don't** colour a card's border or a heading magenta to announce a wait. The badge and the single magenta verb already say it. (The flow canvas's decision cards still carry a magenta outline. That is a known divergence, not the rule.)
-- **Don't** put more than one magenta verb on a screen or card, and don't make a recommended option magenta. A recommendation is not urgency.
-- **Don't** use magenta, or any hue near it, for failure. Failure is vermilion.
+- **Don't** colour a card's border or a heading accent to announce a wait. The badge and the single accent verb already say it. (The flow canvas's decision cards still carry a accent outline. That is a known divergence, not the rule.)
+- **Don't** put more than one accent verb on a screen or card, and don't make a recommended option accent. A recommendation is not urgency.
+- **Don't** use accent, or any hue near it, for failure. Failure is vermilion.
 - **Don't** colour a problem line red inside a card that has not failed. Render it neutral (raised fill, ink text).
 - **Don't** use glass, backdrop blur or gradients, or a shadow on a card inside a sheet.
 - **Don't** set headings, labels or status words in Geist Mono, and don't use uppercase, letter-spaced labels.
