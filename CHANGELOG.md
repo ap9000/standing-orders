@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.7.0 — 2026-09-30
+
+- **Know when a newer Toolroll exists.** Once a day Toolroll makes one
+  anonymous request to npm, plus one to GitHub for that release's notes, and
+  keeps the answer beside the database; offline it says nothing.
+  `toolroll status` adds one line when a newer version exists, the console
+  shows a quiet notice you can dismiss per version, and Settings → Updates
+  shows this version, the latest and its notes, the command for how you
+  installed it, each worker's version, and a switch to turn the check off
+  (or set `TOOLROLL_NO_UPDATE_CHECK=1`). A security release (notes with a
+  "Security" line or heading) also messages each operator once. A plane
+  deployed from a checkout reads as a source install.
+
 ## 0.6.0 — 2026-09-30
 
 - **Ink instead of magenta.** The accent for what waits on a person is ink

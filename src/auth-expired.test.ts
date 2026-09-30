@@ -16,8 +16,9 @@ import { acquire, finalizeFailureFenced, finalizePlanFailureFenced } from "./cla
 import { register } from "./runner.js";
 import { invokeAgent } from "./invoke.js";
 import { addApprover } from "./scope.js";
-import { AUTH_TRIAL_MS, authPauseOf, authWaitOf, claimAuthTrial, liftAuthPause, noteSignInProbe, openAuthPauses, pauseForAuth, signInGate, signInNotices } from "./provider-auth.js";
+import { AUTH_TRIAL_MS, authPauseOf, authWaitOf, claimAuthTrial, giveBackAuthTrial, liftAuthPause, noteSignInProbe, openAuthPauses, pauseForAuth, signInGate, signInNotices } from "./provider-auth.js";
 import { diagnoseTaskDispatch } from "./dispatch.js";
+import { workIndexPage } from "./work-index.js";
 import { installationStatus, renderInstallationStatus } from "./lead-status.js";
 import { bridgePass, hashPairingCode, mintPairingCode, PAIRING_TTL_MS, type TelegramTransport } from "./telegram.js";
 import { SlackState, slackHash } from "./slack-state.js";
@@ -223,11 +224,11 @@ describe("sign-in pauses", () => {
   test("a paused provider lets one task through as a trial every ten minutes", () => {
     failAuth("t-1", "claude", at(1_000));
     const pause = authPauseOf(store, "claude")!;
-    expect(claimAuthTrial(store, pause, at(2_000))).toBe(false);
-    expect(claimAuthTrial(store, pause, at(1_000 + AUTH_TRIAL_MS))).toBe(true);
+    expect(claimAuthTrial(store, pause, at(2_000))).toBeNull();
+    expect(claimAuthTrial(store, pause, at(1_000 + AUTH_TRIAL_MS))).not.toBeNull();
     // Only one trial per window, however many tasks ask.
-    expect(claimAuthTrial(store, pause, at(1_000 + AUTH_TRIAL_MS + 5_000))).toBe(false);
-    expect(claimAuthTrial(store, pause, at(1_000 + 2 * AUTH_TRIAL_MS))).toBe(true);
+    expect(claimAuthTrial(store, pause, at(1_000 + AUTH_TRIAL_MS + 5_000))).toBeNull();
+    expect(claimAuthTrial(store, pause, at(1_000 + 2 * AUTH_TRIAL_MS))).not.toBeNull();
     // A trial that fails the same way stays inside the incident: nobody is told twice.
     failAuth("t-2", "claude", at(1_000 + 2 * AUTH_TRIAL_MS + 1_000));
     expect(authNotices().filter(one => one["kind"] === "auth-expired")).toHaveLength(1);
@@ -239,19 +240,71 @@ describe("sign-in pauses", () => {
     const waiting = store.refFor("built-in", "t-review").id;
     const note = () => store.handle.prepare("SELECT auth_wait_pause FROM task_ref WHERE id = ?").get(waiting)?.["auth_wait_pause"];
     // Paused: it waits (no failure, no retry of its own), and the task says why.
-    expect(signInGate(store, ["claude"], at(2_000), waiting)).toMatchObject({ provider: "claude" });
+    expect(signInGate(store, ["claude"], at(2_000), waiting).waiting).toMatchObject({ provider: "claude" });
     expect(authWaitOf(store, waiting)).toMatchObject({ provider: "claude" });
     // Another provider is not held.
-    expect(signInGate(store, ["codex"], at(2_000))).toBeNull();
+    expect(signInGate(store, ["codex"], at(2_000)).waiting).toBeNull();
     // The one trial goes ahead and clears its note; the next asker waits again.
-    expect(signInGate(store, ["claude"], at(1_000 + AUTH_TRIAL_MS), waiting)).toBeNull();
+    expect(signInGate(store, ["claude"], at(1_000 + AUTH_TRIAL_MS), waiting).waiting).toBeNull();
     expect(note()).toBeNull();
-    expect(signInGate(store, ["claude"], at(1_000 + AUTH_TRIAL_MS + 1_000), waiting)).not.toBeNull();
+    expect(signInGate(store, ["claude"], at(1_000 + AUTH_TRIAL_MS + 1_000), waiting).waiting).not.toBeNull();
     // A person's resume lets everything go; a note left behind names a lifted pause and says nothing.
     liftAuthPause(store, "claude", "person", "alex", at(1_000 + AUTH_TRIAL_MS + 2_000));
     expect(authWaitOf(store, waiting)).toBeNull();
-    expect(signInGate(store, ["claude"], at(1_000 + AUTH_TRIAL_MS + 3_000), waiting)).toBeNull();
+    expect(signInGate(store, ["claude"], at(1_000 + AUTH_TRIAL_MS + 3_000), waiting).waiting).toBeNull();
     expect(note()).toBeNull();
+  });
+
+  test("a trial whose claim then fails is given back: the next pass takes it instead of waiting ten minutes", () => {
+    failAuth("t-1", "claude", at(1_000));
+    const trialTime = () => store.handle.prepare("SELECT last_trial_at FROM provider_auth_pause WHERE provider = 'claude'").get()?.["last_trial_at"];
+    const first = at(1_000 + AUTH_TRIAL_MS);
+    // The trial is taken; the task's claim then fails (capacity, a lease held elsewhere), so it is given back.
+    const lost = signInGate(store, ["claude"], first);
+    expect(lost.waiting).toBeNull();
+    expect(trialTime()).toBe(first.toISOString());
+    lost.giveBack();
+    expect(trialTime()).toBeNull();
+    // Giving back twice changes nothing.
+    lost.giveBack();
+    expect(trialTime()).toBeNull();
+    // The next pass, seconds later, still has its trial.
+    const next = signInGate(store, ["claude"], at(1_000 + AUTH_TRIAL_MS + 5_000));
+    expect(next.waiting).toBeNull();
+    // Kept this time: the window closes behind it.
+    expect(signInGate(store, ["claude"], at(1_000 + AUTH_TRIAL_MS + 6_000)).waiting).toMatchObject({ provider: "claude" });
+    // A second trial given back restores the earlier trial time, not an empty one.
+    const later = claimAuthTrial(store, authPauseOf(store, "claude")!, at(1_000 + 3 * AUTH_TRIAL_MS))!;
+    expect(later.previous).toBe(at(1_000 + AUTH_TRIAL_MS + 5_000).toISOString());
+    giveBackAuthTrial(store, later);
+    expect(trialTime()).toBe(at(1_000 + AUTH_TRIAL_MS + 5_000).toISOString());
+    // With nothing paused there is nothing to give back.
+    liftAuthPause(store, "claude", "person", "alex", at(1_000 + 3 * AUTH_TRIAL_MS + 1_000));
+    const free = signInGate(store, ["claude"], at(1_000 + 3 * AUTH_TRIAL_MS + 2_000));
+    expect(free.waiting).toBeNull();
+    expect(() => free.giveBack()).not.toThrow();
+  });
+
+  test("a task re-routed to another provider stops saying it waits on the old provider's sign-in", () => {
+    failAuth("t-1", "claude", at(1_000));
+    store.createTask({ id: "t-plan", title: "plan it first" }, T0);
+    const ref = store.refFor("built-in", "t-plan").id;
+    store.placeTask(ref, REPO);
+    expect(store.requestPlan(ref, T0).ok).toBe(true);
+    const status = () => workIndexPage(store, at(2_000), { principal: "operator", repos: null, includeUnplaced: true }).items.find(one => one.activeTaskId === "t-plan")?.status;
+    // An unpinned planner: configuration picked Claude, and the gate left it waiting on Claude's pause.
+    expect(signInGate(store, ["claude"], at(2_000), ref).waiting).toMatchObject({ provider: "claude" });
+    expect(diagnoseTaskDispatch(store, "t-plan", at(2_000))?.code).toBe("signed-out");
+    expect(status()).toMatchObject({ label: "Claude needs you to sign in again" });
+    // Pinned to Claude, it still waits.
+    expect(store.setPlanPins(ref, "claude", null, at(2_000)).ok).toBe(true);
+    expect(authWaitOf(store, ref)).toMatchObject({ provider: "claude" });
+    expect(status()).toMatchObject({ label: "Claude needs you to sign in again" });
+    // Re-routed to Codex: the old note no longer speaks for it, in dispatch or the work index.
+    expect(store.setPlanPins(ref, "codex", null, at(2_000)).ok).toBe(true);
+    expect(authWaitOf(store, ref)).toBeNull();
+    expect(diagnoseTaskDispatch(store, "t-plan", at(2_000))?.code).not.toBe("signed-out");
+    expect(status()?.label).toBe("Planner ready");
   });
 
   test("a run that started before the pause opened does not lift it", () => {

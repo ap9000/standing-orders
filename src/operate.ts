@@ -10,7 +10,7 @@ import { billingOf, budgetHoldWords, budgetLabel, budgetStates, monthNamed, mont
 import { spendCsv } from "./spend-ui.js";
 import { buildExport, exportSummary, exportZip, writeExportFolder } from "./export.js";
 import { startBudgetAlerts } from "./budget-alerts.js";
-import { liftAuthPause, openAuthPauses, signInGate, signInWords, startSignInProbes } from "./provider-auth.js";
+import { liftAuthPause, openAuthPauses, signInGate, signInWords, startSignInProbes, type SignInGate } from "./provider-auth.js";
 import { createConnectionChecker } from "./provider-connection.js";
 import { backupFiles, backupFolderOf, backupOwner, backupNow, restoreDatabase, startBackups } from "./backup.js";
 import { pushLimitSink } from "./provider-limits.js";
@@ -292,6 +292,9 @@ import { updateAdmissionPaused, UPDATE_PAUSED } from "./desktop-update-gate.js";
 import { beads } from "./beads.js";
 import { githubIssues } from "./issues.js";
 import { installationStatus, renderInstallationStatus, renderTaskWait, taskWaitSnapshot } from "./lead-status.js";
+import { latestRelease, newerRelease, notifySecurityRelease, recordRunnerVersion, startUpdateChecks, updateLine, type ReleaseIo } from "./releases.js";
+import { installMethod } from "./install-method.js";
+import { PACKAGE_VERSION } from "./version.js";
 
 export type Write = (line: string) => void;
 
@@ -318,6 +321,10 @@ export type OperateOptions = {
   additionalProjectRepos?: () => readonly string[];
   /** Overridden by tests and by an agent that wants its own queue. */
   databaseFile?: string;
+  /** Injected by tests: how `status` and the console ask for the latest release. */
+  releaseIo?: ReleaseIo;
+  /** Injected by tests: the bin whose real path says how Toolroll was installed. */
+  installBin?: string;
   openDatabase?: (file: string) => Store;
   now?: Date;
   /**
@@ -893,6 +900,8 @@ export async function runOperate(
       ...(options.mateSeams === undefined ? {} : { mateSeams: options.mateSeams }),
       ...(options.heldCoordinator === undefined ? {} : { heldCoordinator: options.heldCoordinator }),
       ...(options.waitSleep === undefined ? {} : { waitSleep: options.waitSleep }),
+      ...(options.releaseIo === undefined ? {} : { releaseIo: options.releaseIo }),
+      ...(options.installBin === undefined ? {} : { installBin: options.installBin }),
     });
   } catch (error) {
     if (isDatabaseBusy(error)) return databaseFailure(write, json, command, file, error);
@@ -955,6 +964,8 @@ type Context = {
   maxHeldSessions?: number;
   /** Test seam for task wait; production uses a timer. */
   waitSleep?: (milliseconds: number) => Promise<void>;
+  releaseIo?: ReleaseIo;
+  installBin?: string;
 };
 
 
@@ -2496,10 +2507,10 @@ async function tickCommand(
         continue;
       }
       // The sign-in pause holds a resumed lane too: it waits, parked, instead of failing.
-      const laneSignedOut = signInGate(store, [racer.provider], clock());
-      if (laneSignedOut !== null) {
+      const laneGate = signInGate(store, [racer.provider], clock());
+      if (laneGate.waiting !== null) {
         backToParked();
-        resumed.push({ id: taskId, outcome: "skipped", reason: "signed-out", detail: signInWords(laneSignedOut) });
+        resumed.push({ id: taskId, outcome: "skipped", reason: "signed-out", detail: signInWords(laneGate.waiting) });
         continue;
       }
       // Legacy comparison lanes carried an absolute clock. New profiles use
@@ -2508,6 +2519,7 @@ async function tickCommand(
       // wall-clock contract.
       const remaining = waiting.kind === "comparison" ? null : racer.budgetMicrousd - racer.accountedMicrousd;
       if (remaining !== null && remaining <= 0) {
+        laneGate.giveBack();
         const current = store.getContestant(racer.id);
         if (current !== null) store.casContestantState(racer.id, ["ready"], "stopped", current.generation);
         contestMaybeAggregate(store, waiting.id, clock());
@@ -2518,6 +2530,7 @@ async function tickCommand(
         const laneProfile = racer.profile ?? contestantProfileOf(racer.provider, racer.model, racer.repairModel);
         const clockCapMs = 3 * laneProfile.timeoutSeconds * 1000;
         if (laneProfile.timeoutKind !== "idle" && store.contestantCumulativeMs(racer.id) >= clockCapMs) {
+          laneGate.giveBack();
           const current = store.getContestant(racer.id);
           if (current !== null) store.casContestantState(racer.id, ["ready"], "stopped", current.generation);
           contestMaybeAggregate(store, waiting.id, clock());
@@ -2527,12 +2540,14 @@ async function tickCommand(
       }
       const reclaimed = acquire(store, waiting.taskRef, runner, { now: clock(), token, ttlMs: leaseTtlMs });
       if (!reclaimed.ok) {
+        laneGate.giveBack();
         backToParked();
         continue;
       }
       const freshContest = store.getContest(waiting.id);
       if (freshContest === null || !store.casContestState(waiting.id, ["decision-wait", "racing"], "racing", freshContest.generation)) {
         release(store, reclaimed.claim.leaseId, clock());
+        laneGate.giveBack();
         backToParked();
         continue;
       }
@@ -2766,7 +2781,10 @@ async function tickCommand(
   // gateway re-checks freshly at spawn; this cache only keeps a skipped
   // queue from probing once per task.
   const attestedThisPass = new Map<ProviderId, AttestOutcome | null>();
+  let untakenTrial: SignInGate | null = null;
   for (const ref of ready) {
+    untakenTrial?.giveBack();
+    untakenTrial = null;
     // The build budget governs UNATTENDED admissions (round-1 finding 4):
     // once it is spent, the pass keeps SCANNING for attended
     // authorizations — operator-invoked sessions launch regardless —
@@ -2989,11 +3007,14 @@ async function tickCommand(
     // One task every AUTH_TRIAL_MS goes ahead as the trial: a sign-in check
     // can say "logged in" for a session that cannot refresh, so a real run
     // decides — it lifts the pause, or fails into the same incident.
-    const signedOut = signInGate(store, modeProviders, clock(), ref.id);
-    if (signedOut !== null) {
-      dispatched.push({ id, outcome: "skipped", reason: "signed-out", detail: signInWords(signedOut) });
+    const gate = signInGate(store, modeProviders, clock(), ref.id);
+    if (gate.waiting !== null) {
+      dispatched.push({ id, outcome: "skipped", reason: "signed-out", detail: signInWords(gate.waiting) });
       continue;
     }
+    // A trial whose task is skipped before its claim succeeds is given back
+    // at the next task (or after the pass), so the next pass may take it.
+    untakenTrial = gate;
     // The leg is the authority: what resolved must BE the leg, exactly —
     // the sealed build leg, or the parked fallback entry's own pair.
     const governingLeg = wantsPlan ? planLeg : parkedEntry !== null ? { provider: parkedEntry.provider, model: parkedEntry.model, chosen: "fallback" as const } : sealedBuildLeg;
@@ -3169,6 +3190,7 @@ async function tickCommand(
         ? {}
         : { maxOpenDecisions: Number(text(flags, "max-open-decisions")) }),
     });
+    if (claimed.ok) untakenTrial = null;
     if (!claimed.ok) {
       // Losing a race, finding the task no longer ready, and a machine that
       // lacks what the task needs are all the system working. None fails the
@@ -4161,6 +4183,7 @@ async function tickCommand(
         break;
     }
   }
+  untakenTrial?.giveBack();
 
   // THE CHAIN ADMISSION PASS (E3d): cycles a recognized exhaustion advanced
   // to pending-admission dispatch their NEXT approved entry here — the ONLY
@@ -4208,9 +4231,9 @@ async function tickCommand(
       continue;
     }
     // The sign-in pause holds a fallback entry too: the admission stays pending until its provider works.
-    const entrySignedOut = signInGate(store, [peek.profile.provider], clock(), pending.taskRef);
-    if (entrySignedOut !== null) {
-      dispatched.push({ id: pending.taskId, outcome: "skipped", reason: "signed-out", detail: signInWords(entrySignedOut) });
+    const entryGate = signInGate(store, [peek.profile.provider], clock(), pending.taskRef);
+    if (entryGate.waiting !== null) {
+      dispatched.push({ id: pending.taskId, outcome: "skipped", reason: "signed-out", detail: signInWords(entryGate.waiting) });
       continue;
     }
     // The FALLBACK claim (finding 4): every acquireIfReady gate — task
@@ -4235,6 +4258,7 @@ async function tickCommand(
         : { maxOpenDecisions: Number(text(flags, "max-open-decisions")) }),
     });
     if (!claimed.ok) {
+      entryGate.giveBack();
       dispatched.push({ id: pending.taskId, outcome: "skipped", reason: claimed.reason });
       continue;
     }
@@ -4414,14 +4438,15 @@ async function tickCommand(
         continue;
       }
       // The sign-in pause holds a continuation too: its authorization stays open and it starts once the sign-in works.
-      const continuationSignedOut = signInGate(store, [pinned.provider], clock(), parent.taskRef);
-      if (continuationSignedOut !== null) {
-        dispatched.push({ id: taskId, outcome: "skipped", reason: "signed-out", detail: signInWords(continuationSignedOut) });
+      const continuationGate = signInGate(store, [pinned.provider], clock(), parent.taskRef);
+      if (continuationGate.waiting !== null) {
+        dispatched.push({ id: taskId, outcome: "skipped", reason: "signed-out", detail: signInWords(continuationGate.waiting) });
         continue;
       }
 
       const claimed = acquireContinuation(store, continuation, runner, { now: clock(), token, ttlMs: leaseTtlMs });
       if (!claimed.ok) {
+        continuationGate.giveBack();
         dispatched.push({ id: taskId, outcome: "skipped", reason: claimed.reason, ...("message" in claimed ? { detail: claimed.message } : {}) });
         continue;
       }
@@ -5254,6 +5279,8 @@ async function startConsole(options: {
   // Sprint 8: scheduled backups, a pass a minute; its lease also tells a restore that the console is running.
   server.on("close", startBackups(context.store, context.databaseFile));
   server.on("close", startCodexLimits(context.store));
+  // At most one anonymous look a day for a newer Toolroll (Settings → Updates can switch it off).
+  server.on("close", startUpdateChecks(context.store, dirname(context.databaseFile), PACKAGE_VERSION, installMethod(context.installBin).updateCommand, context.releaseIo ?? {}));
   const bound = server.address();
   const port = typeof bound === "object" && bound !== null ? bound.port : options.port;
   // A bind-everywhere address is not a place a browser can go: the URL
@@ -7970,6 +7997,7 @@ async function runWatchLoop(args: {
   // attributes to this episode by runner and window, and `brief
   // --latest-watch` bounds itself to exactly it.
   store.startWatchEpisode({ repo, runner, incarnation }, new Date());
+  recordRunnerVersion(dirname(context.databaseFile), runner, PACKAGE_VERSION, new Date());
   args.onReady?.();
 
   // A false renewal is FATAL (arc 2 finding 15): the lease or the
@@ -9020,6 +9048,7 @@ async function upCommand(
       });
   };
   observeReadiness();
+  recordRunnerVersion(dirname(context.databaseFile), runnerName, PACKAGE_VERSION, clock());
   const runnerHeartbeat = setInterval(() => {
     const beat = heartbeatRunner(store, runnerName, runnerToken, clock());
     if (!beat.ok && !stopping) {
@@ -10023,11 +10052,11 @@ function readPaths(flags: Map<string, string | true>, backend: string): string[]
 
 // ---- authoring ------------------------------------------------------------
 
-function statusCommand(
+async function statusCommand(
   positional: readonly string[],
   flags: Map<string, string | true>,
   context: Context,
-): number {
+): Promise<number> {
   const command = "status";
   const allowed = new Set(["db", "json"]);
   for (const name of flags.keys()) {
@@ -10035,7 +10064,14 @@ function statusCommand(
   }
   if (positional.length > 0) return fail(context.write, context.json, command, "usage", "Use `toolroll status [--json]`.", EXIT.usage);
   const status = installationStatus(context.store, context.clock());
-  return succeed(context.write, context.json, command, { ...status }, () => renderInstallationStatus(status));
+  // One line, only when a newer Toolroll exists; offline or switched off says nothing.
+  const current = PACKAGE_VERSION;
+  const method = installMethod(context.installBin);
+  const release = newerRelease(await latestRelease(dirname(context.databaseFile), { now: context.clock, ...context.releaseIo }), current);
+  if (release !== null) notifySecurityRelease(context.store, release, current, method.updateCommand, context.clock());
+  const line = updateLine(release, current, method.updateCommand);
+  const update = release === null ? {} : { update: { current, latest: release.version, security: release.security, updateCommand: method.updateCommand, url: release.url } };
+  return succeed(context.write, context.json, command, { ...status, ...update }, () => [...renderInstallationStatus(status), ...(line === null ? [] : [line])]);
 }
 
 async function waitTask(
