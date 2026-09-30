@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+## 0.9.2 — 2026-10-01
+
+- **Flows from a terminal.** `toolroll flows` lists and shows flows (zones
+  with their next and failure paths, triggers, recent cards) and sets them
+  up under the console's own rules: `create` from a template, a starter flow
+  or the lead's step format, `edit`, `trigger add|pause|resume|remove|check`,
+  `script save`, `card add` and `archive`. Writes take an approver's
+  password (`--as/--token` or the remembered login) and land in the ledger;
+  create, edit, archive and trigger add preview until `--yes`. It is in
+  `contract --commands` and `skills get operating`.
+- **Toolroll reviews its own last day, every morning.** A new plane review
+  trigger reads the last 24 hours from the store at 07:30 and makes one card
+  per problem worth fixing — failed runs by cause, tasks waiting on a person,
+  sign-in and plan-limit pauses, chat delivery failures, Broken integrations,
+  failed release checks and worker breakages — with counts, run ids and
+  redacted excerpts. A problem that comes back joins its card; a clean day
+  adds nothing. The **Morning plane review** starter (Settings → Flows, or
+  `toolroll onboard --starter plane-review`) researches each one, builds a fix
+  under the usual approvals and opens a pull request; failures wait in
+  **Needs a look**. Flow insights show which problems recur.
+- **Flows that test Toolroll.** `scripts/flows/real-model-journeys.mjs` runs
+  the journeys that use real models (unit tests and CI never do), retrying a
+  failure once before calling it real, and `scripts/flows/weekly-upkeep.mjs`
+  reports outdated or vulnerable dependencies and new agent CLI versions.
+  Both run in a flow's check zone. A Toolroll started inside the agents'
+  fence now runs its agents inside that outer fence instead of failing to
+  nest a second one.
+
 ## 0.9.1 — 2026-09-30
 
 - **Phones show more on a screen.** On a phone the console is about a third

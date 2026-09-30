@@ -15,7 +15,7 @@ import { SKIPPED_FADE } from "./e2e-kit.mjs";
  * the installed Toolroll is never touched.
  */
 import { spawn, execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync, createWriteStream } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync, createWriteStream } from "node:fs";
 import { createServer } from "node:net";
 import { createServer as createHttpServer } from "node:http";
 import { tmpdir, homedir } from "node:os";
@@ -82,23 +82,24 @@ const results = [];
 const failedPrerequisites = new Set();
 /** A check that can't run here (a missing key, say): skipped with the reason, never passed. */
 class Skip extends Error {}
+// Every result names what it needs, so a rerun can pick just the failed checks and what they need (flows/real-model-journeys.mjs).
 async function check(name, needs, body) {
   const at = Date.now();
-  if (only !== null && !only.test(name)) { results.push({ name, state: "not selected" }); return null; }
+  if (only !== null && !only.test(name)) { results.push({ name, needs, state: "not selected" }); return null; }
   const missing = needs.filter(one => failedPrerequisites.has(one));
-  if (missing.length > 0) { results.push({ name, state: "skipped", because: missing }); say(`SKIP  ${name} (needs ${missing.join(", ")})`); failedPrerequisites.add(name); return null; }
+  if (missing.length > 0) { results.push({ name, needs, state: "skipped", because: missing }); say(`SKIP  ${name} (needs ${missing.join(", ")})`); failedPrerequisites.add(name); return null; }
   say(`...   ${name}`);
   try {
     const detail = await body();
-    results.push({ name, state: "passed", seconds: Math.round((Date.now() - at) / 100) / 10, ...(detail === undefined ? {} : { detail }) });
+    results.push({ name, needs, state: "passed", seconds: Math.round((Date.now() - at) / 100) / 10, ...(detail === undefined ? {} : { detail }) });
     say(`PASS  ${name} (${Math.round((Date.now() - at) / 1000)} s)`);
     return detail ?? true;
   } catch (error) {
     failedPrerequisites.add(name);
-    if (error instanceof Skip) { results.push({ name, state: "skipped", because: [error.message] }); say(`SKIP  ${name} (${error.message})`); return null; }
+    if (error instanceof Skip) { results.push({ name, needs, state: "skipped", because: [error.message] }); say(`SKIP  ${name} (${error.message})`); return null; }
     const file = join(out, `${results.length + 1}-failed.png`);
     for (const page of openPages) await page.screenshot({ path: file.replace(".png", `-${openPages.indexOf(page)}.png`) }).catch(() => undefined);
-    results.push({ name, state: "failed", seconds: Math.round((Date.now() - at) / 100) / 10, error: error instanceof Error ? error.message : String(error) });
+    results.push({ name, needs, state: "failed", seconds: Math.round((Date.now() - at) / 100) / 10, error: error instanceof Error ? error.message : String(error) });
     say(`FAIL  ${name}: ${(error instanceof Error ? error.message : String(error)).split("\n")[0]}`);
     return null;
   }
@@ -251,7 +252,10 @@ await check("The lead draws a sorting flow from plain words (real Claude turn)",
 
 await check("Jev sorts real cards through OpenRouter (Exception routing template)", ["Sign in and turn the lead chat on (first-run setup)"], async () => {
   const { namedPath } = await import(new URL("../dist/names.js", import.meta.url).href);
-  if (!existsSync(join(namedPath(homedir(), ["keys"], { dot: true }), "openrouter"))) throw new Skip("needs an OpenRouter key saved in Settings → AI providers");
+  // Inside the agents' fence (a flow's check zone) the saved key is out of reach, as it is for the worker there.
+  try { accessSync(join(namedPath(homedir(), ["keys"], { dot: true }), "openrouter"), constants.R_OK); } catch (error) {
+    throw new Skip(error.code === "EPERM" ? "the OpenRouter key saved in Settings → AI providers is out of reach inside the agents' fence" : "needs an OpenRouter key saved in Settings → AI providers");
+  }
   await page.goto(`${base}/flows`);
   await page.evaluate(() => { for (const one of document.querySelectorAll("details")) one.open = true; });
   await page.fill('form[action="/flows/new"] input[name="name"]', "Support desk");

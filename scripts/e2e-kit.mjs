@@ -260,6 +260,34 @@ export async function world(name, { seed, env = {} } = {}) {
   return { root, repo, state, db, out, base, port, passwords, auth, cli, sql, rows, until, check, say, git, browser, signIn, page, json, shot, askLead, leadCalls, pendingCard, confirmCard, problems, openPages, start, finish, bin: BIN };
 }
 
+/** The journeys to run again from a failed group's report: the failed ones, the ones skipped because of them, and everything
+ * those need. Null when the whole group has to run again. */
+export function retrySet(results) {
+  // A console error can come from any journey, passed ones included: that failure retries the whole group.
+  if (results.some(one => one.name === BROWSER_CHECK && one.state === "failed")) return null;
+  const failed = results.filter(one => one.state === "failed").map(one => one.name);
+  if (failed.length === 0 || results.some(one => !Array.isArray(one.needs))) return null;
+  const again = new Set(failed);
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const one of results) {
+      const wanted = again.has(one.name) ? one.needs : one.state === "skipped" && one.needs.some(need => again.has(need)) ? [one.name] : [];
+      for (const each of wanted) if (!again.has(each)) { again.add(each); grew = true; }
+    }
+  }
+  return results.map(one => one.name).filter(one => again.has(one));
+}
+export const exactly = names => `^(?:${names.map(one => one.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})$`;
+/** A retry that cleared a failed run, from both reports: every journey that failed the first time, and the browser-error
+ * check, PASSED the second time. A journey skipped (or not run) the second time proved nothing. */
+export function retryCleared(before, after) {
+  if (!after) return false;
+  const state = new Map(after.map(each => [each.name, each.state]));
+  const mustPass = new Set(before.filter(each => each.state === "failed").map(each => each.name));
+  if (after.some(each => each.name === BROWSER_CHECK)) mustPass.add(BROWSER_CHECK);
+  return [...mustPass].every(name => state.get(name) === "passed");
+}
+
 /** A mail server that keeps what it's sent (SMTP, no TLS, no sign-in): the oracle for emails. */
 export function mailSink() {
   const received = [];

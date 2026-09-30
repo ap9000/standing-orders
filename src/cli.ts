@@ -132,6 +132,8 @@ and any queue command + --help prints it too
   toolroll heartbeat <lease> / release <lease> / reap
   toolroll tick --runner <name> --token <t> --repo <path>
                                one unattended pass over the ready set
+  toolroll flows list | show <id> | create | edit | trigger | script | card | archive
+                               set up and inspect flows (writes preview until --yes)
   toolroll chat --as <you> --token <t>
                                talk to the mate: one conversation across every
                                project; it proposes, you confirm (--say "…" for one turn)
@@ -284,6 +286,7 @@ export const OPERATE_COMMANDS = new Set([
   "publish",
   "reconcile",
   "routine",
+  "flows",
   "config", "chat", "proposals", "mode", "people", "keys",
   "setup",
   "verify",

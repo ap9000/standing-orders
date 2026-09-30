@@ -134,6 +134,7 @@ describe("the machine envelope", () => {
       storage: ["--json"],
       monitoring: ["--json"],
       integrations: ["--saved", "--json"],
+      flows: ["list", "--json"],
       "check-progress": ["999", "--json"],
       spend: ["--json"],
       budget: ["list", "--json"],

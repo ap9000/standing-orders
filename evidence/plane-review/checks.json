@@ -1,0 +1,93 @@
+{
+  "synthetic": true,
+  "checks": [
+    {
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      },
+      "rows": [
+        {
+          "id": "plane-review",
+          "suggested": "true",
+          "action": "Switch on"
+        },
+        {
+          "id": "ci-fix",
+          "suggested": "false",
+          "action": "Open flow"
+        },
+        {
+          "id": "issue-task",
+          "suggested": "false",
+          "action": "Switch on"
+        },
+        {
+          "id": "overnight",
+          "suggested": "false",
+          "action": "Switch on"
+        }
+      ],
+      "overflow": false,
+      "smallestTap": 44,
+      "wrappedButton": false
+    },
+    {
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "rows": [
+        {
+          "id": "plane-review",
+          "suggested": "true",
+          "action": "Switch on"
+        },
+        {
+          "id": "ci-fix",
+          "suggested": "false",
+          "action": "Open flow"
+        },
+        {
+          "id": "issue-task",
+          "suggested": "false",
+          "action": "Switch on"
+        },
+        {
+          "id": "overnight",
+          "suggested": "false",
+          "action": "Switch on"
+        }
+      ],
+      "overflow": false,
+      "smallestTap": 44,
+      "wrappedButton": false
+    }
+  ],
+  "flows": [
+    {
+      "name": "Morning plane review",
+      "triggers": [
+        "plane-review"
+      ],
+      "zones": [
+        "report",
+        "task",
+        "pull-request",
+        "inbox",
+        "done"
+      ]
+    },
+    {
+      "name": "Fix failing CI",
+      "triggers": [
+        "github"
+      ],
+      "zones": [
+        "task",
+        "approval",
+        "done"
+      ]
+    }
+  ]
+}

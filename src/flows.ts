@@ -542,6 +542,11 @@ function defaultInstructions(kind: "task" | "report", earlier: readonly FlowStag
     : `Investigate this and write a short, clear report with a summary first: {{card.title}}\n\n{{card.description}}${notes}\n\nFeedback to address (if any): {{note}}`;
 }
 
+/** Steps as the lead's flow tool and `toolroll flows` take them: "me" as a decider is the person asking, stored by name. */
+export function stepsFor(steps: unknown, name: string): unknown {
+  return Array.isArray(steps) ? steps.map(step => step !== null && typeof step === "object" && typeof (step as FlowStepInput).decider === "string" && /^(me|myself|i|you|the operator)$/i.test((step as FlowStepInput).decider!.trim()) ? { ...step, decider: name } : step) : steps;
+}
+
 /**
  * A flow from an ordered list of steps: ids from names, each step leading
  * to the next, a Done zone at the end when none is listed, and a decision

@@ -37,6 +37,7 @@ import { followSlack } from "./slack.js";
 import { validateScopeText } from "./task-text.js";
 import { runMemoryCommand } from "./memory-cli.js";
 import { runKnowledgeCommand } from "./knowledge-cli.js";
+import { FLOWS_VALUE_FLAGS, runFlowsCommand } from "./flows-cli.js";
 import { runAssignmentCommand } from "./assignment-adapters.js";
 import { applyProjectProfile, runProjectCommand } from "./project-cli.js";
 import { runTaskOutcomeCommand } from "./task-outcome-cli.js";
@@ -582,6 +583,19 @@ Routines — tasks that fire on a schedule, each instance isolated
   toolroll routine pause|resume <name>
   toolroll routine run-now <name> --as <you> --token <t>
 
+Flows — processes cards move through; the console's rules
+  toolroll flows list [--repo <path>] | show <id>
+  toolroll flows create --repo <path> --name <name> (--template <id> | --steps <file|->)
+  toolroll flows edit <id> --steps <file|-> [--name <name>]
+  toolroll flows trigger add <id> <json|file|->
+  toolroll flows trigger pause|resume|remove|check <id> <trigger>
+  toolroll flows script save --repo <path> --name <name> (--file <path in project> | --body <file>)
+      --about "<one line>" [--language shell|python|node] [--timeout-minutes <n>]
+  toolroll flows card add <id> --title <t> [--description <d>] [--zone <zone>]
+  toolroll flows archive <id>
+      writes take --as <you> --token <t> (or the remembered login); create,
+      edit, archive and trigger add preview until --yes
+
 Agents — which provider and model each phase runs on
   toolroll providers                 what is installed, logged in, and
                                         configured on this machine — without
@@ -758,6 +772,8 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "run", "containment", "agent",
   // onboard: the starter flows to switch on.
   "starter",
+  // flows: templates, steps, scripts and cards.
+  "template", "steps", "about", "language", "timeout-minutes", "body", "description", "zone",
   "token-env", "after", "repair-max-attempts", "consumer", "batch", "feedback", "source", "view", "cursor", "why", "supersedes", "decision", "sessions", "timeout",
 ]);
 export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
@@ -772,17 +788,18 @@ export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "saved",
 ]);
 
-export function parseOperateArgs(argv: readonly string[]): Args | { error: string } {
+export function parseOperateArgs(argv: readonly string[], ownValues: ReadonlySet<string> = new Set()): Args | { error: string } {
   const positional: string[] = [];
   const flags = new Map<string, string | true>();
   const repoList: string[] = [];
-  const wantsValue = OPERATE_VALUE_FLAGS;
+  const wantsValue = new Set([...OPERATE_VALUE_FLAGS, ...ownValues]);
 
   // Every boolean flag any verb reads. A --flag in neither set is a typo,
   // and a typo silently becoming `true` (with its intended value demoted to
   // a positional) surfaces later as a different, wronger error — refuse it
   // here by name instead (Codex round-4 findings 3/8).
-  const booleans = OPERATE_BOOLEAN_FLAGS;
+  // A verb may read a global switch's name as a value of its own (`flows script save --file <path>`).
+  const booleans = new Set([...OPERATE_BOOLEAN_FLAGS].filter(name => !ownValues.has(name)));
 
   for (let index = 0; index < argv.length; index++) {
     const argument = argv[index] as string;
@@ -830,7 +847,7 @@ export async function runOperate(
   write: Write,
   options: OperateOptions = {},
 ): Promise<number> {
-  const parsed = parseOperateArgs(argv);
+  const parsed = parseOperateArgs(argv, command === "flows" ? FLOWS_VALUE_FLAGS : undefined);
   // A parse error precedes the flags map, so JSON mode is read from the raw
   // argv — the envelope contract holds even for the earliest refusal.
   if ("error" in parsed) return fail(write, argv.includes("--json"), command, "usage", parsed.error, EXIT.usage);
@@ -1167,6 +1184,8 @@ async function dispatch(
       return incidentCommand(positional, flags, context);
     case "routine":
       return routineCommand(positional, flags, context);
+    case "flows":
+      return flowsCommand(positional, flags, context);
     case "config":
       return configCommand(positional, flags, context);
     case "chat":
@@ -12201,6 +12220,23 @@ async function askCredentials(
   }
   if (name === undefined || token === undefined || name === "" || token === "") return null;
   return { name, token };
+}
+
+/** `flows …`: the console's flow rules from a terminal. Writes are an approver's (--as/--token or the remembered login). */
+async function flowsCommand(positional: readonly string[], flags: Map<string, string | true>, context: Context): Promise<number> {
+  const { store } = context;
+  const registered = await loadRepos(registryPathOf(context)).catch(() => ({ error: "unreadable" }));
+  const projects = [...new Set([...store.knownRepos(), ...store.listProjects().map(one => one.path), ...("error" in registered ? [] : registered.repos)])];
+  const writes = positional[0] !== undefined && positional[0] !== "list" && positional[0] !== "show";
+  const acting = writes && !flags.has("help") ? await askCredentials(flags, context) : null;
+  const dir = dirname(context.databaseFile);
+  return runFlowsCommand(positional, flags, {
+    store, write: context.write, json: context.json, clock: context.clock, credentials: acting, projects, configDir: dir, evidenceRoot: context.evidenceRoot,
+    // "Check now": the same io the worker's pass checks triggers with.
+    triggerIo: { gh: context.flowTriggerIo?.gh ?? run, fetch: context.flowTriggerIo?.fetch ?? fetch, dir: context.flowTriggerIo?.dir ?? dir,
+      shell: context.flowTriggerIo?.shell ?? context.flowStepIo?.shell ?? run, scratch: context.flowTriggerIo?.scratch ?? join(dir, "flow-scratch"),
+      ...(context.flowTriggerIo?.mail === undefined ? {} : { mail: context.flowTriggerIo.mail }) },
+  });
 }
 
 async function approverCommand(

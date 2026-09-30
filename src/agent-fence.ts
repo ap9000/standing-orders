@@ -138,9 +138,27 @@ export function macosFenceProfile(fence: readonly string[]): string {
 
 export const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
 
-/** Whether this machine can run an agent inside the macOS fence. */
-export function macosFenceAvailable(platform: NodeJS.Platform = process.platform): boolean {
-  return platform === "darwin" && existsSync(SANDBOX_EXEC);
+/** A process already inside a Seatbelt sandbox (an agent's, or a flow check zone's) can't apply another: sandbox-exec says so. */
+const NESTED_SANDBOX = /sandbox_apply: Operation not permitted/;
+let seatbeltWorks: boolean | null = null;
+/**
+ * Whether this machine can run an agent inside the macOS fence (checked once). Not from inside another
+ * sandbox: a Toolroll a fenced process starts (the end-to-end journeys a flow's check zone runs) can't nest
+ * its fence, and would otherwise fail every launch. Its agents stay inside the outer fence, which every
+ * child inherits, and are recorded with the fence they actually got. Any other probe failure keeps the
+ * fence on, so a launch fails loudly rather than running unfenced.
+ */
+export function macosFenceAvailable(platform: NodeJS.Platform = process.platform, probe?: () => { status: number | null; stderr: string }): boolean {
+  if (platform !== "darwin" || !existsSync(SANDBOX_EXEC)) return false;
+  const works = (check: () => { status: number | null; stderr: string }) => {
+    try { const ran = check(); return !(ran.status !== 0 && NESTED_SANDBOX.test(ran.stderr)); } catch { return true; }
+  };
+  if (probe !== undefined) return works(probe);
+  seatbeltWorks ??= works(() => {
+    const ran = spawnSync(SANDBOX_EXEC, ["-p", "(version 1)(allow default)", "/usr/bin/true"], { timeout: 5_000, encoding: "utf8" });
+    return { status: ran.status, stderr: ran.stderr ?? "" };
+  });
+  return seatbeltWorks;
 }
 
 /** The spawn that runs `file args` inside the macOS fence (same process: sandbox-exec replaces itself with the agent). */

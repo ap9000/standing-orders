@@ -171,6 +171,10 @@ describe("auth mode: subscription first, key as fallback", () => {
     // A provider with no subscription login is the key whatever the file says.
     writeFileSync(join(home, ".toolroll", "keys", "openrouter.auth"), "subscription");
     expect(readAuthModeStrict("openrouter", home)).toEqual({ ok: true, mode: "api-key" });
+    // A file its permissions make unreadable is a stated problem too (only the agents' fence, EPERM, reads as absent).
+    writeFileSync(join(home, ".toolroll", "keys", "claude.auth"), "api-key");
+    chmodSync(join(home, ".toolroll", "keys", "claude.auth"), 0o000);
+    if (process.getuid?.() !== 0) expect(readAuthModeStrict("claude", home)).toMatchObject({ ok: false, problem: expect.stringContaining("cannot be read (EACCES)") });
   });
 
   test("defaults: claude/codex subscription, gemini/openrouter api-key; openrouter cannot go subscription", () => {

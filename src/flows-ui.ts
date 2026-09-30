@@ -136,7 +136,7 @@ export function flowView(store: Store, flow: FlowRow, viewer: { name: string; ap
       zone: title(config?.zone ?? definition?.start ?? ""), zoneId: config?.zone ?? definition?.start ?? "", state: trigger.state, status: trigger.lastOutcome, statusAt: trigger.lastAt, failing: trigger.failures > 0,
       button: config?.kind === "button" ? { label: config.label, questions: config.questions } : null,
       hook: config !== null && takesDeliveries(config) ? { ready: hookReady(trigger, setup.dir), needsSecret: config.kind === "linear" } : null,
-      checkable: ((config?.kind === "github" || config?.kind === "linear") && config.delivery === "poll") || config?.kind === "email" || (config?.kind === "schedule" && config.script !== undefined),
+      checkable: ((config?.kind === "github" || config?.kind === "linear") && config.delivery === "poll") || config?.kind === "email" || (config?.kind === "schedule" && config.script !== undefined) || config?.kind === "plane-review",
       shared: config?.kind === "button" && trigger.hookHash !== null,
     };
   });

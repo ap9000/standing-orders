@@ -18,7 +18,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import { BROWSER_CHECK, here } from "./e2e-kit.mjs";
+import { BROWSER_CHECK, exactly, here, retryCleared, retrySet } from "./e2e-kit.mjs";
 
 const [script, ...given] = process.argv.slice(2);
 if (script === undefined) { console.error("Usage: node scripts/e2e-parallel.mjs <script.mjs> [--no-retry] [--output <dir>] [options for every group]"); process.exit(2); }
@@ -51,24 +51,6 @@ const runGroup = (group, folder, extra = []) => new Promise(done => {
 process.on("SIGINT", () => process.exit(130));
 
 const report = folder => { try { return JSON.parse(readFileSync(join(out, folder, "report.json"), "utf8")); } catch { return null; } };
-/** The journeys to run again from a failed group's report: the failed ones, the ones skipped because of them, and everything
- * those need. Null when the whole group has to run again. */
-function retrySet(results) {
-  // A console error can come from any journey, passed ones included: that failure retries the whole group.
-  if (results.some(one => one.name === BROWSER_CHECK && one.state === "failed")) return null;
-  const failed = results.filter(one => one.state === "failed").map(one => one.name);
-  if (failed.length === 0 || results.some(one => !Array.isArray(one.needs))) return null;
-  const again = new Set(failed);
-  for (let grew = true; grew;) {
-    grew = false;
-    for (const one of results) {
-      const wanted = again.has(one.name) ? one.needs : one.state === "skipped" && one.needs.some(need => again.has(need)) ? [one.name] : [];
-      for (const each of wanted) if (!again.has(each)) { again.add(each); grew = true; }
-    }
-  }
-  return results.map(one => one.name).filter(one => again.has(one));
-}
-const exactly = names => `^(?:${names.map(one => one.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})$`;
 // The first run's own --only is replaced by the journeys to retry (they are a subset of it).
 const without = (list, flag) => list.filter((one, index) => one !== flag && list[index - 1] !== flag);
 
@@ -85,11 +67,7 @@ function retryPassed(one) {
   if (one.code !== 0) return false;
   const before = report(one.group)?.results, after = report(one.folder)?.results;
   if (!before) return true;
-  if (!after) return false;
-  const state = new Map(after.map(each => [each.name, each.state]));
-  const mustPass = new Set(before.filter(each => each.state === "failed").map(each => each.name));
-  if (after.some(each => each.name === BROWSER_CHECK)) mustPass.add(BROWSER_CHECK);
-  return [...mustPass].every(name => state.get(name) === "passed");
+  return retryCleared(before, after);
 }
 const judged = again.map(one => ({ ...one, code: retryPassed(one) ? 0 : one.code || 1 }));
 const finished = first.map(one => judged.find(next => next.group === one.group) ?? one);

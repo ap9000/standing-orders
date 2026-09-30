@@ -65,7 +65,20 @@ a report, a draft, a sort, an API's answer).
 **Triggers** add cards on their own: a button (which can also be shared as a
 public form), a schedule, GitHub (new issues, a label, new pull requests,
 failed checks), Linear, another flow's cards reaching a zone, a webhook, an
-**email inbox**, or a **chat channel**.
+**email inbox**, a **chat channel**, or a **plane review**.
+
+A **plane review** reads Toolroll's own last 24 hours every day at a set time
+(07:30 in your time zone unless you choose another) and makes one card per
+problem worth fixing: failed or no-change runs grouped by cause (provider
+error, sign-in expiry, check failure, timeout, quitting without a handoff,
+a stuck lease, a process left behind), tasks that waited on a person for over
+a day, sign-in and plan-limit pauses, chat replies that weren't delivered,
+Broken integrations, failed release checks, and work the worker logged as
+broke. Each card has the counts, run ids and short excerpts, with anything
+that looks like a key hidden. The same problem on a later day joins its card
+as a note while the card is open; a clean day adds nothing. It reads the
+store directly, never through a script, and only projects the flow's owner
+can see.
 
 An email inbox trigger turns each new message in your mailbox into a card:
 the subject is its title, and the sender and the new part of the message
@@ -104,19 +117,58 @@ reminder, then anyone can decide), and Blank.
 
 ## Starter flows
 
-Settings → Flows (and `toolroll onboard`) offers three flows that are on from
+Settings → Flows (and `toolroll onboard`) offers four flows that are on from
 day one, each switched on with one yes: **Fix failing CI** (a failed check on
 the main branch files a fix task), **Issues become tasks** (an issue labelled
-`toolroll` becomes a task) and **Overnight queue** (cards added in the day
-start after 22:00; results wait for you in the morning). Each says what it
+`toolroll` becomes a task), **Overnight queue** (cards added in the day
+start after 22:00; results wait for you in the morning) and **Morning plane
+review** (`toolroll onboard --starter plane-review`: a plane review each
+morning, then research that finds the root cause, a build of the fix under
+your usual approvals, and a pull request; anything that fails waits in
+**Needs a look**). In Toolroll's own repository the fixes land in Toolroll;
+anywhere else the research says what to change in Toolroll's settings, and
+the build changes nothing unless the cause is in your project. Each says what it
 will do and what it never does; none merges without a person. A task's
 **Do this every time…** and the lead in chat offer the matching one.
+
+## Flows that test Toolroll
+
+Toolroll's own repository has two scripts for flows that test it on a
+schedule. Save each as a project script that runs its file, then draw:
+
+1. A **Schedule** trigger: `daily 02:00` for the journeys, `monday 07:00`
+   for upkeep.
+2. A **Run a script** zone that runs in a copy of the card's work (main,
+   after the project's setup). **If it fails** goes to step 3; **Then** goes
+   to Done. For the journeys, add the answers **pass** (to Done) and
+   **fail** (to step 3).
+3. A **Research** zone that reports what failed and what to do about it.
+4. A **Build** zone that fixes it, then a **Pull request** zone.
+
+- **Real-model journeys** (`scripts/flows/real-model-journeys.mjs`) builds
+  Toolroll and runs the journeys that use real models, which unit tests and
+  CI never run: `scripts/flows-e2e.mjs` and the lead journeys of
+  `scripts/app-e2e.mjs`. A failed journey runs once more, with the journeys
+  it needs, to rule out a flaky model. It prints each journey that failed
+  twice, its error and what it saw, and ends with `goto: pass` or
+  `goto: fail`. It stops itself at 25 minutes; give the script 30.
+- **Weekly upkeep** (`scripts/flows/weekly-upkeep.mjs`) runs `npm outdated`
+  and `npm audit`, and compares the installed claude, codex and gemini with
+  the versions it recorded last time (in
+  `~/.cache/toolroll-flows/weekly-upkeep.json`). It prints one line per
+  thing to act on and fails when there is one.
+
+Both run inside the agents' fence with the computer's claude and codex
+sign-ins, the npm registry and servers on localhost. The fence keeps
+Toolroll's saved keys out of reach, so the journey that needs an OpenRouter
+key is skipped there, and says so.
 
 ## Insights
 
 **Insights** on a flow shows where cards fail or get sent back, how long they
 wait, how each script does, how well Sort zones sort (how often people moved
-a sorted card elsewhere, by how sure Jev was), and every step's run log.
+a sorted card elsewhere, by how sure Jev was), which problems a plane review
+keeps finding (on how many days), and every step's run log.
 
 ## From chat
 

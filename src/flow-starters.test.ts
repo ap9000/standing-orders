@@ -5,7 +5,7 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openStore, type Store } from "./store.js";
@@ -35,7 +35,7 @@ afterEach(() => { store.close(); rmSync(dir, { recursive: true, force: true }); 
 describe("starter flows", () => {
   test("c3: switching one on creates its trigger and zones, together and once; each says what it does and never does", () => {
     const views = startersFor(store, repo);
-    expect(views.map(one => [one.id, one.on, one.blocked])).toEqual([["ci-fix", null, null], ["issue-task", null, null], ["overnight", null, null]]);
+    expect(views.map(one => [one.id, one.on, one.blocked])).toEqual([["ci-fix", null, null], ["issue-task", null, null], ["overnight", null, null], ["plane-review", null, null]]);
     expect(views[0]!.does).toEqual(["Watches checks on main in alex/shop.", "Files a task to fix each failure, under your usual approvals.", "Asks you to review the fix."]);
     for (const one of views) expect(one.never).toMatch(/^Never merges/);
 
@@ -55,11 +55,41 @@ describe("starter flows", () => {
     expect(flowDefinitionOf(store.getFlow(issues.flow)!)!.stages.find(one => one.kind === "update")).toMatchObject({ close: false });
 
     // Not on GitHub: the GitHub starters say so and make nothing; the overnight queue still works.
-    expect(startersFor(store, plain).map(one => one.blocked)).toEqual(["This project isn't on GitHub, so this can't watch it.", "This project isn't on GitHub, so this can't watch it.", null]);
+    expect(startersFor(store, plain).map(one => one.blocked)).toEqual(["This project isn't on GitHub, so this can't watch it.", "This project isn't on GitHub, so this can't watch it.", null, null]);
     expect(switchOnStarter(store, starterOf("ci-fix")!, plain, "alex", T0, dir)).toEqual({ ok: false, said: "This project isn't on GitHub, so this can't watch it." });
     expect(store.listFlows([plain])).toEqual([]);
     expect(switchOnStarter(store, starterOf("overnight")!, plain, "alex", T0, dir)).toMatchObject({ ok: true });
-    for (const starter of STARTER_FLOWS) expect(starter.steps.some(step => step.kind === "pull-request")).toBe(false);
+    // Only the plane review opens pull requests, and none merges.
+    for (const starter of STARTER_FLOWS) expect(starter.steps.some(step => step.kind === "pull-request")).toBe(starter.id === "plane-review");
+    for (const starter of STARTER_FLOWS) expect([...starter.steps, ...starter.ownSteps ?? []].some(step => step.merge !== undefined)).toBe(false);
+  });
+
+  test("c2: the Morning plane review switches on as a daily plane review, then research, a build, a pull request, and a holding zone for every failure", () => {
+    const view = startersFor(store, plain).find(one => one.id === "plane-review")!;
+    expect(view).toMatchObject({ name: "Morning plane review", on: null, blocked: null, never: "Never merges or ships anything without you. Each fix waits for your approval." });
+    expect(view.does[2]).toMatch(/^Finds the cause\. One in this project gets a fix/);
+    const made = switchOnStarter(store, starterOf("plane-review")!, plain, "alex", T0, dir);
+    expect(made).toMatchObject({ ok: true, said: "Morning plane review is on.", already: false });
+    const flow = store.getFlow((made as { flow: number }).flow)!;
+    const stages = flowDefinitionOf(flow)!.stages;
+    expect(stages.map(one => [one.id, one.kind, one.next, one.onFail])).toEqual([
+      ["find-cause", "report", "fix", "needs-a-look"], ["fix", "task", "pull-request", "needs-a-look"], ["pull-request", "pull-request", "done", "needs-a-look"],
+      ["needs-a-look", "inbox", "done", null], ["done", "done", null, null]]);
+    expect(stages.find(one => one.id === "pull-request")!.merge).toBeUndefined();
+    expect(stages[0]!.instructions).toContain("say exactly what to change in Toolroll's settings");
+    expect(stages[1]!.instructions).toContain("{{stage.find-cause}}");
+    expect(store.flowTriggers(flow.id).map(one => [one.kind, JSON.parse(one.configJson)])).toEqual([["schedule", { kind: "plane-review", schedule: expect.stringMatching(/^daily:07:30(@.+)?$/), zone: "find-cause" }]]);
+    expect(startersFor(store, plain).find(one => one.id === "plane-review")!.on).toEqual({ flow: flow.id });
+
+    // In Toolroll's own repository, the fixes land in Toolroll.
+    const own = join(dir, "own");
+    mkdirSync(own);
+    writeFileSync(join(own, "package.json"), JSON.stringify({ name: "toolroll" }));
+    expect(startersFor(store, own).find(one => one.id === "plane-review")!.does[2]).toBe("Finds the cause in Toolroll's code, builds a fix under your usual approvals, and opens a pull request.");
+    const ours = switchOnStarter(store, starterOf("plane-review")!, own, "alex", T0, dir) as { flow: number };
+    const ourStages = flowDefinitionOf(store.getFlow(ours.flow)!)!.stages;
+    expect(ourStages[0]!.instructions).toContain("This project is Toolroll itself, so the fix belongs here.");
+    expect(ourStages[1]!.instructions).not.toContain("No build needed");
   });
 
   test("the overnight queue holds a card added in the day until 22:00, and one added at night goes straight on", () => {
@@ -106,10 +136,10 @@ describe("starter flows", () => {
         .headers.getSetCookie().map(one => one.split(";")[0]!).find(one => one.startsWith("standing-orders_session="))!;
       const page = await (await fetch(`${base}/settings/flows?repo=${encodeURIComponent(repo)}&starter=overnight`, { headers: { cookie } })).text();
       expect(page).toContain("<h1>Flows</h1>");
-      expect(page.match(/data-starter="[a-z-]+"/g)).toEqual(['data-starter="overnight"', 'data-starter="ci-fix"', 'data-starter="issue-task"']);
+      expect(page.match(/data-starter="[a-z-]+"/g)).toEqual(['data-starter="overnight"', 'data-starter="ci-fix"', 'data-starter="issue-task"', 'data-starter="plane-review"']);
       expect(page).toContain('data-starter="overnight" data-suggested="true"');
       expect(page).toContain("Never merges or pushes to your branch. You decide what ships.");
-      expect(page.match(/<button type="submit">Switch on<\/button>/g)).toHaveLength(3);
+      expect(page.match(/<button type="submit">Switch on<\/button>/g)).toHaveLength(4);
       const csrf = /name="csrf" value="([^"]+)"/.exec(page)![1]!;
 
       const switched = await fetch(`${base}/settings/flows/on`, { method: "POST", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, redirect: "manual",
@@ -126,6 +156,15 @@ describe("starter flows", () => {
       expect((await fetch(`${base}/settings/flows/on`, { method: "POST", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, redirect: "manual",
         body: new URLSearchParams({ csrf: "stale", repo, starter: "overnight" }) })).status).toBe(403);
       expect(store.listFlows([repo])).toHaveLength(1);
+
+      // The Morning plane review switches on from here too.
+      const fresh = await (await fetch(`${base}/settings/flows?repo=${encodeURIComponent(repo)}`, { headers: { cookie } })).text();
+      const token = /name="csrf" value="([^"]+)"/.exec(fresh)![1]!;
+      const review = await fetch(`${base}/settings/flows/on`, { method: "POST", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, redirect: "manual",
+        body: new URLSearchParams({ csrf: token, repo, starter: "plane-review" }) });
+      expect(review.status).toBe(303);
+      const plane = store.listFlows([repo]).find(one => one.name === "Morning plane review")!;
+      expect(store.flowTriggers(plane.id).map(one => JSON.parse(one.configJson).kind)).toEqual(["plane-review"]);
     } finally {
       server.closeAllConnections();
       await new Promise<void>(resolve => server.close(() => resolve()));
@@ -134,7 +173,7 @@ describe("starter flows", () => {
 
   test("the page reads in plain words when nothing can be switched on here", () => {
     const html = startersHtml({ repo: plain, projects: [{ path: plain, name: "notes" }], starters: startersFor(store, plain), csrf: "x", canSwitch: true, suggested: null, said: null, problem: null });
-    expect(html.match(/Switch on<\/button>/g)).toHaveLength(1);
+    expect(html.match(/Switch on<\/button>/g)).toHaveLength(2);
     expect(html).toContain("This project isn&#39;t on GitHub, so this can&#39;t watch it.");
     expect(startersHtml({ repo: plain, projects: [], starters: startersFor(store, plain), csrf: "", canSwitch: false, suggested: null, said: null, problem: null })).toContain("An approver switches these on.");
   });
