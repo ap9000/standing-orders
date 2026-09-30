@@ -13,15 +13,18 @@ export const SIGN_IN_COMMAND = "claude auth login";
 export const SANDBOX_COMMAND = "npx toolroll demo";
 
 export type FirstRunAction = { kind: "link"; label: string; href: string } | { kind: "command"; command: string };
-export type FirstRunStep = { key: "agent" | "project" | "task"; title: string; done: boolean; action: FirstRunAction | null };
-export type FirstRunFacts = { agentSignedIn: boolean; projects: number; hasTask: boolean; firstResultAt: string | null };
+/** `checking`: the answer is not in yet, so the step is shown neither done nor to do. */
+export type FirstRunStep = { key: "agent" | "project" | "task"; title: string; done: boolean; action: FirstRunAction | null; checking?: true };
+/** agentSignedIn is null until this machine's first sign-in check has answered. */
+export type FirstRunFacts = { agentSignedIn: boolean | null; projects: number; hasTask: boolean; firstResultAt: string | null };
 
 /** The three steps, each done or with the one action that does it; null once the first result has arrived. */
 export function firstRunSteps(facts: FirstRunFacts): FirstRunStep[] | null {
   if (facts.firstResultAt !== null) return null;
   const project = facts.projects > 0;
   return [
-    { key: "agent", title: "Agent signed in", done: facts.agentSignedIn, action: facts.agentSignedIn ? null : { kind: "command", command: SIGN_IN_COMMAND } },
+    facts.agentSignedIn === null ? { key: "agent", title: "Agent signed in", done: false, action: null, checking: true }
+      : { key: "agent", title: "Agent signed in", done: facts.agentSignedIn, action: facts.agentSignedIn ? null : { kind: "command", command: SIGN_IN_COMMAND } },
     { key: "project", title: "Project added", done: project, action: project ? null : { kind: "link", label: "Add a project", href: "/projects" } },
     { key: "task", title: "Your first task", done: facts.hasTask, action: facts.hasTask ? null : { kind: "link", label: "New task", href: "/tasks/new" } },
   ];

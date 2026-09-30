@@ -280,6 +280,9 @@ import { BACKUP_EVERY_HOURS, MAX_KEEP, backupFolderOf, backupNow, checkBackupFol
 import { prometheusMetrics } from "./metrics.js";
 import { SPEND_CSS, spendCsv, spendHtml } from "./spend-ui.js";
 import { RETENTION_CSS, retentionHtml } from "./retention-ui.js";
+import { STORAGE_CSS, storageHtml } from "./storage-ui.js";
+import { bytesWords, parseCleanup } from "./storage.js";
+import { checkoutPlan, cleanCheckouts, discardCheckout, previewDigest } from "./checkout-cleanup.js";
 import { UPDATES_CSS, newerThan, updateStepsHtml, updatesHtml, updatesScript } from "./toolroll-update-ui.js";
 import { abandonRuntimeUpdate, launchRuntimeUpdate, markWhatsNewSeen, prepareRuntimeUpdate, requestRuntimeUpdateCancel, runningWorkWords, runtimeUpdateStatus, runtimeUpdateTerminal, currentRuntime, type When } from "./toolroll-update.js";
 import { latestVersionNow } from "./releases.js";
@@ -663,6 +666,8 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
   }
   const clock = options.clock ?? (() => new Date());
+  /** Task checkouts, for Settings → Storage: the pool's own root, or the folder beside the database. */
+  const storagePool = (databaseFile: string) => new WorktreePool(store, { root: options.poolRoot ?? join(dirname(databaseFile), "worktrees") });
   const install = installMethod(options.installBin);
   /** What the last daily check found (the cache only, never the network), or nothing while checks are off. */
   const updateFacts = (): { release: Release | null; newer: boolean; on: boolean; byEnv: boolean } | null => {
@@ -1595,7 +1600,7 @@ export function createDecisionServer(options: ServeOptions): Server {
               !url.searchParams.has('task') && !url.searchParams.has('result') && !url.searchParams.has('request')) {
             const key = createHash('sha256').update(JSON.stringify([workspaceIncarnation, who.name,
               who.session.generation, who.session.csrf, who.session.project, who.session.projectRevision,
-              admissionList(), url.pathname + url.search])).digest('hex');
+              admissionList(), url.pathname + url.search, localSignIn?.signedIn ?? null])).digest('hex');
             const revision = workspaceRevision.current(), now = clock();
             const prior = workspaceValidators.get(key);
             if (prior && prior.revision === revision && prior.expiresAt > now.getTime() && request.headers['if-none-match'] === prior.etag) {
@@ -3860,7 +3865,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const current = options.updates?.current ?? PACKAGE_VERSION;
       // While update checks are off the page asks npm nothing until Check now.
       const checksOff = updateChecksOff(process.env, options.configDir ?? dirname(databaseFile)).off && url.searchParams.get("check") !== "now";
-      const view = { current, latest: active ? { version: current } : checksOff ? { off: true as const } : await latestReleaseFor(options.updates?.latest), method: options.updates?.method ?? installMethod(), journal: status.journal, running: status.running, whatsNew: status.whatsNew, csrf: who.session.csrf };
+      const view = { current, latest: active ? { version: current } : checksOff ? { off: true as const } : await latestReleaseFor(options.updates?.latest), method: options.updates?.method ?? installMethod(), journal: status.journal, running: status.running, whatsNew: status.whatsNew, rollbackTo: status.lastUpdate?.to === current ? status.lastUpdate.from : null, csrf: who.session.csrf };
       return sendScreen(response, 200, screen("Updates", `<p><a href="/settings">Settings</a></p><h1>Updates</h1>${updatesHtml(view, { said: url.searchParams.get("said"), problem: url.searchParams.get("problem") })}`,
         { chrome: chromeFor(project, "settings"), ...(active ? { functional: { script: updatesScript(), fetches: true } } : {}) }));
     }
@@ -3869,6 +3874,15 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (who.via !== "cookie" || !store.isInstanceOperator(who.name)) return refuse(response, who, 403, "An instance operator sets retention.", "/settings");
       const view = { periods: store.retentionPeriods(), next: retentionPlan(store, evidenceRoot, now).counts, lastSweep: lastSweepAt(store), csrf: who.session.csrf };
       return sendScreen(response, 200, screen("Retention", `<p><a href="/settings">Settings</a></p><h1>Retention</h1>${retentionHtml(view, { said: url.searchParams.get("said"), problem: url.searchParams.get("problem") })}`,
+        { chrome: chromeFor(project, "settings") }));
+    }
+    // Settings → Storage: what task checkouts use, cleaning up now (the preview behind the password), and when a
+    // finished task's clean checkout goes by itself. An instance operator's page.
+    if (url.pathname === "/settings/storage") {
+      const databaseFile = store.databaseFile();
+      if (who.via !== "cookie" || !store.isInstanceOperator(who.name) || databaseFile === null) return refuse(response, who, 403, "An instance operator looks after storage.", "/settings");
+      const plan = await checkoutPlan(store, storagePool(databaseFile), now, { manual: true });
+      return sendScreen(response, 200, screen("Storage", `<p><a href="/settings">Settings</a></p><h1>Storage</h1>${storageHtml({ plan, csrf: who.session.csrf }, { said: url.searchParams.get("said"), problem: url.searchParams.get("problem") })}`,
         { chrome: chromeFor(project, "settings") }));
     }
     // Sprint 8: Settings → Backups, how the last backup went and the schedule. An instance operator's page.
@@ -4087,20 +4101,22 @@ export function createDecisionServer(options: ServeOptions): Server {
   /**
    * Whether a coding agent is signed in where the work runs. This machine's
    * own checks (the ones Settings makes) speak only for a worker on this
-   * machine; a worker elsewhere speaks through its own readiness report, and
+   * machine, or for the first one while none is registered yet (it is started
+   * here); a worker elsewhere speaks through its own readiness report, and
    * the console never claims to have checked that machine (finding 15).
    * Nothing here waits on a probe: this machine's answer is the last one
-   * seen, refreshed in the background.
+   * seen, refreshed in the background, and null until the first one is in.
    */
-  function agentSignedIn(now: Date): boolean {
+  function agentSignedIn(now: Date): boolean | null {
     const here = hostname();
-    const workers = store.listRunners().filter(one => one.retiredAt === null && runnerAlive(one, now));
-    if ((options.localRunner !== undefined || workers.some(one => one.host === here)) && localAgentSignedIn()) return true;
-    return workers.some(one => one.host !== here && store.providerReadiness(one.name).some(seen => seen.state === "ready"));
+    const registered = store.listRunners().filter(one => one.retiredAt === null);
+    const workers = registered.filter(one => runnerAlive(one, now));
+    if (workers.some(one => one.host !== here && store.providerReadiness(one.name).some(seen => seen.state === "ready"))) return true;
+    return options.localRunner !== undefined || registered.length === 0 || workers.some(one => one.host === here) ? localAgentSignedIn() : false;
   }
   let localSignIn: { at: number; signedIn: boolean } | null = null;
   let localSignInChecking = false;
-  function localAgentSignedIn(): boolean {
+  function localAgentSignedIn(): boolean | null {
     if (!localSignInChecking && (localSignIn === null || Date.now() - localSignIn.at > 30_000)) {
       localSignInChecking = true;
       void Promise.all((["claude", "codex"] as const).map(one => connectionCheck(one).then(value => value.state, () => "unverified")))
@@ -4108,7 +4124,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         .catch(() => {})
         .finally(() => { localSignInChecking = false; });
     }
-    return localSignIn?.signedIn ?? false;
+    return localSignIn?.signedIn ?? null;
   }
   /** First tasks per project: the last ones found (safe generic ones until then), re-read in the background at most
    * every ten minutes. A render never waits on `gh` or `git grep`. */
@@ -4135,7 +4151,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     return {
       steps,
       suggestions: taskFiled || repo === null ? [] : firstTasksFor(repo),
-      sandbox: steps.find(one => one.key === "agent")?.done === false ? SANDBOX_COMMAND : null,
+      sandbox: steps.find(one => one.key === "agent" && !one.done && !one.checking) ? SANDBOX_COMMAND : null,
     };
   }
 
@@ -6670,6 +6686,33 @@ export function createDecisionServer(options: ServeOptions): Server {
       const changed = chosen.filter(one => one.days !== before[one.kind]);
       for (const one of changed) store.setRetentionPeriod(one.kind, one.days ?? null, who.name, now);
       return back("said", changed.length === 0 ? "Nothing changed." : "Saved. The next daily sweep uses these periods.");
+    }
+    // Settings → Storage: when a finished task's clean checkout goes, cleaning up what the preview showed, and throwing
+    // away a checkout kept for its changes. Each takes the password; the ledger keeps every change and removal.
+    if (url.pathname === "/settings/storage" || url.pathname === "/settings/storage/clean" || url.pathname === "/settings/storage/discard") {
+      const databaseFile = store.databaseFile();
+      if (who.via !== "cookie" || !store.isInstanceOperator(who.name) || databaseFile === null) return refuse(response, who, 403, "An instance operator looks after storage.", "/settings");
+      const back = (key: "said" | "problem", words: string) => redirect(response, `/settings/storage?${key}=${encodeURIComponent(words)}`);
+      const what = url.pathname.endsWith("/clean") ? "clean up" : url.pathname.endsWith("/discard") ? "discard a checkout" : "change checkout cleanup";
+      if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return back("problem", `Enter your Toolroll password to ${what}.`);
+      if (url.pathname === "/settings/storage") {
+        const cleanup = parseCleanup(body.get("cleanup") ?? "");
+        if (cleanup === undefined) return back("problem", "Choose when a finished task's checkout is removed.");
+        const before = store.checkoutCleanup();
+        store.setCheckoutCleanup(cleanup, who.name, now);
+        return back("said", cleanup === before ? "Nothing changed." : "Saved.");
+      }
+      const pool = storagePool(databaseFile);
+      if (url.pathname.endsWith("/clean")) {
+        // Only what the preview showed goes: when that changed since, the person looks again.
+        const plan = await checkoutPlan(store, pool, clock(), { manual: true });
+        if (plan.go.length === 0) return back("said", "Nothing to clean up.");
+        if (body.get("preview") !== previewDigest(plan)) return back("problem", "What a clean-up would remove changed since you looked. Check the list again.");
+        const done = await cleanCheckouts(store, pool, clock, { manual: true, actor: who.name, only: new Set(plan.go.map(one => one.path)) });
+        return back("said", done.removed.length === 0 ? "Nothing was removed: those checkouts are no longer ready to go." : `Removed ${done.removed.length} checkout${done.removed.length === 1 ? "" : "s"}, about ${bytesWords(done.freed)}. Their branches stay.`);
+      }
+      const done = await discardCheckout(store, pool, body.get("path") ?? "", now, who.name);
+      return done.ok ? back("said", `Discarded, about ${bytesWords(done.bytes)}. Its branch stays.`) : back("problem", done.message);
     }
     // Sprint 8: back up now. An instance operator; the outcome is kept like a scheduled one's.
     if (url.pathname === "/settings/backups/now") {
@@ -14108,7 +14151,7 @@ button.pick-file { min-height: 1.75rem; padding: 0 .55rem; font-size: .75rem; }
 const THEME_CONTROLS_CSS = `.task-repo select{width:100%;min-height:2.75rem;font-size:1rem}.task-repo-add{margin:.35rem .1rem .5rem}.task-repo-add a{display:inline-flex;align-items:center;min-height:2.25rem}details.result-request-open.result-request-form>summary{border:0;background:transparent;padding:.5rem 0;min-height:2.75rem;font-weight:600;display:list-item;list-style:revert}details.result-request-open.result-request-form>summary::-webkit-details-marker{display:revert}form.js-autosave button[type=submit]{display:none}.provider-row{border-bottom:1px solid var(--so-line);padding:.35rem 0}.provider-row:first-of-type{border-top:1px solid var(--so-line)}.provider-head{display:flex;align-items:center;gap:.75rem;margin:.4rem 0 0}.provider-status{display:inline-flex;align-items:center;gap:.4rem;color:var(--so-muted);font-size:.875rem}.provider-status i{width:.5rem;height:.5rem;border-radius:50%;background:var(--so-muted)}.provider-status--ok i{background:var(--so-success)}.provider-status--warn i{background:var(--so-attention)}.provider-status--off i{background:transparent;border:1.5px solid var(--so-muted)}details.provider-manage>summary{cursor:pointer;color:var(--so-accent-text);font-size:.875rem;min-height:2.5rem;display:list-item;padding-block:.5rem}.card.props .row{display:grid;gap:.1rem;margin:0 0 .75rem}.card.props .row>.meta{display:block;font-size:.75rem}.card.props .row>.meta::first-letter{text-transform:uppercase}.card.props .row>.mono{font-family:var(--font-sans);font-size:.875rem}.card.props .row>.mono .seal{font-family:var(--font-mono);font-size:.8125rem}details.evidence-files{margin:1rem 0}details.evidence-files>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:600}details.evidence-files ul{list-style:none;margin:0;padding:0}details.evidence-files li{display:flex;justify-content:space-between;gap:1rem;padding:.5rem 0;border-bottom:1px solid var(--so-line)}.result-action .result-feedback-link{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;text-decoration:none}@media(hover:hover) and (pointer:fine){.result-action .result-feedback-link:hover{background:var(--so-raised)}}.so-sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}.verdict{margin:.5rem 0 .75rem}.verdict-chips{display:flex;flex-wrap:wrap;gap:.4rem;list-style:none;padding:0;margin:0}.verdict-chip{display:inline-flex;align-items:center;gap:.3rem;min-height:1.75rem;padding:.2rem .65rem;border-radius:999px;font-size:.8125rem;font-weight:600;background:var(--so-neutral-soft);color:var(--so-neutral-ink)}.verdict-chip svg{width:.9rem;height:.9rem}.verdict-chip--success{background:var(--so-success-soft);color:var(--so-success)}.verdict-chip--danger{background:var(--so-danger-soft);color:var(--so-danger)}.verdict-chip--warning{background:var(--so-warning-soft);color:var(--so-warning)}.verdict-chip--info{background:var(--so-info-soft);color:var(--so-info)}.verdict-by{margin:.4rem 0 0}details.result-request-open{margin:.5rem 0}details.result-request-open>summary{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;cursor:pointer;list-style:none}details.result-request-open>summary::-webkit-details-marker{display:none}details.result-request-open[open]>summary{margin-bottom:.75rem}.settings-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(8.5rem,1fr));gap:.5rem;margin:0 0 2rem}.settings-tiles a{display:flex;align-items:center;gap:.6rem;min-height:3rem;padding:.65rem .8rem;border:1px solid var(--so-line);border-radius:.625rem;background:var(--so-paper);color:var(--so-ink);text-decoration:none;font-weight:550;font-size:.875rem}@media(hover:hover) and (pointer:fine){.settings-tiles a:hover{border-color:var(--so-input-line);background:var(--so-raised)}}.settings-tiles svg{width:1.1rem;height:1.1rem;flex-shrink:0;color:var(--so-accent-text)}details.settings-more{margin:.25rem 0 1.25rem}details.settings-more>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:550}details.settings-more>summary .meta{font-weight:400;margin-left:.35rem}.settings-changed{margin-top:-.25rem}.appearance{margin:0 0 28px}.appearance h2{margin:0 0 10px}.theme-switch{display:inline-flex;flex-wrap:nowrap;max-width:100%;gap:4px;padding:4px;margin:0;border:1px solid var(--so-line);border-radius:10px;background:var(--so-raised)}.theme-switch .theme-choice,.so-native-region .theme-switch .theme-choice{flex:1 1 0;width:auto;white-space:nowrap;min-height:40px;padding:8px 16px;border:0;border-radius:7px;background:transparent;color:var(--so-muted);font:inherit;font-weight:550;box-shadow:none;cursor:pointer}@media(hover:hover) and (pointer:fine){.theme-switch .theme-choice:hover{color:var(--so-ink)}}.theme-switch .theme-choice[aria-pressed="true"]{background:var(--so-paper);color:var(--so-ink);box-shadow:0 1px 2px rgb(0 0 0 / .1)}.appearance .meta{margin:8px 0 0}@media(max-width:600px){.theme-switch .theme-choice{min-height:44px}}.update-notes{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;max-height:18rem;overflow:auto}`;
 /** The page CSS this module writes itself (not the imported modules'), for the stylesheet contract tests. */
 export const PAGE_CSS = STYLE + THEME_CONTROLS_CSS;
-const WORKSPACE_STYLE = styleAsset(STYLE + APPROVAL_RULES_CSS + SPEND_CSS + RETENTION_CSS + UPDATES_CSS + LIMITS_CSS + MONITORING_CSS + BACKUP_CSS + EXPORT_CSS + PROJECT_DELETE_CSS + POLICY_CSS + EVIDENCE_PACK_CSS + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KITS_CSS + SSO_CSS + CREDENTIALS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
+const WORKSPACE_STYLE = styleAsset(STYLE + APPROVAL_RULES_CSS + SPEND_CSS + RETENTION_CSS + STORAGE_CSS + UPDATES_CSS + LIMITS_CSS + MONITORING_CSS + BACKUP_CSS + EXPORT_CSS + PROJECT_DELETE_CSS + POLICY_CSS + EVIDENCE_PACK_CSS + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KITS_CSS + SSO_CSS + CREDENTIALS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
@@ -14970,7 +15013,7 @@ function inboxPage(chrome: Chrome, data: {
           .map(
             step =>
               `<p class="row" data-step="${step.key}"><span class="mono" aria-hidden="true">${step.done ? "\u2713" : "\u25cb"}</span> <strong>${escape(step.title)}</strong>` +
-              (step.action === null ? ` <span class="meta">done</span>`
+              (step.checking ? ` <span class="meta">checking…</span>` : step.action === null ? ` <span class="meta">done</span>`
                 : step.action.kind === "link" ? ` <a href="${escape(step.action.href)}">${escape(step.action.label)}</a>`
                 : ` <code>${escape(step.action.command)}</code>`) +
               `</p>`,
@@ -23755,6 +23798,7 @@ const SETTINGS_TILE_ICONS: [string, string, string][] = [
     ["/settings/approval", "Approval rules", `<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/>`],
     ["/settings/monitoring", "Monitoring", `<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>`],
     ["/settings/retention", "Retention", `<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>`],
+    ["/settings/storage", "Storage", `<path d="M22 12H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><path d="M6 16h.01M10 16h.01"/>`],
     ["/settings/updates", "Updates", `<path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/>`],
     ["/settings/backups", "Backups", `<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3"/>`],
     ["/settings/data", "Data", `<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>`],

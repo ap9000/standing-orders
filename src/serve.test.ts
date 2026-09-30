@@ -3747,7 +3747,9 @@ describe("the first run: three plain steps to a first result", () => {
   test("a young installation gets three plain steps, derived from live state", async () => {
     await boot({ repo: "/repo/main" });
     const cookie = await login();
-    const html = await (await fetch(url("/inbox"), { headers: { cookie } })).text();
+    // This machine's sign-in check answers in the background; the step waits for it.
+    let html = "";
+    await vi.waitFor(async () => { html = await (await fetch(url("/inbox"), { headers: { cookie } })).text(); expect(html).not.toContain("checking…"); });
     expect(html).toContain("Get to your first result");
     // The empty-queue card yields to the steps.
     expect(html).not.toContain("Nothing needs you.");
@@ -3769,6 +3771,26 @@ describe("the first run: three plain steps to a first result", () => {
     await boot({ repo: "/repo/main", connectionProbe: signedIn });
     const cookie = await login();
     await vi.waitFor(async () => expect(await agentStep(cookie)).not.toContain("claude auth login"));
+  });
+
+  test("with no worker registered yet, the first render checks this machine, and shows the step as checking until it answers", async () => {
+    let answer: (() => void) | null = null;
+    const probe = vi.fn((file: string) => new Promise<Awaited<ReturnType<typeof signedIn>>>(done => {
+      const reply = () => { void signedIn(file).then(done); };
+      if (answer === null) answer = reply; else { const earlier = answer; answer = () => { earlier(); reply(); }; }
+    }));
+    await boot({ repo: "/repo/main", connectionProbe: probe });
+    const cookie = await login();
+    const before = await agentStep(cookie);
+    expect(before).toContain("checking…");
+    expect(before).not.toContain("claude auth login");
+    const chat = await (await fetch(url("/chat?format=workspace"), { headers: { cookie } })).json() as import("./browser-workspace.js").BrowserWorkspace;
+    expect(chat.firstRun!.steps[0]).toMatchObject({ key: "agent", done: false, action: null, checking: true });
+    expect(chat.firstRun!.sandbox).toBeNull();
+    expect(probe).toHaveBeenCalled();
+    answer!();
+    await vi.waitFor(async () => expect(await agentStep(cookie)).toContain("done"));
+    expect(await agentStep(cookie)).not.toContain("checking…");
   });
 
   test("with the worker on another machine, its own report decides, never this machine's sign-in", async () => {

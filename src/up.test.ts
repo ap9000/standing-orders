@@ -213,7 +213,16 @@ describe("toolroll up", () => {
 
   test("a coding agent is known by its variables; a person's own CODEX_HOME is not one", () => {
     for (const env of [{ CLAUDECODE: "1" }, { CLAUDE_CODE_ENTRYPOINT: "cli" }, { CODEX_SANDBOX: "seatbelt" }, { CODEX_THREAD_ID: "t-1" }]) expect(underAgent(env)).toBe(true);
-    for (const env of [{}, { CODEX_HOME: "/Users/alex/.codex" }, { CODEX_API_KEY: "sk-x" }, { CLAUDECODE: "" }]) expect(underAgent(env)).toBe(false);
+    for (const env of [{}, { CODEX_HOME: "/Users/alex/.codex" }, { CODEX_API_KEY: "sk-x" }, { CODEX_PROFILE: "work" }, { CODEX_MODEL: "gpt-5" }, { CLAUDECODE: "" }]) expect(underAgent(env)).toBe(false);
+  });
+
+  test("an agent that sets no variable is known by the program running the command", () => {
+    for (const programs of [["zsh", "aider"], ["bash", "node", "copilot"], ["zsh", "node", "amp"], ["bash", "goose"], ["zsh", "codex"], ["sh", "python3.12", "aider"]]) {
+      expect(underAgent({}, () => programs)).toBe(true);
+    }
+    for (const programs of [[], ["zsh", "login", "Terminal"], ["bash", "tmux"], ["zsh", "node", "vite"]]) expect(underAgent({}, () => programs)).toBe(false);
+    // A person's own CODEX_ setting in a plain terminal leaves the prompts on.
+    expect(underAgent({ CODEX_PROFILE: "work" }, () => ["zsh", "login"])).toBe(false);
   });
 
   test("under a coding agent, even at a terminal, it prints the handoff and never the password", async () => {

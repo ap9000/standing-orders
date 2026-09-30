@@ -33,6 +33,8 @@ export type UpdatesView = {
   journal: RuntimeUpdateJournal | null;
   running: boolean;
   whatsNew: { version: string; notes: string[] } | null;
+  /** The version `toolroll update --rollback` returns to: the last completed update's, while it is what runs. */
+  rollbackTo: string | null;
   csrf: string;
 };
 
@@ -91,7 +93,7 @@ export function updatesHtml(view: UpdatesView, notice: { said?: string | null; p
       `<div class="update-actions"><button type="submit" name="when" value="now" class="primary">Update now</button>` +
       `<button type="submit" name="when" value="when-idle">When idle</button><button type="submit" name="when" value="tonight">Tonight (03:00)</button></div></form>`
     : "";
-  const rollback = j?.kind === "update" && j.phase === "complete" ? `<p class="meta">To go back to ${e(j.from.version)}: <code>toolroll update --rollback</code></p>` : "";
+  const rollback = view.rollbackTo !== null ? `<p class="meta">To go back to ${e(view.rollbackTo)}: <code>toolroll update --rollback</code></p>` : "";
   return `<section class="updates">${note}${whatsNew}${j ? outcomeHtml(j) : ""}<div class="card" data-update-state="${newer ? "available" : "current"}">${state}${form}${rollback}</div></section>`;
 }
 

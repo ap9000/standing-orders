@@ -3,7 +3,8 @@ import { parseProtectedPaths } from "./approval-policy.js";
 import { rulesSummary } from "./approval-rules-ui.js";
 import { evidencePack, exportDay, ledgerExportChunks, standaloneEvidenceHtml, type LedgerExport } from "./evidence-pack.js";
 import { matchesOutsideCheckpoint } from "./ledger-chain.js";
-import { bytesWords, storageReport } from "./storage.js";
+import { CLEANUP_CHOICES, bytesWords, cleanupWords, parseCleanup, storageReport } from "./storage.js";
+import { checkoutPlan, cleanCheckouts, discardCheckout, whyWords, type CheckoutItem, type CheckoutPlan } from "./checkout-cleanup.js";
 import { MIN_DAYS, RETENTION_KINDS, countWords, dailyRetention, isRetentionKind, lastSweepAt, parsePeriod, periodWords, retentionPlan, sweepWords, type RetentionKind, type RetentionSweep } from "./retention.js";
 import { checkPolicy, parseList, policyParts, type SavedPolicy } from "./policy.js";
 import { billingOf, budgetHoldWords, budgetLabel, budgetStates, monthNamed, monthOf, spendItems, teammateNames, usd as spendUsd, type BudgetAgent, type BudgetHold } from "./spend.js";
@@ -308,11 +309,6 @@ export type Write = (line: string) => void;
  */
 export const EXIT = { ok: 0, failed: 1, usage: 2, refused: 3 } as const;
 
-/** Storage retention: how long a finished task's clean checkout is kept after it was let go, and a result marked
- * complete's or a release candidate's after it was (its checkout holds the build a deploy installs). */
-export const CHECKOUT_KEEP_MS = 2 * 24 * 60 * 60_000;
-export const RESULT_KEEP_MS = 7 * 24 * 60 * 60_000;
-
 export type OperateOptions = {
   /** Native-shell proof key, passed in memory rather than command-line arguments. */
   desktopIdentity?: string;
@@ -379,6 +375,9 @@ export const OPERATE_HELP = `toolroll — operating the queue
                                         --not-requester on|off, --protect none|project, --protect-paths "a/**,b/**"
   toolroll task evidence <id>        the task's evidence pack as JSON (--html for a printable page; --out <file>)
   toolroll storage                   where the disk goes: database, build checkouts, releases, evidence
+  toolroll storage clean [--yes]     preview removing finished tasks' clean checkouts (their branches stay); --yes removes them
+  toolroll storage cleanup <when>    remove a finished task's clean checkout: finished|2d|7d|never (instance operator)
+  toolroll storage discard <path> --yes   throw away a checkout kept for its changes; its branch stays
   toolroll monitoring                where the audit stream and traces go, and how each destination is doing
   toolroll check-progress <run>      current or final approved check progress
   toolroll spend [--month YYYY-MM] [--csv]   what agent work cost, by project, person, teammate and model
@@ -1070,13 +1069,8 @@ async function dispatch(
       return exportCommand(positional, flags, context);
     case "policy":
       return policyCommand(positional, flags, context);
-    case "storage": {
-      const report = storageReport(context.store, context.databaseFile, context.clock(), CHECKOUT_KEEP_MS);
-      return succeed(context.write, context.json, "storage", report, () => [
-        `${report.folder}: ${bytesWords(report.total)}`,
-        ...report.lines.map(one => `  ${one.what.padEnd(17)} ${bytesWords(one.bytes).padStart(8)}${one.count === undefined ? "" : `  (${one.count})`}${one.note === undefined ? "" : `  ${one.note}`}`),
-      ]);
-    }
+    case "storage":
+      return storageCommand(positional, flags, context);
     case "monitoring": {
       // Where the audit stream and traces go, and how each destination is doing. Settings → Monitoring changes it.
       const settings = readMonitoring(dirname(context.databaseFile));
@@ -4799,13 +4793,9 @@ async function reconcileCommand(
     });
   }
 
-  // Storage retention: finished work's clean checkouts go two days after they were let go (their branches stay); a
-  // result marked complete, or a release candidate, a week after (a deploy installs the build in its checkout).
-  const pruned = await worktrees.prune(repo, clock(), CHECKOUT_KEEP_MS, () => store.keptBranches(repo, clock(), RESULT_KEEP_MS));
-  for (const row of pruned.removed) {
-    store.recordAction({ at: clock().toISOString(), actor: "worker", repo, taskId: row.taskRef === null ? null : store.externalIdFor(row.taskRef), runId: null,
-      action: "checkout removed", outcome: "removed", source: "work", detail: `${basename(row.path)} (released ${row.releasedAt?.slice(0, 10) ?? "?"})` });
-  }
+  // Checkout cleanup (Settings → Storage): finished work's clean checkouts go as the setting says (by default when
+  // the task is complete or cancelled); their branches stay. Each removal is in the ledger.
+  const pruned = await cleanCheckouts(store, worktrees, clock, { manual: false, actor: "worker", repo });
 
   // Retention (Settings → Retention): once a day, what's older than its setting goes; one ledger entry says what.
   let retention: RetentionSweep | null = null;
@@ -4830,7 +4820,7 @@ async function reconcileCommand(
       reaped: reaped.map(claim => claim.leaseId),
       adopted: adoption.adopted,
       forgotten: adoption.forgotten,
-      checkoutsRemoved: pruned.removed.map(row => row.path),
+      checkoutsRemoved: pruned.removed.map(one => one.path),
       checkoutsKept: pruned.kept,
       liveViewsSwept: liveSwept.removed.length,
       retention: retention === null ? null : { counts: retention.counts, freedBytes: retention.freed },
@@ -4846,7 +4836,7 @@ async function reconcileCommand(
             ...(reaped.length === 0 ? [] : [`Reaped ${reaped.length} expired lease(s).`]),
             ...adoption.adopted.map(path => `Adopted ${path} — released, unverified, somebody should look.`),
             ...adoption.forgotten.map(path => `Forgot ${path} — its directory is gone.`),
-            ...(pruned.removed.length === 0 ? [] : [`Removed ${pruned.removed.length} checkout(s) nobody has used for two days; their branches stay.`]),
+            ...(pruned.removed.length === 0 ? [] : [`Removed ${pruned.removed.length} finished task checkout(s), about ${bytesWords(pruned.freed)}; their branches stay.`]),
             ...(liveSwept.removed.length === 0 ? [] : [`Cleared ${liveSwept.removed.length} finished live view(s).`]),
             ...(retention === null || retained.length === 0 ? [] : [`Retention removed ${sweepWords(retention.counts, retention.freed)}.`]),
           ],
@@ -12570,6 +12560,89 @@ async function retentionCommand(positional: readonly string[], flags: Map<string
   }
   const periods = store.setRetentionPeriod(kind, days, acting.name, context.clock());
   return succeed(context.write, context.json, command, { periods }, () => [`${label(kind)}: kept ${days === null ? "forever" : `for ${periodWords(days)}`}.`]);
+}
+
+/** `storage`, `storage cleanup [<when>]`, `storage clean [--yes]`, `storage discard <path> --yes`: where the disk goes,
+ * and task checkouts: when a finished task's clean checkout is removed, cleaning up now, and throwing away one kept for
+ * its changes. Changing anything takes an instance operator. */
+async function storageCommand(positional: readonly string[], flags: Map<string, string | true>, context: Context): Promise<number> {
+  const [action, ...rest] = positional;
+  const command = `storage ${action ?? ""}`.trim();
+  const store = context.store;
+  const changes = (action === "cleanup" && rest.length > 0) || (action === "clean" && flags.has("yes")) || action === "discard";
+  const allowed = new Set([...(changes ? ["as", "token", "token-file", "token-env"] : []), ...(action === "clean" || action === "discard" ? ["yes"] : []), "db", "json"]);
+  for (const name of flags.keys()) if (!allowed.has(name)) return fail(context.write, context.json, command, "usage", `--${name} is not a ${command} option.`, EXIT.usage);
+  const pool = new WorktreePool(store, { root: join(dirname(context.databaseFile), "worktrees"), ...(context.gitRunner === undefined ? {} : { runner: context.gitRunner }) });
+  const operator = async (): Promise<string | null> => {
+    const acting = await askCredentials(flags, context);
+    const verified = acting === null ? null : authenticateApprover(store, acting.name, acting.token);
+    return acting !== null && verified !== null && verified.ok && store.isInstanceOperator(acting.name) ? acting.name : null;
+  };
+  const refused = (what: string) => fail(context.write, context.json, command, "refused", `An instance operator ${what}: pass --as and --token (or use the remembered login).`, EXIT.refused);
+  const summary = (plan: CheckoutPlan): string[] => [
+    `Checkouts: ${plan.count}, ${bytesWords(plan.totalBytes)}. ${plan.waitingReview} waiting for review, ${plan.withChanges} kept because they have changes.`,
+    plan.go.length === 0 ? "A clean up now would free nothing." : `A clean up now would free about ${bytesWords(plan.freeBytes)} (${plan.go.length} checkout${plan.go.length === 1 ? "" : "s"}): toolroll storage clean`,
+    `A finished task's clean checkout is removed ${cleanupWords(plan.cleanup)}; its branch stays.`,
+  ];
+  const itemLine = (one: CheckoutItem) => `  ${bytesWords(one.bytes).padStart(8)}  ${one.path}${one.why === null ? "" : `  (${whyWords(one)})`}`;
+
+  if (action === undefined) {
+    const plan = await checkoutPlan(store, pool, context.clock(), { manual: true });
+    const report = storageReport(store, context.databaseFile, plan.go.length === 0 ? "nothing to clean up" : `about ${bytesWords(plan.freeBytes)} to clean up`);
+    return succeed(context.write, context.json, "storage", { ...report, checkouts: checkoutSummary(plan) }, () => [
+      `${report.folder}: ${bytesWords(report.total)}`,
+      ...report.lines.map(one => `  ${one.what.padEnd(17)} ${bytesWords(one.bytes).padStart(8)}${one.count === undefined ? "" : `  (${one.count})`}${one.note === undefined ? "" : `  ${one.note}`}`),
+      ...summary(plan),
+    ]);
+  }
+  if (action === "cleanup") {
+    if (rest.length === 0) {
+      const cleanup = store.checkoutCleanup();
+      return succeed(context.write, context.json, command, { cleanup }, () => [`A finished task's clean checkout is removed ${cleanupWords(cleanup)}; its branch stays.`]);
+    }
+    const cleanup = rest.length === 1 ? parseCleanup(rest[0]!) : undefined;
+    if (cleanup === undefined) return fail(context.write, context.json, command, "usage", `Use storage cleanup <${CLEANUP_CHOICES.map(one => one.value).join("|")}>.`, EXIT.usage);
+    const actor = await operator();
+    if (actor === null) return refused("sets checkout cleanup");
+    const saved = store.setCheckoutCleanup(cleanup, actor, context.clock());
+    return succeed(context.write, context.json, command, { cleanup: saved }, () => [`Saved. A finished task's clean checkout is removed ${cleanupWords(saved)}; its branch stays.`]);
+  }
+  if (action === "clean") {
+    if (rest.length > 0) return fail(context.write, context.json, command, "usage", "Use storage clean to preview, then storage clean --yes.", EXIT.usage);
+    if (!flags.has("yes")) {
+      const plan = await checkoutPlan(store, pool, context.clock(), { manual: true });
+      return succeed(context.write, context.json, command, { preview: true, go: plan.go, stay: plan.stay, freeBytes: plan.freeBytes }, () => [
+        ...(plan.go.length === 0 ? ["Nothing to clean up."] : [`Would remove ${plan.go.length} checkout${plan.go.length === 1 ? "" : "s"}, freeing about ${bytesWords(plan.freeBytes)} (their branches stay):`, ...plan.go.map(itemLine)]),
+        ...(plan.stay.length === 0 ? [] : [`Stays (${plan.stay.length}):`, ...plan.stay.map(itemLine)]),
+        plan.go.length === 0 ? "Nothing was removed." : "Nothing was removed. Run toolroll storage clean --yes to remove them.",
+      ]);
+    }
+    const actor = await operator();
+    if (actor === null) return refused("cleans up checkouts");
+    const done = await cleanCheckouts(store, pool, context.clock, { manual: true, actor });
+    return succeed(context.write, context.json, command, { removed: done.removed, kept: done.kept, freedBytes: done.freed }, () => [
+      done.removed.length === 0 ? "Nothing to clean up." : `Removed ${done.removed.length} checkout${done.removed.length === 1 ? "" : "s"}, about ${bytesWords(done.freed)}; their branches stay.`,
+      ...done.removed.map(itemLine),
+      ...done.kept.map(one => `  kept ${one.path} (${whyWords({ why: one.why })})`),
+    ]);
+  }
+  if (action === "discard") {
+    const [path, ...extra] = rest;
+    if (path === undefined || extra.length > 0) return fail(context.write, context.json, command, "usage", "Use storage discard <path> --yes.", EXIT.usage);
+    const target = resolve(path);
+    if (store.getWorktree(target) === null) return fail(context.write, context.json, command, "not-found", `${target} is not a task checkout. toolroll storage clean lists them.`, EXIT.refused);
+    if (!flags.has("yes")) return fail(context.write, context.json, command, "usage", `This throws away ${target} and its uncommitted changes (its branch stays). Add --yes to discard it.`, EXIT.usage);
+    const actor = await operator();
+    if (actor === null) return refused("discards a checkout");
+    const done = await discardCheckout(store, pool, target, context.clock(), actor);
+    if (!done.ok) return fail(context.write, context.json, command, "refused", done.message, EXIT.refused);
+    return succeed(context.write, context.json, command, { discarded: target, freedBytes: done.bytes }, () => [`Discarded ${target}, about ${bytesWords(done.bytes)}; its branch stays.`]);
+  }
+  return fail(context.write, context.json, command, "usage", "Use storage, storage cleanup <when>, storage clean [--yes] or storage discard <path> --yes.", EXIT.usage);
+}
+
+function checkoutSummary(plan: CheckoutPlan) {
+  return { count: plan.count, totalBytes: plan.totalBytes, waitingReview: plan.waitingReview, withChanges: plan.withChanges, cleanBytes: plan.freeBytes, cleanCount: plan.go.length, cleanup: plan.cleanup };
 }
 
 /** `policy show | set` (sprint 8): the organisation policy. Setting it takes an instance operator's credentials; each rule

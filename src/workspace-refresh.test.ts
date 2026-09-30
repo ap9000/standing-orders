@@ -25,7 +25,9 @@ beforeEach(async () => {
   token = account.token;
   server = createDecisionServer({ store, evidenceRoot: join(directory, 'evidence'), clock: () => now,
     projectRoots: [directory], currentRepos: () => admitted,
-    chatEnv: {}, chatFetcher: provider as typeof fetch, subscriptionChatRunner: provider });
+    chatEnv: {}, chatFetcher: provider as typeof fetch, subscriptionChatRunner: provider,
+    // Never the machine's real claude, codex, gh or git grep: an instant, fixed answer.
+    connectionProbe: signedOut, firstTaskRunner: quietRepo });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
   if (address === null || typeof address === 'string') throw new Error('server fixture');
@@ -39,11 +41,27 @@ afterEach(async () => {
   store.close(); rmSync(directory, { recursive: true, force: true });
 });
 
+const signedOut = async (file: string) => ({ code: 1, stdout: file === 'codex' ? 'Not logged in\n' : JSON.stringify({ loggedIn: false }), stderr: '', timedOut: false, notFound: false });
+const quietRepo = async () => ({ code: 1, stdout: '', stderr: '', timedOut: false, notFound: false });
+
 async function login(): Promise<string> {
   const response = await fetch(base + '/login', { method: 'POST', redirect: 'manual',
     body: new URLSearchParams({ name: 'alex', token }) });
   expect(response.status).toBe(303);
-  return response.headers.get('set-cookie')!.split(';')[0]!;
+  const cookie = response.headers.get('set-cookie')!.split(';')[0]!;
+  await settle(cookie);
+  return cookie;
+}
+/** The first render starts the sign-in check in the background, and its answer is part of the page: let it land, so
+ * the validator a test takes next is not changed by that answer arriving (it arrives at once in CI, later here). */
+async function settle(cookie: string): Promise<void> {
+  let last: string | null = null;
+  for (let attempt = 0; attempt < 50; attempt++) {
+    const tag = (await read(cookie)).headers.get('etag');
+    if (tag !== null && tag === last) return;
+    last = tag;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
 }
 function read(cookie: string, etag?: string, path = CHAT): Promise<Response> {
   return fetch(base + path, { redirect: 'manual', headers: { cookie, ...(etag ? { 'if-none-match': etag } : {}) } });

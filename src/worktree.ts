@@ -26,11 +26,11 @@
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync, rmSync, realpathSync, mkdirSync, readdirSync } from "node:fs";
 import { hostname } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
 import { run, type ExecResult, type RunOptions } from "./exec.js";
 import { currentBootId, provenDeadByBootChange } from "./boot-identity.js";
 import type { Run, Store, WorktreeRow } from "./store.js";
-import { HANDOFF_PREFIX, MAILBOX_SUFFIX, readMailbox } from "./evidence.js";
+import { HANDOFF_PREFIX, MAILBOX_SUFFIX, looksLikeProtocolFile, readMailbox } from "./evidence.js";
 import { parseHandoff } from "./decision.js";
 
 export type Runner = (
@@ -700,50 +700,82 @@ export class WorktreePool {
   }
 
   /**
-   * Keep storage in check: remove the working copies nobody needs any more.
-   * A checkout goes when it was released `keepMs` ago or longer, nothing
-   * holds it, it is clean (build output that .gitignore hides is not work),
-   * everything its HEAD reaches is on a branch, tag or remote, and it isn't the
-   * checkout of one of `keep()`'s branches (those unfinished tasks work on or
-   * would come back to, read afresh before each removal), by its branch or by
-   * the name a lease of that branch would give it under any root. Only the
-   * working copy goes: its branch, and so every commit, stays, and a later
-   * lease of the same branch makes a new one. At most `max` go per pass.
+   * Whether a let-go checkout could go without losing anything: clean (build output that .gitignore hides is not
+   * work, and neither are the files Toolroll itself wrote in there), and everything its HEAD reaches on a branch, tag
+   * or remote. Reads only.
    */
-  async prune(repo: string, now: Date, keepMs: number, keep: () => readonly string[], max = 20): Promise<{ removed: WorktreeRow[]; kept: { path: string; why: KeptWhy }[] }> {
+  async inspect(path: string): Promise<"clean" | KeptWhy> {
+    const dirty = await this.isDirty(path, true);
+    if (dirty !== false) return dirty === null ? "unreadable" : "has changes";
+    // Commits only this checkout's HEAD reaches (a detached HEAD moved on) exist nowhere else.
+    const own = await this.runner(GIT, [...READ_ONLY, "rev-list", "-1", "HEAD", "--not", "--branches", "--tags", "--remotes"], { cwd: path, timeoutMs: WORKTREE_TIMEOUT_MS });
+    if (own.code !== 0) return "unreadable";
+    return own.stdout.trim() === "" ? "clean" : "has commits";
+  }
+
+  /**
+   * Keep storage in check: remove the working copies nobody needs any more. Of `rows`, a checkout goes when it is
+   * let go, nothing holds it, `wanted` says it may go (asked again right before it goes, so a task coming back or a
+   * lease since keeps it) and `inspect` finds it clean. Only the working copy goes: its branch, and so every commit,
+   * stays, and a later lease of the same branch makes a new one. At most `max` go per pass.
+   */
+  async prune(rows: readonly WorktreeRow[], wanted: (row: WorktreeRow, fresh: boolean) => boolean, max = Infinity): Promise<{ removed: WorktreeRow[]; kept: { path: string; why: KeptWhy }[] }> {
     const removed: WorktreeRow[] = [];
     const kept: { path: string; why: KeptWhy }[] = [];
     const idle = (row: WorktreeRow | null, releasedAt: string) =>
       row !== null && row.runner === null && row.releasedAt === releasedAt && !this.inUse(row.path).held;
-    const kept_ = (branches: readonly string[], row: WorktreeRow) =>
-      branches.includes(row.branch) || branches.some(branch => basename(worktreePath("/", repo, branch)) === basename(row.path));
-    for (const row of this.store.listWorktrees().filter(one => one.repo === repo)) {
+    for (const row of rows) {
       if (removed.length >= max) break;
-      if (row.releasedAt === null || row.runner !== null || busy.has(row.path) || kept_(keep(), row)) continue;
-      if (now.getTime() - Date.parse(row.releasedAt) < keepMs || !existsSync(row.path) || !idle(row, row.releasedAt)) continue;
-      const dirty = await this.isDirty(row.path);
-      if (dirty !== false) { kept.push({ path: row.path, why: dirty === null ? "unreadable" : "has changes" }); continue; }
-      // Commits only this checkout's HEAD reaches (a detached HEAD moved on) exist nowhere else.
-      const own = await this.runner(GIT, [...READ_ONLY, "rev-list", "-1", "HEAD", "--not", "--branches", "--tags", "--remotes"], { cwd: row.path, timeoutMs: WORKTREE_TIMEOUT_MS });
-      if (own.code !== 0 || own.stdout.trim() !== "") { kept.push({ path: row.path, why: own.code !== 0 ? "unreadable" : "has commits" }); continue; }
+      if (row.releasedAt === null || row.runner !== null || busy.has(row.path) || !wanted(row, false)) continue;
+      if (!existsSync(row.path) || !idle(row, row.releasedAt)) continue;
+      const found = await this.inspect(row.path);
+      if (found !== "clean") { kept.push({ path: row.path, why: found }); continue; }
       if (busy.has(row.path)) continue;
       busy.set(row.path, "removing");
       try {
         // A lease, or a task coming back, since the listing wins: look again right before removing.
-        if (!idle(this.store.getWorktree(row.path), row.releasedAt) || kept_(keep(), row)) continue;
-        // Held while it goes: another process's lease sees this process in it (the busy map is this process's only).
-        const note = join(row.path, MARKER);
-        try { writeFileSync(note, `${process.pid} storage-retention removing ${currentBootId() ?? "unknown"} ${hostname()}\n`, "utf8"); } catch { continue; }
-        const gone = await this.git(repo, ["worktree", "remove", "--force", row.path]);
-        if (gone.code !== 0) { rmSync(note, { force: true }); kept.push({ path: row.path, why: "git refused" }); continue; }
-        this.store.transact(() => {
-          const still = this.store.getWorktree(row.path);
-          if (still !== null && still.runner === null && still.releasedAt === row.releasedAt) this.store.forgetWorktree(row.path);
-        });
+        const now = this.store.getWorktree(row.path);
+        if (!idle(now, row.releasedAt) || !wanted(now as WorktreeRow, true)) continue;
+        const gone = await this.removeWorkingCopy(row);
+        if (!gone) { kept.push({ path: row.path, why: "git refused" }); continue; }
         removed.push(row);
       } finally { busy.delete(row.path); }
     }
     return { removed, kept };
+  }
+
+  /**
+   * Throw away a let-go checkout kept for its changes, on purpose: the working copy and what is uncommitted in it
+   * go; its branch, and every commit on it, stays. Refused while anything holds it.
+   */
+  async discardChanges(path: string): Promise<{ ok: true; row: WorktreeRow } | { ok: false; message: string }> {
+    const row = this.store.getWorktree(path);
+    if (row === null) return { ok: false, message: `${path} is not a checkout Toolroll made` };
+    if (row.releasedAt === null || row.runner !== null || busy.has(path)) return { ok: false, message: `${path} is in use — it can't be discarded now` };
+    const occupied = this.inUse(path);
+    if (occupied.held) return { ok: false, message: `${path} is being used by process ${occupied.by} — it can't be discarded now` };
+    busy.set(path, "removing");
+    try {
+      if (!existsSync(path)) {
+        this.store.transact(() => { const still = this.store.getWorktree(path); if (still !== null && still.runner === null && still.releasedAt === row.releasedAt) this.store.forgetWorktree(path); });
+        return { ok: true, row };
+      }
+      return (await this.removeWorkingCopy(row)) ? { ok: true, row } : { ok: false, message: `git would not remove ${path}` };
+    } finally { busy.delete(path); }
+  }
+
+  /** Remove one idle checkout's working copy (the caller holds it in `busy`) and forget its row. */
+  private async removeWorkingCopy(row: WorktreeRow): Promise<boolean> {
+    // Held while it goes: another process's lease sees this process in it (the busy map is this process's only).
+    const note = join(row.path, MARKER);
+    try { writeFileSync(note, `${process.pid} storage-retention removing ${currentBootId() ?? "unknown"} ${hostname()}\n`, "utf8"); } catch { return false; }
+    const gone = await this.git(row.repo, ["worktree", "remove", "--force", row.path]);
+    if (gone.code !== 0) { rmSync(note, { force: true }); return false; }
+    this.store.transact(() => {
+      const still = this.store.getWorktree(row.path);
+      if (still !== null && still.runner === null && still.releasedAt === row.releasedAt) this.store.forgetWorktree(row.path);
+    });
+    return true;
   }
 
   /**
@@ -753,7 +785,7 @@ export class WorktreePool {
    * `--untracked-files=all` and no `--ignored`: build output that .gitignore
    * hides is not work, but a file somebody dropped in and never staged is.
    */
-  private async isDirty(path: string): Promise<boolean | null> {
+  private async isDirty(path: string, ignoreOwnFiles = false): Promise<boolean | null> {
     const status = await this.runner(
       GIT,
       [...READ_ONLY, "status", "--porcelain", "--untracked-files=all"],
@@ -765,10 +797,12 @@ export class WorktreePool {
     // makes every checkout permanently dirty, which would jam the pool shut on
     // the first lease — untracked files counting as dirty is the right rule,
     // and this is the one file it must not apply to.
+    // Deciding whether a checkout can go, the files Toolroll wrote at its top (a progress note, a handoff, a
+    // proof list) are not a person's work either; any other untracked or changed file still is.
     return status.stdout
       .split("\n")
       .filter(line => line.trim() !== "")
-      .some(line => !line.trimEnd().endsWith(MARKER));
+      .some(line => !line.trimEnd().endsWith(MARKER) && !(ignoreOwnFiles && line.startsWith("?? ") && looksLikeProtocolFile(line.slice(3).trim())));
   }
 
   private git(

@@ -6,6 +6,8 @@
  * hanging on "password:" at 3am is the one bug this module must not have.
  */
 
+import { spawnSync } from "node:child_process";
+import { basename } from "node:path";
 import { createInterface } from "node:readline";
 
 /** Whether asking is even possible: a human on both ends of the pipe. */
@@ -13,18 +15,42 @@ export function interactive(): boolean {
   return process.stdin.isTTY === true && process.stdout.isTTY === true;
 }
 
-/** Variables a coding agent sets for the commands it runs. CODEX_HOME and CODEX_API_KEY are a person's own settings. */
-const AGENT_VARIABLES = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "GEMINI_CLI", "CURSOR_AGENT", "OPENCODE"];
-const PERSON_CODEX_VARIABLES = new Set(["CODEX_HOME", "CODEX_API_KEY"]);
+/** Variables a coding agent sets for the commands it runs. Only Codex's own CODEX_ names: a person exports others
+ * (CODEX_HOME, CODEX_API_KEY, a profile) for themselves. */
+const AGENT_VARIABLES = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "GEMINI_CLI", "CURSOR_AGENT", "OPENCODE", "GOOSE_TERMINAL", "AIDER_CHAT",
+  "CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED", "CODEX_THREAD_ID", "CODEX_CI", "CODEX_MANAGED_BY_NPM", "CODEX_MANAGED_BY_BUN"];
+/** Agents known by the program running this command, for those that set no variable of their own. */
+const AGENT_PROGRAMS = new Set(["claude", "codex", "gemini", "cursor-agent", "opencode", "aider", "copilot", "amp", "goose", "crush", "qwen"]);
+
+/** The program names of this process's ancestors, nearest first: each one's command and, for a script run by node
+ * or python, the script's name. Empty where `ps` cannot say. */
+export function ancestorPrograms(): string[] {
+  if (process.platform === "win32") return [];
+  const names: string[] = [];
+  let pid = process.ppid;
+  for (let depth = 0; depth < 12 && pid > 1; depth++) {
+    const answered = spawnSync("/bin/ps", ["-o", "ppid=,args=", "-p", String(pid)], { encoding: "utf8", timeout: 2000 });
+    const found = answered.status === 0 ? /^\s*(\d+)\s+(.*)$/.exec(answered.stdout.trim()) : null;
+    if (!found) break;
+    const words = found[2]!.split(/\s+/);
+    const program = basename(words[0] ?? "");
+    names.push(program);
+    if (/^(node|bun|deno|python[\d.]*)$/.test(program) && words[1] !== undefined && !words[1].startsWith("-")) names.push(basename(words[1]));
+    pid = Number(found[1]);
+  }
+  return names;
+}
 
 /**
  * Whether a coding agent is running this command. An agent's shell can be a
  * real terminal, yet whatever is printed lands in its transcript and nobody
- * types at the prompt, so it is treated like no terminal at all.
+ * types at the prompt, so it is treated like no terminal at all. The agent is
+ * known by a variable it sets or, for one that sets none, by the program above
+ * this one. `programs` is read only for this process's own environment.
  */
-export function underAgent(env: Record<string, string | undefined> = process.env): boolean {
-  return Object.entries(env).some(([name, value]) => value !== undefined && value !== ""
-    && (AGENT_VARIABLES.includes(name) || (name.startsWith("CODEX_") && !PERSON_CODEX_VARIABLES.has(name))));
+export function underAgent(env: Record<string, string | undefined> = process.env, programs: () => readonly string[] = env === process.env ? ancestorPrograms : () => []): boolean {
+  if (AGENT_VARIABLES.some(name => env[name] !== undefined && env[name] !== "")) return true;
+  return programs().some(name => AGENT_PROGRAMS.has(name.replace(/\.(?:js|mjs|cjs|py|exe)$/, "")));
 }
 
 export function ask(question: string): Promise<string> {

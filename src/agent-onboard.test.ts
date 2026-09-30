@@ -12,9 +12,9 @@ import { execFileSync } from "node:child_process";
 import { runOperate, type OnboardSeams } from "./operate.js";
 import { openStore } from "./store.js";
 import { loadProjectRegistry } from "./repos.js";
-import { agentHome, operatorSkillContent } from "./agent-onboard.js";
+import { RELEASED_SKILLS, agentHome, operatorSkillContent, skillFingerprint } from "./agent-onboard.js";
 import { addApprover } from "./scope.js";
-import { CLAUDE_CODE_MANAGED_MARK, planClaudeCodeInstall } from "./skills.js";
+import { CLAUDE_CODE_MANAGED_MARK, claudeCodeGuideContent, claudeCodeSkillContent, planClaudeCodeInstall } from "./skills.js";
 import type { ProviderConnection } from "./provider-connection.js";
 import { PACKAGE_VERSION } from "./version.js";
 
@@ -197,11 +197,32 @@ describe("toolroll onboard", () => {
     const folder = join(home, ".claude", "skills", "toolroll");
     mkdirSync(folder, { recursive: true });
     writeFileSync(claudeSkill(), operatorSkillContent("0.1.0"));
-    writeFileSync(join(folder, "console.md"), `${CLAUDE_CODE_MANAGED_MARK}\n\n# old\n`);
+    writeFileSync(join(folder, "console.md"), claudeCodeGuideContent("console"));
     expect(await onboard(["--yes", "--json"])).toBe(0);
     expect(envelope().skill).toMatchObject({ state: "written", files: [{ action: "replace" }], removed: [join(folder, "console.md")] });
     expect(readFileSync(claudeSkill(), "utf8")).toBe(operatorSkillContent(PACKAGE_VERSION));
     expect(existsSync(join(folder, "console.md"))).toBe(false);
+  });
+
+  test("an old guide copy the person edited, or one no release wrote, stays", async () => {
+    const folder = join(home, ".claude", "skills", "toolroll");
+    mkdirSync(folder, { recursive: true });
+    writeFileSync(claudeSkill(), operatorSkillContent("0.1.0"));
+    const edited = `${claudeCodeGuideContent("operating")}\nMy own note: never queue on Fridays.\n`, unknown = `${CLAUDE_CODE_MANAGED_MARK}\n\n# old\n`;
+    writeFileSync(join(folder, "operating.md"), edited);
+    writeFileSync(join(folder, "runner.md"), unknown);
+    expect(await onboard(["--yes", "--json"])).toBe(0);
+    expect(envelope().skill).toMatchObject({ state: "written", removed: [] });
+    expect(readFileSync(join(folder, "operating.md"), "utf8")).toBe(edited);
+    expect(readFileSync(join(folder, "runner.md"), "utf8")).toBe(unknown);
+    lines = [];
+    expect(await onboard(["--remove", "--yes", "--json"])).toBe(0);
+    expect(readFileSync(join(folder, "operating.md"), "utf8")).toBe(edited);
+  });
+
+  test("the skills this build writes are recorded, so a later wording change still knows them as Toolroll's", () => {
+    // When this fails, the words changed: append the new fingerprint to RELEASED_SKILLS and keep the old ones.
+    for (const content of [operatorSkillContent(PACKAGE_VERSION), claudeCodeSkillContent()]) expect(RELEASED_SKILLS).toContain(skillFingerprint(content));
   });
 
   test("`skills install --claude-code` recognizes the operator skill as Toolroll's", async () => {

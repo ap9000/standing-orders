@@ -14,6 +14,7 @@ import {
 } from "./toolroll-update.js";
 import { REGISTRY, setUpdateChecks } from "./releases.js";
 import { runUpdateCommand } from "./toolroll-update-cli.js";
+import { updatesHtml } from "./toolroll-update-ui.js";
 import { addApprover } from "./scope.js";
 import { createDecisionServer } from "./serve.js";
 
@@ -126,6 +127,7 @@ function fixture(options: { coding?: boolean } = {}) {
     serviceUnit: from => readFileSync(unit, "utf8").includes(from.dist) ? unit : null,
     watchUnits: () => [],
     servicePids: async () => serviceRunning ? [4242] : [],
+    serviceLoaded: async () => true,
     restartService: async () => { calls.push("restart"); serviceRunning = true; },
     stopService: async () => { calls.push("stop"); serviceRunning = false; },
     processAlive: () => serviceRunning,
@@ -477,7 +479,7 @@ test("c2: the one-off update job has no RunAtLoad, starts by kickstart, and resu
   const f = fixture();
   try {
     const launchctl: string[][] = [];
-    const run = async (_file: string, args: readonly string[]) => { launchctl.push([...args]); return { code: args[0] === "print" ? 113 : 0, stdout: "", stderr: "", timedOut: false }; };
+    const run = async (file: string, args: readonly string[]) => { if (file === "launchctl") launchctl.push([...args]); return { code: args[0] === "print" ? 113 : 0, stdout: "", stderr: "", timedOut: false }; };
     const home = join(f.root, "home");
     const id = randomUUID();
     await launchRuntimeUpdate({ databaseFile: f.databaseFile, id, dist: f.oldDist }, { home, run: run as never, platform: "darwin" });
@@ -995,6 +997,109 @@ test("r4: a live database that cannot be read is left aside whole, and the backu
   } finally { f.close(); }
 });
 
+/** The new version writes T-new, and then (optionally) leaves the live database unreadable, and is never healthy. */
+const failingHealth = (f: ReturnType<typeof fixture>, unreadable = false) => {
+  let restarts = 0;
+  return {
+    restartService: async () => {
+      f.calls.push("restart");
+      if (++restarts > 1) return;
+      f.write("T-new");
+      if (!unreadable) return;
+      for (const suffix of ["-wal", "-shm"]) rmSync(f.databaseFile + suffix, { force: true });
+      writeFileSync(f.databaseFile, "this is not a database any more");
+    },
+    healthy: async () => false,
+  };
+};
+
+test("f1: a live database that is only busy is never moved aside: the restore stops with it in place, and a resume finishes", async () => {
+  const f = fixture();
+  let holder: DatabaseSync | null = null;
+  try {
+    const failing = failingHealth(f);
+    const outcome = await f.start({
+      ...failing,
+      processAlive: () => false,
+      stopService: async () => {
+        f.calls.push("stop");
+        if (f.calls.filter(c => c === "stop").length !== 2) return;
+        // Something outside the service holds the database exclusively while the restore runs.
+        holder = new DatabaseSync(f.databaseFile);
+        holder.exec("PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE; INSERT INTO task(id,title,state,created_at,updated_at) VALUES('T-held','held','queued','x','x'); COMMIT;");
+      },
+    });
+    expect(outcome.phase).toBe("needs-attention");
+    expect(outcome.message).toContain("could not be copied aside before the restore");
+    expect(outcome.journal!.kept ?? []).toEqual([]);
+    expect(outcome.journal!.restoredDatabase).toBeUndefined();
+    (holder as DatabaseSync | null)?.close(); holder = null;
+    expect(f.tasks()).toEqual(["T-1", "T-held", "T-new"]);
+    const resumed = await resumeRuntimeUpdate(f.stateDir, { ...f.system, ...failing });
+    expect(resumed.phase).toBe("restored");
+    expect(f.tasks()).toEqual(["T-1"]);
+    expect(f.tasks(resumed.journal!.keptAside!)).toEqual(["T-1", "T-held", "T-new"]);
+  } finally { (holder as DatabaseSync | null)?.close(); f.close(); }
+});
+
+test("f1: a changed backup or too little room stops the restore before the unreadable live database moves", async () => {
+  for (const problem of ["backup changed", "no room"] as const) {
+    const f = fixture();
+    try {
+      const outcome = await f.start({
+        ...failingHealth(f, true),
+        ...(problem === "no room" ? { freeBytes: () => 1024 } : {}),
+        checkpoint: phase => { if (phase === "rolling-back" && problem === "backup changed") writeFileSync(readRuntimeUpdate(f.stateDir)!.backupPath!, "tampered"); },
+      });
+      expect(outcome.phase).toBe("needs-attention");
+      expect(outcome.message).toMatch(problem === "backup changed" ? /backup changed\. Nothing was put back; the live database is as it was/ : /free and the restore needs .* Nothing was put back/);
+      expect(readFileSync(f.databaseFile, "utf8")).toBe("this is not a database any more");
+      expect(outcome.journal!.kept ?? []).toEqual([]);
+    } finally { f.close(); }
+  }
+});
+
+test("f1: a backup that cannot be put back after the live database moved aside puts the live database back", async () => {
+  const f = fixture();
+  try {
+    let blocked = true;
+    const failing = failingHealth(f, true);
+    const outcome = await f.start({
+      ...failing,
+      checkpoint: phase => { if (phase === "kept-aside" && blocked) fs.chmodSync(readRuntimeUpdate(f.stateDir)!.backupPath!, 0o000); },
+    });
+    expect(outcome.phase).toBe("needs-attention");
+    // Never empty and never a fresh database: the live path holds what it held.
+    expect(readFileSync(f.databaseFile, "utf8")).toBe("this is not a database any more");
+    expect(outcome.journal!.kept ?? []).toEqual([]);
+    blocked = false; fs.chmodSync(outcome.journal!.backupPath!, 0o600);
+    const resumed = await resumeRuntimeUpdate(f.stateDir, { ...f.system, ...failing, checkpoint: () => {} });
+    expect(resumed.phase).toBe("restored");
+    expect(f.tasks()).toEqual(["T-1"]);
+    expect(resumed.journal!.kept).toEqual([{ path: resumed.journal!.keptAside, unreadable: true }]);
+    expect(readFileSync(resumed.journal!.keptAside!, "utf8")).toBe("this is not a database any more");
+  } finally { f.close(); }
+});
+
+test("f1: every copy kept aside stays named: a resumed restore adds one and keeps the pointer to the first", async () => {
+  const f = fixture();
+  try {
+    const failing = failingHealth(f);
+    let attempts = 0;
+    const first = await f.start({ ...failing, checkpoint: phase => { if (phase === "kept-aside" && ++attempts === 1) throw Error("The disk went away."); } });
+    expect(first.phase).toBe("needs-attention");
+    const [earlier] = first.journal!.kept!;
+    expect(f.tasks(earlier!.path)).toEqual(["T-1", "T-new"]);
+    // A 0.8.1 journal names only its newest copy: it is carried into the list.
+    const saved = JSON.parse(readFileSync(join(f.stateDir, "toolroll-update.json"), "utf8"));
+    delete saved.kept; writeFileSync(join(f.stateDir, "toolroll-update.json"), JSON.stringify(saved));
+    const resumed = await resumeRuntimeUpdate(f.stateDir, { ...f.system, ...failing });
+    expect(resumed.phase).toBe("restored");
+    expect(resumed.journal!.kept!.map(one => one.path)).toEqual([earlier!.path, resumed.journal!.keptAside]);
+    expect(resumed.message).toContain(`kept in ${earlier!.path} and ${resumed.journal!.keptAside}`);
+  } finally { f.close(); }
+});
+
 test("r5: the stop waits as long as toolroll up takes to exit, and a stop that times out leaves the label enabled", async () => {
   const f = fixture();
   try {
@@ -1041,6 +1146,30 @@ test("r6: each repo's watch daemon is stopped, switched and restarted with the s
   }
 });
 
+test("f9: a watch daemon the person had unloaded is switched but never stopped or started by the update", async () => {
+  for (const healthy of [true, false]) {
+    const f = fixture();
+    try {
+      const watches = ["app-1", "app-2"].map(name => join(f.root, `com.toolroll.watch.${name}.plist`));
+      for (const watch of watches) writeFileSync(watch, `<plist><string>${f.oldDist}/bin.js</string><string>watch</string></plist>`);
+      const units: string[] = [];
+      const outcome = await f.start({
+        watchUnits: from => watches.filter(watch => readFileSync(watch, "utf8").includes(from.dist)),
+        serviceLoaded: async unit => !unit.includes("app-2"),
+        stopService: async unit => { units.push(`stop ${basename(unit)}`); },
+        restartService: async unit => { units.push(`restart ${basename(unit)}`); },
+        processAlive: () => false,
+        healthy: async () => healthy,
+      });
+      expect(outcome.phase).toBe(healthy ? "complete" : "restored");
+      expect(units.filter(one => one.includes("app-2"))).toEqual([]);
+      expect(units).toContain("restart com.toolroll.watch.app-1.plist");
+      expect(outcome.journal!.watches!.map(w => [w.unit, w.loaded])).toEqual([[watches[0], true], [watches[1], false]]);
+      if (healthy) expect(readFileSync(watches[1]!, "utf8")).toContain(outcome.journal!.to.dist);
+    } finally { f.close(); }
+  }
+});
+
 test("r6: a toolroll up started while the new version ran keeps the restore from putting the database back under it", async () => {
   const f = fixture();
   try {
@@ -1082,15 +1211,47 @@ test("r7: a refused attempt after a completed update leaves --rollback working",
   } finally { f.close(); }
 });
 
+test("f8: Settings → Updates offers --rollback from the last completed update, even after a refused attempt", async () => {
+  const f = fixture();
+  try {
+    const update = await f.start();
+    await startRuntimeUpdate({ stateDir: f.stateDir, databaseFile: f.databaseFile, current: update.journal!.to, actor: "ada", version: "0.8.0", when: "now" }, f.system);
+    const status = runtimeUpdateStatus(f.stateDir);
+    expect(status.journal!.phase).toBe("refused");
+    expect(status.lastUpdate).toEqual({ from: "0.6.0", to: "0.7.0" });
+    const html = updatesHtml({ current: "0.7.0", latest: { version: "0.7.0" }, method: { kind: "npm", updateCommand: "npm install -g toolroll@latest" }, journal: status.journal, running: false, whatsNew: null, rollbackTo: status.lastUpdate!.from, csrf: "x" }, {});
+    expect(html).toContain("To go back to 0.6.0: <code>toolroll update --rollback</code>");
+    // Rolled back: nothing is offered.
+    await startRuntimeRollback({ stateDir: f.stateDir, databaseFile: f.databaseFile, current: update.journal!.to, actor: "ada", when: "when-idle" }, f.system);
+    expect(runtimeUpdateStatus(f.stateDir).lastUpdate).toBeNull();
+  } finally { f.close(); }
+});
+
 test("r8: the console's update job looks for toolroll where it is usually linked", async () => {
   const f = fixture();
   try {
     const run = async (_file: string, args: readonly string[]) => ({ code: args[0] === "print" ? 113 : 0, stdout: "", stderr: "", timedOut: false });
     const home = join(f.root, "home");
-    await launchRuntimeUpdate({ databaseFile: f.databaseFile, id: randomUUID(), dist: f.oldDist }, { home, run: run as never, platform: "darwin", npmBin: () => "/Users/a/.npm-global/bin" });
+    await launchRuntimeUpdate({ databaseFile: f.databaseFile, id: randomUUID(), dist: f.oldDist }, { home, run: run as never, platform: "darwin", npmBin: async () => "/Users/a/.npm-global/bin" });
     const plist = readFileSync(join(home, "Library", "LaunchAgents", `${UPDATE_JOB_LABEL}.plist`), "utf8");
     const path = /<key>PATH<\/key>\s*<string>([^<]+)<\/string>/.exec(plist)![1]!.split(":");
     expect(path).toEqual(expect.arrayContaining([dirname(process.execPath), "/Users/a/.npm-global/bin", join(home, ".local", "bin"), join(home, "bin"), join(home, "Library", "pnpm"), "/usr/local/bin", "/opt/homebrew/bin"]));
+  } finally { f.close(); }
+});
+
+test("r9: the job asks npm for its global folder without blocking the console", async () => {
+  const f = fixture();
+  try {
+    const asked: string[][] = [];
+    const run = async (file: string, args: readonly string[]) => {
+      asked.push([file, ...args]);
+      return { code: args[0] === "print" ? 113 : 0, stdout: file === "npm" ? "/Users/b/.npm-prefix\n" : "", stderr: "", timedOut: false };
+    };
+    const home = join(f.root, "home");
+    await launchRuntimeUpdate({ databaseFile: f.databaseFile, id: randomUUID(), dist: f.oldDist }, { home, run: run as never, platform: "darwin" });
+    expect(asked[0]).toEqual(["npm", "prefix", "--global", "--no-color"]);
+    const plist = readFileSync(join(home, "Library", "LaunchAgents", `${UPDATE_JOB_LABEL}.plist`), "utf8");
+    expect(/<key>PATH<\/key>\s*<string>([^<]+)<\/string>/.exec(plist)![1]!.split(":")).toContain("/Users/b/.npm-prefix/bin");
   } finally { f.close(); }
 });
 
@@ -1107,6 +1268,30 @@ test("--cancel with no updater running lifts the pause and cancels", async () =>
     expect(f.ledger().map(e => e.action)).toEqual(["toolroll update cancelled"]);
     for (const link of f.links) expect(readlinkSync(link)).toBe(join(f.oldDist, "bin.js"));
   } finally { f.close(); }
+});
+
+test("f3: --cancel reads the update again under the lock, and leaves one that moved on or was replaced alone", async () => {
+  for (const change of ["moved on", "replaced", "finished"] as const) {
+    const f = fixture();
+    try {
+      f.startRun();
+      await expect(f.start({ sleep: async () => { throw Object.assign(Error("crash"), { simulatedCrash: true }); } }, "when-idle")).rejects.toThrow("crash");
+      const file = join(f.stateDir, "toolroll-update.json");
+      const staged = readRuntimeUpdate(f.stateDir)!;
+      mkdirSync(join(staged.stageDir, "runtime"), { recursive: true });
+      const words = requestRuntimeUpdateCancel(f.stateDir, new Date(), {
+        // Between the first read and the lock, an updater carried on (or another update replaced this one).
+        locked: () => writeFileSync(file, JSON.stringify(change === "replaced" ? { ...staged, id: randomUUID() } : { ...staged, phase: change === "moved on" ? "switching" : "complete" })),
+      });
+      expect(words).toBe(change === "moved on" ? "The update to 0.7.0 is past the point it can be cancelled (switching); it will finish or restore on its own."
+        : change === "replaced" ? "A different update was saved while cancelling. Nothing was cancelled." : "No update is in progress.");
+      expect(readRuntimeUpdate(f.stateDir)!.phase).toBe(change === "moved on" ? "switching" : change === "replaced" ? "draining" : "complete");
+      expect(existsSync(join(staged.stageDir, "runtime"))).toBe(true);
+      expect(existsSync(join(staged.stageDir, "cancel-request.json"))).toBe(false);
+      expect(f.paused()).toBe(true);
+      expect(f.ledger()).toEqual([]);
+    } finally { f.close(); }
+  }
 });
 
 test("pruning never deletes a folder holding a kept-aside database", () => {

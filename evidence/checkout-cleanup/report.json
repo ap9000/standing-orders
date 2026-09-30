@@ -1,0 +1,70 @@
+{
+ "synthetic": true,
+ "note": "Synthetic fixture: a throwaway database, repository and seven task checkouts seeded by capture.ts; not the live plane.",
+ "captures": [
+  {
+   "file": "desktop-storage.png",
+   "viewport": {
+    "width": 1440,
+    "height": 900
+   },
+   "colorScheme": "light",
+   "cleanUpOpen": false,
+   "overflow": 0,
+   "text": [
+    "Checkouts use 254 MB",
+    "",
+    "7 checkouts · 1 waiting for review · 1 kept for their changes",
+    ""
+   ]
+  },
+  {
+   "file": "desktop-clean-up-preview.png",
+   "viewport": {
+    "width": 1440,
+    "height": 1600
+   },
+   "colorScheme": "light",
+   "cleanUpOpen": true,
+   "overflow": 0,
+   "text": [
+    "Checkouts use 254 MB",
+    "",
+    "7 checkouts · 1 waiting for review · 1 kept for their changes",
+    ""
+   ]
+  },
+  {
+   "file": "phone-storage.png",
+   "viewport": {
+    "width": 390,
+    "height": 844
+   },
+   "colorScheme": "light",
+   "cleanUpOpen": false,
+   "overflow": 0,
+   "text": [
+    "Checkouts use 254 MB",
+    "",
+    "7 checkouts · 1 waiting for review · 1 kept for their changes",
+    ""
+   ]
+  },
+  {
+   "file": "phone-clean-up-preview.png",
+   "viewport": {
+    "width": 390,
+    "height": 2700
+   },
+   "colorScheme": "dark",
+   "cleanUpOpen": true,
+   "overflow": 0,
+   "text": [
+    "Checkouts use 254 MB",
+    "",
+    "7 checkouts · 1 waiting for review · 1 kept for their changes",
+    ""
+   ]
+  }
+ ]
+}

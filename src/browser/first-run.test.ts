@@ -42,6 +42,14 @@ test("with no agent signed in, the sandbox and the sign-in command sit side by s
   expect([...document.querySelectorAll("code")].filter(one => one.textContent === "claude auth login")).toHaveLength(1);
 });
 
+test("before this machine's sign-in check answers, the agent step says Checking and offers nothing", async () => {
+  await mount({ ...signedOut(), steps: [{ key: "agent", title: "Agent signed in", done: false, action: null, checking: true }, ...signedOut().steps.slice(1)], sandbox: null }, () => {});
+  const agent = document.querySelector('[data-step="agent"]')!;
+  expect(agent.textContent).toBe("Agent signed in: checkingChecking…");
+  expect(agent.querySelector("code, a, button")).toBeNull();
+  expect(document.querySelector("[data-first-run-choices]")).toBeNull();
+});
+
 test("a tap drafts the task in the composer and files nothing", async () => {
   const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);
   const drafted: string[] = [];
