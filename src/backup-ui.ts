@@ -5,13 +5,15 @@
  */
 import type { BackupRun, BackupSettings } from "./store.js";
 import { bytesWords } from "./storage.js";
+import { whenUtc } from "./when-html.js";
 
 /** The schedules on offer and the most copies kept. Here rather than in backup.ts so the page never loads `node:sqlite`. */
 export const BACKUP_EVERY_HOURS = [1, 6, 12, 24] as const;
 export const MAX_KEEP = 100;
 
 const e = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
-const when = (at: string) => `${e(at.slice(0, 16).replace("T", " "))} UTC`;
+const when = (at: string) => whenUtc(at);
+const whenWords = (at: string) => `${at.slice(0, 16).replace("T", " ")} UTC`;
 const everyWords = (hours: number) => hours === 1 ? "Every hour" : hours === 24 ? "Every day" : `Every ${hours} hours`;
 const fileName = (path: string) => path.slice(path.lastIndexOf("/") + 1);
 
@@ -34,7 +36,7 @@ function state(view: BackupView): string {
   const good = view.runs.find(one => one.ok === true);
   const next = !view.settings.enabled ? "Scheduled backups are off."
     : good === undefined ? "The first scheduled backup runs within a minute or two of the console starting."
-    : `Next one about ${when(new Date(Date.parse(good.startedAt) + view.settings.everyHours * 3_600_000).toISOString())}.`;
+    : `Next one about ${whenWords(new Date(Date.parse(good.startedAt) + view.settings.everyHours * 3_600_000).toISOString())}.`;
   if (last === undefined) return `<h2>No backups yet</h2><p class="meta">${e(next)}</p>`;
   if (last.ok === null) return `<h2>Backing up</h2><p class="meta">Started ${when(last.startedAt)}.</p>`;
   if (last.ok === false) {

@@ -6,9 +6,10 @@
 import type { MonitoringStatus } from "./store.js";
 import type { MonitoringSettings } from "./monitoring-settings.js";
 import { targetOf } from "./monitoring.js";
+import { whenUtc } from "./when-html.js";
 
 const e = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
-const when = (at: string) => `${e(at.slice(0, 16).replace("T", " "))} UTC`;
+const when = (at: string) => whenUtc(at);
 
 export const MONITORING_CSS = `.monitoring{max-width:720px;min-width:0}.monitoring fieldset{border:0;padding:0;margin:20px 0 0;min-width:0}` +
   `.monitoring legend{font-weight:600;font-size:.9375rem;margin-bottom:6px}.monitoring label{display:grid;gap:4px;margin:10px 0 0;font-size:.875rem}` +

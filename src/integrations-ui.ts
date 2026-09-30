@@ -5,13 +5,14 @@
  * render never waits on one (see integrations.ts).
  */
 import { STATE_WORDS, type Integration, type IntegrationGroup } from "./integrations.js";
+import { whenUtc } from "./when-html.js";
 
 const e = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
-const when = (at: string) => `${e(at.slice(0, 16).replace("T", " "))} UTC`;
+const when = (at: string) => whenUtc(at);
 
 export const INTEGRATIONS_CSS = `.integrations{max-width:760px;min-width:0}.integrations h2{margin:24px 0 6px;font-size:.9375rem}` +
   `.integrations .integration{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 16px;align-items:start;padding:12px 0;border-top:1px solid var(--so-line);min-width:0}` +
-  `.integrations .integration>:not(.integration-action){grid-column:1}.integrations .integration:first-of-type{border-top:0}.integrations .integration-head{margin:0;display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;min-width:0}` +
+  `.integrations .integration>:not(.integration-action),.integrations .integration-body>*{grid-column:1}.integrations .integration-body{display:contents}.integrations .integration:first-of-type{border-top:0}.integrations .integration-head{margin:0;display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;min-width:0}` +
   `.integrations .integration-head strong{overflow-wrap:anywhere}.integrations .integration p{margin:2px 0 0;min-width:0;overflow-wrap:anywhere}` +
   `.integrations .integration-action{grid-column:2;grid-row:1 / span 3;align-self:center;margin:0}.integrations .integration-action button,.integrations .integration-action .button-link{min-height:44px;white-space:nowrap}` +
   `.integrations .integration .integration-action button{width:auto}.integrations .integration .integration-action a.integration-quiet{background:var(--so-paper);color:var(--so-ink);border:1px solid var(--so-input-line)}` +
@@ -20,7 +21,11 @@ export const INTEGRATIONS_CSS = `.integrations{max-width:760px;min-width:0}.inte
   `.integration-state i{width:6px;height:6px;border-radius:50%;background:currentColor}` +
   `.integration-state--connected{color:var(--so-success);background:var(--so-success-soft)}.integration-state--broken{color:var(--so-danger);background:var(--so-danger-soft)}` +
   `.integration-state--not-set-up,.integration-state--checking{color:var(--so-muted);background:var(--so-neutral-soft)}` +
-  `@media (max-width:560px){.integrations .integration{grid-template-columns:minmax(0,1fr)}.integrations .integration-action{grid-column:1;grid-row:auto;margin-top:8px}}`;
+  // A phone: the action sits at the right of the name line, and the facts under it run on as one line.
+  `@media (max-width:760px){.integrations h2{margin:16px 0 0}.integrations .integration{gap:0 12px;padding:6px 0 8px}.integrations .integration-head{min-height:44px}` +
+  `.integrations .integration-action{grid-row:1;align-self:center}.integrations .integration-body{display:block;grid-column:1 / -1;line-height:1.35}` +
+  `.integrations .integration-body>p{margin:0}.integrations .integration-body>p.meta{display:inline}.integrations .integration-body>p.meta+p.meta::before{content:" · "}` +
+  `.integrations .integration-body>:not(.meta){margin-top:4px}.integrations .integration-body>:not(.meta)+p.meta{display:block;margin-top:2px}.integrations details{margin-top:2px}}`;
 
 const GROUPS: [IntegrationGroup, string][] = [
   ["chat", "Chat"], ["code", "Code and issues"], ["mail", "Email"], ["tools", "MCP tools"], ["monitoring", "Monitoring"], ["agents", "Agents"],
@@ -54,7 +59,7 @@ function row(one: Integration, csrf: string): string {
   return `<div class="integration" data-integration="${e(one.key)}" data-state="${one.state}">` +
     `<p class="integration-head"><strong>${e(one.name)}</strong> ${badge}</p>` +
     action(one, csrf) +
-    (facts === "" ? "" : `<p class="meta">${facts}</p>`) + fix + run + history + lastError + `</div>`;
+    `<div class="integration-body">${facts === "" ? "" : `<p class="meta">${facts}</p>`}${fix}${run}${history}${lastError}</div></div>`;
 }
 
 export function integrationsHtml(list: readonly Integration[], csrf: string, notice: { said?: string | null; problem?: string | null; checking?: boolean }): string {

@@ -188,6 +188,7 @@ import {
   sweepMerges,
 } from "./publish.js";
 import { checkPublishing, publishingOf, savePublishing, followPullRequests } from "./pull-request-flow.js";
+import { starterOf, startersFor, switchOnStarter } from "./flow-starters.js";
 
 type CapabilityKind = Capability["kind"];
 import {
@@ -755,6 +756,8 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "label", "reviewers", "limit", "role", "key-file", "weekly-usd", "daily-turns", "per-hour", "token-file", "race", "compare", "race-per-usd", "race-total-usd", "race-count", "race-agents", "budget-usd", "build-usd", "sync-max-age", "merge-method",
   "phase", "risk", "tier", "clear-phase",
   "run", "containment", "agent",
+  // onboard: the starter flows to switch on.
+  "starter",
   "token-env", "after", "repair-max-attempts", "consumer", "batch", "feedback", "source", "view", "cursor", "why", "supersedes", "decision", "sessions", "timeout",
 ]);
 export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
@@ -8721,6 +8724,20 @@ async function onboardCommand(flags: Map<string, string | true>, context: Contex
       if (!checked.ok) return `off: ${checked.message}`;
       return `off: turn on with toolroll publish setup --repo ${repo} --yes (asks your password), or in Settings → Projects`;
     }),
+    starterFlag: text(flags, "starter"),
+    // Starter flows belong to a person: the flow's decisions ask them. With no account yet, none can be switched on.
+    starters: {
+      list: async repo => {
+        const views = startersFor(store, repo);
+        return store.listApprovers().length > 0 ? views : views.map(one => ({ ...one, blocked: one.blocked ?? "Needs your account first: run toolroll up, then onboard again." }));
+      },
+      switchOn: async (repo, id) => {
+        const owner = onboardLogin(store, loginFile)?.account ?? store.listApprovers()[0]?.name ?? null;
+        const starter = starterOf(id);
+        if (owner === null || starter === null) return { ok: false, said: "Needs your account first: run toolroll up, then onboard again." };
+        return switchOnStarter(store, starter, repo, owner, clock(), dirname(context.databaseFile));
+      },
+    },
   });
   // One line when an integration is Broken, from the last checks only (never a new check here).
   if (!json) {

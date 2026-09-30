@@ -58,8 +58,8 @@ export function pullRequestSettingsHtml(view: PullRequestSettingsView): string {
     `<input type="hidden" name="github" value="${escape(plan.githubRepo)}"><input type="hidden" name="base" value="${escape(plan.base)}">` +
     `<p><strong>Ready to turn on</strong></p>` +
     `<ul class="pr-terms"><li>Pull requests open on <span class="mono">${escape(plan.githubRepo)}</span> into <span class="mono">${escape(plan.base)}</span>${plan.account === null ? "" : `, as ${escape(plan.account)}`}.</li>` +
-    `<li>Complete offers “Complete and open a pull request”, from the exact completed commit.</li>` +
-    `<li>Merging squashes and deletes the branch, and always takes your password.</li></ul>` +
+    `<li>Complete offers “Complete and open a pull request”, from the exact completed commit. A flow's Pull request zone can open one too.</li>` +
+    `<li>Merging squashes and deletes the branch. A person merges with their password; a flow merges only when its zone says so, after a person approved the card.</li></ul>` +
     `${password}<button type="submit">Turn on pull requests</button></form>`;
 }
 

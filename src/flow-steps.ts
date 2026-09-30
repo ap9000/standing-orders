@@ -15,6 +15,8 @@
  * - sort   — (v85) asks Jev through OpenRouter which of the zone's answers
  *            fits the card (flow-sort.ts), and sends it where that answer
  *            leads, or down the not-sure path.
+ * - pull-request — opens a pull request for the card's result and follows
+ *            its CI (flow-pull-request.ts).
  *
  * One run per visit to the zone (flow_step_run): two workers never run it
  * twice. Trouble reaching a service is retried three times, 5 then 15
@@ -44,6 +46,7 @@ import type { TurnRunner } from "./teammates.js";
 import type { ToolLister } from "./teammate-tools.js";
 import { budgetHoldWords, claudeMachineBilling, monthOf } from "./spend.js";
 import { toolRefusal } from "./policy.js";
+import { pullRequestStep } from "./flow-pull-request.js";
 
 export type StepIo = {
   /** `gh` for GitHub; git and the check's shell, both without a model. */
@@ -104,6 +107,15 @@ export async function runFlowSteps(store: Store, repo: string, now: Date, io: St
     // v92: a teammate's turn — a zone it handles, or a decision it staffs (a person decides when it's paused or gone).
     if (stage.kind === "teammate" || (stage.kind === "approval" && stage.teammate !== undefined)) {
       await teammateStep(store, known.flow, known.definition!, stage, card, now, io, pass);
+      continue;
+    }
+    // A pull request: opened for the card's result, then CI decides where it goes (flow-pull-request.ts).
+    if (stage.kind === "pull-request") {
+      try {
+        if (await pullRequestStep(store, known.flow, known.definition!, stage, card, now, { gh: io.gh, ...(io.evidenceRoot === undefined ? {} : { evidenceRoot: io.evidenceRoot }) })) pass.ran++;
+      } catch (error) {
+        pass.problems.push(`flow card ${card.id}: ${error instanceof Error ? error.message : "the pull request step couldn't run"}`);
+      }
       continue;
     }
     if (!(["check", "update", "sort", "draft", "request", "email", "tool"] as const).includes(stage.kind as "check")) continue;

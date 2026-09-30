@@ -2,10 +2,11 @@
  * role picked from live lists, and the models that just arrived. */
 import type { ModelOption, RuntimeState, SeenModel, WatchState } from "./model-catalog.js";
 import { priceWords } from "./model-catalog.js";
+import { whenUtc } from "./when-html.js";
 
 const e = (s: unknown) => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));
 const hidden = (data: Record<string, string>) => Object.entries(data).map(([k, v]) => `<input type="hidden" name="${e(k)}" value="${e(v)}">`).join("");
-const when = (iso: string | null) => iso === null ? "never" : `${iso.slice(0, 16).replace("T", " ")} UTC`;
+const when = (iso: string | null) => iso === null ? "never" : whenUtc(iso);
 
 export const MODELS_CSS = `.models{max-width:780px;min-width:0;overflow-wrap:anywhere}.models .card{padding:16px 20px;margin:12px 0;min-width:0}.models h2{margin:24px 0 8px}.models form{margin:0}.models label{display:grid;gap:6px}.models select,.models input[type=search]{box-sizing:border-box;width:100%;max-width:100%;min-width:0}.models button,.models summary,.models .button-link{min-height:44px}.models button{white-space:nowrap}.models summary{padding:12px 0;cursor:pointer}.models .tool{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap}.models .role{display:grid;grid-template-columns:minmax(0,1fr);gap:8px}.models .role-row{display:flex;gap:12px;align-items:end;flex-wrap:wrap}.models .role-row select{flex:1 1 240px;width:auto;min-width:0}.models .role-name{font-weight:600}.models .new{font-weight:600}.models ul{padding-left:20px}.models .meta{font-size:.86rem}@media(max-width:600px){.models .card{padding:14px}}`;
 
@@ -78,7 +79,7 @@ export function modelsHtml(view: ModelsView): string {
       `<button type="submit" class="secondary">${view.watch.enabled ? "Turn off" : "Turn on"}</button></form></details>`
     : "";
   return `<section class="models">${status}${problem}` +
-    `<h2>AI tools</h2>${tools}<p class="meta">Checked ${e(when(view.watch.checkedAt))} ${check}</p>` +
+    `<h2>AI tools</h2>${tools}<p class="meta">Checked ${when(view.watch.checkedAt)} ${check}</p>` +
     fresh +
     `<h2>Default agents</h2><p class="meta">New tasks use these. Approved tasks keep the agents they were approved with.</p>` +
     view.roles.map(role => roleForm(role, manage, view.csrf)).join("") +

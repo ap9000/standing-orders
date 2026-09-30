@@ -8,7 +8,7 @@
 import { assignmentOf } from "./assignment.js";
 import { filerFor } from "./approval-policy.js";
 import { diagnoseTaskDispatch } from "./dispatch.js";
-import { deciderOf, durationWords, fillFlowText, validateFlowDefinition, type FlowDefinition, type FlowStage } from "./flows.js";
+import { deciderOf, durationWords, fillFlowText, validateFlowDefinition, withinHours, type FlowDefinition, type FlowStage } from "./flows.js";
 import { reportSummaryFor } from "./report-summary.js";
 import { fileTaskProposal } from "./proposal.js";
 import { requestResultChanges } from "./result-actions.js";
@@ -131,6 +131,13 @@ function advanceCard(store: Store, flow: FlowRow, definition: FlowDefinition | n
       return;
     case "wait": {
       const wait = stage.wait ?? { for: "reply" as const, minutes: 24 * 60 };
+      // Set hours (like 22:00–06:00): a card goes on once the clock is inside them, at once when it already is.
+      if (wait.for === "hours") {
+        if (withinHours(wait, now)) { onward("ok"); return; }
+        const waiting = `Waiting until ${wait.from}.`;
+        if (card.waiting !== waiting) store.updateFlowCard(card.id, { waiting }, now);
+        return;
+      }
       const entered = Date.parse(store.flowCardEnteredAt(card.id) ?? card.updatedAt);
       const words = durationWords(wait.minutes);
       if (now.getTime() < entered + wait.minutes * 60_000) {
@@ -204,6 +211,7 @@ function advanceCard(store: Store, flow: FlowRow, definition: FlowDefinition | n
       workStage(store, flow, stage, card, now, options, outcome, onward);
       return;
     case "check":
+    case "pull-request":
     case "update":
     case "sort":
     case "draft":

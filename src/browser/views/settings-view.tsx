@@ -1,7 +1,7 @@
 /** Settings, rebuilt with shadcn/ui. Every control posts to the same server
  * route as before (CSRF included); choices save the moment they change and
  * the server's confirmation arrives as a toast. */
-import { BookOpen, ChevronDown, Cpu, Hash, LineChart, MessageSquare, Monitor, Moon, Plug, Send, Sparkles, Sun, Users, Wrench } from "lucide-react";
+import { BookOpen, ChevronDown, Cpu, Hash, LineChart, MessageSquare, Monitor, Moon, Plug, Send, Sparkles, Sun, Users, Workflow, Wrench } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { BrowserSettingsView } from "../../browser-workspace.js";
@@ -13,7 +13,7 @@ import {
 } from "../components/ui/index.js";
 
 const TILE_ICONS: Record<string, ReactNode> = {
-  "/settings/integrations": <Plug />, "/settings/models": <Cpu />, "/settings/skills": <Sparkles />, "/settings/tools": <Wrench />, "/settings/knowledge": <BookOpen />, "/settings/telegram": <Send />,
+  "/settings/flows": <Workflow />, "/settings/integrations": <Plug />, "/settings/models": <Cpu />, "/settings/skills": <Sparkles />, "/settings/tools": <Wrench />, "/settings/knowledge": <BookOpen />, "/settings/telegram": <Send />,
   "/settings/slack": <Hash />, "/settings/discord": <MessageSquare />, "/settings/teams": <Users />, "/settings/learning": <LineChart />,
 };
 
@@ -44,7 +44,7 @@ function Themes({ view, csrf }: { view: BrowserSettingsView; csrf: string }) {
     <Csrf csrf={csrf} />
     <div role="group" aria-label="Theme" className="inline-flex rounded-lg bg-muted p-0.5">
       {options.map(([value, label, icon]) => <button key={value} type="submit" name="theme" value={value} aria-pressed={view.theme === value}
-        className={cn("inline-flex h-7 items-center gap-2 rounded-md px-2.5 text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground max-sm:h-11 [&_svg]:size-3.5", view.theme === value && "bg-card text-foreground shadow-[var(--so-pill-shadow)]")}>{icon}{label}</button>)}
+        className={cn("inline-flex h-7 items-center gap-2 rounded-md px-2.5 text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground phone:h-11 [&_svg]:size-3.5", view.theme === value && "bg-card text-foreground shadow-[var(--so-pill-shadow)]")}>{icon}{label}</button>)}
     </div>
     <span className="text-[13px] text-muted-foreground">Saved in this browser.</span>
   </form>;
@@ -78,7 +78,7 @@ function ColourPlane({ hsv, onChange }: { hsv: Hsv; onChange: (next: Hsv) => voi
   };
   return <div role="slider" tabIndex={0} aria-label="Saturation and brightness" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(hsv.s * 100)}
     aria-valuetext={`saturation ${Math.round(hsv.s * 100)}%, brightness ${Math.round(hsv.v * 100)}%`}
-    className="relative h-28 w-44 shrink-0 cursor-crosshair touch-none rounded-lg shadow-[inset_0_0_0_1px_rgb(0_0_0/.08)] max-sm:h-36 max-sm:w-full"
+    className="relative h-28 w-44 shrink-0 cursor-crosshair touch-none rounded-lg shadow-[inset_0_0_0_1px_rgb(0_0_0/.08)] phone:h-36 phone:w-full"
     style={{ background: `linear-gradient(to top, #000, transparent), linear-gradient(to right, #fff, hsl(${hsv.h} 100% 50%))` }}
     onPointerDown={event => { event.currentTarget.setPointerCapture(event.pointerId); at(event); }}
     onPointerMove={event => { if (event.buttons !== 0) at(event); }}
@@ -120,7 +120,7 @@ function AccentPicker({ view, csrf }: { view: BrowserSettingsView; csrf: string 
       <div className="flex min-w-0 flex-1 basis-52 flex-col gap-2.5">
         <input type="range" min={0} max={359} value={Math.round(hsv.h)} aria-label="Hue"
           onChange={event => { const next = { ...hsv, h: Number(event.target.value), s: hsv.s || 0.75, v: hsv.v || 0.75 }; choose(hsvToHex(next), next); }}
-          className="h-3 w-full cursor-pointer appearance-none rounded-full bg-[linear-gradient(to_right,#f00,#ff0,#0f0,#0ff,#00f,#f0f,#f00)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring [&::-moz-range-thumb]:size-4 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-2 [&::-moz-range-thumb]:border-white [&::-moz-range-thumb]:bg-transparent [&::-webkit-slider-thumb]:size-4 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:border-2 [&::-webkit-slider-thumb]:border-white [&::-webkit-slider-thumb]:shadow-[0_0_0_1px_rgb(0_0_0/.35)]" />
+          className="h-3 w-full cursor-pointer appearance-none rounded-full phone:h-11 phone:bg-[length:100%_12px] phone:bg-center phone:bg-no-repeat bg-[linear-gradient(to_right,#f00,#ff0,#0f0,#0ff,#00f,#f0f,#f00)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring [&::-moz-range-thumb]:size-4 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-2 [&::-moz-range-thumb]:border-white [&::-moz-range-thumb]:bg-transparent [&::-webkit-slider-thumb]:size-4 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:border-2 [&::-webkit-slider-thumb]:border-white [&::-webkit-slider-thumb]:shadow-[0_0_0_1px_rgb(0_0_0/.35)]" />
         <div className="flex items-center gap-2">
           <span aria-hidden="true" className="size-8 shrink-0 rounded-md shadow-[inset_0_0_0_1px_rgb(0_0_0/.12)]" style={{ background: hex }} />
           <Input value={draft} aria-label="Hex colour" spellCheck={false} autoComplete="off" className="w-28 font-mono"
@@ -143,7 +143,7 @@ function AccentPicker({ view, csrf }: { view: BrowserSettingsView; csrf: string 
       {view.accentPresets.map(one => <button key={one.id} type="button" data-preset={one.id} aria-pressed={one.hex === hex}
         aria-label={`${one.name}${one.year === null ? ", the default" : `, ${one.year}`}`} title={`${one.name}${one.year === null ? "" : ` · ${one.year}`}`}
         onClick={() => choose(one.hex)} style={{ background: one.hex }}
-        className={cn("size-6 rounded-full shadow-[inset_0_0_0_1px_rgb(0_0_0/.12)] ring-offset-2 ring-offset-card transition-shadow max-sm:size-11",
+        className={cn("size-6 rounded-full shadow-[inset_0_0_0_1px_rgb(0_0_0/.12)] ring-offset-2 ring-offset-card transition-shadow phone:size-11",
           one.hex === hex ? "ring-2 ring-foreground" : "hover:ring-2 hover:ring-input")} />)}
     </div>
     <p className="text-[12.5px] text-muted-foreground">Presets are Pantone's colours of the year. Colours are deepened or lightened as needed so text stays readable. Saved in this browser.</p>
@@ -158,7 +158,7 @@ function DefaultChoice({ title, description, action, field, value, canManage, ch
   const current = options.find(one => one.value === value);
   return <Section title={title} description={description}>
     {canManage ? <AutoForm action={action} csrf={csrf}>{submit => <>
-      <RadioGroup name={field} defaultValue={value} onValueChange={submit} className="grid gap-2 sm:grid-cols-2" aria-label={title}>
+      <RadioGroup name={field} defaultValue={value} onValueChange={submit} className="grid gap-2 desk:grid-cols-2" aria-label={title}>
         {options.map(one => <RadioCard key={one.value} id={`${base}-${one.value}`} value={one.value} title={one.title} description={one.description} />)}
       </RadioGroup>
       <noscript><Button type="submit" className="mt-3">Save</Button></noscript>
@@ -193,15 +193,15 @@ function Email({ email, csrf }: { email: NonNullable<BrowserSettingsView["email"
             <form method="post" action="/settings/email" className="mt-3 grid gap-3 rounded-lg bg-muted p-4" data-email-settings>
               <Csrf csrf={csrf} />
               <p className="text-[13px] text-muted-foreground">For Gmail: smtp.gmail.com, port 587, your address, and an app password. To read mail too, add imap.gmail.com.</p>
-              <div className="grid gap-3 sm:grid-cols-[1fr_7rem]">
+              <div className="grid gap-3 desk:grid-cols-[1fr_7rem]">
                 <div className="grid gap-2"><Label htmlFor="email-host">Mail server</Label><Input id="email-host" name="host" defaultValue={email.host} placeholder="smtp.gmail.com" required /></div>
                 <div className="grid gap-2"><Label htmlFor="email-port">Port</Label><Input id="email-port" name="port" type="number" min={1} max={65535} defaultValue={String(email.port)} required /></div>
               </div>
               <div className="grid gap-2"><Label htmlFor="email-from">Send from</Label><Input id="email-from" name="from" type="email" defaultValue={email.from} placeholder="you@example.com" required /></div>
               <div className="grid gap-2"><Label htmlFor="email-user">Username</Label><Input id="email-user" name="user" autoComplete="username" defaultValue={email.user} placeholder="Usually the same address" /></div>
               <div className="grid gap-2"><Label htmlFor="email-password">Password</Label><Input id="email-password" name="password" type="password" autoComplete="off" placeholder={email.set ? "Leave empty to keep the saved one" : "An app password"} /></div>
-              <label className="flex items-center gap-2 text-[13px]"><input type="checkbox" name="secure" className="size-4 accent-[var(--so-accent)]" defaultChecked={email.secure} />Use SSL from the start (port 465)</label>
-              <div className="grid gap-3 sm:grid-cols-[1fr_7rem]">
+              <label className="flex items-center gap-2 text-[13px] phone:-ml-3.5 phone:min-h-11 phone:pl-3.5"><input type="checkbox" name="secure" className="size-4 accent-[var(--so-accent)]" defaultChecked={email.secure} />Use SSL from the start (port 465)</label>
+              <div className="grid gap-3 desk:grid-cols-[1fr_7rem]">
                 <div className="grid gap-2"><Label htmlFor="email-imap">Read mail from (optional)</Label><Input id="email-imap" name="imapHost" defaultValue={email.imapHost} placeholder="imap.gmail.com" /></div>
                 <div className="grid gap-2"><Label htmlFor="email-imap-port">Port</Label><Input id="email-imap-port" name="imapPort" type="number" min={1} max={65535} defaultValue={String(email.imapPort)} /></div>
               </div>
@@ -212,7 +212,7 @@ function Email({ email, csrf }: { email: NonNullable<BrowserSettingsView["email"
               </div>
             </form>
             <details className="mt-3 rounded-lg border px-4 py-3" open={email.google.clientId !== "" && !email.set} data-google-setup>
-              <summary className="cursor-pointer text-[13px] font-semibold">Or sign in with a Google account</summary>
+              <summary className="cursor-pointer text-[13px] font-semibold phone:-my-3 phone:min-h-11 phone:py-3 phone:leading-5">Or sign in with a Google account</summary>
               <form method="post" action="/settings/google" className="mt-3 grid gap-3">
                 <Csrf csrf={csrf} />
                 <ol className="list-decimal space-y-1 pl-5 text-[13px] text-muted-foreground">
@@ -283,7 +283,7 @@ function Workers({ workers }: { workers: NonNullable<BrowserSettingsView["worker
           {one.running.length === 0
             ? <p className="text-[13px] text-muted-foreground">Nothing running.</p>
             : <ul className="grid gap-1">{one.running.map(task => <li key={task.taskId} className="flex min-w-0 items-baseline gap-2 text-sm">
-              <a className="min-w-0 truncate underline-offset-4 hover:underline" href={task.href}>{task.title}</a>
+              <a className="min-w-0 truncate underline-offset-4 hover:underline phone:min-h-11 phone:leading-[44px]" href={task.href}>{task.title}</a>
               {task.project && <span className="shrink-0 text-[13px] text-muted-foreground">{task.project}</span>}
             </li>)}</ul>}
         </li>)}
@@ -310,7 +310,7 @@ function Updates({ updates, csrf, firstResult }: { updates: NonNullable<BrowserS
       {newer?.security && <Badge tone="warning">Security fixes</Badge>}
     </div>
     {firstResult !== null && <p className="text-[13px] text-muted-foreground" data-first-result>{firstResult}</p>}
-    {newer && <div className="grid gap-2 rounded-lg bg-muted p-3 max-sm:p-3" data-update-command>
+    {newer && <div className="grid gap-2 rounded-lg bg-muted p-3 phone:p-3" data-update-command>
       <div className="flex flex-wrap items-center gap-2">
         <code className="min-w-0 flex-1 break-words font-mono text-[12.5px]">{updates.updateCommand}</code>
         <Button variant="outline" size="sm" onClick={copy}>{copied ? "Copied" : "Copy"}</Button>
@@ -351,15 +351,15 @@ function Notifications({ view, csrf }: { view: BrowserSettingsView; csrf: string
   const base = useId();
   if (!view.chat && view.services === null && view.push === null && view.digest === null) return null;
   return <Section id="notifications" title="Notifications">
-    {view.chat && <AutoForm action="/settings/notifications" csrf={csrf} className="grid gap-4">{submit => <>
-      <RadioGroup name="mode" defaultValue={view.chat!.mode} onValueChange={submit} className="grid gap-2 sm:grid-cols-2" aria-label="Chat messages">
+    {view.chat && <AutoForm action="/settings/notifications" csrf={csrf} className="grid gap-4 phone:gap-3">{submit => <>
+      <RadioGroup name="mode" defaultValue={view.chat!.mode} onValueChange={submit} className="grid gap-2 desk:grid-cols-2" aria-label="Chat messages">
         <RadioCard id={`${base}-quiet`} value="quiet" title="Only when I'm needed" description="One message per task, updated as it moves." />
         <RadioCard id={`${base}-all`} value="all" title="Every step" description="A new message for each update." />
       </RadioGroup>
       <div className="grid gap-2">
         <Label htmlFor={`${base}-evening`}>Evening digest</Label>
         <Select name="digest" defaultValue={view.chat!.digestAt ?? "off"} onValueChange={submit}>
-          <SelectTrigger id={`${base}-evening`} className="sm:max-w-72"><SelectValue /></SelectTrigger>
+          <SelectTrigger id={`${base}-evening`} className="desk:max-w-72"><SelectValue /></SelectTrigger>
           <SelectContent>{digestTimes(view.chat!.digestAt).map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent>
         </Select>
         <p className="text-[13px] text-muted-foreground">One message: what finished, what waits, what failed.</p>
@@ -372,7 +372,7 @@ function Notifications({ view, csrf }: { view: BrowserSettingsView; csrf: string
       : <AutoForm action="/settings/messaging" csrf={csrf}>{submit => <div className="grid gap-2">
         <Label>Alert service</Label>
         {view.services!.implicit && <p className="text-[13px] text-warning">Several are connected and none was chosen. Pick one.</p>}
-        <RadioGroup name="primary" {...(view.services!.channel === null ? {} : { defaultValue: view.services!.channel })} onValueChange={submit} className="grid gap-2 sm:grid-cols-2">
+        <RadioGroup name="primary" {...(view.services!.channel === null ? {} : { defaultValue: view.services!.channel })} onValueChange={submit} className="grid gap-2 desk:grid-cols-2">
           {view.services!.configured.map(one => <RadioCard key={one} id={`${base}-${one}`} value={one} title={one.charAt(0).toUpperCase() + one.slice(1)} description={one === "telegram" ? "Answer buttons and replies" : "Messages with links"} />)}
         </RadioGroup></div>}</AutoForm>)}
     {view.push && <>
@@ -398,7 +398,7 @@ function Notifications({ view, csrf }: { view: BrowserSettingsView; csrf: string
         <Label htmlFor={`${base}-digest`}>Telegram digest</Label>
         <p className="text-[13px] text-muted-foreground">Bundle routine updates. Anything that needs you still arrives at once.</p>
         <Select name="every" defaultValue={view.digest!.every} onValueChange={submit}>
-          <SelectTrigger id={`${base}-digest`} className="sm:max-w-72"><SelectValue /></SelectTrigger>
+          <SelectTrigger id={`${base}-digest`} className="desk:max-w-72"><SelectValue /></SelectTrigger>
           <SelectContent>{[["off", "Off: send each update"], ["30", "Every 30 minutes"], ["60", "Every hour"], ["240", "Every 4 hours"], ["720", "Every 12 hours"], ["1440", "Once a day"]].map(([value, label]) => <SelectItem key={value} value={value!}>{label}</SelectItem>)}</SelectContent>
         </Select>
         {view.digest!.held && <p className="text-[13px] text-muted-foreground">{view.digest!.held}</p>}
@@ -409,11 +409,11 @@ function Notifications({ view, csrf }: { view: BrowserSettingsView; csrf: string
 
 function TelegramToken({ view, csrf }: { view: BrowserSettingsView; csrf: string }) {
   return <Collapsible className="rounded-lg border border-border bg-card">
-    <CollapsibleTrigger asChild><button className="group flex w-full items-center justify-between gap-3 px-5 py-4 text-left max-sm:px-4">
+    <CollapsibleTrigger asChild><button className="group flex w-full items-center justify-between gap-3 px-5 py-4 text-left phone:px-4">
       <span className="font-semibold">Telegram bot token <span className="ml-2 text-sm font-normal text-muted-foreground">{view.telegram.state}</span></span>
       <ChevronDown className="size-4 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
     </button></CollapsibleTrigger>
-    <CollapsibleContent className="grid gap-3 border-t border-border px-5 py-4 max-sm:px-4">
+    <CollapsibleContent className="grid gap-3 border-t border-border px-5 py-4 phone:px-4">
       <p className="text-[13px] text-muted-foreground">Current: {view.telegram.current}</p>
       {view.telegram.delivery != null && <p className="text-[13px] text-muted-foreground" data-telegram-delivery>{view.telegram.delivery}</p>}
       <form method="post" action="/settings/telegram-token" className="flex flex-wrap items-end gap-3">
@@ -429,10 +429,10 @@ function TelegramToken({ view, csrf }: { view: BrowserSettingsView; csrf: string
 export function SettingsView({ view, csrf }: { view: BrowserSettingsView; csrf: string }) {
   const [said] = useState(view.said);
   useEffect(() => { if (said) toast(said.charAt(0).toUpperCase() + said.slice(1)); }, [said]);
-  return <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
+  return <div className="mx-auto flex w-full max-w-3xl flex-col gap-5 phone:gap-3">
     <h1 className="sr-only">Settings</h1>
-    <nav aria-label="Settings sections" className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-      {view.tiles.map(tile => <a key={tile.href} href={tile.href} className="flex min-h-12 items-center gap-2.5 rounded-lg border border-border bg-card px-3 text-sm font-semibold transition-colors hover:bg-accent [&_svg]:size-[18px] [&_svg]:text-primary">
+    <nav aria-label="Settings sections" className="grid grid-cols-2 gap-2 desk:grid-cols-4 phone:gap-1.5">
+      {view.tiles.map(tile => <a key={tile.href} href={tile.href} className="flex min-h-12 items-center gap-2.5 rounded-lg border border-border bg-card px-3 text-sm font-semibold phone:min-h-11 transition-colors hover:bg-accent [&_svg]:size-[18px] [&_svg]:text-primary">
         {TILE_ICONS[tile.href]}{tile.label}</a>)}
     </nav>
     <Section title="Appearance"><Themes view={view} csrf={csrf} /></Section>

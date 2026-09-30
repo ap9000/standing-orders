@@ -397,6 +397,6 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
   operator("serve", "the operations console (HTTP)"),
   operator("watch", "the unattended loop, kept running"),
   operator("up", "console + worker + browser, one command"),
-  operator("onboard", "add this repository, report signed-in agents, install or --remove the operator skill (--yes), and print the handoff"),
+  operator("onboard", "add this repository, report signed-in agents, install or --remove the operator skill (--yes), offer the starter flows (--starter <ids>), and print the handoff"),
   operator("daemon", "install the loop under the OS service manager"),
 ];

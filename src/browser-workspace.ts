@@ -136,6 +136,8 @@ export type BrowserTaskView = {
   manage: BrowserTaskSection[];
   /** The armed cancel form; null once the task cannot be cancelled. */
   cancel: { html: string; open: boolean } | null;
+  /** "Do this every time…": Settings → Flows with the matching starter flow marked. */
+  everyTime?: { href: string; starter: string } | null;
 };
 /** One project on the Projects page; opening it is a POST to /projects/open. */
 export type BrowserProjectRow = {
@@ -209,7 +211,7 @@ export type BrowserResultView = {
 };
 /** One zone on a flow's canvas: its step, where it leads, and where it sits. */
 export type BrowserFlowStage = {
-  id: string; title: string; kind: "inbox" | "task" | "report" | "approval" | "check" | "update" | "notify" | "sort" | "draft" | "request" | "email" | "tool" | "wait" | "teammate" | "done";
+  id: string; title: string; kind: "inbox" | "task" | "report" | "approval" | "check" | "pull-request" | "update" | "notify" | "sort" | "draft" | "request" | "email" | "tool" | "wait" | "teammate" | "done";
   zone: { x: number; y: number; w: number; h: number; color: string };
   instructions: string | null; planning: "auto" | "required" | "skip" | null; approver: string | null; message: string | null;
   /** An approval zone the flow's owner decides. */
@@ -224,7 +226,9 @@ export type BrowserFlowStage = {
   /** A sort zone: Jev's question, its answers and where each goes, how sure it must be to act alone, and what else it notes. */
   sort: { question: string; answers: { answer: string; means: string; to: string }[]; sureAt: number; notes: { id: string; kind: "score" | "yes-no"; question: string; levels: string[] | null }[] } | null;
   /** v91: a Wait zone waits for a reply to the card's email (onFail: no reply in time) or a set time; any other zone may have a time limit. */
-  wait?: { for: "reply" | "time"; minutes: number };
+  wait?: { for: "reply" | "time" | "hours"; minutes: number; from?: string; to?: string; timeZone?: string };
+  /** A Pull request zone merges once checks pass (after a person approved), this way. */
+  merge?: "squash" | "merge" | "rebase" | undefined;
   limit?: { minutes: number; to: string | null } | undefined;
   /** v92: the AI teammate who decides (an approval zone) or handles (a teammate zone) it. */
   teammate?: string | undefined;

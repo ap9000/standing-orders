@@ -79,14 +79,14 @@ function StatusCard({ selected, csrf }: { selected: Selected; csrf: string }) {
         </h2>
         {panel !== null && <p className="mt-1.5 text-sm"><span className="font-semibold">{panel.heading}.</span> <span className="text-muted-foreground">{panel.outcome}</span></p>}
       </div>
-      {(complete !== null || panel?.canRequest === true) && <div className="flex flex-wrap items-center gap-2 max-sm:w-full">
-        {complete !== null && <form method="post" action={complete.action} className="max-sm:flex-1">
+      {(complete !== null || panel?.canRequest === true) && <div className="flex flex-wrap items-center gap-2 phone:w-full">
+        {complete !== null && <form method="post" action={complete.action} className="phone:flex-1">
           <input type="hidden" name="csrf" value={csrf} />
           <input type="hidden" name="receipt" value={complete.receipt} />
           <input type="hidden" name="run" value={String(complete.run)} />
-          <Button type="submit" className="max-sm:w-full"><Check />Mark complete</Button>
+          <Button type="submit" className="phone:w-full"><Check />Mark complete</Button>
         </form>}
-        {panel?.canRequest === true && <Button asChild variant="outline" className="max-sm:flex-1"><a href="#request-changes">Request changes</a></Button>}
+        {panel?.canRequest === true && <Button asChild variant="outline" className="phone:flex-1"><a href="#request-changes">Request changes</a></Button>}
       </div>}
     </div>
 
@@ -120,7 +120,7 @@ function StatusCard({ selected, csrf }: { selected: Selected; csrf: string }) {
 
 function Fold({ summary, children }: { summary: ReactNode; children: ReactNode }) {
   return <details className="group text-[13px]">
-    <summary className="flex cursor-pointer list-none items-center gap-1.5 py-1 font-medium text-muted-foreground hover:text-foreground max-sm:min-h-11 [&::-webkit-details-marker]:hidden">
+    <summary className="flex cursor-pointer list-none items-center gap-1.5 py-1 font-medium text-muted-foreground hover:text-foreground phone:min-h-11 [&::-webkit-details-marker]:hidden">
       <ChevronRight className="size-4 transition-transform group-open:rotate-90" aria-hidden="true" />{summary}
     </summary>
     <div className="pb-1 pl-5.5 pt-1">{children}</div>
@@ -132,14 +132,14 @@ function Fold({ summary, children }: { summary: ReactNode; children: ReactNode }
 function Panel({ panel }: { panel: BrowserResultPanel }) {
   return <div id="result" {...panel.attributes} className="flex scroll-mt-4 flex-col gap-4">
     {panel.history !== "" && <Html html={panel.history} />}
-    <Card className="gap-0 overflow-hidden p-0 max-sm:p-0">
-      <nav role="tablist" aria-label="Result views" className="flex gap-1 overflow-x-auto border-b border-border px-3 max-sm:px-2">
+    <Card className="gap-0 overflow-hidden p-0 phone:p-0">
+      <nav role="tablist" aria-label="Result views" className="flex gap-1 overflow-x-auto border-b border-border px-3 phone:px-2">
         {panel.tabs.map(tab => <a key={tab.key} role="tab" href={tab.href} data-result-tab={tab.key} aria-selected={tab.active ? "true" : "false"} {...(tab.active ? {} : { tabIndex: -1 })}
-          className="-mb-px inline-flex items-center gap-1.5 whitespace-nowrap border-b-2 border-transparent px-3 py-3 text-sm font-semibold text-muted-foreground transition-colors hover:text-foreground aria-selected:border-primary aria-selected:text-foreground max-sm:min-h-11">
+          className="-mb-px inline-flex items-center gap-1.5 whitespace-nowrap border-b-2 border-transparent px-3 py-3 text-sm font-semibold text-muted-foreground transition-colors hover:text-foreground aria-selected:border-primary aria-selected:text-foreground phone:min-h-11">
           {tab.label}{tab.count !== "" && <span className="rounded-full bg-muted px-1.5 text-xs font-medium tabular-nums">{tab.count}</span>}
         </a>)}
       </nav>
-      {panel.views.map(one => <div key={one.key} role="tabpanel" data-result-view={one.key} hidden={!panel.tabs.some(tab => tab.key === one.key && tab.active)} className="px-5 py-4 max-sm:px-4">
+      {panel.views.map(one => <div key={one.key} role="tabpanel" data-result-view={one.key} hidden={!panel.tabs.some(tab => tab.key === one.key && tab.active)} className="px-5 py-4 phone:px-4">
         <Html html={one.html} className="so-result-view" />
       </div>)}
     </Card>
@@ -159,16 +159,16 @@ function Details({ selected }: { selected: Selected }) {
     ...(selected.notes.length === 0 ? [] : [{ id: "notes", title: "Operator notes", hint: null, count: selected.notes.length,
       body: <ul className="flex flex-col gap-2 text-sm">{selected.notes.map((one, index) => <li key={index}><span className="text-muted-foreground">{one.author} · {shortWhen(one.at)}</span> {one.note}</li>)}</ul> }]),
   ];
-  return <Card aria-label="Result details" className="gap-0 divide-y divide-border overflow-hidden p-0 max-sm:p-0">
+  return <Card aria-label="Result details" className="gap-0 divide-y divide-border overflow-hidden p-0 phone:p-0">
     {learning !== "" && <div data-cockpit-section="learning"><Html html={learning} className="so-result-learning" /></div>}
     {rows.map(row => <details key={row.id} className="group" data-cockpit-section={row.id}>
-      <summary className="flex cursor-pointer list-none items-center gap-2 px-5 py-3.5 hover:bg-accent/50 max-sm:min-h-12 max-sm:px-4 [&::-webkit-details-marker]:hidden">
+      <summary className="flex cursor-pointer list-none items-center gap-2 px-5 py-3.5 hover:bg-accent/50 phone:min-h-12 phone:px-4 [&::-webkit-details-marker]:hidden">
         <ChevronRight className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-90" aria-hidden="true" />
         <h2 className="text-[15px] font-semibold">{row.title}</h2>
         {row.count !== undefined && <Badge>{row.count}</Badge>}
         {row.hint !== null && <span className="min-w-0 truncate text-[13px] text-muted-foreground">{row.hint}</span>}
       </summary>
-      <div className="px-5 pb-5 pt-1 max-sm:px-4">{row.body}</div>
+      <div className="px-5 pb-5 pt-1 phone:px-4">{row.body}</div>
     </details>)}
   </Card>;
 }
@@ -179,7 +179,7 @@ export function ResultView({ view, csrf }: { view: BrowserResultView; csrf: stri
     <header className="flex flex-col gap-3 pb-1">
       <div className="flex flex-wrap items-start gap-x-4 gap-y-3">
         <div className="min-w-0 flex-1 basis-72">
-          <h1 className="text-[26px] font-semibold leading-tight tracking-tight max-sm:text-[22px]">{selected?.title ?? "Results"}</h1>
+          <h1 className="text-[26px] font-semibold leading-tight tracking-tight phone:text-[22px]">{selected?.title ?? "Results"}</h1>
           {selected !== null && <p className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-muted-foreground">
             {selected.project !== null && <><span className="font-medium text-foreground/80">{selected.project}</span><span aria-hidden="true">·</span></>}
             {selected.build !== null && <><a href={`/r/${selected.build}`} className="hover:text-foreground hover:underline">Build #{selected.build}</a><span aria-hidden="true">·</span></>}
@@ -197,8 +197,8 @@ export function ResultView({ view, csrf }: { view: BrowserResultView; csrf: stri
     {selected === null
       ? view.results.length === 0
         ? <Card className="items-start py-10"><p className="text-base text-muted-foreground">Nothing to review yet.</p><Button asChild variant="outline"><a href="/work">Open tasks</a></Button></Card>
-        : <Card aria-label="Results" className="gap-0 overflow-hidden p-0 max-sm:p-0">
-            <ul className="divide-y divide-border">{view.results.map(row => <li key={row.href} className="flex items-start gap-3 px-5 py-3 max-sm:px-4">
+        : <Card aria-label="Results" className="gap-0 overflow-hidden p-0 phone:p-0">
+            <ul className="divide-y divide-border">{view.results.map(row => <li key={row.href} className="flex items-start gap-3 px-5 py-3 phone:px-4">
               <span aria-hidden="true" className={cn("mt-2 size-2 shrink-0 rounded-full", row.status === null ? "bg-muted-foreground" : DOT[toneOf(row.status.tone)])} />
               <div className="min-w-0 flex-1">
                 <a href={row.href} className={cn("block truncate hover:underline hover:underline-offset-4", row.needsYou ? "font-semibold" : "font-medium")}>{row.title}</a>

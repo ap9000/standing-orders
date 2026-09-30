@@ -1,0 +1,196 @@
+{
+  "synthetic": true,
+  "viewports": {
+    "phone": {
+      "chat": {
+        "onScreen": 3,
+        "content": 1161,
+        "shown": 0.552,
+        "overflow": false,
+        "small": []
+      },
+      "catch-up": {
+        "onScreen": 4,
+        "content": 844,
+        "shown": 1,
+        "overflow": false,
+        "small": []
+      },
+      "crew": {
+        "onScreen": 9,
+        "content": 1069,
+        "shown": 0.79,
+        "overflow": false,
+        "small": []
+      },
+      "tasks": {
+        "onScreen": 13,
+        "content": 1359,
+        "shown": 0.54,
+        "overflow": false,
+        "small": []
+      },
+      "task": {
+        "onScreen": 5,
+        "content": 2399,
+        "shown": 0.306,
+        "overflow": false,
+        "small": []
+      },
+      "inbox": {
+        "onScreen": 1,
+        "content": 1149,
+        "shown": 0.639,
+        "overflow": false,
+        "small": []
+      },
+      "flows": {
+        "onScreen": 4,
+        "content": 844,
+        "shown": 1,
+        "overflow": false,
+        "small": []
+      },
+      "projects": {
+        "onScreen": 4,
+        "content": 844,
+        "shown": 1,
+        "overflow": false,
+        "small": []
+      },
+      "settings": {
+        "onScreen": 2,
+        "content": 4569,
+        "shown": 0.161,
+        "overflow": false,
+        "small": []
+      },
+      "integrations": {
+        "onScreen": 7,
+        "content": 1280,
+        "shown": 0.573,
+        "overflow": false,
+        "small": []
+      },
+      "notifications": {
+        "onScreen": 5,
+        "content": 4569,
+        "shown": 0.161,
+        "overflow": false,
+        "small": []
+      },
+      "pull-requests": {
+        "onScreen": 0,
+        "content": 844,
+        "shown": 1,
+        "overflow": false,
+        "small": []
+      }
+    },
+    "narrow": {
+      "chat": {
+        "onScreen": 3,
+        "content": 1540,
+        "shown": 0.336,
+        "overflow": false,
+        "small": []
+      },
+      "tasks": {
+        "onScreen": 12,
+        "content": 1418,
+        "shown": 0.444,
+        "overflow": false,
+        "small": []
+      },
+      "task": {
+        "onScreen": 5,
+        "content": 2610,
+        "shown": 0.241,
+        "overflow": false,
+        "small": []
+      },
+      "integrations": {
+        "onScreen": 6,
+        "content": 1367,
+        "shown": 0.461,
+        "overflow": false,
+        "small": []
+      },
+      "notifications": {
+        "onScreen": 5,
+        "content": 4913,
+        "shown": 0.128,
+        "overflow": false,
+        "small": []
+      }
+    },
+    "desktop": {
+      "chat": {
+        "onScreen": 4,
+        "content": 1844,
+        "shown": 0.348,
+        "overflow": false
+      },
+      "catch-up": {
+        "onScreen": 11,
+        "content": 1370,
+        "shown": 0.645,
+        "overflow": false
+      },
+      "tasks": {
+        "onScreen": 15,
+        "content": 1105,
+        "shown": 0.709,
+        "overflow": false
+      },
+      "task": {
+        "onScreen": 12,
+        "content": 2091,
+        "shown": 0.374,
+        "overflow": false
+      },
+      "inbox": {
+        "onScreen": 8,
+        "content": 1370,
+        "shown": 0.645,
+        "overflow": false
+      },
+      "flows": {
+        "onScreen": 11,
+        "content": 1370,
+        "shown": 0.645,
+        "overflow": false
+      },
+      "projects": {
+        "onScreen": 11,
+        "content": 1370,
+        "shown": 0.645,
+        "overflow": false
+      },
+      "settings": {
+        "onScreen": 9,
+        "content": 3365,
+        "shown": 0.233,
+        "overflow": false
+      },
+      "integrations": {
+        "onScreen": 14,
+        "content": 1431,
+        "shown": 0.547,
+        "overflow": false
+      },
+      "notifications": {
+        "onScreen": 12,
+        "content": 3365,
+        "shown": 0.233,
+        "overflow": false
+      },
+      "pull-requests": {
+        "onScreen": 7,
+        "content": 1370,
+        "shown": 0.645,
+        "overflow": false
+      }
+    }
+  }
+}

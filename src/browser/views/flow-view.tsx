@@ -25,7 +25,7 @@ const COLORS: Record<string, string> = { slate: "#64748b", blue: "#3b82f6", viol
 const KIND_ICONS: Record<BrowserFlowStage["kind"], ReactNode> = {
   inbox: <Inbox className="size-3.5" aria-hidden="true" />, task: <Hammer className="size-3.5" aria-hidden="true" />, report: <Search className="size-3.5" aria-hidden="true" />,
   approval: <UserCheck className="size-3.5" aria-hidden="true" />, notify: <Megaphone className="size-3.5" aria-hidden="true" />, done: <Flag className="size-3.5" aria-hidden="true" />,
-  check: <ListChecks className="size-3.5" aria-hidden="true" />, update: <MessageSquareReply className="size-3.5" aria-hidden="true" />,
+  check: <ListChecks className="size-3.5" aria-hidden="true" />, "pull-request": <GitPullRequest className="size-3.5" aria-hidden="true" />, update: <MessageSquareReply className="size-3.5" aria-hidden="true" />,
   sort: <Split className="size-3.5" aria-hidden="true" />, draft: <PenLine className="size-3.5" aria-hidden="true" />,
   request: <Globe className="size-3.5" aria-hidden="true" />, email: <Mail className="size-3.5" aria-hidden="true" />, tool: <Wrench className="size-3.5" aria-hidden="true" />, wait: <Hourglass className="size-3.5" aria-hidden="true" />, teammate: <Bot className="size-3.5" aria-hidden="true" />,
 };
@@ -723,6 +723,11 @@ function ZonePanel({ stage, stages, view, csrf, apply, update, remove, makeStart
       <Field label="Comment on the issue" hint={"Fill-ins: {{card.title}}, {{note}}, {{stage.<zone id>}}."}><Textarea rows={3} value={stage.message ?? ""} maxLength={1000} onChange={event => update({ message: event.target.value })} aria-label="Comment on the issue" /></Field>
       <label className="flex items-center gap-2 text-[13px]"><input type="checkbox" className="size-4 accent-[var(--so-accent)]" checked={stage.close !== false} onChange={event => update({ close: event.target.checked })} />Close the issue too (Linear: move it to done)</label>
     </>}
+    {stage.kind === "pull-request" && <Field label="When checks pass" hint="Merging needs a “Person decides” zone before this one, and a person's approval of the card since it was built.">
+      <select className={select} aria-label="When checks pass" value={stage.merge ?? ""} onChange={event => update({ merge: event.target.value === "" ? undefined : event.target.value as "squash" | "merge" | "rebase" })}>
+        <option value="">Move on; a person merges</option><option value="squash">Merge (squash)</option><option value="merge">Merge (merge commit)</option><option value="rebase">Merge (rebase)</option>
+      </select>
+    </Field>}
     {stage.kind === "check" && <CodeSettings stage={stage} others={others} view={view} csrf={csrf} apply={apply} update={update} />}
     {stage.kind === "teammate" && <TeammateSettings stage={stage} others={others} view={view} update={update} />}
     {stage.kind === "request" && stage.request !== undefined && <RequestSettings request={stage.request} view={view} csrf={csrf} apply={apply} set={request => update({ request })} />}
@@ -731,11 +736,16 @@ function ZonePanel({ stage, stages, view, csrf, apply, update, remove, makeStart
     {stage.kind === "sort" && stage.sort !== null && <SortSettings sort={stage.sort} others={others} ready={view.sortReady} set={sort => update({ sort })} />}
     {stage.kind === "wait" && stage.wait !== undefined && <>
       <Field label="Wait for" hint={stage.wait.for === "reply" ? "Only a reply from someone it emailed counts. Needs the inbox in Settings → Email." : undefined}>
-        <select className={select} aria-label="Wait for" value={stage.wait.for} onChange={event => update({ wait: { ...stage.wait!, for: event.target.value as "reply" | "time" } })}>
-          <option value="reply">A reply to the card's email</option><option value="time">A set time</option>
+        <select className={select} aria-label="Wait for" value={stage.wait.for} onChange={event => update({ wait: event.target.value === "hours" ? { for: "hours", minutes: 0, from: stage.wait!.from ?? "22:00", to: stage.wait!.to ?? "06:00" }
+          : { for: event.target.value as "reply" | "time", minutes: stage.wait!.minutes > 0 ? stage.wait!.minutes : 24 * 60 } })}>
+          <option value="reply">A reply to the card's email</option><option value="time">A set time</option><option value="hours">Set hours, like overnight</option>
         </select>
       </Field>
-      <Field label={stage.wait.for === "reply" ? "For up to" : "How long"}><Duration minutes={stage.wait.minutes} label={stage.wait.for === "reply" ? "For up to" : "How long"} set={minutes => update({ wait: { ...stage.wait!, minutes } })} /></Field>
+      {stage.wait.for === "hours" ? <div className="grid grid-cols-2 gap-2">
+        <Field label="From"><Input type="time" value={stage.wait.from ?? "22:00"} onChange={event => update({ wait: { ...stage.wait!, from: event.target.value } })} aria-label="From" /></Field>
+        <Field label="Until"><Input type="time" value={stage.wait.to ?? "06:00"} onChange={event => update({ wait: { ...stage.wait!, to: event.target.value } })} aria-label="Until" /></Field>
+      </div>
+        : <Field label={stage.wait.for === "reply" ? "For up to" : "How long"}><Duration minutes={stage.wait.minutes} label={stage.wait.for === "reply" ? "For up to" : "How long"} set={minutes => update({ wait: { ...stage.wait!, minutes } })} /></Field>}
     </>}
     {stage.kind !== "done" && stage.kind !== "sort" && <Field label={stage.kind === "wait" && stage.wait?.for === "reply" ? "When they reply" : "Then"}>
       <select className={select} aria-label={stage.kind === "wait" && stage.wait?.for === "reply" ? "When they reply" : "Then"} value={stage.next ?? ""} onChange={event => update({ next: event.target.value || null })}>
@@ -747,8 +757,8 @@ function ZonePanel({ stage, stages, view, csrf, apply, update, remove, makeStart
         <option value="">Stay here for a person</option>{others.map(one => <option key={one.id} value={one.id}>{one.title}</option>)}
       </select>
     </Field>}
-    {(stage.kind === "approval" || stage.kind === "task" || stage.kind === "report" || stage.kind === "check" || stage.kind === "update" || stage.kind === "sort" || stage.kind === "request" || stage.kind === "email" || stage.kind === "tool" || stage.kind === "teammate") && <Field label={stage.kind === "approval" ? "If sent back" : stage.kind === "sort" ? "If it isn't sure" : stage.kind === "teammate" ? "If it can't handle it" : "If it fails"}>
-      <select className={select} aria-label={stage.kind === "approval" ? "If sent back" : stage.kind === "sort" ? "If it isn't sure" : stage.kind === "teammate" ? "If it can't handle it" : "If it fails"} value={stage.onFail ?? ""} onChange={event => update({ onFail: event.target.value || null })}>
+    {(stage.kind === "approval" || stage.kind === "task" || stage.kind === "report" || stage.kind === "check" || stage.kind === "pull-request" || stage.kind === "update" || stage.kind === "sort" || stage.kind === "request" || stage.kind === "email" || stage.kind === "tool" || stage.kind === "teammate") && <Field label={stage.kind === "approval" ? "If sent back" : stage.kind === "sort" ? "If it isn't sure" : stage.kind === "teammate" ? "If it can't handle it" : stage.kind === "pull-request" ? "If checks fail" : "If it fails"}>
+      <select className={select} aria-label={stage.kind === "approval" ? "If sent back" : stage.kind === "sort" ? "If it isn't sure" : stage.kind === "teammate" ? "If it can't handle it" : stage.kind === "pull-request" ? "If checks fail" : "If it fails"} value={stage.onFail ?? ""} onChange={event => update({ onFail: event.target.value || null })}>
         <option value="">{stage.kind === "approval" ? "Can't be sent back" : stage.kind === "sort" ? "Wait here for a person" : "Wait here"}</option>{others.map(one => <option key={one.id} value={one.id}>{one.title}</option>)}
       </select>
     </Field>}

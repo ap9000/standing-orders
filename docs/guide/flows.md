@@ -12,6 +12,7 @@ work moving through them. Open **Flows**, then **Edit flow** to draw.
 | Research | An agent investigates and writes a report; no code changes. |
 | Person decides | Someone approves, or sends the card back with a note. |
 | Run a script | One of the project's scripts (Python, Node or shell) runs with the card, with no AI. What it prints is passed on, and it can pick where the card goes. See [Code in flows](code.md). |
+| Pull request | Opens a pull request for the card's built result (Projects → Pull requests must be on) and waits for CI. Green moves the card on; red takes the failure path with the failing check named, back to the build as a revision. Its **When checks pass** setting can merge (squash by default), only after a Person decides zone approved the card. |
 | Sort | Jev picks where the card goes, in under a second. |
 | Draft | Claude writes a reply, summary or note from the card. |
 | Web request | Calls an API with the card's details. |
@@ -19,7 +20,7 @@ work moving through them. Open **Flows**, then **Edit flow** to draw.
 | Use a tool | Calls one of the project's tools (MCP servers). |
 | Update where it came from | Comments on (and can close) the GitHub or Linear issue the card came from, or answers in the chat thread it came from. |
 | Message | Posts to the project's chat. |
-| Wait | Waits for a reply to the card's email, or for a set time. |
+| Wait | Waits for a reply to the card's email, for a set time, or until set hours (like 22:00–06:00). |
 | Done | The end. |
 
 Each zone has a **Then** (where cards go next) and, where it can fail, an
@@ -95,10 +96,21 @@ is here, and a face on a card shows who has that card open.
 
 ## Templates
 
-Coding, Research, Issue triage, Spam filter, Lead routing, Effort routing,
+Coding, Issues to PRs (GitHub issues labelled `toolroll` → build → you
+approve → pull request → a comment that closes the issue), Research, Issue triage, Spam filter, Lead routing, Effort routing,
 Exception routing, Email replies, Reply and follow up (a nudge in the same
 thread after 3 days without an answer), Decisions that don't stall (a
 reminder, then anyone can decide), and Blank.
+
+## Starter flows
+
+Settings → Flows (and `toolroll onboard`) offers three flows that are on from
+day one, each switched on with one yes: **Fix failing CI** (a failed check on
+the main branch files a fix task), **Issues become tasks** (an issue labelled
+`toolroll` becomes a task) and **Overnight queue** (cards added in the day
+start after 22:00; results wait for you in the morning). Each says what it
+will do and what it never does; none merges without a person. A task's
+**Do this every time…** and the lead in chat offer the matching one.
 
 ## Insights
 

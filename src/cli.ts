@@ -106,7 +106,7 @@ Usage
   toolroll skills get <name>  print one guide (version-matched, never stale)
   toolroll demo             a seeded throwaway sandbox — see it working in 90 seconds
   toolroll up               app + builder for every saved project — the normal start
-  toolroll onboard          make your agent Toolroll's lead: add this repo, install its skill (--yes)
+  toolroll onboard          make your agent Toolroll's lead: add this repo, install its skill (--yes), offer starter flows (--starter)
   toolroll status           running, queued, ready results, release check and plan windows
   toolroll integrations     which integrations work, and what to do about the ones that don't (--json)
   toolroll session          native coding sessions through the running service

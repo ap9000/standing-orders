@@ -398,20 +398,22 @@ Both families are self-hosted as latin woff2 at weights 400, 500 and 600 from `/
 
 **Compact desk (901 to 1150px).** The sidebar narrows to 184px (172px in detail, 178px docked) and the Crew sheet to 286px. Gutters tighten to 17 to 22px.
 
-**Phones (900px and below).** The frame dissolves. The layout becomes a single flex column with no padding, the background turns paper, and the sheet fills the screen with no inset, radius or shadow. The sidebar is replaced by a menu button that opens it as a left drawer (at most 300px, on frame grey). Crew and the Ask panel become a second full-screen view, reached from a header button and returned from with a back button. The header grows to 60px and clears the status bar with `env(safe-area-inset-top)`. The composer clears the home indicator. Controls, nav rows, summaries and standalone links become 44px tall. Inputs are set at 16px so iOS does not zoom.
+**Phones (900px and below).** The frame dissolves. The layout becomes a single flex column with no padding, the background turns paper, and the sheet fills the screen with no inset, radius or shadow. The sidebar is replaced by a menu button that opens it as a left drawer (at most 300px, on frame grey). Crew and the Ask panel become a second full-screen view, reached from a header button and returned from with a back button. The header grows to 60px (52px at 760px and below) and clears the status bar with `env(safe-area-inset-top)`. The composer clears the home indicator. Controls, nav rows, summaries and standalone links become 44px tall. Inputs are set at 16px so iOS does not zoom.
 
 **Inside a sheet.** A 52px header sits over a hairline, holding the page name (Title Small), a muted focus label, and on the right the command trigger with its mono ⌘K hint. Page content is padded 24px top and bottom and 28px on the sides (20px / 16px on phones). Notices stack in the top gutter with 8px gaps.
 
 **Content widths.** The Tasks list and Projects span the sheet, left-aligned, so they share the notice's left edge and the header's right edge. Task and result pages are centred at up to 56rem. The conversation column is centred at 780px with prose capped at 72ch. Empty-state copy is capped at 42ch.
 
 **Rows and grids.**
-- *Tasks list:* one three-column grid shared by every row through `subgrid`, with a 24px column gap: title and meta (`minmax(0, 1fr)`), status badge (auto), action (auto). Because the rows share the list's columns, every badge starts at the same x and every action ends at the same edge, whatever their widths. Rows are padded 12px by 8px and separated by hairlines, the whole list sits between a top and bottom hairline, not inside a card, and a hovered row fills with raised. Below 640px a row stacks: the title and meta first, then the badge and the action on one line pushed apart.
+- *Tasks list:* one three-column grid shared by every row through `subgrid`, with a 24px column gap: title and meta (`minmax(0, 1fr)`), status badge (auto), action (auto). Because the rows share the list's columns, every badge starts at the same x and every action ends at the same edge, whatever their widths. Rows are padded 12px by 8px and separated by hairlines, the whole list sits between a top and bottom hairline, not inside a card, and a hovered row fills with raised. At 760px and below a row is a small grid: the title with its action on the right of the title line, then the badge beside the project and age, then any detail.
 - *Task facts:* a definition grid under a hairline (not a card), with a 32px column gap and 16px row gap. It has one column below 480px, two from 480px and three from 1024px.
 - *Crew rows:* the title (13px / 500) with its badge under it, the project name in muted 12px, and an optional text action. Hairlines run above the first row and between rows. On phones the badge moves beside the title.
 
 **Rhythm.** Spacing steps are 4, 8, 12, 16, 20, 24 and 28px. Page blocks stack with 16 to 20px gaps, card internals with 12 to 16px, and inline clusters with 6 to 8px. Section headings get more space above them than below.
 
-**Control heights.** Controls are 32px at a desk (28px for the small size) and 44px on phones. The shell switches at 900px. The shadcn components switch at Tailwind's 640px (`max-sm`), so between 641px and 900px they stay 32px. This is a known divergence.
+**Phone density (760px and below).** Phones show about a third more on a screen, compact by layout and never by shrinking what a finger hits. The header is 52px, the side gutter 14px, and the steps tighten to the shared `--so-phone-*` tokens (in `serve.ts`): 12px under the header, 14px between page blocks, 8px between rows, 12 to 14px inside a card. Secondary lines sit at a 1.35 line height and meta text keeps the desk's size. A row's action sits at the right of its title line, a status chip stays beside the name or on the meta line, and secondary facts run on as one line ("Last success 16:39 · Used by Alerts"). Times shorten to "16:39" today, "Yesterday 16:39", or "Sep 28"; the full stamp stays in the `title` and on a desk (`when-html.ts`). Every tap target stays at least 44px (a small control may reach it with transparent padding taken back by a negative margin, or a larger hit area) and every field 16px.
+
+**Control heights.** Controls are 32px at a desk (28px for the small size) and 44px on phones. The shell switches at 900px. The shadcn components switch at 760px (the `phone:` variant in `tailwind.css`, with `desk:` above it), so between 761px and 900px they stay 32px. This is a known divergence.
 
 ## Elevation & Depth
 
@@ -459,7 +461,7 @@ Quiet, compact, and ink by default. The colour is saved for the one verb that se
 - **Background:** paper, on a paper sheet, so a card is defined by its hairline border and not by its fill.
 - **Shadow Strategy:** none. See Elevation.
 - **Border:** a 1px hairline. A failed status card takes vermilion at 50% and nothing else changes colour. A waiting card keeps a neutral border, and its badge and single accent verb carry the wait.
-- **Internal Padding:** 20px (16px on phones), with a 16px gap between blocks. Grouped folds (task details, Manage) are one card with zero padding, divided by hairlines, each fold with a 15px / 600 summary and a rotating chevron.
+- **Internal Padding:** 20px (14px on phones), with a 16px gap between blocks (12px on phones). Grouped folds (task details, Manage) are one card with zero padding, divided by hairlines, each fold with a 15px / 600 summary and a rotating chevron.
 
 ### Inputs / Fields
 - **Style:** a paper fill, a 1px control-line border, 8px corners, 32px tall, 10px side padding and 13px text. Placeholders are muted.

@@ -555,3 +555,80 @@ body:has(.so-workspace) { margin: 0; padding: 0; background: var(--so-ground); o
   .so-first-run-choices > div { padding: 10px; }
   .so-first-run-steps .ui-button { min-height: 44px; }
 }
+
+/* Phones (760px and narrower) show about a third more on a screen (2026-09-30).
+   Compact by layout, never by shrinking what a finger hits: a shorter header,
+   tighter gutters and gaps between blocks, less padding inside cards, and
+   secondary lines at 1.35. Controls stay 44px and fields 16px (the rules
+   above); the spacing steps are the shared --so-phone-* tokens in serve.ts. */
+@media (max-width: 760px) {
+  .so-workspace-header, .so-ask-header { min-height: 52px; padding-top: max(4px, env(safe-area-inset-top)); padding-bottom: 4px; }
+  .so-work-panel-header, .so-supporting-panel--detail .so-work-panel-header { min-height: 52px; padding-top: max(4px, env(safe-area-inset-top)); padding-bottom: 4px; }
+  .so-workspace-notices { padding: var(--so-phone-row) var(--so-phone-gutter) 0; gap: 6px; }
+  .so-workspace-notices .ui-alert { padding: 7px 10px; line-height: 1.35; }
+  .so-work-detail-content, .so-page-content { padding: var(--so-phone-gap) var(--so-phone-gutter) 20px; }
+  .so-conversation-content { padding: var(--so-phone-gap) var(--so-phone-gutter) var(--so-phone-block); }
+  .ui-conversation-empty { min-height: 26vh; }
+  .ui-message { margin-bottom: 14px; }
+  .ui-message-content { line-height: 1.5; }
+  .ui-message-content p { margin-bottom: 6px; }
+  .ui-message-content :is(ul, ol) { margin: 6px 0; }
+  .ui-message--user { padding: 7px 12px; }
+  .so-message-label { margin-bottom: 2px; line-height: 1.35; }
+  .so-message-cards { margin-top: 10px; }
+  .so-catch-up { margin-bottom: var(--so-phone-block); }
+  .so-crew { padding: var(--so-phone-gap) var(--so-phone-gutter) 20px; }
+  .so-section-heading { margin-bottom: 6px; }
+  .so-work-row { padding: 6px 0; }
+  .so-work-heading { gap: 8px; }
+  .so-work-project { margin-top: 1px; line-height: 1.35; }
+  /* Crew actions and the section link reach 44px by overlapping the row's slack above them. */
+  .so-work-action { position: relative; display: inline-flex; align-items: center; min-height: 44px; margin: -12px 0 0; }
+  .so-section-heading > a { position: relative; z-index: 1; display: inline-flex; align-items: center; min-height: 44px; margin-block: -10px; }
+  .so-crew-finished > summary { min-height: 44px; }
+  .so-all-work { margin-top: 10px; }
+  .so-crew-empty { margin-top: 20px; }
+  .so-crew-finished { margin-top: 10px; }
+  .so-native-region > .ui-alert { margin-bottom: var(--so-phone-row); }
+  .so-native-region :where(h1) { font-size: 20px; margin-bottom: 2px; }
+  .so-native-region :where(h2) { margin-top: var(--so-phone-block); margin-bottom: 4px; }
+  .so-native-region :where(h3) { margin-top: var(--so-phone-gap); margin-bottom: 4px; }
+  .so-native-region :where(p) { margin-block: 4px; }
+  .so-native-region :where(.meta, .hint, .recap, small, dd) { line-height: 1.35; }
+  .so-native-region :where(.card) { padding: var(--so-phone-card); margin-block: var(--so-phone-row); }
+  .so-native-region :where(.problem) { padding: 8px 10px; margin-block: var(--so-phone-row); line-height: 1.35; }
+  .so-native-region :where(details) { margin-block: var(--so-phone-row); }
+  .so-native-region :where(.row) { padding-block: 6px; }
+  .so-task-context + .ui-artifact { margin-top: var(--so-phone-gap); }
+  .so-result-task-details { margin-bottom: var(--so-phone-gap); }
+  .so-first-run { gap: 10px; margin-bottom: 18px; }
+  .so-first-run-steps > li { min-height: 44px; padding: 4px 0; }
+  /* The composer is one line where it fits: the text and Send side by side, the hint under both. */
+  .so-composer-area .ui-textarea { min-height: 46px; padding: 11px 3px 3px; }
+  .so-composer-area form[data-workspace-composer] { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 8px; align-items: end; padding: 6px 6px 6px 11px; }
+  .so-composer-area form[data-workspace-composer] > .ui-textarea { grid-column: 1; grid-row: 1; }
+  .so-composer-area .so-composer-actions { display: contents; }
+  .so-composer-area .so-composer-actions > span { grid-column: 1 / -1; grid-row: 2; padding: 2px 3px 2px; line-height: 1.35; }
+  .so-composer-area .so-composer-actions .ui-button { grid-column: 2; grid-row: 1; }
+  /* What a finger hits stays 44px: the small chat disclosures and the send
+     button, and fields inside server fragments a rebuilt view embeds (16px
+     text, so iOS does not zoom). */
+  .so-composer-actions .ui-button { min-height: 44px; }
+  .ui-disclosure { margin-top: 4px; }
+  /* A reply's Activity: its 44px target overlaps the reply's slack instead of adding a line of space. */
+  .ui-message .ui-disclosure { margin-top: 0; margin-bottom: -8px; }
+  .ui-disclosure-trigger, .so-conversation-settings > summary { min-height: 44px; padding-block: 12px; line-height: 20px; box-sizing: border-box; }
+  .so-conversation-settings { margin-top: 0; }
+  /* Doubled class: above the rebuilt views' scoped reset ([data-view] … in tailwind.css). */
+  .so-workspace.so-workspace :is(input:not([type="hidden"], [type="checkbox"], [type="radio"], [type="range"], [type="color"], [type="file"]), select) { min-height: 44px; }
+  .so-workspace.so-workspace :is(input:not([type="hidden"], [type="checkbox"], [type="radio"], [type="range"], [type="color"], [type="file"], [type="submit"], [type="button"]), select, textarea) { font-size: 16px; }
+  .so-workspace :where(summary) { min-height: 44px; padding-block: 11px; box-sizing: border-box; }
+  /* A question inside the task page's card reads as its content, not a second card. */
+  [data-slot="card"] .so-task-questions .decide-card { border: 0; border-radius: 0; padding: 0; margin: 4px 0 0; background: none; }
+  .so-native-region .decide-card { padding: 10px 12px; margin-block: var(--so-phone-row); }
+  .so-native-region .decide-option { padding: 8px 10px; }
+  .so-native-region :where(p.row > a:first-child) { display: inline-flex; align-items: center; min-height: 44px; }
+  .so-native-region :where(p > a.new-task:only-child) { padding-block: 12px; }
+  /* The "Settings" crumb over a settings page: a 44px target that overlaps the heading's slack, not a taller line. */
+  .so-native-region > div > p:first-child > a[href="/settings"]:only-child { position: relative; z-index: 1; display: inline-flex; align-items: center; min-height: 44px; margin-block: -8px -12px; }
+}

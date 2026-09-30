@@ -202,4 +202,17 @@ describe("the lead builds and runs a flow", () => {
     expect(confirm(coding)).toMatchObject({ ok: true, href: "/flows/2" });
     expect(store.getFlow(2)).toMatchObject({ name: "Coding flow" });
   });
+
+  test("\"do this every time\": the lead offers a starter flow as one card, saying what it does and never does; confirming makes its trigger and zones", () => {
+    const offered = lead("propose_flow", { operation: "starter", repo: "r1", starter: "overnight" });
+    const card = sharedActionPayload(store.getMateProposal(proposalOf(offered))!.payload)!;
+    expect(card.title).toBe("Switch on Overnight queue in shop");
+    expect(card.terms).toEqual(["Cards you add during the day start after 22:00; results wait for you in the morning.", "Adds a “Queue for tonight” button.",
+      "Holds each card until 22:00, then builds it as a task, under your usual approvals.", "Results wait for your review in the morning.", "Never merges or ships anything without you."]);
+    expect(confirm(proposalOf(offered))).toMatchObject({ ok: true, said: "Overnight queue is on.", href: "/flows/1" });
+    expect(store.flowTriggers(1).map(one => JSON.parse(one.configJson))).toEqual([expect.objectContaining({ kind: "button", label: "Queue for tonight", zone: "tonight" })]);
+    // Once on, it isn't offered again; a GitHub starter on a project that isn't on GitHub says why.
+    expect(lead("propose_flow", { operation: "starter", repo: "r1", starter: "overnight" })).toMatchObject({ ok: false, message: expect.stringContaining("Overnight queue is already on in") });
+    expect(lead("propose_flow", { operation: "starter", repo: "r1", starter: "ci-fix" })).toMatchObject({ ok: false, message: expect.stringContaining("This project isn't on GitHub") });
+  });
 });

@@ -1,0 +1,1232 @@
+{
+  "synthetic": true,
+  "viewports": {
+    "phone": {
+      "chat": {
+        "onScreen": 3,
+        "content": 1435,
+        "shown": 0.407,
+        "overflow": false,
+        "small": [
+          {
+            "tag": "summary",
+            "text": "Activity",
+            "height": 36,
+            "width": 350,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "ui-message-content",
+              "SUMMARY"
+            ]
+          },
+          {
+            "tag": "summary",
+            "text": "Activity",
+            "height": 36,
+            "width": 350,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "ui-message-content",
+              "SUMMARY"
+            ]
+          },
+          {
+            "tag": "summary",
+            "text": "Conversation settings",
+            "height": 30,
+            "width": 362,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "so-composer-area",
+              "SUMMARY"
+            ]
+          }
+        ]
+      },
+      "catch-up": {
+        "onScreen": 4,
+        "content": 844,
+        "shown": 1,
+        "overflow": false,
+        "small": [
+          {
+            "tag": "a",
+            "text": "Confirm the new inbox empty-state copy r",
+            "height": 44,
+            "width": 346,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Guard the payout limiter against concurr",
+            "height": 44,
+            "width": 346,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Retire the legacy payout feature flag",
+            "height": 44,
+            "width": 346,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "",
+              "A"
+            ]
+          }
+        ]
+      },
+      "crew": {
+        "onScreen": 7,
+        "content": 1452,
+        "shown": 0.581,
+        "overflow": false,
+        "small": [
+          {
+            "tag": "a",
+            "text": "All tasks",
+            "height": 18,
+            "width": 49,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "so-crew",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Review plan",
+            "height": 18,
+            "width": 68,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "so-work-row",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Review and retry",
+            "height": 18,
+            "width": 93,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "so-work-row",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Review hold",
+            "height": 18,
+            "width": 67,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "so-work-row",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Review required task",
+            "height": 18,
+            "width": 117,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "so-work-row",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Check the unfinished attempt",
+            "height": 18,
+            "width": 165,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "so-work-row",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Review plan",
+            "height": 18,
+            "width": 68,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "so-work-row",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Check connection",
+            "height": 18,
+            "width": 101,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "so-work-row",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Watch the build",
+            "height": 18,
+            "width": 87,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "so-work-row",
+              "A"
+            ]
+          },
+          {
+            "tag": "summary",
+            "text": "Finished (1)",
+            "height": 40,
+            "width": 350,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "so-crew",
+              "SUMMARY"
+            ]
+          }
+        ]
+      },
+      "tasks": {
+        "onScreen": 11,
+        "content": 1904,
+        "shown": 0.374,
+        "overflow": false,
+        "small": [
+          {
+            "tag": "a",
+            "text": "All11",
+            "height": 40,
+            "width": 68,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "inline-flex h-8 items-center gap-0.5 rou",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Needs you9",
+            "height": 40,
+            "width": 109,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "inline-flex h-8 items-center gap-0.5 rou",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Running1",
+            "height": 40,
+            "width": 95,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "inline-flex h-8 items-center gap-0.5 rou",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Complete0",
+            "height": 40,
+            "width": 104,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "inline-flex h-8 items-center gap-0.5 rou",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Confirm the new inbox empty-state copy r",
+            "height": 27,
+            "width": 342,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "grid grid-cols-1 gap-y-2 px-2 py-3 trans",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Retire the legacy payout feature flag",
+            "height": 27,
+            "width": 342,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "grid grid-cols-1 gap-y-2 px-2 py-3 trans",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Fix the payout rounding drift",
+            "height": 27,
+            "width": 342,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "grid grid-cols-1 gap-y-2 px-2 py-3 trans",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Migrate billing exports to the new vendo",
+            "height": 27,
+            "width": 342,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "grid grid-cols-1 gap-y-2 px-2 py-3 trans",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Ship dark mode",
+            "height": 27,
+            "width": 342,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "grid grid-cols-1 gap-y-2 px-2 py-3 trans",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Choose the webhook retry policy",
+            "height": 27,
+            "width": 342,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "grid grid-cols-1 gap-y-2 px-2 py-3 trans",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Rotate the request-log format to JSON li",
+            "height": 27,
+            "width": 342,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "grid grid-cols-1 gap-y-2 px-2 py-3 trans",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "nightly-deps · 2026-09-28 03:30 UTC",
+            "height": 27,
+            "width": 342,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "grid grid-cols-1 gap-y-2 px-2 py-3 trans",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Harden webhook delivery against slow con",
+            "height": 27,
+            "width": 342,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "grid grid-cols-1 gap-y-2 px-2 py-3 trans",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Extract the design tokens package",
+            "height": 27,
+            "width": 342,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "grid grid-cols-1 gap-y-2 px-2 py-3 trans",
+              "A"
+            ]
+          }
+        ]
+      },
+      "task": {
+        "onScreen": 5,
+        "content": 2754,
+        "shown": 0.259,
+        "overflow": false,
+        "small": [
+          {
+            "tag": "a",
+            "text": "Overview",
+            "height": 36,
+            "width": 92,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "inline-flex h-10 items-center gap-1 roun",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Ask",
+            "height": 36,
+            "width": 54,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "inline-flex h-10 items-center gap-1 roun",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Evidence pack",
+            "height": 16,
+            "width": 97,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "text-xs font-medium text-muted-foregroun",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "How should webhook retries back off?",
+            "height": 20,
+            "width": 232,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "px-5 pb-5 pt-1 max-sm:px-4",
+              "A"
+            ]
+          }
+        ]
+      },
+      "inbox": {
+        "onScreen": 1,
+        "content": 1268,
+        "shown": 0.562,
+        "overflow": false,
+        "small": [
+          {
+            "tag": "a",
+            "text": "clear the queue → one thing at a time",
+            "height": 20,
+            "width": 223,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "retire-legacy-flag",
+            "height": 20,
+            "width": 106,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "ship-dark-mode",
+            "height": 20,
+            "width": 98,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "",
+              "A"
+            ]
+          }
+        ]
+      },
+      "flows": {
+        "onScreen": 4,
+        "content": 844,
+        "shown": 1,
+        "overflow": false,
+        "small": [
+          {
+            "tag": "a",
+            "text": "Customer replies",
+            "height": 19,
+            "width": 137,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "card",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Support desk",
+            "height": 19,
+            "width": 108,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "card",
+              "A"
+            ]
+          }
+        ]
+      },
+      "projects": {
+        "onScreen": 4,
+        "content": 844,
+        "shown": 1,
+        "overflow": false,
+        "small": [
+          {
+            "tag": "button",
+            "text": "payments-api",
+            "height": 20,
+            "width": 87,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "flex items-center gap-x-4 px-2 py-3 max-",
+              "BUTTON"
+            ]
+          },
+          {
+            "tag": "button",
+            "text": "6 waiting on you",
+            "height": 20,
+            "width": 101,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "text-left font-semibold hover:underline ",
+              "BUTTON"
+            ]
+          },
+          {
+            "tag": "button",
+            "text": "1 running",
+            "height": 20,
+            "width": 61,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "flex flex-wrap items-center gap-x-2 gap-",
+              "BUTTON"
+            ]
+          },
+          {
+            "tag": "button",
+            "text": "4 queued",
+            "height": 20,
+            "width": 63,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "inline-flex w-fit shrink-0 items-center ",
+              "BUTTON"
+            ]
+          },
+          {
+            "tag": "button",
+            "text": "1 built today",
+            "height": 20,
+            "width": 78,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "inline-flex w-fit shrink-0 items-center ",
+              "BUTTON"
+            ]
+          },
+          {
+            "tag": "button",
+            "text": "web-console",
+            "height": 20,
+            "width": 82,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "flex items-center gap-x-4 px-2 py-3 max-",
+              "BUTTON"
+            ]
+          },
+          {
+            "tag": "button",
+            "text": "3 waiting on you",
+            "height": 20,
+            "width": 101,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "text-left font-semibold hover:underline ",
+              "BUTTON"
+            ]
+          },
+          {
+            "tag": "button",
+            "text": "2 queued",
+            "height": 20,
+            "width": 63,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "flex flex-wrap items-center gap-x-2 gap-",
+              "BUTTON"
+            ]
+          },
+          {
+            "tag": "button",
+            "text": "1 built today",
+            "height": 20,
+            "width": 78,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "inline-flex w-fit shrink-0 items-center ",
+              "BUTTON"
+            ]
+          }
+        ]
+      },
+      "settings": {
+        "onScreen": 1,
+        "content": 4816,
+        "shown": 0.148,
+        "overflow": false,
+        "small": [
+          {
+            "tag": "input",
+            "text": "Hue",
+            "height": 12,
+            "width": 324,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "flex flex-wrap gap-4",
+              "INPUT"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Harden webhook delivery against slow con",
+            "height": 20,
+            "width": 233,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "inline-flex items-center gap-2 text-sm t",
+              "A"
+            ]
+          },
+          {
+            "tag": "button",
+            "text": "",
+            "height": 24,
+            "width": 44,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "flex items-center justify-between gap-4",
+              "BUTTON"
+            ]
+          },
+          {
+            "tag": "input",
+            "text": "",
+            "height": 16,
+            "width": 16,
+            "tall": false,
+            "wide": false,
+            "at": [
+              "mt-3 grid gap-3 rounded-lg bg-muted p-4",
+              "FORM"
+            ]
+          },
+          {
+            "tag": "summary",
+            "text": "Or sign in with a Google account",
+            "height": 20,
+            "width": 290,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "mt-3 rounded-lg border px-4 py-3",
+              "SUMMARY"
+            ]
+          }
+        ]
+      },
+      "integrations": {
+        "onScreen": 5,
+        "content": 1925,
+        "shown": 0.37,
+        "overflow": false,
+        "small": [
+          {
+            "tag": "a",
+            "text": "Settings",
+            "height": 15,
+            "width": 50,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "so-page-content",
+              "A"
+            ]
+          }
+        ]
+      },
+      "notifications": {
+        "onScreen": 5,
+        "content": 4816,
+        "shown": 0.148,
+        "overflow": false,
+        "small": [
+          {
+            "tag": "input",
+            "text": "Hue",
+            "height": 12,
+            "width": 324,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "flex flex-wrap gap-4",
+              "INPUT"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Harden webhook delivery against slow con",
+            "height": 20,
+            "width": 233,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "inline-flex items-center gap-2 text-sm t",
+              "A"
+            ]
+          },
+          {
+            "tag": "button",
+            "text": "",
+            "height": 24,
+            "width": 44,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "flex items-center justify-between gap-4",
+              "BUTTON"
+            ]
+          },
+          {
+            "tag": "input",
+            "text": "",
+            "height": 16,
+            "width": 16,
+            "tall": false,
+            "wide": false,
+            "at": [
+              "mt-3 grid gap-3 rounded-lg bg-muted p-4",
+              "FORM"
+            ]
+          },
+          {
+            "tag": "summary",
+            "text": "Or sign in with a Google account",
+            "height": 20,
+            "width": 290,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "mt-3 rounded-lg border px-4 py-3",
+              "SUMMARY"
+            ]
+          }
+        ]
+      },
+      "pull-requests": {
+        "onScreen": 0,
+        "content": 844,
+        "shown": 1,
+        "overflow": false,
+        "small": []
+      }
+    },
+    "narrow": {
+      "chat": {
+        "onScreen": 3,
+        "content": 1892,
+        "shown": 0.254,
+        "overflow": false,
+        "small": [
+          {
+            "tag": "summary",
+            "text": "Activity",
+            "height": 36,
+            "width": 280,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "ui-message-content",
+              "SUMMARY"
+            ]
+          },
+          {
+            "tag": "summary",
+            "text": "Activity",
+            "height": 36,
+            "width": 280,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "ui-message-content",
+              "SUMMARY"
+            ]
+          },
+          {
+            "tag": "summary",
+            "text": "Activity",
+            "height": 36,
+            "width": 280,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "ui-message-content",
+              "SUMMARY"
+            ]
+          },
+          {
+            "tag": "button",
+            "text": "Send message",
+            "height": 42,
+            "width": 75,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "ui-button ui-button--primary ui-button--",
+              "svg"
+            ]
+          },
+          {
+            "tag": "summary",
+            "text": "Conversation settings",
+            "height": 30,
+            "width": 292,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "so-composer-area",
+              "SUMMARY"
+            ]
+          }
+        ]
+      },
+      "tasks": {
+        "onScreen": 10,
+        "content": 1997,
+        "shown": 0.304,
+        "overflow": false,
+        "small": [
+          {
+            "tag": "a",
+            "text": "All11",
+            "height": 40,
+            "width": 68,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "inline-flex h-8 items-center gap-0.5 rou",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Needs you9",
+            "height": 40,
+            "width": 109,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "inline-flex h-8 items-center gap-0.5 rou",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Running1",
+            "height": 40,
+            "width": 95,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "inline-flex h-8 items-center gap-0.5 rou",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Complete0",
+            "height": 40,
+            "width": 104,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "inline-flex h-8 items-center gap-0.5 rou",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Retire the legacy payout feature flag",
+            "height": 27,
+            "width": 272,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "grid grid-cols-1 gap-y-2 px-2 py-3 trans",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Fix the payout rounding drift",
+            "height": 27,
+            "width": 272,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "grid grid-cols-1 gap-y-2 px-2 py-3 trans",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Migrate billing exports to the new vendo",
+            "height": 27,
+            "width": 272,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "grid grid-cols-1 gap-y-2 px-2 py-3 trans",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Ship dark mode",
+            "height": 27,
+            "width": 272,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "grid grid-cols-1 gap-y-2 px-2 py-3 trans",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Choose the webhook retry policy",
+            "height": 27,
+            "width": 272,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "grid grid-cols-1 gap-y-2 px-2 py-3 trans",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "nightly-deps · 2026-09-28 03:30 UTC",
+            "height": 27,
+            "width": 272,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "grid grid-cols-1 gap-y-2 px-2 py-3 trans",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Extract the design tokens package",
+            "height": 27,
+            "width": 272,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "grid grid-cols-1 gap-y-2 px-2 py-3 trans",
+              "A"
+            ]
+          }
+        ]
+      },
+      "task": {
+        "onScreen": 5,
+        "content": 2997,
+        "shown": 0.203,
+        "overflow": false,
+        "small": [
+          {
+            "tag": "a",
+            "text": "Overview",
+            "height": 36,
+            "width": 92,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "inline-flex h-10 items-center gap-1 roun",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Ask",
+            "height": 36,
+            "width": 54,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "inline-flex h-10 items-center gap-1 roun",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Evidence pack",
+            "height": 16,
+            "width": 97,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "text-xs font-medium text-muted-foregroun",
+              "A"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "How should webhook retries back off?",
+            "height": 20,
+            "width": 232,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "px-5 pb-5 pt-1 max-sm:px-4",
+              "A"
+            ]
+          }
+        ]
+      },
+      "integrations": {
+        "onScreen": 4,
+        "content": 1964,
+        "shown": 0.31,
+        "overflow": false,
+        "small": [
+          {
+            "tag": "a",
+            "text": "Settings",
+            "height": 15,
+            "width": 50,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "so-page-content",
+              "A"
+            ]
+          }
+        ]
+      },
+      "notifications": {
+        "onScreen": 5,
+        "content": 5248,
+        "shown": 0.116,
+        "overflow": false,
+        "small": [
+          {
+            "tag": "input",
+            "text": "Hue",
+            "height": 12,
+            "width": 254,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "flex flex-wrap gap-4",
+              "INPUT"
+            ]
+          },
+          {
+            "tag": "a",
+            "text": "Harden webhook delivery against slow con",
+            "height": 20,
+            "width": 163,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "flex flex-wrap items-center gap-x-3 gap-",
+              "A"
+            ]
+          },
+          {
+            "tag": "button",
+            "text": "",
+            "height": 24,
+            "width": 44,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "flex items-center justify-between gap-4",
+              "BUTTON"
+            ]
+          },
+          {
+            "tag": "input",
+            "text": "",
+            "height": 16,
+            "width": 16,
+            "tall": false,
+            "wide": false,
+            "at": [
+              "mt-3 grid gap-3 rounded-lg bg-muted p-4",
+              "FORM"
+            ]
+          },
+          {
+            "tag": "summary",
+            "text": "Or sign in with a Google account",
+            "height": 20,
+            "width": 220,
+            "tall": false,
+            "wide": true,
+            "at": [
+              "mt-3 rounded-lg border px-4 py-3",
+              "SUMMARY"
+            ]
+          }
+        ]
+      }
+    },
+    "desktop": {
+      "chat": {
+        "onScreen": 4,
+        "content": 1844,
+        "shown": 0.348,
+        "overflow": false
+      },
+      "catch-up": {
+        "onScreen": 11,
+        "content": 1370,
+        "shown": 0.645,
+        "overflow": false
+      },
+      "tasks": {
+        "onScreen": 15,
+        "content": 1105,
+        "shown": 0.709,
+        "overflow": false
+      },
+      "task": {
+        "onScreen": 12,
+        "content": 2091,
+        "shown": 0.374,
+        "overflow": false
+      },
+      "inbox": {
+        "onScreen": 8,
+        "content": 1370,
+        "shown": 0.645,
+        "overflow": false
+      },
+      "flows": {
+        "onScreen": 11,
+        "content": 1370,
+        "shown": 0.645,
+        "overflow": false
+      },
+      "projects": {
+        "onScreen": 11,
+        "content": 1370,
+        "shown": 0.645,
+        "overflow": false
+      },
+      "settings": {
+        "onScreen": 9,
+        "content": 3365,
+        "shown": 0.233,
+        "overflow": false
+      },
+      "integrations": {
+        "onScreen": 14,
+        "content": 1431,
+        "shown": 0.547,
+        "overflow": false
+      },
+      "notifications": {
+        "onScreen": 12,
+        "content": 3365,
+        "shown": 0.233,
+        "overflow": false
+      },
+      "pull-requests": {
+        "onScreen": 7,
+        "content": 1370,
+        "shown": 0.645,
+        "overflow": false
+      }
+    }
+  }
+}
