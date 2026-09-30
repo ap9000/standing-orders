@@ -54,7 +54,7 @@ const s = (row: Row, key: string) => row[key] == null ? null : String(row[key]);
 const PROJECTION = `WITH RECURSIVE admitted AS MATERIALIZED (
   SELECT t.id, t.title, t.state, t.created_at, t.updated_at, r.id ref_id, r.repo,
     r.revision_of, r.revision_brief_artifact, r.assigned_runner, r.plan,
-    r.deliverable, r.coordinator_cid, r.capability_requirements, r.park_rate
+    r.deliverable, r.coordinator_cid, r.capability_requirements, r.park_rate, r.auth_wait_pause
   FROM task_ref r JOIN task t ON t.id = r.external_id
   WHERE r.backend = 'built-in' AND ((r.repo IS NULL AND $unplaced = 1)
     OR (r.repo IS NOT NULL AND ($all = 1 OR r.repo IN (SELECT value FROM json_each($repos)))))
@@ -119,10 +119,14 @@ const PROJECTION = `WITH RECURSIVE admitted AS MATERIALIZED (
     (SELECT id FROM run WHERE task_ref=c.ref_id AND lease_id=c.live_lease AND outcome IS NULL ORDER BY id DESC LIMIT 1) live_run,
     h.owner_kind hold_kind,h.reason hold_reason,h.until hold_until,
     sc.task_id scope_id,sc.digest,sc.approved_at,sc.proposed_at,sc.profile_state,
+    -- The pause the dispatch gate itself left this task waiting on (the provider it resolved, pins,
+    -- configuration and planners included) first; the approved terms answer before any gate has looked.
+    EXISTS(SELECT 1 FROM provider_auth_pause p WHERE p.id=c.auth_wait_pause AND p.lifted_at IS NULL) gate_signed_out,
+    COALESCE((SELECT p.provider||':'||p.auth_mode FROM provider_auth_pause p WHERE p.id=c.auth_wait_pause AND p.lifted_at IS NULL),
     (SELECT p.provider||':'||p.auth_mode FROM provider_auth_pause p WHERE p.lifted_at IS NULL AND p.provider IN (
       SELECT json_extract(sc.approved_profile_json,'$.provider') WHERE json_valid(sc.approved_profile_json)
       UNION ALL SELECT json_extract(leg.value,'$.provider') FROM json_each(CASE WHEN json_valid(sc.approved_route_json) THEN sc.approved_route_json ELSE '{}' END,'$.legs') leg
-        WHERE json_extract(leg.value,'$.phase')='build')) signed_out,
+        WHERE json_extract(leg.value,'$.phase')='build'))) signed_out,
     (sc.approved_at IS NOT NULL AND sc.approved_by IS NOT NULL AND sc.approved_digest=sc.digest) approved,
     (sc.approval_basis IS NOT 'mode' OR EXISTS(SELECT 1 FROM operating_mode om JOIN approver signer ON signer.name=om.signed_by
       WHERE om.repo=c.repo AND om.digest=sc.mode_digest AND om.revoked_at IS NULL AND om.absolute_expiry>$now
@@ -217,7 +221,7 @@ const PROJECTION = `WITH RECURSIVE admitted AS MATERIALIZED (
     WHEN worker_count=0 THEN 'no-worker-registered'
     WHEN online_count=0 THEN 'no-worker-online'
     WHEN available_count=0 THEN 'worker-at-capacity'
-    WHEN signed_out IS NOT NULL AND NOT (plan='requested' AND NOT COALESCE(approved AND dispatch_approval,0)) THEN 'signed-out'
+    WHEN signed_out IS NOT NULL AND (gate_signed_out OR NOT (plan='requested' AND NOT COALESCE(approved AND dispatch_approval,0))) THEN 'signed-out'
     WHEN (plan='requested' OR park_rate>0) AND (SELECT COUNT(*) FROM decision WHERE state<>'answered' AND answered_at IS NULL)>=5 THEN 'decision-queue'
     WHEN plan='requested' AND NOT COALESCE(approved AND dispatch_approval,0) THEN 'planning-ready'
     WHEN deliverable='report' THEN 'scouting-ready'

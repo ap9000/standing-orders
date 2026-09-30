@@ -25,6 +25,8 @@ import type { MateProviderAnswer } from "./converse.js";
 import { resultFactsFromHtml } from "./result-review.js";
 import { Window } from "happy-dom";
 import { validateTaskText, TASK_TEXT_LIMITS } from "./task-text.js";
+import { previewProjectInstructions } from "./setup-guide.js";
+import { LEGACY_SKILL_DIR, SKILL_FILE } from "./skills.js";
 
 
 /** The exact route authority a fixture PRESENTS at admission (v48 authority repair): the
@@ -3754,6 +3756,27 @@ describe("the first-run checklist (adoption track, step 3)", () => {
     // No work yet: the templates are offered.
     expect(html).toContain("/routines?template=nightly-deps");
     expect(html).toContain("/tasks?template=lint-sweep");
+  });
+
+  test("a skill only in the folder from before the rename counts on the checklist, and the setup guide offers to bring it up to date", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "toolroll-wizard-legacy-skill-"));
+    try {
+      mkdirSync(join(repo, LEGACY_SKILL_DIR), { recursive: true });
+      writeFileSync(join(repo, LEGACY_SKILL_DIR, SKILL_FILE), "---\nname: standing-orders\n---\n");
+      await boot({ repo });
+      const cookie = await login();
+      const html = await (await fetch(url("/inbox"), { headers: { cookie } })).text();
+      expect(html).toContain("skill installed");
+      // The setup guide still offers Review: installing moves it into .claude/skills/toolroll with current content.
+      expect(previewProjectInstructions(repo)).toMatchObject({ ok: true, installed: false });
+      // Without it, both say it is missing.
+      rmSync(join(repo, ".claude"), { recursive: true });
+      const bare = await (await fetch(url("/inbox"), { headers: { cookie } })).text();
+      expect(bare).not.toContain("skill installed");
+      expect(previewProjectInstructions(repo)).toMatchObject({ ok: true, installed: false });
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
   });
 
   test("unscoped mode is named, not normalized — the step instructs the restart", async () => {

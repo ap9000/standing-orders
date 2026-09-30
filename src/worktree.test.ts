@@ -586,6 +586,80 @@ describe("the pool, against real git", () => {
     expect(existsSync(join(retry.worktree.path, "renamed.ts"))).toBe(true);
   });
 
+  /** Attempt one stops before its handoff; attempt two inherits its work and ends as `ending` says. */
+  const unhandedThenRetried = async (id: string, ending: (retryRun: number, path: string) => Promise<void> | void) => {
+    const pool = new WorktreePool(store, { root: join(base, "pool") });
+    const evidence = join(base, "evidence");
+    store.createTask({ id, title: "keep unhanded work until it breaks" }, T0);
+    const ref = store.refFor("built-in", id).id;
+    const branch = `feat/${id}`;
+    const first = await pool.lease({ repo, branch, base: "main", runner: "builder-1", taskRef: ref, now: T0 });
+    if (!first.ok) throw new Error(first.message);
+    const unhanded = store.startRun({ taskRef: ref, leaseId: `${id}-1`, runner: "builder-1", branch, worktree: first.worktree.path, ...bareLegacy("build", "claude", null), now: T0 });
+    await writeFile(join(first.worktree.path, "renamed.ts"), "export const toolroll = true;\n");
+    store.finishRun(unhanded, { outcome: "failed", reason: "no-handoff", now: later(1_000) });
+    await pool.release(first.worktree.path, later(2_000));
+    const second = await pool.lease({ repo, branch, runner: "builder-1", taskRef: ref, now: later(3_000), reclaim: { evidenceRoot: evidence } });
+    expect(second).toMatchObject({ ok: true, resumedFromRun: unhanded, recoveryKind: "partial" });
+    if (!second.ok) throw new Error(second.message);
+    const recovered = store.admitRecoveredBuilder({
+      taskRef: ref, leaseId: `${id}-2`, runner: "builder-1", branch, worktree: second.worktree.path, provider: "claude",
+      recoveredFrom: unhanded, ...bareLegacy("build", "claude", null), now: later(3_100),
+    });
+    if (!recovered.ok) throw new Error(recovered.problem);
+    await writeFile(join(second.worktree.path, "half-broken.ts"), "export const broken = \n");
+    await ending(recovered.runId, second.worktree.path);
+    await pool.release(second.worktree.path, later(4_000));
+    const third = await pool.lease({ repo, branch, runner: "builder-1", taskRef: ref, now: later(5_000), reclaim: { evidenceRoot: evidence } });
+    if (!third.ok) throw new Error(third.message);
+    return { unhanded, third };
+  };
+
+  test("unhanded work is kept only until a later attempt fails some other way; then the saved tree is reset", async () => {
+    const { third } = await unhandedThenRetried("t-broke", retryRun => {
+      store.finishRun(retryRun, { outcome: "failed", reason: "agent", now: later(3_500) });
+    });
+    expect(third.resumedFromRun).toBeUndefined();
+    expect(third.recoveryKind).toBeUndefined();
+    // Saved before the reset: both attempts' work is in the leftover patch.
+    const patch = await import("node:fs/promises").then(fs => fs.readFile(third.reclaimed as string, "utf8"));
+    expect(patch).toContain("export const toolroll = true;");
+    expect(patch).toContain("export const broken =");
+    expect(existsSync(join(third.worktree.path, "renamed.ts"))).toBe(false);
+    expect(existsSync(join(third.worktree.path, "half-broken.ts"))).toBe(false);
+  });
+
+  test("a later attempt that also stopped before its handoff, or lost its sign-in, keeps the unhanded work", async () => {
+    for (const reason of ["no-handoff", "auth-expired"]) {
+      let retried = 0;
+      const { unhanded, third } = await unhandedThenRetried(`t-${reason}`, retryRun => {
+        retried = retryRun;
+        store.finishRun(retryRun, { outcome: "failed", reason, now: later(3_500) });
+      });
+      // The newest unhanded attempt is the draft; a lost sign-in leaves the first one's.
+      expect(third).toMatchObject({ resumedFromRun: reason === "no-handoff" ? retried : unhanded, recoveryKind: "partial" });
+      expect(existsSync(join(third.worktree.path, "renamed.ts"))).toBe(true);
+    }
+  });
+
+  test("a resumed turn that fails inside an attempt that then stops before its handoff keeps the work", async () => {
+    let retried = 0;
+    const { third } = await unhandedThenRetried("t-turn", (retryRun, path) => {
+      retried = retryRun;
+      const taskRef = store.getRun(retryRun)!.taskRef;
+      // The turn mends the attempt under its own live claim.
+      store.raw().prepare("INSERT INTO claim (lease_id, task_ref, lease_generation, runner, acquired_at, expires_at, heartbeat_at) VALUES ('t-turn-2', ?, 1, 'builder-1', ?, ?, ?)")
+        .run(taskRef, later(3_000).toISOString(), later(60_000).toISOString(), later(3_000).toISOString());
+      const turn = store.admitRepair({ taskRef, leaseId: "t-turn-2", runner: "builder-1", branch: "feat/t-turn", worktree: path,
+        provider: "claude", parentRun: retryRun, ...bareLegacy("repair", "claude", null), now: later(3_200) });
+      if (!turn.ok) throw new Error(turn.problem);
+      store.finishRun(turn.runId, { outcome: "failed", reason: "timeout", now: later(3_300) });
+      store.finishRun(retryRun, { outcome: "failed", reason: "no-handoff", now: later(3_500) });
+    });
+    expect(third).toMatchObject({ resumedFromRun: retried, recoveryKind: "partial" });
+    expect(existsSync(join(third.worktree.path, "half-broken.ts"))).toBe(true);
+  });
+
   test("saveWorkPatch writes tracked changes and untracked files without touching the tree", async () => {
     const pool = new WorktreePool(store, { root: join(base, "pool") });
     const leased = await pool.lease({ repo, branch: "feat/patch", base: "main", runner: "builder-1", now: T0 });

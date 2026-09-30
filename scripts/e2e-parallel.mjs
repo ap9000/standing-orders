@@ -4,32 +4,38 @@
  * fail if any group fails. The script lists its groups with `--groups --json`
  * and runs one with `--group <name>`.
  *
- *   npm run e2e:app:parallel      (or: node scripts/e2e-parallel.mjs scripts/app-e2e.mjs [--keep] [--only <pattern>] …)
+ *   npm run e2e:app:parallel      (or: node scripts/e2e-parallel.mjs scripts/app-e2e.mjs [--no-retry] [--output <dir>] [--keep] [--only <pattern>] …)
  *
  * Each group's output is prefixed with its name; its report goes to
  * output/e2e/<script>-parallel-<time>/<group>/report.md and is printed at the end.
+ *
+ * A group with failed journeys runs once more in a fresh world with just those
+ * journeys, what they need (each report names every journey's needs) and the
+ * browser-error check; a journey that passes then is flaky (a follow-up), not a
+ * failed run. With no report to read, or only the browser-error check failed,
+ * the whole group runs again.
  */
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import { here } from "./e2e-kit.mjs";
+import { BROWSER_CHECK, here } from "./e2e-kit.mjs";
 
 const [script, ...given] = process.argv.slice(2);
-if (script === undefined) { console.error("Usage: node scripts/e2e-parallel.mjs <script.mjs> [--no-retry] [options for every group]"); process.exit(2); }
-// A group that fails runs once more in a fresh world; passing then marks it flaky (a follow-up), not a failed run.
+if (script === undefined) { console.error("Usage: node scripts/e2e-parallel.mjs <script.mjs> [--no-retry] [--output <dir>] [options for every group]"); process.exit(2); }
 const retry = !given.includes("--no-retry");
-const rest = given.filter(one => one !== "--no-retry");
+const at = given.indexOf("--output");
+const rest = given.filter((one, index) => one !== "--no-retry" && (at === -1 || (index !== at && index !== at + 1)));
 const groups = JSON.parse(execFileSync(process.execPath, [script, "--groups", "--json"], { encoding: "utf8" }));
 const name = basename(script, ".mjs").replace(/-e2e$/, "");
-const out = resolve(join(here, "output/e2e", `${name}-parallel-${new Date().toISOString().replace(/[:.]/g, "-")}`));
+const out = resolve(at === -1 ? join(here, "output/e2e", `${name}-parallel-${new Date().toISOString().replace(/[:.]/g, "-")}`) : given[at + 1]);
 const started = Date.now();
 const minutes = ms => Math.round(ms / 6000) / 10;
-const width = Math.max(...groups.map(one => one.name.length));
+const width = Math.max(...groups.map(one => one.name.length)) + "-retry".length;
 console.log(`Running ${groups.length} groups at once: ${groups.map(one => one.name).join(", ")}`);
 
-const runGroup = (group, folder) => new Promise(done => {
+const runGroup = (group, folder, extra = []) => new Promise(done => {
   const at = Date.now();
-  const child = spawn(process.execPath, [script, "--group", group, "--output", join(out, folder), ...rest], { stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(process.execPath, [script, "--group", group, "--output", join(out, folder), ...extra], { stdio: ["ignore", "pipe", "pipe"] });
   const tag = `[${folder.padEnd(width)}]`;
   for (const stream of [child.stdout, child.stderr]) {
     let partial = "";
@@ -44,16 +50,62 @@ const runGroup = (group, folder) => new Promise(done => {
 });
 process.on("SIGINT", () => process.exit(130));
 
-const first = await Promise.all(groups.map(({ name: group }) => runGroup(group, group)));
-const again = retry ? await Promise.all(first.filter(one => one.code !== 0).map(one => runGroup(one.group, `${one.group}-retry`))) : [];
-const finished = first.map(one => again.find(next => next.group === one.group) ?? one);
-const flaky = again.filter(one => one.code === 0).map(one => one.group);
+const report = folder => { try { return JSON.parse(readFileSync(join(out, folder, "report.json"), "utf8")); } catch { return null; } };
+/** The journeys to run again from a failed group's report: the failed ones, the ones skipped because of them, and everything
+ * those need. Null when the whole group has to run again. */
+function retrySet(results) {
+  // A console error can come from any journey, passed ones included: that failure retries the whole group.
+  if (results.some(one => one.name === BROWSER_CHECK && one.state === "failed")) return null;
+  const failed = results.filter(one => one.state === "failed").map(one => one.name);
+  if (failed.length === 0 || results.some(one => !Array.isArray(one.needs))) return null;
+  const again = new Set(failed);
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const one of results) {
+      const wanted = again.has(one.name) ? one.needs : one.state === "skipped" && one.needs.some(need => again.has(need)) ? [one.name] : [];
+      for (const each of wanted) if (!again.has(each)) { again.add(each); grew = true; }
+    }
+  }
+  return results.map(one => one.name).filter(one => again.has(one));
+}
+const exactly = names => `^(?:${names.map(one => one.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})$`;
+// The first run's own --only is replaced by the journeys to retry (they are a subset of it).
+const without = (list, flag) => list.filter((one, index) => one !== flag && list[index - 1] !== flag);
+
+const first = await Promise.all(groups.map(({ name: group }) => runGroup(group, group, rest)));
+const again = retry ? await Promise.all(first.filter(one => one.code !== 0).map(one => {
+  const journeys = retrySet(report(one.folder)?.results ?? []);
+  console.log(`Retrying ${one.group}: ${journeys === null ? "the whole group" : `${journeys.length} journey${journeys.length === 1 ? "" : "s"} — ${journeys.join("; ")}`}`);
+  return runGroup(one.group, `${one.group}-retry`, journeys === null ? rest : [...without(rest, "--only"), "--only", exactly(journeys)]).then(done => ({ ...done, journeys }));
+})) : [];
+/** A retry passes only on its report: every journey that failed the first time, and the browser-error check,
+ * PASSED on the retry. A clean exit alone is not enough: a journey skipped (or not run) the second time proved
+ * nothing. With no first report to read (the group crashed), the whole group ran again and its exit decides. */
+function retryPassed(one) {
+  if (one.code !== 0) return false;
+  const before = report(one.group)?.results, after = report(one.folder)?.results;
+  if (!before) return true;
+  if (!after) return false;
+  const state = new Map(after.map(each => [each.name, each.state]));
+  const mustPass = new Set(before.filter(each => each.state === "failed").map(each => each.name));
+  if (after.some(each => each.name === BROWSER_CHECK)) mustPass.add(BROWSER_CHECK);
+  return [...mustPass].every(name => state.get(name) === "passed");
+}
+const judged = again.map(one => ({ ...one, code: retryPassed(one) ? 0 : one.code || 1 }));
+const finished = first.map(one => judged.find(next => next.group === one.group) ?? one);
 console.log("");
 for (const one of [...first, ...again]) {
-  const report = join(out, one.folder, "report.md");
-  console.log(existsSync(report) ? readFileSync(report, "utf8") : `# ${one.folder} — no report (exited ${one.signal ?? one.code})\n`);
+  const path = join(out, one.folder, "report.md");
+  console.log(existsSync(path) ? readFileSync(path, "utf8") : `# ${one.folder} — no report (exited ${one.signal ?? one.code})\n`);
 }
+// Flaky: failed on the first try and passed on the second.
+const flaky = judged.filter(one => one.code === 0).flatMap(one => {
+  if (one.journeys === null) return [`${one.group}: the whole group`];
+  const passed = new Set((report(one.folder)?.results ?? []).filter(each => each.state === "passed").map(each => each.name));
+  return (report(one.group)?.results ?? []).filter(each => each.state === "failed" && passed.has(each.name)).map(each => `${one.group}: ${each.name}`);
+});
 const failed = finished.filter(one => one.code !== 0);
-console.log(finished.map(one => `${one.code === 0 ? "✅" : "❌"} ${one.group.padEnd(width)}  ${one.minutes} min${flaky.includes(one.group) ? "  (flaky: passed on the second try)" : ""}`).join("\n"));
-console.log(`\n${groups.length - failed.length} of ${groups.length} groups passed${flaky.length > 0 ? ` (flaky, passed on the second try: ${flaky.join(", ")})` : ""} in ${minutes(Date.now() - started)} min — ${out}`);
+console.log(finished.map(one => `${one.code === 0 ? "✅" : "❌"} ${one.group.padEnd(width)}  ${one.minutes} min`).join("\n"));
+if (flaky.length > 0) console.log(`\nFlaky, passed on the second try:\n${flaky.map(one => `- ${one}`).join("\n")}`);
+console.log(`\n${groups.length - failed.length} of ${groups.length} groups passed${flaky.length > 0 ? ` (${flaky.length} flaky journey${flaky.length === 1 ? "" : "s"})` : ""} in ${minutes(Date.now() - started)} min — ${out}`);
 process.exitCode = failed.length === 0 ? 0 : 1;

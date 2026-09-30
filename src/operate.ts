@@ -10,7 +10,7 @@ import { billingOf, budgetHoldWords, budgetLabel, budgetStates, monthNamed, mont
 import { spendCsv } from "./spend-ui.js";
 import { buildExport, exportSummary, exportZip, writeExportFolder } from "./export.js";
 import { startBudgetAlerts } from "./budget-alerts.js";
-import { authPauseOf, claimAuthTrial, liftAuthPause, openAuthPauses, signInWords, startSignInProbes } from "./provider-auth.js";
+import { liftAuthPause, openAuthPauses, signInGate, signInWords, startSignInProbes } from "./provider-auth.js";
 import { createConnectionChecker } from "./provider-connection.js";
 import { backupFiles, backupFolderOf, backupOwner, backupNow, restoreDatabase, startBackups } from "./backup.js";
 import { pushLimitSink } from "./provider-limits.js";
@@ -141,7 +141,7 @@ import { createDecisionServer } from "./serve.js";
 import {
   daemonLaunchCommand,
   daemonStatus,
-  installDaemon,
+  installReplacingLegacy,
   installedLegacyDaemon,
   planDaemon,
   uninstallDaemon,
@@ -2495,6 +2495,13 @@ async function tickCommand(
         resumed.push({ id: taskId, outcome: "skipped", reason: "budget", detail: budgetWords(laneBudget) });
         continue;
       }
+      // The sign-in pause holds a resumed lane too: it waits, parked, instead of failing.
+      const laneSignedOut = signInGate(store, [racer.provider], clock());
+      if (laneSignedOut !== null) {
+        backToParked();
+        resumed.push({ id: taskId, outcome: "skipped", reason: "signed-out", detail: signInWords(laneSignedOut) });
+        continue;
+      }
       // Legacy comparison lanes carried an absolute clock. New profiles use
       // a progress watchdog and may remain alive indefinitely while useful
       // work is observable; only legacy approvals retain their cumulative
@@ -2979,11 +2986,11 @@ async function tickCommand(
     // new work — no claim, no run, never a substitute (a lapsed login must not
     // reach a paid fallback) — until a run or check on it works again or a
     // person resumes it. Other providers keep working.
-    const signedOut = [...new Set(modeProviders)].map(one => authPauseOf(store, one)).find(one => one !== null);
     // One task every AUTH_TRIAL_MS goes ahead as the trial: a sign-in check
     // can say "logged in" for a session that cannot refresh, so a real run
     // decides — it lifts the pause, or fails into the same incident.
-    if (signedOut !== undefined && signedOut !== null && !claimAuthTrial(store, signedOut, clock())) {
+    const signedOut = signInGate(store, modeProviders, clock(), ref.id);
+    if (signedOut !== null) {
       dispatched.push({ id, outcome: "skipped", reason: "signed-out", detail: signInWords(signedOut) });
       continue;
     }
@@ -4200,6 +4207,12 @@ async function tickCommand(
       dispatched.push({ id: pending.taskId, outcome: "skipped", reason: "budget-unenforceable" });
       continue;
     }
+    // The sign-in pause holds a fallback entry too: the admission stays pending until its provider works.
+    const entrySignedOut = signInGate(store, [peek.profile.provider], clock(), pending.taskRef);
+    if (entrySignedOut !== null) {
+      dispatched.push({ id: pending.taskId, outcome: "skipped", reason: "signed-out", detail: signInWords(entrySignedOut) });
+      continue;
+    }
     // The FALLBACK claim (finding 4): every acquireIfReady gate — task
     // state, non-backoff holds, blockers, approved scope + mode belt,
     // capability, capacity, and quota keyed by the PINNED credential —
@@ -4398,6 +4411,12 @@ async function tickCommand(
       const continuationBudget = budgetHold(parent.taskRef, store.agentsFor([pinned.provider]));
       if (continuationBudget.over !== null) {
         dispatched.push({ id: taskId, outcome: "skipped", reason: "budget", detail: budgetWords(continuationBudget) });
+        continue;
+      }
+      // The sign-in pause holds a continuation too: its authorization stays open and it starts once the sign-in works.
+      const continuationSignedOut = signInGate(store, [pinned.provider], clock(), parent.taskRef);
+      if (continuationSignedOut !== null) {
+        dispatched.push({ id: taskId, outcome: "skipped", reason: "signed-out", detail: signInWords(continuationSignedOut) });
         continue;
       }
 
@@ -7746,17 +7765,12 @@ async function daemonCommand(
       return EXIT.ok;
     }
 
-    if (legacy !== null) {
-      try {
-        await uninstallDaemon(legacy, supervise);
-      } catch (error) {
-        return fail(write, json, "daemon install", "supervisor", `could not stop ${legacy.label}, the same watch under its older name: ${(error as Error).message}`, EXIT.failed);
-      }
-    }
-    const installed = await installDaemon(plan, token, supervise);
+    const installed = await installReplacingLegacy(plan, token, legacy, supervise);
     if (!installed.ok) {
       return fail(write, json, "daemon install", "supervisor", installed.message, EXIT.failed);
     }
+    // The legacy watch beat for this runner until it stopped: only a beat after that proves the new one.
+    const readySince = legacy === null ? heartbeatBefore : store.getRunner(runnerName)?.runner.heartbeatAt ?? null;
     const started = await daemonStatus(plan, supervise);
     if (started.state !== "running") {
       return fail(
@@ -7774,7 +7788,7 @@ async function daemonCommand(
     // readiness receipt that proves this service reached the work loop —
     // a FRESH one when the service was (re)started; the one already
     // standing when a healthy running service was left alone.
-    const fresh = await awaitFreshHeartbeat(store, runnerName, installed.action === "running" ? null : heartbeatBefore);
+    const fresh = await awaitFreshHeartbeat(store, runnerName, installed.action === "running" && legacy === null ? null : readySince);
     const liveRunner = fresh.ok ? store.getRunner(runnerName)?.runner ?? null : null;
     if (liveRunner === null) {
       const macHint = process.platform === "darwin" && repo.startsWith(join(homedir(), "Documents"))

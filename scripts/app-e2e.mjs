@@ -23,7 +23,7 @@ import { createServer as createHttpServer } from "node:http";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createHash, generateKeyPairSync, randomBytes, sign as signWith } from "node:crypto";
-import { flag, freePort, mailSink, option, Skip, sleep, world } from "./e2e-kit.mjs";
+import { flag, freePort, GiveUp, mailSink, option, REAL_TURN_MS, Skip, sleep, waitFor, world } from "./e2e-kit.mjs";
 
 const skipBuild = flag("--skip-build");
 
@@ -148,7 +148,7 @@ const w = await world(group === null ? "app" : `app-${group}`, {
     writeFileSync(join(repo, "README.md"), "# Shop\n\nA tiny shop library. `add` lives in src/math.js.\n");
   },
 });
-const { base, page, cli, rows, until, check, shot, json, signIn, askLead, confirmCard, auth, repo } = w;
+const { base, page, cli, rows, until, check, shot, json, signIn, askLead, pendingCard, confirmCard, auth, repo } = w;
 const placed = new Map();
 /** A journey in its group: it runs when its group (or every group) runs, and what it needs is in the same group. */
 function journey(name, title, needs, body) {
@@ -299,7 +299,8 @@ await journey("console", "Sessions and API tokens: a read token made in Settings
   return { token: "revoked" };
 });
 
-await journey("console", "Approval rules: with 'someone other than the requester' on, the task alex filed can't be approved by alex; sam approves it, and the task says who filed it", [], async () => {
+const APPROVAL_RULES = "Approval rules: with 'someone other than the requester' on, the task alex filed can't be approved by alex; sam approves it, and the task says who filed it";
+await journey("console", APPROVAL_RULES, [], async () => {
   await page.goto(`${base}/settings/approval?repo=${encodeURIComponent(repo)}`);
   await page.locator('.approval-rules input[name="not_requester"]').check();
   await page.locator('.approval-rules input[name="password"]').fill(w.passwords.alex);
@@ -332,7 +333,8 @@ await journey("console", "Approval rules: with 'someone other than the requester
   }
 });
 
-await journey("console", "Audit: the ledger chain verifies, a checkpoint made on the ledger page verifies from the command line, and the task's evidence pack names who filed and who approved it", [], async () => {
+// The evidence pack it reads is of the task the approval rules journey filed.
+await journey("console", "Audit: the ledger chain verifies, a checkpoint made on the ledger page verifies from the command line, and the task's evidence pack names who filed and who approved it", [APPROVAL_RULES], async () => {
   await page.goto(`${base}/ledger`);
   if (await page.locator('[data-ledger-chain="ok"]').count() !== 1) throw new Error(`the chain: ${(await page.locator(".ledger-chain-panel").innerText()).slice(0, 200)}`);
   await Promise.all([page.waitForNavigation(), page.locator('.ledger-checkpoint-form button').click()]);
@@ -456,6 +458,22 @@ await journey("console", "The command line answers: the task list, the approvers
 const refOf = id => rows(`SELECT id, plan FROM task_ref WHERE external_id = '${id}'`)[0];
 const latestBuild = id => rows(`SELECT r.id, r.outcome, r.finished_at FROM run r JOIN task_ref t ON t.id = r.task_ref WHERE t.external_id = '${id}' AND r.role = 'builder' ORDER BY r.id DESC LIMIT 1`)[0];
 const taskState = id => rows(`SELECT state FROM task WHERE id = '${id}'`)[0]?.state;
+/** The planner's attempts on a task so far, in words: "run 3 failed (repair agent exit 1), run 4 …". */
+const plannerRuns = id => rows(`SELECT r.id, r.outcome, r.reason FROM run r JOIN task_ref t ON t.id = r.task_ref WHERE t.external_id = '${id}' AND r.role = 'planner' ORDER BY r.id`)
+  .map(one => `run ${one.id} ${one.outcome ?? "running"}${one.reason ? ` (${one.reason})` : ""}`).join(", ") || "none yet";
+// The worker gives a failed planning attempt two more tries, 1 then 2 minutes apart (claim.ts PLAN_BACKOFF_MS), and one
+// attempt can take a few minutes with its structured repair: the wait fits all three, and ends early once planning is held
+// for a person (every attempt failed, or an answer failed validation), since nothing more comes then.
+const PLANNER_MS = 3 * REAL_TURN_MS;
+async function plannerDrafted(id, what, ready = ref => ref?.plan === "drafted") {
+  return until(what, async () => {
+    const ref = refOf(id);
+    if (ready(ref)) return ref;
+    const held = rows(`SELECT i.kind FROM incident i JOIN run r ON r.id = i.run JOIN task_ref t ON t.id = r.task_ref WHERE t.external_id = '${id}' AND r.role = 'planner' AND i.resolved_at IS NULL`)[0];
+    if (held !== undefined) throw new GiveUp(`planning is held for a person (${held.kind}); planner attempts: ${plannerRuns(id)}`);
+    return null;
+  }, { timeoutMs: PLANNER_MS, everyMs: 5000, seen: () => `plan ${refOf(id)?.plan ?? "missing"}; planner attempts: ${plannerRuns(id)}` });
+}
 /** Approve a task's scope on its page: open the plan, type the password again, approve. */
 async function approveOnPage(id) {
   await page.goto(`${base}/t/${id}`);
@@ -486,7 +504,7 @@ await journey("task", "File a task in the console; the planner (Claude) drafts i
   await Promise.all([page.waitForNavigation(), page.click('form[action="/tasks/add"] button.task-submit')]);
   firstTask = /\/t\/([^/?#]+)/.exec(page.url())?.[1];
   if (!firstTask) throw new Error(`filing didn't open the task: ${page.url()}`);
-  const planned = await until("the planner's scope", async () => { const ref = refOf(firstTask); return ref?.plan === "drafted" && rows(`SELECT 1 FROM task_scope WHERE task_id = '${firstTask}'`).length > 0 ? ref : null; }, { timeoutMs: 420_000, everyMs: 5000 });
+  const planned = await plannerDrafted(firstTask, "the planner's scope", ref => ref?.plan === "drafted" && rows(`SELECT 1 FROM task_scope WHERE task_id = '${firstTask}'`).length > 0);
   const scope = rows(`SELECT goal FROM task_scope WHERE task_id = '${firstTask}'`)[0];
   if (!/subtract/i.test(scope.goal)) throw new Error(`the planner's goal: ${scope.goal}`);
   await approveOnPage(firstTask);
@@ -528,7 +546,7 @@ async function sendBack(id, note) {
   if (!child || child === id) throw new Error(`no revision was made: ${page.url()}`);
   if (refOf(child)?.plan !== "requested" && refOf(child)?.plan !== "drafted") throw new Error(`the revision wasn't sent to the planner: plan ${refOf(child)?.plan}`);
   if (!/Updating the plan/.test(await page.locator("body").innerText())) throw new Error("the task page doesn't say the plan is being updated");
-  await until("the planner's updated plan", async () => refOf(child)?.plan === "drafted", { timeoutMs: 420_000, everyMs: 5000 });
+  await plannerDrafted(child, "the planner's updated plan");
   return child;
 }
 const branchFile = (runId, file) => execFileSync("git", ["-C", repo, "show", `refs/heads/${rows(`SELECT branch FROM run WHERE id = ${runId}`)[0].branch}:${file}`], { encoding: "utf8" });
@@ -640,15 +658,25 @@ async function turnLeadChatOn() {
 await journey("lead", "Turn the lead chat on (first-run setup, with your password)", [], turnLeadChatOn);
 
 await journey("lead", "The lead answers a question about the project from its files (real Claude turn)", ["Turn the lead chat on (first-run setup, with your password)"], async () => {
-  const { text } = await askLead("What does src/math.js export? One line.");
-  if (!/add/i.test(text)) throw new Error(`the answer doesn't mention add: ${text.slice(0, 300)}`);
-  return { answer: text.slice(0, 200) };
+  // The project's code index, refreshed the way Settings → Knowledge does, so the lead's project search reads a current one.
+  await page.goto(`${base}/settings/knowledge?repo=${encodeURIComponent(repo)}`);
+  const refreshed = await post("/settings/knowledge/refresh", { repo });
+  if (refreshed.status !== 200) throw new Error(`refreshing the project's code index answered ${refreshed.status}: ${refreshed.body.slice(0, 200)}`);
+  // Asked in the project's own chat: the lead is told which project its tools read.
+  const { text, calls } = await askLead("What does src/math.js export? One line.", page, { project: repo });
+  // What the lead's project search returned is the proof it read the file; its words must then name the export.
+  const searched = calls.filter(one => one.tool === "get_project_context");
+  if (searched.length === 0) throw new Error(`the lead didn't search the project (it called ${JSON.stringify(calls.map(one => one.tool))}); it said: ${text.slice(0, 300)}`);
+  const found = searched.find(one => one.ok && /src\/math\.js/.test(one.result ?? "") && /export const add/.test(one.result ?? ""));
+  if (found === undefined) throw new Error(`the project search didn't return src/math.js's export: ${JSON.stringify(searched.map(one => ({ args: one.args, ok: one.ok, message: one.message, result: one.result?.slice(0, 200) })))}`);
+  if (!/\badd\b/i.test(text)) throw new Error(`the search returned add, but the answer doesn't mention it: ${text.slice(0, 300)}`);
+  return { searched: found.args, answer: text.slice(0, 200) };
 });
 
 await journey("lead", "The lead files a task from plain words, as a card you confirm (real Claude turn)", ["The lead answers a question about the project from its files (real Claude turn)"], async () => {
   const { reply } = await askLead("File a task in this project to add a short usage section about add() to README.md. Just file it, no need to ask.");
   const card = reply.locator('[data-view="chat-card"][data-card-kind="task"][data-card-state="pending"]').first();
-  await card.waitFor({ timeout: 20_000 });
+  await waitFor(card, "a task card to confirm in the lead's reply", { timeoutMs: 20_000, seen: async () => `the reply “${(await reply.innerText()).replace(/\s+/g, " ").slice(0, 300)}”` });
   await card.locator("[data-card-confirm]").click();
   await until("the task card to be confirmed", async () => (await reply.locator('[data-view="chat-card"][data-card-kind="task"][data-card-state="confirmed"]').count()) > 0, { timeoutMs: 30_000 });
   const filed = rows("SELECT external_id AS id FROM task_ref WHERE filed_via = 'mate' ORDER BY id DESC LIMIT 1")[0];
@@ -661,8 +689,7 @@ await journey("lead", "The lead files a task from plain words, as a card you con
 await journey("lead", "The lead draws a follow-up flow from plain words: it emails, waits for a reply, and nudges when none comes (real Claude turn)", ["The lead answers a question about the project from its files (real Claude turn)"], async () => {
   const before = rows("SELECT COALESCE(MAX(id), 0) AS id FROM flow")[0].id;
   const { reply } = await askLead("Make a flow called Quote follow-up in this project: email the customer our quote, wait 3 days for them to reply, and if they don't, send them a short reminder. Replies go to a holding step called Replied. Just draft it, no need to ask.");
-  const card = reply.locator('[data-view="chat-card"][data-card-state="pending"]').first();
-  await card.waitFor({ timeout: 30_000 });
+  const card = await pendingCard(reply, "the flow card to confirm in the lead's reply");
   await card.locator("[data-card-confirm]").click();
   const flow = await until("the flow", async () => rows(`SELECT id, definition_json FROM flow WHERE id > ${before} ORDER BY id DESC LIMIT 1`)[0], { timeoutMs: 30_000 });
   const stages = JSON.parse(flow.definition_json).stages;
@@ -1119,15 +1146,16 @@ await journey("lead", "AI teammates: Maya (a support rep) answers a question car
 });
 
 await journey("lead", "The lead adds a teammate and changes one's rules from plain words, as cards you confirm (real Claude turns)", ["Turn the lead chat on (first-run setup, with your password)", "AI teammates: Maya (a support rep) answers a question card, approves a small refund on its own, brings the big one to you, and stops while paused (real Claude turns)"], async () => {
-  const confirm = async reply => {
-    const card = reply.locator('[data-view="chat-card"][data-card-state="pending"]').first();
-    await card.waitFor({ timeout: 30_000 });
+  // The lead's own proposal is what's checked: the card it drafted (a reply without one fails quoting the reply and the
+  // tools the lead called), then what confirming it saved.
+  const confirm = async (asked, what) => {
+    const card = await pendingCard(asked.reply, `${what} in the lead's reply (it called ${JSON.stringify(asked.calls.map(one => `${one.tool}${one.ok ? "" : " ✗"}`))})`);
     await card.locator("[data-card-confirm]").click();
-    await until("the card to be confirmed", async () => (await reply.locator('[data-view="chat-card"][data-card-state="confirmed"]').count()) > 0, { timeoutMs: 30_000 });
+    await until(`${what} to be confirmed`, async () => (await asked.reply.locator('[data-view="chat-card"][data-card-state="confirmed"]').count()) > 0, { timeoutMs: 30_000 });
   };
-  await confirm((await askLead("Add a sales rep teammate called Leo to this project. Just draft it, no need to ask.")).reply);
+  await confirm(await askLead("Add a sales rep teammate called Leo to this project. Just draft it, no need to ask."), "the card adding Leo");
   if (rows("SELECT 1 FROM teammate WHERE handle = 'leo' AND state = 'active'").length !== 1) throw new Error("Leo isn't on the team");
-  await confirm((await askLead("Maya can approve refunds and replacements up to $100 on her own now. Update her rules.")).reply);
+  await confirm(await askLead("Maya can approve refunds and replacements up to $100 on her own now. Update her rules."), "the card changing Maya's rules");
   const soul = rows("SELECT soul FROM teammate WHERE handle = 'maya'")[0]?.soul ?? "";
   if (!/\$100/.test(soul) || !/name: Maya/.test(soul)) throw new Error(`Maya's soul file: ${soul.slice(0, 400)}`);
   return { maya: soul.split("## Decide on your own")[1]?.split("##")[0]?.trim().slice(0, 200) };
@@ -1251,7 +1279,7 @@ await journey("rosa", "The lead changes a teammate's tool rule from plain words,
   if (!leadChatOn) await turnLeadChatOn();
   const { reply } = await askLead("Rosa can refund orders up to $100 in the store without asking me now. Just draft it.");
   const pending = reply.locator('[data-view="chat-card"][data-card-state="pending"]:has([data-card-confirm])');
-  await pending.first().waitFor({ timeout: 30_000 });
+  await waitFor(pending.first(), "a card changing Rosa's rule in the lead's reply", { seen: async () => `the reply “${(await reply.innerText()).replace(/\s+/g, " ").slice(0, 300)}”` });
   // The lead may draft her soul file's words too: confirm each card it drafted; the rule itself is what's checked.
   for (let left = 3; left > 0 && await pending.count() > 0; left--) {
     await pending.first().locator("[data-card-confirm]").click();
@@ -1436,7 +1464,8 @@ await journey("flows", "Starter kits: the Support desk kit sets up Maya and its 
 });
 
 await journey("flows", "One-click connections: Connect Stripe on the kit's checklist, allow it on Stripe's page, and Maya can use it; the sign-in stays out of the database and the worker renews it", ["Starter kits: the Support desk kit sets up Maya and its flow in one click, its checklist says what's left, and Try it has Maya draft a reply for you to check (real Claude turn)"], async () => {
-  const secrets = join(homedir(), ".standing-orders", "tool-secrets", createHash("sha256").update(repo).digest("hex").slice(0, 16), "stripe.json");
+  const { namedPath } = await import(new URL("../dist/names.js", import.meta.url).href);
+  const secrets = join(namedPath(homedir(), ["tool-secrets"], { dot: true }), createHash("sha256").update(repo).digest("hex").slice(0, 16), "stripe.json");
   try {
     await page.goto(`${base}/kits/support-desk?repo=${encodeURIComponent(repo)}`);
     await Promise.all([page.waitForNavigation(), page.locator('[data-step="tool-stripe"] a:has-text("Connect")').click()]);

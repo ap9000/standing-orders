@@ -476,10 +476,13 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
       progress({ kind: "tool", turn: turnId, step: steps, label: mateToolLabel(call.name) });
       const outcome = executeMateTool({ store, who, now: clock(), draft, selectEvidence, step: steps, readDecisions, readResults, ...(input.evidenceRoot === undefined ? {} : { evidenceRoot: input.evidenceRoot }), ...(input.mediaDelivery === undefined ? {} : { mediaDelivery: input.mediaDelivery }) }, call.name, call.args, view);
       if (READ_TOOLS.has(call.name)) reads++;
-      // Opt-in, local diagnostics for end-to-end runs: what the lead asked of each tool and what came back, keys blanked.
+      // Opt-in, local diagnostics for end-to-end runs: what the lead asked of each tool and what came back (its start), keys
+      // blanked. Each line stays whole JSON so a run can assert on what a tool returned rather than on the model's words.
       if (envValue(process.env, "MATE_TRACE") === "1") {
         const blanked = (_: string, value: unknown) => typeof value === "string" ? redactSecretAssignments(redactSecretLines(value, scanForSecrets(value))) : value;
-        process.stderr.write(`mate-trace ${JSON.stringify({ turn: turnId, step: steps, tool: call.name, args: call.args, ok: outcome.ok, ...(outcome.ok ? {} : { message: outcome.message }) }, blanked).slice(0, 4000)}\n`);
+        const args = JSON.stringify(call.args, blanked).slice(0, 1500);
+        const result = JSON.stringify(outcome.ok ? outcome.body : null, blanked)?.slice(0, 2000) ?? null;
+        process.stderr.write(`mate-trace ${JSON.stringify({ turn: turnId, step: steps, tool: call.name, args: args.length < 1500 ? call.args : args, ok: outcome.ok, ...(outcome.ok ? { result } : { message: outcome.message }) }, blanked)}\n`);
       }
       history.push({ role: "tool", callId: call.id, name: call.name, result: capped(outcome.ok ? outcome.body : { ok: false, message: outcome.message }) });
     }

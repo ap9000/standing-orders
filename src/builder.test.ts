@@ -3,7 +3,7 @@ import { disposeBuildOutcome } from "./dispose.js";
 import { presetTerms, modeTermsJson, modeDigestOf } from "./modes.js";
 import { isVerificationReceipt, verificationEvidence } from "./verification-evidence.js";
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
-import { agentExitWords, build, handoffResumePrompt, NO_HANDOFF_WORDS, PROTECTED, proveApprovedProfile, verificationExecutableMissing, type Runner } from "./builder.js";
+import { agentExitWords, build, handoffResumePrompt, NO_HANDOFF_WORDS, PROTECTED, WIP_COMMIT_WORDS, proveApprovedProfile, verificationExecutableMissing, type Runner } from "./builder.js";
 import { routeDigestOf } from "./phase-routing.js";
 import { openStore, type Store } from "./store.js";
 import { register, retireRunnerIfCurrent } from "./runner.js";
@@ -4662,6 +4662,44 @@ describe("an agent that stops before its handoff keeps its work (run 2085)", () 
     expect(sh("show", "feat/a:names.ts")).toBe("export const name = \"toolroll\";");
     expect(sh("log", "-1", "--format=%B")).toContain("Work in progress: the agent stopped before handing off.");
     expect(readFileSync(join2(evidence, String(runId), "unhanded-work.patch"), "utf8")).toContain("toolroll");
+  });
+
+  test("an attempt that finds the kept work-in-progress commit complete and hands off with a clean tree succeeds", async () => {
+    // Attempt one: work, no handoff, no session to resume — kept as a WIP commit.
+    const first = buildWith(async () => {
+      writeSync2(join2(wt, "names.ts"), "export const name = \"toolroll\";\n");
+      return { ...OK, stdout: JSON.stringify({ result: "No session to name." }) };
+    });
+    expect(await first.result).toMatchObject({ ok: false, reason: "no-handoff" });
+    store.finishRun(first.runId, { outcome: "failed", reason: "no-handoff", now: T0 });
+    const originalBase = sh("rev-parse", "main");
+    const wip = sh("rev-parse", "HEAD");
+    expect(sh("log", "-1", "--format=%B")).toContain(WIP_COMMIT_WORDS);
+
+    // Attempt two starts from that commit, finds the work done and says so.
+    const second = buildWith(async (_file, args) => {
+      writeSync2(join2(wt, doneFrom(promptOf(args))), JSON.stringify({ version: 2, status: "completed", conclusion: "The rename was already complete." }));
+      return { ...OK, stdout: JSON.stringify({ result: "Handed off.", session_id: "sess-2" }) };
+    });
+    expect(await second.result).toMatchObject({ ok: true, committed: true, summary: "The rename was already complete." });
+    // No new commit: the kept one is the result, sealed against the task's original base.
+    expect(sh("rev-parse", "HEAD")).toBe(wip);
+    expect(store.getRun(second.runId)).toMatchObject({ baseRevision: wip, headRevision: wip });
+    expect(store.firstBuilderBase(taskRef, "feat/a")).toBe(originalBase);
+  });
+
+  test("a clean completed handoff on any other commit is still a no-op, even after a no-handoff attempt", async () => {
+    // An earlier no-handoff attempt from the original base, then an ordinary commit on the branch.
+    const earlier = store.startRun({ taskRef, leaseId: "test-lease", runner: "builder-1", branch: "feat/a", worktree: wt, now: T0, ...presented(store, taskRef, "builder") });
+    store.stampRun(earlier, { baseRevision: sh("rev-parse", "HEAD") });
+    store.finishRun(earlier, { outcome: "failed", reason: "no-handoff", now: T0 });
+    writeSync2(join2(wt, "names.ts"), "export const name = \"edited\";\n");
+    sh("commit", "-q", "-am", "an earlier accepted change");
+    const { result } = buildWith(async (_file, args) => {
+      writeSync2(join2(wt, doneFrom(promptOf(args))), JSON.stringify({ version: 2, status: "completed", conclusion: "Done." }));
+      return { ...OK, stdout: JSON.stringify({ result: "Handed off.", session_id: "sess-3" }) };
+    });
+    expect(await result).toMatchObject({ ok: false, reason: "no-op" });
   });
 
   test("a clean tree with no handoff keeps the ordinary protocol failure", async () => {

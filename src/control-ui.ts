@@ -47,7 +47,7 @@ export function controlSetupHtml(data: {
     `<p class="meta">Preparation applies to subsequent runs, including already approved tasks. Saving setup does not execute it.</p></details>` +
     `<button type="submit">Review project setup</button></form>` +
     `<section class="card"><h2>Agent instructions</h2>` +
-    (data.instructions.message ? `<p>${escape(data.instructions.message)}</p>` : data.instructions.installed ? `<p>Current Toolroll instructions are installed.</p>` :
+    (data.instructions.message ? `<p>${escape(data.instructions.message)}</p>` : data.instructions.installed ? `<p>Toolroll instructions are installed.</p>` :
       `<p>Give the agent the project's Toolroll handoff instructions.</p><form method="post" action="/control/instructions-preview">${hiddenFields({ csrf: data.csrf, repo: data.repo })}<button>Review instructions</button></form>`) +
     `</section><p><a href="/fleet">Configure planning, repair, and review agents</a> · <a href="/tasks/new">Describe a task</a></p>`;
 }

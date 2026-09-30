@@ -300,7 +300,8 @@ export type SealedLedgerEntry = LedgerEntry & { seal: { prev: string; hash: stri
 // v106 keeps the organisation policy, retention periods, backup settings and runs, check progress, and runner capacity changes.
 // v107 keeps a check's progress and result in one record (run_check absorbs check_progress).
 // v108 keeps sign-in pauses: one incident per provider whose sign-in stopped working (provider_auth_pause).
-export const SCHEMA_VERSION = 108;
+// v109 remembers which sign-in pause parked a task (task_ref.auth_wait_pause), so reviews and other runs outside the tick wait for it too.
+export const SCHEMA_VERSION = 109;
 
 /** v102: a project's approval rules, and each person's approval of an exact scope (two are needed for protected work). */
 const APPROVAL_SCHEMA = `
@@ -4955,6 +4956,8 @@ function initializeStore(db: Database, file: string): Store {
   db.exec(SPEND_SCHEMA);
   // Sign-in pauses: one row per incident of a provider's sign-in no longer working.
   db.exec(PROVIDER_AUTH_SCHEMA);
+  // The sign-in pause the dispatch gate last left this task waiting on (null: none), for the work index.
+  addColumn(db, "task_ref", "auth_wait_pause", "INTEGER REFERENCES provider_auth_pause(id)");
   db.exec(RETENTION_SCHEMA);
   db.exec(BACKUP_SCHEMA);
   // Sprint 8: the organisation policy (one row, or none: nothing restricted).
@@ -18781,7 +18784,7 @@ export class Store {
    * recovered-draft admission and the fallback admission's `recoveredFrom`:
    * the interrupted attempt whose draft a fresh run inherits is THIS
    * task's own builder or repair turn, left in this very worktree on this
-   * branch, either ended as `failed` for `interrupted` or still open under
+   * branch, either ended as `failed` for `interrupted` (or `no-handoff`) or still open under
    * a lease nobody holds any more. A planner, scout, or reviewer; a
    * parked, built, or otherwise failed run; a foreign workspace; or an
    * attempt still being built under a live claim is no grant — the words
@@ -18791,7 +18794,9 @@ export class Store {
     if (parent.taskRef !== run.taskRef) return `run #${parent.id} belongs to task_ref ${parent.taskRef} — a builder run continues its own task's run only`;
     if (parent.role !== "builder" && parent.role !== "repair") return `run #${parent.id} is a ${parent.role} run — a recovered draft is a builder's or its repair turn's`;
     if (parent.worktree !== run.worktree || parent.branch !== run.branch) return `run #${parent.id} left its draft in ${parent.worktree ?? "no worktree"} on ${parent.branch ?? "no branch"}, not ${run.worktree} on ${run.branch}`;
-    const interrupted = parent.outcome === null || (parent.outcome === "failed" && parent.reason === "interrupted");
+    // An attempt that stopped before its handoff (run 2085) left its work in
+    // place for exactly this: the retry inherits it, like an interrupted one's.
+    const interrupted = parent.outcome === null || (parent.outcome === "failed" && (parent.reason === "interrupted" || parent.reason === "no-handoff"));
     if (!interrupted) return `run #${parent.id} ended as ${parent.outcome}${parent.reason === null ? "" : ` (${parent.reason})`} — only an interrupted attempt's draft is recovered`;
     if (parent.outcome === null && this.liveClaimByLease(parent.leaseId, now) !== null) return `run #${parent.id} is still being built under lease ${parent.leaseId} — nothing recovers a live attempt's draft`;
     // THE RESUME GRANT (v52): an operator-stopped attempt's draft is

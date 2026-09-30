@@ -18,6 +18,7 @@ import {
   definitionDigest,
   installDaemon,
   installLaunchdService,
+  installReplacingLegacy,
   installedLegacyDaemon,
   labelFor,
   legacyLabelFor,
@@ -348,6 +349,32 @@ describe("the daemon plan", () => {
     const script = scripted({ "launchctl print": { code: 113 }, launchctl: { code: 0 } });
     expect(await uninstallDaemon(found!, script.run)).toMatchObject({ ok: true, existed: true });
     expect(script.calls.map(call => call.args.slice(0, 2).join(" "))).toEqual([`disable gui/${uid}/${old.label}`, `bootout gui/${uid}/${old.label}`, `print gui/${uid}/${old.label}`]);
+    expect(installedLegacyDaemon(args)).toBeNull();
+  });
+
+  test("replacing the watch from before the rename installs the new job first; a failed install leaves the legacy watch running", async () => {
+    const args = { platform: "darwin" as const, bin: process.execPath, binArgs: [], runner: "builder-1", repo: "/Users/alex/code/thing", configDir: dir, watchFlags: [], home: dir, pathEnv: "/usr/bin" };
+    const old = planDaemon({ ...args, label: legacyLabelFor(args.repo) });
+    const next = planDaemon(args);
+    if ("error" in old || "error" in next) throw new Error("plan failed");
+    await installDaemon(old, "t", scripted({ "launchctl print": { code: 113 }, launchctl: { code: 0 } }).run);
+    const legacy = installedLegacyDaemon(args)!;
+    const touchesLegacy = (calls: { args: string[] }[]) => calls.some(call => call.args.some(arg => arg.includes(old.label)));
+
+    // launchd refuses the new unit: the legacy job is neither stopped nor removed.
+    const refused = scripted({ "launchctl print": { code: 113 }, "launchctl bootstrap": { code: 5 }, "launchctl load": { code: 1 }, launchctl: { code: 0 } });
+    expect(await installReplacingLegacy(next, "t", legacy, refused.run)).toMatchObject({ ok: false });
+    expect(touchesLegacy(refused.calls)).toBe(false);
+    expect(installedLegacyDaemon(args)).not.toBeNull();
+
+    // The new job installs: only then is the legacy one stopped and removed, and the new one started again.
+    const accepted = scripted({ "launchctl print": { code: 113 }, launchctl: { code: 0 } });
+    expect(await installReplacingLegacy(next, "t", legacy, accepted.run)).toMatchObject({ ok: true });
+    const steps = accepted.calls.map(call => call.args.slice(0, 2).join(" "));
+    const firstStart = steps.indexOf(`kickstart gui/${uid}/${next.label}`);
+    expect(firstStart).toBeGreaterThanOrEqual(0);
+    expect(steps.indexOf(`bootout gui/${uid}/${old.label}`)).toBeGreaterThan(firstStart);
+    expect(steps.lastIndexOf(`kickstart gui/${uid}/${next.label}`)).toBeGreaterThan(steps.indexOf(`bootout gui/${uid}/${old.label}`));
     expect(installedLegacyDaemon(args)).toBeNull();
   });
 

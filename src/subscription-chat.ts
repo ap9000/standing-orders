@@ -88,6 +88,9 @@ export function composeSubscriptionMatePrompt(request: Omit<SubscriptionMateRequ
     request.system,
     "SUBSCRIPTION HARNESS PROTOCOL:",
     "Do not use any harness tools or inspect the computer. The only current state is DATA and TOOL RESULTS below.",
+    // The model tried host tools as its own tool calls, which the harness refuses, and sometimes then told the operator the
+    // project search "wasn't available" (gate run, 2026-09-30). Host tools are requested only through calls.
+    "Host tools are not tools you can call yourself here: calling one directly always fails. Request one only by listing it in calls of the JSON object you return. Every AVAILABLE HOST TOOL below is available this way; never say one is unavailable. For what a project's files or code say, request get_project_context.",
     "Return the required JSON object. To request a host tool, append {id, name, argumentsJson} to calls; argumentsJson is the JSON serialization of that tool's argument object.",
     "The host validates and runs those calls, then gives you another step. When finished, return a non-empty text and an empty calls array.",
     `AVAILABLE HOST TOOLS:\n${JSON.stringify(request.tools)}`,

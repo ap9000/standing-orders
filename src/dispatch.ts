@@ -11,7 +11,7 @@ import { isAlive } from "./runner.js";
 import { updateAdmissionPaused, UPDATE_PAUSED } from "./desktop-update-gate.js";
 import { approvalOf, type ExecutionProfile } from "./scope.js";
 import { plannerSourceProblemOf } from "./planner-source.js";
-import { authPauseOf, providerName, signInReason } from "./provider-auth.js";
+import { authPauseOf, authWaitOf, providerName, signInReason } from "./provider-auth.js";
 import { REVIEW_TOKENS, resultStatusOf, reviewFactsOf } from "./workspace-ui.js";
 import { BUILT_IN, parseCapabilityKey, type ChatSnapshot, type ReviewRequestOrigin, type ReviewRetryState, type Store, type TaskState } from "./store.js";
 
@@ -409,7 +409,7 @@ export function diagnoseTaskDispatch(store: Store, taskId: string, now: Date): D
   // The sign-in pause: the task's provider stopped working; nothing it would
   // run starts until someone signs in (or a run or check on it works again).
   const provider = profile?.provider ?? (role === "planner" ? ref.planProvider : null) ?? null;
-  const signedOut = provider === null ? null : authPauseOf(store, provider);
+  const signedOut = authWaitOf(store, ref.id) ?? (provider === null ? null : authPauseOf(store, provider));
   if (signedOut !== null) {
     return answer("signed-out", "waiting", signInReason(signedOut), `This task starts again on its own once ${providerName(signedOut.provider)} works.`, { role });
   }

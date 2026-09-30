@@ -29,7 +29,7 @@ import { hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { run, type ExecResult, type RunOptions } from "./exec.js";
 import { currentBootId, provenDeadByBootChange } from "./boot-identity.js";
-import type { Store, WorktreeRow } from "./store.js";
+import type { Run, Store, WorktreeRow } from "./store.js";
 import { HANDOFF_PREFIX, MAILBOX_SUFFIX, readMailbox } from "./evidence.js";
 import { parseHandoff } from "./decision.js";
 
@@ -349,7 +349,7 @@ export class WorktreePool {
         }
         const previousRun = this.store.latestRunInWorktree(path);
         const recoveryRun = this.store.latestRecoverableRunInWorktree(path);
-        const recovery = recoveryRun === null ? null : this.recoverableDraft(path, recoveryRun);
+        const recovery = recoveryRun === null ? null : this.recoverableDraft(path, recoveryRun, previousRun);
         const kept = await this.keepLeftover(path, (request.reclaim as { evidenceRoot: string }).evidenceRoot, request.now);
         if (!kept.ok) return { ok: false, reason: "git", message: kept.message };
         reclaimed = kept.file;
@@ -433,7 +433,7 @@ export class WorktreePool {
    * the old result. It classifies the recovery context for the next freshly
    * fenced attempt, which must review and prove the inherited work itself.
    */
-  private recoverableDraft(path: string, runId: number): { runId: number; kind: "completed" | "partial" } | null {
+  private recoverableDraft(path: string, runId: number, latestRun: number | null): { runId: number; kind: "completed" | "partial" } | null {
     const prior = this.store.getRun(runId);
     if (prior === null) return null;
     // Once a fresh attempt has explicitly inherited a validated draft, keep
@@ -442,13 +442,29 @@ export class WorktreePool {
     // failed/interrupted source required here.
     if (prior.parentRun !== null) {
       const source = this.store.getRun(prior.parentRun);
-      if (source?.outcome === "failed" && (source.reason === "interrupted" || source.reason === "no-handoff")) {
+      if (source?.outcome === "failed" && source.reason === "interrupted") {
         return { runId: source.id, kind: "partial" };
       }
     }
     // An attempt that stopped before its handoff (run 2085) left work it
-    // never got to hand off: kept in place for the next attempt, never reset.
-    if (prior.outcome === "failed" && prior.reason === "no-handoff") return { runId, kind: "partial" };
+    // never got to hand off: kept in place for the next attempt, never reset
+    // — until a later attempt fails some other way. That failure may have
+    // broken the tree, and the work is already saved (its own patch, and the
+    // leftover patch the caller writes first), so the tree can be reset. A
+    // crash or a sign-in that stopped working says nothing about the tree.
+    // A resumed or repair turn is judged as part of the attempt it belongs to.
+    const attemptOf = (one: Run | null): Run | null =>
+      one !== null && one.role === "repair" && one.parentRun !== null ? this.store.getRun(one.parentRun) ?? one : one;
+    const brokeTree = (one: Run | null): boolean =>
+      one !== null && one.outcome === "failed" && one.reason !== "no-handoff" && one.reason !== "interrupted" && one.reason !== "auth-expired";
+    const attempt = attemptOf(prior)!;
+    const later = latestRun !== null && latestRun > runId ? attemptOf(this.store.getRun(latestRun)) : null;
+    const unhanded = attempt.outcome === "failed" && attempt.reason === "no-handoff"
+      ? attempt
+      : attempt.parentRun === null ? null : this.store.getRun(attempt.parentRun);
+    if (unhanded !== null && unhanded.outcome === "failed" && unhanded.reason === "no-handoff") {
+      return brokeTree(attempt) || brokeTree(later) ? null : { runId: unhanded.id, kind: "partial" };
+    }
     if (prior.outcome !== null && (prior.outcome !== "failed" || prior.reason !== "interrupted")) return null;
     let names: string[];
     try {

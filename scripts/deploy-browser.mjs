@@ -23,6 +23,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { deployStateDir, loadNames, stagedPackageName } from "./deploy-paths.mjs";
 import { loadCodingDeploymentRuntime, observeCodingDeployment, backupCodingDeployment, verifyCodingDeploymentBackup, assertCodingDeploymentStopped } from "./deploy-coding.mjs";
 
 // Every direct connection waits at the same bounded lock boundary as Store.
@@ -52,11 +53,13 @@ const runId = Number(flag("run"));
 const phaseWanted = flag("phase", "all");
 // New names first; an install made under the older name keeps being found (nothing is moved).
 const named = (paths) => paths.find(one => existsSync(one)) ?? paths[0];
-const stateDir = flag("state", named(["toolroll", "standing-orders"].map(name => join(homedir(), ".config", name))));
+const source = resolve(flag("source", dirname(dirname(fileURLToPath(import.meta.url)))));
+const names = await loadNames(join(source, "dist"));
+// The folder that holds the database wins, exactly as the plane picks it.
+const stateDir = flag("state") ?? deployStateDir(names, process.env, homedir());
 const database = flag("db", join(stateDir, "orders.db"));
 const label = flag("label", basename(named(["com.toolroll.browser", "com.standing-orders.browser"].map(one => join(homedir(), "Library", "LaunchAgents", `${one}.plist`))), ".plist"));
 const plist = flag("plist", join(homedir(), "Library", "LaunchAgents", `${label}.plist`));
-const source = resolve(flag("source", dirname(dirname(fileURLToPath(import.meta.url)))));
 // The staged runtime installs the candidate under its own package name (toolroll; standing-orders before the rename).
 const packageName = JSON.parse(readFileSync(join(source, "package.json"), "utf8")).name;
 const uid = userInfo().uid;
@@ -79,7 +82,9 @@ const candidateHead = execFileSync("git", ["-C", source, "rev-parse", "HEAD"], {
 const short = candidateHead.slice(0, 7);
 const stageDir = flag("stage") ?? join(stateDir, "staged-upgrades", `browser-${short}-${randomUUID().slice(0, 6)}`);
 const journalFile = join(stageDir, "deployment.json");
-const nextDist = join(stageDir, "runtime", "node_modules", packageName, "dist");
+// A stage made before the rename installed the runtime under the older name; resuming it keeps that path.
+const stagedName = stagedPackageName(stageDir, packageName, names);
+const nextDist = join(stageDir, "runtime", "node_modules", stagedName, "dist");
 const evidenceRoot = join(dirname(database), "evidence");
 const readJournal = () => JSON.parse(readFileSync(journalFile, "utf8"));
 const save = (r, phase) => { r.phase = phase; r.updatedAt = new Date().toISOString(); oldRt.update.durableJson(journalFile, r); say(`• ${phase}`); };
@@ -235,7 +240,7 @@ function stagedPackages(dir, prefix) {
  * later phase (once per process). */
 function proveStaged() {
   requireTrue(existsSync(nextDist), `No staged runtime at ${nextDist}.`);
-  const runtime = join(stageDir, "runtime"), self = join(runtime, "node_modules", packageName);
+  const runtime = join(stageDir, "runtime"), self = join(runtime, "node_modules", stagedName);
   requireTrue(JSON.parse(readFileSync(join(runtime, "package.json"), "utf8")).candidate === candidateHead, "The staged runtime was built for a different candidate.");
   const built = cleanBuildOf(candidateHead);
   requireTrue(JSON.stringify(built.files) === JSON.stringify(list(nextDist)), "Staged dist inventory differs from a clean build of the candidate commit.");
@@ -244,7 +249,7 @@ function proveStaged() {
     const blob = spawnSync("git", ["-C", source, "show", `${candidateHead}:${f}`], { maxBuffer: 64 * 1024 * 1024 });
     requireTrue(blob.status === 0 && blob.stdout.equals(readFileSync(join(self, f))), `Packed file differs from the candidate commit: ${f}`);
   }
-  const staged = stagedPackages(join(runtime, "node_modules"), "node_modules").filter(dep => dep !== `node_modules/${packageName}`).sort();
+  const staged = stagedPackages(join(runtime, "node_modules"), "node_modules").filter(dep => dep !== `node_modules/${stagedName}`).sort();
   requireTrue(JSON.stringify(staged) === JSON.stringify(built.dependencies), `Staged dependency inventory differs from the lockfile install: ${JSON.stringify({ staged: staged.length, lockfile: built.dependencies.length })}`);
   for (const dep of staged) {
     const clean = join(built.scratch, dep), installed = join(runtime, dep), depFiles = list(clean);
