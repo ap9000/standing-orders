@@ -5,6 +5,7 @@
  * with their password.
  */
 import type { LedgerEntry } from "./action-ledger.js";
+import { whenUtc } from "./when-html.js";
 import { LEVEL_HINTS, LEVEL_NAMES, PERMISSION_LEVELS, POLICY_PROVIDERS, PROVIDER_NAMES, policyParts, type SavedPolicy } from "./policy.js";
 
 const e = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
@@ -31,7 +32,7 @@ function historyItem(entry: LedgerEntry): string {
   const what = entry.action.replace(/^organisation policy: /, "");
   const [before, after] = (entry.detail ?? "").split(" → ");
   return `<li><span class="what">${e(what.charAt(0).toUpperCase() + what.slice(1))}: ${e(before ?? "")} → <strong>${e(after ?? "")}</strong></span>` +
-    `<span class="meta">${e(entry.actor)} · <time datetime="${e(entry.at)}">${e(entry.at.slice(0, 16).replace("T", " "))} UTC</time></span></li>`;
+    `<span class="meta">${e(entry.actor)} · ${whenUtc(entry.at)}</span></li>`;
 }
 
 export function policyHtml(view: PolicyView, csrf: string, notice: { said?: string | null; problem?: string | null }): string {

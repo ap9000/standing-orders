@@ -30,6 +30,11 @@
  *               {{card.email}} is the first address the card mentions.
  * - tool      — (v87) calls one tool of one of the project's MCP servers
  *               (Settings → Tools), with arguments filled from the card.
+ * - pull-request — opens a pull request for the card's built result under
+ *               the project's pull request setup (flow-pull-request.ts),
+ *               waits for CI, and moves on when it passes or down the
+ *               failure path, naming the failing check, when it fails. It
+ *               can merge once checks pass, only after a person approved.
  * - done      — the end.
  *
  * The engine is deterministic and model-free: it runs in the worker's pass
@@ -37,7 +42,7 @@
  */
 import { createHash } from "node:crypto";
 
-export const FLOW_STAGE_KINDS = ["inbox", "task", "report", "approval", "check", "update", "notify", "sort", "draft", "request", "email", "tool", "wait", "teammate", "done"] as const;
+export const FLOW_STAGE_KINDS = ["inbox", "task", "report", "approval", "check", "pull-request", "update", "notify", "sort", "draft", "request", "email", "tool", "wait", "teammate", "done"] as const;
 export type FlowStageKind = (typeof FLOW_STAGE_KINDS)[number];
 export const FLOW_COLORS = ["slate", "blue", "violet", "amber", "green", "rose"] as const;
 export type FlowColor = (typeof FLOW_COLORS)[number];
@@ -56,8 +61,12 @@ export type FlowRequest = { method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 export type FlowEmail = { to: string; subject: string; body: string };
 /** tool: which of the project's tools (MCP servers), which of its functions, and the arguments as JSON with fill-ins. */
 export type FlowTool = { server: string; name: string; args: string };
-/** wait (v91): for a reply to the card's email (next: replied, onFail: no reply in time), or for a set time (then next). */
-export type FlowWait = { for: "reply" | "time"; minutes: number };
+/** wait (v91): for a reply to the card's email (next: replied, onFail: no reply in time), or for a set time (then next).
+ * "hours": until the clock is between `from` and `to` (like 22:00–06:00), in the computer's time zone unless one is named. */
+export type FlowWait = { for: "reply" | "time" | "hours"; minutes: number; from?: string; to?: string; timeZone?: string };
+/** How a Pull request zone merges once checks pass. */
+export const FLOW_MERGE_METHODS = ["squash", "merge", "rebase"] as const;
+export type FlowMergeMethod = (typeof FLOW_MERGE_METHODS)[number];
 /** A time limit on a zone (v91): after this long, the person it waits on is reminded, and a Holding or
  * "Person decides" zone can move the card on (`to`). */
 export type FlowLimit = { minutes: number; to: string | null };
@@ -102,6 +111,8 @@ export type FlowStage = {
   teammate?: string;
   /** v96: a "Teammate handles it" zone sends what the teammate writes back to whoever asked (the person who added the card, its chat thread, or the teammate's manager). */
   reply?: boolean;
+  /** pull-request: merge once checks pass, this way. Only allowed after a "Person decides" zone, and a card merges only when a person approved it after it was built. */
+  merge?: FlowMergeMethod;
   /** Where a card goes when this zone's step succeeds, and when it fails or is sent back (sort: when it isn't sure). */
   next: string | null;
   onFail: string | null;
@@ -116,6 +127,7 @@ export const FLOW_KIND_WORDS: Record<FlowStageKind, { label: string; about: stri
   report: { label: "Research", about: "An agent investigates and writes a report. No code changes." },
   approval: { label: "Person decides", about: "Someone approves, or sends it back with a note." },
   check: { label: "Run a script", about: "Runs one of the project's scripts (shell, Python or Node) with no AI. It gets the card; what it prints is passed on, and it can pick where the card goes next. If it fails, the card takes its failure path." },
+  "pull-request": { label: "Pull request", about: "Opens a pull request for the card's built result and waits for CI. Green moves it on; red takes the failure path with the failing check named. It can merge once checks pass, only after a person approved." },
   update: { label: "Update where it came from", about: "Comments on the GitHub or Linear issue the card came from (and can close it), or answers in the chat thread it came from. Other cards pass straight through." },
   notify: { label: "Message", about: "Posts a message to the project's chat, then moves on." },
   request: { label: "Web request", about: "Calls an address on the web, like an API, with the card's details, and keeps what it answers. If it fails, the card takes its failure path." },
@@ -258,9 +270,33 @@ export function durationWords(minutes: number): string {
 /** A Wait zone's settings, checked. */
 function validateWait(input: unknown, title: string): FlowWait {
   const raw = (input ?? {}) as Record<string, unknown>;
+  if (raw["for"] === "hours") {
+    const from = clockTime(raw["from"]), to = clockTime(raw["to"]);
+    if (from === null || to === null || from === to) throw new Error(`Zone ${title}: say the hours it waits for, like 22:00 to 06:00.`);
+    const zone = typeof raw["timeZone"] === "string" && raw["timeZone"].trim() !== "" ? raw["timeZone"].trim() : null;
+    if (zone !== null && !knownTimeZone(zone)) throw new Error(`Zone ${title}: ${zone} isn't a time zone, like Europe/London.`);
+    return { for: "hours", minutes: 0, from, to, ...(zone === null ? {} : { timeZone: zone }) };
+  }
   const minutes = durationMinutes(raw["minutes"]);
   if (minutes === null) throw new Error(`Zone ${title}: say how long it waits, from 1 minute to 30 days.`);
   return { for: raw["for"] === "time" ? "time" : "reply", minutes };
+}
+
+/** "22:00", "9:30" as "HH:MM"; null when it isn't a time of day. */
+export function clockTime(value: unknown): string | null {
+  const match = typeof value === "string" ? /^\s*([01]?[0-9]|2[0-3]):([0-5][0-9])\s*$/.exec(value) : null;
+  return match === null ? null : `${match[1]!.padStart(2, "0")}:${match[2]}`;
+}
+function knownTimeZone(zone: string): boolean {
+  try { new Intl.DateTimeFormat("en-GB", { timeZone: zone }); return true; } catch { return false; }
+}
+/** Whether a time falls inside an "hours" wait (22:00–06:00 runs past midnight), in its time zone or this computer's. */
+export function withinHours(wait: Pick<FlowWait, "from" | "to" | "timeZone">, now: Date): boolean {
+  const parts = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", hourCycle: "h23", ...(wait.timeZone === undefined ? {} : { timeZone: wait.timeZone }) }).formatToParts(now);
+  const at = Number(parts.find(one => one.type === "hour")?.value ?? 0) * 60 + Number(parts.find(one => one.type === "minute")?.value ?? 0);
+  const minutesOf = (time: string | undefined) => { const [h = "0", m = "0"] = (time ?? "00:00").split(":"); return Number(h) * 60 + Number(m); };
+  const from = minutesOf(wait.from), to = minutesOf(wait.to);
+  return from < to ? at >= from && at < to : at >= from || at < to;
 }
 
 /** A zone's time limit, checked; null when it has none. Only Holding and "Person decides" zones move a card on. */
@@ -312,6 +348,7 @@ export function validateFlowDefinition(input: unknown): FlowDefinition {
       ...(kind === "email" ? { email: validateEmail(stage["email"], title) } : {}),
       ...(kind === "tool" ? { tool: validateTool(stage["tool"], title) } : {}),
       ...(kind === "wait" ? { wait: validateWait(stage["wait"], title) } : {}),
+      ...(kind === "pull-request" && stage["merge"] !== undefined && stage["merge"] !== null && stage["merge"] !== false ? { merge: validateMerge(stage["merge"], title) } : {}),
       ...((kind === "approval" || kind === "teammate") && stage["teammate"] !== undefined && stage["teammate"] !== null && stage["teammate"] !== "" ? { teammate: validateTeammate(stage["teammate"], title) } : {}),
       ...(kind === "teammate" ? validateRoutes(stage, title) : {}),
       ...(kind === "teammate" && stage["reply"] === true ? { reply: true } : {}),
@@ -338,7 +375,33 @@ export function validateFlowDefinition(input: unknown): FlowDefinition {
     if (stage.kind === "teammate" && stage.teammate === undefined) throw new Error(`Zone ${stage.title}: choose which teammate handles it.`);
   }
   const start = typeof raw.start === "string" && ids.has(raw.start) ? raw.start : stages[0]!.id;
+  // A zone that merges comes after a person's decision on every path to it: never merged without one.
+  const unapproved = reachableWithout(stages, start, one => one.kind === "approval");
+  for (const stage of stages) {
+    if (stage.merge !== undefined && unapproved.has(stage.id)) throw new Error(`Zone ${stage.title} merges, so a “Person decides” zone must come before it on every path.`);
+  }
   return { version: 1, start, stages };
+}
+
+/** A Pull request zone's merge: true is squash, the default. */
+function validateMerge(value: unknown, title: string): FlowMergeMethod {
+  if (value === true) return "squash";
+  if (typeof value === "string" && (FLOW_MERGE_METHODS as readonly string[]).includes(value)) return value as FlowMergeMethod;
+  throw new Error(`Zone ${title}: merge by squash, merge or rebase.`);
+}
+
+/** The zones a card can reach from `start` without passing through a zone `stop` picks (those zones aren't included). */
+export function reachableWithout(stages: readonly FlowStage[], start: string, stop: (stage: FlowStage) => boolean): Set<string> {
+  const seen = new Set<string>();
+  const queue = [start];
+  while (queue.length > 0) {
+    const id = queue.shift();
+    const stage = stages.find(one => one.id === id);
+    if (stage === undefined || seen.has(stage.id) || stop(stage)) continue;
+    seen.add(stage.id);
+    queue.push(...[stage.next, stage.onFail, stage.limit?.to ?? null, ...(stage.sort?.answers.map(one => one.to) ?? []), ...(stage.routes?.map(one => one.to) ?? [])].filter((one): one is string => one !== null));
+  }
+  return seen;
 }
 
 /** A teammate's handle on a zone (v92): which teammate works it. Whether it exists is the project's to say, when a card arrives. */
@@ -427,8 +490,11 @@ export type FlowStepInput = {
   method?: FlowRequest["method"]; url?: string; headers?: Record<string, string>; body?: string;
   to?: string; subject?: string;
   server?: string; tool?: string; args?: Record<string, unknown> | string;
-  /** wait (v91): for a reply (the default) or a set time, and how long ("3 days"); where a card goes when no reply comes. */
-  waitFor?: "reply" | "time"; wait?: string | number; ifNoReply?: string;
+  /** wait (v91): for a reply (the default) or a set time, and how long ("3 days"); where a card goes when no reply comes.
+   * "hours": until the clock is between `from` and `until` ("22:00", "06:00"). */
+  waitFor?: "reply" | "time" | "hours"; wait?: string | number; ifNoReply?: string; from?: string; until?: string;
+  /** pull-request: merge once checks pass (true is squash). Needs a decision before it. */
+  merge?: boolean | FlowMergeMethod;
   /** Any step but wait and done (v91): remind after this long ("2 days"; "none" removes it), and on holding and approval steps, move the card to this step then. */
   remindAfter?: string | number; thenMoveTo?: string;
   /** v92: the AI teammate (by name) who decides an approval step (handing hard ones to its decider) or handles a teammate step. */
@@ -438,7 +504,7 @@ export type FlowStepInput = {
   next?: string; ifFails?: string; ifNotSure?: string;
 };
 
-const KIND_COLORS: Record<FlowStageKind, FlowColor> = { inbox: "slate", task: "blue", report: "violet", approval: "amber", check: "blue", update: "green", notify: "green", sort: "violet", draft: "violet", request: "blue", email: "green", tool: "blue", wait: "slate", teammate: "violet", done: "green" };
+const KIND_COLORS: Record<FlowStageKind, FlowColor> = { inbox: "slate", task: "blue", report: "violet", approval: "amber", check: "blue", "pull-request": "blue", update: "green", notify: "green", sort: "violet", draft: "violet", request: "blue", email: "green", tool: "blue", wait: "slate", teammate: "violet", done: "green" };
 /** A step id as the lead may write it (sort_by_hand, Sort-By-Hand) in the one form zones use. */
 const idOf = (value: string) => value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32);
 const slugOf = (title: string) => title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 28) || "zone";
@@ -446,6 +512,11 @@ const overlaps = (a: FlowZone, b: FlowZone) => a.x < b.x + b.w && b.x < a.x + a.
 
 /** A wait step's settings: what it waits for and how long (3 days when neither the step nor the zone it keeps says). */
 function waitFromStep(step: FlowStepInput, old: FlowWait | null, title: string): FlowWait {
+  if ((step.waitFor ?? old?.for) === "hours") {
+    const from = clockTime(step.from ?? old?.from ?? "22:00"), to = clockTime(step.until ?? old?.to ?? "06:00");
+    if (from === null || to === null) throw new Error(`Step ${title}: say the hours it waits for, like from 22:00 until 06:00.`);
+    return { for: "hours", minutes: 0, from, to, ...(old?.timeZone === undefined ? {} : { timeZone: old.timeZone }) };
+  }
   const minutes = step.wait === undefined ? old?.minutes ?? 3 * 24 * 60 : durationMinutes(step.wait);
   if (minutes === null) throw new Error(`Step ${title}: say how long it waits, like "3 days" or "4 hours" (up to 30 days).`);
   return { for: step.waitFor ?? old?.for ?? "reply", minutes };
@@ -523,7 +594,9 @@ export function flowFromSteps(input: unknown, previous: FlowDefinition | null = 
       : kind === "wait" && typeof step.ifNoReply === "string" && step.ifNoReply.trim() !== "" ? step.ifNoReply : step.ifFails;
     const onFail = kind === "done" ? null
       : typeof notSure === "string" && notSure.trim() !== "" ? find(notSure, title)
-      : keptFail ?? (kind === "approval" ? worker?.id ?? (drafts[0]!.id === id ? null : drafts[0]!.id) : null);
+      : keptFail ?? (kind === "approval" ? worker?.id ?? (drafts[0]!.id === id ? null : drafts[0]!.id)
+        // Red CI goes back to the build before it, carrying the failing check.
+        : kind === "pull-request" ? [...earlier].reverse().find(one => one.kind === "task")?.id ?? null : null);
     // "owner": whoever owns the flow when the card arrives.
     const toOwner = kind === "approval" && (step.decider === undefined ? old?.toOwner === true : typeof step.decider === "string" && /^(owner|the owner|flow owner|the flow owner|the flow's owner)$/i.test(step.decider.trim()));
     const approver = kind !== "approval" || toOwner ? null
@@ -556,6 +629,7 @@ export function flowFromSteps(input: unknown, previous: FlowDefinition | null = 
       ...(kind === "email" ? { email: { to: step.to ?? old?.email?.to ?? "{{card.email}}", subject: step.subject ?? old?.email?.subject ?? "Re: {{card.title}}", body: step.body ?? old?.email?.body ?? "" } } : {}),
       ...(kind === "tool" ? { tool: { server: step.server ?? old?.tool?.server ?? "", name: step.tool ?? old?.tool?.name ?? "", args: typeof step.args === "string" ? step.args : step.args !== undefined ? JSON.stringify(step.args) : old?.tool?.args ?? "{}" } } : {}),
       ...(kind === "wait" ? { wait: waitFromStep(step, old?.wait ?? null, title) } : {}),
+      ...(kind === "pull-request" && (step.merge === undefined ? old?.merge !== undefined : step.merge !== false) ? { merge: step.merge === undefined || step.merge === true || step.merge === false ? old?.merge ?? "squash" : step.merge } : {}),
       // v92: "nobody" (or "none") takes a teammate off an approval step.
       ...((kind === "approval" || kind === "teammate") && (step.teammate === undefined ? old?.teammate !== undefined : !/^(nobody|none|no one)$/i.test(step.teammate.trim())) ? { teammate: idOf(step.teammate ?? old!.teammate!) } : {}),
       ...(kind === "teammate" ? step.routes !== undefined ? step.routes.length === 0 ? {} : { routes: step.routes.map(one => ({ answer: String(one.answer ?? "").trim(), to: find(String(one.goesTo ?? ""), title) })) } : old?.routes === undefined ? {} : { routes: old.routes } : {}),
@@ -673,8 +747,15 @@ export function flowTerms(definition: FlowDefinition, previous: FlowDefinition |
         `Less than ${percent}% sure → ${stage.onFail === null ? "waits here for a person." : to(stage.onFail)}`);
       if (stage.sort.notes.length > 0) lines.push(`Also notes: ${stage.sort.notes.map(one => one.kind === "score" ? `${one.question} (${one.levels?.join(" / ")})` : `${one.question} (yes or no)`).join("; ")}`);
     }
+    else if (stage.kind === "pull-request") {
+      const approval = [...definition.stages.slice(0, index)].reverse().find(one => one.kind === "approval");
+      lines.push("Opens a pull request for the card's built result, then waits for CI.",
+        `Checks pass → ${stage.merge === undefined ? to(stage.next) : `merges it (${stage.merge}) and deletes its branch, only when a person approved it${approval === undefined ? "" : ` at ${approval.title}`} since it was built. Then → ${to(stage.next)}`}`,
+        `Checks fail → ${stage.onFail === null ? "waits there, naming the failing check." : `${to(stage.onFail)} The failing check is named on the card.`}`);
+    }
     else if (stage.kind === "check") lines.push(`Runs the project's script “${stage.script}” with no AI.`, `Passes → ${to(stage.next)}${stage.onFail === null ? " Fails → waits there." : ` Fails → ${to(stage.onFail)}`}`);
-    else if (stage.kind === "wait" && stage.wait !== undefined) lines.push(stage.wait.for === "time" ? `Waits ${durationWords(stage.wait.minutes)}. Then → ${to(stage.next)}`
+    else if (stage.kind === "wait" && stage.wait !== undefined) lines.push(stage.wait.for === "hours" ? `Waits until it's between ${stage.wait.from} and ${stage.wait.to}${stage.wait.timeZone === undefined ? "" : ` (${stage.wait.timeZone})`}; cards that arrive then go straight on. Then → ${to(stage.next)}`
+      : stage.wait.for === "time" ? `Waits ${durationWords(stage.wait.minutes)}. Then → ${to(stage.next)}`
       : `Waits up to ${durationWords(stage.wait.minutes)} for a reply to the card's email, from someone it was sent to. Reply → ${to(stage.next)} No reply → ${stage.onFail === null ? "stays there for a person." : to(stage.onFail)}`);
     else if (stage.next !== null) lines.push(`Then → ${to(stage.next)}${stage.onFail === null ? "" : ` If it fails → ${to(stage.onFail)}`}`);
     if (stage.limit !== undefined) lines.push(`After ${durationWords(stage.limit.minutes)} there: reminds ${stage.kind === "approval" ? "whoever decides" : "the card's owner"}${stage.limit.to === null ? "." : `, and moves it to ${to(stage.limit.to)}`}`);
@@ -698,6 +779,7 @@ export function flowTerms(definition: FlowDefinition, previous: FlowDefinition |
   terms.push("Build and research steps become ordinary tasks, so your usual approvals and checks apply.");
   if (definition.stages.some(one => one.kind === "sort")) terms.push("Sort steps send each card's title, details and earlier notes to Jev through your OpenRouter account.");
   if (definition.stages.some(one => one.kind === "request" || one.kind === "email" || one.kind === "tool")) terms.push("Web request, email and tool steps send what they're given outside this computer, with no one checking unless a decision comes before them.");
+  if (definition.stages.some(one => one.kind === "pull-request")) terms.push(`Pull request steps push the card's branch to GitHub and open a pull request under this project's pull request setup.${definition.stages.some(one => one.merge !== undefined) ? " A merge happens only after a person approves the card; nothing merges without one." : " Nothing merges on its own."}`);
   if (definition.stages.some(one => one.kind === "draft")) terms.push("Draft steps send each card's text to Claude through the lead chat's sign-in. Nothing a draft writes is sent until a later step sends it.");
   if (definition.stages.some(one => one.teammate !== undefined)) terms.push("AI teammates decide and act within their soul files' rules, reading each card through Claude on this computer's sign-in; they never approve code tasks or merges.");
   return terms;
@@ -707,8 +789,12 @@ const zone = (x: number, y: number, color: FlowColor, h = 300): FlowZone => ({ x
 const stage = (id: string, title: string, kind: FlowStageKind, at: FlowZone, rest: Partial<FlowStage> = {}): FlowStage =>
   ({ id, title, kind, zone: at, instructions: null, planning: kind === "task" ? "auto" : null, approver: null, message: null, close: kind === "update" ? true : null, script: null, sort: null, next: null, onFail: null, ...rest });
 
-/** Ready-made flows: the coding flow is the whole business process around a change. */
-export const FLOW_TEMPLATES: readonly { id: string; label: string; about: string; definition: FlowDefinition }[] = [
+/** The label an issue gets to become work: what the Issues to PRs template and the issue starter flow watch for. */
+export const ISSUE_LABEL = "toolroll";
+
+/** Ready-made flows: the coding flow is the whole business process around a change. A template's `trigger`
+ * (a trigger's settings, as flow-triggers.ts reads them) is added with it. */
+export const FLOW_TEMPLATES: readonly { id: string; label: string; about: string; definition: FlowDefinition; trigger?: Record<string, unknown> }[] = [
   {
     id: "coding",
     label: "Coding flow",
@@ -730,6 +816,23 @@ export const FLOW_TEMPLATES: readonly { id: string; label: string; about: string
         stage("review", "Review", "approval", zone(900, 380, "amber"), { toOwner: true, next: "announce", onFail: "build" }),
         stage("announce", "Tell the team", "notify", zone(600, 380, "green", 220), { message: "Shipped: {{card.title}}", next: "done" }),
         stage("done", "Done", "done", zone(300, 380, "green", 220)),
+      ],
+    },
+  },
+  {
+    id: "issues-to-prs",
+    label: "Issues to PRs",
+    about: `GitHub issues labelled “${ISSUE_LABEL}” are built, a person approves, a pull request opens and waits for CI, then the issue gets a comment and is closed. Nothing merges on its own.`,
+    trigger: { kind: "github", watch: "issues", label: ISSUE_LABEL },
+    definition: {
+      version: 1,
+      start: "build",
+      stages: [
+        stage("build", "Build", "task", zone(0, 0, "blue"), { instructions: "{{card.title}}\n\n{{card.description}}\n\nChanges asked for (if any): {{note}}", next: "approve" }),
+        stage("approve", "Approve", "approval", zone(300, 0, "amber"), { toOwner: true, next: "pull-request", onFail: "build" }),
+        stage("pull-request", "Pull request", "pull-request", zone(600, 0, "blue"), { next: "update-issue", onFail: "build" }),
+        stage("update-issue", "Update the issue", "update", zone(900, 0, "green", 220), { message: "Done: {{card.title}}. {{stage.pull-request}}", next: "done" }),
+        stage("done", "Done", "done", zone(900, 280, "green", 220)),
       ],
     },
   },

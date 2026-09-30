@@ -349,3 +349,64 @@ describe("the handoff", () => {
     expect(envelope().handoff.console).toBe("http://127.0.0.1:4190");
   });
 });
+
+describe("toolroll onboard offers the starter flows", () => {
+  const withAccountAndGithub = () => {
+    execFileSync("git", ["remote", "add", "origin", "git@github.com:alex/shop.git"], { cwd: repo });
+    const store = openStore(db);
+    try { if (!addApprover(store, "alex", new Date("2026-09-30T09:00:00Z")).ok) throw new Error("account"); } finally { store.close(); }
+  };
+
+  test("c3: --starter switches on the named starters, each making its trigger and zones; the rest are offered with the command", async () => {
+    withAccountAndGithub();
+    expect(await onboard(["--yes", "--json", "--starter", "ci-fix,overnight"], { pullRequests: async () => "off" })).toBe(0);
+    const answer = envelope();
+    expect(answer.starters.map((one: { id: string; state: string }) => [one.id, one.state])).toEqual([["ci-fix", "switched-on"], ["issue-task", "off"], ["overnight", "switched-on"]]);
+    expect(answer.starters[1]).toMatchObject({ command: "toolroll onboard --starter issue-task", never: "Never merges or closes anything without you." });
+    const store = openStore(db);
+    try {
+      const flows = store.listFlows([repo]);
+      expect(flows.map(one => one.name).sort()).toEqual(["Fix failing CI", "Overnight queue"]);
+      const ci = flows.find(one => one.name === "Fix failing CI")!;
+      expect(store.flowTriggers(ci.id).map(one => [one.kind, JSON.parse(one.configJson)])).toEqual([["github", expect.objectContaining({ repo: "alex/shop", watch: "checks", branch: "main", zone: "fix" })]]);
+      const overnight = flows.find(one => one.name === "Overnight queue")!;
+      expect(JSON.parse(overnight.definitionJson).stages.map((one: { id: string; kind: string }) => [one.id, one.kind])).toEqual([["tonight", "wait"], ["build", "task"], ["morning", "approval"], ["done", "done"]]);
+      expect(store.flowTriggers(overnight.id).map(one => JSON.parse(one.configJson))).toEqual([expect.objectContaining({ kind: "button", label: "Queue for tonight", zone: "tonight" })]);
+      expect(overnight.owner).toBe("alex");
+    } finally {
+      store.close();
+    }
+    // Again: already on, nothing doubled.
+    lines = [];
+    await onboard(["--json", "--starter", "ci-fix"], { pullRequests: async () => "off" });
+    expect(envelope().starters[0]).toMatchObject({ id: "ci-fix", state: "on" });
+    const again = openStore(db);
+    try { expect(again.listFlows([repo])).toHaveLength(2); } finally { again.close(); }
+    lines = [];
+    expect(await onboard(["--json", "--starter", "nightly"], { pullRequests: async () => "off" })).toBe(2);
+    expect(envelope()).toMatchObject({ ok: false, reason: "usage", message: "--starter takes ci-fix, issue-task, overnight" });
+  });
+
+  test("c3: at a terminal each starter is one yes, saying what it does and never does; --yes alone switches none on", async () => {
+    withAccountAndGithub();
+    expect(await onboard(["--yes"], { pullRequests: async () => "off" })).toBe(0);
+    let store = openStore(db);
+    try { expect(store.listFlows([repo])).toEqual([]); } finally { store.close(); }
+    expect(lines.join("\n")).toContain("starters  Fix failing CI: When CI fails on the main branch, a task to fix it is filed. Never merges or pushes to your branch. You decide what ships. Switch on: toolroll onboard --starter ci-fix");
+
+    lines = [];
+    await onboard([], { pullRequests: async () => "off", interactive: true, confirm: async question => { asked.push(question); return question.startsWith("Switch on Issues become tasks?"); } });
+    expect(asked.filter(one => one.startsWith("Switch on"))).toEqual([
+      "Switch on Fix failing CI? When CI fails on the main branch, a task to fix it is filed. Never merges or pushes to your branch. You decide what ships. [y/N]",
+      "Switch on Issues become tasks? A GitHub issue labelled “toolroll” becomes a task. Never merges or closes anything without you. [y/N]",
+      "Switch on Overnight queue? Cards you add during the day start after 22:00; results wait for you in the morning. Never merges or ships anything without you. [y/N]",
+    ]);
+    expect(lines.join("\n")).toContain("         Issues become tasks: switched on");
+    store = openStore(db);
+    try {
+      const flow = store.listFlows([repo])[0]!;
+      expect(flow.name).toBe("Issues become tasks");
+      expect(store.flowTriggers(flow.id).map(one => JSON.parse(one.configJson))).toEqual([expect.objectContaining({ kind: "github", watch: "issues", label: "toolroll", zone: "build" })]);
+    } finally { store.close(); }
+  });
+});

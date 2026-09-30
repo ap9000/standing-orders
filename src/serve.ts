@@ -25,6 +25,8 @@ import { grantTool, revokeTool, rulesFromForm, setToolRules } from "./teammate-t
 import { addKitGithubTrigger, addKitSample, kitInstalled, kitOf, setUpKit } from "./kits.js";
 import { CONNECT_CALLBACK, connectionsOf, finishConnect, oneClickOf, startConnect, type ConnectVisit } from "./mcp-connect.js";
 import { KITS_CSS, kitPageHtml, kitsGalleryHtml } from "./kits-ui.js";
+import { STARTERS_CSS, startersHtml } from "./flow-starters-ui.js";
+import { starterForWork, starterOf, startersFor, switchOnStarter } from "./flow-starters.js";
 import { createTeammateFrom, labelOf, nameOf, saveSoul, setTeammateState, teammateSettings, sendTeammateSummaries } from "./teammate-admin.js";
 import { editMemory, forgetMemory, tellTeammate } from "./teammate-memory.js";
 import { addRoutine, removeRoutine, runRoutine } from "./teammate-desk.js";
@@ -326,6 +328,7 @@ import { cachedRelease, isNewer, runnerVersions, setUpdateChecks, updateChecksOf
 import { installMethod, type InstallMethod } from "./install-method.js";
 import { PACKAGE_VERSION } from "./version.js";
 import { updateNoticeWords } from "./update-notice.js";
+import { whenHtml } from "./when-html.js";
 
 export type ServeOptions = {
   /** Tests: the bin whose real path says how Toolroll was installed (Settings → Updates' command). */
@@ -1742,8 +1745,8 @@ export function createDecisionServer(options: ServeOptions): Server {
       if(action&&proposal&&store.getMateThread(proposal.thread)?.approver===who.name&&visible(action.repo)&&store.accountCanAccess(who.name,action.repo))return true;
       refuse(response,who,404,'No such action in your projects.','/projects');return false;
     }
-    const read = new Set(["/settings/skills", "/settings/knowledge", "/settings", "/settings/learning", "/recipes", "/recipes/run", "/recipes/start", "/recipes/new", "/recipes/edit", "/recipes/from-task", "/recipes/preview", "/recipes/export", "/", "/inbox", "/work", "/projects", "/people", "/ledger", "/ledger/export", "/next", "/board", "/tasks", "/tasks/new", "/runs", "/review", "/done", "/routines", "/menu"]);
-    const write = new Set(["/settings/skills/import", "/settings/skills/change", "/settings/skills/revise", "/settings/knowledge/change", "/settings/knowledge/refresh", "/settings/learning/change", "/recipes/prepare", "/recipes/preview", "/recipes/import", "/recipes/save", "/recipes/launch", "/projects/select", "/tasks/add", "/routines/add"]);
+    const read = new Set(["/settings/flows", "/settings/skills", "/settings/knowledge", "/settings", "/settings/learning", "/recipes", "/recipes/run", "/recipes/start", "/recipes/new", "/recipes/edit", "/recipes/from-task", "/recipes/preview", "/recipes/export", "/", "/inbox", "/work", "/projects", "/people", "/ledger", "/ledger/export", "/next", "/board", "/tasks", "/tasks/new", "/runs", "/review", "/done", "/routines", "/menu"]);
+    const write = new Set(["/settings/flows/on", "/settings/skills/import", "/settings/skills/change", "/settings/skills/revise", "/settings/knowledge/change", "/settings/knowledge/refresh", "/settings/learning/change", "/recipes/prepare", "/recipes/preview", "/recipes/import", "/recipes/save", "/recipes/launch", "/projects/select", "/tasks/add", "/routines/add"]);
     const task = matchTaskPath(path, request.method === "GET" ? "(/evidence)?$" : "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|next|reopen|steer|accept-proof|accept-revision|reject-revision|route|retry-review|complete|merge|stop|resume-arm|resume)$");
     const resource = request.method === "GET"
       ? /^\/(?:r|d)\/[0-9]{1,15}(?:\/evidence\/[0-9]{1,15})?$/.test(path) || /^\/routines\/[0-9]{1,15}$/.test(path) || path === "/flows" || /^\/flows\/[0-9]{1,15}(\/insights|\/runs\/[0-9]{1,15}\/[0-9]{1,15})?$/.test(path)
@@ -3871,6 +3874,18 @@ export function createDecisionServer(options: ServeOptions): Server {
       return sendScreen(response, 200, screen("Sessions & tokens", `<p><a href="/settings">Settings</a></p><h1>Sessions &amp; tokens</h1>${credentialsHtml(view, who.session.csrf, { said: url.searchParams.get("said"), problem: url.searchParams.get("problem") })}`,
         { chrome: chromeFor(project, "settings") }));
     }
+    // Settings → Flows: the starter flows, each switched on with one yes. ?starter= marks the one a task's
+    // "Do this every time…" asked about.
+    if (url.pathname === "/settings/flows") {
+      const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
+      const chosen = url.searchParams.get("repo") ?? project ?? projects[0] ?? "";
+      if (chosen && !projects.includes(chosen)) return refuse(response, who, 403, "That project is outside your access.", "/settings");
+      const content = chosen === "" ? "<p>Add a project to switch on starter flows.</p>" : startersHtml({
+        repo: chosen, projects: projects.map(path => ({ path, name: projectName(path) })), starters: startersFor(store, chosen), csrf: who.via === "cookie" ? who.session.csrf : "",
+        canSwitch: who.via === "cookie" && who.role === "approver" && !store.isDemo(), suggested: starterOf(url.searchParams.get("starter") ?? "")?.id ?? null,
+        said: url.searchParams.get("said"), problem: url.searchParams.get("problem") });
+      return sendScreen(response, 200, screen("Flows", `<p><a href="/settings">Settings</a></p><h1>Flows</h1>${content}`, { chrome: chromeFor(chosen || project, "settings") }));
+    }
     // Settings → Integrations: which integrations work. The list is the last checks; a render never waits on one.
     if (url.pathname === "/settings/integrations") {
       if (who.via !== "cookie" || who.role !== "approver" || restricted() || !options.configDir) return refuse(response, who, 403, "An installation approver sees integrations.", "/settings");
@@ -5098,7 +5113,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           `<a class="item${run.id === currentId ? " current" : ""}" href="/r/${run.id}">` +
           `<span class="t">#${run.id} \u00b7 ${escape(run.taskId)}</span>` +
           `<span class="m">${runOutcomeBadge(run, live.has(run.id))}` +
-          `<span class="mono">${escape(when(run.startedAt))}</span></span></a>`,
+          `<span class="mono">${whenTime(run.startedAt)}</span></span></a>`,
       )
       .join("\n");
     return `<h2>builds</h2>\n${items === "" ? `<p class="meta">none yet</p>` : items}`;
@@ -6439,7 +6454,11 @@ export function createDecisionServer(options: ServeOptions): Server {
         if (!projects.includes(repo)) return redirect(response, `/flows?problem=${encodeURIComponent("Choose one of your projects.")}`);
         const template = FLOW_TEMPLATES.find(one => one.id === body.get("template")) ?? FLOW_TEMPLATES[0]!;
         const name = (body.get("name") ?? "").replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 80) || template.label;
-        return redirect(response, `/flows/${store.createFlow({ repo, name, definitionJson: JSON.stringify(template.definition), by: who.name }, now)}`);
+        const made = store.createFlow({ repo, name, definitionJson: JSON.stringify(template.definition), by: who.name }, now);
+        // A template that starts from something (Issues to PRs: labelled issues) comes with its trigger.
+        const trigger = template.trigger === undefined ? null : addFlowTriggerTo(store, store.getFlow(made)!, template.trigger, who.name, now, options.configDir ?? null);
+        if (trigger !== null && !trigger.ok) return redirect(response, `/flows?problem=${encodeURIComponent(`${name} was made, but its trigger wasn't: ${trigger.message} Add one on its Triggers panel.`)}`);
+        return redirect(response, `/flows/${made}`);
       }
       const flow = store.getFlow(Number((flowPost ?? triggerPost)![1]));
       if (flow === null || flow.state !== "active" || !visible(flow.repo)) return answer(404, { ok: false, said: "No such flow in your projects." });
@@ -6863,6 +6882,18 @@ export function createDecisionServer(options: ServeOptions): Server {
       response.writeHead(200, { "content-type": "application/zip", "content-disposition": `attachment; filename="${exported.root}.zip"`, "content-length": String(zip.length),
         "cache-control": "no-store", "x-content-type-options": "nosniff" });
       return void response.end(zip);
+    }
+    // Settings → Flows → Switch on: a starter flow's zones and trigger, made together.
+    if (url.pathname === "/settings/flows/on") {
+      const repo = body.get("repo") ?? "";
+      const back = (key: "said" | "problem", words: string) => redirect(response, `/settings/flows?repo=${encodeURIComponent(repo)}&${key}=${encodeURIComponent(words)}`);
+      const known = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])];
+      if (who.via !== "cookie" || who.role !== "approver" || store.isDemo()) return refuse(response, who, 403, "An approver switches starter flows on.", "/settings/flows");
+      if (!known.includes(repo) || !visible(repo)) return refuse(response, who, 404, "No such project.", "/settings/flows");
+      const starter = starterOf(body.get("starter") ?? "");
+      if (starter === null) return back("problem", "Choose a starter flow.");
+      const switched = switchOnStarter(store, starter, repo, who.name, clock(), options.configDir ?? null);
+      return switched.ok ? back("said", switched.said) : back("problem", switched.said);
     }
     // Settings → Integrations → Send test: one harmless read-only check of one integration, now.
     if (url.pathname === "/settings/integrations/test") {
@@ -9312,7 +9343,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       `<p class="meta">worker</p><p class="recap" style="margin-top:0">${escape(terms.runner)} (this machine)</p>` +
       `<p class="meta">spending</p><p class="recap" style="margin-top:0">up to about $${(terms.budgetMicrousd / 1_000_000).toFixed(2)} — the agent stops as soon as its total crosses this; the final step may run a little past it</p>` +
       `<p class="meta">conversation</p><p class="recap" style="margin-top:0">at most ${terms.maxSessionTurns} messages to the agent, this whole session; each may work up to ${Math.round(terms.turnTimeoutSeconds / 60)} minutes — one that runs past that ends the whole session. If it needs a repair, the repair uses the same session, model, and clock.</p>` +
-      `<p class="meta">while you watch — a signed term</p><p class="recap" style="margin-top:0">your console being open is what keeps it running — any page of it, this one included; close the console and the session winds down within a minute. Everything ends by ${escape(when(terms.absoluteExpiry))} regardless. One attempt; it never converts into unattended work.</p>` +
+      `<p class="meta">while you watch — a signed term</p><p class="recap" style="margin-top:0">your console being open is what keeps it running — any page of it, this one included; close the console and the session winds down within a minute. Everything ends by ${whenTime(terms.absoluteExpiry)} regardless. One attempt; it never converts into unattended work.</p>` +
       (quick
         ? `<p class="meta">your signed mode covers this mint — no password; the mode is re-proved as you confirm, and the session is stamped with its signature</p>`
         : `<label>your password, typed again — a signed-in session alone cannot authorize work<input type="password" name="token" autocomplete="current-password"></label>`) +
@@ -10867,6 +10898,11 @@ function when(iso: string | null): string {
   return iso === null ? "" : iso.slice(0, 16).replace("T", " ");
 }
 
+/** The same minute as a `<time>`: the full stamp on a desk, "16:39" / "Yesterday 16:39" / "Sep 28" on a phone. */
+function whenTime(iso: string | null): string {
+  return iso === null ? "" : whenHtml(iso, when(iso));
+}
+
 /** Overdue is derived at render — display never writes. */
 function isOverdue(decision: Decision, now: Date): boolean {
   if (decision.state === "expired") return true;
@@ -11466,7 +11502,7 @@ function agentsAvailabilityHtml(projection: RouteProjection): string {
   const items = [...seen.values()].map(leg => {
     const state = leg.readiness === "ready" ? "ready" : leg.readiness === "unavailable" ? "unavailable" : "not yet checked";
     const detail = leg.readiness === "unavailable" && leg.readinessReason !== null ? ` (${escape(leg.readinessReason)})` : "";
-    return `<li class="agents-availability-${escape(leg.readiness)}"><span class="mono">${escape(leg.provider)}</span> ${state}${detail}${leg.readinessRunner === null ? "" : ` <span class="meta">— ${escape(leg.readinessRunner)}${leg.observedAt === null ? "" : `, ${escape(when(leg.observedAt))}`}</span>`}</li>`;
+    return `<li class="agents-availability-${escape(leg.readiness)}"><span class="mono">${escape(leg.provider)}</span> ${state}${detail}${leg.readinessRunner === null ? "" : ` <span class="meta">— ${escape(leg.readinessRunner)}${leg.observedAt === null ? "" : `, ${whenTime(leg.observedAt)}`}</span>`}</li>`;
   });
   return `<p class="meta agents-availability-label">Availability right now</p><ul class="agents-availability">${items.join("")}</ul>`;
 }
@@ -11569,7 +11605,7 @@ function agentsCardHtml(taskId: string, view: RouteView | null | undefined, csrf
       : `<ul class="agents-overrides">${view.overrides
           .map(
             one =>
-              `<li><span>${escape(ROLE_NOUN[one.phase])} → <span class="mono">${escape(one.provider)} · ${escape(one.model)}</span> <span class="meta">by ${escape(one.by)} ${escape(when(one.at))}</span></span>` +
+              `<li><span>${escape(ROLE_NOUN[one.phase])} → <span class="mono">${escape(one.provider)} · ${escape(one.model)}</span> <span class="meta">by ${escape(one.by)} ${whenTime(one.at)}</span></span>` +
               (canEdit && view.editable ? `<form method="post" action="${taskHref(taskId)}/route" class="agents-clear">${hidden}<input type="hidden" name="clear-phase" value="${escape(one.phase)}"><button type="submit" class="secondary" aria-label="clear the ${escape(ROLE_NOUN[one.phase].toLowerCase())} choice">clear</button></form>` : "") +
               `</li>`,
           )
@@ -11749,6 +11785,9 @@ ${THEME_MAPPING}
     --so-ease-out: cubic-bezier(.23, 1, .32, 1);
     --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
     --font-mono: "Geist Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    /* Phone spacing steps (760px and narrower): side gutter, gap under the
+       header, gap between page blocks, between rows, and inside a card. */
+    --so-phone-gutter: 14px; --so-phone-gap: 12px; --so-phone-block: 14px; --so-phone-row: 8px; --so-phone-card: 12px;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
@@ -14319,13 +14358,28 @@ button.pick-file { min-height: 1.75rem; padding: 0 .55rem; font-size: .75rem; }
   }
   .sticky-actions button { margin: 0; }
 }
+
+/* A time a person reads (when-html.ts): the full stamp on a desk, the short
+   one on a phone; the full stamp stays in the title. */
+.so-when-short { display: none; }
+@media (max-width: 760px) {
+  .so-when-full { display: none; }
+  .so-when-short { display: inline; }
+  /* Server pages outside the workspace keep the same phone rhythm. */
+  main { padding: var(--so-phone-gap) var(--so-phone-gutter) 3rem; }
+  h2 { margin: 1.25rem 0 .375rem; }
+  .card { padding: var(--so-phone-card); margin: var(--so-phone-row) 0; }
+  .problem { padding: .5rem .625rem; margin: var(--so-phone-row) 0; }
+  .meta, .hint { line-height: 1.35; }
+  details { margin: var(--so-phone-row) 0; }
+}
 `;
 
 /** Appearance: a three-way segmented switch, one tap per choice. */
 const THEME_CONTROLS_CSS = `.task-repo select{width:100%;min-height:2.75rem;font-size:1rem}.task-repo-add{margin:.35rem .1rem .5rem}.task-repo-add a{display:inline-flex;align-items:center;min-height:2.25rem}details.result-request-open.result-request-form>summary{border:0;background:transparent;padding:.5rem 0;min-height:2.75rem;font-weight:600;display:list-item;list-style:revert}details.result-request-open.result-request-form>summary::-webkit-details-marker{display:revert}form.js-autosave button[type=submit]{display:none}.provider-row{border-bottom:1px solid var(--so-line);padding:.35rem 0}.provider-row:first-of-type{border-top:1px solid var(--so-line)}.provider-head{display:flex;align-items:center;gap:.75rem;margin:.4rem 0 0}.provider-status{display:inline-flex;align-items:center;gap:.4rem;color:var(--so-muted);font-size:.875rem}.provider-status i{width:.5rem;height:.5rem;border-radius:50%;background:var(--so-muted)}.provider-status--ok i{background:var(--so-success)}.provider-status--warn i{background:var(--so-attention)}.provider-status--off i{background:transparent;border:1.5px solid var(--so-muted)}details.provider-manage>summary{cursor:pointer;color:var(--so-accent-text);font-size:.875rem;min-height:2.5rem;display:list-item;padding-block:.5rem}.card.props .row{display:grid;gap:.1rem;margin:0 0 .75rem}.card.props .row>.meta{display:block;font-size:.75rem}.card.props .row>.meta::first-letter{text-transform:uppercase}.card.props .row>.mono{font-family:var(--font-sans);font-size:.875rem}.card.props .row>.mono .seal{font-family:var(--font-mono);font-size:.8125rem}details.evidence-files{margin:1rem 0}details.evidence-files>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:600}details.evidence-files ul{list-style:none;margin:0;padding:0}details.evidence-files li{display:flex;justify-content:space-between;gap:1rem;padding:.5rem 0;border-bottom:1px solid var(--so-line)}.result-action .result-feedback-link{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;text-decoration:none}@media(hover:hover) and (pointer:fine){.result-action .result-feedback-link:hover{background:var(--so-raised)}}.so-sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}.verdict{margin:.5rem 0 .75rem}.verdict-chips{display:flex;flex-wrap:wrap;gap:.4rem;list-style:none;padding:0;margin:0}.verdict-chip{display:inline-flex;align-items:center;gap:.3rem;min-height:1.75rem;padding:.2rem .65rem;border-radius:999px;font-size:.8125rem;font-weight:600;background:var(--so-neutral-soft);color:var(--so-neutral-ink)}.verdict-chip svg{width:.9rem;height:.9rem}.verdict-chip--success{background:var(--so-success-soft);color:var(--so-success)}.verdict-chip--danger{background:var(--so-danger-soft);color:var(--so-danger)}.verdict-chip--warning{background:var(--so-warning-soft);color:var(--so-warning)}.verdict-chip--info{background:var(--so-info-soft);color:var(--so-info)}.verdict-by{margin:.4rem 0 0}details.result-request-open{margin:.5rem 0}details.result-request-open>summary{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;cursor:pointer;list-style:none}details.result-request-open>summary::-webkit-details-marker{display:none}details.result-request-open[open]>summary{margin-bottom:.75rem}.settings-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(8.5rem,1fr));gap:.5rem;margin:0 0 2rem}.settings-tiles a{display:flex;align-items:center;gap:.6rem;min-height:3rem;padding:.65rem .8rem;border:1px solid var(--so-line);border-radius:.625rem;background:var(--so-paper);color:var(--so-ink);text-decoration:none;font-weight:550;font-size:.875rem}@media(hover:hover) and (pointer:fine){.settings-tiles a:hover{border-color:var(--so-input-line);background:var(--so-raised)}}.settings-tiles svg{width:1.1rem;height:1.1rem;flex-shrink:0;color:var(--so-accent-text)}details.settings-more{margin:.25rem 0 1.25rem}details.settings-more>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:550}details.settings-more>summary .meta{font-weight:400;margin-left:.35rem}.settings-changed{margin-top:-.25rem}.appearance{margin:0 0 28px}.appearance h2{margin:0 0 10px}.theme-switch{display:inline-flex;flex-wrap:nowrap;max-width:100%;gap:4px;padding:4px;margin:0;border:1px solid var(--so-line);border-radius:10px;background:var(--so-raised)}.theme-switch .theme-choice,.so-native-region .theme-switch .theme-choice{flex:1 1 0;width:auto;white-space:nowrap;min-height:40px;padding:8px 16px;border:0;border-radius:7px;background:transparent;color:var(--so-muted);font:inherit;font-weight:550;box-shadow:none;cursor:pointer}@media(hover:hover) and (pointer:fine){.theme-switch .theme-choice:hover{color:var(--so-ink)}}.theme-switch .theme-choice[aria-pressed="true"]{background:var(--so-paper);color:var(--so-ink);box-shadow:0 1px 2px rgb(0 0 0 / .1)}.appearance .meta{margin:8px 0 0}@media(max-width:600px){.theme-switch .theme-choice{min-height:44px}}.update-notes{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;max-height:18rem;overflow:auto}`;
 /** The page CSS this module writes itself (not the imported modules'), for the stylesheet contract tests. */
 export const PAGE_CSS = STYLE + THEME_CONTROLS_CSS;
-const WORKSPACE_STYLE = styleAsset(STYLE + APPROVAL_RULES_CSS + SPEND_CSS + RETENTION_CSS + STORAGE_CSS + UPDATES_CSS + LIMITS_CSS + MONITORING_CSS + INTEGRATIONS_CSS + BACKUP_CSS + EXPORT_CSS + PROJECT_DELETE_CSS + POLICY_CSS + EVIDENCE_PACK_CSS + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KITS_CSS + SSO_CSS + CREDENTIALS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + PULL_REQUEST_SETTINGS_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
+const WORKSPACE_STYLE = styleAsset(STYLE + APPROVAL_RULES_CSS + SPEND_CSS + RETENTION_CSS + STORAGE_CSS + UPDATES_CSS + LIMITS_CSS + MONITORING_CSS + INTEGRATIONS_CSS + BACKUP_CSS + EXPORT_CSS + PROJECT_DELETE_CSS + POLICY_CSS + EVIDENCE_PACK_CSS + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KITS_CSS + STARTERS_CSS + SSO_CSS + CREDENTIALS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + PULL_REQUEST_SETTINGS_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
@@ -15201,7 +15255,7 @@ function inboxPage(chrome: Chrome, data: {
       : `<div class="card builder-notice" data-builder-status="${data.worker.registered === 0 ? "not-connected" : "disconnected"}">` +
         (data.worker.registered === 0
           ? `<strong>No builder is connected yet.</strong> Toolroll is open, but no machine is connected to do project work. On the machine where the project lives, open that folder and run <span class="mono">toolroll up</span>. Keep Toolroll running; approved work starts automatically.`
-          : `<strong>Builder disconnected.</strong> ${data.worker.registered} builder${data.worker.registered === 1 ? " is" : "s are"} configured, last checked in ${data.worker.lastHeard === null ? "never" : escape(when(data.worker.lastHeard))}. Reopen Toolroll on that machine. Queued work starts automatically when a builder reconnects.`) +
+          : `<strong>Builder disconnected.</strong> ${data.worker.registered} builder${data.worker.registered === 1 ? " is" : "s are"} configured, last checked in ${data.worker.lastHeard === null ? "never" : whenTime(data.worker.lastHeard)}. Reopen Toolroll on that machine. Queued work starts automatically when a builder reconnects.`) +
         `</div>`;
 
   return screen("inbox", [
@@ -15295,8 +15349,8 @@ function systemPage(chrome: Chrome, data: {
       : `<div class="stat-card"><span class="k"><span class="dot ${data.episode.endedAt === null ? "dot-ok pulse" : "dot-off"}"></span>Toolroll</span>` +
         `<span class="v">${
           data.episode.endedAt === null
-            ? `running since ${escape(when(data.episode.startedAt))}`
-            : `last run: ${data.episode.built} built, ${data.episode.broke} broke \u00b7 ended ${escape(when(data.episode.endedAt))}`
+            ? `running since ${whenTime(data.episode.startedAt)}`
+            : `last run: ${data.episode.built} built, ${data.episode.broke} broke \u00b7 ended ${whenTime(data.episode.endedAt)}`
         }</span></div>`;
   const cards = [...runnerCards, watchCard, ...worktreeCards].filter(one => one !== "");
   const PHASE_SAID: Record<string, string> = {
@@ -15626,7 +15680,7 @@ function donePage(
               `<div class="card"><p><a href="${taskHref(row.taskId)}"><strong>${escape(row.title)}</strong></a>` +
               `${row.outcome === "no-change" ? ` <span class="badge">no change needed</span>` : ""}${pr}${needsVerification}${criterionMatrixSummary(row.proofMatrix)}</p>` +
               `${row.handoff === null ? "" : `<p class="meta">${escape(row.handoff.length > 200 ? row.handoff.slice(0, 200) + "\u2026" : row.handoff)}</p>`}` +
-              `<p class="meta mono">${escape(row.taskId)} \u00b7 ${escape(when(row.completedAt))}${row.ranMinutes === null ? "" : ` \u00b7 ran ${row.ranMinutes}m`}${row.provider === null ? "" : ` \u00b7 ${escape(runCostWords({ authMode: row.authMode, costUsd: row.costUsd, tokensIn: null, tokensOut: null }))}`}` +
+              `<p class="meta mono">${escape(row.taskId)} \u00b7 ${whenTime(row.completedAt)}${row.ranMinutes === null ? "" : ` \u00b7 ran ${row.ranMinutes}m`}${row.provider === null ? "" : ` \u00b7 ${escape(runCostWords({ authMode: row.authMode, costUsd: row.costUsd, tokensIn: null, tokensOut: null }))}`}` +
               ` \u00b7 <a href="${reviewHref(row.taskId)}">review \u2192</a></p></div>`
             );
           })
@@ -17388,7 +17442,7 @@ function routineScreenPage(chrome: Chrome, data: {
 
   const ledger =
     fires.length === 0
-      ? `<p class="meta">No firings yet${approved && routine.nextFireAt !== null ? ` — first at ${escape(when(routine.nextFireAt))}` : ""}.</p>`
+      ? `<p class="meta">No firings yet${approved && routine.nextFireAt !== null ? ` — first at ${whenTime(routine.nextFireAt)}` : ""}.</p>`
       : fires
           .map(fire => {
             const said =
@@ -17398,7 +17452,7 @@ function routineScreenPage(chrome: Chrome, data: {
                   : `<a href="${taskHref(fire.instanceTaskId)}" class="mono">${escape(fire.instanceTaskId)}</a>${fire.instanceState === null ? "" : ` <span class="badge badge-${escape(fire.instanceState)}">${escape(fire.instanceState)}</span>`}`
                 : `<span class="meta">skipped — ${escape(fire.reason ?? "")}</span>`;
             const slot = fire.scheduledFor.replace(/^manual:/, "");
-            return `<p class="row">${said}<span class="right meta mono">${fire.reason === "manual" ? "run now · " : ""}${escape(when(slot))}</span></p>`;
+            return `<p class="row">${said}<span class="right meta mono">${fire.reason === "manual" ? "run now · " : ""}${whenTime(slot)}</span></p>`;
           })
           .join("\n");
 
@@ -17411,7 +17465,7 @@ function routineScreenPage(chrome: Chrome, data: {
       ? `<div class="problem">stopped behind <a href="${taskHref(data.blocker.taskId)}" class="mono">${escape(data.blocker.taskId)}</a> (${escape(data.blocker.state)}) — the track resumes when it finishes or is cancelled</div>`
       : "",
     approved && !routine.paused && routine.nextFireAt !== null
-      ? `<p class="meta">next fire ${escape(when(routine.nextFireAt))}</p>`
+      ? `<p class="meta">next fire ${whenTime(routine.nextFireAt)}</p>`
       : "",
     "<h2>the standing order</h2>",
     terms,
@@ -17555,8 +17609,8 @@ function homePage(chrome: Chrome, data: {
       : `<div class="stat-card"><span class="k"><span class="dot ${data.episode.endedAt === null ? "dot-ok pulse" : "dot-off"}"></span>Toolroll</span>` +
         `<span class="v">${
           data.episode.endedAt === null
-            ? `running since ${escape(when(data.episode.startedAt))}`
-            : `last window: ${data.episode.built} built, ${data.episode.broke} broke \u00b7 ended ${escape(when(data.episode.endedAt))}`
+            ? `running since ${whenTime(data.episode.startedAt)}`
+            : `last window: ${data.episode.built} built, ${data.episode.broke} broke \u00b7 ended ${whenTime(data.episode.endedAt)}`
         }</span></div>`;
   const fleetCards = [...runnerCards, watchCard, ...worktreeCards].filter(one => one !== "");
   const fleet =
@@ -18426,7 +18480,7 @@ function contestPage(chrome: Chrome, data: {
       `only one result will be kept as the task's outcome; the rest stay archived with their evidence</p>`,
     data.problem === null ? "" : `<div class="problem">${escape(data.problem)}</div>`,
     `<p class="row"><strong>${escape((CONTEST_STATE_WORDS[contest.state] ?? "the tournament is in an unexpected state — the records have the detail").replace(/tournament/g, contestNoun(contest.kind)))}</strong></p>`,
-    contest.pickedBy === null ? "" : `<p class="meta">picked by ${escape(contest.pickedBy)} at ${escape(when(contest.pickedAt ?? ""))}</p>`,
+    contest.pickedBy === null ? "" : `<p class="meta">picked by ${escape(contest.pickedBy)} at ${whenTime(contest.pickedAt ?? "")}</p>`,
     contest.kind === "comparison"
       ? `<p class="row"><strong>spend</strong> ${escape(contestDollars(data.totalMicrousd))} measured on the lanes that report dollars` +
         `${data.anyUnknown ? ` <span class="meta">— the rest report tokens only</span>` : ""}</p>`
@@ -18651,7 +18705,7 @@ function githubReposPage(
                 `<div class="row"><strong>${escape(repo.nameWithOwner)}</strong>${repo.isPrivate ? ` <span class="badge">private</span>` : ""}`,
                 `<span class="right">${action}</span></div>`,
                 localPath === null
-                  ? `<p class="meta">not on this machine yet${/^\d{4}-\d{2}-\d{2}T/.test(repo.updatedAt) ? ` · pushed ${escape(when(repo.updatedAt))}` : ""}</p>`
+                  ? `<p class="meta">not on this machine yet${/^\d{4}-\d{2}-\d{2}T/.test(repo.updatedAt) ? ` · pushed ${whenTime(repo.updatedAt)}` : ""}</p>`
                   : `<p class="meta mono" style="overflow-wrap:anywhere;margin:.2rem 0">${escape(localPath)}</p>`,
                 repo.description === "" ? "" : `<p class="meta">${escape(repo.description)}</p>`,
                 `</div>`,
@@ -19461,7 +19515,7 @@ function planRevisionLedgerHtml(ledger: PlanRevisionLedgerView | null | undefine
           .map(
             one =>
               `<p class="row"><span class="mono">rev ${one.revision}</span> <span class="badge">${escape(one.status)}</span> ` +
-              `<span class="meta">${escape(one.author)} · ${escape(when(one.createdAt))}</span> — ${escape(one.reason)}</p>`,
+              `<span class="meta">${escape(one.author)} · ${whenTime(one.createdAt)}</span> — ${escape(one.reason)}</p>`,
           )
           .join("\n") +
         `</details>`;
@@ -20058,7 +20112,7 @@ function taskBodyParts(data: {
   const steerRows = steering
     .map(
       one =>
-        `<p class="row"><span class="meta">${escape(one.author)} · ${escape(when(one.createdAt))} · ${escape(steerState(one))}</span> ` +
+        `<p class="row"><span class="meta">${escape(one.author)} · ${whenTime(one.createdAt)} · ${escape(steerState(one))}</span> ` +
         `${escape(one.note)}</p>`,
     )
     .join("\n");
@@ -20081,7 +20135,7 @@ function taskBodyParts(data: {
           .map(
             hold =>
               `<p class="row">${escape(holdOwnerWords(hold.ownerKind))} — ${escape(hold.reason)}` +
-              `${hold.until === null ? "" : ` <span class="meta">until ${escape(when(hold.until))}</span>`}</p>`,
+              `${hold.until === null ? "" : ` <span class="meta">until ${whenTime(hold.until)}</span>`}</p>`,
           )
           .join("\n") +
         `<p class="meta">only your hold can be lifted here — waits caused by questions, incidents, or retry delays clear on their own</p>`;
@@ -20114,7 +20168,7 @@ function taskBodyParts(data: {
           })(),
           acceptanceCeremonyHtml(scope.acceptance),
           approval.approved
-            ? `<p class="meta scope-seal">Approved by ${escape(approval.by)} · ${escape(when(approval.at))} · <span class="seal">signs ${shortDigest(scope.digest)}</span><span class="so-sr-only"> — approval binds to this exact wording</span></p>`
+            ? `<p class="meta scope-seal">Approved by ${escape(approval.by)} · ${whenTime(approval.at)} · <span class="seal">signs ${shortDigest(scope.digest)}</span><span class="so-sr-only"> — approval binds to this exact wording</span></p>`
             : `<p class="meta"><span class="seal">signs ${shortDigest(scope.digest)}</span> — approval binds to this exact wording</p>` +
               `<p class="meta">Not approved${approval.reason === "changed" ? " — approved once, then rewritten" : ""}</p>`,
           `</div>`,
@@ -20340,7 +20394,7 @@ function taskBodyParts(data: {
         ? [
             `<div class="card" data-attended="${escape(attended.open.id)}">`,
             `<p><strong>attended session</strong> <span class="meta">${escape(attended.open.state)}</span></p>`,
-            `<p class="meta">${attended.open.running ? "the agent is running — your open console keeps it live" : "waiting to dispatch to this machine"} · ${attended.open.turnsUsed}/${attended.open.cap} messages · $${(attended.open.spentMicrousd / 1_000_000).toFixed(2)} of $${(attended.open.budgetMicrousd / 1_000_000).toFixed(2)} · everything ends by ${escape(when(attended.open.expiresAt))}</p>`,
+            `<p class="meta">${attended.open.running ? "the agent is running — your open console keeps it live" : "waiting to dispatch to this machine"} · ${attended.open.turnsUsed}/${attended.open.cap} messages · $${(attended.open.spentMicrousd / 1_000_000).toFixed(2)} of $${(attended.open.budgetMicrousd / 1_000_000).toFixed(2)} · everything ends by ${whenTime(attended.open.expiresAt)}</p>`,
             `<p class="meta">this page being open keeps it alive — close it and the session winds down within a minute</p>`,
             `<form method="post" action="${taskHref(task.id)}/attend-revoke" class="inline">`,
             `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
@@ -20511,7 +20565,7 @@ function taskBodyParts(data: {
               runOutcomeBadge(run, run.id === liveHistoryRunId) +
               `${run.reason === null ? "" : ` <span class="meta">${escape(reasonWords(run.reason))}</span>`}` +
               ` <span class="meta mono">${escape(bits.join(" · "))}</span>` +
-              `<span class="right meta mono">${escape(when(run.startedAt))}</span></p>`
+              `<span class="right meta mono">${whenTime(run.startedAt)}</span></p>`
             );
           })
           .join("\n");
@@ -20594,7 +20648,7 @@ function taskBodyParts(data: {
     scope === null
       ? prop("scope", "none yet")
       : approval.approved
-        ? prop("approved scope", `<span class="seal">signs ${shortDigest(scope.digest)}</span> · ${escape(qualityModeTitle(scope.qualityMode ?? "default"))} · approved by ${escape(approval.by)} · ${escape(when(approval.at))}`)
+        ? prop("approved scope", `<span class="seal">signs ${shortDigest(scope.digest)}</span> · ${escape(qualityModeTitle(scope.qualityMode ?? "default"))} · approved by ${escape(approval.by)} · ${whenTime(approval.at)}`)
         : prop("scope", approval.reason === "changed" ? "rewritten since its approval — needs a new yes" : "not approved");
   const strikesRow = data.strikes > 0 ? prop("strikes", `${data.strikes} failed attempt(s)`) : "";
   const propsCard = `<div class="card props">${workerRow}${queueRow}${scopeRow}${publishesRow}${economics}${strikesRow}</div>`;
@@ -21008,6 +21062,11 @@ function taskBodyParts(data: {
       { id: "task-diagnostics", title: "Task options", html: optionsHtml, open: optionsOpen, count: null },
     ],
     cancel: cancelForm === "" ? null : { html: cancelForm, open: data.cancelDraft !== undefined },
+    // "Do this every time…": the starter flow that does this kind of work on its own, one yes away.
+    everyTime: data.repo === null || data.csrf === "" ? null : (() => {
+      const starter = starterForWork(`${task.title}\n${scope?.goal ?? ""}`);
+      return { href: `/settings/flows?repo=${encodeURIComponent(data.repo)}&starter=${starter.id}#starter-${starter.id}`, starter: starter.name };
+    })(),
   };
   return { html, view };
 }
@@ -21459,7 +21518,7 @@ function reviewCockpitPage(
             return (
               `<li data-review-priority="${row.priority.band}"><a class="cockpit-row${current ? " current" : ""}" href="${escape(reviewHref(row.taskId, row.runId, row.repo))}"${current ? ` aria-current="page"` : ""}>` +
               `<span class="cockpit-row-head"><strong>${escape(row.title)}</strong></span>` +
-              `<span class="cockpit-row-meta">${escape(when(row.completedAt))}${row.runId === null ? " · no build" : row.outcome === "no-change" ? " · no change" : ""}${row.prNumber === null ? "" : ` · PR #${row.prNumber}`}</span>` +
+              `<span class="cockpit-row-meta">${whenTime(row.completedAt)}${row.runId === null ? " · no build" : row.outcome === "no-change" ? " · no change" : ""}${row.prNumber === null ? "" : ` · PR #${row.prNumber}`}</span>` +
               (row.historyProblem ? `<span class="cockpit-why" data-history-problem>History unavailable</span>` : why) +
               (status !== null && row.ciFailing ? `<span class="cockpit-why">CI is failing</span>` : "") +
               `</a></li>`
@@ -21556,7 +21615,7 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
         ? "the scope changed after approval — the words below are the current text, not the signed one"
         : "never approved — the result was built without a signed scope";
     const approval = intent.approval.approved
-      ? `approved by ${escape(intent.approvedBy ?? "an operator")} · ${escape(when(intent.approval.at))}`
+      ? `approved by ${escape(intent.approvedBy ?? "an operator")} · ${whenTime(intent.approval.at)}`
       : approvalWords;
     const body =
       `<p class="recap" style="margin-top:.25rem"><strong>goal</strong> ${escape(intent.goal)}</p>` +
@@ -21626,7 +21685,7 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
   if (view.notes.length > 0) {
     parts.push(
       `<section class="card cockpit-section" data-cockpit-section="notes"><h3>operator notes</h3>` +
-        view.notes.map(one => `<p class="row"><span class="meta">${escape(one.author)} · ${escape(when(one.createdAt))}</span> ${escape(one.note)}</p>`).join("\n") +
+        view.notes.map(one => `<p class="row"><span class="meta">${escape(one.author)} · ${whenTime(one.createdAt)}</span> ${escape(one.note)}</p>`).join("\n") +
         `</section>`,
     );
   }
@@ -21852,7 +21911,7 @@ function runsPage(
               needsVerification +
               criterionMatrixSummary(verdicts.get(run.id)?.matrix ?? []) +
               `${run.provider === "claude" ? "" : ` <span class="meta mono">${escape(run.provider)}</span>`}` +
-              `<span class="right meta mono">${escape(when(run.startedAt))}` +
+              `<span class="right meta mono">${whenTime(run.startedAt)}` +
               `${run.providerStartedAt === null && run.tokensIn === null && run.tokensOut === null && run.costUsd === null ? "" : ` \u00b7 ${escape(runCostWords(run, liveIds.has(run.id)))}`}</span></p>`
             );
           })
@@ -22515,7 +22574,7 @@ function evidenceBundleCard(view: ProofBundleView | null, run: Pick<Run, "id" | 
   }
   if (view.accepted !== null) {
     parts.push(
-      `<p class="meta">Accepted with an exception by <span class="mono">${escape(view.accepted.by)}</span> · ${escape(when(view.accepted.at))}${view.accepted.note === null ? "" : ` — ${escape(view.accepted.note)}`}</p>`,
+      `<p class="meta">Accepted with an exception by <span class="mono">${escape(view.accepted.by)}</span> · ${whenTime(view.accepted.at)}${view.accepted.note === null ? "" : ` — ${escape(view.accepted.note)}`}</p>`,
     );
   }
 
@@ -22891,7 +22950,7 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
       ? ""
       : ` ${prUrl === null ? `<span class="mono">PR #${publication.prNumber}</span>` : `<a href="${escape(prUrl)}">PR #${publication.prNumber}</a>`}` +
         `<span class="meta" data-ci-observed="${escape(detail.ciFailing ? "failing" : (publication.lastCheckState ?? "none"))}"> · ${
-          detail.ciFailing ? "CI failing at the last check" : publication.lastCheckState === "passing" ? `CI passing, observed ${escape(when(publication.lastCheckAt))}` : publication.lastCheckState === "running" ? "CI still running at the last check" : "no CI checks found — verify on GitHub"
+          detail.ciFailing ? "CI failing at the last check" : publication.lastCheckState === "passing" ? `CI passing, observed ${whenTime(publication.lastCheckAt)}` : publication.lastCheckState === "running" ? "CI still running at the last check" : "no CI checks found — verify on GitHub"
         }</span>`) +
     `</p>`;
   const agent = runAgentWords(detail.route);
@@ -22906,7 +22965,7 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
     `<details class="result-details" data-result-details><summary>Build details</summary>` +
       (unavailableShots.length === 0 ? "" : `<ul class="result-unavailable meta" data-result-unavailable="${unavailableShots.length}">${unavailableShots.map(one => `<li>Screenshot unavailable — <span class="mono">${escape(one.path)}</span>: ${escape(one.problem ?? "")}</li>`).join("")}</ul>`) +
       `<dl class="result-facts">` +
-      `<div><dt>Build</dt><dd>#${runId} · ${escape(run.runner)}${agent === null ? ` · ${escape(run.provider)}` : ""}${run.finishedAt === null ? "" : ` · ${escape(when(run.finishedAt))}`}</dd></div>` +
+      `<div><dt>Build</dt><dd>#${runId} · ${escape(run.runner)}${agent === null ? ` · ${escape(run.provider)}` : ""}${run.finishedAt === null ? "" : ` · ${whenTime(run.finishedAt)}`}</dd></div>` +
       (agent === null ? "" : `<div><dt>Agent</dt><dd>${escape(agent)}</dd></div>`) +
       `<div><dt>Commits</dt><dd>${
         facts.head === null
@@ -22980,7 +23039,7 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
     } else if (proof.verdict === null && run.outcome !== "no-change") {
       checkParts.push(`<p class="meta" data-proof-verdict="none">No verification result is available for this build.</p>`);
     }
-    if (proof.accepted !== null) checkParts.push(`<p class="meta">${humanReview ? "Accepted after human review" : "Accepted with an exception"} by <span class="mono">${escape(proof.accepted.by)}</span> · ${escape(when(proof.accepted.at))}${proof.accepted.note === null ? "" : ` — ${escape(proof.accepted.note)}`}</p>`);
+    if (proof.accepted !== null) checkParts.push(`<p class="meta">${humanReview ? "Accepted after human review" : "Accepted with an exception"} by <span class="mono">${escape(proof.accepted.by)}</span> · ${whenTime(proof.accepted.at)}${proof.accepted.note === null ? "" : ` — ${escape(proof.accepted.note)}`}</p>`);
     if (proof.matrix.length === 0) {
       checkParts.push(detail.signedCriteria > 0 ? `<p class="meta">The approved scope has ${detail.signedCriteria} requirement${detail.signedCriteria === 1 ? "" : "s"}, but this build has no requirement-by-requirement verification.</p>` : `<p class="meta">This scope signed no acceptance checks.</p>`);
     } else {
@@ -23036,7 +23095,7 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
   if (detail.comments.length > 0) {
     requestParts.push(
       `<p class="meta">Saved for later · ${detail.comments.length}</p><div class="diff-comments" data-result-notes="${detail.comments.length}">` +
-        detail.comments.map(one => `<div class="diff-comment"><span class="diff-comment-pin" aria-hidden="true"></span><p>${one.path === null ? "" : pathWords(one.path, one.line)}${escape(one.note)}</p><span class="meta">${escape(one.author)} · ${escape(when(one.createdAt))}</span></div>`).join("") +
+        detail.comments.map(one => `<div class="diff-comment"><span class="diff-comment-pin" aria-hidden="true"></span><p>${one.path === null ? "" : pathWords(one.path, one.line)}${escape(one.note)}</p><span class="meta">${escape(one.author)} · ${whenTime(one.createdAt)}</span></div>`).join("") +
         `</div>`,
     );
     if (o.csrf !== "" && !detail.canAnnotate) {
@@ -23048,7 +23107,7 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
     }
   }
   if ((detail.pastComments?.length ?? 0) > 0) {
-    requestParts.push(`<details class="result-feedback-history"><summary>Earlier feedback</summary><div class="diff-comments" data-past-feedback>${detail.pastComments!.map(one => `<div class="diff-comment"><p>${one.path === null ? "" : pathWords(one.path, one.line)}${escape(one.note)}</p><span class="meta">${escape(one.author)} · ${escape(when(one.createdAt))}</span></div>`).join("")}</div></details>`);
+    requestParts.push(`<details class="result-feedback-history"><summary>Earlier feedback</summary><div class="diff-comments" data-past-feedback>${detail.pastComments!.map(one => `<div class="diff-comment"><p>${one.path === null ? "" : pathWords(one.path, one.line)}${escape(one.note)}</p><span class="meta">${escape(one.author)} · ${whenTime(one.createdAt)}</span></div>`).join("")}</div></details>`);
   }
   for (const revision of detail.revisions) {
     // The child's standing is the shared status projection's own words
@@ -23306,7 +23365,7 @@ function runPage(
                         : turn.sourceKind === "answer"
                           ? "your answer"
                           : "repair (machine)"
-                  } · ${escape(when(turn.recordedAt))}${turnWords(turn)}</span> ${escape(oneLineOf(turn.text, 240))}</p>`,
+                  } · ${whenTime(turn.recordedAt)}${turnWords(turn)}</span> ${escape(oneLineOf(turn.text, 240))}</p>`,
               )
               .join("\n")) +
         (heldTurns.open && csrf !== ""
@@ -23390,7 +23449,7 @@ function runPage(
       one =>
         `<div class="diff-comment"><span class="diff-comment-pin" aria-hidden="true"></span><p>` +
         `${one.path === null ? "" : commentPathWords(one.path, one.line)}` +
-        `${escape(one.note)}</p><span class="meta">${escape(one.author)} · ${escape(when(one.createdAt))}</span></div>`,
+        `${escape(one.note)}</p><span class="meta">${escape(one.author)} · ${whenTime(one.createdAt)}</span></div>`,
     )
     .join("\n");
   const commentForm =
@@ -23445,7 +23504,7 @@ function runPage(
       : notes
           .map(
             one =>
-              `<p class="row"><span class="meta">${escape(one.author)} · ${escape(when(one.createdAt))}</span> ` +
+              `<p class="row"><span class="meta">${escape(one.author)} · ${whenTime(one.createdAt)}</span> ` +
               `${escape(one.note)}</p>`,
           )
           .join("\n");
@@ -23694,7 +23753,7 @@ function settingsPage(
             : `<div class="card"><p><strong>${permissionDefault.mode === "bypassPermissions" ? "Full access" : "Auto"}</strong></p><p class="meta">an approver can change this default</p></div>`,
           permissionDefault.updatedAt === null
             ? ""
-            : `<p class="meta settings-changed">Changed ${escape(when(permissionDefault.updatedAt))}${permissionDefault.updatedBy === null ? "" : ` by ${escape(permissionDefault.updatedBy)}`}</p>`,
+            : `<p class="meta settings-changed">Changed ${whenTime(permissionDefault.updatedAt)}${permissionDefault.updatedBy === null ? "" : ` by ${escape(permissionDefault.updatedBy)}`}</p>`,
         ].join("\n");
   const qualityCard =
     qualityDefault === null
@@ -23709,7 +23768,7 @@ function settingsPage(
             : `<div class="card"><p><strong>${escape(qualityModeTitle(qualityDefault.mode))}</strong></p><p class="meta">an approver can change this default</p></div>`,
           qualityDefault.updatedAt === null
             ? ""
-            : `<p class="meta settings-changed">Changed ${escape(when(qualityDefault.updatedAt))}${qualityDefault.updatedBy === null ? "" : ` by ${escape(qualityDefault.updatedBy)}`}</p>`,
+            : `<p class="meta settings-changed">Changed ${whenTime(qualityDefault.updatedAt)}${qualityDefault.updatedBy === null ? "" : ` by ${escape(qualityDefault.updatedBy)}`}</p>`,
         ].join("\n");
   // Quiet chat: this person's own choice. The installation's Telegram cadence only bundles Every step updates.
   const chatCard =
@@ -23821,7 +23880,7 @@ function settingsPage(
             .filter(one => one.retiredAt === null || one.retiredReason === "gone")
             .map(
               one =>
-                `<p class="row">${escape(one.uaWords)} · since ${escape(when(one.createdAt))}` +
+                `<p class="row">${escape(one.uaWords)} · since ${whenTime(one.createdAt)}` +
                 `${one.retiredAt !== null ? ` · <span class="meta">expired</span>` : one.consecutiveFailures >= 20 ? ` · <span class="meta">failing</span>` : ""}` +
                 (one.retiredAt === null
                   ? ` <form method="post" action="/push/remove" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="id" value="${one.id}"><button type="submit">Remove</button></form>`
@@ -24026,6 +24085,7 @@ function settingsTiles(): string {
   return `<nav class="settings-tiles" aria-label="Settings sections">${tiles.map(([href, label, icon]) => `<a href="${href}">${strokeIcon(icon)}<span>${label}</span></a>`).join("")}</nav>`;
 }
 const SETTINGS_TILE_ICONS: [string, string, string][] = [
+    ["/settings/flows", "Flows", `<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><path d="M10 6.5h4a3 3 0 0 1 3 3V14"/>`],
     ["/settings/integrations", "Integrations", `<path d="M9 2v6M15 2v6"/><path d="M6 8h12v4a6 6 0 0 1-12 0z"/><path d="M12 18v4"/>`],
     ["/settings/models", "Models", `<rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/>`],
     ["/settings/skills", "Skills", `<path d="m12 3 1.9 5.8L20 10l-5 3.6L16.8 20 12 16.4 7.2 20 9 13.6 4 10l6.1-1.2z"/>`],
@@ -24113,7 +24173,7 @@ function nextPage(chrome: Chrome, data: {
   if (item.kind === "decision") {
     const { decision } = item;
     card =
-      `<h1>${escape(decision.taskId)} <span class="meta">asked ${escape(when(decision.createdAt))}</span></h1>` +
+      `<h1>${escape(decision.taskId)} <span class="meta">asked ${whenTime(decision.createdAt)}</span></h1>` +
       `<div class="recap">${escape(decision.recap)}</div>` +
       `<div class="question">${escape(decision.question)}</div>` +
       decisionOptionForms(decision, data.csrf, "next");

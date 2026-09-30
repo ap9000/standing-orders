@@ -18,10 +18,10 @@ export const buttonVariants = cva(
         link: "text-foreground underline underline-offset-4 decoration-border hover:decoration-muted-foreground",
       },
       size: {
-        default: "h-8 px-3 max-sm:h-11 max-sm:px-4",
-        sm: "h-7 px-2.5 text-[12.5px] max-sm:h-11 max-sm:px-3 max-sm:text-[13px]",
+        default: "h-8 px-3 phone:h-11 phone:px-4",
+        sm: "h-7 px-2.5 text-[12.5px] phone:h-11 phone:px-3 phone:text-[13px]",
         lg: "h-10 px-5",
-        icon: "size-8 max-sm:size-11",
+        icon: "size-8 phone:size-11",
       },
     },
     defaultVariants: { variant: "default", size: "default" },

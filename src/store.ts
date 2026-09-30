@@ -5047,6 +5047,8 @@ function initializeStore(db: Database, file: string): Store {
   addColumn(db, "publication_grant", "publish_on", "TEXT NOT NULL DEFAULT 'build' CHECK (publish_on IN ('build', 'complete'))");
   addColumn(db, "publication_grant", "merge_when_green", "INTEGER NOT NULL DEFAULT 0 CHECK (merge_when_green IN (0, 1))");
   db.exec(PULL_REQUEST_SCHEMA);
+  // A pull request a flow's Pull request zone opened: the zone follows its CI, so Complete's follower leaves it alone.
+  addColumn(db, "pull_request_follow", "flow_card", "INTEGER REFERENCES flow_card(id)");
   addColumn(db, "flow_card", "source_json", "TEXT");
   addColumn(db, "flow_card", "owner", "TEXT");
   addColumn(db, "flow", "owner", "TEXT");

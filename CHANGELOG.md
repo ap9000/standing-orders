@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 0.9.1 — 2026-09-30
+
+- **Phones show more on a screen.** On a phone the console is about a third
+  denser: a row's action sits on its title line, status chips beside the
+  name, facts on one line, and times shorten to "16:39", "Yesterday 16:39"
+  or "Sep 28" (the full time stays on desktop and on hover). Every tap target
+  is still at least 44px and text fields 16px; nothing scrolls sideways at
+  320px, and the desktop layout is unchanged.
+- **Flows open pull requests, and starter flows are one yes away.** A new
+  Pull request zone opens a PR for a card's built result under the project's
+  pull request setup, waits for CI, moves on when it passes and takes the
+  failure path (naming the failing check) when it fails; it can merge, squash
+  by default, only after a person approved the card. The Issues to PRs
+  template runs labelled GitHub issues through build, approval, pull request
+  and a closing comment. Settings → Flows and `toolroll onboard --starter`
+  switch on Fix failing CI, Issues become tasks and Overnight queue; a task's
+  "Do this every time…" and chat offer the matching one.
+
 ## 0.9.0 — 2026-09-30
 
 - **Chat pings only when you're needed.** In Telegram, Slack, Discord and

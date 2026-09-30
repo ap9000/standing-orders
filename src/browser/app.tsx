@@ -463,7 +463,8 @@ function LeadChat({ controller, docked = null }: { controller: ReturnType<typeof
   // while a turn is known to be running.
   const live = useLiveReply(chat, busy || (draft.pending !== null && !sending), () => { void controller.check(); });
   const disabled = sending || stale || offline || busy || draft.pending !== null || !draft.text.trim();
-  useLayoutEffect(() => { if (box.current) { box.current.style.height = "auto"; box.current.style.height = `${Math.min(180, Math.max(48, box.current.scrollHeight))}px`; } }, [draft.text]);
+  // A phone starts the box at one line (Send sits beside it); a desk keeps its two.
+  useLayoutEffect(() => { const el = box.current; if (el) { const phone = matchMedia("(max-width: 760px)").matches; el.style.height = phone ? "0px" : "auto"; el.style.height = `${Math.min(180, Math.max(phone ? 44 : 48, el.scrollHeight))}px`; } }, [draft.text]);
   const delivery = offline ? "Offline. Your draft stays in this tab." : sending ? "Sending…" : notice;
   return <div className="so-lead-chat" data-workspace-chat>
     <Conversation className="so-conversation"><ConversationContent className="so-conversation-content">

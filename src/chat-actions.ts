@@ -52,6 +52,7 @@ import { cleanMemory, editMemory, forgetMemory, tellTeammate } from "./teammate-
 import { addRoutine, removeRoutine, routineSchedule, routinesOf } from "./teammate-desk.js";
 import { requestUndo, undoFor } from "./teammate-week.js";
 import { kitInstalled, kitOf, KITS, setUpKitNow } from "./kits.js";
+import { starterFlowOf, starterOf, startersFor, starterTerms, STARTER_FLOWS, switchOnStarter } from "./flow-starters.js";
 import { answerTeammateQuestion } from "./teammate-work.js";
 import { callWords, checkRule, defaultRule, grantListed, revokeTool, ruleWords, setToolRules } from "./teammate-tools.js";
 
@@ -102,6 +103,8 @@ export const CHAT_ACTIONS = {
   tool_remove: { label: "Remove tool", protected: false, password: false },
   // Flows: a drawing and cards on it. Any work a card files is an ordinary task under the usual approvals.
   flow_create: { label: "Create flow", protected: false, password: false },
+  // A starter flow: its zones and its trigger, switched on with one yes (flow-starters.ts).
+  flow_starter: { label: "Switch on", protected: false, password: false },
   flow_edit: { label: "Save flow", protected: false, password: false },
   flow_card_add: { label: "Add card", protected: false, password: false },
   flow_card_move: { label: "Move card", protected: false, password: false },
@@ -164,7 +167,8 @@ export const CHAT_ACTION_FIELDS: Record<ChatAction, readonly string[]> = {
   knowledge_restore: ["repo", "restore"],
   tool_add: ["repo", "catalog", "name", "command", "args", "url", "secrets", "about"],
   tool_remove: ["repo", "name"],
-  flow_create: ["repo", "name", "definition"],
+  flow_create: ["repo", "name", "definition", "trigger"],
+  flow_starter: ["repo", "starter"],
   flow_edit: ["flow", "name", "definition"],
   flow_card_add: ["flow", "title", "description", "zone"],
   flow_card_move: ["card", "zone"],
@@ -321,7 +325,7 @@ export function prepareSharedAction(
     operation.startsWith("skill_") || operation.startsWith("knowledge_") || operation.startsWith("decision_") || operation.startsWith("tool_") || operation.startsWith("flow_") || operation.startsWith("teammate_") || operation.startsWith("kit_")
       ? null
       : text(input, "task", 64);
-  const flowTarget = operation.startsWith("flow_") && operation !== "flow_create" && operation !== "flow_script_save" ? flowTargetOf(store, input) : null;
+  const flowTarget = operation.startsWith("flow_") && operation !== "flow_create" && operation !== "flow_script_save" && operation !== "flow_starter" ? flowTargetOf(store, input) : null;
   // v92: a teammate names its project; a question names it through its card's flow.
   const mateTarget = operation.startsWith("teammate_") && operation !== "teammate_create" && operation !== "teammate_answer" ? store.getTeammate(integer(input, "teammate")) : null;
   if (mateTarget !== null && mateTarget.state === "removed") throw Error("That teammate is off the team.");
@@ -579,6 +583,23 @@ export function prepareSharedAction(
       state = {};
       title = `Create the ${name} flow in ${project}`;
       terms.push(...flowTerms(definition, null));
+      // A template's trigger (Issues to PRs: labelled issues) comes with it, checked as the flow will have it.
+      if (input["trigger"] !== undefined) {
+        const draft: FlowRow = { id: 0, repo, name, definitionJson: JSON.stringify(definition), revision: 1, state: "active", createdBy: who.name, createdAt: now.toISOString(), updatedBy: who.name, updatedAt: now.toISOString(), owner: who.name };
+        const config = validateTriggerConfig(input["trigger"], { store, flow: draft, definition, actor: who.name });
+        if (takesDeliveries(config)) throw Error("Webhook addresses are secrets, so they are set up on the flow's Triggers panel.");
+        request["trigger"] = config;
+        terms.push(`Starts cards from: ${describeTrigger(config, store)}. Only what happens from now on counts.`);
+      }
+    } else if (operation === "flow_starter") {
+      const starter = starterOf(String(input["starter"] ?? ""));
+      if (starter === null) throw Error(`Choose a starter flow: ${STARTER_FLOWS.map(one => one.id).join(", ")}.`);
+      if (starterFlowOf(store, starter, repo) !== null) throw Error(`${starter.name} is already on in ${project}.`);
+      const blocked = startersFor(store, repo).find(one => one.id === starter.id)?.blocked ?? null;
+      if (blocked !== null) throw Error(blocked);
+      state = {};
+      title = `Switch on ${starter.name} in ${project}`;
+      terms.push(...starterTerms(store, starter, repo));
     } else if (operation === "flow_edit") {
       const { flow, definition: before } = flowTarget!;
       const name = input["name"] === undefined ? flow.name : text(input, "name", 80).trim();
@@ -1365,8 +1386,20 @@ function runFlowAction(store: Store, payload: SharedAction, actor: string, repos
     return { said: `${said}${filed}`, href: card === null ? `/flows/${flow}` : flowCardHref(flow, card) };
   };
   if (payload.operation === "flow_create") {
-    const id = store.createFlow({ repo: payload.repo, name: String(req["name"]), definitionJson: JSON.stringify(req["definition"]), by: actor }, now);
+    const id = store.transact(() => {
+      const made = store.createFlow({ repo: payload.repo, name: String(req["name"]), definitionJson: JSON.stringify(req["definition"]), by: actor }, now);
+      if (req["trigger"] !== undefined) {
+        const trigger = addFlowTriggerTo(store, store.getFlow(made)!, req["trigger"], actor, now, null);
+        if (!trigger.ok) throw Error(trigger.message);
+      }
+      return made;
+    });
     return { said: "Flow created. Add cards to it here or on its canvas.", href: `/flows/${id}` };
+  }
+  if (payload.operation === "flow_starter") {
+    const switched = switchOnStarter(store, starterOf(String(req["starter"]))!, payload.repo, actor, now, configDirOf(store));
+    if (!switched.ok) throw Error(switched.said);
+    return { said: switched.said, href: `/flows/${switched.flow}` };
   }
   if (payload.operation === "flow_edit") {
     const flow = Number(payload.state["flow"]);

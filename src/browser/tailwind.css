@@ -10,6 +10,11 @@
 @import "tailwindcss/utilities.css" important;
 @source "./";
 
+/* Phones are 760px and narrower everywhere (the server pages and the shell's
+ * density rules use the same width), so the components switch there too. */
+@custom-variant phone (@media (max-width: 760px));
+@custom-variant desk (@media (min-width: 761px));
+
 @theme inline {
   --color-background: var(--so-ground);
   --color-foreground: var(--so-ink);

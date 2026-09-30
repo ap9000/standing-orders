@@ -8,7 +8,9 @@
  * without running it, and ends with a handoff the agent can relay.
  *
  * Adding the project and writing the skill both need --yes or one yes
- * typed at a terminal. The project is the main checkout (never a linked
+ * typed at a terminal. Then it offers the starter flows (flow-starters.ts),
+ * each switched on by its own yes at a terminal or by --starter; --yes alone
+ * never switches one on. The project is the main checkout (never a linked
  * worktree, the home folder, or one of Toolroll's own worktrees). The skill
  * is replaced by the next onboard and deleted by `onboard --remove` only
  * while it is exactly a version Toolroll wrote; a file of the same name
@@ -22,6 +24,7 @@ import { CLAUDE_CODE_GUIDES, CLAUDE_CODE_MANAGED_MARK, MANAGED_MARK, OPERATOR_SK
 import type { ProviderConnection } from "./provider-connection.js";
 import { connectionWords } from "./control-ui.js";
 import { envelopeJson } from "./envelope.js";
+import type { StarterView, SwitchedOn } from "./flow-starters.js";
 
 export type OnboardAgent = "claude" | "codex";
 export const ONBOARD_AGENTS: readonly OnboardAgent[] = ["claude", "codex"];
@@ -282,7 +285,46 @@ export type OnboardIo = {
   /** Whether the project can open pull requests at Complete, in one line: on, the one command that turns it on, or
    * what to fix first. Turning it on stays a person's password step. */
   pullRequests?: (repo: string) => Promise<string>;
+  /** --starter, as typed: a comma list of starter flow ids to switch on. */
+  starterFlag?: string | undefined;
+  /** The project's starter flows, and switching one on — its trigger and zones. */
+  starters?: { list: (repo: string) => Promise<StarterView[]>; switchOn: (repo: string, id: string) => Promise<SwitchedOn> };
 };
+
+export type StarterAnswer = { id: string; name: string; summary: string; does: string[]; never: string; state: "on" | "switched-on" | "off" | "unavailable" | "failed"; flow?: number; said?: string };
+
+/** Offer each starter flow: switch on the ones --starter names, or ask one yes each at a terminal. */
+async function offerStarters(io: OnboardIo, repo: string): Promise<StarterAnswer[] | { usage: string }> {
+  if (io.starters === undefined) return [];
+  const list = await io.starters.list(repo);
+  const named = io.starterFlag === undefined ? null : io.starterFlag.split(",").map(one => one.trim()).filter(one => one !== "");
+  const unknown = named?.filter(one => !list.some(starter => starter.id === one)) ?? [];
+  if (named !== null && (named.length === 0 || unknown.length > 0)) return { usage: `--starter takes ${list.map(one => one.id).join(", ")}` };
+  const answers: StarterAnswer[] = [];
+  for (const one of list) {
+    const base = { id: one.id, name: one.name, summary: one.summary, does: one.does, never: one.never };
+    if (one.on !== null) { answers.push({ ...base, state: "on", flow: one.on.flow }); continue; }
+    if (one.blocked !== null) { answers.push({ ...base, state: "unavailable", said: one.blocked }); continue; }
+    const wanted = named !== null ? named.includes(one.id) : io.interactive && !io.json && await io.confirm(`Switch on ${one.name}? ${one.summary} ${one.never} [y/N]`);
+    if (!wanted) { answers.push({ ...base, state: "off" }); continue; }
+    const switched = await io.starters.switchOn(repo, one.id);
+    answers.push(switched.ok ? { ...base, state: switched.already ? "on" : "switched-on", flow: switched.flow } : { ...base, state: "failed", said: switched.said });
+  }
+  return answers;
+}
+
+function starterLines(answers: readonly StarterAnswer[]): string[] {
+  return answers.map((one, index) => {
+    const head = index === 0 ? "starters " : "         ";
+    switch (one.state) {
+      case "on": return `${head} ${one.name}: on`;
+      case "switched-on": return `${head} ${one.name}: switched on`;
+      case "unavailable": return `${head} ${one.name}: ${one.said}`;
+      case "failed": return `${head} ${one.name}: ${one.said}`;
+      case "off": return `${head} ${one.name}: ${one.summary} ${one.never} Switch on: toolroll onboard --starter ${one.id}`;
+    }
+  });
+}
 
 type SkillAnswer = { state: "written" | "current" | "needs-yes" | "declined" | "not-ours" | "edited" | "removed" | "absent"; files: SkillStep[]; wrote: string[]; removed: string[] };
 
@@ -411,6 +453,8 @@ export async function runOnboard(io: OnboardIo): Promise<number> {
 
   const projectData = project.state === "added" || project.state === "already" ? { path: project.path, added: project.state === "added" } : null;
   const pullRequests = projectData === null || io.pullRequests === undefined ? null : await io.pullRequests(projectData.path);
+  const offered = projectData === null ? [] : await offerStarters(io, projectData.path);
+  if (!Array.isArray(offered)) return refuse("usage", offered.usage, 2);
   const projectProblem = (() => {
     switch (project.state) {
       case "none": return "not inside a git repository";
@@ -428,6 +472,7 @@ export async function runOnboard(io: OnboardIo): Promise<number> {
       project: projectData,
       ...(projectProblem === null ? {} : { projectProblem }),
       ...(pullRequests === null ? {} : { pullRequests }),
+      ...(offered.length === 0 ? {} : { starters: offered.map(one => ({ ...one, ...(one.state === "off" ? { command: `toolroll onboard --starter ${one.id}` } : {}) })) }),
       agents: reports,
       skill: skillData,
       mcp,
@@ -441,6 +486,7 @@ export async function runOnboard(io: OnboardIo): Promise<number> {
   io.write([
     projectLine,
     ...(pullRequests === null ? [] : [`pull requests ${pullRequests}`]),
+    ...starterLines(offered),
     `agents    ${reports.map(one => `${one.name}: ${[one.words, one.plan].filter(Boolean).join(" · ")}`).join("; ")}`,
     skillLine(),
     ...mcp.map((one, index) => `${index === 0 ? "tools    " : "         "} ${one.command}   (add Toolroll as tools; not run)`),

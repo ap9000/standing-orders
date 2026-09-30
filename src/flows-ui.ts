@@ -20,7 +20,7 @@ const e = (value: unknown) =>
   String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 const projectName = (repo: string) => repo.split(/[\\/]/).filter(Boolean).pop() ?? repo;
 
-export const FLOWS_CSS = `.flows{max-width:880px;min-width:0}.flows .card{padding:16px 18px;margin:12px 0}.flows .flow-row{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap}.flows .flow-row h2{font-size:1.05rem;margin:0}.flows .flow-counts{font-size:.85rem;color:var(--so-muted)}.flows form{display:grid;gap:10px;margin:0}.flows label{display:grid;gap:6px}.flows input,.flows select{box-sizing:border-box;width:100%;max-width:100%}.flows button{justify-self:start;min-height:44px}.flows .flow-fallback ol{padding-left:20px}.flows summary{cursor:pointer;min-height:44px;display:flex;align-items:center;font-weight:600}.flows .flow-buttons{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 0}@media(max-width:600px){.flows input,.flows select{font-size:16px}}`;
+export const FLOWS_CSS = `.flows{max-width:880px;min-width:0}.flows .card{padding:16px 18px;margin:12px 0}.flows .flow-row{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap}.flows .flow-row h2{font-size:1.05rem;margin:0}.flows .flow-counts{font-size:.85rem;color:var(--so-muted)}.flows form{display:grid;gap:10px;margin:0}.flows label{display:grid;gap:6px}.flows input,.flows select{box-sizing:border-box;width:100%;max-width:100%}.flows button{justify-self:start;min-height:44px}.flows .flow-fallback ol{padding-left:20px}.flows summary{cursor:pointer;min-height:44px;display:flex;align-items:center;font-weight:600}.flows .flow-buttons{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 0}@media(max-width:600px){.flows input,.flows select{font-size:16px}}@media(max-width:760px){.flows .card{padding:10px 12px;margin:8px 0;position:relative}.flows .flow-row{row-gap:2px}.flows .flow-row h2 a::after{content:"";position:absolute;inset:0;border-radius:inherit}.flows .flow-counts{line-height:1.35}}`;
 
 /** The flows a person can open, with how many cards wait in each, and the new-flow form. */
 export function flowsListHtml(store: Store, flows: readonly FlowRow[], projects: readonly string[], csrf: string, canCreate: boolean, problem: string | null): string {
@@ -81,11 +81,12 @@ export function flowView(store: Store, flow: FlowRow, viewer: { name: string; ap
     const decision = parseSortDecision(decisions.get(card.id)?.decisionJson ?? null);
     const shown = stage?.kind === "approval" && definition !== null ? draftFor(definition, stage) : null;
     // v91: when a Wait zone gives up (or moves on), or a zone's time limit comes.
-    const clock = stage?.wait ?? stage?.limit;
+    // An "hours" wait has no deadline of its own: it goes on when the clock reaches its hours.
+    const clock = stage?.wait?.for === "hours" ? stage.limit : stage?.wait ?? stage?.limit;
     const until = card.state !== "active" || stage === undefined || clock === undefined ? null : new Date(Date.parse(store.flowCardEnteredAt(card.id) ?? card.updatedAt) + clock.minutes * 60_000);
     const deadline = until === null || until.getTime() <= Date.now() ? null : {
       at: until.toISOString(),
-      label: stage!.wait !== undefined ? (stage!.wait.for === "reply" ? "No reply by" : "Moves on at") : stage!.limit!.to !== null ? `Moves to ${title(stage!.limit!.to)} at` : "Reminder at",
+      label: stage!.wait !== undefined && stage!.wait.for !== "hours" ? (stage!.wait.for === "reply" ? "No reply by" : "Moves on at") : stage!.limit!.to !== null ? `Moves to ${title(stage!.limit!.to)} at` : "Reminder at",
     };
     // Its open question: one of its own, or (v94) a tool call waiting for approval.
     const asked = card.state === "active" ? store.openTeammateQuestionOn(card.id, card.entry) : null;
