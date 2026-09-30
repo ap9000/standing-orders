@@ -11,6 +11,7 @@ import { isAlive } from "./runner.js";
 import { updateAdmissionPaused, UPDATE_PAUSED } from "./desktop-update-gate.js";
 import { approvalOf, type ExecutionProfile } from "./scope.js";
 import { plannerSourceProblemOf } from "./planner-source.js";
+import { authPauseOf, providerName, signInReason } from "./provider-auth.js";
 import { REVIEW_TOKENS, resultStatusOf, reviewFactsOf } from "./workspace-ui.js";
 import { BUILT_IN, parseCapabilityKey, type ChatSnapshot, type ReviewRequestOrigin, type ReviewRetryState, type Store, type TaskState } from "./store.js";
 
@@ -73,6 +74,8 @@ export type DispatchDiagnosisCode =
   | "no-worker-online"
   | "worker-at-capacity"
   | "provider-quota"
+  /** The provider's sign-in stopped working; its dispatch is paused. */
+  | "signed-out"
   | "planning-ready"
   | "planner-source"
   | "scouting-ready"
@@ -337,6 +340,10 @@ export function diagnoseTaskDispatch(store: Store, taskId: string, now: Date): D
   const local = taskReadinessBlocker(store, ref.id, now);
   if (local?.code === "hold") {
     if (local.ownerKind === "backoff") {
+      // Run 2085: an attempt that stopped before its handoff says so plainly.
+      const last = store.runsFor(ref.id).find(one => one.role === "builder" && one.finishedAt !== null);
+      const when = local.until === null ? "" : ` The next attempt is eligible at ${local.until}.`;
+      if (last?.reason === "no-handoff") return answer("retry-scheduled", "retrying", "Retry scheduled", `The agent stopped before handing off; its work was kept and it is being resumed.${when}`, { nextAt: local.until });
       return answer("retry-scheduled", "retrying", "Retry scheduled", local.until === null ? "The failed attempt is backing off before retrying." : `The next attempt is eligible at ${local.until}.`, { nextAt: local.until });
     }
     if (local.ownerKind === "decision") return answer("waiting-decision", "waiting", "Waiting on your answer", "An agent parked a question; answering it resumes the task.", { action: "answer-decision" });
@@ -397,6 +404,14 @@ export function diagnoseTaskDispatch(store: Store, taskId: string, now: Date): D
       const nextAt = resets[0] ?? null;
       return answer("provider-quota", "retrying", "Provider quota exhausted", nextAt === null ? "The provider has not supplied a reset time; this needs operator attention." : `The next recorded reset is ${nextAt}.`, { action: nextAt === null ? "select-agent" : null, nextAt, role });
     }
+  }
+
+  // The sign-in pause: the task's provider stopped working; nothing it would
+  // run starts until someone signs in (or a run or check on it works again).
+  const provider = profile?.provider ?? (role === "planner" ? ref.planProvider : null) ?? null;
+  const signedOut = provider === null ? null : authPauseOf(store, provider);
+  if (signedOut !== null) {
+    return answer("signed-out", "waiting", signInReason(signedOut), `This task starts again on its own once ${providerName(signedOut.provider)} works.`, { role });
   }
 
   const openDecisions = store.countUnanswered();

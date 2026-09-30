@@ -1,0 +1,95 @@
+{
+  "synthetic": true,
+  "modelCalls": 0,
+  "note": "Scripted Claude agent that fails with the 2026-09-29 sign-in error; real tick, gateway, failure seal, CLI and console. Not a live-provider or physical-device proof.",
+  "tick": [
+    {
+      "id": "payout-rounding",
+      "outcome": "failed",
+      "reason": "auth-expired — requeued, sign-in needed",
+      "detail": "Failed to authenticate: OAuth session expired and could not be refreshed",
+      "worktree": "/private/var/folders/gy/qjcnx5hj1m3420l6dnpzkfsh0000gn/T/toolroll-auth-proof-yKOB2y/pool/payments/toolroll-payout-rounding-0ffb79d0"
+    },
+    {
+      "id": "csv-header",
+      "outcome": "skipped",
+      "reason": "signed-out",
+      "detail": "Claude needs you to sign in again. Run `claude /login` on this computer; its tasks start again on their own once it works (or `toolroll providers resume claude`)."
+    }
+  ],
+  "checks": [
+    {
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      },
+      "shot": "work",
+      "path": "/work",
+      "signInShown": true,
+      "resumeButton": {
+        "x": 1281.0625,
+        "y": 82.5,
+        "width": 110.9375,
+        "height": 36
+      },
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      },
+      "shot": "task",
+      "path": "/t/payout-rounding",
+      "signInShown": true,
+      "resumeButton": {
+        "x": 953.0625,
+        "y": 82.5,
+        "width": 110.9375,
+        "height": 36
+      },
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "shot": "work",
+      "path": "/work",
+      "signInShown": true,
+      "resumeButton": {
+        "x": 26,
+        "y": 135,
+        "width": 338,
+        "height": 44
+      },
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "shot": "task",
+      "path": "/t/payout-rounding",
+      "signInShown": true,
+      "resumeButton": {
+        "x": 26,
+        "y": 135,
+        "width": 338,
+        "height": 44
+      },
+      "overflow": false,
+      "errors": []
+    },
+    {
+      "shot": "after-resume",
+      "signInShown": false,
+      "resumedMessage": "Claude is signed in again, 1 task resumed"
+    }
+  ]
+}

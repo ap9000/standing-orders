@@ -26,7 +26,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync, rmSync, realpathSync, mkdirSync, readdirSync } from "node:fs";
 import { hostname } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { run, type ExecResult, type RunOptions } from "./exec.js";
 import { currentBootId, provenDeadByBootChange } from "./boot-identity.js";
 import type { Store, WorktreeRow } from "./store.js";
@@ -186,6 +186,37 @@ export function worktreeProcessOccupancy(path: string): { held: true; by: number
     const code = (error as NodeJS.ErrnoException).code;
     return code === "ESRCH" ? { held: false } : { held: true, by: pid };
   }
+}
+
+/**
+ * A checkout's uncommitted work as one patch — tracked changes against HEAD,
+ * then each untracked file against nothing (the lease note aside) — written
+ * to `file`. Nothing in the checkout is touched. Every road that is about to
+ * reset or clean a tree saves this first.
+ */
+export async function saveWorkPatch(runner: Runner, path: string, file: string, header: string): Promise<{ ok: true; file: string } | { ok: false; message: string }> {
+  const status = await runner(GIT, [...READ_ONLY, "status", "--porcelain", "--untracked-files=all"], { cwd: path, timeoutMs: WORKTREE_TIMEOUT_MS });
+  if (status.code !== 0) return { ok: false, message: `${path} could not be inspected before its work was saved` };
+  const untracked = status.stdout
+    .split("\n")
+    .filter(line => line.startsWith("?? ") && !line.trimEnd().endsWith(MARKER))
+    .map(line => line.slice(3).trim());
+  const tracked = await runner(GIT, [...READ_ONLY, "diff", "--binary", "HEAD"], { cwd: path, timeoutMs: WORKTREE_TIMEOUT_MS });
+  if (tracked.code !== 0) return { ok: false, message: `${path}: git diff failed while saving its work (${firstLine(tracked.stderr)})` };
+  const parts = [tracked.stdout];
+  for (const one of untracked) {
+    // --no-index exits 1 when the sides differ; that is the expected answer.
+    const diff = await runner(GIT, [...READ_ONLY, "diff", "--binary", "--no-index", "--", "/dev/null", one], { cwd: path, timeoutMs: WORKTREE_TIMEOUT_MS });
+    if (diff.code > 1) return { ok: false, message: `${path}: ${one} could not be captured (${firstLine(diff.stderr)})` };
+    parts.push(diff.stdout);
+  }
+  try {
+    mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+    writeFileSync(file, header + parts.join(""), { mode: 0o600 });
+  } catch (error) {
+    return { ok: false, message: `${path}: its work could not be written to ${file} (${error instanceof Error ? error.message : String(error)})` };
+  }
+  return { ok: true, file };
 }
 
 export class WorktreePool {
@@ -411,10 +442,13 @@ export class WorktreePool {
     // failed/interrupted source required here.
     if (prior.parentRun !== null) {
       const source = this.store.getRun(prior.parentRun);
-      if (source?.outcome === "failed" && source.reason === "interrupted") {
+      if (source?.outcome === "failed" && (source.reason === "interrupted" || source.reason === "no-handoff")) {
         return { runId: source.id, kind: "partial" };
       }
     }
+    // An attempt that stopped before its handoff (run 2085) left work it
+    // never got to hand off: kept in place for the next attempt, never reset.
+    if (prior.outcome === "failed" && prior.reason === "no-handoff") return { runId, kind: "partial" };
     if (prior.outcome !== null && (prior.outcome !== "failed" || prior.reason !== "interrupted")) return null;
     let names: string[];
     try {
@@ -439,31 +473,10 @@ export class WorktreePool {
    * run is on record). Nothing is deleted here.
    */
   private async keepLeftover(path: string, evidenceRoot: string, now: Date): Promise<{ ok: true; file: string } | { ok: false; message: string }> {
-    const status = await this.runner(GIT, [...READ_ONLY, "status", "--porcelain", "--untracked-files=all"], { cwd: path, timeoutMs: WORKTREE_TIMEOUT_MS });
-    if (status.code !== 0) return { ok: false, message: `${path} could not be inspected before reclaiming it` };
-    const untracked = status.stdout
-      .split("\n")
-      .filter(line => line.startsWith("?? ") && !line.trimEnd().endsWith(MARKER))
-      .map(line => line.slice(3).trim());
-    const tracked = await this.runner(GIT, [...READ_ONLY, "diff", "--binary", "HEAD"], { cwd: path, timeoutMs: WORKTREE_TIMEOUT_MS });
-    if (tracked.code !== 0) return { ok: false, message: `${path}: git diff failed while reclaiming (${firstLine(tracked.stderr)})` };
-    const parts = [tracked.stdout];
-    for (const file of untracked) {
-      // --no-index exits 1 when the sides differ; that is the expected answer.
-      const one = await this.runner(GIT, [...READ_ONLY, "diff", "--binary", "--no-index", "--", "/dev/null", file], { cwd: path, timeoutMs: WORKTREE_TIMEOUT_MS });
-      if (one.code > 1) return { ok: false, message: `${path}: ${file} could not be captured (${firstLine(one.stderr)})` };
-      parts.push(one.stdout);
-    }
     const lastRun = this.store.latestRunInWorktree(path);
     const dir = lastRun === null ? join(evidenceRoot, "leftover") : join(evidenceRoot, String(lastRun));
     const file = join(dir, lastRun === null ? `${now.toISOString().replace(/[:.]/g, "-")}.patch` : "leftover.patch");
-    try {
-      mkdirSync(dir, { recursive: true, mode: 0o700 });
-      writeFileSync(file, `# leftover from ${path}\n# kept ${now.toISOString()} before the tree was reset for the next attempt\n` + parts.join(""), { mode: 0o600 });
-    } catch (error) {
-      return { ok: false, message: `${path}: the leftover could not be written to ${file} (${error instanceof Error ? error.message : String(error)})` };
-    }
-    return { ok: true, file };
+    return saveWorkPatch(this.runner, path, file, `# leftover from ${path}\n# kept ${now.toISOString()} before the tree was reset for the next attempt\n`);
   }
 
   /** Back to HEAD, untracked gone, our lease note kept; proven clean after. */

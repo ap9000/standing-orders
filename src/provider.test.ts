@@ -40,8 +40,18 @@ describe("argv dialects", () => {
       "--max-turns", "40",
       "--permission-mode", "auto",
       "--model", "sonnet",
+      "--disallowedTools", "ScheduleWakeup,CronCreate,Monitor",
     ]);
     expect(adapterFor("claude").argv({ ...ASK, resumeSession: "s-1" })).toContain("--resume");
+  });
+
+  test("headless claude runs cannot schedule a wakeup, cron job or monitor (run 2085)", () => {
+    for (const phase of ["build", "repair", "plan"] as const) {
+      const argv = adapterFor("claude").argv({ ...ASK, phase, resumeSession: phase === "repair" ? "s-1" : null });
+      expect(argv[argv.indexOf("--disallowedTools") + 1]).toBe("ScheduleWakeup,CronCreate,Monitor");
+    }
+    // The reviewer already runs with Read as its only tool.
+    expect(adapterFor("claude").argv({ ...ASK, phase: "review" })).not.toContain("--disallowedTools");
   });
 
   test("codex: exec --json, sandboxed workspace-write, brief positional, resume a subcommand", () => {

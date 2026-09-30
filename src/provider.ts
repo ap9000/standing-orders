@@ -314,6 +314,9 @@ const CLAUDE_REVIEW_JSON_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+/** Claude's own tools that only make sense with a person to wake them. */
+export const HEADLESS_DISALLOWED_TOOLS: readonly string[] = ["ScheduleWakeup", "CronCreate", "Monitor"];
+
 const claudeArgv = (invocation: Invocation): string[] => [
   "-p",
   invocation.brief,
@@ -337,7 +340,11 @@ const claudeArgv = (invocation: Invocation): string[] => [
   ...(invocation.maxBudgetUsd === undefined ? [] : ["--max-budget-usd", String(invocation.maxBudgetUsd)]),
   ...(invocation.phase === "review"
     ? [...CLAUDE_REVIEW_ISOLATION_ARGV, "--json-schema", JSON.stringify(CLAUDE_REVIEW_JSON_SCHEMA)]
-    : [...(invocation.toolArgv ?? []), ...(invocation.fence !== undefined && invocation.fence.length > 0 ? ["--settings", claudeFenceSettings(invocation.fence)] : [])]),
+    : [
+        // Headless (run 2085): a wakeup, cron job or monitor needs a later
+        // turn that a -p process never gets. Denied at the harness too.
+        "--disallowedTools", HEADLESS_DISALLOWED_TOOLS.join(","),
+        ...(invocation.toolArgv ?? []), ...(invocation.fence !== undefined && invocation.fence.length > 0 ? ["--settings", claudeFenceSettings(invocation.fence)] : [])]),
 ];
 
 /** A claude envelope object, whichever line carried it. */

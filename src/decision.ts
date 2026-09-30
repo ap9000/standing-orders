@@ -439,6 +439,18 @@ export function parseHandoff(
  * then the one instruction. Written for an agent that already holds the
  * context — it needs the list of what failed, not the theory of why.
  */
+/**
+ * Every unattended agent runs headless (run 2085): its turn ending IS the
+ * process exiting, so a command left in the background, a wakeup or a loop
+ * never gets a second turn — the attempt just ends without its handoff.
+ */
+export const HEADLESS_RULE: readonly string[] = [
+  "- You run headless: run every command in the foreground and wait for it,",
+  "  however long it takes. Never background a command to wait on it, and",
+  "  never schedule a wakeup, cron job, monitor or loop. Your turn ending",
+  "  ends the run, so write the handoff before you stop.",
+];
+
 export function repairPrompt(problems: readonly Problem[], mailbox: string): string {
   return [
     `Your parked decision in ${mailbox} failed validation:`,
@@ -449,5 +461,6 @@ export function repairPrompt(problems: readonly Problem[], mailbox: string): str
     "JSON: { urgency: \"blocking\", recap, question, options: [{ id, label,",
     "consequence, reversible }], recommendation } — at least two options, every",
     "option's reversible stated explicitly, recommendation naming an option id.",
+    ...HEADLESS_RULE,
   ].join("\n");
 }

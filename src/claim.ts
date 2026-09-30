@@ -31,6 +31,7 @@
 import { randomUUID } from "node:crypto";
 import { attendedLivenessState, type AttendedLiveness } from "./liveness.js";
 import { authenticate } from "./runner.js";
+import { pauseForAuth } from "./provider-auth.js";
 import {
   DEFAULT_MAX_OPEN_DECISIONS,
   missingCapability,
@@ -1255,6 +1256,8 @@ export type FailureClass =
   | "agent-reported"
   | "retryable-infra"
   | "no-op"
+  /** Run 2085: stopped before its handoff; the work was kept and the retry resumes it. Strikes like no-op. */
+  | "no-handoff"
   | "commit-failure"
   | "unknown";
 
@@ -1266,6 +1269,7 @@ export type FailureDisposition =
   | { ok: true; disposition: "backoff"; strikes: number; until: string }
   | { ok: true; disposition: "stalled"; strikes: number; incidentId: number }
   | { ok: true; disposition: "commit-incident"; incidentId: number }
+  | { ok: true; disposition: "auth-expired"; provider: string }
   | { ok: false; reason: "fenced" | "unknown" | "stopped" };
 
 export type InterruptSeal =
@@ -1411,6 +1415,11 @@ export function finalizeFailureFenced(
       return refusal(db, leaseId);
     }
 
+    // A sign-in that no longer works is not the attempt's fault: no strike,
+    // no retry, the task back in the queue, and its provider paused.
+    if (failureClass !== "commit-failure" && run.terminalClass === "auth-expired") {
+      return { ok: true as const, ...sealAuthExpired(store, run, taskId, now) };
+    }
     store.finishRun(runId, { outcome: "failed", reason: failureClass, now });
 
     if (failureClass === "commit-failure") {
@@ -1485,7 +1494,10 @@ export function finalizeFailureFenced(
         taskRef: run.taskRef,
         ownerKind: "backoff",
         ownerId: String(run.taskRef),
-        reason: `retry ${strikes}/${MAX_STRIKES} after ${failureClass} — backing off ${Math.round(wait / 60_000)}m`,
+        // Run 2085: this failure is named in plain words wherever the hold shows.
+        reason: failureClass === "no-handoff"
+          ? `The agent stopped before handing off; its work was kept and it is being resumed (retry ${strikes}/${MAX_STRIKES} in ${Math.round(wait / 60_000)}m)`
+          : `retry ${strikes}/${MAX_STRIKES} after ${failureClass} — backing off ${Math.round(wait / 60_000)}m`,
         until,
       },
       now,
@@ -1495,13 +1507,29 @@ export function finalizeFailureFenced(
         source: { run: runId },
         dedupeKey: `run:${runId}:failed`,
         kind: "build-failed",
-        subject: `${taskId}: attempt failed (${failureClass}), retry ${strikes}/${MAX_STRIKES}`,
+        subject: failureClass === "no-handoff"
+          ? `${taskId}: the agent stopped before handing off; its work was kept, retry ${strikes}/${MAX_STRIKES}`
+          : `${taskId}: attempt failed (${failureClass}), retry ${strikes}/${MAX_STRIKES}`,
         body: `${oneLine(message, 200)}\nNext attempt no earlier than ${until.toISOString()}.`,
       },
       now,
     );
     return { ok: true as const, disposition: "backoff" as const, strikes, until: until.toISOString() };
   });
+}
+
+/**
+ * The auth-expired ending, inside the caller's fenced transaction (claim
+ * already released): the run fails as `auth-expired`, the task goes back to
+ * the queue with no strike and no backoff, and dispatch for the run's
+ * provider pauses — the first such run of an incident tells a person once.
+ */
+function sealAuthExpired(store: Store, run: Run, taskId: string, now: Date): { disposition: "auth-expired"; provider: string } {
+  store.finishRun(run.id, { outcome: "failed", reason: "auth-expired", now });
+  store.handle.prepare("UPDATE task SET state = 'queued', updated_at = ? WHERE id = ? AND state = 'running'").run(now.toISOString(), taskId);
+  pauseForAuth(store, { provider: run.provider, authMode: run.authMode ?? null, runId: run.id, taskRef: run.taskRef, now });
+  store.bumpWake();
+  return { disposition: "auth-expired", provider: run.provider };
 }
 
 /** Untrusted text on its way into a subject line: one line, bounded. */
@@ -1922,6 +1950,7 @@ export type PlanFailureDisposition =
   | { ok: true; disposition: "malformed-incident"; incidentId: number }
   | { ok: true; disposition: "backoff"; strikes: number }
   | { ok: true; disposition: "exhausted"; incidentId: number; strikes: number }
+  | { ok: true; disposition: "auth-expired"; provider: string }
   | { ok: false; reason: "fenced" | "unknown" | "stopped" };
 
 /**
@@ -1972,6 +2001,7 @@ export function finalizePlanFailureFenced(
       store.finishRun(runId, { outcome: "refused", reason: "fenced", now });
       return refusal(db, leaseId);
     }
+    if (kind === "failure" && run.terminalClass === "auth-expired") return { ok: true as const, ...sealAuthExpired(store, run, taskId, now) };
     const malformedKind = args.malformed === "decision" ? "malformed-decision" : "malformed-plan";
     store.finishRun(runId, { outcome: "failed", reason: kind === "malformed" ? malformedKind : oneLine(message, 120), now });
 
@@ -2138,6 +2168,7 @@ export type ScoutFailureDisposition =
   | { ok: true; disposition: "malformed-incident"; incidentId: number }
   | { ok: true; disposition: "backoff"; strikes: number }
   | { ok: true; disposition: "stalled"; incidentId: number; strikes: number }
+  | { ok: true; disposition: "auth-expired"; provider: string }
   | { ok: false; reason: "fenced" | "unknown" | "stopped" };
 
 /**
@@ -2184,6 +2215,7 @@ export function finalizeScoutFailureFenced(
       store.finishRun(runId, { outcome: "refused", reason: "fenced", now });
       return refusal(db, leaseId);
     }
+    if (kind === "failure" && run.terminalClass === "auth-expired") return { ok: true as const, ...sealAuthExpired(store, run, taskId, now) };
     const malformedKind = args.malformed === "decision" ? "malformed-decision" : "malformed-report";
     store.finishRun(runId, { outcome: "failed", reason: kind === "malformed" ? malformedKind : oneLine(message, 120), now });
 

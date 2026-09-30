@@ -2,6 +2,8 @@
  * not verify artifacts, inspect processes, or authorize task operations. */
 import { createHash } from 'node:crypto';
 import { readProjectAccess } from './project-access.js';
+import { providerName, signInReason } from './provider-auth.js';
+import type { ProviderId } from './provider.js';
 import { scopeTermsProblem, type Store, type TaskState } from './store.js';
 import type { AssignmentSnapshot } from './assignment.js';
 import type { WorkAction, WorkSummaryAccess } from './work-summary.js';
@@ -117,6 +119,10 @@ const PROJECTION = `WITH RECURSIVE admitted AS MATERIALIZED (
     (SELECT id FROM run WHERE task_ref=c.ref_id AND lease_id=c.live_lease AND outcome IS NULL ORDER BY id DESC LIMIT 1) live_run,
     h.owner_kind hold_kind,h.reason hold_reason,h.until hold_until,
     sc.task_id scope_id,sc.digest,sc.approved_at,sc.proposed_at,sc.profile_state,
+    (SELECT p.provider||':'||p.auth_mode FROM provider_auth_pause p WHERE p.lifted_at IS NULL AND p.provider IN (
+      SELECT json_extract(sc.approved_profile_json,'$.provider') WHERE json_valid(sc.approved_profile_json)
+      UNION ALL SELECT json_extract(leg.value,'$.provider') FROM json_each(CASE WHEN json_valid(sc.approved_route_json) THEN sc.approved_route_json ELSE '{}' END,'$.legs') leg
+        WHERE json_extract(leg.value,'$.phase')='build')) signed_out,
     (sc.approved_at IS NOT NULL AND sc.approved_by IS NOT NULL AND sc.approved_digest=sc.digest) approved,
     (sc.approval_basis IS NOT 'mode' OR EXISTS(SELECT 1 FROM operating_mode om JOIN approver signer ON signer.name=om.signed_by
       WHERE om.repo=c.repo AND om.digest=sc.mode_digest AND om.revoked_at IS NULL AND om.absolute_expiry>$now
@@ -211,15 +217,16 @@ const PROJECTION = `WITH RECURSIVE admitted AS MATERIALIZED (
     WHEN worker_count=0 THEN 'no-worker-registered'
     WHEN online_count=0 THEN 'no-worker-online'
     WHEN available_count=0 THEN 'worker-at-capacity'
+    WHEN signed_out IS NOT NULL AND NOT (plan='requested' AND NOT COALESCE(approved AND dispatch_approval,0)) THEN 'signed-out'
     WHEN (plan='requested' OR park_rate>0) AND (SELECT COUNT(*) FROM decision WHERE state<>'answered' AND answered_at IS NULL)>=5 THEN 'decision-queue'
     WHEN plan='requested' AND NOT COALESCE(approved AND dispatch_approval,0) THEN 'planning-ready'
     WHEN deliverable='report' THEN 'scouting-ready'
     ELSE 'queued' END code
   FROM checked f
 ), ranked AS MATERIALIZED (
-  SELECT c.*,code NOT IN ('cancelled','complete','running','updating','retry-scheduled','waiting-dependency','worker-at-capacity','planning-ready','scouting-ready','queued') needs,
+  SELECT c.*,code NOT IN ('cancelled','complete','running','updating','retry-scheduled','waiting-dependency','worker-at-capacity','signed-out','planning-ready','scouting-ready','queued') needs,
     CASE WHEN code='complete' THEN 3 WHEN code='cancelled' THEN 4 WHEN code='running' THEN 1
-      WHEN code IN ('updating','retry-scheduled','waiting-dependency','worker-at-capacity','planning-ready','scouting-ready','queued') THEN 2 ELSE 0 END rank,
+      WHEN code IN ('updating','retry-scheduled','waiting-dependency','worker-at-capacity','signed-out','planning-ready','scouting-ready','queued') THEN 2 ELSE 0 END rank,
     CASE WHEN code='complete' THEN completed.at ELSE family_updated END sort_at,
     completed.actor checked_actor,completed.at checked_at,completed.outcome checked_digest
   FROM classified c LEFT JOIN action_ledger completed ON completed.id=c.checked_id WHERE ($state IS NULL OR c.state=$state) AND ($leadId IS NULL OR EXISTS(SELECT 1 FROM team_task_owner own WHERE own.task_ref=c.root_ref AND own.lead=$leadId))
@@ -313,7 +320,7 @@ export function workIndexPage(store: Store, now: Date, access: WorkSummaryAccess
     'earlier_id',earlier_id,'broken',broken,'live_run',live_run,'result_id',page_result_id,'result_outcome',(SELECT outcome FROM run WHERE id=page_result_id),
     'publication_url',(SELECT pr_url FROM publication WHERE run=page_result_id),'code',code,'needs',needs,'family_running',family_running,'rank',rank,'sort_at',sort_at,
     'checked_actor',checked_actor,'checked_at',checked_at,'checked_digest',checked_digest,'question_id',question_id,
-    'dependency_id',dependency_id,'dependency_state',dependency_state,'custody_unresolved',custody_unresolved,'hold_kind',hold_kind,'hold_reason',substr(hold_reason,1,300),'stop_run',stop_run,'unfinished',unfinished,
+    'dependency_id',dependency_id,'dependency_state',dependency_state,'custody_unresolved',custody_unresolved,'hold_kind',hold_kind,'hold_reason',substr(hold_reason,1,300),'stop_run',stop_run,'unfinished',unfinished,'signed_out',signed_out,
     'question_run',(SELECT run FROM decision WHERE id=page.question_id),
     'question_task',(SELECT r.external_id FROM decision d JOIN run ON run.id=d.run JOIN task_ref r ON r.id=run.task_ref WHERE d.id=page.question_id)) FROM page`)
     .all({ ...parameters(now, access, options), $cursorRoot: cursor?.root ?? 0, $cursorRank: cursor?.rank ?? 0, $cursorAt: cursor?.at ?? '', $limit: limit + 1, $recent: new Date(now.getTime()-86_400_000).toISOString() });
@@ -368,6 +375,7 @@ function itemOf(row: Row, principal: WorkSummaryAccess['principal']): WorkIndexI
     'no-worker-registered': ['Needs your decision', 'No connected builder includes this project.', 'start-worker', 'Check connection'],
     'no-worker-online': ['Needs your decision', 'The builder has stopped checking in.', 'start-worker', 'Check connection'],
     'worker-at-capacity': ['Waiting for worker capacity', 'This task starts when an eligible worker has capacity.', null, ''],
+    'signed-out': ['Waiting for a sign-in', 'Its agent needs you to sign in again; it starts on its own once that works.', null, ''],
     'retry-scheduled': ['Retry scheduled', 'The attempt is backing off before retrying.', null, ''],
     updating: ['Waiting for app update', 'New work resumes after the update.', null, ''],
     'planning-ready': ['Planner ready', 'A connected worker can draft the plan.', null, ''],
@@ -375,6 +383,11 @@ function itemOf(row: Row, principal: WorkSummaryAccess['principal']): WorkIndexI
     queued: ['Ready to run', 'A connected worker can claim this task.', null, ''],
   };
   let [label, detail, actionCode, actionLabel] = words[code]!;
+  if (code === 'signed-out') {
+    const [provider = '', authMode = 'subscription'] = (s(row, 'signed_out') ?? '').split(':');
+    label = signInReason({ provider: provider as ProviderId, authMode: authMode === 'api-key' ? 'api-key' : 'subscription' });
+    detail = `It starts again on its own once ${providerName(provider)} works.`;
+  }
   if (code === 'running' && n(row, 'version_count') > 1) label = 'Revising';
   if (code === 'terminal-dependency' && s(row, 'dependency_id') !== null) detail = `${s(row, 'dependency_id')} ${s(row, 'dependency_state') === 'cancelled' ? 'was cancelled' : 'failed'} before it finished.`;
   if (code === 'result-needs-attention' && n(row, 'custody_unresolved')) detail = 'A process exit is not recorded. Open the result to check whether its work has stopped.';

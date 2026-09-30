@@ -3,7 +3,7 @@ import { disposeBuildOutcome } from "./dispose.js";
 import { presetTerms, modeTermsJson, modeDigestOf } from "./modes.js";
 import { isVerificationReceipt, verificationEvidence } from "./verification-evidence.js";
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
-import { agentExitWords, build, PROTECTED, proveApprovedProfile, verificationExecutableMissing, type Runner } from "./builder.js";
+import { agentExitWords, build, handoffResumePrompt, NO_HANDOFF_WORDS, PROTECTED, proveApprovedProfile, verificationExecutableMissing, type Runner } from "./builder.js";
 import { routeDigestOf } from "./phase-routing.js";
 import { openStore, type Store } from "./store.js";
 import { register, retireRunnerIfCurrent } from "./runner.js";
@@ -11,7 +11,8 @@ import { acquire, currentClaim, reap } from "./claim.js";
 import { propose, approve, addApprover, profileDigestOf, type ExecutionProfile } from "./scope.js";
 import { resetAttestationCache } from "./attest.js";
 import { PROOF_LIMITS } from "./proof.js";
-import { HANDOFF_LIST_CAP, HANDOFF_PAYLOAD_CAP } from "./decision.js";
+import { HANDOFF_LIST_CAP, HANDOFF_PAYLOAD_CAP, HEADLESS_RULE, repairPrompt } from "./decision.js";
+import { execFileSync } from "node:child_process";
 import { readVerifiedArtifact, writeEvidenceFile } from "./evidence.js";
 import { createHash as sha } from "node:crypto";
 import {
@@ -40,7 +41,7 @@ function bootstrapApprover(store: Store): string {
 }
 const AGENT_SAID = JSON.stringify({ result: "Added the guard and a test for it." });
 
-import { mkdtempSync, writeFileSync as writeSync2 } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync as writeSync2 } from "node:fs";
 import { tmpdir as tmpdir2 } from "node:os";
 import { join as join2 } from "node:path";
 
@@ -1387,8 +1388,9 @@ describe("what the builder does afterwards", () => {
       return { ...OK };
     }, silent);
 
-    expect(result).toMatchObject({ ok: false, reason: "no-op" });
-    if (!result.ok) expect(result.message).toContain("without writing its handoff");
+    // With changes in the tree it is named plainly and the work is kept (run 2085).
+    expect(result).toMatchObject({ ok: false, reason: "no-handoff" });
+    if (!result.ok) expect(result.message.startsWith(NO_HANDOFF_WORDS)).toBe(true);
   });
 
   test("an agent that commits for itself is refused — the machine commits", async () => {
@@ -4534,5 +4536,150 @@ describe("bringWorktreeTo against real git (v69)", () => {
       expect(readFileSync(join(repo, ".standing-orders-mailbox"), "utf8")).toBe("untracked protocol file");
       expect(sh("status", "--porcelain").split("\n").filter(line => !line.startsWith("??")).sort()).toEqual(["A  d.txt", "M  dir/c.txt", "R  a.txt -> z.txt", "D  b.txt"].sort());
     } finally { rmSync(repo, { recursive: true, force: true }); }
+  });
+});
+
+describe("an agent that stops before its handoff keeps its work (run 2085)", () => {
+  let store: Store;
+  let taskRef: number;
+  let evidence: string;
+
+  const sh = (...args: string[]) => execFileSync("git", ["-C", wt, ...args], { encoding: "utf8", env: {
+    ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@x", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@x",
+  } }).trim();
+  // Real git in the worktree; the project clone's questions answer from it too.
+  const realGit: Runner = async (file, args, options) => {
+    const { run } = await import("./exec.js");
+    if (options?.cwd === REPO && args.includes("symbolic-ref")) return { ...OK, stdout: "main\n" };
+    return run(file, args, { ...options, cwd: options?.cwd === REPO ? wt : options?.cwd });
+  };
+  const doneFrom = (prompt: string): string => /STANDING-ORDERS-DONE-[0-9a-f]{16}\.json/.exec(prompt)?.[0] ?? "";
+  const promptOf = (args: readonly string[]): string => args[args.indexOf("-p") + 1] ?? "";
+
+  beforeEach(() => {
+    store = openStore(":memory:");
+    store.setPhaseConfig("installation", "build", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
+    store.setPhaseConfig("installation", "plan", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
+    store.setPhaseConfig("installation", "review", "claude", "sonnet", "test", new Date("2026-08-11T00:00:00.000Z"));
+    const token = bootstrapApprover(store);
+    store.createTask({ id: "t-1", title: "the work" }, T0);
+    taskRef = store.refFor("built-in", "t-1").id;
+    register(store, { name: "builder-1", host: "h", capacity: 9, repos: [REPO], now: T0, newToken: () => tok("builder-1") });
+    store.placeTask(taskRef, REPO);
+    store.saveWorktree({
+      path: wt, repo: REPO, branch: "feat/a", runner: "builder-1", taskRef,
+      createdAt: T0.toISOString(), leasedAt: T0.toISOString(), releasedAt: null, verified: true,
+    });
+    propose(store, { taskId: "t-1", goal: "rename the internals", now: T0 });
+    approve(store, "t-1", "alex", T0, store.getScope("t-1")!.digest, token);
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: T0, ttlMs: 60 * 60_000, newLeaseId: () => "test-lease" });
+    evidence = mkdtempSync(join2(tmpdir2(), "so-no-handoff-ev-"));
+    sh("init", "-q", "-b", "main"); sh("config", "user.name", "t"); sh("config", "user.email", "t@x");
+    writeSync2(join2(wt, "names.ts"), "export const name = \"old\";\n");
+    sh("add", "."); sh("commit", "-q", "-m", "base");
+    sh("checkout", "-q", "-b", "feat/a");
+  });
+
+  afterEach(() => store.close());
+
+  const buildWith = (agent: Runner) => {
+    const runId = store.startRun({
+      taskRef, leaseId: "test-lease", runner: "builder-1", branch: "feat/a", worktree: wt, now: T0,
+      ...presented(store, taskRef, "builder"),
+    });
+    return { runId, result: build(store, {
+      taskId: "t-1", taskRef, runner: "builder-1", leaseId: "test-lease", worktree: wt, branch: "feat/a",
+      now: T0, runId, evidenceRoot: evidence, agent, git: realGit,
+    }) };
+  };
+
+  test("the stopped turn is resumed in the same session and worktree, and its changes are committed", async () => {
+    const calls: { args: string[]; cwd: string | undefined }[] = [];
+    let done = "";
+    const agent: Runner = async (_file, args, options) => {
+      calls.push({ args: [...args], cwd: options?.cwd });
+      if (calls.length === 1) {
+        done = doneFrom(promptOf(args));
+        // Edits, an untracked file, then the turn ends — no handoff.
+        writeSync2(join2(wt, "names.ts"), "export const name = \"toolroll\";\n");
+        writeSync2(join2(wt, "renamed.ts"), "export const renamed = true;\n");
+        return { ...OK, stdout: JSON.stringify({ result: "Tests are running in the background.", session_id: "sess-2085" }) };
+      }
+      // The resumed turn still sees the first turn's work, then hands off.
+      expect(readFileSync(join2(wt, "renamed.ts"), "utf8")).toBe("export const renamed = true;\n");
+      writeSync2(join2(wt, done), JSON.stringify({ version: 2, status: "completed", conclusion: "Renamed the internals." }));
+      return { ...OK, stdout: JSON.stringify({ result: "Handed off.", session_id: "sess-2085" }) };
+    };
+    const { runId, result } = buildWith(agent);
+    expect(await result).toMatchObject({ ok: true, committed: true });
+
+    expect(calls).toHaveLength(2);
+    const resumed = calls[1]!;
+    expect(resumed.args[resumed.args.indexOf("--resume") + 1]).toBe("sess-2085");
+    expect(resumed.cwd).toBe(wt);
+    expect(promptOf(resumed.args)).toContain(`Your last turn ended before the handoff. Finish the task and write ${done}.`);
+    expect(promptOf(resumed.args)).toContain("You run headless");
+    // The builder's own brief carries the headless rule too.
+    expect(promptOf(calls[0]!.args)).toContain(HEADLESS_RULE.join("\n"));
+    // Both turns deny the tools that need a later turn.
+    for (const call of calls) expect(call.args[call.args.indexOf("--disallowedTools") + 1]).toBe("ScheduleWakeup,CronCreate,Monitor");
+    // The work survived into the machine's commit.
+    expect(sh("show", "HEAD:names.ts")).toBe("export const name = \"toolroll\";");
+    expect(sh("show", "HEAD:renamed.ts")).toBe("export const renamed = true;");
+    expect(sh("status", "--porcelain", "--", "names.ts", "renamed.ts")).toBe("");
+    const child = store.runsFor(taskRef).find(one => one.parentRun === runId && one.role === "repair");
+    expect(child).toMatchObject({ sessionId: "sess-2085", worktree: wt, outcome: "built", reason: "resumed-handoff" });
+  });
+
+  test("when the resumed turn also stops, the attempt says so plainly and the work stays, saved to evidence first", async () => {
+    let turns = 0;
+    const agent: Runner = async () => {
+      turns++;
+      if (turns === 1) writeSync2(join2(wt, "renamed.ts"), "export const renamed = true;\n");
+      return { ...OK, stdout: JSON.stringify({ result: "Waiting for a wakeup.", session_id: "sess-2085" }) };
+    };
+    const { runId, result } = buildWith(agent);
+    const settled = await result;
+    expect(settled).toMatchObject({ ok: false, reason: "no-handoff", message: NO_HANDOFF_WORDS });
+    // Every allowed resume turn was tried; the validation was not weakened.
+    expect(turns).toBe(1 + 2);
+    expect(readFileSync(join2(wt, "renamed.ts"), "utf8")).toBe("export const renamed = true;\n");
+    expect(sh("rev-list", "--count", "main..feat/a")).toBe("0");
+    const patch = readFileSync(join2(evidence, String(runId), "unhanded-work.patch"), "utf8");
+    expect(patch).toContain("+export const renamed = true;");
+  });
+
+  test("when the session cannot be resumed, the work is kept as a work-in-progress commit on the branch", async () => {
+    const agent: Runner = async () => {
+      writeSync2(join2(wt, "names.ts"), "export const name = \"toolroll\";\n");
+      return { ...OK, stdout: JSON.stringify({ result: "No session to name." }) };
+    };
+    const { runId, result } = buildWith(agent);
+    const settled = await result;
+    expect(settled).toMatchObject({ ok: false, reason: "no-handoff" });
+    if (!settled.ok) expect(settled.message.startsWith(NO_HANDOFF_WORDS)).toBe(true);
+    expect(sh("rev-list", "--count", "main..feat/a")).toBe("1");
+    expect(sh("show", "feat/a:names.ts")).toBe("export const name = \"toolroll\";");
+    expect(sh("log", "-1", "--format=%B")).toContain("Work in progress: the agent stopped before handing off.");
+    expect(readFileSync(join2(evidence, String(runId), "unhanded-work.patch"), "utf8")).toContain("toolroll");
+  });
+
+  test("a clean tree with no handoff keeps the ordinary protocol failure", async () => {
+    const agent: Runner = async () => ({ ...OK, stdout: JSON.stringify({ result: "Nothing done.", session_id: "sess-1" }) });
+    const { result } = buildWith(agent);
+    const settled = await result;
+    expect(settled).toMatchObject({ ok: false, reason: "no-op" });
+    if (!settled.ok) expect(settled.message).toContain("without writing its handoff");
+  });
+});
+
+describe("the headless rule rides every builder, revision and repair prompt", () => {
+  test("the park repair prompts carry it", () => {
+    const problems = [{ reason: "bad", message: "bad field" }];
+    expect(repairPrompt(problems, "PARK.json")).toContain(HEADLESS_RULE.join("\n"));
+    expect(handoffResumePrompt("DONE.json")).toContain(HEADLESS_RULE.join("\n"));
+    expect(HEADLESS_RULE.join(" ")).toMatch(/foreground/);
+    expect(HEADLESS_RULE.join(" ")).toMatch(/wakeup/);
+    expect(HEADLESS_RULE.join(" ")).toMatch(/write the handoff before you stop/);
   });
 });

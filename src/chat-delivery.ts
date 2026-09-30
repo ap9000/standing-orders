@@ -767,16 +767,18 @@ export async function planChatNotifications(
         notification.createdAt >= binding.created &&
         notification.resolvedAt === null &&
         // A flow decision for "anyone who approves" reaches every approver who can see the project.
-        (personal ? notification.recipient === binding.approver : notification.taskId || notification.kind === "flow-decision") &&
-        notification.project &&
-        repos.includes(notification.project)
+        // A notification addressed to this person reaches them whatever project
+        // their channel follows (a sign-in pause is the installation's, v108).
+        (personal
+          ? notification.recipient === binding.approver && (notification.project === null || repos.includes(notification.project))
+          : (notification.taskId || notification.kind === "flow-decision") && notification.project !== null && repos.includes(notification.project))
       ) {
         const run = store.telegramProgressRun(notification);
         const id = chatHash(
             `${options.state.channel}:notice:${binding.id}:${notification.id}`,
           ),
           now = nowOf(options);
-        if (run && notification.taskId && isTelegramProgressNotification(notification)) {
+        if (run && notification.taskId && notification.project !== null && isTelegramProgressNotification(notification)) {
           const card = telegramProgressCard(
             store,
             store.getRun(run.id)!,
