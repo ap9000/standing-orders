@@ -70,6 +70,11 @@ export function assignmentBrief(assignment: AssignmentSnapshot | null) {
     publication: assignment.publication, deployment: assignment.deployment };
 }
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+/** A lookup added with lead-quiet, read safely: a deploy proves completion with this code over the INSTALLED runtime's
+ * store, before this version's migration, so the method (or its table) may not exist yet. Absent reads as none. */
+function olderStoreSafe<T>(read: () => T, absent: T): T {
+  try { return read(); } catch (error) { if (error instanceof TypeError || /no such (table|column)/.test(String(error))) return absent; throw error; }
+}
 /** A check as the receipt digest seals it: presentation-only fields (check-levels.ts) left out. */
 const sealedChecks = ({ level: _level, running: _running, ...proof }: AssignmentChecks): Omit<AssignmentChecks, "level" | "running"> => proof;
 const OWNER_ACTION = "assignment claimed";
@@ -210,7 +215,7 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
   if (family.problem !== null) state = "needs-decision";
   else if (current.state === "cancelled") {
     state = "cancelled";
-    const successor = store.replacementOf(current.id) ?? store.replacementOf(family.root.id);
+    const successor = olderStoreSafe(() => store.replacementOf(current.id) ?? store.replacementOf(family.root.id), null);
     detail = successor === null ? "This assignment was cancelled." : `${replacedWords(successor)}.`;
     primaryAction = successor === null ? { code: "inspect-task", label: "View assignment", target: { taskId: current.id, runId: null, decisionId: null }, access: "read", retry: "read-again" }
       : { code: "inspect-task", label: `Open ${successor}`, target: { taskId: successor, runId: null, decisionId: null }, access: "read", retry: "read-again" };
@@ -241,7 +246,7 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
     // The exact result digest still fences changes to work, scope and history.
     if (checked !== undefined) {
       const rootRef = store.lookupRef(family.root.id);
-      const byLead = rootRef !== null && store.taskActs(rootRef.id).filter(one => one.act === "completed").at(-1)?.lead === true;
+      const byLead = rootRef !== null && olderStoreSafe(() => store.taskActs(rootRef.id), []).filter(one => one.act === "completed").at(-1)?.lead === true;
       completion = { actor: String(checked["actor"]), at: String(checked["at"]), digest: receipt.digest, ...(byLead ? { lead: true as const } : {}) };
       state = "complete";
       primaryAction = { ...primaryAction, label: completionKind === "research-report" ? "Read report" : "Open result" };
