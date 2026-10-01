@@ -4,7 +4,7 @@
  * take a step-up.
  */
 import { bytesWords } from "./storage.js";
-import { PERIOD_CHOICES, RETENTION_KINDS, countWords, periodWords, type RetentionCount, type RetentionPeriods } from "./retention.js";
+import { RETENTION_KINDS, countWords, periodChoices, periodLabel, type RetentionCount, type RetentionKind, type RetentionPeriods } from "./retention.js";
 
 const e = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 
@@ -14,7 +14,8 @@ export const RETENTION_CSS = `.retention{max-width:720px;min-width:0}.retention-
   `.retention .step-up{display:grid;gap:4px;font-size:.8125rem;margin:16px 0 8px;max-width:20rem}.retention .step-up input{min-height:44px}.retention button{justify-self:start;min-height:44px}` +
   `@media (max-width:560px){.retention .kind{grid-template-columns:minmax(0,1fr)}.retention .kind select{grid-column:1;grid-row:auto}}`;
 
-export type RetentionView = { periods: RetentionPeriods; next: RetentionCount[]; lastSweep: string | null; csrf: string };
+/** `chosen`: the kinds someone chose a period for; the rest keep their default. */
+export type RetentionView = { periods: RetentionPeriods; chosen: readonly RetentionKind[]; next: RetentionCount[]; lastSweep: string | null; csrf: string };
 
 const listWords = (parts: string[]) => parts.length < 2 ? parts.join("") : `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}`;
 
@@ -31,8 +32,8 @@ export function retentionHtml(view: RetentionView, notice: { said?: string | nul
   const note = notice.problem ? `<p class="problem" role="alert">${e(notice.problem)}</p>` : notice.said ? `<p role="status">${e(notice.said)}</p>` : "";
   const rows = RETENTION_KINDS.map(({ kind, label, detail }) => {
     const current = view.periods[kind];
-    const choices = PERIOD_CHOICES.includes(current) ? PERIOD_CHOICES : [...PERIOD_CHOICES.slice(0, -1), current, null].sort((a, b) => (a ?? Infinity) - (b ?? Infinity));
-    const options = choices.map(days => `<option value="${days === null ? "forever" : days}"${days === current ? " selected" : ""}>${days === null ? "Forever" : `${periodWords(days)[0]!.toUpperCase()}${periodWords(days).slice(1)}`}</option>`).join("");
+    const chosen = view.chosen.includes(kind);
+    const options = periodChoices(kind, current).map(days => `<option value="${days === null ? "forever" : days}"${days === current ? " selected" : ""}>${e(periodLabel(kind, days, chosen || days !== current))}</option>`).join("");
     return `<div class="kind" data-kind="${kind}"><label class="name" for="keep-${kind}">${e(label)}</label><p class="meta">${e(detail)}</p><select id="keep-${kind}" name="${kind}">${options}</select></div>`;
   }).join("");
   const last = view.lastSweep === null ? "" : ` Last sweep ${e(view.lastSweep.slice(0, 10))}.`;
@@ -40,5 +41,5 @@ export function retentionHtml(view: RetentionView, notice: { said?: string | nul
     `<form method="post" action="/settings/retention"><input type="hidden" name="csrf" value="${e(view.csrf)}">${rows}` +
     `<label class="step-up">Your Toolroll password<input type="password" name="password" autocomplete="current-password" required></label>` +
     `<button type="submit">Save</button></form>` +
-    `<p class="meta">Never removed: the action ledger, and anything a task still needs (unfinished tasks, results not yet completed, anything on hold).</p></article>`;
+    `<p class="meta">Never removed: the action ledger, and anything a task still needs (unfinished tasks, results Ready for review, anything on hold).</p></article>`;
 }

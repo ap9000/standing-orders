@@ -7,7 +7,7 @@ import { evidencePack, exportDay, ledgerExportChunks, standaloneEvidenceHtml, ty
 import { matchesOutsideCheckpoint } from "./ledger-chain.js";
 import { CLEANUP_CHOICES, bytesWords, cleanupWords, parseCleanup, storageReport } from "./storage.js";
 import { checkoutPlan, cleanCheckouts, discardCheckout, whyWords, type CheckoutItem, type CheckoutPlan } from "./checkout-cleanup.js";
-import { MIN_DAYS, RETENTION_KINDS, countWords, dailyRetention, isRetentionKind, lastSweepAt, parsePeriod, periodWords, retentionPlan, sweepWords, type RetentionKind, type RetentionSweep } from "./retention.js";
+import { MIN_DAYS, RETENTION_KINDS, countWords, dailyRetention, isRetentionKind, lastSweepAt, parsePeriod, periodLabel, periodWords, retentionPlan, sweepWords, type RetentionKind, type RetentionSweep } from "./retention.js";
 import { checkPolicy, parseList, policyParts, type SavedPolicy } from "./policy.js";
 import { billingOf, budgetHoldWords, budgetLabel, budgetStates, monthNamed, monthOf, spendItems, teammateNames, usd as spendUsd, type BudgetAgent, type BudgetHold } from "./spend.js";
 import { spendCsv } from "./spend-ui.js";
@@ -410,7 +410,7 @@ export const OPERATE_HELP = `toolroll — operating the queue
   toolroll notifications digest <HH:MM>|off   one evening message: what finished, what waits, what failed
   toolroll notifications mute|unmute --repo <p>   no pings for a project; the console and digest keep it
   toolroll retention show|preview    how long evidence, checkout records, chat and notifications are kept; what the daily sweep would remove
-  toolroll retention set <kind> <period>   evidence|checkouts|chat|notifications, 30d|1y|forever (instance operator)
+  toolroll retention set <kind> <period>   evidence|checkouts|chat|notifications, 1d|30d|1y|forever (instance operator)
   toolroll backup now|list          back the database up now; list backups and how the last ones went
   toolroll restore <file> [--dry-run]  put a backup back (Toolroll stopped; the current database is kept)
   toolroll policy show|set          the organisation policy; an instance operator sets it with --providers claude,codex|any,
@@ -13244,9 +13244,11 @@ async function retentionCommand(positional: readonly string[], flags: Map<string
   const label = (kind: RetentionKind) => RETENTION_KINDS.find(one => one.kind === kind)!.label;
   if (action === undefined || action === "show") {
     const periods = store.retentionPeriods();
+    const chosen = store.retentionChosen();
+    const defaulted = RETENTION_KINDS.map(one => one.kind).filter(kind => !(kind in chosen));
     const last = lastSweepAt(store);
-    return succeed(context.write, context.json, command, { periods, lastSweep: last }, () => [
-      ...RETENTION_KINDS.map(one => `  ${one.kind.padEnd(14)} ${periodWords(periods[one.kind]).padEnd(9)} ${one.label}`),
+    return succeed(context.write, context.json, command, { periods, defaulted, lastSweep: last }, () => [
+      ...RETENTION_KINDS.map(one => `  ${one.kind.padEnd(14)} ${periodLabel(one.kind, periods[one.kind], one.kind in chosen).toLowerCase().padEnd(18)} ${one.label}`),
       last === null ? "No sweep yet; the worker runs one a day." : `Last sweep ${last.slice(0, 16).replace("T", " ")} UTC.`,
     ]);
   }
@@ -13261,10 +13263,10 @@ async function retentionCommand(positional: readonly string[], flags: Map<string
   if (action !== "set") return fail(context.write, context.json, command, "usage", "Use retention show, retention preview or retention set <kind> <period>.", EXIT.usage);
   const [kind, period, ...extra] = rest;
   if (kind === undefined || !isRetentionKind(kind) || period === undefined || extra.length > 0) {
-    return fail(context.write, context.json, command, "usage", `Use retention set <${RETENTION_KINDS.map(one => one.kind).join("|")}> <days, like 90d or 1y, or forever>.`, EXIT.usage);
+    return fail(context.write, context.json, command, "usage", `Use retention set <${RETENTION_KINDS.map(one => one.kind).join("|")}> <days, like 1d, 90d or 1y, or forever>.`, EXIT.usage);
   }
   const days = parsePeriod(period);
-  if (days === undefined) return fail(context.write, context.json, command, "usage", `A period is forever, or ${MIN_DAYS} days to 10 years (90d, 12w, 1y).`, EXIT.usage);
+  if (days === undefined) return fail(context.write, context.json, command, "usage", `A period is forever, or ${MIN_DAYS} day to 10 years (1d, 90d, 12w, 1y).`, EXIT.usage);
   const acting = await askCredentials(flags, context);
   const verified = acting === null ? null : authenticateApprover(store, acting.name, acting.token);
   if (acting === null || verified === null || !verified.ok || !store.isInstanceOperator(acting.name)) {

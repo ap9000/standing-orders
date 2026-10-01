@@ -305,7 +305,7 @@ import { checkoutPlan, cleanCheckouts, discardCheckout, previewDigest } from "./
 import { UPDATES_CSS, newerThan, updateStepsHtml, updatesHtml, updatesScript } from "./toolroll-update-ui.js";
 import { abandonRuntimeUpdate, launchRuntimeUpdate, markWhatsNewSeen, prepareRuntimeUpdate, requestRuntimeUpdateCancel, runningWorkWords, runtimeUpdateStatus, runtimeUpdateTerminal, currentRuntime, type When } from "./toolroll-update.js";
 import { latestVersionNow } from "./releases.js";
-import { RETENTION_KINDS, lastSweepAt, parsePeriod, retentionPlan } from "./retention.js";
+import { RETENTION_KINDS, lastSweepAt, parsePeriod, periodChoices, retentionPlan, type RetentionKind } from "./retention.js";
 import { EXPORT_CSS, dataExportHtml } from "./export-ui.js";
 import { buildExport, exportZip } from "./export.js";
 import { PROJECT_DELETE_CSS, projectDeleteConfirmHtml, projectSettingsHtml, type ProjectSettingsView } from "./project-delete-ui.js";
@@ -4124,7 +4124,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     // v105: Settings → Retention, how long each kind of data is kept. An instance operator's page.
     if (url.pathname === "/settings/retention") {
       if (who.via !== "cookie" || !store.isInstanceOperator(who.name)) return refuse(response, who, 403, "An instance operator sets retention.", "/settings");
-      const view = { periods: store.retentionPeriods(), next: retentionPlan(store, evidenceRoot, now).counts, lastSweep: lastSweepAt(store), csrf: who.session.csrf };
+      const view = { periods: store.retentionPeriods(), chosen: Object.keys(store.retentionChosen()) as RetentionKind[], next: retentionPlan(store, evidenceRoot, now).counts, lastSweep: lastSweepAt(store), csrf: who.session.csrf };
       return sendScreen(response, 200, screen("Retention", `<p><a href="/settings">Settings</a></p><h1>Retention</h1>${retentionHtml(view, { said: url.searchParams.get("said"), problem: url.searchParams.get("problem") })}`,
         { chrome: chromeFor(project, "settings") }));
     }
@@ -7264,7 +7264,9 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       const back = (key: "said" | "problem", words: string) => redirect(response, `/settings/retention?${key}=${encodeURIComponent(words)}`);
       if (!authenticateApprover(store, who.name, body.get("password") ?? "").ok) return back("problem", "Enter your Toolroll password to change retention.");
       const before = store.retentionPeriods();
-      const chosen = RETENTION_KINDS.map(({ kind }) => ({ kind, days: body.has(kind) ? parsePeriod(body.get(kind) ?? "") : before[kind] }));
+      // Only what the page offers (or the period already set): a hand-made value doesn't save.
+      const offered = (kind: RetentionKind, days: number | null | undefined) => days !== undefined && periodChoices(kind, before[kind]).includes(days) ? days : undefined;
+      const chosen = RETENTION_KINDS.map(({ kind }) => ({ kind, days: body.has(kind) ? offered(kind, parsePeriod(body.get(kind) ?? "")) : before[kind] }));
       if (chosen.some(one => one.days === undefined)) return back("problem", "Choose a period for each kind of data.");
       const changed = chosen.filter(one => one.days !== before[one.kind]);
       for (const one of changed) store.setRetentionPeriod(one.kind, one.days ?? null, who.name, now);
