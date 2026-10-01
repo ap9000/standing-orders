@@ -71,6 +71,14 @@ function fileTask(taskId: string): void {
   expect(approve(store, taskId, "alex", at, store.getScope(taskId)!.digest, token).ok).toBe(true);
 }
 
+function fileCandidateTask(taskId: string): void {
+  const at = now();
+  store.createTask({ id: taskId, title: "Release gate" }, at);
+  store.placeTask(store.lookupRef(taskId)!.id, REPO);
+  propose(store, { taskId, goal: "Verify the release candidate", acceptance: [{ id: "c1", statement: "The candidate passes its check", how: null, evidence: ["check"] }], candidate: HEAD, now: at });
+  expect(approve(store, taskId, "alex", at, store.getScope(taskId)!.digest, token).ok).toBe(true);
+}
+
 function signHandsOff(): void {
   const terms = presetTerms("hands-off", new Date(Date.now() + 86_400_000).toISOString());
   store.signMode({ repo: REPO, name: "hands-off", termsJson: modeTermsJson(terms), digest: modeDigestOf(terms), signedBy: "alex", absoluteExpiry: terms.absoluteExpiry, publication: terms.publication }, now());
@@ -176,6 +184,20 @@ describe("one review per finished build (c1)", () => {
     maybeRequestAutoReview(store, REPO, red, true, false, now(), root);
     expect(buildReviewOf(store, red)).toBeNull();
     expect(store.openReviewRequests()).toEqual([]);
+  });
+
+  test("a passing release candidate check is never reviewed and reaches the person Ready", async () => {
+    store.setReviewSwitch(REPO, true, "alex", now());
+    fileCandidateTask("gate");
+    expect(store.getScope("gate")!.candidate).toBe(HEAD);
+    const run = finishedBuild("gate");
+    maybeRequestAutoReview(store, REPO, run, true, false, now(), root);
+    expect(buildReviewOf(store, run)).toBeNull();
+    expect(store.handle.prepare("SELECT 1 FROM build_review WHERE run = ?").get(run)).toBeUndefined();
+    expect(store.openReviewRequests()).toEqual([]);
+    expect(await pass(reviewer([]))).toEqual([]);
+    expect(reviewers("gate")).toHaveLength(0);
+    expect(assignment("gate")).toMatchObject({ state: "ready-to-check", handoff: { kind: "result" } });
   });
 
   test("with the project's checks Off, a finished build is reviewed without a check", () => {

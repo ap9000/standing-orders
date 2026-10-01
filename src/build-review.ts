@@ -78,6 +78,8 @@ function queueLocked(store: Store, repo: string, runId: number, root: string, no
   if (!checkPassed(store, root, runId)) return;
   const taskId = store.externalIdFor(run.taskRef);
   if (taskId === null) return;
+  // A release candidate check only verifies an existing commit: no diff of its own to review.
+  if ((store.getScope(taskId)?.candidate ?? null) !== null) return;
   const asked = store.requestReview(runId, AUTOMATIC_REVIEWER, now, undefined, "automatic");
   store.handle.prepare(`INSERT INTO build_review (run, task_id, repo, state, request, reason, queued_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(runId, taskId, repo, asked.ok ? "pending" : "not-reviewed", asked.ok ? asked.id : null,
