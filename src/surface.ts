@@ -314,6 +314,7 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
   operator("task route", "which configured agents plan, build and repair this task; phase and risk changes require renewed approval"),
   operator("task reopen", "resume external work its tracker closed and has been SEEN open again"),
   operator("task stop", "stop ONE exact live attempt (--run <id>): durable before any process is signalled, answers 'stopping' until its own processes are established gone; work, branch, and evidence preserved; no strike, no retry"),
+  operator("run settle", "last resort for a finished run whose process witness can't be proven either way: records your --why in the ledger; refuses while any of the run's processes is alive"),
   operator("task resume", "resume the exact stopped attempt (--run <id>): refuses until it is quiescent, lifts only that stop's hold, approves nothing — the next pass re-proves the scope and inherits the draft with fresh proof"),
 
   // ---- leases (runner surface) ----

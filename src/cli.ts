@@ -289,6 +289,7 @@ export const OPERATE_COMMANDS = new Set([
   "bridge",
   "publish",
   "reconcile",
+  "run",
   "routine",
   "flows",
   "config", "chat", "proposals", "mode", "people", "keys",
