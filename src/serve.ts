@@ -310,6 +310,7 @@ import { EXPORT_CSS, dataExportHtml } from "./export-ui.js";
 import { buildExport, exportZip } from "./export.js";
 import { PROJECT_DELETE_CSS, projectDeleteConfirmHtml, projectSettingsHtml, type ProjectSettingsView } from "./project-delete-ui.js";
 import { parseProjectConcurrency, PROJECT_CONCURRENCY_DEFAULT, projectConcurrency, saveProjectConcurrency } from "./project-concurrency.js";
+import { buildReviewOf, findingWords, type BuildReviewView } from "./review-switch.js";
 import { deleteProject, holdingsWords, projectHoldings, projectRunning } from "./project-delete.js";
 import { POLICY_CSS, policyHtml } from "./policy-ui.js";
 import { checkPolicy, parseList, policyParts } from "./policy.js";
@@ -4158,6 +4159,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       const quick = liveQuickCommand(store, repo);
       const html = checkSettingsHtml({ repo, name: projectName(repo), csrf: who.session.csrf, canChange: who.role === "approver" && !store.isDemo(),
         level: projectCheckLevel(store, repo).level, full: store.liveVerifyCommand(repo), quick, suggestion: quick === null ? suggestQuickCommand(repo) : null,
+        review: (({ on, source }) => ({ on, source }))(store.reviewSwitch(repo, clock())),
         said: url.searchParams.get("said"), problem: url.searchParams.get("problem") });
       return sendScreen(response, 200, screen("Checks", `<p><a href="/projects">Projects</a></p><h1>Checks</h1>${html}`, { chrome: chromeFor(project, "projects") }));
     }
@@ -5366,7 +5368,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     reviewFactsOf(store.reviewRetryStateOf(runId), runner => {
       const one = store.getRunner(runner)?.runner;
       return one !== undefined && runnerAlive(one, clock());
-    });
+    }, buildReviewOf(store, runId)?.state === "pending");
 
   /** Keep detailed receipt diagnostics; shared assignment reads own readiness. */
   function freshAssignment(assignment: AssignmentSnapshot | null, receipt: CompletionReceiptView | null): AssignmentSnapshot | null {
@@ -7337,6 +7339,12 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       const back = (key: "said" | "problem", words: string) => redirect(response, `/settings/checks?repo=${encodeURIComponent(repo)}&${key}=${encodeURIComponent(words)}`);
       if (!authenticateApprover(store, who.name, body.get("password") ?? "", repo).ok) return back("problem", "Enter your Toolroll password to change checks.");
       const act = body.get("act");
+      // The automatic review switch: the policy log keeps before → after.
+      if (act === "review") {
+        const on = body.get("on") === "1";
+        store.setReviewSwitch(repo, on, who.name, now);
+        return back("said", on ? "Automatic review is on." : "Automatic review is off.");
+      }
       if (act === "level") {
         const level = body.get("level");
         if (!isCheckLevel(level)) return back("problem", "Choose Quick, Full or Off.");
@@ -11238,6 +11246,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       comments: store.liveDiffComments(run.id).filter(isRevisionFeedback),
       pastComments: store.allDiffComments(run.id).filter(one => one.reviewerRun === null && (one.consumedBy !== null || one.supersededBy !== null)),
       reviewerFindings: store.allDiffComments(run.id).filter(one => one.reviewerRun !== null),
+      automaticReview: buildReviewOf(store, run.id),
       revisions: store.revisionsFromRun(run.id).flatMap(one => {
         const child = store.getTask(one.id);
         if (child === null || !visible(store.lookupRef(one.id)?.repo ?? null)) return [];
@@ -23761,6 +23770,8 @@ type ResultDetail = {
   comments: DiffComment[];
   pastComments?: DiffComment[];
   reviewerFindings: DiffComment[];
+  /** The build's one automatic review, when its project had review on. */
+  automaticReview?: BuildReviewView | null;
   /** Revisions already sealed from this run — the forward link. Each
    * carries the shared status projection's own words for the child
    * (repair 2026-09-14): CURRENT exact approval and actual activity, so
@@ -23869,6 +23880,14 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
   // reason. Keep that explanation once and retain every other caveat.
   if (current == null) attention.push(...receipt.caveats.filter(caveat => !historicalAssessmentReason(caveat) && !attention.some(problem => problem.includes(caveat))));
   attention.push(...(handoff?.followUps ?? []).map(one => `Follow-up: ${one}`));
+  // The automatic review: a HIGH that did not send the work back, or a review
+  // that could not finish, is the person's to see. (Said once when the
+  // current assignment already carries it.)
+  const automatic = detail.automaticReview ?? null;
+  if (automatic !== null && automatic.sentBackAs === null) {
+    const reviewed = [...(automatic.state === "not-reviewed" ? [`Not reviewed: ${automatic.reason ?? "the automatic review did not finish"}.`] : []), ...automatic.high.map(one => `Review: ${findingWords(one)}`)];
+    for (const line of reviewed) if (!attention.includes(line)) attention.push(line);
+  }
   // Publication risks stay in the open (repair 2026-09-14); the routine
   // publication fact lives with the build details below.
   // With the shared status, the pull request is its own quiet row (its reason under Details).
@@ -23946,6 +23965,12 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
     ...(handoff !== null && handoff.verification.length > 0 ? [`<p class="meta">Checked by the agent:</p><ul class="result-changes" data-cockpit-source="agent-words">${handoff.verification.map(one => `<li>${escape(one)}</li>`).join("")}</ul>`] : []),
   ];
   if (agentAccount.length > 0) summaryParts.push(`<details class="result-notes" data-result-notes-agent><summary>What the agent reported</summary>${agentAccount.join("")}</details>`);
+  // MEDIUM and LOW never block: suggested follow-ups, on request.
+  if (automatic !== null && automatic.followUps.length > 0) {
+    summaryParts.push(`<details class="result-notes" data-review-followups="${automatic.followUps.length}"><summary>Suggested follow-ups · ${automatic.followUps.length}</summary><ul class="result-changes">${
+      automatic.followUps.map(one => `<li><span class="badge">${one.severity === "MEDIUM" ? "Medium" : "Low"}</span> <span class="mono">${escape(`${one.file}:${one.line}`)}</span> ${escape(one.scenario)}</li>`).join("")
+    }</ul></details>`);
+  }
   const evidenceSources = [
     ...(report !== null ? [report.ok ? `verified report${report.truncated ? " (shortened)" : ""}` : "report (unverifiable)"] : []),
     ...(patch !== null ? [patchOk ? `sealed diff${patch.truncated ? " (shortened)" : ""}` : "diff (unverifiable)"] : []),

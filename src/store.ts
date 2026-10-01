@@ -100,6 +100,7 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 import type { LimitReading, LimitWindow } from "./provider-limits.js";
 import { POLICY_SCHEMA, agentRefusal, approvalRefusal, attendedRefusal, policyParts, readPolicy, underCeiling, sessionCeilingRefusal, type OrgPolicy, type SavedPolicy } from "./policy.js";
 import { PROVIDER_AUTH_SCHEMA } from "./provider-auth.js";
+import { REVIEW_SCHEMA, reviewSwitchWords, type ReviewSwitch } from "./review-switch.js";
 import { SPEND_SCHEMA, billingOf, budgetStates, canPrice, claudeMachineBilling, countsToward, filersOf, monthOf, priceWork, seenBilling as seenBillingOf, spendItems, teammateFilers, usd, type Billing, type Budget, type BudgetAgent, type BudgetHold, type BudgetScope, type BudgetState, type SpendItem } from "./spend.js";
 import { FOREVER, RETENTION_SCHEMA, periodWords, type RetentionKind, type RetentionPeriods } from "./retention.js";
 import { CHECKOUT_CLEANUP_SCHEMA, DEFAULT_CLEANUP, cleanupWords, type CheckoutCleanup } from "./storage.js";
@@ -5083,6 +5084,7 @@ function initializeStore(db: Database, file: string): Store {
   db.exec(PROVIDER_AUTH_SCHEMA);
   // The sign-in pause the dispatch gate last left this task waiting on (null: none), for the work index.
   addColumn(db, "task_ref", "auth_wait_pause", "INTEGER REFERENCES provider_auth_pause(id)");
+  db.exec(REVIEW_SCHEMA);
   db.exec(RETENTION_SCHEMA);
   db.exec(CHECKOUT_CLEANUP_SCHEMA);
   db.exec(BACKUP_SCHEMA);
@@ -11233,6 +11235,28 @@ export class Store {
   private recordPolicy(by: string, repo: string | null, action: string, before: string, after: string, now: Date, outcome = "changed"): void {
     if (before === after) return;
     this.recordAction({ at: now.toISOString(), actor: by, repo, taskId: null, runId: null, action, outcome, source: "policy", detail: `${before} → ${after}` });
+  }
+
+  /** The project's automatic review switch: its explicit setting, else on
+   * while a hands-off mode is active on it, else off. */
+  reviewSwitch(repo: string, now: Date): ReviewSwitch {
+    const row = this.db.prepare("SELECT enabled, changed_by, changed_at FROM review_switch WHERE repo = ?").get(repo);
+    if (row !== undefined) return { on: Number(row["enabled"]) === 1, source: "project", changedBy: String(row["changed_by"]), changedAt: String(row["changed_at"]) };
+    const handsOff = this.activeMode(repo, now)?.name === "hands-off";
+    return { on: handsOff, source: handsOff ? "hands-off" : "default", changedBy: null, changedAt: null };
+  }
+
+  /** Turn a project's automatic review on or off; the policy log keeps before → after. */
+  setReviewSwitch(repo: string, on: boolean, by: string, now: Date): { before: ReviewSwitch; after: ReviewSwitch } {
+    return this.transact(() => {
+      const before = this.reviewSwitch(repo, now);
+      this.db.prepare(`INSERT INTO review_switch (repo, enabled, changed_by, changed_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT(repo) DO UPDATE SET enabled = excluded.enabled, changed_by = excluded.changed_by, changed_at = excluded.changed_at`)
+        .run(repo, on ? 1 : 0, by, now.toISOString());
+      const after = this.reviewSwitch(repo, now);
+      this.recordPolicy(by, repo, "automatic review", reviewSwitchWords(before), reviewSwitchWords(after), now);
+      return { before, after };
+    });
   }
 
   /** A project deleted (project-delete.ts): who, and what it held → how it went. Returns the entry's id. */

@@ -142,6 +142,7 @@ describe("the machine envelope", () => {
       notifications: ["later", "--json"],
       lead: ["--json"],
       policy: ["show", "--json"],
+      review: ["show", "--repo", "/nope", "--json"],
       backup: ["list", "--json"],
       restore: ["--json"],
       export: ["--json"],

@@ -1035,7 +1035,7 @@ describe("the architecture rule", () => {
    * builder/planner/scout may import the gateway itself. The retired
    * reviewer must remain unable to spend.
    */
-  test("only the gateway imports the spawning surface; only builder, planner, and scout spend", () => {
+  test("only the gateway imports the spawning surface; only builder, planner, scout and the one build review spend", () => {
     const src = join(process.cwd(), "src");
     const spawners: string[] = [];
     const invokers: string[] = [];
@@ -1050,6 +1050,7 @@ describe("the architecture rule", () => {
       }
     }
     expect(spawners).toEqual([]);
-    expect(invokers.sort()).toEqual(["builder.ts", "planner.ts", "scout.ts"]);
+    // build-review.ts: the one automatic read-only review per build, admitted through admitReview's run and budget.
+    expect(invokers.sort()).toEqual(["build-review.ts", "builder.ts", "planner.ts", "scout.ts"]);
   });
 });

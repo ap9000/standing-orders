@@ -16,6 +16,7 @@ import { noteAssignmentStatus } from "./assignment-status.js";
 import { historicalAssessmentReason } from "./assignment-presentation.js";
 import { runCheckLevel, type CheckLevel } from "./check-levels.js";
 import { followUpChecksOf, withFollowUps } from "./result-follow-ups.js";
+import { buildReviewOf, findingWords, type BuildReviewView } from "./review-switch.js";
 
 export type AssignmentAccess = WorkSummaryAccess;
 export type AssignmentOwner = { kind: "coordinator" | "lead"; id: string; label: string };
@@ -52,6 +53,9 @@ export type AssignmentSnapshot = {
   completion: { actor: string; at: string; digest: string; lead?: true } | null;
   handoff: { kind: "result" | "decision" | "attention"; digest: string; acknowledged: boolean } | null;
   publication: { state: string; prUrl: string | null; remoteState: string | null } | null;
+  /** The result's one automatic review, when its project had review on:
+   * pending, HIGH findings, suggested follow-ups (MEDIUM/LOW), or not reviewed. */
+  review: BuildReviewView | null;
   deployment: { status: "not-recorded" };
 };
 
@@ -67,7 +71,7 @@ export function assignmentBrief(assignment: AssignmentSnapshot | null) {
       base: receipt.base, head: receipt.head, completionKind: receipt.completionKind,
       checks: receipt.checks, proofAcceptance: receipt.proofAcceptance, verdict: receipt.proof?.verdict ?? null,
       criteria: { passed: receipt.proof?.matrix.filter(row => row.state === "pass").length ?? 0, total: receipt.proof?.matrix.length ?? 0 }, evidence: receipt.evidence },
-    publication: assignment.publication, deployment: assignment.deployment };
+    publication: assignment.publication, review: assignment.review, deployment: assignment.deployment };
 }
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 /** A lookup added with lead-quiet, read safely: a deploy proves completion with this code over the INSTALLED runtime's
@@ -207,7 +211,11 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
   // The exact completed result, scope, family and custody fences apply to
   // every deliverable. Human acceptance remains its own recorded authority;
   // it never changes a machine verdict or supplies a missing report.
-  const ready = current.state === "done" && result !== null && completionKind !== null &&
+  // Kept out of the sealed receipt (sealedChecks): the review never changes the result's digest.
+  const review = result === null ? null : olderStoreSafe(() => buildReviewOf(store, result.id), null);
+  // A result under its one automatic review has not reached the person yet.
+  const reviewing = review?.state === "pending" && current.state === "done";
+  const ready = !reviewing && current.state === "done" && result !== null && completionKind !== null &&
     scope !== null && scope.termsProblem == null && approvalOf(scope).approved && scope.digest === result.scopeDigest &&
     store.activeHolds(current.refId, now).length === 0 && store.applicableStopFor(result.id) === null &&
     processProblem === null &&
@@ -232,6 +240,11 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
     state = "needs-decision";
     detail = question.decision.question;
     primaryAction = workDecisionAction(question.taskId, question.decision, access.principal);
+  }
+  else if (reviewing && result !== null) {
+    state = "checking";
+    detail = "An automatic review is reading this result before it reaches you.";
+    primaryAction = { code: "inspect-run", label: "Open result", target: { taskId: current.id, runId: result.id, decisionId: null }, access: "read", retry: "read-again" };
   }
   else if (ready && receipt !== null) {
     state = "ready-to-check";
@@ -278,6 +291,10 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
     if (proof?.verdict !== "verified") attention.push(...(proof?.reasons ?? []).filter(reason => !historicalAssessmentReason(reason)));
     attention.push(...receipt.caveats.filter(reason => !proof?.reasons.includes(reason)));
   }
+  if (review !== null && review.sentBackAs === null) {
+    if (review.state === "not-reviewed") attention.push(`Not reviewed: ${review.reason ?? "the automatic review did not finish"}.`);
+    attention.push(...review.high.map(one => `Review: ${findingWords(one)}`));
+  }
   if (state !== "complete") completion = null;
   if (current.state !== "cancelled") attention.push(...questions.map(question => question.decision.question));
   if (owner !== null && !owner.active) attention.push(owner.kind === "lead" ? "This lead is paused. A manager can resume it or transfer responsibility." : "The previous lead no longer has access. Another lead can claim this assignment.");
@@ -305,7 +322,7 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
   return { version: 1, rootId: family.root.id, activeTaskId: current.id, repo: current.repo, title: family.root.title,
     state, detail, primaryAction, attention: [...new Set(attention)], attempts, owner, receipt, savedContext, completion, handoff,
     publication: publication === null ? null : { state: publication.state, prUrl: publication.prUrl, remoteState: publication.remoteState },
-    deployment: { status: "not-recorded" } };
+    review, deployment: { status: "not-recorded" } };
 }
 
 type MutationResult = { ok: true; assignment: AssignmentSnapshot } | { ok: false; reason: string; message: string };

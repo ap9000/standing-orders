@@ -31,7 +31,8 @@ export type StatusAction = { label: string; href: string | null };
 export type StatusDetail = { key: DetailKey; label: string; text: string; mark: DetailMark; href: string | null; action: StatusAction | null; why: string | null };
 export type TaskStatus = { headline: Headline; tone: HeadlineTone; sentence: string; details: StatusDetail[]; primaryAction: StatusAction | null; why: string[] };
 
-export type TaskStage = "queued" | "planning" | "needs-you" | "building" | "checking" | "finished" | "complete" | "failed" | "stopped";
+/** `reviewing`: the one automatic review (build-review.ts) is reading a finished build; it reads Building, not a headline of its own. */
+export type TaskStage = "queued" | "planning" | "needs-you" | "building" | "checking" | "reviewing" | "finished" | "complete" | "failed" | "stopped";
 export type ChecksFact = {
   status: "passed" | "failed" | "running" | "not-run" | "unavailable"; exitCode: number | null; head: string | null;
   /** The check level that ran (check-levels.ts). Off never reads Ready; a quick pass says so. */
@@ -74,7 +75,7 @@ export function headlineOf(facts: Pick<TaskStatusFacts, "stage" | "checks" | "re
     case "queued": return "Queued";
     case "planning": return "Planning";
     case "needs-you": return "Needs you";
-    case "building": case "checking": return "Building";
+    case "building": case "checking": case "reviewing": return "Building";
     case "finished":
       if (facts.report) return "Ready for review";
       if (facts.checks?.status === "failed") return "Failed";
@@ -96,7 +97,8 @@ function sentenceOf(headline: Headline, facts: TaskStatusFacts): string {
     case "Needs you": return facts.need === "approval" ? "Review the plan and approve it to start." : reason ?? (facts.need === "answer" ? "Answer the question so the work can continue."
       : facts.need === "sign-in" ? "Sign in again; the task starts on its own after."
       : "Something needs your decision before the work can continue.");
-    case "Building": return facts.stage === "checking" ? "Checks are running on the change." : reason ?? "An agent is working on it.";
+    case "Building": return facts.stage === "checking" ? "Checks are running on the change."
+      : facts.stage === "reviewing" ? "Reviewing the change before it reaches you." : reason ?? "An agent is working on it.";
     case "Ready for review":
       if (facts.report) return "The report is ready to read. Read it, then mark it complete.";
       if (facts.checks?.level === "off" && facts.checks.status !== "passed") return "Checks are off for this project. Review the change, then mark it complete.";
@@ -185,7 +187,7 @@ export function taskStatusOf(facts: TaskStatusFacts): TaskStatus {
 const CODE_STAGE: Readonly<Record<string, [TaskStage, TaskStatusFacts["need"]?]>> = {
   queued: ["queued"], ready: ["queued"], "worker-at-capacity": ["queued"], "retry-scheduled": ["queued"], updating: ["queued"],
   "waiting-dependency": ["queued"], "scouting-ready": ["queued"], "planning-ready": ["queued"], "provider-quota": ["queued"], "planner-source": ["queued"],
-  running: ["building"], reviewing: ["building"], "review-pending": ["building"],
+  running: ["building"], reviewing: ["reviewing"], "review-pending": ["building"],
   "signed-out": ["needs-you", "sign-in"],
   "needs-approval": ["needs-you", "approval"],
   "waiting-decision": ["needs-you", "answer"], "decision-queue": ["needs-you", "answer"],
@@ -200,7 +202,7 @@ const CODE_STAGE: Readonly<Record<string, [TaskStage, TaskStatusFacts["need"]?]>
  * building reason is scheduler wording, and the default sentence is plainer. */
 const QUEUED_REASONS = new Set(["worker-at-capacity", "waiting-dependency", "retry-scheduled", "updating", "planning-ready", "scouting-ready", "provider-quota"]);
 export function plainReasonOf(stage: TaskStage, code: string, detail: string | null | undefined): string | null {
-  if (stage === "building" || stage === "checking" || stage === "planning") return null;
+  if (stage === "building" || stage === "checking" || stage === "reviewing" || stage === "planning") return null;
   if (stage === "queued") return QUEUED_REASONS.has(code) ? detail ?? null : null;
   return detail ?? null;
 }
@@ -234,12 +236,12 @@ export function pullRequestFactOf(publication: { state: string; prNumber?: numbe
 
 /** The assignment's stage. The work status, when the caller read one, names
  * the exact reason (a running planner, a pause, a failed attempt, a sign-in). */
-export function assignmentStageOf(assignment: Pick<AssignmentSnapshot, "state" | "primaryAction">, work?: { token: string; views?: readonly string[] } | null, planning = false): { stage: TaskStage; need?: TaskStatusFacts["need"] } {
+export function assignmentStageOf(assignment: Pick<AssignmentSnapshot, "state" | "primaryAction"> & { review?: AssignmentSnapshot["review"] }, work?: { token: string; views?: readonly string[] } | null, planning = false): { stage: TaskStage; need?: TaskStatusFacts["need"] } {
   switch (assignment.state) {
     case "cancelled": return { stage: "stopped" };
     case "complete": return { stage: "complete" };
     case "ready-to-check": return { stage: "finished" };
-    case "checking": return { stage: "checking" };
+    case "checking": return { stage: assignment.review?.state === "pending" ? "reviewing" : "checking" };
     case "working": {
       const token = work?.token ?? "running";
       const read = stageOfCode(token, { needsPerson: work?.views?.includes("needs-you") ?? false, planning });
@@ -375,7 +377,8 @@ export const TASK_STATUS_CSS = `.status-headline{display:flex;align-items:center
  * a refuted result whose project check failed is Failed. */
 export function stageOfDispatch(d: { code: string; condition: string; action: string | null; role?: string | null; detail?: string },
   options: { completed?: boolean } = {}): { stage: TaskStage; need?: TaskStatusFacts["need"] } {
-  if (d.code === "complete" || d.code.startsWith("review-") || d.code === "reviewing") return { stage: options.completed ? "complete" : "finished" };
+  if (d.code === "reviewing") return { stage: "reviewing" };
+  if (d.code === "complete" || d.code.startsWith("review-")) return { stage: options.completed ? "complete" : "finished" };
   if (d.code === "proof-refuted") return /approved check failed|checks failed/i.test(d.detail ?? "") ? { stage: "failed" } : { stage: "needs-you", need: "other" };
   if (d.code === "needs-verification") return { stage: "needs-you", need: "other" };
   return stageOfCode(d.code, { needsPerson: d.condition === "waiting" && d.action !== null, planning: d.condition === "running" && d.role === "planner", operatorHold: d.action === "unhold" });

@@ -33,7 +33,9 @@ export type ModeTerms = {
   planAuto: boolean;
   /** Attended mint without the per-mint password — signer only (D8). */
   quickMint: boolean;
-  /** Historical signed field; new modes leave it false and no worker consumes it. */
+  /** Historical signed field; new modes leave it false and no worker consumes
+   * it. Automatic review is the project's review switch (review-switch.ts),
+   * on by default while a hands-off mode is active. */
   reviewAuto: boolean;
   /** Historical signed retry term, retained for digest and audit compatibility. */
   reviewRetryAuto: boolean;
@@ -218,7 +220,9 @@ export function modeWords(terms: ModeTerms): string[] {
     terms.planAuto
       ? "plans for your pre-authorized filings auto-approve only when the goal, exclusions, paths, acceptance criteria, risk, budget, and agent route remain exactly unchanged; provide a goal, paths and acceptance criteria upfront; amendments and unresolved questions still wait for you"
       : "planner-generated plans wait for your approval",
-    "finished work and saved checks go to the lead or user; no separate model review runs",
+    terms.name === "hands-off"
+      ? "automatic review is on for this project unless you turn it off (`toolroll review off --repo <path>`): each finished build whose check passes (or that finishes, with checks Off) gets one read-only review by the project's review agent; a HIGH finding sends it back once as a revision filed under this mode, a HIGH on that revision comes to you, MEDIUM and LOW findings come to you as suggested follow-ups, and a review that fails or times out never holds the work — it reaches you marked not reviewed"
+      : "finished work and saved checks go to the lead or user; automatic review runs only where a project turns it on (`toolroll review on --repo <path>`)",
     ...(terms.reviewAuto || terms.reviewRetryAuto
       ? ["historical review grants are retained on record but no longer schedule work"] : []),
     terms.perAttemptBudgetMicrousd === null

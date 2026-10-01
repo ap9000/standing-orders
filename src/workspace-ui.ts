@@ -77,12 +77,14 @@ export type ReviewFacts = {
   queuedOrigin?: "operator" | "automatic" | null;
   /** Whether the live attempt's reviewer worker is answering. */
   reviewerAlive: boolean;
+  /** The build's one automatic review is still pending (build-review.ts). */
+  automaticPending?: boolean;
 };
 
 /** The review facts from the store's bounded retry projection — the same
  * reading `diagnoseTaskDispatch` makes, so every surface starts from one
  * record. `reviewerAlive` answers for the live attempt's runner. */
-export function reviewFactsOf(retry: ReviewRetryState | null, reviewerAlive: (runner: string) => boolean): ReviewFacts | null {
+export function reviewFactsOf(retry: ReviewRetryState | null, reviewerAlive: (runner: string) => boolean, automaticPending = false): ReviewFacts | null {
   if (retry === null || retry.state === "unrequested") return null;
   const current = retry.live ?? (retry.state === "queued" ? null : retry.latest);
   return {
@@ -96,6 +98,7 @@ export function reviewFactsOf(retry: ReviewRetryState | null, reviewerAlive: (ru
     queuedBy: retry.openRequest?.requestedBy ?? null,
     queuedOrigin: retry.openRequest?.origin ?? null,
     reviewerAlive: retry.live !== null && reviewerAlive(retry.live.runner),
+    automaticPending,
   };
 }
 
@@ -113,12 +116,11 @@ const retriesLeft = (count: number, explicit = true): string => `${count}${expli
  * the v50 dispatch contract; nothing here changes the lifecycle.
  */
 export function reviewStatusOf(review: ReviewFacts | null): DisplayStatus | null {
-  // Model review is retired (2026-09-21): nothing schedules, retries or
-  // waits for a reviewer, so a recorded review request or attempt is
-  // history and never the result's primary status. The stored verdict and
-  // the assignment's Ready/Complete state speak instead.
-  void review;
-  return null;
+  // The one automatic review (build-review.ts) holds the result only while it
+  // is queued or running. A failed review never blocks: the result reads as
+  // it would unreviewed, marked "not reviewed" by the result itself.
+  if (review === null || review.automaticPending !== true || (review.state !== "queued" && review.state !== "running")) return null;
+  return { token: "reviewing", label: "Reviewing", detail: "An automatic review is reading this result before it reaches you.", tone: "live", action: { label: "Open the result", kind: "open-result" } };
 }
 
 export type PublicationFacts = {
@@ -215,7 +217,7 @@ export function publicationStatusOf(publication: PublicationFacts): { token: str
  * the detail).
  */
 export function resultStatusOf(result: ResultFacts | null, publication: PublicationFacts = null): DisplayStatus {
-  return storedResultStatusOf(result, publication);
+  return (result?.role === "builder" ? reviewStatusOf(result.review ?? null) : null) ?? storedResultStatusOf(result, publication);
 }
 
 /** What the machine itself recorded about a result, in a clause. */

@@ -14,6 +14,7 @@ import { plannerSourceProblemOf } from "./planner-source.js";
 import { authPauseOf, authWaitOf, providerName, signInReason } from "./provider-auth.js";
 import { REVIEW_TOKENS, resultStatusOf, reviewFactsOf } from "./workspace-ui.js";
 import { replacedWords } from "./task-status.js";
+import { buildReviewOf } from "./review-switch.js";
 import { BUILT_IN, parseCapabilityKey, type ChatSnapshot, type ReviewRequestOrigin, type ReviewRetryState, type Store, type TaskState } from "./store.js";
 
 export const DEFAULT_MAX_OPEN_DECISIONS = 5;
@@ -301,7 +302,7 @@ export function diagnoseTaskDispatch(store: Store, taskId: string, now: Date): D
     const reviewFacts = reviewFactsOf(retry, runner => {
       const reviewer = store.getRunner(runner)?.runner;
       return reviewer !== undefined && isAlive(reviewer, now);
-    });
+    }, result !== undefined && buildReviewOf(store, result.id)?.state === "pending");
     // A no-change conclusion owes no proof beyond its handoff and sealed
     // diff (the task page's own "attested floor"); with both on record it
     // is complete, not verification-needed.

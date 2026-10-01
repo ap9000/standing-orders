@@ -298,6 +298,22 @@ const CLAUDE_REVIEW_JSON_SCHEMA = {
         additionalProperties: false,
       },
     },
+    // The automatic build review's reply (build-review.ts). Shape only;
+    // parseBuildFindings is the validator.
+    findings: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          severity: { type: "string", enum: ["HIGH", "MEDIUM", "LOW"] },
+          file: { type: "string" },
+          line: { type: "integer", minimum: 1 },
+          scenario: { type: "string" },
+        },
+        required: ["severity", "file", "line", "scenario"],
+        additionalProperties: false,
+      },
+    },
     // The read request rides the same structured reply channel and
     // session. The machine validates the exact allowlist/hash/range
     // before supplying bytes; this only shapes the request.

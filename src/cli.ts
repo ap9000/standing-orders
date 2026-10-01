@@ -258,6 +258,7 @@ export const OPERATE_COMMANDS = new Set([
   "restore",
   "export",
   "policy",
+  "review",
   "assignment",
   "knowledge",
   "memory",
