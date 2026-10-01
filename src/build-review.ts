@@ -32,7 +32,7 @@ import { revisionSourceOf } from "./result-review.js";
 import { parseBuildFindings, REVIEW_PATCH_NAME } from "./reviewer.js";
 import type { BuildFinding } from "./review-switch.js";
 import { heartbeat as runnerHeartbeat } from "./runner.js";
-import { TOKEN_ENV as TELEGRAM_TOKEN_ENV } from "./telegram.js";
+import { TELEGRAM_TOKEN_ENVS } from "./names.js";
 import { CLAUDE_LIMITS } from "./scope.js";
 
 export { buildReviewOf, buildReviewHeadline, buildReviewLines, findingWords, type BuildReviewView } from "./review-switch.js";
@@ -188,7 +188,7 @@ async function runReviewer(store: Store, options: {
       permissionMode: "plan", skipPermissions: false, resumeSession: null,
     }, {
       cwd: scratch, idleTimeoutMs: options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS, timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-      omitEnv: [TELEGRAM_TOKEN_ENV], clock: options.clock, ...(options.agent === undefined ? {} : { runner: options.agent }),
+      omitEnv: [...TELEGRAM_TOKEN_ENVS], clock: options.clock, ...(options.agent === undefined ? {} : { runner: options.agent }),
     });
     if (invoked.kind === "refused") return fail(invoked.reason, invoked.diagnostic ?? `the reviewer could not start (${invoked.reason})`, "refused");
     const result = invoked.outcome;
