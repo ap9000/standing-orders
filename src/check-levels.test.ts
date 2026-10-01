@@ -230,14 +230,13 @@ describe("c1: a project is Quick, Full or Off, and a task can override it", () =
   });
 });
 
-describe("c2: Off reads Built, not checked and never Ready; a Quick pass reads Ready with Quick checks passed", () => {
+describe("c2: Off reads Ready for review and says no check ran; a Quick pass reads Ready with Quick checks passed", () => {
   test("the shared status function", () => {
-    expect(HEADLINES).toContain("Built, not checked");
-    expect(HEADLINE_TONE["Built, not checked"]).toBe("neutral");
+    expect(HEADLINES).not.toContain("Built, not checked");
     const off = taskStatusOf({ stage: "finished", checks: { status: "not-run", exitCode: null, head: HEAD, level: "off" }, links: { runChecks: "/r/1?tab=checks#follow-ups" } });
-    expect(off.headline).toBe("Built, not checked");
-    expect(off.tone).toBe("neutral");
-    expect(off.details[0]).toMatchObject({ key: "checks", text: "Off", mark: "none", action: { label: "Run checks" } });
+    expect(off.headline).toBe("Ready for review");
+    expect(off.sentence).toBe("Checks are off for this project. Review the change, then mark it complete.");
+    expect(off.details[0]).toMatchObject({ key: "checks", text: "Off for this project", mark: "none", action: { label: "Run checks" } });
     const quick = taskStatusOf({ stage: "finished", checks: { status: "passed", exitCode: 0, head: HEAD, level: "quick" } });
     expect(quick.headline).toBe("Ready for review");
     expect(quick.sentence).toBe(`Quick checks passed on ${HEAD.slice(0, 7)}. Review the change, then mark it complete.`);
@@ -250,23 +249,23 @@ describe("c2: Off reads Built, not checked and never Ready; a Quick pass reads R
   });
 
   test("each result's own status", () => {
-    expect(statusOf("checks-off")).toMatchObject({ headline: "Built, not checked", tone: "neutral" });
+    expect(statusOf("checks-off")).toMatchObject({ headline: "Ready for review" });
     expect(statusOf("quick-pass").headline).toBe("Ready for review");
     expect(statusOf("quick-pass").details.find(one => one.key === "checks")!.text).toBe(`Quick checks passed on ${HEAD.slice(0, 7)}`);
     expect(statusOf("quick-fail").headline).toBe("Failed");
     expect(statusOf("full-pass").details.find(one => one.key === "checks")!.text).toBe(`Passed on ${HEAD.slice(0, 7)}`);
   });
 
-  test("the Tasks list and the task page say the same, and Off is never Ready", async () => {
+  test("the Tasks list and the task page say the same, and Off says no check ran", async () => {
     const workspace = workspaceOf(await page("/work"));
     const rows = (workspace.view as Extract<BrowserWorkspace["view"], { kind: "tasks" }>).rows;
     const label = (id: string) => rows.find(row => row.id === id)!.status;
-    expect(label("checks-off")).toMatchObject({ label: "Built, not checked", tone: "muted" });
+    expect(label("checks-off")).toMatchObject({ label: "Ready for review" });
     expect(label("quick-pass").label).toBe("Ready for review");
     expect(label("quick-fail").label).toBe("Failed");
     const off = await taskView("checks-off");
-    expect(off.status!.status.headline).toBe("Built, not checked");
-    expect(off.status!.status.details.find(one => one.key === "checks")).toMatchObject({ text: "Off", mark: "none", action: { label: "Run checks" } });
+    expect(off.status!.status.headline).toBe("Ready for review");
+    expect(off.status!.status.details.find(one => one.key === "checks")).toMatchObject({ text: "Off for this project", mark: "none", action: { label: "Run checks" } });
     const quick = await taskView("quick-pass");
     expect(quick.status!.status.sentence).toContain("Quick checks passed");
   });

@@ -15,12 +15,12 @@ import type { AssignmentSnapshot } from "./assignment.js";
 /** A cancelled task with a successor reads "Replaced by <id>" everywhere, never "Cancelled". */
 export const replacedWords = (successor: string): string => `Replaced by ${successor}`;
 const REPLACED = /^Replaced by \S+/;
-export const HEADLINES = ["Queued", "Planning", "Needs you", "Building", "Built, not checked", "Ready for review", "Complete", "Failed", "Stopped"] as const;
+export const HEADLINES = ["Queued", "Planning", "Needs you", "Building", "Ready for review", "Complete", "Failed", "Stopped"] as const;
 export type Headline = (typeof HEADLINES)[number];
 export type HeadlineTone = "neutral" | "live" | "attention" | "ready" | "success" | "danger";
 export const HEADLINE_TONE: Readonly<Record<Headline, HeadlineTone>> = {
   Queued: "neutral", Planning: "live", "Needs you": "attention", Building: "live",
-  "Built, not checked": "neutral", "Ready for review": "ready", Complete: "success", Failed: "danger", Stopped: "neutral",
+  "Ready for review": "ready", Complete: "success", Failed: "danger", Stopped: "neutral",
 };
 
 export type DetailKey = "checks" | "pull-request" | "requirements" | "evidence";
@@ -78,8 +78,8 @@ export function headlineOf(facts: Pick<TaskStatusFacts, "stage" | "checks" | "re
     case "finished":
       if (facts.report) return "Ready for review";
       if (facts.checks?.status === "failed") return "Failed";
-      // Off: built, and nothing checked it. Never Ready until a check passes.
-      return facts.checks?.level === "off" && facts.checks.status !== "passed" ? "Built, not checked" : "Ready for review";
+      // Off: ready like any build; the sentence and the Checks row say no check ran.
+      return "Ready for review";
     case "complete": return "Complete";
     case "failed": return "Failed";
     case "stopped": return "Stopped";
@@ -97,9 +97,9 @@ function sentenceOf(headline: Headline, facts: TaskStatusFacts): string {
       : facts.need === "sign-in" ? "Sign in again; the task starts on its own after."
       : "Something needs your decision before the work can continue.");
     case "Building": return facts.stage === "checking" ? "Checks are running on the change." : reason ?? "An agent is working on it.";
-    case "Built, not checked": return "Checks were off for this build. Review the change, or run checks first.";
     case "Ready for review":
       if (facts.report) return "The report is ready to read. Read it, then mark it complete.";
+      if (facts.checks?.level === "off" && facts.checks.status !== "passed") return "Checks are off for this project. Review the change, then mark it complete.";
       if (facts.checks?.status === "passed") return `${facts.checks.level === "quick" ? "Quick checks" : "Checks"} passed${sha === null ? "" : ` on ${sha}`}. Review the change, then mark it complete.`;
       // Never claim a check that isn't known to have passed.
       if (facts.checks == null) return "Review the change, then mark it complete.";
@@ -135,7 +135,7 @@ function detailsOf(headline: Headline, facts: TaskStatusFacts): StatusDetail[] {
     else if (checks.status === "failed") row("checks", "Checks", `${quick ? "Quick checks failed" : "Failed"}${checks.exitCode === null ? "" : ` (exit ${checks.exitCode})`}`, problem(headline),
       headline === "Failed" ? { href: checksHref } : { action: { label: "See what failed", href: checksHref } });
     else if (checks.status === "running") row("checks", "Checks", "Running", "running");
-    else if (checks.level === "off") row("checks", "Checks", "Off", "none", runChecks === null ? {} : { action: runChecks });
+    else if (checks.level === "off") row("checks", "Checks", "Off for this project", "none", runChecks === null ? {} : { action: runChecks });
     else if (checks.status === "not-run") row("checks", "Checks", "Didn't run", "none", runChecks === null ? {} : { action: runChecks });
     else row("checks", "Checks", "Couldn't be read", "note", { action: { label: "Open the result", href: facts.links?.result ?? null } });
   }
@@ -322,7 +322,6 @@ export function workToneOf(headline: Headline): "attention" | "problem" | "live"
     case "Failed": return "problem";
     case "Building": case "Planning": return "live";
     case "Ready for review": return "ready";
-    case "Built, not checked": return "muted";
     case "Complete": return "done";
     default: return "muted";
   }
@@ -336,7 +335,7 @@ export function statusDetailLines(status: TaskStatus): string[] {
 
 /** The headline's emoji for chat cards (colour is never the only signal: the words follow). */
 export function headlineEmoji(headline: Headline): string {
-  return ({ Queued: "🕓", Planning: "📝", "Needs you": "👋", Building: "⏳", "Built, not checked": "🔨", "Ready for review": "✅", Complete: "✅", Failed: "❌", Stopped: "⏹" } as const)[headline];
+  return ({ Queued: "🕓", Planning: "📝", "Needs you": "👋", Building: "⏳", "Ready for review": "✅", Complete: "✅", Failed: "❌", Stopped: "⏹" } as const)[headline];
 }
 
 const escapeHtml = (value: string): string => value.replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]!);

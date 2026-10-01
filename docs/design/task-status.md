@@ -26,7 +26,6 @@
 | Planning | The lead is writing the plan | live |
 | Needs you | A decision, approval, answer or sign-in from a person; the sentence says which | attention (the ink/magenta "person needed" tone) |
 | Building | An agent is working, or checks are running | live |
-| Built, not checked | Built with checks Off; nothing has checked the commit yet (never Ready) | neutral |
 | Ready for review | Built, and the project's checks passed on the commit | success-quiet |
 | Complete | A person marked it complete | success |
 | Failed | The build or its checks failed and it isn't being retried | danger |

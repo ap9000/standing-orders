@@ -4,7 +4,7 @@
  *   near the change). New projects start here.
  * - Full: the project's approved check, as before. Projects that already
  *   had a check keep it.
- * - Off: no check. The result reads "Built, not checked", never Ready.
+ * - Off: no check. The result reads Ready for review, with "Checks: Off for this project" underneath.
  *
  * Nothing here needs a new table. A project's level and a task's choice are
  * append-only ledger entries (the newest one wins, and the ledger already
@@ -23,7 +23,7 @@ export const CHECK_LEVEL_WORDS: Readonly<Record<CheckLevel, string>> = { quick: 
 export const CHECK_LEVEL_HINTS: Readonly<Record<CheckLevel, string>> = {
   quick: "A fast check while building: typecheck and the tests near the change.",
   full: "The project's full check after every build.",
-  off: "No check. Results read “Built, not checked” until checks run.",
+  off: "No check. Results are Ready for review, and say no check ran.",
 };
 
 /** Ledger actions. The ledger is append-only, so the newest entry is the setting. */

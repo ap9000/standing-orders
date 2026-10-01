@@ -20,8 +20,8 @@
   Catch up and the Inbox have tabs: Needs you, Ready, Running, All.
 - **Checks: quick while building, easy to turn off.** Each project has a
   check level: Quick (the default for new projects), Full or Off, and a task
-  can override it ("skip the tests"). Off reads "Built, not checked", never
-  Ready. Any result can run its checks again or file a task to add tests.
+  can override it ("skip the tests"). With checks Off a result is still
+  Ready for review, and says no check ran. Any result can run its checks again or file a task to add tests.
 - **A flow gallery, and flows as files.** Flows → New is a gallery of
   templates grouped by what they're for, with new ones for developers
   (Overnight bug bash, Flaky test hunter, Release notes writer, Docs follow

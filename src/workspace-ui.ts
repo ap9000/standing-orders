@@ -52,7 +52,7 @@ export type ResultFacts = {
    * undefined when the caller did not read them. */
   recordComplete?: boolean;
   /** The check level this result now stands at (check-levels.ts): Off reads
-   * "Built, not checked" until a follow-up check passes. */
+   * Ready for review, saying no check ran, until a follow-up check passes. */
   checkLevel?: "quick" | "full" | "off" | null;
   /** This exact run's independent review (v50 retry projection), read
    * per run so an older selected result keeps its own words; undefined
@@ -457,7 +457,7 @@ export function workStatusOf(facts: WorkFacts, resultDisplay?: DisplayStatus): W
   const shared = taskStatusOf({ stage, ...(read.need === undefined ? {} : { need: read.need }), reason: plainReasonOf(stage, status.token, status.detail),
     report: facts.result?.role === "scout", checks: stage !== "finished" ? null : VERIFIED_RESULT.has(status.token) ? { status: "passed", exitCode: null, head: null, level }
       : level === "off" ? { status: "not-run", exitCode: null, head: null, level } : null });
-  return { ...status, label: shared.headline, tone: workToneOf(shared.headline), detail: stage === "finished" && shared.headline !== "Built, not checked" ? status.detail : shared.sentence };
+  return { ...status, label: shared.headline, tone: workToneOf(shared.headline), detail: stage === "finished" && level !== "off" ? status.detail : shared.sentence };
 }
 
 function workStatusWordsOf(facts: WorkFacts, resultDisplay?: DisplayStatus): WorkStatus {
