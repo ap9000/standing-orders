@@ -6,7 +6,7 @@ import { describe, expect, test, vi } from "vitest";
 import { run } from "./exec.js";
 import type { ExecResult, RunOptions } from "./exec.js";
 import {
-  findFirstTasks, firstResultWords, firstRunSteps, firstTaskSuggestions, GENERIC_FIRST_TASKS, parseTodoLines, SIGN_IN_COMMAND,
+  findFirstTasks, firstResultWords, firstRunSteps, firstTaskSuggestions, GENERIC_FIRST_TASKS, parseTodoLines, SIGN_IN_COMMAND, signInCommandFor,
 } from "./first-run.js";
 
 const result = (stdout: string, code = 0): ExecResult => ({ code, stdout, stderr: "", timedOut: false, notFound: false });
@@ -150,4 +150,20 @@ test("the first result reads as time since the installation began", () => {
   expect(firstResultWords("2026-09-29T10:00:00.000Z", "2026-09-29T12:05:00.000Z")).toBe("First result in 2 h 5 min");
   expect(firstResultWords("2026-09-29T10:00:00.000Z", "2026-10-02T10:00:00.000Z")).toBe("First result in 3 days");
   expect(firstResultWords("2026-09-29T10:00:00.000Z", "2026-09-28T10:00:00.000Z")).toBeNull();
+});
+
+describe("the one command that gets an agent signed in here", () => {
+  test("a fresh machine installs Claude Code and signs in, written for this operating system's shell", () => {
+    expect(signInCommandFor(null, "darwin")).toBe("npm install -g @anthropic-ai/claude-code && claude auth login");
+    expect(signInCommandFor({ claude: "not-installed", codex: "not-installed" }, "linux")).toBe("npm install -g @anthropic-ai/claude-code && claude auth login");
+    expect(signInCommandFor({ claude: "not-installed", codex: "not-installed" }, "win32")).toBe("npm install -g @anthropic-ai/claude-code; claude auth login");
+  });
+  test("an installed CLI only signs in: Claude Code first, then Codex", () => {
+    expect(signInCommandFor({ claude: "signed-out", codex: "signed-out" }, "darwin")).toBe("claude auth login");
+    expect(signInCommandFor({ claude: "not-installed", codex: "signed-out" }, "darwin")).toBe("codex login");
+  });
+  test("the first-run step shows that command", () => {
+    const steps = firstRunSteps({ agentSignedIn: false, projects: 1, hasTask: false, firstResultAt: null, signInCommand: "codex login" })!;
+    expect(steps[0]!.action).toEqual({ kind: "command", command: "codex login" });
+  });
 });

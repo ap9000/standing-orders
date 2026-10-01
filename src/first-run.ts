@@ -11,12 +11,30 @@ import { githubIssues } from "./issues.js";
 
 export const SIGN_IN_COMMAND = "claude auth login";
 export const SANDBOX_COMMAND = "npx toolroll demo";
+/** How a person starts on a real project (the demo hands off to this). */
+export const START_COMMAND = "npx toolroll up";
+/** How it works, once, above the composer until the first request. */
+export const HOW_IT_WORKS = "Ask for a change. The lead writes a short plan; you approve it; an agent builds it on its own branch; it's Ready when your tests pass.";
+
+type SignInState = "connected" | "signed-out" | "not-installed" | "unverified" | "key-present" | "key-works" | "key-refused" | "missing-key";
+
+/**
+ * The one command that gets an agent signed in on this computer: sign in to the CLI that's installed (Claude Code
+ * first, then Codex), or install Claude Code and sign in, written for this operating system's shell. Unknown states
+ * (not checked yet) get the install-and-sign-in command, which is right on a fresh machine and harmless otherwise.
+ */
+export function signInCommandFor(states: { claude: SignInState; codex: SignInState } | null, platform: NodeJS.Platform): string {
+  const installed = (state: SignInState | undefined) => state !== undefined && state !== "not-installed";
+  if (installed(states?.claude)) return SIGN_IN_COMMAND;
+  if (installed(states?.codex)) return "codex login";
+  return `npm install -g @anthropic-ai/claude-code${platform === "win32" ? ";" : " &&"} ${SIGN_IN_COMMAND}`;
+}
 
 export type FirstRunAction = { kind: "link"; label: string; href: string } | { kind: "command"; command: string };
 /** `checking`: the answer is not in yet, so the step is shown neither done nor to do. */
 export type FirstRunStep = { key: "agent" | "project" | "task"; title: string; done: boolean; action: FirstRunAction | null; checking?: true };
 /** agentSignedIn is null until this machine's first sign-in check has answered. */
-export type FirstRunFacts = { agentSignedIn: boolean | null; projects: number; hasTask: boolean; firstResultAt: string | null };
+export type FirstRunFacts = { agentSignedIn: boolean | null; projects: number; hasTask: boolean; firstResultAt: string | null; signInCommand?: string };
 
 /** The three steps, each done or with the one action that does it; null once the first result has arrived. */
 export function firstRunSteps(facts: FirstRunFacts): FirstRunStep[] | null {
@@ -24,7 +42,7 @@ export function firstRunSteps(facts: FirstRunFacts): FirstRunStep[] | null {
   const project = facts.projects > 0;
   return [
     facts.agentSignedIn === null ? { key: "agent", title: "Agent signed in", done: false, action: null, checking: true }
-      : { key: "agent", title: "Agent signed in", done: facts.agentSignedIn, action: facts.agentSignedIn ? null : { kind: "command", command: SIGN_IN_COMMAND } },
+      : { key: "agent", title: "Agent signed in", done: facts.agentSignedIn, action: facts.agentSignedIn ? null : { kind: "command", command: facts.signInCommand ?? SIGN_IN_COMMAND } },
     { key: "project", title: "Project added", done: project, action: project ? null : { kind: "link", label: "Add a project", href: "/projects" } },
     { key: "task", title: "Your first task", done: facts.hasTask, action: facts.hasTask ? null : { kind: "link", label: "New task", href: "/tasks/new" } },
   ];
@@ -107,4 +125,29 @@ export function firstResultWords(since: string, at: string): string | null {
   if (minutes < 60) return `First result in ${minutes} min`;
   if (minutes < 48 * 60) { const hours = Math.floor(minutes / 60), rest = minutes % 60; return `First result in ${hours} h${rest === 0 ? "" : ` ${rest} min`}`; }
   return `First result in ${Math.round(minutes / (24 * 60))} days`;
+}
+
+/** The first task's five steps, as a person reads them. */
+export const JOURNEY_STEPS = [["plan", "Plan"], ["approve", "You approve"], ["build", "Build"], ["checks", "Checks"], ["ready", "Ready"]] as const;
+export type JourneyKey = (typeof JOURNEY_STEPS)[number][0];
+/** `stuck`: the step it stopped at (Failed, Stopped, or waiting on something other than the approval). */
+export type JourneyStep = { key: JourneyKey; label: string; state: "done" | "current" | "stuck" | "todo" };
+
+/**
+ * Where the first task stands on Plan → You approve → Build → Checks → Ready, from the one stage every surface reads
+ * (task-status.ts). Waiting for a worker before approval is still the plan; after approval it is the build. `built`:
+ * the build finished with a result.
+ */
+export function firstTaskJourney(read: { stage: "queued" | "planning" | "needs-you" | "building" | "checking" | "finished" | "complete" | "failed" | "stopped"; need?: string | undefined }, approved: boolean, built = false): JourneyStep[] {
+  const at: { index: number; stuck: boolean } =
+    read.stage === "finished" || read.stage === "complete" ? { index: 5, stuck: false }
+    : read.stage === "checking" ? { index: 3, stuck: false }
+    : read.stage === "building" ? { index: 2, stuck: false }
+    : read.stage === "needs-you" && read.need === "approval" ? { index: 1, stuck: false }
+    : read.stage === "planning" ? { index: 0, stuck: false }
+    : read.stage === "queued" ? { index: approved ? 2 : 0, stuck: false }
+    // A build that finished but isn't Ready (its checks failed or didn't run, or it needs a decision) stopped at Checks.
+    : { index: built ? 3 : approved ? 2 : 0, stuck: true };
+  return JOURNEY_STEPS.map(([key, label], index) => ({ key, label,
+    state: index < at.index ? "done" : index === at.index ? (at.stuck ? "stuck" : "current") : "todo" }));
 }

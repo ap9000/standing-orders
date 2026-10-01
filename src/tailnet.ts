@@ -1,0 +1,42 @@
+/**
+ * This computer's own names on its tailnet, when Tailscale is up: the console
+ * answers to them on its port without an --allow-host, and the phone card
+ * names the address to type. Read with `tailscale status --json`, which
+ * spends nothing and changes nothing; any failure means no tailnet.
+ */
+import { existsSync } from "node:fs";
+import { run } from "./exec.js";
+
+type Runner = (file: string, args: readonly string[], options: { timeoutMs: number }) => Promise<{ code: number | null; stdout: string; notFound?: boolean }>;
+
+/** The Mac app ships its command line inside the app bundle. */
+const MAC_APP_CLI = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
+
+const NAME = /^[a-z0-9]([a-z0-9-]{0,62})(\.[a-z0-9]([a-z0-9-]{0,62}))*$/;
+
+/** The full MagicDNS name first (machine.tailnet.ts.net), then its short form (machine). Empty when Tailscale isn't running. */
+export function tailnetNamesOf(statusJson: string): string[] {
+  let status: unknown;
+  try { status = JSON.parse(statusJson); } catch { return []; }
+  if (typeof status !== "object" || status === null) return [];
+  const body = status as { BackendState?: unknown; Self?: { DNSName?: unknown; Online?: unknown } };
+  if (body.BackendState !== "Running" || typeof body.Self?.DNSName !== "string") return [];
+  const full = body.Self.DNSName.replace(/\.$/, "").toLowerCase();
+  if (!NAME.test(full) || full.length > 253) return [];
+  const short = full.split(".")[0]!;
+  return short === full ? [full] : [full, short];
+}
+
+export async function readTailnetNames(runner: Runner = run, platform: NodeJS.Platform = process.platform): Promise<string[]> {
+  const candidates = ["tailscale", ...(platform === "darwin" && existsSync(MAC_APP_CLI) ? [MAC_APP_CLI] : [])];
+  for (const file of candidates) {
+    try {
+      const answer = await runner(file, ["status", "--json"], { timeoutMs: 3_000 });
+      if (answer.notFound === true) continue;
+      if (answer.code === 0) return tailnetNamesOf(answer.stdout);
+    } catch {
+      // No Tailscale here: no tailnet names.
+    }
+  }
+  return [];
+}

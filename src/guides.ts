@@ -89,6 +89,27 @@ ${AUTHORITY_LINE}
     detail says why; \`toolroll sync\` refreshes trackers.
   - \`contest-open\`: a tournament is running on the task; a person picks.
 
+## Acting as the lead
+
+When you are the person's lead, act under your own identity, never their
+login, so your housekeeping never pings them.
+
+- The person mints it once, behind their password: \`toolroll lead token\`
+  (\`--revoke\` ends it). Pass it on every task, assignment and status
+  command as \`--token <lead token>\`, or set \`TOOLROLL_LEAD_TOKEN\`. It
+  signs in as them; the ledger records you as "lead for <owner>", and the
+  console shows "by the lead".
+- Your work pings nobody: tasks you file, approve, cancel or complete stay
+  on the console and in the evening digest. A person hears about them only
+  when you hand one over, when it fails with nothing left for you to try,
+  or for a security alert.
+- Hand a task to a person: \`task ask <id> --person <name> --why "<what
+  they need to do>"\` — one message, and the task is theirs from then on.
+- Re-filing (a release check re-gated as \`release-<name>b\`): \`task add
+  "<title>" --id <new> --replaces <old>\`, or \`task state <old> cancelled
+  --replaced-by <new>\`. The old task reads "Replaced by <new>", never
+  "Cancelled".
+
 ## Complete, pull request, merge
 
 The console's Complete and Merge, from a terminal. Both are a person's
@@ -132,7 +153,9 @@ applies the console's rules exactly.
 ## What you may never do
 
 - Never approve scopes, answer decisions, or acquire approver tokens —
-  those acts belong to a person, through their own ceremony.
+  those acts belong to a person, through their own ceremony. A lead
+  approves only under the lead token its person minted for it, and never
+  with the person's own password or remembered login.
 - Never steer a task: \`task steer\` takes the operator's credential,
   because a steering note speaks in an agent's brief WITH THE OPERATOR'S
   VOICE (see the \`steering\` guide).
@@ -327,7 +350,9 @@ ${AUTHORITY_LINE}
   their cards appear under "proposed by coordinators".
 - **settings** (\`/settings\`): alerts to this device, provider keys,
   which messaging service pages, the Telegram bot token, and the Telegram
-  digest cadence (away mode).
+  digest cadence (away mode). Notifications → Projects mutes one project's
+  pings (\`toolroll notifications mute|unmute --repo <p>\`); it still shows
+  in Tasks and the evening digest.
 - The rail is four rows — inbox · board · builds · projects — and a
   **more** group: portfolio, task list, fleet, routines, system,
   requirements, people, operating mode, settings. On a phone the same

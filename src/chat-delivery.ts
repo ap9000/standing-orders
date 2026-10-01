@@ -793,6 +793,8 @@ export async function planChatNotifications(
       if (
         notification.createdAt >= binding.created &&
         notification.resolvedAt === null &&
+        // Pings follow responsibility: the lead's work, this person's own act and a muted project stay in the console.
+        store.pingAllowed(notification, binding.approver) &&
         // A flow decision for "anyone who approves" reaches every approver who can see the project.
         // A notification addressed to this person reaches them whatever project
         // their channel follows (a sign-in pause is the installation's, v108).

@@ -4,12 +4,15 @@
  * addCardToFlow — so a flow made here is checked exactly as one drawn there.
  * Reads need no login; every write is an approver's, proved by --as/--token
  * (or the remembered login), and lands in the ledger as a console request
- * does. create, edit, archive and trigger add preview until --yes. */
-import { readFileSync } from 'node:fs';
+ * does. create, edit, archive, import and trigger add preview until --yes.
+ * export writes a flow file (flow-share.ts); import reads one, from a path
+ * or a gist/GitHub address, and previews it in plain words first. */
+import { readFileSync, statSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { envelopeJson } from './envelope.js';
 import { addCardToFlow, advanceFlows, flowDefinitionOf } from './flow-engine.js';
 import { saveScript } from './flow-scripts.js';
+import { exportFlow, fetchFlowFile, FLOW_FILE_MAX_BYTES, FlowFileError, importFlow, parseFlowFile, planFlowImport, type FetchLike } from './flow-share.js';
 import { STARTER_FLOWS, starterFlowOf, starterOf, startersFor, starterTerms, switchOnStarter } from './flow-starters.js';
 import { addFlowTriggerTo, checkFlowTriggerNow, describeTrigger, removeFlowTrigger, triggerConfigOf, validateTriggerConfig, type TriggerIo } from './flow-triggers.js';
 import { deciderOf, FLOW_KIND_WORDS, FLOW_TEMPLATES, flowDigest, flowFromSteps, flowTerms, stepsFor, type FlowDefinition, type FlowStage } from './flows.js';
@@ -51,11 +54,16 @@ export const FLOWS_DESCRIPTORS = [
     { name: 'title', takesValue: true, meaning: "the card's title" },
     { name: 'description', takesValue: true, meaning: 'its details' },
     { name: 'zone', takesValue: true, meaning: 'a zone id or name' }] },
+  { action: 'export', synopsis: 'write a flow as a *.toolroll-flow.json file: zones, paths, trigger settings and scripts; never secrets, webhook addresses, names or cards', mutation: 'none', positionals: ['flow'], flags: [...read,
+    { name: 'out', takesValue: true, meaning: 'write the file here (default: print it)' }] },
+  { action: 'import', synopsis: 'make a flow from a flow file or a gist/GitHub https address; previews in plain words until --yes; triggers arrive off and scripts wait for approval', mutation: 'unkeyed', positionals: ['file'], flags: [...write, yes, repo,
+    { name: 'param', takesValue: true, meaning: 'a value the file asks for, as name=value (repeat for more)' }] },
+  { action: 'script approve', synopsis: 'approve a script an imported flow brought, so it runs', mutation: 'identity-idempotent', flags: [...write, repo, { name: 'name', takesValue: true, meaning: "the script's name" }] },
   { action: 'archive', synopsis: 'archive a flow: its cards stop moving and its triggers stop; previews until --yes', mutation: 'identity-idempotent', positionals: ['flow'], flags: [...write, yes] },
 ] as const;
 
 /** `--file` is a value here (a path in the project), where elsewhere it is a switch. */
-export const FLOWS_VALUE_FLAGS: ReadonlySet<string> = new Set(['file']);
+export const FLOWS_VALUE_FLAGS: ReadonlySet<string> = new Set(['file', 'param']);
 
 export type FlowsCliContext = {
   store: Store;
@@ -72,6 +80,8 @@ export type FlowsCliContext = {
   triggerIo: TriggerIo;
   /** Reads a file, or stdin for "-". */
   readInput?: (path: string) => string;
+  /** Fetches a flow file's address (tests stand in for the network). */
+  fetchFlow?: FetchLike;
 };
 
 type Flags = Map<string, string | true>;
@@ -113,6 +123,21 @@ export async function runFlowsCommand(positional: readonly string[], flags: Flag
     if (flow === null) return fail('unknown-flow', 'No such flow in your projects. toolroll flows list names them.');
     const shown = describeFlow(store, flow);
     return ok({ flow: shown }, showLines(shown));
+  }
+  if (action === 'export') {
+    const flow = flowOf(args[0], context.projects);
+    if (flow === null) return fail('unknown-flow', 'No such flow in your projects. toolroll flows list names them.');
+    let exported: ReturnType<typeof exportFlow>;
+    try { exported = exportFlow(store, flow, context.configDir); } catch (error) { return fail('unreadable', error instanceof Error ? error.message : 'This flow can\'t be exported.'); }
+    const left = exported.left.length === 0 ? [] : [`Left out: ${exported.left.join('; ')}.`];
+    const out = text('out');
+    if (out === null) {
+      if (context.json) return ok({ file: exported.file, fileName: exported.fileName, left: exported.left }, []);
+      context.write(exported.json.trimEnd());
+      return EXIT.ok;
+    }
+    try { writeFileSync(resolve(out), exported.json); } catch { return fail('unwritable', `Couldn't write ${out}.`, EXIT.failed); }
+    return ok({ path: resolve(out), fileName: exported.fileName, left: exported.left }, [`Wrote ${flow.name} to ${resolve(out)}.`, ...left]);
   }
 
   // ---- writes: an approver's, on a project they can reach
@@ -209,6 +234,55 @@ export async function runFlowsCommand(positional: readonly string[], flags: Flag
     record(project, 'accepted', `script ${String(text('name')).trim().toLowerCase()} v${saved.version}`);
     settle(project);
     return ok({ applied: true, repo: project, script: store.flowScript(project, String(text('name')).trim().toLowerCase()), said: saved.said }, [saved.said]);
+  }
+
+  if (action === 'import') {
+    const given = text('repo');
+    if (given === null || args[0] === undefined) return fail('usage', 'Use flows import <file|https address> --repo <path> [--param name=value …] [--yes].', EXIT.usage);
+    const project = projectOf(given);
+    if (project === null || !reachable.includes(project)) return refuse(null, 'unknown-project', 'That isn\'t one of your projects. toolroll repos lists them.');
+    const source = args[0];
+    const params: Record<string, string> = {};
+    for (const line of (text('param') ?? '').split('\n').filter(one => one.trim() !== '')) {
+      const equals = line.indexOf('=');
+      if (equals < 1) return fail('usage', `Give --param as name=value, not ${line}.`, EXIT.usage);
+      params[line.slice(0, equals).trim()] = line.slice(equals + 1);
+    }
+    let plan: ReturnType<typeof planFlowImport>;
+    try {
+      let raw: string;
+      if (/^[a-z][a-z0-9+.-]*:\/\//i.test(source)) raw = await fetchFlowFile(source, context.fetchFlow);
+      else {
+        let size = 0;
+        try { size = source === '-' ? 0 : statSync(resolve(source)).size; } catch { /* readInput says it can't be read */ }
+        if (size > FLOW_FILE_MAX_BYTES) throw new FlowFileError(`That file is too big: a flow file is at most ${FLOW_FILE_MAX_BYTES / 1024} KB.`);
+        try { raw = readInput(source); } catch { throw new FlowFileError(`${source} couldn't be read.`); }
+      }
+      plan = planFlowImport(store, project, parseFlowFile(raw), params, who);
+    } catch (error) {
+      if (!(error instanceof FlowFileError)) throw error;
+      return refuse(project, 'invalid-file', error.message);
+    }
+    if (!flags.has('yes')) return preview(project, plan.title, plan.terms, { name: plan.name, definition: plan.definition, parameters: plan.values });
+    let made: ReturnType<typeof importFlow>;
+    try { made = importFlow(store, plan, who, now, context.configDir); }
+    catch (error) { return refuse(project, 'invalid-file', error instanceof Error ? error.message : 'That flow couldn\'t be imported.'); }
+    record(project, 'accepted', `flow #${made.id}`);
+    return ok({ applied: true, flow: describeFlow(store, store.getFlow(made.id)!), said: made.said }, [`${made.said} Flow #${made.id}.`]);
+  }
+
+  if (action === 'script approve') {
+    const given = text('repo'), name = text('name');
+    if (given === null || name === null) return fail('usage', 'Use flows script approve --repo <path> --name <name>.', EXIT.usage);
+    const project = projectOf(given);
+    if (project === null || !reachable.includes(project)) return refuse(null, 'unknown-project', 'That isn\'t one of your projects. toolroll repos lists them.');
+    const script = store.flowScript(project, name.trim().toLowerCase());
+    if (script === null) return refuse(project, 'unknown-script', `There's no script called ${name} in ${projectName(project)}.`);
+    if (script.held === null) return ok({ applied: false, repo: project, said: `${script.name} already runs.` }, [`${script.name} already runs.`]);
+    store.approveFlowScript(project, script.name);
+    record(project, 'accepted', `script ${script.name} approved`);
+    settle(project);
+    return ok({ applied: true, repo: project, said: `Approved ${script.name}. Zones that run it go on.` }, [`Approved ${script.name}. Zones that run it go on.`]);
   }
 
   // Everything else names a flow in one of this person's projects.

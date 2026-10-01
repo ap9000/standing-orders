@@ -68,7 +68,7 @@ function headlineFor(store: Store, id: string, d: DispatchDiagnosis): TaskStatus
 
 function groupOf(d: DispatchDiagnosis): string {
   if (d.condition === "running") return "Working";
-  if (d.code === "cancelled") return "Cancelled";
+  if (d.code === "cancelled") return d.summary.startsWith("Replaced by ") ? "Replaced" : "Cancelled";
   if (d.code === "complete") return "Finished";
   if (d.code === "review-pending" || d.action === null) return "Waiting / next up";
   return "Needs attention";
@@ -104,7 +104,7 @@ export function phoneStatus(store: Store, repos: readonly string[], now: Date, f
     const lines = [...(focused === null ? [] : [`Talking about: ${focused} · /lead to switch back`, ""]), "Recent work", `As of ${now.toISOString().replace("T", " ").slice(0, 19)} UTC · ${repos.length} project(s)`, ""];
     if (snapshot.tasksSaturated) lines.push("Newest 60 tasks only — older work may still need attention.", "");
     if (snapshot.tasks.length === 0) lines.push("No tasks are recorded in these projects.");
-    for (const group of ["Needs attention", "Working", "Waiting / next up", "Finished", "Cancelled"]) {
+    for (const group of ["Needs attention", "Working", "Waiting / next up", "Finished", "Replaced", "Cancelled"]) {
       const rows = snapshot.tasks.filter(t => t.dispatch !== null && t.dispatch !== undefined && groupOf(t.dispatch) === group);
       if (rows.length === 0) continue;
       lines.push(`${group} · ${rows.length}${snapshot.tasksSaturated ? " in this snapshot" : ""}`);

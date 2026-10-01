@@ -8,7 +8,9 @@ import { scopeTermsProblem, type Store, type TaskState } from './store.js';
 import type { AssignmentSnapshot } from './assignment.js';
 import type { WorkAction, WorkSummaryAccess } from './work-summary.js';
 import type { WorkStatus, WorkView } from './workspace-ui.js';
-import { plainReasonOf, stageOfCode, taskStatusOf, workToneOf } from './task-status.js';
+import { plainReasonOf, replacedWords, stageOfCode, taskStatusOf, workToneOf, type ChecksFact } from './task-status.js';
+import { isCheckLevel } from './check-levels.js';
+import { withFollowUps } from './result-follow-ups.js';
 
 export type WorkIndexCounts = Record<WorkView, number>;
 export type WorkIndexItem = {
@@ -329,11 +331,15 @@ export function workIndexPage(store: Store, now: Date, access: WorkSummaryAccess
     'publication_url',(SELECT pr_url FROM publication WHERE run=page_result_id),
     'result_role',(SELECT role FROM run WHERE id=page_result_id),'live_role',(SELECT role FROM run WHERE id=page.live_run),
     'check_status',(SELECT status FROM run_check WHERE run=page_result_id),
+    'check_level',(SELECT outcome FROM action_ledger WHERE repo IS page.repo AND run_id=page_result_id AND action='checks used' ORDER BY id DESC LIMIT 1),
+    'check_follows',(SELECT json_group_array(q.outcome||' '||COALESCE((SELECT substr(f.outcome,instr(f.outcome,':')+1) FROM action_ledger f WHERE f.repo IS page.repo AND f.run_id=page_result_id
+      AND f.action='checks finished' AND f.outcome LIKE q.id||':%' LIMIT 1),'open')) FROM (SELECT id,outcome FROM action_ledger WHERE repo IS page.repo AND run_id=page_result_id AND action='checks requested' ORDER BY id) q),
     'proof_verdict',(SELECT COALESCE(machine_verdict,verdict) FROM proof_verdict WHERE run=page_result_id),
     'proof_failed_check',(SELECT verdict='refuted' AND reasons_json LIKE '%approved verification command exited%' FROM proof_verdict WHERE run=page_result_id),'code',code,'needs',needs,'family_running',family_running,'rank',rank,'sort_at',sort_at,
     'checked_actor',checked_actor,'checked_at',checked_at,'checked_digest',checked_digest,'question_id',question_id,
     'dependency_id',dependency_id,'dependency_state',dependency_state,'custody_unresolved',custody_unresolved,'hold_kind',hold_kind,'hold_reason',substr(hold_reason,1,300),'stop_run',stop_run,'unfinished',unfinished,'signed_out',signed_out,
-    'question_run',(SELECT run FROM decision WHERE id=page.question_id),
+    'question_run',(SELECT run FROM decision WHERE id=page.question_id),'replaced_by',(SELECT successor FROM task_replacement WHERE task_ref=page.ref_id),
+    'completed_by_lead',(SELECT lead FROM task_act WHERE task_ref=page.root_ref AND act='completed' ORDER BY id DESC LIMIT 1),
     'question_task',(SELECT r.external_id FROM decision d JOIN run ON run.id=d.run JOIN task_ref r ON r.id=run.task_ref WHERE d.id=page.question_id)) FROM page`)
     .all({ ...parameters(now, access, options), $cursorRoot: cursor?.root ?? 0, $cursorRank: cursor?.rank ?? 0, $cursorAt: cursor?.at ?? '', $limit: limit + 1, $recent: new Date(now.getTime()-86_400_000).toISOString() });
   const selected = rows.slice(1).map(row => JSON.parse(String(row['row_json'])) as Row);
@@ -354,6 +360,23 @@ export function workCountsByProject(store: Store, now: Date, access: WorkSummary
 
 /** Labels stay navigation, never an authorization to mutate. Full task
  * opening re-proves process custody, receipt bytes and approval terms. */
+/** The list's Checks: the build's own result, its level, and follow-up checks on the same commit (result-follow-ups.ts). */
+function listChecksOf(own: 'passed' | 'failed' | null, level: string | null, follows: unknown): ChecksFact | null {
+  let done: { level: 'quick' | 'full'; state: 'passed' | 'failed' | 'waiting' | 'not-run'; head: string; exitCode: null }[] = [];
+  try {
+    // The row's JSON already holds the list; an older reader may hand over its text.
+    done = ((typeof follows === 'string' ? JSON.parse(follows) : Array.isArray(follows) ? follows : []) as unknown[]).flatMap(one => {
+      const [ask, said] = String(one).split(' ');
+      if (ask !== 'quick' && ask !== 'full') return [];
+      return [{ level: ask, state: said === 'passed' || said === 'failed' ? said : said === 'open' ? 'waiting' as const : 'not-run' as const, head: '', exitCode: null }];
+    });
+  } catch { done = []; }
+  const ran = isCheckLevel(level) ? level : null;
+  const read = withFollowUps({ status: own ?? 'not-run', level: ran, exitCode: null, head: null }, done);
+  if (own === null && read.status === 'not-run' && ran !== 'off' && read.running === null) return null;
+  return { status: read.status, exitCode: null, head: null, level: read.level, running: read.running };
+}
+
 function itemOf(row: Row, principal: WorkSummaryAccess['principal']): WorkIndexItem {
   const code = String(row['code']), id = String(row['id']);
   const need = n(row, 'needs') === 1, running = n(row, 'family_running') === 1;
@@ -401,13 +424,16 @@ function itemOf(row: Row, principal: WorkSummaryAccess['principal']): WorkIndexI
     detail = `${label}. It starts again on its own once ${providerName(provider)} works.`;
   }
   if (code === 'running' && n(row, 'version_count') > 1) label = 'Revising';
+  // Replaced, never "Cancelled": the successor is one tap away.
+  const successor = code === 'cancelled' ? s(row, 'replaced_by') : null;
+  if (successor !== null) { detail = `${replacedWords(successor)}.`; actionLabel = `Open ${successor}`; }
   if (code === 'terminal-dependency' && s(row, 'dependency_id') !== null) detail = `${s(row, 'dependency_id')} ${s(row, 'dependency_state') === 'cancelled' ? 'was cancelled' : 'failed'} before it finished.`;
   if (code === 'result-needs-attention' && n(row, 'custody_unresolved')) detail = 'A process exit is not recorded. Open the result to check whether its work has stopped.';
   if (code === 'result-needs-attention' && ['built', 'no-change'].includes(s(row, 'result_outcome') ?? '')) { actionCode = 'open-result'; actionLabel = 'Open result'; }
   if (actionCode === null) { actionCode = code === 'running' ? 'inspect-run' : 'inspect-task'; actionLabel = code === 'running' ? 'Watch the build' : 'View task details'; }
   const read = actionCode !== null && ['inspect-task', 'inspect-run', 'inspect-stop', 'inspect-decisions', 'open-result'].includes(actionCode);
   const primaryAction: WorkAction | null = actionCode === null ? null : { code: actionCode, label: actionLabel,
-    target: { taskId: code === 'earlier-active' ? s(row, 'earlier_id') ?? id : actionCode === 'answer-decision' ? s(row, 'question_task') ?? id : id,
+    target: { taskId: successor ?? (code === 'earlier-active' ? s(row, 'earlier_id') ?? id : actionCode === 'answer-decision' ? s(row, 'question_task') ?? id : id),
       runId: actionCode === 'answer-decision' ? n(row, 'question_run') || null : actionCode === 'inspect-run' && code === 'running' ? n(row, 'live_run') || null : actionCode === 'open-result' || actionCode === 'inspect-run' ? n(row, 'result_id') || null
         : actionCode === 'reconcile-run' ? n(row, 'unfinished') || null : ['resume-run', 'inspect-stop'].includes(actionCode) ? n(row, 'stop_run') || null : null,
       decisionId: actionCode === 'answer-decision' ? n(row, 'question_id') || null : null },
@@ -417,11 +443,11 @@ function itemOf(row: Row, principal: WorkSummaryAccess['principal']): WorkIndexI
   const reading = stageOfCode(code, { needsPerson: need, planning: s(row, 'live_role') === 'planner', operatorHold: s(row, 'hold_kind') === 'operator' });
   const checkStatus = s(row, 'check_status'), verdict = s(row, 'proof_verdict');
   const finished = reading.stage === 'finished' || reading.stage === 'complete';
+  const own = checkStatus === 'failed' || n(row, 'proof_failed_check') === 1 ? 'failed' as const : checkStatus === 'passed' || verdict === 'verified' ? 'passed' as const : null;
   const shared = taskStatusOf({ stage: reading.stage, ...(reading.need === undefined ? {} : { need: reading.need }),
     reason: finished ? null : plainReasonOf(reading.stage, code, detail || null), report: s(row, 'result_role') === 'scout',
-    checks: !finished ? null : checkStatus === 'failed' || n(row, 'proof_failed_check') === 1 ? { status: 'failed', exitCode: null, head: null }
-      : checkStatus === 'passed' || verdict === 'verified' ? { status: 'passed', exitCode: null, head: null } : null,
-    completedBy: code === 'complete' ? String(row['checked_actor']).replace(/^(?:operator|coordinator|lead):/, '') : null });
+    checks: !finished ? null : listChecksOf(own, s(row, 'check_level'), row['check_follows']),
+    completedBy: code !== 'complete' ? null : n(row, 'completed_by_lead') === 1 ? 'the lead' : String(row['checked_actor']).replace(/^(?:operator|coordinator|lead):/, '') });
   label = shared.headline;
   detail = shared.sentence;
   const views: WorkView[] = ['all'];

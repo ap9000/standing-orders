@@ -14,6 +14,7 @@ import { executeSharedAction, sharedActionPayload, sharedActionAllowsChallenge, 
  * scope was rewritten, the decision answered) is a refusal, never a
  * silent re-read.
  */
+import { isCheckLevel, setTaskCheckLevel } from "./check-levels.js";
 import { verifiedAuthor, type CoordinatorProposal, type MateProposal, type Store } from "./store.js";
 import type { VerifiedApprover } from "./principal.js";
 import { isVerifiedApprover, reproveApprover } from "./principal.js";
@@ -294,6 +295,8 @@ function executeProposal(
       now,
     );
     if (!filed.ok) return refuse("refused", `not filed: ${filed.message}`);
+    const checks = payload["checks"];
+    if (isCheckLevel(checks)) setTaskCheckLevel(store, filed.id, checks, actor.name, now);
     return {
       ok: true,
       kind,
@@ -338,7 +341,7 @@ function executeProposal(
   if (kind === "task_action") {
     // An attended surface (the console, the paired phone) honours the
     // operator's own automatic-approval mode; the CLI keeps its ceremony.
-    const result = applyChatTaskAction(store, actor, payload, now, options.via !== "cli", { held: options.held, deferSignal: options.deferSignal, via: options.via });
+    const result = applyChatTaskAction(store, actor, payload, now, options.via !== "cli", { held: options.held, deferSignal: options.deferSignal, via: options.via, ...(options.evidenceRoot === undefined ? {} : { evidenceRoot: options.evidenceRoot }) });
     return result.ok ? { ok: true, kind, taskId: result.taskId, said: result.said } : refuse("stale", result.message);
   }
 

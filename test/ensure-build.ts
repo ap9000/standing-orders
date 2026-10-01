@@ -1,5 +1,5 @@
 import { execSync } from "node:child_process";
-import { readdirSync, statSync, existsSync } from "node:fs";
+import { readdirSync, readFileSync, statSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 /** CLI integration tests are required even on a fresh checkout. Build once,
@@ -37,7 +37,24 @@ export function buildIsStale(root: string): boolean {
   return newerBrowserInput(join(root, "src", "browser"));
 }
 
-export default function ensureBuild(): void {
+/** The release check starts the unit tests beside its own build and names a file it writes when that build ends
+ * ("ok" or "failed"). Wait for it rather than build a second time into the same dist/. */
+async function releaseBuild(marker: string): Promise<void> {
+  const deadline = Date.now() + 15 * 60_000;
+  for (;;) {
+    if (existsSync(marker)) {
+      const outcome = readFileSync(marker, "utf8").trim();
+      if (outcome === "ok") return;
+      throw new Error(`The release check's build ${outcome === "" ? "ended without saying how" : outcome}.`);
+    }
+    if (Date.now() > deadline) throw new Error("The release check's build didn't finish in 15 minutes.");
+    await new Promise(done => setTimeout(done, 200));
+  }
+}
+
+export default async function ensureBuild(): Promise<void> {
   const root = resolve(import.meta.dirname, "..");
+  const marker = process.env.TOOLROLL_RELEASE_BUILD;
+  if (marker !== undefined && marker !== "") return releaseBuild(marker);
   if (buildIsStale(root)) execSync("npm run build", { cwd: root, stdio: "inherit" });
 }

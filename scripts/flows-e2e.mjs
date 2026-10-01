@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { SKIPPED_FADE } from "./e2e-kit.mjs";
+import { BROWSER_CHECK, SKIPPED_FADE } from "./e2e-kit.mjs";
 /**
  * Flows, end to end. A throwaway Toolroll instance — the real CLI,
  * the real console (`serve`) and the real worker loop (`watch`) — against a
@@ -7,7 +7,14 @@ import { SKIPPED_FADE } from "./e2e-kit.mjs";
  * for the lead and a real Claude build. Nothing is stubbed: every check waits
  * for what a person would see, and reads the database only as the oracle.
  *
- *   npm run e2e:flows      (or: node scripts/flows-e2e.mjs [--skip-build] [--keep] [--only <pattern>] [--playwright <index.mjs>] [--output <dir>])
+ *   npm run e2e:flows      (or: node scripts/flows-e2e.mjs [--group <name>] [--skip-build] [--keep] [--only <pattern>] [--playwright <index.mjs>] [--output <dir>])
+ *   node scripts/e2e-parallel.mjs scripts/flows-e2e.mjs      (every group at once, each in its own world)
+ *   node scripts/flows-e2e.mjs --groups      (the groups and what each covers)
+ *
+ * The checks are in groups. Each group runs in a world of its own, so the
+ * groups can run at once: every group starts with the first-run setup and ends
+ * with the browser-error check, and a check that needs an earlier one is in its
+ * group. With no --group, every check runs in one world, one after another.
  *
  * Needs: a built dist/, `claude` logged in (subscription), `gh` logged in,
  * git, npm. Spends a few subscription turns and one real build. Everything it
@@ -38,6 +45,22 @@ async function loadPlaywright() {
   }
   throw new Error("Needs Playwright and its browser: npx playwright install chromium, or pass --playwright <path to playwright/index.mjs>");
 }
+/** The groups, in the order they're listed. */
+const GROUPS = {
+  build: { about: "The lead saves a script and draws a flow from plain words, and a card goes all the way through a real build" },
+  lead: { about: "The lead draws a sorting flow and a reply-and-approve flow from plain words" },
+  steps: { about: "Jev sorts through OpenRouter, a Draft step writes with Claude, and web request, email and tool steps reach outside" },
+  triggers: { about: "A failing script and Insights, then a public form, a webhook, GitHub, a schedule, mentions, and the lead on where flows break" },
+};
+/** Not a group: the checks every group has (the first-run setup and the browser-error check). */
+const EVERY = "every";
+const group = option("--group", null);
+if (flag("--groups")) {
+  const list = Object.entries(GROUPS).map(([name, one]) => ({ name, about: one.about }));
+  console.log(flag("--json") ? JSON.stringify(list) : list.map(one => `${one.name.padEnd(9)} ${one.about}`).join("\n"));
+  process.exit(0);
+}
+if (group !== null && !(group in GROUPS)) { console.error(`No group "${group}". The groups: ${Object.keys(GROUPS).join(", ")}`); process.exit(2); }
 const skipBuild = flag("--skip-build");
 /** --only <pattern>: run just the checks whose names match (the ones they need count as met). */
 const only = option("--only", null) === null ? null : new RegExp(option("--only", ""), "i");
@@ -85,7 +108,8 @@ class Skip extends Error {}
 // Every result names what it needs, so a rerun can pick just the failed checks and what they need (flows/real-model-journeys.mjs).
 async function check(name, needs, body) {
   const at = Date.now();
-  if (only !== null && !only.test(name)) { results.push({ name, needs, state: "not selected" }); return null; }
+  // Whatever --only picked, the pages it opened are checked.
+  if (only !== null && !only.test(name) && name !== BROWSER_CHECK) { results.push({ name, needs, state: "not selected" }); return null; }
   const missing = needs.filter(one => failedPrerequisites.has(one));
   if (missing.length > 0) { results.push({ name, needs, state: "skipped", because: missing }); say(`SKIP  ${name} (needs ${missing.join(", ")})`); failedPrerequisites.add(name); return null; }
   say(`...   ${name}`);
@@ -103,6 +127,15 @@ async function check(name, needs, body) {
     say(`FAIL  ${name}: ${(error instanceof Error ? error.message : String(error)).split("\n")[0]}`);
     return null;
   }
+}
+
+const placed = new Map();
+/** A check in its group (or in EVERY group): it runs when its group, or every group, runs; what it needs is in the same group. */
+function journey(name, title, needs, body) {
+  const elsewhere = needs.filter(one => placed.get(one) !== name && placed.get(one) !== EVERY);
+  if ((name !== EVERY && !(name in GROUPS)) || placed.has(title) || elsewhere.length > 0) throw new Error(`"${title}" in group ${name}: ${elsewhere.length > 0 ? `needs ${elsewhere.join(", ")} from another group` : "an unknown group, or a second check of that name"}`);
+  placed.set(title, name);
+  return group === null || name === EVERY || name === group ? check(title, needs, body) : null;
 }
 
 // ------------------------------------------------------------------ the world
@@ -189,7 +222,7 @@ async function confirmCard(reply, label) {
 
 // ------------------------------------------------------------------ checks
 
-await check("Sign in and turn the lead chat on (first-run setup)", [], async () => {
+await journey(EVERY, "Sign in and turn the lead chat on (first-run setup)", [], async () => {
   await page.goto(`${base}/chat`);
   await page.selectOption('form[action="/chat/config"] select[name="provider"]', "claude-subscription");
   await page.fill('form[action="/chat/config"] input[name="model"]', "sonnet");
@@ -200,7 +233,7 @@ await check("Sign in and turn the lead chat on (first-run setup)", [], async () 
 });
 
 let flowId = null;
-await check("The lead saves a script from plain words (real Claude turn)", ["Sign in and turn the lead chat on (first-run setup)"], async () => {
+await journey("build", "The lead saves a script from plain words (real Claude turn)", ["Sign in and turn the lead chat on (first-run setup)"], async () => {
   const { reply, text } = await askLead("Make a project script called unit-tests that runs npm test, for up to 5 minutes.");
   await shot("lead-script-card");
   await confirmCard(reply, "unit-tests");
@@ -209,7 +242,7 @@ await check("The lead saves a script from plain words (real Claude turn)", ["Sig
   return { saved };
 });
 
-await check("The lead draws a flow from plain words (real Claude turn)", ["The lead saves a script from plain words (real Claude turn)"], async () => {
+await journey("build", "The lead draws a flow from plain words (real Claude turn)", ["The lead saves a script from plain words (real Claude turn)"], async () => {
   const { reply, text } = await askLead("Make a flow called Bug fixes in this project: new requests wait in an inbox, then an agent builds the fix, then it runs the unit-tests script, then I review it and decide. If the script fails, send the card back to the build.");
   await shot("lead-flow-card");
   const { href } = await confirmCard(reply, "Bug fixes");
@@ -229,7 +262,7 @@ await check("The lead draws a flow from plain words (real Claude turn)", ["The l
   return { zones: view.stages.map(one => `${one.title} (${one.kind})`) };
 });
 
-await check("The lead draws a sorting flow from plain words (real Claude turn)", ["Sign in and turn the lead chat on (first-run setup)"], async () => {
+await journey("lead", "The lead draws a sorting flow from plain words (real Claude turn)", ["Sign in and turn the lead chat on (first-run setup)"], async () => {
   const { reply, text } = await askLead("Make a flow called Ticket sorter in this project: Jev sorts each new ticket into billing, technical or account questions, each going to its own team's zone, and anything it isn't sure about waits in a zone called Sort by hand. Also note how urgent each ticket is.");
   await shot("lead-sort-card");
   const { href } = await confirmCard(reply, "Ticket sorter");
@@ -250,17 +283,16 @@ await check("The lead draws a sorting flow from plain words (real Claude turn)",
   return { answers: sort.sort.answers.map(one => `${one.answer} → ${view.stages.find(z => z.id === one.to)?.title}`), notSure: sort.onFail, sureAt: sort.sort.sureAt };
 });
 
-await check("Jev sorts real cards through OpenRouter (Exception routing template)", ["Sign in and turn the lead chat on (first-run setup)"], async () => {
+await journey("steps", "Jev sorts real cards through OpenRouter (Exception routing template)", ["Sign in and turn the lead chat on (first-run setup)"], async () => {
   const { namedPath } = await import(new URL("../dist/names.js", import.meta.url).href);
   // Inside the agents' fence (a flow's check zone) the saved key is out of reach, as it is for the worker there.
   try { accessSync(join(namedPath(homedir(), ["keys"], { dot: true }), "openrouter"), constants.R_OK); } catch (error) {
     throw new Skip(error.code === "EPERM" ? "the OpenRouter key saved in Settings → AI providers is out of reach inside the agents' fence" : "needs an OpenRouter key saved in Settings → AI providers");
   }
-  await page.goto(`${base}/flows`);
-  await page.evaluate(() => { for (const one of document.querySelectorAll("details")) one.open = true; });
-  await page.fill('form[action="/flows/new"] input[name="name"]', "Support desk");
-  await page.selectOption('form[action="/flows/new"] select[name="template"]', "exception-routing");
-  await Promise.all([page.waitForNavigation(), page.click('form[action="/flows/new"] button')]);
+  // Flows → New → a template's page: name it, then create what it previews.
+  await page.goto(`${base}/flows/new/exception-routing`);
+  await page.fill('form[data-gallery-use] input[name="name"]', "Support desk");
+  await Promise.all([page.waitForNavigation(), page.click('form[data-gallery-use] button[value="create"]')]);
   const id = Number(/\/flows\/(\d+)/.exec(page.url())[1]);
   await page.waitForSelector("[data-zone]");
   const tickets = [
@@ -296,13 +328,12 @@ await check("Jev sorts real cards through OpenRouter (Exception routing template
   return { zones: sorted.map(one => `${one.title} → ${one.stage} (${one.sorted?.chip})`), ms: decisions.map(one => one.ms), costUsd: decisions.reduce((sum, one) => sum + (one.cost ?? 0), 0) };
 });
 
-await check("A Draft step writes a real reply with Claude, and the owner edits and approves it", ["Sign in and turn the lead chat on (first-run setup)"], async () => {
-  await page.goto(`${base}/flows`);
+await journey("steps", "A Draft step writes a real reply with Claude, and the owner edits and approves it", ["Sign in and turn the lead chat on (first-run setup)"], async () => {
+  // Flows → New → a template's page: name it, then create what it previews.
+  await page.goto(`${base}/flows/new/blank`);
   const csrf = await page.locator('input[name="csrf"]').first().inputValue();
-  await page.evaluate(() => { for (const one of document.querySelectorAll("details")) one.open = true; });
-  await page.fill('form[action="/flows/new"] input[name="name"]', "Replies");
-  await page.selectOption('form[action="/flows/new"] select[name="template"]', "blank");
-  await Promise.all([page.waitForNavigation(), page.click('form[action="/flows/new"] button')]);
+  await page.fill('form[data-gallery-use] input[name="name"]', "Replies");
+  await Promise.all([page.waitForNavigation(), page.click('form[data-gallery-use] button[value="create"]')]);
   const id = Number(/\/flows\/(\d+)/.exec(page.url())[1]);
   const view = await flowView(id);
   if (view.flow.owner !== "alex") throw new Error(`the flow's owner is ${view.flow.owner}, not whoever made it`);
@@ -348,7 +379,7 @@ await check("A Draft step writes a real reply with Claude, and the owner edits a
   return { draft: draft.slice(0, 200), seconds: Math.round(run.duration_ms / 100) / 10, result: run.result };
 });
 
-await check("The lead drafts a reply-and-approve flow from plain words (real Claude turn)", ["Sign in and turn the lead chat on (first-run setup)"], async () => {
+await journey("lead", "The lead drafts a reply-and-approve flow from plain words (real Claude turn)", ["Sign in and turn the lead chat on (first-run setup)"], async () => {
   let { reply, text } = await askLead("Make a flow called Customer replies in this project: Claude drafts a reply to each new question, I approve or edit it in my chat app, then it's posted to the team chat.");
   // An earlier check made a similar "Replies" flow, and the lead may fairly ask whether to reuse it: answered the way a person would.
   const drafted = await reply.locator('[data-view="chat-card"][data-card-state="pending"]').filter({ hasText: "Customer replies" }).first().waitFor({ timeout: 10_000 }).then(() => true, () => false);
@@ -399,7 +430,7 @@ function mailSink() {
   return new Promise(done => server.listen(0, "127.0.0.1", () => done({ server, port: server.address().port, received })));
 }
 
-await check("Web request, email and tool steps reach outside for real: a web server, a mail server and an MCP tool", ["Sign in and turn the lead chat on (first-run setup)"], async () => {
+await journey("steps", "Web request, email and tool steps reach outside for real: a web server, a mail server and an MCP tool", ["Sign in and turn the lead chat on (first-run setup)"], async () => {
   const calls = [];
   const web = createHttpServer((request, response) => { let body = ""; request.on("data", chunk => { body += chunk; }); request.on("end", () => { calls.push({ url: request.url, auth: request.headers["authorization"], body }); response.writeHead(201, { "content-type": "application/json" }); response.end('{"ticket": "T-1042"}'); }); });
   await new Promise(done => web.listen(0, "127.0.0.1", done));
@@ -431,11 +462,10 @@ createInterface({ input: process.stdin }).on("line", line => {
       if (answered.status() >= 400) throw new Error(`the Tools page refused ${form.action}: ${answered.status()}`);
     }
     // The flow: call the web server, post to the tool, email whoever asked.
-    await page.goto(`${base}/flows`);
-    await page.evaluate(() => { for (const one of document.querySelectorAll("details")) one.open = true; });
-    await page.fill('form[action="/flows/new"] input[name="name"]', "Intake");
-    await page.selectOption('form[action="/flows/new"] select[name="template"]', "blank");
-    await Promise.all([page.waitForNavigation(), page.click('form[action="/flows/new"] button')]);
+    // Flows → New → a template's page: name it, then create what it previews.
+    await page.goto(`${base}/flows/new/blank`);
+    await page.fill('form[data-gallery-use] input[name="name"]', "Intake");
+    await Promise.all([page.waitForNavigation(), page.click('form[data-gallery-use] button[value="create"]')]);
     const id = Number(/\/flows\/(\d+)/.exec(page.url())[1]);
     const view = await flowView(id);
     const zone = x => ({ x, y: 0, w: 260, h: 300, color: "blue" });
@@ -476,7 +506,7 @@ createInterface({ input: process.stdin }).on("line", line => {
 });
 
 let buildCard = null;
-if (!skipBuild) await check("A card goes all the way through with a real build, a real script and a person's decision", ["The lead draws a flow from plain words (real Claude turn)"], async () => {
+if (!skipBuild) await journey("build", "A card goes all the way through with a real build, a real script and a person's decision", ["The lead draws a flow from plain words (real Claude turn)"], async () => {
   await page.goto(`${base}/flows/${flowId}`);
   await page.waitForSelector("[data-zone]");
   await page.click('button:has-text("New card")');
@@ -524,14 +554,13 @@ if (!skipBuild) await check("A card goes all the way through with a real build, 
 });
 
 let checksFlow = null;
-await check("A failing script sends the card back, and Insights show where and why", ["Sign in and turn the lead chat on (first-run setup)"], async () => {
+await journey("triggers", "A failing script sends the card back, and Insights show where and why", ["Sign in and turn the lead chat on (first-run setup)"], async () => {
   // A script made on the Scripts panel.
-  await page.goto(`${base}/flows`);
+  // Flows → New → a template's page: name it, then create what it previews.
+  await page.goto(`${base}/flows/new/blank`);
   const csrf = await page.locator('input[name="csrf"]').first().inputValue();
-  await page.evaluate(() => { for (const one of document.querySelectorAll("details")) one.open = true; });
-  await page.fill('form[action="/flows/new"] input[name="name"]', "Checks");
-  await page.selectOption('form[action="/flows/new"] select[name="template"]', "blank");
-  await Promise.all([page.waitForNavigation(), page.click('form[action="/flows/new"] button')]);
+  await page.fill('form[data-gallery-use] input[name="name"]', "Checks");
+  await Promise.all([page.waitForNavigation(), page.click('form[data-gallery-use] button[value="create"]')]);
   checksFlow = Number(/\/flows\/(\d+)/.exec(page.url())[1]);
   await page.waitForSelector("[data-zone]");
   await page.click("[data-open-scripts]");
@@ -587,7 +616,7 @@ const trigger = async (flow, fill) => {
 const pick = (form, label, value) => form.locator("label", { hasText: label }).locator("select").selectOption(value);
 const type = (form, label, value) => form.locator("label", { hasText: label }).locator("input, textarea").first().fill(value);
 
-await check("A button shared as a public form makes a card without signing in", ["A failing script sends the card back, and Insights show where and why"], async () => {
+await journey("triggers", "A button shared as a public form makes a card without signing in", ["A failing script sends the card back, and Insights show where and why"], async () => {
   await trigger(checksFlow, async form => { await pick(form, "What starts cards", "button"); await type(form, "Button name", "Report a bug"); await type(form, "Questions it asks", "What happened?\nWhere?"); });
   const row = page.locator("[data-trigger-row]", { hasText: "Report a bug" });
   await row.locator("button", { hasText: "Share as a form" }).click();
@@ -605,7 +634,7 @@ await check("A button shared as a public form makes a card without signing in", 
   return { source: card.source?.label };
 });
 
-await check("A webhook trigger makes a card from a posted JSON body", ["A failing script sends the card back, and Insights show where and why"], async () => {
+await journey("triggers", "A webhook trigger makes a card from a posted JSON body", ["A failing script sends the card back, and Insights show where and why"], async () => {
   await trigger(checksFlow, async form => { await pick(form, "What starts cards", "webhook"); await type(form, "Title field", "alert.title"); });
   const path = /\/hooks\/flow\/[A-Za-z0-9_-]+/.exec(await page.locator("[data-trigger-reveal]").innerText())?.[0];
   if (path === undefined) throw new Error("no webhook address was shown");
@@ -616,7 +645,7 @@ await check("A webhook trigger makes a card from a posted JSON body", ["A failin
   if (!(await again.text()).includes("Nothing new")) throw new Error("the same delivery made a second card");
 });
 
-await check("A GitHub trigger checks a real repository with gh (Check now)", ["A failing script sends the card back, and Insights show where and why"], async () => {
+await journey("triggers", "A GitHub trigger checks a real repository with gh (Check now)", ["A failing script sends the card back, and Insights show where and why"], async () => {
   await trigger(checksFlow, async form => { await pick(form, "What starts cards", "github"); await type(form, "Repository", "ap9000/standing-orders"); await pick(form, "Watch", "checks"); });
   const row = page.locator("[data-trigger-row]", { hasText: "Failed checks on main" });
   await row.locator("button", { hasText: "Check now" }).click();
@@ -628,12 +657,12 @@ const scheduleAddedAt = Date.now();
 // Daily at the next whole minute at least 45 s away (UTC): it fires in about a minute, where the
 // shortest "every" schedule (5 minutes) kept the whole run waiting for it.
 const fireAt = new Date(Math.ceil((scheduleAddedAt + 45_000) / 60_000) * 60_000);
-const scheduled = await check("A schedule trigger is added (checked at the end)", ["A failing script sends the card back, and Insights show where and why"], async () => {
+const scheduled = await journey("triggers", "A schedule trigger is added (checked at the end)", ["A failing script sends the card back, and Insights show where and why"], async () => {
   await trigger(checksFlow, async form => { await pick(form, "What starts cards", "schedule"); await type(form, "When", `daily ${fireAt.toISOString().slice(11, 16)}`); await type(form, "Card title", "Health check"); });
   if ((await page.locator("[data-trigger-row]", { hasText: "Health check" }).count()) === 0) throw new Error("the schedule trigger isn't listed");
 });
 
-await check("People: a mention reaches only the person mentioned, who then sees the card as theirs", ["A failing script sends the card back, and Insights show where and why"], async () => {
+await journey("triggers", "People: a mention reaches only the person mentioned, who then sees the card as theirs", ["A failing script sends the card back, and Insights show where and why"], async () => {
   await page.goto(`${base}/flows/${checksFlow}`); await page.waitForSelector("[data-zone]");
   const card = (await flowView(checksFlow)).cards.find(one => one.title === "Check the math module");
   await page.locator(`[data-card="${card.id}"]`).click();
@@ -653,18 +682,18 @@ await check("People: a mention reaches only the person mentioned, who then sees 
   return { notifications: notes };
 });
 
-await check("The lead explains where the flows break (real Claude turn)", ["A failing script sends the card back, and Insights show where and why"], async () => {
+await journey("triggers", "The lead explains where the flows break (real Claude turn)", ["A failing script sends the card back, and Insights show where and why"], async () => {
   const { text } = await askLead("Where do my flows break? Keep it short.");
   if (!/lint/i.test(text)) throw new Error(`the answer doesn't mention the failing Lint step: ${text.slice(0, 400)}`);
   return { answer: text.slice(0, 400) };
 });
 
-if (scheduled !== null && scheduled !== undefined) await check("The schedule trigger makes its card on time", ["A schedule trigger is added (checked at the end)"], async () => {
+if (scheduled !== null && scheduled !== undefined) await journey("triggers", "The schedule trigger makes its card on time", ["A schedule trigger is added (checked at the end)"], async () => {
   const card = await until("the scheduled card", async () => (await flowView(checksFlow)).cards.find(one => one.title.startsWith("Health check")), { timeoutMs: Math.max(30_000, fireAt.getTime() + 60_000 - Date.now()), everyMs: 5000 });
   return { title: card.title, minutes: Math.round((Date.now() - scheduleAddedAt) / 6000) / 10 };
 });
 
-await check("No browser errors on any page", [], async () => { if (problems.length > 0) throw new Error(problems.slice(0, 5).join(" | ")); });
+await journey(EVERY, BROWSER_CHECK, [], async () => { if (problems.length > 0) throw new Error(problems.slice(0, 5).join(" | ")); });
 
 // ------------------------------------------------------------------ report
 
@@ -675,7 +704,7 @@ const passed = results.filter(one => one.state === "passed").length, failed = re
 results.splice(0, results.length, ...results.filter(one => one.state !== "not selected"));
 const report = { startedAt: new Date(started).toISOString(), minutes: Math.round((Date.now() - started) / 6000) / 10, workspace: root, passed, failed, skipped, results };
 writeFileSync(join(out, "report.json"), JSON.stringify(report, null, 2) + "\n");
-writeFileSync(join(out, "report.md"), [`# Flows end to end — ${passed} passed, ${failed} failed, ${skipped} skipped (${report.minutes} min)`, "",
+writeFileSync(join(out, "report.md"), [`# Flows end to end${group === null ? "" : `: ${group}`} — ${passed} passed, ${failed} failed, ${skipped} skipped (${report.minutes} min)`, "",
   ...results.map(one => `- ${one.state === "passed" ? "✅" : one.state === "failed" ? "❌" : "⏭️"} ${one.name}${one.seconds === undefined ? "" : ` — ${one.seconds} s`}${one.error ? `\n  - ${one.error.split("\n")[0]}` : ""}`),
   "", `Workspace: ${root}`, `Logs and screenshots: ${out}`, ""].join("\n"));
 say(`${passed} passed, ${failed} failed, ${skipped} skipped — ${join(out, "report.md")}`);

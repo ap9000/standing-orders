@@ -2,6 +2,7 @@ import * as projectSkills from "./project-skills.js";
 import { disposeBuildOutcome } from "./dispose.js";
 import { presetTerms, modeTermsJson, modeDigestOf } from "./modes.js";
 import { isVerificationReceipt, verificationEvidence } from "./verification-evidence.js";
+import { quickVerifyKey, runCheckLevel, setProjectCheckLevel } from "./check-levels.js";
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { agentExitWords, build, handoffResumePrompt, NO_HANDOFF_WORDS, PROTECTED, WIP_COMMIT_WORDS, proveApprovedProfile, verificationExecutableMissing, type Runner } from "./builder.js";
 import { routeDigestOf } from "./phase-routing.js";
@@ -2099,6 +2100,34 @@ describe("the pulse", () => {
     const finished = currentClaim(store, taskRef, new Date())!.heartbeatAt;
     await sleep(25);
     expect(currentClaim(store, taskRef, new Date())!.heartbeatAt).toBe(finished);
+  });
+
+  test("check levels: Quick runs the approved quick command, Off runs nothing, and each run records the level it used", async () => {
+    acquire(store, taskRef, "builder-1", { token: tok("builder-1"), now: new Date(), ttlMs: 60 * 60_000, newLeaseId: ids("lease-a", "lease-b") });
+    store.setVerifyCommand({ repo: REPO, command: "full-check", timeoutMs: 5_000, approvedBy: "alex" }, T0);
+    store.setVerifyCommand({ repo: quickVerifyKey(REPO), command: "quick-check", timeoutMs: 5_000, approvedBy: "alex" }, T0);
+    setProjectCheckLevel(store, REPO, "quick", "alex", T0);
+    const ran: string[] = [];
+    const agent: Runner = async (_file, args, options) => { conclude(args, options); return { ...OK, stdout: AGENT_SAID }; };
+    const verify: Runner = async (_file, args) => { ran.push(args.at(-1)!); return { ...OK }; };
+    const quick = request("lease-a", { agent, verify });
+    expect(await build(store, quick)).toMatchObject({ ok: true, committed: true });
+    expect(ran).toEqual(["quick-check"]);
+    expect(runCheckLevel(store, quick.runId)).toBe("quick");
+    expect(store.runCheckFor(quick.runId)).toMatchObject({ status: "passed" });
+    // The sealed receipt binds the quick grant, and it still verifies.
+    const gate = verificationEvidence(store, quick.evidenceRoot, quick.runId);
+    expect(gate.ok && JSON.parse(gate.bytes!).command.command).toBe("quick-check");
+
+    setProjectCheckLevel(store, REPO, "off", "alex", T0);
+    ran.length = 0;
+    const off = request("lease-a", { agent, verify });
+    await build(store, off);
+    expect(ran).toEqual([]);
+    expect(runCheckLevel(store, off.runId)).toBe("off");
+    expect(store.runCheckFor(off.runId)).toMatchObject({ status: "not-run" });
+    // Off recorded no check, and that is not a gap in the evidence.
+    expect(verificationEvidence(store, off.evidenceRoot, off.runId)).toMatchObject({ ok: true, bytes: null });
   });
 
   test("a build fenced while the agent runs commits nothing", async () => {

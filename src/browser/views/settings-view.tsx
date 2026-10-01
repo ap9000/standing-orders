@@ -1,7 +1,7 @@
 /** Settings, rebuilt with shadcn/ui. Every control posts to the same server
  * route as before (CSRF included); choices save the moment they change and
  * the server's confirmation arrives as a toast. */
-import { BookOpen, ChevronDown, Cpu, Hash, LineChart, MessageSquare, Monitor, Moon, Plug, Send, Sparkles, Sun, Users, Workflow, Wrench } from "lucide-react";
+import { Bot, BookOpen, ChevronDown, Cpu, Hash, LineChart, MessageSquare, Monitor, Moon, Plug, Send, Sparkles, Sun, Users, Workflow, Wrench } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { BrowserSettingsView } from "../../browser-workspace.js";
@@ -13,7 +13,7 @@ import {
 } from "../components/ui/index.js";
 
 const TILE_ICONS: Record<string, ReactNode> = {
-  "/settings/flows": <Workflow />, "/settings/integrations": <Plug />, "/settings/models": <Cpu />, "/settings/skills": <Sparkles />, "/settings/tools": <Wrench />, "/settings/knowledge": <BookOpen />, "/settings/telegram": <Send />,
+  "/settings/lead": <Bot />, "/settings/flows": <Workflow />, "/settings/integrations": <Plug />, "/settings/models": <Cpu />, "/settings/skills": <Sparkles />, "/settings/tools": <Wrench />, "/settings/knowledge": <BookOpen />, "/settings/telegram": <Send />,
   "/settings/slack": <Hash />, "/settings/discord": <MessageSquare />, "/settings/teams": <Users />, "/settings/learning": <LineChart />,
 };
 
@@ -366,6 +366,20 @@ function Notifications({ view, csrf }: { view: BrowserSettingsView; csrf: string
       </div>
       <noscript><Button type="submit">Save</Button></noscript>
     </>}</AutoForm>}
+    {view.chat?.projects && view.chat.projects.length > 0 && <div className="grid gap-2">
+      <span className="font-semibold">Projects</span>
+      <ul className="-my-1 divide-y divide-border" aria-label="Project pings">
+        {view.chat.projects.map((one, index) => <li key={one.repo} data-project-pings={one.name}>
+          <AutoForm action="/settings/notifications/mute" csrf={csrf} className="flex items-center justify-between gap-4 py-2">{submit => <>
+            <input type="hidden" name="repo" value={one.repo} />
+            <Label htmlFor={`${base}-mute-${index}`} className="min-w-0 break-all">{one.name}</Label>
+            <Switch id={`${base}-mute-${index}`} name="pings" value="on" defaultChecked={!one.muted} onCheckedChange={submit} aria-label={`Pings for ${one.name}`} />
+            <noscript><Button type="submit" size="sm" variant="outline">Save</Button></noscript>
+          </>}</AutoForm>
+        </li>)}
+      </ul>
+      <p className="text-[13px] text-muted-foreground">Off: no pings. It still shows in Tasks and the evening digest.</p>
+    </div>}
     {view.chat && view.services && <Separator />}
     {view.services && (view.services.configured.length === 1 && !view.services.implicit
       ? <div className="flex items-center gap-3"><span className="font-semibold capitalize">{view.services.configured[0]}</span><span className="inline-flex items-center gap-2 text-sm text-muted-foreground"><StatusDot tone="ok" />Receiving alerts</span></div>

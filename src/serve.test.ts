@@ -4044,7 +4044,9 @@ describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
     await boot();
     const cookie = await login();
     const off = await (await fetch(url("/chat"), { headers: { cookie } })).text();
-    expect(off).toContain("chat is not configured");
+    // The lead's form lives in Settings → Lead now (onboarding); Chat names no jargon form.
+    expect(off).not.toContain('action="/chat/config"');
+    expect(await (await fetch(url("/settings/lead"), { headers: { cookie } })).text()).toContain("The lead is off.");
     store.setChatConfig({ provider: "anthropic-api", model: "claude-sonnet-5", dailyTurns: 50, weeklyCeilingMicrousd: 1_000_000, priceInMicrousd: 3, priceOutMicrousd: 15 }, "alex", T0);
     const noKey = await new Promise<string>(resolve => {
       server.close(() => resolve(""));
@@ -4062,7 +4064,7 @@ describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
     const cookie = await login();
     const html = await (await fetch(url("/chat"), { headers: { cookie } })).text();
     expect(html).toContain("Chat isn’t available in demo mode");
-    expect(html).toContain("Demo data never contacts an external model. Start Toolroll with a real project to use chat.");
+    expect(html).toContain("Demo data never contacts an external model. Start Toolroll with a real project to use chat: <code>npx toolroll up</code> in your repository.");
     expect(html).not.toContain("chat is off.");
   });
 
@@ -4246,8 +4248,8 @@ describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
     store.clearChatConfig();
     await boot();
     const cookie = await login();
-    const html = await (await fetch(url("/chat"), { headers: { cookie } })).text();
-    // The setup form is right there, and it says where the key lives.
+    const html = await (await fetch(url("/settings/lead"), { headers: { cookie } })).text();
+    // The setup form is in Settings → Lead (Advanced), and it says where the key lives.
     expect(html).toContain('action="/chat/config"');
     expect(html).toContain("never INTO the database");
     expect(html).toContain("claude-sonnet-5");
@@ -4310,7 +4312,7 @@ describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
       store.clearChatConfig();
       await boot({ chatEnv: {}, configDir });
       const cookie = await login();
-      let html = await (await fetch(url("/chat"), { headers: { cookie } })).text();
+      let html = await (await fetch(url("/settings/lead"), { headers: { cookie } })).text();
       expect(html).toContain("none yet");
       const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(html)?.[1] as string;
 
@@ -4340,8 +4342,10 @@ describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
       // Chat is ON with the stored key; the page shows a tail, never the key.
       html = await (await fetch(url("/chat"), { headers: { cookie } })).text();
       expect(html).toContain('<details class="chat-limits"><summary>Model &amp; limits');
-      expect(html).toContain("stored");
       expect(html).not.toContain(secret);
+      const lead = await (await fetch(url("/settings/lead"), { headers: { cookie } })).text();
+      expect(lead).toContain("stored");
+      expect(lead).not.toContain(secret);
       // The database carries no key anywhere.
       expect(store.installationFact("chat-key")).toBeNull();
 
@@ -4367,7 +4371,7 @@ describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
       writeFileSync(join(configDir, "chat-key-anthropic-api"), "sk-ant-" + "b".repeat(40), { mode: 0o600 });
       await boot({ chatEnv: { ANTHROPIC_API_KEY: "sk-test-key" }, configDir });
       const cookie = await login();
-      const html = await (await fetch(url("/chat"), { headers: { cookie } })).text();
+      const html = await (await fetch(url("/settings/lead"), { headers: { cookie } })).text();
       expect(html).toContain("from the environment");
     } finally {
       rmSync(configDir, { recursive: true, force: true });
@@ -9758,8 +9762,11 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
 
     // A membership conversation starts on its own; its settings live one tap away.
     html = await (await fetch(url("/chat?settings=1"), { headers: { cookie } })).text();
-    expect(html).toContain("Codex membership (logged-in CLI)");
     expect(html).toContain("membership login · no dollar ceiling");
+    expect(html).toContain('href="/settings/lead">Lead settings</a>');
+    html = await (await fetch(url("/settings/lead"), { headers: { cookie } })).text();
+    expect(html).toContain("The lead uses your Codex sign-in.");
+    expect(html).toContain("Codex membership (logged-in CLI)");
     expect(html).toContain("no dollar maximum");
     expect(html).toContain("codex login");
     expect(html).not.toContain('name="weekly-usd"');
@@ -10004,7 +10011,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(store.activeMateSession("alex")).not.toBeNull();
     expect(html).not.toContain('action="/chat/mate/mint"');
     expect(html).not.toContain('autocomplete="current-password"');
-    expect(html).toContain('href="/chat?settings=1#chat-settings">Chat settings</a>');
+    expect(html).toContain('href="/settings/lead">Lead settings</a>');
     // Reloading keeps the same conversation rather than starting another.
     const first = store.activeMateSession("alex")!.id;
     await page(cookie);
@@ -10013,7 +10020,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     store.endMateSessionsFor("alex", "alex", T0);
     const settings = await (await fetch(url("/chat?settings=1"), { headers: { cookie } })).text();
     expect(store.activeMateSession("alex")).toBeNull();
-    expect(settings).toContain('<details id="chat-settings" open>');
+    expect(settings).toContain('<p class="meta" id="chat-settings"><a href="/settings/lead">Lead settings</a>');
   });
 
   test("UI polish 2026-09-13: a membership never shows a dollar figure as a charge on the chat page", async () => {
@@ -10572,6 +10579,34 @@ describe("scout tasks and the digest card on the console (mate arc §10)", () =>
     expect((await post({ mode: "quiet", digest: "off" })).status).toBe(303);
     expect(store.notificationPreference("alex")).toMatchObject({ mode: "quiet", digestAt: null });
     expect((await fetch(`${base}/settings/notifications`, { method: "POST", body: new URLSearchParams({ mode: "all" }) })).status).toBe(401);
+  });
+
+  test("c3: Settings → Notifications mutes one project's pings; Tasks and the evening digest still show it", async () => {
+    store.upsertProject("/repo/main", "main", T0);
+    store.upsertProject("/repo/side", "side", T0);
+    const cookie = await login();
+    let page = await (await fetch(`${base}/settings`, { headers: { cookie } })).text();
+    expect(page).toContain('action="/settings/notifications/mute"');
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(page)?.[1] ?? "";
+    const post = (fields: Record<string, string>) => fetch(`${base}/settings/notifications/mute`, { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf, ...fields }), redirect: "manual" });
+    expect((await post({ repo: "/repo/nowhere" })).status).toBe(400);
+    // A switch turned off sends no `pings`: the project is muted.
+    const muted = await post({ repo: "/repo/main" });
+    expect(muted.status).toBe(303);
+    expect(decodeURIComponent(muted.headers.get("location") ?? "")).toContain("main muted. It still shows in Tasks and your evening digest.");
+    expect(store.mutedProjects("alex")).toEqual(["/repo/main"]);
+    page = await (await fetch(`${base}/settings`, { headers: { cookie } })).text();
+    expect(page).toMatch(/main <span class="meta">· muted<\/span>/);
+    // A muted project's fact pings nobody here, but the console's facts and the evening digest keep it.
+    store.createTask({ id: "quiet-one", title: "Tidy the release notes" }, T0);
+    store.placeTask(store.refFor("built-in", "quiet-one").id, "/repo/main", {}, T0);
+    const fact = store.listNotifications("all").find(one => one.taskId === "quiet-one")!;
+    expect(store.pingAllowed(fact, "alex")).toBe(false);
+    expect(store.taskFactsSince(new Date(T0.getTime() - 1000).toISOString()).some(one => one.taskId === "quiet-one")).toBe(true);
+    expect((await post({ repo: "/repo/main", pings: "on" })).status).toBe(303);
+    expect(store.mutedProjects("alex")).toEqual([]);
+    expect(store.pingAllowed(fact, "alex")).toBe(true);
+    expect((await fetch(`${base}/settings/notifications/mute`, { method: "POST", body: new URLSearchParams({ repo: "/repo/main" }) })).status).toBe(401);
   });
 
   test("the digest card sets the cadence from a closed list; the choice lands in the store and says so", async () => {
@@ -11924,8 +11959,11 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(before).not.toContain("draft-repair");
     expect(before).not.toContain("/contest/");
     // Every form carries the token, and the annotate script rides along.
+    // The two forms: the note, and Add tests under Checks (this project has no check to run).
     const forms = [...mainOf(before).matchAll(/<form[^>]*>(.*?)<\/form>/gs)];
-    expect(forms.length).toBe(1);
+    expect(forms.length).toBe(2);
+    expect(before).toContain(`<form method="post" action="/r/${run}/add-tests" class="follow-up-act">`);
+    expect(before).not.toContain(`action="/r/${run}/checks"`);
     for (const form of forms) expect(form[1]).toContain('name="csrf"');
     expect(before).toContain("document.getElementById('comment-form')");
     const csrf = csrfOf(before);

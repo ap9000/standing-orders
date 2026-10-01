@@ -1341,6 +1341,51 @@ export function finalizeInterruptedFenced(
 }
 
 /**
+ * Hand an attempt back because the SERVICE stopped (its builder is
+ * stopping or restarting), not because anyone stopped the task: one fenced
+ * transaction releases the claim as `interrupted`, ends the run (and every
+ * open run it owns) as `failed` / `interrupted` — the words dead-runner
+ * recovery writes, so the next attempt inherits the preserved work in the
+ * same checkout exactly as after a crash — and returns the task to the
+ * queue with no strike, no backoff and no hold, so the next builder pass
+ * resumes it. A lease the world moved past still ends the run, touching no
+ * task state.
+ */
+export function finalizeHandBackFenced(
+  store: Store,
+  args: { leaseId: string; runId: number; taskId: string; message: string; now: Date },
+): { ok: true; requeued: boolean; fenced: boolean } {
+  const { leaseId, runId, taskId, now } = args;
+  const db = store.handle;
+  return inTransaction(store, () => {
+    const run = store.getRun(runId);
+    if (run === null || run.leaseId !== leaseId || run.outcome !== null) {
+      throw new Error(`run ${runId} is not ${leaseId}'s open attempt — a hand-back seals exactly one`);
+    }
+    const { changes } = db
+      .prepare(
+        `UPDATE claim SET released_at = ?, released_by = 'interrupted'
+          WHERE lease_id = ? AND released_at IS NULL AND ${NOT_SUPERSEDED}`,
+      )
+      .run(now.toISOString(), leaseId);
+    const fenced = Number(changes) === 0;
+    if (args.message.trim() !== "") store.recordOutcomeFacts(runId, { handoff: args.message });
+    for (const owned of store.ownedRunsOf(runId)) {
+      if (owned === runId) continue;
+      const child = store.getRun(owned);
+      if (child !== null && child.outcome === null) store.finishRun(owned, { outcome: "failed", reason: "interrupted", now });
+    }
+    store.finishRun(runId, { outcome: "failed", reason: "interrupted", now });
+    if (fenced) return { ok: true as const, requeued: false, fenced: true };
+    const requeued = db
+      .prepare("UPDATE task SET state = 'queued', updated_at = ? WHERE id = ? AND state = 'running'")
+      .run(now.toISOString(), taskId);
+    store.bumpWake();
+    return { ok: true as const, requeued: Number(requeued.changes) > 0, fenced: false };
+  });
+}
+
+/**
  * THE STOP FENCE at settlement (v52): when a stop applies to the run —
  * its own or an owning ancestor's — seal the attempt as interrupted and
  * answer with the seal; otherwise null, and the caller's own ending

@@ -8,6 +8,7 @@ import { MEMORY_SCHEMA } from "./project-memory.js";
 import { MODELS_SCHEMA } from "./model-catalog.js";
 import { validateTaskText } from "./task-text.js";
 import { chatControlHref, chatResultHref } from "./chat-controls.js";
+import { actorLabel, currentActor, leadSecretMatches, mintLeadToken, parseLeadToken, type Actor } from "./actor.js";
 import { scanForSecrets } from "./evidence.js";
 /**
  * The database: a small task store, and the operational overlay beside it.
@@ -87,6 +88,7 @@ import type { BackendGrant, MutationClass, TaskOrigin } from "./grant.js";
 import type { Runner } from "./runner.js";
 import { authenticate as runnerAuthenticate } from "./runner.js";
 import type { Scope } from "./scope.js";
+import { stampNewProjectLevel } from "./check-levels.js";
 import type { QualityMode } from "./quality.js";
 import type { ProgressSnapshot } from "./plan.js";
 import { parseCheckProgressSnapshot, type CheckProgressSnapshot } from "./check-progress.js";
@@ -199,6 +201,57 @@ CREATE TABLE IF NOT EXISTS chat_card_task (
 );
 CREATE INDEX IF NOT EXISTS chat_card_task_card ON chat_card_task(card);
 `;
+
+/** Pings follow responsibility (no version bump: additive only). `lead_credential` is a lead token: an agent acting
+ * for `owner`, only its hash kept. `task_act` is who filed, approved, cancelled, completed or handed on a task
+ * (`lead` 1: the owner's lead; `person`/`why`: who the lead asked, and why). `notification_actor` is whose act made
+ * a fact. `task_replacement` is the task that replaced a cancelled one. `project_mute` is a person's muted projects. */
+const LEAD_QUIET_SCHEMA = `
+CREATE TABLE IF NOT EXISTS lead_credential (
+  id          TEXT PRIMARY KEY,
+  owner       TEXT NOT NULL,
+  secret_hash TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  created_by  TEXT NOT NULL,
+  revoked_at  TEXT,
+  revoked_by  TEXT
+);
+CREATE INDEX IF NOT EXISTS lead_credential_owner ON lead_credential (owner);
+CREATE TABLE IF NOT EXISTS task_act (
+  id       INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_ref INTEGER NOT NULL,
+  act      TEXT NOT NULL CHECK (act IN ('filed', 'approved', 'cancelled', 'completed', 'asked')),
+  account  TEXT NOT NULL,
+  lead     INTEGER NOT NULL DEFAULT 0 CHECK (lead IN (0, 1)),
+  person   TEXT,
+  why      TEXT,
+  at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS task_act_task ON task_act (task_ref, id);
+CREATE TABLE IF NOT EXISTS notification_actor (
+  notification INTEGER PRIMARY KEY REFERENCES notification(id) ON DELETE CASCADE,
+  account      TEXT NOT NULL,
+  lead         INTEGER NOT NULL DEFAULT 0 CHECK (lead IN (0, 1))
+);
+CREATE TABLE IF NOT EXISTS task_replacement (
+  task_ref  INTEGER PRIMARY KEY,
+  successor TEXT NOT NULL,
+  by        TEXT,
+  at        TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS project_mute (
+  account TEXT NOT NULL,
+  repo    TEXT NOT NULL,
+  at      TEXT NOT NULL,
+  PRIMARY KEY (account, repo)
+);
+`;
+/** What still pings on the lead's own work: a security alert. */
+const SECURITY_KINDS = new Set(["secret-detected", "security-release"]);
+/** A failure that leaves nothing for the lead to try: the attempts are spent. */
+const SPENT_KINDS = new Set(["attempts-exhausted", "plan-attempts-exhausted"]);
+export type TaskAct = "filed" | "approved" | "cancelled" | "completed" | "asked";
+export type TaskActRow = { act: TaskAct; account: string; lead: boolean; person: string | null; why: string | null; at: string };
 
 /** Settings → Integrations (no version bump): each integration's last check. `outcome` is ok, failed, or absent (the check found
  * nothing set up, such as no `gh` sign-in). `ok_at` and `error`/`error_at` keep the last success and the last
@@ -867,7 +920,9 @@ export type FlowStepRunRow = { card: number; entry: number; stage: string; kind:
   decisionJson: string | null };
 /** A project script (v84). v90: in shell, Python or Node; `file` (a path in the project) runs instead of the body. */
 export type FlowScriptRow = { id: number; repo: string; name: string; about: string; body: string; timeoutMinutes: number; version: number; digest: string; savedBy: string; savedAt: string;
-  language: "shell" | "python" | "node"; file: string | null };
+  language: "shell" | "python" | "node"; file: string | null;
+  /** Why it can't run yet ("imported": it came in with a flow file and waits for a person's approval); null when it runs. */
+  held: string | null };
 /** Where a card came from when a trigger made it: what to call it and where to look (a GitHub issue, a Linear issue, another flow's card). */
 /** Where a card came from. `mail` (v89): the email it came from, so a reply to its sender stays in the thread.
  * `chat` (v89): the chat message it came from — the app, the channel, the conversation to answer in, the
@@ -889,7 +944,8 @@ function readFlowRow(row: Record<string, unknown>): FlowRow {
 function readFlowScriptRow(row: Record<string, unknown>): FlowScriptRow {
   return { id: Number(row["id"]), repo: String(row["repo"]), name: String(row["name"]), about: String(row["about"]), body: String(row["body"]), timeoutMinutes: Number(row["timeout_minutes"]),
     version: Number(row["version"]), digest: String(row["digest"]), savedBy: String(row["saved_by"]), savedAt: String(row["saved_at"]),
-    language: row["language"] === "python" || row["language"] === "node" ? row["language"] : "shell", file: row["file"] === null || row["file"] === undefined ? null : String(row["file"]) };
+    language: row["language"] === "python" || row["language"] === "node" ? row["language"] : "shell", file: row["file"] === null || row["file"] === undefined ? null : String(row["file"]),
+    held: row["held"] === null || row["held"] === undefined ? null : String(row["held"]) };
 }
 
 function readFlowStepRunRow(row: Record<string, unknown>): FlowStepRunRow {
@@ -5034,6 +5090,7 @@ function initializeStore(db: Database, file: string): Store {
   db.exec(POLICY_SCHEMA);
   db.exec(RUN_CHECK_SCHEMA);
   db.exec(QUIET_CHAT_SCHEMA);
+  db.exec(LEAD_QUIET_SCHEMA);
   mergeCheckTables(db);
   addColumn(db, "monitoring_status", "target", "TEXT");
   // v105: how a teammate's turn was billed (this computer's Claude sign-in, as last seen).
@@ -5055,6 +5112,8 @@ function initializeStore(db: Database, file: string): Store {
   // v90: scripts in Python and Node, and scripts that run a file in the project.
   addColumn(db, "flow_script", "language", "TEXT NOT NULL DEFAULT 'shell'");
   addColumn(db, "flow_script", "file", "TEXT");
+  // A script that came in with an imported flow waits for a person to approve it before it runs (no version bump: additive only).
+  addColumn(db, "flow_script", "held", "TEXT");
   addColumn(db, "notification", "recipient", "TEXT");
   addColumn(db, "approver", "projects_json", "TEXT");
   addColumn(db, "invite", "projects_json", "TEXT");
@@ -8516,6 +8575,8 @@ export class Store {
       const earlier = this.db.prepare("SELECT 1 AS hit FROM task_ref WHERE external_id = ?").get(spec.id) !== undefined;
       // Created here, so it is ours — the one place that is true by construction.
       const ref = this.refFor(BUILT_IN, spec.id, "ours");
+      // Who filed it, when someone is acting: the lead's work pings nobody.
+      this.noteTaskAct(ref.id, "filed", now);
       if (earlier) this.recordAction({ at: stamp, actor: "system", repo: ref.repo, taskId: spec.id, runId: null, action: "task registered", outcome: "recorded", source: "work", detail: REGISTERED_AT_FILING });
       // v102: who filed it, set once with the filing (separation of duties reads it; nothing changes it).
       if (spec.filedBy !== undefined) {
@@ -8594,8 +8655,9 @@ export class Store {
       | { kind: "machine"; code: "mirror-latched" | "disowned-completion" },
     now: Date,
     admittedFrom: readonly TaskState[] | null,
+    replacedBy?: string,
   ): CancellationTransition {
-    return this.transact(() => this.applyCancellationLocked(taskId, reason, now, admittedFrom));
+    return this.transact(() => this.applyCancellationLocked(taskId, reason, now, admittedFrom, replacedBy));
   }
 
   private applyCancellationLocked(
@@ -8605,6 +8667,7 @@ export class Store {
       | { kind: "machine"; code: "mirror-latched" | "disowned-completion" },
     now: Date,
     admittedFrom: readonly TaskState[] | null,
+    replacedBy?: string,
   ): CancellationTransition {
     const ref = this.db
       .prepare("SELECT id, coordinator_cid FROM task_ref WHERE backend = ? AND external_id = ?")
@@ -8627,6 +8690,13 @@ export class Store {
       .prepare(`UPDATE task SET state = 'cancelled', updated_at = ? WHERE id = ?${filter}`)
       .run(now.toISOString(), taskId, ...(admittedFrom ?? []));
     if (Number(changes) === 0) return { changed: false };
+    // Replaced: the successor is part of the cancellation, so every surface says "Replaced by <id>".
+    if (ref !== undefined && replacedBy !== undefined) {
+      this.db.prepare(`INSERT INTO task_replacement (task_ref, successor, by, at) VALUES (?, ?, ?, ?)
+        ON CONFLICT (task_ref) DO UPDATE SET successor = excluded.successor, by = excluded.by, at = excluded.at`)
+        .run(Number(ref["id"]), replacedBy, currentActor() === null ? null : actorLabel(currentActor()!), now.toISOString());
+    }
+    if (ref !== undefined && prior?.["state"] !== "cancelled") this.noteTaskAct(Number(ref["id"]), "cancelled", now);
     // A cancelled task's pending steering settles superseded in the SAME
     // transaction, whichever road cancelled it — a note silently waiting
     // for a build that can no longer happen is wrong on every road, not
@@ -8650,13 +8720,15 @@ export class Store {
       this.noteLifecycle(
         {
           taskRef: Number(ref["id"]), kind: "task-cancelled", identity: `t${Number(ref["id"])}`,
-          subject: "Cancelled",
-          body: reason.kind === "operator"
+          subject: replacedBy === undefined ? "Cancelled" : `Replaced by ${replacedBy}`,
+          body: replacedBy !== undefined
+            ? `${replacedBy} replaces it. Nothing more runs for it.`
+            : reason.kind === "operator"
             ? `${cancellationWords(reason.text)} Nothing more runs for it.`
             : reason.code === "mirror-latched"
               ? "The tracker closed it. Nothing more runs for it."
               : "The tracker closed it while it was being built, so the finished work was not accepted.",
-          link: chatControlHref("task", taskId),
+          link: chatControlHref("task", replacedBy ?? taskId),
         },
         now,
       );
@@ -8670,6 +8742,7 @@ export class Store {
     now: Date,
     mutation: Mutation = {},
     cancellationReason?: string,
+    replacedBy?: string,
   ): { ok: true } | { ok: false; reason: "unknown-task" | "external-closed" | CancellationRefusal } {
     return this.once(
       mutation,
@@ -8688,7 +8761,7 @@ export class Store {
         }
         return this.transact(() => {
           if (state === "cancelled") {
-            const done = this.applyCancellation(id, { kind: "operator", text: cancellationReason ?? null }, now, null);
+            const done = this.applyCancellation(id, { kind: "operator", text: cancellationReason ?? null }, now, null, replacedBy);
             if (done.reason !== undefined) return { ok: false as const, reason: done.reason };
             if (!done.changed) return { ok: false as const, reason: "unknown-task" as const };
             this.bumpWake();
@@ -8699,6 +8772,10 @@ export class Store {
             .prepare("UPDATE task SET state = ?, updated_at = ? WHERE id = ?")
             .run(state, now.toISOString(), id);
           if (Number(changes) === 0) return { ok: false as const, reason: "unknown-task" as const };
+          if (state === "done" && prior?.["state"] !== "done") {
+            const done = this.lookupRef(id);
+            if (done !== null) this.noteTaskAct(done.id, "completed", now);
+          }
           // The return-to-queue fact (Telegram task updates): a running
           // task its worker released unfinished, or a closed one reopened
           // by the state verb. Marking done or failed by hand rides the
@@ -10367,6 +10444,7 @@ export class Store {
           // (setup review): the approval is what was stale, and it is new.
           const ref = this.db.prepare("SELECT id FROM task_ref WHERE backend = ? AND external_id = ?").get(BUILT_IN, taskId);
           if (ref !== undefined) {
+            if (basis === undefined) this.noteTaskAct(Number(ref["id"]), "approved", now);
             this.db.prepare("DELETE FROM hold WHERE owner_kind = 'backoff' AND owner_id = ?").run(`stale:${Number(ref["id"])}`);
             this.db
               .prepare("UPDATE notification SET resolved_at = ? WHERE dedupe_key LIKE ? AND resolved_at IS NULL")
@@ -10381,7 +10459,7 @@ export class Store {
                   taskRef: Number(ref["id"]), kind: "scope-approved", identity: `t${Number(ref["id"])}`,
                   subject: "Scope approved",
                   body: basis === undefined
-                    ? `Approved by ${lifecycleWords(by, 40)}. A connected worker can take it next.`
+                    ? `Approved by ${currentActor()?.lead === true ? "the lead" : lifecycleWords(by, 40)}. A connected worker can take it next.`
                     : "Approved automatically under the operating mode. A connected worker can take it next.",
                   link: chatControlHref("task", taskId),
                 },
@@ -17967,7 +18045,7 @@ export class Store {
       : source !== undefined && "project" in source && source.project !== "" ? "project"
       : source !== undefined && "installation" in source ? "installation" : "unknown";
     const project = scope === "task" ? String(ref!["repo"]) : scope === "project" && source !== undefined && "project" in source ? source.project : null;
-    const { changes } = this.db
+    const { changes, lastInsertRowid } = this.db
       .prepare(
         `INSERT OR IGNORE INTO notification (dedupe_key, kind, subject, body, created_at, push_class, link, provenance_scope, project, task_ref, task_id, source_run, recipient)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -17983,6 +18061,11 @@ export class Store {
         scope, project, ref === undefined ? null : taskRef, ref === undefined ? null : String(ref["external_id"]), run?.id ?? null,
         notification.recipient ?? null,
       );
+    // Whose act made this fact: pings follow it (see pingAllowed).
+    const actor = currentActor();
+    if (Number(changes) > 0 && actor !== null) {
+      this.db.prepare("INSERT OR IGNORE INTO notification_actor (notification, account, lead) VALUES (?, ?, ?)").run(Number(lastInsertRowid), actor.account, actor.lead ? 1 : 0);
+    }
     return Number(changes) > 0;
   }
 
@@ -23160,15 +23243,21 @@ export class Store {
   }
 
   /** Save a script's next version; the previous one stays in history. Returns the version. */
-  saveFlowScript(script: { repo: string; name: string; about: string; body: string; timeoutMinutes: number; digest: string; by: string; language?: "shell" | "python" | "node"; file?: string | null }, now: Date): number {
+  saveFlowScript(script: { repo: string; name: string; about: string; body: string; timeoutMinutes: number; digest: string; by: string; language?: "shell" | "python" | "node"; file?: string | null; held?: string | null }, now: Date): number {
     return this.transact(() => {
       const current = this.flowScript(script.repo, script.name);
       const version = (current?.version ?? Number(this.db.prepare("SELECT COALESCE(MAX(version), 0) AS v FROM flow_script WHERE repo = ? AND name = ?").get(script.repo, script.name)?.["v"] ?? 0)) + 1;
       if (current !== null) this.db.prepare("UPDATE flow_script SET state = 'removed' WHERE id = ?").run(current.id);
-      this.db.prepare(`INSERT INTO flow_script (repo, name, about, body, timeout_minutes, version, digest, saved_by, saved_at, state, language, file)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`).run(script.repo, script.name, script.about, script.body, script.timeoutMinutes, version, script.digest, script.by, now.toISOString(), script.language ?? "shell", script.file ?? null);
+      this.db.prepare(`INSERT INTO flow_script (repo, name, about, body, timeout_minutes, version, digest, saved_by, saved_at, state, language, file, held)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`).run(script.repo, script.name, script.about, script.body, script.timeoutMinutes, version, script.digest, script.by, now.toISOString(), script.language ?? "shell", script.file ?? null, script.held ?? null);
       return version;
     });
+  }
+
+  /** A person approves a held script (one an imported flow brought): from now on it runs. False when it wasn't held. */
+  approveFlowScript(repo: string, name: string): boolean {
+    const { changes } = this.db.prepare("UPDATE flow_script SET held = NULL WHERE repo = ? AND name = ? AND state = 'active' AND held IS NOT NULL").run(repo, name);
+    return Number(changes) === 1;
   }
 
   removeFlowScript(repo: string, name: string): boolean {
@@ -23903,14 +23992,19 @@ export class Store {
 
   // ---- projects ------------------------------------------------------------
 
-  /** Remember a project was opened. Upsert keeps added_at; recency always moves. */
+  /** Remember a project was opened. Upsert keeps added_at; recency always moves.
+   * A project added for the first time starts on Quick checks. */
   upsertProject(path: string, name: string, now: Date): void {
-    this.db
-      .prepare(
-        `INSERT INTO project (path, name, added_at, last_opened_at) VALUES (?, ?, ?, ?)
-         ON CONFLICT (path) DO UPDATE SET name = excluded.name, last_opened_at = excluded.last_opened_at`,
-      )
-      .run(path, name, now.toISOString(), now.toISOString());
+    this.transact(() => {
+      const added = this.db.prepare("SELECT 1 FROM project WHERE path = ?").get(path) === undefined;
+      this.db
+        .prepare(
+          `INSERT INTO project (path, name, added_at, last_opened_at) VALUES (?, ?, ?, ?)
+           ON CONFLICT (path) DO UPDATE SET name = excluded.name, last_opened_at = excluded.last_opened_at`,
+        )
+        .run(path, name, now.toISOString(), now.toISOString());
+      if (added) stampNewProjectLevel(this, path, now);
+    });
   }
 
   /** Most recently opened first — the opener page's order. */
@@ -25518,6 +25612,51 @@ export class Store {
     return Number(row?.["n"] ?? 0);
   }
 
+  /** The same live claims as liveClaimCount, by the project their task is placed in. */
+  liveClaimCountsByRepo(runner: string, now: Date): Map<string, number> {
+    const rows = this.db
+      .prepare(
+        `SELECT task_ref.repo AS repo, COUNT(*) AS n FROM claim
+           JOIN task_ref ON task_ref.id = claim.task_ref
+          WHERE claim.runner = ? AND claim.released_at IS NULL AND claim.expires_at > ?
+            AND claim.lease_generation = (
+              SELECT MAX(newest.lease_generation) FROM claim AS newest
+              WHERE newest.task_ref = claim.task_ref
+            )
+            AND claim.lease_id NOT IN (SELECT lease_id FROM held_session WHERE ended_at IS NULL)
+          GROUP BY task_ref.repo`,
+      )
+      .all(runner, now.toISOString());
+    const counts = new Map<string, number>();
+    for (const row of rows) if (row["repo"] != null) counts.set(String(row["repo"]), Number(row["n"]));
+    return counts;
+  }
+
+  /** Every builder's live attempts, by project: what `status` shows against each project's limit. */
+  runningBuildsByRepo(now: Date): Map<string, number> {
+    const rows = this.db
+      .prepare(
+        `SELECT task_ref.repo AS repo, COUNT(*) AS n FROM claim
+           JOIN task_ref ON task_ref.id = claim.task_ref
+          WHERE claim.released_at IS NULL AND claim.expires_at > ?
+            AND claim.lease_generation = (
+              SELECT MAX(newest.lease_generation) FROM claim AS newest
+              WHERE newest.task_ref = claim.task_ref
+            )
+            AND claim.lease_id NOT IN (SELECT lease_id FROM held_session WHERE ended_at IS NULL)
+          GROUP BY task_ref.repo`,
+      )
+      .all(now.toISOString());
+    const counts = new Map<string, number>();
+    for (const row of rows) if (row["repo"] != null) counts.set(String(row["repo"]), Number(row["n"]));
+    return counts;
+  }
+
+  /** A project's build concurrency changed (project-concurrency.ts): the ledger keeps before → after. */
+  recordProjectConcurrency(by: string, repo: string, before: number, after: number, now: Date): void {
+    this.recordPolicy(by, repo, "builds at once", String(before), String(after), now);
+  }
+
   /** Forward only, and only under the live generation. A stale poller moves nothing. */
   /** v98: an update Telegram pushed, kept until the bridge applies it; false when it's already kept or applied. */
   queueTelegramUpdate(botId: string, updateId: number, payload: string, now: Date): boolean {
@@ -25937,6 +26076,14 @@ export class Store {
       this.db.prepare(`UPDATE notification_delivery SET receipt = '${TELEGRAM_SKIPPED_ELSEWHERE}'
         WHERE destination = ? AND delivered_at IS NULL AND receipt IS NULL
           AND notification IN (SELECT id FROM notification WHERE recipient IS NOT NULL AND recipient <> ?)`).run(destination, binding.approver);
+      // Pings follow responsibility (the lead's work, this person's own act, a muted project): settled here, unsent.
+      for (const raw of this.db.prepare(`SELECT n.* FROM notification n JOIN notification_delivery d ON d.notification = n.id AND d.destination = ?
+          WHERE n.resolved_at IS NULL AND d.delivered_at IS NULL AND d.receipt IS NULL AND (d.claim_owner IS NULL OR d.claim_expires_at <= ?)`).all(destination, now.toISOString())) {
+        const row = readNotification(raw);
+        if (!this.pingAllowed(row, binding.approver)) {
+          this.db.prepare(`UPDATE notification_delivery SET receipt = '${TELEGRAM_SKIPPED_QUIET}' WHERE notification = ? AND destination = ?`).run(row.id, destination);
+        }
+      }
       if (this.telegramRetryAt(binding.botId) > now.toISOString()) return [];
       const rows = this.db.prepare(`SELECT n.*, d.claim_generation FROM notification n
         JOIN notification_delivery d ON d.notification = n.id AND d.destination = ?
@@ -26165,6 +26312,140 @@ export class Store {
   claimEveningDigestDay(account: string, day: string): boolean {
     return Number(this.db.prepare("UPDATE notification_preference SET digest_on = ? WHERE account = ? AND digest_at IS NOT NULL AND (digest_on IS NULL OR digest_on < ?)")
       .run(day, account, day).changes) === 1;
+  }
+
+  // ---- pings follow responsibility: the lead, who acted, replacements and muted projects ----
+
+  /** A lead token for one person, shown once. A new one ends their earlier ones; the ledger names it "lead for <owner>". */
+  mintLeadCredential(owner: string, by: string, now: Date): { id: string; token: string } {
+    return this.transact(() => {
+      const stamp = now.toISOString();
+      this.db.prepare("UPDATE lead_credential SET revoked_at = ?, revoked_by = ? WHERE owner = ? AND revoked_at IS NULL").run(stamp, by, owner);
+      const minted = mintLeadToken();
+      this.db.prepare("INSERT INTO lead_credential (id, owner, secret_hash, created_at, created_by) VALUES (?, ?, ?, ?, ?)").run(minted.id, owner, minted.hash, stamp, by);
+      this.recordAction({ at: stamp, actor: by, repo: null, taskId: null, runId: null, action: "lead token created", outcome: "recorded", source: "access", detail: `lead for ${owner}` });
+      return { id: minted.id, token: minted.token };
+    });
+  }
+
+  /** End every live lead token for one person. */
+  revokeLeadCredentials(owner: string, by: string, now: Date): number {
+    return this.transact(() => {
+      const ended = Number(this.db.prepare("UPDATE lead_credential SET revoked_at = ?, revoked_by = ? WHERE owner = ? AND revoked_at IS NULL").run(now.toISOString(), by, owner).changes);
+      if (ended > 0) this.recordAction({ at: now.toISOString(), actor: by, repo: null, taskId: null, runId: null, action: "lead token revoked", outcome: "recorded", source: "access", detail: `lead for ${owner}` });
+      return ended;
+    });
+  }
+
+  /** Whose lead a presented token is: a live token whose owner is still an approver, or null. */
+  leadFor(presented: string): { owner: string; id: string } | null {
+    const parsed = parseLeadToken(presented);
+    if (parsed === null) return null;
+    const row = this.db.prepare("SELECT owner, secret_hash FROM lead_credential WHERE id = ? AND revoked_at IS NULL").get(parsed.id);
+    if (row === undefined || !leadSecretMatches(parsed.secret, String(row["secret_hash"]))) return null;
+    const owner = String(row["owner"]), account = this.accountOf(owner);
+    return account === null || account.revokedAt !== null || account.role !== "approver" ? null : { owner, id: parsed.id };
+  }
+
+  /** Record who did this to a task, when someone is acting. The lead's acts are also in the ledger as "lead for <owner>". */
+  noteTaskAct(taskRef: number, act: TaskAct, now: Date, handed?: { person: string; why: string }, actor: Actor | null = currentActor()): void {
+    if (actor === null) return;
+    this.db.prepare("INSERT INTO task_act (task_ref, act, account, lead, person, why, at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(taskRef, act, actor.account, actor.lead ? 1 : 0, handed?.person ?? null, handed?.why ?? null, now.toISOString());
+    if (!actor.lead) return;
+    const ref = this.db.prepare("SELECT repo, external_id FROM task_ref WHERE id = ?").get(taskRef);
+    this.recordAction({ at: now.toISOString(), actor: actorLabel(actor), repo: ref?.["repo"] == null ? null : String(ref["repo"]), taskId: ref === undefined ? null : String(ref["external_id"]), runId: null,
+      action: act === "asked" ? "task handed to a person" : `task ${act}`, outcome: "recorded", source: "work", detail: handed === undefined ? null : `${handed.person}: ${handed.why}` });
+  }
+
+  /** Every recorded act on a task, oldest first. */
+  taskActs(taskRef: number): TaskActRow[] {
+    return this.db.prepare("SELECT act, account, lead, person, why, at FROM task_act WHERE task_ref = ? ORDER BY id").all(taskRef).map(row => ({
+      act: String(row["act"]) as TaskAct, account: String(row["account"]), lead: Number(row["lead"]) === 1,
+      person: row["person"] == null ? null : String(row["person"]), why: row["why"] == null ? null : String(row["why"]), at: String(row["at"]) }));
+  }
+
+  /** Whose lead's work this task is: the last to file, approve or hand it on was that person's lead (null: a person's). */
+  leadWorkOf(taskRef: number): string | null {
+    const row = this.db.prepare("SELECT account, lead, act FROM task_act WHERE task_ref = ? AND act IN ('filed', 'approved', 'asked') ORDER BY id DESC LIMIT 1").get(taskRef);
+    return row === undefined || Number(row["lead"]) !== 1 || row["act"] === "asked" ? null : String(row["account"]);
+  }
+
+  /** The lead hands a task to a person: it becomes theirs, and they get one message saying why. */
+  askPerson(taskId: string, person: string, why: string, now: Date): { ok: true } | { ok: false; reason: "unknown-task" | "unknown-person" | "unplaced" } {
+    return this.transact(() => {
+      const ref = this.lookupRef(taskId);
+      if (ref === null) return { ok: false as const, reason: "unknown-task" as const };
+      if (ref.repo === null) return { ok: false as const, reason: "unplaced" as const };
+      const account = this.accountOf(person);
+      if (account === null || account.revokedAt !== null || !this.accountCanAccess(person, ref.repo)) return { ok: false as const, reason: "unknown-person" as const };
+      this.noteTaskAct(ref.id, "asked", now, { person, why });
+      const asks = this.taskActs(ref.id).filter(one => one.act === "asked").length;
+      const actor = currentActor();
+      this.enqueueNotification({ dedupeKey: `ask:${ref.id}:${asks}`, kind: "task-ask", pushClass: "attention", recipient: person,
+        subject: `${actor?.lead ? "The lead" : actor?.account ?? "Someone"} needs you: ${lifecycleWords(this.getTask(taskId)?.title ?? taskId, 80)}`,
+        body: lifecycleWords(why, 400), link: chatControlHref("task", taskId), source: { taskRef: ref.id } }, now);
+      return { ok: true as const };
+    });
+  }
+
+  /** The task that replaced a cancelled one, or null. */
+  replacementOf(taskId: string): string | null {
+    const row = this.db.prepare("SELECT r.successor FROM task_replacement r JOIN task_ref t ON t.id = r.task_ref WHERE t.backend = ? AND t.external_id = ?").get(BUILT_IN, taskId);
+    return row === undefined ? null : String(row["successor"]);
+  }
+
+  /** Every replaced task in one read, for lists: task id → its successor. */
+  replacements(): Map<string, string> {
+    return new Map(this.db.prepare("SELECT t.external_id, r.successor FROM task_replacement r JOIN task_ref t ON t.id = r.task_ref").all()
+      .map(row => [String(row["external_id"]), String(row["successor"])]));
+  }
+
+  /** Mute or unmute one project's pings for one person. The console and digest keep everything. */
+  setProjectMuted(account: string, repo: string, muted: boolean, now: Date): void {
+    if (muted) this.db.prepare("INSERT OR IGNORE INTO project_mute (account, repo, at) VALUES (?, ?, ?)").run(account, repo, now.toISOString());
+    else this.db.prepare("DELETE FROM project_mute WHERE account = ? AND repo = ?").run(account, repo);
+  }
+
+  mutedProjects(account: string): string[] {
+    return this.db.prepare("SELECT repo FROM project_mute WHERE account = ? ORDER BY repo").all(account).map(row => String(row["repo"]));
+  }
+
+  /** Whose act made this fact, if anyone's. */
+  notificationActor(id: number): Actor | null {
+    const row = this.db.prepare("SELECT account, lead FROM notification_actor WHERE notification = ?").get(id);
+    return row === undefined ? null : { account: String(row["account"]), lead: Number(row["lead"]) === 1 };
+  }
+
+  /**
+   * Whether this fact may message this person (every chat, phone and browser asks here). Pings follow
+   * responsibility: a security alert always does; nobody is messaged about their own act (or their lead's);
+   * the lead's work messages nobody unless it is handed to a person or fails with nothing left for the lead
+   * to try; and a person's muted project stays quiet. A fact addressed to one person is theirs. The console
+   * and the evening digest keep every fact either way.
+   */
+  pingAllowed(row: Pick<Notification, "id" | "kind" | "recipient" | "project" | "taskRef">, account: string): boolean {
+    if (SECURITY_KINDS.has(row.kind) || row.kind === "evening-digest") return true;
+    if (row.recipient !== null && row.kind === "task-ask") return true;
+    const actor = this.notificationActor(row.id);
+    if (actor !== null && actor.account === account) return false;
+    if (row.recipient !== null) return true;
+    if (this.leadQuiet(row, actor)) return false;
+    return row.project === null || this.db.prepare("SELECT 1 AS hit FROM project_mute WHERE account = ? AND repo = ?").get(account, row.project) === undefined;
+  }
+
+  /** The lead's work, which messages nobody: unless it is a security alert or a failure with nothing left for the lead. */
+  leadQuiet(row: Pick<Notification, "id" | "kind" | "taskRef">, actor: Actor | null = this.notificationActor(row.id)): boolean {
+    if (SECURITY_KINDS.has(row.kind)) return false;
+    const lead = actor?.lead === true || (row.taskRef !== null && this.leadWorkOf(row.taskRef) !== null);
+    return lead && !this.failedForGood(row);
+  }
+
+  /** A failure with nothing left for the lead to do: its attempts are spent, or the task has failed for good. */
+  private failedForGood(row: Pick<Notification, "kind" | "taskRef">): boolean {
+    if (SPENT_KINDS.has(row.kind)) return true;
+    if (!/fail|exhausted/.test(row.kind) || row.taskRef === null) return false;
+    return this.db.prepare("SELECT 1 AS hit FROM task t JOIN task_ref r ON r.external_id = t.id AND r.backend = ? WHERE r.id = ? AND t.state = 'failed'").get(BUILT_IN, row.taskRef) !== undefined;
   }
 
   /** The card a destination keeps for this task. A task with none joins a card whose first task was filed within
@@ -26414,6 +26695,17 @@ export class Store {
             AND notification.id > push_subscription.starts_after_notification`,
       )
       .run(now.toISOString());
+    // Pings follow responsibility: a pair this person must not be alerted about retires before it is ever sent.
+    if (Number(changes) > 0) {
+      const fresh = this.db.prepare(`SELECT p.id AS pair, s.approver AS approver, n.* FROM push_delivery p
+          JOIN push_subscription s ON s.id = p.subscription JOIN notification n ON n.id = p.notification
+          WHERE p.state = 'pending' AND p.attempts = 0 AND p.created_at = ?`).all(now.toISOString());
+      for (const raw of fresh) {
+        if (!this.pingAllowed(readNotification(raw), String(raw["approver"]))) {
+          this.db.prepare("UPDATE push_delivery SET state = 'retired', last_error = 'quiet' WHERE id = ? AND state = 'pending'").run(Number(raw["pair"]));
+        }
+      }
+    }
     return Number(changes);
   }
 
@@ -26787,6 +27079,8 @@ function readHold(row: Record<string, unknown>): Hold {
 export const TELEGRAM_SKIPPED_RECEIPT = "skipped:before-pairing";
 /** v83: a notification for another person, settled for this destination without sending. */
 export const TELEGRAM_SKIPPED_ELSEWHERE = "skipped:for-another-person";
+/** A fact this person is not messaged about: the lead's work, their own act, or a project they muted. */
+export const TELEGRAM_SKIPPED_QUIET = "skipped:quiet";
 
 /** A destination receipt (`d` = notification_delivery) that still owes a
  * send: not delivered, and not explicitly skipped as pre-pairing history.

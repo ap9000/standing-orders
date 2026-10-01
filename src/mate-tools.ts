@@ -1,4 +1,5 @@
 import { connectionsOf, oneClickOf } from "./mcp-connect.js";
+import { checkLevelFromWords, isCheckLevel } from "./check-levels.js";
 import { policyParts } from "./policy.js";
 import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
@@ -484,7 +485,7 @@ export const MATE_TOOLS: MateTool[] = [
   },
   {
     name: "propose_task_action",
-    description: "Propose stop/resume/retry/plan/wait_for/stop_waiting for currentExecution. Stop/resume needs get_task control.run; resume requires password review.",
+    description: "Propose stop/resume/retry/plan/wait_for/stop_waiting/run_checks/run_full_checks/add_tests for currentExecution. Stop/resume needs get_task control.run; resume requires password review. run_checks and run_full_checks check the latest result's exact commit; add_tests files a task to write tests for it.",
     inputSchema: schema({ task: TASK_ARG, operation: { type: "string", enum: Object.keys(CHAT_TASK_ACTIONS) }, dependency: TASK_ARG, run: { type: "integer", minimum: 1 } }, ["task", "operation"]),
     handle: (ctx, args) => {
       const task = taskIdOf(args), operation = args["operation"];
@@ -1291,9 +1292,9 @@ export const MATE_TOOLS: MateTool[] = [
   },
   {
     name: "propose_task",
-    description: "Draft inferred title/goal/criteria. report:true investigates without code; planning required plans first, skip needs explicit direct-build request, auto is default.",
+    description: "Draft inferred title/goal/criteria. report:true investigates without code; planning required plans first, skip needs explicit direct-build request, auto is default. checks only when the person asked: off for \"skip the tests\", full for \"run the full checks\", quick for quick checks; omit to use the project's setting.",
     inputSchema: schema(
-      { repo: REPO_ARG, title: { type: "string", maxLength: 200 }, goal: TASK_SCOPE_TEXT_SCHEMA, not: TASK_SCOPE_TEXT_SCHEMA, touches: { type: "array", items: { type: "string", maxLength: 200 }, maxItems: 50 }, acceptance: ACCEPTANCE_ARG_SCHEMA, planning: { type: "string", enum: ["auto", "required", "skip"] }, report: { type: "boolean" } },
+      { repo: REPO_ARG, title: { type: "string", maxLength: 200 }, goal: TASK_SCOPE_TEXT_SCHEMA, not: TASK_SCOPE_TEXT_SCHEMA, touches: { type: "array", items: { type: "string", maxLength: 200 }, maxItems: 50 }, acceptance: ACCEPTANCE_ARG_SCHEMA, planning: { type: "string", enum: ["auto", "required", "skip"] }, report: { type: "boolean" }, checks: { type: "string", maxLength: 80 } },
       ["repo", "title", "goal", "acceptance"],
     ),
     handle: (ctx, args) => {
@@ -1313,7 +1314,10 @@ export const MATE_TOOLS: MateTool[] = [
       if (planning !== "auto" && planning !== "required" && planning !== "skip") return { ok: false, message: "planning is auto, required, or skip" };
       if (args["report"] !== undefined && typeof args["report"] !== "boolean") return { ok: false, message: "report is true or false" };
       const report = args["report"] === true;
-      const id = ctx.draft("task", { repo, repoId: args["repo"], title: args["title"], goal: args["goal"], not, touches, acceptance, planning, report });
+      // A level, or the person's own words ("skip the tests", "run the full checks").
+      const checks = args["checks"] === undefined ? null : isCheckLevel(args["checks"]) ? args["checks"] : typeof args["checks"] === "string" ? checkLevelFromWords(args["checks"]) : null;
+      if (args["checks"] !== undefined && checks === null) return { ok: false, message: "checks is quick, full or off" };
+      const id = ctx.draft("task", { repo, repoId: args["repo"], title: args["title"], goal: args["goal"], not, touches, acceptance, planning, report, ...(checks === null || report ? {} : { checks }) });
       if (id === null) return tooMany();
       return { ok: true, body: { proposal: id, kind: "task", repo: args["repo"], deliverable: report ? "report" : "branch", planning: report ? "not needed for a scout" : planning, awaiting: "the operator's confirmation" } };
     },

@@ -112,7 +112,7 @@ export async function runTaskMergeCommand(positional: readonly string[], flags: 
     return result.ok ? 0 : result.reason === 'usage' ? 2 : 3;
   };
   const fail = (reason: string, message: string) => emit({ ok: false, reason, message });
-  const allowed = new Set(['json', 'db', 'as', 'token']);
+  const allowed = new Set(['json', 'db', 'as', 'token', 'anyway']);
   for (const key of flags.keys()) if (!allowed.has(key)) return fail('usage', `--${key} is not a task merge option.`);
   const task = positional[0];
   if (positional.length !== 1 || !task || task.length > 64 || /[\x00-\x1f]/.test(task)) return fail('usage', 'Use task merge <task> --as <you> --token <password>.');
@@ -125,7 +125,7 @@ export async function runTaskMergeCommand(positional: readonly string[], flags: 
   if (family === null) return fail('not-found', 'That task is unavailable in your projects.');
   const view = newestPullRequestOf(store, family.versions.map(one => one.id));
   if (view === null) return fail('no-pr', 'This task has no pull request. Open one with task complete --pull-request.');
-  const merged = await mergeAsPerson(store, { runId: view.runId, name: acting.name, password: acting.token, ...(context.exec === undefined ? {} : { exec: context.exec }), clock: context.clock });
+  const merged = await mergeAsPerson(store, { runId: view.runId, name: acting.name, password: acting.token, ...(flags.get('anyway') === true ? { anyway: true } : {}), ...(context.exec === undefined ? {} : { exec: context.exec }), clock: context.clock });
   if (!merged.ok) return emit({ ...merged, reason: merged.reason === 'password' ? 'not-an-approver' : merged.reason, pullRequest: view });
   const after = newestPullRequestOf(store, family.versions.map(one => one.id));
   return emit({ ok: true, pullRequest: after }, [

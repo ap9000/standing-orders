@@ -51,6 +51,9 @@ export type ResultFacts = {
   /** A no-change conclusion's two presence facts (handoff + sealed diff);
    * undefined when the caller did not read them. */
   recordComplete?: boolean;
+  /** The check level this result now stands at (check-levels.ts): Off reads
+   * "Built, not checked" until a follow-up check passes. */
+  checkLevel?: "quick" | "full" | "off" | null;
   /** This exact run's independent review (v50 retry projection), read
    * per run so an older selected result keeps its own words; undefined
    * when the caller did not read it, null when never requested. */
@@ -450,9 +453,11 @@ export function workStatusOf(facts: WorkFacts, resultDisplay?: DisplayStatus): W
   const read = done ? RESULT_NEEDS_YOU.has(status.token) ? { stage: "needs-you" as const, need: "other" as const } : stageOfCode(status.token, { needsPerson: false })
     : stageOfCode(status.token, { needsPerson: status.views.includes("needs-you"), planning: facts.dispatch?.code === "running" && facts.dispatch.role === "planner", operatorHold: facts.dispatch?.action === "unhold" });
   const stage = done && read.stage !== "needs-you" && read.stage !== "failed" ? "finished" as const : read.stage;
+  const level = facts.result?.checkLevel ?? null;
   const shared = taskStatusOf({ stage, ...(read.need === undefined ? {} : { need: read.need }), reason: plainReasonOf(stage, status.token, status.detail),
-    report: facts.result?.role === "scout", checks: stage === "finished" && VERIFIED_RESULT.has(status.token) ? { status: "passed", exitCode: null, head: null } : null });
-  return { ...status, label: shared.headline, tone: workToneOf(shared.headline), detail: stage === "finished" ? status.detail : shared.sentence };
+    report: facts.result?.role === "scout", checks: stage !== "finished" ? null : VERIFIED_RESULT.has(status.token) ? { status: "passed", exitCode: null, head: null, level }
+      : level === "off" ? { status: "not-run", exitCode: null, head: null, level } : null });
+  return { ...status, label: shared.headline, tone: workToneOf(shared.headline), detail: stage === "finished" && shared.headline !== "Built, not checked" ? status.detail : shared.sentence };
 }
 
 function workStatusWordsOf(facts: WorkFacts, resultDisplay?: DisplayStatus): WorkStatus {
@@ -496,7 +501,7 @@ function workStatusWordsOf(facts: WorkFacts, resultDisplay?: DisplayStatus): Wor
     return { ...result, views, rank: needs ? 0 : 3 };
   }
   if (facts.state === "cancelled") {
-    return { token: "cancelled", label: "Cancelled", detail: dispatch?.detail ?? "Nothing else will run for this task.", tone: "muted", action: null, views, rank: 4 };
+    return { token: "cancelled", label: dispatch?.summary.startsWith("Replaced by ") ? dispatch.summary : "Cancelled", detail: dispatch?.detail ?? "Nothing else will run for this task.", tone: "muted", action: null, views, rank: 4 };
   }
   if (question !== null && facts.state !== "failed" && dispatch !== null && QUESTION_FIRST.has(dispatch.code)) {
     return {

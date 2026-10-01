@@ -2,6 +2,7 @@ import { verifiedAuthor, type Store } from "./store.js";
 import type { VerifiedApprover } from "./principal.js";
 import { requestTaskStop, taskControlOf, type StopRequest } from "./task-control.js";
 import { authorizePlanUnderMode } from "./plan-auto.js";
+import { fileAddTestsTask, requestFollowUpChecks } from "./result-follow-ups.js";
 
 export const CHAT_TASK_ACTIONS = {
   // Build #1604 feedback: one short consequence that still says saved work
@@ -12,6 +13,10 @@ export const CHAT_TASK_ACTIONS = {
   plan: { label: "Plan first", detail: "Requests a plan. Building still requires approval." },
   wait_for: { label: "Add dependency", detail: "Waits for the selected task to finish." },
   stop_waiting: { label: "Remove dependency", detail: "Stops waiting for the selected task. Other requirements still apply." },
+  // Follow-ups on a result (result-follow-ups.ts): the same actions as the result page.
+  run_checks: { label: "Run checks", detail: "Runs the project's quick check on this result's exact commit. A pass upgrades its status; a failure stays visible." },
+  run_full_checks: { label: "Run full checks", detail: "Runs the project's full check on this result's exact commit. A pass upgrades its status; a failure stays visible." },
+  add_tests: { label: "Add tests", detail: "Files a small task to write tests for this change. Nothing runs until it is approved." },
 } as const;
 export function isChatTaskAction(value: unknown): value is keyof typeof CHAT_TASK_ACTIONS {
   return typeof value === "string" && Object.hasOwn(CHAT_TASK_ACTIONS, value);
@@ -32,7 +37,7 @@ export function chatTaskRun(store: Store, task: string, operation: "stop" | "res
   const control = taskControlOf(store, ref.id, now);
   return (operation === "stop" && control.kind === "stop") || (operation === "resume" && control.kind === "paused") ? control.run : null;
 }
-export function applyChatTaskAction(store: Store, who: VerifiedApprover, payload: Record<string, unknown>, now: Date, web: boolean, controls: Pick<StopRequest, "held" | "deferSignal"> & { via?: StopRequest["via"] } = {}):
+export function applyChatTaskAction(store: Store, who: VerifiedApprover, payload: Record<string, unknown>, now: Date, web: boolean, controls: Pick<StopRequest, "held" | "deferSignal"> & { via?: StopRequest["via"]; evidenceRoot?: string } = {}):
   { ok: true; taskId: string; said: string } | { ok: false; message: string } {
   const task = payload["task"], operation = payload["operation"];
   if (typeof task !== "string" || !isChatTaskAction(operation)) return { ok: false, message: "This task action is incomplete." };
@@ -46,7 +51,7 @@ export function applyChatTaskAction(store: Store, who: VerifiedApprover, payload
     if (run === null || run !== payload["run"]) return { ok: false, message: "This attempt changed. Review the current task before confirming." };
     // Resume remains the existing nonce + password ceremony. A proposal only opens it.
     if (operation === "resume") return { ok: true, taskId: task, said: `Resume review requested for ${task}. Complete the password confirmation on the task to resume.` };
-    const { via, ...rest } = controls;
+    const { via, evidenceRoot: _root, ...rest } = controls;
     const result = requestTaskStop(store, { taskId: task, runId: run, by: verifiedAuthor(who.name), via: via ?? (web ? "web" : "cli"), ...rest }, now);
     return result.ok ? { ok: true, taskId: task, said: `Stop requested for ${task}, run #${run}.` }
       : { ok: false, message: result.detail };
@@ -55,6 +60,18 @@ export function applyChatTaskAction(store: Store, who: VerifiedApprover, payload
     const result = store.requeueTask(task, who.name, now);
     return result.ok ? { ok: true, taskId: task, said: "Task queued again." } : { ok: false, message:
       result.reason === "claimed" ? "This task is already running." : result.reason === "not-stalled" ? "This task does not need another attempt." : "That task is no longer available." };
+  }
+  if (operation === "run_checks" || operation === "run_full_checks" || operation === "add_tests") {
+    const result = store.runsFor(ref.id).find(one => one.role === "builder" && one.finishedAt !== null && one.headRevision !== null) ?? null;
+    if (result === null) return { ok: false, message: "This task has no finished result yet." };
+    if (operation === "add_tests") {
+      const filed = fileAddTestsTask(store, controls.evidenceRoot ?? null, { runId: result.id, actor: who.name, filedVia: web ? "console" : "cli", admittedRepos: who.repos }, now);
+      return filed.ok ? { ok: true, taskId: filed.id, said: filed.existing ? `Tests are already filed as ${filed.id}.` : `Filed ${filed.id} to add tests. Review and approve it to start.` }
+        : { ok: false, message: filed.message };
+    }
+    const asked = requestFollowUpChecks(store, { runId: result.id, level: operation === "run_full_checks" ? "full" : "quick", actor: who.name }, now);
+    return asked.ok ? { ok: true, taskId: task, said: `${asked.level === "full" ? "Full" : "Quick"} checks ${asked.existing ? "are already" : "are"} queued on this result's commit.` }
+      : { ok: false, message: asked.message };
   }
   if (operation === "plan") {
     const result = store.requestPlan(ref.id, now);

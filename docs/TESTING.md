@@ -18,10 +18,14 @@ Each run makes a throwaway world (`scripts/e2e-kit.mjs`) and writes
 open page when a check fails. `--only <pattern>` runs just some checks;
 `--keep` keeps the world to look at.
 
-`e2e:app` journeys are in groups (`node scripts/app-e2e.mjs --groups` lists
-them); `--group <name>` runs one. A journey that needs an earlier one is in
-that one's group. The flows run stays one world: every flow check needs its
-first-run lead chat, and its schedule check is timed across the whole run.
+`e2e:app` and `e2e:flows` journeys are in groups (`--groups` lists them);
+`--group <name>` runs one, and `node scripts/e2e-parallel.mjs <script>` runs
+them all at once. A journey that needs an earlier one is in that one's group;
+one that others build on (Rosa's first tool journey, turning the lead chat on)
+is in each of their groups and runs in each. Every flows group starts with its
+own first-run setup and ends with the browser-error check. Both mail journeys
+stay in one group: the mail server has fixed ports (IMAP is read over TLS only
+on 993).
 A journey retried alone in a fresh world can pass when it failed from state an
 earlier journey left, so a flaky retry is a follow-up to look at, not proof.
 
@@ -31,7 +35,10 @@ mail server, python3. An OpenRouter key in Settings → AI providers for Jev.
 A run spends a few Claude turns and a few real builds (about 45 minutes for
 both).
 
-The release gate runs both before a build ships.
+The release gate (`scripts/release-check.mjs`) runs both, every group at once,
+before a build ships. It starts typecheck, build and the unit tests together
+(the tests' setup waits for that build); the journeys start once the build is
+done. Its summary ends with how long each part took.
 
 ## Unit tests (`npm test`)
 

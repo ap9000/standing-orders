@@ -2,6 +2,44 @@
 
 ## Unreleased
 
+## 0.9.7 — 2026-10-01
+
+- **Onboarding without a password or a form.** `toolroll up` prints three
+  lines and opens the console already signed in, through a one-time link that
+  works once, for ten minutes, from this computer only. The lead turns on by
+  itself with the agent that's signed in (Claude Code, else Codex); the old
+  setup form moved to Settings → Lead → Advanced. With no agent signed in,
+  Chat shows the command to install and sign in, and checks again on its own.
+  A short "how it works", a live Plan → Ready timeline on your first task, a
+  card for pairing your phone, and a "wrong host" page that says what to run.
+- **The task page is one conversation.** The status stays on top; below it
+  the plan, the agent's notes and results, questions and your replies, in
+  order, ending in a box to message the agent (Build, Plan only, or Just
+  answer). Details (scope, attempts, audit) moved to a side panel, or a sheet
+  on phones. The Chat home shows who is working now and four counts, and
+  Catch up and the Inbox have tabs: Needs you, Ready, Running, All.
+- **Checks: quick while building, easy to turn off.** Each project has a
+  check level: Quick (the default for new projects), Full or Off, and a task
+  can override it ("skip the tests"). Off reads "Built, not checked", never
+  Ready. Any result can run its checks again or file a task to add tests.
+- **A flow gallery, and flows as files.** Flows → New is a gallery of
+  templates grouped by what they're for, with new ones for developers
+  (Overnight bug bash, Flaky test hunter, Release notes writer, Docs follow
+  the code, Error to fix, PR second opinion and more). Export any flow as a
+  `.toolroll-flow.json` file and import one from a file or a link, with a
+  preview; secrets never leave, and imported triggers start switched off.
+- **Several builds at once on one project.** The service builds up to two
+  tasks of a project at a time (Settings → Projects, `toolroll project
+  concurrency`), within the machine's limit. Stopping the service mid-build
+  saves the work and resumes it next time.
+- **The lead's housekeeping stays quiet.** An agent acting as your lead gets
+  its own credential (`toolroll lead token`); its work pings nobody unless it
+  hands something to you. Your own actions never ping you, a replaced task
+  reads "Replaced by", and a whole project can be muted.
+- **A faster release check.** Flow journeys run in parallel groups, browser
+  journeys are rebalanced, and a version-only bump no longer forces every
+  test.
+
 ## 0.9.6 — 2026-10-01
 
 - **Every task's status, clear at a glance.** One headline from a fixed set

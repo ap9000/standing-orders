@@ -1,0 +1,150 @@
+{
+ "synthetic": true,
+ "note": "Synthetic fixture seeded by capture.ts; not the live plane, no model, no GitHub.",
+ "captures": [
+  {
+   "file": "evidence/console-v2/after/building-desktop-light.png",
+   "size": "desktop",
+   "scheme": "light",
+   "state": "building",
+   "overflow": 0
+  },
+  {
+   "file": "evidence/console-v2/after/ready-revision-desktop-light.png",
+   "size": "desktop",
+   "scheme": "light",
+   "state": "ready-revision",
+   "overflow": 0
+  },
+  {
+   "file": "evidence/console-v2/after/home-desktop-light.png",
+   "size": "desktop",
+   "scheme": "light",
+   "state": "home",
+   "overflow": 0
+  },
+  {
+   "file": "evidence/console-v2/after/inbox-desktop-light.png",
+   "size": "desktop",
+   "scheme": "light",
+   "state": "inbox",
+   "overflow": 0
+  },
+  {
+   "check": "hash-to-details",
+   "size": "desktop",
+   "scheme": "light",
+   "view": "work",
+   "open": true,
+   "visible": true
+  },
+  {
+   "file": "evidence/console-v2/after/building-desktop-dark.png",
+   "size": "desktop",
+   "scheme": "dark",
+   "state": "building",
+   "overflow": 0
+  },
+  {
+   "file": "evidence/console-v2/after/ready-revision-desktop-dark.png",
+   "size": "desktop",
+   "scheme": "dark",
+   "state": "ready-revision",
+   "overflow": 0
+  },
+  {
+   "file": "evidence/console-v2/after/home-desktop-dark.png",
+   "size": "desktop",
+   "scheme": "dark",
+   "state": "home",
+   "overflow": 0
+  },
+  {
+   "file": "evidence/console-v2/after/inbox-desktop-dark.png",
+   "size": "desktop",
+   "scheme": "dark",
+   "state": "inbox",
+   "overflow": 0
+  },
+  {
+   "check": "hash-to-details",
+   "size": "desktop",
+   "scheme": "dark",
+   "view": "work",
+   "open": true,
+   "visible": true
+  },
+  {
+   "file": "evidence/console-v2/after/building-phone-light.png",
+   "size": "phone",
+   "scheme": "light",
+   "state": "building",
+   "overflow": 0
+  },
+  {
+   "file": "evidence/console-v2/after/ready-revision-phone-light.png",
+   "size": "phone",
+   "scheme": "light",
+   "state": "ready-revision",
+   "overflow": 0
+  },
+  {
+   "file": "evidence/console-v2/after/home-phone-light.png",
+   "size": "phone",
+   "scheme": "light",
+   "state": "home",
+   "overflow": 0
+  },
+  {
+   "file": "evidence/console-v2/after/inbox-phone-light.png",
+   "size": "phone",
+   "scheme": "light",
+   "state": "inbox",
+   "overflow": 0
+  },
+  {
+   "check": "hash-to-details",
+   "size": "phone",
+   "scheme": "light",
+   "view": "work",
+   "open": true,
+   "visible": true
+  },
+  {
+   "file": "evidence/console-v2/after/building-phone-dark.png",
+   "size": "phone",
+   "scheme": "dark",
+   "state": "building",
+   "overflow": 0
+  },
+  {
+   "file": "evidence/console-v2/after/ready-revision-phone-dark.png",
+   "size": "phone",
+   "scheme": "dark",
+   "state": "ready-revision",
+   "overflow": 0
+  },
+  {
+   "file": "evidence/console-v2/after/home-phone-dark.png",
+   "size": "phone",
+   "scheme": "dark",
+   "state": "home",
+   "overflow": 0
+  },
+  {
+   "file": "evidence/console-v2/after/inbox-phone-dark.png",
+   "size": "phone",
+   "scheme": "dark",
+   "state": "inbox",
+   "overflow": 0
+  },
+  {
+   "check": "hash-to-details",
+   "size": "phone",
+   "scheme": "dark",
+   "view": "work",
+   "open": true,
+   "visible": true
+  }
+ ]
+}

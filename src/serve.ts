@@ -1,7 +1,10 @@
+import { withActor } from "./actor.js";
 import { repositoryContext, repositoryContextRead } from './repository-context.js';
+import { ADD_TESTS_ACTION, followUpChecksOf, requestFollowUpChecks, fileAddTestsTask, resultCheckLevel, type FollowUpCheck } from './result-follow-ups.js';
+import { CHECK_LEVEL_WORDS, isCheckLevel, liveQuickCommand, projectCheckLevel, quickVerifyKey, setProjectCheckLevel, suggestQuickCommand, type CheckLevel } from './check-levels.js';
 import { repositoryContextHtml } from './repository-context-ui.js';
 import { browserAssetsAvailable, browserWorkspaceDocument, serveBrowserAsset } from './browser-shell.js';
-import { browserCrewOf, browserCrewFromIndex, browserWorkActionHref, browserProjectsOf, browserNavigationOf, type BrowserWorkspace, type BrowserChatLink, type BrowserTasksView, type BrowserLimits, type BrowserSettingsView, type BrowserTaskView, type BrowserTaskFact, type BrowserTaskSection, type BrowserProjectsView, type BrowserProjectRow, type BrowserResultPanel, type BrowserResultView, type BrowserActionCard, type BrowserSignIn, type BrowserUpdateNotice, type BrowserUpdates, type BrowserFirstRun } from './browser-workspace.js';
+import { browserCrewOf, browserCrewFromIndex, browserWorkActionHref, browserProjectsOf, browserNavigationOf, type BrowserWorkspace, type BrowserChatLink, type BrowserTasksView, type BrowserLimits, type BrowserSettingsView, type BrowserTaskView, type BrowserTaskFact, type BrowserTaskSection, type BrowserTaskThreadItem, type BrowserTaskDetailGroup, type BrowserHome, type BrowserHomeCount, type BrowserCatchUpItem, type BrowserProjectsView, type BrowserProjectRow, type BrowserResultPanel, type BrowserResultView, type BrowserActionCard, type BrowserSignIn, type BrowserUpdateNotice, type BrowserUpdates, type BrowserFirstRun, type BrowserPhoneCard } from './browser-workspace.js';
 import { configureLeadFollow, leadFollowStatus, runLeadFollowPass } from './lead-follow.js';
 import { startMaintenance } from './maintenance.js';
 import { codingHandoffPreview, createCodingHandoff } from './coding-handoff.js';
@@ -19,13 +22,16 @@ import { CHAT_ACTIONS, sharedActionPayload, sharedActionNeedsReview, sharedActio
 import { changeSkills, githubSkill, importSkill, readSkillsSnapshot, reviseSkillTest, skillTestResult, skillsView, testSkill, type SkillFile } from "./project-skills.js";
 import { skillsHtml, skillsScript, skillsSnapshotHtml, skillTestFeedbackHtml, SKILLS_CSS } from "./skills-ui.js";
 import { toolsHtml, TOOLS_CSS, type ToolsView } from "./tools-ui.js";
-import { flowFallbackHtml, flowsListHtml, flowView, FLOWS_CSS } from "./flows-ui.js";
+import { flowFallbackHtml, flowImportHtml, flowsListHtml, flowView, FLOW_IMPORT_SCRIPT, FLOWS_CSS } from "./flows-ui.js";
+import { exportFlow, fetchFlowFile, FlowFileError, importFlow, parseFlowFile, planFlowImport, type FetchLike, type FlowImportPlan } from "./flow-share.js";
 import { BLANK_SOUL, TEAMMATE_CSS, teammatePageHtml, teammatesListHtml } from "./teammates-ui.js";
 import { grantTool, revokeTool, rulesFromForm, setToolRules } from "./teammate-tools.js";
 import { addKitGithubTrigger, addKitSample, kitInstalled, kitOf, setUpKit } from "./kits.js";
 import { CONNECT_CALLBACK, connectionsOf, finishConnect, oneClickOf, startConnect, type ConnectVisit } from "./mcp-connect.js";
 import { KITS_CSS, kitPageHtml, kitsGalleryHtml } from "./kits-ui.js";
 import { STARTERS_CSS, startersHtml } from "./flow-starters-ui.js";
+import { GALLERY_CSS, galleryHtml, galleryUseHtml } from "./flow-gallery-ui.js";
+import { galleryDefaults, galleryDiagram, galleryTemplateOf, previewGallery, useGalleryTemplate, type GalleryAnswers, type GalleryPreview } from "./flow-gallery.js";
 import { starterForWork, starterOf, startersFor, switchOnStarter } from "./flow-starters.js";
 import { createTeammateFrom, labelOf, nameOf, saveSoul, setTeammateState, teammateSettings, sendTeammateSummaries } from "./teammate-admin.js";
 import { editMemory, forgetMemory, tellTeammate } from "./teammate-memory.js";
@@ -55,18 +61,20 @@ import { handleTeamHttp } from './team-http.js';
 import { teamWorkspaceHtml } from './team-ui.js';
 import { createTeamRuntime } from './team-runtime.js';
 import { prepareWorkspaceRevision, WorkspaceValidatorCache } from "./workspace-revision.js";
-import { workIndexPage, workCountsByProject, WorkIndexCursorError, type WorkIndexPage, type WorkIndexItem } from "./work-index.js";
+import { workIndexPage, workCountsByProject, WorkIndexCursorError, WORK_INDEX_MAX_LIMIT, type WorkIndexPage, type WorkIndexItem } from "./work-index.js";
 import { openWorkDecisionOf } from "./work-summary.js";
 import { assignmentOf, checkAssignmentAsOperator, type AssignmentSnapshot } from './assignment.js';
 import type { DemoExchange, DemoLead } from "./demo.js";
 import { demoChatHtml, demoThreadHtml, DEMO_CHAT_SCRIPT, type DemoResultView } from "./demo-chat.js";
 import type { PublishExec } from './publish.js';
 import { pullRequestSettingsHtml, PULL_REQUEST_SETTINGS_CSS } from './pull-request-ui.js';
+import { checkSettingsHtml, CHECK_SETTINGS_CSS } from './check-levels-ui.js';
+import { hasDisguisedText } from './decision.js';
 import { checkPublishing, completeAndOpenPullRequest, mergeAsPerson, pullRequestBlocker, publishingOf, saveMergeSettings, savePublishing, newestPullRequestOf, MERGE_METHODS, type MergeMethod, type PullRequestView } from './pull-request-flow.js';
 import { leadBriefHtml, LEAD_CONTEXT_CSS } from './lead-context.js';
 import { assignmentCatchUp } from './assignment-brief.js';
 import { assignmentCardOf, assignmentStatusOf, assignmentSummaryHtml, assignmentWithEvidence, ASSIGNMENT_CSS } from './assignment-ui.js';
-import { pullRequestFactOf, stageOfDispatch, statusDetailsHtml, statusIconSvg, statusWhyHtml, taskStatusOf, TASK_STATUS_CSS, type PullRequestFact } from './task-status.js';
+import { assignmentStageOf, pullRequestFactOf, stageOfCode, stageOfDispatch, statusDetailsHtml, statusIconSvg, statusWhyHtml, taskStatusOf, TASK_STATUS_CSS, type PullRequestFact } from './task-status.js';
 import { assignmentPresentationOf, historicalAssessmentReason, shortenedMaterialReason } from './assignment-presentation.js';
 import type { TaskFamily } from "./store.js";
 import { ledgerBody } from "./ledger-view.js";
@@ -130,7 +138,7 @@ import { projectAuthority } from "./project-access.js";
  */
 
 import { createConnectionChecker, type ProviderConnection } from "./provider-connection.js";
-import { liftAuthPause, noteSignInProbe, signInNotices } from "./provider-auth.js";
+import { liftAuthPause, noteSignInProbe, providerName, signInNotices } from "./provider-auth.js";
 import { openRouterModelsCache, openRouterPickerScript } from "./openrouter-models.js";
 import { checkModels, isNewModel, livePin, modelOptions, modelWords, RUNTIME_TOOLS, runtimeStates, seenModels, setWatch, updateRuntime, watchState, type CatalogSeams, type RuntimeTool, type VersionRunner } from "./model-catalog.js";
 import { MODELS_CSS, modelsHtml, modelsScript, type RoleView } from "./models-ui.js";
@@ -245,7 +253,7 @@ import { digestTimes } from "./digest-times.js";
 import type { MateProgress } from "./mate-progress.js";
 import { updateRepos, addRepos, removeRepos } from "./repos.js";
 import { run as execRun } from "./exec.js";
-import { findFirstTasks, firstResultWords, firstRunSteps, firstTaskSuggestions, SANDBOX_COMMAND, type FirstRunStep, type FirstTaskSuggestion } from "./first-run.js";
+import { findFirstTasks, firstResultWords, firstRunSteps, firstTaskJourney, firstTaskSuggestions, HOW_IT_WORKS, SANDBOX_COMMAND, signInCommandFor, START_COMMAND, type FirstRunStep, type FirstTaskSuggestion } from "./first-run.js";
 
 /** A user agent, reduced to safe display words — never echoed raw. */
 function oneLineUa(raw: string | string[] | undefined): string {
@@ -301,6 +309,7 @@ import { RETENTION_KINDS, lastSweepAt, parsePeriod, retentionPlan } from "./rete
 import { EXPORT_CSS, dataExportHtml } from "./export-ui.js";
 import { buildExport, exportZip } from "./export.js";
 import { PROJECT_DELETE_CSS, projectDeleteConfirmHtml, projectSettingsHtml, type ProjectSettingsView } from "./project-delete-ui.js";
+import { parseProjectConcurrency, PROJECT_CONCURRENCY_DEFAULT, projectConcurrency, saveProjectConcurrency } from "./project-concurrency.js";
 import { deleteProject, holdingsWords, projectHoldings, projectRunning } from "./project-delete.js";
 import { POLICY_CSS, policyHtml } from "./policy-ui.js";
 import { checkPolicy, parseList, policyParts } from "./policy.js";
@@ -355,8 +364,22 @@ export type ServeOptions = {
   registryPath?: string;
   /** This console fronts an `up` process: onboarding copy says how to watch. */
   upConsole?: boolean;
+  /**
+   * The lead on by default (onboarding): with no lead set up, the agent CLI
+   * signed in on this computer runs it, once. `up` and `serve` turn this on;
+   * tests opt in.
+   */
+  leadByDefault?: boolean;
+  /** Test seam: the operating system the sign-in command is written for. */
+  platform?: NodeJS.Platform;
   /** Extra Host values this server answers as (a Tailscale name, a LAN ip:port). */
   allowedHosts?: readonly string[];
+  /**
+   * This computer's names on its tailnet (onboarding): read at start and every
+   * few minutes; the console answers to each on its own port without an
+   * --allow-host, and the phone card names the address. Absent = none.
+   */
+  tailnetNames?: () => Promise<readonly string[]>;
   /**
    * The first-account road (setup review): while NO approver exists, the
    * login page offers "create the first account", gated by this code —
@@ -415,6 +438,8 @@ export type ServeOptions = {
   toolHome?: string;
   /** v87: sends Send email steps' mail and the settings test (tests inject one). */
   mailSender?: MailSender;
+  /** Injected by tests: how Flows → Import fetches a flow file's address. */
+  flowFetch?: FetchLike;
   /** v89: Google's token endpoint (tests inject a scripted one). */
   googleFetch?: typeof fetch;
   /** Tests: every request a one-click connection makes (discovery, registration, tokens). */
@@ -474,6 +499,13 @@ export type ServeOptions = {
 };
 
 const SESSION_COOKIE = "standing-orders_session";
+/** Where `up`'s one-time sign-in link points, and how long it works. */
+export const SIGN_IN_LINK_PATH = "/login/once/";
+export const SIGN_IN_LINK_MS = 10 * 60_000;
+/** The installation fact that the lead was turned on by default, once (its value: the provider). */
+const LEAD_BY_DEFAULT_FACT = "lead-on-by-default";
+/** The installation fact that the phone card was put away. */
+const PHONE_CARD_FACT = "phone-card-dismissed";
 const BODY_CAP = 16 * 1024;
 // URL encoding can triple UTF-8 bytes. Admit the existing bounded task
 // fields (including paths and rubric) before canonical text validation.
@@ -672,7 +704,10 @@ class PersistentSessions extends Map<string, Session> {
   hashOf(session: Session): string | null { const id = this.ids.get(session); return id === undefined ? null : PersistentSessions.hash(id); }
 }
 
-export function createDecisionServer(options: ServeOptions): Server {
+/** The console's server, and the one-time sign-in link `up` opens: a path on this server, or null for no such approver. */
+export type DecisionServer = Server & { mintSignInLink(account: string): string | null };
+
+export function createDecisionServer(options: ServeOptions): DecisionServer {
   const { store, evidenceRoot } = options;
   let coding = options.codingWorkspace ?? null;
   let codingProblem: string | undefined;
@@ -791,6 +826,26 @@ export function createDecisionServer(options: ServeOptions): Server {
   const ssoOffer = () => { const settings = ssoSettings(); return settings === null ? null : { label: settings.label, operatorsOnly: settings.passwords === "operators" }; };
   /** A step-up within this long of the provider checking someone needs no password. */
   const SSO_FRESH_MS = 10 * 60_000;
+  // The one-time sign-in link `up` opens in the browser: single use, ten minutes, from this computer only. Only a hash
+  // of the code is kept, in memory; the code itself is never written to a log or the ledger.
+  const signInLinks = new Map<string, { account: string; expires: number }>();
+  const linkKey = (code: string) => createHash("sha256").update(code).digest("hex");
+  function mintSignInLink(account: string): string | null {
+    const known = store.accountOf(account);
+    if (known === null || known.role !== "approver" || known.revokedAt !== null) return null;
+    for (const [key, one] of signInLinks) if (one.expires < Date.now()) signInLinks.delete(key);
+    while (signInLinks.size >= 20) signInLinks.delete(signInLinks.keys().next().value!);
+    const code = randomBytes(32).toString("base64url");
+    signInLinks.set(linkKey(code), { account, expires: Date.now() + SIGN_IN_LINK_MS });
+    return `${SIGN_IN_LINK_PATH}${code}`;
+  }
+  /** This computer, and nothing in front of it: a loopback peer that names a loopback address, with no forwarding proxy. */
+  const fromThisComputer = (request: IncomingMessage): boolean => {
+    const peer = request.socket.remoteAddress ?? "";
+    const loopback = peer === "127.0.0.1" || peer === "::1" || peer === "::ffff:127.0.0.1";
+    return loopback && request.headers["x-forwarded-for"] === undefined && request.headers["forwarded"] === undefined
+      && /^(localhost|127\.0\.0\.1|\[::1\]):[0-9]{1,5}$/.test(request.headers.host ?? "");
+  };
   async function providerFor(issuer: string): Promise<{ ok: true; provider: OidcProvider } | { ok: false; said: string }> {
     if (ssoProvider !== null && ssoProvider.issuer === issuer && Date.now() - ssoProvider.at < 10 * 60_000) return { ok: true, provider: ssoProvider.provider };
     const found = await discoverOidc(issuer, options.ssoFetch ?? fetch);
@@ -880,7 +935,18 @@ export function createDecisionServer(options: ServeOptions): Server {
   const projectViewOf = (repo: string, who: Who): ProjectSettingsView => ({
     repo, name: projectName(repo), holdings: projectHoldings(store, repo), running: projectRunning(store, repo, clock()),
     canDelete: who.via === "cookie" && store.isInstanceOperator(who.name),
+    builds: projectBuildsOf(repo, who),
   });
+  /** Settings → Project → Builds at once: the saved number, its workers' capacity, and what builds now. */
+  const projectBuildsOf = (repo: string, who: Who): NonNullable<ProjectSettingsView["builds"]> => {
+    const capacities = store.listRunners().filter(one => one.retiredAt === null && one.repos.includes(repo)).map(one => one.capacity);
+    return {
+      setting: (() => { const file = store.databaseFile(); return file === null ? PROJECT_CONCURRENCY_DEFAULT : projectConcurrency(file, repo); })(),
+      capacity: capacities.length === 0 ? null : Math.max(...capacities),
+      building: store.runningBuildsByRepo(clock()).get(repo) ?? 0,
+      canChange: who.via === "cookie" && who.role === "approver" && store.accountCanAccess(who.name, repo),
+    };
+  };
   /** Codex's own MCP servers for a project (`codex mcp list --json`), for "Found on this computer"; null when Codex can't say. */
   const codexServers = async (repo: string): Promise<unknown[] | null> => {
     try {
@@ -964,7 +1030,7 @@ export function createDecisionServer(options: ServeOptions): Server {
   const server = createServer((request, response) => {
     void handle(request, response).catch(error => {
       // Every unhandled error is logged (v99): the path and the message, never the request's body or query.
-      logEvent("error", "serve.error", { method: request.method, path: new URL(request.url ?? "/", "http://placeholder").pathname, error: error instanceof Error ? error.message : String(error) });
+      logEvent("error", "serve.error", { method: request.method, path: redactedPath(new URL(request.url ?? "/", "http://placeholder").pathname), error: error instanceof Error ? error.message : String(error) });
       if (envValue(process.env, "SERVE_DEBUG") === "1") console.error("SERVE ERROR:", error);
       if (!response.headersSent) {
         const updating = error instanceof Error && error.message.includes(UPDATE_PAUSED);
@@ -997,14 +1063,42 @@ export function createDecisionServer(options: ServeOptions): Server {
   const consoleOrigin = (host: string | undefined): string | null =>
     host === undefined ? null : publicOrigin !== null && host === publicOrigin.host ? publicOrigin.origin : /^(localhost|127\.0\.0\.1|\[::1\]):[0-9]{1,5}$/.test(host) ? `http://${host}` : null;
 
+  /** This computer's tailnet names, the last ones read (onboarding). */
+  let tailnet: readonly string[] = [];
+  if (options.tailnetNames !== undefined) {
+    const readTailnet = options.tailnetNames;
+    const refresh = () => { void readTailnet().then(names => { tailnet = names; }, () => {}); };
+    refresh();
+    const timer = setInterval(refresh, 5 * 60_000);
+    timer.unref?.();
+    server.on("close", () => clearInterval(timer));
+  }
+  const servedPort = (): number | null => {
+    const address = server.address();
+    return typeof address === "object" && address !== null ? address.port : null;
+  };
   /** The names this server answers as. Anything else is a rebind, refused. */
   const allowedHost = (host: string | undefined): boolean => {
     if (host === undefined) return false;
-    const address = server.address();
-    const port = typeof address === "object" && address !== null ? address.port : null;
+    const port = servedPort();
     const locals =
-      port === null ? [] : [`localhost:${port}`, `127.0.0.1:${port}`, `[::1]:${port}`];
+      port === null ? [] : [`localhost:${port}`, `127.0.0.1:${port}`, `[::1]:${port}`, ...tailnet.map(name => `${name}:${port}`)];
     return [...locals, ...(options.allowedHosts ?? []), ...(publicOrigin === null ? [] : [publicOrigin.host])].includes(host);
+  };
+  /** The exact command that starts this console again as it runs now, plus a listening address or one more allowed host. */
+  const consoleCommand = (change: { host?: string; allow?: string }): string => {
+    const port = servedPort() ?? 4180;
+    const address = server.address();
+    const bound = typeof address === "object" && address !== null ? address.address : "127.0.0.1";
+    const host = change.host ?? (bound === "127.0.0.1" || bound === "::1" ? null : bound === "::" ? "0.0.0.0" : bound);
+    const allowed = [...(options.allowedHosts ?? []), ...(change.allow === undefined ? [] : [change.allow])];
+    return [`toolroll ${options.upConsole === true ? "up" : "serve"}`, ...(host === null ? [] : [`--host ${host}`]), ...(port === 4180 ? [] : [`--port ${port}`]),
+      ...(allowed.length === 0 ? [] : [`--allow-host ${allowed.join(",")}`])].join(" ");
+  };
+  /** The wrong-host page's facts: the address opened, where the console answers, and the exact command that admits it. */
+  const wrongHost = (host: string | undefined) => {
+    const opened = host !== undefined && /^[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?$|^\[[0-9A-Fa-f:.]{2,45}\](:[0-9]{1,5})?$/.test(host) ? host : null;
+    return { opened, served: `127.0.0.1:${servedPort() ?? 4180}`, command: opened === null ? null : consoleCommand({ allow: opened }) };
   };
 
   /**
@@ -1277,7 +1371,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (hook.pathname === TELEGRAM_HOOK_PATH) return telegramHook(request, response);
     if (hook.pathname.startsWith("/hooks/")) return flowHook(request, response, hook);
     if (!allowedHost(request.headers.host)) {
-      return respond(response, 421, "text/plain; charset=utf-8", "wrong host");
+      return respond(response, 421, "text/html; charset=utf-8", wrongHostPage(wrongHost(request.headers.host)));
     }
 
     const url = new URL(request.url ?? "/", "http://placeholder");
@@ -1345,6 +1439,30 @@ export function createDecisionServer(options: ServeOptions): Server {
         return page(response, 200, signupPage(null, setupAttemptsLeft));
       }
       return page(response, 200, loginPage(null, loginReturn(url.searchParams.get("return")), ssoOffer()));
+    }
+    // The one-time link `up` opens (onboarding): it signs the browser on this computer in and lands on Chat. Spent on
+    // the first visit whatever happens; the ledger notes the sign-in, never the link.
+    if (url.pathname.startsWith(SIGN_IN_LINK_PATH) && method === "GET") {
+      const code = url.pathname.slice(SIGN_IN_LINK_PATH.length);
+      const held = /^[A-Za-z0-9_-]{43}$/.test(code) ? signInLinks.get(linkKey(code)) : undefined;
+      if (held !== undefined) signInLinks.delete(linkKey(code));
+      response.setHeader("Referrer-Policy", "no-referrer");
+      if (!fromThisComputer(request)) {
+        recordSignIn(held?.account ?? "unknown account", "sign-in refused", "one-time link", "opened from another device");
+        return page(response, 403, loginPage("That sign-in link works only in a browser on the computer running Toolroll. Sign in with your password.", "/chat", ssoOffer()));
+      }
+      if (held === undefined || held.expires < Date.now()) {
+        return page(response, 410, loginPage("That sign-in link has been used or has expired. Sign in with your password, or run toolroll up again.", "/chat", ssoOffer()));
+      }
+      const account = store.accountOf(held.account);
+      if (account === null || account.role !== "approver" || account.revokedAt !== null) return page(response, 403, loginPage("That account can't sign in here any more.", "/chat", ssoOffer()));
+      if (!passwordAllowed(held.account)) return page(response, 403, loginPage(`Sign in with ${ssoSettings()?.label ?? "your identity provider"}.`, "/chat", ssoOffer()));
+      const id = randomBytes(32).toString("hex");
+      sessions.set(id, { ...arrival(request), name: held.account, csrf: randomBytes(32).toString("hex"), role: account.role, generation: account.generation, createdAt: Date.now(), sawBoardAt: null, lastSeen: Date.now(),
+        project: defaultProject, projectRevision: 1 });
+      recordSignIn(held.account, "signed in", "one-time link");
+      response.setHeader("Set-Cookie", `${SESSION_COOKIE}=${id}; HttpOnly; SameSite=Strict; Path=/${cookieSecure}`);
+      return redirect(response, "/chat");
     }
     // v100: sign-in with the identity provider. ?reauth=1 asks it to check the person again (a step-up);
     // ?link=1 links the signed-in account to it. The browser that starts it holds the visit's state.
@@ -1619,7 +1737,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     // An empty password stands for a fresh identity-provider sign-in, for this person only (v100).
     if (method === "GET" || method === "POST") return freshIdentitySignIn.run({ actor: requestFacts.sso?.fresh === true ? who.name : null }, () => requestContext.run(requestFacts, async () => {
       const taskTextForm = url.pathname === "/tasks/add" || /^\/t\/[^/]+\/scope$/.test(url.pathname);
-      const body = method === "POST" ? await form(request, url.pathname === "/settings/skills/import" ? 2 * 1024 * 1024 : taskTextForm ? TASK_FORM_BODY_CAP : BODY_CAP) : null;
+      const body = method === "POST" ? await form(request, url.pathname === "/settings/skills/import" ? 2 * 1024 * 1024 : url.pathname === "/flows/import" ? 1024 * 1024 : taskTextForm ? TASK_FORM_BODY_CAP : BODY_CAP) : null;
       const target = actionTarget(url, who, request, body);
       const execute = async () => {
         if (!projectRequestAllowed(url, who, request, response)) return;
@@ -1754,8 +1872,8 @@ export function createDecisionServer(options: ServeOptions): Server {
     const write = new Set(["/settings/flows/on", "/settings/skills/import", "/settings/skills/change", "/settings/skills/revise", "/settings/knowledge/change", "/settings/knowledge/refresh", "/settings/learning/change", "/recipes/prepare", "/recipes/preview", "/recipes/import", "/recipes/save", "/recipes/launch", "/projects/select", "/tasks/add", "/routines/add"]);
     const task = matchTaskPath(path, request.method === "GET" ? "(/evidence)?$" : "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|next|reopen|steer|accept-proof|accept-revision|reject-revision|route|retry-review|complete|merge|stop|resume-arm|resume)$");
     const resource = request.method === "GET"
-      ? /^\/(?:r|d)\/[0-9]{1,15}(?:\/evidence\/[0-9]{1,15})?$/.test(path) || /^\/routines\/[0-9]{1,15}$/.test(path) || path === "/flows" || /^\/flows\/[0-9]{1,15}(\/insights|\/runs\/[0-9]{1,15}\/[0-9]{1,15})?$/.test(path)
-      : /^\/d\/[0-9]{1,15}\/answer$/.test(path) || /^\/routines\/[0-9]{1,15}\/(approve|refresh|pause|resume|run-now)$/.test(path) || path === "/flows/new" || /^\/flows\/[0-9]{1,15}\/(save|cards|archive|scripts)$/.test(path) || /^\/flows\/[0-9]{1,15}\/cards\/[0-9]{1,15}\/(move|decide|cancel|comment|assign|watch)$/.test(path) || /^\/flows\/[0-9]{1,15}\/triggers(\/[0-9]{1,15}\/(pause|resume|remove|check|press|renew|secret|share|unshare))?$/.test(path) || /^\/r\/[0-9]{1,15}\/(note|comment|revise|draft-repair)$/.test(path);
+      ? /^\/(?:r|d)\/[0-9]{1,15}(?:\/evidence\/[0-9]{1,15})?$/.test(path) || /^\/routines\/[0-9]{1,15}$/.test(path) || path === "/flows" || /^\/flows\/[0-9]{1,15}(\/insights|\/export|\/runs\/[0-9]{1,15}\/[0-9]{1,15})?$/.test(path) || path === "/flows/new" || /^\/flows\/new\/[a-z-]{1,40}$/.test(path)
+      : /^\/d\/[0-9]{1,15}\/answer$/.test(path) || /^\/routines\/[0-9]{1,15}\/(approve|refresh|pause|resume|run-now)$/.test(path) || path === "/flows/new" || /^\/flows\/new\/[a-z-]{1,40}$/.test(path) || path === "/flows/import" || /^\/flows\/[0-9]{1,15}\/(save|cards|archive|scripts)$/.test(path) || /^\/flows\/[0-9]{1,15}\/cards\/[0-9]{1,15}\/(move|decide|cancel|comment|assign|watch)$/.test(path) || /^\/flows\/[0-9]{1,15}\/triggers(\/[0-9]{1,15}\/(pause|resume|remove|check|press|renew|secret|share|unshare))?$/.test(path) || /^\/r\/[0-9]{1,15}\/(note|comment|revise|draft-repair|checks|add-tests)$/.test(path);
     if (!(request.method === "GET" ? read : write).has(path) && task === null && !resource) {
       refuse(response, who, 403, "This area requires instance access. Your account operates within its assigned projects.", "/projects");
       return false;
@@ -1778,6 +1896,17 @@ export function createDecisionServer(options: ServeOptions): Server {
   }
 
   // ---- reads ---------------------------------------------------------------
+
+  /** A gallery template's page (Flows → New → Use this): its questions, the preview of these answers, and Create. */
+  function sendGalleryUse(response: ServerResponse, who: Who, template: NonNullable<ReturnType<typeof galleryTemplateOf>>, projects: readonly string[], repo: string, given: GalleryAnswers | null, name: string, notice: string | null): void {
+    const answers = given ?? galleryDefaults(store, template, repo);
+    let preview: GalleryPreview | null = null, problem = notice;
+    try { preview = previewGallery(store, template, repo, answers, who.name, clock()); }
+    catch (error) { problem = error instanceof Error ? error.message : "That can't be made here."; }
+    const html = galleryUseHtml({ template, projects: projects.map(path => ({ path, name: projectName(path) })), repo, answers, name, preview, problem,
+      csrf: who.via === "cookie" ? who.session.csrf : "", diagram: preview?.built.definition ?? galleryDiagram(template) });
+    return sendScreen(response, problem !== null && preview === null && notice !== null ? 400 : 200, screen(template.name, `<p><a href="/flows/new">New flow</a></p><h1>${escape(template.name)}</h1>${html}`, { chrome: chromeFor(repo, "flows") }));
+  }
 
   async function handleGet(url: URL, who: Who, request: IncomingMessage, response: ServerResponse): Promise<void> {
     const now = clock();
@@ -1869,7 +1998,9 @@ export function createDecisionServer(options: ServeOptions): Server {
       url.pathname !== "/menu" &&
       url.pathname !== "/recipes" &&
       // A flow names its own project; the list spans every project.
-      url.pathname !== "/flows" && !/^\/flows\/[0-9]{1,15}(\/insights|\/runs\/[0-9]{1,15}\/[0-9]{1,15})?$/.test(url.pathname) &&
+      url.pathname !== "/flows" && url.pathname !== "/flows/import" && !/^\/flows\/[0-9]{1,15}(\/insights|\/export|\/runs\/[0-9]{1,15}\/[0-9]{1,15})?$/.test(url.pathname) &&
+      // The gallery (Flows → New) asks for its project on each template's page.
+      url.pathname !== "/flows/new" && !/^\/flows\/new\/[a-z-]{1,40}$/.test(url.pathname) &&
       // Teammates (v92) name their own project, like flows.
       !url.pathname.startsWith("/teammates") &&
       // New work names its project in the form (a dropdown of known
@@ -1882,6 +2013,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       url.pathname !== "/projects/browse" && url.pathname !== "/projects/github" && url.pathname !== "/workbench" &&
       url.pathname !== "/fleet" &&
       url.pathname !== "/chat" && url.pathname !== "/chat/mate/status" && url.pathname !== "/chat/task-status" && url.pathname !== "/chat/stream" &&
+      url.pathname !== "/lead/status" && url.pathname !== "/onboarding/phone/dismiss" &&
       !url.pathname.startsWith("/chat/demo/") &&
       !/^\/chat\/action\/[0-9]{1,15}$/.test(url.pathname) &&
       !url.pathname.startsWith("/settings") && url.pathname !== "/logout" && url.pathname !== "/people" && url.pathname !== "/ledger" && url.pathname !== "/ledger/export" && url.pathname !== "/metrics" && url.pathname !== "/spend" && url.pathname !== "/spend/budget" &&
@@ -2036,10 +2168,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const cancelled = store
         .listCancelledBlockersScoped(project, 10, admission)
         .filter(one => visible(one.repo) && visible(one.blockerRepo));
-      return sendScreen(
-        response,
-        200,
-        inboxPage(chromeFor(project, "inbox"), {
+      const inboxData = {
           csrf: who.via === "cookie" ? who.session.csrf : "",
           revision: who.via === "cookie" ? who.session.projectRevision : 0,
           rollup,
@@ -2081,8 +2210,24 @@ export function createDecisionServer(options: ServeOptions): Server {
             return { answering: answering.length, registered: runners.length, lastHeard };
           })(),
           now,
-        }),
-      );
+          // Console v2: results ready to review and work running now, from the same admitted work index.
+          ...(() => {
+            const row = (one: WorkIndexItem) => ({ taskId: one.rootId, title: one.title, detail: one.status.detail, repo: one.repo });
+            const needsYou = workIndexPage(store, now, workAccess(), { view: "needs-you", limit: 40, project });
+            const runningNow = workIndexPage(store, now, workAccess(), { view: "running", limit: 40, project });
+            return { ready: needsYou.items.filter(one => one.assignmentState === "ready-to-check").map(row), running: runningNow.items.map(row) };
+          })(),
+      };
+      // Which tabs hold something new since this browser last looked (the dots on a phone).
+      const tab = parseInboxTab(url.searchParams.get("tab")) ?? "all";
+      const prints = inboxFingerprints(inboxData);
+      const seenWords = /(?:^|;\s*)so-inbox-seen=([0-9a-f]{8}(?:\.[0-9a-f]{8}){3})(?:;|$)/.exec(request.headers.cookie ?? "")?.[1]?.split(".") ?? null;
+      const order = ["needs-you", "ready", "running", "all"] as const;
+      const seen = Object.fromEntries(order.map((one, index) => [one, seenWords?.[index] ?? ""])) as Record<InboxTab, string>;
+      const unread = order.filter(one => seenWords !== null && seen[one] !== prints[one]);
+      for (const one of order) if (tab === "all" || one === tab) seen[one] = prints[one];
+      response.setHeader("Set-Cookie", `so-inbox-seen=${order.map(one => seen[one] || prints[one]).join(".")}; SameSite=Lax; Path=/; Max-Age=31536000`);
+      return sendScreen(response, 200, inboxPage(chromeFor(project, "inbox"), { ...inboxData, tab, unread }));
     }
 
     if (url.pathname === "/work") {
@@ -2835,6 +2980,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           prefill,
           store.permissionDefault().mode,
           store.qualityDefault().mode,
+          store.replacements(),
         ),
       );
     }
@@ -3228,10 +3374,28 @@ export function createDecisionServer(options: ServeOptions): Server {
       );
     }
 
+    // Flows → New: the gallery, and each template's page.
+    if (url.pathname === "/flows/new") {
+      const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
+      const canUse = who.via === "cookie" && who.role === "approver" && projects.length > 0;
+      const repo = url.searchParams.get("repo");
+      return sendScreen(response, 200, screen("New flow", `<p><a href="/flows">Flows</a></p><h1>New flow</h1>${galleryHtml({ repo: repo !== null && projects.includes(repo) ? repo : null, canUse })}`, { chrome: chromeFor(project, "flows") }));
+    }
+    const galleryRead = /^\/flows\/new\/([a-z-]{1,40})$/.exec(url.pathname);
+    if (galleryRead !== null) {
+      const template = galleryTemplateOf(galleryRead[1]!);
+      const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
+      if (template === null) return refuse(response, who, 404, "There's no template by that name.", "/flows/new");
+      if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "Sign in as an approver to create flows.", "/flows/new");
+      if (projects.length === 0) return refuse(response, who, 409, "Add a project first.", "/projects");
+      const asked = url.searchParams.get("repo");
+      const repo = asked !== null && projects.includes(asked) ? asked : project !== null && projects.includes(project) ? project : projects[0]!;
+      return sendGalleryUse(response, who, template, projects, repo, null, template.name, null);
+    }
     if (url.pathname === "/flows") {
       const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
       const flows = store.listFlows(projects);
-      return sendScreen(response, 200, screen("Flows", `<h1>Flows</h1>${flowsListHtml(store, flows, projects, who.via === "cookie" ? who.session.csrf : "", who.via === "cookie" && who.role === "approver", url.searchParams.get("problem"))}`, { chrome: chromeFor(project, "flows") }));
+      return sendScreen(response, 200, screen("Flows", `<h1>Flows</h1>${flowsListHtml(store, flows, projects, who.via === "cookie" ? who.session.csrf : "", who.via === "cookie" && who.role === "approver", url.searchParams.get("problem"))}`, { chrome: chromeFor(project, "flows"), functional: { script: FLOW_IMPORT_SCRIPT } }));
     }
     // starter kits — the gallery, and each kit's checklist in a project.
     if (url.pathname === "/kits" || /^\/kits\/[a-z-]{1,40}$/.test(url.pathname)) {
@@ -3273,6 +3437,17 @@ export function createDecisionServer(options: ServeOptions): Server {
       const run = card === null || card.flow !== flow.id ? null : store.flowStepRun(card.id, Number(flowRead[4]));
       if (run === null) return json(404, { said: "No such run." });
       return json(200, { card: run.card, entry: run.entry, script: run.script, version: run.scriptVersion, state: run.state, result: run.result, exitCode: run.exitCode, durationMs: run.durationMs, at: run.finishedAt ?? run.startedAt, log: run.log ?? "" });
+    }
+    const flowExport = /^\/flows\/([1-9][0-9]{0,9})\/export$/.exec(url.pathname);
+    if (flowExport !== null) {
+      // A flow as a file (flow-share.ts): zones, paths, trigger settings and scripts; never secrets, addresses, names or cards.
+      const flow = store.getFlow(Number(flowExport[1]));
+      if (flow === null || flow.state !== "active" || !visible(flow.repo)) return refuse(response, who, 404, "No such flow in your projects.", "/flows");
+      let exported: ReturnType<typeof exportFlow>;
+      try { exported = exportFlow(store, flow, options.configDir ?? null); }
+      catch (error) { return refuse(response, who, 409, error instanceof Error ? error.message : "This flow can't be exported.", `/flows/${flow.id}`); }
+      response.setHeader("Content-Disposition", `attachment; filename="${exported.fileName}"`);
+      return respond(response, 200, "application/json; charset=utf-8", exported.json);
     }
     const flowLive = /^\/flows\/([1-9][0-9]{0,9})\/live$/.exec(url.pathname);
     if (flowLive !== null) {
@@ -3670,7 +3845,11 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       // The first run belongs to the lead conversation, for someone who can act on it.
       const firstRun = focusTask === null && who.role === "approver" ? chatFirstRun(now, chatProject) : undefined;
-      const withFirstRun = (shown: Screen): Screen => firstRun === undefined ? shown : { ...shown, workspace: { ...shown.workspace, firstRun } };
+      const phone = focusTask === null && who.via === "cookie" ? phoneCard(who, now) : undefined;
+      // Console v2: the landing's live view (who is working, four counts, Catch up in tabs).
+      const home = focusTask === null && chatProject === null && !roomId ? chatHomeOf(who, repos, now) : null;
+      const withFirstRun = (shown: Screen): Screen => firstRun === undefined && phone === undefined && home === null ? shown
+        : { ...shown, workspace: { ...shown.workspace, ...(firstRun === undefined ? {} : { firstRun }), ...(phone === undefined ? {} : { phone }), ...(home === null ? {} : { home }) } };
       if (enabled.ok && mateSession !== null && principal !== null && !ceilingStale) {
         {
           const said = takeMateNote(who.session.csrf, mateSession.id);
@@ -3704,6 +3883,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         200,
         withFirstRun(chatPage(chromeFor(null, "chat", undefined, "all"), {
           settingsOpen: settingsView,
+          firstRunShown: firstRun !== undefined,
           enabled,
           pending,
           latched,
@@ -3908,7 +4088,9 @@ export function createDecisionServer(options: ServeOptions): Server {
       const content = chosen === "" ? "<p>Add a project to switch on starter flows.</p>" : startersHtml({
         repo: chosen, projects: projects.map(path => ({ path, name: projectName(path) })), starters: startersFor(store, chosen), csrf: who.via === "cookie" ? who.session.csrf : "",
         canSwitch: who.via === "cookie" && who.role === "approver" && !store.isDemo(), suggested: starterOf(url.searchParams.get("starter") ?? "")?.id ?? null,
-        said: url.searchParams.get("said"), problem: url.searchParams.get("problem") });
+        said: url.searchParams.get("said"), problem: url.searchParams.get("problem") }) +
+        // Every template, beside the starters: Use this opens its page for this project.
+        `<h2 class="gallery-heading">Templates</h2>${galleryHtml({ repo: chosen, canUse: who.via === "cookie" && who.role === "approver" && !store.isDemo() })}`;
       return sendScreen(response, 200, screen("Flows", `<p><a href="/settings">Settings</a></p><h1>Flows</h1>${content}`, { chrome: chromeFor(chosen || project, "settings") }));
     }
     // Settings → Integrations: which integrations work. The list is the last checks; a render never waits on one.
@@ -3967,6 +4149,17 @@ export function createDecisionServer(options: ServeOptions): Server {
       const html = pullRequestSettingsHtml({ repo, name: projectName(repo), csrf: who.session.csrf, canChange, publishing, check,
         said: url.searchParams.get("said"), problem: url.searchParams.get("problem") });
       return sendScreen(response, 200, screen("Pull requests", `<p><a href="/projects">Projects</a></p><h1>Pull requests</h1>${html}`, { chrome: chromeFor(project, "projects") }));
+    }
+    // Settings → Projects → Checks: how much checks after each build, and the quick command beside the full one.
+    if (url.pathname === "/settings/checks") {
+      const repo = url.searchParams.get("repo") ?? "";
+      const known = [...new Set([...managedRepos(), ...store.knownRepos(), ...store.listProjects().map(one => one.path)])];
+      if (who.via !== "cookie" || !known.includes(repo) || !visible(repo)) return refuse(response, who, 404, "No such project.", "/projects");
+      const quick = liveQuickCommand(store, repo);
+      const html = checkSettingsHtml({ repo, name: projectName(repo), csrf: who.session.csrf, canChange: who.role === "approver" && !store.isDemo(),
+        level: projectCheckLevel(store, repo).level, full: store.liveVerifyCommand(repo), quick, suggestion: quick === null ? suggestQuickCommand(repo) : null,
+        said: url.searchParams.get("said"), problem: url.searchParams.get("problem") });
+      return sendScreen(response, 200, screen("Checks", `<p><a href="/projects">Projects</a></p><h1>Checks</h1>${html}`, { chrome: chromeFor(project, "projects") }));
     }
     // Sprint 8: Settings → Backups, how the last backup went and the schedule. An instance operator's page.
     if (url.pathname === "/settings/backups") {
@@ -4045,6 +4238,25 @@ export function createDecisionServer(options: ServeOptions): Server {
         catch { content = '<p class="problem" role="alert">Learning is unavailable. Reload to retry. Task results are unchanged.</p>'; }
       }
       return sendScreen(response, 200, screen("Learning", `<p><a href="/settings">Settings</a></p><h1>Learning</h1>${selector}${content}`, { chrome: chromeFor(chosen || project, "settings") }));
+    }
+    // Settings → Lead (onboarding): what runs the lead in one line, and the full form under Advanced.
+    if (url.pathname === "/settings/lead") {
+      if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "An approver sets up the lead.", "/settings");
+      if (localSignIn === null) await Promise.race([checkLocalAgents(), new Promise(done => setTimeout(done, 6_000).unref?.())]);
+      const config = store.getChatConfig();
+      const facts: LeadFormFacts = {
+        keyFacts: (["anthropic-api", "openrouter-api"] as const).map(one => {
+          const found = chatKeyFor(one);
+          return { provider: one, state: found === null ? "none" : found.source, tail: found === null || found.source === "environment" ? null : redactToken(found.key) };
+        }),
+        openrouterModels: (await chatCatalog())?.map(one => one.id) ?? null,
+        liveModels: [...modelOptions(store, "claude", now, providerHome), ...modelOptions(store, "codex", now, providerHome)],
+        csrf: who.session.csrf,
+        returnTo: "/settings/lead",
+      };
+      const signedIn = localSignIn?.states.claude === "connected" ? "Claude Code" : localSignIn?.states.codex === "connected" ? "Codex" : null;
+      return sendScreen(response, 200, screen("Lead", leadSettingsHtml({ config, facts, words: leadWords(), signedIn, command: agentSignInCommand(),
+        said: url.searchParams.get("said") }), { chrome: chromeFor(project, "settings") }));
     }
     if (url.pathname === "/settings/telegram") {
       // Any approver pairs their OWN phone here; the bot token stays on /settings.
@@ -4130,7 +4342,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           return at === null || since === null ? null : firstResultWords(since, at);
         })(), (() => {
           const chosen = store.notificationPreference(who.name);
-          return { mode: chosen.mode, digestAt: chosen.digestAt };
+          return { mode: chosen.mode, digestAt: chosen.digestAt, projects: notificationProjects(store, who.name) };
         })()),
       );
     }
@@ -4157,6 +4369,17 @@ export function createDecisionServer(options: ServeOptions): Server {
       return sendScreen(response, 200, decisionPage(chromeFor(project, "none"), decision, taskId, store.evidenceFor(decision.id), who, now, back));
     }
 
+    // While no agent is signed in, Chat asks this computer again on its own (onboarding): a fresh, non-spending sign-in
+    // check at most every few seconds, and the lead turns on as soon as one is found.
+    if (url.pathname === "/lead/status") {
+      if (who.via !== "cookie") return respond(response, 403, "application/json", JSON.stringify({ error: "sign in" }));
+      if (Date.now() - leadRecheckedAt > 4_000) {
+        leadRecheckedAt = Date.now();
+        await Promise.race([checkLocalAgents(true), new Promise(done => setTimeout(done, 8_000).unref?.())]);
+      }
+      response.setHeader("cache-control", "no-store");
+      return respond(response, 200, "application/json", JSON.stringify({ lead: store.getChatConfig() === null ? "off" : "on", agent: localSignIn?.signedIn ?? null, command: agentSignInCommand() }));
+    }
     if (url.pathname === "/chat/task-status") {
       if (who.via !== "cookie") return respond(response, 403, "text/plain; charset=utf-8", "sign in to see this task");
       const focus = taskChatFocus(url.searchParams.get("task"), now, who, { mintNonce: false });
@@ -4182,7 +4405,7 @@ export function createDecisionServer(options: ServeOptions): Server {
    */
   function firstRunStepsNow(now: Date): FirstRunStep[] | null {
     if (restricted() || store.isDemo() || store.firstSuccessAt(now) !== null) return null;
-    return firstRunSteps({ agentSignedIn: agentSignedIn(now), projects: managedRepos().length, hasTask: store.hasAnyWork(), firstResultAt: null });
+    return firstRunSteps({ agentSignedIn: agentSignedIn(now), projects: managedRepos().length, hasTask: store.hasAnyWork(), firstResultAt: null, signInCommand: agentSignInCommand() });
   }
   /**
    * Whether a coding agent is signed in where the work runs. This machine's
@@ -4200,17 +4423,49 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (workers.some(one => one.host !== here && store.providerReadiness(one.name).some(seen => seen.state === "ready"))) return true;
     return options.localRunner !== undefined || registered.length === 0 || workers.some(one => one.host === here) ? localAgentSignedIn() : false;
   }
-  let localSignIn: { at: number; signedIn: boolean } | null = null;
-  let localSignInChecking = false;
+  let localSignIn: { at: number; signedIn: boolean; states: Record<"claude" | "codex", ProviderConnection["state"] | "unverified"> } | null = null;
+  let localSignInChecking: Promise<void> | null = null;
+  let leadRecheckedAt = 0;
+  /** Ask this computer's agent CLIs again (no model, nothing spent); `fresh` skips their 30-second cache. */
+  function checkLocalAgents(fresh = false): Promise<void> {
+    if (localSignInChecking !== null) return localSignInChecking;
+    localSignInChecking = Promise.all((["claude", "codex"] as const).map(one => connectionCheck(one, fresh).then(value => value.state, () => "unverified" as const)))
+      .then(([claude, codex]) => {
+        localSignIn = { at: Date.now(), signedIn: [claude, codex].some(state => state === "connected" || state === "key-works" || state === "key-present"), states: { claude: claude!, codex: codex! } };
+        leadByDefault();
+      })
+      .catch(() => {})
+      .finally(() => { localSignInChecking = null; });
+    return localSignInChecking;
+  }
   function localAgentSignedIn(): boolean | null {
-    if (!localSignInChecking && (localSignIn === null || Date.now() - localSignIn.at > 30_000)) {
-      localSignInChecking = true;
-      void Promise.all((["claude", "codex"] as const).map(one => connectionCheck(one).then(value => value.state, () => "unverified")))
-        .then(states => { localSignIn = { at: Date.now(), signedIn: states.some(state => state === "connected" || state === "key-works" || state === "key-present") }; })
-        .catch(() => {})
-        .finally(() => { localSignInChecking = false; });
-    }
+    if (localSignInChecking === null && (localSignIn === null || Date.now() - localSignIn.at > 30_000)) void checkLocalAgents();
     return localSignIn?.signedIn ?? null;
+  }
+  /**
+   * The lead on by default (onboarding): with no lead set up yet, the agent CLI signed in on this computer runs it
+   * (Claude Code first, else Codex) on its membership with today's safe defaults: the CLI's own default model, 50 turns
+   * a day, no dollar spend, and every action it proposes still a card a person confirms. Once only, ever: a lead
+   * someone turned off stays off, and Settings → Lead changes it.
+   */
+  function leadByDefault(): void {
+    if (options.leadByDefault !== true || store.isDemo() || store.getChatConfig() !== null || store.installationFact(LEAD_BY_DEFAULT_FACT) !== null) return;
+    const provider = localSignIn?.states.claude === "connected" ? "claude-subscription" : localSignIn?.states.codex === "connected" ? "codex-subscription" : null;
+    if (provider === null) return;
+    const now = clock();
+    store.setChatConfig({ provider, model: "default", dailyTurns: 50, weeklyCeilingMicrousd: 0, priceInMicrousd: 0, priceOutMicrousd: 0 }, "toolroll", now);
+    store.recordInstallationFact(LEAD_BY_DEFAULT_FACT, provider, now);
+  }
+  // Look once at start, so the lead is on by the time the browser opens.
+  if (options.leadByDefault === true && !store.isDemo() && store.getChatConfig() === null) void checkLocalAgents();
+  /** What the lead runs on, in words for one line ("your Claude Code sign-in"); null for a direct API or no lead. */
+  function leadWords(): string | null {
+    const config = store.getChatConfig();
+    return config?.provider === "claude-subscription" ? "your Claude Code sign-in" : config?.provider === "codex-subscription" ? "your Codex sign-in" : null;
+  }
+  /** The one command that gets an agent signed in here, for this operating system: sign in when its CLI is installed, else install Claude Code and sign in. */
+  function agentSignInCommand(): string {
+    return signInCommandFor(localSignIn?.states ?? null, options.platform ?? process.platform);
   }
   /** First tasks per project: the last ones found (safe generic ones until then), re-read in the background at most
    * every ten minutes. A render never waits on `gh` or `git grep`. */
@@ -4234,10 +4489,39 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (steps === null) return undefined;
     const taskFiled = steps.find(one => one.key === "task")?.done ?? true;
     const repo = project ?? managedRepos()[0] ?? null;
+    const agent = steps.find(one => one.key === "agent");
+    const lead = leadWords();
     return {
       steps,
       suggestions: taskFiled || repo === null ? [] : firstTasksFor(repo),
-      sandbox: steps.find(one => one.key === "agent" && !one.done && !one.checking) ? SANDBOX_COMMAND : null,
+      sandbox: agent !== undefined && !agent.done && !agent.checking ? SANDBOX_COMMAND : null,
+      intro: HOW_IT_WORKS,
+      lead: lead === null ? null : { words: `The lead uses ${lead}`, href: "/settings/lead" },
+      // With no lead yet and no agent signed in, the page asks this computer again on its own.
+      recheck: store.getChatConfig() === null && agent !== undefined && !agent.done ? "/lead/status" : null,
+    };
+  }
+  /** The first task's way to Ready shows until the first Ready result, and stays on the installation's first task. */
+  function guided(rootId: string, now: Date): boolean {
+    if (store.isDemo()) return false;
+    if (store.firstSuccessAt(now) === null) return true;
+    const first = store.handle.prepare("SELECT id FROM task ORDER BY created_at, rowid LIMIT 1").get();
+    return first !== undefined && String(first["id"]) === rootId;
+  }
+  /** After the first Ready result, once (onboarding): the phone, by a chat app or the console over Tailscale. */
+  function phoneCard(who: Who & { via: "cookie" }, now: Date): BrowserPhoneCard | undefined {
+    if (who.role !== "approver" || store.isDemo() || store.firstSuccessAt(now) === null || store.installationFact(PHONE_CARD_FACT) !== null) return undefined;
+    const botId = options.telegramTokenFile === undefined ? null : loadBotToken(process.env, options.telegramTokenFile)?.botId ?? null;
+    if (botId !== null && store.liveTelegramBindings(botId).length > 0) return undefined;
+    const port = servedPort() ?? 4180;
+    const address = server.address();
+    const bound = typeof address === "object" && address !== null ? address.address : "127.0.0.1";
+    const name = tailnet[0] ?? null;
+    const reachable = bound !== "127.0.0.1" && bound !== "::1";
+    return {
+      chatApps: [{ label: "Telegram", href: "/settings/telegram" }, { label: "Slack", href: "/settings/slack" }, { label: "Discord", href: "/settings/discord" }, { label: "Teams", href: "/settings/teams" }],
+      tailnet: name === null ? null : { address: `http://${name}:${port}/`, restart: reachable ? null : consoleCommand({ host: "0.0.0.0" }) },
+      dismissHref: "/onboarding/phone/dismiss",
     };
   }
 
@@ -4429,7 +4713,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     }
     if (managedRepos().length === 0) return { ok: false, code: "empty", why: "add a project first — chat will include it automatically" };
     const config = store.getChatConfig();
-    if (config === null) return { ok: false, code: "unconfigured", why: "chat is not configured yet — set it up below, or from the terminal: toolroll config set chat" };
+    if (config === null) return { ok: false, code: "unconfigured", why: "the lead is off — turn it on in Settings → Lead, or from the terminal: toolroll config set chat" };
     if (isSubscriptionChatProvider(config.provider)) {
       return {
         ok: true,
@@ -4835,6 +5119,8 @@ export function createDecisionServer(options: ServeOptions): Server {
         ...(s.chrome.signIn === undefined ? {} : { signIn: s.chrome.signIn }),
         ...(s.chrome.update === undefined ? {} : { update: s.chrome.update }),
         ...(extras.firstRun === undefined ? {} : { firstRun: extras.firstRun }),
+        ...(extras.phone === undefined ? {} : { phone: extras.phone }),
+        ...(extras.home == null ? {} : { home: extras.home }),
       };
       if (requestFacts.workspaceRead) {
         const validator = requestFacts.workspaceValidator;
@@ -4889,6 +5175,39 @@ export function createDecisionServer(options: ServeOptions): Server {
    * package 1): Work's own Needs-you membership, cached per viewer and
    * project, so the rail, the phone tab, the scope bar, the project cards,
    * the chat overview, and the Needs-you tab never disagree. */
+  /** The Chat landing's live view: each agent at work now with its task and
+   * phase, four counts, plan-window use (never dollars: subscriptions don't
+   * bill per run) and Catch up's items, each tagged with its tab. Reads only. */
+  function chatHomeOf(who: Who, repos: readonly string[], now: Date): BrowserHome {
+    const access = { principal: "operator" as const, repos: admissionList(), includeUnplaced: visible(null) };
+    const admitted = (repo: string | null) => repo === null ? visible(null) : repos.includes(repo);
+    const agents = store.liveRuns(now).filter(run => admitted(run.repo)).map(run => {
+      const root = familyOf(run.taskId)?.root ?? null;
+      return { runId: run.id, taskId: root?.id ?? run.taskId, title: root?.title ?? run.title, href: taskHref(root?.id ?? run.taskId),
+        agent: `${providerName(run.provider)} on ${run.runner}`, phase: homePhaseWords(run), project: run.repo === null ? null : projectName(run.repo), since: run.startedAt };
+    });
+    const all = workIndexPage(store, now, access, { view: "all", limit: WORK_INDEX_MAX_LIMIT });
+    const needs = workIndexPage(store, now, access, { view: "needs-you", limit: WORK_INDEX_MAX_LIMIT });
+    const done = workIndexPage(store, now, access, { view: "completed", limit: WORK_INDEX_MAX_LIMIT });
+    const weekAgo = new Date(now.getTime() - 7 * 86_400_000).toISOString();
+    const counts: BrowserHomeCount[] = [
+      { key: "working", label: "Working now", value: agents.length, href: "/work?view=running" },
+      { key: "waiting", label: "Waiting on you", value: needs.items.filter(one => one.assignmentState === "needs-decision").length, href: "/work?view=needs-you" },
+      { key: "ready", label: "Ready to review", value: needs.items.filter(one => one.assignmentState === "ready-to-check").length, href: "/work?view=needs-you" },
+      { key: "done", label: "Done this week", value: done.items.filter(one => (one.completion?.at ?? one.updatedAt) >= weekAgo).length, href: "/work?view=completed" },
+    ];
+    const tabOf = (state: WorkIndexItem["assignmentState"]): BrowserCatchUpItem["tab"] =>
+      state === "needs-decision" ? "needs-you" : state === "ready-to-check" ? "ready" : state === "working" || state === "checking" ? "running" : "finished";
+    const catchUp = all.items.filter(one => tabOf(one.assignmentState) !== "finished" || one.updatedAt >= weekAgo).slice(0, 40).map(one => ({
+      id: one.rootId, title: one.title, href: taskHref(one.rootId), project: one.repo === null ? null : projectName(one.repo), tab: tabOf(one.assignmentState),
+      label: one.status.label, tone: one.status.tone, detail: one.status.detail, at: one.updatedAt,
+    }));
+    const windows = who.via === "cookie" && store.isInstanceOperator(who.name) ? limitsView(store.providerLimits(), [], { project: projectName, teammate: id => `Teammate ${id}` }, now) : null;
+    return {
+      agents, counts, catchUp, allHref: "/work",
+      planUse: (windows?.tiles ?? []).map(one => ({ name: one.name, window: one.window, percent: one.percent, detail: one.detail, tone: one.tone })),
+    };
+  }
   function needsYouBadge(project: string | null): { count: number; saturated: boolean } {
     const actor = requestContext.getStore()?.actor;
     const key = `${actor ?? ""}:${actor === undefined ? "" : store.accountOf(actor)?.generation}:${project ?? ""}`;
@@ -5089,6 +5408,7 @@ export function createDecisionServer(options: ServeOptions): Server {
                 verdict: verdict?.verdict ?? null,
                 reasons: verdict?.reasons ?? [],
                 accepted: store.proofAcceptance(latest.id) !== null,
+                checkLevel: resultCheckLevel(store, latest.id, now),
                 review: reviewFactsFor(latest.id),
                 ...(latest.outcome !== "no-change"
                   ? {}
@@ -5230,7 +5550,8 @@ export function createDecisionServer(options: ServeOptions): Server {
     return sendScreen(
       response,
       status,
-      projectsPage(chromeFor(open, "projects"), recent, [...candidates], open, csrf, problem, !restricted() && unscopedMode, !restricted() && (ceiling.roots.length > 0 || unscopedMode), onboardState, peeks, returnTo, who.via === "cookie" ? (path: string) => publishingOf(store, path).on : undefined),
+      projectsPage(chromeFor(open, "projects"), recent, [...candidates], open, csrf, problem, !restricted() && unscopedMode, !restricted() && (ceiling.roots.length > 0 || unscopedMode), onboardState, peeks, returnTo, who.via === "cookie" ? (path: string) => publishingOf(store, path).on : undefined,
+        who.via === "cookie" ? (path: string) => projectCheckLevel(store, path).level : undefined),
     );
   }
 
@@ -5357,6 +5678,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     const assignment = freshAssignment(recordedAssignment, completion?.receipt ?? null);
     const progressRun = runs.find(one => runIsLive(one))?.id ?? completion?.runId ?? null;
     return {
+        guide: guided(family?.root.id ?? taskId, now),
         assignment,
         checkProgress: progressRun === null ? null : store.checkProgress(progressRun),
         task: found,
@@ -5635,6 +5957,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       id: family.root.id,
       executionId: task.id,
       family,
+      guide: guided(family.root.id, now),
       history: familyHistory(family),
       title: family.root.title,
       state: task.state,
@@ -5733,6 +6056,12 @@ export function createDecisionServer(options: ServeOptions): Server {
     if (scopeDraft !== undefined) presentedData.scopeDraft = scopeDraft;
     if (cancelDraft !== undefined) presentedData.cancelDraft = cancelDraft;
     (presentedData as { pullRequest?: TaskPullRequest | null }).pullRequest = taskPullRequestOf(taskId, who);
+    // The thread reads the whole family: the original, its revisions, and every attempt across them.
+    if (family !== null && family.problem === null) {
+      presentedData.family = { root: { id: family.root.id, title: family.root.title, createdAt: family.root.createdAt, goal: store.getScope(family.root.id)?.goal ?? null },
+        versions: family.versions.map(one => ({ id: one.id, title: one.title, state: one.state })),
+        runs: family.versions.flatMap(version => version.id === data.task.id ? data.runs.map(run => ({ ...run, taskId: version.id })) : store.runsFor(version.refId).map(run => ({ ...run, taskId: version.id }))) };
+    }
     const paneProject = restricted() ? store.lookupRef(taskId)?.repo ?? null : who.via === "cookie" ? who.session.project : null;
     const page = taskPage(
       paneProject === null && !unscopedMode
@@ -5743,9 +6072,11 @@ export function createDecisionServer(options: ServeOptions): Server {
     // The task's own conversation, docked beside the page (v77).
     const focus = taskChatFocus(family?.root.id ?? taskId, clock(), who, { mintNonce: false });
     const docked = focus === null ? null : dockedConversation(who, focus, null, clock(), taskHref(focus.id));
-    // The panel is the Ask view here, so the page drops its own Ask tab.
-    const taskView = page.workspace?.view?.kind === "task" ? { ...page.workspace.view, tabs: [] } : page.workspace?.view;
+    // The conversation is the page's own thread here, so the page drops its Ask tab;
+    // only an approver is offered a road to message the agent.
+    const taskView = page.workspace?.view?.kind === "task" ? { ...page.workspace.view, ...(docked === null ? {} : { tabs: [] }), ...(who.role === "approver" ? {} : { chatHref: null }) } : page.workspace?.view;
     if (docked !== null) page.workspace = { ...page.workspace, ...(taskView === undefined ? {} : { view: taskView }), conversation: docked, pageHtml: page.body };
+    else if (taskView !== undefined && page.workspace !== undefined) page.workspace = { ...page.workspace, view: taskView };
     return sendScreen(response, status, page);
   }
 
@@ -6516,13 +6847,33 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (action === "state" && body.get("state") === "removed" && done.ok) return redirect(response, `/teammates?said=${encodeURIComponent(done.said)}`);
       return redirect(response, `${back}?${done.ok ? "said" : "problem"}=${encodeURIComponent(done.said)}${action === "note" ? "#memory" : ""}`);
     }
+    // Flows → New → a template: preview these answers, or create exactly what was previewed.
+    const galleryPost = /^\/flows\/new\/([a-z-]{1,40})$/.exec(url.pathname);
+    if (galleryPost !== null) {
+      const template = galleryTemplateOf(galleryPost[1]!);
+      const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
+      if (template === null) return refuse(response, who, 404, "There's no template by that name.", "/flows/new");
+      if (who.via !== "cookie" || who.role !== "approver" || store.isDemo()) return refuse(response, who, 403, "Sign in as an approver to create flows.", "/flows/new");
+      const repo = body.get("repo") ?? "";
+      if (!projects.includes(repo)) return refuse(response, who, 404, "Choose one of your projects.", "/flows/new");
+      const answers: GalleryAnswers = Object.fromEntries(template.asks.map(ask => [ask.key, body.get(ask.key) ?? ""]));
+      const name = (body.get("name") ?? "").replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 80) || template.name;
+      if (body.get("intent") !== "create") return sendGalleryUse(response, who, template, projects, repo, answers, name, null);
+      // What's made is what was previewed: changed answers are previewed again first.
+      let digest: string | null = null;
+      try { digest = previewGallery(store, template, repo, answers, who.name, clock()).digest; } catch { digest = null; }
+      if (digest === null || digest !== body.get("previewed")) return sendGalleryUse(response, who, template, projects, repo, answers, name, digest === null ? null : "Your answers changed. Check the preview, then create the flow.");
+      const used = useGalleryTemplate(store, template, repo, answers, { name, by: who.name, now: clock(), dir: options.configDir ?? null });
+      if (!used.ok) return sendGalleryUse(response, who, template, projects, repo, answers, name, used.said);
+      return redirect(response, `/flows/${used.flow}`);
+    }
     const flowPost = /^\/flows\/([1-9][0-9]{0,9})\/(save|cards|archive|triggers|linear-key|hooks-address|scripts|secrets)$/.exec(url.pathname) ?? /^\/flows\/([1-9][0-9]{0,9})\/cards\/([1-9][0-9]{0,9})\/(move|decide|cancel|comment|assign|watch)$/.exec(url.pathname);
     const triggerPost = /^\/flows\/([1-9][0-9]{0,9})\/triggers\/([1-9][0-9]{0,9})\/(pause|resume|remove|check|press|renew|secret|share|unshare)$/.exec(url.pathname);
-    if (url.pathname === "/flows/new" || url.pathname === "/flows/example" || flowPost !== null || triggerPost !== null) {
+    if (url.pathname === "/flows/new" || url.pathname === "/flows/example" || url.pathname === "/flows/import" || flowPost !== null || triggerPost !== null) {
       const now = clock();
       const answer = (status: number, payload: Record<string, unknown>) => respond(response, status, "application/json; charset=utf-8", JSON.stringify(payload));
       const projects = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
-      if (who.via !== "cookie" || who.role !== "approver") return url.pathname === "/flows/new" || url.pathname === "/flows/example" ? refuse(response, who, 403, "Sign in as an approver to create flows.", "/flows") : answer(403, { ok: false, said: "Sign in as an approver to change flows." });
+      if (who.via !== "cookie" || who.role !== "approver") return url.pathname === "/flows/new" || url.pathname === "/flows/example" || url.pathname === "/flows/import" ? refuse(response, who, 403, "Sign in as an approver to create flows.", "/flows") : answer(403, { ok: false, said: "Sign in as an approver to change flows." });
       if (url.pathname === "/flows/example") {
         // A first look (v88): the Email replies template with one sample question, which Claude drafts a reply to straight away.
         const repo = body.get("repo") ?? "";
@@ -6531,6 +6882,40 @@ export function createDecisionServer(options: ServeOptions): Server {
         const id = store.createFlow({ repo, name: "Customer replies (example)", definitionJson: JSON.stringify(template.definition), by: who.name }, now);
         addCardToFlow(store, store.getFlow(id)!, { title: "Do you ship to Canada?", description: "Hi! I'm thinking of ordering but I live in Toronto. Do you ship there, and how long does it take? — sam@example.com", stage: null }, who.name, now);
         return redirect(response, `/flows/${id}`);
+      }
+      if (url.pathname === "/flows/import") {
+        // A flow file, chosen or fetched from a gist: previewed in plain words, then made with its triggers off and its scripts held.
+        const repo = body.get("repo") ?? "";
+        const back = (problem: string) => redirect(response, `/flows?problem=${encodeURIComponent(problem)}`);
+        if (!projects.includes(repo)) return back("Choose one of your projects.");
+        let document = body.get("document") ?? "";
+        const address = (body.get("url") ?? "").trim();
+        let file: ReturnType<typeof parseFlowFile>;
+        try {
+          if (document.trim() === "" && address !== "") document = await fetchFlowFile(address, options.flowFetch);
+          if (document.trim() === "") return back("Choose a flow file or give its address.");
+          file = parseFlowFile(document);
+        } catch (error) {
+          if (error instanceof FlowFileError) return back(error.message);
+          throw error;
+        }
+        const given = Object.fromEntries(file.parameters.flatMap(one => body.has(`param.${one.id}`) ? [[one.id, body.get(`param.${one.id}`) ?? ""]] : []));
+        // What was previewed: the file and every value it resolved to (a default the first preview filled in included).
+        const previewedOf = (plan: FlowImportPlan | null) => createHash("sha256").update(`${document}\0${JSON.stringify(plan?.values ?? given)}`).digest("hex").slice(0, 32);
+        const page = (plan: FlowImportPlan | null, problem: string | null, status: number) => sendScreen(response, status, screen(`Import ${file.name}`,
+          `<p><a href="/flows">Flows</a></p><h1>Import ${escape(file.name)}</h1>${flowImportHtml({ plan, file, document, repo, csrf: who.session.csrf, values: given, previewed: previewedOf(plan), problem })}`, { chrome: chromeFor(repo, "flows") }));
+        let plan: FlowImportPlan;
+        try { plan = planFlowImport(store, repo, file, given, who.name); }
+        catch (error) {
+          if (error instanceof FlowFileError) return page(null, error.message, 400);
+          throw error;
+        }
+        if (body.get("confirm") === "yes") {
+          if (body.get("previewed") !== previewedOf(plan)) return page(plan, "What you filled in changed. Check the preview again, then import.", 409);
+          try { return redirect(response, `/flows/${importFlow(store, plan, who.name, now, options.configDir ?? null).id}`); }
+          catch (error) { return page(plan, error instanceof Error ? error.message : "That flow couldn't be imported.", 400); }
+        }
+        return page(plan, null, 200);
       }
       if (url.pathname === "/flows/new") {
         const repo = body.get("repo") ?? "";
@@ -6596,6 +6981,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       if (action === "scripts") {
         // The project's script library, reached from any of its flows.
+        if (body.get("approve") === "yes") return store.approveFlowScript(flow.repo, body.get("name") ?? "") ? settle("Approved. Zones that run it go on.") : answer(404, { ok: false, said: "That script isn't waiting for approval." });
         if (body.get("remove") === "yes") return store.removeFlowScript(flow.repo, body.get("name") ?? "") ? settle("Script removed. Zones that ran it wait until it's back.") : answer(404, { ok: false, said: "There's no script by that name." });
         const saved = saveScript(store, flow.repo, { name: body.get("name"), about: body.get("about"), body: body.get("body"), timeoutMinutes: body.get("timeoutMinutes"), language: body.get("language"), file: body.get("file") }, who.name, now);
         return saved.ok ? settle(saved.said) : answer(400, { ok: false, said: saved.message });
@@ -6692,6 +7078,22 @@ export function createDecisionServer(options: ServeOptions): Server {
       return back("said", `${label}: ${spendUsd(saved.limitMicrousd)} a month${saved.hardStop ? ", API work stops at 100%" : ", alerts only"}.`);
     }
     // Delete a project, in two steps: its name, then what goes and the password. An instance operator; the ledger keeps who and what.
+    // Settings → Project → Builds at once: an approver for the project sets it; the ledger keeps before → after.
+    if (url.pathname === "/settings/project/concurrency") {
+      const repo = body.get("repo") ?? "";
+      const known = [...new Set([...(admissionList() ?? []), ...managedRepos(), ...store.knownRepos()])].filter(visible);
+      if (!known.includes(repo)) return refuse(response, who, 403, "That project is outside your access.", "/settings/project");
+      if (who.via !== "cookie" || who.role !== "approver" || !store.accountCanAccess(who.name, repo)) return refuse(response, who, 403, "An approver for this project sets how many tasks build at once.", "/settings/project");
+      const back = (key: "said" | "problem", words: string) => redirect(response, `/settings/project?repo=${encodeURIComponent(repo)}&${key}=${encodeURIComponent(words)}`);
+      const n = parseProjectConcurrency(body.get("concurrency") ?? "");
+      if (n === null) return back("problem", "Builds at once is a whole number from 1 to 64. Nothing changed.");
+      const databaseFile = store.databaseFile();
+      if (databaseFile === null) return back("problem", "This database keeps no settings files. Nothing changed.");
+      const changed = saveProjectConcurrency(databaseFile, repo, n);
+      store.recordProjectConcurrency(who.name, repo, changed.before, changed.after, now);
+      store.bumpWake();
+      return back("said", changed.before === changed.after ? "Nothing changed." : `Saved. Up to ${n} at once.`);
+    }
     if (url.pathname === "/settings/project/delete") {
       if (who.via !== "cookie" || !store.isInstanceOperator(who.name)) return refuse(response, who, 403, "An instance operator deletes projects.", "/settings/project");
       const repo = body.get("repo") ?? "";
@@ -6922,6 +7324,41 @@ export function createDecisionServer(options: ServeOptions): Server {
         const revoked = store.revokePublicationGrant(repo, who.name, now);
         if (revoked) store.recordAction({ at: now.toISOString(), actor: who.name, repo, taskId: null, runId: null, action: "pull requests turned off", outcome: "off", source: "policy" });
         return back("said", revoked ? "Pull requests are off." : "Pull requests were already off.");
+      }
+      return back("problem", "That change isn't available.");
+    }
+    // Checks for one project: the level, or the quick command (approved like `verify set --quick`). Each takes
+    // the password and lands in the ledger.
+    if (url.pathname === "/settings/checks") {
+      const repo = body.get("repo") ?? "";
+      const known = [...new Set([...managedRepos(), ...store.knownRepos(), ...store.listProjects().map(one => one.path)])];
+      if (who.via !== "cookie" || !known.includes(repo) || !visible(repo)) return refuse(response, who, 404, "No such project.", "/projects");
+      if (who.role !== "approver" || store.isDemo()) return refuse(response, who, 403, "An approver sets a project's checks.", "/projects");
+      const back = (key: "said" | "problem", words: string) => redirect(response, `/settings/checks?repo=${encodeURIComponent(repo)}&${key}=${encodeURIComponent(words)}`);
+      if (!authenticateApprover(store, who.name, body.get("password") ?? "", repo).ok) return back("problem", "Enter your Toolroll password to change checks.");
+      const act = body.get("act");
+      if (act === "level") {
+        const level = body.get("level");
+        if (!isCheckLevel(level)) return back("problem", "Choose Quick, Full or Off.");
+        const changed = setProjectCheckLevel(store, repo, level, who.name, now);
+        return back("said", changed.changed ? `Checks are ${CHECK_LEVEL_WORDS[level]}.` : "Saved.");
+      }
+      if (act === "quick") {
+        const command = (body.get("command") ?? "").trim();
+        const seconds = Number(body.get("timeout") ?? "180");
+        if (command === "" || command.length > 2000 || hasDisguisedText(command)) return back("problem", "Enter the quick command: one line of up to 2000 characters.");
+        if (/([A-Za-z0-9_-]*(?:token|secret|password|passwd|apikey|api_key|authorization|bearer|credential)[A-Za-z0-9_-]*\s*[=:]\s*)(?![$"']?\$)\S+/i.test(command) || /\/\/[^\s/@]+:[^\s/@]+@/.test(command)) {
+          return back("problem", "That command seems to hold a credential. Use an environment variable instead.");
+        }
+        if (!Number.isInteger(seconds) || seconds < 1 || seconds > 3600) return back("problem", "Choose a time limit from 1 to 3600 seconds.");
+        store.setVerifyCommand({ repo: quickVerifyKey(repo), command, timeoutMs: seconds * 1000, approvedBy: who.name }, now);
+        store.recordAction({ at: now.toISOString(), actor: who.name, repo, taskId: null, runId: null, action: "quick check approved", outcome: "approved", source: "policy", detail: command.slice(0, 200) });
+        return back("said", "Quick check approved.");
+      }
+      if (act === "quick-clear") {
+        const cleared = store.clearVerifyCommand(quickVerifyKey(repo), who.name, now);
+        if (cleared) store.recordAction({ at: now.toISOString(), actor: who.name, repo, taskId: null, runId: null, action: "quick check removed", outcome: "removed", source: "policy" });
+        return back("said", cleared ? "Quick check removed. Quick builds run the full check." : "There was no quick check.");
       }
       return back("problem", "That change isn't available.");
     }
@@ -7443,6 +7880,16 @@ export function createDecisionServer(options: ServeOptions): Server {
       return redirect(response, `/settings?said=${encodeURIComponent(said)}`);
     }
 
+    if (url.pathname === "/settings/notifications/mute") {
+      // Each person's own pings: a muted project stays in Tasks and the evening digest.
+      const repo = body.get("repo") ?? "";
+      const project = notificationProjects(store, who.name).find(one => one.repo === repo);
+      if (project === undefined) return refuse(response, who, 400, "that project isn't one you can see", "/settings");
+      const muted = body.get("pings") !== "on";
+      store.setProjectMuted(who.name, repo, muted, now);
+      return redirect(response, `/settings?said=${encodeURIComponent(muted ? `${project.name} muted. It still shows in Tasks and your evening digest.` : `${project.name} pings you again.`)}#notifications`);
+    }
+
     if (url.pathname === "/settings/telegram-digest" && options.telegramTokenFile !== undefined) {
       // The cadence is a closed list of minutes — never a free number from
       // a form; "off" clears it. Any approver session may set it.
@@ -7651,7 +8098,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         return sendScreen(
           response,
           400,
-          tasksPage(chromeFor(project, "tasks"), familyTasksInView(project).slice(0, 200), null, csrf, "name a repository — no project is open, so the task must say where it belongs", project, null, store.permissionDefault().mode, store.qualityDefault().mode),
+          tasksPage(chromeFor(project, "tasks"), familyTasksInView(project).slice(0, 200), null, csrf, "name a repository — no project is open, so the task must say where it belongs", project, null, store.permissionDefault().mode, store.qualityDefault().mode, store.replacements()),
         );
       }
       let repo = effective;
@@ -7664,7 +8111,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           return sendScreen(
             response,
             403,
-            tasksPage(chromeFor(project, "tasks"), familyTasksInView(project).slice(0, 200), null, csrf, `${effective} is outside what this server was configured to show`, project, null, store.permissionDefault().mode, store.qualityDefault().mode),
+            tasksPage(chromeFor(project, "tasks"), familyTasksInView(project).slice(0, 200), null, csrf, `${effective} is outside what this server was configured to show`, project, null, store.permissionDefault().mode, store.qualityDefault().mode, store.replacements()),
           );
         }
         repo = canonical;
@@ -7728,7 +8175,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         return sendScreen(
           response,
           made.reason === "backlog-full" ? 429 : 400,
-          tasksPage(chromeFor(project, "tasks"), familyTasksInView(project).slice(0, 200), null, csrf, made.message, project, { title, goal, not: notThis, touches: body.get("touches") ?? "", acceptance: body.get("acceptance") ?? "", values: body }, store.permissionDefault().mode, store.qualityDefault().mode),
+          tasksPage(chromeFor(project, "tasks"), familyTasksInView(project).slice(0, 200), null, csrf, made.message, project, { title, goal, not: notThis, touches: body.get("touches") ?? "", acceptance: body.get("acceptance") ?? "", values: body }, store.permissionDefault().mode, store.qualityDefault().mode, store.replacements()),
         );
       }
       const actionContext = requestContext.getStore();
@@ -8217,7 +8664,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (run === null || runTask === null || familyOf(runTask)?.root.id !== (familyOf(act.taskId)?.root.id ?? act.taskId)) {
         return taskScreen(response, who, act.taskId, "That pull request isn't part of this task.", 409);
       }
-      const merged = await mergeAsPerson(store, { runId: run.id, name: who.name, password: body.get("token") ?? "", ...(options.publishExec === undefined ? {} : { exec: options.publishExec }), clock });
+      const merged = await mergeAsPerson(store, { runId: run.id, name: who.name, password: body.get("token") ?? "", ...(body.get("anyway") === "1" ? { anyway: true } : {}), ...(options.publishExec === undefined ? {} : { exec: options.publishExec }), clock });
       if (!merged.ok) return taskScreen(response, who, act.taskId, merged.message, merged.reason === "password" ? 403 : 409);
       return redirect(response, `${taskHref(act.taskId)}#merge`);
     }
@@ -8392,6 +8839,21 @@ export function createDecisionServer(options: ServeOptions): Server {
       return redirect(response, `/settings?said=${encodeURIComponent("removed — that device stops receiving pushes")}`);
     }
 
+    if (url.pathname === "/onboarding/phone/dismiss") {
+      if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "An approver puts this away.", "/chat");
+      store.recordInstallationFact(PHONE_CARD_FACT, who.name, now);
+      return body.get("quiet") === "1" ? respond(response, 204, "text/plain; charset=utf-8", "") : redirect(response, "/chat");
+    }
+    // Turn the lead on with the agent signed in on this computer: its membership spends no dollars, so like starting a
+    // conversation it needs no second password; the full form (Advanced) still asks for one.
+    if (url.pathname === "/settings/lead/on") {
+      if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "An approver turns the lead on.", "/settings/lead");
+      await checkLocalAgents(true);
+      const provider = localSignIn?.states.claude === "connected" ? "claude-subscription" : localSignIn?.states.codex === "connected" ? "codex-subscription" : null;
+      if (provider === null) return redirect(response, chatReturnWithSaid("/settings/lead", `No agent is signed in on this computer yet. Run ${agentSignInCommand()}, then try again.`));
+      store.setChatConfig({ provider, model: "default", dailyTurns: 50, weeklyCeilingMicrousd: 0, priceInMicrousd: 0, priceOutMicrousd: 0 }, who.name, now);
+      return redirect(response, "/chat");
+    }
     if (url.pathname === "/chat/config") {
       // The console's own door into `config set chat` (operator request:
       // chat lives mainly in the web UI). Same ceremony weight as the CLI
@@ -8399,7 +8861,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       // write is audited under their name, and the KEY still never
       // touches a form or this database — environment only.
       if (who.via !== "cookie") return refuse(response, who, 403, "chat setup is a browser surface");
-      const back = safeChatReturn(body.get("return"));
+      const back = body.get("return") === "/settings/lead" ? "/settings/lead" : safeChatReturn(body.get("return"));
       const password = body.get("token") ?? "";
       if (password === "" || !authenticateApprover(store, who.name, password).ok) {
         return redirect(response, chatReturnWithSaid(back, "configuring chat spend takes your password, typed again"));
@@ -8645,6 +9107,14 @@ export function createDecisionServer(options: ServeOptions): Server {
         return said(409, "That result is no longer available for this task. Review the task before sending.");
       }
       const resultContext = viewedRun === null ? "" : ` The operator is viewing result #${viewedRun.id} from execution ${store.externalIdFor(viewedRun.taskRef)}. Use get_result for that exact execution and run when responding to feedback; do not substitute another result.`;
+      // The task composer's mode (console v2): fixed words for this turn only.
+      // It steers what the lead proposes and grants nothing: every action
+      // still arrives as a card the person confirms under its own rules.
+      const modeValue = body.get("mode");
+      if (modeValue !== null && (focusTask === null || body.getAll("mode").length !== 1 || !Object.hasOwn(TASK_COMPOSER_MODES, modeValue))) {
+        return said(400, "Choose Build, Plan only or Just answer, then send again. Your draft is saved.");
+      }
+      const modeContext = modeValue === null ? "" : ` ${TASK_COMPOSER_MODES[modeValue as TaskComposerMode]}`;
       const enabled = chatEnablement();
       if (!enabled.ok) return said(409, enabled.why);
       // A live mate session: the message is a mate turn — no password, the
@@ -8664,7 +9134,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         }
         const opened = store.openMateThread(who.name, principal.ceilingDigest, now, chatScopeOf(focusTask, chatProject));
         const onProgress = beginLiveTurn(opened.thread.id);
-        void runMateTurn({ store, who: principal, session: mateSession, thread: opened.thread, config: enabled.config, key: enabled.key, message, onProgress, ...(requestId === null ? {} : { requestId }), ...(focusTask === null && chatProject !== null ? { context: `Current project: ${projectName(chatProject)} (${chatProject}). Keep this conversation about that project unless the operator explicitly asks to broaden it; use it as the repo for project tools.` } : {}), ...(focusTask === null ? {} : { context: `Current task: ${focusTask.id}. Read it with get_task before answering or proposing changes. Read its currentExecution next and bind new actions to that exact execution. Never replace the target of a prior proposal with a newer revision. Keep this turn about that task unless the operator explicitly asks to broaden it.${resultContext}` }), fetcher: chatFetcher, ...(options.subscriptionChatRunner === undefined ? {} : { subscriptionRunner: options.subscriptionChatRunner }), clock, evidenceRoot })
+        void runMateTurn({ store, who: principal, session: mateSession, thread: opened.thread, config: enabled.config, key: enabled.key, message, onProgress, ...(requestId === null ? {} : { requestId }), ...(focusTask === null && chatProject !== null ? { context: `Current project: ${projectName(chatProject)} (${chatProject}). Keep this conversation about that project unless the operator explicitly asks to broaden it; use it as the repo for project tools.` } : {}), ...(focusTask === null ? {} : { context: `Current task: ${focusTask.id}. Read it with get_task before answering or proposing changes. Read its currentExecution next and bind new actions to that exact execution. Never replace the target of a prior proposal with a newer revision. Keep this turn about that task unless the operator explicitly asks to broaden it.${resultContext}${modeContext}` }), fetcher: chatFetcher, ...(options.subscriptionChatRunner === undefined ? {} : { subscriptionRunner: options.subscriptionChatRunner }), clock, evidenceRoot })
           .then(outcome => {
             if (!outcome.ok) noteMate(who.session.csrf, "turn" in outcome ? outcome.turn : null, outcome.message);
             endLiveTurn(opened.thread.id, outcome.ok);
@@ -9163,6 +9633,28 @@ export function createDecisionServer(options: ServeOptions): Server {
       }, now);
       if (!result.ok) return refuse(response, who, result.status, result.message, back);
       return redirect(response, revisionDestination(result.id, back));
+    }
+
+    // Follow-ups on a result: Run checks on its exact commit (a worker runs the
+    // approved command once and seals the log), or file a task to add tests.
+    const followUp = /^\/r\/([0-9]{1,15})\/(checks|add-tests)$/.exec(url.pathname);
+    if (followUp !== null) {
+      const id = Number(followUp[1]);
+      const found = store.getRun(id);
+      if (found === null || !visible(taskRepoOf(found.taskRef))) return refuse(response, who, 404, "no such run");
+      const back = resultReturnTarget(body.get("return"), id);
+      if (who.via !== "cookie") return refuse(response, who, 403, "Sign in with a browser session to do this.", back);
+      if (followUp[2] === "checks") {
+        if (who.role !== "approver") return refuse(response, who, 403, "An approver runs checks.", back);
+        if (store.isDemo()) return refuse(response, who, 403, "The demo runs no checks.", back);
+        const level = body.get("level") === "full" ? "full" as const : "quick" as const;
+        const asked = requestFollowUpChecks(store, { runId: id, level, actor: who.name }, now);
+        if (!asked.ok) return refuse(response, who, 409, asked.message, back);
+        return redirect(response, `${back.split("#")[0]}#follow-ups`);
+      }
+      const filed = fileAddTestsTask(store, evidenceRoot, { runId: id, actor: who.name, filedVia: "console", ...(admissionList() === null ? {} : { admittedRepos: admissionList()! }) }, now);
+      if (!filed.ok) return refuse(response, who, 409, filed.message, back);
+      return redirect(response, taskHref(filed.id));
     }
 
     const draftRepair = /^\/r\/([0-9]{1,15})\/draft-repair$/.exec(url.pathname);
@@ -9872,7 +10364,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       }
       case "cancel": {
         const reason = body.get("reason") ?? undefined;
-        const cancelled = store.cancelTask(taskId, now, reason);
+        const cancelled = withActor({ account: who.name, lead: false }, () => store.cancelTask(taskId, now, reason));
         if (!cancelled.ok) {
           if (cancelled.reason === "reason-required" || cancelled.reason === "bad-reason") {
             return taskScreen(response, who, taskId,
@@ -10754,6 +11246,7 @@ export function createDecisionServer(options: ServeOptions): Server {
         return [{ id: one.id, title: one.title, state: one.state, approved: approvalOf(store.getScope(one.id)).approved, standing: status.label, tone: status.tone }];
       }),
       sourceDigest: scope?.digest ?? null,
+      followUps: followUpsFor(store, evidenceRoot, run, now),
       route: store.runRoute(run.id),
       // Editor links (arc 6): the deployment capability, THIS machine's
       // runner owning the run, the session's own device-side yes, and a
@@ -10936,7 +11429,7 @@ export function createDecisionServer(options: ServeOptions): Server {
     });
     return server;
   }) as Server['close'];
-  return server;
+  return Object.assign(server, { mintSignInLink });
 }
 
 // ---- path plumbing ---------------------------------------------------------
@@ -11757,7 +12250,7 @@ function agentsStripHtml(view: RouteView | null, taskId: string): string {
 }
 
 /** The demo's one-line promise, on every page. */
-const DEMO_BANNER = "Demo: a scripted lead and sample projects. Nothing calls a model, reaches outside or spends.";
+const DEMO_BANNER = `Demo: a scripted lead and sample projects. Nothing calls a model, reaches outside or spends. For your own project, run ${START_COMMAND} in its folder.`;
 
 /** Every character that could open a tag or an attribute, dead at the sink. */
 function escape(text: string): string {
@@ -12754,6 +13247,8 @@ ${THEME_DARK}
   @keyframes demo-pulse { 50% { opacity: .35; } }
   @media (prefers-reduced-motion: reduce) { .demo-steps li.now::before { animation: none; } }
   .demo-state { display: flex; align-items: center; gap: .5rem; margin: 0 !important; }
+  .demo-chat .demo-handoff { border-color: var(--so-input-line); }
+  .demo-command { margin: .4rem 0 .5rem; padding: .6rem .8rem; border-radius: calc(var(--radius) - 3px); background: var(--so-raised); font: 500 .8125rem/1.5 var(--font-mono); overflow-wrap: anywhere; white-space: pre-wrap; }
   .demo-chat .badge.demo-ready { background: var(--so-info-soft); color: var(--so-info); }
   .demo-chat .badge.demo-complete { background: var(--so-success-soft); color: var(--so-success); }
   .demo-pass { color: var(--so-success); font-weight: 500; }
@@ -14535,7 +15030,15 @@ button.pick-file { min-height: 1.75rem; padding: 0 .55rem; font-size: .75rem; }
 const THEME_CONTROLS_CSS = `.task-repo select{width:100%;min-height:2.75rem;font-size:1rem}.task-repo-add{margin:.35rem .1rem .5rem}.task-repo-add a{display:inline-flex;align-items:center;min-height:2.25rem}details.result-request-open.result-request-form>summary{border:0;background:transparent;padding:.5rem 0;min-height:2.75rem;font-weight:600;display:list-item;list-style:revert}details.result-request-open.result-request-form>summary::-webkit-details-marker{display:revert}form.js-autosave button[type=submit]{display:none}.provider-row{border-bottom:1px solid var(--so-line);padding:.35rem 0}.provider-row:first-of-type{border-top:1px solid var(--so-line)}.provider-head{display:flex;align-items:center;gap:.75rem;margin:.4rem 0 0}.provider-status{display:inline-flex;align-items:center;gap:.4rem;color:var(--so-muted);font-size:.875rem}.provider-status i{width:.5rem;height:.5rem;border-radius:50%;background:var(--so-muted)}.provider-status--ok i{background:var(--so-success)}.provider-status--warn i{background:var(--so-attention)}.provider-status--off i{background:transparent;border:1.5px solid var(--so-muted)}details.provider-manage>summary{cursor:pointer;color:var(--so-accent-text);font-size:.875rem;min-height:2.5rem;display:list-item;padding-block:.5rem}.card.props .row{display:grid;gap:.1rem;margin:0 0 .75rem}.card.props .row>.meta{display:block;font-size:.75rem}.card.props .row>.meta::first-letter{text-transform:uppercase}.card.props .row>.mono{font-family:var(--font-sans);font-size:.875rem}.card.props .row>.mono .seal{font-family:var(--font-mono);font-size:.8125rem}details.evidence-files{margin:1rem 0}details.evidence-files>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:600}details.evidence-files ul{list-style:none;margin:0;padding:0}details.evidence-files li{display:flex;justify-content:space-between;gap:1rem;padding:.5rem 0;border-bottom:1px solid var(--so-line)}.result-action .result-feedback-link{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;text-decoration:none}@media(hover:hover) and (pointer:fine){.result-action .result-feedback-link:hover{background:var(--so-raised)}}.so-sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}.verdict{margin:.5rem 0 .75rem}.verdict-chips{display:flex;flex-wrap:wrap;gap:.4rem;list-style:none;padding:0;margin:0}.verdict-chip{display:inline-flex;align-items:center;gap:.3rem;min-height:1.75rem;padding:.2rem .65rem;border-radius:999px;font-size:.8125rem;font-weight:600;background:var(--so-neutral-soft);color:var(--so-neutral-ink)}.verdict-chip svg{width:.9rem;height:.9rem}.verdict-chip--success{background:var(--so-success-soft);color:var(--so-success)}.verdict-chip--danger{background:var(--so-danger-soft);color:var(--so-danger)}.verdict-chip--warning{background:var(--so-warning-soft);color:var(--so-warning)}.verdict-chip--info{background:var(--so-info-soft);color:var(--so-info)}.verdict-by{margin:.4rem 0 0}details.result-request-open{margin:.5rem 0}details.result-request-open>summary{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;cursor:pointer;list-style:none}details.result-request-open>summary::-webkit-details-marker{display:none}details.result-request-open[open]>summary{margin-bottom:.75rem}.settings-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(8.5rem,1fr));gap:.5rem;margin:0 0 2rem}.settings-tiles a{display:flex;align-items:center;gap:.6rem;min-height:3rem;padding:.65rem .8rem;border:1px solid var(--so-line);border-radius:.625rem;background:var(--so-paper);color:var(--so-ink);text-decoration:none;font-weight:550;font-size:.875rem}@media(hover:hover) and (pointer:fine){.settings-tiles a:hover{border-color:var(--so-input-line);background:var(--so-raised)}}.settings-tiles svg{width:1.1rem;height:1.1rem;flex-shrink:0;color:var(--so-accent-text)}details.settings-more{margin:.25rem 0 1.25rem}details.settings-more>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:550}details.settings-more>summary .meta{font-weight:400;margin-left:.35rem}.settings-changed{margin-top:-.25rem}.appearance{margin:0 0 28px}.appearance h2{margin:0 0 10px}.theme-switch{display:inline-flex;flex-wrap:nowrap;max-width:100%;gap:4px;padding:4px;margin:0;border:1px solid var(--so-line);border-radius:10px;background:var(--so-raised)}.theme-switch .theme-choice,.so-native-region .theme-switch .theme-choice{flex:1 1 0;width:auto;white-space:nowrap;min-height:40px;padding:8px 16px;border:0;border-radius:7px;background:transparent;color:var(--so-muted);font:inherit;font-weight:550;box-shadow:none;cursor:pointer}@media(hover:hover) and (pointer:fine){.theme-switch .theme-choice:hover{color:var(--so-ink)}}.theme-switch .theme-choice[aria-pressed="true"]{background:var(--so-paper);color:var(--so-ink);box-shadow:0 1px 2px rgb(0 0 0 / .1)}.appearance .meta{margin:8px 0 0}@media(max-width:600px){.theme-switch .theme-choice{min-height:44px}}.update-notes{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;max-height:18rem;overflow:auto}`;
 /** The page CSS this module writes itself (not the imported modules'), for the stylesheet contract tests. */
 export const PAGE_CSS = STYLE + THEME_CONTROLS_CSS;
-const WORKSPACE_STYLE = styleAsset(STYLE + APPROVAL_RULES_CSS + SPEND_CSS + RETENTION_CSS + STORAGE_CSS + UPDATES_CSS + LIMITS_CSS + MONITORING_CSS + INTEGRATIONS_CSS + BACKUP_CSS + EXPORT_CSS + PROJECT_DELETE_CSS + POLICY_CSS + EVIDENCE_PACK_CSS + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KITS_CSS + STARTERS_CSS + SSO_CSS + CREDENTIALS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + TASK_STATUS_CSS + LEAD_CONTEXT_CSS + PULL_REQUEST_SETTINGS_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
+/** The Inbox tabs (console v2): a segmented track of real links; the dot marks a tab with something new, on phones only. */
+const INBOX_TABS_CSS = '.inbox-tabs{display:inline-flex;gap:2px;max-width:100%;overflow-x:auto;margin:4px 0 14px;padding:2px;border-radius:12px;background:var(--so-raised);scrollbar-width:none}' +
+  '.inbox-tabs a{position:relative;display:inline-flex;align-items:center;gap:6px;min-height:28px;padding:0 10px;border-radius:8px;color:var(--so-muted);font-size:13px;font-weight:500;text-decoration:none;white-space:nowrap}' +
+  '.inbox-tabs a[aria-current="page"]{background:var(--so-paper);color:var(--so-ink);box-shadow:var(--so-pill-shadow)}' +
+  '.inbox-tab-count{min-width:18px;padding:0 5px;border-radius:9999px;font:500 11px/18px var(--so-mono,ui-monospace,monospace);font-variant-numeric:tabular-nums;text-align:center}' +
+  '.inbox-tab-count--needs{background:var(--so-signal);color:var(--so-on-signal)}' +
+  '.inbox-unread{display:none;position:absolute;top:4px;right:3px;width:6px;height:6px;border-radius:50%;background:var(--so-signal)}' +
+  '@media (max-width:760px){.inbox-tabs{display:flex;width:100%}.inbox-tabs a{flex:1;justify-content:center;min-height:44px;padding:0 6px}.inbox-unread{display:block}}';
+const WORKSPACE_STYLE = styleAsset(STYLE + INBOX_TABS_CSS + APPROVAL_RULES_CSS + SPEND_CSS + RETENTION_CSS + STORAGE_CSS + UPDATES_CSS + LIMITS_CSS + MONITORING_CSS + INTEGRATIONS_CSS + BACKUP_CSS + EXPORT_CSS + PROJECT_DELETE_CSS + POLICY_CSS + EVIDENCE_PACK_CSS + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KITS_CSS + STARTERS_CSS + GALLERY_CSS + SSO_CSS + CREDENTIALS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + TASK_STATUS_CSS + LEAD_CONTEXT_CSS + PULL_REQUEST_SETTINGS_CSS + CHECK_SETTINGS_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
@@ -14842,7 +15345,7 @@ type Screen = {
    * secrets and judgment calls the classifier cannot see. */
   forceSensitive?: boolean;
   /** Structured conversation; complex guarded forms stay native islands. */
-  workspace?: Partial<Pick<BrowserWorkspace, 'conversation' | 'team' | 'focus' | 'result' | 'catchUpHtml' | 'controlsHtml' | 'notices' | 'pageHtml' | 'view' | 'firstRun'>>;
+  workspace?: Partial<Pick<BrowserWorkspace, 'conversation' | 'team' | 'focus' | 'result' | 'catchUpHtml' | 'controlsHtml' | 'notices' | 'pageHtml' | 'view' | 'firstRun' | 'phone' | 'home'>>;
 };
 
 const ROLE_TITLES: Record<"plan" | "build" | "review" | "repair", string> = { plan: "Planner", build: "Builder", review: "Reviewer", repair: "Repair" };
@@ -15228,6 +15731,38 @@ function loginPage(problem: string | null, returnTo = "/", sso: { label: string;
   ].join("\n"), { nav: false });
 }
 
+/**
+ * The page for an address the console doesn't answer to (onboarding): what was opened, where it answers, and the exact
+ * command that admits this address. It stands alone (styles inline, no script, no font), because every other asset
+ * would be refused at this address too; and it holds nothing a stranger's page doesn't already know.
+ */
+export function wrongHostPage(facts: { opened: string | null; served: string; command: string | null }): string {
+  const code = (text: string) => `<code>${escape(text)}</code>`;
+  return [
+    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">`,
+    `<meta name="color-scheme" content="light dark"><title>Toolroll isn't set up for this address</title>`,
+    `<style>`,
+    `:root{color-scheme:light dark;--ground:#efefef;--paper:#fff;--ink:#171717;--muted:#666;--line:#e6e6e6;--soft:#f2f2f2}`,
+    `@media (prefers-color-scheme:dark){:root{--ground:#0b0b0b;--paper:#161616;--ink:#ededed;--muted:#a1a1a1;--line:#262626;--soft:#1f1f1f}}`,
+    `*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px 16px;background:var(--ground);color:var(--ink);`,
+    `font:14px/1.6 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}`,
+    `main{width:100%;max-width:520px;background:var(--paper);border:1px solid var(--line);border-radius:12px;padding:28px}`,
+    `.mark{font-weight:600;letter-spacing:-.01em;color:var(--muted);margin:0 0 16px}h1{font-size:18px;line-height:1.375;margin:0 0 8px;letter-spacing:-.01em}`,
+    `p{margin:0 0 12px}code{font:12.5px/1.5 ui-monospace,"SF Mono",Menlo,Consolas,monospace;background:var(--soft);border-radius:5px;padding:1px 5px;overflow-wrap:anywhere}`,
+    `pre{margin:0 0 16px;background:var(--soft);border:1px solid var(--line);border-radius:8px;padding:12px 14px;white-space:pre-wrap;overflow-wrap:anywhere}pre code{background:none;padding:0}`,
+    `.meta{color:var(--muted);font-size:13px;margin:0}`,
+    `</style></head><body><main>`,
+    `<p class="mark">Toolroll</p>`,
+    `<h1>Toolroll isn't set up for this address</h1>`,
+    facts.opened === null
+      ? `<p>It answers at ${code(facts.served)} on the computer running it.</p>`
+      : `<p>You opened it at ${code(facts.opened)}. It answers at ${code(facts.served)} on the computer running it.</p>`,
+    facts.command === null ? "" : `<p>To use this address, stop Toolroll (Ctrl-C) and start it again with:</p><pre><code>${escape(facts.command)}</code></pre>`,
+    `<p class="meta">On that computer, ${code(`http://${facts.served}/`)} always works. Other addresses need your say-so, so no other website can reach it.</p>`,
+    `</main></body></html>`,
+  ].join("\n");
+}
+
 /** The first-account page (setup review): shown only while no approver exists. */
 function signupPage(problem: string | null, attemptsLeft: number): string {
   return shell("Toolroll", [
@@ -15258,6 +15793,24 @@ function signupPage(problem: string | null, attemptsLeft: number): string {
  * auto-refresh — approval links lead to the step-up screen, and a page
  * that might hold typed input never re-renders itself.
  */
+export type InboxTab = "needs-you" | "ready" | "running" | "all";
+const INBOX_TABS: readonly { id: InboxTab; label: string }[] = [
+  { id: "needs-you", label: "Needs you" }, { id: "ready", label: "Ready" }, { id: "running", label: "Running" }, { id: "all", label: "All" },
+];
+export function parseInboxTab(raw: string | null): InboxTab | undefined {
+  return INBOX_TABS.some(one => one.id === raw) ? raw as InboxTab : undefined;
+}
+/** What each tab holds, as a short fingerprint: a tab is unread when its
+ * fingerprint differs from the one this browser saw there last. */
+export function inboxFingerprints(data: Pick<Parameters<typeof inboxPage>[1], "decisions" | "approvals" | "requeueables" | "cancelledBlockers" | "gaps" | "needsVerification" | "ready" | "running">): Record<InboxTab, string> {
+  const print = (keys: string[]) => createHash("sha256").update([...keys].sort().join("\n")).digest("hex").slice(0, 8);
+  const needs = [...data.decisions.map(one => `d${one.id}`), ...data.approvals.map(one => `a${one.taskId}@${one.proposedAt}`), ...data.requeueables.map(one => `q${one.taskId}:${one.strikes}`),
+    ...data.cancelledBlockers.map(one => `c${one.blockerId}`), ...data.gaps.map(one => `g${one.key}`)];
+  const ready = [...data.needsVerification.map(one => `v${one.taskId}`), ...(data.ready ?? []).map(one => `r${one.taskId}`)];
+  const running = (data.running ?? []).map(one => `u${one.taskId}`);
+  return { "needs-you": print(needs), ready: print(ready), running: print(running), all: print([...needs, ...ready, ...running]) };
+}
+
 function inboxPage(chrome: Chrome, data: {
   csrf: string;
   revision: number;
@@ -15282,6 +15835,12 @@ function inboxPage(chrome: Chrome, data: {
   /** Whether any worker is answering right now — said at the top when none is. */
   worker: { answering: number; registered: number; lastHeard: string | null };
   now: Date;
+  /** Console v2: the tab shown, results ready to review, work running now,
+   * and the tabs holding something this browser hasn't seen (dots on a phone). */
+  tab?: InboxTab;
+  ready?: { taskId: string; title: string; detail: string; repo: string | null }[];
+  running?: { taskId: string; title: string; detail: string; repo: string | null }[];
+  unread?: readonly InboxTab[];
 }): Screen {
   /** The row's project, worn openly in the roll-up — null is UNPLACED,
    * said as such, never a silent missing chip (finding 13). */
@@ -15414,19 +15973,43 @@ function inboxPage(chrome: Chrome, data: {
           : `<strong>Builder disconnected.</strong> ${data.worker.registered} builder${data.worker.registered === 1 ? " is" : "s are"} configured, last checked in ${data.worker.lastHeard === null ? "never" : whenTime(data.worker.lastHeard)}. Reopen Toolroll on that machine. Queued work starts automatically when a builder reconnects.`) +
         `</div>`;
 
+  // Console v2: Needs you · Ready · Running · All, as real links (Back and
+  // bookmarks work). Each section belongs to one tab; All shows every one.
+  const tab = data.tab ?? "all";
+  const shows = (one: Exclude<InboxTab, "all">): boolean => tab === "all" || tab === one;
+  const listRows = (rows: { taskId: string; title: string; detail: string; repo: string | null }[]): string =>
+    rows.map(one => `<p class="row"><a href="${taskHref(one.taskId)}">${escape(one.title)}</a>${chip(one.repo)} <span class="meta">${escape(one.detail)}</span></p>`).join("\n");
+  const ready = (data.ready ?? []).length === 0 ? "" : `<h2>ready to review</h2>` + listRows(data.ready ?? []);
+  const running = (data.running ?? []).length === 0 ? "" : `<h2>running now</h2>` + listRows(data.running ?? []);
+  const counts: Record<InboxTab, number> = {
+    "needs-you": data.decisions.length + data.approvals.length + data.requeueables.length + data.cancelledBlockers.length + data.gaps.length,
+    ready: data.needsVerification.length + (data.ready ?? []).length,
+    running: (data.running ?? []).length,
+    all: 0,
+  };
+  counts.all = counts["needs-you"] + counts.ready + counts.running;
+  const tabs = data.tab === undefined ? "" : `<nav class="inbox-tabs" aria-label="Inbox views">` + INBOX_TABS.map(one =>
+    `<a href="/inbox?tab=${one.id}"${one.id === tab ? ` aria-current="page"` : ""} data-inbox-tab="${one.id}">${one.label}` +
+    `<span class="inbox-tab-count${one.id === "needs-you" && counts[one.id] > 0 ? " inbox-tab-count--needs" : ""}">${counts[one.id]}</span>` +
+    `${one.id !== tab && (data.unread ?? []).includes(one.id) ? `<span class="inbox-unread" aria-label="new"></span>` : ""}</a>`).join("") + `</nav>`;
+  const tabEmpty = data.tab !== undefined && tab !== "all" && counts[tab] === 0
+    ? `<div class="card"><p class="meta">${tab === "needs-you" ? "Nothing needs you." : tab === "ready" ? "No results are waiting for review." : "Nothing is running."}</p></div>` : "";
   return screen("inbox", [
     `<h1>Inbox</h1>`,
     `<p class="meta">everything that waits on you \u2014 empty means the fleet is working</p>`,
+    tabs,
     noWorker,
     wizard,
-    empty ? "" : `<p><a class="new-task" style="display:inline-block" href="/next">clear the queue \u2192 one thing at a time</a></p>`,
-    empty && data.wizard === null ? `<div class="card"><p><strong>Nothing needs you.</strong></p><p class="meta">The queue is either working or waiting on its own timers. <a href="/board">Watch the board</a> or <a href="/activity">read the activity report</a>.</p></div>` : "",
-    decisions,
-    approvals,
-    requeueables,
-    needsVerification,
-    cancelled,
-    gaps,
+    empty || !shows("needs-you") ? "" : `<p><a class="new-task" style="display:inline-block" href="/next">clear the queue \u2192 one thing at a time</a></p>`,
+    empty && data.wizard === null && shows("needs-you") && counts.all === 0 ? `<div class="card"><p><strong>Nothing needs you.</strong></p><p class="meta">The queue is either working or waiting on its own timers. <a href="/board">Watch the board</a> or <a href="/activity">read the activity report</a>.</p></div>` : tabEmpty,
+    shows("needs-you") ? decisions : "",
+    shows("needs-you") ? approvals : "",
+    shows("needs-you") ? requeueables : "",
+    shows("ready") ? needsVerification : "",
+    shows("ready") ? ready : "",
+    shows("running") ? running : "",
+    shows("needs-you") ? cancelled : "",
+    shows("needs-you") ? gaps : "",
     data.rollup
       ? `<p class="meta">requirement gaps are checked one project at a time \u2014 open a project to see and fill its gaps · <a href="/projects">open a project</a></p>`
       : "",
@@ -15961,6 +16544,8 @@ function approvalFormDigest(scopeDigest: string, raceDigest: string | null, plan
  * unified conversation; this is a focused lens, not a second chat silo. */
 type TaskChatFocus = {
   executionId: string;
+  /** Until this installation's first Ready result, the task shows where it stands on Plan → You approve → Build → Checks → Ready. */
+  guide?: boolean;
   family: TaskFamily;
   history: string;
   status: DisplayStatus;
@@ -16007,6 +16592,13 @@ type TaskChatFocus = {
 };
 
 const taskChatHref = (taskId: string): string => `/chat?task=${encodeURIComponent(taskId)}`;
+/** The task composer's modes (console v2), as the words the lead reads for that one turn. */
+export type TaskComposerMode = "build" | "plan" | "answer";
+export const TASK_COMPOSER_MODES: Record<TaskComposerMode, string> = {
+  build: "The operator chose Build: if they ask for a change to the result, read it with get_result and propose a revision of this task with propose_review (operation revise) for them to confirm. Nothing builds until they confirm the card.",
+  plan: "The operator chose Plan only: answer with a short plan for what they ask. Do not propose a revision, a new task or any other action this turn.",
+  answer: "The operator chose Just answer: answer from what you can read. Do not propose any action this turn.",
+};
 /** A project's own lead thread (v77). */
 const projectChatHref = (repo: string): string => `/chat?project=${encodeURIComponent(repo)}`;
 
@@ -16315,6 +16907,7 @@ function taskChatLiveRegion(focus: TaskChatFocus, csrf: string, fragment = false
   const polling = !inert && ((focus.approval === null || focus.plan === "requested") && focus.state !== "done" && focus.state !== "cancelled" || focus.control.kind === "stopping" || focus.control.kind === "stop");
   return (
     `<section id="task-chat-live" aria-live="polite" data-task="${escape(focus.id)}" data-execution="${escape(focus.executionId)}" data-source="/chat/task-status?task=${encodeURIComponent(focus.id)}" data-poll="${polling ? "1" : "0"}" data-approval="${escape(focus.approval?.digest ?? "")}" data-plan="${escape(focus.plan ?? "")}">` +
+    (focus.guide === true && focus.state !== "cancelled" ? firstTaskJourneyHtml(focus) : "") +
     `<div class="task-live-summary">` +
     (focus.assignment !== null ? assignmentSummaryHtml(focus.assignment, { workStatus: focus.status, hideAction: focus.approval !== null && focus.dispatch?.action === "approve-scope", ...(receiptLeads ? { resultHref: chatResultHref(focus.id, focus.result!.runId) } : {}) }) + (receiptLeads ? completionReceiptCard(focus.result!, focus.id, "chat", focus.status, focus.assignment, false) : "") : receiptLeads ? completionReceiptCard(focus.result!, focus.id, "chat", focus.status) : taskStatusCard(focus.status, focus.id, focus.dispatch, focus.liveRun?.id ?? null, focus.approval !== null && focus.dispatch?.action === "approve-scope")) +
     checkProgressHtml(focus.checkProgress) +
@@ -16338,6 +16931,17 @@ function taskChatLiveRegion(focus: TaskChatFocus, csrf: string, fragment = false
     (focus.publication === null ? "" : `<p class="chat-publication meta">Published as ${safePrUrl(focus.publication.prUrl) === null ? `<span class="mono">PR #${focus.publication.prNumber ?? "?"}</span>` : `<a href="${escape(safePrUrl(focus.publication.prUrl) as string)}">PR #${focus.publication.prNumber ?? "?"}</a>`} · ${escape(focus.publication.state)}${focus.publication.lastCheckState === null ? "" : ` · CI ${escape(focus.publication.lastCheckState)}`}</p>`) +
     `</section>`
   );
+}
+
+/** The first task's way to Ready, filled in as it moves (onboarding): the same stage every surface reads. */
+function firstTaskJourneyHtml(focus: TaskChatFocus): string {
+  const planning = focus.plan === "requested" && focus.approval === null;
+  const read = focus.assignment !== null ? assignmentStageOf(focus.assignment, { token: focus.status.token }, planning) : stageOfCode(focus.status.token, { planning });
+  const steps = firstTaskJourney(read, focus.scope === "approved", focus.state === "done");
+  const current = steps.find(one => one.state === "current" || one.state === "stuck");
+  return `<ol class="first-task-journey" aria-label="Where this task is${current === undefined ? ": Ready" : `: ${escape(current.label)}`}" data-first-task-journey>` +
+    steps.map(one => `<li data-step="${one.key}" data-state="${one.state}"${one.state === "current" || one.state === "stuck" ? ` aria-current="step"` : ""}><span class="first-task-journey-mark" aria-hidden="true"></span><span>${escape(one.label)}</span></li>`).join("") +
+    `</ol>`;
 }
 
 function taskChatHeading(focus: TaskChatFocus): string {
@@ -16633,6 +17237,95 @@ function chatLimitsHtml(facts: {
   return `<details class="chat-limits"><summary>Model &amp; limits<span class="meta">${escape(facts.subscription ? "membership" : facts.provider)}</span></summary><div class="chat-budget">${rows.join("")}</div></details>`;
 }
 
+/** What the lead's settings form shows beside the saved configuration: where keys come from (never the keys), the
+ * live model lists, and where saving goes back to. */
+type LeadFormFacts = {
+  keyFacts: { provider: string; state: "environment" | "stored" | "none"; tail: string | null }[];
+  openrouterModels: string[] | null;
+  liveModels?: { value: string; label: string }[];
+  csrf: string;
+  returnTo: string;
+};
+
+/** Settings → Lead: one line for what runs the lead and one action; the full form, turning it off and stored keys under Advanced. */
+function leadSettingsHtml(data: { config: import("./store.js").ChatConfig | null; facts: LeadFormFacts; words: string | null; signedIn: string | null; command: string; said: string | null }): string {
+  const { config, facts } = data;
+  const hidden = `<input type="hidden" name="csrf" value="${escape(facts.csrf)}"><input type="hidden" name="return" value="/settings/lead">`;
+  const summary = config === null
+    ? data.signedIn !== null
+      ? `<p>The lead is off.</p><form method="post" action="/settings/lead/on">${hidden}<button type="submit">Use your ${escape(data.signedIn)} sign-in</button></form>`
+      : `<p>The lead is off. Sign in an agent on this computer to turn it on:</p><p><code>${escape(data.command)}</code></p>`
+    : data.words !== null
+      ? `<p>The lead uses ${escape(data.words)}.</p><p class="meta">${config.model === "default" ? "Its default model" : `Model ${escape(config.model)}`} · up to ${config.dailyTurns} turns a day · no dollar spend. Every action it proposes waits for you to confirm it.</p>`
+      : `<p>The lead uses the ${escape(config.provider === "anthropic-api" ? "Anthropic" : "OpenRouter")} API with ${escape(config.model)}.</p><p class="meta">Up to ${chatMoney(config.weeklyCeilingMicrousd)} a week · up to ${config.dailyTurns} turns a day.</p>`;
+  const forget = facts.keyFacts.filter(one => one.state === "stored").map(one =>
+    `<form method="post" action="/chat/config" class="inline">${hidden}<input type="hidden" name="forget-key" value="${escape(one.provider)}">` +
+    `<input type="password" name="token" placeholder="your password" autocomplete="current-password" aria-label="Your password"><button type="submit" class="secondary">Forget the stored ${escape(one.provider)} key</button></form>`).join("");
+  return [
+    `<p><a href="/settings">Settings</a></p><h1>Lead</h1>`,
+    data.said === null ? "" : `<p class="problem" role="status">${escape(data.said)}</p>`,
+    `<section class="card lead-settings" data-lead-settings>${summary}</section>`,
+    `<details class="lead-advanced" data-lead-advanced><summary>Advanced</summary>`,
+    leadConfigForm(config, facts),
+    config === null ? "" : `<form method="post" action="/chat/config" class="inline">${hidden}<input type="hidden" name="off" value="1">` +
+      `<input type="password" name="token" placeholder="your password" autocomplete="current-password" aria-label="Your password"><button type="submit" class="secondary">Turn the lead off</button></form>`,
+    forget,
+    `</details>`,
+  ].join("\n");
+}
+
+/** The lead's full settings (Settings → Lead → Advanced): provider, model, limits and a direct API key. */
+function leadConfigForm(current: import("./store.js").ChatConfig | null, data: LeadFormFacts): string {
+  const anthropicModels = PRICED_MODELS.filter(one => !one.includes("/"));
+  const openrouterModels = data.openrouterModels ?? PRICED_MODELS.filter(one => one.includes("/"));
+  const currentSubscription = current !== null && isSubscriptionChatProvider(current.provider);
+  const labels = new Map((data.liveModels ?? []).map(one => [one.value, one.label]));
+  const models = [...new Set(["default", ...labels.keys(), ...anthropicModels, ...openrouterModels, ...(current === null ? [] : [current.model])])];
+  return [
+    `<form method="post" action="/chat/config" class="card">`,
+    `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
+    `<input type="hidden" name="return" value="${escape(data.returnTo)}">`,
+    `<label>provider<select name="provider">`,
+    `<option value="codex-subscription"${current?.provider === "codex-subscription" ? " selected" : ""}>Codex membership (logged-in CLI)</option>`,
+    `<option value="claude-subscription"${current?.provider === "claude-subscription" ? " selected" : ""}>Anthropic membership (logged-in CLI)</option>`,
+    `<option value="anthropic-api"${current?.provider === "anthropic-api" ? " selected" : ""}>anthropic-api (direct API)</option>`,
+    `<option value="openrouter-api"${current?.provider === "openrouter-api" ? " selected" : ""}>openrouter-api (direct API)</option>`,
+    `</select></label>`,
+    `<label>model <span class="meta">(use default for your membership's current model; direct API models need a pinned price)</span>` +
+      `<input name="model" list="chat-models" value="${escape(current?.model ?? "default")}"><datalist id="chat-models">` +
+      `${models.map(model => `<option value="${escape(model)}">${escape(labels.get(model) ?? "")}</option>`).join("")}</datalist></label>`,
+    data.openrouterModels === null
+      ? `<p class="meta">with OPENROUTER_API_KEY in the serve environment, this list becomes OpenRouter's full live catalog — each model priced by the party that bills it</p>`
+      : `<p class="meta">${data.openrouterModels.length} models live from OpenRouter's catalog; saving pins today's price — re-save to re-pin</p>`,
+    currentSubscription
+      ? `<p class="meta"><strong>no dollar maximum.</strong> Membership chat uses the plan attached to the logged-in CLI; the conversation stays live until you end it, and the daily turn limit still applies.</p>`
+      : `<label>weekly ceiling <span class="meta">(direct API only; leave blank when choosing a membership)</span>` +
+        `<input type="text" name="weekly-usd" inputmode="decimal" style="width:8rem" value="${current === null ? "" : (current.weeklyCeilingMicrousd / 1_000_000).toFixed(2)}"></label>`,
+    `<label>daily turns <span class="meta">(default 50)</span>` +
+      `<input type="text" name="daily-turns" inputmode="numeric" style="width:8rem" value="${current === null ? "" : String(current.dailyTurns)}"></label>`,
+    currentSubscription
+      ? `<p class="meta">Authenticate on this machine first with ${current?.provider === "codex-subscription" ? `<span class="mono">codex login</span>` : `the <span class="mono">claude</span> CLI`}. Toolroll reuses that cached login and never stores it.</p>`
+      : `<label>API key <span class="meta">(${data.keyFacts
+        .map(one =>
+          one.state === "none"
+            ? `${escape(one.provider)}: none yet`
+            : one.state === "environment"
+              ? `${escape(one.provider)}: from the environment`
+              : `${escape(one.provider)}: stored ${escape(one.tail ?? "")}`,
+        )
+        .join(" · ")})</span>` +
+        `<input type="password" name="key" placeholder="direct API only — leave empty to keep" autocomplete="off"></label>`,
+    `<label>your password <span class="meta">(typed again to change the provider)</span>` +
+      `<input type="password" name="token" autocomplete="current-password"></label>`,
+    `<button type="submit">${current === null ? "turn chat on" : "save"}</button>`,
+    `</form>`,
+    currentSubscription
+      ? `<p class="meta">The membership provider runs without repository tools in a temporary directory; Toolroll remains the only layer that can turn a proposed action into a confirmation card.</p>`
+      : `<p class="meta">a pasted key is written once to a mode-0600 file beside the database — never INTO the database, never shown again beyond its last characters; an environment variable (` +
+        `<span class="mono">ANTHROPIC_API_KEY</span> / <span class="mono">OPENROUTER_API_KEY</span>) always wins when set</p>`,
+  ].join("\n");
+}
+
 function chatPage(chrome: Chrome, data: {
   enabled: { ok: true } & Record<string, unknown> | { ok: false; why: string };
   pending: ChatTurn | null;
@@ -16664,57 +17357,11 @@ function chatPage(chrome: Chrome, data: {
   resultPanel?: string | null;
   /** Opened from "Chat settings": show them expanded. */
   settingsOpen?: boolean;
+  /** Chat's first run is on the page: it already says what to do while there is no lead. */
+  firstRunShown?: boolean;
 }): Screen {
-  const configForm = (current: import("./store.js").ChatConfig | null): string => {
-    const anthropicModels = PRICED_MODELS.filter(one => !one.includes("/"));
-    const openrouterModels = data.openrouterModels ?? PRICED_MODELS.filter(one => one.includes("/"));
-    const currentSubscription = current !== null && isSubscriptionChatProvider(current.provider);
-    const labels = new Map((data.liveModels ?? []).map(one => [one.value, one.label]));
-    const models = [...new Set(["default", ...labels.keys(), ...anthropicModels, ...openrouterModels, ...(current === null ? [] : [current.model])])];
-    return [
-      `<form method="post" action="/chat/config" class="card">`,
-      `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
-      `<input type="hidden" name="return" value="${escape(data.focusTask === null ? "/chat" : taskChatHref(data.focusTask.id))}">`,
-      `<label>provider<select name="provider">`,
-      `<option value="codex-subscription"${current?.provider === "codex-subscription" ? " selected" : ""}>Codex membership (logged-in CLI)</option>`,
-      `<option value="claude-subscription"${current?.provider === "claude-subscription" ? " selected" : ""}>Anthropic membership (logged-in CLI)</option>`,
-      `<option value="anthropic-api"${current?.provider === "anthropic-api" ? " selected" : ""}>anthropic-api (direct API)</option>`,
-      `<option value="openrouter-api"${current?.provider === "openrouter-api" ? " selected" : ""}>openrouter-api (direct API)</option>`,
-      `</select></label>`,
-      `<label>model <span class="meta">(use default for your membership's current model; direct API models need a pinned price)</span>` +
-        `<input name="model" list="chat-models" value="${escape(current?.model ?? "default")}"><datalist id="chat-models">` +
-        `${models.map(model => `<option value="${escape(model)}">${escape(labels.get(model) ?? "")}</option>`).join("")}</datalist></label>`,
-      data.openrouterModels === null
-        ? `<p class="meta">with OPENROUTER_API_KEY in the serve environment, this list becomes OpenRouter's full live catalog — each model priced by the party that bills it</p>`
-        : `<p class="meta">${data.openrouterModels.length} models live from OpenRouter's catalog; saving pins today's price — re-save to re-pin</p>`,
-      currentSubscription
-        ? `<p class="meta"><strong>no dollar maximum.</strong> Membership chat uses the plan attached to the logged-in CLI; the conversation stays live until you end it, and the daily turn limit still applies.</p>`
-        : `<label>weekly ceiling <span class="meta">(direct API only; leave blank when choosing a membership)</span>` +
-          `<input type="text" name="weekly-usd" inputmode="decimal" style="width:8rem" value="${current === null ? "" : (current.weeklyCeilingMicrousd / 1_000_000).toFixed(2)}"></label>`,
-      `<label>daily turns <span class="meta">(default 50)</span>` +
-        `<input type="text" name="daily-turns" inputmode="numeric" style="width:8rem" value="${current === null ? "" : String(current.dailyTurns)}"></label>`,
-      currentSubscription
-        ? `<p class="meta">Authenticate on this machine first with ${current?.provider === "codex-subscription" ? `<span class="mono">codex login</span>` : `the <span class="mono">claude</span> CLI`}. Toolroll reuses that cached login and never stores it.</p>`
-        : `<label>API key <span class="meta">(${data.keyFacts
-          .map(one =>
-            one.state === "none"
-              ? `${escape(one.provider)}: none yet`
-              : one.state === "environment"
-                ? `${escape(one.provider)}: from the environment`
-                : `${escape(one.provider)}: stored ${escape(one.tail ?? "")}`,
-          )
-          .join(" · ")})</span>` +
-          `<input type="password" name="key" placeholder="direct API only — leave empty to keep" autocomplete="off"></label>`,
-      `<label>your password <span class="meta">(typed again to change the provider)</span>` +
-        `<input type="password" name="token" autocomplete="current-password"></label>`,
-      `<button type="submit">${current === null ? "turn chat on" : "save"}</button>`,
-      `</form>`,
-      currentSubscription
-        ? `<p class="meta">The membership provider runs without repository tools in a temporary directory; Toolroll remains the only layer that can turn a proposed action into a confirmation card.</p>`
-        : `<p class="meta">a pasted key is written once to a mode-0600 file beside the database — never INTO the database, never shown again beyond its last characters; an environment variable (` +
-          `<span class="mono">ANTHROPIC_API_KEY</span> / <span class="mono">OPENROUTER_API_KEY</span>) always wins when set</p>`,
-    ].join("\n");
-  };
+  const formFacts: LeadFormFacts = { keyFacts: data.keyFacts, openrouterModels: data.openrouterModels, ...(data.liveModels === undefined ? {} : { liveModels: data.liveModels }), csrf: data.csrf,
+    returnTo: data.focusTask === null ? "/chat" : taskChatHref(data.focusTask.id) };
   const parts: string[] = [
     data.focusTask === null
       ? chatHeading("", data.projects.length, data.enabled.ok)
@@ -16726,16 +17373,18 @@ function chatPage(chrome: Chrome, data: {
     const code = (data.enabled as { code?: string }).code;
     // The sandbox shows no conversation at all: chat evidence is a real
     // subscription-backed plane, never a seeded transcript (v48 authority repair).
-    parts.push(
+    // With no lead yet, the first run says what happens next (it turns on with the signed-in agent, or shows the one
+    // command to run); otherwise one line, and its settings live in Settings → Lead (onboarding).
+    const settingsLink = data.canManage ? ` <a href="/settings/lead">Settings → Lead</a>` : "";
+    if (!(code === "unconfigured" && data.firstRunShown === true)) parts.push(
       code === "demo"
-        ? `<div class="card" id="latest"><p><strong>Chat isn’t available in demo mode</strong></p><p class="meta">Demo data never contacts an external model. Start Toolroll with a real project to use chat.</p></div>`
-        : `<div class="card" id="latest"><p><strong>chat is off.</strong></p><p class="meta">${escape(data.enabled.why)}</p></div>`,
+        ? `<div class="card" id="latest"><p><strong>Chat isn’t available in demo mode</strong></p><p class="meta">Demo data never contacts an external model. Start Toolroll with a real project to use chat: <code>${escape(START_COMMAND)}</code> in your repository.</p></div>`
+        : code === "unconfigured"
+          ? `<div class="card" id="latest" data-lead-off><p><strong>The lead is off.</strong></p><p class="meta">${data.canManage ? `Turn it on in${settingsLink}.` : "An approver can turn it on."}</p></div>`
+          : code === "unpriced" || code === "no-key"
+            ? `<div class="card" id="latest"><p><strong>The lead can’t run yet.</strong></p><p class="meta">${escape(data.enabled.why)}${data.canManage ? ` ·${settingsLink}` : ""}</p></div>`
+            : `<div class="card" id="latest"><p><strong>chat is off.</strong></p><p class="meta">${escape(data.enabled.why)}</p></div>`,
     );
-    // The ceiling refusals need a restart to fix; configuration does not —
-    // it is a first-class act of this console (operator request).
-    if (data.canManage && (code === "unconfigured" || code === "unpriced" || code === "no-key")) {
-      parts.push(`<h2>${code === "unconfigured" ? "set it up" : "reconfigure"}</h2>`, configForm(data.config));
-    }
     return screen("chat", chatWorkspace(parts.join("\n"), data.projects, data.csrf, true, data.focusTask, data.resultPanel ?? null), { chrome, functional: { script: CHAT_UI_SCRIPT + (data.focusTask === null ? "" : RESULT_REVIEW_SCRIPT), fetches: data.focusTask !== null } });
   }
   const config = (data.enabled as unknown as { config: { provider: ChatProviderId; model: string; dailyTurns: number; weeklyCeilingMicrousd: number } }).config;
@@ -16804,28 +17453,7 @@ function chatPage(chrome: Chrome, data: {
   }
   if (data.canManage) {
     parts.push(
-      `<details id="chat-settings"${data.settingsOpen ? " open" : ""}><summary class="meta">Chat settings</summary>`,
-      configForm(data.config),
-      `<form method="post" action="/chat/config" class="inline">`,
-      `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
-      `<input type="hidden" name="return" value="${escape(data.focusTask === null ? "/chat" : taskChatHref(data.focusTask.id))}">`,
-      `<input type="hidden" name="off" value="1">`,
-      `<input type="password" name="token" placeholder="your password" autocomplete="current-password">`,
-      `<button type="submit">turn chat off</button>`,
-      `</form>`,
-      data.keyFacts
-        .filter(one => one.state === "stored")
-        .map(
-          one =>
-            `<form method="post" action="/chat/config" class="inline">` +
-            `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
-            `<input type="hidden" name="return" value="${escape(data.focusTask === null ? "/chat" : taskChatHref(data.focusTask.id))}">` +
-            `<input type="hidden" name="forget-key" value="${escape(one.provider)}">` +
-            `<input type="password" name="token" placeholder="your password" autocomplete="current-password">` +
-            `<button type="submit">forget the stored ${escape(one.provider)} key</button></form>`,
-        )
-        .join("\n"),
-      `</details>`,
+      `<p class="meta" id="chat-settings"><a href="/settings/lead">Lead settings</a> · provider, model and limits</p>`,
     );
   }
   if (data.recent.length > 0) {
@@ -16968,6 +17596,7 @@ function proposalCardParts(view: ProposalCardView, csrf: string, inert: boolean,
         ["project", `<span class="mono">${escape(repoId)}</span>`],
         ["deliverable", payload["report"] === true ? "report only" : "branch"],
         ["planning", planningWords],
+        ["checks", isCheckLevel(payload["checks"]) ? { quick: "Quick checks", full: "Full checks", off: "Off — built, not checked" }[payload["checks"]] : ""],
         ["out of scope", escape(text("not"))],
         ["may touch", Array.isArray(payload["touches"]) ? (payload["touches"] as string[]).map(one => `<span class="mono">${escape(one)}</span>`).join("<br>") : ""],
       );
@@ -17380,7 +18009,7 @@ function matePage(chrome: Chrome, data: MateThreadRows & {
       : `<p class="meta">recent turns: ${data.recent
           .map(turn => `<span class="mono">#${turn.id}</span> ${escape(turn.state)}${turn.failureReason === null ? "" : ` · ${escape(turn.failureReason)}`} · ${subscription ? "membership" : chatMoney(turn.settledMicrousd ?? turn.reservedMicrousd)}`)
           .join(" · ")}</p>`,
-    `<p class="meta"><a href="/chat?settings=1#chat-settings">Chat settings</a> · provider, model and limits</p>`,
+    `<p class="meta"><a href="/settings/lead">Lead settings</a> · provider, model and limits</p>`,
     `</details>`,
   ].join("\n");
   const conversation: string[] = [
@@ -18021,6 +18650,7 @@ function tasksPage(
   prefill: TaskComposerPrefill | null = null,
   permissionDefault: UnattendedPermissionMode = "auto",
   qualityDefault: QualityMode = "default",
+  replaced: ReadonlyMap<string, string> = new Map(),
 ): Screen {
   const filters = TASK_STATES.map(
     one => (one === state ? `<strong>${one}</strong>` : `<a href="/tasks?state=${one}">${one}</a>`),
@@ -18036,7 +18666,7 @@ function tasksPage(
           .map(
             task =>
               `<a class="row" href="${taskHref(task.id)}"><span class="mono">${escape(task.id)}</span> ` +
-              `${escape(task.title)} <span class="right badge badge-${escape(task.state)}">${escape(task.state)}</span></a>`,
+              `${escape(task.title)} <span class="right badge badge-${escape(task.state)}">${escape(task.state === "cancelled" && replaced.has(task.id) ? `replaced by ${replaced.get(task.id)}` : task.state)}</span></a>`,
           )
           .join("\n");
   return screen("tasks", [
@@ -18895,6 +19525,7 @@ function projectsPage(
   peeks: Record<string, ProjectPeek | null> = {},
   returnTo = "/",
   pullRequestsOn?: (path: string) => boolean,
+  checkLevelOf?: (path: string) => CheckLevel,
 ): Screen {
   // The onboarding card (repo onboarding, findings 1-39): preview first,
   // then a password-confirmed clone into a configured root. Disabled
@@ -18994,6 +19625,7 @@ function projectsPage(
       name, path, shortPath: path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path, open: open !== null && open === path, openedAt,
       knowledgeHref: `/settings/knowledge?repo=${encodeURIComponent(path)}`,
       ...(pullRequestsOn === undefined ? {} : { pullRequests: { href: `/settings/pull-requests?repo=${encodeURIComponent(path)}`, on: pullRequestsOn(path) } }),
+      ...(checkLevelOf === undefined ? {} : { checks: { href: `/settings/checks?repo=${encodeURIComponent(path)}`, level: CHECK_LEVEL_WORDS[checkLevelOf(path)] } }),
       peek: peek === null ? null : [
         ...(peek.waiting > 0 ? [{ label: `${peek.waiting} waiting on you`, href: "/", tone: "attention" as const }] : []),
         ...(peek.running > 0 ? [{ label: `${peek.running} running`, href: "/runs", tone: "neutral" as const }] : []),
@@ -19141,6 +19773,11 @@ function loginReturn(raw: string | null | undefined): string {
   }
   const query = parsed.searchParams.toString();
   return `${parsed.pathname}${query === "" ? "" : `?${query}`}`;
+}
+
+/** A request path fit for a log: the one-time sign-in link's code is left out. */
+export function redactedPath(path: string): string {
+  return path.startsWith(SIGN_IN_LINK_PATH) ? `${SIGN_IN_LINK_PATH}…` : path;
 }
 
 /** The sign-in page that comes back to `path` afterwards, or plain /login when the path is not one to come back to. */
@@ -19793,6 +20430,8 @@ function revisionLineageHtml(lineage: RevisionLineage | null): string {
 }
 
 function taskBodyParts(data: {
+  /** Until the first Ready result: show the task's way there (onboarding). */
+  guide?: boolean;
   assignment?: AssignmentSnapshot | null;
   checkProgress?: CheckProgress | null;
   rootId?: string;
@@ -19924,6 +20563,8 @@ function taskBodyParts(data: {
   /** The pull request opened through Complete (its state, link, CI and merge), or the offer to open one for a
    * result already marked complete; null when neither applies. */
   pullRequest?: TaskPullRequest | null;
+  /** The task's whole family (the original and its revisions) and every attempt across it, for the thread. */
+  family?: { root: { id: string; title: string; createdAt: string; goal?: string | null }; versions: { id: string; title: string; state: string }[]; runs: (Run & { taskId: string })[] } | null;
   /** Degraded composition (slice 1c). "sensitive": the page carries a
    * password ceremony, so no live poller runs, the attempt panel is a
    * static line, and open decisions render link-only — decided by the page
@@ -20828,7 +21469,7 @@ function taskBodyParts(data: {
     facts.push({ label: "Queue", parts: [`${data.position.position} of ${data.position.total}${data.position.column === null ? " in the shared queue" : ` in ${data.position.column}'s queue`} · `, { label: "Reorder", href: "/board?view=order" }] });
   }
   facts.push(scope === null ? { label: "Scope", parts: ["none yet"] }
-    : approval.approved ? { label: "Approved scope", parts: [{ seal: `signs ${scope.digest.length <= 12 ? scope.digest : `${scope.digest.slice(0, 12)}…`}` }, ` · ${qualityModeTitle(scope.qualityMode ?? "default")} · approved by ${approval.by} · ${when(approval.at)}`] }
+    : approval.approved ? { label: "Approved scope", parts: [{ seal: `signs ${scope.digest.length <= 12 ? scope.digest : `${scope.digest.slice(0, 12)}…`}` }, ` · ${qualityModeTitle(scope.qualityMode ?? "default")} · approved by ${approval.by}`, ...(approval.at === null ? [] : [" · ", { at: approval.at }])] }
     : { label: "Scope", parts: [approval.reason === "changed" ? "rewritten since its approval — needs a new yes" : "not approved"] });
   facts.push({ label: "Publishes as", parts: [publishesAs] });
   // v102: who asked for it, and what the project's approval rules need.
@@ -21198,6 +21839,123 @@ function taskBodyParts(data: {
     `</div><aside class="task-rail">${rail}</aside></div>`,
   ].join("\n");
 
+  // Console v2: one thread in time order (the plan, the agent's notes and
+  // results, its questions, the person's replies) and the metadata grouped
+  // for a Details panel. Every form below keeps its own route and fields.
+  const familyRuns = data.family?.runs ?? data.runs.map(run => ({ ...run, taskId: task.id }));
+  const versionLabelOf = (taskId: string): string => {
+    const index = data.family?.versions.findIndex(one => one.id === taskId) ?? -1;
+    return index <= 0 ? "" : ` · revision ${index}`;
+  };
+  const thread: BrowserTaskThreadItem[] = [];
+  const filedBy = data.filer?.name ?? data.coordinator?.label ?? null;
+  const rootFiled = data.family?.root.createdAt ?? task.createdAt;
+  thread.push({ key: "filed", at: rootFiled, kind: "filed", who: "person", author: filedBy ?? "", title: "Filed the task",
+    text: (() => { const goal = data.family?.root.goal ?? scope?.goal ?? null; return goal === null ? null : oneLineOf(goal, 280); })(), link: null, html: "", more: null });
+  const newestBuilt = familyRuns.filter(run => run.outcome === "built" && run.role !== "planner" && run.role !== "reviewer").sort((a, b) => b.id - a.id)[0];
+  for (const run of familyRuns) {
+    const live = run.id === liveHistoryRunId || (run.outcome === null && run.id === liveRunId);
+    const noun = runNoun(run);
+    const href = { label: `${noun[0]!.toUpperCase()}${noun.slice(1)} #${run.id}`, href: `/r/${run.id}` };
+    const revision = versionLabelOf(run.taskId);
+    if (run.role === "planner") {
+      thread.push({ key: `run-${run.id}`, at: run.finishedAt ?? run.startedAt, kind: "plan", who: "agent", author: run.runner,
+        title: live ? "Planning" : run.reason === "plan-drafted" ? "Drafted a plan" : `Planning ended · ${run.outcome === null ? "never finished" : run.reason === null ? run.outcome : reasonWords(run.reason)}`,
+        text: null, link: href, html: "", more: null });
+      continue;
+    }
+    if (live) {
+      thread.push({ key: `run-${run.id}`, at: run.startedAt, kind: "progress", who: "agent", author: run.runner,
+        title: `${run.role === "reviewer" ? "Reviewing" : run.role === "scout" ? "Investigating" : "Building"}${revision}`,
+        text: `${homePhaseWords(run)}.`, link: href, html: "", more: null });
+      continue;
+    }
+    const title = run.role === "reviewer" ? "Reviewed the result"
+      : run.outcome === "built" ? (run.role === "scout" ? "Report ready" : "Result ready")
+      : run.outcome === "no-change" ? "Finished with no change"
+      : run.outcome === "parked" ? "Stopped to ask"
+      : run.outcome === null ? "Attempt never finished"
+      : `${noun[0]!.toUpperCase()}${noun.slice(1)} ${run.outcome}`;
+    thread.push({ key: `run-${run.id}`, at: run.finishedAt ?? run.startedAt, kind: "result", who: "agent", author: run.runner,
+      title: `${title}${revision}`, text: run.handoff === null ? (run.reason === null || run.outcome === "built" ? null : reasonWords(run.reason)) : oneLineOf(run.handoff, 600),
+      link: href, html: "",
+      more: previousResult !== null && run.id === newestBuilt?.id && run.taskId === task.id ? { summary: "Result details", html: previousResult.html } : null });
+  }
+  // What the agent is working through now, and how its plan changed.
+  const liveAt = liveRun?.startedAt ?? task.updatedAt;
+  if (planCard !== "") thread.push({ key: "plan", at: familyRuns.filter(run => run.role === "planner").map(run => run.finishedAt ?? run.startedAt).sort().at(-1) ?? task.updatedAt,
+    kind: "plan", who: "agent", author: "", title: "The plan", text: null, link: null, html: planCard, more: null });
+  if (progressCard !== "") thread.push({ key: "progress", at: liveAt, kind: "progress", who: "agent", author: "", title: "Progress", text: null, link: null, html: progressCard, more: null });
+  if (revisionLedgerCard !== "") thread.push({ key: "plan-revisions", at: liveAt, kind: "progress", who: "agent", author: "", title: "Plan changes", text: null, link: null, html: revisionLedgerCard, more: null });
+  // The change a person asked for: the revision's own brief.
+  if (data.revision != null && !("problem" in data.revision)) {
+    const feedback = data.revision;
+    thread.push({ key: "revision", at: task.createdAt, kind: "reply", who: "person", author: feedback.comments[0]?.author ?? "You",
+      title: feedback.kind === "ci-repair" ? "Asked for a CI repair" : feedback.kind === "criterion-repair" ? "Asked for a repair" : "Asked for changes",
+      text: feedback.comments.map(one => `${one.path === null ? "" : `${one.path}${one.line === null ? "" : `:${one.line}`} — `}${one.note}`).join("\n"),
+      link: { label: `From build #${feedback.sourceRun}`, href: `/r/${feedback.sourceRun}` }, html: "", more: null });
+  }
+  for (const decision of data.decisions) {
+    if (decision.state === "open" || decision.state === "expired") continue;
+    thread.push({ key: `question-${decision.id}`, at: decision.createdAt, kind: "question", who: "agent", author: "", title: "Asked",
+      text: decision.question, link: { label: "Question", href: `/d/${decision.id}` }, html: "", more: null });
+    if (decision.answeredAt !== null) {
+      const chosen = decision.options.find(one => one.id === decision.choice)?.label ?? decision.choice;
+      thread.push({ key: `answer-${decision.id}`, at: decision.answeredAt, kind: "reply", who: "person", author: decision.answeredBy ?? "You", title: "Answered",
+        text: [chosen, decision.note].filter((one): one is string => one !== null && one !== "").join(" — ") || null, link: null, html: "", more: null });
+    }
+  }
+  // Open questions keep their answer card (and its #task-questions anchor).
+  if (decisionRail !== "") thread.push({ key: "questions", at: openDecisions.map(one => one.createdAt).sort()[0] ?? task.updatedAt, kind: "question", who: "agent", author: "",
+    title: openDecisions.length === 1 ? "Asked you a question" : `Asked you ${openDecisions.length} questions`, text: null, link: null, html: decisionRail, more: null });
+  for (const note of data.steering ?? []) {
+    thread.push({ key: `steer-${note.id}`, at: note.createdAt, kind: "reply", who: "person", author: note.author, title: "Note to the agent", text: note.note, link: null, html: "", more: null });
+  }
+  thread.sort((a, b) => a.at === b.at ? 0 : a.at < b.at ? -1 : 1);
+
+  // The Details panel: the same facts, grouped and said once.
+  const lastRunForAgent = liveRun ?? familyRuns.filter(run => run.role !== "reviewer").sort((a, b) => b.id - a.id)[0];
+  const work: BrowserTaskFact[] = [];
+  work.push({ label: "Status", parts: [data.assignment != null && assignmentOptions !== null ? assignmentCardOf(data.assignment, assignmentOptions).status.headline : status.label] });
+  if (data.repo !== null) work.push({ label: "Project", parts: [projectName(data.repo)] });
+  work.push({ label: "Agent", parts: [lastRunForAgent !== undefined ? `${lastRunForAgent.provider}${lastRunForAgent.model === null ? "" : ` · ${lastRunForAgent.model}`} on ${lastRunForAgent.runner}`
+    : data.route?.legacy != null ? `${data.route.legacy.provider} · ${data.route.legacy.model}` : "The project's default"] });
+  if (scope !== null) work.push({ label: "Checks level", parts: [qualityModeTitle(scope.qualityMode ?? "default")] });
+  for (const label of ["Worker", "Last attempt", "Queue", "Budget", "Policy", "Strikes"]) {
+    const fact = facts.find(one => one.label === label);
+    if (fact !== undefined) work.push(fact);
+  }
+  const links: BrowserTaskFact[] = [];
+  if (data.family != null && data.family.root.id !== task.id) links.push({ label: "Parent", parts: [{ label: data.family.root.title, href: `${taskHref(data.family.root.id)}?version=${encodeURIComponent(data.family.root.id)}` }] });
+  const blockers = data.waitsFor ?? [];
+  if (blockers.length > 0) links.push({ label: "Blocked by", parts: blockers.flatMap((one, index) => [...(index === 0 ? [] : [", "]), one.admitted ? { label: one.title ?? one.id, href: taskHref(one.id) } : one.id]) });
+  const laterVersions = (data.family?.versions ?? []).filter((one, index, all) => index > all.findIndex(version => version.id === task.id) && all.findIndex(version => version.id === task.id) >= 0);
+  if (laterVersions.length > 0) links.push({ label: "Follow-ups", parts: laterVersions.flatMap((one, index) => [...(index === 0 ? [] : [", "]), { label: one.title, href: `${taskHref(data.family!.root.id)}?version=${encodeURIComponent(one.id)}` }]) });
+  const published = facts.find(one => one.label === "Published");
+  if (published !== undefined) links.push({ ...published, label: "Pull request" });
+  else if (data.pullRequest?.view != null) {
+    const pr = data.pullRequest.view;
+    const prHref = safePrUrl(pr.prUrl);
+    links.push({ label: "Pull request", parts: [prHref === null ? `#${pr.prNumber ?? "?"}` : { label: `#${pr.prNumber ?? "?"}`, href: prHref }, ` · ${pr.label}`] });
+  }
+  const review: BrowserTaskFact[] = [];
+  const approvedScope = facts.find(one => one.label === "Approved scope" || one.label === "Scope");
+  if (approvedScope !== undefined) review.push({ ...approvedScope, label: approvedScope.label === "Approved scope" ? "Approvals" : "Scope" });
+  review.push({ label: "Who reviews", parts: [facts.find(one => one.label === "Approval rules")?.parts[0] as string | undefined ?? "Any approver in this project"] });
+  review.push({ label: "Publishes as", parts: [publishesAs] });
+  const about: BrowserTaskFact[] = [];
+  const filedFact = facts.find(one => one.label === "Filed by");
+  about.push(filedFact ?? { label: "Filed by", parts: [filedBy ?? (data.filedVia == null ? "Not recorded" : `via ${data.filedVia}`)] });
+  about.push({ label: "Filed", parts: [{ at: rootFiled }] });
+  about.push({ label: "Updated", parts: [{ at: task.updatedAt }] });
+  for (const label of ["Audit", "This attempt", "Task total"]) {
+    const fact = facts.find(one => one.label === label);
+    if (fact !== undefined) about.push({ ...fact, label: label === "Audit" ? "Audit" : label === "This attempt" ? "Usage, this attempt" : "Usage, all attempts" });
+  }
+  const details: BrowserTaskDetailGroup[] = [
+    { title: "Work", facts: work }, { title: "Links", facts: links }, { title: "Review", facts: review }, { title: "About", facts: about },
+  ];
+
   // The rebuilt page (shadcn/ui): the same parts in a calmer order — what
   // needs a person, then facts, then folds; the mechanics under Manage.
   const MANAGE = new Set(["steering", "waits-for", "holds"]);
@@ -21216,25 +21974,35 @@ function taskBodyParts(data: {
     status: data.assignment != null && assignmentOptions !== null ? assignmentCardOf(data.assignment, assignmentOptions) : null,
     statusHtml,
     approval: approvalHtml,
+    // The plan, progress and plan changes are thread entries now; the rest still needs a person here.
     lead: [
       { key: "history", html: data.history ?? "" }, { key: "control", html: controlHtml }, { key: "problem", html: problemHtml },
       { key: "pull-request", html: pullRequestCard },
-      { key: "needs-scope", html: needsScopeCard }, { key: "progress", html: progressCard }, { key: "revisions", html: revisionLedgerCard },
-      { key: "plan", html: planCard }, { key: "mirror", html: mirrorCard }, { key: "contest", html: contestCard }, { key: "attempt", html: attemptPanel },
+      { key: "needs-scope", html: needsScopeCard },
+      { key: "mirror", html: mirrorCard }, { key: "contest", html: contestCard }, { key: "attempt", html: attemptPanel },
     ].filter(one => one.html !== ""),
-    questions: decisionRail,
+    // Open questions are answered in the thread.
+    questions: "",
     facts,
     sections: [
-      ...(previousResult === null ? [] : [{ id: "result", title: previousResult.title, html: previousResult.html, open: false, count: null }]),
-      // A finished task leads with its result; its scope folds until asked.
-      ...sectionParts.filter(one => !MANAGE.has(one.id)).map(one => one.id === "scope" && finished && data.scopeDraft === undefined ? { ...one, open: false } : one),
+      ...(previousResult === null || thread.some(one => one.more !== null) ? [] : [{ id: "result", title: previousResult.title, html: previousResult.html, open: false, count: null }]),
+      // Questions are in the thread; the scope and the ledgers fold here until asked.
+      ...sectionParts.filter(one => !MANAGE.has(one.id) && one.id !== "decisions").map(one => one.id === "scope" && data.scopeDraft === undefined && (finished || approval.approved) ? { ...one, open: false } : one),
     ],
     manage: [
       ...sectionParts.filter(one => MANAGE.has(one.id)),
       { id: "task-diagnostics", title: "Task options", html: optionsHtml, open: optionsOpen, count: null },
     ],
     cancel: cancelForm === "" ? null : { html: cancelForm, open: data.cancelDraft !== undefined },
+    journey: data.guide !== true || task.state === "cancelled" || data.status === undefined ? null : (() => {
+      const planning = data.plan === "requested" && approveForm === "";
+      const read = data.assignment != null ? assignmentStageOf(data.assignment, { token: data.status.token }, planning) : stageOfCode(data.status.token, { planning });
+      return firstTaskJourney(read, scope !== null && approvalOf(scope).approved, task.state === "done");
+    })(),
     // "Do this every time…": the starter flow that does this kind of work on its own, one yes away.
+    thread,
+    details,
+    chatHref: data.csrf === "" ? null : taskChatHref(data.rootId ?? task.id),
     everyTime: data.repo === null || data.csrf === "" ? null : (() => {
       const starter = starterForWork(`${task.title}\n${scope?.goal ?? ""}`);
       return { href: `/settings/flows?repo=${encodeURIComponent(data.repo)}&starter=${starter.id}#starter-${starter.id}`, starter: starter.name };
@@ -21910,7 +22678,7 @@ function pullRequestCardHtml(pr: TaskPullRequest, csrf: string): string {
     `<input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="run" value="${view.runId}">` +
     `<p class="meta">${escape(view.mergeMethod === "squash" ? "Squash-merges" : view.mergeMethod === "rebase" ? "Rebase-merges" : "Merges")} PR #${view.prNumber} into ${escape(target)} and deletes its branch.</p>` +
     `<label>Password<input type="password" name="token" autocomplete="current-password" required></label>` +
-    `<button type="submit">Merge</button></form>`;
+    (view.fullCheck === null ? `<button type="submit">Merge</button>` : `<input type="hidden" name="anyway" value="1"><button type="submit" class="secondary">Merge anyway</button>`) + `</form>`;
   return `<section class="card pull-request pull-request--${tone}" id="merge" data-pull-request="${escape(view.state)}">` +
     `<div class="pull-request-head"><strong>${escape(view.label)}</strong>${link}</div>` +
     `<p class="meta">${escape(view.detail)}${revision}</p>${merged}${act}</section>`;
@@ -21956,6 +22724,16 @@ const PHASE_WORDS: Record<string, string> = {
   "capturing-evidence": "capturing evidence",
   committing: "committing",
 };
+
+/** An agent's phase on the home card, from the machine's own vocabulary. */
+function homePhaseWords(run: Pick<Run, "role" | "phase">): string {
+  if (run.role === "planner") return "Planning";
+  if (run.role === "reviewer") return "Reviewing";
+  if (run.role === "scout") return "Investigating";
+  const words: Record<string, string> = { "agent-running": "Writing the change", "validating-handoff": "Checking its handoff", "capturing-evidence": "Saving its evidence",
+    committing: "Committing", "verifying-proof": "Running the checks", "correcting-proof": "Correcting its evidence" };
+  return run.phase === null ? "Starting" : words[run.phase] ?? "Working";
+}
 
 function phaseWords(phase: string): string {
   return PHASE_WORDS[phase] ?? "the agent is working";
@@ -22813,6 +23591,35 @@ function evidenceBundleCard(view: ProofBundleView | null, run: Pick<Run, "id" | 
  * the operator's acceptance alone — shared with the review cockpit's
  * header chip so the two surfaces never name one state differently. */
 /** The receipt's facts as the shared projection reads them. */
+/** A result's follow-ups: checks run on its commit since it finished, and its tests task. */
+function followUpsFor(store: Store, evidenceRoot: string, run: Run, now: Date): NonNullable<ResultDetail["followUps"]> | null {
+  if (run.role !== "builder" || run.finishedAt === null || run.headRevision === null) return null;
+  const repo = store.refById(run.taskRef)?.repo ?? null;
+  const tests = store.handle.prepare("SELECT outcome FROM action_ledger WHERE run_id = ? AND action = ? ORDER BY id DESC LIMIT 1").get(run.id, ADD_TESTS_ACTION);
+  return { repo, checks: followUpChecksOf(store, run.id, now, evidenceRoot), testsTask: tests === undefined ? null : String(tests["outcome"]),
+    quick: repo !== null && liveQuickCommand(store, repo) !== null, full: repo !== null && store.liveVerifyCommand(repo) !== null };
+}
+
+const FOLLOW_UP_WORDS: Record<FollowUpCheck["state"], string> = { waiting: "waiting for a worker", running: "running", passed: "passed", failed: "failed", "not-run": "didn't run" };
+/** Run checks and Add tests, under the result's Checks: what ran since, then the two acts. */
+function followUpsHtml(followUps: NonNullable<ResultDetail["followUps"]>, runId: number, o: ResultPanelOptions): string {
+  const rows = followUps.checks.map(one => `<li data-follow-up-check="${one.state}">${escape(CHECK_LEVEL_WORDS[one.level])} checks ${escape(FOLLOW_UP_WORDS[one.state])}` +
+    `${one.exitCode === null || one.state === "passed" ? "" : ` (exit ${one.exitCode})`} on <span class="mono">${escape(one.head.slice(0, 7))}</span>` +
+    `<span class="meta"> · ${one.why === "pull-request" ? "for the pull request" : escape(one.actor)}${one.note === null ? "" : ` · ${escape(one.note)}`}</span>` +
+    `${one.logArtifactId === null ? "" : ` <a href="/r/${runId}/evidence/${one.logArtifactId}">Log</a>`}</li>`).join("");
+  const hidden = `<input type="hidden" name="csrf" value="${escape(o.csrf)}"><input type="hidden" name="return" value="${escape(o.returnTo)}">`;
+  const canCheck = followUps.quick || followUps.full;
+  const checkActs = !canCheck || o.csrf === "" ? "" : `<form method="post" action="/r/${runId}/checks" class="follow-up-act">${hidden}` +
+    (followUps.quick && followUps.full ? `<button type="submit" name="level" value="quick">Run quick checks</button><button type="submit" name="level" value="full" class="secondary">Run full checks</button>`
+      : `<button type="submit" name="level" value="${followUps.quick ? "quick" : "full"}">Run checks</button>`) + `</form>`;
+  const tests = followUps.testsTask !== null ? `<p class="meta">Tests task: <a href="${taskHref(followUps.testsTask)}">${escape(followUps.testsTask)}</a></p>`
+    : o.csrf === "" ? "" : `<form method="post" action="/r/${runId}/add-tests" class="follow-up-act">${hidden}<button type="submit" class="secondary">Add tests</button></form>`;
+  return `<section class="result-section follow-ups" id="follow-ups" data-follow-ups><strong>Follow-ups</strong>` +
+    (rows === "" ? "" : `<ul class="follow-up-list">${rows}</ul>`) +
+    (canCheck || followUps.repo === null ? "" : `<p class="meta">No approved check to run. <a href="/settings/checks?repo=${encodeURIComponent(followUps.repo)}">Set one up</a>.</p>`) +
+    (checkActs === "" && tests === "" ? "" : `<div class="follow-up-acts">${checkActs}${tests}</div>`) + `</section>`;
+}
+
 function receiptStatusOf(view: CompletionReceiptView, review: ReviewFacts | null = view.review): DisplayStatus {
   // The evidence health rides the status (repair 2026-09-14): a result
   // whose stored records are damaged is never called ready on the strength
@@ -22969,6 +23776,8 @@ type ResultDetail = {
   signedCriteria: number;
   /** Whether a reviewer can annotate here (sealed non-empty patch verifies, cookie session). */
   canAnnotate: boolean;
+  /** Follow-ups on this result (result-follow-ups.ts): checks run since, the tests task, and what can run. */
+  followUps?: { repo: string | null; checks: FollowUpCheck[]; testsTask: string | null; quick: boolean; full: boolean } | null;
 };
 
 type ResultPanelOptions = {
@@ -23019,7 +23828,9 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
   const { run, receipt, proof, terminal, handoff } = detail;
   const facts = receipt.facts;
   const current = detail.assignment?.receipt?.runId === run.id ? detail.assignment : null;
-  const resultLinks = { result: o.hrefFor("summary"), checks: o.hrefFor("checks"), pullRequest: `${taskHref(detail.rootId ?? detail.taskId)}#merge` };
+  const followUps = detail.followUps ?? null;
+  const resultLinks = { result: o.hrefFor("summary"), checks: o.hrefFor("checks"), pullRequest: `${taskHref(detail.rootId ?? detail.taskId)}#merge`,
+    ...(followUps !== null && (followUps.quick || followUps.full) && o.csrf !== "" ? { runChecks: `${o.hrefFor("checks")}#follow-ups` } : {}) };
   const presentation = current == null ? null : assignmentPresentationOf(current, { additionalAttention: [...facts.evidenceProblems, ...receipt.caveats],
     ...(detail.publication === null ? {} : { pullRequest: pullRequestFactOf({ ...detail.publication, lastCheckState: detail.ciFailing ? "failing" : detail.publication.lastCheckState }) }),
     evidence: { damaged: facts.evidenceHealth.damaged, missing: facts.evidenceHealth.missing, shortened: facts.evidenceHealth.shortened }, links: resultLinks });
@@ -23254,7 +24065,7 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
       );
     }
     if (proof.proofProblem !== null) checkParts.push(`<p class="problem">Verification details are unavailable: ${escape(proof.proofProblem)}</p>`);
-    checkParts.push(proof.checkLog === null ? `<p class="meta" data-cockpit-source="machine">No automated check was configured for this build.</p>` : checkLogHtml(proof.checkLog, runId, ' data-cockpit-source="machine"'));
+    checkParts.push(proof.checkLog === null ? `<p class="meta" data-cockpit-source="machine">${current?.receipt?.checks.level === "off" ? "Checks were off for this build." : "No automated check was configured for this build."}</p>` : checkLogHtml(proof.checkLog, runId, ' data-cockpit-source="machine"'));
     checkParts.push(
       proof.proof === null || proof.proof.checks.length === 0
         ? directAssessment ? "" : `<p class="meta" data-cockpit-source="agent">The agent reported no checks.</p>`
@@ -23278,6 +24089,7 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
         : `<details class="cockpit-proof-group" data-cockpit-source="caveats"><summary>Agent caveats · ${receipt.caveats.length}</summary><ul>${receipt.caveats.map(one => `<li>${escape(one)}</li>`).join("")}</ul></details>`,
     );
   }
+  if (followUps !== null && run.role === "builder") checkParts.push(followUpsHtml(followUps, runId, o));
   // The handoff's own account of its checks — the agent's words, labeled
   // as such, whether or not a proof exists.
   if (!directAssessment && handoff !== null && handoff.verification.length > 0) checkParts.push(`<div class="result-section" data-cockpit-source="agent-words"><strong>the agent's own account</strong><ul>${handoff.verification.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`);
@@ -23892,6 +24704,14 @@ function telegramDeliveryWords(store: Store, bot: TokenSource | null): string | 
   return `Toolroll asks Telegram for new messages every few seconds${state?.problem ? ` (${state.problem})` : ""}.`;
 }
 
+/** The projects this person can see, by name, and whether they muted each one's pings. */
+function notificationProjects(store: Store, account: string): { repo: string; name: string; muted: boolean }[] {
+  const muted = new Set(store.mutedProjects(account));
+  return store.listProjects().filter(one => store.accountCanAccess(account, one.path))
+    .map(one => ({ repo: one.path, name: one.name, muted: muted.has(one.path) }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
 function settingsPage(
   chrome: Chrome,
   existing: TokenSource | null,
@@ -23909,7 +24729,7 @@ function settingsPage(
   workers: NonNullable<BrowserSettingsView["workers"]> | null = null,
   updates: BrowserUpdates | null = null,
   firstResult: string | null = null,
-  chatNotices: { mode: "quiet" | "all"; digestAt: string | null } | null = null,
+  chatNotices: { mode: "quiet" | "all"; digestAt: string | null; projects?: { repo: string; name: string; muted: boolean }[] } | null = null,
 ): Screen {
   const permissionCard =
     permissionDefault === null
@@ -23957,6 +24777,14 @@ function settingsPage(
           `<p class="meta">One message: what finished, what waits, what failed.</p>`,
           `<button type="submit">Save</button>`,
           `</form>`,
+          ...((chatNotices.projects ?? []).length === 0 ? [] : [
+            "<h3>Projects</h3>",
+            `<ul class="card">${chatNotices.projects!.map(one => `<li><form method="post" action="/settings/notifications/mute">` +
+              `<input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="repo" value="${escape(one.repo)}">` +
+              (one.muted ? "" : `<input type="hidden" name="pings" value="on">`) +
+              `${escape(one.name)} <span class="meta">· ${one.muted ? "muted" : "pings on"}</span> <button type="submit">${one.muted ? "Unmute" : "Mute"}</button></form></li>`).join("")}</ul>`,
+            `<p class="meta">Muted projects still show in Tasks and the evening digest.</p>`,
+          ]),
         ].join("\n");
   const digestCard =
     digest === null || csrf === "" || chatNotices?.mode === "quiet"
@@ -24258,6 +25086,7 @@ function settingsTiles(): string {
 const SETTINGS_TILE_ICONS: [string, string, string][] = [
     ["/settings/flows", "Flows", `<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><path d="M10 6.5h4a3 3 0 0 1 3 3V14"/>`],
     ["/settings/integrations", "Integrations", `<path d="M9 2v6M15 2v6"/><path d="M6 8h12v4a6 6 0 0 1-12 0z"/><path d="M12 18v4"/>`],
+    ["/settings/lead", "Lead", `<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M8 9h8M8 13h5"/>`],
     ["/settings/models", "Models", `<rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/>`],
     ["/settings/skills", "Skills", `<path d="m12 3 1.9 5.8L20 10l-5 3.6L16.8 20 12 16.4 7.2 20 9 13.6 4 10l6.1-1.2z"/>`],
     ["/settings/tools", "Tools", `<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>`],

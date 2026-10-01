@@ -17,10 +17,12 @@ import { browserCrewFromIndex } from "../browser-crew.js";
 import type { TeamSnapshot } from "../team-contract.js";
 import { GuardedHtml, notifyWorkspaceRendered, regionIsEditing } from "./guarded-html.js";
 import { ActionCards, CHAT_COMMANDS } from "./chat-cards.js";
-import { FirstRun, withSuggestion } from "./first-run.js";
-import { ViewHost } from "./views/index.js";
+import { FirstRequest, FirstRun, PhoneCard, withSuggestion } from "./first-run.js";
+import { TaskDetails, ViewHost, type ThreadChat } from "./views/index.js";
+import { threadWhen } from "./views/task-view.js";
+import { Home } from "./views/home-view.js";
 import { HeadlineBadge } from "./views/status-summary.js";
-import { Toaster } from "./components/ui/index.js";
+import { Toaster, Button as ViewButton, cn } from "./components/ui/index.js";
 import { updateNoticeWords } from "../update-notice.js";
 import "./workspace.css";
 
@@ -171,7 +173,7 @@ export function useWorkspace(initial: BrowserWorkspace) {
     };
   }, [check, initial.conversation, initial.refreshSeconds]);
 
-  const send = async (event: FormEvent) => {
+  const send = async (event: FormEvent, mode: string | null = null) => {
     event.preventDefault();
     const current = state.current;
     if (sendLatch.current || current.stale || navigator.onLine === false || current.draft.pending
@@ -183,7 +185,7 @@ export function useWorkspace(initial: BrowserWorkspace) {
     updateDraft(next);
     setNotice("");
     try {
-      const result = await sendMessage(current.workspace, next.pending);
+      const result = await sendMessage(current.workspace, next.pending, fetch, mode);
       if (!mounted.current) return;
       if (result.refused) {
         updateDraft(rejectDraft(state.current.draft, next.pending.request));
@@ -465,8 +467,8 @@ function LeadChat({ controller, docked = null }: { controller: ReturnType<typeof
   const delivery = offline ? "Offline. Your draft stays in this tab." : sending ? "Sending…" : notice;
   return <div className="so-lead-chat" data-workspace-chat>
     <Conversation className="so-conversation"><ConversationContent className="so-conversation-content">
-      {!dock && workspace.firstRun && <FirstRun firstRun={workspace.firstRun} onDraft={text => { controller.edit(withSuggestion(draft.text, text)); box.current?.focus(); }} />}
-      {!dock && workspace.catchUpHtml && <GuardedHtml html={workspace.catchUpHtml} className="so-catch-up" />}
+      {!dock && workspace.firstRun && <FirstRun firstRun={workspace.firstRun} />}
+      {!dock && (workspace.home ? <div className="so-catch-up" data-view="home"><Home home={workspace.home} /></div> : workspace.catchUpHtml && <GuardedHtml html={workspace.catchUpHtml} className="so-catch-up" />)}
       {chat.messages.length === 0 && (!dock && workspace.firstRun ? null : dock
         ? <div className="so-docked-empty"><p className="so-docked-empty-title">{dock.title}</p><p className="so-docked-empty-hint">{dock.hint}</p>
             <div className="so-suggestions">{dock.suggestions.map(one => <button key={one} type="button" className="so-suggestion" onClick={() => { controller.edit(one); box.current?.focus(); }}>{one.trim().replace(/:$/, "…")}</button>)}</div></div>
@@ -484,6 +486,8 @@ function LeadChat({ controller, docked = null }: { controller: ReturnType<typeof
       {(busy || live !== null) && <LiveReplyBubble live={live} />}
     </ConversationContent><ConversationScrollButton /></Conversation>
     <div className="so-composer-area">
+      {!dock && workspace.phone && <PhoneCard phone={workspace.phone} csrf={workspace.csrf} />}
+      {!dock && workspace.firstRun && chat.messages.length === 0 && !busy && <FirstRequest firstRun={workspace.firstRun} onDraft={text => { controller.edit(withSuggestion(draft.text, text)); box.current?.focus(); }} />}
       {delivery && <div className="so-connection" role={stale ? "alert" : "status"}><span>{delivery}</span>
         {stale ? <Button variant="secondary" size="sm" onClick={controller.reconnect}>Reconnect</Button> : !sending && !offline && <Button variant="ghost" size="sm" onClick={() => { void controller.check(); }}>Check again</Button>}
       </div>}
@@ -513,6 +517,77 @@ function LeadChat({ controller, docked = null }: { controller: ReturnType<typeof
       {!dock && workspace.controlsHtml && <Disclosure summary="Conversation settings" className="so-conversation-settings"><GuardedHtml html={workspace.controlsHtml} immutable /></Disclosure>}
     </div>
   </div>;
+}
+
+/** The task composer's modes: what the lead may come back with. Every action
+ * still arrives as a card the person confirms; the mode grants nothing. */
+const TASK_MODES = [
+  { id: "build", label: "Build", hint: "Changes come back for you to confirm" },
+  { id: "plan", label: "Plan only", hint: "A plan only; nothing is filed" },
+  { id: "answer", label: "Just answer", hint: "An answer only" },
+] as const;
+type TaskMode = (typeof TASK_MODES)[number]["id"];
+
+/** The task's conversation as thread entries, and the composer that ends the
+ * thread. Sending is the same one POST to /chat as every chat composer. */
+function useTaskThreadChat(controller: ReturnType<typeof useWorkspace>): ThreadChat | null {
+  const { workspace, draft, notice, storageAvailable, sending, stale, offline } = controller;
+  const chat = workspace.conversation;
+  const box = useRef<HTMLTextAreaElement>(null);
+  const modeName = useId();
+  const [mode, setMode] = useState<TaskMode>("build");
+  // Only a task page's thread watches here; every other conversation has its own LeadChat.
+  const active = chat !== null && !!chat.taskId && !workspace.team && workspace.view?.kind === "task";
+  const busy = chat !== null && chat.pendingTurnId !== null;
+  const live = useLiveReply(chat, active && (busy || (draft.pending !== null && !sending)), () => { void controller.check(); });
+  useLayoutEffect(() => { const el = box.current; if (el) { const phone = matchMedia("(max-width: 760px)").matches; el.style.height = phone ? "0px" : "auto"; el.style.height = `${Math.min(180, Math.max(phone ? 44 : 48, el.scrollHeight))}px`; } }, [draft.text]);
+  if (!active || chat === null) return null;
+  const disabled = sending || stale || offline || busy || draft.pending !== null || !draft.text.trim();
+  const delivery = offline ? "Offline. Your draft stays in this tab." : sending ? "Sending…" : notice;
+  const hint = TASK_MODES.find(one => one.id === mode)!.hint;
+  return {
+    entries: chat.messages.map(message => ({ key: `message-${message.id}`, at: message.createdAt, node:
+      <li key={`message-${message.id}`} data-message-id={message.id} data-thread-kind="message" className="so-thread-entry relative flex gap-3">
+        <span aria-hidden="true" className="relative z-[1] flex size-6 shrink-0 items-center justify-center rounded-full border border-border bg-card text-[10.5px] font-semibold text-muted-foreground">{message.role === "operator" ? "Y" : "L"}</span>
+        <div className="min-w-0 flex-1 pb-5 phone:pb-4">
+          <p className="flex min-h-6 flex-wrap items-baseline gap-x-2 text-[13px] leading-6">
+            <span className="font-medium">{message.role === "operator" ? "You" : "Lead"}</span>
+            <time dateTime={message.createdAt} className="ml-auto text-xs tabular-nums text-muted-foreground">{threadWhen(message.createdAt)}</time>
+          </p>
+          <MessageContent className={message.role === "operator" ? "so-thread-mine" : "so-thread-theirs"}><GuardedHtml html={message.html} />
+            {message.activity && <Disclosure summary="Activity"><p className="so-activity-copy">{message.activity}</p></Disclosure>}
+            {message.cards !== undefined && message.cards.length > 0
+              ? <ActionCards cards={message.cards} csrf={workspace.csrf} onChanged={() => { void controller.check(); }} />
+              : message.cardsHtml && <GuardedHtml html={message.cardsHtml} className="so-message-cards" />}
+          </MessageContent>
+        </div>
+      </li> })),
+    footer: <div className="so-task-composer flex flex-col gap-2">
+      {(busy || live !== null) && <LiveReplyBubble live={live} />}
+      {delivery && <div className="so-connection" role={stale ? "alert" : "status"}><span>{delivery}</span>
+        {stale ? <ViewButton variant="outline" size="sm" onClick={controller.reconnect}>Reconnect</ViewButton> : !sending && !offline && <ViewButton variant="ghost" size="sm" onClick={() => { void controller.check(); }}>Check again</ViewButton>}
+      </div>}
+      <form onSubmit={event => { void controller.send(event, mode); }} action="/chat" method="post" data-workspace-composer data-task-composer aria-busy={sending}
+        className="rounded-xl border border-input bg-card px-3 pb-2 pt-2.5 shadow-[0_1px_2px_rgb(0_0_0/.04)] transition-[border-color,box-shadow] duration-100 focus-within:border-attention focus-within:shadow-[0_0_0_3px_var(--so-signal-soft)] phone:px-2.5">
+        <label htmlFor="task-message" className="sr-only">Message the agent</label>
+        <textarea ref={box} id="task-message" name="message" rows={2} maxLength={chat.maxChars} placeholder="Message the agent: ask, or ask for a change" value={draft.text}
+          className="block max-h-[180px] min-h-12 w-full resize-none px-0.5 pb-2 text-sm leading-relaxed outline-none placeholder:text-muted-foreground phone:min-h-11 phone:text-base"
+          onChange={event => controller.edit(event.target.value)} onKeyDown={event => {
+            if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); if (!disabled) event.currentTarget.form?.requestSubmit(); }
+          }} aria-describedby="task-composer-hint" />
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+          <div role="radiogroup" aria-label="Mode" className="so-mode-switch">
+            {TASK_MODES.map(one => <label key={one.id} className="so-mode" data-mode={one.id}>
+              <input type="radio" name={modeName} value={one.id} checked={mode === one.id} onChange={() => setMode(one.id)} />
+              <span>{one.label}</span>
+            </label>)}
+          </div>
+          <span id="task-composer-hint" className="min-w-0 flex-1 truncate text-xs text-muted-foreground">{!storageAvailable ? "Draft stays on this page only." : draft.text.length > chat.maxChars - 200 ? `${draft.text.length} / ${chat.maxChars}` : hint}</span>
+          <ViewButton type="submit" size="sm" disabled={disabled} aria-label="Send message" className={cn("ml-auto")}><Icon name="send" /><span>Send</span></ViewButton>
+        </div>
+      </form>
+    </div>,
+  };
 }
 
 /** The workspace scrolls inside its panes; the window never should. A #section
@@ -545,9 +620,22 @@ export function WorkspaceApp({ initial }: { initial: BrowserWorkspace }) {
   const section = workspace.navigation.find(item => item.active)?.label ?? (workspace.title.charAt(0).toUpperCase() + workspace.title.slice(1));
   // The Ask panel (v77): a page with its own view and its own conversation
   // keeps the page in the middle and the conversation beside it.
-  const docked = !workspace.team && workspace.conversation !== null && workspace.view != null;
+  // A task page (console v2): the conversation is the page's own thread, and
+  // the right sheet is its Details (a Details sheet on a phone).
+  const taskView = !workspace.team && workspace.view?.kind === "task" ? workspace.view : null;
+  const docked = !workspace.team && workspace.conversation !== null && workspace.view != null && taskView === null;
   const [panelTab, setPanelTab] = useState<"chat" | "crew">("chat");
-  const pageOnly = !workspace.team && (!workspace.conversation || docked);
+  const pageOnly = !workspace.team && (!workspace.conversation || docked || taskView !== null);
+  const taskChat = useTaskThreadChat(controller);
+  useEffect(() => {
+    if (taskView === null) return;
+    const show = () => setPhoneView("work");
+    window.addEventListener("so:show-details", show);
+    // A link that arrives at a fold in Details (#scope, #holds…) opens the sheet on a phone.
+    const id = decodeURIComponent(window.location.hash.slice(1));
+    if (id !== "" && document.getElementById(id)?.closest("[data-task-details]")) show();
+    return () => window.removeEventListener("so:show-details", show);
+  }, [taskView === null]);
   // The Tasks page already lists every task; the Crew panel would repeat it.
   // A flow's canvas needs the whole width.
   // Pages that are themselves a list of work, or need the width (the board's columns, a coding session), go without the side panel.
@@ -557,7 +645,7 @@ export function WorkspaceApp({ initial }: { initial: BrowserWorkspace }) {
   const update = workspace.update !== undefined && workspace.update.version !== dismissedUpdate ? workspace.update : null;
   useEffect(notifyWorkspaceRendered, []);
   useWindowStaysPut();
-  return <><Toaster /><div className={`so-workspace${hidePanel ? " so-workspace--single" : ""}${docked ? " so-workspace--docked" : ""}`} data-workspace-shell data-workspace-phone-view={phoneView} data-workspace-has-result={workspace.result !== null}>
+  return <><Toaster /><div className={`so-workspace${hidePanel ? " so-workspace--single" : ""}${docked || taskView !== null ? " so-workspace--docked" : ""}${taskView !== null ? " so-workspace--details" : ""}`} data-workspace-shell data-workspace-phone-view={phoneView} data-workspace-has-result={workspace.result !== null}>
     <a href="#workspace-main" className="so-skip-link">Skip to content</a>
     <aside className="so-sidebar"><Navigation workspace={workspace} /></aside>
     <div className={`so-main-column${isChat ? " so-main-column--chat" : ""}`}>
@@ -568,6 +656,7 @@ export function WorkspaceApp({ initial }: { initial: BrowserWorkspace }) {
         <CommandMenu workspace={workspace} />
         {isChat && <Button variant="secondary" size="sm" className="so-phone-work-button" onClick={() => setPhoneView("work")}>{hasWork ? "Open work" : "Crew"}</Button>}
         {docked && <Button variant="secondary" size="sm" className="so-phone-work-button" onClick={() => { setPanelTab("chat"); setPhoneView("work"); }}><Icon name="chat" />Ask</Button>}
+        {taskView !== null && <Button variant="secondary" size="sm" className="so-phone-work-button" data-open-details onClick={() => setPhoneView("work")}>Details</Button>}
       </header>
       {(workspace.notices.length > 0 || (workspace.signIn?.length ?? 0) > 0 || update !== null) && <div className="so-workspace-notices">
         {workspace.signIn?.map(item => <Alert key={item.provider} className="so-sign-in" data-sign-in={item.provider}>
@@ -590,7 +679,7 @@ export function WorkspaceApp({ initial }: { initial: BrowserWorkspace }) {
         </Alert>}
       </div>}
       <main id="workspace-main" className="so-main-content" tabIndex={-1}>
-        {workspace.team ? <TeamChat initial={workspace.team} user={workspace.user} csrf={workspace.csrf} onSnapshot={setTeamSnapshot} /> : workspace.conversation && !docked ? <LeadChat controller={controller} /> : <div className="so-page-content" data-workspace-page>{isChat && workspace.firstRun && <FirstRun firstRun={workspace.firstRun} />}{workspace.view ? <ViewHost view={workspace.view} csrf={workspace.csrf} /> : <GuardedHtml html={initial.pageHtml ?? ""} immutable />}</div>}
+        {workspace.team ? <TeamChat initial={workspace.team} user={workspace.user} csrf={workspace.csrf} onSnapshot={setTeamSnapshot} /> : workspace.conversation && !docked && taskView === null ? <LeadChat controller={controller} /> : <div className="so-page-content" data-workspace-page>{isChat && workspace.firstRun && <FirstRun firstRun={workspace.firstRun} />}{workspace.view ? <ViewHost view={workspace.view} csrf={workspace.csrf} taskChat={taskChat} taskDetails={false} /> : <GuardedHtml html={initial.pageHtml ?? ""} immutable />}</div>}
       </main>
     </div>
     {docked && <aside className="so-supporting-panel so-ask-panel" data-workspace-detail aria-label="Ask">
@@ -604,7 +693,14 @@ export function WorkspaceApp({ initial }: { initial: BrowserWorkspace }) {
       <div className="so-ask-body" hidden={panelTab !== "chat"}><LeadChat controller={controller} docked={workspace.view?.kind ?? "task"} /></div>
       {panelTab === "crew" && <Crew workspace={workspace} />}
     </aside>}
-    {!hidePanel && !docked && <aside className={`so-supporting-panel${hasWork ? " so-supporting-panel--detail" : ""}`} data-workspace-detail>
+    {taskView !== null && <aside className="so-supporting-panel so-details-panel" data-workspace-detail aria-label="Details">
+      <div className="so-details-header">
+        <Button variant="ghost" size="sm" className="so-phone-back" onClick={() => setPhoneView("chat")}><Icon name="arrow" />Back</Button>
+        <h2>Details</h2>
+      </div>
+      <div data-view="task-details" className="w-full"><TaskDetails view={taskView} /></div>
+    </aside>}
+    {!hidePanel && !docked && taskView === null && <aside className={`so-supporting-panel${hasWork ? " so-supporting-panel--detail" : ""}`} data-workspace-detail>
       <div className="so-work-panel-header"><Button variant="ghost" size="sm" className="so-phone-back" onClick={() => setPhoneView("chat")}><Icon name="arrow" />{isChat ? "Back to chat" : "Back"}</Button>
         {hasWork && <><h2>{workspace.result ? "Result" : "Task"}</h2>{workspace.result && selectedTask && <HeadlineBadge label={selectedTask.label} tone={selectedTask.tone} className="so-current-task-state" data-workspace-current-task-state="" />}<a href={teamSnapshot?.selected ? "/chat?conversation=" + encodeURIComponent(teamSnapshot.selected.id) : "/chat"} className="so-close-work" aria-label="Close work and return to the main chat"><Icon name="close" /></a></>}
       </div>

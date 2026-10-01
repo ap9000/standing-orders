@@ -5,19 +5,28 @@
  *
  *   - unit tests related to the changed files (`vitest related <files>`);
  *     the whole suite when test setup, config or dependencies changed
- *   - the browser journeys (flows-e2e and every app-e2e group) only when the
+ *   - the browser journeys (every flows-e2e and app-e2e group) only when the
  *     change touches something a page shows: the console, the server that
  *     renders it, the e2e scripts, or dependencies
  *   - nothing more for docs, evidence and design notes
  *
+ * A package.json or package-lock.json whose only change is the project's own
+ * "version" (a release's bump) is not a dependency change; any other change
+ * to them is.
+ *
+ * Everything starts at once: typecheck, build and the unit tests (whose setup
+ * waits for this build rather than building again); the journeys start when
+ * the build is done, flows-e2e and app-e2e each in parallel groups
+ * (scripts/e2e-parallel.mjs).
+ *
  * The base is origin/main, fetched fresh; files are compared, not ancestry.
  * No difference from main (or no main) means everything runs. `--full` (or TOOLROLL_FULL_CHECK=1) runs
- * everything, as the check did before. Ends with the same `== summary` block.
+ * everything, as the check did before. Ends with the same `== summary` block, and how long each part took.
  *
  *   node scripts/release-check.mjs [--full] [--base <ref>] [--plan]
  */
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -26,7 +35,7 @@ const full = args.includes("--full") || process.env.TOOLROLL_FULL_CHECK === "1";
 const planOnly = args.includes("--plan");
 const baseFlag = args.includes("--base") ? args[args.indexOf("--base") + 1] : undefined;
 
-const git = (...argv) => execFileSync("git", argv, { encoding: "utf8" }).trim();
+const git = (...argv) => execFileSync("git", argv, { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 }).trim();
 const tryGit = (...argv) => { try { return git(...argv); } catch { return null; } };
 
 /**
@@ -51,11 +60,32 @@ const BROWSER = [
 ];
 /** Changes no test reads. */
 const NOTHING = [/\.md$/, /^docs\//, /^evidence\//, /^design\//, /^output\//, /^LICENSE$/, /\.png$/];
+/** Where a release bumps the project's own version. */
+const VERSIONED = ["package.json", "package-lock.json"];
 
-export function planFor(changed, { full: all = false } = {}) {
+/**
+ * Whether `file` changed from `before` to `after` only in the project's own version: the top-level "version" (and, in
+ * the lockfile, the root package's). Anything else — a dependency, a script, a reordering, a file added or removed —
+ * is a real change.
+ */
+export function versionOnly(file, before, after) {
+  if (!VERSIONED.includes(file) || typeof before !== "string" || typeof after !== "string") return false;
+  const rest = text => {
+    const json = JSON.parse(text);
+    if (json === null || typeof json !== "object" || Array.isArray(json)) throw new Error("not an object");
+    delete json.version;
+    if (file === "package-lock.json" && json.packages?.[""] !== undefined) delete json.packages[""].version;
+    return JSON.stringify(json);
+  };
+  try { return rest(before) === rest(after); } catch { return false; }
+}
+
+export function planFor(changed, { full: all = false, versionBumps = [] } = {}) {
   if (all) return { unit: "all", browser: true, why: "a full check was asked for" };
-  const code = changed.filter(file => !NOTHING.some(re => re.test(file)));
-  if (code.length === 0) return { unit: "none", browser: false, why: "only docs, evidence or design notes changed" };
+  const bumped = changed.filter(file => versionBumps.includes(file));
+  const bump = bumped.length === 0 ? "" : `; only the version changed in ${bumped.join(" and ")}`;
+  const code = changed.filter(file => !NOTHING.some(re => re.test(file)) && !bumped.includes(file));
+  if (code.length === 0) return { unit: "none", browser: false, why: bumped.length === 0 ? "only docs, evidence or design notes changed" : `nothing a test reads changed${bump}` };
   const wholeUnit = code.find(file => WHOLE_UNIT.some(re => re.test(file)));
   const page = code.find(file => BROWSER.some(re => re.test(file)));
   return {
@@ -64,51 +94,71 @@ export function planFor(changed, { full: all = false } = {}) {
     why: [
       wholeUnit !== undefined ? `every unit test (${wholeUnit} changed)` : "unit tests related to the change",
       page !== undefined ? `browser journeys (${page} changed)` : "no browser journeys (nothing a page shows changed)",
-    ].join("; "),
+    ].join("; ") + bump,
   };
 }
 
-const run = (label, command, argv, dir) => new Promise(done => {
+const run = (label, command, argv, dir, env = {}) => new Promise(done => {
   const log = join(dir, `${label}.log`);
-  const child = spawn(command, argv, { stdio: ["ignore", "pipe", "pipe"] });
+  const at = Date.now();
+  const child = spawn(command, argv, { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...env } });
   const chunks = [];
   for (const stream of [child.stdout, child.stderr]) stream.on("data", chunk => chunks.push(chunk));
-  child.on("close", code => { writeFileSync(log, Buffer.concat(chunks)); done({ label, code: code ?? 1, log }); });
+  child.on("close", code => { writeFileSync(log, Buffer.concat(chunks)); done({ label, code: code ?? 1, log, ms: Date.now() - at }); });
 });
+const took = ms => ms < 60_000 ? `${Math.round(ms / 1000)} s` : `${Math.round(ms / 6000) / 10} min`;
 
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
+  const started = Date.now();
   const base = baseOf();
   const changed = base === null ? [] : git("diff", "--name-only", base, "HEAD").split("\n").filter(Boolean);
+  const versionBumps = base === null ? [] : VERSIONED.filter(file => changed.includes(file) && versionOnly(file, tryGit("show", `${base}:${file}`), tryGit("show", `HEAD:${file}`)));
   // No main to compare with, or nothing differs from it (a release of main itself): check everything.
-  const plan = planFor(changed, { full: full || changed.length === 0 });
+  const plan = planFor(changed, { full: full || changed.length === 0, versionBumps });
   console.log(`Release check against ${base === null ? "nothing (origin/main unknown)" : `origin/main ${base.slice(0, 12)}`} (${changed.length} changed files): ${plan.why}.`);
   if (planOnly) process.exit(0);
 
-  try {
-    execFileSync("npm", ["run", "typecheck"], { stdio: "inherit" });
-    execFileSync("npm", ["run", "build"], { stdio: "inherit" });
-  } catch { process.exit(1); }
-
   const dir = mkdtempSync(join(tmpdir(), "release-check-"));
-  const jobs = [];
-  if (plan.unit === "all") jobs.push(run("unit", "npm", ["test", "--", "--run", "--reporter=dot"], dir));
+  // The unit tests' setup (test/ensure-build.ts) waits for this file: the build's outcome.
+  const built = join(dir, "build-outcome");
+  const typecheck = run("typecheck", "npm", ["run", "typecheck"], dir);
+  const build = run("build", "npm", ["run", "build"], dir).then(one => {
+    // Whole or not at all: written aside, then renamed into place.
+    writeFileSync(`${built}.part`, one.code === 0 ? "ok" : `failed (exit ${one.code})`);
+    renameSync(`${built}.part`, built);
+    return one;
+  });
+  const unitEnv = { TOOLROLL_RELEASE_BUILD: built };
+  const units = [];
+  if (plan.unit === "all") units.push(run("unit", "npm", ["test", "--", "--run", "--reporter=dot"], dir, unitEnv));
   // The changed files themselves, not `--changed <ref>`: vitest reads that as
   // ancestry (ref...HEAD), which the gate's own commit makes meaningless.
   const sources = changed.filter(file => /\.(?:[cm]?[jt]sx?)$/.test(file) && existsSync(file));
-  if (plan.unit === "related" && sources.length > 0) jobs.push(run("unit", "npx", ["vitest", "related", "--run", "--reporter=dot", "--passWithNoTests", ...sources], dir));
-  if (plan.browser) {
-    jobs.push(run("flows", process.execPath, ["scripts/flows-e2e.mjs"], dir));
-    jobs.push(run("app", process.execPath, ["scripts/e2e-parallel.mjs", "scripts/app-e2e.mjs", "--skip-build"], dir));
-  }
-  const results = await Promise.all(jobs);
-  for (const one of results) { console.log(`== ${one.label}`); console.log(readFileSync(one.log, "utf8")); }
+  if (plan.unit === "related" && sources.length > 0) units.push(run("unit", "npx", ["vitest", "related", "--run", "--reporter=dot", "--passWithNoTests", ...sources], dir, unitEnv));
+  // The journeys need the built console; they don't start when the build (or a typecheck already done) failed.
+  let typed = null, held = false;
+  typecheck.then(one => { typed = one; });
+  const journeys = build.then(one => {
+    held = plan.browser && (one.code !== 0 || (typed !== null && typed.code !== 0));
+    if (!plan.browser || held) return [];
+    return Promise.all([
+      run("flows", process.execPath, ["scripts/e2e-parallel.mjs", "scripts/flows-e2e.mjs"], dir),
+      run("app", process.execPath, ["scripts/e2e-parallel.mjs", "scripts/app-e2e.mjs", "--skip-build"], dir),
+    ]);
+  });
+  const first = await Promise.all([typecheck, build]);
+  const results = [...await Promise.all(units), ...await journeys];
+  for (const one of [...first, ...results]) { console.log(`== ${one.label}`); console.log(readFileSync(one.log, "utf8")); }
   console.log("== summary");
   console.log(`plan: ${plan.why}`);
+  for (const one of first.filter(each => each.code !== 0)) console.log(`${one.label}: exit ${one.code}`);
   for (const one of results) {
     console.log(`${one.label}: exit ${one.code}`);
     const lines = readFileSync(one.log, "utf8").split("\n").filter(line => /FAIL|Test Files|passed, /.test(line));
     for (const line of lines.slice(-5)) console.log(line);
   }
-  if (results.length === 0) console.log("typecheck and build passed; nothing else to run");
-  process.exitCode = results.some(one => one.code !== 0) ? 1 : 0;
+  if (held) console.log("browser journeys not run: the typecheck or build failed");
+  if (results.length === 0 && first.every(one => one.code === 0)) console.log("typecheck and build passed; nothing else to run");
+  console.log(`took: ${[...first, ...results].map(one => `${one.label} ${took(one.ms)}`).join(", ")}; whole check ${took(Date.now() - started)}`);
+  process.exitCode = [...first, ...results].some(one => one.code !== 0) ? 1 : 0;
 }

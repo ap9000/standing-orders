@@ -18,6 +18,7 @@ import { createHash } from "node:crypto";
 import {
   completeFenced,
   finalizeFailureFenced,
+  finalizeHandBackFenced,
   finalizeMalformedFenced,
   finalizeParkFenced,
   interruptIfStopped,
@@ -90,6 +91,11 @@ export type Disposition =
    * settled, no strike and no retry. `stopRun` names the exact stopped
    * run (this one, or the owning ancestor whose stop it inherited). */
   | { kind: "stopped"; stopRun: number; requeued: boolean }
+  /** The service stopped or restarted while the attempt ran (no one stopped
+   * the task): its work is preserved, the run ends as interrupted, and the
+   * task is back in the queue — no strike, no backoff — so the next builder
+   * pass resumes it from the kept work. */
+  | { kind: "handed-back"; requeued: boolean }
   | { kind: "invariant"; reason: string };
 
 /** The reasons tick classifies as the attempt itself breaking. */
@@ -425,6 +431,13 @@ function disposeBuildOutcomeLocked(context: DisposeContext, result: BuildResult)
       now: clock(),
     });
     return { kind: "malformed", sealed: sealed.ok };
+  }
+
+  // A stop no operator asked for is the SERVICE stopping (the fence above
+  // already settled every task stop): hand the attempt back, never strike it.
+  if (result.reason === "stopped" && policy === "tick" && leaseId !== undefined && store.getRun(runId)?.role === "builder") {
+    const handed = finalizeHandBackFenced(store, { leaseId, runId, taskId, message: result.message, now: clock() });
+    return { kind: "handed-back", requeued: handed.requeued };
   }
 
   if (TICK_FAILURE_REASONS.has(result.reason)) {

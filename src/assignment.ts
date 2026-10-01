@@ -2,6 +2,8 @@
  * approval or proof state. Lead ownership and exact receipt acknowledgments
  * are append-only actions; handoffs use the existing durable outbox. */
 import { createHash } from "node:crypto";
+import { currentActor, withActor } from "./actor.js";
+import { replacedWords } from "./task-status.js";
 import { COMPLETION_ACTION, familyChangedFiles } from "./result-completion.js";
 import { homedir } from "node:os";
 import { readSchemaVersion, type Store, type ProofVerdictRow, type ProofAcceptanceRow, type Artifact } from "./store.js";
@@ -12,12 +14,18 @@ import { verificationEvidence } from "./verification-evidence.js";
 import { reproveApprover, type VerifiedApprover } from "./principal.js";
 import { noteAssignmentStatus } from "./assignment-status.js";
 import { historicalAssessmentReason } from "./assignment-presentation.js";
+import { runCheckLevel, type CheckLevel } from "./check-levels.js";
+import { followUpChecksOf, withFollowUps } from "./result-follow-ups.js";
 
 export type AssignmentAccess = WorkSummaryAccess;
 export type AssignmentOwner = { kind: "coordinator" | "lead"; id: string; label: string };
 export type AssignmentChecks = {
   status: "passed" | "failed" | "not-run" | "unavailable";
   exitCode: number | null; command: string | null; logArtifactId: number | null; detail: string;
+  /** Which check this is (check-levels.ts): quick, full, or off; null before levels. */
+  level?: CheckLevel | null;
+  /** A follow-up check waiting or running on this commit. */
+  running?: "quick" | "full" | null;
 };
 export type AssignmentReceipt = {
   digest: string; rootId: string; taskId: string; runId: number;
@@ -40,7 +48,8 @@ export type AssignmentSnapshot = {
     goal: string | null; outOfScope: string | null;
     excerpts: { artifactId: number; runId: number; kind: string; sha256: string; text: string | null; shortened: boolean; problem: string | null }[];
   };
-  completion: { actor: string; at: string; digest: string } | null;
+  /** `lead`: marked complete by the person's lead (`toolroll lead token`), shown as "by the lead". */
+  completion: { actor: string; at: string; digest: string; lead?: true } | null;
   handoff: { kind: "result" | "decision" | "attention"; digest: string; acknowledged: boolean } | null;
   publication: { state: string; prUrl: string | null; remoteState: string | null } | null;
   deployment: { status: "not-recorded" };
@@ -87,18 +96,37 @@ function ownerOf(store: Store, rootId: string, repo: string | null): AssignmentS
 }
 
 // Report the recorded check outcome, never turn a model verdict into a check.
-function nativeChecks(store: Store, root: string | undefined, runId: number): AssignmentChecks {
-  const unavailable = (detail: string): AssignmentChecks => ({ status: "unavailable", exitCode: null, command: null, logArtifactId: null, detail });
+// Follow-up checks on the same commit (Run checks) upgrade a pass and show a failure.
+function nativeChecks(store: Store, root: string | undefined, runId: number, now: Date): AssignmentChecks {
+  const own = buildChecks(store, root, runId);
+  const run = store.getRun(runId);
+  const followUps = followUpChecksOf(store, runId, now, root);
+  if (followUps.length === 0) return own;
+  const read = withFollowUps({ status: own.status, level: own.level ?? null, exitCode: own.exitCode, head: run?.headRevision ?? null }, followUps);
+  const latest = [...followUps].reverse().find(one => one.state === "passed" || one.state === "failed");
+  const changed = read.status !== own.status || read.level !== (own.level ?? null) || read.exitCode !== own.exitCode;
+  const words = read.level === "quick" ? "Quick checks" : "Checks";
+  return { ...own, running: read.running,
+    ...(changed ? { status: read.status, level: read.level, exitCode: read.exitCode, logArtifactId: latest?.logArtifactId ?? own.logArtifactId,
+      detail: read.status === "passed" ? `${words} passed.` : `${words} failed (exit ${read.exitCode}).` } : {}) };
+}
+
+function buildChecks(store: Store, root: string | undefined, runId: number): AssignmentChecks {
+  const level = runCheckLevel(store, runId);
+  const unavailable = (detail: string): AssignmentChecks => ({ status: "unavailable", exitCode: null, command: null, logArtifactId: null, detail, level });
   if (root === undefined) return unavailable("Saved checks are unavailable.");
   try {
     const gate = verificationEvidence(store, root, runId);
     if (!gate.ok) return unavailable(gate.problem);
     const receipt = gate.bytes === null ? null : JSON.parse(gate.bytes);
-    if (receipt === null) return { ...unavailable("No machine check is recorded."), status: "not-run" };
+    if (receipt === null) return { ...unavailable(level === "off" ? "Checks were off for this build." : "No machine check is recorded."), status: "not-run" };
     const ran = receipt.result.ran === true, exitCode = ran ? receipt.result.exitCode : null;
+    // The sealed receipt names the grant that ran: the quick one, or the full one.
+    const sealedLevel: CheckLevel = typeof receipt.command?.repo === "string" && receipt.command.repo.startsWith("quick:") ? "quick" : "full";
+    const words = sealedLevel === "quick" ? "Quick checks" : "Checks";
     return { status: ran ? exitCode === 0 ? "passed" : "failed" : "not-run", exitCode,
-      command: receipt.command.command, logArtifactId: receipt.log.artifactId,
-      detail: ran ? exitCode === 0 ? "Checks passed." : `Checks failed (exit ${exitCode}).` : "Checks did not finish." };
+      command: receipt.command.command, logArtifactId: receipt.log.artifactId, level: level === null ? null : sealedLevel,
+      detail: ran ? exitCode === 0 ? `${words} passed.` : `${words} failed (exit ${exitCode}).` : `${words} did not finish.` };
   } catch { return unavailable("Saved checks could not be read."); }
 }
 
@@ -135,7 +163,7 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
   const unavailable = family.versions.flatMap(version => store.runsFor(version.refId).flatMap(run =>
     store.artifactsFor(run.id).filter(artifact => root === undefined || !readVerifiedArtifact(root, artifact).ok)
       .map(artifact => `Saved ${artifact.kind} #${artifact.id} (run ${run.id}) is unavailable or changed.`)));
-  const checks = result === null ? null : nativeChecks(store, root, result.id);
+  const checks = result === null ? null : nativeChecks(store, root, result.id, now);
   const finishedBuild = result?.role === "builder" && (result.outcome === "built" || result.outcome === "no-change") &&
     result.finishedAt !== null && /^[a-f0-9]{40}$/.test(result.headRevision ?? "");
   // Finished work returns to its lead or user. Strict terms and previous model
@@ -176,8 +204,10 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
   if (family.problem !== null) state = "needs-decision";
   else if (current.state === "cancelled") {
     state = "cancelled";
-    detail = "This assignment was cancelled.";
-    primaryAction = { code: "inspect-task", label: "View assignment", target: { taskId: current.id, runId: null, decisionId: null }, access: "read", retry: "read-again" };
+    const successor = store.replacementOf(current.id) ?? store.replacementOf(family.root.id);
+    detail = successor === null ? "This assignment was cancelled." : `${replacedWords(successor)}.`;
+    primaryAction = successor === null ? { code: "inspect-task", label: "View assignment", target: { taskId: current.id, runId: null, decisionId: null }, access: "read", retry: "read-again" }
+      : { code: "inspect-task", label: `Open ${successor}`, target: { taskId: successor, runId: null, decisionId: null }, access: "read", retry: "read-again" };
   }
   else if (!live && processProblem !== null && result !== null) {
     state = "needs-decision";
@@ -204,10 +234,12 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
     // membership changes and ownership transfer cannot revoke past completion.
     // The exact result digest still fences changes to work, scope and history.
     if (checked !== undefined) {
-      completion = { actor: String(checked["actor"]), at: String(checked["at"]), digest: receipt.digest };
+      const rootRef = store.lookupRef(family.root.id);
+      const byLead = rootRef !== null && store.taskActs(rootRef.id).filter(one => one.act === "completed").at(-1)?.lead === true;
+      completion = { actor: String(checked["actor"]), at: String(checked["at"]), digest: receipt.digest, ...(byLead ? { lead: true as const } : {}) };
       state = "complete";
       primaryAction = { ...primaryAction, label: completionKind === "research-report" ? "Read report" : "Open result" };
-      const label = completion.actor.startsWith("operator:") ? completion.actor.slice(9) : owner && completion.actor === actorOf(owner) ? owner.label : "the previous lead";
+      const label = byLead ? "the lead" : completion.actor.startsWith("operator:") ? completion.actor.slice(9) : owner && completion.actor === actorOf(owner) ? owner.label : "the previous lead";
       detail = completionKind === "research-report" ? `Research report checked by ${label}. No deployment is implied.`
         : `Handled by ${label}. ${receipt.checks.detail} Publication and deployment are separate.`;
     }
@@ -319,6 +351,8 @@ function acknowledgeCurrent(store: Store, current: AssignmentSnapshot, receiptDi
     if (problem !== null) return { ok: false, reason: "approval-rules", message: problem };
     store.recordAction({ at: now.toISOString(), actor, repo: current.repo,
       taskId: current.rootId, runId: receipt.runId, action: CHECK_ACTION, outcome: receiptDigest, source: "work" });
+    const ref = store.lookupRef(current.rootId);
+    if (ref !== null) store.noteTaskAct(ref.id, "completed", now);
     store.bumpWake();
   }
   const assignment = assignmentOf(store, current.rootId, now, access, root)!;
@@ -338,13 +372,14 @@ export function checkAssignment(store: Store, taskId: string, receiptDigest: str
 /** The signed-in user can mark the same exact receipt handled without taking
  * lead ownership. This records review, never check success or new authority. */
 export function checkAssignmentAsOperator(store: Store, taskId: string, receiptDigest: string, who: VerifiedApprover, now: Date, root = evidenceRoot(homedir())): MutationResult {
-  return store.transact(() => {
+  // Completing is this person's act (or their lead's): it never pings them.
+  return withActor(currentActor() ?? { account: who.name, lead: false }, () => store.transact(() => {
     if (!reproveApprover(store, who).ok) return { ok: false, reason: "unauthenticated", message: "Sign in again before marking this result complete." };
     const access: AssignmentAccess = { principal: "operator", repos: who.repos };
     const current = assignmentOf(store, taskId, now, access, root);
     if (current === null || !store.accountCanAccess(who.name, current.repo)) return { ok: false, reason: "not-found", message: "No assignment is available in your projects." };
     return acknowledgeCurrent(store, current, receiptDigest, `operator:${who.name}`, now, root, access);
-  });
+  }));
 }
 
 function noteAssignmentHandoff(store: Store, assignment: AssignmentSnapshot, now: Date): void {

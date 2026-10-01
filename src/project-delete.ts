@@ -240,6 +240,7 @@ function deleteRows(store: Store, repo: string, d: Doomed, now: Date): number {
   del("telegram_outbound_message", `project = ? OR ${IN("notification")} OR ${IN("task_ref")} OR ${IN("source_run")}`, repo, notifications, T, R);
   del("chat_card_task", IN("task_ref"), T);
   del("push_delivery", IN("notification"), notifications);
+  del("notification_actor", IN("notification"), notifications);
   del("notification_delivery", IN("notification"), notifications);
   del("notification", IN("id"), notifications);
   del("chat_focus", IN("task"), K);
@@ -293,6 +294,7 @@ function deleteRows(store: Store, repo: string, d: Doomed, now: Date): number {
   del("workflow_preview", "repo = ?", repo);
   del("coding_handoff_scope", `id IN (SELECT id FROM coding_handoff WHERE json_extract(payload, '$.repo') = ?)`, repo);
   del("coding_handoff", "json_extract(payload, '$.repo') = ?", repo);
+  for (const table of ["task_act", "task_replacement"]) del(table, IN("task_ref"), T);
   del("task_ref", IN("id"), T);
   del("task_scope", IN("task_id"), K);
   del("task_edge", `${IN("blocked")} OR ${IN("blocker")}`, K, K);
@@ -317,6 +319,7 @@ function deleteRows(store: Store, repo: string, d: Doomed, now: Date): number {
   del("memory_sighting", "gap IN (SELECT id FROM memory_gap WHERE repo = ?) OR session IN (SELECT id FROM memory_session WHERE repo = ?)", repo, repo);
   del("routine_fire", "routine_id IN (SELECT id FROM routine WHERE repo = ?)", repo);
   for (const [table, column] of SETTINGS) del(table, `${column} = ?`, repo);
+  del("project_mute", "repo = ?", repo);
   for (const table of ["knowledge_change", "project_skill_change", "memory_gap", "memory_proposal", "memory_rejection", "memory_session", "memory_search", "mode_rail", "side_spend", "watch_episode", "worktree", "coordinator_proposal"]) del(table, "repo = ?", repo);
   // A builder watching the project keeps its lease until it stops; an ended one goes.
   del("watch_lease", "repo = ? AND expires_at <= ?", repo, now.toISOString());

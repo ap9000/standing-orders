@@ -1,5 +1,6 @@
 /** Shared, exact-state actions. Models may prepare; only the existing human
  * confirmation door executes. Protected actions use a one-use review receipt. */
+import { withActor } from "./actor.js";
 import { publicChatText } from "./chat-display.js";
 import { gateWords } from "./approval-policy.js";
 import { createHash, randomBytes } from "node:crypto";
@@ -1255,7 +1256,7 @@ export function executeSharedAction(
         );
         if (!completed.ok) throw Error(completed.message);
       } else if (payload.operation === "task_cancel") {
-        const result = store.cancelTask(task!, now);
+        const result = withActor({ account: who.name, lead: false }, () => store.cancelTask(task!, now));
         if (!result.ok)
           throw Error(`Task was not cancelled: ${result.reason}.`);
       } else if (payload.operation === "task_resume") {

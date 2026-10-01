@@ -7,7 +7,7 @@
 import { assignmentOf } from "./assignment.js";
 import { chatControlHref } from "./chat-controls.js";
 import { telegramProgressCard, type ProgressEntity } from "./telegram-progress.js";
-import { assignmentStatusFacts, headlineEmoji, taskStatusOf, type Headline } from "./task-status.js";
+import { assignmentStatusFacts, headlineEmoji, replacedWords, taskStatusOf, type Headline } from "./task-status.js";
 import { phoneText, projectLabel, type PhoneTaskLink } from "./telegram-status.js";
 import { isLifecycleNotification, type Notification, type Run, type Store } from "./store.js";
 
@@ -60,6 +60,16 @@ function taskLine(store: Store, taskRef: number, now: Date, root?: string): Task
   if (ref === null || ref.repo === null) return null;
   const task = store.getTask(ref.externalId);
   const title = phoneText(task?.title ?? ref.externalId, 88);
+  // Replaced, never "Cancelled": the card names its successor and links to it.
+  const successor = task?.state === "cancelled" ? store.replacementOf(ref.externalId) : null;
+  if (successor !== null) {
+    const heading = `${headlineEmoji("Stopped")} ${replacedWords(successor)}`;
+    const text = [title, heading, "", `${projectLabel(ref.repo)} · ${ref.externalId}`].join("\n");
+    return { title, icon: headlineEmoji("Stopped"), status: replacedWords(successor), project: ref.repo, view: {
+      text, entities: [{ type: "bold", offset: 0, length: title.length }, { type: "bold", offset: title.length + 1, length: heading.length }],
+      link: { label: `Open ${phoneText(successor, 40)}`, path: chatControlHref("task", successor) },
+    } };
+  }
   const run = cardRun(store, taskRef);
   if (run !== null) {
     const view = telegramProgressCard(store, run, ref.externalId, ref.repo, now, root);
