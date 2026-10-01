@@ -383,3 +383,11 @@ describe("the reply parser", () => {
     }
   });
 });
+
+describe("a deploy reads the candidate's code over the installed file", () => {
+  test("no build_review table yet reads as no review, not an error", async () => {
+    const { DatabaseSync } = await import("node:sqlite");
+    const older = new DatabaseSync(":memory:");
+    try { expect(buildReviewOf({ handle: older } as unknown as Store, 1)).toBeNull(); } finally { older.close(); }
+  });
+});

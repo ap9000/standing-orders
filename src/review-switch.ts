@@ -56,7 +56,11 @@ export type BuildReviewView = {
 };
 
 export function buildReviewOf(store: Pick<Store, "handle">, runId: number): BuildReviewView | null {
-  const row = store.handle.prepare("SELECT * FROM build_review WHERE run = ?").get(runId);
+  let row: Record<string, unknown> | undefined;
+  // A deploy reads this with the candidate's code over the INSTALLED runtime's file, before this version's migration
+  // made the table: no table reads as no review.
+  try { row = store.handle.prepare("SELECT * FROM build_review WHERE run = ?").get(runId); }
+  catch (error) { if (/no such table: build_review/.test(String(error))) return null; throw error; }
   if (row === undefined) return null;
   // The row was validated when it was written (parseBuildFindings).
   let findings: BuildFinding[] = [];
