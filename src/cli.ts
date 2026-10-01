@@ -1364,7 +1364,7 @@ async function runDemoCommand(argv: readonly string[], write: Write): Promise<nu
   const DEMO_USAGE = "`toolroll demo [--port <n>] [--host <addr>] [--allow-host name:port,…] [--keep]` — the port is a number under 65536; absent, a free one is picked";
   // Asking how it works never starts a sandbox.
   if (argv.includes("--help") || argv.includes("-h")) {
-    write(json ? envelopeJson({ ok: true, command: "demo", usage: DEMO_USAGE }) : `${DEMO_USAGE}\n\nA throwaway sandbox with a seeded fleet and flows mid-flight. It never spends and never reaches outside; Ctrl-C removes it unless --keep.`);
+    write(json ? envelopeJson({ ok: true, command: "demo", usage: DEMO_USAGE }) : `${DEMO_USAGE}\n\nA throwaway sandbox: a scripted lead in Chat, sample projects and flows mid-flight. It never calls a model, spends or reaches outside; Ctrl-C removes it unless --keep.`);
     return 0;
   }
   if (!Number.isInteger(port) || port < 0 || port > 65_535) {
@@ -1389,9 +1389,9 @@ async function runDemoCommand(argv: readonly string[], write: Write): Promise<nu
   const { createDemoSandbox } = await import("./demo.js");
   const { createDecisionServer } = await import("./serve.js");
   const now = new Date();
-  const { sandbox, store, seed, evidenceRoot, passwordFile } = createDemoSandbox(now);
+  const { sandbox, store, seed, evidenceRoot, passwordFile, lead } = createDemoSandbox(now);
   const server = createDecisionServer({
-    store, evidenceRoot, clock: () => new Date(), repos: seed.repos,
+    store, evidenceRoot, clock: () => new Date(), repos: seed.repos, demoLead: lead,
     ...(allowedHosts.length === 0 ? {} : { allowedHosts }),
   });
   await new Promise<void>((ready, failed) => {
@@ -1409,14 +1409,13 @@ async function runDemoCommand(argv: readonly string[], write: Write): Promise<nu
     // envelopes land in logs. It lives in the 0600 file and on the TTY.
     write(envelopeJson({ ok: true, command: "demo", url, sandbox, login: { name: seed.login.name, passwordFile }, keep }));
   } else {
-    write("Demo sandbox is up — seeded fleet, zero spend, zero remotes.");
+    write("Demo sandbox is up. A scripted lead answers Chat: no model, no key, no spend, nothing leaves this machine.");
     write("");
     write(`  open      ${url}`);
     write(`  login     ${seed.login.name} / ${seed.login.password}`);
     write(`  sandbox   ${sandbox}`);
     write("");
-    write("Two projects are seeded. The inbox works project-free; the board and");
-    write("routines ask you to open one first — pick payments-api.");
+    write("Open Chat and ask for a change, like \"fix the flaky refund test\".");
     write("");
     write(
       keep
@@ -1434,6 +1433,7 @@ async function runDemoCommand(argv: readonly string[], write: Write): Promise<nu
     process.on("SIGINT", stop);
     process.on("SIGTERM", stop);
   });
+  lead.stop();
   await new Promise<void>(closed => server.close(() => closed()));
   store.close();
   if (!keep) {

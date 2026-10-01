@@ -173,6 +173,9 @@ export type BrowserResultPanel = {
   verdict: { chips: BrowserResultChip[]; by: string | null } | null;
   reviewHistory: string | null;
   attention: string[];
+  /** Requirements only a person can confirm, in plain words, and the one
+   * Accept that records the decision (null when it is not offered here). */
+  youCheck: { lines: string[]; accept: { action: string; run: number; returnTo: string } | null } | null;
   /** Storage limits on saved output (shortened logs or diffs): shown on request. */
   limits: string[];
   tabs: { key: BrowserResultTab; label: string; count: string; href: string; active: boolean }[];

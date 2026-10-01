@@ -58,6 +58,8 @@ import { prepareWorkspaceRevision, WorkspaceValidatorCache } from "./workspace-r
 import { workIndexPage, workCountsByProject, WorkIndexCursorError, type WorkIndexPage, type WorkIndexItem } from "./work-index.js";
 import { openWorkDecisionOf } from "./work-summary.js";
 import { assignmentOf, checkAssignmentAsOperator, type AssignmentSnapshot } from './assignment.js';
+import type { DemoExchange, DemoLead } from "./demo.js";
+import { demoChatHtml, demoThreadHtml, DEMO_CHAT_SCRIPT, type DemoResultView } from "./demo-chat.js";
 import type { PublishExec } from './publish.js';
 import { pullRequestSettingsHtml, PULL_REQUEST_SETTINGS_CSS } from './pull-request-ui.js';
 import { checkPublishing, completeAndOpenPullRequest, mergeAsPerson, pullRequestBlocker, publishingOf, saveMergeSettings, savePublishing, newestPullRequestOf, MERGE_METHODS, type MergeMethod, type PullRequestView } from './pull-request-flow.js';
@@ -153,7 +155,7 @@ import { TEMPLATES, templateByName } from "./templates.js";
 import { starterRecipes, savedRecipes, findRecipe, importRecipe, exportRecipe, createWorkflowPreview, workflowPreview, launchWorkflow, saveWorkflowRecipe, RecipeError, prepareRecipeRun } from "./recipes.js";
 import { recipeFromForm, recipeLibraryHtml, recipeEditorHtml, workflowPreviewHtml, recipeScript, RECIPE_CSS, recipeDefinitionPreviewHtml, recipeRunHtml, recipeAnswersFromForm } from "./recipe-ui.js";
 import { EVIDENCE_CAPS, readVerifiedArtifact, readVerifiedReport, readVerifiedProofForRun, storeEvidence, writeEvidenceFile, scanForSecrets, type ReportView } from "./evidence.js";
-import { GOAL_ASSESSMENT_PENDING, reviewConflict, manualReviewOnly, dispatchStatusToken, passFraction, semanticCoverage, coverageWords, coverageStateWords, type ProofVerdict, type CriterionMatrixRow, type CriterionEvidenceRef } from "./proof.js";
+import { GOAL_ASSESSMENT_PENDING, reviewConflict, manualReviewOnly, manualReviewCriterionOf, personCheckWords, plainReasonWords, dispatchStatusToken, passFraction, semanticCoverage, coverageWords, coverageStateWords, type ProofVerdict, type CriterionMatrixRow, type CriterionEvidenceRef } from "./proof.js";
 import {
   WORK_VIEWS, REVIEW_TOKENS, parseWorkView, resultStatusOf, receiptHeadingOf, receiptPublicationWords, reviewFactsOf, workStatusOf, primaryDestinationOf, needsPerson, dispatchActionLabel,
   type WorkView, type WorkFacts, type WorkStatus, type DisplayStatus, type PublicationFacts, type ReviewFacts,
@@ -331,6 +333,8 @@ import { updateNoticeWords } from "./update-notice.js";
 import { whenHtml } from "./when-html.js";
 
 export type ServeOptions = {
+  /** `toolroll demo`: the scripted lead that answers Chat instead of a model. */
+  demoLead?: import("./demo.js").DemoLead;
   /** Tests: the bin whose real path says how Toolroll was installed (Settings → Updates' command). */
   installBin?: string;
   /** Native coding workspace injection for isolated integration tests. */
@@ -1877,6 +1881,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       url.pathname !== "/projects/browse" && url.pathname !== "/projects/github" && url.pathname !== "/workbench" &&
       url.pathname !== "/fleet" &&
       url.pathname !== "/chat" && url.pathname !== "/chat/mate/status" && url.pathname !== "/chat/task-status" && url.pathname !== "/chat/stream" &&
+      !url.pathname.startsWith("/chat/demo/") &&
       !/^\/chat\/action\/[0-9]{1,15}$/.test(url.pathname) &&
       !url.pathname.startsWith("/settings") && url.pathname !== "/logout" && url.pathname !== "/people" && url.pathname !== "/ledger" && url.pathname !== "/ledger/export" && url.pathname !== "/metrics" && url.pathname !== "/spend" && url.pathname !== "/spend/budget" &&
       !(url.pathname === "/board" && url.searchParams.get("scope") === "all");
@@ -3489,6 +3494,25 @@ export function createDecisionServer(options: ServeOptions): Server {
       }));
     }
 
+    // `toolroll demo`: Chat is the scripted lead, never a model.
+    if (url.pathname === "/chat/demo/live") {
+      const lead = demoLeadHere();
+      if (lead === null || who.via !== "cookie") return respond(response, 404, "application/json", JSON.stringify({ ok: false }));
+      const exchanges = lead.exchanges();
+      return respond(response, 200, "application/json", JSON.stringify({
+        version: lead.version(), working: exchanges.some(one => one.state === "working"),
+        html: demoThreadHtml(exchanges, who.session.csrf, demoResultView),
+      }));
+    }
+    if (url.pathname === "/chat" && demoLeadHere() !== null && who.via === "cookie" &&
+      !["task", "result", "project", "conversation", "team", "proposal"].some(name => url.searchParams.has(name))) {
+      const lead = demoLeadHere()!;
+      const said = url.searchParams.get("said")?.slice(0, 300) ?? null;
+      return sendScreen(response, 200, screen("Chat", demoChatHtml({ exchanges: lead.exchanges(), csrf: who.session.csrf, version: lead.version(), problem: said, resultOf: demoResultView }), {
+        chrome: chromeFor(null, "chat", undefined, "all"),
+        functional: { script: DEMO_CHAT_SCRIPT, fetches: true },
+      }));
+    }
     if (url.pathname === "/chat") {
       // Cookie sessions only (Codex v3 review, change 7): drafts live in
       // THIS session's memory; a bearer caller has nowhere to keep them.
@@ -4364,6 +4388,36 @@ export function createDecisionServer(options: ServeOptions): Server {
     | { ok: true; billing: "subscription"; config: ChatConfig & { provider: SubscriptionChatProviderId }; key: null; keySource: null; price: null; credentialKey: string }
     | { ok: false; code: "demo" | "unscoped" | "roots" | "unresolved" | "empty" | "unconfigured" | "unpriced" | "no-key"; why: string };
 
+  /** The scripted lead answers only inside a demo database. */
+  function demoLeadHere(): DemoLead | null {
+    return options.demoLead !== undefined && store.isDemo() ? options.demoLead : null;
+  }
+  /** A finished demo exchange's result, read back from the evidence its run actually stored. */
+  function demoResultView(exchange: DemoExchange): DemoResultView | null {
+    if (exchange.runId === null || exchange.taskId === null) return null;
+    const artifacts = store.artifactsFor(exchange.runId);
+    const text = (kind: string): string | null => {
+      const artifact = artifacts.find(one => one.kind === kind);
+      if (artifact === undefined) return null;
+      const read = readVerifiedArtifact(evidenceRoot, artifact);
+      return read.ok ? read.content.toString("utf8") : null;
+    };
+    const shot = artifacts.find(one => one.kind === "screenshot");
+    const stat = (() => { try { return JSON.parse(text("diff-stat") ?? "null") as { additions: number; deletions: number; fileCount: number } | null; } catch { return null; } })();
+    const assignment = assignmentOf(store, exchange.taskId, clock(), { principal: "operator", repos: managedRepos() }, evidenceRoot);
+    const log = text("check-log");
+    return {
+      diff: text("terminal-diff"),
+      checkLog: log === null ? null : log.slice(log.indexOf("$ ") === -1 ? 0 : log.indexOf("$ ")),
+      checks: { status: assignment?.receipt?.checks.status ?? "unavailable", detail: assignment?.receipt?.checks.detail ?? "Saved checks are unavailable." },
+      screenshot: shot === undefined ? null : { href: `/r/${exchange.runId}/evidence/${shot.id}`, caption: exchange.plan.screenshot.caption },
+      additions: stat?.additions ?? 0,
+      deletions: stat?.deletions ?? 0,
+      files: stat?.fileCount ?? 0,
+      taskHref: taskHref(exchange.taskId),
+    };
+  }
+
   /** Every condition re-proved per request — the render and the POST each
    * ask again; nothing is cached into authority. */
   function chatEnablement(): ChatEnablement {
@@ -4711,7 +4765,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       if (s.workspace?.view?.kind === "flow") s = { ...s, workspace: { ...s.workspace, view: { ...s.workspace.view, stepUp: { label: ssoFacts.label, fresh: ssoFacts.fresh, confirmHref: `/login/sso?reauth=1&return=${encodeURIComponent(back)}` } } } };
     }
     const teamEntry = requestContext.getStore()?.returnTo;
-    if (teamEntry?.startsWith('/chat') && !s.workspace?.team && !teamEntry.includes('task=') && !teamEntry.includes('proposal=')) {
+    if (teamEntry?.startsWith('/chat') && !s.workspace?.team && !teamEntry.includes('task=') && !teamEntry.includes('proposal=') && demoLeadHere() === null) {
       s.body = '<p class="team-entry"><a href="/chat?team=1">Open team chat</a></p>' + s.body;
       if (s.workspace?.conversation) s.workspace.controlsHtml = '<p><a href="/chat?team=1">Open team chat</a></p>' + (s.workspace.controlsHtml ?? '');
     }
@@ -4731,7 +4785,7 @@ export function createDecisionServer(options: ServeOptions): Server {
       const pageHtml = s.body;
       const extras = s.workspace ?? {};
       const notices = [...(extras.notices ?? [])];
-      if (s.chrome.demo) notices.unshift('Demo workspace — synthetic tasks. External work is disabled.');
+      if (s.chrome.demo) notices.unshift(DEMO_BANNER);
       if (s.chrome.modeBanner) notices.push(s.chrome.modeBanner.words);
       let crew: Pick<BrowserWorkspace, 'crew' | 'crewTruncated'> = { crew: [], crewTruncated: false };
       try {
@@ -6175,6 +6229,37 @@ export function createDecisionServer(options: ServeOptions): Server {
 
     const denied = authorizeMutation(request, who, body);
     if (denied !== null) return refuse(response, who, denied.status, denied.message);
+    // The scripted demo lead's acts: ask, approve, change a plan, complete or send back a result.
+    const demoAct = /^\/chat\/demo\/(?:ask|([0-9]{1,9})\/(approve|change|revise|complete))$/.exec(url.pathname);
+    if (demoAct !== null) {
+      const lead = demoLeadHere();
+      if (lead === null || who.via !== "cookie") return refuse(response, who, 404, "There's no page at this address.", "/chat");
+      if (who.role !== "approver") return redirect(response, `/chat?said=${encodeURIComponent("Your login can watch. Approving and completing is an approver's act.")}`);
+      const now = clock();
+      if (demoAct[1] === undefined) {
+        const message = (body.get("message") ?? "").trim();
+        if (message === "") return redirect(response, `/chat?said=${encodeURIComponent("Type a request first.")}`);
+        const asked = lead.ask(message, now);
+        return redirect(response, `/chat#demo-${asked.id}`);
+      }
+      const id = Number(demoAct[1]);
+      const note = body.get("note") ?? "";
+      const done = demoAct[2] === "approve" ? lead.approve(id, now)
+        : demoAct[2] === "change" ? lead.change(id, note, now)
+        : demoAct[2] === "revise" ? lead.requestChanges(id, note, now)
+        : lead.complete(id, now, (taskId, runId) => {
+          const principal = matePrincipal(who);
+          if (principal === null) return { ok: false, message: "Your access changed. Sign in again." };
+          const current = assignmentOf(store, taskId, now, { principal: "operator", repos: principal.repos }, evidenceRoot);
+          if (current?.receipt?.runId !== runId) return { ok: false, message: "This result changed. Reload before marking it complete." };
+          const completed = checkAssignmentAsOperator(store, taskId, current.receipt.digest, principal, now, evidenceRoot);
+          return completed.ok ? { ok: true } : { ok: false, message: completed.message };
+        });
+      bustBadge();
+      if (!done.ok) return redirect(response, `/chat?said=${encodeURIComponent(done.message)}`);
+      const latest = lead.exchanges().at(-1);
+      return redirect(response, demoAct[2] === "change" || demoAct[2] === "revise" ? `/chat#demo-${latest?.id ?? id}` : `/chat#demo-${id}-work`);
+    }
     // A person says a provider's sign-in works again: its sign-in pause
     // lifts, its tasks may start, and one short message says so.
     const resumeProvider = /^\/providers\/([a-z]+)\/resume$/.exec(url.pathname);
@@ -10151,7 +10236,7 @@ export function createDecisionServer(options: ServeOptions): Server {
           note = validated.note;
         }
         store.acceptProof(latest.id, verifiedAuthor(who.name), note, now);
-        return redirect(response, taskHref(taskId));
+        return redirect(response, body.get("return") === null ? taskHref(taskId) : safeReturn(body.get("return")));
       }
       case "complete": {
         if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "Only an approver can mark a result complete.");
@@ -11160,7 +11245,7 @@ function criterionMatrixHtml(
     const state = row.state;
     const awaitingAssessment = row.assessment?.evidenceState === "pass" && row.review === null;
     const confirmed = row.assessment !== undefined && state === "pass";
-    const label = awaitingAssessment ? "Not assessed" : confirmed ? "Confirmed" : state === "pass" ? "Evidence checks passed" : state === "manual-review" ? "Human review" : state === "missing" ? "Evidence missing" : "Evidence failed";
+    const label = awaitingAssessment ? "Not assessed" : confirmed ? "Confirmed" : state === "pass" ? "Met" : state === "manual-review" ? "You check" : state === "missing" ? "Not shown yet" : "Not met";
     const cls = awaitingAssessment ? "" : state === "pass" ? "badge-done" : state === "manual-review" ? "badge-manual-review" : "badge-failed";
     const warnings: string[] = [];
     // Only replace the known boilerplate. Other recorded failure details
@@ -11663,6 +11748,9 @@ function agentsStripHtml(view: RouteView | null, taskId: string): string {
   if (view.kind === "unreadable") return `<p class="task-chat-agents">${escape(agentsSummaryWords(view))} <a href="${taskHref(taskId)}#agents">Review agent setup</a></p>`;
   return `<details class="task-chat-agents"><summary>Agent setup</summary><p>${escape(agentsSummaryWords(view))}</p><a href="${taskHref(taskId)}#agents">View agents</a></details>`;
 }
+
+/** The demo's one-line promise, on every page. */
+const DEMO_BANNER = "Demo: a scripted lead and sample projects. Nothing calls a model, reaches outside or spends.";
 
 /** Every character that could open a tag or an attribute, dead at the sink. */
 function escape(text: string): string {
@@ -12617,6 +12705,66 @@ ${THEME_DARK}
     padding: .375rem .9rem; font-size: .8125rem; color: var(--muted-foreground);
   }
   .banner .badge { margin-right: .5rem; }
+  /* Chat in \`toolroll demo\`: the scripted lead's conversation. */
+  .demo-chat { display: flex; flex-direction: column; gap: 1rem; max-width: 46rem; margin: 0 auto; padding-bottom: 1rem; }
+  .demo-thread { display: flex; flex-direction: column; gap: 1.25rem; }
+  .demo-turn { display: flex; flex-direction: column; gap: .75rem; scroll-margin-top: 1rem; }
+  .demo-said p { margin: 0; }
+  .demo-you { align-self: flex-end; max-width: min(34rem, 85%); background: var(--so-ink); color: var(--so-paper); border-radius: .875rem .875rem .25rem .875rem; padding: .55rem .85rem; overflow-wrap: anywhere; }
+  .demo-lead { max-width: 40rem; }
+  .demo-who { font-size: .75rem; font-weight: 600; color: var(--so-muted); margin-bottom: .15rem !important; }
+  .demo-chat .card { margin: 0; padding: 1rem 1.125rem; }
+  .demo-chat .card h2 { font-size: .9375rem; margin: .1rem 0 .4rem; }
+  .demo-chat .card h3 { font-size: .75rem; font-weight: 600; color: var(--so-muted); margin: .75rem 0 .25rem; }
+  .demo-chat .card ul { margin: 0; padding-left: 1.1rem; }
+  .demo-chat .card li { margin: .15rem 0; }
+  .demo-chat .card > p { margin: .25rem 0; }
+  .demo-kicker { font-size: .75rem; color: var(--so-muted); margin: 0 !important; }
+  .demo-actions { display: flex; flex-wrap: wrap; align-items: flex-start; gap: .5rem; margin-top: .9rem; }
+  .demo-actions form { margin: 0; }
+  .demo-actions button, .demo-more > summary { min-height: 2.5rem; }
+  .demo-chat button.demo-primary { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); font-weight: 600; }
+  .demo-chat details.demo-more { flex: 1 1 12rem; margin: 0; padding: 0; border: 0; border-radius: 0; background: none; }
+  .demo-chat details.demo-more[open] { padding-bottom: 0; }
+  .demo-chat .demo-more > summary { display: inline-flex; align-items: center; color: var(--so-ink); padding: .35rem .85rem; border: 1px solid var(--so-input-line); border-radius: calc(var(--radius) - 3px); background: var(--so-paper); font-weight: 500; font-size: .8125rem; cursor: pointer; list-style: none; }
+  .demo-more > summary::-webkit-details-marker { display: none; }
+  .demo-more[open] > summary { margin-bottom: .5rem; }
+  .demo-more form, .demo-composer { display: flex; flex-direction: column; gap: .4rem; }
+  .demo-more label { font-size: .8125rem; font-weight: 500; }
+  .demo-more textarea, .demo-composer textarea { width: 100%; font: inherit; font-size: 1rem; resize: vertical; }
+  .demo-more form button { align-self: flex-start; }
+  .demo-steps { display: flex; flex-wrap: wrap; gap: .4rem 1rem; list-style: none; padding: 0 !important; margin: .4rem 0 !important; }
+  .demo-steps li { display: inline-flex; align-items: center; gap: .4rem; color: var(--so-muted); font-size: .8125rem; margin: 0 !important; }
+  .demo-steps li::before { content: ""; width: .55rem; height: .55rem; border-radius: 50%; border: 1.5px solid currentColor; }
+  .demo-steps li.done { color: var(--so-ink); }
+  .demo-steps li.done::before { background: var(--so-success); border-color: var(--so-success); }
+  .demo-steps li.now { color: var(--so-ink); font-weight: 600; }
+  .demo-steps li.now::before { border-color: var(--so-info); background: var(--so-info); animation: demo-pulse 1.2s ease-in-out infinite; }
+  @keyframes demo-pulse { 50% { opacity: .35; } }
+  @media (prefers-reduced-motion: reduce) { .demo-steps li.now::before { animation: none; } }
+  .demo-state { display: flex; align-items: center; gap: .5rem; margin: 0 !important; }
+  .demo-chat .badge.demo-ready { background: var(--so-info-soft); color: var(--so-info); }
+  .demo-chat .badge.demo-complete { background: var(--so-success-soft); color: var(--so-success); }
+  .demo-pass { color: var(--so-success); font-weight: 500; }
+  .demo-fail { color: var(--so-danger); font-weight: 500; }
+  .demo-chat details.demo-evidence { margin: .5rem 0 0; padding: 0; border: 0; border-top: 1px solid var(--so-line); border-radius: 0; background: none; box-shadow: none; }
+  .demo-evidence > summary { min-height: 2.5rem; display: list-item; padding-block: .55rem; cursor: pointer; font-weight: 500; font-size: .8125rem; }
+  .demo-evidence pre { margin: 0 0 .5rem; max-height: 22rem; overflow: auto; padding: .6rem .75rem; border-radius: .5rem; background: var(--so-raised); font: 400 .75rem/1.55 var(--font-mono); white-space: pre; overflow-wrap: normal; }
+  .demo-diff span { display: block; min-width: max-content; }
+  .demo-diff-add { background: var(--so-success-soft); color: var(--so-success); }
+  .demo-diff-del { background: var(--so-danger-soft); color: var(--so-danger); }
+  .demo-diff-hunk, .demo-diff-meta { color: var(--so-muted); }
+  .demo-diff-file { font-weight: 600; }
+  .demo-evidence figure { margin: 0 0 .5rem; }
+  .demo-evidence img { display: block; width: 100%; height: auto; border: 1px solid var(--so-line); border-radius: .5rem; }
+  .demo-evidence figcaption { margin-top: .35rem; }
+  .demo-hint { padding: 1.25rem 0 .25rem; }
+  .demo-hint-title { font-size: .9375rem; font-weight: 600; margin: 0 0 .75rem; }
+  .demo-suggestions { display: flex; flex-wrap: wrap; gap: .5rem; margin: 0; }
+  .demo-suggestions button { min-height: 2.5rem; border-radius: 999px; padding: .35rem .95rem; }
+  .demo-composer { position: sticky; bottom: 0; padding: .75rem 0 .25rem; background: var(--so-paper); flex-direction: row; align-items: flex-end; }
+  .demo-chat .demo-composer textarea { flex: 1 1 auto; width: auto; min-width: 0; min-height: 2.75rem; }
+  .demo-chat .demo-composer button { flex: none; width: auto; min-height: 2.75rem; padding-inline: 1.1rem; }
   .banner a { color: var(--muted-foreground); }
   .sign-in-banner form { display: inline; margin: 0 0 0 .5rem; padding: 0; border: 0; background: transparent; }
 
@@ -13042,6 +13190,9 @@ ${THEME_DARK}
   .result-notes .recap { margin: .25rem 0 .4rem; font-size: .875rem; }
   .result-attention { margin: .75rem 0 .25rem; padding: .7rem .85rem; border-left: 1px solid var(--warning); border-radius: 0 calc(var(--radius) - 3px) calc(var(--radius) - 3px) 0; background: var(--warning-soft); font-size: .8125rem; }
   .result-attention strong { display: block; font-size: .78rem; }
+  .result-you-check { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem .75rem; margin: .75rem 0; padding: .65rem .85rem; border-radius: calc(var(--radius) - 3px); background: var(--muted); font-size: .8125rem; }
+  .result-you-check ul { flex: 1 1 14rem; min-width: 0; margin: 0; padding: 0; list-style: none; }
+  .result-you-check form { margin: 0; }
   .result-attention ul { margin: .3rem 0 0; padding-left: 1.15rem; }
   .result-attention li { margin: .15rem 0; overflow-wrap: anywhere; }
   .result-tabs { display: flex; gap: .25rem; margin: .9rem 0 .75rem; border-bottom: 1px solid var(--border); overflow-x: auto; scrollbar-width: none; }
@@ -14899,7 +15050,7 @@ function shell(
   // the refuseDemo gate in operate.ts, this is the honest label).
   const demoBanner =
     (chrome.demo === true
-      ? `<div class="banner"><span class="badge">sandbox</span>demo data \u2014 nothing here spends money or reaches a remote</div>`
+      ? `<div class="banner"><span class="badge">demo</span>${escape(DEMO_BANNER.replace(/^Demo: /, ""))}</div>`
       : "") +
     (chrome.modeBanner === undefined
       ? ""
@@ -19460,7 +19611,7 @@ function milestoneProgressHtml(milestones: MilestoneProgressView[] | null | unde
           `${escape(one.description)}${one.note === null ? "" : ` <span class="meta">— ${escape(one.note)}</span>`}</li>`,
       )
       .join("\n") +
-    `</ul><p class="meta milestone-progress-note">Live checkpoints from the agent. The task is only done after its proof passes.</p></section>`
+    `</ul><p class="meta milestone-progress-note">Live checkpoints from the agent.</p></section>`
   );
 }
 
@@ -19964,7 +20115,7 @@ function taskBodyParts(data: {
         return `<details class="dispatch-proof-details"><summary>Previous assessment</summary><div class="dispatch-proof-body">` +
           `<p class="meta">Saved assessment history. Current task status and checks are shown above.</p>` +
           (accepted === null ? "" : `<p class="meta">Accepted with an exception by ${escape(accepted.approver)}. Check results are unchanged.${accepted.note === null ? "" : ` ${escape(accepted.note)}`}</p>`) +
-          (proof.proofReasons.length === 0 ? "" : `<ul>${proof.proofReasons.map(reason => `<li>${escape(reason)}</li>`).join("")}</ul>`) +
+          (proof.proofReasons.length === 0 ? "" : `<ul>${[...new Set(proof.proofReasons.map(plainReasonWords))].map(reason => `<li>${escape(reason)}</li>`).join("")}</ul>`) +
           criterionMatrixHtml(proof.proofMatrix, { compact: true, runId: proof.runId, links: proof.proofMatrixLinks }) +
           semanticCoverageHtml(proof.proofMatrix, proof.qualityMode ?? "default") + `</div></details>`;
       }
@@ -21449,10 +21600,12 @@ function verificationExplanation(verdict: ProofVerdict | null, reasons: readonly
     if (reason === "the sealed diff is unavailable or truncated; the claimed changed paths cannot be verified against it") {
       return "The recorded changes were incomplete, so they could not be verified.";
     }
+    const plainWords = plainReasonWords(reason);
+    if (plainWords !== reason) return plainWords;
     const sentence = reason.trim();
     return sentence === "" ? "" : `${sentence[0]?.toUpperCase() ?? ""}${sentence.slice(1)}${/[.!?]$/.test(sentence) ? "" : "."}`;
   }).filter(Boolean);
-  if (plain.length > 0) return plain.join(" ");
+  if (plain.length > 0) return [...new Set(plain)].join(" ");
   if (verdict === "verified") return "Toolroll independently verified this result.";
   if (verdict === "attested") return "The agent supplied evidence, but no independent project check was available.";
   if (verdict === "short") return "Some approved requirements still need evidence.";
@@ -22662,8 +22815,8 @@ function completionReceiptCard(view: CompletionReceiptView, taskId: string, plac
             (view.diff.filesTruncated ? " · list shortened" : "");
   const criteria =
     facts.checks === null
-      ? "No signed rubric"
-      : `${facts.checks.passed}/${facts.checks.total} acceptance criteria passed`;
+      ? "No requirements set"
+      : `${facts.checks.passed}/${facts.checks.total} requirements met`;
   // The deliverable leads (package 3): a scout's report by its title, UI
   // work by its validated screenshots. Unverifiable shots are counted as
   // unavailable, never shown, never called validated.
@@ -22689,7 +22842,7 @@ function completionReceiptCard(view: CompletionReceiptView, taskId: string, plac
   const caveats =
     attention.length === 0
       ? ""
-      : `<div class="receipt-caveats" data-result-attention="${attention.length}"><strong>Before you move on</strong><ul>${attention.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`;
+      : `<div class="receipt-caveats" data-result-attention="${attention.length}"><strong>Before you move on</strong><ul>${attention.map(one => `<li>${escape(plainReasonWords(one))}</li>`).join("")}</ul></div>`;
   // v51: semantic coverage, distinct from the machine proof word above —
   // the same lines the CLI prints, so chat and terminal cannot disagree.
   // Nothing owed (optional and unsettled, or satisfied) folds behind a
@@ -22723,7 +22876,7 @@ function completionReceiptCard(view: CompletionReceiptView, taskId: string, plac
     (inReview ? `<details class="receipt-history"><summary>Review history</summary><p class="receipt-review meta" data-receipt-review="${escape(status.token)}">${escape(status.detail)}</p></details>` : "") +
     // The matrix count is the proof's own citation; it reads as verified
     // only when the machine verified the result (workspace package 1).
-    `<div class="receipt-facts"><span><strong>${escape(criteria)}</strong><small>${stored.tone === "problem" ? "cited by the agent — not verified" : stored.token === "agent-attested" ? "cited by the agent, no independent check" : "against the approved scope"}</small></span>` +
+    `<div class="receipt-facts"><span><strong>${escape(criteria)}</strong><small>${stored.tone === "problem" ? "the agent's own claim — not checked" : stored.token === "agent-attested" ? "the agent's own claim, no project check" : "against the approved scope"}</small></span>` +
     `<span><strong>${escape(diff)}</strong><small>${facts.head === null ? "no commit recorded" : `head ${escape(facts.head.slice(0, 12))} · ${escape(facts.headSource ?? "")}`}</small></span>` +
     `<span><strong>${view.screenshots.length} screenshot${view.screenshots.length === 1 ? "" : "s"}</strong><small>${view.screenshots.length === 0 ? "none required or captured" : unavailable === 0 ? "validated visual proof" : `${unavailable} unavailable — not validated`}</small></span></div>` +
     `<div class="receipt-actions">` +
@@ -22876,10 +23029,26 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
     attention.push(`Publication failed after ${publication.attempts} attempt${publication.attempts === 1 ? "" : "s"}${publication.lastError === null ? "" : ` — ${oneLineOf(publication.lastError, 200)}`}. No pull request or merge is recorded.`);
   }
   if (detail.ciFailing && publication !== null) attention.push(`CI is failing on PR #${publication.prNumber} at the last check.`);
+  // Requirements only a person can confirm: plain words and one Accept,
+  // in neutral ink — nothing failed. Accepting records the person's
+  // decision and leaves the recorded checks as they are.
+  const personChecks = proof === null || proof.accepted !== null ? [] : [
+    ...proof.matrix.filter(row => row.state === "manual-review").map(row => personCheckWords(row.statement)),
+    ...(proof.matrix.length > 0 ? [] : proof.reasons.filter(reason => manualReviewCriterionOf(reason) !== null).map(() => personCheckWords(null))),
+  ];
+  const acceptable = personChecks.length > 0 && humanReview && o.csrf !== "" && (current != null || detail.assignment == null);
+  const youCheck: BrowserResultPanel["youCheck"] = personChecks.length === 0 ? null : {
+    lines: [...new Set(personChecks)],
+    accept: acceptable ? { action: `${taskHref(detail.taskId)}/accept-proof`, run: run.id, returnTo: o.returnTo } : null,
+  };
+  const youCheckHtml = youCheck === null ? "" :
+    `<div class="result-you-check" data-result-you-check="${youCheck.lines.length}"><ul>${youCheck.lines.map(one => `<li>${escape(one)}</li>`).join("")}</ul>` +
+    (youCheck.accept === null ? "" : `<form method="post" action="${escape(youCheck.accept.action)}"><input type="hidden" name="csrf" value="${escape(o.csrf)}"><input type="hidden" name="run" value="${youCheck.accept.run}"><input type="hidden" name="return" value="${escape(youCheck.accept.returnTo)}"><button type="submit" data-accept-result>Accept</button></form>`) +
+    `</div>`;
   const attentionHtml =
     attention.length === 0
       ? ""
-      : `<div class="result-attention" data-result-attention="${attention.length}"><ul>${attention.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`;
+      : `<div class="result-attention" data-result-attention="${attention.length}"><ul>${attention.map(one => `<li>${escape(plainReasonWords(one))}</li>`).join("")}</ul></div>`;
 
   // ---- one outcome, one action (repair 2026-09-14) ------------------------
   // The outcome is the handoff's first sentence, bounded; the agent's full
@@ -23151,9 +23320,10 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
       (current == null || o.place === "review" && (current.state === "ready-to-check" || current.state === "complete") ? "" :
         `<div class="verdict" data-current-outcome>${verdictChipsHtml(current, facts)}` +
         (current.receipt?.checks.status === "failed" || current.receipt?.checks.status === "unavailable" ? `<p class="problem">${escape(current.detail)}</p>` : "") + `</div>`) +
+      attentionHtml +
+      youCheckHtml +
       action +
       (REVIEW_TOKENS.has(status.token) ? `<details class="receipt-history"><summary>Review history</summary><p class="receipt-review meta" data-receipt-review="${escape(status.token)}">${escape(status.detail)}</p></details>` : "") +
-      attentionHtml +
       tabs +
       view("summary", summaryParts) +
       view("changes", changeParts) +
@@ -23167,7 +23337,8 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
     heading, outcome,
     verdict: current == null ? null : verdictChipsOf(current, facts),
     reviewHistory: REVIEW_TOKENS.has(status.token) ? status.detail : null,
-    attention: attention.filter(one => !shortenedMaterialReason(one)),
+    attention: attention.filter(one => !shortenedMaterialReason(one)).map(plainReasonWords),
+    youCheck,
     limits: attention.filter(one => shortenedMaterialReason(one)),
     tabs: RESULT_TABS.map(tab => ({ key: tab.key, label: tab.key === "checks" && proof?.matrix.some(row => row.assessment !== undefined) ? "Requirements" : tab.label, count: tabCounts[tab.key], href: o.hrefFor(tab.key), active: tab.key === o.tab })),
     views: [{ key: "summary", html: summaryParts.join("\n") }, { key: "changes", html: changeParts.join("\n") }, { key: "checks", html: checkParts.join("\n") }],

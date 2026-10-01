@@ -35,8 +35,9 @@ npx toolroll up
 
 That starts the app and a builder for your projects, then opens the console
 at http://127.0.0.1:4180. Runs on macOS or Linux with Node.js 22.13+ and git.
-Try the seeded sandbox first with `npx toolroll demo` — it never spends and
-never reaches outside.
+Try the sandbox first with `npx toolroll demo`: ask its scripted lead for a
+change in Chat, approve the plan, and watch it land Ready. It never calls a
+model, spends or reaches outside.
 
 | Install with | Command |
 |---|---|
@@ -710,8 +711,8 @@ only the reason and the act that opens it (re-file the scope, change the
 agents, refresh the routine) — the inbox row reads *needs attention* rather
 than *review & approve*, and the routine's recovery is one labelled, described
 button with nothing to type; an old approval already on a pre-routing row is
-grandfathered, but no new yes lands on it. The demo sandbox shows no seeded
-conversation: chat evidence is a real subscription-backed plane. The task page's controls offer,
+grandfathered, but no new yes lands on it. In the demo sandbox, Chat is a
+scripted lead that never calls a model; real chat evidence is a subscription-backed plane. The task page's controls offer,
 per role, only the agents you configured *for that role* (gemini never
 reviews; repairs stay on the build provider), a current agent the
 configuration no longer names is shown for what runs today and never offered

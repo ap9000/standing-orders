@@ -217,6 +217,14 @@ body:has(.so-workspace) { margin: 0; padding: 0; background: var(--so-ground); o
 .so-page-content :where(#chat-project-panel, .chat-project-toggle, .chat-head h1) { display: none; }
 .so-page-content .chat-workspace .chat-main { display: block; width: 100%; max-width: none; min-width: 0; }
 .so-page-content .chat-head { margin: 0; }
+/* An open result in Chat is its own view: the task's title, then the result once. Back to chat returns to the conversation. */
+.so-page-content .chat-workspace.result-open .chat-main > :is(#task-chat-live, #latest, :not(.chat-head)), .so-page-content .chat-workspace.result-open .chat-task-back { display: none; }
+.so-page-content .chat-workspace.result-open .chat-head h1 { display: block; margin-bottom: 12px; }
+.so-native-region .result-you-check { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; margin: 12px 0; padding: 10px 12px; border-radius: 8px; background: var(--so-raised); color: var(--so-ink); font-size: 13px; }
+.so-native-region .result-you-check ul { flex: 1 1 14rem; min-width: 0; margin: 0; padding: 0; list-style: none; }
+.so-native-region .result-you-check li + li { margin-top: 4px; }
+.so-native-region .result-you-check form { margin: 0; }
+.so-native-region .result-you-check button[type="submit"] { background: var(--so-attention); color: var(--so-on-attention); border-color: transparent; }
 .so-page-content .chat-head-actions:empty { display: none; }
 .so-page-content .chat-workspace .composer { position: static; width: 100%; }
 .so-page-content .work-head h1, .so-work-detail-content .result-back { display: none; }

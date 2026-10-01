@@ -107,6 +107,15 @@ function StatusCard({ selected, csrf }: { selected: Selected; csrf: string }) {
       <Html html={next.control} className="so-result-next" />
     </div>}
 
+    {panel?.youCheck != null && <div className="flex flex-wrap items-center gap-3 rounded-md bg-muted px-4 py-3" data-result-you-check={panel.youCheck.lines.length}>
+      <ul className="flex min-w-0 flex-1 basis-56 flex-col gap-1 text-sm">{panel.youCheck.lines.map(one => <li key={one}>{one}</li>)}</ul>
+      {panel.youCheck.accept !== null && <form method="post" action={panel.youCheck.accept.action} className="phone:w-full">
+        <input type="hidden" name="csrf" value={csrf} />
+        <input type="hidden" name="run" value={String(panel.youCheck.accept.run)} />
+        <input type="hidden" name="return" value={panel.youCheck.accept.returnTo} />
+        <Button type="submit" className="phone:w-full" data-accept-result><Check />Accept</Button>
+      </form>}
+    </div>}
     {panel !== null && panel.attention.length > 0 && <ul className="flex flex-col gap-1.5 rounded-md bg-warning-soft px-4 py-3 text-[13px]" data-result-attention={panel.attention.length}>
       {panel.attention.map(one => <li key={one} className="flex gap-2"><AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" aria-hidden="true" /><span>{one}</span></li>)}
     </ul>}
@@ -156,7 +165,7 @@ function Details({ selected }: { selected: Selected }) {
   const rows: { id: string; title: string; hint: string | null; count?: number; body: ReactNode }[] = [
     { id: "intent", title: "Approved scope", hint: selected.intent?.approval ?? null,
       body: selected.intent === null ? <p className="text-sm text-muted-foreground">No scope was filed for this task, so there is no approved goal or boundary to review.</p> : <Html html={selected.intent.html} className="so-result-intent" /> },
-    ...(selected.notes.length === 0 ? [] : [{ id: "notes", title: "Operator notes", hint: null, count: selected.notes.length,
+    ...(selected.notes.length === 0 ? [] : [{ id: "notes", title: "Notes", hint: null, count: selected.notes.length,
       body: <ul className="flex flex-col gap-2 text-sm">{selected.notes.map((one, index) => <li key={index}><span className="text-muted-foreground">{one.author} · {shortWhen(one.at)}</span> {one.note}</li>)}</ul> }]),
   ];
   return <Card aria-label="Result details" className="gap-0 divide-y divide-border overflow-hidden p-0 phone:p-0">

@@ -3,6 +3,7 @@
 import type { AssignmentSnapshot } from './assignment.js';
 import type { DisplayStatus, StatusTone, WorkStatus } from './workspace-ui.js';
 import { assignmentPresentationOf, shortenedMaterialReason, type AssignmentWorkStatus } from './assignment-presentation.js';
+import { plainReasonWords } from './proof.js';
 
 const escape = (value: string): string => value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!);
 
@@ -104,7 +105,7 @@ export function assignmentCardOf(assignment: AssignmentSnapshot, options: Assign
     passed: ready && !checkProblem && assignment.receipt !== null && assignment.receipt.checks.status === 'passed'
       ? { by: assignment.completion === null ? null : assignment.completion.actor.replace(/^(?:operator|coordinator|lead):/, '') } : null,
     detail: { text: assignment.detail, problem: checkProblem || options.problem === true && !ready },
-    problems: attention.filter(one => savedMaterialNotice(one, assignment) === null),
+    problems: attention.filter(one => savedMaterialNotice(one, assignment) === null).map(plainReasonWords),
     diagnostics: diagnostics.filter(one => savedMaterialNotice(one.detail, assignment) === null)
       .map(one => ({ token: one.token, label: one.label, detail: one.detail, problem: one.tone === 'problem' || one.tone === 'attention' })),
     notices: notices.length === 0 ? null : { summary: [partial ? 'Saved output is partial' : '', history ? 'Earlier material unavailable' : ''].filter(Boolean).join(' · '), lines: [...new Set(notices)] },

@@ -290,7 +290,7 @@ import { scout as scoutTask } from "./scout.js";
 import { profileDigestOf, chainDigestOf, entryDigestOf } from "./scope.js";
 import { PROVIDER_KEY_ENV, SUBSCRIPTION_CAPABLE, clearProviderKey, keyStatus, readAuthMode, readAuthModeStrict, readProviderKey, saveProviderKey, setAuthMode, verifyProviderKey, verdictWords, type AuthMode } from "./keys.js";
 import { run, terminateLiveProviders, run as execRun } from "./exec.js";
-import { containmentStatus, currentContainment, describeContainment, resolveContainment } from "./containment.js";
+import { containmentNotice, containmentStatus, currentContainment, describeContainment, resolveContainment, type EffectiveContainment } from "./containment.js";
 import { readPulls } from "./pulls.js";
 import { startMaintenance } from "./maintenance.js";
 import { livePin, modelWatchPass } from "./model-catalog.js";
@@ -535,7 +535,9 @@ External trackers — build what a tracker nominates, under local approvals
                                         refuses to spawn where none exists
                                         (macOS) instead of downgrading.
                                         Also read by watch, tick and
-                                        daemon install.
+                                        daemon install. --verbose prints
+                                        the exact containment status (a
+                                        service log always has it).
   toolroll reconcile --repo <path>   the morning sweep: recover dead
                                         runners, reap expired leases, adopt
                                         or forget orphaned worktrees. Run it
@@ -791,6 +793,8 @@ export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "saved",
   // task complete: also open the result's pull request.
   "pull-request",
+  // up: the exact start-up details (containment) in the terminal too.
+  "verbose",
 ]);
 
 export function parseOperateArgs(argv: readonly string[], ownValues: ReadonlySet<string> = new Set()): Args | { error: string } {
@@ -8005,6 +8009,8 @@ async function runWatchLoop(args: {
   onFollowController?: (controller: AbortController) => void;
   /** Resolves the caller's readiness: fired after the lease is held. */
   onReady?: () => void;
+  /** The start's containment words; the exact status line when absent. */
+  containmentLines?: (effective: EffectiveContainment) => readonly string[];
 }): Promise<WatchLoopResult> {
   const { context, flags, runner, token, repo, progress } = args;
   const { store } = context;
@@ -8041,7 +8047,7 @@ async function runWatchLoop(args: {
   }
   // What this runner's spawns actually get, in one honest line: native
   // and which backend, observed, or a required policy that will refuse.
-  progress(`watch: ${describeContainment(currentContainment())}`);
+  for (const line of args.containmentLines?.(currentContainment()) ?? [`watch: ${describeContainment(currentContainment())}`]) progress(line);
 
   // The night is a row, not "the last 24 hours": everything this watch does
   // attributes to this episode by runner and window, and `brief
@@ -9122,6 +9128,17 @@ async function upCommand(
     return copy;
   };
   const prefix = (repo: string): string => (activeRepos.size > 1 ? `[${projectName(repo)}] ` : "");
+  // Containment at start: one plain sentence, once, for a person at a
+  // terminal; the exact status line with --verbose, in a service log (no
+  // terminal), and always when a required policy will refuse spawns.
+  const containmentDetail = flags.has("verbose") || !(context.upSeams?.terminal ?? process.stdout.isTTY === true);
+  let containmentSaid = false;
+  const containmentLines = (effective: EffectiveContainment): string[] => {
+    const notice = containmentNotice(effective);
+    if (notice !== null && !containmentSaid) progress(notice);
+    containmentSaid = true;
+    return containmentDetail || effective.refusal !== null ? [`watch: ${describeContainment(effective)}`] : [];
+  };
   const loopResults = new Map<string, Promise<{ repo: string; result: WatchLoopResult }>>();
 
   const launchRepo = async (repo: string, bind: boolean): Promise<void> => {
@@ -9149,6 +9166,7 @@ async function upCommand(
       progress: line => progress(`${prefix(repo)}${line}`),
       isStopping: () => stopping,
       onFollowController: controller => followControllers.push(controller),
+      containmentLines,
       onReady: () => {
         markReady();
         if (bind) progress(`${prefix(repo)}builder connected — queued work can start`);
@@ -9286,10 +9304,10 @@ async function upCommand(
       write(
         repos.length === 0
           ? `  builder   ${runnerName} is ready — add a local folder or GitHub repository in Projects`
-          : `  builder   ${runnerName} is watching ${repos.length === 1 ? repos[0] : `${repos.length} repositories`}`,
+          : `  builder   watching ${repos.length === 1 ? repos[0] : `${repos.length} repositories`}`,
       );
       if (projectRoots.length > 0) write(`  projects  new repositories under ${projectRoots.length === 1 ? projectRoots[0] : `${projectRoots.length} saved folders`} connect automatically`);
-      write("  The inbox checklist shows what remains before approved work builds unattended.");
+      write("  Chat shows the steps to your first result.");
       write("  Ctrl-C stops Toolroll on this machine.");
     }
     if (!json && !flags.has("no-open") && terminal) (context.upSeams?.openBrowser ?? openBrowser)(url);
@@ -9298,7 +9316,7 @@ async function upCommand(
   // 10. Supervise to the end.
   await stopped;
   await registrySupervisor;
-  const results = await Promise.all([...loopResults.values()]);
+  await Promise.all([...loopResults.values()]);
   clearInterval(runnerHeartbeat);
   if (runTimer !== undefined) clearTimeout(runTimer);
   if (graceTimer !== undefined) clearTimeout(graceTimer);
@@ -9333,9 +9351,7 @@ async function upCommand(
     process.stderr.write(`up: ${fatal}\n`);
     return EXIT.failed;
   }
-  const ticks = results.reduce((sum, one) => sum + one.result.ticks, 0);
-  const built = results.reduce((sum, one) => sum + one.result.built, 0);
-  progress(`up: stopped cleanly — ${ticks} pass(es), ${built} with work. Run \`toolroll up\` anywhere on this machine to reconnect every saved project.`);
+  progress("Toolroll stopped. Run `toolroll up` anywhere on this machine to start it again with every saved project.");
   return EXIT.ok;
 }
 

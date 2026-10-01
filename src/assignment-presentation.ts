@@ -2,7 +2,7 @@
  * Saved assessments remain history; this projection never changes receipts,
  * checks, approvals, ownership, or the exact completion identity. */
 import type { AssignmentSnapshot } from './assignment.js';
-import { GOAL_ASSESSMENT_PENDING } from './proof.js';
+import { GOAL_ASSESSMENT_PENDING, manualReviewCriterionOf } from './proof.js';
 import { failedCheckExit, type DisplayStatus, type WorkStatus } from './workspace-ui.js';
 
 export type AssignmentWorkStatus = DisplayStatus & Partial<Pick<WorkStatus, 'views' | 'rank'>>;
@@ -60,7 +60,9 @@ export function assignmentPresentationOf(assignment: AssignmentSnapshot, options
   };
   const attention = new Map<string, AssignmentAttention>();
   for (const detail of [...assignment.attention, ...(options.additionalAttention ?? [])]) {
-    if (historicalAssessmentReason(detail) || detail === assignment.detail) continue;
+    // A requirement only a person can confirm is not a problem: the result
+    // names it in plain words beside its Accept action.
+    if (historicalAssessmentReason(detail) || detail === assignment.detail || manualReviewCriterionOf(detail) !== null) continue;
     const material = materialReason(detail);
     const id = checks !== undefined && checkReason(detail) ? 'checks' : material === null ? `detail:${detail}` : `material:${material}`;
     // A read of the exact machine record owns the check outcome. A legacy

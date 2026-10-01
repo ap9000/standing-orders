@@ -11,6 +11,10 @@ import {
   blockingCaveats,
   caveatAttributionProblems,
   caveatAttributionWords,
+  manualReviewCriterionOf,
+  manualReviewOnly,
+  personCheckWords,
+  plainReasonWords,
   failedMetChecks,
   failedCheckWords,
   proofSubmissionProblems,
@@ -947,5 +951,27 @@ describe("direct assessment of captured evidence", () => {
     const result = adjudicate(captured({ diffStat: { captured: true, truncated: false, paths: new Set() } }));
     expect(result).toMatchObject({ verdict: "short", machineVerdict: "verified" });
     expect(result.matrix[0]?.answered).toEqual([{ kind: "check", ref: "npm test" }]);
+  });
+});
+
+describe("reasons in a person's words (records keep their exact text)", () => {
+  const manual = 'criterion "c1" requires manual-review evidence — an operator must accept it before this can verify';
+
+  test("a requirement only a person can confirm names the statement, not the id", () => {
+    expect(manualReviewCriterionOf(manual)).toBe("c1");
+    expect(manualReviewCriterionOf("the approved verification command could not be run")).toBeNull();
+    expect(manualReviewOnly({ verdict: "short", reasons: [manual] })).toBe(true);
+    expect(personCheckWords("The empty state reads clearly.")).toBe("You check this one: The empty state reads clearly.");
+    expect(personCheckWords(null)).toBe("You check this one yourself.");
+    expect(plainReasonWords(manual)).toBe("A requirement needs your own check.");
+  });
+
+  test("an unassigned caveat and a reviewer's judgement drop the criterion vocabulary", () => {
+    const caveat = caveatAttributionWords({ caveat: "Captured against fixtures.", index: 0, kind: "unassigned", tags: [] });
+    expect(plainReasonWords(caveat)).toBe("The agent left a note without saying which requirement it affects: Captured against fixtures.");
+    expect(plainReasonWords('reviewer:codex contradicts criterion "c1": The diff adds a TODO, not a lock.')).toBe("codex says a requirement is not met: The diff adds a TODO, not a lock.");
+    expect(plainReasonWords('Reviewer:codex needs more evidence for criterion "c2": No screenshot.')).toBe("codex isn't sure a requirement is met: No screenshot.");
+    for (const words of [plainReasonWords(manual), plainReasonWords(caveat)]) expect(words).not.toMatch(/criterion|evidence|operator|verify/i);
+    expect(plainReasonWords("Something else entirely.")).toBe("Something else entirely.");
   });
 });

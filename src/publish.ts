@@ -35,6 +35,16 @@ export const BODY_TEMPLATE_VERSION = 2;
 export const MAX_PUBLISH_ATTEMPTS = 5;
 const EXEC_TIMEOUT_MS = 60_000;
 
+/**
+ * The one grant lookup for a task's publication: its project is the task's repo, and that project's live grant
+ * governs it. The publisher, Complete → pull request and a flow's Pull request zone all ask here, so none of them
+ * can judge a publication by another project's grant. `fallback`: the repo to assume for a task with none recorded.
+ */
+export function publicationGrantOf(store: Store, taskRef: number, fallback: string | null = null): { repo: string | null; grant: PublicationGrant | null } {
+  const repo = store.refById(taskRef)?.repo ?? fallback;
+  return { repo, grant: repo === null ? null : store.publicationGrantFor(repo) };
+}
+
 export type PublishExec = (
   file: string,
   args: readonly string[],
@@ -155,9 +165,14 @@ export async function publishPass(
       concede(store, publication, "the accepted diff carries a detected secret — rewrite the branch before anything publishes", report, clock);
       continue;
     }
+    // Each project's watch publishes its own project's work: the push runs in
+    // that checkout, under that project's grant. Another project's pass must
+    // not touch it — judging it by the wrong grant once recorded "no live
+    // grant" errors until it gave up, while its own pass opened the PR.
     // The grant is re-read per publication, live: revocation is immediate,
     // and an intent created under a grant that has since died goes nowhere.
-    const grant = store.publicationGrantFor(options.repo);
+    const { repo, grant } = publicationGrantOf(store, publication.taskRef, options.repo);
+    if (repo !== options.repo) continue;
     const verdict = permitsPublication(grant, publication);
     if (!verdict.ok) {
       report.problems.push(`publication ${publication.id}: ${verdict.message}`);
@@ -306,6 +321,28 @@ async function openOrAdopt(
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+/**
+ * A publication given up on whose pull request exists anyway — a pass that gave up while another opened it, or a
+ * person who opened it by hand: the PR on its exact head and base, carrying its exact commit, is adopted as opened
+ * (merged or closed ones too; the next observation records which). Whether one was found.
+ */
+export async function adoptPublishedPullRequest(store: Store, publication: Publication, exec: PublishExec, clock: () => Date): Promise<boolean> {
+  if (publication.state !== "failed") return false;
+  const listed = await exec(
+    "gh",
+    ["pr", "list", "--repo", publication.githubRepo, "--head", publication.head, "--base", publication.base, "--state", "all", "--json", "number,url,headRefOid"],
+    { timeoutMs: EXEC_TIMEOUT_MS },
+  );
+  if (listed.code !== 0) return false;
+  let found: { number?: unknown; url?: unknown; headRefOid?: unknown }[];
+  try { found = JSON.parse(listed.stdout || "[]") as typeof found; } catch { return false; }
+  const pr = Array.isArray(found) ? found.find(one => one.headRefOid === publication.headSha && typeof one.number === "number" && typeof one.url === "string") : undefined;
+  if (pr === undefined) return false;
+  store.markPublicationOpened(publication.id, pr.number as number, pr.url as string, clock());
+  enqueueOpened(store, publication, pr.url as string, clock);
+  return true;
 }
 
 export type CheckReport = {
