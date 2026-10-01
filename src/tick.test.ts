@@ -2424,7 +2424,9 @@ describe("watch — the loop, zero tokens idle", () => {
     // work-conserving drain can get t-2 built after t-1 frees it.
     const code = await run([
       "watch", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool,
-      "--for", "4000", "--tick-every", "3600000", "--bridge-every", "3600000", "--reconcile-every", "3600000",
+      // 12 s, not 4: the release check runs this beside the browser journeys, and a loaded machine needed longer
+      // to build two tasks; the hour-long intervals still mean only the drain can build t-2.
+      "--for", "12000", "--tick-every", "3600000", "--bridge-every", "3600000", "--reconcile-every", "3600000",
       "--json",
     ]);
 
