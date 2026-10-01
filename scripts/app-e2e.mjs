@@ -29,7 +29,7 @@ const skipBuild = flag("--skip-build");
 
 /** The groups, in the order they're listed, with how many journeys each has (checked at the end of every run). */
 const GROUPS = {
-  console: { journeys: 20, about: "Sign-in, pages, sessions and tokens, approval rules and audit, monitoring, spend, the command line, projects, knowledge, skills, tools, models, routines, settings, search, identity provider, the demo, signing out" },
+  console: { journeys: 21, about: "Sign-in, pages, sessions and tokens, approval rules and audit, monitoring, spend, the command line, projects, knowledge, skills, tools, models, routines, settings, search, identity provider, the demo and its scripted lead, signing out" },
   task: { journeys: 4, about: "A task from an idea to an accepted result, then sent back twice" },
   builds: { journeys: 2, about: "A build that asks a question, and a build stopped and resumed" },
   lead: { journeys: 6, about: "The lead chat, and AI teammates (Maya) the lead then changes" },
@@ -1602,6 +1602,70 @@ await journey("console", "The demo starts with flows already moving, and opens i
     const text = await visitor.locator("body").innerText();
     await context.close();
     if (!/Customer replies/.test(text) || !/Support desk/.test(text)) throw new Error(`the demo's flows: ${text.slice(0, 300)}`);
+  } finally { demo.kill("SIGINT"); }
+});
+
+await journey("console", "The demo lead: type a request, approve, see it build to Ready, complete, at desktop and phone", [], async () => {
+  const demo = spawn(process.execPath, [w.bin, "demo", "--json"], { env: { ...process.env, NODE_OPTIONS: "" }, stdio: ["ignore", "pipe", "pipe"] });
+  try {
+    const started = await new Promise((done, fail) => {
+      let text = "";
+      const timer = setTimeout(() => fail(new Error(`the demo didn't start: ${text.slice(0, 300)}`)), 60_000);
+      demo.stdout.on("data", chunk => { text += chunk; try { const value = JSON.parse(text.slice(text.indexOf("{"))); clearTimeout(timer); done(value.url === undefined ? value.result ?? value : value); } catch { /* more to come */ } });
+    });
+    if (!/[\\/]toolroll-demo-[^\\/]+$/.test(started.sandbox)) throw new Error(`the sandbox folder is ${started.sandbox}`);
+    const password = /password: (.*)/.exec(readFileSync(started.login.passwordFile, "utf8"))[1].trim();
+    const settle = on => on.evaluate(() => Promise.race([
+      Promise.all(document.getAnimations().filter(one => one.effect?.getComputedTiming().iterations !== Infinity).map(one => one.finished.catch(() => undefined))),
+      new Promise(done => setTimeout(done, 2000)),
+    ])).catch(() => undefined);
+    for (const [width, height, asked] of [[1440, 900, "fix the flaky refund test"], [390, 844, "The payouts page copy is confusing"]]) {
+      const context = await w.browser.newContext({ viewport: { width, height }, deviceScaleFactor: 1 });
+      context.setDefaultTimeout(30_000);
+      const visitor = await context.newPage();
+      const errors = [];
+      visitor.on("pageerror", error => errors.push(String(error)));
+      visitor.on("console", message => { if (message.type() === "error" && !/Failed to load resource/.test(message.text())) errors.push(message.text()); });
+      try {
+        await visitor.goto(`${started.url}/login`);
+        await visitor.fill('input[name="name"]', started.login.name); await visitor.fill('input[name="token"]', password);
+        await Promise.all([visitor.waitForNavigation(), visitor.press('input[name="token"]', "Enter")]);
+        await visitor.goto(`${started.url}/chat`);
+        const banner = await visitor.locator("body").innerText();
+        if (!/Nothing calls a model, reaches outside or spends\./.test(banner)) throw new Error(`the demo banner: ${banner.slice(0, 300)}`);
+        if (width === 1440) {
+          await visitor.locator(".demo-hint").waitFor();
+          if (await visitor.locator(".demo-suggestions button").count() < 2) throw new Error("the first visit shows no suggestions");
+          await settle(visitor); await visitor.screenshot({ path: join(w.out, `demo-hint-${width}.png`) });
+        }
+        await visitor.fill("#demo-message", asked);
+        await Promise.all([visitor.waitForNavigation(), visitor.press("#demo-message", "Enter")]);
+        const turn = visitor.locator(".demo-turn").last();
+        await turn.locator(".demo-plan").getByText("Boundaries").waitFor();
+        await settle(visitor); await visitor.screenshot({ path: join(w.out, `demo-plan-${width}.png`) });
+        await Promise.all([visitor.waitForNavigation(), turn.getByRole("button", { name: "Approve" }).click()]);
+        // The build moves on its own, live, with no reload: planning, building, checks, Ready.
+        await turn.locator(".demo-build").waitFor({ timeout: 5_000 });
+        await turn.locator(".demo-result").getByText("Ready", { exact: true }).waitFor({ timeout: 30_000 });
+        const result = await turn.locator(".demo-result").innerText();
+        if (!/Checks passed\./.test(result) || !/\+\d+ −\d+/.test(result)) throw new Error(`the Ready result: ${result.slice(0, 400)}`);
+        if (await turn.locator(".demo-diff-add").count() === 0) throw new Error("the Ready result shows no diff");
+        await turn.getByText("Screenshot", { exact: true }).click();
+        const loaded = await turn.locator(".demo-evidence img").evaluate(img => img.complete && img.naturalWidth > 0 ? img.naturalWidth
+          : new Promise(done => { img.onload = () => done(img.naturalWidth); img.onerror = () => done(0); setTimeout(() => done(img.naturalWidth), 10_000); }));
+        if (loaded < 320) throw new Error("the result's screenshot didn't load");
+        await turn.getByText("Screenshot", { exact: true }).click();
+        const overflow = await visitor.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+        if (overflow > 1) throw new Error(`the page scrolls sideways by ${overflow}px at ${width} wide`);
+        await turn.locator(".demo-result").scrollIntoViewIfNeeded();
+        await settle(visitor); await visitor.screenshot({ path: join(w.out, `demo-ready-${width}.png`) });
+        await Promise.all([visitor.waitForNavigation(), turn.getByRole("button", { name: "Complete" }).click()]);
+        await turn.locator(".demo-result").getByText("Complete", { exact: true }).waitFor();
+        await turn.getByText("That's the whole loop").waitFor();
+        await settle(visitor); await visitor.screenshot({ path: join(w.out, `demo-complete-${width}.png`) });
+        if (errors.length > 0) throw new Error(`browser errors at ${width} wide: ${errors.join(" | ").slice(0, 400)}`);
+      } finally { await context.close(); }
+    }
   } finally { demo.kill("SIGINT"); }
 });
 

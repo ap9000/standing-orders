@@ -1897,7 +1897,7 @@ describe("the operations console", () => {
     expect(task).toContain('data-card-kind="result-receipt"');
     expect(task).toContain('data-work-status="assignment-needs-decision"');
     expect(task).toContain("Shipped the compact result receipt.");
-    expect(task).toContain("1/1 acceptance criteria passed");
+    expect(task).toContain("1/1 requirements met");
     expect(task).toContain("2 files · +14 −3");
     expect(task).toContain("Physical Windows presentation is still awaiting certification.");
     expect(task).toContain(`src="/r/${run}/evidence/${screenshot}"`);
@@ -1909,7 +1909,7 @@ describe("the operations console", () => {
 
     const chat = await (await fetch(url("/chat?task=t-receipt"), { headers: { cookie } })).text();
     expect(chat).toContain('data-card-kind="result-receipt"');
-    expect(chat).toContain("1/1 acceptance criteria passed");
+    expect(chat).toContain("1/1 requirements met");
     expect(chat).toContain("2 files · +14 −3");
     expect(chat).toContain('href="/review?result=t-receipt">Open result →</a>');
     expect(chat).toContain(`href="/r/${run}">Full build record →</a>`);
@@ -8296,7 +8296,7 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     const contextWindow = new Window();
     contextWindow.document.body.innerHTML = task;
     const incomplete = contextWindow.document.querySelector('.requirement[data-criterion-id="c2"]');
-    expect(incomplete?.querySelector('[data-matrix-state="pass"]')?.textContent).toBe("Evidence checks passed");
+    expect(incomplete?.querySelector('[data-matrix-state="pass"]')?.textContent).toBe("Met");
     const gap = incomplete?.querySelector('[data-context-coverage="gap"]');
     expect(gap?.textContent).toContain("src/guard.ts: 70000 bytes");
     expect(gap?.closest(".requirement-evidence")).toBeNull();
@@ -13820,6 +13820,31 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(task).toContain('id="task-questions"');
   });
 
+  test("a requirement only a person can confirm reads as plain words with one Accept that returns to Chat", async () => {
+    const reasons = ['criterion "c1" requires manual-review evidence — an operator must accept it before this can verify'];
+    const { run } = finished("t-copy", "Confirm empty-state copy", alpha, { verdict: "short", reasons });
+    store.saveProofVerdict(run, "short", reasons, now, [{ id: "c1", statement: "Empty state is clear", requiredEvidence: ["manual-review"], state: "manual-review", detail: [], answered: [], review: null }]);
+    const cookie = await login();
+    const chat = await page(cookie, `/chat?task=t-copy&result=${run}`);
+    const youCheck = /<div class="result-you-check" data-result-you-check="1">[\s\S]*?<\/div>/.exec(chat)?.[0] ?? "";
+    expect(youCheck).toContain("<li>You check this one: Empty state is clear</li>");
+    expect(youCheck).toContain('action="/t/t-copy/accept-proof"');
+    expect(youCheck).toContain("data-accept-result>Accept</button>");
+    // Said once, in a person's words: never the record's criterion vocabulary.
+    expect(chat.match(/<li>You check this one/g)).toHaveLength(1);
+    for (const html of [chat, await page(cookie, "/t/t-copy")]) {
+      expect(html).not.toContain("requires manual-review evidence");
+      expect(html).not.toContain("an operator must accept");
+    }
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(youCheck)?.[1] ?? "";
+    const back = /name="return" value="([^"]+)"/.exec(youCheck)?.[1]?.replaceAll("&amp;", "&") ?? "";
+    expect(back).toBe(`/chat?task=t-copy&result=${run}`);
+    const accepted = await fetch(url("/t/t-copy/accept-proof"), { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf, run: String(run), return: back }), redirect: "manual" });
+    expect(accepted.status).toBe(303);
+    expect(accepted.headers.get("location")).toBe(back);
+    expect(await page(cookie, back)).not.toContain('class="result-you-check"');
+  });
+
   test("All projects opens the exact review result without changing the selected project", async () => {
     const reasons = ['criterion "c1" requires manual-review evidence — an operator must accept it before this can verify'];
     const { run } = finished("t-navigation", "Confirm empty-state copy", beta, { verdict: "short", reasons });
@@ -14674,7 +14699,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(queuedTask).toContain('check failed against this build (exit 1)');
     expect(await page(cookie, "/review?result=t-rev")).toContain('data-review-state="queued"');
     // The receipt's criteria label still reads from the stored verdict.
-    expect(queuedTask).toContain("cited by the agent — not verified");
+    expect(queuedTask).toContain("the agent's own claim — not checked");
     expect(rowsOf(await page(cookie, "/work")).find(row => row.id === "t-rev")?.views).toEqual(["all", "needs-you"]);
     // The older run keeps its own verdict: nothing masks a selected result.
     const olderPage = await page(cookie, `/r/${older}`);
@@ -14759,7 +14784,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const task = await page(cookie, `/t/t-optional`);
     expect(task).not.toContain('class="receipt-coverage"');
     expect(task).toContain('data-receipt-publication="none">Saved on the build branch. No publication, merge, or deployment is recorded here.</p>');
-    expect(task).toContain("<strong>1/1 acceptance criteria passed</strong><small>against the approved scope</small>");
+    expect(task).toContain("<strong>1/1 requirements met</strong><small>against the approved scope</small>");
     // The failed check and its exact result link stay visible; its saved assessment is secondary.
     const failed = await page(cookie, `/t/t-checks`);
     expect(failed).toContain("check failed against this build (exit 1)");

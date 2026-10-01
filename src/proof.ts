@@ -740,7 +740,31 @@ export function manualReviewOnly(proof: { verdict: string; reasons: readonly str
   return proof?.verdict === "short" && (proof.matrix === undefined || (proof.matrix.some(row => row.state === "manual-review")
     && proof.matrix.every(row => row.state === "pass" || row.state === "manual-review")))
     && proof.reasons.length > 0
-    && proof.reasons.every(reason => /^criterion "[^"]+" requires manual-review evidence — an operator must accept it before this can verify$/.test(reason));
+    && proof.reasons.every(reason => manualReviewCriterionOf(reason) !== null);
+}
+
+/** The criterion id a stored "needs a person's check" reason names, or null
+ * for any other reason. The stored words stay as recorded; pages say them
+ * through `personCheckWords`. */
+export function manualReviewCriterionOf(reason: string): string | null {
+  return /^criterion "([^"]+)" requires manual-review evidence — an operator must accept it before this can verify$/.exec(reason)?.[1] ?? null;
+}
+
+/** A stored verification reason as a person would say it, for pages and
+ * cards. The record keeps its exact words; unknown reasons pass through. */
+export function plainReasonWords(reason: string): string {
+  if (manualReviewCriterionOf(reason) !== null) return "A requirement needs your own check.";
+  const unassigned = /^caveat [0-9]+ names no criterion — every caveat is an exception to exactly one signed criterion, named by its exact id \(an unrelated idea belongs in the handoff's follow-ups\): ([\s\S]*)$/.exec(reason);
+  if (unassigned !== null) return `The agent left a note without saying which requirement it affects: ${unassigned[1]}`;
+  const reviewed = /^(?:reviewer:)?([^\s"]+) (contradicts|needs more evidence for) criterion "[^"]+": ([\s\S]*)$/i.exec(reason);
+  if (reviewed !== null) return `${reviewed[1]} ${reviewed[2]!.toLowerCase() === "contradicts" ? "says a requirement is not met" : "isn't sure a requirement is met"}: ${reviewed[3]}`;
+  return reason;
+}
+
+/** A requirement only a person can confirm, as a person would say it. */
+export function personCheckWords(statement: string | null): string {
+  const plain = statement?.trim() ?? "";
+  return plain === "" ? "You check this one yourself." : `You check this one: ${plain}`;
 }
 export type CriterionMatrixRow = {
   /** Controller-captured evidence for direct goal assessment. Kept separately

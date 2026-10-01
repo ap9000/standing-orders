@@ -22,6 +22,27 @@ sudo dnf install bubblewrap      # Fedora
 With it, Claude and Gemini agents run in a sandbox where Toolroll's
 own secrets don't exist. See [Security](security.md).
 
+## Process containment
+
+On a first start you may see:
+
+> Agents run without Linux process containment on this machine (it needs a
+> delegated cgroup). That's fine for trying Toolroll; see docs/guide/linux.md
+> to turn it on.
+
+Without containment, Toolroll still tracks and stops every agent, setup
+and check process it starts. With it, each one runs in its own cgroup, so
+nothing it leaves behind outlives a stop.
+
+To turn it on, you need cgroup v2, Linux 5.14 or newer, and a cgroup this
+user may manage. The simplest way is the user service below with
+`Delegate=yes` under `[Service]`, and `--containment preferred` added to
+`ExecStart` (or `TOOLROLL_CONTAINMENT=preferred`). Inside Docker, the
+container's cgroup is usually read-only, so containment stays off there.
+
+`toolroll up --verbose` prints the exact reason; a service log always
+has it. [Process containment](../PROCESS_CONTAINMENT.md) has the details.
+
 ## Keep it running
 
 `toolroll up` runs until you stop it. To keep it running after you log

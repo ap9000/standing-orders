@@ -17,7 +17,7 @@
 
 import { createHash } from "node:crypto";
 import { run as execRun } from "./exec.js";
-import { bodyHashOf, publicationBody, type ObservedPullRequest, type PublishExec } from "./publish.js";
+import { bodyHashOf, publicationBody, publicationGrantOf, type ObservedPullRequest, type PublishExec } from "./publish.js";
 import { failingChecks, summarizeChecks } from "./pulls.js";
 import { assignmentOf, checkAssignmentAsOperator } from "./assignment.js";
 import { requestResultChanges } from "./result-actions.js";
@@ -151,7 +151,7 @@ export function pullRequestBlocker(store: Store, runId: number): string | null {
   const run = store.getRun(runId);
   const ref = run === null ? null : store.refById(run.taskRef);
   if (run === null || ref === null) return "No such result.";
-  const grant = ref.repo === null ? null : store.publicationGrantFor(ref.repo);
+  const { grant } = publicationGrantOf(store, run.taskRef);
   if (grant === null || !grant.capabilities.includes("push-branch") || !grant.capabilities.includes("open-pr")) return "Pull requests aren't set up for this project.";
   if (run.headRevision === null || run.committed === false) return "This result has no commit to publish.";
   if (run.branch === null || !headWithin(run.branch, grant.headPrefix)) return "This result's branch isn't one Toolroll may push.";
@@ -196,7 +196,7 @@ export function owePullRequest(store: Store, runId: number, actor: string, flowC
   return store.transact(() => {
     const run = store.getRun(runId)!;
     const ref = store.refById(run.taskRef)!;
-    const grant = store.publicationGrantFor(ref.repo!)!;
+    const grant = publicationGrantOf(store, run.taskRef).grant!;
     let publication = store.publicationForRun(run.id);
     if (publication === null) {
       const id = store.createPublicationIntent({

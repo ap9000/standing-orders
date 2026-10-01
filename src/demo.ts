@@ -27,17 +27,18 @@
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { openStore, type Store } from "./store.js";
 import { addApprover, propose, approve, type AcceptanceCriterion } from "./scope.js";
 import { legOf, routeDigestOf, type RouteStamp } from "./phase-routing.js";
-import { acquire } from "./claim.js";
+import { acquire, release } from "./claim.js";
 import { register } from "./runner.js";
 import { approveRoutine, fireRoutine } from "./routine.js";
 import { fileTaskProposal, fileRoutineProposal } from "./proposal.js";
 import { storeEvidence, budgetedStatJson, imageDimensions, type DiffStat } from "./evidence.js";
 import { parseProof, adjudicate } from "./proof.js";
+import { sealVerificationReceipt } from "./verification-evidence.js";
 import { parseExecutionPlanDocument, milestonesOf } from "./plan.js";
 import { maybeTriggerRepair } from "./dispose.js";
 import { deflateSync } from "node:zlib";
@@ -182,7 +183,7 @@ const DEMO_COPY_PROOF = {
   criteria: [
     {
       id: "c1",
-      statement: "An operator confirms the new empty-state copy reads clearly.",
+      statement: "The new empty-state copy reads clearly.",
       verdict: "met" as const,
       how: "Opened the inbox pane with zero items and read the new copy aloud.",
       evidence: [{ kind: "manual-review" as const, ref: "read the new copy in src/inbox-copy.ts" }],
@@ -268,6 +269,26 @@ const DEMO_BUILDING_REVISION_EVIDENCE = "src/webhooks/queue.ts";
  * shipping a binary asset for a run nobody actually captured.
  */
 function encodeDemoPng(width: number, height: number, rgb: readonly [number, number, number]): Buffer {
+  // A faint vertical gradient so the file is not one repeated byte —
+  // "meaningful", not merely large.
+  const stride = width * 3;
+  const raw = Buffer.alloc((stride + 1) * height);
+  for (let y = 0; y < height; y++) {
+    const rowStart = y * (stride + 1);
+    raw[rowStart] = 0; // filter: none
+    const shade = Math.round((y / Math.max(1, height - 1)) * 40);
+    for (let x = 0; x < width; x++) {
+      const p = rowStart + 1 + x * 3;
+      raw[p] = Math.min(255, rgb[0] + shade);
+      raw[p + 1] = Math.min(255, rgb[1] + shade);
+      raw[p + 2] = Math.min(255, rgb[2] + shade);
+    }
+  }
+  return pngOf(width, height, raw);
+}
+
+/** IHDR + one zlib-deflated IDAT + IEND around filtered RGB scanlines. */
+function pngOf(width: number, height: number, raw: Buffer): Buffer {
   const crcTable = Array.from({ length: 256 }, (_, n) => {
     let c = n;
     for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
@@ -291,21 +312,6 @@ function encodeDemoPng(width: number, height: number, rgb: readonly [number, num
   ihdr.writeUInt32BE(height, 4);
   ihdr[8] = 8; // bit depth
   ihdr[9] = 2; // color type: RGB
-  // A faint vertical gradient so the file is not one repeated byte —
-  // "meaningful", not merely large.
-  const stride = width * 3;
-  const raw = Buffer.alloc((stride + 1) * height);
-  for (let y = 0; y < height; y++) {
-    const rowStart = y * (stride + 1);
-    raw[rowStart] = 0; // filter: none
-    const shade = Math.round((y / Math.max(1, height - 1)) * 40);
-    for (let x = 0; x < width; x++) {
-      const p = rowStart + 1 + x * 3;
-      raw[p] = Math.min(255, rgb[0] + shade);
-      raw[p + 1] = Math.min(255, rgb[1] + shade);
-      raw[p + 2] = Math.min(255, rgb[2] + shade);
-    }
-  }
   const idat = deflateSync(raw);
   return Buffer.concat([
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
@@ -785,7 +791,7 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     acceptance: [
       {
         id: "c1",
-        statement: "An operator confirms the new empty-state copy reads clearly.",
+        statement: "The new empty-state copy reads clearly.",
         how: "Open the inbox pane with zero items and read it.",
         evidence: ["manual-review"],
       },
@@ -1152,6 +1158,7 @@ export function makeDemoRepos(root: string): { api: string; web: string } {
     const dir = join(root, name);
     mkdirSync(join(dir, "src"), { recursive: true });
     for (const [file, content] of Object.entries(files)) {
+      mkdirSync(dirname(join(dir, file)), { recursive: true });
       writeFileSync(join(dir, file), content);
     }
     try {
@@ -1170,10 +1177,12 @@ export function makeDemoRepos(root: string): { api: string; web: string } {
     api: make("payments-api", {
       "package.json": JSON.stringify({ name: "payments-api", private: true }, null, 2),
       "src/payout.ts": "export function settle(cents: number, rate: number): number {\n  return Math.round(cents * rate * 100) / 100;\n}\n",
+      ...demoLeadFiles("payments-api"),
     }),
     web: make("web-console", {
       "package.json": JSON.stringify({ name: "web-console", private: true }, null, 2),
       "src/app.ts": "export const app = () => 'hello';\n",
+      ...demoLeadFiles("web-console"),
     }),
   };
 }
@@ -1235,8 +1244,9 @@ export function createDemoSandbox(now: Date): {
   seed: DemoSeed;
   evidenceRoot: string;
   passwordFile: string;
+  lead: DemoLead;
 } {
-  const sandbox = mkdtempSync(join(tmpdir(), "standing-orders-demo-"));
+  const sandbox = mkdtempSync(join(tmpdir(), "toolroll-demo-"));
   const repos = makeDemoRepos(sandbox);
   const store = openStore(join(sandbox, "orders.db"));
   // The stamp precedes every row — a half-seeded sandbox is still fenced.
@@ -1254,5 +1264,527 @@ export function createDemoSandbox(now: Date): {
   store.setBudget({ scope: "project", key: repos.web, limitMicrousd: 25_000_000, hardStop: true }, seed.login.name, now);
   const passwordFile = join(sandbox, "demo-login.txt");
   writeFileSync(passwordFile, `name: ${seed.login.name}\npassword: ${seed.login.password}\n`, { mode: 0o600 });
-  return { sandbox, store, seed, evidenceRoot, passwordFile };
+  const lead = createDemoLead({ store, repos, evidenceRoot, approver: seed.login.name, token: seed.login.password });
+  return { sandbox, store, seed, evidenceRoot, passwordFile, lead };
+}
+
+// ---------------------------------------------------------------------------
+// The scripted demo lead (launch demo): whatever a visitor types in Chat, it
+// answers with a short plan for one of a few realistic changes in the seeded
+// repos. Approve files a real task under a real approval in this fenced
+// database, then a timer walks it through planning, building and checks and
+// lands it Ready with stored evidence — the same rows a real build leaves.
+// Nothing here calls a model, starts a process or reaches outside; the only
+// writes are to the sandbox database and its evidence folder.
+// ---------------------------------------------------------------------------
+
+type DemoProject = "payments-api" | "web-console";
+type DemoFile = { path: string; before: string | null; after: string };
+
+export type DemoPlan = {
+  kind: "flaky-test" | "bug" | "copy" | "flag" | "default";
+  project: DemoProject;
+  title: string;
+  goal: string;
+  boundaries: string[];
+  checks: string[];
+  /** What the builder reports while it works, one line per beat. */
+  progress: string[];
+  conclusion: string;
+  checkOutput: string;
+  screenshot: { caption: string; accent: readonly [number, number, number] };
+  files: DemoFile[];
+};
+
+const DEMO_CHECK_COMMAND = "npm test";
+
+const DEMO_PLANS: Record<DemoPlan["kind"], DemoPlan> = {
+  "flaky-test": {
+    kind: "flaky-test",
+    project: "payments-api",
+    title: "Fix the flaky refund test",
+    goal: "Make the refund retry test pass every time. It fails about one run in twenty because it waits on a real timer.",
+    boundaries: ["Only the test changes; refund logic stays as it is.", "No new dependencies."],
+    checks: ["npm test passes, with the refund test run 50 times in a row.", "A screenshot of the passing test report."],
+    progress: ["Reading test/refunds.test.ts", "Replacing the real timer with a fake clock", "Running the refund test 50 times"],
+    conclusion: "The refund retry test now uses a fake clock instead of a real 200 ms wait, so it no longer depends on how busy the machine is. It passed 50 runs in a row.",
+    checkOutput: " ✓ test/refunds.test.ts (1 test, repeated 50 times) 412ms\n ✓ test/payout.test.ts (14 tests) 38ms\n\n Test Files  9 passed (9)\n      Tests  216 passed (216)\n",
+    screenshot: { caption: "Test report: 216 passed, refund test 50/50.", accent: [33, 131, 88] },
+    files: [{
+      path: "test/refunds.test.ts",
+      before: 'import { test, expect } from "vitest";\nimport { retryRefund } from "../src/refunds";\n\ntest("retries a declined refund", async () => {\n  const started = Date.now();\n  const result = await retryRefund("rf_1042", { delayMs: 200 });\n  expect(result.status).toBe("refunded");\n  expect(Date.now() - started).toBeLessThan(250);\n});\n',
+      after: 'import { test, expect, vi } from "vitest";\nimport { retryRefund } from "../src/refunds";\n\ntest("retries a declined refund", async () => {\n  vi.useFakeTimers();\n  const pending = retryRefund("rf_1042", { delayMs: 200 });\n  await vi.advanceTimersByTimeAsync(200);\n  const result = await pending;\n  expect(result.status).toBe("refunded");\n  vi.useRealTimers();\n});\n',
+    }],
+  },
+  bug: {
+    kind: "bug",
+    project: "payments-api",
+    title: "Stop double refunds when a retry races",
+    goal: "A refund retried while the first request is still in flight pays the customer twice. Make refunds idempotent per request.",
+    boundaries: ["Only src/refunds.ts and a new test change.", "No database or bank API changes."],
+    checks: ["npm test passes, including a new test that retries a refund mid-flight.", "A screenshot of the refunds log showing one refund per request."],
+    progress: ["Reading src/refunds.ts", "Sharing one in-flight refund per request id", "Adding a test that retries mid-flight"],
+    conclusion: "Refunds now share one in-flight request per request id and pass that id to the bank as the idempotency key, so a racing retry returns the first refund instead of paying twice. Added a regression test.",
+    checkOutput: " ✓ test/refunds-race.test.ts (2 tests) 21ms\n ✓ test/refunds.test.ts (1 test) 205ms\n ✓ test/payout.test.ts (14 tests) 38ms\n\n Test Files  10 passed (10)\n      Tests  218 passed (218)\n",
+    screenshot: { caption: "Refunds log: one refund per request after two racing retries.", accent: [13, 116, 206] },
+    files: [
+      {
+        path: "src/refunds.ts",
+        before: 'import { bank } from "./bank";\n\nexport type Refund = { id: string; status: "refunded" | "declined" };\n\nexport async function refund(id: string, requestId: string): Promise<Refund> {\n  return bank.refund(id);\n}\n',
+        after: 'import { bank } from "./bank";\n\nexport type Refund = { id: string; status: "refunded" | "declined" };\n\nconst inFlight = new Map<string, Promise<Refund>>();\n\nexport async function refund(id: string, requestId: string): Promise<Refund> {\n  const existing = inFlight.get(requestId);\n  if (existing) return existing;\n  const started = bank.refund(id, { idempotencyKey: requestId });\n  inFlight.set(requestId, started);\n  try {\n    return await started;\n  } finally {\n    inFlight.delete(requestId);\n  }\n}\n',
+      },
+      {
+        path: "test/refunds-race.test.ts",
+        before: null,
+        after: 'import { test, expect } from "vitest";\nimport { refund } from "../src/refunds";\nimport { bank } from "../src/bank";\n\ntest("a racing retry refunds once", async () => {\n  const [first, second] = await Promise.all([refund("rf_7", "req_1"), refund("rf_7", "req_1")]);\n  expect(second).toBe(first);\n  expect(bank.refunds("rf_7")).toHaveLength(1);\n});\n',
+      },
+    ],
+  },
+  copy: {
+    kind: "copy",
+    project: "web-console",
+    title: "Rewrite the empty Payouts page",
+    goal: "The Payouts page says “No data” before the first payout. Say what will appear there and how to send the first one.",
+    boundaries: ["Only the empty state's words and link change.", "No layout or style changes."],
+    checks: ["npm test passes.", "A screenshot of the new empty Payouts page."],
+    progress: ["Reading src/pages/payouts.tsx", "Writing the new empty-state copy", "Rendering the empty page"],
+    conclusion: "The empty Payouts page now says “No payouts yet”, explains that sent payouts appear there with their status, and links to sending the first one.",
+    checkOutput: " ✓ test/pages.test.tsx (6 tests) 64ms\n ✓ test/app.test.ts (3 tests) 9ms\n\n Test Files  4 passed (4)\n      Tests  41 passed (41)\n",
+    screenshot: { caption: "Payouts page with no payouts: the new heading, sentence and link.", accent: [23, 23, 23] },
+    files: [{
+      path: "src/pages/payouts.tsx",
+      before: 'export function PayoutsEmpty() {\n  return (\n    <div className="empty">\n      <p>No data</p>\n    </div>\n  );\n}\n',
+      after: 'export function PayoutsEmpty() {\n  return (\n    <div className="empty">\n      <h2>No payouts yet</h2>\n      <p>Payouts you send will appear here with their status.</p>\n      <a href="/payouts/new">Send your first payout</a>\n    </div>\n  );\n}\n',
+    }],
+  },
+  flag: {
+    kind: "flag",
+    project: "web-console",
+    title: "Put the new invoice view behind a flag",
+    goal: "Ship the new invoice view switched off, behind an invoices.v2 flag that can be turned on per workspace.",
+    boundaries: ["The current invoice list stays the default.", "No changes to invoice data or the API."],
+    checks: ["npm test passes, with the flag both on and off.", "A screenshot of the invoices page with the flag on."],
+    progress: ["Reading src/flags.ts", "Adding invoices.v2, off by default", "Rendering the invoices page both ways"],
+    conclusion: "Added an invoices.v2 flag, off by default. With it on for a workspace, the invoices page shows the new view; otherwise the current list is unchanged.",
+    checkOutput: " ✓ test/flags.test.ts (4 tests) 7ms\n ✓ test/pages.test.tsx (8 tests) 71ms\n\n Test Files  4 passed (4)\n      Tests  45 passed (45)\n",
+    screenshot: { caption: "Invoices page with invoices.v2 on for the Acme workspace.", accent: [171, 100, 0] },
+    files: [
+      {
+        path: "src/flags.ts",
+        before: 'export const flags = {\n  "billing.export": true,\n} as const;\n\nexport type Flag = keyof typeof flags;\n\nexport function isOn(flag: Flag, workspace: { flags?: Partial<Record<Flag, boolean>> }): boolean {\n  return workspace.flags?.[flag] ?? flags[flag];\n}\n',
+        after: 'export const flags = {\n  "billing.export": true,\n  "invoices.v2": false,\n} as const;\n\nexport type Flag = keyof typeof flags;\n\nexport function isOn(flag: Flag, workspace: { flags?: Partial<Record<Flag, boolean>> }): boolean {\n  return workspace.flags?.[flag] ?? flags[flag];\n}\n',
+      },
+      {
+        path: "src/pages/invoices.tsx",
+        before: 'import { InvoiceList } from "../invoices/list";\n\nexport function InvoicesPage({ workspace }: { workspace: Workspace }) {\n  return <InvoiceList workspace={workspace} />;\n}\n',
+        after: 'import { InvoiceList } from "../invoices/list";\nimport { InvoiceView } from "../invoices/view-v2";\nimport { isOn } from "../flags";\n\nexport function InvoicesPage({ workspace }: { workspace: Workspace }) {\n  if (isOn("invoices.v2", workspace)) return <InvoiceView workspace={workspace} />;\n  return <InvoiceList workspace={workspace} />;\n}\n',
+      },
+    ],
+  },
+  default: {
+    kind: "default",
+    project: "payments-api",
+    title: "Explain declined payouts in the log",
+    goal: "When a payout is declined, the log only says “payout failed”. Log the payout id and the bank's reason so support can answer customers.",
+    boundaries: ["Only the declined-payout log line and its test change.", "No customer data beyond the payout id."],
+    checks: ["npm test passes, including a test for the new log line.", "A screenshot of the log with a declined payout."],
+    progress: ["Reading src/payout-log.ts", "Adding the payout id and reason", "Adding a test for the log line"],
+    conclusion: "Declined payouts now log “payout declined” with the payout id and the bank's reason code. Added a test that checks the log line.",
+    checkOutput: " ✓ test/payout-log.test.ts (1 test) 4ms\n ✓ test/payout.test.ts (14 tests) 38ms\n\n Test Files  9 passed (9)\n      Tests  215 passed (215)\n",
+    screenshot: { caption: "Log viewer: a declined payout with its id and reason.", accent: [196, 50, 10] },
+    files: [
+      {
+        path: "src/payout-log.ts",
+        before: 'import { log } from "./log";\n\nexport function payoutDeclined(payoutId: string, reason: string): void {\n  log.warn("payout failed");\n}\n',
+        after: 'import { log } from "./log";\n\nexport function payoutDeclined(payoutId: string, reason: string): void {\n  log.warn("payout declined", { payoutId, reason });\n}\n',
+      },
+      {
+        path: "test/payout-log.test.ts",
+        before: null,
+        after: 'import { test, expect } from "vitest";\nimport { payoutDeclined } from "../src/payout-log";\nimport { log } from "../src/log";\n\ntest("a declined payout logs its id and reason", () => {\n  payoutDeclined("po_311", "R01");\n  expect(log.last()).toEqual({ level: "warn", message: "payout declined", payoutId: "po_311", reason: "R01" });\n});\n',
+      },
+    ],
+  },
+};
+
+/** The files each plan changes, as they stand before the change. */
+function demoLeadFiles(project: DemoProject): Record<string, string> {
+  const files: Record<string, string> = {};
+  for (const plan of Object.values(DEMO_PLANS)) {
+    if (plan.project !== project) continue;
+    for (const file of plan.files) if (file.before !== null) files[file.path] = file.before;
+  }
+  return files;
+}
+
+/** The scripted lead's choice: a plan named by the request's words, else the default. */
+export function pickDemoPlan(text: string): DemoPlan {
+  const words = text.toLowerCase();
+  if (/\b(tests?|flaky|flake|spec|ci)\b/.test(words)) return DEMO_PLANS["flaky-test"];
+  if (/\b(flags?|toggle|feature|rollout)\b/.test(words)) return DEMO_PLANS.flag;
+  if (/\b(copy|text|wording|words|label|typo|empty|page)\b/.test(words)) return DEMO_PLANS.copy;
+  if (/\b(bugs?|fix|broken|crash|errors?|fails?|wrong|double|refunds?)\b/.test(words)) return DEMO_PLANS.bug;
+  return DEMO_PLANS.default;
+}
+
+/** A unified diff of one small file, one hunk, from a longest-common-subsequence walk. */
+function unifiedDiff(file: DemoFile): { patch: string; additions: number; deletions: number } {
+  const split = (text: string | null): string[] => (text === null ? [] : text.replace(/\n$/, "").split("\n"));
+  const a = split(file.before);
+  const b = split(file.after);
+  const lcs: number[][] = Array.from({ length: a.length + 1 }, () => new Array<number>(b.length + 1).fill(0));
+  for (let i = a.length - 1; i >= 0; i--) {
+    for (let j = b.length - 1; j >= 0; j--) lcs[i]![j] = a[i] === b[j] ? lcs[i + 1]![j + 1]! + 1 : Math.max(lcs[i + 1]![j]!, lcs[i]![j + 1]!);
+  }
+  const lines: string[] = [];
+  let i = 0;
+  let j = 0;
+  let additions = 0;
+  let deletions = 0;
+  while (i < a.length || j < b.length) {
+    if (i < a.length && j < b.length && a[i] === b[j]) { lines.push(` ${a[i]}`); i++; j++; }
+    else if (i < a.length && (j === b.length || lcs[i + 1]![j]! >= lcs[i]![j + 1]!)) { lines.push(`-${a[i]}`); i++; deletions++; }
+    else { lines.push(`+${b[j]}`); j++; additions++; }
+  }
+  const head = file.before === null
+    ? `diff --git a/${file.path} b/${file.path}\nnew file mode 100644\n--- /dev/null\n+++ b/${file.path}\n@@ -0,0 +1,${b.length} @@\n`
+    : `diff --git a/${file.path} b/${file.path}\n--- a/${file.path}\n+++ b/${file.path}\n@@ -1,${a.length} +1,${b.length} @@\n`;
+  return { patch: `${head}${lines.join("\n")}\n`, additions, deletions };
+}
+
+/** A plain mock of the screen the plan's screenshot shows: a header, rows and one coloured result mark. */
+function demoScreenshot(accent: readonly [number, number, number]): Buffer {
+  const width = 960;
+  const height = 600;
+  const pixels = Buffer.alloc(width * height * 3, 255);
+  const fill = (x: number, y: number, w: number, h: number, rgb: readonly [number, number, number]): void => {
+    for (let row = y; row < Math.min(height, y + h); row++) {
+      for (let col = x; col < Math.min(width, x + w); col++) {
+        const p = (row * width + col) * 3;
+        pixels[p] = rgb[0]; pixels[p + 1] = rgb[1]; pixels[p + 2] = rgb[2];
+      }
+    }
+  };
+  fill(0, 0, width, 56, [245, 245, 245]);
+  fill(24, 20, 140, 16, [23, 23, 23]);
+  fill(0, 56, width, 1, [230, 230, 230]);
+  for (let index = 0; index < 7; index++) {
+    const y = 96 + index * 64;
+    fill(48, y, 260 - (index % 3) * 40, 14, [64, 64, 64]);
+    fill(48, y + 24, 420 - (index % 2) * 90, 10, [190, 190, 190]);
+    fill(width - 168, y + 4, 112, 24, index === 0 ? accent : [232, 232, 232]);
+    fill(24, y + 52, width - 48, 1, [236, 236, 236]);
+  }
+  return encodePngPixels(width, height, pixels);
+}
+
+function encodePngPixels(width: number, height: number, pixels: Buffer): Buffer {
+  const stride = width * 3;
+  const raw = Buffer.alloc((stride + 1) * height);
+  for (let y = 0; y < height; y++) pixels.copy(raw, y * (stride + 1) + 1, y * stride, (y + 1) * stride);
+  return pngOf(width, height, raw);
+}
+
+export type DemoExchange = {
+  id: number;
+  /** What the visitor typed, or the note that asked for this plan. */
+  asked: string;
+  reply: string;
+  plan: DemoPlan;
+  /** A visitor's extra instruction carried into the plan by Change it or Request changes. */
+  note: string | null;
+  state: "proposed" | "replaced" | "working" | "ready" | "complete" | "sent-back";
+  stage: "planning" | "building" | "checking" | null;
+  progress: string | null;
+  taskId: string | null;
+  runId: number | null;
+  approvedAt: number | null;
+};
+
+export type DemoLead = {
+  exchanges(): readonly DemoExchange[];
+  /** Changes whenever anything a reader would see changes. */
+  version(): number;
+  ask(text: string, now: Date): DemoExchange;
+  approve(id: number, now: Date): { ok: true } | { ok: false; message: string };
+  change(id: number, note: string, now: Date): { ok: true } | { ok: false; message: string };
+  requestChanges(id: number, note: string, now: Date): { ok: true } | { ok: false; message: string };
+  /** Complete through the real completion act, then mark the exchange. */
+  complete(id: number, now: Date, act: (taskId: string, runId: number) => { ok: true } | { ok: false; message: string }): { ok: true } | { ok: false; message: string };
+  advance(now: Date): void;
+  stop(): void;
+};
+
+const DEMO_STAGES = ["planning", "building", "checking"] as const;
+const DEMO_MAX_EXCHANGES = 40;
+
+/**
+ * The scripted lead. `stepMs` is one beat: planning takes one, building two
+ * (one per progress line), checks one, so a build lands Ready in four beats.
+ * State advances on a timer AND whenever someone reads, so a page and the
+ * Tasks list agree without anyone polling.
+ */
+export function createDemoLead(input: {
+  store: Store;
+  repos: { api: string; web: string };
+  evidenceRoot: string;
+  approver: string;
+  token: string;
+  stepMs?: number;
+  clock?: () => Date;
+}): DemoLead {
+  const { store, repos, evidenceRoot, approver, token } = input;
+  if (!store.isDemo()) throw new Error("the scripted lead only runs in a demo database");
+  const stepMs = input.stepMs ?? 2_500;
+  const clock = input.clock ?? (() => new Date());
+  const list: DemoExchange[] = [];
+  const timers = new Set<NodeJS.Timeout>();
+  let changes = 0;
+  let nextId = 1;
+  const touched = (): void => { changes++; };
+  // The scripted crew is a registered builder, so Tasks reads a demo build
+  // as a live claim on a connected builder — registered on first use only.
+  const CREW = "demo-crew";
+  let crewToken: string | null = null;
+  const crewSeen = (at: Date): string => {
+    if (crewToken === null) crewToken = register(store, { name: CREW, host: "demo", capacity: 4, repos: [repos.api, repos.web], now: at }).token;
+    store.touchRunner(CREW, at);
+    return crewToken;
+  };
+  const leases = new Map<number, string>();
+  const find = (id: number): DemoExchange | undefined => list.find(one => one.id === id);
+  const repoOf = (plan: DemoPlan): string => (plan.project === "payments-api" ? repos.api : repos.web);
+  const said = (text: string): string => text.replace(/\s+/g, " ").trim().slice(0, 500);
+
+  const add = (asked: string, reply: string, plan: DemoPlan, note: string | null): DemoExchange => {
+    const exchange: DemoExchange = { id: nextId++, asked, reply, plan, note, state: "proposed", stage: null, progress: null, taskId: null, runId: null, approvedAt: null };
+    list.push(exchange);
+    if (list.length > DEMO_MAX_EXCHANGES) list.splice(0, list.length - DEMO_MAX_EXCHANGES);
+    touched();
+    return exchange;
+  };
+  const goalOf = (exchange: DemoExchange): string => (exchange.note === null ? exchange.plan.goal : `${exchange.plan.goal} Also: ${exchange.note}`);
+
+  const taskIdFor = (plan: DemoPlan): string => {
+    const base = plan.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48);
+    for (let n = 1; ; n++) {
+      const id = n === 1 ? base : `${base}-${n}`;
+      if (store.lookupRef(id) === null) return id;
+    }
+  };
+
+  /** Each stage's store facts, written once, in order. */
+  const enterStage = (exchange: DemoExchange, stage: number, at: Date): void => {
+    const plan = exchange.plan;
+    const taskId = exchange.taskId!;
+    const ref = store.refFor("built-in", taskId).id;
+    if (stage === 1) {
+      const repo = repoOf(plan);
+      // The project check the result reports, approved before the attempt starts — as `verify set` would.
+      const command = store.liveVerifyCommand(store.refById(ref)?.repo ?? repo);
+      if (command === null || command.command !== DEMO_CHECK_COMMAND) {
+        store.setVerifyCommand({ repo: store.refById(ref)?.repo ?? repo, command: DEMO_CHECK_COMMAND, timeoutMs: 120_000, approvedBy: approver }, at);
+      }
+      const route = store.approvedRouteOf(taskId);
+      const claimed = acquire(store, ref, CREW, { now: at, token: crewSeen(at), ttlMs: 10 * 60_000 });
+      const leaseId = claimed.ok ? claimed.claim.leaseId : `demo-lease-${taskId}`;
+      const run = store.startRun({
+        taskRef: ref,
+        leaseId,
+        runner: CREW,
+        branch: `toolroll/${taskId}`,
+        worktree: join(repo, `.demo-worktree-${taskId}`),
+        now: at,
+        ...(route === null ? {} : { route: { routeDigest: routeDigestOf(route), phase: "build" as const, provider: legOf(route, "build").provider, model: legOf(route, "build").model, chosen: legOf(route, "build").chosen } }),
+      });
+      store.stampRun(run, { baseRevision: randomBytes(20).toString("hex"), scopeDigest: store.getScope(taskId)?.digest ?? "" });
+      store.setRunPhase(run, "agent-running", at);
+      store.setTaskState(taskId, "running", at);
+      exchange.runId = run;
+      if (claimed.ok) leases.set(exchange.id, leaseId);
+    }
+    if (stage === 2) {
+      crewSeen(at);
+      store.setRunPhase(exchange.runId!, "verifying-proof", at);
+    }
+    if (stage === 3) finish(exchange, at);
+  };
+
+  const finish = (exchange: DemoExchange, at: Date): void => {
+    const plan = exchange.plan;
+    const run = exchange.runId!;
+    const taskId = exchange.taskId!;
+    const head = randomBytes(20).toString("hex");
+    const base = store.getRun(run)?.baseRevision ?? "";
+    const diffs = plan.files.map(file => ({ path: file.path, ...unifiedDiff(file) }));
+    const stat: DiffStat = {
+      schema: 1, base, head, fileCount: diffs.length,
+      additions: diffs.reduce((sum, one) => sum + one.additions, 0),
+      deletions: diffs.reduce((sum, one) => sum + one.deletions, 0),
+      binaryCount: 0,
+      files: diffs.map(one => ({ path: one.path, additions: one.additions, deletions: one.deletions })),
+      filesTruncated: false,
+    };
+    const shotPath = `evidence/${plan.kind}.png`;
+    const png = demoScreenshot(plan.screenshot.accent);
+    const handoff = { schema: 1, outcome: "built", committed: true, conclusion: plan.conclusion, changes: diffs.map(one => `Changed ${one.path}.`), verification: [plan.checks[0]!], followUps: [], decisionsIncorporated: [] };
+    const proof = {
+      version: 1 as const,
+      criteria: [
+        { id: "c1", statement: plan.checks[0]!, verdict: "met" as const, how: "Ran the project check.", evidence: [{ kind: "check" as const, ref: DEMO_CHECK_COMMAND }] },
+        { id: "c2", statement: plan.checks[1]!, verdict: "met" as const, how: "Captured the screen after the change.", evidence: [{ kind: "screenshot" as const, ref: shotPath }] },
+      ],
+      checks: [{ command: DEMO_CHECK_COMMAND, exitCode: 0, summary: plan.checkOutput.trim().split("\n").at(-1)!.trim() }],
+      changed: diffs.map(one => one.path),
+      caveats: [],
+      screenshots: [{ path: shotPath, caption: plan.screenshot.caption }],
+    };
+    const synthetic = "[demo: scripted]";
+    storeEvidence(store, evidenceRoot, run, "terminal-diff", "terminal-diff.patch", Buffer.from(diffs.map(one => one.patch).join(""), "utf8"), `git diff --no-ext-diff --no-textconv --no-color ${base.slice(0, 8)}..HEAD (exit 0) ${synthetic}`, at);
+    storeEvidence(store, evidenceRoot, run, "diff-stat", "diff-stat.json", budgetedStatJson(stat), `parsed from git diff --numstat -z ${synthetic}`, at);
+    storeEvidence(store, evidenceRoot, run, "handoff", "handoff.json", Buffer.from(JSON.stringify(handoff, null, 2), "utf8"), `composed at completion ${synthetic}`, at);
+    storeEvidence(store, evidenceRoot, run, "proof", "proof.json", Buffer.from(JSON.stringify(proof, null, 2), "utf8"), `agent-authored proof (validated, re-serialized) ${synthetic}`, at);
+    storeEvidence(store, evidenceRoot, run, "screenshot", `screenshot-${plan.kind}.png`, png, `agent-claimed screenshot at ${shotPath} (validated png) ${synthetic}`, at);
+    const log = `=== Attempt summary ===\n- Project check · attempt 1: (exit 0)\n\n=== Project check · attempt 1 ===\n$ ${DEMO_CHECK_COMMAND}\n(exit 0)\n\n--- stdout ---\n${plan.checkOutput}\n--- stderr ---\n`;
+    storeEvidence(store, evidenceRoot, run, "check-log", "check-log.txt", Buffer.from(log, "utf8"), `${DEMO_CHECK_COMMAND} (attempt recorded) ${synthetic}`, at, { captureStatus: "ok" });
+    store.recordOutcomeFacts(run, { headRevision: head, handoff: plan.conclusion });
+    const repo = store.refById(store.refFor("built-in", taskId).id)?.repo ?? repoOf(plan);
+    const command = store.liveVerifyCommand(repo);
+    if (command !== null) sealVerificationReceipt(store, evidenceRoot, run, head, command, { configured: true, ran: true, exitCode: 0 }, at);
+    store.recordRunCheck(run, { status: "passed", exitCode: 0, suites: [] }, at);
+    const adjudicated = adjudicate({
+      proofArtifactPresent: true,
+      proofParse: parseProof(JSON.stringify(proof)),
+      handoffPresent: true,
+      terminalDiffPresent: true,
+      terminalDiffCaptureStatus: "ok",
+      diffStat: { captured: true, truncated: false, paths: new Set(stat.files.map(one => one.path)) },
+      verifyCommand: { configured: true, ran: true, exitCode: 0 },
+      screenshots: [{ path: shotPath, ok: true, bytes: png.length, dims: imageDimensions(png, "png") }],
+      approvedCriteria: store.getScope(taskId)?.acceptance ?? [],
+    });
+    store.saveProofVerdict(run, adjudicated.verdict, adjudicated.reasons, at, adjudicated.matrix);
+    store.finishRun(run, { outcome: "built", committed: true, now: at });
+    store.setTaskState(taskId, "done", at);
+    crewSeen(at);
+    const lease = leases.get(exchange.id);
+    if (lease !== undefined) { release(store, lease, at); leases.delete(exchange.id); }
+  };
+
+  const advance = (now: Date): void => {
+    for (const exchange of list) {
+      if (exchange.state !== "working" || exchange.approvedAt === null) continue;
+      const beats = Math.floor((now.getTime() - exchange.approvedAt) / stepMs);
+      // planning: beat 0; building: beats 1–2; checks: beat 3; Ready: beat 4.
+      const target = beats >= 4 ? 3 : beats >= 3 ? 2 : beats >= 1 ? 1 : 0;
+      const current = exchange.stage === null ? -1 : DEMO_STAGES.indexOf(exchange.stage);
+      for (let stage = current + 1; stage <= target; stage++) {
+        const at = new Date(exchange.approvedAt + [0, 1, 3, 4][stage]! * stepMs);
+        enterStage(exchange, stage, at);
+        if (stage < 3) exchange.stage = DEMO_STAGES[stage]!;
+        else { exchange.state = "ready"; exchange.stage = null; exchange.progress = null; }
+        touched();
+      }
+      if (exchange.state === "working") {
+        const line = exchange.stage === "planning" ? "Reading the project and its guidance"
+          : exchange.stage === "building" ? exchange.plan.progress[Math.min(1, Math.max(0, beats - 1))]!
+          : `Running ${DEMO_CHECK_COMMAND} — ${exchange.plan.progress[2]!.toLowerCase()}`;
+        if (line !== exchange.progress) { exchange.progress = line; touched(); }
+      }
+    }
+  };
+
+  const schedule = (exchange: DemoExchange): void => {
+    for (const beat of [1, 2, 3, 4]) {
+      const timer = setTimeout(() => {
+        timers.delete(timer);
+        try { advance(clock()); } catch { /* the next read advances it again */ }
+      }, beat * stepMs + 20);
+      timer.unref();
+      timers.add(timer);
+    }
+    void exchange;
+  };
+
+  return {
+    exchanges: () => { advance(clock()); return list; },
+    version: () => { advance(clock()); return changes; },
+    ask(text, now) {
+      advance(now);
+      const asked = said(text);
+      const plan = pickDemoPlan(asked);
+      const reply = plan.kind === "default"
+        ? `This demo lead is scripted, so it can't plan that exactly. Here's a realistic change in ${plan.project} instead.`
+        : `Here's my plan for ${plan.project}. Approve it and the crew starts.`;
+      return add(asked, reply, plan, null);
+    },
+    approve(id, now) {
+      advance(now);
+      const exchange = find(id);
+      if (exchange === undefined) return { ok: false, message: "That plan is no longer here. Ask again." };
+      if (exchange.state !== "proposed") return { ok: false, message: "That plan was already handled." };
+      const repo = repoOf(exchange.plan);
+      const taskId = taskIdFor(exchange.plan);
+      const acceptance: AcceptanceCriterion[] = [
+        { id: "c1", statement: exchange.plan.checks[0]!, how: null, evidence: ["check"] },
+        { id: "c2", statement: exchange.plan.checks[1]!, how: null, evidence: ["screenshot"] },
+      ];
+      const made = fileTaskProposal(store, { id: taskId, title: exchange.plan.title, repo, goal: goalOf(exchange), acceptance, filedVia: "demo" }, now);
+      if (!made.ok) return { ok: false, message: "The demo couldn't file that task." };
+      const proposed = propose(store, {
+        profile: DEMO_PROFILE,
+        taskId,
+        goal: goalOf(exchange),
+        outOfScope: exchange.plan.boundaries.join(" "),
+        touches: exchange.plan.files.map(file => file.path),
+        acceptance,
+        now,
+      });
+      const approved = approve(store, taskId, approver, now, proposed.digest, token);
+      if (!approved.ok) return { ok: false, message: "The demo couldn't approve that plan." };
+      exchange.taskId = taskId;
+      exchange.state = "working";
+      exchange.stage = "planning";
+      exchange.progress = "Reading the project and its guidance";
+      exchange.approvedAt = now.getTime();
+      store.setTaskState(taskId, "queued", now);
+      crewSeen(now);
+      touched();
+      schedule(exchange);
+      return { ok: true };
+    },
+    change(id, note, now) {
+      advance(now);
+      const exchange = find(id);
+      const words = said(note);
+      if (exchange === undefined || exchange.state !== "proposed") return { ok: false, message: "That plan was already handled." };
+      if (words === "") return { ok: false, message: "Say what should change." };
+      exchange.state = "replaced";
+      add(words, "Updated the plan with your note.", exchange.plan, exchange.note === null ? words : `${exchange.note} ${words}`);
+      return { ok: true };
+    },
+    requestChanges(id, note, now) {
+      advance(now);
+      const exchange = find(id);
+      const words = said(note);
+      if (exchange === undefined || exchange.state !== "ready") return { ok: false, message: "That result was already handled." };
+      if (words === "") return { ok: false, message: "Say what should change." };
+      store.addRunNote(exchange.runId!, approver, words, now);
+      exchange.state = "sent-back";
+      add(words, "Sent back with your note. Here's the revised plan.", exchange.plan, exchange.note === null ? words : `${exchange.note} ${words}`);
+      return { ok: true };
+    },
+    complete(id, now, act) {
+      advance(now);
+      const exchange = find(id);
+      if (exchange === undefined || exchange.state !== "ready") return { ok: false, message: "That result was already handled." };
+      const done = act(exchange.taskId!, exchange.runId!);
+      if (!done.ok) return done;
+      exchange.state = "complete";
+      touched();
+      return { ok: true };
+    },
+    advance,
+    stop() { for (const timer of timers) clearTimeout(timer); timers.clear(); },
+  };
 }

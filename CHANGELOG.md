@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 0.9.5 — 2026-10-01
+
+- **A demo you can feel in 90 seconds.** In `npx toolroll demo`, Chat has a
+  scripted lead: ask for anything and it answers with a short plan in a
+  sample project; Approve builds it live to Ready with a diff, a passing
+  check and a screenshot, then Complete or Request changes. It never calls a
+  model, reaches outside or spends. The sandbox folder is now `toolroll-demo-*`.
+- **Calmer first impressions.** A result in Chat shows each fact once, in
+  plain words ("You check this one: …" instead of criterion and evidence
+  terms), and a first start on Linux without process containment says so in
+  one sentence instead of a cgroup error.
+- **Pull requests open reliably.** Each project's worker now publishes only
+  its own project's pull requests, under one permission lookup shared by
+  Complete, flows and the publisher. Before, another project's worker could
+  give up on a pull request that was actually opened, and a flow could file a
+  needless rebuild.
+
 ## 0.9.4 — 2026-10-01
 
 - **Flow steps act exactly once.** However many workers advance a

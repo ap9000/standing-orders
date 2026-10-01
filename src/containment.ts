@@ -232,6 +232,15 @@ export function describeContainment(effective: EffectiveContainment): string {
   return `containment: observed (${effective.policy}) — ${effective.capability.detail}`;
 }
 
+/** The one sentence a person reads at start when agents on Linux run
+ * without native containment that the machine could offer once set up;
+ * null when there is nothing a person needs to read. The exact
+ * `describeContainment` line stays in --verbose and in a service log. */
+export function containmentNotice(effective: EffectiveContainment): string | null {
+  if (effective.refusal !== null || effective.mode !== "observed" || effective.capability.platform !== "linux" || effective.capability.available) return null;
+  return "Agents run without Linux process containment on this machine (it needs a delegated cgroup). That's fine for trying Toolroll; see docs/guide/linux.md to turn it on.";
+}
+
 /** The status envelope's shape: no paths a person did not already know, no secrets. */
 export function containmentStatus(effective: EffectiveContainment): Record<string, unknown> {
   return {

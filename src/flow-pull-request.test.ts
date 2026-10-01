@@ -176,7 +176,86 @@ describe("the Pull request zone", () => {
     expect(store.listNotifications("all").some(one => one.subject === "Issues to PRs: Pull request didn't pass for “Checkout total is wrong”")).toBe(true);
   });
 
-  test("c1: no pull request setup, or no built result, takes the failure path saying what to do", async () => {
+  test("c1: set up by publish setup, with another project's watch publishing too: one PR, the card waits on CI, then moves on", async () => {
+    const { card, runId } = approvedCard(issuesToPrs(false), "fix-total");
+    const quiet = scripted([]);
+    await runFlowSteps(store, REPO, at(3), io(quiet.exec));
+    // Another project's watch (no grant of its own) runs its passes over the same database: it leaves this
+    // project's publication alone — no "no live grant" errors counted against it, no giving up.
+    const other = scripted([]);
+    for (let pass = 0; pass < 8; pass++) await publishPass(store, { repo: "/projects/other", exec: other.exec, clock: () => at(4), evidenceRoot: dir });
+    expect(other.calls).toEqual([]);
+    expect(store.pendingPublications()).toMatchObject([{ run: runId, attempts: 0, lastError: null, state: "intended" }]);
+    await runFlowSteps(store, REPO, at(4), io(quiet.exec));
+    expect(store.getFlowCard(card)).toMatchObject({ stage: "pull-request", waiting: "Opening the pull request…" });
+
+    const publisher = scripted([["gh pr list", { stdout: "[]" }], ["gh pr create", { stdout: "https://github.com/alex/shop/pull/12\n" }]]);
+    expect(await publishPass(store, { repo: REPO, exec: publisher.exec, clock: () => at(5), evidenceRoot: dir })).toMatchObject({ pushed: 1, opened: 1, failed: 0 });
+    expect(publisher.ran("git push")).toHaveLength(1);
+    expect(publisher.ran("gh pr create")).toHaveLength(1);
+    await runFlowSteps(store, REPO, at(5), io(quiet.exec));
+    expect(store.getFlowCard(card)).toMatchObject({ stage: "pull-request", waiting: "Waiting for CI on PR #12." });
+
+    await observeChecks(store, { exec: scripted([["gh pr view", prView("SUCCESS")]]).exec, clock: () => at(6) });
+    await runFlowSteps(store, REPO, at(7), io(quiet.exec));
+    expect(store.getFlowCard(card)).toMatchObject({ stage: "update-issue", outputs: { "pull-request": "Pull request: https://github.com/alex/shop/pull/12 (checks passed)" } });
+    // One PR, and the card never went back to Build.
+    expect(store.handle.prepare("SELECT COUNT(*) AS n FROM publication").get()).toEqual({ n: 1 });
+    expect(store.flowEvents(card).filter(event => event.toStage === "build" && event.outcome === "fail")).toEqual([]);
+  });
+
+  test("c2: a missing grant is one clear waiting state, never a rebuild, and the card carries on once set up", async () => {
+    const { card } = approvedCard(issuesToPrs(false), "fix-total");
+    store.revokePublicationGrant(REPO, "alex", at(2));
+    for (let minute = 3; minute < 8; minute++) await runFlowSteps(store, REPO, at(minute), io(scripted([]).exec));
+    const after = store.getFlowCard(card)!;
+    expect(after).toMatchObject({ stage: "pull-request", primaryTask: "fix-total",
+      waiting: "Pull requests aren't set up for this project. Turn them on in Projects → Pull requests (or run toolroll publish setup); the card carries on by itself." });
+    expect(store.flowEvents(card).filter(event => event.outcome === "fail")).toEqual([]);
+    expect(store.pendingPublications()).toEqual([]);
+    // Told once.
+    expect(store.listNotifications("all").filter(one => one.subject.includes("is waiting on you for “Checkout total is wrong”"))).toHaveLength(1);
+
+    const setup = scripted([
+      ["git remote get-url origin", { stdout: "git@github.com:alex/shop.git\n" }], ["gh auth status", {}],
+      ["gh repo view alex/shop", { stdout: JSON.stringify({ nameWithOwner: "alex/shop", defaultBranchRef: { name: "main" }, viewerPermission: "WRITE" }) }], ["gh api user", { stdout: "alex\n" }],
+    ]);
+    const checked = await checkPublishing(REPO, { exec: setup.exec });
+    if (!checked.ok) throw new Error(checked.message);
+    savePublishing(store, checked.plan, "alex", {}, at(8));
+    await runFlowSteps(store, REPO, at(9), io(scripted([]).exec));
+    expect(store.getFlowCard(card)).toMatchObject({ stage: "pull-request", waiting: "Opening the pull request…" });
+    expect(store.pendingPublications()).toHaveLength(1);
+  });
+
+  test("c2: a publication given up on whose PR opened anyway is adopted and waits on CI; one with no PR waits, never rebuilds", async () => {
+    const { card, runId } = approvedCard(issuesToPrs(false), "fix-total");
+    await runFlowSteps(store, REPO, at(3), io(scripted([]).exec));
+    const id = store.publicationForRun(runId)!.id;
+    store.recordPublicationError(id, "no live publication grant — nothing may be pushed", at(3));
+    store.failPublication(id, at(3));
+    const gh = scripted([["gh pr list", { stdout: JSON.stringify([{ number: 3, url: "https://github.com/alex/shop/pull/3", headRefOid: HEAD }]) }]]);
+    await runFlowSteps(store, REPO, at(4), io(gh.exec));
+    expect(gh.ran("gh pr list")).toEqual([["gh", "pr", "list", "--repo", "alex/shop", "--head", "toolroll/fix-total", "--base", "main", "--state", "all", "--json", "number,url,headRefOid"]]);
+    expect(store.publicationForRun(runId)).toMatchObject({ state: "opened", prNumber: 3 });
+    expect(store.getFlowCard(card)).toMatchObject({ stage: "pull-request", waiting: "Waiting for CI on PR #3." });
+
+    // Gave up, and no PR carries this commit: a waiting state saying what to do, asked of GitHub once.
+    const second = approvedCard(issuesToPrs(false), "fix-tax");
+    await runFlowSteps(store, REPO, at(5), io(scripted([]).exec));
+    const other = store.publicationForRun(second.runId)!.id;
+    store.recordPublicationError(other, "remote rejected the push", at(5));
+    store.failPublication(other, at(5));
+    const none = scripted([["gh pr list", { stdout: "[]" }]]);
+    await runFlowSteps(store, REPO, at(6), io(none.exec));
+    await runFlowSteps(store, REPO, at(7), io(none.exec));
+    expect(none.ran("gh pr list")).toHaveLength(1);
+    expect(store.getFlowCard(second.card)).toMatchObject({ stage: "pull-request",
+      waiting: "Couldn't open the pull request: remote rejected the push. The commit is safe locally. Fix that, then move the card back to Build for a fresh result." });
+    expect(store.flowEvents(second.card).filter(event => event.outcome === "fail")).toEqual([]);
+  });
+
+  test("c1: no built result takes the failure path saying what to do", async () => {
     const definition = issuesToPrs(false);
     const flow = store.createFlow({ repo: REPO, name: "Issues to PRs", definitionJson: JSON.stringify(definition), by: "alex" }, T0);
     const card = store.addFlowCard({ flow, title: "Nothing built", description: null, stage: "pull-request", by: "alex" }, T0);

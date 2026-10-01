@@ -17,6 +17,7 @@ import type { Runner } from "./backend.js";
 import { assignmentOf } from "./assignment.js";
 import { cardFollowers, notifyPeople } from "./flow-people.js";
 import type { FlowDefinition, FlowStage } from "./flows.js";
+import { adoptPublishedPullRequest } from "./publish.js";
 import { failingCheckOf, mergePullRequest, owePullRequest, pullRequestBlocker, pullRequestFollowOf } from "./pull-request-flow.js";
 import { requestResultChanges } from "./result-actions.js";
 import { revisionSourceOf } from "./result-review.js";
@@ -58,6 +59,15 @@ export async function pullRequestStep(store: Store, flow: FlowRow, definition: F
     return true;
   };
 
+  // Publishing that can't proceed is not the build's fault: rebuilding wouldn't change it, so the card waits here,
+  // saying what to do, and the people on it hear once. It carries on by itself once the cause is fixed.
+  const stuck = (said: string): boolean => {
+    if (!waiting(said)) return false;
+    const people = card.owner === null ? cardFollowers(store, card) : [card.owner];
+    notifyPeople(store, card, people, null, { key: `pr-stuck:${card.entry}`, subject: `${stage.title} is waiting on you for “${card.title}”`, attention: true, body: said }, now);
+    return true;
+  };
+
   // With no failure path, a card that didn't pass waits for a person to move it (a move is a fresh visit).
   if (stage.onFail === null && card.waiting !== null && card.waiting.endsWith(" Fix it, then move the card to try again.")) return false;
   const task = card.primaryTask;
@@ -68,12 +78,21 @@ export async function pullRequestStep(store: Store, flow: FlowRow, definition: F
   if (publication === null || pullRequestFollowOf(store, publication.id) === null) {
     if (publication === null) {
       const blocked = pullRequestBlocker(store, runId);
-      if (blocked !== null) return failed(blocked === "Pull requests aren't set up for this project." ? "Pull requests aren't set up for this project. Turn them on in Projects → Pull requests, then move the card back here." : blocked);
+      // Only a result that can't be published as built goes back to be built again.
+      if (blocked !== null && (blocked === "This result has no commit to publish." || blocked.includes("looks like a secret"))) return failed(blocked);
+      if (blocked === "Pull requests aren't set up for this project.") return stuck("Pull requests aren't set up for this project. Turn them on in Projects → Pull requests (or run toolroll publish setup); the card carries on by itself.");
+      if (blocked !== null) return stuck(blocked);
     }
     publication = owePullRequest(store, runId, `flow ${flow.name}`, card.id, now);
   }
+  if (publication.state === "failed") {
+    const said = `Couldn't open the pull request: ${publication.lastError ?? "GitHub refused it"}. The commit is safe locally. Fix that, then move the card back to Build for a fresh result.`;
+    if (card.waiting === said) return false;
+    // A pull request opened for this commit anyway (another pass, or a person) is the card's pull request.
+    if (await adoptPublishedPullRequest(store, publication, io.gh, () => now)) publication = store.publicationForRun(runId)!;
+    else return stuck(said);
+  }
   const pr = publication.prNumber === null ? "the pull request" : `PR #${publication.prNumber}`;
-  if (publication.state === "failed") return failed(`Couldn't open the pull request: ${publication.lastError ?? "GitHub refused it"}. The commit is safe locally.`);
   if (publication.state !== "opened") return waiting(publication.lastError === null ? "Opening the pull request…" : `Opening the pull request. Retrying: ${publication.lastError}`);
   const link = publication.prUrl ?? pr;
   if (publication.remoteState === "MERGED") return passed(`${pr} was merged on GitHub.`, `Merged: ${link}`);

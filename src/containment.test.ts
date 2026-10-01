@@ -16,6 +16,7 @@ import { join } from "node:path";
 import {
   CGROUP2_PRELUDE,
   CONTAINMENT_ENV,
+  containmentNotice,
   createContainer,
   currentContainment,
   describeContainment,
@@ -154,6 +155,25 @@ describe("the effective status is truthful", () => {
     expect(refused.refusal).toContain(unavailable.detail);
     expect(describeContainment(refused)).toContain("REQUIRED but unavailable");
     expect(effectiveContainment("required", available)).toMatchObject({ mode: "native", refusal: null });
+  });
+});
+
+describe("the start-up notice", () => {
+  const undelegated: ContainmentCapability = { platform: "linux", backend: "cgroup2", available: false, cgroupRoot: "/sys/fs/cgroup", detail: "cgroup / is not delegated to this user (EROFS creating a child cgroup) — delegate it" };
+
+  test("Linux without a delegated cgroup reads as one plain sentence; the exact reason stays in the status line", () => {
+    for (const policy of ["observed", "preferred"] as const) {
+      const effective = effectiveContainment(policy, undelegated);
+      expect(containmentNotice(effective)).toBe("Agents run without Linux process containment on this machine (it needs a delegated cgroup). That's fine for trying Toolroll; see docs/guide/linux.md to turn it on.");
+      expect(describeContainment(effective)).toContain("EROFS");
+    }
+  });
+
+  test("nothing to say when containment is on, on other platforms, and never in place of a refusal", () => {
+    expect(containmentNotice(effectiveContainment("preferred", available))).toBeNull();
+    expect(containmentNotice(effectiveContainment("observed", available))).toBeNull();
+    expect(containmentNotice(effectiveContainment("observed", unavailable))).toBeNull();
+    expect(containmentNotice(effectiveContainment("required", undelegated))).toBeNull();
   });
 });
 

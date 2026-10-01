@@ -22410,10 +22410,11 @@ export class Store {
       .run(now.toISOString(), id);
   }
 
+  /** A PR that exists is recorded as opened, even if a concurrent pass gave up on the row meanwhile: it truly opened. */
   markPublicationOpened(id: number, prNumber: number, prUrl: string, now: Date): void {
     this.db
       .prepare(
-        "UPDATE publication SET state = 'opened', pr_number = ?, pr_url = ?, updated_at = ? WHERE id = ? AND state = 'pushed'",
+        "UPDATE publication SET state = 'opened', pr_number = ?, pr_url = ?, updated_at = ? WHERE id = ? AND state IN ('pushed','failed')",
       )
       .run(prNumber, prUrl, now.toISOString(), id);
   }

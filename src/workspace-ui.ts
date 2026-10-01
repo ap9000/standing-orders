@@ -275,7 +275,7 @@ function storedResultStatusOf(result: ResultFacts | null, publication: Publicati
       label: "Result saved, but its record does not match",
       // A structural refutation is settled before the approved check is
       // weighed, so it says nothing about whether that check passed.
-      detail: withPublication("The proof's claims disagree with the sealed record. Whether the approved check passed is not settled by this verdict."),
+      detail: withPublication("What the agent reported doesn't match the changes it saved. This doesn't say whether the project check passed."),
       tone: "problem",
       action: { label: "Open the record", kind: "open-review" },
     };

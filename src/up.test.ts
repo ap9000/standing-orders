@@ -200,6 +200,8 @@ describe("toolroll up", () => {
     expect(text).not.toContain(password);
     expect(text).not.toContain("Ctrl-C stops Toolroll");
     expect(opened).toEqual([]);
+    // A log (no terminal) keeps the exact containment status.
+    expect(text).toContain("watch: containment: ");
 
     lines = [];
     expect(await runOperate("up", ["--repo", repo, "--port", String(PORT + 15), "--for", "1200"], line => lines.push(line), {
@@ -207,8 +209,18 @@ describe("toolroll up", () => {
       upSeams: { terminal: true, env: {}, openBrowser: url => opened.push(url) },
     })).toBe(0);
     expect(opened).toEqual([`http://127.0.0.1:${PORT + 15}/`]);
+    // A person at a terminal reads at most one plain sentence about containment; --verbose adds the exact status.
+    expect(lines.join("\n")).not.toContain("watch: containment: ");
+    expect(lines.filter(line => line.startsWith("Agents run without Linux process containment")).length).toBeLessThanOrEqual(1);
+    expect(lines.join("\n")).toContain("Toolroll stopped. Run `toolroll up` anywhere on this machine");
     // onboard names the console where up last served it.
     expect(JSON.parse(readFileSync(join(base, "up-console.json"), "utf8"))).toMatchObject({ url: `http://127.0.0.1:${PORT + 15}/` });
+    lines = [];
+    expect(await runOperate("up", ["--repo", repo, "--port", String(PORT + 17), "--for", "1200", "--verbose"], line => lines.push(line), {
+      databaseFile: db,
+      upSeams: { terminal: true, env: {}, openBrowser: () => undefined },
+    })).toBe(0);
+    expect(lines.join("\n")).toContain("watch: containment: ");
   });
 
   test("a coding agent is known by its variables; a person's own CODEX_HOME is not one", () => {
