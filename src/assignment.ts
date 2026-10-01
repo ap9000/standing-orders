@@ -70,6 +70,8 @@ export function assignmentBrief(assignment: AssignmentSnapshot | null) {
     publication: assignment.publication, deployment: assignment.deployment };
 }
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+/** A check as the receipt digest seals it: presentation-only fields (check-levels.ts) left out. */
+const sealedChecks = ({ level: _level, running: _running, ...proof }: AssignmentChecks): Omit<AssignmentChecks, "level" | "running"> => proof;
 const OWNER_ACTION = "assignment claimed";
 const CHECK_ACTION = COMPLETION_ACTION;
 const actorOf = (owner: AssignmentOwner) => `${owner.kind}:${owner.id}`;
@@ -184,7 +186,11 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
       ...artifacts.filter(a => a.kind !== "check-log" && (a.truncated || a.captureStatus === "failed")).map(a => `Saved ${a.kind} #${a.id} is ${a.captureStatus === "failed" ? "a failed capture" : "incomplete"}.`)],
     agentReport: result.handoff, evidence: "recorded" as const,
   };
-  const receipt = receiptBody === null ? null : { ...receiptBody, digest: digest({ receipt: receiptBody,
+  // The digest seals the proof, not how it is shown: the check's `level` (read from its sealed command) and `running`
+  // (a follow-up in flight) stay out of it, so a result completed before check levels keeps its completion, and a
+  // follow-up check that is still running never unseals one.
+  const sealedBody = receiptBody === null ? null : { ...receiptBody, checks: sealedChecks(receiptBody.checks) };
+  const receipt = receiptBody === null ? null : { ...receiptBody, digest: digest({ receipt: sealedBody,
     scope: scope === null ? null : { digest: scope.digest, approved: approvalOf(scope).approved, termsProblem: scope.termsProblem ?? null },
     versions: family.versions.map(v => ({ id: v.id, state: v.state })) }) };
   let completion: AssignmentSnapshot["completion"] = null;

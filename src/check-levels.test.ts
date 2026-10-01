@@ -15,7 +15,7 @@ import { addApprover, approve, propose } from "./scope.js";
 import { storeEvidence } from "./evidence.js";
 import { sealVerificationReceipt } from "./verification-evidence.js";
 import { createDecisionServer } from "./serve.js";
-import { assignmentOf } from "./assignment.js";
+import { assignmentOf, checkAssignmentAsOperator } from "./assignment.js";
 import { assignmentTaskStatusOf } from "./assignment-presentation.js";
 import { taskStatusOf, HEADLINES, HEADLINE_TONE } from "./task-status.js";
 import { verifyApproverByPassword } from "./principal.js";
@@ -414,5 +414,24 @@ describe("Settings → Projects → Checks", () => {
     expect(after).toContain('name="level" value="quick" checked');
     expect(after).toContain("npm run typecheck");
     await post("/settings/checks", { csrf, repo: REPO, act: "level", level: "full", password });
+  });
+});
+
+describe("upgrade: a result completed before check levels stays complete", () => {
+  test("the receipt digest seals the proof, not the check's level or a follow-up still running", () => {
+    const run = built("sealed-proof", "Keep a completed result complete", ago(40), "full");
+    const read = () => assignmentOf(store, "sealed-proof", NOW, { principal: "operator", repos: [REPO] }, root)!;
+    const before = read();
+    expect(before.receipt!.checks.level).toBe("full");
+    const who = verifyApproverByPassword(store, "sam", password, [REPO]);
+    if (!who.ok) throw new Error("approver fixture");
+    expect(checkAssignmentAsOperator(store, "sealed-proof", before.receipt!.digest, who.who, NOW, root).ok).toBe(true);
+    expect(read().state).toBe("complete");
+    // A follow-up check in flight shows as running, but never unseals the completion.
+    expect(requestFollowUpChecks(store, { runId: run, level: "quick", actor: "sam" }, NOW)).toMatchObject({ ok: true });
+    const after = read();
+    expect(after.receipt!.checks.running).toBe("quick");
+    expect(after.receipt!.digest).toBe(before.receipt!.digest);
+    expect(after.state).toBe("complete");
   });
 });
