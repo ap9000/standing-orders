@@ -174,6 +174,7 @@ describe("the machine envelope", () => {
       bridge: ["--json"],
       publish: ["status", "--json"],
       reconcile: ["--json"],
+      run: ["settle", "--json"],
       routine: ["list", "--json"],
       config: ["show", "--json"],
       mode: ["show", "--repo", "/nope", "--json"],

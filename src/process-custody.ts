@@ -71,6 +71,13 @@ export function witnessedRunner(store: Store, runId: number, clock: () => Date, 
         store.recordRunProcess(runId, pid, clock(), options.processGroup === true, witnesses.at(-1));
         options.onSpawn?.(pid);
       },
+      // The spawn made no process (ENOENT, EAGAIN, a throw): its reservation
+      // settles as never started now, not only if the transport returns.
+      onSpawnFailed: () => {
+        const witness = witnesses.at(-1);
+        if (witness !== undefined) store.finishUnspawnedProcess(witness, clock());
+        options.onSpawnFailed?.();
+      },
       onContainer: info => {
         native = true;
         const witness = witnesses.at(-1);

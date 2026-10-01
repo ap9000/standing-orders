@@ -25355,6 +25355,95 @@ export class Store {
       .run(now.toISOString(), witness);
   }
 
+  /** The reconcile road for a pid-less witness a crash or a thrown spawn
+   * left behind: once its run has finished, no live child is tracked for it
+   * here, every other witness of the run has exited and none of the run's
+   * process groups is alive, it settles as never started, with a ledger
+   * entry. A sole pid-less witness has no group to prove gone and stays for
+   * `run settle`. Native witnesses keep their OS-only road. */
+  settleUnspawnedWitnesses(now: Date): number {
+    const candidates = this.db.prepare(`SELECT DISTINCT p.run FROM run_process p JOIN run r ON r.id = p.run
+      WHERE p.exited_at IS NULL AND p.pid IS NULL AND p.containment IS NULL AND p.container IS NULL
+        AND p.host = ? AND r.outcome IS NOT NULL AND r.finished_at IS NOT NULL ORDER BY p.run`).all(hostname());
+    let settled = 0;
+    for (const candidate of candidates) {
+      const runId = Number(candidate["run"]);
+      this.recordRunProcessExits(runId, now);
+      settled += this.transact(() => {
+        const run = this.getRun(runId);
+        if (run === null || run.outcome === null) return 0;
+        if (ownedProcessCount(runOwnerTag(this, runId)) > 0) return 0;
+        const held = this.heldSessionOf(runId);
+        if (held !== null && held.endedAt === null) return 0;
+        const rows = this.db.prepare("SELECT * FROM run_process WHERE run = ? ORDER BY id").all(runId);
+        const pidless = rows.filter(row => row["exited_at"] === null && row["pid"] === null && row["containment"] === null && row["container"] === null && row["host"] === hostname());
+        const others = rows.filter(row => !pidless.includes(row));
+        if (pidless.length === 0 || others.length === 0) return 0;
+        if (others.some(row => row["exited_at"] === null)) return 0;
+        // Exit was recorded once; the group's members are asked again now.
+        const groups = others.filter(row => row["pid"] !== null && row["host"] === hostname());
+        if (groups.length === 0 || groups.some(row => processMayBeAlive(Number(row["pid"]), row["process_group"] === 1, { observedAt: row["observed_at"], finishedAt: run.finishedAt }))) return 0;
+        const ref = this.refById(run.taskRef);
+        let count = 0;
+        for (const row of pidless) {
+          const changed = this.db.prepare(`UPDATE run_process SET exited_at = ?
+            WHERE id = ? AND run = ? AND pid IS NULL AND exited_at IS NULL AND containment IS NULL AND container IS NULL`)
+            .run(now.toISOString(), row["id"], runId);
+          if (Number(changed.changes) !== 1) continue;
+          count++;
+          this.recordAction({ at: now.toISOString(), actor: "system", repo: ref?.repo ?? null, taskId: ref?.externalId ?? null, runId,
+            action: "process witness settled", outcome: "never started", source: "work",
+            detail: `witness ${String(row["id"])}: no pid; the run finished, every other witness exited and none of its process groups is alive` });
+        }
+        return count;
+      });
+    }
+    return settled;
+  }
+
+  /** `run settle` (an approver's last resort): every witness of a finished
+   * run that cannot be proven either way is recorded settled under the
+   * approver's reason, in the ledger. Refuses while anything of the run is
+   * alive or could be checked only from another host. Never signals. */
+  settleRunWitnessesByApprover(args: { runId: number; by: string; why: string }, now: Date):
+    | { ok: true; witnesses: number[]; repeated: boolean }
+    | { ok: false; reason: "unknown-run" | "still-running" | "alive"; detail: string } {
+    return this.transact(() => {
+      const run = this.getRun(args.runId);
+      if (run === null) return { ok: false as const, reason: "unknown-run" as const, detail: `no run #${args.runId}` };
+      if (run.outcome === null) return { ok: false as const, reason: "still-running" as const, detail: `run #${args.runId} is still open` };
+      const alive = (detail: string) => ({ ok: false as const, reason: "alive" as const, detail });
+      if (ownedProcessCount(runOwnerTag(this, args.runId)) > 0) return alive(`run #${args.runId} still has an owned subprocess`);
+      const held = this.heldSessionOf(args.runId);
+      if (held !== null && held.endedAt === null) return alive(`run #${args.runId}'s held supervisor has not finished shutdown`);
+      const rows = this.db.prepare("SELECT * FROM run_process WHERE run = ? ORDER BY id").all(args.runId);
+      const open = rows.filter(row => row["exited_at"] === null);
+      for (const row of rows) {
+        if (row["pid"] === null) continue;
+        if (row["host"] !== hostname()) {
+          if (row["exited_at"] === null) return alive(`run #${args.runId}'s process ${String(row["pid"])} belongs to ${String(row["host"])}; settle it there`);
+          continue;
+        }
+        if (processMayBeAlive(Number(row["pid"]), row["process_group"] === 1, { observedAt: row["observed_at"], finishedAt: run.finishedAt })) return alive(`run #${args.runId}'s process ${String(row["pid"])} is still running`);
+      }
+      for (const row of open) {
+        if (row["pid"] === null && row["host"] !== hostname()) return alive(`run #${args.runId} has a witness from ${String(row["host"])}; settle it there`);
+        if (row["containment"] != null && row["container"] != null && row["container_empty_at"] == null &&
+            containerEmptiness(String(row["containment"]), String(row["container"]), process.platform, row["container_identity"] == null ? null : String(row["container_identity"])) === "populated") {
+          return alive(`run #${args.runId}'s ${String(row["containment"])} object ${String(row["container"])} still has members`);
+        }
+      }
+      if (open.length === 0) return { ok: true as const, witnesses: [], repeated: true };
+      const ids = open.map(row => Number(row["id"]));
+      for (const id of ids) this.db.prepare("UPDATE run_process SET exited_at = ? WHERE id = ? AND run = ? AND exited_at IS NULL").run(now.toISOString(), id, args.runId);
+      const ref = this.refById(run.taskRef);
+      this.recordAction({ at: now.toISOString(), actor: args.by, repo: ref?.repo ?? null, taskId: ref?.externalId ?? null, runId: args.runId,
+        action: "process witness settled by approver", outcome: `witness ${ids.join(", ")}`, source: "request", detail: args.why });
+      this.settleQuiescentStops(now);
+      return { ok: true as const, witnesses: ids, repeated: false };
+    });
+  }
+
   recordRunProcess(runId: number, pid: number, now: Date, group = true, witness?: number): void {
     if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("a process witness needs a valid spawned PID");
     if (witness !== undefined) {

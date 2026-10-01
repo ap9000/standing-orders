@@ -120,6 +120,11 @@ export type RunOptions = ProcessTreeObserver & {
   /** Fires once the child exists, with its pid (the process-group id when
    * processGroup is set) — the slot ledger records it (v14 finding 26). */
   onSpawn?: (pid: number) => void;
+  /** Fires instead of onSpawn when a spawn that beforeSpawn admitted made no
+   * process at all (the OS call threw — ENOENT, EAGAIN — returned no pid, or
+   * its OS object could not be made), so its reserved witness can be settled
+   * as never started in the same step. Never fires once a child exists. */
+  onSpawnFailed?: () => void;
   /** Fires before any target spawn, so a crash cannot lose its OS object. */
   onContainer?: (info: { backend: ContainmentBackendId; id: string; identity?: string }) => void;
   /** Fires once the OS proved this spawn's object empty (every member
@@ -211,7 +216,7 @@ function spawnContained(
   args: readonly string[],
   spawnOptions: { cwd?: string | undefined; env?: Record<string, string | undefined> | undefined; stdio: ("pipe" | "ignore")[]; detached: boolean },
   label: string,
-  bag: { beforeSpawn?: (() => boolean) | undefined; onSpawn?: ((pid: number) => void) | undefined; onContainer?: RunOptions["onContainer"]; onContainerEmpty?: RunOptions["onContainerEmpty"]; onUnknown?: RunOptions["onUnknown"]; fence?: readonly string[] | undefined },
+  bag: { beforeSpawn?: (() => boolean) | undefined; onSpawn?: ((pid: number) => void) | undefined; onSpawnFailed?: (() => void) | undefined; onContainer?: RunOptions["onContainer"]; onContainerEmpty?: RunOptions["onContainerEmpty"]; onUnknown?: RunOptions["onUnknown"]; fence?: readonly string[] | undefined },
   contain = true,
 ): ContainedSpawn {
   // The agent fence wraps the target itself (sandbox-exec then execs it, same pid).
@@ -222,14 +227,19 @@ function spawnContained(
   const effective = contain ? currentContainment() : null;
   if (effective !== null && effective.refusal !== null) throw new ContainmentRefusal(effective.refusal);
   if (bag.beforeSpawn?.() === false) throw new Error("the attempt stopped before this process could spawn");
-  const made = effective === null ? { container: null } : createContainer(effective, label);
-  if ("refused" in made) throw new ContainmentRefusal(made.refused);
+  // From here a witness may be reserved: every road that makes no process
+  // says so through onSpawnFailed before it returns or throws.
+  const neverStarted = (): void => { try { bag.onSpawnFailed?.(); } catch { /* the reservation stays unproven */ } };
+  let made: ReturnType<typeof createContainer>;
+  try { made = effective === null ? { container: null } : createContainer(effective, label); }
+  catch (error) { neverStarted(); throw error; }
+  if ("refused" in made) { neverStarted(); throw new ContainmentRefusal(made.refused); }
   const container = made.container;
   try { if (container !== null) bag.onContainer?.({ backend: container.backend, id: container.id, ...(container.identity ? { identity: container.identity } : {}) }); }
-  catch (error) { container?.release(); throw error; }
+  catch (error) { container?.release(); neverStarted(); throw error; }
   let launch: ReturnType<Container["launch"]> | null;
   try { launch = container === null ? null : container.launch(file, args); }
-  catch (error) { container?.release(); throw error; }
+  catch (error) { container?.release(); neverStarted(); throw error; }
   let child: import("node:child_process").ChildProcess;
   try {
     child = spawn(launch === null ? file : launch.file, launch === null ? [...args] : launch.args, {
@@ -244,6 +254,7 @@ function spawnContained(
     // The OS spawn itself threw: this invocation made no target process.
     try { if (container !== null) bag.onContainerEmpty?.(); } catch {}
     container?.release();
+    neverStarted();
     throw error;
   }
   if (container !== null) {
@@ -258,6 +269,11 @@ function spawnContained(
   try {
     if (child.pid !== undefined) {
       bag.onSpawn?.(child.pid);
+    } else if (container === null) {
+      // No pid: the OS refused the spawn (ENOENT, EACCES) and only an
+      // 'error' event follows. A contained spawn settles once its object is
+      // proven empty, and its transport's return finishes the witness.
+      neverStarted();
     }
   } catch (error) {
     throw new SpawnCustodyFailure(child, error);
@@ -315,7 +331,7 @@ function spawnStream(
     args,
     { cwd: options.cwd, env: childEnv, stdio, detached: options.processGroup === true && process.platform !== "win32" },
     options.owner ?? "stream",
-    { beforeSpawn: options.beforeSpawn, onSpawn: options.onSpawn, onContainer: options.onContainer, onContainerEmpty: options.onContainerEmpty, onUnknown: options.onUnknown, fence: options.fence },
+    { beforeSpawn: options.beforeSpawn, onSpawn: options.onSpawn, onSpawnFailed: options.onSpawnFailed, onContainer: options.onContainer, onContainerEmpty: options.onContainerEmpty, onUnknown: options.onUnknown, fence: options.fence },
     options.processGroup === true,
   );
 }
@@ -627,6 +643,7 @@ export function run(file: string, args: readonly string[], options: RunOptions =
         ...(cwd === undefined ? {} : { cwd }),
         ...(childEnv === undefined ? {} : { childEnv }),
         ...(options.onSpawn === undefined ? {} : { onSpawn: options.onSpawn }),
+        ...(options.onSpawnFailed === undefined ? {} : { onSpawnFailed: options.onSpawnFailed }),
         ...(options.owner === undefined ? {} : { owner: options.owner }),
         ...(options.beforeSpawn === undefined ? {} : { beforeSpawn: options.beforeSpawn }),
         ...(options.onStdout === undefined ? {} : { onStdout: options.onStdout }),
@@ -682,7 +699,7 @@ export function run(file: string, args: readonly string[], options: RunOptions =
 function runBufferedGroup(
   file: string,
   args: readonly string[],
-  bag: ProcessTreeObserver & { cwd?: string; stdin?: string; timeoutMs: number; maxBuffer: number; childEnv?: Record<string, string | undefined>; onSpawn?: (pid: number) => void; owner?: string; beforeSpawn?: () => boolean; onContainer?: RunOptions["onContainer"]; onContainerEmpty?: RunOptions["onContainerEmpty"]; onStdout?: (chunk: string) => void; onStderr?: (chunk: string) => void; fence?: readonly string[] },
+  bag: ProcessTreeObserver & { cwd?: string; stdin?: string; timeoutMs: number; maxBuffer: number; childEnv?: Record<string, string | undefined>; onSpawn?: (pid: number) => void; onSpawnFailed?: () => void; owner?: string; beforeSpawn?: () => boolean; onContainer?: RunOptions["onContainer"]; onContainerEmpty?: RunOptions["onContainerEmpty"]; onStdout?: (chunk: string) => void; onStderr?: (chunk: string) => void; fence?: readonly string[] },
 ): Promise<SpawnAttempt> {
   return new Promise(resolve => {
     let child!: ReturnType<typeof spawn>;
@@ -694,7 +711,7 @@ function runBufferedGroup(
         args,
         { cwd: bag.cwd, env: bag.childEnv, stdio: [bag.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"], detached: process.platform !== "win32" },
         bag.owner ?? "buffered",
-        { beforeSpawn: bag.beforeSpawn, onSpawn: bag.onSpawn, onContainer: bag.onContainer, onContainerEmpty: bag.onContainerEmpty, onUnknown: bag.onUnknown, fence: bag.fence },
+        { beforeSpawn: bag.beforeSpawn, onSpawn: bag.onSpawn, onSpawnFailed: bag.onSpawnFailed, onContainer: bag.onContainer, onContainerEmpty: bag.onContainerEmpty, onUnknown: bag.onUnknown, fence: bag.fence },
       );
       child = spawned.child;
       container = spawned.container;
@@ -1771,6 +1788,7 @@ export function startClaudeHeldSession(
         {
           beforeSpawn: options.beforeSpawn,
           onSpawn: options.onSpawn,
+          onSpawnFailed: options.onSpawnFailed,
           onContainer: options.onContainer,
           onContainerEmpty: options.onContainerEmpty,
           onUnknown: options.onUnknown,
