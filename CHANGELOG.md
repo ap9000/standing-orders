@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.9.6 — 2026-10-01
+
+- **Every task's status, clear at a glance.** One headline from a fixed set
+  (Queued, Planning, Needs you, Building, Ready for review, Complete, Failed,
+  Stopped) and one plain sentence, the same words on the Tasks list, the task
+  page, the result, Crew, the Telegram/Slack/Discord/Teams card and
+  `toolroll status`. Checks, the pull request, requirements and saved
+  evidence sit underneath as quiet rows. A pull request that couldn't open
+  is an amber note with one action, never a red chip beside Complete: red
+  now means only Failed. The exact technical reason stays under Details.
+
 ## 0.9.5 — 2026-10-01
 
 - **A demo you can feel in 90 seconds.** In `npx toolroll demo`, Chat has a

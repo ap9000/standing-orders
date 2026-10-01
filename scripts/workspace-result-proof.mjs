@@ -459,7 +459,7 @@ async function sameTaskJourney() {
       check(`${name} revision ${revision}: lost seal response returns the same child`, replay.status() === 303 && replay.headers().location === `/chat?task=${root}&revision=${child}` && fixture.store.revisionsFromRun(sourceRun).length === 1);
       check(`${name} revision ${revision}: root draft and session survive creation`, await page.inputValue('.composer textarea[name="message"]') === draft && fixture.store.activeMateSession(fixture.name).id === thread.id);
       const work = await read('/work');
-      check(`${name} revision ${revision}: one root Work card with current approval state`, (work.match(new RegExp(`class="work-row" data-task="${root}"`, 'g')) ?? []).length === 1 && !work.includes(`class="work-row" data-task="${child}"`) && /Needs your approval/.test(work.split(`data-task="${root}"`)[1]?.split('</article>')[0] ?? ''));
+      check(`${name} revision ${revision}: one root Work card with current approval state`, (work.match(new RegExp(`class="work-row" data-task="${root}"`, 'g')) ?? []).length === 1 && !work.includes(`class="work-row" data-task="${child}"`) && /Needs you/.test(work.split(`data-task="${root}"`)[1]?.split('</article>')[0] ?? ''));
       await page.locator('.chat-approval > summary').focus();
       await page.keyboard.press('Enter');
       await scrollTo(page, '.chat-approval-section .recap', 100);
@@ -482,7 +482,7 @@ async function sameTaskJourney() {
       const beforeLive = countsOf(await read(`/t/${root}`));
       const live = fixture.startRevision(child);
       await page.reload();
-      check(`${name} revision ${revision}: actual live revision says Revising with its stored row still queued`, fixture.store.getTask(child).state === 'queued' && await page.locator('#task-chat-live').innerText().then(text => text.includes('Revising')));
+      check(`${name} revision ${revision}: actual live revision says Building with its stored row still queued`, fixture.store.getTask(child).state === 'queued' && await page.locator('#task-chat-live').innerText().then(text => text.includes('Building')));
       for (const phase of ['agent-running', 'verifying-proof']) {
         fixture.store.setRunPhase(live, phase);
         const header = countsOf(await read(`/t/${root}`));
@@ -805,7 +805,7 @@ try {
   // Forward link and preserved original evidence.
   await goto(page, `/r/${runId}`);
   const forward = await page.evaluate(() => ({ revision: document.querySelector('[data-result-revision]')?.getAttribute('data-result-revision'), words: document.querySelector('[data-result-revision]')?.textContent, shots: document.querySelectorAll('.result-panel .receipt-shot img').length, diff: document.querySelector('[data-review-diff]') !== null, batchGone: document.querySelector('.result-request .revision-from-comments') === null }));
-  check('c3 the original result links forward to the proposed revision and keeps its own evidence (screenshot, diff); the consumed batch no longer offers a second seal', forward.revision === revisionId && /Needs your approval/.test(forward.words ?? '') && forward.shots === 1 && forward.diff && forward.batchGone, JSON.stringify(forward));
+  check('c3 the original result links forward to the proposed revision and keeps its own evidence (screenshot, diff); the consumed batch no longer offers a second seal', forward.revision === revisionId && /Needs you/.test(forward.words ?? '') && forward.shots === 1 && forward.diff && forward.batchGone, JSON.stringify(forward));
   const chatApproval = await html(`/chat?task=${revisionId}`);
   check('c3 the revision\'s chat approval card links back to the original result', chatApproval.includes(`href="/chat?task=${task}&amp;result=${runId}" data-revision-source>Original result: build #${runId} →</a>`), '');
   await desktop.ctx.close();
@@ -1046,10 +1046,10 @@ try {
   await page.reload({ waitUntil: 'load' });
   standing.rescoped = await revisionLine(); standing.rescopedRow = await rowWords();
   standing.rescopedStampKept = fixture.store.getScope(childX)?.approvedAt !== null;
-  check('c10 unapproved → needs your approval, the same words as the child\'s Work row', standing.unapproved?.approved === '0' && standing.unapproved?.words === 'Needs your approval' && standing.unapproved?.words === standing.unapprovedRow, JSON.stringify(standing));
+  check('c10 unapproved → needs your approval, the same words as the child\'s Work row', standing.unapproved?.approved === '0' && standing.unapproved?.words === 'Needs you' && standing.unapproved?.words === standing.unapprovedRow, JSON.stringify(standing));
   check('c10 approved exactly → approval no longer asked for, and not "building" (nothing runs); the Work row agrees', standing.approved?.approved === '1' && !/approval|building/i.test(standing.approved?.words ?? '') && standing.approved?.words === standing.approvedRow, JSON.stringify(standing));
   check('c10 held after approval → On hold, never building', standing.held?.approved === '1' && standing.held?.words === 'On hold' && standing.held?.words === standing.heldRow, JSON.stringify(standing));
-  check('c10 rescoped after approval → the old stamp is no approval: needs your approval again', standing.rescopedStampKept && standing.rescoped?.approved === '0' && standing.rescoped?.words === 'Needs your approval' && standing.rescoped?.words === standing.rescopedRow, JSON.stringify(standing));
+  check('c10 rescoped after approval → the old stamp is no approval: needs your approval again', standing.rescopedStampKept && standing.rescoped?.approved === '0' && standing.rescoped?.words === 'Needs you' && standing.rescoped?.words === standing.rescopedRow, JSON.stringify(standing));
   await scrollTo(page, '#request-changes');
   await shot(page, 'desktop-c10-revision-standing', 'Desktop 1440×900: the sealed revision\'s line after approve-then-rescope — needs approval again (synthetic fixture)');
   await c7.ctx.close();

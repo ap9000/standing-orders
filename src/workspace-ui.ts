@@ -21,6 +21,7 @@ import type { DispatchAction, DispatchDiagnosis } from "./dispatch.js";
 import { GOAL_ASSESSMENT_PENDING, manualReviewOnly, type ProofVerdict } from "./proof.js";
 import type { ReviewRetryState, TaskState } from "./store.js";
 import type { TaskControlView } from "./task-control.js";
+import { plainReasonOf, stageOfCode, taskStatusOf, workToneOf } from "./task-status.js";
 
 /** The Work destination's views — shortcuts over the same rows, never a
  * persisted state. All is the default. */
@@ -29,7 +30,7 @@ export type WorkView = "all" | "needs-you" | "running" | "completed";
 export const WORK_VIEWS: readonly { key: WorkView; label: string; hint: string; empty: string }[] = [
   { key: "all", label: "All", hint: "Every task in view, most urgent first.", empty: "Nothing is in progress. Describe work in chat or add a task, and it appears here." },
   { key: "needs-you", label: "Needs you", hint: "Tasks waiting on an answer, approval, or your inspection.", empty: "Nothing needs you right now. Queued and running work continues on its own." },
-  { key: "running", label: "Running", hint: "Attempts a builder owns right now.", empty: "Nothing is building right now. Approved tasks start when a builder with capacity is connected." },
+  { key: "running", label: "Building", hint: "Attempts a builder owns right now.", empty: "Nothing is building right now. Approved tasks start when a builder with capacity is connected." },
   { key: "completed", label: "Complete", hint: "Tasks the lead or user has marked complete. Recorded check results remain available.", empty: "No tasks have been marked complete in this view." },
 ];
 
@@ -423,7 +424,38 @@ export function dispatchActionLabel(dispatch: DispatchDiagnosis | null): string 
   return dispatch?.action == null ? "View task details" : DISPATCH_ACTION_LABELS[dispatch.action];
 }
 
+/** Result tokens a done task can wear, as the shared stage they mean. A
+ * result that is missing its record waits on a person; a failed check fails. */
+const RESULT_NEEDS_YOU = new Set(["no-build-record", "verification-needed", "evidence-mismatch", "record-incomplete", "evidence-damaged"]);
+/** Result tokens that only follow a passing project check. */
+const VERIFIED_RESULT = new Set(["ready-to-review", "pr-opened", "merge-observed", "pr-closed"]);
+
+/** A finished result's display status in the shared headline's words: a
+ * failed project check is Failed, a result missing its record needs a
+ * person, every other saved result is Ready for review. Token and action stay. */
+export function resultHeadlineOf<T extends DisplayStatus>(status: T): T {
+  const read = RESULT_NEEDS_YOU.has(status.token) ? { stage: "needs-you" as const, need: "other" as const }
+    : status.token === "checks-failed" ? { stage: "failed" as const } : { stage: "finished" as const };
+  const shared = taskStatusOf({ ...read, reason: status.detail, checks: read.stage === "failed" ? { status: "failed", exitCode: null, head: null }
+    : VERIFIED_RESULT.has(status.token) ? { status: "passed", exitCode: null, head: null } : null });
+  return { ...status, label: shared.headline, tone: workToneOf(shared.headline) };
+}
+
+/** The one shared headline (task-status.ts) over the work status below: the
+ * token, views, rank, action and diagnostics stay; the words and tone are
+ * the eight headlines'. */
 export function workStatusOf(facts: WorkFacts, resultDisplay?: DisplayStatus): WorkStatus {
+  const status = workStatusWordsOf(facts, resultDisplay);
+  const done = facts.state === "done" && status.token !== "waiting-decision";
+  const read = done ? RESULT_NEEDS_YOU.has(status.token) ? { stage: "needs-you" as const, need: "other" as const } : stageOfCode(status.token, { needsPerson: false })
+    : stageOfCode(status.token, { needsPerson: status.views.includes("needs-you"), planning: facts.dispatch?.code === "running" && facts.dispatch.role === "planner", operatorHold: facts.dispatch?.action === "unhold" });
+  const stage = done && read.stage !== "needs-you" && read.stage !== "failed" ? "finished" as const : read.stage;
+  const shared = taskStatusOf({ stage, ...(read.need === undefined ? {} : { need: read.need }), reason: plainReasonOf(stage, status.token, status.detail),
+    report: facts.result?.role === "scout", checks: stage === "finished" && VERIFIED_RESULT.has(status.token) ? { status: "passed", exitCode: null, head: null } : null });
+  return { ...status, label: shared.headline, tone: workToneOf(shared.headline), detail: stage === "finished" ? status.detail : shared.sentence };
+}
+
+function workStatusWordsOf(facts: WorkFacts, resultDisplay?: DisplayStatus): WorkStatus {
   const dispatch = facts.dispatch;
   const result = facts.state === "done" ? resultDisplay ?? resultStatusOf(facts.result, facts.publication) : null;
   const running = facts.liveRunId !== null || (dispatch?.condition === "running" && !REVIEW_TOKENS.has(dispatch.code));

@@ -2,13 +2,13 @@
  * then anything that needs a person, the key facts, and folds for the rest.
  * Forms, ceremonies and ledgers stay the server's own HTML (same ids, same
  * page scripts); this page only frames them. */
-import { ArrowRight, Check, ChevronRight, Repeat } from "lucide-react";
+import { ArrowRight, ChevronRight, Repeat } from "lucide-react";
 import { useEffect, type ReactNode } from "react";
 import type { AssignmentCard } from "../../assignment-ui.js";
 import type { BrowserTaskFact, BrowserTaskSection, BrowserTaskView } from "../../browser-workspace.js";
 import { GuardedHtml } from "../guarded-html.js";
 import { Badge, Button, Card, cn } from "../components/ui/index.js";
-import { toneOf } from "./tone.js";
+import { StatusDetails, StatusHeadline, StatusWhy } from "./status-summary.js";
 
 /** A link to a fold (#scope, #holds, #task-actions) opens it and every fold
  * around it, on arrival and on in-page links alike. */
@@ -29,41 +29,30 @@ function useRevealHashTarget() {
   }, []);
 }
 
-const DOT: Record<string, string> = {
-  attention: "bg-attention", danger: "bg-destructive", info: "bg-info", success: "bg-success", neutral: "bg-muted-foreground", warning: "bg-warning",
-};
-
 function Html({ html, className }: { html: string; className?: string }) {
   return <GuardedHtml html={html} immutable {...(className === undefined ? {} : { className })} />;
 }
 
+/** One headline, one sentence and one action; the details sit quietly
+ * underneath (task-status.ts). Never a red card: only Failed wears red, on
+ * its dot. */
 function StatusCard({ card, approval }: { card: AssignmentCard; approval: string }) {
-  const tone = toneOf(card.tone);
   const history = card.attempts.length > 1 || card.lead !== null;
-  return <Card data-task-status data-work-status={card.token} aria-label="Task status"
-    className={cn(tone === "danger" && "border-destructive/50")}>
+  return <Card data-task-status data-work-status={card.token} data-headline={card.status.headline} aria-label="Task status">
     <div className="flex flex-wrap items-center gap-x-4 gap-y-3 phone:gap-y-2.5">
       <div className="min-w-0 flex-1 basis-64">
-        <h2 className="flex items-center gap-2.5 text-lg font-semibold leading-snug">
-          <span aria-hidden="true" className={cn("size-2.5 shrink-0 rounded-full", DOT[tone])} />{card.label}
-        </h2>
-        {card.passed !== null
-          ? <p className="mt-2 flex flex-wrap items-center gap-2 text-[13px] text-muted-foreground">
-              <Badge tone="success"><Check />Checks passed</Badge>{card.passed.by !== null && <span>Completed by {card.passed.by}</span>}
-            </p>
-          : <p className={cn("mt-1.5 text-sm phone:mt-1 phone:leading-[1.35]", card.detail.problem ? "text-destructive" : "text-muted-foreground")}>{card.detail.text}</p>}
+        <StatusHeadline status={card.status} />
+        <p className="mt-1.5 text-sm text-muted-foreground phone:mt-1 phone:leading-[1.35]">{card.status.sentence}</p>
       </div>
-      {card.action !== null && <Button asChild variant={tone === "attention" ? "attention" : "default"} className="phone:w-full">
+      {card.action !== null && <Button asChild variant={card.status.headline === "Needs you" ? "attention" : "default"} className="phone:w-full">
         <a href={card.action.href} data-primary-action {...(card.action.openResult ? { "data-open-result": "" } : {})}>{card.action.label}<ArrowRight /></a>
       </Button>}
     </div>
-    {card.problems.map(one => tone === "danger"
-      ? <p key={one} role="alert" className="rounded-md bg-destructive-soft px-3 py-2 text-[13px] text-destructive">{one}</p>
-      : <p key={one} className="rounded-md bg-muted px-3 py-2 text-[13px] text-foreground">{one}</p>)}
-    {card.diagnostics.map(one => <p key={one.token} data-work-diagnostic={one.token}
-      className={cn("text-[13px]", one.problem ? "rounded-md bg-destructive-soft px-3 py-2 text-destructive" : "text-muted-foreground")}>{one.label} · {one.detail}</p>)}
+    <StatusDetails status={card.status} />
     {approval !== "" && <Html html={approval} className="so-task-approval" />}
-    {(card.notices !== null || history) && <div className="flex flex-col gap-1 border-t border-border pt-3 text-[13px] phone:pt-2 phone:leading-[1.35]">
+    {(card.notices !== null || history || card.reasons.length > 0 || card.diagnostics.length > 0 || card.status.why.length > 0 || card.status.details.some(one => one.why !== null)) &&
+      <div className="flex flex-col gap-1 border-t border-border pt-3 text-[13px] phone:pt-2 phone:leading-[1.35]">
+      <StatusWhy status={card.status} extra={[...card.reasons, ...card.diagnostics.map(one => `${one.label} · ${one.detail}`)]} />
       {card.notices !== null && <Fold summary={card.notices.summary} quiet>
         {card.notices.lines.map(line => <p key={line} className="text-muted-foreground">{line}</p>)}
       </Fold>}

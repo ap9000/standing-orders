@@ -8,6 +8,7 @@ import { scopeTermsProblem, type Store, type TaskState } from './store.js';
 import type { AssignmentSnapshot } from './assignment.js';
 import type { WorkAction, WorkSummaryAccess } from './work-summary.js';
 import type { WorkStatus, WorkView } from './workspace-ui.js';
+import { plainReasonOf, stageOfCode, taskStatusOf, workToneOf } from './task-status.js';
 
 export type WorkIndexCounts = Record<WorkView, number>;
 export type WorkIndexItem = {
@@ -231,9 +232,9 @@ const PROJECTION = `WITH RECURSIVE admitted AS MATERIALIZED (
     ELSE 'queued' END code
   FROM checked f
 ), ranked AS MATERIALIZED (
-  SELECT c.*,code NOT IN ('cancelled','complete','running','updating','retry-scheduled','waiting-dependency','worker-at-capacity','signed-out','planning-ready','scouting-ready','queued') needs,
+  SELECT c.*,code NOT IN ('cancelled','complete','running','updating','retry-scheduled','waiting-dependency','worker-at-capacity','planning-ready','scouting-ready','queued') needs,
     CASE WHEN code='complete' THEN 3 WHEN code='cancelled' THEN 4 WHEN code='running' THEN 1
-      WHEN code IN ('updating','retry-scheduled','waiting-dependency','worker-at-capacity','signed-out','planning-ready','scouting-ready','queued') THEN 2 ELSE 0 END rank,
+      WHEN code IN ('updating','retry-scheduled','waiting-dependency','worker-at-capacity','planning-ready','scouting-ready','queued') THEN 2 ELSE 0 END rank,
     CASE WHEN code='complete' THEN completed.at ELSE family_updated END sort_at,
     completed.actor checked_actor,completed.at checked_at,completed.outcome checked_digest
   FROM classified c LEFT JOIN action_ledger completed ON completed.id=c.checked_id WHERE ($state IS NULL OR c.state=$state) AND ($leadId IS NULL OR EXISTS(SELECT 1 FROM team_task_owner own WHERE own.task_ref=c.root_ref AND own.lead=$leadId))
@@ -325,7 +326,11 @@ export function workIndexPage(store: Store, now: Date, access: WorkSummaryAccess
   UNION ALL SELECT 1,0,0,0,0,json_object('root_ref',root_ref,'root_id',root_id,'id',id,'root_title',root_title,'repo',repo,
     'state',state,'created_at',created_at,'family_updated',family_updated,'version_count',version_count,'earlier_active',earlier_active,
     'earlier_id',earlier_id,'broken',broken,'live_run',live_run,'result_id',page_result_id,'result_outcome',(SELECT outcome FROM run WHERE id=page_result_id),
-    'publication_url',(SELECT pr_url FROM publication WHERE run=page_result_id),'code',code,'needs',needs,'family_running',family_running,'rank',rank,'sort_at',sort_at,
+    'publication_url',(SELECT pr_url FROM publication WHERE run=page_result_id),
+    'result_role',(SELECT role FROM run WHERE id=page_result_id),'live_role',(SELECT role FROM run WHERE id=page.live_run),
+    'check_status',(SELECT status FROM run_check WHERE run=page_result_id),
+    'proof_verdict',(SELECT COALESCE(machine_verdict,verdict) FROM proof_verdict WHERE run=page_result_id),
+    'proof_failed_check',(SELECT verdict='refuted' AND reasons_json LIKE '%approved verification command exited%' FROM proof_verdict WHERE run=page_result_id),'code',code,'needs',needs,'family_running',family_running,'rank',rank,'sort_at',sort_at,
     'checked_actor',checked_actor,'checked_at',checked_at,'checked_digest',checked_digest,'question_id',question_id,
     'dependency_id',dependency_id,'dependency_state',dependency_state,'custody_unresolved',custody_unresolved,'hold_kind',hold_kind,'hold_reason',substr(hold_reason,1,300),'stop_run',stop_run,'unfinished',unfinished,'signed_out',signed_out,
     'question_run',(SELECT run FROM decision WHERE id=page.question_id),
@@ -360,15 +365,15 @@ function itemOf(row: Row, principal: WorkSummaryAccess['principal']): WorkIndexI
     'ready-to-check': ['Ready', 'The saved result is ready to review.', 'open-result', 'Open result'],
     complete: ['Complete', 'Completion is recorded for this result. Open it to inspect the saved evidence.', 'open-result', 'Open result'],
     cancelled: ['Cancelled', 'This assignment was cancelled.', 'inspect-task', 'View assignment'],
-    running: ['Running now', 'A worker owns a current live claim.', null, ''],
+    running: ['Running now', '', null, ''],
     'waiting-decision': ['Needs your decision', 'An unanswered question is waiting.', n(row, 'question_id') ? 'answer-decision' : 'inspect-decisions', 'Answer question'],
     'decision-queue': ['Needs your decision', 'The decision queue is full.', 'inspect-decisions', 'Review open questions'],
     'result-needs-attention': ['Needs your decision', 'Inspect the saved result and resolve its remaining execution or scope issue.', 'inspect-run', 'Inspect run'],
     'process-needs-attention': ['Needs your decision', 'A process exit is not recorded. Open the attempt to check whether its work has stopped.', 'inspect-run', 'Inspect run'],
     failed: ['Needs your decision', 'The last attempt stopped; review its incident before retrying.', 'retry-task', 'Review and retry'],
     'vanished-run': ['Needs your decision', 'An unfinished attempt has no current live claim.', 'reconcile-run', 'Check the unfinished attempt'],
-    stopping: ['Needs your decision', 'The stop is waiting for recorded settlement.', 'inspect-stop', 'View stop details'],
-    stopped: ['Needs your decision', 'The stopped attempt is preserved.', 'resume-run', 'Review pause'],
+    stopping: ['Needs your decision', 'Stopping. The work so far is kept.', 'inspect-stop', 'View stop details'],
+    stopped: ['Needs your decision', 'Paused by a person. The work so far is kept.', 'resume-run', 'Review pause'],
     held: ['Needs your decision', s(row, 'hold_reason') ?? 'This task is on hold.', s(row, 'hold_kind') === 'operator' ? 'unhold' : 'inspect-hold', 'Review hold'],
     'waiting-incident': ['Needs your decision', 'An unresolved incident holds the next attempt.', 'retry-task', 'Review and retry'],
     'terminal-dependency': ['Needs your decision', 'A required task did not finish.', 'repair-dependency', 'Review required task'],
@@ -387,13 +392,13 @@ function itemOf(row: Row, principal: WorkSummaryAccess['principal']): WorkIndexI
     updating: ['Waiting for app update', 'New work resumes after the update.', null, ''],
     'planning-ready': ['Planner ready', 'A connected worker can draft the plan.', null, ''],
     'scouting-ready': ['Scout ready', 'A connected worker can produce the report.', null, ''],
-    queued: ['Ready to run', 'A connected worker can claim this task.', null, ''],
+    queued: ['Queued', '', null, ''],
   };
   let [label, detail, actionCode, actionLabel] = words[code]!;
   if (code === 'signed-out') {
     const [provider = '', authMode = 'subscription'] = (s(row, 'signed_out') ?? '').split(':');
     label = signInReason({ provider: provider as ProviderId, authMode: authMode === 'api-key' ? 'api-key' : 'subscription' });
-    detail = `It starts again on its own once ${providerName(provider)} works.`;
+    detail = `${label}. It starts again on its own once ${providerName(provider)} works.`;
   }
   if (code === 'running' && n(row, 'version_count') > 1) label = 'Revising';
   if (code === 'terminal-dependency' && s(row, 'dependency_id') !== null) detail = `${s(row, 'dependency_id')} ${s(row, 'dependency_state') === 'cancelled' ? 'was cancelled' : 'failed'} before it finished.`;
@@ -408,6 +413,17 @@ function itemOf(row: Row, principal: WorkSummaryAccess['principal']): WorkIndexI
       decisionId: actionCode === 'answer-decision' ? n(row, 'question_id') || null : null },
     access: read ? 'read' : principal === 'operator' ? 'operator-control' : ['answer-decision', 'write-scope', 'unhold'].includes(actionCode) ? 'proposal-only' : 'operator-handoff',
     retry: actionCode === 'reconcile-run' ? 'reconcile-before-retry' : read ? 'read-again' : 'refresh-before-acting' };
+  // The one shared status: the headline and sentence every surface uses.
+  const reading = stageOfCode(code, { needsPerson: need, planning: s(row, 'live_role') === 'planner', operatorHold: s(row, 'hold_kind') === 'operator' });
+  const checkStatus = s(row, 'check_status'), verdict = s(row, 'proof_verdict');
+  const finished = reading.stage === 'finished' || reading.stage === 'complete';
+  const shared = taskStatusOf({ stage: reading.stage, ...(reading.need === undefined ? {} : { need: reading.need }),
+    reason: finished ? null : plainReasonOf(reading.stage, code, detail || null), report: s(row, 'result_role') === 'scout',
+    checks: !finished ? null : checkStatus === 'failed' || n(row, 'proof_failed_check') === 1 ? { status: 'failed', exitCode: null, head: null }
+      : checkStatus === 'passed' || verdict === 'verified' ? { status: 'passed', exitCode: null, head: null } : null,
+    completedBy: code === 'complete' ? String(row['checked_actor']).replace(/^(?:operator|coordinator|lead):/, '') : null });
+  label = shared.headline;
+  detail = shared.sentence;
   const views: WorkView[] = ['all'];
   if (need) views.push('needs-you');
   if (running) views.push('running');
@@ -417,7 +433,7 @@ function itemOf(row: Row, principal: WorkSummaryAccess['principal']): WorkIndexI
     versionCount: n(row, 'version_count'), earlierActiveCount: n(row, 'earlier_active'), familyProblem: n(row, 'broken') ? FAMILY_PROBLEM : null,
     liveRunId: n(row, 'live_run') || null, unfinishedRunId: n(row, 'unfinished') || null, resultRunId: n(row, 'result_id') || null, resultTaskId: n(row, 'result_id') ? id : null,
     resultOutcome: s(row, 'result_outcome'), publicationUrl: s(row, 'publication_url'),
-    status: { token: `assignment-${assignmentState}`, label, detail, tone: code === 'complete' ? 'done' : code === 'ready-to-check' ? 'ready' : need ? 'attention' : running ? 'live' : 'muted',
+    status: { token: `assignment-${assignmentState}`, label, detail, tone: workToneOf(shared.headline),
       action: primaryAction === null ? null : { label: actionLabel, kind: actionCode === 'open-result' ? 'open-result' : 'open-task' }, views, rank: n(row, 'rank') },
     primaryAction, completion: code === 'complete' ? { actor: String(row['checked_actor']), at: String(row['checked_at']), digest: String(row['checked_digest']) } : null,
     evidence: 'recorded' };

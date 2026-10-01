@@ -7,6 +7,7 @@
 import { assignmentOf } from "./assignment.js";
 import { chatControlHref } from "./chat-controls.js";
 import { telegramProgressCard, type ProgressEntity } from "./telegram-progress.js";
+import { assignmentStatusFacts, headlineEmoji, taskStatusOf, type Headline } from "./task-status.js";
 import { phoneText, projectLabel, type PhoneTaskLink } from "./telegram-status.js";
 import { isLifecycleNotification, type Notification, type Run, type Store } from "./store.js";
 
@@ -40,15 +41,16 @@ function cardRun(store: Store, taskRef: number): Run | null {
 }
 
 /** Before any attempt starts, the card says where the task stands in the words of its last lifecycle fact. */
+const before = (headline: Headline) => ({ icon: headlineEmoji(headline), status: headline });
 const BEFORE_RUN: Record<string, { icon: string; status: string }> = {
-  "task-filed": { icon: "📝", status: "Filed" },
-  "scope-approved": { icon: "✓", status: "Approved · Waiting to start" },
-  "approval-withdrawn": { icon: "📝", status: "Approval withdrawn" },
-  "task-held": { icon: "⏸", status: "Paused" },
-  "task-released": { icon: "✓", status: "Waiting to start" },
-  "task-queued": { icon: "✓", status: "Waiting to start" },
-  "task-requeued": { icon: "✓", status: "Waiting to start" },
-  "task-cancelled": { icon: "⏹", status: "Cancelled" },
+  "task-filed": before("Queued"),
+  "scope-approved": before("Queued"),
+  "approval-withdrawn": before("Needs you"),
+  "task-held": before("Stopped"),
+  "task-released": before("Queued"),
+  "task-queued": before("Queued"),
+  "task-requeued": before("Queued"),
+  "task-cancelled": before("Stopped"),
 };
 
 type TaskLine = { title: string; icon: string; status: string; project: string; view: QuietView };
@@ -90,10 +92,8 @@ export function quietCardView(store: Store, taskRefs: readonly number[], now: Da
 export function readyPingView(store: Store, run: Run, taskId: string, project: string, now: Date, root?: string): QuietView {
   const card = telegramProgressCard(store, run, taskId, project, now, root);
   const [title = "", shown = ""] = card.entities.map(one => card.text.slice(one.offset, one.offset + one.length));
-  // A saved result is Ready even in the moment before its worker lets go of the task.
-  const saved = shown.endsWith(" Result saved");
-  const heading = saved ? "✅ Ready" : shown;
-  const next = card.next !== "" ? card.next : saved ? "Next: open the result, then mark it complete or request changes." : "";
+  const heading = shown;
+  const next = card.next;
   const first = `${heading} · ${title}`;
   return { text: next === "" ? first : `${first}\n${next}`, entities: [{ type: "bold", offset: 0, length: heading.length }], link: card.link };
 }
@@ -125,13 +125,14 @@ export function eveningDigestText(store: Store, account: string, now: Date, root
     else if (FAILURE.test(row.kind)) failed.set(row.taskId, title(row.taskId));
   }
   for (const taskId of new Set(facts.map(row => row.taskId).filter((one): one is string => one !== null))) {
-    let state: string | null = null;
+    let headline: Headline | null = null;
     try {
       const project = facts.find(row => row.taskId === taskId)!.project!;
-      state = assignmentOf(store, taskId, now, { principal: "operator", repos: [project] }, root)?.state ?? null;
-    } catch { state = null; }
-    if (state === "ready-to-check") waits.set(taskId, `${title(taskId)} · Ready for review`);
-    else if (state === "needs-decision") waits.set(taskId, `${title(taskId)} · Needs your decision`);
+      const assignment = assignmentOf(store, taskId, now, { principal: "operator", repos: [project] }, root);
+      headline = assignment === null ? null : taskStatusOf(assignmentStatusFacts(assignment)).headline;
+    } catch { headline = null; }
+    if (headline === "Ready for review" || headline === "Needs you") waits.set(taskId, `${title(taskId)} · ${headline}`);
+    else if (headline === "Failed") failed.set(taskId, title(taskId));
   }
   if (finished.size + failed.size + waits.size === 0) return null;
   const section = (name: string, items: Map<string, string>) => items.size === 0 ? [] : ["", `${name} (${items.size})`, ...[...items.values()].slice(0, 12).map(one => `• ${one}`), ...(items.size > 12 ? [`• and ${items.size - 12} more`] : [])];

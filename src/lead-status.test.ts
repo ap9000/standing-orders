@@ -1,3 +1,4 @@
+import { HEADLINES } from "./task-status.js";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -247,9 +248,14 @@ describe("lead status commands", () => {
     const textLines: string[] = [];
     expect(await runOperate("status", [], line => textLines.push(line), { databaseFile: db, now: NOW })).toBe(0);
     const report = textLines.join("\n").split("\n");
-    expect(report.length).toBeLessThanOrEqual(12);
+    // Each task's one shared headline leads (task-status.ts); the bounded aggregate follows.
+    expect(report[0]).toBe("Tasks:");
+    const taskLines = report.slice(1, 1 + body.tasks.length);
+    expect(taskLines.length).toBeGreaterThan(0);
+    for (const line of taskLines) expect(HEADLINES.some(headline => line.startsWith(`  ${headline}`)), line).toBe(true);
+    expect(report.length - taskLines.length - 1).toBeLessThanOrEqual(12);
     expect(report).toEqual(expect.arrayContaining([
-      `Running: 1 — running-check (#${runningRun}, running checks)`,
+      `Building: 1 — running-check (#${runningRun}, running checks)`,
       `Ready for review: 1 — ready-result (#${releaseRun})`,
       `Release check: ready-result #${releaseRun} — passed (exit 0)`,
       "  Suites: Typecheck passed (exit 0); Tests passed (exit 0)",

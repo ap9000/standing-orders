@@ -1,0 +1,282 @@
+{
+ "synthetic": true,
+ "note": "Synthetic fixture seeded by capture.ts; not the live plane and not GitHub.",
+ "captures": [
+  {
+   "file": "evidence/task-status/after/reported-desktop-light.png",
+   "size": "desktop",
+   "scheme": "light",
+   "state": "reported",
+   "overflow": 0,
+   "redText": []
+  },
+  {
+   "file": "evidence/task-status/after/ready-desktop-light.png",
+   "size": "desktop",
+   "scheme": "light",
+   "state": "ready",
+   "overflow": 0,
+   "redText": []
+  },
+  {
+   "file": "evidence/task-status/after/building-desktop-light.png",
+   "size": "desktop",
+   "scheme": "light",
+   "state": "building",
+   "overflow": 0,
+   "redText": [
+    "Stop",
+    "Confirm cancellation"
+   ]
+  },
+  {
+   "file": "evidence/task-status/after/needs-you-desktop-light.png",
+   "size": "desktop",
+   "scheme": "light",
+   "state": "needs-you",
+   "overflow": 0,
+   "redText": [
+    "Confirm cancellation"
+   ]
+  },
+  {
+   "file": "evidence/task-status/after/failed-desktop-light.png",
+   "size": "desktop",
+   "scheme": "light",
+   "state": "failed",
+   "overflow": 0,
+   "redText": []
+  },
+  {
+   "file": "evidence/task-status/after/merged-desktop-light.png",
+   "size": "desktop",
+   "scheme": "light",
+   "state": "merged",
+   "overflow": 0,
+   "redText": []
+  },
+  {
+   "file": "evidence/task-status/after/tasks-desktop-light.png",
+   "size": "desktop",
+   "scheme": "light",
+   "state": "tasks",
+   "overflow": 0,
+   "redText": []
+  },
+  {
+   "file": "evidence/task-status/after/reported-result-desktop-light.png",
+   "size": "desktop",
+   "scheme": "light",
+   "state": "reported-result",
+   "overflow": 0,
+   "redText": []
+  },
+  {
+   "file": "evidence/task-status/after/reported-desktop-dark.png",
+   "size": "desktop",
+   "scheme": "dark",
+   "state": "reported",
+   "overflow": 0,
+   "redText": []
+  },
+  {
+   "file": "evidence/task-status/after/ready-desktop-dark.png",
+   "size": "desktop",
+   "scheme": "dark",
+   "state": "ready",
+   "overflow": 0,
+   "redText": []
+  },
+  {
+   "file": "evidence/task-status/after/building-desktop-dark.png",
+   "size": "desktop",
+   "scheme": "dark",
+   "state": "building",
+   "overflow": 0,
+   "redText": [
+    "Stop",
+    "Confirm cancellation"
+   ]
+  },
+  {
+   "file": "evidence/task-status/after/needs-you-desktop-dark.png",
+   "size": "desktop",
+   "scheme": "dark",
+   "state": "needs-you",
+   "overflow": 0,
+   "redText": [
+    "Confirm cancellation"
+   ]
+  },
+  {
+   "file": "evidence/task-status/after/failed-desktop-dark.png",
+   "size": "desktop",
+   "scheme": "dark",
+   "state": "failed",
+   "overflow": 0,
+   "redText": []
+  },
+  {
+   "file": "evidence/task-status/after/merged-desktop-dark.png",
+   "size": "desktop",
+   "scheme": "dark",
+   "state": "merged",
+   "overflow": 0,
+   "redText": []
+  },
+  {
+   "file": "evidence/task-status/after/tasks-desktop-dark.png",
+   "size": "desktop",
+   "scheme": "dark",
+   "state": "tasks",
+   "overflow": 0,
+   "redText": []
+  },
+  {
+   "file": "evidence/task-status/after/reported-result-desktop-dark.png",
+   "size": "desktop",
+   "scheme": "dark",
+   "state": "reported-result",
+   "overflow": 0,
+   "redText": []
+  },
+  {
+   "file": "evidence/task-status/after/reported-phone-light.png",
+   "size": "phone",
+   "scheme": "light",
+   "state": "reported",
+   "overflow": 0,
+   "redText": []
+  },
+  {
+   "file": "evidence/task-status/after/ready-phone-light.png",
+   "size": "phone",
+   "scheme": "light",
+   "state": "ready",
+   "overflow": 0,
+   "redText": []
+  },
+  {
+   "file": "evidence/task-status/after/building-phone-light.png",
+   "size": "phone",
+   "scheme": "light",
+   "state": "building",
+   "overflow": 0,
+   "redText": [
+    "Stop",
+    "Confirm cancellation"
+   ]
+  },
+  {
+   "file": "evidence/task-status/after/needs-you-phone-light.png",
+   "size": "phone",
+   "scheme": "light",
+   "state": "needs-you",
+   "overflow": 0,
+   "redText": [
+    "Confirm cancellation"
+   ]
+  },
+  {
+   "file": "evidence/task-status/after/failed-phone-light.png",
+   "size": "phone",
+   "scheme": "light",
+   "state": "failed",
+   "overflow": 0,
+   "redText": []
+  },
+  {
+   "file": "evidence/task-status/after/merged-phone-light.png",
+   "size": "phone",
+   "scheme": "light",
+   "state": "merged",
+   "overflow": 0,
+   "redText": []
+  },
+  {
+   "file": "evidence/task-status/after/tasks-phone-light.png",
+   "size": "phone",
+   "scheme": "light",
+   "state": "tasks",
+   "overflow": 0,
+   "redText": []
+  },
+  {
+   "file": "evidence/task-status/after/reported-result-phone-light.png",
+   "size": "phone",
+   "scheme": "light",
+   "state": "reported-result",
+   "overflow": 0,
+   "redText": []
+  },
+  {
+   "file": "evidence/task-status/after/reported-phone-dark.png",
+   "size": "phone",
+   "scheme": "dark",
+   "state": "reported",
+   "overflow": 0,
+   "redText": []
+  },
+  {
+   "file": "evidence/task-status/after/ready-phone-dark.png",
+   "size": "phone",
+   "scheme": "dark",
+   "state": "ready",
+   "overflow": 0,
+   "redText": []
+  },
+  {
+   "file": "evidence/task-status/after/building-phone-dark.png",
+   "size": "phone",
+   "scheme": "dark",
+   "state": "building",
+   "overflow": 0,
+   "redText": [
+    "Stop",
+    "Confirm cancellation"
+   ]
+  },
+  {
+   "file": "evidence/task-status/after/needs-you-phone-dark.png",
+   "size": "phone",
+   "scheme": "dark",
+   "state": "needs-you",
+   "overflow": 0,
+   "redText": [
+    "Confirm cancellation"
+   ]
+  },
+  {
+   "file": "evidence/task-status/after/failed-phone-dark.png",
+   "size": "phone",
+   "scheme": "dark",
+   "state": "failed",
+   "overflow": 0,
+   "redText": []
+  },
+  {
+   "file": "evidence/task-status/after/merged-phone-dark.png",
+   "size": "phone",
+   "scheme": "dark",
+   "state": "merged",
+   "overflow": 0,
+   "redText": []
+  },
+  {
+   "file": "evidence/task-status/after/tasks-phone-dark.png",
+   "size": "phone",
+   "scheme": "dark",
+   "state": "tasks",
+   "overflow": 0,
+   "redText": []
+  },
+  {
+   "file": "evidence/task-status/after/reported-result-phone-dark.png",
+   "size": "phone",
+   "scheme": "dark",
+   "state": "reported-result",
+   "overflow": 0,
+   "redText": []
+  }
+ ]
+}

@@ -4,14 +4,15 @@
  * header instead of beside the result. Tab contents, the diff and the
  * feedback form stay the server's own HTML; the page script binds to the
  * same data attributes and ids it always has. */
-import { AlertTriangle, Check, ChevronDown, ChevronRight, X } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, ChevronRight } from "lucide-react";
 import type { ReactNode } from "react";
-import type { BrowserResultChip, BrowserResultPanel, BrowserResultView } from "../../browser-workspace.js";
+import type { BrowserResultPanel, BrowserResultView } from "../../browser-workspace.js";
 import { GuardedHtml } from "../guarded-html.js";
 import {
   Badge, Button, Card, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger, cn,
 } from "../components/ui/index.js";
 import { toneOf } from "./tone.js";
+import { StatusDetails, StatusHeadline, StatusWhy } from "./status-summary.js";
 
 type Selected = NonNullable<BrowserResultView["selected"]>;
 
@@ -31,12 +32,6 @@ function shortWhen(iso: string): string {
   return date.toDateString() === today.toDateString()
     ? new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(date)
     : new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", ...(date.getFullYear() === today.getFullYear() ? {} : { year: "numeric" }) }).format(date);
-}
-
-function Chip({ chip }: { chip: BrowserResultChip }) {
-  return <Badge tone={chip.tone} {...(chip.title === null ? {} : { title: chip.title })}>
-    {chip.icon === "check" ? <Check /> : chip.icon === "x" ? <X /> : null}{chip.label}
-  </Badge>;
 }
 
 function ResultsMenu({ view }: { view: BrowserResultView }) {
@@ -68,16 +63,20 @@ function ResultsMenu({ view }: { view: BrowserResultView }) {
 }
 
 function StatusCard({ selected, csrf }: { selected: Selected; csrf: string }) {
-  const tone = toneOf(selected.status.tone);
   const { panel, complete, checks, next } = selected;
-  return <Card data-result-status={selected.status.token} aria-label="Result status"
-    className={cn(tone === "danger" && "border-destructive/50")}>
+  const status = panel?.status ?? null;
+  const tone = toneOf(selected.status.tone);
+  return <Card data-result-status={selected.status.token} data-headline={status?.headline ?? selected.status.label} aria-label="Result status">
     <div className="flex flex-wrap items-center gap-x-4 gap-y-3">
       <div className="min-w-0 flex-1 basis-64">
-        <h2 className="flex items-center gap-2.5 text-lg font-semibold leading-snug">
-          <span aria-hidden="true" className={cn("size-2.5 shrink-0 rounded-full", DOT[tone])} />{selected.status.label}
-        </h2>
-        {panel !== null && <p className="mt-1.5 text-sm"><span className="font-semibold">{panel.heading}.</span> <span className="text-muted-foreground">{panel.outcome}</span></p>}
+        {status !== null ? <StatusHeadline status={status} />
+          : <h2 className="flex items-center gap-2.5 text-lg font-semibold leading-snug">
+              <span aria-hidden="true" className={cn("size-2.5 shrink-0 rounded-full", DOT[tone])} />{selected.status.label}
+            </h2>}
+        {status !== null && <p className="mt-1.5 text-sm text-muted-foreground">{status.sentence}</p>}
+        {panel !== null && (status !== null
+          ? <p className="mt-1.5 text-sm">{panel.outcome}</p>
+          : <p className="mt-1.5 text-sm"><span className="font-semibold">{panel.heading}.</span> <span className="text-muted-foreground">{panel.outcome}</span></p>)}
       </div>
       {(complete !== null || panel?.canRequest === true) && <div className="flex flex-wrap items-center gap-2 phone:w-full">
         {complete !== null && <form method="post" action={complete.action} className="phone:flex-1">
@@ -90,14 +89,12 @@ function StatusCard({ selected, csrf }: { selected: Selected; csrf: string }) {
       </div>}
     </div>
 
-    {(panel?.verdict != null || checks?.logHref != null) && <div className="flex flex-wrap items-center gap-2 text-[13px] text-muted-foreground">
-      {panel?.verdict?.chips.map(chip => <Chip key={chip.label} chip={chip} />)}
-      {panel?.verdict?.by != null && <span>Completed by {panel.verdict.by}</span>}
-      {checks?.logHref != null && <a href={checks.logHref} className="underline decoration-border underline-offset-4 hover:text-foreground">Check output</a>}
-    </div>}
+    {status !== null && <StatusDetails status={status} />}
+    {checks?.logHref != null && <p className="text-[13px] text-muted-foreground"><a href={checks.logHref} className="underline decoration-border underline-offset-4 hover:text-foreground">Check output</a></p>}
     {complete !== null && <p className="text-[13px] text-muted-foreground">Marking it complete changes no checks and publishes nothing.</p>}
-    {checks?.problem === true && <p role="alert" className="rounded-md bg-destructive-soft px-3 py-2 text-[13px] text-destructive">{checks.detail}</p>}
-    {selected.problem !== null && <p role="alert" className="rounded-md bg-destructive-soft px-3 py-2 text-[13px] text-destructive">{selected.problem}</p>}
+    {status === null && checks?.problem === true && <p className="rounded-md bg-muted px-3 py-2 text-[13px] text-foreground">{checks.detail}</p>}
+    {selected.problem !== null && <p className={cn("rounded-md px-3 py-2 text-[13px]", status?.headline === "Failed" ? "bg-destructive-soft text-destructive" : "bg-muted text-foreground")}>{selected.problem}</p>}
+    {status !== null && <StatusWhy status={status} />}
 
     {next !== null && <div className="flex flex-wrap items-center gap-3 rounded-md bg-muted px-4 py-3" data-next-action={next.kind}>
       <div className="min-w-0 flex-1 basis-56">
@@ -199,7 +196,7 @@ export function ResultView({ view, csrf }: { view: BrowserResultView; csrf: stri
         </div>
         {selected !== null && <ResultsMenu view={view} />}
       </div>
-      {view.missing !== null && <p role="alert" className="rounded-md bg-destructive-soft px-3 py-2 text-[13px] text-destructive">{view.missing}{selected !== null ? " Showing the newest result instead." : ""}</p>}
+      {view.missing !== null && <p role="status" className="rounded-md bg-muted px-3 py-2 text-[13px] text-foreground">{view.missing}{selected !== null ? " Showing the newest result instead." : ""}</p>}
       {view.beyond && <p className="text-[13px] text-muted-foreground">This result is older than the list in Results.</p>}
     </header>
 

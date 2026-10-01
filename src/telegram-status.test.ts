@@ -282,9 +282,11 @@ describe("read-only phone status", () => {
     expect(overview).toContain("Needs attention · 1");
     expect(overview).not.toContain("Finished ·");
     const detail = phoneTask(store, [REPO], "needs-proof", NOW);
-    expect(detail).toContain(diagnoseTaskDispatch(store, "needs-proof", NOW)!.summary);
+    // The shared headline (task-status.ts): a result missing its record waits on a person.
+    expect(detail.split("\n")[4]).toBe("Needs you");
+    expect(diagnoseTaskDispatch(store, "needs-proof", NOW)!.code).not.toBe("complete");
     expect(detail).not.toContain("verifying-proof");
-    expect(detail).toContain("Result saved locally; no publication recorded");
+    expect(detail).not.toContain("Pull request:");
   });
 
   test("operator acceptance preserves weak evidence and publication never means merge", () => {
@@ -294,13 +296,14 @@ describe("read-only phone status", () => {
     store.markPublicationPushed(publication, NOW);
     store.markPublicationOpened(publication, 7, "https://github.com/owner/repo/pull/7", NOW);
     const detail = phoneTask(store, [REPO], "accepted", NOW);
-    expect(detail).toContain("Accepted with an exception");
+    expect(detail.split("\n")[4]).toBe("Ready for review");
     expect(detail).not.toContain("Checks passed");
     expect(detail).toContain("Required saved material is missing");
     expect(detail).toContain("does not change its recorded checks");
-    expect(detail).toContain("Pull request #7 opened; not recorded as merged");
+    expect(detail).toContain("Pull request: #7 open.");
+    expect(detail).not.toContain("merged");
     store.recordPublicationRemoteState(publication, "MERGED", NOW);
-    expect(phoneTask(store, [REPO], "accepted", NOW)).toContain("Merge observed on GitHub");
+    expect(phoneTask(store, [REPO], "accepted", NOW)).toContain("Pull request: #7 merged.");
   });
 
   test("a historical pending model review does not queue finished work or request approval", () => {
@@ -322,7 +325,7 @@ describe("read-only phone status", () => {
     const until = new Date(NOW.getTime() + 60_000);
     store.holdOwned({ taskRef: ref, ownerKind: "backoff", ownerId: "attempt-1", reason: "temporary failure", until }, NOW);
     const detail = phoneTask(store, [REPO], "mobile-nav", NOW);
-    expect(detail).toContain("Retry scheduled");
+    expect(detail.split("\n")[4]).toBe("Queued");
     expect(detail).toContain(`Earliest recorded wake: ${until.toISOString()}`);
     expect(detail).toContain("a connected worker is still required");
   });

@@ -3,6 +3,7 @@
  * rendered as plain server HTML with native forms. One small script keeps a
  * running build's progress live; without it the page still works by reload.
  */
+import { headlineOf } from "./task-status.js";
 import type { DemoExchange } from "./demo.js";
 
 /** What a finished exchange's stored result holds, read back from its evidence. */
@@ -79,9 +80,11 @@ function diffHtml(diff: string): string {
 
 function resultCard(exchange: DemoExchange, csrf: string, result: DemoResultView | null): string {
   if (result === null) return `<section class="card demo-result"><p class="meta">This result's saved evidence is unavailable.</p></section>`;
-  const status = exchange.state === "complete" ? `<span class="badge demo-complete">Complete</span>`
-    : exchange.state === "sent-back" ? `<span class="badge">Sent back</span>` : `<span class="badge demo-ready">Ready</span>`;
   const passed = result.checks.status === "passed";
+  // The shared headline (task-status.ts): the same words as every real task.
+  const headline = headlineOf({ stage: exchange.state === "complete" ? "complete" : exchange.state === "sent-back" ? "building" : "finished",
+    checks: { status: passed ? "passed" : "failed", exitCode: null, head: null } });
+  const status = `<span class="badge${headline === "Complete" ? " demo-complete" : headline === "Ready for review" ? " demo-ready" : ""}" data-headline="${headline}">${headline}</span>`;
   const summary = `${result.files} file${result.files === 1 ? "" : "s"} changed · +${result.additions} −${result.deletions} · ` +
     `<span class="${passed ? "demo-pass" : "demo-fail"}">${esc(result.checks.detail)}</span>`;
   const actions = exchange.state === "ready"

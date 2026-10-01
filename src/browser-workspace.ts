@@ -10,6 +10,7 @@ import type { WorkSummaryAccess } from './work-summary.js';
 import { workIndexPage, type WorkIndexItem, type WorkIndexPage } from './work-index.js';
 import type { StatusTone } from './workspace-ui.js';
 import type { AssignmentCard } from './assignment-ui.js';
+import type { TaskStatus } from './task-status.js';
 import type { FirstRunStep, FirstTaskSuggestion } from './first-run.js';
 
 export type BrowserProject = { name: string; path: string; href: string; knowledgeHref: string };
@@ -162,7 +163,6 @@ export type BrowserProjectsView = {
   add: { browse: string | null; github: string | null; html: string };
 };
 export type BrowserResultTab = 'summary' | 'changes' | 'checks';
-export type BrowserResultChip = { tone: 'success' | 'danger' | 'warning' | 'info' | 'neutral'; label: string; icon: 'check' | 'x' | null; title: string | null };
 /** The shared result panel in parts. Each tab's content, the feedback
  * section and the learning card are the server's own HTML; the page script
  * binds to the same data attributes and ids (tabs, drafts, line notes). */
@@ -170,7 +170,8 @@ export type BrowserResultPanel = {
   attributes: Record<string, string>;
   heading: string;
   outcome: string;
-  verdict: { chips: BrowserResultChip[]; by: string | null } | null;
+  /** The shared task status (task-status.ts): headline, sentence and detail rows. */
+  status: TaskStatus | null;
   reviewHistory: string | null;
   attention: string[];
   /** Requirements only a person can confirm, in plain words, and the one

@@ -839,8 +839,10 @@ describe("tick, against real git", () => {
       // The console's task list says the same, not "Ready to run" (the attempted task's scripted
       // runner leaves no process record here, so only the untried one is asserted).
       const untried = failedId === "t-1" ? "t-2" : "t-1";
-      expect(workIndexPage(store, T0, { principal: "operator", repos: null, includeUnplaced: true }).items.find(one => one.activeTaskId === untried)?.status.label)
-        .toBe("Claude needs you to sign in again");
+      // The shared headline (task-status.ts): a sign-in is Needs you; the sentence names it.
+      const row = workIndexPage(store, T0, { principal: "operator", repos: null, includeUnplaced: true }).items.find(one => one.activeTaskId === untried)?.status;
+      expect(row?.label).toBe("Needs you");
+      expect(row?.detail).toContain("Claude needs you to sign in again");
     } finally { store.close(); }
 
     // status and ready say it plainly, first.
@@ -933,7 +935,7 @@ describe("tick, against real git", () => {
     try {
       const items = workIndexPage(after, T0, { principal: "operator", repos: null, includeUnplaced: true }).items;
       for (const id of skipped) {
-        expect(items.find(one => one.activeTaskId === id)?.status).toMatchObject({ label: "Claude needs you to sign in again", detail: "It starts again on its own once Claude works." });
+        expect(items.find(one => one.activeTaskId === id)?.status).toMatchObject({ label: "Needs you", detail: "Claude needs you to sign in again. It starts again on its own once Claude works." });
       }
     } finally { after.close(); }
     await run(["task", "show", "t-plan", "--json"]);
@@ -944,7 +946,8 @@ describe("tick, against real git", () => {
     const resumed = openStore(db);
     try {
       const items = workIndexPage(resumed, T0, { principal: "operator", repos: null, includeUnplaced: true }).items;
-      expect(items.find(one => one.activeTaskId === "t-plan")?.status.label).toBe("Planner ready");
+      // Waiting for a worker to draft its plan: Queued, and the sentence says what for.
+      expect(items.find(one => one.activeTaskId === "t-plan")?.status).toMatchObject({ label: "Queued", detail: "A connected worker can draft the plan." });
     } finally { resumed.close(); }
   });
 
@@ -2421,7 +2424,9 @@ describe("watch — the loop, zero tokens idle", () => {
     // work-conserving drain can get t-2 built after t-1 frees it.
     const code = await run([
       "watch", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool,
-      "--for", "4000", "--tick-every", "3600000", "--bridge-every", "3600000", "--reconcile-every", "3600000",
+      // 12 s, not 4: the release check runs this beside the browser journeys, and a loaded machine needed longer
+      // to build two tasks; the hour-long intervals still mean only the drain can build t-2.
+      "--for", "12000", "--tick-every", "3600000", "--bridge-every", "3600000", "--reconcile-every", "3600000",
       "--json",
     ]);
 
