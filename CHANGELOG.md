@@ -1,7 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.9.8 — 2026-10-01
 
+- **One automatic review per build.** When a build's checks pass (or it
+  finishes, with checks Off) in a project with review on, one read-only
+  reviewer reads the scope, acceptance and diff and grades each finding HIGH,
+  MEDIUM or LOW. Any HIGH sends the task back once, with the findings as its
+  note; a HIGH on that revision comes to you. MEDIUM and LOW never block: they
+  show on the result as suggested follow-ups. A review that fails or times
+  out never blocks: the result reaches you marked Not reviewed. Turn it on or
+  off per project in Settings or with `toolroll review on|off --repo <path>`;
+  it's on by default under a hands-off mode. Release candidate checks are
+  never reviewed.
 - **Evidence is kept 1, 7, 14 or 28 days, or forever.** Settings →
   Retention and `toolroll retention set evidence 1d` take any of them. Until
   someone chooses, evidence is kept 28 days: **after upgrading, the daily
@@ -10,6 +20,12 @@
   as "30 days (custom)".
   Nothing a task still needs is removed: unfinished tasks, results Ready for
   review, anything on hold, live runs and release candidates.
+- **A run whose process never started no longer blocks updates.** A spawn
+  that fails now settles its own record, and Toolroll settles a finished run's
+  leftover record once its processes are provably gone, noting it in the
+  ledger. For the rare record that can't be proven either way, an approver
+  can run `toolroll run settle <run> --why "<reason>"`; it refuses while
+  anything of the run is alive.
 
 ## 0.9.7 — 2026-10-01
 
