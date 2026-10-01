@@ -102,7 +102,7 @@ import { POLICY_SCHEMA, agentRefusal, approvalRefusal, attendedRefusal, policyPa
 import { PROVIDER_AUTH_SCHEMA } from "./provider-auth.js";
 import { REVIEW_SCHEMA, reviewSwitchWords, type ReviewSwitch } from "./review-switch.js";
 import { SPEND_SCHEMA, billingOf, budgetStates, canPrice, claudeMachineBilling, countsToward, filersOf, monthOf, priceWork, seenBilling as seenBillingOf, spendItems, teammateFilers, usd, type Billing, type Budget, type BudgetAgent, type BudgetHold, type BudgetScope, type BudgetState, type SpendItem } from "./spend.js";
-import { FOREVER, RETENTION_SCHEMA, periodWords, type RetentionKind, type RetentionPeriods } from "./retention.js";
+import { DEFAULT_PERIODS, RETENTION_SCHEMA, periodWords, widenRetentionSchema, type RetentionKind, type RetentionPeriods } from "./retention.js";
 import { CHECKOUT_CLEANUP_SCHEMA, DEFAULT_CLEANUP, cleanupWords, type CheckoutCleanup } from "./storage.js";
 import { IN_RANGE, LEDGER_CHAIN_SCHEMA, safeWhole, sealLedger, verifyLedgerChain, type LedgerChainReport, type VerifiedHead } from "./ledger-chain.js";
 import { NO_RULES, filerFor, isProtectedWork, protectedChanges, rulesWords, type ApprovalGate, type ApprovalRules, type ApproverKind, type Filer, type FilerKind } from "./approval-policy.js";
@@ -5086,6 +5086,8 @@ function initializeStore(db: Database, file: string): Store {
   addColumn(db, "task_ref", "auth_wait_pause", "INTEGER REFERENCES provider_auth_pause(id)");
   db.exec(REVIEW_SCHEMA);
   db.exec(RETENTION_SCHEMA);
+  // 1-day evidence: an older file's retention_setting only allowed 7 days or more (no version bump: its rows carry over).
+  widenRetentionSchema(db);
   db.exec(CHECKOUT_CLEANUP_SCHEMA);
   db.exec(BACKUP_SCHEMA);
   // Sprint 8: the organisation policy (one row, or none: nothing restricted).
@@ -19626,13 +19628,18 @@ export class Store {
 
   // ---- Retention (v105) -----------------------------------------------------
 
-  /** How long each kind of data is kept; null is forever (every kind, until someone chooses). */
+  /** How long each kind of data is kept; null is forever. A kind nobody chose keeps its default (evidence 28 days, the rest forever). */
   retentionPeriods(): RetentionPeriods {
-    const periods: RetentionPeriods = { ...FOREVER };
+    return { ...DEFAULT_PERIODS, ...this.retentionChosen() };
+  }
+
+  /** The periods someone chose: only kinds with a saved row. */
+  retentionChosen(): Partial<RetentionPeriods> {
+    const chosen: Partial<RetentionPeriods> = {};
     for (const row of this.db.prepare("SELECT kind, days FROM retention_setting").all()) {
-      periods[String(row["kind"]) as RetentionKind] = row["days"] === null ? null : Number(row["days"]);
+      chosen[String(row["kind"]) as RetentionKind] = row["days"] === null ? null : Number(row["days"]);
     }
-    return periods;
+    return chosen;
   }
 
   /** Set how long one kind is kept (null: forever); the ledger keeps before → after. */

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Evidence is kept 1, 7, 14 or 28 days, or forever.** Settings →
+  Retention and `toolroll retention set evidence 1d` take any of them. Until
+  someone chooses, evidence is kept 28 days: **after upgrading, the daily
+  sweep starts removing finished tasks' evidence older than 28 days.** A
+  period chosen before stays as it was; one the page no longer offers shows
+  as "30 days (custom)".
+  Nothing a task still needs is removed: unfinished tasks, results Ready for
+  review, anything on hold, live runs and release candidates.
+
 ## 0.9.7 — 2026-10-01
 
 - **Onboarding without a password or a form.** `toolroll up` prints three

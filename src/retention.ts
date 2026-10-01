@@ -1,9 +1,10 @@
 /**
  * Retention (v105): how long Toolroll keeps run evidence and logs,
- * finished checkouts' records, chat messages and notifications. Each kind
- * keeps everything ("forever") until an instance operator chooses a period;
- * a daily sweep then deletes what is older than it and writes one action
- * ledger entry saying what went and about how much space it freed.
+ * finished checkouts' records, chat messages and notifications. Until an
+ * instance operator chooses a period, evidence is kept 28 days and every
+ * other kind forever; a daily sweep deletes what is older than its period
+ * and writes one action ledger entry saying what went and about how much
+ * space it freed.
  *
  * Never deleted, whatever the settings: the action ledger (it is append-only),
  * and anything a task still needs. A task still needs its things until it is
@@ -21,17 +22,36 @@ import { join } from "node:path";
 import { RETENTION_NOTE } from "./evidence.js";
 import { COMPLETION_ACTION } from "./result-completion.js";
 import { bytesWords, treeBytes } from "./storage.js";
-import type { Store } from "./store.js";
+import type { Database, Store } from "./store.js";
 
-export const RETENTION_SCHEMA = `
-CREATE TABLE IF NOT EXISTS retention_setting (
+const RETENTION_TABLE = (name: string) => `
+CREATE TABLE IF NOT EXISTS ${name} (
   kind       TEXT PRIMARY KEY CHECK (kind IN ('evidence', 'checkouts', 'chat', 'notifications')),
   -- NULL is forever; a row only exists once someone chose.
-  days       INTEGER CHECK (days IS NULL OR (days >= 7 AND days <= 3650)),
+  days       INTEGER CHECK (days IS NULL OR (days >= 1 AND days <= 3650)),
   updated_by TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
 `;
+export const RETENTION_SCHEMA = RETENTION_TABLE("retention_setting");
+
+/** A file from before 1-day evidence keeps `days >= 7` in its CHECK: rebuild the table with the wider one, keeping
+ * every row, in one transaction. A file already widened is untouched. */
+export function widenRetentionSchema(db: Database): void {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'retention_setting'").get();
+  if (row === undefined || !/days\s*>=\s*7\b/.test(String(row["sql"]))) return;
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(RETENTION_TABLE("retention_setting_next"));
+    db.exec("INSERT INTO retention_setting_next (kind, days, updated_by, updated_at) SELECT kind, days, updated_by, updated_at FROM retention_setting");
+    db.exec("DROP TABLE retention_setting");
+    db.exec("ALTER TABLE retention_setting_next RENAME TO retention_setting");
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
 
 export type RetentionKind = "evidence" | "checkouts" | "chat" | "notifications";
 export type RetentionPeriods = Record<RetentionKind, number | null>;
@@ -43,9 +63,12 @@ export const RETENTION_KINDS: readonly { kind: RetentionKind; label: string; det
   { kind: "notifications", label: "Notifications", detail: "Delivered or dismissed notifications" },
 ];
 
-/** The periods the page offers; the command line takes any number of days from 7 to 3650. */
-export const PERIOD_CHOICES: readonly (number | null)[] = [30, 90, 180, 365, 730, null];
-export const MIN_DAYS = 7;
+/** The periods the page offers for each kind; the command line takes any number of days from 1 to 3650. */
+const LONG_CHOICES: readonly (number | null)[] = [30, 90, 180, 365, 730, null];
+export const PERIOD_CHOICES: Readonly<Record<RetentionKind, readonly (number | null)[]>> = {
+  evidence: [1, 7, 14, 28, null], checkouts: LONG_CHOICES, chat: LONG_CHOICES, notifications: LONG_CHOICES,
+};
+export const MIN_DAYS = 1;
 export const MAX_DAYS = 3650;
 const DAY_MS = 86_400_000;
 /** A sweep is due once a day. */
@@ -54,7 +77,8 @@ export const SWEEP_EVERY_MS = DAY_MS;
 export const SWEEP_BATCH = 2000;
 const SWEEP_CURSOR = "retention:last-sweep";
 
-export const FOREVER: RetentionPeriods = { evidence: null, checkouts: null, chat: null, notifications: null };
+/** What each kind keeps until someone chooses: evidence 28 days, everything else forever. */
+export const DEFAULT_PERIODS: RetentionPeriods = { evidence: 28, checkouts: null, chat: null, notifications: null };
 
 export function isRetentionKind(value: string): value is RetentionKind {
   return RETENTION_KINDS.some(one => one.kind === value);
@@ -74,7 +98,21 @@ export function parsePeriod(text: string): number | null | undefined {
 export function periodWords(days: number | null): string {
   if (days === null) return "forever";
   if (days % 365 === 0) return days === 365 ? "1 year" : `${days / 365} years`;
-  return `${days} days`;
+  return days === 1 ? "1 day" : `${days} days`;
+}
+
+/** What the page offers for `kind`, with `current` among them (in order) when it was set some other way. */
+export function periodChoices(kind: RetentionKind, current: number | null): readonly (number | null)[] {
+  const offered = PERIOD_CHOICES[kind];
+  return offered.includes(current) ? offered : [...offered, current].sort((a, b) => (a ?? Infinity) - (b ?? Infinity));
+}
+
+/** A period as the page and `retention show` say it: "28 days (default)" when nobody chose, "30 days (custom)" when it's not one the page offers. */
+export function periodLabel(kind: RetentionKind, days: number | null, chosen: boolean): string {
+  const words = periodWords(days);
+  const label = `${words[0]!.toUpperCase()}${words.slice(1)}`;
+  if (!chosen) return `${label} (default)`;
+  return PERIOD_CHOICES[kind].includes(days) ? label : `${label} (custom)`;
 }
 
 export type RetentionCount = { kind: RetentionKind; days: number | null; count: number; bytes: number; more: boolean };

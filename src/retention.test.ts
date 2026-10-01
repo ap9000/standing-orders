@@ -1,6 +1,7 @@
 /**
  * Retention (v105): how long evidence and logs, finished checkout records,
- * chat messages and notifications are kept (forever until someone chooses),
+ * chat messages and notifications are kept (evidence 28 days and the rest
+ * forever until someone chooses),
  * the daily sweep that deletes what is older and says so in the ledger once,
  * and what is never deleted: the ledger, and anything a task still needs.
  */
@@ -14,7 +15,7 @@ import { createDecisionServer } from "./serve.js";
 import { runOperate } from "./operate.js";
 import { readVerifiedArtifact, storeEvidence } from "./evidence.js";
 import { COMPLETION_ACTION } from "./result-completion.js";
-import { dailyRetention, parsePeriod, periodWords, retentionPlan, sweepRetention } from "./retention.js";
+import { dailyRetention, parsePeriod, periodLabel, periodWords, retentionPlan, sweepRetention } from "./retention.js";
 
 let dir: string, file: string, root: string, store: Store;
 const NOW = new Date("2026-09-20T12:00:00.000Z");
@@ -56,15 +57,19 @@ function work(finish: Finish, at = OLD): { id: string; ref: number; run: number;
 const ledgerCount = () => Number(store.handle.prepare("SELECT COUNT(*) AS n FROM action_ledger").get()!["n"]);
 const everything = (days: number) => { for (const kind of ["evidence", "checkouts", "chat", "notifications"] as const) store.setRetentionPeriod(kind, days, "alex", NOW); };
 
-test("periods: forever by default; a day count, weeks or years from 7 days to 10 years; each change is in the ledger with before → after", () => {
-  expect(store.retentionPeriods()).toEqual({ evidence: null, checkouts: null, chat: null, notifications: null });
+test("periods: evidence 28 days and the rest forever by default; a day count, weeks or years from 1 day to 10 years; each change is in the ledger with before → after", () => {
+  expect(store.retentionPeriods()).toEqual({ evidence: 28, checkouts: null, chat: null, notifications: null });
   expect(parsePeriod("forever")).toBeNull();
+  expect(parsePeriod("1d")).toBe(1);
+  expect(parsePeriod("1")).toBe(1);
   expect(parsePeriod("90")).toBe(90);
   expect(parsePeriod("90d")).toBe(90);
   expect(parsePeriod("12w")).toBe(84);
   expect(parsePeriod("1y")).toBe(365);
-  for (const bad of ["3d", "0", "11y", "-5", "soon", ""]) expect(parsePeriod(bad)).toBeUndefined();
-  expect([periodWords(null), periodWords(30), periodWords(365), periodWords(730)]).toEqual(["forever", "30 days", "1 year", "2 years"]);
+  for (const bad of ["0d", "0", "11y", "-5", "soon", ""]) expect(parsePeriod(bad)).toBeUndefined();
+  expect([periodWords(null), periodWords(1), periodWords(30), periodWords(365), periodWords(730)]).toEqual(["forever", "1 day", "30 days", "1 year", "2 years"]);
+  expect([periodLabel("evidence", 28, false), periodLabel("evidence", 1, true), periodLabel("evidence", 30, true), periodLabel("chat", 30, true)])
+    .toEqual(["28 days (default)", "1 day", "30 days (custom)", "30 days"]);
 
   store.setRetentionPeriod("chat", 90, "alex", NOW);
   store.setRetentionPeriod("chat", 90, "alex", NOW);
@@ -77,6 +82,7 @@ test("periods: forever by default; a day count, weeks or years from 7 days to 10
 
 test("with every period forever the sweep deletes nothing and writes nothing", () => {
   const done = work("completed");
+  store.setRetentionPeriod("evidence", null, "alex", NOW);
   const before = ledgerCount();
   const swept = sweepRetention(store, root, NOW);
   expect(swept).toMatchObject({ counts: [], freed: 0, ledgerId: null });
@@ -192,6 +198,70 @@ test("the sweep runs once a day", () => {
   expect(readVerifiedArtifact(root, store.artifactsFor(first.run)[0]!).ok).toBe(false);
 });
 
+test("evidence keeps 28 days only while nobody chose: a saved choice, forever included, replaces it", () => {
+  const old = work("completed", new Date(NOW.getTime() - 40 * DAY));
+  const young = work("completed", new Date(NOW.getTime() - 20 * DAY));
+  expect(store.retentionChosen()).toEqual({});
+  expect(retentionPlan(store, root, NOW).items.evidence.map(one => one.run)).toEqual([old.run]);
+  store.setRetentionPeriod("evidence", null, "alex", NOW);
+  expect(store.retentionPeriods().evidence).toBeNull();
+  expect(store.retentionChosen()).toEqual({ evidence: null });
+  expect(retentionPlan(store, root, NOW).items.evidence).toEqual([]);
+  store.setRetentionPeriod("evidence", 1, "alex", NOW);
+  expect(store.retentionPeriods().evidence).toBe(1);
+  expect(retentionPlan(store, root, NOW).items.evidence.map(one => one.run).sort((a, b) => a - b)).toEqual([old.run, young.run].sort((a, b) => a - b));
+  expect(store.actionLedger({ repos: null }).filter(one => one.action === "retention changed: evidence").map(one => one.detail).sort())
+    .toEqual(["28 days → forever", "forever → 1 day"]);
+});
+
+test("a 1-day sweep never removes what a task still needs: Ready for review, unfinished, failed, on hold, live or a release candidate", () => {
+  const twoDaysAgo = new Date(NOW.getTime() - 2 * DAY);
+  const completed = work("completed", twoDaysAgo);
+  const ready = work("ready", twoDaysAgo);
+  const queued = work("queued", twoDaysAgo);
+  const failed = work("failed", twoDaysAgo);
+  const held = work("held", twoDaysAgo);
+  const live = work("completed", twoDaysAgo);
+  store.startRun({ taskRef: live.ref, leaseId: "l-live", runner: "b2", branch: `standing-orders/${live.id}-2`, worktree: `/w/${live.id}-2`, route: legacy, now: NOW });
+  const candidate = work("completed", twoDaysAgo);
+  store.handle.prepare("INSERT INTO task_scope (task_id, goal, proposed_at, digest, candidate) VALUES (?, 'g', ?, 'd', 'abc')").run(candidate.id, NOW.toISOString());
+  store.setRetentionPeriod("evidence", 1, "alex", NOW);
+
+  const swept = sweepRetention(store, root, NOW);
+  expect(swept.counts.find(one => one.kind === "evidence")!.count).toBe(1);
+  expect(readVerifiedArtifact(root, store.artifactsFor(completed.run)[0]!)).toEqual({ ok: false, problem: "the file was removed by the retention setting" });
+  for (const kept of [ready, queued, failed, held, live, candidate]) expect(readVerifiedArtifact(root, store.artifactsFor(kept.run)[0]!).ok).toBe(true);
+});
+
+test("an older file's retention_setting (7 days or more) is rebuilt for 1 day, keeping every choice", () => {
+  const db = store.handle;
+  db.exec("DROP TABLE retention_setting");
+  db.exec(`CREATE TABLE retention_setting (
+  kind       TEXT PRIMARY KEY CHECK (kind IN ('evidence', 'checkouts', 'chat', 'notifications')),
+  days       INTEGER CHECK (days IS NULL OR (days >= 7 AND days <= 3650)),
+  updated_by TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+)`);
+  const insert = db.prepare("INSERT INTO retention_setting (kind, days, updated_by, updated_at) VALUES (?, ?, 'alex', ?)");
+  insert.run("evidence", 30, OLD.toISOString());
+  insert.run("chat", null, OLD.toISOString());
+  insert.run("notifications", 365, OLD.toISOString());
+  expect(() => insert.run("checkouts", 1, OLD.toISOString())).toThrow();
+  const before = db.prepare("SELECT * FROM retention_setting ORDER BY kind").all();
+  store.close();
+
+  store = openStore(file);
+  expect(store.handle.prepare("SELECT * FROM retention_setting ORDER BY kind").all()).toEqual(before);
+  expect(store.retentionPeriods()).toEqual({ evidence: 30, checkouts: null, chat: null, notifications: 365 });
+  expect(periodLabel("evidence", 30, true)).toBe("30 days (custom)");
+  store.setRetentionPeriod("evidence", 1, "alex", NOW);
+  expect(store.retentionPeriods().evidence).toBe(1);
+  // Opening again leaves the widened table as it is.
+  store.close();
+  store = openStore(file);
+  expect(store.retentionPeriods()).toEqual({ evidence: 1, checkouts: null, chat: null, notifications: 365 });
+});
+
 test("the command line shows periods, previews without deleting, and sets them for an instance operator", async () => {
   const alex = addApprover(store, "alex", NOW);
   if (!alex.ok) throw new Error("alex");
@@ -200,12 +270,16 @@ test("the command line shows periods, previews without deleting, and sets them f
   let lines: string[] = [];
   const run = async (argv: string[]) => { lines = []; const code = await runOperate("retention", argv, line => { lines.push(line); }, { databaseFile: file, evidenceRoot: root }); return { code, out: lines.join("\n") }; };
   try {
-    expect(JSON.parse((await run(["show", "--json"])).out)).toMatchObject({ ok: true, periods: { evidence: null, checkouts: null, chat: null, notifications: null } });
-    expect((await run(["preview"])).out).toContain("Everything is kept forever; nothing would be removed.");
+    expect(JSON.parse((await run(["show", "--json"])).out)).toMatchObject({ ok: true, periods: { evidence: 28, checkouts: null, chat: null, notifications: null }, defaulted: ["evidence", "checkouts", "chat", "notifications"] });
+    expect((await run(["show"])).out).toMatch(/evidence\s+28 days \(default\)/);
+    expect((await run(["preview"])).out).toContain("1 run's evidence older than 28 days");
     expect((await run(["set", "evidence", "90d", "--json"])).code).toBe(3);
-    expect((await run(["set", "evidence", "3d", "--as", "alex", "--token", alex.token])).code).toBe(2);
+    expect((await run(["set", "evidence", "0d", "--as", "alex", "--token", alex.token])).code).toBe(2);
+    expect((await run(["set", "evidence", "1d", "--as", "alex", "--token", alex.token])).out).toContain("Run evidence and logs: kept for 1 day.");
+    expect((await run(["show"])).out).toMatch(/evidence\s+1 day\s/);
     expect((await run(["set", "evidence", "90d", "--as", "alex", "--token", alex.token])).out).toContain("Run evidence and logs: kept for 90 days.");
-    expect((await run(["show"])).out).toMatch(/evidence\s+90 days/);
+    expect((await run(["show"])).out).toMatch(/evidence\s+90 days \(custom\)/);
+    expect(JSON.parse((await run(["show", "--json"])).out).defaulted).toEqual(["checkouts", "chat", "notifications"]);
     const preview = await run(["preview", "--json"]);
     expect(JSON.parse(preview.out).counts.find((one: { kind: string }) => one.kind === "evidence")).toMatchObject({ count: 1, days: 90 });
     expect((await run(["preview"])).out).toContain("1 run's evidence older than 90 days");
@@ -233,19 +307,26 @@ test("Settings → Retention is an instance operator's; saving takes the passwor
     const cookie = await signIn("alex", alex.token);
     const page = await (await fetch(`${base}/settings/retention`, { headers: { cookie } })).text();
     expect(page).toContain("<h1>Retention</h1>");
-    expect(page).toContain("Everything is kept forever.");
-    expect(page).toMatch(/<select id="keep-chat" name="chat">.*<option value="forever" selected>Forever<\/option>/);
+    expect(page).toContain("Nothing is old enough to remove yet.");
+    expect(page).toMatch(/<select id="keep-evidence" name="evidence"><option value="1">1 day<\/option><option value="7">7 days<\/option><option value="14">14 days<\/option><option value="28" selected>28 days \(default\)<\/option><option value="forever">Forever<\/option><\/select>/);
+    expect(page).toMatch(/<select id="keep-chat" name="chat">.*<option value="forever" selected>Forever \(default\)<\/option>/);
     const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(page)![1]!;
     const post = (fields: Record<string, string>) => fetch(`${base}/settings/retention`, { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf, ...fields }), redirect: "manual" });
-    const choices = { evidence: "365", checkouts: "90", chat: "forever", notifications: "30" };
+    const choices = { evidence: "1", checkouts: "365", chat: "forever", notifications: "30" };
     expect((await post({ ...choices, password: "wrong" })).headers.get("location")).toContain("problem=");
-    expect(store.retentionPeriods()).toEqual({ evidence: null, checkouts: null, chat: null, notifications: null });
-    expect((await post({ ...choices, evidence: "2", password: alex.token })).headers.get("location")).toContain("problem=");
+    expect(store.retentionPeriods()).toEqual({ evidence: 28, checkouts: null, chat: null, notifications: null });
+    // Only the periods the page offers for each kind save.
+    for (const bad of ["2", "365"]) expect((await post({ ...choices, evidence: bad, password: alex.token })).headers.get("location")).toContain("problem=");
+    expect((await post({ ...choices, chat: "1", password: alex.token })).headers.get("location")).toContain("problem=");
+    expect(store.retentionChosen()).toEqual({});
     expect((await post({ ...choices, password: alex.token })).headers.get("location")).toContain("said=");
-    expect(store.retentionPeriods()).toEqual({ evidence: 365, checkouts: 90, chat: null, notifications: 30 });
+    expect(store.retentionPeriods()).toEqual({ evidence: 1, checkouts: 365, chat: null, notifications: 30 });
     expect(store.actionLedger({ repos: null }).filter(one => one.action.startsWith("retention changed")).map(one => one.detail).sort())
-      .toEqual(["forever → 1 year", "forever → 30 days", "forever → 90 days"]);
-    expect(await (await fetch(`${base}/settings/retention`, { headers: { cookie } })).text()).toContain('<option value="365" selected>1 year</option>');
+      .toEqual(["28 days → 1 day", "forever → 1 year", "forever → 30 days"]);
+    const saved = await (await fetch(`${base}/settings/retention`, { headers: { cookie } })).text();
+    expect(saved).toContain('<option value="1" selected>1 day</option>');
+    expect(saved).toContain('<option value="365" selected>1 year</option>');
+    expect(saved).toContain('<option value="forever" selected>Forever (default)</option>');
     const samCookie = await signIn("sam", sam.token);
     expect((await fetch(`${base}/settings/retention`, { headers: { cookie: samCookie }, redirect: "manual" })).status).toBe(403);
   } finally {
