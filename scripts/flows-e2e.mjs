@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { BROWSER_CHECK, SKIPPED_FADE } from "./e2e-kit.mjs";
+import { BROWSER_CHECK, processesIn, SKIPPED_FADE, spawnOwned, stopOwned } from "./e2e-kit.mjs";
 /**
  * Flows, end to end. A throwaway Toolroll instance — the real CLI,
  * the real console (`serve`) and the real worker loop (`watch`) — against a
@@ -162,14 +162,12 @@ cli(["verify", "set", "--repo", repo, "--command", "npm test", "--timeout-second
 const port = await freePort();
 const base = `http://127.0.0.1:${port}`;
 const logs = { serve: createWriteStream(join(out, "serve.log")), watch: createWriteStream(join(out, "watch.log")) };
-const children = [];
-// However the run ends — finished, a crash, or Ctrl-C — the console and the worker stop with it.
-process.on("exit", () => { for (const child of children) child.kill("SIGTERM"); });
-process.on("SIGINT", () => process.exit(130));
+// However the run ends — finished, a crash, or Ctrl-C — the console and the worker stop with it, each with its whole
+// process group (e2e-kit.mjs).
+processesIn(out);
 function start(name, argv) {
-  const child = spawn(process.execPath, [BIN, ...argv, "--db", db], { env: { ...process.env, NODE_OPTIONS: "", TOOLROLL_MATE_TRACE: "1", STANDING_ORDERS_MATE_TRACE: "1" }, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawnOwned(name, process.execPath, [BIN, ...argv, "--db", db], { env: { ...process.env, NODE_OPTIONS: "", TOOLROLL_MATE_TRACE: "1", STANDING_ORDERS_MATE_TRACE: "1" }, stdio: ["ignore", "pipe", "pipe"] });
   child.stdout.pipe(logs[name]); child.stderr.pipe(logs[name]);
-  children.push(child);
   return child;
 }
 start("serve", ["serve", "--repo", repo, "--port", String(port)]);
@@ -700,8 +698,8 @@ await journey(EVERY, BROWSER_CHECK, [], async () => { if (problems.length > 0) t
 // ------------------------------------------------------------------ report
 
 await browser.close();
-for (const child of children) child.kill("SIGTERM");
-await sleep(1500);
+const unstopped = await stopOwned().then(() => null, error => error.message);
+if (unstopped !== null) say(`left running: ${unstopped}`);
 const passed = results.filter(one => one.state === "passed").length, failed = results.filter(one => one.state === "failed").length, skipped = results.filter(one => one.state === "skipped").length;
 results.splice(0, results.length, ...results.filter(one => one.state !== "not selected"));
 const report = { startedAt: new Date(started).toISOString(), minutes: Math.round((Date.now() - started) / 6000) / 10, workspace: root, passed, failed, skipped, results };
@@ -711,4 +709,4 @@ writeFileSync(join(out, "report.md"), [`# Flows end to end${group === null ? "" 
   "", `Workspace: ${root}`, `Logs and screenshots: ${out}`, ""].join("\n"));
 say(`${passed} passed, ${failed} failed, ${skipped} skipped — ${join(out, "report.md")}`);
 if (!flag("--keep") && failed === 0) rmSync(root, { recursive: true, force: true });
-process.exitCode = failed === 0 ? 0 : 1;
+process.exitCode = failed === 0 && unstopped === null ? 0 : 1;
