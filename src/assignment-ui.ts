@@ -2,8 +2,10 @@
  * existing projections and signed operating-mode terms, never this renderer. */
 import type { AssignmentSnapshot } from './assignment.js';
 import type { DisplayStatus, StatusTone, WorkStatus } from './workspace-ui.js';
-import { assignmentPresentationOf, shortenedMaterialReason, type AssignmentWorkStatus } from './assignment-presentation.js';
+import { assignmentPresentationOf, shortenedMaterialReason, type AssignmentStatusOptions, type AssignmentWorkStatus } from './assignment-presentation.js';
 import { plainReasonWords } from './proof.js';
+import { chatResultHref } from './chat-controls.js';
+import { statusDetailsHtml, statusWhyHtml, type PullRequestFact, type TaskStatus } from './task-status.js';
 
 const escape = (value: string): string => value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!);
 
@@ -71,43 +73,42 @@ function savedMaterialNotice(detail: string, assignment: AssignmentSnapshot): 'p
     !assignment.receipt.artifacts.some(one => one.id === Number(earlier[1])) ? 'history' : null;
 }
 
-type AssignmentCardOptions = { hideAction?: boolean; problem?: boolean; diagnostics?: WorkStatus['diagnostics']; workStatus?: AssignmentWorkStatus; resultHref?: string };
+type AssignmentCardOptions = Omit<AssignmentStatusOptions, 'links'> & { hideAction?: boolean; problem?: boolean; resultHref?: string; pullRequest?: PullRequestFact | null };
 
 /** The status card's content: one projection for the server HTML and the
- * rebuilt task page, so the two never word the same state differently. */
+ * rebuilt task page, so the two never word the same state differently. The
+ * headline, sentence and detail rows are the shared task status; the exact
+ * recorded reasons stay one tap away under Details, never as red text. */
 export type AssignmentCard = {
   token: string; tone: StatusTone; label: string;
+  status: TaskStatus;
   action: { label: string; href: string; openResult: boolean } | null;
-  /** Ready with passing checks: a verdict chip replaces the detail sentence. */
-  passed: { by: string | null } | null;
-  detail: { text: string; problem: boolean };
-  problems: string[];
-  diagnostics: { token: string; label: string; detail: string; problem: boolean }[];
+  /** Exact technical reasons and diagnostics, shown on request. */
+  reasons: string[];
+  diagnostics: { token: string; label: string; detail: string }[];
   notices: { summary: string; lines: string[] } | null;
   attempts: AssignmentAttemptRow[];
   lead: { label: string; active: boolean } | null;
 };
 
 export function assignmentCardOf(assignment: AssignmentSnapshot, options: AssignmentCardOptions = {}): AssignmentCard {
-  const presentation = assignmentPresentationOf(assignment, options);
-  const { status, diagnostics } = presentation;
+  const receipt = assignment.receipt;
+  const links = receipt === null ? {} : { result: options.resultHref ?? chatResultHref(receipt.taskId, receipt.runId), checks: chatResultHref(receipt.taskId, receipt.runId, 'checks'),
+    pullRequest: `/t/${encodeURIComponent(assignment.rootId)}#merge` };
+  const presentation = assignmentPresentationOf(assignment, { ...options, links });
+  const { status, diagnostics, taskStatus } = presentation;
   const href = assignment.primaryAction?.code === 'open-result' && options.resultHref !== undefined ? options.resultHref : assignmentActionHref(assignment);
   const attention = presentation.attention.map(one => one.detail);
   const notices = [...attention, ...diagnostics.map(one => one.detail)].filter(one => savedMaterialNotice(one, assignment) !== null);
   const partial = notices.some(one => savedMaterialNotice(one, assignment) === 'partial');
   const history = notices.some(one => savedMaterialNotice(one, assignment) === 'history');
-  const ready = assignment.state === "ready-to-check" || assignment.state === "complete";
-  const checkProblem = ready && assignment.receipt !== null && assignment.receipt.completionKind !== 'research-report' && assignment.receipt.checks.status !== 'passed';
+  const recorded = assignment.detail === taskStatus.sentence || taskStatus.headline === 'Ready for review' || taskStatus.headline === 'Complete' ? [] : [assignment.detail];
   return {
-    token: status.token, tone: status.tone, label: status.label,
+    token: status.token, tone: status.tone, label: status.label, status: taskStatus,
     action: options.hideAction || href === null ? null : { label: assignment.primaryAction!.label, href, openResult: options.resultHref !== undefined },
-    // A good outcome at a glance; the same words stay in the result.
-    passed: ready && !checkProblem && assignment.receipt !== null && assignment.receipt.checks.status === 'passed'
-      ? { by: assignment.completion === null ? null : assignment.completion.actor.replace(/^(?:operator|coordinator|lead):/, '') } : null,
-    detail: { text: assignment.detail, problem: checkProblem || options.problem === true && !ready },
-    problems: attention.filter(one => savedMaterialNotice(one, assignment) === null).map(plainReasonWords),
+    reasons: [...new Set([...recorded, ...attention.filter(one => savedMaterialNotice(one, assignment) === null).map(plainReasonWords)])].filter(one => one !== taskStatus.sentence),
     diagnostics: diagnostics.filter(one => savedMaterialNotice(one.detail, assignment) === null)
-      .map(one => ({ token: one.token, label: one.label, detail: one.detail, problem: one.tone === 'problem' || one.tone === 'attention' })),
+      .map(one => ({ token: one.token, label: one.label, detail: one.detail })),
     notices: notices.length === 0 ? null : { summary: [partial ? 'Saved output is partial' : '', history ? 'Earlier material unavailable' : ''].filter(Boolean).join(' · '), lines: [...new Set(notices)] },
     attempts: assignmentAttemptsOf(assignment),
     lead: assignment.owner === null ? null : { label: assignment.owner.label, active: assignment.owner.active },
@@ -116,14 +117,13 @@ export function assignmentCardOf(assignment: AssignmentSnapshot, options: Assign
 
 export function assignmentSummaryHtml(assignment: AssignmentSnapshot, options: AssignmentCardOptions & { compact?: boolean } = {}): string {
   const card = assignmentCardOf(assignment, options);
-  return `<section class="${options.compact ? 'assignment-summary' : 'card assignment-summary'}" aria-label="assignment progress" data-assignment="${escape(assignment.rootId)}" data-work-status="${card.token}" data-tone="${card.tone}"${options.compact ? '' : ' data-task-status'}>` +
-    (options.compact ? `<span class="status-line" data-work-status="${card.token}" data-tone="${card.tone}"><i class="status-dot" aria-hidden="true"></i><span class="status-label">${card.label}</span></span>` : `<h2 class="assignment-state">${card.label}</h2>`) +
+  const tone = card.status.tone;
+  return `<section class="${options.compact ? 'assignment-summary' : 'card assignment-summary'}" aria-label="assignment progress" data-assignment="${escape(assignment.rootId)}" data-work-status="${card.token}" data-tone="${card.tone}" data-headline="${escape(card.status.headline)}" data-headline-tone="${tone}"${options.compact ? '' : ' data-task-status'}>` +
+    (options.compact ? `<span class="status-line" data-work-status="${card.token}" data-tone="${card.tone}"><i class="status-dot" aria-hidden="true"></i><span class="status-label">${card.label}</span></span>` : `<h2 class="assignment-state status-headline"><i aria-hidden="true"></i>${escape(card.label)}</h2>`) +
+    `<p class="meta assignment-detail status-sentence">${escape(card.status.sentence)}</p>` +
     (card.action === null ? '' : `<a class="${options.compact ? 'work-action' : 'button-link'}" href="${escape(card.action.href)}"${card.action.openResult ? ' data-open-result' : ''}${options.compact ? '' : ' data-primary-action'}>${escape(card.action.label)}${options.compact ? ' →' : ''}</a>`) +
-    (!options.compact && card.passed !== null
-      ? `<p class="meta assignment-detail assignment-verdict"><span class="verdict-chip verdict-chip--success">Checks passed</span>${card.passed.by === null ? '' : ` Completed by ${escape(card.passed.by)}`}</p>`
-      : `<p class="${card.detail.problem ? 'problem' : 'meta'} assignment-detail">${escape(card.detail.text)}</p>`) +
-    card.problems.map(one => `<p class="problem">${escape(one)}</p>`).join('') +
-    card.diagnostics.map(one => `<p class="${one.problem ? 'problem' : 'meta'}" data-work-diagnostic="${escape(one.token)}">${escape(one.label)} · ${escape(one.detail)}</p>`).join('') +
+    (options.compact ? '' : statusDetailsHtml(card.status)) +
+    statusWhyHtml(card.status, card.reasons, card.diagnostics) +
     (card.notices === null ? '' : `<details class="assignment-notices"><summary>${card.notices.summary}</summary>${card.notices.lines.map(one => `<p class="meta">${escape(one)}</p>`).join('')}</details>`) +
     assignmentAttemptsHtml(assignment) + `</section>`;
 }

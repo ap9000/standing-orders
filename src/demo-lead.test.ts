@@ -125,7 +125,7 @@ describe("the scripted demo lead", () => {
 
     later(2_000);
     const ready = await page(cookie);
-    expect(ready).toContain(">Ready</span>");
+    expect(ready).toContain(">Ready for review</span>");
     expect(ready).toContain("Checks passed.");
     expect(ready).toContain("+  vi.useFakeTimers();");
     expect(ready).toContain("216 passed");
@@ -165,12 +165,12 @@ describe("the scripted demo lead", () => {
     await post(cookie, `/chat/demo/${id}/approve`, { csrf: csrfIn(html) });
     later(4_500);
     html = await page(cookie);
-    expect(html).toContain(">Ready</span>");
+    expect(html).toContain(">Ready for review</span>");
     expect(html).toContain("+      &lt;h2&gt;No payouts yet&lt;/h2&gt;");
 
     expect((await post(cookie, `/chat/demo/${id}/revise`, { csrf: csrfIn(html), note: "Say payments, not payouts." })).status).toBe(303);
     html = await page(cookie);
-    expect(html).toContain("Sent back</span>");
+    expect(html).toContain(">Building</span>");
     expect(html).toContain("Also: Keep the link text short. Say payments, not payouts.");
     const runId = lead.exchanges().find(one => one.id === Number(id))!.runId!;
     expect(store.notesForRun(runId).map(one => one.note)).toContain("Say payments, not payouts.");
@@ -180,7 +180,7 @@ describe("the scripted demo lead", () => {
     await post(cookie, `/chat/demo/${revised}/approve`, { csrf: csrfIn(html) });
     later(4_500);
     html = await page(cookie);
-    expect(html.match(/>Ready<\/span>/g)?.length).toBe(1);
+    expect(html.match(/>Ready for review<\/span>/g)?.length).toBe(1);
     const tasks = lead.exchanges().filter(one => one.taskId !== null).map(one => one.taskId);
     expect(new Set(tasks).size).toBe(2);
 

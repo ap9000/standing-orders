@@ -4,13 +4,10 @@
 import type { AssignmentSnapshot } from './assignment.js';
 import { GOAL_ASSESSMENT_PENDING, manualReviewCriterionOf } from './proof.js';
 import { failedCheckExit, type DisplayStatus, type WorkStatus } from './workspace-ui.js';
+import { assignmentStatusFacts, taskStatusOf, workToneOf, type PullRequestFact, type StatusAction, type TaskStatus, type TaskStatusFacts } from './task-status.js';
 
 export type AssignmentWorkStatus = DisplayStatus & Partial<Pick<WorkStatus, 'views' | 'rank'>>;
 export type AssignmentAttention = { id: string; detail: string; tone: 'problem' | 'attention' };
-const LABELS: Record<AssignmentSnapshot['state'], string> = {
-  working: 'Working', checking: 'Checking', 'needs-decision': 'Needs your decision',
-  'ready-to-check': 'Ready', complete: 'Complete', cancelled: 'Cancelled',
-};
 
 /** Only the retired assessment requirement is history-only. Specific missing
  * material, defects and failed checks remain visible, including reviewer findings. */
@@ -29,15 +26,37 @@ export function shortenedMaterialReason(detail: string): boolean {
     /^Saved (?:terminal-diff|report) #\d+ is incomplete\.$/.test(detail);
 }
 
-export function assignmentPresentationOf(assignment: AssignmentSnapshot, options: {
+export type AssignmentStatusOptions = {
   workStatus?: AssignmentWorkStatus; diagnostics?: WorkStatus['diagnostics']; additionalAttention?: readonly string[];
-} = {}) {
+  /** A live planner rather than a builder holds the work. */
+  planning?: boolean;
+  pullRequest?: PullRequestFact | null; action?: StatusAction | null; links?: TaskStatusFacts['links']; evidence?: TaskStatusFacts['evidence'];
+};
+
+/** The one shared status (task-status.ts) for this assignment. */
+export function assignmentTaskStatusOf(assignment: AssignmentSnapshot, options: AssignmentStatusOptions = {}): TaskStatus {
+  const work = options.workStatus;
+  return taskStatusOf(assignmentStatusFacts(assignment, {
+    work: work === undefined ? null : { token: work.token, ...(work.views === undefined ? {} : { views: work.views }), detail: work.detail },
+    ...(options.planning === undefined ? {} : { planning: options.planning }),
+    ...(options.pullRequest === undefined ? {} : { pullRequest: options.pullRequest }),
+    ...(options.action === undefined ? {} : { action: options.action }),
+    ...(options.links === undefined ? {} : { links: options.links }),
+    ...(options.evidence === undefined ? {} : { evidence: options.evidence }),
+  }));
+}
+
+export function assignmentPresentationOf(assignment: AssignmentSnapshot, options: AssignmentStatusOptions = {}) {
   const { state } = assignment, work = options.workStatus;
+  const taskStatus = assignmentTaskStatusOf(assignment, options);
+  // The headline and its sentence are the shared words; the token, views and
+  // rank stay the existing projection's (pages and tests key off them).
+  const shared = { label: taskStatus.headline, tone: workToneOf(taskStatus.headline), detail: taskStatus.sentence, action: null };
+  const needsYou = taskStatus.headline === 'Needs you';
   const status: WorkStatus = state === 'working'
-    ? { ...(work ?? { label: LABELS[state], tone: 'muted' as const }), token: `assignment-${state}`,
-      detail: assignment.detail, action: null, views: work?.views?.filter(view => view !== 'completed') ?? ['all'], rank: work?.rank ?? 2 }
-    : { token: `assignment-${state}`, label: state === 'checking' ? work?.label ?? LABELS[state] : LABELS[state], detail: assignment.detail,
-      action: null, tone: state === 'needs-decision' ? 'attention' : state === 'checking' ? work?.tone ?? 'live' : state === 'ready-to-check' ? 'ready' : state === 'complete' ? 'done' : 'muted',
+    ? { ...shared, token: `assignment-${state}`,
+      views: [...new Set([...(work?.views?.filter(view => view !== 'completed') ?? ['all' as const]), ...(needsYou ? ['needs-you' as const] : [])])], rank: needsYou ? 0 : work?.rank ?? 2 }
+    : { ...shared, token: `assignment-${state}`,
       views: state === 'ready-to-check' || state === 'needs-decision' ? ['all', 'needs-you'] : state === 'complete' ? ['all', 'completed']
         : state === 'checking' && work?.views?.includes('running') ? ['all', 'running'] : ['all'],
       rank: state === 'needs-decision' || state === 'ready-to-check' ? 0 : state === 'checking' ? 1 : state === 'complete' ? 3 : 4 };
@@ -80,5 +99,5 @@ export function assignmentPresentationOf(assignment: AssignmentSnapshot, options
     if (checks !== undefined && (one.token === 'checks-failed' || checkReason(one.detail))) return false;
     return true;
   });
-  return { status, primaryAction: assignment.primaryAction, attention: [...attention.values()], diagnostics };
+  return { status, taskStatus, primaryAction: assignment.primaryAction, attention: [...attention.values()], diagnostics };
 }

@@ -1,7 +1,7 @@
 import { repositoryContext, repositoryContextRead } from './repository-context.js';
 import { repositoryContextHtml } from './repository-context-ui.js';
 import { browserAssetsAvailable, browserWorkspaceDocument, serveBrowserAsset } from './browser-shell.js';
-import { browserCrewOf, browserCrewFromIndex, browserWorkActionHref, browserProjectsOf, browserNavigationOf, type BrowserWorkspace, type BrowserChatLink, type BrowserTasksView, type BrowserLimits, type BrowserSettingsView, type BrowserTaskView, type BrowserTaskFact, type BrowserTaskSection, type BrowserProjectsView, type BrowserProjectRow, type BrowserResultChip, type BrowserResultPanel, type BrowserResultView, type BrowserActionCard, type BrowserSignIn, type BrowserUpdateNotice, type BrowserUpdates, type BrowserFirstRun } from './browser-workspace.js';
+import { browserCrewOf, browserCrewFromIndex, browserWorkActionHref, browserProjectsOf, browserNavigationOf, type BrowserWorkspace, type BrowserChatLink, type BrowserTasksView, type BrowserLimits, type BrowserSettingsView, type BrowserTaskView, type BrowserTaskFact, type BrowserTaskSection, type BrowserProjectsView, type BrowserProjectRow, type BrowserResultPanel, type BrowserResultView, type BrowserActionCard, type BrowserSignIn, type BrowserUpdateNotice, type BrowserUpdates, type BrowserFirstRun } from './browser-workspace.js';
 import { configureLeadFollow, leadFollowStatus, runLeadFollowPass } from './lead-follow.js';
 import { startMaintenance } from './maintenance.js';
 import { codingHandoffPreview, createCodingHandoff } from './coding-handoff.js';
@@ -66,6 +66,7 @@ import { checkPublishing, completeAndOpenPullRequest, mergeAsPerson, pullRequest
 import { leadBriefHtml, LEAD_CONTEXT_CSS } from './lead-context.js';
 import { assignmentCatchUp } from './assignment-brief.js';
 import { assignmentCardOf, assignmentStatusOf, assignmentSummaryHtml, assignmentWithEvidence, ASSIGNMENT_CSS } from './assignment-ui.js';
+import { pullRequestFactOf, stageOfDispatch, statusDetailsHtml, statusIconSvg, statusWhyHtml, taskStatusOf, TASK_STATUS_CSS, type PullRequestFact } from './task-status.js';
 import { assignmentPresentationOf, historicalAssessmentReason, shortenedMaterialReason } from './assignment-presentation.js';
 import type { TaskFamily } from "./store.js";
 import { ledgerBody } from "./ledger-view.js";
@@ -157,7 +158,7 @@ import { recipeFromForm, recipeLibraryHtml, recipeEditorHtml, workflowPreviewHtm
 import { EVIDENCE_CAPS, readVerifiedArtifact, readVerifiedReport, readVerifiedProofForRun, storeEvidence, writeEvidenceFile, scanForSecrets, type ReportView } from "./evidence.js";
 import { GOAL_ASSESSMENT_PENDING, reviewConflict, manualReviewOnly, manualReviewCriterionOf, personCheckWords, plainReasonWords, dispatchStatusToken, passFraction, semanticCoverage, coverageWords, coverageStateWords, type ProofVerdict, type CriterionMatrixRow, type CriterionEvidenceRef } from "./proof.js";
 import {
-  WORK_VIEWS, REVIEW_TOKENS, parseWorkView, resultStatusOf, receiptHeadingOf, receiptPublicationWords, reviewFactsOf, workStatusOf, primaryDestinationOf, needsPerson, dispatchActionLabel,
+  WORK_VIEWS, REVIEW_TOKENS, parseWorkView, resultStatusOf, resultHeadlineOf, receiptHeadingOf, receiptPublicationWords, reviewFactsOf, workStatusOf, primaryDestinationOf, needsPerson, dispatchActionLabel,
   type WorkView, type WorkFacts, type WorkStatus, type DisplayStatus, type PublicationFacts, type ReviewFacts,
 } from "./workspace-ui.js";
 import { PRICED_BUILD_MODELS } from "./pricing.js";
@@ -5104,7 +5105,6 @@ export function createDecisionServer(options: ServeOptions): Server {
     const result = receipt === undefined && task.state === "done" && latest !== null && (latest.outcome === "built" || latest.outcome === "no-change")
       ? completionReceiptView(store, latest, store.artifactsFor(latest.id), evidenceRoot, reviewFactsFor(latest.id)) : receipt;
     const status = workStatusOf(facts, result == null ? undefined : receiptStatusOf(result));
-    if (store.lookupRef(task.id)?.revisionOf !== null && live !== null && status.tone === "live") status.label = "Revising";
     const earlierLive = task.family === undefined ? [] : earlierLiveVersions(task.family, now);
     if (earlierLive.length > 0 && !status.views.includes("running")) status.views = [...status.views, "running"];
     const otherActive = new Set([...(task.family?.otherActive.map(one => one.id) ?? []), ...earlierLive]).size;
@@ -5699,7 +5699,12 @@ export function createDecisionServer(options: ServeOptions): Server {
     const publishing = publishingOf(store, repo);
     const target = publishing.on ? publishing.base : null;
     const view = newestPullRequestOf(store, family === null ? [taskId] : family.versions.map(one => one.id));
-    if (view !== null) return { taskId: rootId, view: { ...view, canMerge: view.canMerge && who.role === "approver" && who.via === "cookie" }, offer: null, target };
+    if (view !== null) {
+      const publication = store.publicationForRun(view.runId);
+      const fact = publication === null ? null : { ...pullRequestFactOf({ ...publication, merged: view.state === "merged" })!,
+        note: view.state === "merged" ? `${view.detail}${view.mergeCommit === null ? "" : ` Merge commit ${view.mergeCommit.slice(0, 12)}.`}` : null };
+      return { taskId: rootId, view: { ...view, canMerge: view.canMerge && who.role === "approver" && who.via === "cookie" }, offer: null, target, fact };
+    }
     if (!publishing.on || who.via !== "cookie" || who.role !== "approver") return null;
     const assignment = assignmentOf(store, taskId, clock(), { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) }, evidenceRoot);
     const receipt = assignment?.receipt ?? null;
@@ -11130,7 +11135,8 @@ export function editorFileHref(worktree: string, path: string, line?: number | n
  * chat (v39, extending Priority 2's "one surface, six places" rule from
  * the verdict word to the per-criterion state). */
 function matrixStateBadge(state: CriterionMatrixRow["state"]): string {
-  const cls = state === "pass" ? "badge-done" : state === "failed" ? "badge-failed" : state === "missing" ? "badge-failed" : "badge-manual-review";
+  // Red belongs to a Failed headline alone (task-status.ts); an unmet requirement is an amber note.
+  const cls = state === "pass" ? "badge-done" : state === "failed" ? "badge-note" : state === "missing" ? "badge-note" : "badge-manual-review";
   const word = state === "pass" ? "pass" : state === "missing" ? "missing" : state === "failed" ? "failed" : "manual review";
   return `<span class="badge ${cls}" data-matrix-state="${escape(state)}">${escape(word)}</span>`;
 }
@@ -11230,7 +11236,7 @@ function criterionMatrixHtml(
 ): string {
   if (matrix.length === 0) return "";
   const kinds: Record<CriterionEvidenceRef["kind"], string> = {
-    check: "Checks", "changed-path": "Changed files", screenshot: "Screenshots", "manual-review": "Human review",
+    check: "Checks", "changed-path": "Changed files", screenshot: "Screenshots", "manual-review": "You check",
   };
   const evidenceLink = (a: CriterionEvidenceRef): string => {
     const text = `<code>${escape(a.ref)}</code>`;
@@ -11245,8 +11251,9 @@ function criterionMatrixHtml(
     const state = row.state;
     const awaitingAssessment = row.assessment?.evidenceState === "pass" && row.review === null;
     const confirmed = row.assessment !== undefined && state === "pass";
-    const label = awaitingAssessment ? "Not assessed" : confirmed ? "Confirmed" : state === "pass" ? "Met" : state === "manual-review" ? "You check" : state === "missing" ? "Not shown yet" : "Not met";
-    const cls = awaitingAssessment ? "" : state === "pass" ? "badge-done" : state === "manual-review" ? "badge-manual-review" : "badge-failed";
+    // Plain words (task-status brief): the retired assessment step is not a state a person acts on.
+    const label = awaitingAssessment ? "Met" : confirmed ? "Confirmed" : state === "pass" ? "Met" : state === "manual-review" ? "You check" : state === "missing" ? "Not shown yet" : "Not met";
+    const cls = awaitingAssessment ? "badge-done" : state === "pass" ? "badge-done" : state === "manual-review" ? "badge-manual-review" : "badge-note";
     const warnings: string[] = [];
     // Only replace the known boilerplate. Other recorded failure details
     // remain verbatim, so concision cannot hide a different problem.
@@ -11986,6 +11993,10 @@ ${THEME_DARK}
   .badge-failed {
     background: color-mix(in srgb, var(--muted) 58%, var(--card));
     color: color-mix(in srgb, var(--destructive) 68%, var(--foreground)); border-color: var(--border);
+  }
+  .badge-note {
+    background: color-mix(in srgb, var(--muted) 58%, var(--card));
+    color: var(--so-warning, #ab6400); border-color: var(--border);
   }
   .badge-overdue {
     background: color-mix(in srgb, var(--muted) 58%, var(--card)); color: var(--foreground);
@@ -12827,8 +12838,9 @@ ${THEME_DARK}
   .dispatch-status[data-dispatch-status="proof-refuted"] .dispatch-copy > strong::before,
   .dispatch-status[data-dispatch-status="needs-verification"] .dispatch-copy > strong::before {
     content: ""; display: inline-block; width: .45rem; height: .45rem; margin-right: .45rem; border-radius: 50%; vertical-align: .08rem;
-    background: var(--destructive);
+    background: var(--so-warning, #ab6400);
   }
+  .problem.dispatch-status[data-dispatch-status="proof-refuted"] .dispatch-copy > strong::before { background: var(--destructive); }
   .dispatch-status[data-dispatch-status="needs-verification"] .dispatch-copy > strong::before { background: var(--muted-foreground); }
   /* A review in flight (review fixes): the box reads neutral — neither the
      green of a settled verdict nor the red of a problem — with the dot in
@@ -13329,7 +13341,7 @@ ${THEME_DARK}
   .pull-request-head strong { font-size: 1.0625rem; font-weight: 600; color: var(--foreground); display: inline-flex; align-items: center; gap: .5rem; }
   .pull-request-head strong::before { content: ""; width: .5rem; height: .5rem; border-radius: 999px; background: var(--muted-foreground); }
   .pull-request--ok .pull-request-head strong::before { background: var(--success, #15803d); }
-  .pull-request--problem .pull-request-head strong::before { background: var(--destructive, #b91c1c); }
+  .pull-request--problem .pull-request-head strong::before { background: var(--so-warning, #ab6400); }
   .pull-request-act { display: flex; flex-wrap: wrap; align-items: flex-end; gap: .5rem .75rem; margin: .25rem 0 0; }
   .pull-request-act .meta { flex: 1 1 100%; }
   .pull-request-act label { display: grid; gap: .25rem; flex: 1 1 12rem; margin: 0; }
@@ -14523,7 +14535,7 @@ button.pick-file { min-height: 1.75rem; padding: 0 .55rem; font-size: .75rem; }
 const THEME_CONTROLS_CSS = `.task-repo select{width:100%;min-height:2.75rem;font-size:1rem}.task-repo-add{margin:.35rem .1rem .5rem}.task-repo-add a{display:inline-flex;align-items:center;min-height:2.25rem}details.result-request-open.result-request-form>summary{border:0;background:transparent;padding:.5rem 0;min-height:2.75rem;font-weight:600;display:list-item;list-style:revert}details.result-request-open.result-request-form>summary::-webkit-details-marker{display:revert}form.js-autosave button[type=submit]{display:none}.provider-row{border-bottom:1px solid var(--so-line);padding:.35rem 0}.provider-row:first-of-type{border-top:1px solid var(--so-line)}.provider-head{display:flex;align-items:center;gap:.75rem;margin:.4rem 0 0}.provider-status{display:inline-flex;align-items:center;gap:.4rem;color:var(--so-muted);font-size:.875rem}.provider-status i{width:.5rem;height:.5rem;border-radius:50%;background:var(--so-muted)}.provider-status--ok i{background:var(--so-success)}.provider-status--warn i{background:var(--so-attention)}.provider-status--off i{background:transparent;border:1.5px solid var(--so-muted)}details.provider-manage>summary{cursor:pointer;color:var(--so-accent-text);font-size:.875rem;min-height:2.5rem;display:list-item;padding-block:.5rem}.card.props .row{display:grid;gap:.1rem;margin:0 0 .75rem}.card.props .row>.meta{display:block;font-size:.75rem}.card.props .row>.meta::first-letter{text-transform:uppercase}.card.props .row>.mono{font-family:var(--font-sans);font-size:.875rem}.card.props .row>.mono .seal{font-family:var(--font-mono);font-size:.8125rem}details.evidence-files{margin:1rem 0}details.evidence-files>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:600}details.evidence-files ul{list-style:none;margin:0;padding:0}details.evidence-files li{display:flex;justify-content:space-between;gap:1rem;padding:.5rem 0;border-bottom:1px solid var(--so-line)}.result-action .result-feedback-link{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;text-decoration:none}@media(hover:hover) and (pointer:fine){.result-action .result-feedback-link:hover{background:var(--so-raised)}}.so-sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}.verdict{margin:.5rem 0 .75rem}.verdict-chips{display:flex;flex-wrap:wrap;gap:.4rem;list-style:none;padding:0;margin:0}.verdict-chip{display:inline-flex;align-items:center;gap:.3rem;min-height:1.75rem;padding:.2rem .65rem;border-radius:999px;font-size:.8125rem;font-weight:600;background:var(--so-neutral-soft);color:var(--so-neutral-ink)}.verdict-chip svg{width:.9rem;height:.9rem}.verdict-chip--success{background:var(--so-success-soft);color:var(--so-success)}.verdict-chip--danger{background:var(--so-danger-soft);color:var(--so-danger)}.verdict-chip--warning{background:var(--so-warning-soft);color:var(--so-warning)}.verdict-chip--info{background:var(--so-info-soft);color:var(--so-info)}.verdict-by{margin:.4rem 0 0}details.result-request-open{margin:.5rem 0}details.result-request-open>summary{display:inline-flex;align-items:center;min-height:2.5rem;padding:.5rem 1rem;border:1px solid var(--so-input-line);border-radius:.5rem;background:var(--so-paper);color:var(--so-ink);font-weight:600;cursor:pointer;list-style:none}details.result-request-open>summary::-webkit-details-marker{display:none}details.result-request-open[open]>summary{margin-bottom:.75rem}.settings-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(8.5rem,1fr));gap:.5rem;margin:0 0 2rem}.settings-tiles a{display:flex;align-items:center;gap:.6rem;min-height:3rem;padding:.65rem .8rem;border:1px solid var(--so-line);border-radius:.625rem;background:var(--so-paper);color:var(--so-ink);text-decoration:none;font-weight:550;font-size:.875rem}@media(hover:hover) and (pointer:fine){.settings-tiles a:hover{border-color:var(--so-input-line);background:var(--so-raised)}}.settings-tiles svg{width:1.1rem;height:1.1rem;flex-shrink:0;color:var(--so-accent-text)}details.settings-more{margin:.25rem 0 1.25rem}details.settings-more>summary{cursor:pointer;min-height:2.75rem;display:list-item;padding-block:.7rem;font-weight:550}details.settings-more>summary .meta{font-weight:400;margin-left:.35rem}.settings-changed{margin-top:-.25rem}.appearance{margin:0 0 28px}.appearance h2{margin:0 0 10px}.theme-switch{display:inline-flex;flex-wrap:nowrap;max-width:100%;gap:4px;padding:4px;margin:0;border:1px solid var(--so-line);border-radius:10px;background:var(--so-raised)}.theme-switch .theme-choice,.so-native-region .theme-switch .theme-choice{flex:1 1 0;width:auto;white-space:nowrap;min-height:40px;padding:8px 16px;border:0;border-radius:7px;background:transparent;color:var(--so-muted);font:inherit;font-weight:550;box-shadow:none;cursor:pointer}@media(hover:hover) and (pointer:fine){.theme-switch .theme-choice:hover{color:var(--so-ink)}}.theme-switch .theme-choice[aria-pressed="true"]{background:var(--so-paper);color:var(--so-ink);box-shadow:0 1px 2px rgb(0 0 0 / .1)}.appearance .meta{margin:8px 0 0}@media(max-width:600px){.theme-switch .theme-choice{min-height:44px}}.update-notes{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;max-height:18rem;overflow:auto}`;
 /** The page CSS this module writes itself (not the imported modules'), for the stylesheet contract tests. */
 export const PAGE_CSS = STYLE + THEME_CONTROLS_CSS;
-const WORKSPACE_STYLE = styleAsset(STYLE + APPROVAL_RULES_CSS + SPEND_CSS + RETENTION_CSS + STORAGE_CSS + UPDATES_CSS + LIMITS_CSS + MONITORING_CSS + INTEGRATIONS_CSS + BACKUP_CSS + EXPORT_CSS + PROJECT_DELETE_CSS + POLICY_CSS + EVIDENCE_PACK_CSS + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KITS_CSS + STARTERS_CSS + SSO_CSS + CREDENTIALS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + LEAD_CONTEXT_CSS + PULL_REQUEST_SETTINGS_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
+const WORKSPACE_STYLE = styleAsset(STYLE + APPROVAL_RULES_CSS + SPEND_CSS + RETENTION_CSS + STORAGE_CSS + UPDATES_CSS + LIMITS_CSS + MONITORING_CSS + INTEGRATIONS_CSS + BACKUP_CSS + EXPORT_CSS + PROJECT_DELETE_CSS + POLICY_CSS + EVIDENCE_PACK_CSS + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KITS_CSS + STARTERS_CSS + SSO_CSS + CREDENTIALS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + TASK_STATUS_CSS + LEAD_CONTEXT_CSS + PULL_REQUEST_SETTINGS_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
@@ -16394,7 +16406,7 @@ function chatFleetOverview(
     rows.push(
       `<a class="chat-overview-item decision" href="${taskHref(task.rootId ?? task.id)}" data-dispatch-status="${escape(dispatch.code)}">` +
         `<span class="chat-overview-icon">${strokeIcon(`<path d="M12 8v4"/><path d="M12 16h.01"/><circle cx="12" cy="12" r="9"/>`)}</span>` +
-        `<span class="chat-overview-copy"><strong>${escape(task.title)}</strong><span>${escape(projectOf(task.repoIndex))} · ${escape(task.id)} · ${escape(dispatch.summary.toLowerCase())}</span></span>` +
+        `<span class="chat-overview-copy"><strong>${escape(task.title)}</strong><span>${escape(projectOf(task.repoIndex))} · ${escape(task.id)} · ${escape(dispatchHeadline(dispatch))}</span></span>` +
         `<span class="chat-overview-arrow" aria-hidden="true">→</span></a>`,
     );
   }
@@ -17912,6 +17924,12 @@ function statusActionHref(status: DisplayStatus, taskId: string, runId: number |
 
 /** The one status line every surface renders: a dot in the tone, the
  * label, and the `data-work-status` token tests and CSS key off. */
+/** A not-yet-finished task's shared headline from its dispatch diagnosis (task-status.ts). */
+function dispatchHeadline(d: DispatchDiagnosis): string {
+  const read = stageOfDispatch(d);
+  return taskStatusOf({ stage: read.stage, ...(read.need === undefined ? {} : { need: read.need }) }).headline;
+}
+
 function statusLineHtml(status: DisplayStatus, extra = ""): string {
   return `<span class="status-line" data-work-status="${escape(status.token)}" data-tone="${escape(status.tone)}"><i class="status-dot" aria-hidden="true"></i><span class="status-label">${escape(status.label)}</span>${extra}</span>`;
 }
@@ -17969,7 +17987,7 @@ function workPage(
       const actionHref = row.primaryAction?.code === 'open-result' && target?.runId != null
         ? `/review?result=${encodeURIComponent(target.taskId)}&run=${target.runId}${row.repo === null ? '' : '&project=' + encodeURIComponent(row.repo)}`
         : browserWorkActionHref(row);
-      const needsYouDetail = row.status.views.includes('needs-you') && !['write-scope', 'approve-scope'].includes(row.primaryAction?.code ?? '') && row.status.detail !== row.status.label && row.status.detail !== row.familyProblem;
+      const needsYouDetail = (row.status.views.includes('needs-you') || row.status.label === 'Failed') && !['write-scope', 'approve-scope'].includes(row.primaryAction?.code ?? '') && row.status.label !== 'Ready for review' && row.status.detail !== row.status.label && row.status.detail !== row.familyProblem;
       return {
         id: row.rootId, title: row.title, href: taskHref(row.rootId),
         project: data.multiProject || row.repo === null ? (row.repo === null ? 'Unplaced' : projectName(row.repo)) : null,
@@ -19263,7 +19281,7 @@ function queueCard(one: QueueCardTask, csrf: string, revision: number, queueRevi
       : `<span class="badge">reserved for ${escape(column)}</span>`;
   const chips =
     ` ${state}` +
-    `${one.dispatch === null || one.dispatch === undefined ? "" : ` <a class="badge" href="${taskHref(one.id)}">${escape(one.dispatch.summary.toLowerCase())}</a>`}`;
+    `${one.dispatch === null || one.dispatch === undefined ? "" : ` <a class="badge" href="${taskHref(one.id)}" title="${escape(one.dispatch.summary)}">${escape(dispatchHeadline(one.dispatch))}</a>`}`;
   const hidden =
     `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
     `<input type="hidden" name="projectRevision" value="${revision}">` +
@@ -20020,8 +20038,12 @@ function taskBodyParts(data: {
     // data-work-status is the shared projection's token (package 1) —
     // the same one the Work row, chat, and cockpit carry for this task.
     const workToken = resultStatus?.token ?? data.dispatch?.code ?? "unknown";
-    const box = (kind: "ok" | "problem", title: string, detail: string, status?: string, controls = ""): string =>
-      `<div class="${kind === "problem" && !inReview ? "problem" : "answered"} dispatch-status" id="run-status" data-dispatch-status="${escape(status ?? title.toLowerCase().replace(/[^a-z0-9]+/g, "-"))}" data-work-status="${escape(workToken)}">` +
+    // A diagnosis under Task options: the exact technical reason, one tap
+    // away from the shared headline (task-status.ts). Red only when that
+    // headline is Failed.
+    const headline = status.label;
+    const box = (kind: "ok" | "problem", title: string, detail: string, code?: string, controls = ""): string =>
+      `<div class="${kind === "problem" && !inReview && headline === "Failed" ? "problem" : "answered"} dispatch-status" id="run-status" data-dispatch-status="${escape(code ?? title.toLowerCase().replace(/[^a-z0-9]+/g, "-"))}" data-work-status="${escape(workToken)}">` +
       `<div class="dispatch-copy"><strong>${escape(inReview ? "Recorded checks" : title)}</strong><span class="meta">${detail}</span></div>${controls}</div>`;
 
     if (task.state !== "done") {
@@ -21036,7 +21058,13 @@ function taskBodyParts(data: {
       }${data.deliverable === "report" ? ` · <span class="badge">scout</span>` : ""}</p>`;
   // A pull request that can be merged (or opened) owns the one primary action; the result stays in its section.
   const pullRequestActs = data.csrf !== "" && (data.pullRequest?.view?.canMerge === true || (data.pullRequest?.view == null && data.pullRequest?.offer != null));
-  const assignmentOptions = data.assignment == null ? null : { workStatus: status, hideAction: (approveForm !== "" && data.dispatch?.action === "approve-scope") || pullRequestActs, problem: status.tone === "problem", diagnostics: [...((status as WorkStatus).diagnostics ?? []), ...(status.tone === "problem" && status.detail !== data.assignment.detail ? [status] : [])] };
+  const pullRequestFact = data.pullRequest?.fact != null && data.pullRequest.view?.runId === data.assignment?.receipt?.runId ? data.pullRequest.fact : undefined;
+  const assignmentOptions = data.assignment == null ? null : { workStatus: status, hideAction: (approveForm !== "" && data.dispatch?.action === "approve-scope") || pullRequestActs, problem: status.tone === "problem",
+    planning: data.dispatch?.code === "running" && data.dispatch.role === "planner", ...(pullRequestFact === undefined ? {} : { pullRequest: pullRequestFact }),
+    diagnostics: [...((status as WorkStatus).diagnostics ?? []), ...(status.tone === "problem" && status.detail !== data.assignment.detail ? [status] : [])] };
+  // Say it once: a pull request that couldn't open, or merged, is the status
+  // card's own row (its reason or merge commit under Details), not a second card.
+  const pullRequestCard = data.pullRequest == null || (pullRequestFact !== undefined && (data.pullRequest.view?.state === "failed" || data.pullRequest.view?.state === "merged")) ? "" : pullRequestCardHtml(data.pullRequest, data.csrf);
   // The result takes over from the task status as soon as it is ready.
   const statusHtml = (data.assignment != null && assignmentOptions !== null ? assignmentSummaryHtml(data.assignment, assignmentOptions) : receiptLeads ? completionReceiptCard(data.completion!.receipt!, task.id, "task", status) : taskStatusCard(status, task.id, data.dispatch ?? null, liveRunId, approveForm !== "" && data.dispatch?.action === "approve-scope")) + checkProgressHtml(data.checkProgress ?? null);
   // The exact-run control (v52), directly under the scheduler's answer:
@@ -21190,7 +21218,7 @@ function taskBodyParts(data: {
     approval: approvalHtml,
     lead: [
       { key: "history", html: data.history ?? "" }, { key: "control", html: controlHtml }, { key: "problem", html: problemHtml },
-      { key: "pull-request", html: data.pullRequest == null ? "" : pullRequestCardHtml(data.pullRequest, data.csrf) },
+      { key: "pull-request", html: pullRequestCard },
       { key: "needs-scope", html: needsScopeCard }, { key: "progress", html: progressCard }, { key: "revisions", html: revisionLedgerCard },
       { key: "plan", html: planCard }, { key: "mirror", html: mirrorCard }, { key: "contest", html: contestCard }, { key: "attempt", html: attemptPanel },
     ].filter(one => one.html !== ""),
@@ -21520,10 +21548,10 @@ const reviewHref = (taskId: string, runId: number | null = null, repo: string | 
 function cockpitStatusOf(view: ReviewCockpitView): DisplayStatus {
   // The receipt's own status (package 3): the same projection the chat
   // receipt and the run page print, read from the shared detail.
-  if (view.run === null || view.detail === null) return view.assignment === null ? resultStatusOf(null, null) : assignmentPresentationOf(view.assignment).status;
+  if (view.run === null || view.detail === null) return view.assignment === null ? resultHeadlineOf(resultStatusOf(null, null)) : assignmentPresentationOf(view.assignment).status;
   const receiptStatus = receiptStatusOf(view.detail.receipt);
   if (view.assignment !== null) return assignmentStatusOf(assignmentWithEvidence(view.assignment, receiptStatus, view.run.id));
-  return receiptStatus;
+  return resultHeadlineOf(receiptStatus);
 }
 
 /** Turn verifier records into one sentence a project owner can act on.
@@ -21855,7 +21883,9 @@ function completionForm(taskId: string, runId: number, digest: string, csrf: str
 }
 
 /** What the task page shows about a result's pull request: the view, or the offer to open one. */
-type TaskPullRequest = { taskId: string; view: PullRequestView | null; offer: { taskId: string; runId: number; digest: string } | null; target: string | null };
+type TaskPullRequest = { taskId: string; view: PullRequestView | null; offer: { taskId: string; runId: number; digest: string } | null; target: string | null;
+  /** The same pull request as the shared status's detail row reads it. */
+  fact?: PullRequestFact | null };
 
 /** The pull request, in one card: its state and link, one line of detail, and the one action it needs — Merge
  * behind the password when checks passed, or Open a pull request for a result completed without one. */
@@ -21870,7 +21900,8 @@ function pullRequestCardHtml(pr: TaskPullRequest, csrf: string): string {
   const view = pr.view;
   const url = safePrUrl(view.prUrl);
   const link = view.prNumber === null ? "" : url === null ? `<span class="mono">PR #${view.prNumber}</span>` : `<a href="${escape(url)}" class="mono" rel="noreferrer" target="_blank">PR #${view.prNumber}</a>`;
-  const tone = view.state === "ready" || view.state === "merged" ? "ok" : view.state === "failing" || view.state === "failed" || view.state === "closed" ? "problem" : "waiting";
+  // A pull request's trouble never undoes the result: amber, never red.
+  const tone = view.state === "ready" || view.state === "merged" ? "ok" : view.state === "failing" || view.state === "failed" ? "problem" : "waiting";
   const revision = view.revisionTask === null || view.state !== "failing" ? "" : ` <a href="${taskHref(view.revisionTask)}">Open revision</a>`;
   const merged = view.mergeCommit === null ? "" : `<p class="meta">Merge commit <span class="mono">${escape(view.mergeCommit.slice(0, 12))}</span></p>`;
   const target = pr.target === null ? "the base branch" : pr.target;
@@ -22863,7 +22894,8 @@ function completionReceiptCard(view: CompletionReceiptView, taskId: string, plac
     lead +
     `<p class="receipt-summary">${escape(conciseOutcomeOf(view.summary ?? (view.outcome === "no-change" ? "The agent found that no repository change was needed." : "The build finished without a concise handoff.")))}</p>` +
     (headline ? `<div class="receipt-actions"><a class="button-link" href="${escape(resultHref)}" data-open-result data-primary-action>${escape(status.action?.label ?? "Open result")}</a></div>` : "") +
-    (view.publication?.state === "failed" ? `<p class="problem">${escape(facts.publicationWords)}</p>` : "") +
+    // A pull request that couldn't open never undoes the result: an amber note, not red.
+    (view.publication?.state === "failed" ? `<p class="receipt-note">${statusIconSvg("note")} Pull request couldn't open. The commit is safe locally.</p>` : "") +
     caveats +
     coverage +
     `<details class="receipt-details"><summary>Result details</summary>` +
@@ -22987,15 +23019,18 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
   const { run, receipt, proof, terminal, handoff } = detail;
   const facts = receipt.facts;
   const current = detail.assignment?.receipt?.runId === run.id ? detail.assignment : null;
-  const presentation = current == null ? null : assignmentPresentationOf(current, { additionalAttention: [...facts.evidenceProblems, ...receipt.caveats] });
-  let status = presentation?.status ?? receiptStatusOf(receipt);
+  const resultLinks = { result: o.hrefFor("summary"), checks: o.hrefFor("checks"), pullRequest: `${taskHref(detail.rootId ?? detail.taskId)}#merge` };
+  const presentation = current == null ? null : assignmentPresentationOf(current, { additionalAttention: [...facts.evidenceProblems, ...receipt.caveats],
+    ...(detail.publication === null ? {} : { pullRequest: pullRequestFactOf({ ...detail.publication, lastCheckState: detail.ciFailing ? "failing" : detail.publication.lastCheckState }) }),
+    evidence: { damaged: facts.evidenceHealth.damaged, missing: facts.evidenceHealth.missing, shortened: facts.evidenceHealth.shortened }, links: resultLinks });
+  const taskStatus = presentation?.taskStatus ?? null;
+  const status = presentation?.status ?? resultHeadlineOf(receiptStatusOf(receipt));
   const stored = receiptStatusOf(receipt, null);
   const humanReview = manualReviewOnly(proof === null ? null : { ...proof, verdict: proof.verdict ?? "" });
   const directAssessment = proof?.matrix.some(row => row.assessment !== undefined) === true;
   const awaitingGoalReview = directAssessment && proof?.reasons.length === 1 && proof.reasons[0] === GOAL_ASSESSMENT_PENDING;
   const assessmentReasons = directAssessment ? new Set(proof!.matrix.flatMap(row => row.review ? [`${row.review.author} ${row.review.judgement === "contradicts" ? "contradicts" : "needs more evidence for"} criterion "${row.id}": ${row.review.note}`] : [])) : new Set<string>();
   const physicalReasons = receipt.reasons.filter(reason => !assessmentReasons.has(reason));
-  if (directAssessment && status.token === "verification-needed" && proof?.verdict === "short" && proof.matrix.some(row => row.review?.judgement === "cannot-tell") && physicalReasons.length === 0) status = { ...status, label: "More evidence needed", tone: "attention" };
   const runId = run.id;
   const shots = proof?.screenshots ?? [];
   const shown = shots.filter(one => one.problem === null);
@@ -23025,10 +23060,11 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
   attention.push(...(handoff?.followUps ?? []).map(one => `Follow-up: ${one}`));
   // Publication risks stay in the open (repair 2026-09-14); the routine
   // publication fact lives with the build details below.
-  if (publication !== null && publication.state === "failed") {
+  // With the shared status, the pull request is its own quiet row (its reason under Details).
+  if (publication !== null && publication.state === "failed" && taskStatus === null) {
     attention.push(`Publication failed after ${publication.attempts} attempt${publication.attempts === 1 ? "" : "s"}${publication.lastError === null ? "" : ` — ${oneLineOf(publication.lastError, 200)}`}. No pull request or merge is recorded.`);
   }
-  if (detail.ciFailing && publication !== null) attention.push(`CI is failing on PR #${publication.prNumber} at the last check.`);
+  if (detail.ciFailing && publication !== null && taskStatus === null) attention.push(`CI is failing on PR #${publication.prNumber} at the last check.`);
   // Requirements only a person can confirm: plain words and one Accept,
   // in neutral ink — nothing failed. Accepting records the person's
   // decision and leaves the recorded checks as they are.
@@ -23315,11 +23351,13 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
     `<section class="card result-panel" id="result" data-result-panel data-result-place="${o.place}" data-result-lead="${lead}" data-result-task="${escape(detail.rootId ?? detail.taskId)}" data-result-user="${escape(o.user)}"${resultFactsAttributes(facts)}>` +
       (o.back === null ? "" : `<p class="result-back"><a href="${escape(o.back.href)}" data-result-back>← ${escape(o.back.label)}</a></p>`) +
       (detail.history ?? "") +
-      `<header class="result-head"><div><h2>${escape(heading)}</h2></div>${o.headStatus === false ? "" : statusLineHtml(status.token === "verification-needed" && !directAssessment ? { ...status, label: "Verification needed" } : status)}</header>` +
+      // One headline: with the shared status, its words lead (task-status.ts); "Changes saved" would compete with them.
+      (taskStatus !== null && o.headStatus !== false
+        ? `<header class="result-head"><div data-headline-tone="${taskStatus.tone}"><h2 class="status-headline" data-work-status="${escape(status.token)}"><i aria-hidden="true"></i>${escape(taskStatus.headline)}</h2><p class="status-sentence">${escape(taskStatus.sentence)}</p></div></header>`
+        : `<header class="result-head"><div><h2>${escape(heading)}</h2></div>${o.headStatus === false ? "" : statusLineHtml(status)}</header>`) +
       `<p class="result-summary">${escape(outcome)}</p>` +
       (current == null || o.place === "review" && (current.state === "ready-to-check" || current.state === "complete") ? "" :
-        `<div class="verdict" data-current-outcome>${verdictChipsHtml(current, facts)}` +
-        (current.receipt?.checks.status === "failed" || current.receipt?.checks.status === "unavailable" ? `<p class="problem">${escape(current.detail)}</p>` : "") + `</div>`) +
+        `<div class="verdict" data-current-outcome data-headline="${escape(taskStatus!.headline)}">${statusDetailsHtml(taskStatus!)}${statusWhyHtml(taskStatus!)}</div>`) +
       attentionHtml +
       youCheckHtml +
       action +
@@ -23335,7 +23373,7 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
   const panel: BrowserResultPanel = {
     attributes: { "data-result-panel": "", "data-result-place": o.place, "data-result-lead": lead, "data-result-task": detail.rootId ?? detail.taskId, "data-result-user": o.user, ...resultFactsAttributeMap(facts) },
     heading, outcome,
-    verdict: current == null ? null : verdictChipsOf(current, facts),
+    status: taskStatus,
     reviewHistory: REVIEW_TOKENS.has(status.token) ? status.detail : null,
     attention: attention.filter(one => !shortenedMaterialReason(one)).map(plainReasonWords),
     youCheck,
@@ -23349,37 +23387,6 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
     requestQuiet: detail.canAnnotate && o.csrf !== "" && detail.comments.length === 0 && (detail.pastComments?.length ?? 0) === 0 && detail.revisions.length === 0,
   };
   return { html, panel };
-}
-
-const CHIP_ICONS = { check: `<path d="M20 6 9 17l-5-5"/>`, x: `<path d="M18 6 6 18M6 6l12 12"/>` } as const;
-
-/** The chips as data: the server list below and the rebuilt result page. */
-function verdictChipsOf(current: AssignmentSnapshot, facts: SharedResultFacts): { chips: BrowserResultChip[]; by: string | null } {
-  const chips: BrowserResultChip[] = [];
-  const checks = current.receipt?.checks.status ?? null;
-  if (checks === "passed") chips.push({ tone: "success", label: "Checks passed", icon: "check", title: null });
-  else if (checks === "failed") chips.push({ tone: "danger", label: "Checks failed", icon: "x", title: null });
-  else if (checks === "unavailable") chips.push({ tone: "warning", label: "Check unavailable", icon: null, title: null });
-  const publication: Record<string, [BrowserResultChip["tone"], string]> = { none: ["neutral", "Branch only"], intended: ["info", "Publishing"], pushed: ["info", "Pushed"], opened: ["info", "Pull request open"], failed: ["danger", "Publish failed"] };
-  const [tone, label] = publication[facts.publicationState] ?? ["neutral", facts.publicationState];
-  chips.push({ tone, label, icon: null, title: facts.publicationWords });
-  const health = facts.evidenceHealth;
-  if (health.damaged > 0) chips.push({ tone: "danger", label: "Damaged evidence", icon: null, title: null });
-  else if (health.missing > 0) chips.push({ tone: "warning", label: "Missing evidence", icon: null, title: null });
-  else if (health.shortened > 0) chips.push({ tone: "warning", label: "Partial output", icon: null, title: "Some saved output was shortened when stored" });
-  return { chips, by: current.completion === null ? null : current.completion.actor.replace(/^(?:operator|coordinator|lead):/, "") };
-}
-
-/** The verdict at a glance: checks, where the work lives, and whether any
- * saved output is partial, as chips instead of sentences. The same facts
- * stay available in words on the Checks tab and in Build details. */
-function verdictChipsHtml(current: AssignmentSnapshot, facts: SharedResultFacts): string {
-  const { chips, by } = verdictChipsOf(current, facts);
-  const items = chips.map(one => {
-    const label = `${one.icon === null ? "" : strokeIcon(CHIP_ICONS[one.icon])}${one.label}`;
-    return `<li class="verdict-chip verdict-chip--${one.tone}" title="${escape(one.title ?? label)}">${label}</li>`;
-  });
-  return `<ul class="verdict-chips" aria-label="Result at a glance">${items.join("")}</ul>` + (by === null ? "" : `<p class="meta verdict-by">Completed by ${escape(by)}</p>`);
 }
 
 /** The outcome in one bounded sentence (repair 2026-09-14): the handoff's

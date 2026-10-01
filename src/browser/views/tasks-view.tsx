@@ -7,7 +7,7 @@ import { ArrowRight, ChevronDown, Inbox, LayoutGrid, ListTodo, Plus, Repeat, Spa
 import type { ReactNode } from "react";
 import type { BrowserLimits, BrowserLimitTile, BrowserTasksView } from "../../browser-workspace.js";
 import { Badge, Button, Card, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, cn } from "../components/ui/index.js";
-import { toneOf } from "./tone.js";
+import { HeadlineBadge } from "./status-summary.js";
 
 const TOOL_ICONS: Record<string, ReactNode> = {
   "/inbox": <Inbox />, "/code": <Code2 />, "/board": <LayoutGrid />, "/board?view=order": <ListOrdered />,
@@ -84,7 +84,6 @@ export function TasksView({ view }: { view: BrowserTasksView }) {
     </Card> : <div className="border-y border-border">
       <ul className="divide-y divide-border desk:grid desk:grid-cols-[minmax(0,1fr)_auto_auto]">
         {view.rows.map(row => {
-          const tone = toneOf(row.status.tone);
           // On a phone the row is a small grid: the title with its action on the right, then the status beside the
           // project and age, then any detail. The title block and the badge cluster dissolve into it (contents).
           return <li key={row.id} data-task={row.id} data-work-status={row.status.token}
@@ -97,11 +96,11 @@ export function TasksView({ view }: { view: BrowserTasksView }) {
                 <span className="tabular-nums">{row.age}</span>
               </p>
               {row.detail && <p className="mt-1 text-[12.5px] text-muted-foreground phone:col-span-full phone:leading-[1.35]">{row.detail}</p>}
-              {row.problem && <p className="mt-1 text-[12.5px] text-destructive phone:col-span-full phone:leading-[1.35]">{row.problem}</p>}
+              {row.problem && <p className="mt-1 text-[12.5px] text-muted-foreground phone:col-span-full phone:leading-[1.35]">{row.problem}</p>}
               {row.notes.map(note => <p key={note} className="mt-1 text-[12.5px] text-muted-foreground phone:col-span-full phone:leading-[1.35]">{note}</p>)}
             </div>
             <div className="flex items-center gap-3 phone:contents desk:contents">
-              <Badge tone={tone} className="desk:justify-self-start phone:col-start-1 phone:row-start-2 phone:self-center">{row.status.label}</Badge>
+              <HeadlineBadge label={row.status.label} tone={row.status.tone} className="desk:justify-self-start phone:col-start-1 phone:row-start-2 phone:self-center" />
               {row.action && <Button asChild variant="outline" size="sm" className="desk:justify-self-end phone:col-start-3 phone:row-start-1 phone:self-start">
                 <a href={row.action.href} data-primary-action>{row.action.label}<ArrowRight /></a>
               </Button>}

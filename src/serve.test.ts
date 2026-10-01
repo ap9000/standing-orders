@@ -7983,7 +7983,8 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     const queue = await (await fetch(url("/board?view=order"), { headers: { cookie } })).text();
     expect(queue).toContain('data-task="t-dependent"');
     expect(queue).toContain('data-dispatch-status="terminal-dependency"');
-    expect(queue).toContain("a required task did not finish");
+    // The shared headline, with the diagnosis one hover away.
+    expect(queue).toContain('title="A required task did not finish">Needs you</a>');
 
     const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(task)?.[1];
     if (csrf === undefined) throw new Error("no csrf on task");
@@ -8058,7 +8059,7 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(bare).toContain("<h2>Changes saved</h2>");
     expect(bare).toContain('data-receipt-publication="none">Saved on the build branch. No publication, merge, or deployment is recorded here.</p>');
     expect(bare).toContain('data-work-status="assignment-needs-decision"');
-    expect(bare).toContain("Needs your decision");
+    expect(bare).toContain("Needs you");
     expect(bare).toContain(`href="/review?result=t-proof">Open result →</a>`);
     expect(bare).not.toContain("Review the missing evidence");
     expect(bare).toContain('href="/chat?task=t-proof">Discuss in chat →</a>');
@@ -8091,13 +8092,13 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(attested).toContain('data-work-status="assignment-needs-decision"');
     expect(attested).toContain(`data-result-run="${run}"`);
     expect(attested).toContain("the proof agrees with the sealed diff; no verification command is configured to re-run");
-    expect(attested).toContain("Needs your decision");
+    expect(attested).toContain("Needs you");
     expect(attested).not.toContain("Ready to review");
 
     store.saveProofVerdict(run, "verified", ["the approved verification command passed"], T0);
     const verified = await (await fetch(url("/t/t-proof"), { headers: { cookie } })).text();
     expect(verified).toContain('data-work-status="assignment-needs-decision"');
-    expect(verified).toContain("Needs your decision");
+    expect(verified).toContain("Needs you");
     expect(store.proofVerdictFor(run)?.verdict).toBe("verified");
 
     store.saveProofVerdict(run, "verified", ["the approved verification command passed after the approved setup command ran"], T0);
@@ -9282,7 +9283,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(data.view?.kind).toBe('task');
     const task = data.view as import('./browser-workspace.js').BrowserTaskView;
     expect(task).toMatchObject({ id: 'a', title: 'task a', tabs: [{ label: 'Overview', href: '/t/a', active: true }, { label: 'Ask', active: false }] });
-    expect(task.status).toMatchObject({ label: 'Needs your decision', tone: 'attention', action: null });
+    expect(task.status).toMatchObject({ label: 'Needs you', tone: 'attention', action: null });
     expect(task.approval).toContain('id="approve"');
     expect(task.approval).toContain('type="password"');
     expect(task.facts.find(fact => fact.label === 'Scope')?.parts).toEqual(['not approved']);
@@ -11479,7 +11480,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(html).not.toContain("never shown");
     expect(queue.indexOf("t-ours")).toBeLessThan(queue.indexOf("t-older"));
     expect(html).toContain("2 need your attention");
-    expect(queue).toContain("Needs your decision");
+    expect(queue).toContain("Needs you");
     expect(queue).not.toContain("missing evidence");
     // Escaped everywhere the title lands.
     expect(html).toContain("ours — the &lt;b&gt;title&lt;/b&gt;");
@@ -11503,7 +11504,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(review.results.map(one => one.title)).toEqual(["ours — the <b>title</b>", "older, needs eyes"]);
     expect(review.results.find(one => one.current)?.href).toBe(`/review?result=t-older&run=${olderRun}&project=%2Frepo%2Fmain`);
     expect(review.attention).toBe(2);
-    expect(review.selected).toMatchObject({ taskId: "t-older", build: olderRun, taskHref: "/t/t-older", status: { label: "Needs your decision" } });
+    expect(review.selected).toMatchObject({ taskId: "t-older", build: olderRun, taskHref: "/t/t-older", status: { label: "Needs you" } });
     const panel = review.selected!.panel!;
     expect(panel.attributes).toMatchObject({ "data-result-panel": "", "data-result-place": "review", "data-result-task": "t-older", "data-result-run": String(olderRun) });
     expect(panel.tabs.map(tab => [tab.key, tab.active])).toEqual([["summary", true], ["changes", false], ["checks", false]]);
@@ -11609,7 +11610,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(mainOf(manual)).not.toContain("<form");
 
     const legacy = await (await fetch(url("/review?result=t-legacy"), { headers: { cookie } })).text();
-    expect(legacy).toContain("Needs your decision");
+    expect(legacy).toContain("Needs you");
     expect(legacy).toContain('data-work-status="assignment-needs-decision"');
     expect(legacy).toContain("no verification result");
     expect(legacy).toContain("This build has no verification result or captured evidence");
@@ -11761,7 +11762,8 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
       const html = await (await fetch(url(path), { headers: { cookie } })).text();
       expect(html).not.toContain("An independent review found conflicting evidence");
       expect(html).not.toContain("Ready for goal review");
-      expect(html).toContain("Not assessed");
+      // Plain words (task-status brief): a retired assessment is never "Not assessed".
+      expect(html).not.toContain("Not assessed");
       if (path.startsWith("/r/")) {
         expect(html).toContain("Open result");
         expect(html).not.toContain("At completion:");
@@ -11783,7 +11785,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     });
     await boot(); const cookie = await login();
     const html = await (await fetch(url(`/r/${run}?tab=checks`), { headers: { cookie } })).text();
-    expect(html).toContain("Needs your decision");
+    expect(html).toContain("Needs you");
     expect(html).not.toContain("More evidence needed");
     expect(html).toContain(`data-result-run="${run}"`);
     expect(renderedHtmlOf(html).split(note)).toHaveLength(2);
@@ -11881,9 +11883,11 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(plain).toContain("No caveats were reported");
     expect(plain).toContain('data-matrix-state="missing"');
     expect(plain).toContain('data-receipt-publication="failed">The last publication attempt failed; no pull request or merge is recorded here.</p>');
-    // The failed publication is a risk, so it stays in the open, ahead of the tabs (repair 2026-09-14).
-    expect(plain).toContain("<li>Publication failed after 1 attempt — remote: permission denied. No pull request or merge is recorded.</li>");
-    expect(plain.indexOf("Publication failed after 1 attempt")).toBeLessThan(plain.indexOf('class="result-tabs"'));
+    // The failed publication stays in the open, ahead of the tabs (repair 2026-09-14), as the
+    // shared status's amber Pull request row; its exact reason waits one tap away (task-status.ts).
+    expect(plain).toContain('data-status-detail="pull-request" data-mark="note"');
+    expect(plain.indexOf('data-status-detail="pull-request" data-mark="note"')).toBeLessThan(plain.indexOf('class="result-tabs"'));
+    expect(plain).toContain("Pull request: remote: permission denied The commit is safe locally.");
   });
 
   test("actions: only applicable roads appear, each through its existing endpoint with the session's CSRF; a bearer session sees no forms", async () => {
@@ -11969,7 +11973,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(done).not.toContain("Checks passed");
     expect(done).toContain("Accepted with an exception by <span class=\"mono\">alex</span>");
     expect(done).toContain("read it myself");
-    expect(queueOf(done)).toContain("Needs your decision");
+    expect(queueOf(done)).toContain("Needs you");
     expect(queueOf(done)).not.toContain("missing evidence — accepted with exception");
     expect(done).toContain('data-next-action="revise"');
     // The stored verdict never moved.
@@ -12023,7 +12027,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(old).toContain('This result is not in the current review list.');
     expect(old).not.toContain("is in view here");
     expect(old).not.toContain('class="cockpit-row current"');
-    expect(old).toContain("Needs your decision");
+    expect(old).toContain("Needs you");
     expect(old).toContain(`data-result-run="${oldRun}"`);
     expect(old).toContain(`href="/r/${oldRun}">Full build record →</a>`);
     expect(old).toContain(`<form method="post" action="/r/${oldRun}/comment" class="diff-comment-form" id="comment-form">`);
@@ -12058,7 +12062,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
       const receipt = await (await fetch(url(`/t/${id}`), { headers: { cookie } })).text();
       for (const html of [cockpit,receipt]) {
         expect(html,id).toContain('data-work-status="assignment-needs-decision"');
-        expect(html,id).toContain('Needs your decision');
+        expect(html,id).toContain('Needs you');
       }
       const run=store.runsFor(store.lookupRef(id)!.id)[0]!.id;
       expect(store.proofVerdictFor(run)?.verdict ?? null).toBe(verdict);
@@ -12239,7 +12243,8 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(mergedResponse.status).toBe(303);
     expect(calls.filter(call => call[1] === "pr" && call[2] === "merge")).toEqual([["gh", "pr", "merge", "7", "--repo", "alex/payouts", "--squash", "--match-head-commit", "b".repeat(40), "--delete-branch"]]);
     const after = await page();
-    expect(after).toContain('data-pull-request="merged"');
+    // Said once: the merged pull request is the status card's own row; who merged it waits under Details.
+    expect(after).toContain('data-status-detail="pull-request" data-mark="ok"');
     expect(after).toContain("Merged by alex (squash). Branch deleted.");
     expect(after).toContain("c".repeat(12));
     expect(after).not.toContain('action="/t/t-pr/merge"');
@@ -12256,7 +12261,8 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     sealVerificationReceipt(store, evidenceRoot, run, "b".repeat(40), store.liveVerifyCommand("/repo/main")!, { configured: true, ran: true, exitCode: 1 }, T0);
     const cookie = await login();
     const html = await (await fetch(url(`/review?result=t-complete&run=${run}`), { headers: { cookie } })).text();
-    expect(html).toContain('>Ready</span>');
+    // Checks failed on the saved result: the one red headline (task-status.ts), still ready to complete or revise.
+    expect(html).toContain('>Failed</span>');
     expect(queueOf(html)).toContain('data-work-status="assignment-ready-to-check"');
     expect(queueOf(html)).not.toContain('conflicting evidence');
     expect(html).toContain('1 needs your attention');
@@ -12432,7 +12438,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     try {
       win.document.body.innerHTML = html;
       const panel = win.document.querySelector('.result-panel')!;
-      expect(panel.querySelector('.result-head .status-label')?.textContent).toBe('Needs your decision');
+      expect(panel.querySelector('.result-head .status-headline')?.textContent).toBe('Needs you');
       expect(panel.querySelector('.result-attention')?.textContent).toBe('No machine check is recorded.');
       expect(panel.querySelector('[data-result-view="checks"]')?.textContent).toContain('no verification result');
       const field = panel.querySelector('textarea[name="note"]')!;
@@ -12536,8 +12542,11 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
 
     // The investigation leads with its escaped report and a text download; it owes no diff.
     const scout = await read(`/r/${scoutRun}`);
-    for (const html of [scout, await read("/t/t-scout"), await read("/chat?task=t-scout"), await read(`/chat?task=t-scout&result=${scoutRun}`)]) {
-      expect(html).toContain("Report saved");
+    const scoutResult = await read(`/chat?task=t-scout&result=${scoutRun}`);
+    for (const html of [await read("/t/t-scout"), await read("/chat?task=t-scout")]) expect(html).toContain("Report saved");
+    // The result panel leads with the shared headline instead (task-status.ts).
+    for (const html of [scout, scoutResult]) expect(html).toMatch(/<h2 class="status-headline"[^>]*><i aria-hidden="true"><\/i>(?:Ready for review|Needs you)<\/h2>/);
+    for (const html of [scout, await read("/t/t-scout"), await read("/chat?task=t-scout"), scoutResult]) {
       expect(html).toContain("Two rounding sites disagree.");
       expect(html).not.toContain("The build finished without a concise handoff.");
     }
@@ -13284,10 +13293,11 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
       for (const html of texts) {
         expect(factsOf(html)[0]?.evidence).toBe("problems:1");
         if (sample.kind === "shortened") {
-          expect(html).toMatch(/data-result-attention=|class="problem"|<details class="assignment-notices"><summary>Saved output is partial<\/summary>/);
+          expect(html).toMatch(/data-result-attention=|class="problem"|<details class="assignment-notices"><summary>Saved output is partial<\/summary>|data-status-detail="evidence" data-mark="note"/);
         } else {
           // Missing, damaged, and unreadable current material stays expanded.
-          expect(html).toMatch(/data-result-attention=|class="problem"/);
+          // The shared status names it as an amber Saved evidence row; the exact file waits under Details.
+          expect(html).toMatch(/data-result-attention=|class="problem"|data-status-detail="evidence" data-mark="note"/);
         }
         if (sample.kind !== "shortened") {
           expect(html).toContain('data-work-status="assignment-needs-decision"');
@@ -13331,13 +13341,14 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     // The Work row names the assignment; the selected result still names the exact revision state.
     const rowWords = async () => /<span class="status-label">([^<]*)<\/span>/.exec((await read("/work?view=all")).split(`data-task="t-standing"`)[1] ?? "")?.[1] ?? null;
     // Planned first: nothing to approve until the plan is updated (this fixture's worker is stale, and it says so).
-    expect((await line())?.[3]).toBe("Builder disconnected");
+    // The revision's standing is its shared headline (task-status.ts).
+    expect((await line())?.[3]).toBe("Needs you");
     plannerKeptTerms(store, child);
     // Unapproved: the exact revision names approval; the root names the decision.
     const unapproved = await line();
     expect(unapproved?.[1]).toBe("0");
-    expect(unapproved?.[3]).toBe("Needs your approval");
-    expect(await rowWords()).toBe("Needs your decision");
+    expect(unapproved?.[3]).toBe("Needs you");
+    expect(await rowWords()).toBe("Needs you");
     // Approved exactly: no longer waiting for approval — and not "building"
     // either: nothing runs, and this fixture's builder is not heartbeating.
     const scope = store.getScope(child)!;
@@ -13346,13 +13357,13 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     const approved = await line();
     expect(approved?.[1]).toBe("1");
     expect(approved?.[3]).not.toMatch(/building|approval/i);
-    expect(await rowWords()).toBe("Needs your decision");
+    expect(await rowWords()).toBe("Needs you");
     // Held after approval: on hold, never building.
     store.hold(childRef, "Wait for the column names to settle.", null, T0);
     const held = await line();
     expect(held?.[1]).toBe("1");
-    expect(held?.[3]).toBe("On hold");
-    expect(await rowWords()).toBe("Needs your decision");
+    expect(held?.[3]).toBe("Stopped");
+    expect(await rowWords()).toBe("Stopped");
     store.unhold(childRef, T0);
     // Rescoped after approval: the old stamp is no approval of the new terms.
     propose(store, { taskId: child, goal: `${scope.goal} — and also the header row`, outOfScope: scope.outOfScope, touches: scope.touches, acceptance: scope.acceptance, now: T0 });
@@ -13360,8 +13371,8 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(store.revisionsFromRun(run)[0]?.approved).toBe(false);
     const rescoped = await line();
     expect(rescoped?.[1]).toBe("0");
-    expect(rescoped?.[3]).toBe("Needs your approval");
-    expect(await rowWords()).toBe("Needs your decision");
+    expect(rescoped?.[3]).toBe("Needs you");
+    expect(await rowWords()).toBe("Needs you");
     // A live claim makes both the revision and its root Revising; a settled stop is Paused.
     const again = approve(store, child, "alex", T0, store.getScope(child)!.digest, approverToken);
     if (!again.ok) throw new Error(again.reason);
@@ -13371,8 +13382,8 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     store.setTaskState(child, "running", T0);
     const running = await line();
     expect(running?.[1]).toBe("1");
-    expect(running?.[3]).toBe("Revising");
-    expect(await rowWords()).toBe("Revising");
+    expect(running?.[3]).toBe("Building");
+    expect(await rowWords()).toBe("Building");
     const stopped = store.requestRunStop({ runId: live, taskRef: childRef, by: "alex", via: "web" }, T0);
     if (!stopped.ok) throw new Error(stopped.reason);
     store.finishRun(live, { outcome: "interrupted", reason: "stopped", now: T0, stopSettlement: "interrupted" });
@@ -13380,8 +13391,8 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     store.setTaskState(child, "queued", T0);
     const paused = await line();
     expect(paused?.[1]).toBe("1");
-    expect(paused?.[3]).toBe("Paused");
-    expect(await rowWords()).toBe("Needs your decision");
+    expect(paused?.[3]).toBe("Stopped");
+    expect(await rowWords()).toBe("Stopped");
   });
 });
 
@@ -13767,8 +13778,10 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     }
     return { ref, run };
   };
+  // A status line, or a result's shared headline (task-status.ts), which replaces its status line.
   const statusOf = (html: string): { token: string; label: string }[] =>
-    [...html.matchAll(/<span class="status-line" data-work-status="([^"]+)" data-tone="[a-z]+"><i class="status-dot" aria-hidden="true"><\/i><span class="status-label">([^<]+)<\/span>/g)].map(m => ({ token: m[1] as string, label: m[2] as string }));
+    [...html.matchAll(/<span class="status-line" data-work-status="([^"]+)" data-tone="[a-z]+"><i class="status-dot" aria-hidden="true"><\/i><span class="status-label">([^<]+)<\/span>|<h2 class="status-headline" data-work-status="([^"]+)"><i aria-hidden="true"><\/i>([^<]+)<\/h2>/g)]
+      .map(m => ({ token: (m[1] ?? m[3]) as string, label: (m[2] ?? m[4]) as string }));
   const rowsOf = (html: string): { id: string; token: string; views: string[]; label: string }[] =>
     [...html.matchAll(/<article class="work-row" data-task="([^"]+)" data-work-status="([^"]+)" data-work-views="([^"]+)">[\s\S]*?<span class="status-label">([^<]+)<\/span>/g)].map(m => ({ id: m[1] as string, token: m[2] as string, views: (m[3] as string).split(" "), label: m[4] as string }));
   const countsOf = (html: string): Record<string, number> =>
@@ -14026,7 +14039,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(live).toContain('data-history-version="newest-sibling"');
     expect(live).toContain("1 earlier task version is still active");
     expect(await page(cookie, "/projects")).toContain('>1 running</a>');
-    expect(countsOf(await page(cookie, "/work"))["Running"]).toBe(1);
+    expect(countsOf(await page(cookie, "/work"))["Building"]).toBe(1);
     // A released or exactly expired lease cannot keep an orphaned run live.
     release(store, claim.claim.leaseId, now);
     expect(await page(cookie, "/t/family-root")).toContain('<a href="/runs">0 live</a>');
@@ -14245,7 +14258,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const empty = await page(cookie, "/work");
     expect(empty).toContain('data-work-empty="all"');
     expect(empty).toContain("Nothing is in progress.");
-    expect(countsOf(empty)).toEqual({ All: 0, "Needs you": 0, Running: 0, Complete: 0 });
+    expect(countsOf(empty)).toEqual({ All: 0, "Needs you": 0, Building: 0, Complete: 0 });
     expect(empty).toContain('<a href="/work" class="active" aria-current="page">All<span class="count">0</span></a>');
 
     // Approved and waiting for a builder; chained behind it; on hold;
@@ -14283,13 +14296,14 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const rows = rowsOf(all);
     const byId = Object.fromEntries(rows.map(row => [row.id, row]));
     expect(byId).toMatchObject({
-      "t-builder": { token: "assignment-working", views: ["all"], label: "Ready to run" },
-      "t-chained": { token: "assignment-working", views: ["all"], label: "Waiting for another task" },
-      "t-held": { token: "assignment-needs-decision", views: ["all", "needs-you"], label: "Needs your decision" },
-      "t-failed": { token: "assignment-needs-decision", views: ["all", "needs-you"], label: "Needs your decision" },
-      "t-cancelled": { token: "assignment-cancelled", views: ["all"], label: "Cancelled" },
-      "t-live": { token: "assignment-working", views: ["all", "running"], label: "Running now" },
-      ...Object.fromEntries(["t-checks", "t-mismatch", "t-missing", "t-attested", "t-accepted", "t-verified", "t-pr", "t-merged"].map(id => [id, { token: "assignment-needs-decision", views: ["all", "needs-you"], label: "Needs your decision" }])),
+      // Each row's one shared headline (task-status.ts); views and tokens are unchanged.
+      "t-builder": { token: "assignment-working", views: ["all"], label: "Queued" },
+      "t-chained": { token: "assignment-working", views: ["all"], label: "Queued" },
+      "t-held": { token: "assignment-needs-decision", views: ["all", "needs-you"], label: "Stopped" },
+      "t-failed": { token: "assignment-needs-decision", views: ["all", "needs-you"], label: "Failed" },
+      "t-cancelled": { token: "assignment-cancelled", views: ["all"], label: "Stopped" },
+      "t-live": { token: "assignment-working", views: ["all", "running"], label: "Building" },
+      ...Object.fromEntries(["t-checks", "t-mismatch", "t-missing", "t-attested", "t-accepted", "t-verified", "t-pr", "t-merged"].map(id => [id, { token: "assignment-needs-decision", views: ["all", "needs-you"], label: "Needs you" }])),
     });
     expect(rows.length).toBe(14);
     // All sorts what needs a person first, then live work, then queued
@@ -14298,7 +14312,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(order.indexOf("assignment-working")).toBeGreaterThan(order.lastIndexOf("assignment-needs-decision"));
     expect(order.indexOf("assignment-cancelled")).toBe(order.length - 1);
     // Finished results are not Complete until the lead or user marks the exact result complete.
-    expect(countsOf(all)).toEqual({ All: 14, "Needs you": 10, Running: 1, Complete: 0 });
+    expect(countsOf(all)).toEqual({ All: 14, "Needs you": 10, Building: 1, Complete: 0 });
     // Each view lists exactly its members, and marks itself active.
     for (const [view, expected] of [
       ["needs-you", ["t-held", "t-failed", "t-checks", "t-mismatch", "t-missing", "t-attested", "t-accepted", "t-verified", "t-pr", "t-merged"]],
@@ -14360,7 +14374,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     };
     for (const [id, [token, label]] of Object.entries(expected)) {
       const row = rowsOf(work).find(one => one.id === id);
-      expect(row, id).toMatchObject({ token: "assignment-needs-decision", label: "Needs your decision" });
+      expect(row, id).toMatchObject({ token: "assignment-needs-decision", label: "Needs you" });
       const task = await page(cookie, `/t/${id}`);
       const chat = await page(cookie, `/chat?task=${id}`);
       const review = await page(cookie, `/review?result=${id}`);
@@ -14368,7 +14382,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
       // title carries the words ONCE — no status line rides the h1 while
       // the box beneath says the same thing (concise revision).
       expect(task, id).toContain(`data-work-status="assignment-needs-decision"`);
-      expect(task, id).toContain('>Needs your decision</h2>');
+      expect(task, id).toContain('>Needs you</h2>');
       expect(statusOf(task).map(one => one.label), id).not.toContain(label);
       expect(/<h1 class="task-main-title">([^<]*)<\/h1>/.exec(task)?.[1], id).toMatch(/^\S.*\S$/);
       expect(task, id).not.toMatch(/<h1 class="task-main-title">[^<]*<span class="status-line"/);
@@ -14376,11 +14390,11 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
       // The focused chat: the journey headline and the receipt.
       expect(chat, id).toContain('data-work-status="assignment-needs-decision"');
       expect(chat, id).not.toContain('class="card task-journey"');
-      expect(chat, id).toContain('>Needs your decision</h2>');
+      expect(chat, id).toContain('>Needs you</h2>');
       expect(statusOf(chat).map(one => one.label), id).not.toContain(label);
       // The review cockpit's headline chip.
       expect(/<header class="cockpit-head"[^>]*>.*?<p class="cockpit-chips">(.*?)<\/p>/s.exec(review)?.[1], id).toContain(`data-work-status="assignment-needs-decision"`);
-      expect(statusOf(review)[0]?.label, id).toBe("Needs your decision");
+      expect(statusOf(review)[0]?.label, id).toBe("Needs you");
       // No surface calls anything shipped or deployed; the receipt names
       // what the record supports.
       for (const [name, html] of [["task", task], ["chat", chat], ["review", review]] as const) {
@@ -14488,7 +14502,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(scopedRows).not.toContain("alpha-000");
     expect(scopedRows).toContain("alpha-200");
     expect(scopedRows).not.toContain("beta-newest");
-    expect(countsOf(scoped)).toEqual({ All: 201, "Needs you": 201, Running: 0, Complete: 0 });
+    expect(countsOf(scoped)).toEqual({ All: 201, "Needs you": 201, Building: 0, Complete: 0 });
     expect(scoped).not.toContain("200+");
     expect(scoped).not.toContain("data-work-bound");
     expect(scoped).not.toContain('data-work-empty="all"');
@@ -14500,7 +14514,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
       const html = await page(cookie, next);
       const rows = rowsOf(html).map(row => row.id);
       expect(rows.length).toBeLessThanOrEqual(40);
-      expect(countsOf(html)).toEqual({ All: 201, "Needs you": 201, Running: 0, Complete: 0 });
+      expect(countsOf(html)).toEqual({ All: 201, "Needs you": 201, Building: 0, Complete: 0 });
       seen.push(...rows);
       expect(seen.length).toBeLessThanOrEqual(201);
       next = nextOf(html);
@@ -14529,7 +14543,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const small = await page(cookie, "/work");
     expect(rowsOf(small).map(row => row.id)).toEqual(["beta-newest"]);
     expect(nextOf(small)).toBeNull();
-    expect(countsOf(small)).toEqual({ All: 1, "Needs you": 1, Running: 0, Complete: 0 });
+    expect(countsOf(small)).toEqual({ All: 1, "Needs you": 1, Building: 0, Complete: 0 });
     expect(await page(cookie, "/work?view=completed")).toContain("No tasks have been marked complete in this view.");
 
     // 501 newer tasks in a repository outside the ceiling: the roll-up's
@@ -14553,7 +14567,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(rollupRows).toContain("alpha-200");
     expect(rollupRows).not.toContain("alpha-001");
     expect(rollup).not.toContain('data-work-empty="all"');
-    expect(countsOf(rollup)).toEqual({ All: 202, "Needs you": 201, Running: 0, Complete: 0 });
+    expect(countsOf(rollup)).toEqual({ All: 202, "Needs you": 201, Building: 0, Complete: 0 });
     expect(nextOf(rollup)).not.toBeNull();
     expect(rollup).toContain('<span class="project-label">beta</span>');
     // The chrome badge uses the same exact admitted count, not only this page.
@@ -14584,7 +14598,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const memberWorkRows = rowsOf(memberHtml).map(row => row.id);
     expect(memberWorkRows).toHaveLength(40);
     expect(memberWorkRows.every(id => id.startsWith("alpha-"))).toBe(true);
-    expect(countsOf(memberHtml)).toEqual({ All: 201, "Needs you": 200, Running: 0, Complete: 0 });
+    expect(countsOf(memberHtml)).toEqual({ All: 201, "Needs you": 200, Building: 0, Complete: 0 });
     expect(nextOf(memberHtml)).not.toBeNull();
     expect((await fetch(url(`/r/${run}`), { headers: { cookie: member2 }, redirect: "manual" })).status).toBe(200);
     await selectProject(member2, beta);
@@ -14603,7 +14617,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const memberAlpha = await page(member2, "/work");
     expect(rowsOf(memberAlpha).map(row => row.id)).toHaveLength(40);
     expect(rowsOf(memberAlpha).some(row => row.id.startsWith("unplaced-"))).toBe(false);
-    expect(countsOf(memberAlpha)).toEqual({ All: 201, "Needs you": 200, Running: 0, Complete: 0 });
+    expect(countsOf(memberAlpha)).toEqual({ All: 201, "Needs you": 200, Building: 0, Complete: 0 });
     expect(nextOf(memberAlpha)).not.toBeNull();
     // The unrestricted viewer still sees unplaced rows, newest first among
     // the admitted projects, with the honest bound.
@@ -14625,7 +14639,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(hidden).not.toContain("unproven");
     expect(hidden).not.toContain("500-record");
     expect(hidden).not.toContain('data-work-empty="all"');
-    expect(countsOf(hidden)).toMatchObject({ Running: 0, Complete: 0 });
+    expect(countsOf(hidden)).toMatchObject({ Building: 0, Complete: 0 });
     expect(hidden).toContain('<span class="count">2</span>');
     // Clearing selection still chooses the first admitted project, with
     // exact counts and a cursor, without admitting any unplaced rows.
@@ -14634,7 +14648,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const memberFirstRows = rowsOf(memberFirst).map(row => row.id);
     expect(memberFirstRows).toHaveLength(40);
     expect(memberFirstRows.every(id => id.startsWith("alpha-"))).toBe(true);
-    expect(countsOf(memberFirst)).toEqual({ All: 201, "Needs you": 200, Running: 0, Complete: 0 });
+    expect(countsOf(memberFirst)).toEqual({ All: 201, "Needs you": 200, Building: 0, Complete: 0 });
     expect(nextOf(memberFirst)).not.toBeNull();
     // The unrestricted viewer still sees the unplaced rows, newest first.
     const unrestricted = rowsOf(await page(all, "/work")).map(row => row.id);
@@ -14667,14 +14681,14 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
       // The title never repeats the box (concise revision): the h1 is the
       // bare title, and the receipt is the page's only status line.
       expect(task).toContain('<h1 class="task-main-title">Review me</h1>');
-      const current = /<section class="card assignment-summary"[^>]*data-work-status="([^"]+)"[^>]*><h2 class="assignment-state">([^<]+)<\/h2>/.exec(task);
+      const current = /<section class="card assignment-summary"[^>]*data-work-status="([^"]+)"[^>]*><h2 class="assignment-state status-headline"><i aria-hidden="true"><\/i>([^<]+)<\/h2>/.exec(task);
       expect(current).not.toBeNull();
       return {
         work: { token: work?.token, label: work?.label },
         receipt: { token: current?.[1], label: current?.[2] },
         chat: {
           token: /data-assignment="t-rev" data-work-status="([^"]+)"/.exec(chat)?.[1],
-          label: /<h2 class="assignment-state">([^<]+)<\/h2>/.exec(chat)?.[1],
+          label: /<h2 class="assignment-state status-headline"><i aria-hidden="true"><\/i>([^<]+)<\/h2>/.exec(chat)?.[1],
         },
         cockpit: { token: /<p class="cockpit-chips">.*?data-work-status="([^"]+)"/s.exec(review)?.[1], label: statusOf(review)[0]?.label },
         run: { token: /<header class="result-head">[\s\S]*?data-work-status="([^"]+)"/.exec(run)?.[1], label: statusOf(run)[0]?.label },
@@ -14686,14 +14700,14 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
       }
     };
     // This historical fixture lacks current candidate/scope bindings. Every
-    // current surface says Needs your decision; saved failed checks stay history.
-    agree(await surfaces(), "assignment-needs-decision", "Needs your decision");
+    // current surface says Needs you; saved failed checks stay history.
+    agree(await surfaces(), "assignment-needs-decision", "Needs you");
 
     // Queued: one primary status on every surface; the receipt and the
     // status box carry the earlier verdict as history, in the same words.
     const first = store.requestReview(latest, "alex", now);
     if (!first.ok) throw new Error(first.reason);
-    agree(await surfaces(), "assignment-needs-decision", "Needs your decision");
+    agree(await surfaces(), "assignment-needs-decision", "Needs you");
     const queuedTask = await page(cookie, "/t/t-rev");
     // The receipt's history sentence sits behind a native disclosure (concise pass, 2026-09-13) — the same words, secondary.
     expect(queuedTask).toContain('check failed against this build (exit 1)');
@@ -14709,7 +14723,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     // A live historical reviewer does not turn current work into Reviewing.
     const admitted = store.admitReview(first.id, { runner: "night-shift-1", token: "tok-night-1", provider: "claude", model: "sonnet" }, now);
     if (!admitted.ok) throw new Error(admitted.reason);
-    agree(await surfaces(), "assignment-needs-decision", "Needs your decision");
+    agree(await surfaces(), "assignment-needs-decision", "Needs you");
     expect(rowsOf(await page(cookie, "/work")).find(row => row.id === "t-rev")?.views).toEqual(["all", "needs-you"]);
     expect(rowsOf(await page(cookie, "/work?view=running")).map(row => row.id)).not.toContain("t-rev");
     const liveTask = await page(cookie, "/t/t-rev");
@@ -14730,13 +14744,13 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const orphan = await page(cookie, '/t/t-rev');
     expect(orphan).toContain(`review #${admitted.reviewerRunId}</a> · never finished`);
     expect(orphan).toContain('<a href="/runs">0 live</a>');
-    expect(orphan).toContain('<h2 class="assignment-state">Needs your decision</h2>');
+    expect(orphan).toContain('<h2 class="assignment-state status-headline"><i aria-hidden="true"></i>Needs you</h2>');
     store.touchRunner('night-shift-1', now);
 
     // A failed historical reviewer does not offer another review attempt.
     store.finishRun(admitted.reviewerRunId, { outcome: "failed", reason: "reviewer-agent", now });
     store.stampReviewRequestOutcome(first.id, "reviewer-agent");
-    agree(await surfaces(), "assignment-needs-decision", "Needs your decision");
+    agree(await surfaces(), "assignment-needs-decision", "Needs you");
     const failedTask = await page(cookie, "/t/t-rev");
     expect(await page(cookie, "/review?result=t-rev")).toContain("<summary>Previous assessments</summary>");
     expect(failedTask).not.toContain("/retry-review");
@@ -14745,7 +14759,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     // Historical exception acceptance never invents missing current candidate
     // bindings or marks the assignment Complete. Its exact record stays readable.
     store.acceptProof(latest, "alex", "checked by hand", now);
-    agree(await surfaces(), "assignment-needs-decision", "Needs your decision");
+    agree(await surfaces(), "assignment-needs-decision", "Needs you");
     expect(await page(cookie, "/review?result=t-rev")).toContain('data-review-state="retryable"');
     expect(store.proofAcceptance(latest)?.note).toBe("checked by hand");
     expect(store.proofVerdictFor(latest)?.verdict).toBe("refuted");
@@ -14822,7 +14836,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(meta).not.toContain("t-checks");
     expect(row).not.toContain('<details class="assignment-attempts">');
     expect(row).toContain('href="/t/t-checks"');
-    expect(row).toContain('<span class="status-label">Needs your decision</span>');
+    expect(row).toContain('<span class="status-label">Needs you</span>');
     expect(row).not.toContain("Checks passed");
     expect(row).toContain(`<a class="work-action" data-primary-action href="/review?result=t-checks&amp;run=${checks.run}&amp;project=${encodeURIComponent(alpha)}">Open result →</a>`);
     for (const id of ["t-rev", "t-queued"]) expect(work).toContain(`data-task="${id}"`);
@@ -14832,7 +14846,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     // and the exception control stay in the open.
     const failed = await page(cookie, "/t/t-checks");
     expect(failed).toContain('<h1 class="task-main-title">Round at cent precision</h1>');
-    expect(failed.match(/<h2 class="assignment-state">Needs your decision<\/h2>/g)).toHaveLength(1);
+    expect(failed.match(/<h2 class="assignment-state status-headline"><i aria-hidden="true"><\/i>Needs you<\/h2>/g)).toHaveLength(1);
     expect(failed).toContain('data-work-status="assignment-needs-decision"');
     expect(failed).toContain("check failed against this build (exit 1)");
     expect(failed).toContain(`href="/review?result=t-checks&amp;run=${checks.run}&amp;project=${encodeURIComponent(alpha)}" data-primary-action>Open the failed check</a>`);
@@ -14843,7 +14857,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const queued = await page(cookie, "/t/t-queued");
     expect(queued).toContain('<h1 class="task-main-title">Rework the ledger export</h1>');
     expect(queued).toContain('data-work-status="assignment-needs-decision"');
-    expect(queued).toContain('<h2 class="assignment-state">Needs your decision</h2>');
+    expect(queued).toContain('<h2 class="assignment-state status-headline"><i aria-hidden="true"></i>Needs you</h2>');
     // This run remains the current result: task state is shared, while its saved verdict is retained.
     const olderPage = await page(cookie, `/r/${older}`);
     expect(/<header class="result-head">[\s\S]*?data-work-status="([^"]+)"/.exec(olderPage)?.[1]).toBe("assignment-needs-decision");

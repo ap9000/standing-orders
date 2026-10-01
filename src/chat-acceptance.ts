@@ -11,7 +11,7 @@ export const ACCEPTANCE_PAGE_SIZE = 3;
 
 export function acceptanceStatus(proof: { verdict: string; reasons: readonly string[]; matrix: readonly CriterionMatrixRow[] } | null, accepted: boolean): string {
   if (accepted) return manualReviewOnly(proof) ? "Accepted by a person" : "Accepted with an exception";
-  if (manualReviewOnly(proof)) return "Ready to inspect";
+  if (manualReviewOnly(proof)) return "You check the remaining requirements";
   return proof === null ? "No checks recorded" : ({ verified: "Checks passed", attested: "Checks reported by the agent", short: "Some required material is missing", refuted: "Saved result conflicts with the approved scope" }[proof.verdict] ?? "Some required material is missing");
 }
 
@@ -64,7 +64,7 @@ export function readAcceptanceEvidence(store: Store, who: VerifiedApprover, root
     accepted: acceptance !== null, acceptance: acceptance === null ? null : { at: acceptance.acceptedAt, note: brief(acceptance.note) },
     reasons: (recorded?.reasons ?? []).map(one => brief(one)), gate,
     criteriaTotal: matrix.length, nextCriterionOffset: offset + page.length < matrix.length ? offset + page.length : null,
-    criteria: page.map(row => ({ id: row.id, requirement: brief(row.statement), state: row.state === "manual-review" ? "Human review required" : row.state,
+    criteria: page.map(row => ({ id: row.id, requirement: brief(row.statement), state: row.state === "manual-review" ? "You check" : row.state,
       details: row.detail.map(one => brief(one)), requiredEvidence: row.requiredEvidence,
       reviewer: row.review == null ? null : { judgement: row.review.judgement, note: brief(row.review.note) },
       evidence: row.answered.map(one => ({ kind: one.kind, reference: brief(one.ref) })),

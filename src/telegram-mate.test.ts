@@ -1418,7 +1418,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       );
       script.updates.push([textUpdate(nextUpdate++, "Send the evidence for acceptance")]);
       expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1, problems: [] } });
-      expect(toolResult("get_acceptance_evidence")).toMatchObject({ status: "Ready to inspect", run, accepted: false, criteria: [{ requirement: "Inspect the phone layout", reviewer: { judgement: "upholds" } }] });
+      expect(toolResult("get_acceptance_evidence")).toMatchObject({ status: "You check the remaining requirements", run, accepted: false, criteria: [{ requirement: "Inspect the phone layout", reviewer: { judgement: "upholds" } }] });
       expect(script.documents()).toHaveLength(2);
       expect(urlButtons(script.sends().at(-1))).toEqual([["Inspect result", `https://console.example/review?result=payout&run=${run}&tab=checks`]]);
       expect(store.proofAcceptance(run)).toBeNull();

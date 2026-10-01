@@ -376,8 +376,9 @@ describe("lifecycle facts through the Telegram transport", () => {
     const edits = script.calls.filter(call => call.method === "editMessageText");
     expect(edits.length).toBeGreaterThanOrEqual(2);
     expect(new Set(edits.map(call => call.params["message_id"]))).toEqual(new Set([100]));
-    expect(edits.at(-1)?.params["text"]).toContain("✓ Build saved\n○ Checks did not run");
-    expect(edits.at(-1)?.params["text"]).toContain("Saved locally · Not published");
+    // The card speaks the shared status (task-status.ts): one headline, then quiet rows.
+    expect(edits.at(-1)?.params["text"]).toContain("○ Checks · Didn't run");
+    expect(edits.at(-1)?.params["text"]).toContain("○ Pull request · None");
     expect(edits.at(-1)?.params["text"]).not.toMatch(/Review|reviewer/);
     expect(script.buttons(edits.at(-1)!)).toEqual([{ text: "Open result", url: `${ORIGIN}/chat?task=clear-acceptance&result=${run}` }]);
     expect(store.telegramMessageBindings(store.liveTelegramBinding(BOT)!, "100")).toEqual([{ taskId: "clear-acceptance", taskRef: ref, run, project: ALPHA }]);
@@ -474,7 +475,7 @@ describe("lifecycle facts through the Telegram transport", () => {
     await pass(script);
     expect(script.sends()).toHaveLength(3);
     expect(script.texts().at(-1)).toContain("The expected error message did not appear.");
-    expect(script.calls.filter(call => call.method === "editMessageText").at(-1)?.params["text"]).toContain("Build needs attention");
+    expect(String(script.calls.filter(call => call.method === "editMessageText").at(-1)?.params["text"]).split("\n")[1]).toBe("❌ Failed");
   });
 
   test("a routine infrastructure retry and operator hold update one formatted card with an exact reply binding", async () => {
@@ -483,7 +484,7 @@ describe("lifecycle facts through the Telegram transport", () => {
     store.signMode({ repo: ALPHA, name: "hands-off", termsJson: modeTermsJson(terms), digest: modeDigestOf(terms), signedBy: "alex", absoluteExpiry: terms.absoluteExpiry, publication: terms.publication }, now);
     const script = scriptedTransport();
     await pass(script);
-    expect(script.texts()[0]).toContain("○ Checks pending");
+    expect(script.texts()[0]).toContain("⏳ Building");
     expect(script.texts()[0]).not.toContain("Review pending");
     store.recordOutcomeFacts(run, { handoff: "could not re-read the branch in /Users/alex/private/worktree" });
     store.finishRun(run, { outcome: "failed", reason: "retryable-infra", now });
@@ -495,8 +496,8 @@ describe("lifecycle facts through the Telegram transport", () => {
     expect(edits).toHaveLength(2);
     const card = edits.at(-1)!;
     const text = String(card.params["text"]);
-    expect(text).toContain("⏸ Worker needs project access");
-    expect(text).toContain("Next: restore the worker’s folder access, then resume.");
+    expect(text).toContain("👋 Needs you");
+    expect(text).toContain("The worker can't read the project folder. Restore its access, then resume.");
     expect(text).not.toMatch(/retryable-infra|\/Users|Review optional|20\d\d-\d\d-\d\dT/);
     expect(card.params["entities"]).toEqual(telegramProgressCard(store, store.getRun(run)!, "clear-acceptance", ALPHA, now).entities);
     expect(script.buttons(card)[0]?.text).toBe("Open task");
@@ -525,13 +526,13 @@ describe("lifecycle facts through the Telegram transport", () => {
     const { run } = progressAttempt();
     store.handle.prepare("UPDATE task SET title = ? WHERE id = ?").run("😀 **Ship & test**", "clear-acceptance");
     const card = telegramProgressCard(store, store.getRun(run)!, "clear-acceptance", ALPHA, now);
-    expect(card.entities.map(e => card.text.slice(e.offset, e.offset + e.length))).toEqual(["😀 **Ship & test**", "⏳ Working"]);
+    expect(card.entities.map(e => card.text.slice(e.offset, e.offset + e.length))).toEqual(["😀 **Ship & test**", "⏳ Building"]);
   });
 
   test("progress shows a person's acceptance plainly and never turns a record gap into a reviewer stage", () => {
     const { run } = humanReviewResult();
     const view = () => telegramProgressCard(store, store.getRun(run)!, "alpha-1", ALPHA).text;
-    expect(view()).toContain("Checks · 0/1");
+    expect(view()).toContain("○ Requirements · 0 of 1 met · You check 1");
     expect(view()).not.toMatch(/Review|reviewer/);
     store.acceptProof(run, "alex", "Inspected the saved screenshots.", now);
     expect(view()).toContain("Accepted by a person · Recorded checks unchanged");
@@ -551,11 +552,13 @@ describe("lifecycle facts through the Telegram transport", () => {
       verifyCommand: { configured: true, ran: true, exitCode: 0 }, screenshots: [],
       approvedCriteria: [{ id: "c1", statement: "Saved values survive reload", evidence: ["check"] }] });
     store.saveProofVerdict(run, proof.verdict, proof.reasons, now, proof.matrix, proof.machineVerdict);
+    store.saveArtifact({ run, kind: "terminal-diff", key: `${run}/diff.patch`, bytesOriginal: 12, bytesStored: 12, truncated: false, sha256: "a".repeat(64), capture: "git diff (exit 0)", captureStatus: "ok" }, now);
     const card = telegramProgressCard(store, store.getRun(run)!, "clear-acceptance", ALPHA, now);
-    expect(card.text).toContain("✓ Checks passed");
+    // The same words as the console: the evidence passed, and no check is called failed.
+    expect(card.text).toContain("✓ Requirements · 1 of 1 met");
+    expect(card.text).not.toMatch(/✕|Failed/);
     expect(card.text).not.toContain("failed or missing checks");
     expect(card.text).not.toMatch(/Review|reviewer/);
-    store.saveArtifact({ run, kind: "terminal-diff", key: `${run}/diff.patch`, bytesOriginal: 12, bytesStored: 12, truncated: false, sha256: "a".repeat(64), capture: "git diff (exit 0)", captureStatus: "ok" }, now);
     expect(store.requestReview(run, "alex", now).ok).toBe(true);
     expect(telegramProgressCard(store, store.getRun(run)!, "clear-acceptance", ALPHA, now).text).toBe(card.text);
   });
@@ -564,10 +567,10 @@ describe("lifecycle facts through the Telegram transport", () => {
     const { ref, run } = progressAttempt();
     store.finishRun(run, { outcome: "built", committed: true, now });
     const view = (strict = false) => telegramProgressCard(store, { ...store.getRun(run)!, qualityMode: strict ? "strict" : "default" }, "clear-acceptance", ALPHA).text;
-    expect(view()).toContain("Checks not recorded");
+    expect(view()).toContain("⚠ Checks · Couldn't be read");
     const matrix = [{ id: "c1", statement: "Readable progress", requiredEvidence: ["check"], state: "pass", detail: [], answered: [], review: null }];
     store.saveProofVerdict(run, "verified", [], now, matrix as never);
-    expect(view()).toContain("✓ Checks · 1/1 requirements");
+    expect(view()).toContain("✓ Requirements · 1 of 1 met");
     expect(view(true)).not.toMatch(/Review|reviewer/);
     store.saveArtifact({ run, kind: "terminal-diff", key: `${run}/diff.patch`, bytesOriginal: 12, bytesStored: 12, truncated: false, sha256: "a".repeat(64), capture: "git diff (exit 0)", captureStatus: "ok" }, now);
     const request = store.requestReview(run, "alex", now);
@@ -575,7 +578,7 @@ describe("lifecycle facts through the Telegram transport", () => {
     const reviewer = store.startRun({ taskRef: ref, leaseId: "l-review", runner: RUNNER, role: "reviewer", parentRun: run, request: request.id, ...bareLegacy("review"), now });
     store.finishRun(reviewer, { outcome: "no-change", reason: "comments only", now });
     expect(view(true)).not.toMatch(/Review|reviewer/);
-    expect(view(true)).toContain("✓ Checks · 1/1 requirements");
+    expect(view(true)).toContain("✓ Requirements · 1 of 1 met");
   });
 
   test("a saved result reads Ready, then Complete once a person marks that exact result", () => {
@@ -595,13 +598,13 @@ describe("lifecycle facts through the Telegram transport", () => {
     storeEvidence(store, dir, run, "check-log", "checks.txt", Buffer.from("1 test passed"), "npm test", now, { captureStatus: "ok" });
     sealVerificationReceipt(store, dir, run, "a".repeat(40), store.liveVerifyCommand(ALPHA)!, { configured: true, ran: true, exitCode: 0 }, now);
     const view = () => telegramProgressCard(store, store.getRun(run)!, "ready-1", ALPHA, now, dir);
-    expect(view().text).toContain("✅ Ready\n\n✓ Build saved\n✓ Checks passed\n\nNext: open the result, then mark it complete or request changes.");
+    expect(view().text).toContain("✅ Ready for review\nChecks passed on aaaaaaa. Review the change, then mark it complete.\n\n✓ Checks · Passed on aaaaaaa");
     expect(view().link).toEqual({ label: "Open result", path: `/chat?task=ready-1&result=${run}` });
     const who = verifyApproverStanding(store, "alex", store.accountOf("alex")!.generation, [ALPHA]);
     if (!who.ok) throw new Error("approver fixture");
     const receipt = assignmentOf(store, "ready-1", now, { principal: "operator", repos: [ALPHA] }, dir)!.receipt!;
     expect(checkAssignmentAsOperator(store, "ready-1", receipt.digest, who.who, now, dir).ok).toBe(true);
-    expect(view().text).toContain("✅ Complete\n\n✓ Build saved\n✓ Checks passed\n\nHandled by alex.");
+    expect(view().text).toContain("✅ Complete\nMarked complete by alex.\n\n✓ Checks · Passed on aaaaaaa");
     expect(view().text).not.toMatch(/Review|reviewer/);
   });
 
@@ -726,7 +729,7 @@ describe("lifecycle facts through the Telegram transport", () => {
     expect(await pass(script)).toMatchObject({ ok: true, report: { sent: 2 } });
     expect(store.pendingForAttention().filter(isLifecycleNotification)).toEqual([]);
     expect(script.texts().at(-1)).toContain(`alpha · #${run}`);
-    expect(script.texts().at(-1)).toContain("● Build in progress\n○ Checks pending");
+    expect(script.texts().at(-1)).toContain("⏳ Building");
     const edits = script.calls.filter(call => call.method === "editMessageText");
     expect(edits).toHaveLength(1);
     expect(edits[0]?.params["text"]).toBe(script.texts().at(-1));
@@ -857,7 +860,7 @@ describe("lifecycle facts through the Telegram transport", () => {
       "beta / beta-1 · New task: Rotate the API keys\n\nFiled and waiting in the queue.",
     ]);
     expect(script.texts().at(-1)).toContain(`alpha · #${run}`);
-    expect(script.texts().at(-1)).toContain("✓ Build saved\n○ Checks did not run");
+    expect(script.texts().at(-1)).toContain("○ Checks · Didn't run");
     expect(script.calls.filter(call => call.method === "editMessageText")).toHaveLength(1);
     expect(script.buttons(script.sends().at(-1)!)).toEqual([{ text: "Open result", url: `${ORIGIN}/chat?task=alpha-1&result=${run}` }]);
     expect(script.calls.filter(call => ["sendMessage", "editMessageText"].includes(call.method)).slice(-4).every(send => String(send.params["chat_id"]) === String(CHAT + 1))).toBe(true);

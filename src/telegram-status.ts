@@ -4,6 +4,8 @@ import { manualReviewOnly } from "./proof.js";
  * No provider calls, repository access, new workflow state, or inferred success. */
 import { diagnoseTaskDispatch, withDispatchDiagnoses, type DispatchDiagnosis } from "./dispatch.js";
 import type { Notification, Store } from "./store.js";
+import { COMPLETION_ACTION } from "./result-completion.js";
+import { plainReasonOf, stageOfDispatch, taskStatusOf, type TaskStatus } from "./task-status.js";
 import { CHAT_CONTROLS, chatControlHref, chatResultHref, type ChatControl } from "./chat-controls.js";
 
 export type PhoneCommand = { kind: "status" } | { kind: "help" } | { kind: "task"; id: string } | { kind: "tasks" } | { kind: "lead" };
@@ -54,6 +56,16 @@ export function projectLabel(repo: string): string {
   return plain(repo.split(/[\\/]/).filter(Boolean).pop() ?? "project", 48);
 }
 
+/** The shared headline (task-status.ts) for a dispatch diagnosis on the phone. */
+function headlineFor(store: Store, id: string, d: DispatchDiagnosis): TaskStatus {
+  const completed = d.code === "complete" && store.handle.prepare("SELECT 1 FROM action_ledger WHERE task_id = ? AND action = ? AND source = 'work' LIMIT 1")
+    .get(store.taskFamilyOf(id, null, true)?.root.id ?? id, COMPLETION_ACTION) !== undefined;
+  const read = stageOfDispatch(d, { completed });
+  const finished = read.stage === "finished" || read.stage === "complete" || read.stage === "failed";
+  return taskStatusOf({ stage: read.stage, ...(read.need === undefined ? {} : { need: read.need }), reason: finished ? null : plainReasonOf(read.stage, d.code, d.detail),
+    checks: read.stage === "failed" && d.code === "proof-refuted" ? { status: "failed", exitCode: null, head: null } : null });
+}
+
 function groupOf(d: DispatchDiagnosis): string {
   if (d.condition === "running") return "Working";
   if (d.code === "cancelled") return "Cancelled";
@@ -97,7 +109,7 @@ export function phoneStatus(store: Store, repos: readonly string[], now: Date, f
       if (rows.length === 0) continue;
       lines.push(`${group} · ${rows.length}${snapshot.tasksSaturated ? " in this snapshot" : ""}`);
       for (const task of rows.slice(0, 2)) {
-        lines.push(`${plain(task.id, 64)} · ${projectLabel(repos[task.repoIndex]!)}`, `  ${plain(task.title, 64)} — ${plain(task.dispatch!.summary, 80)}`);
+        lines.push(`${plain(task.id, 64)} · ${projectLabel(repos[task.repoIndex]!)}`, `  ${plain(task.title, 64)} — ${headlineFor(store, task.id, task.dispatch!).headline}`);
       }
       if (rows.length > 2) lines.push(`  +${rows.length - 2} more in the console`);
       lines.push("");
@@ -129,7 +141,7 @@ export function phoneTaskChoices(store: Store, repos: readonly string[], now: Da
       const id = row.rootId ?? row.id;
       if (seen.has(id) || !words.every(word => `${id} ${row.title}`.toLowerCase().includes(word))) continue;
       seen.add(id);
-      choices.push({ id, title: plain(row.title, 64), label: plain(row.dispatch!.summary, 48), group: groupOf(row.dispatch!) });
+      choices.push({ id, title: plain(row.title, 64), label: headlineFor(store, row.id, row.dispatch!).headline, group: groupOf(row.dispatch!) });
       if (choices.length >= limit) break;
     }
     return choices;
@@ -217,10 +229,11 @@ export function phoneTaskView(store: Store, repos: readonly string[], id: string
     if (task === null || ref?.repo == null) return { text: "No such task in your connected projects. Send /status for task IDs.", link: null, run: null };
     const d = diagnoseTaskDispatch(store, id, now);
     if (d === null) return { text: "This task's status is unavailable. Open it in the console before retrying.", link: null, run: null };
-    const lines = [plain(task.title, 140), `${plain(id, 64)} · ${projectLabel(ref.repo)}`, `As of ${now.toISOString().replace("T", " ").slice(0, 19)} UTC`, "", plain(d.summary, 160)];
+    const shared = headlineFor(store, id, d);
+    const lines = [plain(task.title, 140), `${plain(id, 64)} · ${projectLabel(ref.repo)}`, `As of ${now.toISOString().replace("T", " ").slice(0, 19)} UTC`, "", shared.headline];
     const blocker = d.blockerTaskId === null ? null : store.lookupRef(d.blockerTaskId);
     const hiddenDependency = blocker !== null && (blocker.repo === null || !repos.includes(blocker.repo));
-    lines.push(hiddenDependency ? "A required task outside this phone view has not finished. Open the dependency in the console." : plain(d.detail, 650));
+    lines.push(hiddenDependency ? "A required task outside this phone view has not finished. Open the dependency in the console." : plain(shared.sentence, 650));
     if (d.nextAt !== null) lines.push(`Earliest recorded wake: ${plain(d.nextAt, 40)} (a connected worker is still required).`);
 
     const runs = store.runsFor(ref.id);
@@ -246,8 +259,8 @@ export function phoneTaskView(store: Store, repos: readonly string[], id: string
       if (proof !== null && proof.matrix.length > 0) lines.push(`Requirements: ${proof.matrix.filter(row => row.state === "pass").length}/${proof.matrix.length} satisfied in the saved record.`);
       if (accepted && !manualReviewOnly(proof)) lines.push("An operator accepted this result; that does not change its recorded checks.");
       const publication = store.publicationForRun(result.id);
-      const delivery = publication?.remoteState === "MERGED" ? "Merge observed on GitHub" : publication?.remoteState === "CLOSED" ? "Pull request closed, not merged" : publication?.state === "opened" ? `Pull request #${publication.prNumber ?? "?"} opened; not recorded as merged` : publication?.state === "pushed" ? "Branch pushed; pull request not yet recorded" : publication?.state === "intended" ? "Publication queued; not yet confirmed" : publication?.state === "failed" ? "Publication failed; the local result is preserved" : result.role === "scout" ? "Report saved locally" : "Result saved locally; no publication recorded";
-      lines.push(`Delivery: ${delivery}.`);
+      const delivery = publication?.remoteState === "MERGED" ? `#${publication.prNumber ?? "?"} merged` : publication?.remoteState === "CLOSED" ? `#${publication.prNumber ?? "?"} closed without merging` : publication?.state === "opened" ? `#${publication.prNumber ?? "?"} open` : publication?.state === "pushed" || publication?.state === "intended" ? "Opening…" : publication?.state === "failed" ? "Couldn't open; the commit is safe locally" : null;
+      if (delivery !== null) lines.push(`Pull request: ${delivery}.`);
     }
     if (result === undefined) link = taskLinkFor(id, d, null);
     // Said once: the button is where; the sender adds the closing line when no button can ride.

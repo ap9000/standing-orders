@@ -19,6 +19,7 @@ import { GuardedHtml, notifyWorkspaceRendered, regionIsEditing } from "./guarded
 import { ActionCards, CHAT_COMMANDS } from "./chat-cards.js";
 import { FirstRun, withSuggestion } from "./first-run.js";
 import { ViewHost } from "./views/index.js";
+import { HeadlineBadge } from "./views/status-summary.js";
 import { Toaster } from "./components/ui/index.js";
 import { updateNoticeWords } from "../update-notice.js";
 import "./workspace.css";
@@ -248,14 +249,10 @@ export function useWorkspace(initial: BrowserWorkspace) {
     edit: (text: string) => updateDraft(editDraft(state.current.draft, text)) };
 }
 
-function badgeTone(tone: BrowserCrewItem["tone"]) {
-  return tone === "problem" ? "danger" : tone === "attention" ? "attention" : tone === "done" || tone === "ready" ? "success" : tone === "live" ? "info" : "neutral";
-}
-
 function CrewRows({ workspace, items }: { workspace: BrowserWorkspace; items: BrowserWorkspace["crew"] }) {
   return <ul className="so-work-list">{items.map(item => <li key={item.id} data-workspace-task={item.id} data-work-status={item.state}>
     <a className="so-work-row" href={item.resultHref ?? item.href} aria-current={workspace.focus?.id === item.id ? "page" : undefined}>
-      <div className="so-work-heading"><span className="so-work-title">{item.title}</span><Badge tone={badgeTone(item.tone)}>{item.label}</Badge></div>
+      <div className="so-work-heading"><span className="so-work-title">{item.title}</span><HeadlineBadge label={item.label} tone={item.tone} /></div>
       {item.project && <span className="so-work-project">{workspace.projects.find(project => project.path === item.project)?.name ?? item.project.split(/[\\/]/).filter(Boolean).pop()}</span>}
     </a>
     {item.action && item.action.href !== (item.resultHref ?? item.href) && <a className="so-work-action" href={item.action.href}>{item.action.label}</a>}
@@ -609,7 +606,7 @@ export function WorkspaceApp({ initial }: { initial: BrowserWorkspace }) {
     </aside>}
     {!hidePanel && !docked && <aside className={`so-supporting-panel${hasWork ? " so-supporting-panel--detail" : ""}`} data-workspace-detail>
       <div className="so-work-panel-header"><Button variant="ghost" size="sm" className="so-phone-back" onClick={() => setPhoneView("chat")}><Icon name="arrow" />{isChat ? "Back to chat" : "Back"}</Button>
-        {hasWork && <><h2>{workspace.result ? "Result" : "Task"}</h2>{workspace.result && selectedTask && <Badge tone={badgeTone(selectedTask.tone)} className="so-current-task-state" data-workspace-current-task-state>Task: {selectedTask.label}</Badge>}<a href={teamSnapshot?.selected ? "/chat?conversation=" + encodeURIComponent(teamSnapshot.selected.id) : "/chat"} className="so-close-work" aria-label="Close work and return to the main chat"><Icon name="close" /></a></>}
+        {hasWork && <><h2>{workspace.result ? "Result" : "Task"}</h2>{workspace.result && selectedTask && <HeadlineBadge label={selectedTask.label} tone={selectedTask.tone} className="so-current-task-state" data-workspace-current-task-state="" />}<a href={teamSnapshot?.selected ? "/chat?conversation=" + encodeURIComponent(teamSnapshot.selected.id) : "/chat"} className="so-close-work" aria-label="Close work and return to the main chat"><Icon name="close" /></a></>}
       </div>
       {hasWork ? <div className="so-work-detail-content">
         {workspace.focus && (workspace.result

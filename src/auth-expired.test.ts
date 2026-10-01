@@ -295,16 +295,16 @@ describe("sign-in pauses", () => {
     // An unpinned planner: configuration picked Claude, and the gate left it waiting on Claude's pause.
     expect(signInGate(store, ["claude"], at(2_000), ref).waiting).toMatchObject({ provider: "claude" });
     expect(diagnoseTaskDispatch(store, "t-plan", at(2_000))?.code).toBe("signed-out");
-    expect(status()).toMatchObject({ label: "Claude needs you to sign in again" });
+    expect(status()).toMatchObject({ label: "Needs you", detail: expect.stringContaining("Claude needs you to sign in again") });
     // Pinned to Claude, it still waits.
     expect(store.setPlanPins(ref, "claude", null, at(2_000)).ok).toBe(true);
     expect(authWaitOf(store, ref)).toMatchObject({ provider: "claude" });
-    expect(status()).toMatchObject({ label: "Claude needs you to sign in again" });
+    expect(status()).toMatchObject({ label: "Needs you", detail: expect.stringContaining("Claude needs you to sign in again") });
     // Re-routed to Codex: the old note no longer speaks for it, in dispatch or the work index.
     expect(store.setPlanPins(ref, "codex", null, at(2_000)).ok).toBe(true);
     expect(authWaitOf(store, ref)).toBeNull();
     expect(diagnoseTaskDispatch(store, "t-plan", at(2_000))?.code).not.toBe("signed-out");
-    expect(status()?.label).toBe("Planner ready");
+    expect(status()).toMatchObject({ label: "Queued", detail: "A connected worker can draft the plan." });
   });
 
   test("a run that started before the pause opened does not lift it", () => {

@@ -120,7 +120,8 @@ describe("quiet chat on Telegram", () => {
     const edits = script.edits();
     expect(edits.length).toBeGreaterThanOrEqual(3);
     expect(new Set(edits.map(call => call.params["message_id"]))).toEqual(new Set([100]));
-    expect(String(edits.at(-1)!.params["text"])).toContain("✓ Build saved");
+    // The card's heading is the shared headline (task-status.ts): no approved scope here, so a person is needed.
+    expect(String(edits.at(-1)!.params["text"]).split("\n")[1]).toBe("👋 Needs you");
     // The ledger is unchanged: every fact has its own settled receipt, and replies to the card name the task.
     const binding = store.liveTelegramBinding(BOT)!;
     expect(store.telegramDeliveries(binding).filter(row => row.taskId === "status-replies").every(row => row.deliveredAt !== null)).toBe(true);
@@ -172,8 +173,8 @@ describe("quiet chat on Telegram", () => {
     expect(script.sends()).toHaveLength(1);
     const listed = String((script.edits().at(-1) ?? script.sends()[0]!).params["text"]);
     expect(listed).toContain("2 tasks");
-    expect(listed).toContain("Tidy the import screen · Filed");
-    expect(listed).toContain("Explain the empty state · Filed");
+    expect(listed).toContain("Tidy the import screen · Queued");
+    expect(listed).toContain("Explain the empty state · Queued");
     expect(script.buttons(script.edits().at(-1) ?? script.sends()[0]!)).toEqual([{ text: "Open tasks", url: `${ORIGIN}/tasks` }]);
     now = at(180_000);
     placed("third", "Rename the export button");

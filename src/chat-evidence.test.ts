@@ -100,8 +100,8 @@ describe("shared result image selection", () => {
     const me = who([repos.a]);
     const ctx = { store, who: me, now: T0, evidenceRoot, step: 1, readDecisions: new Map<number, number>(), draft: () => null };
     expect(executeMateTool(ctx, "get_acceptance_evidence", { task: "alpha", run })).toMatchObject({ ok: true, body: {
-      status: "Ready to inspect", accepted: false, run, criteriaTotal: 4, nextCriterionOffset: 3, problems: [],
-      criteria: [{ id: "c1", state: "Human review required", reviewer: { judgement: "upholds" } }, { id: "c2" }, { id: "c3" }],
+      status: "You check the remaining requirements", accepted: false, run, criteriaTotal: 4, nextCriterionOffset: 3, problems: [],
+      criteria: [{ id: "c1", state: "You check", reviewer: { judgement: "upholds" } }, { id: "c2" }, { id: "c3" }],
       caveats: ["Physical Telegram rendering was not tested."],
     } });
     expect(readAcceptanceEvidence(store, me, evidenceRoot, "alpha", run, 3)).toMatchObject({ ok: true, body: { criteria: [{ id: "c4" }], nextCriterionOffset: null } });

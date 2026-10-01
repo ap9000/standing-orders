@@ -4,6 +4,7 @@ import { COMPLETION_ACTION } from "./result-completion.js";
 import { windowLabel, type LimitWindow } from "./provider-limits.js";
 import { openAuthPauses, signInCommand, signInReason } from "./provider-auth.js";
 import { BUILT_IN, checkSuitesOf, type RunCheckSuite, type Store } from "./store.js";
+import { workIndexPage } from "./work-index.js";
 
 export type CheckSummary = {
   status: "passed" | "failed" | "not-run" | "unknown";
@@ -38,6 +39,8 @@ export type InstallationStatus = {
   planWindows: (LimitWindow & { provider: string; plan: string | null; observedAt: string })[];
   /** Providers whose sign-in stopped working: their dispatch is paused. */
   signIn: { provider: string; reason: string; command: string; since: string }[];
+  /** The most urgent tasks with the shared headline and sentence (task-status.ts), as every other surface words them. */
+  tasks: { task: string; title: string; headline: string; sentence: string }[];
 };
 
 const maybeNumber = (value: unknown): number | null => value === null || value === undefined || !Number.isInteger(Number(value)) ? null : Number(value);
@@ -280,6 +283,8 @@ export function installationStatus(store: Store, now: Date): InstallationStatus 
         observedAt: String(row["observed_at"]),
       })),
     signIn: pauses.map(one => ({ provider: one.provider, reason: signInReason(one), command: signInCommand(one), since: one.openedAt })),
+    tasks: workIndexPage(store, now, { principal: "operator", repos: null, includeUnplaced: true }, { limit: 8 }).items
+      .map(one => ({ task: one.rootId, title: one.title, headline: one.status.label, sentence: one.status.detail })),
   };
 }
 
@@ -287,7 +292,12 @@ export function renderInstallationStatus(status: InstallationStatus): string[] {
   const lines: string[] = [];
   // A paused provider comes first: it is the one thing a person must do.
   for (const one of status.signIn) lines.push(`${one.reason} — run \`${one.command}\`. Its tasks wait until then.`);
-  lines.push(status.running.count === 0 ? "Running: none" : `Running: ${status.running.count} — ${status.running.tasks.map(one => `${one.task} (#${one.run}, ${one.phase})`).join(", ")}${status.running.count > status.running.tasks.length ? ", …" : ""}`);
+  // Each task's one headline, the same words as the console and chat cards.
+  if (status.tasks.length > 0) {
+    lines.push("Tasks:");
+    for (const one of status.tasks) lines.push(`  ${one.headline.padEnd(16)} ${one.title} (${one.task}) — ${one.sentence}`);
+  }
+  lines.push(status.running.count === 0 ? "Building: none" : `Building: ${status.running.count} — ${status.running.tasks.map(one => `${one.task} (#${one.run}, ${one.phase})`).join(", ")}${status.running.count > status.running.tasks.length ? ", …" : ""}`);
   lines.push(status.queued.count === 0 ? "Queued: none" : `Queued: ${status.queued.count} — ${status.queued.tasks.map(one => `${one.task} (${one.reason})`).join(", ")}${status.queued.count > status.queued.tasks.length ? ", …" : ""}`);
   lines.push(status.waitingForReview.count === 0 ? "Ready for review: none" : `Ready for review: ${status.waitingForReview.count} — ${status.waitingForReview.results.map(one => `${one.task} (#${one.run})`).join(", ")}${status.waitingForReview.count > status.waitingForReview.results.length ? ", …" : ""}`);
   if (status.releaseCheck === null) {
@@ -314,7 +324,7 @@ export function renderInstallationStatus(status: InstallationStatus): string[] {
       lines.push(`Plan windows: ${provider} — ${detail}`);
     }
   }
-  return lines.slice(0, 12 + status.signIn.length);
+  return lines.slice(0, 12 + status.signIn.length + (status.tasks.length === 0 ? 0 : status.tasks.length + 1));
 }
 
 export function renderTaskWait(snapshot: TaskWaitSnapshot, outcome: string = snapshot.outcome): string {
