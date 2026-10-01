@@ -223,7 +223,9 @@ async function confirmCard(reply, label) {
 // ------------------------------------------------------------------ checks
 
 await journey(EVERY, "Sign in and turn the lead chat on (first-run setup)", [], async () => {
-  await page.goto(`${base}/chat`);
+  // Onboarding turned the lead on by itself and moved its form to Settings → Lead → Advanced.
+  await page.goto(`${base}/settings/lead`);
+  await page.locator("details[data-lead-advanced]").evaluate(el => { el.open = true; }).catch(() => undefined);
   await page.selectOption('form[action="/chat/config"] select[name="provider"]', "claude-subscription");
   await page.fill('form[action="/chat/config"] input[name="model"]', "sonnet");
   await page.fill('form[action="/chat/config"] input[name="token"]', alexPassword);

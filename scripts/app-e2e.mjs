@@ -652,7 +652,9 @@ await journey("stop", "Stop a build while it runs, then resume it with your pass
 
 let leadChatOn = false;
 async function turnLeadChatOn() {
-  await page.goto(`${base}/chat`);
+  // Onboarding turned the lead on by itself and moved its form to Settings → Lead → Advanced.
+  await page.goto(`${base}/settings/lead`);
+  await page.locator("details[data-lead-advanced]").evaluate(el => { el.open = true; }).catch(() => undefined);
   await page.selectOption('form[action="/chat/config"] select[name="provider"]', "claude-subscription");
   await page.fill('form[action="/chat/config"] input[name="model"]', "sonnet");
   await page.fill('form[action="/chat/config"] input[name="token"]', w.passwords.alex);
