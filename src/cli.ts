@@ -112,6 +112,7 @@ Usage
   toolroll session          native coding sessions through the running service
   toolroll connect          save a private connection to your central service
   toolroll lead             named leads on the connected service
+  toolroll lead token       mint your lead agent's credential: its own work pings nobody
   toolroll conversation     shared and private conversations on that service
   toolroll chat --lead <id> --conversation <id>  central chat (use --local for local chat)
 
@@ -237,6 +238,8 @@ export const TOP_LEVEL_COMMANDS: readonly string[] = [
 
 export const OPERATE_COMMANDS = new Set([
   "up",
+  // Only `lead token` reaches here; the central service's lead verbs answer first.
+  "lead",
   "onboard",
   "status",
   "ready",
@@ -1416,6 +1419,7 @@ async function runDemoCommand(argv: readonly string[], write: Write): Promise<nu
     write(`  sandbox   ${sandbox}`);
     write("");
     write("Open Chat and ask for a change, like \"fix the flaky refund test\".");
+    write("For your own project, run `npx toolroll up` in its folder.");
     write("");
     write(
       keep

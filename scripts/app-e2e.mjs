@@ -11,6 +11,7 @@
  *
  * The journeys are in groups. Each group runs in a world of its own, so the
  * groups can run at once; a journey that needs an earlier one is in its group.
+ * A journey others build on can be in more than one group (it runs in each).
  * With no --group, every journey runs in one world, one after another.
  *
  * Needs: a built dist/, `claude` logged in, git, npm, sqlite3; Docker for the
@@ -18,29 +19,34 @@
  * for the Python script. Spends a few Claude turns and real builds.
  */
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { createHash, generateKeyPairSync, randomBytes, sign as signWith } from "node:crypto";
-import { flag, freePort, GiveUp, mailSink, option, REAL_TURN_MS, Skip, sleep, waitFor, world } from "./e2e-kit.mjs";
+import { flag, freePort, GiveUp, mailSink, option, REAL_TURN_MS, Skip, SKIPPED_FADE, sleep, waitFor, world } from "./e2e-kit.mjs";
 
 const skipBuild = flag("--skip-build");
 
 /** The groups, in the order they're listed, with how many journeys each has (checked at the end of every run). */
 const GROUPS = {
-  console: { journeys: 21, about: "Sign-in, pages, sessions and tokens, approval rules and audit, monitoring, spend, the command line, projects, knowledge, skills, tools, models, routines, settings, search, identity provider, the demo and its scripted lead, signing out" },
+  console: { journeys: 14, about: "Sign-in and its hardening, sessions and tokens, approval rules and audit, monitoring, spend, the command line, projects, knowledge, skills, tools, models, routines" },
+  pages: { journeys: 7, about: "Every main page on desktop and phone, settings, search, identity provider, the demo and its scripted lead, signing out" },
   task: { journeys: 4, about: "A task from an idea to an accepted result, then sent back twice" },
-  builds: { journeys: 2, about: "A build that asks a question, and a build stopped and resumed" },
-  lead: { journeys: 6, about: "The lead chat, and AI teammates (Maya) the lead then changes" },
-  rosa: { journeys: 5, about: "A teammate that acts with a real tool: its rules, memory, routine, week and undo" },
+  builds: { journeys: 1, about: "A build that asks a question" },
+  stop: { journeys: 1, about: "A build stopped and resumed" },
+  lead: { journeys: 4, about: "The lead chat: questions, tasks and flows from plain words" },
+  maya: { journeys: 3, about: "AI teammates (Maya), which the lead then changes" },
+  rosa: { journeys: 4, about: "A teammate that acts with a real tool: its rules, routine, week and undo" },
+  memory: { journeys: 2, about: "A teammate that acts with a real tool: its memory, and the looser rule it suggests" },
   mail: { journeys: 2, about: "A real mail server: the email inbox and follow-ups (needs Docker)" },
   flows: { journeys: 5, about: "Code steps and schedules in flows, the live canvas, starter kits and one-click connections" },
+  onboarding: { journeys: 4, about: "From an empty home folder: toolroll up opens Chat signed in with the lead on, a first task filed and followed to Ready, no agent shows the command and turns on by itself, the wrong-host page" },
 };
 const group = option("--group", null);
 if (flag("--groups")) {
   const list = Object.entries(GROUPS).map(([name, one]) => ({ name, journeys: one.journeys, about: one.about }));
-  console.log(flag("--json") ? JSON.stringify(list) : list.map(one => `${one.name.padEnd(8)} ${String(one.journeys).padStart(2)} journeys  ${one.about}`).join("\n"));
+  console.log(flag("--json") ? JSON.stringify(list) : list.map(one => `${one.name.padEnd(10)} ${String(one.journeys).padStart(2)} journeys  ${one.about}`).join("\n"));
   process.exit(0);
 }
 if (group !== null && !(group in GROUPS)) { console.error(`No group "${group}". The groups: ${Object.keys(GROUPS).join(", ")}`); process.exit(2); }
@@ -150,12 +156,13 @@ const w = await world(group === null ? "app" : `app-${group}`, {
 });
 const { base, page, cli, rows, until, check, shot, json, signIn, askLead, pendingCard, confirmCard, auth, repo } = w;
 const placed = new Map();
-/** A journey in its group: it runs when its group (or every group) runs, and what it needs is in the same group. */
+/** A journey in its group (or groups): it runs when one of them (or every group) runs, and what it needs is in each of them. */
 function journey(name, title, needs, body) {
-  const elsewhere = needs.filter(one => placed.get(one) !== name);
-  if (!(name in GROUPS) || placed.has(title) || elsewhere.length > 0) throw new Error(`"${title}" in group ${name}: ${elsewhere.length > 0 ? `needs ${elsewhere.join(", ")} from another group` : "an unknown group, or a second journey of that name"}`);
-  placed.set(title, name);
-  return group === null || group === name ? check(title, needs, body) : null;
+  const names = [name].flat();
+  const elsewhere = needs.filter(one => !names.every(each => placed.get(one)?.includes(each)));
+  if (!names.every(each => each in GROUPS) || placed.has(title) || elsewhere.length > 0) throw new Error(`"${title}" in group ${names.join(", ")}: ${elsewhere.length > 0 ? `needs ${elsewhere.join(", ")} from another group` : "an unknown group, or a second journey of that name"}`);
+  placed.set(title, names);
+  return group === null || names.includes(group) ? check(title, needs, body) : null;
 }
 const flowView = id => json(`/flows/${id}?format=json`);
 const csrfOf = async on => on.locator('input[name="csrf"]').first().inputValue();
@@ -165,11 +172,10 @@ const post = async (path, form, on = page) => {
 };
 /** A flow drawn from steps the way the canvas saves one. */
 async function newFlow(name, stages, start) {
-  await page.goto(`${base}/flows`);
-  await page.evaluate(() => { for (const one of document.querySelectorAll("details")) one.open = true; });
-  await page.fill('form[action="/flows/new"] input[name="name"]', name);
-  await page.selectOption('form[action="/flows/new"] select[name="template"]', "blank");
-  await Promise.all([page.waitForNavigation(), page.click('form[action="/flows/new"] button')]);
+  // Flows → New → a template's page: name it, then create what it previews.
+  await page.goto(`${base}/flows/new/blank`);
+  await page.fill('form[data-gallery-use] input[name="name"]', name);
+  await Promise.all([page.waitForNavigation(), page.click('form[data-gallery-use] button[value="create"]')]);
   const id = Number(/\/flows\/(\d+)/.exec(page.url())[1]);
   const view = await flowView(id);
   const saved = await post(`/flows/${id}/save`, { name, owner: "alex", revision: String(view.flow.revision), definition: JSON.stringify({ version: 1, start, stages }) });
@@ -206,7 +212,7 @@ await journey("console", "A wrong password is refused, and a signed-out visitor 
   await wrong.close();
 });
 
-await journey("console", "Every main page opens without an error, in the one workspace look, on desktop and on a phone", [], async () => {
+await journey("pages", "Every main page opens without an error, in the one workspace look, on desktop and on a phone", [], async () => {
   const paths = ["/chat", "/work", "/tasks", "/tasks/new", "/projects", "/flows", `/settings/knowledge?repo=${encodeURIComponent(repo)}`, "/settings", "/settings/models", "/settings/skills", `/settings/tools?repo=${encodeURIComponent(repo)}`, "/routines", "/recipes",
     "/inbox", "/board", "/next", "/done", "/system", "/workbench", "/code", "/kits", "/teammates", "/fleet", "/people"];
   const broken = [];
@@ -615,7 +621,7 @@ await journey("builds", "A build stops to ask a question the plan leaves open; y
   return { question: asked.question.slice(0, 160), answer: labels[pick].trim(), run: built.id };
 });
 
-await journey("builds", "Stop a build while it runs, then resume it with your password; it finishes", [], async () => {
+await journey("stop", "Stop a build while it runs, then resume it with your password; it finishes", [], async () => {
   const id = "divide";
   cli(["task", "add", "Add a divide function", "--id", id, "--repo", repo, ...auth]);
   cli(["task", "scope", id, "--goal", "Add divide(a, b) to src/math.js, throwing on division by zero, with tests for both in test/math.test.js.", "--acceptance", "divide works and refuses zero|check", ...auth]);
@@ -646,7 +652,9 @@ await journey("builds", "Stop a build while it runs, then resume it with your pa
 
 let leadChatOn = false;
 async function turnLeadChatOn() {
-  await page.goto(`${base}/chat`);
+  // Onboarding turned the lead on by itself and moved its form to Settings → Lead → Advanced.
+  await page.goto(`${base}/settings/lead`);
+  await page.locator("details[data-lead-advanced]").evaluate(el => { el.open = true; }).catch(() => undefined);
   await page.selectOption('form[action="/chat/config"] select[name="provider"]', "claude-subscription");
   await page.fill('form[action="/chat/config"] input[name="model"]', "sonnet");
   await page.fill('form[action="/chat/config"] input[name="token"]', w.passwords.alex);
@@ -655,7 +663,7 @@ async function turnLeadChatOn() {
   await page.waitForSelector("[data-workspace-composer] textarea", { timeout: 15_000 });
   leadChatOn = true;
 }
-await journey("lead", "Turn the lead chat on (first-run setup, with your password)", [], turnLeadChatOn);
+await journey(["lead", "maya"], "Turn the lead chat on (first-run setup, with your password)", [], turnLeadChatOn);
 
 await journey("lead", "The lead answers a question about the project from its files (real Claude turn)", ["Turn the lead chat on (first-run setup, with your password)"], async () => {
   // The project's code index, refreshed the way Settings → Knowledge does, so the lead's project search reads a current one.
@@ -794,7 +802,7 @@ await journey("console", "Routines: a standing order is filed, approved with you
   return { routine: routine.id, task: fired.id };
 });
 
-await journey("console", "Settings: the theme switches to dark and the accent to Emerald, and both stay", [], async () => {
+await journey("pages", "Settings: the theme switches to dark and the accent to Emerald, and both stay", [], async () => {
   await page.goto(`${base}/settings`);
   await Promise.all([page.waitForNavigation(), page.click('form[action="/settings/appearance"] button[value="dark"]')]);
   await page.click('[data-accent-picker] button[data-preset="emerald"]');
@@ -808,7 +816,7 @@ await journey("console", "Settings: the theme switches to dark and the accent to
   await page.locator("[data-accent-status]", { hasText: "Saved" }).waitFor({ timeout: 10_000 });
 });
 
-await journey("console", "Search finds the project and a task", [], async () => {
+await journey("pages", "Search finds the project and a task", [], async () => {
   // Search is left off pages that show a password field; Flows has none.
   await page.goto(`${base}/flows`);
   await page.click("button.so-command-trigger");
@@ -954,11 +962,10 @@ await journey("mail", "Email inbox: a real email becomes a card, Claude drafts a
     const told = new URL(page.url()).searchParams.get("said") ?? "";
     if (told !== "Reading works: signed in to the inbox of support@shop.example.") throw new Error(`Check the inbox said: ${told}`);
     // A Customer replies flow (the template) with an Email inbox trigger added on its Triggers panel.
-    await page.goto(`${base}/flows`);
-    await page.evaluate(() => { for (const one of document.querySelectorAll("details")) one.open = true; });
-    await page.fill('form[action="/flows/new"] input[name="name"]', "Support inbox");
-    await page.selectOption('form[action="/flows/new"] select[name="template"]', "email-replies");
-    await Promise.all([page.waitForNavigation(), page.click('form[action="/flows/new"] button')]);
+    // Flows → New → a template's page: name it, then create what it previews.
+    await page.goto(`${base}/flows/new/email-replies`);
+    await page.fill('form[data-gallery-use] input[name="name"]', "Support inbox");
+    await Promise.all([page.waitForNavigation(), page.click('form[data-gallery-use] button[value="create"]')]);
     const id = Number(/\/flows\/(\d+)/.exec(page.url())[1]);
     await page.waitForSelector("[data-zone]");
     await page.click("[data-open-triggers]");
@@ -1069,7 +1076,7 @@ await journey("mail", "Follow-ups: a card emails someone and waits; their reply 
 
 // ------------------------------------------------------------------ two people on one flow
 
-await journey("lead", "AI teammates: Maya (a support rep) answers a question card, approves a small refund on its own, brings the big one to you, and stops while paused (real Claude turns)", [], async () => {
+await journey("maya", "AI teammates: Maya (a support rep) answers a question card, approves a small refund on its own, brings the big one to you, and stops while paused (real Claude turns)", [], async () => {
   // A teammate from the Support rep template, on the Teammates page; its soul file saves as a new version.
   await page.goto(`${base}/teammates`);
   await page.selectOption('form[data-new-teammate] select[name="template"]', "support");
@@ -1145,7 +1152,7 @@ await journey("lead", "AI teammates: Maya (a support rep) answers a question car
   return { reply: reply.slice(0, 120), summary: (await page.locator(".teammate-summary").innerText()).slice(0, 200) };
 });
 
-await journey("lead", "The lead adds a teammate and changes one's rules from plain words, as cards you confirm (real Claude turns)", ["Turn the lead chat on (first-run setup, with your password)", "AI teammates: Maya (a support rep) answers a question card, approves a small refund on its own, brings the big one to you, and stops while paused (real Claude turns)"], async () => {
+await journey("maya", "The lead adds a teammate and changes one's rules from plain words, as cards you confirm (real Claude turns)", ["Turn the lead chat on (first-run setup, with your password)", "AI teammates: Maya (a support rep) answers a question card, approves a small refund on its own, brings the big one to you, and stops while paused (real Claude turns)"], async () => {
   // The lead's own proposal is what's checked: the card it drafted (a reply without one fails quoting the reply and the
   // tools the lead called), then what confirming it saved.
   const confirm = async (asked, what) => {
@@ -1162,7 +1169,7 @@ await journey("lead", "The lead adds a teammate and changes one's rules from pla
 });
 
 const TOOL_CHECK = "Teammates that act: Rosa uses a real store tool under her rules — looks orders up and refunds $30 on her own, asks you before $400, and your Approve makes exactly that call (real Claude turns)";
-await journey("rosa", TOOL_CHECK, [], async () => {
+await journey(["rosa", "memory"], TOOL_CHECK, [], async () => {
   // A real MCP server over stdio (named store: the lead never sees this project's folder name, shop): it looks orders up and refunds them, and writes down every call it gets.
   const shop = join(w.root, "shop-mcp.mjs"), log = join(w.root, "shop-calls.log");
   writeFileSync(shop, `import { createInterface } from "node:readline";
@@ -1293,7 +1300,7 @@ await journey("rosa", "The lead changes a teammate's tool rule from plain words,
   return { rule: rules.refund_order };
 });
 
-await journey("rosa", "Teammates remember and learn: Rosa keeps a customer's preference for later cards, you correct her memory, and after approving refunds in a row she suggests a looser rule you accept in one tap (real Claude turns)", [TOOL_CHECK], async () => {
+await journey("memory", "Teammates remember and learn: Rosa keeps a customer's preference for later cards, you correct her memory, and after approving refunds in a row she suggests a looser rule you accept in one tap (real Claude turns)", [TOOL_CHECK], async () => {
   const mate = rows("SELECT id FROM teammate WHERE handle = 'rosa' AND state = 'active'")[0]?.id;
   const flowId = rows("SELECT id FROM flow WHERE name = 'Refund desk'")[0]?.id;
   if (!mate || !flowId) throw new Error("Rosa or her flow is missing");
@@ -1514,7 +1521,7 @@ await journey("flows", "One-click connections: Connect Stripe on the kit's check
   }
 });
 
-await journey("console", "Sign-in with an identity provider: turned on in Settings, a person signs in there and gets an account from their groups, their approvals are that sign-in (no password), and a group that may not enter is refused", [], async () => {
+await journey("pages", "Sign-in with an identity provider: turned on in Settings, a person signs in there and gets an account from their groups, their approvals are that sign-in (no password), and a group that may not enter is refused", [], async () => {
   await page.goto(`${base}/settings/sign-in`);
   if (!(await page.locator(".redirect code").innerText()).endsWith("/login/sso/callback")) throw new Error("the page doesn't say which address to register");
   await page.fill('input[name="issuer"]', idpBase); await page.fill('input[name="client-id"]', "so-e2e"); await page.fill('input[name="client-secret"]', `idp-${randomBytes(6).toString("hex")}`);
@@ -1584,7 +1591,7 @@ await journey("flows", "Live canvas: a teammate sees who's here and a card move 
 
 // ------------------------------------------------------------------ the demo
 
-await journey("console", "The demo starts with flows already moving, and opens in a browser", [], async () => {
+await journey("pages", "The demo starts with flows already moving, and opens in a browser", [], async () => {
   const demo = spawn(process.execPath, [w.bin, "demo", "--json"], { env: { ...process.env, NODE_OPTIONS: "" }, stdio: ["ignore", "pipe", "pipe"] });
   try {
     const started = await new Promise((done, fail) => {
@@ -1605,7 +1612,7 @@ await journey("console", "The demo starts with flows already moving, and opens i
   } finally { demo.kill("SIGINT"); }
 });
 
-await journey("console", "The demo lead: type a request, approve, see it build to Ready, complete, at desktop and phone", [], async () => {
+await journey("pages", "The demo lead: type a request, approve, see it build to Ready, complete, at desktop and phone", [], async () => {
   const demo = spawn(process.execPath, [w.bin, "demo", "--json"], { env: { ...process.env, NODE_OPTIONS: "" }, stdio: ["ignore", "pipe", "pipe"] });
   try {
     const started = await new Promise((done, fail) => {
@@ -1633,6 +1640,8 @@ await journey("console", "The demo lead: type a request, approve, see it build t
         await visitor.goto(`${started.url}/chat`);
         const banner = await visitor.locator("body").innerText();
         if (!/Nothing calls a model, reaches outside or spends\./.test(banner)) throw new Error(`the demo banner: ${banner.slice(0, 300)}`);
+        // The demo hands off: its banner says how to start on a real project.
+        if (!/For your own project, run npx toolroll up in its folder\./.test(banner)) throw new Error(`the demo banner doesn't hand off: ${banner.slice(0, 300)}`);
         if (width === 1440) {
           await visitor.locator(".demo-hint").waitFor();
           if (await visitor.locator(".demo-suggestions button").count() < 2) throw new Error("the first visit shows no suggestions");
@@ -1662,6 +1671,10 @@ await journey("console", "The demo lead: type a request, approve, see it build t
         await Promise.all([visitor.waitForNavigation(), turn.getByRole("button", { name: "Complete" }).click()]);
         await turn.locator(".demo-result").getByText("Complete", { exact: true }).waitFor();
         await turn.getByText("That's the whole loop").waitFor();
+        // ...and so does its last step.
+        const handoff = await turn.locator("[data-demo-handoff]").innerText();
+        if (!handoff.includes("npx toolroll up")) throw new Error(`the demo's last step: ${handoff}`);
+        await turn.locator("[data-demo-handoff]").scrollIntoViewIfNeeded();
         await settle(visitor); await visitor.screenshot({ path: join(w.out, `demo-complete-${width}.png`) });
         if (errors.length > 0) throw new Error(`browser errors at ${width} wide: ${errors.join(" | ").slice(0, 400)}`);
       } finally { await context.close(); }
@@ -1669,7 +1682,7 @@ await journey("console", "The demo lead: type a request, approve, see it build t
   } finally { demo.kill("SIGINT"); }
 });
 
-await journey("console", "Signing out ends the session: pages ask to sign in again", [], async () => {
+await journey("pages", "Signing out ends the session: pages ask to sign in again", [], async () => {
   const sam = await signIn("sam");
   await sam.goto(`${base}/chat`);
   await Promise.all([sam.waitForNavigation(), sam.locator('.so-account form[action="/logout"] button').click()]);
@@ -1680,9 +1693,255 @@ await journey("console", "Signing out ends the session: pages ask to sign in aga
   if (answer.status() < 300 || answer.status() >= 400) throw new Error(`after signing out, /flows answered ${answer.status()}`);
 });
 
+// ------------------------------------------------------------------ onboarding (docs/design/onboarding.md)
+
+/**
+ * A stranger's first ten minutes, from an empty home folder: `toolroll up` run in a repository at a real terminal
+ * (a pseudo-terminal, no coding agent above it), the browser it opens, and nothing typed but the request. The agent
+ * CLIs on the PATH are only the ones a journey puts there: `claude` is this computer's own Claude Code, run with its
+ * own home so its sign-in is the real one. Screenshots at 1440 and 390 of each step land in the output folder.
+ */
+const realClaude = (() => { try { return execFileSync("/bin/sh", ["-c", "command -v claude"], { encoding: "utf8" }).trim() || null; } catch { return null; } })();
+const fresh = {};
+async function freshInstall(name, { claude, crewModels = false }) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), `toolroll-onboarding-${name}-`)));
+  const home = join(root, "home"), shop = join(root, "shop"), bin = join(root, "bin"), opened = join(root, "opened.txt"), log = join(root, "terminal.log");
+  for (const one of [home, shop, bin]) mkdirSync(one);
+  // The PATH a stranger's shell might have, minus every agent CLI: node and npm, git, the system's own tools.
+  symlinkSync(process.execPath, join(bin, "node"));
+  const npm = join(dirname(process.execPath), "npm");
+  if (existsSync(npm)) symlinkSync(realpathSync(npm), join(bin, "npm"));
+  const signIn = () => {
+    // This computer's Claude Code, with its own home and user (its sign-in lives in the user's keychain).
+    const user = JSON.stringify(process.env.USER ?? "");
+    writeFileSync(join(bin, "claude"), `#!/bin/sh\nHOME=${JSON.stringify(homedir())} USER=${user} LOGNAME=${user} exec ${JSON.stringify(realClaude)} "$@"\n`);
+    chmodSync(join(bin, "claude"), 0o755);
+  };
+  if (claude) signIn();
+  // The browser `up` opens: the one-time link is handed to this program, never printed. The journey's browser opens it.
+  writeFileSync(join(bin, "open-browser"), `#!/bin/sh\nprintf '%s' "$1" > ${JSON.stringify(opened)}\n`);
+  chmodSync(join(bin, "open-browser"), 0o755);
+  // A small project with a test and one note to fix.
+  writeFileSync(join(shop, "package.json"), JSON.stringify({ name: "shop", version: "1.0.0", type: "module", scripts: { test: "node --test" } }, null, 2) + "\n");
+  mkdirSync(join(shop, "src")); mkdirSync(join(shop, "test"));
+  writeFileSync(join(shop, "src/math.js"), "// TODO: add a subtract(a, b) function next to add\nexport const add = (a, b) => a + b;\n");
+  writeFileSync(join(shop, "test/math.test.js"), "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { add } from '../src/math.js';\n\ntest('adds', () => assert.equal(add(2, 3), 5));\n");
+  writeFileSync(join(shop, "README.md"), "# Shop\n\nA tiny shop library.\n");
+  const git = (...args) => execFileSync("git", ["-C", shop, ...args], { stdio: "ignore" });
+  git("init", "-q", "-b", "main"); git("add", "."); git("-c", "user.name=Sam Rivera", "-c", "user.email=sam@example.invalid", "commit", "-qm", "First version");
+  const port = await freePort();
+  // A real terminal for `up`: `script` gives it one. Stopping `script` closes that terminal, which ends `up` (--for is the backstop).
+  const env = { PATH: `${bin}:/usr/bin:/bin:/usr/sbin:/sbin`, HOME: home, USER: "sam", LANG: "en_US.UTF-8", TERM: "xterm-256color", TMPDIR: join(root, "tmp"),
+    TOOLROLL_BROWSER_COMMAND: join(bin, "open-browser"), TOOLROLL_NO_PLAN_PROBE: "1",
+    GIT_AUTHOR_NAME: "Sam Rivera", GIT_AUTHOR_EMAIL: "sam@example.invalid", GIT_COMMITTER_NAME: "Sam Rivera", GIT_COMMITTER_EMAIL: "sam@example.invalid" };
+  mkdirSync(env.TMPDIR);
+  const up = [w.bin, "up", "--port", String(port), "--for", String(40 * 60_000)].map(one => `'${one}'`).join(" ");
+  const shell = spawn("/bin/sh", ["-c", `cd '${shop}' && script -q /dev/null ${JSON.stringify(process.execPath)} ${up} < /dev/null > '${log}' 2>&1 & echo $!`], { detached: true, stdio: ["ignore", "pipe", "ignore"], env });
+  // `script` keeps the shell's output open on some systems: read the one line (its process id), not to the end.
+  const pid = await new Promise(done => { let text = ""; shell.stdout.on("data", chunk => { text += chunk; if (text.includes("\n")) { shell.stdout.destroy(); done(Number(text.trim())); } }); });
+  const base = `http://127.0.0.1:${port}`;
+  const terminal = () => existsSync(log) ? readFileSync(log, "utf8").replace(/\r/g, "").replace(/\^D\x08\x08/g, "") : "";
+  await until(`${name}: toolroll up to open the browser`, async () => existsSync(opened) && readFileSync(opened, "utf8").startsWith(base), { timeoutMs: 90_000, everyMs: 500, seen: terminal });
+  const state = (() => { for (const one of [join(home, ".config", "toolroll"), join(home, ".toolroll"), join(home, ".config", "standing-orders")]) if (existsSync(join(one, "orders.db"))) return one; throw new Error(`no database under ${home}`); })();
+  const stop = () => { try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ } };
+  process.on("exit", stop);
+  // Not yet automatic (see the onboarding handoff): a fresh install has no exact crew models (approvals bind exact
+  // routing, so a first task would wait at Plan) and no project check (so a result could never be Ready). The setup a
+  // person does once, from the terminal, before anything is filed.
+  if (crewModels) {
+    const [who, secret] = readFileSync(join(state, "up-login.txt"), "utf8").trim().split(" ");
+    const toolroll = (...args) => execFileSync(process.execPath, [w.bin, ...args, "--as", who, "--token", secret, "--db", join(state, "orders.db")], { stdio: "ignore", env: { ...process.env, HOME: home } });
+    for (const phase of ["plan", "build", "repair", "review"]) toolroll("config", "set", phase, "--provider", "claude", "--model", "sonnet");
+    toolroll("verify", "set", "--repo", realpathSync(shop), "--command", "npm test", "--timeout-seconds", "120", "--yes");
+  }
+  return { root, home, shop, bin, base, port, state, db: join(state, "orders.db"), link: readFileSync(opened, "utf8"), terminal, signIn, stop };
+}
+/** A screenshot at 1440 and at 390 of the same page, settled. */
+async function bothSizes(on, name) {
+  for (const [width, height] of [[1440, 900], [390, 844]]) {
+    await on.setViewportSize({ width, height });
+    await on.waitForTimeout(400);
+    await on.evaluate(() => Promise.race([Promise.all(document.getAnimations().filter(one => one.effect?.getComputedTiming().iterations !== Infinity).map(one => one.finished.catch(() => undefined))), new Promise(done => setTimeout(done, 1500))])).catch(() => undefined);
+    const overflow = await on.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+    if (overflow > 1) throw new Error(`${name} scrolls sideways by ${overflow}px at ${width} wide`);
+    await on.screenshot({ path: join(w.out, `onboarding-${name}-${width}.png`) });
+  }
+  await on.setViewportSize({ width: 1440, height: 900 });
+}
+/** The terminal as the person saw it, drawn for the screenshots (the captured output, verbatim). */
+async function terminalShot(text, name) {
+  const context = await w.browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: "dark" });
+  const on = await context.newPage();
+  const lines = text.split("\n").map(one => one.replace(/&/g, "&amp;").replace(/</g, "&lt;")).join("\n");
+  await on.setContent(`<!doctype html><meta name="viewport" content="width=device-width"><title>Terminal</title><body style="margin:0;background:#0b0b0b;color:#ededed;font:14px/1.6 ui-monospace,Menlo,monospace">` +
+    `<p style="margin:0;padding:10px 16px;color:#a1a1a1;font:12px system-ui;border-bottom:1px solid #262626">Captured terminal output, toolroll up in ~/shop (onboarding journey)</p>` +
+    `<pre style="margin:0;padding:16px;white-space:pre-wrap;overflow-wrap:anywhere">$ npx toolroll up\n${lines}</pre></body>`);
+  await bothSizes(on, name);
+  await context.close();
+}
+const freshRows = (db, query) => JSON.parse(execFileSync("sqlite3", ["-json", db, query], { encoding: "utf8" }).trim() || "[]");
+
+await journey("onboarding", "A fresh install with Claude Code signed in reaches a filed first task without a password or a form", [], async () => {
+  if (realClaude === null) throw new Skip("needs Claude Code installed and signed in on this computer");
+  const install = fresh.claude = await freshInstall("claude", { claude: true, crewModels: true });
+  // 1. Three lines: where it is, that it opens signed in, and what to do if it doesn't. No password, no link.
+  await until("the three-line greeting", async () => /Opening it in your browser now/.test(install.terminal()), { timeoutMs: 30_000, seen: install.terminal });
+  const said = install.terminal().split("\n").filter(one => one.trim() !== "");
+  const [account, password] = readFileSync(join(install.state, "up-login.txt"), "utf8").trim().split(" ");
+  const greeting = said.slice(said.findIndex(one => one.startsWith("Toolroll is on ")), said.findIndex(one => one.startsWith("Toolroll is on ")) + 3);
+  if (greeting.length !== 3 || greeting[0] !== `Toolroll is on ${install.base}/` || greeting[1] !== "Opening it in your browser now, already signed in." || !greeting[2].startsWith(`If it doesn't open, go to that address and sign in as ${account}: the password is in ~/`)) throw new Error(`the greeting: ${said.join(" | ")}`);
+  if (said.length > 4) throw new Error(`more than the greeting was printed: ${said.join(" | ")}`);
+  if (install.terminal().includes(password) || install.terminal().includes("/login/once/")) throw new Error("the terminal shows the password or the sign-in link");
+  await terminalShot(said.join("\n"), "1-terminal");
+  // 2. The browser opens signed in, on Chat.
+  const context = await w.browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
+  const on = await context.newPage();
+  install.page = on;
+  w.openPages.push(on);
+  on.on("pageerror", error => { if (!SKIPPED_FADE.test(String(error))) w.problems.push(`fresh install on ${on.url()}: ${String(error)}`); });
+  const visited = [];
+  on.on("framenavigated", frame => { if (frame === on.mainFrame()) visited.push(new URL(frame.url()).pathname); });
+  await on.goto(install.link);
+  if (new URL(on.url()).pathname !== "/chat") throw new Error(`the link landed on ${on.url()}`);
+  if (visited.includes("/login")) throw new Error(`a sign-in page came up: ${visited.join(" → ")}`);
+  // 3. The lead is already on with the Claude Code sign-in; 4. how it works, once, above the composer, with first tasks.
+  await waitFor(on.locator("[data-lead-line]"), "the line saying what runs the lead", { timeoutMs: 30_000, seen: async () => (await on.locator("main").innerText()).slice(0, 400) });
+  const lead = await on.locator("[data-lead-line]").innerText();
+  if (lead !== "The lead uses your Claude Code sign-in · Change") throw new Error(`the lead line: ${lead}`);
+  if (await on.locator('a[href="/settings/lead"]', { hasText: "Change" }).count() !== 1) throw new Error("no Change link to Settings → Lead");
+  const intro = await on.locator("[data-how-it-works]").innerText();
+  if (!intro.startsWith("Ask for a change. The lead writes a short plan; you approve it;")) throw new Error(`how it works: ${intro}`);
+  const firstTasks = on.locator("[data-first-tasks] button");
+  if (await firstTasks.count() !== 3) throw new Error(`${await firstTasks.count()} first tasks`);
+  if (await on.locator('input[type="password"], form[action="/chat/config"]').count() > 0) throw new Error("Chat asks for a password or shows the setup form");
+  await bothSizes(on, "2-chat-signed-in");
+  // The first request: the note in the project, drafted by a tap and sent.
+  const note = firstTasks.filter({ hasText: "subtract" });
+  await (await note.count() > 0 ? note.first() : firstTasks.first()).click();
+  const draft = await on.inputValue("[data-workspace-composer] textarea");
+  if (draft.trim() === "") throw new Error("the tap drafted nothing");
+  await on.fill("[data-workspace-composer] textarea", `${draft} File it as a task.`);
+  const before = await on.locator("[data-workspace-chat] [data-message-id]").count();
+  await on.click('[data-workspace-composer] button[type="submit"]');
+  await until("the lead's reply to the first request", async () => (await on.locator("[data-workspace-chat] [data-message-id]").count()) >= before + 2, { timeoutMs: REAL_TURN_MS, everyMs: 2000 });
+  const reply = on.locator("[data-workspace-chat] [data-message-id]").last();
+  const card = reply.locator('[data-view="chat-card"][data-card-state="pending"]').first();
+  await waitFor(card, "the task the lead proposes", { timeoutMs: 30_000, seen: async () => (await reply.innerText()).replace(/\s+/g, " ").slice(0, 400) });
+  await card.locator("[data-card-confirm]").click();
+  await until("the first task to be filed", async () => freshRows(install.db, "SELECT id, title FROM task").length > 0, { timeoutMs: 60_000 });
+  const [task] = freshRows(install.db, "SELECT id, title FROM task ORDER BY rowid LIMIT 1");
+  install.task = task;
+  // Nothing was typed but the request: no password field was ever filled and no form submitted but Chat's.
+  const signIns = freshRows(install.db, "SELECT actor, outcome FROM action_ledger WHERE source = 'sign-in'");
+  if (!signIns.some(one => one.outcome === "one-time link") || signIns.some(one => one.outcome === "browser")) throw new Error(`sign-ins: ${JSON.stringify(signIns)}`);
+  return { task: task.id, title: task.title };
+});
+
+await journey("onboarding", "The first task's timeline fills in as it moves, and after its first result the phone is offered", ["A fresh install with Claude Code signed in reaches a filed first task without a password or a form"], async () => {
+  const install = fresh.claude, on = install.page;
+  // The step it's on; "ready" once every step is done (none is current then).
+  const stepNow = async () => on.evaluate(() => {
+    const list = document.querySelector("[data-first-task-journey]");
+    if (list === null) return null;
+    return list.querySelector('[aria-current="step"]')?.getAttribute("data-step") ?? (list.querySelector('[data-step="ready"][data-state="done"]') ? "ready" : null);
+  }).catch(() => null);
+  await on.goto(`${install.base}/chat?task=${encodeURIComponent(install.task.id)}`);
+  await waitFor(on.locator("[data-first-task-journey]").first(), "the first task's timeline", { timeoutMs: 30_000 });
+  const shotAt = new Set();
+  const capture = async step => { if (shotAt.has(step)) return; shotAt.add(step); await bothSizes(on, `3-task-${step}`); };
+  await capture(await stepNow() ?? "plan");
+  const [, secret] = readFileSync(join(install.state, "up-login.txt"), "utf8").trim().split(" ");
+  await until("the plan to be ready to approve", async () => (await stepNow()) === "approve" || freshRows(install.db, "SELECT state FROM task WHERE state IN ('failed','cancelled')").length > 0, { timeoutMs: 6 * 60_000, everyMs: 3000, seen: stepNow });
+  if (await stepNow() !== "approve") throw new Error(`the first task stopped at ${await stepNow()}`);
+  await capture("approve");
+  // You approve: the saved password, from the file `up` printed the place of.
+  const password = secret;
+  await on.goto(`${install.base}/t/${encodeURIComponent(install.task.id)}#approve`);
+  const approve = on.locator("form.approve-form").first();
+  await waitFor(approve, "the approval form");
+  await on.evaluate(() => { for (const one of document.querySelectorAll("details")) one.open = true; });
+  await approve.locator('input[name="token"]').fill(password);
+  await Promise.all([on.waitForNavigation(), approve.locator('button[type="submit"]').first().click()]);
+  const said = (await on.locator(".problem, [role=alert]").allInnerTexts().catch(() => [])).join(" | ");
+  await on.goto(`${install.base}/chat?task=${encodeURIComponent(install.task.id)}`);
+  await until("the approval to take", async () => (await stepNow()) !== "approve", { timeoutMs: 30_000, seen: async () => `step ${await stepNow()}; the approval page said: ${said.slice(0, 300)}` });
+  for (const step of ["build", "checks"]) {
+    await until(`the first task to reach ${step}`, async () => { const now = await stepNow(); return now === step || ["checks", "ready"].includes(now); }, { timeoutMs: 6 * 60_000, everyMs: 1000, seen: stepNow });
+    const now = await stepNow();
+    if (now === step) await capture(step);
+  }
+  // The build's result: Ready, or held with its reason. Either way the timeline says where, never further than it is.
+  await until("the first build's result", async () => freshRows(install.db, "SELECT 1 FROM task WHERE state = 'done'").length > 0, { timeoutMs: 6 * 60_000, everyMs: 2000, seen: stepNow });
+  await on.reload();
+  await until("the timeline to show the result", async () => ["ready", "checks"].includes(await stepNow()), { timeoutMs: 30_000, seen: stepNow });
+  const ended = await stepNow();
+  if (ended === "checks" && await on.locator('[data-first-task-journey] [data-step="checks"][data-state="stuck"]').count() === 0) throw new Error("a held result isn't marked at Checks");
+  await bothSizes(on, `3-task-result-${ended}`);
+  // After the first Ready result: one card offers the phone.
+  await on.goto(`${install.base}/chat`);
+  await waitFor(on.locator("[data-phone-card]"), "the phone card after the first Ready result", { timeoutMs: 30_000 });
+  const phone = await on.locator("[data-phone-card]").innerText();
+  if (!/Pair Telegram/.test(phone) || !/Tailscale/.test(phone)) throw new Error(`the phone card: ${phone}`);
+  await bothSizes(on, "4-phone");
+  return { result: ended };
+});
+
+await journey("onboarding", "With no agent signed in, Chat shows the exact install and sign-in command and turns the lead on by itself", [], async () => {
+  if (realClaude === null) throw new Skip("needs Claude Code installed and signed in on this computer (to sign in partway through)");
+  const install = fresh.none = await freshInstall("none", { claude: false });
+  const context = await w.browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
+  const on = await context.newPage();
+  w.openPages.push(on);
+  try {
+    await on.goto(install.link);
+    if (new URL(on.url()).pathname !== "/chat") throw new Error(`the link landed on ${on.url()}`);
+    const command = process.platform === "win32" ? "npm install -g @anthropic-ai/claude-code; claude auth login" : "npm install -g @anthropic-ai/claude-code && claude auth login";
+    await waitFor(on.locator("[data-sign-in-command] code", { hasText: command }), "the exact install and sign-in command", { timeoutMs: 30_000, seen: async () => (await on.locator("main").innerText()).slice(0, 400) });
+    if (await on.locator('form[action="/chat/config"], input[type="password"]').count() > 0) throw new Error("Chat shows the setup form or asks for a password");
+    await waitFor(on.locator("[data-first-run-recheck]"), "the note that it checks again on its own");
+    await bothSizes(on, "5-no-agent");
+    // The person runs the command in a terminal; nobody touches the page. It asks again on its own and the lead turns on.
+    let loads = 0;
+    on.on("load", () => { loads += 1; });
+    install.signIn();
+    await waitFor(on.locator("[data-lead-line]"), "the lead to turn on by itself", { timeoutMs: 60_000, seen: async () => (await on.locator("main").innerText()).slice(0, 400) });
+    if (loads === 0) throw new Error("the page did not update itself");
+    if (await on.locator("[data-workspace-composer] textarea").count() !== 1) throw new Error("no composer once the lead is on");
+    await bothSizes(on, "6-no-agent-then-on");
+  } finally { await context.close(); w.openPages.splice(w.openPages.indexOf(on), 1); }
+});
+
+await journey("onboarding", "Another address shows what it is, where Toolroll answers, and the exact command", [], async () => {
+  const install = fresh.claude ?? fresh.none ?? await freshInstall("host", { claude: false });
+  const other = await w.browser.browserType().launch({ args: [`--host-resolver-rules=MAP studio.lan 127.0.0.1`] });
+  try {
+    for (const [colorScheme, width, height] of [["light", 1440, 900], ["dark", 390, 844], ["dark", 1440, 900], ["light", 390, 844]]) {
+      const context = await other.newContext({ viewport: { width, height }, colorScheme, deviceScaleFactor: 1 });
+      const on = await context.newPage();
+      const answer = await on.goto(`http://studio.lan:${install.port}/chat`);
+      if (answer.status() !== 421) throw new Error(`studio.lan answered ${answer.status()}`);
+      const text = await on.locator("main").innerText();
+      const command = `toolroll up --port ${install.port} --allow-host studio.lan:${install.port}`;
+      if (!text.includes(`You opened it at studio.lan:${install.port}`) || !text.includes(command)) throw new Error(`the page says: ${text}`);
+      const overflow = await on.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+      if (overflow > 1) throw new Error(`the page scrolls sideways at ${width}`);
+      await on.screenshot({ path: join(w.out, `onboarding-7-wrong-host-${colorScheme}-${width}.png`) });
+      await context.close();
+    }
+    // localhost and 127.0.0.1 on the served port need nothing.
+    for (const host of ["localhost", "127.0.0.1"]) {
+      const answer = await fetch(`http://${host}:${install.port}/login`);
+      if (answer.status !== 200) throw new Error(`${host} answered ${answer.status}`);
+    }
+  } finally {
+    await other.close();
+    for (const one of [fresh.claude, fresh.none]) one?.stop();
+  }
+});
+
 standIn.close(); standIn.closeAllConnections(); idpServer.close(); idpServer.closeAllConnections();
 await w.finish(group === null ? "Toolroll end to end" : `Toolroll end to end: ${group}`);
 for (const [name, one] of Object.entries(GROUPS)) {
-  const counted = [...placed.values()].filter(each => each === name).length;
+  const counted = [...placed.values()].filter(each => each.includes(name)).length;
   if (counted !== one.journeys) { console.error(`Group ${name} has ${counted} journeys, not the ${one.journeys} GROUPS lists`); process.exitCode = 1; }
 }

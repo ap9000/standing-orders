@@ -156,6 +156,12 @@ export async function runFlowSteps(store: Store, repo: string, now: Date, io: St
       if (card.waiting !== waiting) store.updateFlowCard(card.id, { waiting }, now);
       continue;
     }
+    // A script an imported flow brought waits until a person approves it, like any change to what runs here.
+    if (script !== null && script.held !== null) {
+      const waiting = `The ${script.name} script came with an imported flow. Approve it on the Scripts panel to run it.`;
+      if (card.waiting !== waiting) store.updateFlowCard(card.id, { waiting }, now);
+      continue;
+    }
     // A script waits for the secrets it names (v90), and runs on its own once they're saved.
     const missing = stage.kind === "check" ? (stage.secrets ?? []).filter(name => readFlowSecrets(io.dir, repo)[name] === undefined) : [];
     if (missing.length > 0) {

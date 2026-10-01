@@ -94,7 +94,7 @@ export const STARTER_FLOWS: readonly StarterFlow[] = [
 ];
 
 /** The morning plane review's steps: find the cause, fix it, open a pull request; any failure waits for a person. */
-function planeReviewSteps(own: boolean): FlowStepInput[] {
+export function planeReviewSteps(own: boolean): FlowStepInput[] {
   const where = own
     ? "This project is Toolroll itself, so the fix belongs here. Find the root cause in this code: cite the files and lines, say why it happened, and say what change fixes it."
     : "This project uses Toolroll; it isn't Toolroll's own code. Find the root cause. If it is in this project's code, cite the files and lines and say what change fixes it. If it is in Toolroll or its settings (a sign-in, a plan limit, a chat app, an integration, the worker), say exactly what to change in Toolroll's settings, and start the report with “No build needed”.";

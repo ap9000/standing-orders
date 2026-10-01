@@ -111,6 +111,21 @@ describe("check output progress", () => {
     passing.feed("✅ console  0.2 min\n✅ mail     0.1 min\n\n2 of 2 groups passed in 0.2 min — /tmp/out\n");
     expect(passing.finish()!.line).toBe("unit ✓ 1 · flows ✓ 1 · app ✓ 1/2 · 2/2 groups");
   });
+
+  test("the release check's flows in groups, then app's groups, then its summary with how long each part took", () => {
+    const tracker = new CheckProgressTracker(() => undefined);
+    tracker.feed("== typecheck\n> tsc --noEmit\n== build\n> tsc -p tsconfig.build.json\n== unit\n Test Files  2 passed (2)\n== flows\nRunning 2 groups at once: build, triggers\n");
+    tracker.feed("[build   ] [flows]     4s  PASS  Sign in (4 s)\n[triggers] [flows]     5s  PASS  Sign in (5 s)\n[triggers] [flows]    50s  2 passed, 0 failed, 0 skipped — r\n");
+    tracker.feed("[build   ] [flows]    90s  PASS  A real build (80 s)\n[build   ] [flows]    91s  2 passed, 0 failed, 0 skipped — r\n");
+    tracker.feed("✅ build     1.5 min\n✅ triggers  0.8 min\n\n2 of 2 groups passed in 1.5 min — /tmp/flows\n");
+    expect(tracker.snapshot().line).toBe("unit ✓ 2 · flows ✓ 4 · 2/2 groups · app …");
+    tracker.feed("== app\nRunning 2 groups at once: mail, follow-ups\n[mail      ] [app]  9s  PASS  Email inbox (9 s)\n[mail      ] [app]  10s  1 passed, 0 failed, 0 skipped — r\n");
+    tracker.feed("[follow-ups] [app]  9s  FAIL  Follow-ups: timed out\n[follow-ups] [app]  10s  0 passed, 1 failed, 0 skipped — r\n");
+    tracker.feed("✅ mail        0.2 min\n❌ follow-ups  0.2 min\n\n1 of 2 groups passed in 0.2 min — /tmp/app\n");
+    tracker.feed("== summary\nplan: a full check was asked for\nunit: exit 0\n Test Files  2 passed (2)\nflows: exit 0\napp: exit 1\n");
+    tracker.feed("took: typecheck 5 s, build 8 s, unit 4.1 min, flows 1.5 min, app 0.2 min; whole check 4.3 min\n");
+    expect(tracker.finish()!.line).toBe("unit ✓ 2 · flows ✓ 4 · 2/2 groups · app ✕ 1/2 · 1/2 groups");
+  });
 });
 
 describe("saved and delivered progress", () => {

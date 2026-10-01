@@ -44,9 +44,13 @@ export function leadBriefHtml(brief: AssignmentCatchUp): string {
     // it says what the person or the crew is doing next.
     const quiet = group.title === 'Finished';
     // A state chip that repeats its group's heading says nothing new.
-    const stateChip = (state: string) => { const words = STATE_WORDS[state] ?? state; return words === group.title ? '' : `<span class="lead-brief-state lead-brief-state--${state}">${escape(words)}</span>`; };
+    const stateChip = (state: string, detail?: string) => {
+      // Replaced, never "Cancelled".
+      const words = state === 'cancelled' && /^Replaced by \S+/.test(detail ?? '') ? detail!.replace(/\.$/, '') : STATE_WORDS[state] ?? state;
+      return words === group.title ? '' : `<span class="lead-brief-state lead-brief-state--${state}">${escape(words)}</span>`;
+    };
     return [`<section><h3>${group.title}</h3><ul>${entries.map(one => `<li><a href="/chat?task=${encodeURIComponent(one.rootId)}">${escape(one.title)}</a>` +
-      stateChip(one.state) +
+      stateChip(one.state, one.detail) +
       (quiet ? '' : `<span class="lead-brief-detail">${escape(publicChatText(one.detail || one.outcome || '', 160))}</span>`) + `</li>`).join('')}</ul></section>`];
   });
   return `<section class="lead-brief" aria-label="Project catch-up"><h2>Catch up</h2>${sections.length ? sections.join('') : '<p class="meta">Nothing needs you right now.</p>'}${brief.assignments.length > 3 || brief.omissions.candidateScanLimited || brief.omissions.assignments > 0 ? '<a href="/work">See all tasks</a>' : ''}</section>`;

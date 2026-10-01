@@ -2,7 +2,8 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { FirstRun, withSuggestion } from "./first-run.js";
+import { FirstRequest, FirstRun, Journey, PhoneCard, rechecked, withSuggestion } from "./first-run.js";
+import { firstTaskJourney } from "../first-run.js";
 import type { BrowserFirstRun } from "../browser-workspace.js";
 
 const signedOut = (): BrowserFirstRun => ({
@@ -22,38 +23,43 @@ const signedOut = (): BrowserFirstRun => ({
 let root: Root | null = null;
 beforeEach(() => { document.body.innerHTML = ""; vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true); });
 afterEach(async () => { if (root) await act(async () => root!.unmount()); root = null; vi.restoreAllMocks(); vi.unstubAllGlobals(); });
-async function mount(firstRun: BrowserFirstRun, onDraft?: (text: string) => void) {
-  const element = document.createElement("div"); document.body.append(element); root = createRoot(element);
-  await act(async () => root!.render(createElement(FirstRun, { firstRun, onDraft })));
+async function render(element: ReturnType<typeof createElement>) {
+  const host = document.createElement("div"); document.body.append(host); root = createRoot(host);
+  await act(async () => root!.render(element));
 }
+const mount = (firstRun: BrowserFirstRun) => render(createElement(FirstRun, { firstRun }));
 
 test("three steps, each done or with its one action", async () => {
-  await mount(signedOut(), () => {});
+  await mount(signedOut());
   const rows = [...document.querySelectorAll("[data-step]")];
   expect(rows.map(row => [row.getAttribute("data-step"), row.getAttribute("data-done")])).toEqual([["agent", "false"], ["project", "true"], ["task", "false"]]);
   expect(rows[1]!.querySelector("a, button, code")).toBeNull();
   expect(rows[2]!.querySelector("a")!.getAttribute("href")).toBe("/tasks/new");
 });
 
-test("with no agent signed in, the sandbox and the sign-in command sit side by side, each said once", async () => {
-  await mount(signedOut(), () => {});
+test("with no agent signed in, the sign-in command comes first and the sandbox beside it, each said once", async () => {
+  await mount(signedOut());
   const choices = document.querySelector("[data-first-run-choices]")!;
-  expect([...choices.children].map(one => one.querySelector("code")!.textContent)).toEqual(["npx toolroll demo", "claude auth login"]);
+  expect([...choices.children].map(one => one.querySelector("code")!.textContent)).toEqual(["claude auth login", "npx toolroll demo"]);
   expect([...document.querySelectorAll("code")].filter(one => one.textContent === "claude auth login")).toHaveLength(1);
 });
 
 test("before this machine's sign-in check answers, the agent step says Checking and offers nothing", async () => {
-  await mount({ ...signedOut(), steps: [{ key: "agent", title: "Agent signed in", done: false, action: null, checking: true }, ...signedOut().steps.slice(1)], sandbox: null }, () => {});
+  await mount({ ...signedOut(), steps: [{ key: "agent", title: "Agent signed in", done: false, action: null, checking: true }, ...signedOut().steps.slice(1)], sandbox: null });
   const agent = document.querySelector('[data-step="agent"]')!;
   expect(agent.textContent).toBe("Agent signed in: checkingChecking…");
   expect(agent.querySelector("code, a, button")).toBeNull();
   expect(document.querySelector("[data-first-run-choices]")).toBeNull();
 });
 
-test("a tap drafts the task in the composer and files nothing", async () => {
+test("above the composer: how it works in one sentence, three first tasks, and the one line about the lead", async () => {
   const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);
   const drafted: string[] = [];
-  await mount(signedOut(), text => drafted.push(text));
+  await render(createElement(FirstRequest, { firstRun: { ...signedOut(), intro: "Ask for a change. The lead writes a short plan; you approve it.", lead: { words: "The lead uses your Claude Code sign-in", href: "/settings/lead" } }, onDraft: (text: string) => drafted.push(text) }));
+  expect(document.querySelector("[data-how-it-works]")!.textContent).toBe("Ask for a change. The lead writes a short plan; you approve it.");
+  const lead = document.querySelector("[data-lead-line]")!;
+  expect(lead.textContent).toBe("The lead uses your Claude Code sign-in · Change");
+  expect(lead.querySelector("a")!.getAttribute("href")).toBe("/settings/lead");
   const suggestions = [...document.querySelectorAll<HTMLButtonElement>("[data-first-tasks] button")];
   expect(suggestions.map(one => one.textContent)).toEqual(["#12 Login button does nothing", "Fix a lint warning", "Improve the README's setup section"]);
   expect(suggestions.every(one => one.type === "button" && one.closest("form") === null)).toBe(true);
@@ -62,9 +68,67 @@ test("a tap drafts the task in the composer and files nothing", async () => {
   expect(fetcher).not.toHaveBeenCalled();
 });
 
-test("without a composer to draft into, no suggestions are offered", async () => {
+test("the checklist itself offers no first tasks: they sit above the composer", async () => {
   await mount(signedOut());
   expect(document.querySelector("[data-first-tasks]")).toBeNull();
+});
+
+test("with no agent signed in, the page asks again on its own and shows the lead once it's on", async () => {
+  vi.useFakeTimers();
+  try {
+    const answers = [{ lead: "off", agent: false }, { lead: "on", agent: true }];
+    const fetcher = vi.fn(async () => ({ ok: true, json: async () => answers.shift() }));
+    const reload = vi.fn();
+    vi.stubGlobal("fetch", fetcher);
+    Object.defineProperty(window, "location", { configurable: true, value: { ...window.location, reload } });
+    await mount({ ...signedOut(), recheck: "/lead/status" });
+    expect(document.querySelector("[data-first-run-recheck]")!.textContent).toBe("Checking for a signed-in agent");
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(reload).not.toHaveBeenCalled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher.mock.calls[1]![0]).toBe("/lead/status");
+    expect(reload).toHaveBeenCalledTimes(1);
+  } finally { vi.useRealTimers(); }
+});
+
+test("a sign-in check counts only a lead that is on or an agent that is signed in", () => {
+  expect(rechecked({ lead: "on", agent: null })).toBe(true);
+  expect(rechecked({ lead: "off", agent: true })).toBe(true);
+  for (const answer of [{ lead: "off", agent: false }, { lead: "off", agent: null }, null, "on", {}]) expect(rechecked(answer)).toBe(false);
+});
+
+test("the first task's way to Ready fills in as it moves", async () => {
+  const states = (read: Parameters<typeof firstTaskJourney>[0], approved = false) => firstTaskJourney(read, approved).map(one => one.state);
+  expect(states({ stage: "planning" })).toEqual(["current", "todo", "todo", "todo", "todo"]);
+  expect(states({ stage: "queued" })).toEqual(["current", "todo", "todo", "todo", "todo"]);
+  expect(states({ stage: "needs-you", need: "approval" })).toEqual(["done", "current", "todo", "todo", "todo"]);
+  expect(states({ stage: "queued" }, true)).toEqual(["done", "done", "current", "todo", "todo"]);
+  expect(states({ stage: "building" }, true)).toEqual(["done", "done", "current", "todo", "todo"]);
+  expect(states({ stage: "checking" }, true)).toEqual(["done", "done", "done", "current", "todo"]);
+  expect(states({ stage: "finished" }, true)).toEqual(["done", "done", "done", "done", "done"]);
+  expect(states({ stage: "failed" }, true)).toEqual(["done", "done", "stuck", "todo", "todo"]);
+  expect(states({ stage: "needs-you", need: "other" }, true)).toEqual(["done", "done", "stuck", "todo", "todo"]);
+  expect(firstTaskJourney({ stage: "needs-you", need: "other" }, true, true).map(one => one.state)).toEqual(["done", "done", "done", "stuck", "todo"]);
+  await render(createElement(Journey, { steps: firstTaskJourney({ stage: "needs-you", need: "approval" }, false) }));
+  const list = document.querySelector("[data-first-task-journey]")!;
+  expect(list.getAttribute("aria-label")).toBe("Where this task is: You approve");
+  expect([...list.querySelectorAll("li")].map(one => one.textContent)).toEqual(["Plan", "You approve", "Build", "Checks", "Ready"]);
+  expect(list.querySelector('[aria-current="step"]')!.getAttribute("data-step")).toBe("approve");
+});
+
+test("after the first result, the phone: a chat app or this console over Tailscale, and Not now puts it away", async () => {
+  const fetcher = vi.fn(async () => ({ ok: true })); vi.stubGlobal("fetch", fetcher);
+  const apps = [{ label: "Telegram", href: "/settings/telegram" }, { label: "Slack", href: "/settings/slack" }, { label: "Discord", href: "/settings/discord" }, { label: "Teams", href: "/settings/teams" }];
+  await render(createElement(PhoneCard, { csrf: "c", phone: { chatApps: apps, tailnet: { address: "http://mac.tail1234.ts.net:4180/", restart: "toolroll up --host 0.0.0.0" }, dismissHref: "/onboarding/phone/dismiss" } }));
+  const card = document.querySelector("[data-phone-card]")!;
+  expect(card.querySelector('a[href="/settings/telegram"]')!.textContent).toBe("Pair Telegram");
+  expect([...card.querySelectorAll(".so-phone-others a")].map(one => one.textContent)).toEqual(["Slack", "Discord", "Teams"]);
+  expect([...card.querySelectorAll("[data-phone-tailnet] code")].map(one => one.textContent)).toEqual(["http://mac.tail1234.ts.net:4180/", "toolroll up --host 0.0.0.0"]);
+  await act(async () => (card.querySelector('button[type="submit"]') as HTMLButtonElement).click());
+  expect(document.querySelector("[data-phone-card]")).toBeNull();
+  expect(fetcher).toHaveBeenCalledWith("/onboarding/phone/dismiss", expect.objectContaining({ method: "POST" }));
 });
 
 test("a tapped first task never replaces what the person already typed", () => {

@@ -1,4 +1,6 @@
 import { maybeTriggerRepair } from "./dispose.js";
+import { CHECK_LEVEL_HINTS, CHECK_LEVEL_WORDS, isCheckLevel, liveQuickCommand, projectCheckLevel, quickVerifyKey, setProjectCheckLevel, setTaskCheckLevel, suggestQuickCommand } from "./check-levels.js";
+import { fileAddTestsTask, followUpChecksOf, requestFollowUpChecks, runFollowUpCheck, runWaitingChecks } from "./result-follow-ups.js";
 import { parseProtectedPaths } from "./approval-policy.js";
 import { rulesSummary } from "./approval-rules-ui.js";
 import { evidencePack, exportDay, ledgerExportChunks, standaloneEvidenceHtml, type LedgerExport } from "./evidence-pack.js";
@@ -38,6 +40,7 @@ import { validateScopeText } from "./task-text.js";
 import { runMemoryCommand } from "./memory-cli.js";
 import { runKnowledgeCommand } from "./knowledge-cli.js";
 import { FLOWS_VALUE_FLAGS, runFlowsCommand } from "./flows-cli.js";
+import type { FetchLike } from "./flow-share.js";
 import { runAssignmentCommand } from "./assignment-adapters.js";
 import { applyProjectProfile, runProjectCommand } from "./project-cli.js";
 import { pullRequestLines, runTaskMergeCommand, runTaskOutcomeCommand } from "./task-outcome-cli.js";
@@ -96,6 +99,7 @@ import { deleteProject, holdingsWords, projectHoldings, projectRunning } from ".
 import { pushPass } from "./push.js";
 import { chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, openSync, readFileSync, readSync, realpathSync, renameSync, unlinkSync, writeSync, writeFileSync, mkdirSync } from "node:fs";
 import { BRANCH_PREFIX, envTwins, envValue, existingOrFirst, namedPath, taskBranches } from "./names.js";
+import { claimActor, currentActor, parseLeadToken, withActor, type Actor } from "./actor.js";
 import { createServer as createNetServer } from "node:net";
 import { spawn as spawnChild } from "node:child_process";
 import { envelopeJson } from "./envelope.js";
@@ -143,6 +147,7 @@ import {
 } from "./dispatch.js";
 
 import { createDecisionServer } from "./serve.js";
+import { readTailnetNames } from "./tailnet.js";
 import {
   daemonLaunchCommand,
   daemonStatus,
@@ -248,7 +253,7 @@ import {
 import { mintCoordinator, revokeCoordinator, listCoordinators } from "./coordinator.js";
 import { serveMcp } from "./mcp.js";
 import { createInterface } from "node:readline";
-import { propose, approve, addApprover, authenticateApprover, describeScope, approvalOf, hashToken as hashApproverToken, profileFromJson, fileAndSealUnderMode, type ExecutionProfile, modeFilingCoverage, acceptanceLinesToInput, parseAcceptanceCriteria, splitAcceptanceRubric, rubricIsPlaceholder, isCommitSha } from "./scope.js";
+import { propose, approve, addApprover, authenticateAccount, authenticateApprover, describeScope, approvalOf, hashToken as hashApproverToken, profileFromJson, fileAndSealUnderMode, type ExecutionProfile, modeFilingCoverage, acceptanceLinesToInput, parseAcceptanceCriteria, splitAcceptanceRubric, rubricIsPlaceholder, isCommitSha } from "./scope.js";
 import { presetTerms, modeTermsJson, modeDigestOf, modeTermsFromJson, modeWords, MODE_MAX_DAYS, type ModeName } from "./modes.js";
 import { WorktreePool } from "./worktree.js";
 import { requestTaskStop, resumeTaskStop, taskControlOf } from "./task-control.js";
@@ -275,6 +280,7 @@ import { isDirectChatProvider, isSubscriptionChatProvider, priceOf, PRICED_MODEL
 import { resolvePhaseAgent, resolveScopeProfile, resolveScopeChain, resolveRouteCandidates, routeOfTask, INSTALLATION_SCOPE, type TaskRoute } from "./agentconfig.js";
 import { isRiskLevel, legOf, projectRoute, riskConsequence, routeDigestOf, routeWords, RISK_LEVELS, PHASES as ROUTE_PHASES, type ReadinessLookup, type ReadinessObservation, type RiskLevel, type RouteOverride, type RouteStamp } from "./phase-routing.js";
 import { observeProviderReadiness, reportProviderReadinessAuthed } from "./runner.js";
+import { effectiveConcurrency, maySlotTake, parseProjectConcurrency, PROJECT_CONCURRENCY_DEFAULT, ProjectPasses, projectConcurrency, saveProjectConcurrency, savedProjectConcurrency, type SlotFacts } from "./project-concurrency.js";
 import { clearWebhook, effectivePrimary, isMessagingChannel, loadConsoleUrl, loadPrimary, loadWebhookTargets, phoneOrigin, saveConsoleUrl, savePrimary, saveWebhook, webhookPass, SLACK_ENV, DISCORD_ENV } from "./webhooks.js";
 import { auditOf, inspectionOf, isProviderId, MONEY_CAPABILITIES, PROVIDER_IDS, validModelId, validateSpec, type ProviderAudit, type ProviderId, ALL_CREDENTIAL_ENV } from "./provider.js";
 import { attestProvider, attestationOf, versionInRange, type AttestOutcome, type AttestationRange } from "./attest.js";
@@ -347,6 +353,8 @@ export type OperateOptions = {
   flowTriggerIo?: Partial<TriggerIo>;
   /** Injected by tests: how flow check and update steps run commands and reach GitHub and Linear. */
   flowStepIo?: Partial<StepIo>;
+  /** Injected by tests: how `flows import` fetches a flow file's address. */
+  flowFetch?: FetchLike;
   /** Injected by tests: how `integrations` checks reach services (fetch, gh, sign-in checks, mail servers). */
   integrationIo?: Partial<IntegrationIo>;
   /** Injected by tests: the mate's provider fetch, key environment, and stdin lines. */
@@ -371,7 +379,11 @@ export const OPERATE_HELP = `toolroll — operating the queue
 
   toolroll status                    running, queued, ready results, release check and plan windows
   toolroll ready                     what could be dispatched right now
-  toolroll task add <title>          queue work
+  toolroll task add <title>          queue work (--replaces <id>: it replaces that task, which reads "Replaced by"; --checks quick|full|off overrides the project's checks)
+  toolroll lead token                mint the lead's credential for you (your password; --revoke ends it);
+                                        the lead passes it as --token, or TOOLROLL_LEAD_TOKEN, and its work pings nobody
+  toolroll task ask <id> --person <name> --why "<text>"
+                                        hand a task to a person: it pings them, and it is theirs
   toolroll task list [--view <v>] [--limit <n>] [--cursor <c>]   paginated saved task status
   toolroll task show <id>
   toolroll task wait <id> [--timeout <seconds>]
@@ -380,6 +392,9 @@ export const OPERATE_HELP = `toolroll — operating the queue
   toolroll project show              show the current project and credential reference
   toolroll project rules --repo <p>  a project's approval rules; an instance operator changes them with
                                         --not-requester on|off, --protect none|project, --protect-paths "a/**,b/**"
+  toolroll project concurrency [<n>] --repo <p>
+                                        how many of a project's tasks build at once (default 2, never past the
+                                        worker's capacity); an approver changes it with <n>
   toolroll task evidence <id>        the task's evidence pack as JSON (--html for a printable page; --out <file>)
   toolroll storage                   where the disk goes: database, build checkouts, releases, evidence
   toolroll storage clean [--yes]     preview removing finished tasks' clean checkouts (their branches stay); --yes removes them
@@ -393,6 +408,7 @@ export const OPERATE_HELP = `toolroll — operating the queue
   toolroll budget list|set|remove    monthly budgets (--all | --project <p> | --person <name> | --teammate <id>) --usd <n> [--alerts-only]
   toolroll notifications [quiet|all]   how chats reach you: only when you're needed (the default), or every step
   toolroll notifications digest <HH:MM>|off   one evening message: what finished, what waits, what failed
+  toolroll notifications mute|unmute --repo <p>   no pings for a project; the console and digest keep it
   toolroll retention show|preview    how long evidence, checkout records, chat and notifications are kept; what the daily sweep would remove
   toolroll retention set <kind> <period>   evidence|checkouts|chat|notifications, 30d|1y|forever (instance operator)
   toolroll backup now|list          back the database up now; list backups and how the last ones went
@@ -407,6 +423,10 @@ export const OPERATE_HELP = `toolroll — operating the queue
       [--pull-request]                  --pull-request also opens its pull request
   toolroll task merge <id> --as <you> --token <t>
                                         merge the task's pull request once checks pass
+      [--anyway]                        merge without waiting for the full check
+  toolroll task checks <id> [--level quick|full]
+                                        run checks on the result's exact commit now
+  toolroll task add-tests <id>       file a small task to write tests for that change
   toolroll task revise <id> --feedback "requested change"
   toolroll assignment show <task>    root, current work and exact handoff
   toolroll assignment updates        durable updates (--after <cursor>)
@@ -418,6 +438,7 @@ export const OPERATE_HELP = `toolroll — operating the queue
       claim/check use --token-env NAME or --token-file PATH for a coordinator;
       checking a receipt never approves work, accepts proof or deploys it
   toolroll task state <id> <state> [--reason <text>]   queued|running|done|failed|cancelled
+      [--replaced-by <id>]              cancelled because <id> replaces it: it reads "Replaced by <id>"
   toolroll task block <id> --on <id> <id> waits for <on>
   toolroll task unblock <id> --on <id>  stop waiting for <on>
   toolroll task next <id> [--undo]   move it to the front of ITS
@@ -655,7 +676,13 @@ Agents — which provider and model each phase runs on
                                         executable is missing, then retry
                                         this check once; approval requires
                                         its previewed setup digest
-  toolroll verify clear --repo <path> --as <you> --token <t>
+  toolroll verify clear --repo <path> --as <you> --token <t>   (--level quick clears the quick command)
+  toolroll verify level quick|full|off --repo <path> --as <you> --token <t>
+                                        how much checks after each build: Quick (the
+                                        quick command), Full, or Off (no check)
+  toolroll verify set --repo <path> --quick "<cmd>" --as <you> --token <t> [--yes]
+                                        approve the fast check Quick runs; verify show
+                                        suggests one from the project's scripts
   Pass flags still win for one pass: --provider/--model,
   --plan-provider/--plan-model, --repair-model. A routine instance is
   pinned at fire time and ignores all of them.
@@ -737,7 +764,8 @@ type Args = {
 export const TASK_ACTIONS = [
   "add", "list", "show", "wait", "state", "block", "unblock", "next", "steer", "assign",
   "reopen", "scope", "approve", "hold", "unhold", "require", "requeue", "regate", "plan",
-  "review", "accept", "repair", "route", "stop", "resume", "complete", "revise", "merge",
+  "review", "accept", "repair", "route", "stop", "resume", "complete", "revise", "merge", "ask",
+  "checks", "add-tests",
 ] as const;
 export const PUBLISH_ACTIONS = ["setup", "grant", "revoke", "status", "unblock", "rearm", "merge", "refire"] as const;
 export const CONFIG_ACTIONS = ["show", "set", "clear"] as const;
@@ -780,6 +808,10 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   // flows: templates, steps, scripts and cards.
   "template", "steps", "about", "language", "timeout-minutes", "body", "description", "zone",
   "token-env", "after", "repair-max-attempts", "consumer", "batch", "feedback", "source", "view", "cursor", "why", "supersedes", "decision", "sessions", "timeout",
+  // pings follow responsibility: replacements.
+  "replaced-by", "replaces",
+  // Check levels: a project's level, the quick command, a task's choice.
+  "quick", "level", "checks",
 ]);
 export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "json", "yes", "all", "local", "history", "latest-watch", "dry-run", "file", "allow-paid-fallback",
@@ -795,6 +827,10 @@ export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "pull-request",
   // up: the exact start-up details (containment) in the terminal too.
   "verbose",
+  // lead token: end the lead's credential.
+  "revoke",
+  // task merge: merge without waiting for the full check (Quick or Off results).
+  "anyway",
 ]);
 
 export function parseOperateArgs(argv: readonly string[], ownValues: ReadonlySet<string> = new Set()): Args | { error: string } {
@@ -840,7 +876,8 @@ export function parseOperateArgs(argv: readonly string[], ownValues: ReadonlySet
     // Explicit --name=value also carries arbitrary literal leading hyphens.
     const mintedToken = name === "token" && value !== undefined && /^[A-Za-z0-9_-]{43}$/.test(value);
     if (value === undefined || (equals === -1 && value.startsWith("--") && !mintedToken)) return { error: `--${name} needs a value` };
-    flags.set(name, value);
+    // `flows import --param a=1 --param b=2`: each value kept, one per line.
+    flags.set(name, name === "param" && typeof flags.get(name) === "string" ? `${flags.get(name)}\n${value}` : value);
     if (name === "repo") {
       for (const one of value.split(",").map(part => part.trim()).filter(part => part !== "")) repoList.push(one);
     }
@@ -910,6 +947,26 @@ export async function runOperate(
   } catch (error) {
     return databaseFailure(write, json, command, file, error);
   }
+  // The lead (a lead token, as --token or TOOLROLL_LEAD_TOKEN) acts for its owner in single commands; its work
+  // pings nobody. Anyone else who signs in inside one of these commands is who acted. Services name nobody.
+  const presentedFlag = text(flags, "token");
+  const flagLead = presentedFlag !== undefined && parseLeadToken(presentedFlag) !== null;
+  const envLead = envValue(process.env, "LEAD_TOKEN");
+  const presented = flagLead ? presentedFlag : LEAD_COMMANDS.has(command) && envLead !== undefined && envLead !== "" ? envLead : undefined;
+  let actor: Actor | null = null;
+  if (presented !== undefined) {
+    if (!LEAD_COMMANDS.has(command)) {
+      store.close();
+      return fail(write, json, command, "usage", `A lead token works for ${[...LEAD_COMMANDS].filter(one => one !== "lead").join(", ")}. Use your own sign-in for ${command}.`, EXIT.usage);
+    }
+    const lead = store.leadFor(presented);
+    if (lead === null) {
+      store.close();
+      return fail(write, json, command, "unauthenticated", "That lead token is not valid (revoked, replaced, or its owner can no longer approve). The owner mints a new one with: toolroll lead token", EXIT.refused);
+    }
+    if (flagLead) flags.delete("token");
+    actor = { account: lead.owner, lead: true };
+  }
   // v105: a Claude turn anywhere in this command says its plan's usage windows; keep the latest.
   const dropLimitSink = pushLimitSink(reading => store.recordProviderLimits(reading, new Date()));
 
@@ -920,7 +977,8 @@ export async function runOperate(
   const clock = options.now === undefined ? () => new Date() : () => now;
 
   try {
-    return await dispatch(command, positional, flags, {
+    const run = (): Promise<number> => dispatch(command, positional, flags, {
+      ...(actor === null ? {} : { leadToken: presented! }),
       store,
       write,
       json,
@@ -945,6 +1003,7 @@ export async function runOperate(
       ...(options.dispatchAdapter === undefined ? {} : { dispatchAdapter: options.dispatchAdapter }),
       ...(options.flowTriggerIo === undefined ? {} : { flowTriggerIo: options.flowTriggerIo }),
       ...(options.flowStepIo === undefined ? {} : { flowStepIo: options.flowStepIo }),
+      ...(options.flowFetch === undefined ? {} : { flowFetch: options.flowFetch }),
       ...(options.integrationIo === undefined ? {} : { integrationIo: options.integrationIo }),
       ...(options.shouldStop === undefined ? {} : { shouldStop: options.shouldStop }),
       ...(options.mateSeams === undefined ? {} : { mateSeams: options.mateSeams }),
@@ -955,6 +1014,7 @@ export async function runOperate(
       ...(options.onboardSeams === undefined ? {} : { onboardSeams: options.onboardSeams }),
       ...(options.upSeams === undefined ? {} : { upSeams: options.upSeams }),
     });
+    return await (LEAD_COMMANDS.has(command) ? withActor(actor, run) : run());
   } catch (error) {
     if (isDatabaseBusy(error)) return databaseFailure(write, json, command, file, error);
     return fail(write, json, command, "failed", describe(error), EXIT.failed);
@@ -964,7 +1024,12 @@ export async function runOperate(
   }
 }
 
+/** The short commands a lead token works for, and where whoever signs in is recorded as the actor. */
+const LEAD_COMMANDS: ReadonlySet<string> = new Set(["task", "assignment", "status", "ready", "brief", "peek", "check-progress", "notifications", "lead"]);
+
 type Context = {
+  /** The lead token this command runs under: it signs in as its owner. */
+  leadToken?: string;
   desktopIdentity?: string;
   /** A desktop service directory is state, never an implicitly enrolled project. */
   inferProjectFromCwd?: boolean;
@@ -993,6 +1058,8 @@ type Context = {
   flowTriggerIo?: Partial<TriggerIo>;
   /** Injected by tests: how flow check and update steps run commands and reach GitHub and Linear. */
   flowStepIo?: Partial<StepIo>;
+  /** Injected by tests: how `flows import` fetches a flow file's address. */
+  flowFetch?: FetchLike;
   integrationIo?: Partial<IntegrationIo>;
   /**
    * The stop fence (Codex M5-M8 audit, IV-1): set by the watch when a
@@ -1021,6 +1088,8 @@ type Context = {
   installBin?: string;
   onboardSeams?: OnboardSeams;
   upSeams?: { terminal?: boolean; env?: Record<string, string | undefined>; openBrowser?: (url: string) => void };
+  /** Test seam: this computer's tailnet names (production asks `tailscale status`). */
+  tailnetNames?: () => Promise<readonly string[]>;
 };
 
 
@@ -1110,6 +1179,8 @@ async function dispatch(
       return retentionCommand(positional, flags, context);
     case "notifications":
       return notificationsCommand(positional, flags, context);
+    case "lead":
+      return leadCommand(positional, flags, context);
     case "backup":
       return backupCommand(positional, flags, context);
     case "export":
@@ -1138,6 +1209,7 @@ async function dispatch(
     case "project":
       if (positional[0] === "rules") return projectRulesCommand(positional, flags, context);
       if (positional[0] === "delete") return projectDeleteCommand(positional, flags, context);
+      if (positional[0] === "concurrency") return projectConcurrencyCommand(positional, flags, context);
       return runProjectCommand(positional, flags, context);
     case "assignment":
       return runAssignmentCommand(positional, flags, context);
@@ -2356,10 +2428,15 @@ async function tickCommand(
   if (updateAdmissionPaused(store.raw())) return fail(write, json, "tick", "updating", UPDATE_PAUSED, EXIT.refused);
 
   const maxGiven = text(flags, "max");
-  const max = maxGiven === undefined ? 1 : Number(maxGiven);
-  if (!Number.isInteger(max) || max <= 0) {
+  const maxAsked = maxGiven === undefined ? 1 : Number(maxGiven);
+  if (!Number.isInteger(maxAsked) || maxAsked <= 0) {
     return fail(write, json, "tick", "usage", "--max takes a whole number of tasks", EXIT.usage);
   }
+  // The service's build lanes (project-concurrency.ts): a lane over its
+  // project's fair share still runs its housekeeping but starts no
+  // unattended build this pass; an extra lane only builds.
+  const max = flags.has("yield-builds") ? 0 : maxAsked;
+  const buildsOnly = flags.has("builds-only");
   const syncAgeGiven = text(flags, "sync-max-age");
   const syncMaxAgeMs = syncAgeGiven === undefined ? SYNC_MAX_AGE_MS : Number(syncAgeGiven) * 1000;
   if (!Number.isInteger(syncMaxAgeMs) || syncMaxAgeMs <= 0) {
@@ -2417,7 +2494,7 @@ async function tickCommand(
   // fireRoutine's own transaction, and skipped slots ledger and page
   // themselves there. This loop just reports.
   const routines: { routine: string; outcome: string; taskId?: string; detail?: string }[] = [];
-  for (const routine of store.dueRoutines(repo, clock())) {
+  for (const routine of buildsOnly ? [] : store.dueRoutines(repo, clock())) {
     // The stop fence (audit IV-1): a signal that landed mid-pass stops
     // every further admission — a routine not yet fired stays unfired.
     if (context.shouldStop?.() === true || context.shouldPauseAdmission?.() === true) break;
@@ -2439,7 +2516,7 @@ async function tickCommand(
   // Triggers first: a schedule, GitHub, Linear or another flow may start
   // cards, which then move in the same pass. Checking an outside service is
   // `gh` or one HTTPS request, never a model, and only when it is due.
-  const triggerPass = context.shouldStop?.() === true || context.shouldPauseAdmission?.() === true ? { added: 0, checked: 0, problems: [] }
+  const triggerPass = buildsOnly || context.shouldStop?.() === true || context.shouldPauseAdmission?.() === true ? { added: 0, checked: 0, problems: [] }
     : await runFlowTriggers(store, repo, clock(), { gh: context.flowTriggerIo?.gh ?? run, fetch: context.flowTriggerIo?.fetch ?? fetch, dir: context.flowTriggerIo?.dir ?? dirname(context.databaseFile),
       // A schedule's script (v90) runs like a code step: the same runner, in a clean folder beside the step copies.
       shell: context.flowTriggerIo?.shell ?? context.flowStepIo?.shell ?? run, scratch: context.flowTriggerIo?.scratch ?? context.flowStepIo?.scratch ?? join(pool, "flow-checks"),
@@ -2447,27 +2524,27 @@ async function tickCommand(
   // Replies to cards' emails (v91): read about once a minute, and only while
   // a card is in an email conversation. A reply moves a waiting card on here,
   // before its next step runs.
-  const replyPass = context.shouldStop?.() === true || context.shouldPauseAdmission?.() === true ? { read: 0, taken: 0, problem: null }
+  const replyPass = buildsOnly || context.shouldStop?.() === true || context.shouldPauseAdmission?.() === true ? { read: 0, taken: 0, problem: null }
     : await watchFlowReplies(store, clock(), { fetch: context.flowTriggerIo?.fetch ?? fetch, dir: context.flowTriggerIo?.dir ?? dirname(context.databaseFile),
       ...(context.flowTriggerIo?.mail === undefined ? {} : { mail: context.flowTriggerIo.mail }) });
   // Check and update steps run outside a model: an approved command in a
   // fresh copy of the card's work, or a comment on the issue it came from.
-  const stepPass = context.shouldStop?.() === true || context.shouldPauseAdmission?.() === true ? { ran: 0, problems: [] }
+  const stepPass = buildsOnly || context.shouldStop?.() === true || context.shouldPauseAdmission?.() === true ? { ran: 0, problems: [] }
     : await runFlowSteps(store, repo, clock(), {
       gh: context.flowStepIo?.gh ?? run, git: context.flowStepIo?.git ?? git, shell: context.flowStepIo?.shell ?? run, fetch: context.flowStepIo?.fetch ?? fetch,
       dir: context.flowStepIo?.dir ?? dirname(context.databaseFile), scratch: context.flowStepIo?.scratch ?? join(pool, "flow-checks"), base,
       ...(context.evidenceRoot === undefined ? {} : { evidenceRoot: context.evidenceRoot }),
     });
-  const flowPass = advanceFlows(store, repo, clock(), context.evidenceRoot === undefined ? {} : { evidenceRoot: context.evidenceRoot });
+  const flowPass: ReturnType<typeof advanceFlows> = buildsOnly ? { moved: 0, filed: [], problems: [] } : advanceFlows(store, repo, clock(), context.evidenceRoot === undefined ? {} : { evidenceRoot: context.evidenceRoot });
   // Each AI teammate's daily summary to its manager (v92), once, after 5 pm; its weekly report (v97), Monday mornings.
-  try { sendTeammateSummaries(store, repo, clock()); sendTeammateWeeklies(store, repo, clock()); } catch (error) { flowPass.problems.push(`teammate summaries: ${error instanceof Error ? error.message : "could not send"}`); }
+  if (!buildsOnly) try { sendTeammateSummaries(store, repo, clock()); sendTeammateWeeklies(store, repo, clock()); } catch (error) { flowPass.problems.push(`teammate summaries: ${error instanceof Error ? error.message : "could not send"}`); }
   // Undoing a teammate's tool call asked for in chat (v97): made here, as the person who asked.
-  if (context.shouldStop?.() !== true) {
+  if (!buildsOnly && context.shouldStop?.() !== true) {
     try { await runRequestedUndos(store, {}, clock()); }
     catch (error) { flowPass.problems.push(`teammate undo: ${error instanceof Error ? error.message : "could not run"}`); }
   }
   // Tools connected by signing in: a sign-in that runs out within ten minutes is renewed here, so a build or a teammate's call starts with a fresh one.
-  if (context.shouldStop?.() !== true) {
+  if (!buildsOnly && context.shouldStop?.() !== true) {
     try { flowPass.problems.push(...(await refreshConnections(store, [repo], clock(), context.flowStepIo?.fetch === undefined ? {} : { fetcher: context.flowStepIo.fetch })).problems); }
     catch (error) { flowPass.problems.push(`tool sign-ins: ${error instanceof Error ? error.message : "could not renew"}`); }
   }
@@ -2479,7 +2556,7 @@ async function tickCommand(
   // races recover by CAS, and an ANSWERED question re-admits its parked
   // agent — fresh claim, fresh slot, remaining budget only, the SAME
   // verified checkout on the SAME runner (finding 29's custody rule).
-  recoverContests(store, clock());
+  if (!buildsOnly) recoverContests(store, clock());
   // Expired ceremony nonces are litter with a bound (round-3 finding 30):
   // the mint refuses past 50 open per approver, so the sweep keeps the
   // ceiling meaningful rather than letting dead rows consume it.
@@ -2487,8 +2564,10 @@ async function tickCommand(
   // Decided tournaments give their checkouts back (stage 6) — this runner's
   // custody only; a checkout that will not release cleanly is flagged and
   // paged, never force-cleaned. Undecided ones escalate once at 14 days.
-  await sweepContestCleanup(store, path => worktrees.release(path, clock()), runner, clock());
-  escalateOverdueContests(store, clock());
+  if (!buildsOnly) {
+    await sweepContestCleanup(store, path => worktrees.release(path, clock()), runner, clock());
+    escalateOverdueContests(store, clock());
+  }
   const resumed: TickOutcome[] = [];
   // v105: monthly budgets, read when first needed and again after any build (its spend counts): a used-up hard-stop
   // budget holds back new work billed to an API key, on every road below.
@@ -2513,7 +2592,7 @@ async function tickCommand(
     }
     return null;
   };
-  for (const waiting of store.contestsInStates(["decision-wait"])) {
+  for (const waiting of buildsOnly ? [] : store.contestsInStates(["decision-wait"])) {
     if (context.shouldStop?.() === true || context.shouldPauseAdmission?.() === true) break;
     // D1 belt-and-braces (external dispatch, finding 41): a mirror and a
     // contest should never coexist; if one ever does, its race resumes
@@ -2796,7 +2875,7 @@ async function tickCommand(
   // uses, before any admission can re-tag or race it. Advancing here lands
   // the cycle in pending-admission for THIS pass's chain admission below.
   // One shared piece with the fault tests (F+G review, finding 5).
-  store.reconcileStrandedChains(repo, clock());
+  if (!buildsOnly) store.reconcileStrandedChains(repo, clock());
 
   // The DISPATCH view of the queue (queue columns, v19): this runner's own
   // reserved work first, then the shared queue; work reserved for other
@@ -4235,6 +4314,11 @@ async function tickCommand(
         // not a break, not a strike; the task waits under the stop's hold.
         dispatched.push({ id, outcome: "stopped", reason: `stop:${disposition.stopRun}`, branch, worktree: leased.worktree.path });
         break;
+      case "handed-back":
+        // The service is stopping: the work is kept and the task requeued
+        // to resume on the next pass — not a break, not a strike.
+        dispatched.push({ id, outcome: "stopped", reason: "service-stop", detail: result.ok ? "" : result.message.slice(0, 200), branch, worktree: leased.worktree.path });
+        break;
       case "invariant":
         dispatched.push({ id, outcome: "failed", reason: disposition.reason });
         broke++;
@@ -4250,7 +4334,7 @@ async function tickCommand(
   // paid-fallback grant + the single-use pending edge); this loop carries
   // only claim, worktree, and rail, and its run then re-proves the
   // chain-entry dispatch proof inside build() before any money moves.
-  for (const pending of store.pendingChainAdmissions(repo)) {
+  for (const pending of buildsOnly ? [] : store.pendingChainAdmissions(repo)) {
     if (context.shouldStop?.() === true || context.shouldPauseAdmission?.() === true) break;
     if (built >= max) break;
     // v105: a fallback billed to an API key spends dollars: a used-up budget holds it like any new work.
@@ -4432,6 +4516,9 @@ async function tickCommand(
       case "stopped":
         dispatched.push({ id: pending.taskId, outcome: "stopped", reason: `stop:${disposition.stopRun}`, branch, worktree: leased.worktree.path });
         break;
+      case "handed-back":
+        dispatched.push({ id: pending.taskId, outcome: "stopped", reason: "service-stop", branch, worktree: leased.worktree.path });
+        break;
       case "parked":
         dispatched.push({ id: pending.taskId, outcome: "parked", reason: `decision:${disposition.decisionId}`, worktree: leased.worktree.path });
         parked++;
@@ -4452,7 +4539,7 @@ async function tickCommand(
   // Only a co-located coordinator can hold the session, and everything
   // else (liveness, one attempt, the final proof at the parent's exact
   // head) is re-proved on the way in.
-  if (context.heldCoordinator !== undefined) {
+  if (context.heldCoordinator !== undefined && !buildsOnly) {
     for (const continuation of store.openContinuationAuthorizations(runner)) {
       if (context.shouldStop?.() === true || context.shouldPauseAdmission?.() === true) break;
       const watching = attendedLivenessState(
@@ -4657,7 +4744,7 @@ async function tickCommand(
 
   // Retire queued model-review work without creating a run or a passing verdict.
   // Reauthenticate inside the write transaction and touch only admitted projects.
-  store.transact(() => {
+  if (!buildsOnly) store.transact(() => {
     const current = authenticate(store, runner, token);
     if (!current.ok) return;
     for (const request of store.openReviewRequests()) {
@@ -4667,7 +4754,7 @@ async function tickCommand(
     }
   });
   // Existing worker pass owns durable lead handoffs; reads never create events.
-  syncAssignmentHandoffs(store, clock(), auth.runner.repos, context.evidenceRoot);
+  if (!buildsOnly) syncAssignmentHandoffs(store, clock(), auth.runner.repos, context.evidenceRoot);
 
   const summary = () => {
     const lines = [`Considered ${considered}, built ${built}, parked ${parked}, broke ${broke}.`];
@@ -5303,6 +5390,10 @@ async function startConsole(options: {
     ...(options.localRunner === undefined ? {} : { localRunner: options.localRunner }),
     poolRoot: options.poolRoot,
     ...(options.allowedHosts === undefined ? {} : { allowedHosts: options.allowedHosts }),
+    // This computer's own tailnet names are admitted on the served port without an --allow-host (onboarding).
+    tailnetNames: context.tailnetNames ?? (() => readTailnetNames()),
+    // With no lead set up yet, the agent signed in on this computer runs it (onboarding).
+    leadByDefault: true,
     ...(options.setupCode === undefined ? {} : { setupCode: options.setupCode }),
     ...(options.repos === undefined ? {} : { repos: options.repos }),
     ...(options.projectRoots === undefined ? {} : { projectRoots: options.projectRoots }),
@@ -6757,8 +6848,11 @@ async function verifyCommand(
       return fail(write, json, "verify show", "usage", "which repo? --repo <path>", EXIT.usage);
     }
     const live = store.liveVerifyCommand(repo);
+    const quick = liveQuickCommand(store, repo);
+    const level = projectCheckLevel(store, repo);
+    const suggestion = quick === null ? suggestQuickCommand(repo) : null;
     if (json) {
-      write(envelopeJson({ ok: true, command: "verify show", repo, verify: live }));
+      write(envelopeJson({ ok: true, command: "verify show", repo, verify: live, quick, level: level.level, ...(suggestion === null ? {} : { suggestedQuick: suggestion }) }));
       return EXIT.ok;
     }
     write(
@@ -6766,12 +6860,37 @@ async function verifyCommand(
         ? `No verification command for ${repo}. A build's proof lands "attested" at best — nothing re-runs it.`
         : `${repo} re-runs after every commit:\n  ${live.command}\n  timeout ${Math.round(live.timeoutMs / 1000)}s · digest ${live.digest} · approved by ${live.approvedBy} at ${live.approvedAt}${live.recoverySetupDigest === null ? "" : `\n  self-healing on · approved setup ${live.recoverySetupDigest}`}`,
     );
+    write(`Check level: ${CHECK_LEVEL_WORDS[level.level]}${level.setBy === null ? " (not set; projects from before levels keep the full check)" : ` · set by ${level.setBy}`}`);
+    if (quick !== null) write(`Quick check:\n  ${quick.command}\n  timeout ${Math.round(quick.timeoutMs / 1000)}s · digest ${quick.digest} · approved by ${quick.approvedBy}`);
+    else if (level.level === "quick") write(`No quick command yet, so Quick runs the full check.${suggestion === null ? "" : ` Suggested from the project's scripts:\n  toolroll verify set --repo ${repo} --quick "${suggestion}"`}`);
     return EXIT.ok;
   }
 
-  if (action !== "set" && action !== "clear") {
-    return fail(write, json, "verify", "usage", "`toolroll verify [show|set --command <cmd> [--timeout-seconds <n>] [--self-heal --setup-digest <shown>] --yes|clear] --repo <path> --as <you> --token <t>`", EXIT.usage);
+  // An approver's act: the project's check level. The ledger keeps before → after.
+  if (action === "level") {
+    if (repo === undefined) return fail(write, json, "verify level", "usage", "which repo? --repo <path>", EXIT.usage);
+    const wanted = positional[1];
+    if (!isCheckLevel(wanted)) return fail(write, json, "verify level", "usage", "`toolroll verify level quick|full|off --repo <path> --as <you> --token <t>`", EXIT.usage);
+    const acting = await askCredentials(flags, context);
+    if (acting === null) return fail(write, json, "verify level", "usage", "changing a project's checks takes `--as <you> --token <t>`", EXIT.usage);
+    const authenticated = authenticateApprover(store, acting.name, acting.token, repo);
+    if (!authenticated.ok) return fail(write, json, "verify level", authenticated.reason, describeApproveFailure(authenticated.reason, repo), EXIT.refused);
+    const changed = setProjectCheckLevel(store, repo, wanted, acting.name, clock());
+    const runsFull = wanted === "quick" && liveQuickCommand(store, repo) === null;
+    return succeed(write, json, "verify level", { repo, level: wanted, before: changed.before, changed: changed.changed }, () => [
+      `${repo}: checks are ${CHECK_LEVEL_WORDS[wanted]}${changed.changed ? ` (was ${CHECK_LEVEL_WORDS[changed.before]})` : ""}. ${CHECK_LEVEL_HINTS[wanted]}`,
+      ...(runsFull ? [`No quick command is approved yet, so builds run the full check. Approve one with \`toolroll verify set --repo ${repo} --quick "<cmd>"\`.`] : []),
+      ...(wanted !== "full" ? ["The full check still runs when a pull request opens, and Merge waits for it unless a person merges anyway."] : []),
+    ]);
   }
+
+  if (action !== "set" && action !== "clear") {
+    return fail(write, json, "verify", "usage", "`toolroll verify [show|level quick|full|off|set --command <cmd>|--quick <cmd> [--timeout-seconds <n>] [--self-heal --setup-digest <shown>] --yes|clear [--level quick]] --repo <path> --as <you> --token <t>`", EXIT.usage);
+  }
+  // The quick command is its own approved grant beside the full one.
+  const quickValue = text(flags, "quick");
+  const quickClear = action === "clear" && text(flags, "level") === "quick";
+  const grantKey = repo === undefined ? undefined : quickValue !== undefined || quickClear ? quickVerifyKey(repo) : repo;
   if (repo === undefined) {
     return fail(write, json, `verify ${action}`, "usage", "which repo? --repo <path>", EXIT.usage);
   }
@@ -6786,13 +6905,22 @@ async function verifyCommand(
   }
 
   if (action === "clear") {
-    const cleared = store.clearVerifyCommand(repo, acting.name, clock());
+    const cleared = store.clearVerifyCommand(grantKey!, acting.name, clock());
+    if (quickClear) return succeed(write, json, "verify clear", { repo, cleared, level: "quick" }, () => [
+      cleared ? `Cleared the quick command — Quick builds of ${repo} run the full check now.` : `No quick command was set for ${repo}.`,
+    ]);
     return succeed(write, json, "verify clear", { repo, cleared }, () => [
       cleared ? `Cleared — builds of ${repo} land "attested" at best now; nothing re-runs.` : `Nothing was set for ${repo}.`,
     ]);
   }
 
-  const command = text(flags, "command");
+  const command = quickValue ?? text(flags, "command");
+  if (quickValue !== undefined && text(flags, "command") !== undefined) {
+    return fail(write, json, "verify set", "usage", "give the quick command with --quick \"<cmd>\" or the full one with --command, not both", EXIT.usage);
+  }
+  if (quickValue !== undefined && flags.get("self-heal") === true) {
+    return fail(write, json, "verify set", "usage", "--self-heal applies to the full command only", EXIT.usage);
+  }
   if (command === undefined || command.trim() === "") {
     return fail(write, json, "verify set", "usage", "--command <cmd> is what the plane re-runs after every commit", EXIT.usage);
   }
@@ -6835,6 +6963,7 @@ async function verifyCommand(
         command: "verify set",
         reason: "unconfirmed",
         repo,
+        ...(quickValue === undefined ? {} : { level: "quick" }),
         verifyCommand: command,
         timeoutSeconds,
         selfHeal,
@@ -6848,7 +6977,7 @@ async function verifyCommand(
       `  command  ${command}`,
       `  timeout  ${timeoutSeconds}s`,
       ``,
-      `Every FUTURE build of this repo re-runs this command unattended,`,
+      quickValue === undefined ? `Every FUTURE build of this repo re-runs this command unattended,` : `Every FUTURE Quick build of this repo runs this command unattended,`,
       `once, right after it commits — under an ALLOWLISTED environment`,
       `(PATH, HOME, locale, temp — no credentials). A pass lands the`,
       `build "verified"; a failure lands it "refuted", never blocked.`,
@@ -6894,7 +7023,7 @@ async function verifyCommand(
 
   const saved = store.setVerifyCommand(
     {
-      repo,
+      repo: grantKey!,
       command,
       timeoutMs: timeoutSeconds * 1000,
       approvedBy: acting.name,
@@ -6902,6 +7031,11 @@ async function verifyCommand(
     },
     clock(),
   );
+  if (quickValue !== undefined) {
+    return succeed(write, json, "verify set", { repo, level: "quick", digest: saved.digest, timeoutSeconds }, () => [
+      `Approved the quick check: Quick builds of ${repo} run \`${command}\` (digest ${saved.digest}, ${timeoutSeconds}s) right after commit.`,
+    ]);
+  }
   return succeed(write, json, "verify set", { repo, digest: saved.digest, timeoutSeconds, selfHeal }, () => [
     `Approved: builds of ${repo} re-run \`${command}\` (digest ${saved.digest}, ${timeoutSeconds}s) right after commit${selfHeal ? "; a missing required project executable gets one bounded approved-setup recovery" : ""}.`,
   ]);
@@ -8011,6 +8145,8 @@ async function runWatchLoop(args: {
   onReady?: () => void;
   /** The start's containment words; the exact status line when absent. */
   containmentLines?: (effective: EffectiveContainment) => readonly string[];
+  /** Shared by every project loop of one service, for fair scheduling. */
+  passes?: ProjectPasses;
 }): Promise<WatchLoopResult> {
   const { context, flags, runner, token, repo, progress } = args;
   const { store } = context;
@@ -8214,12 +8350,109 @@ async function runWatchLoop(args: {
 
   // Settings → Models: a quiet check of the public model lists and CLI
   // versions, only when the person turned it on. It never touches work.
+  // Follow-up checks (Run checks, and the full check a pull request waits for):
+  // each waiting request runs once, on its exact commit, in a fresh checkout.
+  const followUpChecks = startMaintenance({
+    intervalMs: 5_000,
+    shouldStop: stopping,
+    onError: error => progress(`watch: a follow-up check failed to run — ${describe(error)}; it is recorded on the result`),
+    run: async () => {
+      if (store.isDemo()) return;
+      const ran = await runWaitingChecks(store, context.evidenceRoot, { now: context.clock, shouldStop: stopping });
+      if (ran > 0) progress(`watch: ran ${ran} follow-up check(s)`);
+    },
+  });
+
   const modelWatch = startMaintenance({
     intervalMs: 15 * 60_000,
     shouldStop: stopping,
     onError: error => progress(`watch: the model check failed — ${describe(error)}; it retries later`),
     run: async () => { if (await modelWatchPass(store, context.clock())) progress("watch: checked models and CLI versions"); },
   });
+
+  // Parallel builds (project-concurrency.ts): this loop is the project's
+  // first build lane and keeps every housekeeping duty; extra lanes, up to
+  // the project's own number (never past the worker's capacity), only
+  // build — each attempt in its own checkout, each under its own claim,
+  // lease and run, so reconcile, retries, the update drain and status count
+  // every one. A lane over the project's fair share leaves the free slot to
+  // a project building fewer, until that project has had a pass to take it.
+  const passes = args.passes ?? new ProjectPasses();
+  const slotFacts = (yieldingSince: number | null): SlotFacts => {
+    const now = new Date();
+    const found = store.getRunner(runner);
+    const bound = new Set(found?.runner.repos ?? [repo]);
+    const saved = savedProjectConcurrency(context.databaseFile);
+    return {
+      repo,
+      capacity: found?.runner.capacity ?? 1,
+      running: store.liveClaimCountsByRepo(runner, now),
+      limitOf: one => saved.get(one) ?? PROJECT_CONCURRENCY_DEFAULT,
+      waiting: new Set(store.listReady(now, runner).map(one => one.repo).filter((one): one is string => one !== null && bound.has(one))),
+      yieldingSince,
+      passes,
+    };
+  };
+  const lanes: Promise<void>[] = [];
+  const buildLane = async (index: number): Promise<void> => {
+    const laneLines: string[] = [];
+    const laneContext: Context = { ...quietContext, write: line => laneLines.push(line) };
+    let yieldingSince: number | null = null;
+    let yieldingTo: string | null = null;
+    while (!stopping() && (deadline === null || Date.now() < deadline)) {
+      const seqBefore = store.wakeSeq();
+      let broke = false;
+      if (!paused()) {
+        const facts = slotFacts(yieldingSince);
+        const answer = index < effectiveConcurrency(facts.limitOf(repo), facts.capacity) ? maySlotTake(facts) : null;
+        if (answer !== null && answer.take) {
+          yieldingSince = null;
+          yieldingTo = null;
+          laneLines.length = 0;
+          let code: number = EXIT.failed;
+          try {
+            code = await tickCommand(passFlags({ "builds-only": "1" }), laneContext);
+          } catch (error) {
+            laneLines.push(JSON.stringify({ dispatched: [{ id: "?", outcome: "failed", reason: "lane", detail: describe(error) }] }));
+          }
+          passes.passed(repo);
+          if (code === EXIT.ok) {
+            built++;
+            progress(`watch: build ${index + 1} did work (${new Date().toISOString()})`);
+            continue;
+          }
+          if (code === EXIT.failed) {
+            brokeCount++;
+            broke = true;
+            progress(`watch: build ${index + 1} — ${brokenWords(laneLines)}`);
+          }
+        } else if (answer !== null && !answer.take && answer.why === "fair-share") {
+          if (yieldingSince === null) {
+            yieldingSince = passes.stamp();
+            store.bumpWake();
+          }
+          yieldingTo = answer.to ?? null;
+        } else {
+          yieldingSince = null;
+          yieldingTo = null;
+        }
+      }
+      if (!broke && store.wakeSeq() !== seqBefore) continue;
+      const seqIdle = store.wakeSeq();
+      const dozeUntil = Math.min(Date.now() + tickEveryMs, deadline ?? Number.MAX_SAFE_INTEGER);
+      const theirTurnEnded = (): boolean => yieldingTo !== null && yieldingSince !== null && passes.lastPass(yieldingTo) > yieldingSince;
+      while (!stopping() && Date.now() < dozeUntil && store.wakeSeq() === seqIdle && !theirTurnEnded()) {
+        await sleep(paused() ? 250 : 50);
+      }
+    }
+  };
+  const ensureLanes = (): void => {
+    const facts = slotFacts(null);
+    const wanted = effectiveConcurrency(facts.limitOf(repo), facts.capacity);
+    while (lanes.length + 1 < wanted && !stopping()) lanes.push(buildLane(lanes.length + 1));
+  };
+  let firstLaneYieldingSince: number | null = null;
+  let firstLaneYieldingTo: string | null = null;
 
   try {
     // Startup recovery still precedes the first dispatch.
@@ -8228,6 +8461,21 @@ async function runWatchLoop(args: {
       if (paused()) {
         await sleep(250);
         continue;
+      }
+      ensureLanes();
+      // This lane builds only within the project's number and its fair
+      // share; over either, its pass still does every housekeeping duty.
+      const share = maySlotTake(slotFacts(firstLaneYieldingSince));
+      const yieldBuilds = !share.take && share.why !== "capacity";
+      if (!share.take && share.why === "fair-share") {
+        if (firstLaneYieldingSince === null) {
+          firstLaneYieldingSince = passes.stamp();
+          store.bumpWake();
+        }
+        firstLaneYieldingTo = share.to ?? null;
+      } else {
+        firstLaneYieldingSince = null;
+        firstLaneYieldingTo = null;
       }
       const seqBefore = store.wakeSeq();
       const now = Date.now();
@@ -8241,7 +8489,8 @@ async function runWatchLoop(args: {
         lastTick = now;
         quiet.length = 0;
         store.expireOverdueDecisions(new Date());
-        const code = await tickCommand(passFlags(), quietContext);
+        const code = await tickCommand(passFlags(yieldBuilds ? { "yield-builds": "1" } : {}), quietContext);
+        passes.passed(repo);
         ticks++;
         if (code === EXIT.ok) {
           tickDidWork = true;
@@ -8341,12 +8590,18 @@ async function runWatchLoop(args: {
       // nothing to do). The 50ms poll is what keeps a stop prompt.
       const seqIdle = store.wakeSeq();
       const dozeUntil = Date.now() + Math.max(idleUntil, 0);
-      while (!stopping() && Date.now() < dozeUntil && store.wakeSeq() === seqIdle) {
+      const theirTurnEnded = (): boolean =>
+        firstLaneYieldingTo !== null && firstLaneYieldingSince !== null && passes.lastPass(firstLaneYieldingTo) > firstLaneYieldingSince;
+      while (!stopping() && Date.now() < dozeUntil && store.wakeSeq() === seqIdle && !theirTurnEnded()) {
         await sleep(50);
       }
     }
   } finally {
+    // Every build lane finishes or hands its attempt back before the
+    // loop's lease and episode end.
+    await Promise.all(lanes);
     await maintenance.stop();
+    await followUpChecks.stop();
     await modelWatch.stop();
     clearInterval(heartbeat);
     followController.abort();
@@ -8420,7 +8675,7 @@ async function watchCommand(
   const hardStop = () => {
     const terminated = terminateLiveProviders();
     if (terminated > 0) {
-      progress(`Hard stop: ${terminated} provider process group(s) terminated. Their runs finalize as failures; worktrees are preserved; fences keep late output out of every commit.`);
+      progress(`Hard stop: ${terminated} provider process group(s) terminated. Their work is saved and kept in each checkout, and each task resumes from it when the builder runs again; fences keep late output out of every commit.`);
     }
   };
   const stop = () => {
@@ -8643,8 +8898,11 @@ async function resolveUpApprover(
 
 /** The platform browser opener — detached, silent, never load-bearing. */
 function openBrowser(url: string): void {
+  // TOOLROLL_BROWSER_COMMAND names another program to open it with (it gets the address as its one argument).
+  const chosen = envValue(process.env, "BROWSER_COMMAND");
   const command =
-    process.platform === "darwin" ? ["open", url]
+    chosen !== undefined && chosen !== "" ? [chosen, url]
+    : process.platform === "darwin" ? ["open", url]
     : process.platform === "win32" ? ["cmd", "/c", "start", "", url]
     : ["xdg-open", url];
   try {
@@ -8900,8 +9158,12 @@ async function upCommand(
       EXIT.refused,
     );
   }
-  for (const repo of repos) progress(`repository  ${repo}`);
-  for (const root of projectRoots) progress(`projects    ${root}`);
+  // A person at a terminal reads three lines (onboarding); the folders are for --verbose, a service log, or an agent.
+  const quietStart = !json && !flags.has("verbose") && (context.upSeams?.terminal ?? process.stdout.isTTY === true) && !underAgent(context.upSeams?.env ?? process.env);
+  if (!quietStart) {
+    for (const repo of repos) progress(`repository  ${repo}`);
+    for (const root of projectRoots) progress(`projects    ${root}`);
+  }
 
   // 3. Reserve the port BEFORE any identity or enrollment mutation
   // (finding 7/19): a busy port must refuse while the world is untouched.
@@ -9095,7 +9357,7 @@ async function upCommand(
   const stopGraceMs = Number(text(flags, "stop-grace") ?? 30_000);
   const hardStop = () => {
     const terminated = terminateLiveProviders();
-    if (terminated > 0) progress(`Hard stop: ${terminated} provider process group(s) terminated.`);
+    if (terminated > 0) progress(`Stopped ${terminated} running build(s). Their work is saved, and each resumes when the builder starts again.`);
   };
   const stop = () => {
     if (stopping) {
@@ -9105,6 +9367,10 @@ async function upCommand(
     stopping = true;
     resolveStopped();
     for (const controller of followControllers) controller.abort();
+    const building = store.liveClaimCount(runnerName, clock());
+    if (building > 0) {
+      progress(`Stopping: ${building} build(s) running. Waiting up to ${Math.round(stopGraceMs / 1000)}s for them to finish; any still running then is saved and resumes when the builder starts again.`);
+    }
     graceTimer = setTimeout(hardStop, stopGraceMs);
     graceTimer.unref?.();
   };
@@ -9140,6 +9406,9 @@ async function upCommand(
     return containmentDetail || effective.refusal !== null ? [`watch: ${describeContainment(effective)}`] : [];
   };
   const loopResults = new Map<string, Promise<{ repo: string; result: WatchLoopResult }>>();
+  // One record of project passes for the whole service: fair scheduling
+  // across its projects (project-concurrency.ts).
+  const projectPasses = new ProjectPasses();
 
   const launchRepo = async (repo: string, bind: boolean): Promise<void> => {
     if (loopResults.has(repo) || stopping) return;
@@ -9167,6 +9436,7 @@ async function upCommand(
       isStopping: () => stopping,
       onFollowController: controller => followControllers.push(controller),
       containmentLines,
+      passes: projectPasses,
       onReady: () => {
         markReady();
         if (bind) progress(`${prefix(repo)}builder connected — queued work can start`);
@@ -9289,28 +9559,27 @@ async function upCommand(
       for (const line of handoffLines(upHandoff)) write(line);
       write("Run `toolroll onboard` inside a repository to add it and install the Toolroll skill for your agent.");
     } else {
+      // Three lines (onboarding): where it is, that it opens signed in, and what to do if it doesn't. The browser gets a
+      // one-time sign-in link (single use, ten minutes, this computer only); it is never printed. The password stays
+      // saved beside the database, for later and for other devices, and is never printed either.
+      const account = approverPlan2.approver;
+      const link = account === null || flags.has("no-open") ? null : console_.server.mintSignInLink(account);
+      const home = homedir();
+      const file = approverPlan2.passwordFile === null ? null : approverPlan2.passwordFile.startsWith(`${home}/`) ? `~${approverPlan2.passwordFile.slice(home.length)}` : approverPlan2.passwordFile;
+      const signInWords = account === null
+        ? `sign in as one of ${approverPlan2.approvers.join(", ")}`
+        : file === null ? `sign in as ${account} with your password` : `sign in as ${account}: the password is in ${file}`;
       write("");
-      write(`The console is on ${url}`);
-      if (approverPlan2.mintedPassword !== null && canPrompt) {
-        write(`  login     ${approverPlan2.approver} / ${approverPlan2.mintedPassword}`);
-        write(`  (also saved to ${approverPlan2.passwordFile})`);
-      } else if (approverPlan2.passwordFile !== null) {
-        write(`  login     ${approverPlan2.approver} — the password is in ${approverPlan2.passwordFile}`);
-      } else if (approverPlan2.approver !== null) {
-        write(`  login     ${approverPlan2.approver} — with your password`);
+      write(`Toolroll is on ${url}`);
+      if (link !== null) {
+        write("Opening it in your browser now, already signed in.");
+        write(`If it doesn't open, go to that address and ${signInWords}.`);
+        (context.upSeams?.openBrowser ?? openBrowser)(new URL(link, url).toString());
       } else {
-        write(`  login     one of: ${approverPlan2.approvers.join(", ")}`);
+        write(`${signInWords.charAt(0).toUpperCase()}${signInWords.slice(1)}.`);
+        write("Ctrl-C stops it.");
       }
-      write(
-        repos.length === 0
-          ? `  builder   ${runnerName} is ready — add a local folder or GitHub repository in Projects`
-          : `  builder   watching ${repos.length === 1 ? repos[0] : `${repos.length} repositories`}`,
-      );
-      if (projectRoots.length > 0) write(`  projects  new repositories under ${projectRoots.length === 1 ? projectRoots[0] : `${projectRoots.length} saved folders`} connect automatically`);
-      write("  Chat shows the steps to your first result.");
-      write("  Ctrl-C stops Toolroll on this machine.");
     }
-    if (!json && !flags.has("no-open") && terminal) (context.upSeams?.openBrowser ?? openBrowser)(url);
   }
 
   // 10. Supervise to the end.
@@ -10320,7 +10589,24 @@ async function statusCommand(
   const brokenIntegrations = await savedIntegrations(context).then(list => list.filter(one => one.state === "broken"), () => []);
   const brokenLine = integrationsBrokenLine(brokenIntegrations);
   const integrations = brokenIntegrations.length === 0 ? {} : { integrations: { broken: brokenIntegrations.map(one => ({ key: one.key, name: one.name, fix: one.action.kind === "fix" ? one.action.words : null })) } };
-  return succeed(context.write, context.json, command, { ...status, ...update, ...integrations }, () => [...renderInstallationStatus(status), ...(line === null ? [] : [line]), ...(brokenLine === null ? [] : [brokenLine])]);
+  const projects = projectBuildsStatus(context);
+  const projectsLine = projects.length === 0 ? null
+    : `Builds by project: ${projects.slice(0, 8).map(one => `${one.name} ${one.running} of ${one.limit}`).join(", ")}${projects.length > 8 ? ", …" : ""}`;
+  return succeed(context.write, context.json, command, { ...status, projects, ...update, ...integrations }, () => [...renderInstallationStatus(status), ...(projectsLine === null ? [] : [projectsLine]), ...(line === null ? [] : [line]), ...(brokenLine === null ? [] : [brokenLine])]);
+}
+
+/** Each known project's running builds against its limit: its own number, never past its workers' capacity. */
+function projectBuildsStatus(context: Context): { repo: string; name: string; running: number; limit: number }[] {
+  const now = context.clock();
+  const running = context.store.runningBuildsByRepo(now);
+  const saved = savedProjectConcurrency(context.databaseFile);
+  const workers = context.store.listRunners().filter(one => one.retiredAt === null);
+  const repos = [...new Set([...context.store.listProjects().map(one => one.path), ...context.store.knownRepos(), ...running.keys()])].sort();
+  return repos.map(repo => {
+    const capacities = workers.filter(one => one.repos.includes(repo)).map(one => one.capacity);
+    const setting = saved.get(repo) ?? PROJECT_CONCURRENCY_DEFAULT;
+    return { repo, name: projectName(repo), running: running.get(repo) ?? 0, limit: capacities.length === 0 ? setting : effectiveConcurrency(setting, Math.max(...capacities)) };
+  });
 }
 
 /** Where `integrations` looks: the installation's files beside the database, and every project it knows. */
@@ -10440,6 +10726,10 @@ function taskCommand(
         demo: context.store.isDemo(), credentials: () => askCredentials(flags, context), ...(context.publishExec === undefined ? {} : { exec: context.publishExec }) });
     case "add":
       return addTask(rest, flags, context);
+    case "checks":
+      return runTaskChecks(rest, flags, context);
+    case "add-tests":
+      return addTestsTask(rest, flags, context);
     case "list":
       return listTasks(flags, context);
     case "show":
@@ -10450,6 +10740,8 @@ function taskCommand(
       return taskEvidenceCommand(rest, flags, context);
     case "state":
       return stateTask(rest, flags, context);
+    case "ask":
+      return askTask(rest, flags, context);
     case "block":
       return blockTask(rest, flags, context);
     case "unblock":
@@ -10510,6 +10802,9 @@ async function addTask(
   const { store, write, json, now } = context;
   const title = positional.join(" ").trim();
   if (title === "") return fail(write, json, "task add", "usage", "a task needs a title", EXIT.usage);
+  // --checks quick|full|off: this task's checks, overriding the project's level.
+  const checks = text(flags, "checks");
+  if (checks !== undefined && !isCheckLevel(checks)) return fail(write, json, "task add", "usage", "--checks is quick, full or off", EXIT.usage);
   // The same text rules every filing door applies (Codex adoption review,
   // finding 7): the bare CLI path must not accept a title the console or a
   // template would refuse.
@@ -10574,6 +10869,12 @@ async function addTask(
   }
 
   const id = text(flags, "id") ?? slug(title, now);
+  // Re-filing: the new task replaces an earlier one, which is cancelled and reads "Replaced by <id>".
+  const replaces = text(flags, "replaces");
+  if (replaces !== undefined && (replaces === id || store.getTask(replaces) === null)) {
+    return fail(write, json, "task add", "unknown-task", `no task \`${replaces}\` to replace`, EXIT.refused);
+  }
+  noteActingPerson(flags, context);
 
   // The existence check goes *inside* the replayed body. Outside it, a retry
   // with the same key hits "already exists" and reports failure for a task the
@@ -10609,6 +10910,12 @@ async function addTask(
     }
   }
 
+  if (replaces !== undefined) store.setTaskState(replaces, "cancelled", now, {}, undefined, outcome.task.id);
+
+  if (checks !== undefined) {
+    const chosen = setTaskCheckLevel(store, outcome.task.id, checks, "cli", now);
+    if (!chosen.ok) return fail(write, json, "task add", "checks-fixed", chosen.message, EXIT.refused);
+  }
   const link = consoleLinkFor(context, `/t/${encodeURIComponent(outcome.task.id)}`);
   return succeed(
     write,
@@ -10616,11 +10923,74 @@ async function addTask(
     "task add",
     {
       task: outcome.task,
+      ...(replaces === undefined ? {} : { replaces }),
       repo: placedIn === undefined ? null : resolve(placedIn),
+      ...(checks === undefined ? {} : { checks }),
       ...(link === null ? {} : { links: { task: link } }),
     },
-    () => [`Queued ${outcome.task.id} — ${outcome.task.title}${flags.has("report") ? " (a scout task: it delivers a report)" : ""}`, ...(link === null ? [] : [`  ${link}`])],
+    () => [`Queued ${outcome.task.id} — ${outcome.task.title}${flags.has("report") ? " (a scout task: it delivers a report)" : ""}${checks === undefined ? "" : ` · checks: ${CHECK_LEVEL_WORDS[checks]}`}`, ...(replaces === undefined ? [] : [`  It replaces ${replaces}.`]), ...(link === null ? [] : [`  ${link}`])],
   );
+}
+
+/** The newest finished build result of a task (any version), for follow-ups. */
+function latestBuildResult(store: Store, taskId: string): { runId: number; head: string } | null {
+  const family = store.taskFamilyOf(taskId, null, true);
+  const versions = family === null ? [taskId] : [family.current.id, ...family.versions.map(one => one.id).filter(id => id !== family.current.id)];
+  for (const id of versions) {
+    const ref = store.lookupRef(id);
+    const run = ref === null ? undefined : store.runsFor(ref.id).find(one => one.role === "builder" && one.finishedAt !== null && one.headRevision !== null);
+    if (run !== undefined) return { runId: run.id, head: run.headRevision! };
+  }
+  return null;
+}
+
+/**
+ * `toolroll task checks <task> [--level quick|full]` — Run checks on the
+ * result's exact commit, now, in the foreground. A pass upgrades what the
+ * result says; a failure stays visible. Asking again while one runs is the same ask.
+ */
+async function runTaskChecks(positional: readonly string[], flags: Map<string, string | true>, context: Context): Promise<number> {
+  const { store, write, json } = context;
+  const clock = context.clock ?? (() => new Date());
+  const taskId = positional[0];
+  if (taskId === undefined) return fail(write, json, "task checks", "usage", "`toolroll task checks <task> [--level quick|full]`", EXIT.usage);
+  const level = text(flags, "level") ?? "quick";
+  if (level !== "quick" && level !== "full") return fail(write, json, "task checks", "usage", "--level is quick or full", EXIT.usage);
+  const demoFence = refuseDemo(context, "task checks");
+  if (demoFence !== null) return demoFence;
+  const result = latestBuildResult(store, taskId);
+  if (result === null) return fail(write, json, "task checks", "no-result", `${taskId} has no finished result to check`, EXIT.refused);
+  const asked = requestFollowUpChecks(store, { runId: result.runId, level, actor: "cli" }, clock());
+  if (!asked.ok) return fail(write, json, "task checks", asked.reason, asked.message, EXIT.refused);
+  const done = await runFollowUpCheck(store, context.evidenceRoot, asked.request, { now: clock });
+  const state = done?.state ?? "waiting";
+  const words = `${CHECK_LEVEL_WORDS[asked.level]} checks`;
+  const payload = { task: taskId, run: result.runId, head: result.head, request: asked.request, level: asked.level, state, exitCode: done?.exitCode ?? null };
+  if (state === "failed") {
+    if (json) { write(envelopeJson({ ok: false, command: "task checks", reason: "checks-failed", ...payload })); return EXIT.failed; }
+    write(`${words} failed on ${result.head.slice(0, 7)}${done?.exitCode == null ? "" : ` (exit ${done.exitCode})`}. The result shows the failure.`);
+    return EXIT.failed;
+  }
+  return succeed(write, json, "task checks", payload, () => [
+    state === "passed" ? `${words} passed on ${result.head.slice(0, 7)}. The result's status is upgraded.`
+      : state === "running" ? `${words} are already running on ${result.head.slice(0, 7)}.`
+      : state === "not-run" ? `${words} didn't run: ${done?.note ?? "see the result's log"}`
+      : `${words} are queued on ${result.head.slice(0, 7)}.`,
+  ]);
+}
+
+/** `toolroll task add-tests <task>` — file a small task to write tests for its change. */
+function addTestsTask(positional: readonly string[], _flags: Map<string, string | true>, context: Context): number {
+  const { store, write, json, now } = context;
+  const taskId = positional[0];
+  if (taskId === undefined) return fail(write, json, "task add-tests", "usage", "`toolroll task add-tests <task>`", EXIT.usage);
+  const result = latestBuildResult(store, taskId);
+  if (result === null) return fail(write, json, "task add-tests", "no-result", `${taskId} has no finished result to write tests for`, EXIT.refused);
+  const filed = fileAddTestsTask(store, context.evidenceRoot, { runId: result.runId, actor: "cli", filedVia: "cli" }, now);
+  if (!filed.ok) return fail(write, json, "task add-tests", filed.reason, filed.message, EXIT.refused);
+  return succeed(write, json, "task add-tests", { task: taskId, filed: filed.id, existing: filed.existing }, () => [
+    filed.existing ? `Tests for ${taskId} are already filed as ${filed.id}.` : `Filed ${filed.id} to add tests for ${taskId}. Approve its scope to start.`,
+  ]);
 }
 
 /**
@@ -11171,7 +11541,13 @@ async function stateTask(
     ]);
   }
 
-  const moved = store.setTaskState(id, state as TaskState, now, mutationFrom(flags, now), text(flags, "reason"));
+  const replacedBy = text(flags, "replaced-by");
+  if (replacedBy !== undefined) {
+    if (state !== "cancelled") return fail(write, json, "task state", "usage", "--replaced-by goes with cancelled: `task state <id> cancelled --replaced-by <id>`", EXIT.usage);
+    if (replacedBy === id || store.getTask(replacedBy) === null) return fail(write, json, "task state", "unknown-task", `no task \`${replacedBy}\` to replace it`, EXIT.refused);
+  }
+  noteActingPerson(flags, context);
+  const moved = store.setTaskState(id, state as TaskState, now, mutationFrom(flags, now), text(flags, "reason"), replacedBy);
   if (!moved.ok) {
     if (moved.reason === "reason-required" || moved.reason === "bad-reason") {
       return fail(write, json, "task state", moved.reason,
@@ -11184,7 +11560,66 @@ async function stateTask(
       : fail(write, json, "task state", "unknown-task", `no task \`${id}\``, EXIT.refused);
   }
 
-  return succeed(write, json, "task state", { id, state }, () => [`${id} is now ${state}.`]);
+  return succeed(write, json, "task state", { id, state, ...(replacedBy === undefined ? {} : { replacedBy }) }, () => [replacedBy === undefined ? `${id} is now ${state}.` : `${id} is replaced by ${replacedBy}.`]);
+}
+
+/** Who acts in this command, for pings: a lead is already known; a person only by a sign-in that verifies here (never asked for). */
+function noteActingPerson(flags: Map<string, string | true>, context: Context): void {
+  if (currentActor() !== null) return;
+  const name = text(flags, "as"), token = text(flags, "token");
+  // A typed password is checked (a success names the person); the remembered login was checked when it was saved.
+  if (token !== undefined) {
+    if (name !== undefined && name !== "" && token !== "") authenticateAccount(context.store, name, token);
+    return;
+  }
+  const remembered = readLoginFile(join(dirname(context.databaseFile), UP_LOGIN_FILE));
+  if (remembered !== null && (name === undefined || name === remembered.name)) claimActor(remembered.name);
+}
+
+/** `task ask <id> --person <name> --why "…"`: the lead hands a task to a person. It pings them once, and the task is theirs. */
+function askTask(positional: readonly string[], flags: Map<string, string | true>, context: Context): number {
+  const { store, write, json, now } = context;
+  const [id, ...extra] = positional;
+  const person = text(flags, "person"), why = text(flags, "why")?.trim();
+  if (id === undefined || extra.length > 0 || person === undefined || why === undefined || why === "") {
+    return fail(write, json, "task ask", "usage", "`toolroll task ask <id> --person <name> --why \"what they need to do\"`", EXIT.usage);
+  }
+  if (why.length > 500 || /[\u0000-\u001f\u007f]/.test(why)) return fail(write, json, "task ask", "usage", "--why is at most 500 plain characters on one line", EXIT.usage);
+  noteActingPerson(flags, context);
+  if (currentActor() === null) return fail(write, json, "task ask", "unauthenticated", "Hand a task on as the lead (its lead token) or with your sign-in (--as and --token, or the remembered login).", EXIT.refused);
+  const asked = store.askPerson(id, person, why, now);
+  if (!asked.ok) {
+    return fail(write, json, "task ask", asked.reason, asked.reason === "unknown-task" ? `no task \`${id}\``
+      : asked.reason === "unplaced" ? `${id} has no project yet, so nobody can be asked about it` : `${person} is not someone who can see this task's project`, EXIT.refused);
+  }
+  return succeed(write, json, "task ask", { id, person, why }, () => [`Asked ${person} about ${id}. It is theirs now, and its updates reach them.`]);
+}
+
+/** `lead token [--revoke]`: the owner (behind their password) mints the credential their lead acts with. */
+async function leadCommand(positional: readonly string[], flags: Map<string, string | true>, context: Context): Promise<number> {
+  const { store, write, json } = context;
+  const [action, ...extra] = positional;
+  const command = "lead token";
+  if (action !== "token" || extra.length > 0) return fail(write, json, `lead ${action ?? ""}`.trim(), "usage", "`toolroll lead token [--revoke] --as <you> --token <password>`", EXIT.usage);
+  for (const name of flags.keys()) if (!["as", "token", "revoke", "db", "json"].includes(name)) return fail(write, json, command, "usage", `--${name} is not a lead token option.`, EXIT.usage);
+  if (currentActor()?.lead === true) return fail(write, json, command, "refused", "A lead cannot mint lead tokens. The person it acts for runs this with their password.", EXIT.refused);
+  const acting = await askCredentials(flags, context);
+  const verified = acting === null ? null : authenticateApprover(store, acting.name, acting.token);
+  if (acting === null || verified === null || !verified.ok) {
+    return fail(write, json, command, "unauthenticated", "A lead token is minted behind your password: pass --as and --token (or use the remembered login).", EXIT.refused);
+  }
+  const now = context.clock();
+  if (flags.has("revoke")) {
+    const ended = store.revokeLeadCredentials(acting.name, acting.name, now);
+    return succeed(write, json, command, { owner: acting.name, revoked: ended }, () => [ended === 0 ? "You had no lead token." : "Your lead token no longer works."]);
+  }
+  const minted = store.mintLeadCredential(acting.name, acting.name, now);
+  return succeed(write, json, command, { owner: acting.name, id: minted.id, token: minted.token, actor: `lead for ${acting.name}` }, () => [
+    minted.token,
+    `Lead for ${acting.name}. Shown once; it replaces any earlier lead token.`,
+    "Your lead passes it as --token <it> (or TOOLROLL_LEAD_TOKEN) on task and assignment commands. Its own work pings nobody;",
+    "it reaches you when the lead asks you (task ask), when it fails with nothing left to try, or for a security alert.",
+  ]);
 }
 
 function blockTask(
@@ -12222,8 +12657,11 @@ async function chatCommand(flags: Map<string, string | true>, context: Context):
  */
 function credentialsFrom(
   flags: Map<string, string | true>,
-  context: { databaseFile: string },
+  context: { databaseFile: string; leadToken?: string },
 ): { name: string | undefined; token: string | undefined } {
+  // The lead signs in as its owner with its own token, never the owner's password.
+  const lead = currentActor();
+  if (context.leadToken !== undefined && lead?.lead === true) return { name: lead.account, token: context.leadToken };
   let name = text(flags, "as");
   let token = text(flags, "token");
   if (token === undefined) {
@@ -12254,11 +12692,12 @@ async function flowsCommand(positional: readonly string[], flags: Map<string, st
   const { store } = context;
   const registered = await loadRepos(registryPathOf(context)).catch(() => ({ error: "unreadable" }));
   const projects = [...new Set([...store.knownRepos(), ...store.listProjects().map(one => one.path), ...("error" in registered ? [] : registered.repos)])];
-  const writes = positional[0] !== undefined && positional[0] !== "list" && positional[0] !== "show";
+  const writes = positional[0] !== undefined && positional[0] !== "list" && positional[0] !== "show" && positional[0] !== "export";
   const acting = writes && !flags.has("help") ? await askCredentials(flags, context) : null;
   const dir = dirname(context.databaseFile);
   return runFlowsCommand(positional, flags, {
     store, write: context.write, json: context.json, clock: context.clock, credentials: acting, projects, configDir: dir, evidenceRoot: context.evidenceRoot,
+    ...(context.flowFetch === undefined ? {} : { fetchFlow: context.flowFetch }),
     // "Check now": the same io the worker's pass checks triggers with.
     triggerIo: { gh: context.flowTriggerIo?.gh ?? run, fetch: context.flowTriggerIo?.fetch ?? fetch, dir: context.flowTriggerIo?.dir ?? dir,
       shell: context.flowTriggerIo?.shell ?? context.flowStepIo?.shell ?? run, scratch: context.flowTriggerIo?.scratch ?? join(dir, "flow-scratch"),
@@ -12536,6 +12975,42 @@ async function projectRulesCommand(positional: readonly string[], flags: Map<str
   return succeed(context.write, context.json, command, { repo, rules: next }, () => [`${repo}: ${rulesSummary(next)}`]);
 }
 
+/** `project concurrency [<n>] --repo <p>`: how many of a project's tasks build at once. Changing it is an approver's act. */
+async function projectConcurrencyCommand(positional: readonly string[], flags: Map<string, string | true>, context: Parameters<typeof taskCommand>[2]): Promise<number> {
+  const command = "project concurrency";
+  const allowed = new Set(["repo", "as", "token", "token-file", "token-env", "db", "json"]);
+  for (const name of flags.keys()) if (!allowed.has(name)) return fail(context.write, context.json, command, "usage", `--${name} is not a project concurrency option.`, EXIT.usage);
+  const repoFlag = text(flags, "repo");
+  if (positional.length > 2 || repoFlag === undefined) return fail(context.write, context.json, command, "usage", "Use project concurrency [<n>] --repo <project path>.", EXIT.usage);
+  const registered = await loadRepos(registryPathOf(context)).catch(() => ({ error: "unreadable" }));
+  const known = [...new Set([...context.store.knownRepos(), ...("error" in registered ? [] : registered.repos)])];
+  const repo = known.find(one => one === repoFlag || one === resolve(repoFlag) || one === canonicalProject(repoFlag));
+  if (repo === undefined) return fail(context.write, context.json, command, "not-found", "That isn't a project Toolroll knows.", EXIT.refused);
+  const workers = context.store.listRunners().filter(one => one.retiredAt === null && one.repos.includes(repo));
+  const capacity = workers.length === 0 ? null : Math.max(...workers.map(one => one.capacity));
+  const words = (n: number): string =>
+    `${repo}: builds up to ${n} at once${capacity !== null && capacity < n ? ` (its worker runs ${capacity} at once, so ${capacity} for now)` : ""}.`;
+  const given = positional[1];
+  if (given === undefined) {
+    const current = projectConcurrency(context.databaseFile, repo);
+    return succeed(context.write, context.json, command, { repo, concurrency: current, workerCapacity: capacity }, () => [words(current)]);
+  }
+  const n = parseProjectConcurrency(given);
+  if (n === null) return fail(context.write, context.json, command, "usage", `Builds at once is a whole number from 1 to ${RUNNER_CAPACITY_MAX}.`, EXIT.usage);
+  const acting = await askCredentials(flags, context);
+  const verified = acting === null ? null : authenticateApprover(context.store, acting.name, acting.token);
+  if (acting === null || verified === null || !verified.ok || !context.store.accountCanAccess(acting.name, repo)) {
+    return fail(context.write, context.json, command, "refused", "An approver for this project changes how many tasks build at once: pass --as and --token (or use the remembered login).", EXIT.refused);
+  }
+  const changed = saveProjectConcurrency(context.databaseFile, repo, n);
+  context.store.recordProjectConcurrency(acting.name, repo, changed.before, changed.after, context.clock());
+  context.store.bumpWake();
+  return succeed(context.write, context.json, command, { repo, before: changed.before, concurrency: changed.after, workerCapacity: capacity }, () => [
+    words(changed.after),
+    ...(changed.before > changed.after ? ["Builds already running carry on; the new number applies to the next one."] : []),
+  ]);
+}
+
 /** Write a pack or export where asked (never over an existing file), or to the terminal. */
 function writeOut(context: Context, command: string, out: string | undefined, content: string, summary: Record<string, unknown>, line: string, data: Record<string, unknown>): number {
   if (out === undefined) { context.write(context.json ? envelopeJson({ ok: true, command, ...summary, ...data }) : content.replace(/\n$/, "")); return EXIT.ok; }
@@ -12723,9 +13198,10 @@ async function notificationsCommand(positional: readonly string[], flags: Map<st
   const [action, value, ...extra] = positional;
   const command = `notifications${action === undefined ? "" : ` ${action}`}`;
   const store = context.store;
-  for (const name of flags.keys()) if (!["as", "token", "token-file", "token-env", "db", "json"].includes(name)) return fail(context.write, context.json, command, "usage", `--${name} is not a notifications option.`, EXIT.usage);
-  const usage = "Use notifications quiet, notifications all, or notifications digest <HH:MM>|off.";
-  if (extra.length > 0 || (action !== undefined && !["quiet", "all", "digest"].includes(action)) || (action === "digest") !== (value !== undefined)) {
+  const muting = action === "mute" || action === "unmute";
+  for (const name of flags.keys()) if (!["as", "token", "token-file", "token-env", "db", "json", ...(muting ? ["repo"] : [])].includes(name)) return fail(context.write, context.json, command, "usage", `--${name} is not a notifications option.`, EXIT.usage);
+  const usage = "Use notifications quiet, notifications all, notifications digest <HH:MM>|off, or notifications mute|unmute --repo <project>.";
+  if (extra.length > 0 || (action !== undefined && !["quiet", "all", "digest", "mute", "unmute"].includes(action)) || (action === "digest") !== (value !== undefined) || (muting && (value !== undefined || text(flags, "repo") === undefined))) {
     return fail(context.write, context.json, command, "usage", usage, EXIT.usage);
   }
   if (action === "digest" && value !== "off" && !isDigestTime(value!)) return fail(context.write, context.json, command, "usage", "The digest time is HH:MM on a 24-hour clock, like 18:30, or off.", EXIT.usage);
@@ -12735,12 +13211,25 @@ async function notificationsCommand(positional: readonly string[], flags: Map<st
     return fail(context.write, context.json, command, "refused", "Notifications are set per person: pass --as and --token (or use the remembered login).", EXIT.refused);
   }
   const now = context.clock();
+  if (muting) {
+    const typed = text(flags, "repo")!;
+    const repo = canonicalProject(typed) ?? resolve(typed);
+    const known = new Set([...store.knownRepos(), ...store.listProjects().map(one => one.path)]);
+    if (!known.has(repo) || !store.accountCanAccess(acting.name, repo)) return fail(context.write, context.json, command, "unknown-project", `${typed} is not a project you can see.`, EXIT.refused);
+    store.setProjectMuted(acting.name, repo, action === "mute", now);
+    const muted = store.mutedProjects(acting.name);
+    return succeed(context.write, context.json, command, { repo, muted: action === "mute", mutedProjects: muted }, () => [
+      action === "mute" ? `${basename(repo)} is muted: no pings for it. The console and your evening digest still show it.` : `${basename(repo)} pings you again.`,
+    ]);
+  }
   const preference = action === "quiet" || action === "all" ? store.setNotificationPreference(acting.name, { mode: action }, acting.name, now)
     : action === "digest" ? store.setNotificationPreference(acting.name, { digestAt: value === "off" ? null : value! }, acting.name, now)
     : store.notificationPreference(acting.name);
-  return succeed(context.write, context.json, command, { mode: preference.mode, digestAt: preference.digestAt }, () => [
+  const muted = store.mutedProjects(acting.name);
+  return succeed(context.write, context.json, command, { mode: preference.mode, digestAt: preference.digestAt, mutedProjects: muted }, () => [
     preference.mode === "quiet" ? "Only when you're needed: one message per task, updated as it moves, and a new one when something needs you." : "Every step: a message for each update.",
     preference.digestAt === null ? "No evening digest." : `Evening digest at ${preference.digestAt}: what finished, what waits and what failed.`,
+    ...(muted.length === 0 ? [] : [`Muted: ${muted.map(one => basename(one)).join(", ")}.`]),
   ]);
 }
 

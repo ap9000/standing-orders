@@ -1,0 +1,90 @@
+/** Settings → Projects → Checks: how much checks after each build, in plain
+ * words. One choice (Quick, Full, Off) and the quick command beside the full
+ * one. Every change takes the password and lands in the ledger; approving a
+ * command restates exactly what will run, unattended, before the yes. */
+import { CHECK_LEVELS, CHECK_LEVEL_HINTS, CHECK_LEVEL_WORDS, type CheckLevel } from "./check-levels.js";
+import type { VerifyCommand } from "./store.js";
+
+const escape = (text: string): string =>
+  text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+
+export type CheckSettingsView = {
+  repo: string;
+  name: string;
+  csrf: string;
+  canChange: boolean;
+  level: CheckLevel;
+  full: VerifyCommand | null;
+  quick: VerifyCommand | null;
+  /** A starting point for the quick command, from the project's scripts. */
+  suggestion: string | null;
+  said: string | null;
+  problem: string | null;
+};
+
+export function checkSettingsHtml(view: CheckSettingsView): string {
+  const hidden = (act: string) => `<input type="hidden" name="csrf" value="${escape(view.csrf)}"><input type="hidden" name="repo" value="${escape(view.repo)}"><input type="hidden" name="act" value="${act}">`;
+  const password = `<label>Password<input type="password" name="password" autocomplete="current-password" required></label>`;
+  const notes = [
+    view.said === null ? "" : `<p class="notice" role="status">${escape(view.said)}</p>`,
+    view.problem === null ? "" : `<p class="problem" role="alert">${escape(view.problem)}</p>`,
+  ].join("");
+  const head = `<p class="meta">${escape(view.name)} · <span class="mono">${escape(view.repo)}</span></p>${notes}`;
+  const command = (one: VerifyCommand) => `<p class="mono check-command">${escape(one.command)}</p><p class="meta">Up to ${Math.round(one.timeoutMs / 1000)}s · approved by ${escape(one.approvedBy)}</p>`;
+  // Quick with no quick command runs the full check; say so where the choice is made.
+  const fallsBack = view.level === "quick" && view.quick === null;
+  const current = `<p><strong>${CHECK_LEVEL_WORDS[view.level]}</strong> · ${escape(CHECK_LEVEL_HINTS[view.level])}</p>` +
+    (fallsBack ? `<p class="meta">No quick command yet, so builds run the full check.</p>` : "") +
+    (view.level !== "full" && view.full !== null ? `<p class="meta">The full check still runs when a pull request opens, and Merge waits for it.</p>` : "");
+  if (!view.canChange) {
+    return head + `<section class="card check-settings">${current}</section>` +
+      `<section class="card check-settings"><h2>Quick check</h2>${view.quick === null ? `<p class="meta">None yet.</p>` : command(view.quick)}</section>` +
+      `<section class="card check-settings"><h2>Full check</h2>${view.full === null ? `<p class="meta">None yet.</p>` : command(view.full)}</section>`;
+  }
+  const choices = CHECK_LEVELS.map(level =>
+    `<label class="check-choice"><input type="radio" name="level" value="${level}"${level === view.level ? " checked" : ""}>` +
+    `<span><strong>${CHECK_LEVEL_WORDS[level]}</strong><span class="meta">${escape(CHECK_LEVEL_HINTS[level])}</span></span></label>`).join("");
+  const levelForm = `<form method="post" action="/settings/checks" class="card check-settings">${hidden("level")}` +
+    `<fieldset><legend>After each build</legend>${choices}</fieldset>` +
+    (fallsBack ? `<p class="meta">No quick command yet, so Quick runs the full check.</p>` : "") +
+    `<p class="meta">A task can choose its own checks when it's filed. With Quick or Off, the full check runs when a pull request opens, and Merge waits for it unless you merge anyway.</p>` +
+    `${password}<button type="submit">Save</button></form>`;
+  const quickTerms = `<ul class="check-terms"><li>Runs unattended right after every Quick build, in that build's checkout.</li><li>Plain environment: no credentials.</li><li>A failure shows on the result; nothing is blocked.</li></ul>`;
+  const quickForm = (value: string, submit: string) => `<form method="post" action="/settings/checks" class="check-settings">${hidden("quick")}` +
+    `<label>Command<textarea name="command" rows="2" maxlength="2000" spellcheck="false" class="mono" required>${escape(value)}</textarea></label>` +
+    `<label>Time limit (seconds)<input type="number" name="timeout" min="1" max="3600" value="${view.quick === null ? 180 : Math.round(view.quick.timeoutMs / 1000)}" required></label>` +
+    `${quickTerms}${password}<button type="submit">${submit}</button></form>`;
+  const quick = view.quick === null
+    ? `<section class="card check-settings"><h2>Quick check</h2>` +
+      (view.suggestion === null ? `<p class="meta">Typecheck and the tests near the change, ideally under 2 minutes.</p>` : `<p class="meta">Suggested from the project's scripts. Edit it before approving.</p>`) +
+      quickForm(view.suggestion ?? "", "Approve quick check") + `</section>`
+    : `<section class="card check-settings"><h2>Quick check</h2>${command(view.quick)}` +
+      `<details class="settings-more"><summary>Change quick check</summary>${quickForm(view.quick.command, "Approve change")}</details>` +
+      `<details class="settings-more"><summary>Remove quick check</summary><form method="post" action="/settings/checks" class="check-settings">${hidden("quick-clear")}` +
+      `<p class="meta">Quick builds run the full check instead.</p>${password}<button type="submit" class="danger">Remove</button></form></details></section>`;
+  const full = `<details class="settings-more"><summary>Full check</summary><section class="card check-settings">` +
+    (view.full === null ? `<p class="meta">None yet. Approve one with <span class="mono">toolroll verify set --repo … --command "…"</span>.</p>` : command(view.full)) + `</section></details>`;
+  return head + levelForm + quick + full;
+}
+
+export const CHECK_SETTINGS_CSS = `
+  .check-settings { display: grid; gap: .6rem; max-width: 40rem; }
+  .check-settings p, .check-settings h2 { margin: 0; }
+  .check-settings h2 { font-size: 1rem; }
+  .check-settings fieldset { border: 0; margin: 0; padding: 0; display: grid; gap: .25rem; }
+  .check-settings legend { font-weight: 600; margin-bottom: .25rem; }
+  .check-settings label { display: grid; gap: .25rem; }
+  .check-settings .check-choice { display: flex; align-items: flex-start; gap: .6rem; min-height: 44px; padding: .35rem 0; cursor: pointer; }
+  .check-settings .check-choice > span { display: grid; gap: .1rem; }
+  .check-settings .check-choice input { margin-top: .2rem; }
+  .check-settings input[type=password], .check-settings input[type=number], .check-settings textarea { min-height: 44px; box-sizing: border-box; width: 100%; }
+  .check-settings button { min-height: 44px; justify-self: start; }
+  .check-settings .check-command { overflow-wrap: anywhere; }
+  .check-terms { margin: 0; padding-left: 1.1rem; display: grid; gap: .25rem; }
+  @media (max-width: 480px) { .check-settings button { justify-self: stretch; } }
+  .follow-ups .follow-up-list { margin: .4rem 0; padding-left: 1.1rem; display: grid; gap: .25rem; }
+  .follow-ups .follow-up-acts, .follow-ups .follow-up-act { display: flex; flex-wrap: wrap; gap: .5rem; margin: .5rem 0 0; }
+  .follow-ups .follow-up-act { margin: 0; }
+  .follow-ups button { min-height: 44px; }
+  @media (max-width: 480px) { .follow-ups .follow-up-acts, .follow-ups .follow-up-act { display: grid; } .follow-ups .follow-up-act button { width: 100%; } }
+`;

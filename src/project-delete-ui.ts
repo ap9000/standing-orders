@@ -13,9 +13,29 @@ export const PROJECT_DELETE_CSS = `.project-settings,.project-delete{max-width:7
   `.project-settings details.danger-zone[open]{padding-bottom:14px}.project-settings form,.project-delete form{display:grid;gap:12px;margin-top:12px}.project-settings label,.project-delete label{display:grid;gap:4px;font-size:.8125rem;font-weight:500}` +
   `.project-settings input,.project-delete input{max-width:100%;min-height:36px}.project-delete .removes{margin:12px 0;padding-left:20px}.project-delete .removes li{margin:2px 0}` +
   `.project-delete .actions{display:flex;flex-wrap:wrap;gap:12px;align-items:center}.project-delete button.danger,.project-settings button.danger{background:var(--danger);color:#fff;border-color:var(--danger);white-space:nowrap}` +
-  `.project-settings button,.project-delete button{justify-self:start;min-height:36px;white-space:nowrap}.project-delete .actions a{min-height:36px;display:inline-flex;align-items:center}`;
+  `.project-settings button,.project-delete button{justify-self:start;min-height:36px;white-space:nowrap}.project-delete .actions a{min-height:36px;display:inline-flex;align-items:center}` +
+  `.project-settings .builds-at-once{margin-top:20px}.project-settings .builds-at-once h2{font-size:1rem;margin:0 0 4px}.project-settings .builds-at-once form{margin-top:4px;gap:4px}` +
+  `.project-settings .builds-at-once .builds-row{display:flex;gap:8px;align-items:stretch}.project-settings .builds-at-once input{width:5.5rem;min-height:44px;margin:0;box-sizing:border-box}.project-settings .builds-at-once button{min-height:44px;margin:0}` +
+  `.project-settings .builds-at-once .meta{margin:0}`;
 
-export type ProjectSettingsView = { repo: string; name: string; holdings: ProjectHoldings; running: string[]; canDelete: boolean };
+export type ProjectSettingsView = {
+  repo: string; name: string; holdings: ProjectHoldings; running: string[]; canDelete: boolean;
+  /** How many of its tasks build at once: the saved number, what its worker allows, how many build now. */
+  builds?: { setting: number; capacity: number | null; building: number; canChange: boolean };
+};
+
+/** Builds at once: one number, one Save. The worker's cap is said only when it lowers the number. */
+function buildsHtml(view: ProjectSettingsView, csrf: string): string {
+  const b = view.builds;
+  if (b === undefined) return "";
+  const capped = b.capacity !== null && b.capacity < b.setting ? ` Its worker runs ${b.capacity} at once, so ${b.capacity} for now.` : "";
+  const now = `${b.building} building now.${capped}`;
+  if (!b.canChange) return `<section class="builds-at-once"><h2>Builds at once</h2><p>Up to ${b.setting}. ${e(now)}</p></section>`;
+  return `<section class="builds-at-once"><h2>Builds at once</h2><form method="post" action="/settings/project/concurrency">` +
+    `<input type="hidden" name="csrf" value="${e(csrf)}"><input type="hidden" name="repo" value="${e(view.repo)}">` +
+    `<div class="builds-row"><input type="number" name="concurrency" min="1" max="64" step="1" inputmode="numeric" value="${b.setting}" aria-label="Builds at once" aria-describedby="builds-now"><button type="submit">Save</button></div>` +
+    `<p class="meta" id="builds-now">${e(now)}</p></form></section>`;
+}
 
 const note = (notice: { said?: string | null; problem?: string | null }) =>
   notice.problem ? `<p class="problem" role="alert">${e(notice.problem)}</p>` : notice.said ? `<p role="status">${e(notice.said)}</p>` : "";
@@ -23,7 +43,7 @@ const note = (notice: { said?: string | null; problem?: string | null }) =>
 /** The project's page: its path, what Toolroll holds for it, and (for an instance operator) Delete project. */
 export function projectSettingsHtml(view: ProjectSettingsView, csrf: string, notice: { said?: string | null; problem?: string | null }): string {
   const held = `<p>Toolroll holds ${e(holdingsWords(view.holdings))} for <strong>${e(view.name)}</strong>.</p>`;
-  const head = `<section class="project-settings">${note(notice)}<p class="path">${e(view.repo)}</p>${held}`;
+  const head = `<section class="project-settings">${note(notice)}<p class="path">${e(view.repo)}</p>${held}${buildsHtml(view, csrf)}`;
   if (!view.canDelete) return `${head}<p class="meta">An instance operator can delete a project.</p></section>`;
   const body = view.running.length > 0
     ? `<p class="problem">Its work is running: ${e(view.running.join(", "))}. Stop it before deleting the project.</p>`

@@ -54,12 +54,17 @@ const report = folder => { try { return JSON.parse(readFileSync(join(out, folder
 // The first run's own --only is replaced by the journeys to retry (they are a subset of it).
 const without = (list, flag) => list.filter((one, index) => one !== flag && list[index - 1] !== flag);
 
-const first = await Promise.all(groups.map(({ name: group }) => runGroup(group, group, rest)));
-const again = retry ? await Promise.all(first.filter(one => one.code !== 0).map(one => {
+// A failed group runs again as soon as its first run ends, not after every group's.
+const runs = await Promise.all(groups.map(async ({ name: group }) => {
+  const one = await runGroup(group, group, rest);
+  if (!retry || one.code === 0) return { one, again: null };
   const journeys = retrySet(report(one.folder)?.results ?? []);
   console.log(`Retrying ${one.group}: ${journeys === null ? "the whole group" : `${journeys.length} journey${journeys.length === 1 ? "" : "s"} — ${journeys.join("; ")}`}`);
-  return runGroup(one.group, `${one.group}-retry`, journeys === null ? rest : [...without(rest, "--only"), "--only", exactly(journeys)]).then(done => ({ ...done, journeys }));
-})) : [];
+  const again = await runGroup(one.group, `${one.group}-retry`, journeys === null ? rest : [...without(rest, "--only"), "--only", exactly(journeys)]);
+  return { one, again: { ...again, journeys } };
+}));
+const first = runs.map(each => each.one);
+const again = runs.flatMap(each => each.again === null ? [] : [each.again]);
 /** A retry passes only on its report: every journey that failed the first time, and the browser-error check,
  * PASSED on the retry. A clean exit alone is not enough: a journey skipped (or not run) the second time proved
  * nothing. With no first report to read (the group crashed), the whole group ran again and its exit decides. */

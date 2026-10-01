@@ -298,6 +298,11 @@ export async function webhookPass(
 
   const claimed = store.claimDeliveries(owner, DELIVERY_CLAIM_MS, clock());
   for (const row of claimed) {
+    // The lead's own work posts to no channel; the console keeps it.
+    if (store.leadQuiet(row)) {
+      store.finalizeDelivery(row.id, owner, { ok: true, receipt: "skipped:quiet" }, clock());
+      continue;
+    }
     const link = linkFor(options.consoleUrl, row);
     const outcomes = await Promise.all(
       options.targets.map(target => postWebhook(target, row, link, options.fetcher ?? fetch)),

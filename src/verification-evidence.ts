@@ -9,6 +9,7 @@ import type { VerifyCommandFacts } from "./proof.js";
 import { adjudicate, type AdjudicateResult } from "./proof.js";
 import { parseReviewContext, reviewContextCustodyProblem } from "./review-context.js";
 import { readVerifiedArtifact, storeEvidence, scanForSecrets, redactSecretLines } from "./evidence.js";
+import { liveQuickCommand, quickVerifyKey, runCheckLevel } from "./check-levels.js";
 
 export const VERIFICATION_RECEIPT_CAPTURE = "machine verification receipt v1";
 export const REVIEW_GATE_NAME = "REVIEW-VERIFICATION.json";
@@ -40,11 +41,14 @@ export function verificationEvidence(store: Store, root: string, runId: number):
   const source = store.getRun(runId);
   if (!source) return fail("The verification source run is missing.");
   const repo = store.refById(source.taskRef)?.repo;
-  const command = repo ? store.liveVerifyCommand(repo) : null;
   const artifacts = store.artifactsFor(runId);
   const receipts = artifacts.filter(isVerificationReceipt);
   const machine = store.proofVerdictFor(runId);
   const verified = (machine?.machineVerdict ?? machine?.verdict) === "verified";
+  // A run whose checks were Off recorded no check; that is not a gap.
+  if (!receipts.length && !verified && runCheckLevel(store, runId) === "off") return { ok: true, bytes: null, digest: hash(null) };
+  // A Quick run is bound to the project's approved quick command, a Full one to the full command.
+  const command = repo ? sealedCommandKey(root, receipts) === quickVerifyKey(repo) ? liveQuickCommand(store, repo) : store.liveVerifyCommand(repo) : null;
   if (!command && !receipts.length && !verified) return { ok: true, bytes: null, digest: hash(null) };
   if (!command || command.approvedAt > source.startedAt) return fail("The original approved verification command is missing or changed.");
   if (receipts.length > 1) return fail("The verification receipt is ambiguous.");
@@ -98,6 +102,17 @@ export function verificationEvidence(store: Store, root: string, runId: number):
   // output exists. Its fingerprint is re-proved before every turn and ingestion.
   const bytes = JSON.stringify(receipt);
   return { ok: true, bytes, digest: hash({ receipt, receipts }) };
+}
+
+/** The grant key a run's single sealed receipt names, read without trusting it further. */
+function sealedCommandKey(root: string, receipts: readonly Artifact[]): string | null {
+  if (receipts.length !== 1) return null;
+  const sealed = readVerifiedArtifact(root, receipts[0]!);
+  if (!sealed.ok) return null;
+  try {
+    const repo = (JSON.parse(sealed.content.toString("utf8")) as { command?: { repo?: unknown } }).command?.repo;
+    return typeof repo === "string" ? repo : null;
+  } catch { return null; }
 }
 
 /** Only a sealed failed check can start unattended diagnosis. Lost custody,

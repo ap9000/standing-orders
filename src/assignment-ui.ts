@@ -94,7 +94,9 @@ export type AssignmentCard = {
 export function assignmentCardOf(assignment: AssignmentSnapshot, options: AssignmentCardOptions = {}): AssignmentCard {
   const receipt = assignment.receipt;
   const links = receipt === null ? {} : { result: options.resultHref ?? chatResultHref(receipt.taskId, receipt.runId), checks: chatResultHref(receipt.taskId, receipt.runId, 'checks'),
-    pullRequest: `/t/${encodeURIComponent(assignment.rootId)}#merge` };
+    pullRequest: `/t/${encodeURIComponent(assignment.rootId)}#merge`,
+    // Run checks lives with the result's checks; the row's action leads there.
+    ...(receipt.completionKind === 'research-report' ? {} : { runChecks: `${chatResultHref(receipt.taskId, receipt.runId, 'checks')}#follow-ups` }) };
   const presentation = assignmentPresentationOf(assignment, { ...options, links });
   const { status, diagnostics, taskStatus } = presentation;
   const href = assignment.primaryAction?.code === 'open-result' && options.resultHref !== undefined ? options.resultHref : assignmentActionHref(assignment);

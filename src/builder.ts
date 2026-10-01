@@ -1,4 +1,5 @@
 import { OBSERVATION_MAILBOX, observationBrief, parseObservationCases, collectObservations } from "./observations.js";
+import { checkCommandFor, effectiveCheckLevel, recordRunCheckLevel } from "./check-levels.js";
 import { skillsContext } from "./project-skills.js";
 import { failedVerificationEvidence, sealVerificationReceipt, verificationEvidence, reuseObservationVerification } from "./verification-evidence.js";
 import { learningContext } from "./project-learning.js";
@@ -1844,11 +1845,7 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
   // own words.
   if (stopRequestedFor(store, request.runId, request.shouldStop)) {
     quarantineMailboxes(worktree, root, request.runId);
-    return {
-      ok: false,
-      reason: "stopped",
-      message: stopWords(store, request.runId, worktree, `the operator stopped this watch while the agent ran — the work is preserved uncommitted in ${worktree}`),
-    };
+    return { ok: false, reason: "stopped", message: await stoppedWords(captured) };
   }
   if (result.timedOut) {
     // A mailbox cut down mid-write is quarantined, never ingested: whatever
@@ -2158,11 +2155,7 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
   // (audit IV-1): an operator's stop beats an agent's finish. The work
   // stays in the worktree, uncommitted, preserved for the successor.
   if (stopRequestedFor(store, request.runId, request.shouldStop)) {
-    return {
-      ok: false,
-      reason: "stopped",
-      message: stopWords(store, request.runId, worktree, `the operator stopped this watch while the agent ran — the work is preserved uncommitted in ${worktree}`),
-    };
+    return { ok: false, reason: "stopped", message: await stoppedWords(captured) };
   }
   store.setRunPhase(request.runId, "committing");
   // Kept work that is already complete is already committed: the attempt's
@@ -2555,7 +2548,13 @@ async function settleProof(
   // re-proved before every authorized spawn, and tracked post-commit changes
   // stop recovery rather than being silently certified.
   const repo = store.getWorktree(worktree)?.repo ?? null;
-  const configured = repo === null ? null : store.liveVerifyCommand(repo);
+  // The check level (check-levels.ts): the task's own choice, else the
+  // project's. Quick runs its own approved command (or the full one when it
+  // has none); Off runs nothing. The level that ran is recorded either way.
+  const checkChoice = effectiveCheckLevel(store, repo, request.taskId);
+  const chosenCheck = repo === null ? null : checkCommandFor(store, repo, checkChoice.level);
+  const configured = chosenCheck?.command ?? null;
+  if (repo !== null && chosenCheck !== null) recordRunCheckLevel(store, { id: runId, taskId: request.taskId, repo }, chosenCheck.level, checkChoice.from, now());
   let verifyCommand: VerifyCommandFacts;
   const checkLog: string[] = [];
   const checkOutcomes: string[] = [];
@@ -2636,7 +2635,7 @@ async function settleProof(
       // the setup command are running.
       const liveRecoverySetup = () => {
         if (repo === null || recoveryDigest === null) return null;
-        const liveVerify = store.liveVerifyCommand(repo);
+        const liveVerify = store.liveVerifyCommand(configured.repo);
         const liveSetup = store.liveWorktreeSetup(repo);
         return liveVerify !== null &&
           liveVerify.digest === configured.digest &&
@@ -2765,7 +2764,7 @@ async function settleProof(
     : checkSuites.some(one => one.status === "failed") ? "failed" as const
     : "not-run" as const;
   const suites: RunCheckSuite[] = checkSuites.length > 0 ? checkSuites : verifyCommand.configured === false ? [] : [{
-    name: reused === null ? "Project check" : "Project check (reused)",
+    name: reused === null ? chosenCheck?.level === "quick" ? "Quick check" : "Project check" : "Project check (reused)",
     status: checkStatus,
     exitCode: "ran" in verifyCommand && verifyCommand.ran ? verifyCommand.exitCode : null,
   }];
@@ -2994,6 +2993,29 @@ async function resumeUnhandedWork(captured: CapturedBuild, sessionId: string | u
   }
   return null;
 }
+
+/**
+ * The words for an attempt a stop ended after its agent ran. A task stop
+ * names who asked. A SERVICE stop (the builder stopping or restarting) also
+ * saves the work as a patch in the run's evidence before saying so: the
+ * changes stay uncommitted in the checkout, and the requeued task resumes
+ * from them on the builder's next pass.
+ */
+async function stoppedWords(captured: CapturedBuild): Promise<string> {
+  const { store, request, git, worktree, root } = captured;
+  if (store.applicableStopFor(request.runId) !== null) {
+    return stopWords(store, request.runId, worktree, `stopped while the agent ran — the work is preserved uncommitted in ${worktree}`);
+  }
+  const changes = await unhandedChanges(git, worktree);
+  const saved = changes === null || changes.length === 0 ? null
+    : await saveWorkPatch(git, worktree, join(root, String(request.runId), "service-stop-work.patch"),
+      `# work in ${worktree} when Toolroll stopped\n# kept ${captured.clock().toISOString()}\n`);
+  const kept = changes !== null && changes.length === 0 ? "It had not changed any files yet"
+    : saved !== null && saved.ok ? `Its work is kept in ${worktree} and saved as ${saved.file}` : `Its work is kept uncommitted in ${worktree}`;
+  return `${SERVICE_STOP_WORDS} ${kept}; the task is back in the queue and resumes from it when the builder runs again.`;
+}
+
+export const SERVICE_STOP_WORDS = "Toolroll stopped while this task was building.";
 
 /**
  * The attempt ended without a handoff, even after any resumed turn. When it

@@ -2,6 +2,7 @@ import { passwordGuardOf } from "./sign-in-guard.js";
 import { validateScopeText } from "./task-text.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { projectAuthority } from "./project-access.js";
+import { claimActor, currentActor, parseLeadToken } from "./actor.js";
 /**
  * What a task is allowed to become, agreed before anything builds it.
  *
@@ -1114,6 +1115,13 @@ export function authenticateAccount(
   secret: string,
 ): { ok: true; role: "approver" | "viewer"; generation: number } | { ok: false; reason: "no-approvers" | "unknown" | "revoked" | "locked" } {
   if (store.listApprovers().length === 0) return { ok: false, reason: "no-approvers" };
+  // A lead token signs in as its owner, only inside a command the lead runs with it (never a console sign-in).
+  const acting = currentActor();
+  if (acting?.lead === true && parseLeadToken(secret) !== null) {
+    const lead = store.leadFor(secret), account = store.accountOf(by);
+    if (lead === null || lead.owner !== by || acting.account !== by || account === null) return { ok: false, reason: "unknown" };
+    return { ok: true, role: account.role, generation: account.generation };
+  }
   // v99: wrong passwords in a row lock the name for a while, whatever road they came by.
   const guard = passwordGuardOf(store), now = Date.now();
   if (guard.lockedFor(by, now) > 0) return { ok: false, reason: "locked" };
@@ -1124,6 +1132,8 @@ export function authenticateAccount(
   }
   guard.succeeded(by);
   if (account.revokedAt !== null) return { ok: false, reason: "revoked" };
+  // Inside a command, the person who signed in is who acted (their own acts never ping them).
+  claimActor(by);
   return { ok: true, role: account.role, generation: account.generation };
 }
 

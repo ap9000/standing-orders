@@ -3,6 +3,7 @@
  * rendered as plain server HTML with native forms. One small script keeps a
  * running build's progress live; without it the page still works by reload.
  */
+import { START_COMMAND } from "./first-run.js";
 import { headlineOf } from "./task-status.js";
 import type { DemoExchange } from "./demo.js";
 
@@ -120,7 +121,10 @@ export function demoThreadHtml(exchanges: readonly DemoExchange[], csrf: string,
     if (exchange.state === "working") parts.push(buildCard(exchange));
     if (exchange.state === "ready" || exchange.state === "complete" || exchange.state === "sent-back") parts.push(resultCard(exchange, csrf, resultOf(exchange)));
     if (exchange.state === "complete") {
-      parts.push(`<div class="demo-said demo-lead"><p class="demo-who">Lead</p><p>Done. That's the whole loop: ask, approve, Ready, Complete. Ask for something else whenever you like.</p></div>`);
+      parts.push(`<div class="demo-said demo-lead"><p class="demo-who">Lead</p><p>Done. That's the whole loop: ask, approve, Ready, Complete. Ask for something else whenever you like.</p></div>`,
+        `<section class="card demo-handoff" data-demo-handoff aria-label="Your own project"><h2>Now try it on your own project</h2>` +
+        `<p>In your repository's folder, run:</p><pre class="demo-command"><code>${esc(START_COMMAND)}</code></pre>` +
+        `<p class="meta">It opens in your browser, already signed in.</p></section>`);
     }
     return `<article class="demo-turn" id="demo-${exchange.id}">${parts.join("")}</article>`;
   }).join("");

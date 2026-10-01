@@ -620,6 +620,7 @@ async function fireScript(store: Store, trigger: FlowTriggerRow, config: Extract
   };
   const script = flow === null ? null : store.flowScript(flow.repo, config.script!);
   if (flow === null || script === null) return done(false, `There's no script called ${config.script} in this project any more.`);
+  if (script.held !== null) return done(false, `The ${script.name} script came with an imported flow. Approve it on the Scripts panel to run it.`);
   const saved = readFlowSecrets(io.dir, flow.repo);
   const missing = (config.secrets ?? []).filter(name => saved[name] === undefined);
   if (missing.length > 0) return done(false, `${script.name} needs the secret${missing.length === 1 ? "" : "s"} ${missing.join(", ")}. Save ${missing.length === 1 ? "it" : "them"} on the flow first.`);

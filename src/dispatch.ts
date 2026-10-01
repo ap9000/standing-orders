@@ -13,6 +13,7 @@ import { approvalOf, type ExecutionProfile } from "./scope.js";
 import { plannerSourceProblemOf } from "./planner-source.js";
 import { authPauseOf, authWaitOf, providerName, signInReason } from "./provider-auth.js";
 import { REVIEW_TOKENS, resultStatusOf, reviewFactsOf } from "./workspace-ui.js";
+import { replacedWords } from "./task-status.js";
 import { BUILT_IN, parseCapabilityKey, type ChatSnapshot, type ReviewRequestOrigin, type ReviewRetryState, type Store, type TaskState } from "./store.js";
 
 export const DEFAULT_MAX_OPEN_DECISIONS = 5;
@@ -331,7 +332,12 @@ export function diagnoseTaskDispatch(store: Store, taskId: string, now: Date): D
       { action: "open-result", review },
     );
   }
-  if (task.state === "cancelled") return answer("cancelled", "terminal", "Cancelled", "Nothing else will run for this task.");
+  if (task.state === "cancelled") {
+    // Replaced, never "Cancelled": a successor carries the work on.
+    const successor = store.replacementOf(taskId);
+    return successor === null ? answer("cancelled", "terminal", "Cancelled", "Nothing else will run for this task.")
+      : answer("cancelled", "terminal", replacedWords(successor), `${replacedWords(successor)}. Nothing else will run for this task.`);
+  }
   if (task.state === "failed") return answer("failed", "terminal", "Needs a retry", "The last attempt stopped; review its incident, then retry it.", { action: "retry-task" });
   if (store.hasLiveClaim(ref.id, now)) return answer("running", "running", "Running now", "A worker owns the current live claim.");
   if (task.state === "running") return answer("vanished-run", "waiting", "Build vanished", "The task says running, but no current claim owns it; reconcile it before retrying.", { action: "retry-task" });

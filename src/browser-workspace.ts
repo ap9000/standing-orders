@@ -11,7 +11,7 @@ import { workIndexPage, type WorkIndexItem, type WorkIndexPage } from './work-in
 import type { StatusTone } from './workspace-ui.js';
 import type { AssignmentCard } from './assignment-ui.js';
 import type { TaskStatus } from './task-status.js';
-import type { FirstRunStep, FirstTaskSuggestion } from './first-run.js';
+import type { FirstRunStep, FirstTaskSuggestion, JourneyStep } from './first-run.js';
 
 export type BrowserProject = { name: string; path: string; href: string; knowledgeHref: string };
 /** count: tasks waiting on a person, shown beside Tasks when above zero. */
@@ -89,7 +89,9 @@ export type BrowserSettingsView = {
   services: { configured: string[]; channel: string | null; implicit: boolean } | null;
   push: { available: boolean; devices: { id: number; words: string; state: string; removable: boolean }[] } | null;
   /** Quiet chat: how chats reach this person, and their evening digest time (null: off). */
-  chat?: { mode: 'quiet' | 'all'; digestAt: string | null } | null;
+  chat?: { mode: 'quiet' | 'all'; digestAt: string | null;
+    /** Each project this person can see; a muted one sends no pings but stays in Tasks and the digest. */
+    projects?: { repo: string; name: string; muted: boolean }[] } | null;
   digest: { every: string; held: string | null } | null;
   telegram: { state: string; current: string;
     /** v98: how the bot's messages reach Toolroll (pushed, or asked for), in words. */
@@ -118,7 +120,19 @@ export type BrowserUpdates = {
 /** A fold on the task page. Its HTML is the server's own section body, so
  * forms, ids and page scripts are unchanged. */
 export type BrowserTaskSection = { id: string; title: string; html: string; open: boolean; count: number | null };
-export type BrowserTaskFact = { label: string; parts: (string | BrowserLink | { seal: string })[] };
+/** `at`: a moment, shown in the reader's own time ("16:39", "Yesterday 16:39", "Sep 28"). */
+export type BrowserTaskFact = { label: string; parts: (string | BrowserLink | { seal: string } | { at: string })[] };
+/** One entry in a task's thread, in time order beside the task's own
+ * conversation: the plan, the agent's progress notes and results, its
+ * questions, and the person's replies. `html` is the server's own card (same
+ * forms and ids) when the entry carries one. */
+export type BrowserTaskThreadItem = {
+  key: string; at: string; kind: 'filed' | 'plan' | 'progress' | 'result' | 'question' | 'reply';
+  who: 'agent' | 'person'; author: string; title: string; text: string | null;
+  link: BrowserLink | null; html: string; more: { summary: string; html: string } | null;
+};
+/** The task's metadata, grouped for the Details panel (desk) or sheet (phone). */
+export type BrowserTaskDetailGroup = { title: 'Work' | 'Links' | 'Review' | 'About'; facts: BrowserTaskFact[] };
 export type BrowserTaskView = {
   kind: 'task';
   id: string; title: string; project: string | null; scout: boolean;
@@ -139,6 +153,13 @@ export type BrowserTaskView = {
   cancel: { html: string; open: boolean } | null;
   /** "Do this every time…": Settings → Flows with the matching starter flow marked. */
   everyTime?: { href: string; starter: string } | null;
+  /** Until the first Ready result: Plan → You approve → Build → Checks → Ready, filled in as it moves. */
+  journey?: JourneyStep[] | null;
+  /** The thread's server-side entries; the conversation's messages join them in time order. */
+  thread?: BrowserTaskThreadItem[];
+  details?: BrowserTaskDetailGroup[];
+  /** Where to message the agent when this page carries no conversation (null: messaging isn't available here). */
+  chatHref?: string | null;
 };
 /** One project on the Projects page; opening it is a POST to /projects/open. */
 export type BrowserProjectRow = {
@@ -148,6 +169,8 @@ export type BrowserProjectRow = {
   knowledgeHref: string;
   /** Settings → Projects → Pull requests for this project, and whether they are on. */
   pullRequests?: { href: string; on: boolean };
+  /** Settings → Projects → Checks for this project, and its level in words. */
+  checks?: { href: string; level: string };
   /** What waits, runs, queues or finished today; null when not scanned. */
   peek: { label: string; href: string; tone: 'attention' | 'info' | 'neutral' | 'success' }[] | null;
 };
@@ -314,7 +337,9 @@ export type BrowserFlowView = {
   tools: { name: string; about: string; functions: string[]; ready: boolean }[];
   /** The project's scripts: reusable steps a "Run a script" zone runs with no AI. */
   /** v90: each script's language, and the project file it runs instead of a body. */
-  scripts: { name: string; about: string; body: string; timeoutMinutes: number; version: number; savedBy: string; savedAt: string; usedHere: string[]; language: "shell" | "python" | "node"; file: string | null }[];
+  scripts: { name: string; about: string; body: string; timeoutMinutes: number; version: number; savedBy: string; savedAt: string; usedHere: string[]; language: "shell" | "python" | "node"; file: string | null;
+    /** It came with an imported flow and waits for a person's approval before it runs. */
+    held: boolean }[];
   start: string;
   stages: BrowserFlowStage[];
   cards: BrowserFlowCard[];
@@ -350,10 +375,36 @@ export type BrowserWorkspace = {
   update?: BrowserUpdateNotice;
   /** Chat's first run, until the first Ready result: the three steps and first tasks to try. */
   firstRun?: BrowserFirstRun;
+  /** Chat, after the first Ready result until put away: use it from the phone. */
+  phone?: BrowserPhoneCard;
+  /** The Chat landing's live view: who is working now, four counts, and Catch up in tabs. */
+  home?: BrowserHome | null;
 };
 
-/** `sandbox`: the demo command, offered beside the sign-in command while no agent is signed in. */
-export type BrowserFirstRun = { steps: FirstRunStep[]; suggestions: FirstTaskSuggestion[]; sandbox: string | null };
+/** One agent at work now: its task and the machine's own phase, in words. */
+export type BrowserHomeAgent = { runId: number; taskId: string; title: string; href: string; agent: string; phase: string; project: string | null; since: string };
+export type BrowserHomeCount = { key: 'working' | 'waiting' | 'ready' | 'done'; label: string; value: number; href: string };
+export type BrowserCatchUpTab = 'needs-you' | 'ready' | 'running' | 'all';
+export type BrowserCatchUpItem = {
+  id: string; title: string; href: string; project: string | null; tab: Exclude<BrowserCatchUpTab, 'all'> | 'finished';
+  label: string; tone: StatusTone; detail: string; at: string;
+};
+/** Plan-window use stands in for spend: subscriptions don't bill per run. */
+export type BrowserHome = {
+  agents: BrowserHomeAgent[]; counts: BrowserHomeCount[];
+  planUse: { name: string; window: string; percent: number; detail: string; tone: 'neutral' | 'warning' | 'danger' }[];
+  catchUp: BrowserCatchUpItem[]; allHref: string;
+};
+
+/** `sandbox`: the demo command, offered beside the sign-in command while no agent is signed in. `intro`: how it works,
+ * once, above the composer with the suggestions. `lead`: the one line saying what runs the lead, and where to change it.
+ * `recheck`: while no agent is signed in, where the page asks again on its own. */
+export type BrowserFirstRun = { steps: FirstRunStep[]; suggestions: FirstTaskSuggestion[]; sandbox: string | null;
+  intro?: string; lead?: { words: string; href: string } | null; recheck?: string | null };
+
+/** After the first Ready result: the phone, through a chat app or the console over Tailscale. `tailnet.restart`: the
+ * command that makes the console listen beyond this computer, when it doesn't yet. */
+export type BrowserPhoneCard = { chatApps: { label: string; href: string }[]; tailnet: { address: string; restart: string | null } | null; dismissHref: string };
 
 /** The console's update notice: neutral, never the accent — an update does not need a person. */
 export type BrowserUpdateNotice = { version: string; security: boolean; href: string; dismissHref: string };

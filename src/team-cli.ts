@@ -208,6 +208,8 @@ function render(reply: TeamResponse, listing?: 'leads' | 'conversations'): strin
 /** null means preserve the existing local command path. Nothing here opens a database. */
 export async function maybeRunTeamCommand(argv: readonly string[], write: (line: string) => void, options: TeamCliOptions = {}): Promise<number | null> {
   const command = argv[0];
+  // `lead token` is local: the credential a lead agent acts with on this computer.
+  if (command === 'lead' && argv[1] === 'token') return null;
   if (!['connect', 'lead', 'conversation', 'chat', 'brief'].includes(command ?? '') && !argv.includes('--profile')) return null;
   const json = argv.includes('--json');
   let secret = '';

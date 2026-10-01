@@ -12,6 +12,9 @@
  * technical reason stays one tap away in `why`. */
 import type { AssignmentSnapshot } from "./assignment.js";
 
+/** A cancelled task with a successor reads "Replaced by <id>" everywhere, never "Cancelled". */
+export const replacedWords = (successor: string): string => `Replaced by ${successor}`;
+const REPLACED = /^Replaced by \S+/;
 export const HEADLINES = ["Queued", "Planning", "Needs you", "Building", "Ready for review", "Complete", "Failed", "Stopped"] as const;
 export type Headline = (typeof HEADLINES)[number];
 export type HeadlineTone = "neutral" | "live" | "attention" | "ready" | "success" | "danger";
@@ -29,7 +32,13 @@ export type StatusDetail = { key: DetailKey; label: string; text: string; mark: 
 export type TaskStatus = { headline: Headline; tone: HeadlineTone; sentence: string; details: StatusDetail[]; primaryAction: StatusAction | null; why: string[] };
 
 export type TaskStage = "queued" | "planning" | "needs-you" | "building" | "checking" | "finished" | "complete" | "failed" | "stopped";
-export type ChecksFact = { status: "passed" | "failed" | "running" | "not-run" | "unavailable"; exitCode: number | null; head: string | null };
+export type ChecksFact = {
+  status: "passed" | "failed" | "running" | "not-run" | "unavailable"; exitCode: number | null; head: string | null;
+  /** The check level that ran (check-levels.ts). Off never reads Ready; a quick pass says so. */
+  level?: "quick" | "full" | "off" | null;
+  /** A follow-up check (Run checks) waiting or running on this commit. */
+  running?: "quick" | "full" | null;
+};
 export type PullRequestFact = {
   state: "none" | "opening" | "open" | "merged" | "closed" | "failed";
   number: number | null; url: string | null; ci: "running" | "passing" | "failing" | null; error: string | null;
@@ -52,8 +61,8 @@ export type TaskStatusFacts = {
   evidence?: { shortened: number; missing: number; damaged: number } | null;
   completedBy?: string | null;
   action?: StatusAction | null;
-  /** Where a row's one action leads: the result (and its Checks tab), the task's pull request. */
-  links?: { result?: string | null; checks?: string | null; pullRequest?: string | null };
+  /** Where a row's one action leads: the result (and its Checks tab), the task's pull request, Run checks. */
+  links?: { result?: string | null; checks?: string | null; pullRequest?: string | null; runChecks?: string | null };
   /** Exact technical reasons, shown only on request. */
   why?: readonly string[];
 };
@@ -66,7 +75,11 @@ export function headlineOf(facts: Pick<TaskStatusFacts, "stage" | "checks" | "re
     case "planning": return "Planning";
     case "needs-you": return "Needs you";
     case "building": case "checking": return "Building";
-    case "finished": return !facts.report && facts.checks?.status === "failed" ? "Failed" : "Ready for review";
+    case "finished":
+      if (facts.report) return "Ready for review";
+      if (facts.checks?.status === "failed") return "Failed";
+      // Off: ready like any build; the sentence and the Checks row say no check ran.
+      return "Ready for review";
     case "complete": return "Complete";
     case "failed": return "Failed";
     case "stopped": return "Stopped";
@@ -86,7 +99,8 @@ function sentenceOf(headline: Headline, facts: TaskStatusFacts): string {
     case "Building": return facts.stage === "checking" ? "Checks are running on the change." : reason ?? "An agent is working on it.";
     case "Ready for review":
       if (facts.report) return "The report is ready to read. Read it, then mark it complete.";
-      if (facts.checks?.status === "passed") return `Checks passed${sha === null ? "" : ` on ${sha}`}. Review the change, then mark it complete.`;
+      if (facts.checks?.level === "off" && facts.checks.status !== "passed") return "Checks are off for this project. Review the change, then mark it complete.";
+      if (facts.checks?.status === "passed") return `${facts.checks.level === "quick" ? "Quick checks" : "Checks"} passed${sha === null ? "" : ` on ${sha}`}. Review the change, then mark it complete.`;
       // Never claim a check that isn't known to have passed.
       if (facts.checks == null) return "Review the change, then mark it complete.";
       return "Built without a passing project check. Review the change, then mark it complete.";
@@ -96,7 +110,7 @@ function sentenceOf(headline: Headline, facts: TaskStatusFacts): string {
       return pr?.state === "merged" ? `${by} ${pr.number === null ? "Its pull request" : `Pull request #${pr.number}`} merged.` : by;
     }
     case "Failed":
-      if (facts.checks?.status === "failed") return `Checks failed${sha === null ? "" : ` on ${sha}`}. See what broke, then retry or ask for changes.`;
+      if (facts.checks?.status === "failed") return `${facts.checks.level === "quick" ? "Quick checks" : "Checks"} failed${sha === null ? "" : ` on ${sha}`}. See what broke, then retry or ask for changes.`;
       return reason ?? "The last attempt stopped before it finished. Review it, then retry.";
     case "Stopped": return reason ?? "Stopped by a person. The work so far is kept.";
   }
@@ -113,11 +127,16 @@ function detailsOf(headline: Headline, facts: TaskStatusFacts): StatusDetail[] {
   if (checks != null && !facts.report) {
     const sha = short(checks.head);
     const checksHref = facts.links?.checks ?? facts.links?.result ?? null;
-    if (checks.status === "passed") row("checks", "Checks", `Passed${sha === null ? "" : ` on ${sha}`}`, "ok", { href: checksHref });
-    else if (checks.status === "failed") row("checks", "Checks", `Failed${checks.exitCode === null ? "" : ` (exit ${checks.exitCode})`}`, problem(headline),
+    const runChecks = facts.links?.runChecks === undefined ? null : { label: "Run checks", href: facts.links.runChecks };
+    const quick = checks.level === "quick";
+    if (checks.running != null) row("checks", "Checks", `${checks.running === "quick" ? "Quick" : "Full"} checks running`, "running", { href: checksHref });
+    else if (checks.status === "passed") row("checks", "Checks", `${quick ? "Quick checks passed" : "Passed"}${sha === null ? "" : ` on ${sha}`}`, "ok",
+      quick && runChecks !== null && headline !== "Complete" ? { href: checksHref, action: { label: "Run full checks", href: runChecks.href } } : { href: checksHref });
+    else if (checks.status === "failed") row("checks", "Checks", `${quick ? "Quick checks failed" : "Failed"}${checks.exitCode === null ? "" : ` (exit ${checks.exitCode})`}`, problem(headline),
       headline === "Failed" ? { href: checksHref } : { action: { label: "See what failed", href: checksHref } });
     else if (checks.status === "running") row("checks", "Checks", "Running", "running");
-    else if (checks.status === "not-run") row("checks", "Checks", "Didn't run", "none");
+    else if (checks.level === "off") row("checks", "Checks", "Off for this project", "none", runChecks === null ? {} : { action: runChecks });
+    else if (checks.status === "not-run") row("checks", "Checks", "Didn't run", "none", runChecks === null ? {} : { action: runChecks });
     else row("checks", "Checks", "Couldn't be read", "note", { action: { label: "Open the result", href: facts.links?.result ?? null } });
   }
   const pr = facts.pullRequest;
@@ -271,14 +290,15 @@ export function assignmentStatusFacts(assignment: AssignmentSnapshot, options: {
   const withResult = finished || stage === "failed" || (stage === "needs-you" && receipt !== null);
   const report = receipt?.completionKind === "research-report";
   const checks: ChecksFact | null = receipt === null || !withResult ? null
-    : { status: receipt.checks.status, exitCode: receipt.checks.exitCode, head: receipt.head };
+    : { status: receipt.checks.status, exitCode: receipt.checks.exitCode, head: receipt.head,
+      ...(receipt.checks.level == null ? {} : { level: receipt.checks.level }), ...(receipt.checks.running == null ? {} : { running: receipt.checks.running }) };
   const publication = assignment.publication;
   const pullRequest = options.pullRequest !== undefined ? options.pullRequest
     : publication === null ? (withResult && !report ? { state: "none" as const, number: null, url: null, ci: null, error: null } : null)
     : pullRequestFactOf(publication);
   // Ready, Complete and Failed speak for themselves; every other stage keeps its recorded reason.
   const reason = stage === "needs-you" || stage === "stopped" || stage === "queued" || (stage === "failed" && checks?.status !== "failed")
-    ? stage === "stopped" && assignment.state === "cancelled" ? "Cancelled. Nothing else will run." : plainReasonOf(stage, options.work?.token ?? "", options.work?.detail ?? assignment.detail)
+    ? stage === "stopped" && assignment.state === "cancelled" ? REPLACED.test(assignment.detail) ? assignment.detail : "Cancelled. Nothing else will run." : plainReasonOf(stage, options.work?.token ?? "", options.work?.detail ?? assignment.detail)
     : null;
   return {
     stage, ...(need === undefined ? {} : { need }), reason, report,
@@ -286,7 +306,7 @@ export function assignmentStatusFacts(assignment: AssignmentSnapshot, options: {
     pullRequest: withResult ? pullRequest : null,
     requirements: withResult ? requirementsOf(receipt?.proof?.matrix) : null,
     evidence: withResult ? options.evidence ?? evidenceOf(receipt, [...(receipt?.caveats ?? []), ...assignment.attention]) : null,
-    completedBy: assignment.completion === null ? null : assignment.completion.actor.replace(/^(?:operator|coordinator|lead):/, ""),
+    completedBy: assignment.completion === null ? null : assignment.completion.lead === true ? "the lead" : assignment.completion.actor.replace(/^(?:operator|coordinator|lead):/, ""),
     action: options.action ?? null,
     ...(options.links === undefined ? {} : { links: options.links }),
     why: options.why ?? [],

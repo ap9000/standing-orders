@@ -29,6 +29,7 @@ import type { Runner } from "./builder.js";
 import { bridgePass, hashPairingCode, mintPairingCode, PAIRING_TTL_MS, type TelegramTransport } from "./telegram.js";
 import { AUTH_TRIAL_MS, authPauseOf, pauseForAuth } from "./provider-auth.js";
 import { workIndexPage } from "./work-index.js";
+import { saveProjectConcurrency } from "./project-concurrency.js";
 
 
 /** The exact route authority a fixture PRESENTS at admission (v48 authority repair): the
@@ -2446,6 +2447,8 @@ describe("watch — the loop, zero tokens idle", () => {
     const { runnerToken, approverToken } = await setup();
     await approved("t-live", approverToken);
     await approved("t-orphan", approverToken);
+    // One build at a time: t-orphan is the abandoned worker's, not a second lane's.
+    saveProjectConcurrency(db, realpathSync(repo), 1);
     let spawns = 0;
     let recoveredDuringBuild = false;
     const busyAgent: Runner = async (_file, args, options) => {

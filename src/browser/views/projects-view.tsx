@@ -2,7 +2,7 @@
  * what needs attention on the first line, where it lives and when it was
  * last opened on the second, Open on the right. Opening stays the server's
  * POST (the session's project changes there), so every road is a form. */
-import { BookOpen, FolderOpen, GitBranch, GitPullRequest, Plus } from "lucide-react";
+import { BookOpen, FolderOpen, GitBranch, GitPullRequest, ListChecks, Plus } from "lucide-react";
 import type { ReactNode } from "react";
 import type { BrowserProjectRow, BrowserProjectsView } from "../../browser-workspace.js";
 import { GuardedHtml } from "../guarded-html.js";
@@ -58,6 +58,7 @@ function Row({ row, csrf, returnTo, choosing }: { row: BrowserProjectRow; csrf: 
     </div>
     <div className="flex shrink-0 items-center gap-1.5 phone:col-start-2 phone:row-start-1">
       <Button asChild variant="ghost" size="sm" className="phone:w-11 phone:px-0"><a href={row.knowledgeHref} aria-label={`${row.name} knowledge`}><BookOpen /><span className="phone:sr-only">Knowledge</span></a></Button>
+      {row.checks && <Button asChild variant="ghost" size="sm" className="phone:w-11 phone:px-0"><a href={row.checks.href} aria-label={`${row.name} checks: ${row.checks.level}`}><ListChecks /><span className="phone:sr-only">Checks · {row.checks.level}</span></a></Button>}
       {row.pullRequests && <Button asChild variant="ghost" size="sm" className="phone:w-11 phone:px-0"><a href={row.pullRequests.href} aria-label={`${row.name} pull requests: ${row.pullRequests.on ? "on" : "off"}`}><GitPullRequest /><span className="phone:sr-only">Pull requests{row.pullRequests.on ? "" : " · Off"}</span></a></Button>}
       {row.open
         ? <Badge tone="success">Open now</Badge>

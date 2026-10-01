@@ -35,7 +35,7 @@ One sentence under the headline says why and what's next, in plain words (e.g. "
 
 **2. Details as a quiet list underneath**, one row each, neutral text with a small icon. Colour only on the icon, and only when it matters:
 
-- Checks: passed / failed / running / couldn't run
+- Checks: passed / failed / running / couldn't run. A quick check says so ("Quick checks passed on a1b2c3d"); Off reads "Off" with **Run checks**; a follow-up check reads "Full checks running"
 - Pull request: none · opening · #12 open, CI running · #12 merged · couldn't open
 - Requirements: "3 of 3 met" · "You check 1" (not "Not assessed")
 - Saved evidence: complete · some output shortened
@@ -48,6 +48,10 @@ One sentence under the headline says why and what's next, in plain words (e.g. "
 **4. One primary action**, chosen from the headline and details (Approve, Review, Mark complete, Merge, Retry the pull request…). Secondary actions stay quiet.
 
 **5. Plain words.** No grant, criterion, evidence, operator, verify, publication, assessment in anything a person reads by default; the exact technical reason stays one tap away (a "Details" disclosure and the run log).
+
+## Check levels
+
+Each project checks at one level, chosen in Settings → Projects → Checks or with `toolroll verify level quick|full|off` (an approver's act, in the ledger): **Quick** runs the approved quick command (typecheck and the tests near the change; new projects start here), **Full** runs the full command (projects from before levels keep it), **Off** runs nothing. A task can choose its own at filing (`task add --checks`, or in chat "skip the tests" / "run the full checks"). With Quick or Off, the full check runs when a pull request opens and Merge waits for it unless a person merges anyway. Every result offers **Run checks** (quick or full, on that exact commit; a pass upgrades the status, a failure stays visible) and **Add tests** (files a small task, unapproved, to write tests for that change).
 
 ## Implementation notes
 

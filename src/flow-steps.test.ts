@@ -152,7 +152,7 @@ test("the console serves a flow's insights and a run's log, from All projects", 
   const card = store.addFlowCard({ flow, title: "Tidy", description: null, stage: "lint", by: "alex" }, T0);
   await runFlowSteps(store, repo, at(1), io());
   const { createDecisionServer } = await import("./serve.js");
-  const server = createDecisionServer({ store, evidenceRoot: dir, repos: [repo], configDir: dir });
+  const server = createDecisionServer({ store, evidenceRoot: dir, repos: [repo], configDir: dir, clock: () => at(60) }); // the seeded runs are at T0: a real clock lets them age out of the 7-day window
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   if (!address || typeof address !== "object") throw new Error("listen");

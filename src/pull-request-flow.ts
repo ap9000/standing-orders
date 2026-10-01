@@ -26,6 +26,7 @@ import { authenticateApprover } from "./scope.js";
 import { BRANCH_PREFIX, headWithin } from "./names.js";
 import type { VerifiedApprover } from "./principal.js";
 import type { Publication, Store } from "./store.js";
+import { fullCheckGate, requestFollowUpChecks } from "./result-follow-ups.js";
 
 export type MergeMethod = "squash" | "merge" | "rebase";
 export const MERGE_METHODS: readonly MergeMethod[] = ["squash", "merge", "rebase"];
@@ -210,6 +211,8 @@ export function owePullRequest(store: Store, runId: number, actor: string, flowC
     }
     store.handle.prepare("INSERT OR IGNORE INTO pull_request_follow (publication, flow_card, revisions, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
       .run(publication.id, flowCard, inheritedRevisions(store, run.taskRef), now.toISOString(), now.toISOString());
+    // Built with Quick or Off checks: the full check runs on this commit now, and Merge waits for it.
+    if (fullCheckGate(store, run.id, now).state === "not-requested") requestFollowUpChecks(store, { runId: run.id, level: "full", actor, why: "pull-request" }, now);
     store.bumpWake();
     return publication;
   });
@@ -342,6 +345,8 @@ export async function followPullRequests(
     }
 
     if (one.state === "passing" && one.headOid === publication.headSha && follow.readyHead !== one.headOid) {
+      // A Quick or Off result is ready only once its full check passed too; this is read again next time.
+      if (fullCheckGate(store, publication.run, clock()).state !== "clear") continue;
       const grant = store.publicationGrantFor(store.refById(publication.taskRef)?.repo ?? "");
       updateFollow(store, publication.id, { ready_head: one.headOid }, clock());
       if (grant?.mergeWhenGreen === true && grant.publishOn === "complete") {
@@ -375,13 +380,15 @@ function askPerson(store: Store, publication: Publication, head: string, body: s
 /** A person's merge: their password first, then the same checked merge. */
 export async function mergeAsPerson(
   store: Store,
-  input: { runId: number; name: string; password: string; exec?: PublishExec; clock?: () => Date },
+  input: { runId: number; name: string; password: string; exec?: PublishExec; clock?: () => Date;
+    /** A person's choice to merge without waiting for the full check (Quick or Off results). */
+    anyway?: boolean },
 ): Promise<Result<{ commit: string | null }>> {
   const run = store.getRun(input.runId);
   const repo = run === null ? null : store.refById(run.taskRef)?.repo ?? null;
   if (input.password === "") return refuse("password", "Enter your password to merge.");
   if (!authenticateApprover(store, input.name, input.password, repo).ok) return refuse("password", "That password didn't work, or you can't merge in this project.");
-  return mergePullRequest(store, { runId: input.runId, by: input.name, ...(input.exec === undefined ? {} : { exec: input.exec }), ...(input.clock === undefined ? {} : { clock: input.clock }) });
+  return mergePullRequest(store, { runId: input.runId, by: input.name, ...(input.anyway === true ? { anyway: true } : {}), ...(input.exec === undefined ? {} : { exec: input.exec }), ...(input.clock === undefined ? {} : { clock: input.clock }) });
 }
 
 /**
@@ -393,7 +400,9 @@ export async function mergePullRequest(
   store: Store,
   input: { runId: number; by: string; exec?: PublishExec; clock?: () => Date;
     /** A flow's Pull request zone merges its own way; otherwise the project's. */
-    method?: MergeMethod },
+    method?: MergeMethod;
+    /** Only a person merging by hand may skip waiting for the full check. */
+    anyway?: boolean },
 ): Promise<Result<{ commit: string | null }>> {
   const exec = input.exec ?? execRun;
   const clock = input.clock ?? (() => new Date());
@@ -422,7 +431,7 @@ export async function mergePullRequest(
       store.recordPublicationRemoteState(publication.id, "MERGED", now);
       store.resolveCiEpisodes(publication.githubRepo, publication.prNumber!, null, now);
       store.recordAction({ at: now.toISOString(), actor: by, repo: ref!.repo, taskId: ref!.externalId, runId: publication.run, action: MERGED_ACTION,
-        outcome: commit ?? "merged", source: "work", detail: `PR #${pr} by ${method}, branch deleted` });
+        outcome: commit ?? "merged", source: "work", detail: `PR #${pr} by ${method}, branch deleted${skippedFullCheck ? ", merged without waiting for the full check" : ""}` });
       store.enqueueNotification({ source: { run: publication.run }, dedupeKey: `pull-request:${publication.id}:merged`, kind: "pull-request-merged",
         subject: `Merged: ${ref!.externalId} (PR #${pr})`, body: `${publication.prUrl ?? publication.githubRepo}${commit === null ? "" : ` — ${commit.slice(0, 12)}`}`,
         link: `/t/${encodeURIComponent(ref!.externalId)}` }, now);
@@ -432,6 +441,12 @@ export async function mergePullRequest(
     updateFollow(store, publication.id, { merge_error: message.slice(0, 300) }, clock());
     return refuse(reason, message);
   };
+
+  // Built with Quick or Off checks: Merge waits for the full check on this commit, unless a person merges anyway.
+  const gate = fullCheckGate(store, publication.run, clock());
+  if (gate.state === "not-requested") requestFollowUpChecks(store, { runId: publication.run, level: "full", actor: input.by, why: "pull-request" }, clock());
+  const skippedFullCheck = gate.state !== "clear";
+  if (skippedFullCheck && input.anyway !== true) return fail("full-checks", gate.message);
 
   const before = await view();
   if (before === null) return fail("unread", "GitHub couldn't be read just now. Try again.");
@@ -462,6 +477,8 @@ export type PullRequestView = {
   mergeMethod: MergeMethod;
   canMerge: boolean;
   revisionTask: string | null;
+  /** Quick or Off results: the full check Merge waits for, unless a person merges anyway. */
+  fullCheck: { state: "not-requested" | "waiting" | "failed" | "not-run"; message: string } | null;
 };
 
 /** The pull request a result opened through Complete, in plain words; null when it opened none. */
@@ -471,7 +488,9 @@ export function pullRequestViewOf(store: Store, runId: number): PullRequestView 
   if (publication === null || follow === null) return null;
   const grant = store.publicationGrantFor(store.refById(publication.taskRef)?.repo ?? "");
   const method: MergeMethod = follow.mergeMethod ?? grant?.mergeMethod ?? "squash";
-  const base = { runId, prNumber: publication.prNumber, prUrl: publication.prUrl, mergeCommit: follow.mergeCommit || null, mergeMethod: method, canMerge: false, revisionTask: follow.revisionTask };
+  const gate = fullCheckGate(store, runId, new Date());
+  const fullCheck = gate.state === "clear" ? null : gate;
+  const base = { runId, prNumber: publication.prNumber, prUrl: publication.prUrl, mergeCommit: follow.mergeCommit || null, mergeMethod: method, canMerge: false, revisionTask: follow.revisionTask, fullCheck };
   const error = follow.mergeError === null ? "" : ` Last merge attempt: ${follow.mergeError}`;
   if (follow.mergeCommit !== null) {
     return { ...base, state: "merged", label: "Merged", detail: follow.mergedBy === null || follow.mergedBy === "GitHub" ? "Merged on GitHub." : `Merged by ${follow.mergedBy}${follow.mergeMethod === null ? "" : ` (${follow.mergeMethod})`}. Branch deleted.` };
@@ -483,6 +502,7 @@ export function pullRequestViewOf(store: Store, runId: number): PullRequestView 
   if (publication.remoteState === "CLOSED") return { ...base, state: "closed", label: "Closed", detail: "The pull request was closed on GitHub without merging." };
   switch (publication.lastCheckState) {
     case "passing":
+      if (fullCheck !== null) return { ...base, state: "waiting", label: fullCheck.state === "failed" ? "Full checks failed" : "Waiting for full checks", detail: `CI passed on GitHub. ${fullCheck.message}${error}`, canMerge: grant !== null };
       return { ...base, state: "ready", label: "Ready to merge", detail: `CI passed on GitHub.${grant?.mergeWhenGreen === true ? " It merges by itself." : ""}${error}`, canMerge: grant !== null };
     case "failing":
       return { ...base, state: "failing", label: "Checks failed", detail: follow.revisionTask !== null && follow.askedHead !== follow.redHead ? `Revision ${follow.revisionTask} was filed with the failure.` : follow.askedHead !== null ? "Toolroll stopped filing revisions. Decide what to do next." : "Reading the failure." };

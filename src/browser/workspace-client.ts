@@ -187,10 +187,13 @@ export async function readWorkspace(workspace: BrowserWorkspace, request: string
 }
 
 /** Exactly one POST. A lost response is resolved only through readWorkspace. */
-export async function sendMessage(workspace: BrowserWorkspace, message: PendingMessage, fetcher: typeof fetch = fetch): Promise<{ refused: boolean; message: string | null }> {
+export async function sendMessage(workspace: BrowserWorkspace, message: PendingMessage, fetcher: typeof fetch = fetch,
+  /** The task composer's mode ("build", "plan" or "answer"); the server refuses it anywhere else. */
+  mode: string | null = null): Promise<{ refused: boolean; message: string | null }> {
   const chat = workspace.conversation;
   if (!chat) throw new WorkspaceAuthError("Reconnect to the conversation before sending.");
   const body = new URLSearchParams({ csrf: workspace.csrf, message: message.text, request: message.request, "request-session": String(chat.sessionId) });
+  if (mode !== null && chat.taskId) body.set("mode", mode);
   if (chat.taskId) body.set("task", chat.taskId);
   else if (chat.project) body.set("project", chat.project);
   if (chat.resultRunId !== null) body.set("result", String(chat.resultRunId));

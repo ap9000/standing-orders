@@ -208,7 +208,20 @@ describe("toolroll up", () => {
       databaseFile: db,
       upSeams: { terminal: true, env: {}, openBrowser: url => opened.push(url) },
     })).toBe(0);
-    expect(opened).toEqual([`http://127.0.0.1:${PORT + 15}/`]);
+    // Three lines (onboarding): where it is, that it opens signed in, and what to do if it doesn't. The browser gets a
+    // one-time sign-in link that is never printed; neither is the password.
+    expect(opened).toHaveLength(1);
+    expect(opened[0]).toMatch(new RegExp(`^http://127\\.0\\.0\\.1:${PORT + 15}/login/once/[A-Za-z0-9_-]{43}$`));
+    const greeting = lines.join("\n");
+    const [who = "", secret = ""] = readFileSync(join(base, "up-login.txt"), "utf8").trim().split(" ");
+    expect(greeting).not.toContain(secret);
+    expect(greeting).toContain([
+      `Toolroll is on http://127.0.0.1:${PORT + 15}/`,
+      "Opening it in your browser now, already signed in.",
+      `If it doesn't open, go to that address and sign in as ${who}: the password is in ${join(base, "up-login.txt")}.`,
+    ].join("\n"));
+    expect(greeting).not.toContain("/login/once/");
+    expect(greeting).not.toContain(`repository  ${repo}`);
     // A person at a terminal reads at most one plain sentence about containment; --verbose adds the exact status.
     expect(lines.join("\n")).not.toContain("watch: containment: ");
     expect(lines.filter(line => line.startsWith("Agents run without Linux process containment")).length).toBeLessThanOrEqual(1);

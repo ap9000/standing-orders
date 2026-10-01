@@ -8,10 +8,10 @@
  * with the faces of whoever else has it open. */
 import { Background, BackgroundVariant, BaseEdge, Controls, EdgeLabelRenderer, Handle, MarkerType, NodeResizer, Position, ReactFlow, ReactFlowProvider, applyNodeChanges, getSmoothStepPath, useReactFlow, type Connection, type Edge, type EdgeProps, type Node, type NodeChange, type NodeProps } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Bell, BellOff, Bot, CalendarClock, Hourglass, LineChart, ListChecks, MessageSquareReply, Copy, Flag, GitPullRequest, Hammer, Inbox, Megaphone, MessageSquare, MousePointerClick, Pencil, PenLine, Plus, Search, Split, Globe, Mail, Wrench, SquareKanban, UserCheck, Webhook, Workflow, X, Zap } from "lucide-react";
+import { Bell, BellOff, Bot, CalendarClock, Download, Ellipsis, Hourglass, LineChart, ListChecks, MessageSquareReply, Copy, Flag, GitPullRequest, Hammer, Inbox, Megaphone, MessageSquare, MousePointerClick, Pencil, PenLine, Plus, Search, Split, Globe, Mail, Wrench, SquareKanban, UserCheck, Webhook, Workflow, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { BrowserFlowCard, BrowserFlowStage, BrowserFlowTrigger, BrowserFlowView } from "../../browser-workspace.js";
-import { Badge, Button, Input, Label, Textarea, cn, toast } from "../components/ui/index.js";
+import { Badge, Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, Input, Label, Textarea, cn, toast } from "../components/ui/index.js";
 
 /** A person's initials in a small circle, the same colour for the same name everywhere. */
 function Face({ name, size = "sm" }: { name: string; size?: "sm" | "md" }) {
@@ -1106,13 +1106,15 @@ function ScriptsPanel({ view, csrf, apply, onClose }: { view: BrowserFlowView; c
       <div className="flex items-start gap-2">
         <span className="mt-0.5 inline-flex size-6 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground"><ListChecks className="size-3.5" aria-hidden="true" /></span>
         <div className="min-w-0 flex-1">
-          <p className="font-mono text-[13px] font-semibold">{script.name}</p>
+          <p className="flex flex-wrap items-center gap-1.5 font-mono text-[13px] font-semibold">{script.name}{script.held && <Badge tone="attention">Needs approval</Badge>}</p>
           <p className="text-[12.5px]">{script.about}</p>
           <p className="text-[12px] text-muted-foreground">{LANGUAGE_NAMES[script.language]}{script.file === null ? "" : ` · runs ${script.file}`} · version {script.version} · {script.savedBy} · up to {script.timeoutMinutes} min{script.usedHere.length > 0 ? ` · runs in ${script.usedHere.join(", ")}` : " · not used in this flow"}</p>
         </div>
       </div>
       {script.file === null && <details className="mt-2"><summary className="cursor-pointer text-[12px] text-muted-foreground">Show the script</summary><pre className="mt-2 max-h-56 overflow-auto rounded-md bg-muted p-2 font-mono text-[12px]">{script.body}</pre></details>}
+      {script.held && <p className="mt-2 text-[12.5px]" data-script-held>It came with an imported flow, so it doesn't run until you approve it. Read it first.</p>}
       {view.canEdit && <div className="mt-2 flex gap-1.5">
+        {script.held && <Button size="sm" disabled={busy} onClick={async () => { setBusy(true); apply(await send(`${view.flow.href}/scripts`, { approve: "yes", name: script.name }, csrf)); setBusy(false); }} data-approve-script>Approve</Button>}
         <Button size="sm" variant="outline" onClick={() => { setRunsFile(script.file !== null); setDraft({ name: script.name, about: script.about, body: script.body, timeoutMinutes: String(script.timeoutMinutes), language: script.language, file: script.file ?? "" }); }}>Edit</Button>
         <Button size="sm" variant="ghost" className="text-destructive" disabled={busy} onClick={async () => { setBusy(true); apply(await send(`${view.flow.href}/scripts`, { remove: "yes", name: script.name }, csrf)); setBusy(false); }}>Remove</Button>
       </div>}
@@ -1452,6 +1454,12 @@ function Canvas({ view: initial, csrf }: { view: BrowserFlowView; csrf: string }
             {view.canEdit && <Button size="sm" variant="ghost" asChild><a href={view.chatHref}><MessageSquare className="size-4" />Change in chat</a></Button>}
             {view.canEdit && <Button size="sm" variant="outline" onClick={startEditing}><Pencil className="size-4" />Edit flow</Button>}
             {view.canEdit && <Button size="sm" onClick={() => { setSelected(null); setAdding(true); }}><Plus className="size-4" />New card</Button>}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild><Button size="sm" variant="ghost" aria-label="More" data-flow-menu><Ellipsis className="size-4" /></Button></DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem asChild><a href={`${view.flow.href}/export`} download data-export-flow><Download className="size-4" />Export as a file</a></DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </>}
     </div>
     <div className="relative flex min-h-0 flex-1">
@@ -1503,7 +1511,7 @@ function PhoneFlow({ view: initial, csrf }: { view: BrowserFlowView; csrf: strin
   if (button !== null) return <div className="p-4"><PressPanel trigger={button} view={view} csrf={csrf} apply={apply} onClose={() => setPressing(null)} /></div>;
   if (card !== null) return <div className="p-4"><CardPanel card={card} view={view} csrf={csrf} apply={apply} onClose={() => setOpen(null)} /></div>;
   return <div className="flex flex-col gap-3 p-4" data-flow={view.flow.id}>
-    <div><h1 className="text-[17px] font-semibold">{view.flow.name}</h1><p className="text-[12px] text-muted-foreground">{view.flow.project}{view.canEdit ? <> · <a className="underline" href={view.chatHref}>change it in chat</a>, or edit it on a larger screen</> : null}</p>
+    <div><h1 className="text-[17px] font-semibold">{view.flow.name}</h1><p className="text-[12px] text-muted-foreground">{view.flow.project}{view.canEdit ? <> · <a className="underline" href={view.chatHref}>change it in chat</a>, or edit it on a larger screen</> : null} · <a className="underline" href={`${view.flow.href}/export`} download data-export-flow>Export</a></p>
       {others.length > 0 && <div className="mt-1.5"><AlsoHere others={others} cards={view.cards} /></div>}</div>
     {view.canEdit && live.some(one => one.button !== null && one.state === "active") && <div className="flex flex-wrap gap-2">
       {live.filter(one => one.button !== null && one.state === "active").map(one => <Button key={one.id} size="sm" onClick={() => setPressing(one.id)}><MousePointerClick className="size-4" />{one.button!.label}</Button>)}</div>}

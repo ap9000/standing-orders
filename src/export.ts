@@ -51,7 +51,7 @@ const DERIVED_TABLE = /^(sqlite_|memory_search)/;
 
 /** Columns that hold a secret (or what stands in for one): never exported. */
 const SECRET_COLUMNS = new Set([
-  "api_token.secret_hash", "approver.credential_hash", "coordinator_credential.credential_hash", "runner.credential_hash", "invite.token_hash",
+  "api_token.secret_hash", "lead_credential.secret_hash", "approver.credential_hash", "coordinator_credential.credential_hash", "runner.credential_hash", "invite.token_hash",
   "flow_trigger.hook_hash", "held_session.cookie", "push_subscription.endpoint", "push_subscription.p256dh", "push_subscription.auth",
   "chat_turn.credential_key", "mate_session.credential_key", "mate_turn.credential_key", "bridge_lease.push_url", "workflow_preview.token",
   "quota.credential_fp",
@@ -76,7 +76,7 @@ export function categoryOf(table: string): string {
     [/^teammate/, "teammates"],
     [/^(flow|routine|workflow_)/, "flows"],
     [/^(chat_|mate_|team_|telegram_|slack_|discord_|teams_|notification|push_|bridge_lease)/, "chats"],
-    [/^(approver|api_token|invite|sso_identity|coordinator_)/, "people"],
+    [/^(approver|api_token|lead_credential|invite|sso_identity|coordinator_)/, "people"],
     [/^(run|artifact|claim|worktree$|execution_slot|contest|tournament_terms|fallback_cycle|fallback_transition|held_session|session_turn|attended_authorization|criterion_review|diff_comment|proof_|review_request|repair_chain|incident|publication$|merge_|side_spend|knowledge_snapshot|learning_snapshot|skill_snapshot)/, "runs"],
     [/^(task|hold$|plan_|scope_|tool_seal|decision|external_|skill_test)/, "tasks"],
     [/^(project|approval_policy|capability|verify_command|worktree_setup|backend_grant|intake_grant|publication_grant|operating_mode|knowledge_|learning_|memory_|skill_)/, "projects"],
@@ -88,6 +88,7 @@ export function categoryOf(table: string): string {
 /** Extra shapes beside the evidence scanner's: this installation's own tokens and password hashes, and bearer headers. */
 const EXTRA_SHAPES: RegExp[] = [
   /\bso_[a-f0-9]{12}_[A-Za-z0-9_-]{43}/g,
+  /\blt_[a-f0-9]{12}_[A-Za-z0-9_-]{43}/g,
   /\bscrypt\$[^\s"',;]+/g,
   /\bBearer\s+[A-Za-z0-9._~+/-]{16,}=*/gi,
   /\bsk-[A-Za-z0-9_-]{20,}/g,

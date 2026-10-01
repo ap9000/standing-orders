@@ -115,6 +115,33 @@ Exception routing, Email replies, Reply and follow up (a nudge in the same
 thread after 3 days without an answer), Decisions that don't stall (a
 reminder, then anyone can decide), and Blank.
 
+## Sharing a flow as a file
+
+A flow travels as one readable JSON file, `*.toolroll-flow.json`
+([schema](../flow-file.schema.json)): its zones in the lead's step words
+(titles, kinds, `next`/`ifFails`, instructions), its triggers' settings and
+the scripts it runs.
+
+- **Export:** the **⋯** menu on a flow → **Export as a file**, or
+  `toolroll flows export <id> [--out file]`.
+- **Import:** Flows → **New flow** → **Or import a flow file** (a file, or a
+  gist or GitHub file address), or
+  `toolroll flows import <file|https address> --repo <path> [--param name=value …] [--yes]`.
+  Addresses are fetched over HTTPS from GitHub only, up to 256 KB.
+
+A file never carries secrets or their values, webhook addresses or hashes,
+tokens, people's names, chat channel connections or cards. The GitHub
+repository, labels, branch, a Linear team, who decides and written-out email
+addresses become parameters the import asks for. A trigger from another flow
+or a chat channel stays behind (export says so).
+
+Every import is previewed in plain words first. Its instructions came from
+someone else, so read what each step is asked. Its triggers arrive switched
+off until you turn them on; its scripts can't run until you **Approve** them
+on the Scripts panel (or `toolroll flows script approve --repo <path> --name <script>`).
+A webhook trigger gets its own new address when you make one on its Triggers
+panel.
+
 ## Starter flows
 
 Settings → Flows (and `toolroll onboard`) offers four flows that are on from

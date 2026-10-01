@@ -1,0 +1,89 @@
+{
+  "synthetic": true,
+  "checks": [
+    {
+      "name": "gallery desktop",
+      "overflow": false,
+      "smallestTap": 36,
+      "wrappedButton": false
+    },
+    {
+      "name": "overnight-bug-bash desktop",
+      "overflow": false,
+      "smallestTap": 32,
+      "wrappedButton": false
+    },
+    {
+      "name": "weekly-upkeep desktop",
+      "overflow": false,
+      "smallestTap": 32,
+      "wrappedButton": false
+    },
+    {
+      "name": "gallery phone",
+      "overflow": false,
+      "smallestTap": 44,
+      "wrappedButton": false
+    },
+    {
+      "name": "overnight-bug-bash phone",
+      "overflow": false,
+      "smallestTap": 44,
+      "wrappedButton": false
+    },
+    {
+      "name": "weekly-upkeep phone",
+      "overflow": false,
+      "smallestTap": 44,
+      "wrappedButton": false
+    },
+    {
+      "name": "gallery desktop-dark",
+      "overflow": false,
+      "smallestTap": 36,
+      "wrappedButton": false
+    },
+    {
+      "name": "weekly-upkeep desktop-dark",
+      "overflow": false,
+      "smallestTap": 32,
+      "wrappedButton": false
+    },
+    {
+      "name": "gallery phone-dark",
+      "overflow": false,
+      "smallestTap": 44,
+      "wrappedButton": false
+    },
+    {
+      "name": "weekly-upkeep phone-dark",
+      "overflow": false,
+      "smallestTap": 44,
+      "wrappedButton": false
+    }
+  ],
+  "flows": [
+    {
+      "name": "Weekly upkeep",
+      "triggers": [
+        {
+          "kind": "schedule",
+          "schedule": "weekly:1:08:30@America/Los_Angeles",
+          "title": "Weekly upkeep",
+          "description": null,
+          "zone": "outdated"
+        }
+      ],
+      "zones": [
+        "check",
+        "task",
+        "approval",
+        "pull-request",
+        "done"
+      ],
+      "scripts": [
+        "outdated"
+      ]
+    }
+  ]
+}

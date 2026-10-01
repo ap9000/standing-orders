@@ -2,6 +2,7 @@
  * State, decisions, approval, process custody and proof still belong to
  * their existing owners. Action hints are navigation/proposal guidance,
  * never credentials or permission to bypass an owning operation. */
+import { resultCheckLevel } from "./result-follow-ups.js";
 import { diagnoseTaskDispatch, type DispatchAction } from "./dispatch.js";
 import { isAlive } from "./runner.js";
 import type { Store } from "./store.js";
@@ -120,6 +121,7 @@ export function taskWorkSummaryOf(store: Store, taskId: string, now: Date, acces
     result: result === null ? null : {
       runId: result.id, role: result.role, outcome: result.outcome,
       verdict: proof?.verdict ?? null, reasons: proof?.reasons ?? [], accepted: store.proofAcceptance(result.id) !== null,
+      checkLevel: resultCheckLevel(store, result.id, now),
       review: reviewFactsOf(store.reviewRetryStateOf(result.id), name => {
         const runner = store.getRunner(name)?.runner;
         return runner !== undefined && isAlive(runner, now);
