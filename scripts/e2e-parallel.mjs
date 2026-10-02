@@ -18,7 +18,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import { BROWSER_CHECK, exactly, here, retryCleared, retrySet } from "./e2e-kit.mjs";
+import { BROWSER_CHECK, exactly, here, retryCleared, retrySet, stopGroups, stopLeftovers } from "./e2e-kit.mjs";
 
 const [script, ...given] = process.argv.slice(2);
 if (script === undefined) { console.error("Usage: node scripts/e2e-parallel.mjs <script.mjs> [--no-retry] [--output <dir>] [options for every group]"); process.exit(2); }
@@ -35,7 +35,10 @@ console.log(`Running ${groups.length} groups at once: ${groups.map(one => one.na
 
 const runGroup = (group, folder, extra = []) => new Promise(done => {
   const at = Date.now();
-  const child = spawn(process.execPath, [script, "--group", group, "--output", join(out, folder), ...extra], { stdio: ["ignore", "pipe", "pipe"] });
+  // In a process group of its own: when it ends, whatever it left in that group, or listed as still running in its
+  // processes.json (a run killed outright never reaches its own finally), is stopped before a retry starts.
+  const child = spawn(process.execPath, [script, "--group", group, "--output", join(out, folder), ...extra], { stdio: ["ignore", "pipe", "pipe"], detached: true });
+  running.add(child.pid);
   const tag = `[${folder.padEnd(width)}]`;
   for (const stream of [child.stdout, child.stderr]) {
     let partial = "";
@@ -46,9 +49,18 @@ const runGroup = (group, folder, extra = []) => new Promise(done => {
     });
     stream.on("end", () => { if (partial !== "") console.log(`${tag} ${partial}`); });
   }
-  child.on("close", (code, signal) => done({ group, folder, code: code ?? 1, signal, minutes: minutes(Date.now() - at) }));
+  child.on("close", async (code, signal) => {
+    await stopGroups([child.pid], { graceMs: 5_000 }).catch(() => undefined);
+    running.delete(child.pid);
+    const left = await stopLeftovers(join(out, folder));
+    if (left > 0) console.log(`${tag} stopped ${left} process group${left === 1 ? "" : "s"} it left running`);
+    done({ group, folder, code: code ?? 1, signal, minutes: minutes(Date.now() - at) });
+  });
 });
-process.on("SIGINT", () => process.exit(130));
+const running = new Set();
+// Interrupted, the runner takes every group's run with it (they are not in its process group); each run's own exit
+// handler stops what it owns.
+process.on("exit", () => { for (const pid of running) { try { process.kill(-pid, "SIGTERM"); } catch { /* already gone */ } } });
 
 const report = folder => { try { return JSON.parse(readFileSync(join(out, folder, "report.json"), "utf8")); } catch { return null; } };
 // The first run's own --only is replaced by the journeys to retry (they are a subset of it).

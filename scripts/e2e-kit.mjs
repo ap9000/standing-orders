@@ -27,6 +27,59 @@ export const option = (name, fallback) => { const at = args.indexOf(name); retur
 export const sleep = ms => new Promise(done => setTimeout(done, ms));
 export const freePort = () => new Promise(done => { const server = createServer(); server.listen(0, "127.0.0.1", () => { const { port } = server.address(); server.close(() => done(port)); }); });
 
+/**
+ * The processes a run owns, by process group: every `serve`, `watch`, `up` and `demo` a journey starts runs in a group
+ * of its own, and the whole group stops when the journey is done with it — passed, failed or timed out. The groups
+ * still running are listed in <output>/processes.json, so a runner whose run was killed outright (no `finally` runs
+ * then) stops them before it retries (e2e-parallel.mjs); whatever is left when this process exits is killed with it.
+ */
+export const PROCESSES_FILE = "processes.json";
+const owned = new Map();
+let ownedFile = option("--output", null) === null ? null : join(resolve(option("--output", "")), PROCESSES_FILE);
+function saveOwned() {
+  if (ownedFile === null) return;
+  try { mkdirSync(dirname(ownedFile), { recursive: true }); writeFileSync(ownedFile, JSON.stringify([...owned].map(([group, label]) => ({ group, label })), null, 2) + "\n"); } catch { /* the exit handler still stops them */ }
+}
+export function processesIn(out) { ownedFile = join(out, PROCESSES_FILE); saveOwned(); }
+/** Own a process group (a child spawned detached leads its own). */
+export function own(group, label) { owned.set(group, label); saveOwned(); return group; }
+/** spawn(), in a process group of its own that this run owns. */
+export function spawnOwned(label, command, argv, options = {}) {
+  const child = spawn(command, argv, { ...options, detached: true });
+  if (child.pid !== undefined) own(child.pid, label);
+  return child;
+}
+export const groupAlive = group => { try { process.kill(-group, 0); return true; } catch (error) { return error.code === "EPERM"; } };
+const signalGroup = (group, signal) => { try { process.kill(-group, signal); } catch { /* already gone */ } };
+/** Stop process groups: SIGTERM, then SIGKILL whatever is still there after `graceMs`; resolves once every group is gone. */
+export async function stopGroups(groups, { graceMs = 10_000 } = {}) {
+  for (const group of groups) signalGroup(group, "SIGTERM");
+  for (const [signal, ms] of [["SIGKILL", graceMs], [null, 5_000]]) {
+    const deadline = Date.now() + ms;
+    while (groups.some(groupAlive) && Date.now() < deadline) await sleep(100);
+    if (signal !== null) for (const group of groups.filter(groupAlive)) signalGroup(group, signal);
+  }
+  for (const group of groups) owned.delete(group);
+  saveOwned();
+  const left = groups.filter(groupAlive);
+  if (left.length > 0) throw new Error(`process group${left.length === 1 ? "" : "s"} ${left.join(", ")} would not stop`);
+}
+/** Stop every group this run still owns. */
+export const stopOwned = options => stopGroups([...owned.keys()], options);
+process.on("exit", () => { for (const group of owned.keys()) signalGroup(group, "SIGKILL"); });
+for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]]) process.on(signal, () => process.exit(code));
+/** For a runner: stop the groups a run left behind in <folder>/processes.json (it was killed, or crashed). Returns how many. */
+export async function stopLeftovers(folder) {
+  let listed = [];
+  try { listed = JSON.parse(readFileSync(join(folder, PROCESSES_FILE), "utf8")).map(one => one.group).filter(one => Number.isInteger(one) && one > 1); } catch { return 0; }
+  // A group id can be taken again once its group is gone: only a group still running this checkout's Toolroll is stopped.
+  const ours = group => { try { execFileSync("pgrep", ["-g", String(group), "-f", join(here, "dist/bin.js")], { stdio: "ignore" }); return true; } catch (error) { return error.status !== 1; } };
+  const alive = listed.filter(groupAlive).filter(ours);
+  await stopGroups(alive, { graceMs: 5_000 }).catch(() => undefined);
+  try { writeFileSync(join(folder, PROCESSES_FILE), "[]\n"); } catch { /* a report folder that is gone */ }
+  return alive.length;
+}
+
 /** Playwright is not a dependency: --playwright <index.mjs>, else a copy `npx playwright` left in the npm cache whose browser is downloaded, else an installed one. */
 export async function loadPlaywright() {
   const given = option("--playwright", null);
@@ -159,13 +212,10 @@ export async function world(name, { seed, env = {} } = {}) {
   const port = await freePort();
   const base = `http://127.0.0.1:${port}`;
   const logs = { serve: createWriteStream(join(out, "serve.log")), watch: createWriteStream(join(out, "watch.log")) };
-  const children = [];
-  process.on("exit", () => { for (const child of children) child.kill("SIGTERM"); });
-  process.on("SIGINT", () => process.exit(130));
+  processesIn(out);
   const start = (label, argv) => {
-    const child = spawn(process.execPath, [BIN, ...argv, "--db", db], { env: { ...process.env, NODE_OPTIONS: "", TOOLROLL_MATE_TRACE: "1", STANDING_ORDERS_MATE_TRACE: "1", TOOLROLL_NO_PLAN_PROBE: "1", STANDING_ORDERS_NO_PLAN_PROBE: "1", ...env }, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawnOwned(label, process.execPath, [BIN, ...argv, "--db", db], { env: { ...process.env, NODE_OPTIONS: "", TOOLROLL_MATE_TRACE: "1", STANDING_ORDERS_MATE_TRACE: "1", TOOLROLL_NO_PLAN_PROBE: "1", STANDING_ORDERS_NO_PLAN_PROBE: "1", ...env }, stdio: ["ignore", "pipe", "pipe"] });
     child.stdout.pipe(logs[label]); child.stderr.pipe(logs[label]);
-    children.push(child);
     return child;
   };
   start("serve", ["serve", "--repo", repo, "--port", String(port)]);
@@ -243,18 +293,19 @@ export async function world(name, { seed, env = {} } = {}) {
     // Whatever --only picked, the pages it opened are checked.
     await check(BROWSER_CHECK, [], async () => { if (problems.length > 0) throw new Error(problems.slice(0, 5).join(" | ")); }, { always: true });
     await browser.close();
-    for (const child of children) child.kill("SIGTERM");
-    await sleep(1500);
+    // The console, the worker and anything a journey started and still owns: every group gone before the report.
+    const unstopped = await stopOwned().then(() => null, error => error.message);
     results.splice(0, results.length, ...results.filter(one => one.state !== "not selected"));
     const passed = results.filter(one => one.state === "passed").length, bad = results.filter(one => one.state === "failed").length, skipped = results.filter(one => one.state === "skipped").length;
-    const report = { startedAt: new Date(started).toISOString(), minutes: Math.round((Date.now() - started) / 6000) / 10, workspace: root, passed, failed: bad, skipped, results };
+    const report = { startedAt: new Date(started).toISOString(), minutes: Math.round((Date.now() - started) / 6000) / 10, workspace: root, passed, failed: bad, skipped, results, ...(unstopped === null ? {} : { unstopped }) };
     writeFileSync(join(out, "report.json"), JSON.stringify(report, null, 2) + "\n");
     writeFileSync(join(out, "report.md"), [`# ${title} — ${passed} passed, ${bad} failed, ${skipped} skipped (${report.minutes} min)`, "",
       ...results.map(one => `- ${one.state === "passed" ? "✅" : one.state === "failed" ? "❌" : "⏭️"} ${one.name}${one.seconds === undefined ? "" : ` — ${one.seconds} s`}${one.error ? `\n  - ${one.error.split("\n")[0]}` : ""}${one.state === "skipped" ? `\n  - skipped: ${one.because.join(", ")}` : ""}`),
       "", `Workspace: ${root}`, `Logs and screenshots: ${out}`, ""].join("\n"));
     say(`${passed} passed, ${bad} failed, ${skipped} skipped — ${join(out, "report.md")}`);
+    if (unstopped !== null) say(`left running: ${unstopped}`);
     if (!flag("--keep") && bad === 0) rmSync(root, { recursive: true, force: true });
-    process.exitCode = bad === 0 ? 0 : 1;
+    process.exitCode = bad === 0 && unstopped === null ? 0 : 1;
   }
 
   return { root, repo, state, db, out, base, port, passwords, auth, cli, sql, rows, until, check, say, git, browser, signIn, page, json, shot, askLead, leadCalls, pendingCard, confirmCard, problems, openPages, start, finish, bin: BIN };

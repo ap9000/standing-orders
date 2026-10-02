@@ -18,6 +18,8 @@ export type CheckSettingsView = {
   quick: VerifyCommand | null;
   /** A starting point for the quick command, from the project's scripts. */
   suggestion: string | null;
+  /** The project's automatic review switch (review-switch.ts), beside its checks. */
+  review?: { on: boolean; source: "project" | "hands-off" | "default" };
   said: string | null;
   problem: string | null;
 };
@@ -37,7 +39,7 @@ export function checkSettingsHtml(view: CheckSettingsView): string {
     (fallsBack ? `<p class="meta">No quick command yet, so builds run the full check.</p>` : "") +
     (view.level !== "full" && view.full !== null ? `<p class="meta">The full check still runs when a pull request opens, and Merge waits for it.</p>` : "");
   if (!view.canChange) {
-    return head + `<section class="card check-settings">${current}</section>` +
+    return head + `<section class="card check-settings">${current}</section>` + reviewHtml(view, "") +
       `<section class="card check-settings"><h2>Quick check</h2>${view.quick === null ? `<p class="meta">None yet.</p>` : command(view.quick)}</section>` +
       `<section class="card check-settings"><h2>Full check</h2>${view.full === null ? `<p class="meta">None yet.</p>` : command(view.full)}</section>`;
   }
@@ -64,7 +66,21 @@ export function checkSettingsHtml(view: CheckSettingsView): string {
       `<p class="meta">Quick builds run the full check instead.</p>${password}<button type="submit" class="danger">Remove</button></form></details></section>`;
   const full = `<details class="settings-more"><summary>Full check</summary><section class="card check-settings">` +
     (view.full === null ? `<p class="meta">None yet. Approve one with <span class="mono">toolroll verify set --repo … --command "…"</span>.</p>` : command(view.full)) + `</section></details>`;
-  return head + levelForm + quick + full;
+  return head + levelForm + reviewHtml(view, password) + quick + full;
+}
+
+/** Automatic review: one state, one sentence, and its one change behind a disclosure (the password). */
+function reviewHtml(view: CheckSettingsView, password: string): string {
+  const review = view.review;
+  if (review === undefined) return "";
+  const state = review.on ? (review.source === "hands-off" ? "On while hands-off lasts" : "On") : "Off";
+  const act = review.on ? "Turn off" : "Turn on";
+  const change = password === "" ? ""
+    : `<details class="settings-more"><summary>${act}</summary><form method="post" action="/settings/checks" class="check-settings">` +
+      `<input type="hidden" name="csrf" value="${escape(view.csrf)}"><input type="hidden" name="repo" value="${escape(view.repo)}"><input type="hidden" name="act" value="review">` +
+      `<input type="hidden" name="on" value="${review.on ? "0" : "1"}">${password}<button type="submit">${act}</button></form></details>`;
+  return `<section class="card check-settings" data-review-switch="${review.on ? "on" : "off"}"><h2>Automatic review</h2>` +
+    `<p><strong>${state}</strong> · One read-only review after each build passes its checks. Only high findings send it back, once.</p>${change}</section>`;
 }
 
 export const CHECK_SETTINGS_CSS = `

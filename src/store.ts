@@ -100,8 +100,9 @@ import { RECIPE_SCHEMA } from "./recipes.js";
 import type { LimitReading, LimitWindow } from "./provider-limits.js";
 import { POLICY_SCHEMA, agentRefusal, approvalRefusal, attendedRefusal, policyParts, readPolicy, underCeiling, sessionCeilingRefusal, type OrgPolicy, type SavedPolicy } from "./policy.js";
 import { PROVIDER_AUTH_SCHEMA } from "./provider-auth.js";
+import { REVIEW_SCHEMA, reviewSwitchWords, type ReviewSwitch } from "./review-switch.js";
 import { SPEND_SCHEMA, billingOf, budgetStates, canPrice, claudeMachineBilling, countsToward, filersOf, monthOf, priceWork, seenBilling as seenBillingOf, spendItems, teammateFilers, usd, type Billing, type Budget, type BudgetAgent, type BudgetHold, type BudgetScope, type BudgetState, type SpendItem } from "./spend.js";
-import { FOREVER, RETENTION_SCHEMA, periodWords, type RetentionKind, type RetentionPeriods } from "./retention.js";
+import { DEFAULT_PERIODS, RETENTION_SCHEMA, periodWords, widenRetentionSchema, type RetentionKind, type RetentionPeriods } from "./retention.js";
 import { CHECKOUT_CLEANUP_SCHEMA, DEFAULT_CLEANUP, cleanupWords, type CheckoutCleanup } from "./storage.js";
 import { IN_RANGE, LEDGER_CHAIN_SCHEMA, safeWhole, sealLedger, verifyLedgerChain, type LedgerChainReport, type VerifiedHead } from "./ledger-chain.js";
 import { NO_RULES, filerFor, isProtectedWork, protectedChanges, rulesWords, type ApprovalGate, type ApprovalRules, type ApproverKind, type Filer, type FilerKind } from "./approval-policy.js";
@@ -5083,7 +5084,10 @@ function initializeStore(db: Database, file: string): Store {
   db.exec(PROVIDER_AUTH_SCHEMA);
   // The sign-in pause the dispatch gate last left this task waiting on (null: none), for the work index.
   addColumn(db, "task_ref", "auth_wait_pause", "INTEGER REFERENCES provider_auth_pause(id)");
+  db.exec(REVIEW_SCHEMA);
   db.exec(RETENTION_SCHEMA);
+  // 1-day evidence: an older file's retention_setting only allowed 7 days or more (no version bump: its rows carry over).
+  widenRetentionSchema(db);
   db.exec(CHECKOUT_CLEANUP_SCHEMA);
   db.exec(BACKUP_SCHEMA);
   // Sprint 8: the organisation policy (one row, or none: nothing restricted).
@@ -11233,6 +11237,28 @@ export class Store {
   private recordPolicy(by: string, repo: string | null, action: string, before: string, after: string, now: Date, outcome = "changed"): void {
     if (before === after) return;
     this.recordAction({ at: now.toISOString(), actor: by, repo, taskId: null, runId: null, action, outcome, source: "policy", detail: `${before} → ${after}` });
+  }
+
+  /** The project's automatic review switch: its explicit setting, else on
+   * while a hands-off mode is active on it, else off. */
+  reviewSwitch(repo: string, now: Date): ReviewSwitch {
+    const row = this.db.prepare("SELECT enabled, changed_by, changed_at FROM review_switch WHERE repo = ?").get(repo);
+    if (row !== undefined) return { on: Number(row["enabled"]) === 1, source: "project", changedBy: String(row["changed_by"]), changedAt: String(row["changed_at"]) };
+    const handsOff = this.activeMode(repo, now)?.name === "hands-off";
+    return { on: handsOff, source: handsOff ? "hands-off" : "default", changedBy: null, changedAt: null };
+  }
+
+  /** Turn a project's automatic review on or off; the policy log keeps before → after. */
+  setReviewSwitch(repo: string, on: boolean, by: string, now: Date): { before: ReviewSwitch; after: ReviewSwitch } {
+    return this.transact(() => {
+      const before = this.reviewSwitch(repo, now);
+      this.db.prepare(`INSERT INTO review_switch (repo, enabled, changed_by, changed_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT(repo) DO UPDATE SET enabled = excluded.enabled, changed_by = excluded.changed_by, changed_at = excluded.changed_at`)
+        .run(repo, on ? 1 : 0, by, now.toISOString());
+      const after = this.reviewSwitch(repo, now);
+      this.recordPolicy(by, repo, "automatic review", reviewSwitchWords(before), reviewSwitchWords(after), now);
+      return { before, after };
+    });
   }
 
   /** A project deleted (project-delete.ts): who, and what it held → how it went. Returns the entry's id. */
@@ -19602,13 +19628,18 @@ export class Store {
 
   // ---- Retention (v105) -----------------------------------------------------
 
-  /** How long each kind of data is kept; null is forever (every kind, until someone chooses). */
+  /** How long each kind of data is kept; null is forever. A kind nobody chose keeps its default (evidence 28 days, the rest forever). */
   retentionPeriods(): RetentionPeriods {
-    const periods: RetentionPeriods = { ...FOREVER };
+    return { ...DEFAULT_PERIODS, ...this.retentionChosen() };
+  }
+
+  /** The periods someone chose: only kinds with a saved row. */
+  retentionChosen(): Partial<RetentionPeriods> {
+    const chosen: Partial<RetentionPeriods> = {};
     for (const row of this.db.prepare("SELECT kind, days FROM retention_setting").all()) {
-      periods[String(row["kind"]) as RetentionKind] = row["days"] === null ? null : Number(row["days"]);
+      chosen[String(row["kind"]) as RetentionKind] = row["days"] === null ? null : Number(row["days"]);
     }
-    return periods;
+    return chosen;
   }
 
   /** Set how long one kind is kept (null: forever); the ledger keeps before → after. */
@@ -25353,6 +25384,95 @@ export class Store {
   finishUnspawnedProcess(witness: number, now: Date): void {
     this.db.prepare("UPDATE run_process SET exited_at = ? WHERE id = ? AND pid IS NULL AND ((containment IS NULL AND container IS NULL) OR container_empty_at IS NOT NULL)")
       .run(now.toISOString(), witness);
+  }
+
+  /** The reconcile road for a pid-less witness a crash or a thrown spawn
+   * left behind: once its run has finished, no live child is tracked for it
+   * here, every other witness of the run has exited and none of the run's
+   * process groups is alive, it settles as never started, with a ledger
+   * entry. A sole pid-less witness has no group to prove gone and stays for
+   * `run settle`. Native witnesses keep their OS-only road. */
+  settleUnspawnedWitnesses(now: Date): number {
+    const candidates = this.db.prepare(`SELECT DISTINCT p.run FROM run_process p JOIN run r ON r.id = p.run
+      WHERE p.exited_at IS NULL AND p.pid IS NULL AND p.containment IS NULL AND p.container IS NULL
+        AND p.host = ? AND r.outcome IS NOT NULL AND r.finished_at IS NOT NULL ORDER BY p.run`).all(hostname());
+    let settled = 0;
+    for (const candidate of candidates) {
+      const runId = Number(candidate["run"]);
+      this.recordRunProcessExits(runId, now);
+      settled += this.transact(() => {
+        const run = this.getRun(runId);
+        if (run === null || run.outcome === null) return 0;
+        if (ownedProcessCount(runOwnerTag(this, runId)) > 0) return 0;
+        const held = this.heldSessionOf(runId);
+        if (held !== null && held.endedAt === null) return 0;
+        const rows = this.db.prepare("SELECT * FROM run_process WHERE run = ? ORDER BY id").all(runId);
+        const pidless = rows.filter(row => row["exited_at"] === null && row["pid"] === null && row["containment"] === null && row["container"] === null && row["host"] === hostname());
+        const others = rows.filter(row => !pidless.includes(row));
+        if (pidless.length === 0 || others.length === 0) return 0;
+        if (others.some(row => row["exited_at"] === null)) return 0;
+        // Exit was recorded once; the group's members are asked again now.
+        const groups = others.filter(row => row["pid"] !== null && row["host"] === hostname());
+        if (groups.length === 0 || groups.some(row => processMayBeAlive(Number(row["pid"]), row["process_group"] === 1, { observedAt: row["observed_at"], finishedAt: run.finishedAt }))) return 0;
+        const ref = this.refById(run.taskRef);
+        let count = 0;
+        for (const row of pidless) {
+          const changed = this.db.prepare(`UPDATE run_process SET exited_at = ?
+            WHERE id = ? AND run = ? AND pid IS NULL AND exited_at IS NULL AND containment IS NULL AND container IS NULL`)
+            .run(now.toISOString(), row["id"], runId);
+          if (Number(changed.changes) !== 1) continue;
+          count++;
+          this.recordAction({ at: now.toISOString(), actor: "system", repo: ref?.repo ?? null, taskId: ref?.externalId ?? null, runId,
+            action: "process witness settled", outcome: "never started", source: "work",
+            detail: `witness ${String(row["id"])}: no pid; the run finished, every other witness exited and none of its process groups is alive` });
+        }
+        return count;
+      });
+    }
+    return settled;
+  }
+
+  /** `run settle` (an approver's last resort): every witness of a finished
+   * run that cannot be proven either way is recorded settled under the
+   * approver's reason, in the ledger. Refuses while anything of the run is
+   * alive or could be checked only from another host. Never signals. */
+  settleRunWitnessesByApprover(args: { runId: number; by: string; why: string }, now: Date):
+    | { ok: true; witnesses: number[]; repeated: boolean }
+    | { ok: false; reason: "unknown-run" | "still-running" | "alive"; detail: string } {
+    return this.transact(() => {
+      const run = this.getRun(args.runId);
+      if (run === null) return { ok: false as const, reason: "unknown-run" as const, detail: `no run #${args.runId}` };
+      if (run.outcome === null) return { ok: false as const, reason: "still-running" as const, detail: `run #${args.runId} is still open` };
+      const alive = (detail: string) => ({ ok: false as const, reason: "alive" as const, detail });
+      if (ownedProcessCount(runOwnerTag(this, args.runId)) > 0) return alive(`run #${args.runId} still has an owned subprocess`);
+      const held = this.heldSessionOf(args.runId);
+      if (held !== null && held.endedAt === null) return alive(`run #${args.runId}'s held supervisor has not finished shutdown`);
+      const rows = this.db.prepare("SELECT * FROM run_process WHERE run = ? ORDER BY id").all(args.runId);
+      const open = rows.filter(row => row["exited_at"] === null);
+      for (const row of rows) {
+        if (row["pid"] === null) continue;
+        if (row["host"] !== hostname()) {
+          if (row["exited_at"] === null) return alive(`run #${args.runId}'s process ${String(row["pid"])} belongs to ${String(row["host"])}; settle it there`);
+          continue;
+        }
+        if (processMayBeAlive(Number(row["pid"]), row["process_group"] === 1, { observedAt: row["observed_at"], finishedAt: run.finishedAt })) return alive(`run #${args.runId}'s process ${String(row["pid"])} is still running`);
+      }
+      for (const row of open) {
+        if (row["pid"] === null && row["host"] !== hostname()) return alive(`run #${args.runId} has a witness from ${String(row["host"])}; settle it there`);
+        if (row["containment"] != null && row["container"] != null && row["container_empty_at"] == null &&
+            containerEmptiness(String(row["containment"]), String(row["container"]), process.platform, row["container_identity"] == null ? null : String(row["container_identity"])) === "populated") {
+          return alive(`run #${args.runId}'s ${String(row["containment"])} object ${String(row["container"])} still has members`);
+        }
+      }
+      if (open.length === 0) return { ok: true as const, witnesses: [], repeated: true };
+      const ids = open.map(row => Number(row["id"]));
+      for (const id of ids) this.db.prepare("UPDATE run_process SET exited_at = ? WHERE id = ? AND run = ? AND exited_at IS NULL").run(now.toISOString(), id, args.runId);
+      const ref = this.refById(run.taskRef);
+      this.recordAction({ at: now.toISOString(), actor: args.by, repo: ref?.repo ?? null, taskId: ref?.externalId ?? null, runId: args.runId,
+        action: "process witness settled by approver", outcome: `witness ${ids.join(", ")}`, source: "request", detail: args.why });
+      this.settleQuiescentStops(now);
+      return { ok: true as const, witnesses: ids, repeated: false };
+    });
   }
 
   recordRunProcess(runId: number, pid: number, now: Date, group = true, witness?: number): void {

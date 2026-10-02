@@ -7,6 +7,7 @@ import { diagnoseTaskDispatch, type DispatchAction } from "./dispatch.js";
 import { isAlive } from "./runner.js";
 import type { Store } from "./store.js";
 import { taskControlOf } from "./task-control.js";
+import { buildReviewOf } from "./review-switch.js";
 import { reviewFactsOf, workStatusOf, type DisplayStatus, type WorkFacts, type WorkStatus } from "./workspace-ui.js";
 
 export type WorkPrincipal = "operator" | "coordinator";
@@ -125,7 +126,7 @@ export function taskWorkSummaryOf(store: Store, taskId: string, now: Date, acces
       review: reviewFactsOf(store.reviewRetryStateOf(result.id), name => {
         const runner = store.getRunner(name)?.runner;
         return runner !== undefined && isAlive(runner, now);
-      }),
+      }, buildReviewOf(store, result.id)?.state === "pending"),
       ...(result.outcome !== "no-change" ? {} : { recordComplete: (() => {
         const kinds = new Set(store.artifactsFor(result.id).map(one => one.kind));
         return kinds.has("handoff") && kinds.has("terminal-diff");

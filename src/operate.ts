@@ -1,13 +1,15 @@
 import { maybeTriggerRepair } from "./dispose.js";
 import { CHECK_LEVEL_HINTS, CHECK_LEVEL_WORDS, isCheckLevel, liveQuickCommand, projectCheckLevel, quickVerifyKey, setProjectCheckLevel, setTaskCheckLevel, suggestQuickCommand } from "./check-levels.js";
 import { fileAddTestsTask, followUpChecksOf, requestFollowUpChecks, runFollowUpCheck, runWaitingChecks } from "./result-follow-ups.js";
+import { buildReviewPass } from "./build-review.js";
+import { buildReviewLines, buildReviewOf } from "./review-switch.js";
 import { parseProtectedPaths } from "./approval-policy.js";
 import { rulesSummary } from "./approval-rules-ui.js";
 import { evidencePack, exportDay, ledgerExportChunks, standaloneEvidenceHtml, type LedgerExport } from "./evidence-pack.js";
 import { matchesOutsideCheckpoint } from "./ledger-chain.js";
 import { CLEANUP_CHOICES, bytesWords, cleanupWords, parseCleanup, storageReport } from "./storage.js";
 import { checkoutPlan, cleanCheckouts, discardCheckout, whyWords, type CheckoutItem, type CheckoutPlan } from "./checkout-cleanup.js";
-import { MIN_DAYS, RETENTION_KINDS, countWords, dailyRetention, isRetentionKind, lastSweepAt, parsePeriod, periodWords, retentionPlan, sweepWords, type RetentionKind, type RetentionSweep } from "./retention.js";
+import { MIN_DAYS, RETENTION_KINDS, countWords, dailyRetention, isRetentionKind, lastSweepAt, parsePeriod, periodLabel, periodWords, retentionPlan, sweepWords, type RetentionKind, type RetentionSweep } from "./retention.js";
 import { checkPolicy, parseList, policyParts, type SavedPolicy } from "./policy.js";
 import { billingOf, budgetHoldWords, budgetLabel, budgetStates, monthNamed, monthOf, spendItems, teammateNames, usd as spendUsd, type BudgetAgent, type BudgetHold } from "./spend.js";
 import { spendCsv } from "./spend-ui.js";
@@ -410,9 +412,10 @@ export const OPERATE_HELP = `toolroll — operating the queue
   toolroll notifications digest <HH:MM>|off   one evening message: what finished, what waits, what failed
   toolroll notifications mute|unmute --repo <p>   no pings for a project; the console and digest keep it
   toolroll retention show|preview    how long evidence, checkout records, chat and notifications are kept; what the daily sweep would remove
-  toolroll retention set <kind> <period>   evidence|checkouts|chat|notifications, 30d|1y|forever (instance operator)
+  toolroll retention set <kind> <period>   evidence|checkouts|chat|notifications, 1d|30d|1y|forever (instance operator)
   toolroll backup now|list          back the database up now; list backups and how the last ones went
   toolroll restore <file> [--dry-run]  put a backup back (Toolroll stopped; the current database is kept)
+  toolroll review show|on|off --repo <path>  one automatic review of each finished build; only HIGH findings send it back
   toolroll policy show|set          the organisation policy; an instance operator sets it with --providers claude,codex|any,
                                         --models <m,…>|any, --tools <t,…>|any, --ceiling safe|standard|escalated
   toolroll ledger verify             check the action ledger's hash chain (--checkpoint <n:hash> to compare a copied head)
@@ -1191,6 +1194,8 @@ async function dispatch(
       return storageCommand(positional, flags, context);
     case "integrations":
       return integrationsCommand(positional, flags, context);
+    case "review":
+      return reviewSwitchCommand(positional, flags, context);
     case "monitoring": {
       // Where the audit stream and traces go, and how each destination is doing. Settings → Monitoring changes it.
       const settings = readMonitoring(dirname(context.databaseFile));
@@ -1248,6 +1253,8 @@ async function dispatch(
       return tickCommand(flags, context);
     case "reconcile":
       return reconcileCommand(flags, context);
+    case "run":
+      return runCommand(positional, flags, context);
     case "cap":
       return capCommand(positional, flags, context);
     case "gaps":
@@ -2372,7 +2379,7 @@ class StaleAuthorization extends Error {}
 /** What happened to one task this pass looked at. */
 type TickOutcome = {
   id: string;
-  outcome: "built" | "planned" | "reported" | "parked" | "skipped" | "failed" | "contest" | "held" | "stopped";
+  outcome: "built" | "planned" | "reported" | "parked" | "skipped" | "failed" | "contest" | "held" | "stopped" | "reviewed" | "not-reviewed";
   /** Why it was skipped or how it failed; absent on a build. */
   reason?: string;
   /** The gap's own words, when the reason is a capability. */
@@ -4742,17 +4749,19 @@ async function tickCommand(
     }
   }
 
-  // Retire queued model-review work without creating a run or a passing verdict.
-  // Reauthenticate inside the write transaction and touch only admitted projects.
-  if (!buildsOnly) store.transact(() => {
-    const current = authenticate(store, runner, token);
-    if (!current.ok) return;
-    for (const request of store.openReviewRequests()) {
-      if (request.repo !== null && current.runner.repos.includes(request.repo)) {
-        store.consumeReviewRequest(request.id, "model-review-retired", clock());
-      }
-    }
-  });
+  // The one automatic review each finished build gets when its project's
+  // switch is on, before the result is handed on below. Other queued review
+  // asks close unrun. Reauthenticated first; only admitted projects.
+  if (!buildsOnly && authenticate(store, runner, token).ok) {
+    const reviewed = await buildReviewPass(store, {
+      runner, token, repos: auth.runner.repos, clock,
+      root: context.evidenceRoot,
+      ...(text(flags, "incarnation") === undefined ? {} : { watchIncarnation: text(flags, "incarnation") as string }),
+      ...(context.agentRunner === undefined ? {} : { agent: context.agentRunner }),
+      shouldStop: () => context.shouldStop?.() === true || context.shouldPauseAdmission?.() === true,
+    });
+    for (const one of reviewed) dispatched.push({ id: `review of run ${one.run}`, outcome: one.outcome === "not-reviewed" ? "not-reviewed" : "reviewed", reason: one.detail });
+  }
   // Existing worker pass owns durable lead handoffs; reads never create events.
   if (!buildsOnly) syncAssignmentHandoffs(store, clock(), auth.runner.repos, context.evidenceRoot);
 
@@ -4794,7 +4803,7 @@ async function tickCommand(
       routines,
     });
   }
-  if (built > 0 || parked > 0 || dispatched.some(one => one.outcome === "planned" || one.outcome === "reported" || one.outcome === "held")) {
+  if (built > 0 || parked > 0 || dispatched.some(one => one.outcome === "planned" || one.outcome === "reported" || one.outcome === "held" || one.outcome === "reviewed" || one.outcome === "not-reviewed")) {
     return succeed(write, json, "tick", { considered, dispatched, routines, ...flows }, summary);
   }
   if (considered === 0) {
@@ -4873,6 +4882,9 @@ async function reconcileCommand(
   }
 
   const recovered = recoverDead(store, clock());
+  // A witness reserved for a spawn that never made a process (a crash or a
+  // thrown spawn) settles once its run's process groups are proven gone.
+  store.settleUnspawnedWitnesses(clock());
   store.settleQuiescentStops(clock());
   for (const one of recovered) {
     for (const leaseId of one.claims) {
@@ -5657,15 +5669,19 @@ async function reviewTaskCommand(
   flags: Map<string, string | true>,
   context: Context,
 ): Promise<number> {
-  const { store, write, json, clock } = context;
+  const { store, write, json } = context;
   const [runText] = positional;
   const runId = Number(runText ?? "");
   if (runText === undefined || !Number.isInteger(runId) || runId < 1) {
     return fail(write, json, "task review", "usage", "`toolroll task review <run-id>`", EXIT.usage);
   }
+  // Read-only: the run's one automatic review, when it had one.
+  const review = buildReviewOf(store, runId);
+  if (review !== null) {
+    return succeed(write, json, "task review", { run: runId, review }, () => [`Run ${runId}`, ...buildReviewLines(review)]);
+  }
   return fail(write, json, "task review", "model-review-retired",
-    `Separate model review has been removed. Inspect run ${runId}'s saved work and checks, then give feedback or request a revision.`, EXIT.refused);
-
+    `Run ${runId} has no automatic review. Manual review requests have been removed; a project's builds are reviewed automatically when its switch is on (\`toolroll review on --repo <path>\`). Inspect the saved work and checks, then give feedback or request a revision.`, EXIT.refused);
 }
 
 /**
@@ -11274,6 +11290,9 @@ function showTask(positional: readonly string[], context: Context): number {
     // v50: the latest build's bounded review history — every root attempt
     // in order, the open request, and the one state they add up to.
     review: latestFinished === null ? null : store.reviewRetryStateOf(latestFinished.id),
+    // The one automatic review of the latest build: HIGH findings, suggested
+    // follow-ups (MEDIUM/LOW), or why it was not reviewed.
+    automaticReview: latestFinished === null ? null : buildReviewOf(store, latestFinished.id),
     dispatch: diagnoseTaskDispatch(store, id, now),
     // v52: the exact-run control the console shows — Stop, Stopping,
     // Paused (resume), or the review-retry door — and every stop on record.
@@ -11327,7 +11346,7 @@ function showTask(positional: readonly string[], context: Context): number {
           : detail.control.kind === "paused"
             ? [`  control: paused — run #${detail.control.run} was stopped by ${detail.control.stop.requestedBy} (${detail.control.stop.settlement ?? "?"})${detail.control.committed ? "; its commit is on the branch" : ""}; work preserved${detail.control.worktree === null ? "" : ` in ${detail.control.worktree}`} — \`task resume ${task.id} --run ${detail.control.run} --as <you> --token <t>\``]
             : [`  control: review #${detail.control.run} was stopped by ${detail.control.stop.requestedBy} — inspect its saved result and give feedback; separate model review has been removed`]),
-    ...reviewStatusLines(detail.review, latestFinished?.id ?? null),
+    ...(detail.automaticReview === null ? reviewStatusLines(detail.review, latestFinished?.id ?? null) : buildReviewLines(detail.automaticReview)),
     ...(scope === null
       ? ["  no scope — nothing will build this until one is written and approved"]
       : describeScope(scope, readiness)),
@@ -12930,6 +12949,49 @@ async function resumeTaskCommand(
   ]);
 }
 
+/**
+ * `toolroll run settle <id> --why "<text>" --as <you> --token <t>`: an
+ * approver's last resort for a finished run whose process witnesses can be
+ * proven neither exited nor alive (a spawn interrupted before its pid was
+ * written). Refuses while anything of the run is alive; the reason is kept
+ * in the ledger against the approver's name. Signals nothing.
+ */
+async function runCommand(
+  positional: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): Promise<number> {
+  const { store, write, json, clock } = context;
+  const [action, id, ...extra] = positional;
+  const command = "run settle";
+  const usage = "`toolroll run settle <run-id> --why \"<reason>\" --as <you> --token <t>`";
+  if (action !== "settle") return fail(write, json, "run", "usage", usage, EXIT.usage);
+  const runId = Number(id ?? "");
+  const why = text(flags, "why")?.trim();
+  if (id === undefined || extra.length > 0 || !/^[1-9]\d*$/.test(id) || !Number.isSafeInteger(runId)) return fail(write, json, command, "usage", usage, EXIT.usage);
+  if (why === undefined || why === "" || why.length > 300 || /[\x00-\x1f\x7f]/.test(why)) {
+    return fail(write, json, command, "usage", "say why in one line with --why (at most 300 characters) — it is kept in the ledger", EXIT.usage);
+  }
+  const run = store.getRun(runId);
+  if (run === null) return fail(write, json, command, "unknown-run", `no run #${runId}`, EXIT.refused);
+  const acting = await askCredentials(flags, context);
+  if (acting === null) {
+    return fail(write, json, command, "usage", "settling takes `--as <you> --token <t>` — it is an approver's act and is recorded against your name", EXIT.usage);
+  }
+  const authenticated = authenticateApprover(store, acting.name, acting.token);
+  const repo = store.refById(run.taskRef)?.repo ?? null;
+  if (!authenticated.ok || !store.accountCanAccess(acting.name, repo)) {
+    return fail(write, json, command, "not-an-approver", "that is not an approver for this run's project, or the token does not match", EXIT.refused);
+  }
+  const settled = store.settleRunWitnessesByApprover({ runId, by: acting.name, why }, clock());
+  if (!settled.ok) return fail(write, json, command, settled.reason, settled.detail, EXIT.refused, { run: runId });
+  return succeed(write, json, command, { run: runId, witnesses: settled.witnesses, repeated: settled.repeated }, () => [
+    settled.repeated
+      ? `Run #${runId} has no unsettled process witness; nothing changed.`
+      : `Settled run #${runId}: ${settled.witnesses.length} process witness${settled.witnesses.length === 1 ? "" : "es"} recorded as ended, with your reason in the ledger.`,
+  ]);
+}
+
 // ---- shared ---------------------------------------------------------------
 
 /**
@@ -13244,9 +13306,11 @@ async function retentionCommand(positional: readonly string[], flags: Map<string
   const label = (kind: RetentionKind) => RETENTION_KINDS.find(one => one.kind === kind)!.label;
   if (action === undefined || action === "show") {
     const periods = store.retentionPeriods();
+    const chosen = store.retentionChosen();
+    const defaulted = RETENTION_KINDS.map(one => one.kind).filter(kind => !(kind in chosen));
     const last = lastSweepAt(store);
-    return succeed(context.write, context.json, command, { periods, lastSweep: last }, () => [
-      ...RETENTION_KINDS.map(one => `  ${one.kind.padEnd(14)} ${periodWords(periods[one.kind]).padEnd(9)} ${one.label}`),
+    return succeed(context.write, context.json, command, { periods, defaulted, lastSweep: last }, () => [
+      ...RETENTION_KINDS.map(one => `  ${one.kind.padEnd(14)} ${periodLabel(one.kind, periods[one.kind], one.kind in chosen).toLowerCase().padEnd(18)} ${one.label}`),
       last === null ? "No sweep yet; the worker runs one a day." : `Last sweep ${last.slice(0, 16).replace("T", " ")} UTC.`,
     ]);
   }
@@ -13261,10 +13325,10 @@ async function retentionCommand(positional: readonly string[], flags: Map<string
   if (action !== "set") return fail(context.write, context.json, command, "usage", "Use retention show, retention preview or retention set <kind> <period>.", EXIT.usage);
   const [kind, period, ...extra] = rest;
   if (kind === undefined || !isRetentionKind(kind) || period === undefined || extra.length > 0) {
-    return fail(context.write, context.json, command, "usage", `Use retention set <${RETENTION_KINDS.map(one => one.kind).join("|")}> <days, like 90d or 1y, or forever>.`, EXIT.usage);
+    return fail(context.write, context.json, command, "usage", `Use retention set <${RETENTION_KINDS.map(one => one.kind).join("|")}> <days, like 1d, 90d or 1y, or forever>.`, EXIT.usage);
   }
   const days = parsePeriod(period);
-  if (days === undefined) return fail(context.write, context.json, command, "usage", `A period is forever, or ${MIN_DAYS} days to 10 years (90d, 12w, 1y).`, EXIT.usage);
+  if (days === undefined) return fail(context.write, context.json, command, "usage", `A period is forever, or ${MIN_DAYS} day to 10 years (1d, 90d, 12w, 1y).`, EXIT.usage);
   const acting = await askCredentials(flags, context);
   const verified = acting === null ? null : authenticateApprover(store, acting.name, acting.token);
   if (acting === null || verified === null || !verified.ok || !store.isInstanceOperator(acting.name)) {
@@ -13355,6 +13419,35 @@ async function storageCommand(positional: readonly string[], flags: Map<string, 
 
 function checkoutSummary(plan: CheckoutPlan) {
   return { count: plan.count, totalBytes: plan.totalBytes, waitingReview: plan.waitingReview, withChanges: plan.withChanges, cleanBytes: plan.freeBytes, cleanCount: plan.go.length, cleanup: plan.cleanup };
+}
+
+/** `review [show] | on | off --repo <path>`: the project's one automatic review
+ * of finished builds. Changing it takes an approver of that project; the
+ * policy log keeps before → after. */
+async function reviewSwitchCommand(positional: readonly string[], flags: Map<string, string | true>, context: Context): Promise<number> {
+  const { store, write, json } = context;
+  const [action = "show", ...extra] = positional;
+  const command = `review ${action}`;
+  if (extra.length > 0 || !["show", "on", "off"].includes(action)) return fail(write, json, command, "usage", "Use toolroll review show|on|off --repo <path>.", EXIT.usage);
+  const allowed = new Set(["repo", "db", "json", ...(action === "show" ? [] : ["as", "token", "token-file", "token-env"])]);
+  for (const name of flags.keys()) if (!allowed.has(name)) return fail(write, json, command, "usage", `--${name} is not a ${command} option.`, EXIT.usage);
+  const given = text(flags, "repo");
+  if (given === undefined) return fail(write, json, command, "usage", "Name the project: toolroll review " + action + " --repo <path>.", EXIT.usage);
+  const repo = canonicalProject(given) ?? resolve(given);
+  const words = (on: boolean, source: string) => `${projectName(repo)}: automatic review is ${on ? "on" : "off"}${source === "hands-off" ? " (on while the hands-off mode lasts)" : source === "default" ? " (the default)" : ""}.`;
+  if (action === "show") {
+    const state = store.reviewSwitch(repo, context.clock());
+    return succeed(write, json, command, { repo, ...state }, () => [words(state.on, state.source)]);
+  }
+  const acting = await askCredentials(flags, context);
+  if (acting === null) return fail(write, json, command, "usage", `Sign in first, or pass --as <you> --token <t>: toolroll review ${action} --repo <path>.`, EXIT.usage);
+  const verified = authenticateApprover(store, acting.name, acting.token, repo);
+  if (!verified.ok) return fail(write, json, command, verified.reason, `Only an approver of ${projectName(repo)} can change its review switch.`, EXIT.refused);
+  const changed = store.setReviewSwitch(repo, action === "on", acting.name, context.clock());
+  return succeed(write, json, command, { repo, ...changed.after, before: changed.before }, () => [
+    words(changed.after.on, changed.after.source),
+    changed.after.on ? "Each finished build whose check passes gets one read-only review; only HIGH findings send it back, once." : "Finished builds go straight to you.",
+  ]);
 }
 
 /** `policy show | set` (sprint 8): the organisation policy. Setting it takes an instance operator's credentials; each rule

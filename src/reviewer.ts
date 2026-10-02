@@ -1,8 +1,10 @@
-/** Pure parser for retained historical review payloads. Model-review execution
- * is retired; this module cannot launch providers, create runs or retry work. */
+/** Pure parsers for review payloads: retained historical reviews, and the one
+ * automatic build review's findings (build-review.ts runs it). This module
+ * cannot launch providers, create runs or retry work. */
 import type { CriterionJudgementWord } from "./proof.js";
 import { citesSuppliedProvenance } from "./review-context.js";
-import { REVIEW_OUTPUT_LIMITS } from "./structured-output.js";
+import { normalizeStructuredJson, REVIEW_OUTPUT_LIMITS } from "./structured-output.js";
+import type { BuildFinding } from "./review-switch.js";
 
 /** The files the pass writes INTO the scratch directory for the agent —
  * the patch always; the rubric, re-serialized proof, check log, and
@@ -248,4 +250,46 @@ export function parseReview(
 
   if (problems.length > 0) return { ok: false, problems };
   return { ok: true, comments, criteria, ...(payload["learning"] === undefined ? {} : { learning: payload["learning"] }), ...(payload["learningAssessment"] === undefined ? {} : { learningAssessment: payload["learningAssessment"] }) };
+}
+
+export type { BuildFinding, FindingSeverity } from "./review-switch.js";
+
+export const FINDING_LIMITS = { findings: 40, file: REVIEW_OUTPUT_LIMITS.path, scenario: REVIEW_OUTPUT_LIMITS.note } as const;
+
+/**
+ * The automatic build review's reply, strict and wholesale like parseReview:
+ * `{"version":1,"findings":[{"severity","file","line","scenario"}]}`. Any
+ * invalid finding refuses the whole reply — a review that did not answer
+ * what it was asked is "not reviewed", never a partial pass. Text is kept
+ * to one line so it can travel in a revision note and a terminal.
+ */
+export function parseBuildFindings(raw: string): { ok: true; findings: BuildFinding[] } | { ok: false; problem: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(normalizeStructuredJson(raw).text);
+  } catch {
+    return { ok: false, problem: "the reply is not JSON" };
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return { ok: false, problem: "the reply is not an object" };
+  const payload = parsed as Record<string, unknown>;
+  if (payload["version"] !== 1) return { ok: false, problem: "version must be 1" };
+  const list = payload["findings"];
+  if (!Array.isArray(list)) return { ok: false, problem: "findings must be an array" };
+  if (list.length > FINDING_LIMITS.findings) return { ok: false, problem: `at most ${FINDING_LIMITS.findings} findings` };
+  const findings: BuildFinding[] = [];
+  const oneLine = (text: string) => text.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]+/g, " ").replace(/\s+/g, " ").trim();
+  for (const [index, one] of list.entries()) {
+    if (one === null || typeof one !== "object" || Array.isArray(one)) return { ok: false, problem: `finding ${index}: not an object` };
+    const finding = one as Record<string, unknown>;
+    const severity = finding["severity"];
+    if (severity !== "HIGH" && severity !== "MEDIUM" && severity !== "LOW") return { ok: false, problem: `finding ${index}: severity must be HIGH, MEDIUM or LOW` };
+    const file = typeof finding["file"] === "string" ? oneLine(finding["file"]) : "";
+    if (file.length === 0 || file.length > FINDING_LIMITS.file) return { ok: false, problem: `finding ${index}: file must be a path of 1..${FINDING_LIMITS.file} characters` };
+    const line = finding["line"];
+    if (typeof line !== "number" || !Number.isInteger(line) || line < 1) return { ok: false, problem: `finding ${index}: line must be a positive whole number` };
+    const scenario = typeof finding["scenario"] === "string" ? oneLine(finding["scenario"]) : "";
+    if (scenario.length === 0 || scenario.length > FINDING_LIMITS.scenario) return { ok: false, problem: `finding ${index}: scenario must be one sentence of 1..${FINDING_LIMITS.scenario} characters` };
+    findings.push({ severity, file, line, scenario });
+  }
+  return { ok: true, findings };
 }

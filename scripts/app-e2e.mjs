@@ -24,7 +24,7 @@ import { createServer as createHttpServer } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createHash, generateKeyPairSync, randomBytes, sign as signWith } from "node:crypto";
-import { flag, freePort, GiveUp, mailSink, option, REAL_TURN_MS, Skip, SKIPPED_FADE, sleep, waitFor, world } from "./e2e-kit.mjs";
+import { flag, freePort, GiveUp, groupAlive, mailSink, option, own, REAL_TURN_MS, Skip, SKIPPED_FADE, sleep, spawnOwned, stopGroups, waitFor, world } from "./e2e-kit.mjs";
 
 const skipBuild = flag("--skip-build");
 
@@ -1592,7 +1592,7 @@ await journey("flows", "Live canvas: a teammate sees who's here and a card move 
 // ------------------------------------------------------------------ the demo
 
 await journey("pages", "The demo starts with flows already moving, and opens in a browser", [], async () => {
-  const demo = spawn(process.execPath, [w.bin, "demo", "--json"], { env: { ...process.env, NODE_OPTIONS: "" }, stdio: ["ignore", "pipe", "pipe"] });
+  const demo = spawnOwned("demo", process.execPath, [w.bin, "demo", "--json"], { env: { ...process.env, NODE_OPTIONS: "" }, stdio: ["ignore", "pipe", "pipe"] });
   try {
     const started = await new Promise((done, fail) => {
       let text = "";
@@ -1609,11 +1609,11 @@ await journey("pages", "The demo starts with flows already moving, and opens in 
     const text = await visitor.locator("body").innerText();
     await context.close();
     if (!/Customer replies/.test(text) || !/Support desk/.test(text)) throw new Error(`the demo's flows: ${text.slice(0, 300)}`);
-  } finally { demo.kill("SIGINT"); }
+  } finally { await stopGroups([demo.pid]); }
 });
 
 await journey("pages", "The demo lead: type a request, approve, see it build to Ready, complete, at desktop and phone", [], async () => {
-  const demo = spawn(process.execPath, [w.bin, "demo", "--json"], { env: { ...process.env, NODE_OPTIONS: "" }, stdio: ["ignore", "pipe", "pipe"] });
+  const demo = spawnOwned("demo", process.execPath, [w.bin, "demo", "--json"], { env: { ...process.env, NODE_OPTIONS: "" }, stdio: ["ignore", "pipe", "pipe"] });
   try {
     const started = await new Promise((done, fail) => {
       let text = "";
@@ -1679,7 +1679,7 @@ await journey("pages", "The demo lead: type a request, approve, see it build to 
         if (errors.length > 0) throw new Error(`browser errors at ${width} wide: ${errors.join(" | ").slice(0, 400)}`);
       } finally { await context.close(); }
     }
-  } finally { demo.kill("SIGINT"); }
+  } finally { await stopGroups([demo.pid]); }
 });
 
 await journey("pages", "Signing out ends the session: pages ask to sign in again", [], async () => {
@@ -1703,6 +1703,8 @@ await journey("pages", "Signing out ends the session: pages ask to sign in again
  */
 const realClaude = (() => { try { return execFileSync("/bin/sh", ["-c", "command -v claude"], { encoding: "utf8" }).trim() || null; } catch { return null; } })();
 const fresh = {};
+/** Every fresh install started, so each one is stopped whichever journeys pass, fail or time out. */
+const installs = [];
 async function freshInstall(name, { claude, crewModels = false }) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), `toolroll-onboarding-${name}-`)));
   const home = join(root, "home"), shop = join(root, "shop"), bin = join(root, "bin"), opened = join(root, "opened.txt"), log = join(root, "terminal.log");
@@ -1729,38 +1731,80 @@ async function freshInstall(name, { claude, crewModels = false }) {
   writeFileSync(join(shop, "README.md"), "# Shop\n\nA tiny shop library.\n");
   const git = (...args) => execFileSync("git", ["-C", shop, ...args], { stdio: "ignore" });
   git("init", "-q", "-b", "main"); git("add", "."); git("-c", "user.name=Sam Rivera", "-c", "user.email=sam@example.invalid", "commit", "-qm", "First version");
-  const port = await freePort();
-  // A real terminal for `up`: `script` gives it one. Stopping `script` closes that terminal, which ends `up` (--for is the backstop).
   const env = { PATH: `${bin}:/usr/bin:/bin:/usr/sbin:/sbin`, HOME: home, USER: "sam", LANG: "en_US.UTF-8", TERM: "xterm-256color", TMPDIR: join(root, "tmp"),
     TOOLROLL_BROWSER_COMMAND: join(bin, "open-browser"), TOOLROLL_NO_PLAN_PROBE: "1",
     GIT_AUTHOR_NAME: "Sam Rivera", GIT_AUTHOR_EMAIL: "sam@example.invalid", GIT_COMMITTER_NAME: "Sam Rivera", GIT_COMMITTER_EMAIL: "sam@example.invalid" };
   mkdirSync(env.TMPDIR);
-  const up = [w.bin, "up", "--port", String(port), "--for", String(40 * 60_000)].map(one => `'${one}'`).join(" ");
-  const shell = spawn("/bin/sh", ["-c", `cd '${shop}' && script -q /dev/null ${JSON.stringify(process.execPath)} ${up} < /dev/null > '${log}' 2>&1 & echo $!`], { detached: true, stdio: ["ignore", "pipe", "ignore"], env });
-  // `script` keeps the shell's output open on some systems: read the one line (its process id), not to the end.
-  const pid = await new Promise(done => { let text = ""; shell.stdout.on("data", chunk => { text += chunk; if (text.includes("\n")) { shell.stdout.destroy(); done(Number(text.trim())); } }); });
-  const base = `http://127.0.0.1:${port}`;
   const terminal = () => existsSync(log) ? readFileSync(log, "utf8").replace(/\r/g, "").replace(/\^D\x08\x08/g, "") : "";
-  await until(`${name}: toolroll up to open the browser`, async () => existsSync(opened) && readFileSync(opened, "utf8").startsWith(base), { timeoutMs: 90_000, everyMs: 500, seen: terminal });
-  const state = (() => { for (const one of [join(home, ".config", "toolroll"), join(home, ".toolroll"), join(home, ".config", "standing-orders")]) if (existsSync(join(one, "orders.db"))) return one; throw new Error(`no database under ${home}`); })();
-  const stop = () => { try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ } };
-  process.on("exit", stop);
-  // Not yet automatic (see the onboarding handoff): a fresh install has no exact crew models (approvals bind exact
-  // routing, so a first task would wait at Plan) and no project check (so a result could never be Ready). The setup a
-  // person does once, from the terminal, before anything is filed.
-  if (crewModels) {
-    const [who, secret] = readFileSync(join(state, "up-login.txt"), "utf8").trim().split(" ");
-    const toolroll = (...args) => execFileSync(process.execPath, [w.bin, ...args, "--as", who, "--token", secret, "--db", join(state, "orders.db")], { stdio: "ignore", env: { ...process.env, HOME: home } });
-    for (const phase of ["plan", "build", "repair", "review"]) toolroll("config", "set", phase, "--provider", "claude", "--model", "sonnet");
-    toolroll("verify", "set", "--repo", realpathSync(shop), "--command", "npm test", "--timeout-seconds", "120", "--yes");
+  const install = { root, home, shop, bin, terminal, signIn, groups: [], stopped: false };
+  // Stops `script` and `up`, each with its whole process group; once is enough, and it is safe to ask again.
+  install.stop = async () => { if (install.stopped) return; install.stopped = true; await stopGroups(install.groups); };
+  installs.push(install);
+  try {
+    // A port that is taken by the time `up` binds it (something else got it first) is a refusal `up` prints at once:
+    // the install starts again on another port.
+    for (let attempt = 1; ; attempt += 1) {
+      install.port = await freePort();
+      install.base = `http://127.0.0.1:${install.port}`;
+      const ended = await startUp(install, { name, env, log, opened, upPid: join(root, "up.pid"), go: join(root, "up.go") });
+      if (ended === null) break;
+      if (attempt >= 3 || !/port \d+ is taken/.test(ended)) throw new Error(`${name}: toolroll up ended before it opened the browser — ${ended}`);
+      // Started again from an empty home folder, as the first try did.
+      await stopGroups(install.groups.splice(0));
+      rmSync(home, { recursive: true, force: true }); mkdirSync(home);
+    }
+    const state = (() => { for (const one of [join(home, ".config", "toolroll"), join(home, ".toolroll"), join(home, ".config", "standing-orders")]) if (existsSync(join(one, "orders.db"))) return one; throw new Error(`no database under ${home}`); })();
+    Object.assign(install, { state, db: join(state, "orders.db"), link: readFileSync(opened, "utf8") });
+    // Not yet automatic (see the onboarding handoff): a fresh install has no exact crew models (approvals bind exact
+    // routing, so a first task would wait at Plan) and no project check (so a result could never be Ready). The setup a
+    // person does once, from the terminal, before anything is filed.
+    if (crewModels) {
+      const [who, secret] = readFileSync(join(state, "up-login.txt"), "utf8").trim().split(" ");
+      const toolroll = (...args) => execFileSync(process.execPath, [w.bin, ...args, "--as", who, "--token", secret, "--db", join(state, "orders.db")], { stdio: "ignore", env: { ...process.env, HOME: home } });
+      for (const phase of ["plan", "build", "repair", "review"]) toolroll("config", "set", phase, "--provider", "claude", "--model", "sonnet");
+      toolroll("verify", "set", "--repo", realpathSync(shop), "--command", "npm test", "--timeout-seconds", "120", "--yes");
+    }
+    return install;
+  } catch (error) {
+    await install.stop();
+    throw error;
   }
-  return { root, home, shop, bin, base, port, state, db: join(state, "orders.db"), link: readFileSync(opened, "utf8"), terminal, signIn, stop };
+}
+const shellWord = text => `'${String(text).replace(/'/g, "'\\''")}'`;
+/**
+ * `toolroll up` at a real terminal, as a person starts it: `script` gives it one (a pseudo-terminal, and a session and
+ * so a process group of its own). The shell that starts `script` exits at once, so nothing of this run is above `up`:
+ * it walks the programs above it to tell whether a coding agent started it (then it opens no browser), and with this
+ * run in between that would turn on whatever runs the run. `up` waits for the word to go until that shell has gone.
+ * Both process groups (`script`'s and `up`'s) belong to the install. Resolves null once `up` has opened the browser,
+ * or what it printed when it ended first.
+ */
+async function startUp(install, { name, env, log, opened, upPid, go }) {
+  for (const one of [opened, upPid, go, log]) rmSync(one, { force: true });
+  const up = [process.execPath, w.bin, "up", "--port", String(install.port), "--for", String(40 * 60_000)].map(shellWord).join(" ");
+  const inner = `echo $$ > ${shellWord(upPid)}; while [ ! -e ${shellWord(go)} ]; do sleep 0.05; done; exec ${up}`;
+  const shell = spawnOwned(`script for toolroll up (${name})`, "/bin/sh", ["-c", `cd ${shellWord(install.shop)} && exec script -q /dev/null /bin/sh -c ${shellWord(inner)} < /dev/null > ${shellWord(log)} 2>&1 &`], { stdio: "ignore", env });
+  install.groups.push(shell.pid);
+  await new Promise(done => { if (shell.exitCode !== null) done(); else shell.once("exit", done); });
+  const running = () => groupAlive(shell.pid);
+  await until(`${name}: the terminal to start toolroll up`, async () => { if (existsSync(upPid) && readFileSync(upPid, "utf8").endsWith("\n")) return true; if (!running()) throw new GiveUp(`script ended: ${install.terminal().slice(-300)}`); return false; }, { timeoutMs: 60_000, everyMs: 100 });
+  install.groups.push(own(Number(readFileSync(upPid, "utf8")), `toolroll up (${name})`));
+  writeFileSync(go, "");
+  // The real signal is `up` opening the browser, or `up` ending; the time limit is only a backstop for a hung start.
+  let ended = null;
+  await until(`${name}: toolroll up to open the browser`, async () => {
+    if (existsSync(opened) && readFileSync(opened, "utf8").startsWith(install.base)) return true;
+    if (!running()) { ended = install.terminal().trim().slice(-400) || "it printed nothing"; return true; }
+    return false;
+  }, { timeoutMs: 10 * 60_000, everyMs: 250, seen: install.terminal });
+  return ended;
 }
 /** A screenshot at 1440 and at 390 of the same page, settled. */
 async function bothSizes(on, name) {
   for (const [width, height] of [[1440, 900], [390, 844]]) {
     await on.setViewportSize({ width, height });
-    await on.waitForTimeout(400);
+    // Laid out at the new size: two frames after the resize, then any animation it started.
+    await on.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
     await on.evaluate(() => Promise.race([Promise.all(document.getAnimations().filter(one => one.effect?.getComputedTiming().iterations !== Infinity).map(one => one.finished.catch(() => undefined))), new Promise(done => setTimeout(done, 1500))])).catch(() => undefined);
     const overflow = await on.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
     if (overflow > 1) throw new Error(`${name} scrolls sideways by ${overflow}px at ${width} wide`);
@@ -1935,11 +1979,14 @@ await journey("onboarding", "Another address shows what it is, where Toolroll an
     }
   } finally {
     await other.close();
-    for (const one of [fresh.claude, fresh.none]) one?.stop();
+    // The last onboarding journey: every install stops here, the host one included, however the journeys went.
+    for (const one of installs) await one.stop();
   }
 });
 
 standIn.close(); standIn.closeAllConnections(); idpServer.close(); idpServer.closeAllConnections();
+// An install a selection of journeys left running (--only without the last one); finish stops anything else still owned.
+for (const one of installs) await one.stop().catch(error => w.say(`couldn't stop a fresh install: ${error.message}`));
 await w.finish(group === null ? "Toolroll end to end" : `Toolroll end to end: ${group}`);
 for (const [name, one] of Object.entries(GROUPS)) {
   const counted = [...placed.values()].filter(each => each.includes(name)).length;

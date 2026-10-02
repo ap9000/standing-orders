@@ -27,7 +27,9 @@ import {
 } from "./claim.js";
 import { bodyHashOf, publicationBody } from "./publish.js";
 import { modeTermsFromJson } from "./modes.js";
-import { readVerifiedArtifact, writeEvidenceFile } from "./evidence.js";
+import { evidenceRoot, readVerifiedArtifact, writeEvidenceFile } from "./evidence.js";
+import { queueBuildReview } from "./build-review.js";
+import { homedir } from "node:os";
 import type { BuildResult } from "./builder.js";
 import type { Store } from "./store.js";
 import { type ProofVerdict, type VerifyCommandFacts } from "./proof.js";
@@ -132,9 +134,13 @@ const STANDALONE_BROKE_REASONS = new Set([
   "git",
 ]);
 
-/** Compatibility for historical integrations: finished work is handed to the
- * lead. No model review is requested and no signed history is rewritten. */
-export function maybeRequestAutoReview(_store: Store, _repo: string, _runId: number, _committed: boolean, _noChange: boolean, _now: Date): void {}
+/** A committed build whose approved check passed gets the project's one
+ * automatic review when its review switch is on (build-review.ts). No-change
+ * results and failed checks go straight to the person, as before. */
+export function maybeRequestAutoReview(store: Store, repo: string, runId: number, committed: boolean, noChange: boolean, now: Date, root = evidenceRoot(homedir())): void {
+  if (!committed || noChange) return;
+  queueBuildReview(store, repo, runId, root, now);
+}
 
 export function disposeBuildOutcome(context: DisposeContext, result: BuildResult): Disposition {
   // Stop and every terminal side effect compete under the same SQLite
@@ -323,6 +329,7 @@ function disposeBuildOutcomeLocked(context: DisposeContext, result: BuildResult)
       // proves the credential, clearing any quota stamp.
       store.resetStrikes(taskRef);
       store.clearQuota(runner, provider, model ?? "");
+      maybeRequestAutoReview(store, repo, runId, result.committed, result.noChange === true, clock(), context.evidenceRoot);
       return { kind: "built", committed: result.committed, noChange: result.noChange === true };
     }
     store.transact(() => {

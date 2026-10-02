@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { GiveUp, until, waitFor } from "../scripts/e2e-kit.mjs";
+import { GiveUp, groupAlive, processesIn, spawnOwned, stopGroups, until, waitFor } from "../scripts/e2e-kit.mjs";
 
 // Regressions for the release gate's browser journeys (gate runs of 2026-09-29/30): a real-turn wait that ran out said only
 // "locator.waitFor: Timeout 30000ms exceeded", and one flaky journey made e2e-parallel.mjs run its whole group again.
@@ -35,7 +35,8 @@ describe("a real-turn wait that runs out", () => {
 /** A stand-in end-to-end script with the real one's interface: --groups --json, --group, --output, --only; it writes a
  * report like the kit's (every result naming its needs) and logs which journeys each run ran. */
 const STAND_IN = String.raw`
-import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 const args = process.argv.slice(2), option = name => { const at = args.indexOf(name); return at === -1 ? null : args[at + 1]; };
 const GROUPS = {
@@ -47,7 +48,19 @@ if (args.includes("--groups")) { console.log(JSON.stringify(Object.keys(GROUPS).
 const group = option("--group"), out = option("--output"), only = option("--only") === null ? null : new RegExp(option("--only"), "i");
 const dir = process.env.STAND_IN_DIR, mark = name => join(dir, name.replace(/\W+/g, "-"));
 mkdirSync(out, { recursive: true });
-if (group === "gamma" && !existsSync(mark("gamma-crashed"))) { writeFileSync(mark("gamma-crashed"), ""); process.exit(3); }
+if (group === "gamma" && !existsSync(mark("gamma-crashed"))) {
+  writeFileSync(mark("gamma-crashed"), "");
+  if (process.env.STAND_IN_LEAVES === "1") {
+    // Killed outright with a console it started still running (no finally, no exit handler): the console is listed.
+    const left = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", process.env.STAND_IN_BIN], { detached: true, stdio: "ignore" });
+    writeFileSync(join(out, "processes.json"), JSON.stringify([{ group: left.pid, label: "serve" }]));
+    writeFileSync(mark("leftover"), String(left.pid));
+    process.kill(process.pid, "SIGKILL");
+  }
+  process.exit(3);
+}
+const leftover = existsSync(mark("leftover")) ? Number(readFileSync(mark("leftover"), "utf8")) : null;
+const leftoverAlive = leftover !== null && (() => { try { process.kill(-leftover, 0); return true; } catch { return false; } })();
 const results = [], failed = new Set();
 for (const [name, needs] of [...GROUPS[group], ["No browser errors on any page", []]]) {
   if (name !== "No browser errors on any page" && only !== null && !only.test(name)) { results.push({ name, needs, state: "not selected" }); continue; }
@@ -61,7 +74,7 @@ for (const [name, needs] of [...GROUPS[group], ["No browser errors on any page",
   results.push({ name, needs, state: ok ? "passed" : "failed", ...(ok ? {} : { error: "Timed out after 1 s waiting for the card" }) });
   console.log((ok ? "PASS  " : "FAIL  ") + name);
 }
-appendFileSync(join(dir, "runs.jsonl"), JSON.stringify({ group, out, ran: results.filter(one => one.state !== "not selected").map(one => one.name) }) + "\n");
+appendFileSync(join(dir, "runs.jsonl"), JSON.stringify({ group, out, ran: results.filter(one => one.state !== "not selected").map(one => one.name), ...(leftover === null ? {} : { leftoverAlive }) }) + "\n");
 const kept = results.filter(one => one.state !== "not selected");
 writeFileSync(join(out, "report.json"), JSON.stringify({ results: kept }));
 writeFileSync(join(out, "report.md"), "# " + group + "\n" + kept.map(one => "- " + one.state + " " + one.name).join("\n") + "\n");
@@ -78,12 +91,12 @@ describe("e2e-parallel.mjs", () => {
     writeFileSync(script, STAND_IN);
     let stdout: string, code = 0;
     try {
-      stdout = execFileSync(process.execPath, [resolve("scripts/e2e-parallel.mjs"), script, "--output", join(dir, "out")], { encoding: "utf8", env: { ...process.env, NODE_OPTIONS: "", STAND_IN_DIR: dir, ...env } });
+      stdout = execFileSync(process.execPath, [resolve("scripts/e2e-parallel.mjs"), script, "--output", join(dir, "out")], { encoding: "utf8", env: { ...process.env, NODE_OPTIONS: "", STAND_IN_DIR: dir, STAND_IN_BIN: resolve("dist/bin.js"), ...env } });
     } catch (error) {
       const failed = error as { status: number; stdout: string };
       stdout = failed.stdout; code = failed.status;
     }
-    const runs = readFileSync(join(dir, "runs.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line) as { group: string; out: string; ran: string[] });
+    const runs = readFileSync(join(dir, "runs.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line) as { group: string; out: string; ran: string[]; leftoverAlive?: boolean });
     return { stdout, code, runs };
   };
 
@@ -131,5 +144,32 @@ describe("e2e-parallel.mjs", () => {
     expect(runs.filter(one => one.group === "alpha")[1]!.ran).toEqual(["Setup (with a $ and parentheses)", "Flaky one", "After flaky", "No browser errors on any page"]);
     expect(stdout).toMatch(/^❌ alpha\s+[0-9.]+ min$/m);
     expect(stdout).toMatch(/^2 of 3 groups passed \(1 flaky journey\) in /m);
+  });
+
+  test("a run killed outright leaves no process behind: its listed process groups stop before the retry", () => {
+    const { code, stdout, runs } = runParallel({ STAND_IN_LEAVES: "1" });
+    expect(stdout).toContain("[gamma");
+    expect(stdout).toMatch(/stopped 1 process group it left running/);
+    const retried = runs.filter(one => one.group === "gamma");
+    expect(retried).toHaveLength(1);
+    expect(retried[0]!.leftoverAlive).toBe(false);
+    expect(code).toBe(0);
+  });
+});
+
+describe("a process a journey starts", () => {
+  test("runs in a process group of its own, listed while it runs, and stops whole: the program and what it started", async () => {
+    const out = mkdtempSync(join(tmpdir(), "so-e2e-owned-"));
+    try {
+      processesIn(out);
+      // A console that starts a worker of its own, which ignores SIGTERM: the group still goes, by SIGKILL.
+      const child = spawnOwned("serve", process.execPath, ["-e", `require("node:child_process").spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { stdio: "ignore" }); setInterval(() => {}, 1000)`], { stdio: "ignore" });
+      const group = child.pid!;
+      expect(JSON.parse(readFileSync(join(out, "processes.json"), "utf8"))).toEqual([{ group, label: "serve" }]);
+      await until("the worker to start", () => { try { return execFileSync("pgrep", ["-g", String(group)], { encoding: "utf8" }).trim().split("\n").length === 2; } catch { return false; } }, { timeoutMs: 10_000, everyMs: 100 });
+      await stopGroups([group], { graceMs: 1_000 });
+      expect(groupAlive(group)).toBe(false);
+      expect(JSON.parse(readFileSync(join(out, "processes.json"), "utf8"))).toEqual([]);
+    } finally { rmSync(out, { recursive: true, force: true }); }
   });
 });

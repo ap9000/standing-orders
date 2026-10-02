@@ -1,5 +1,6 @@
 /** Assignment reads and delivery acknowledgments. These adapters never start
  * work, answer a decision, accept proof, or change an approval. */
+import { buildReviewLines } from "./review-switch.js";
 import { readFileSync, statSync } from "node:fs";
 import { authenticateCoordinator } from "./coordinator.js";
 import { assignmentOf, assignmentUpdates, claimAssignment, checkAssignment, type AssignmentAccess, type AssignmentSnapshot } from "./assignment.js";
@@ -118,6 +119,7 @@ function assignmentLines(assignment: AssignmentSnapshot): string[] {
       ...(receipt.agentReport === null ? [] : [`Agent report: ${receipt.agentReport}`]),
       `Receipt: ${receipt.digest}`,
     ]),
+    ...buildReviewLines(assignment.review ?? null).map(line => line.trimStart().replace(/^review: /, "Review: ")),
     ...(assignment.savedContext === undefined ? [] : [
       ...(assignment.savedContext.goal === null ? [] : [`Goal: ${assignment.savedContext.goal}`]),
       ...(assignment.savedContext.outOfScope === null ? [] : [`Out of scope: ${assignment.savedContext.outOfScope}`]),

@@ -357,7 +357,7 @@ describe("inherited review context (v51)", () => {
     expect(verb.code).toBe(EXIT.usage); expect(verb.envelope.ok).toBe(false);
     const again = await cli("review", String(f.sourceRun));
     expect(again.code).toBe(EXIT.refused); expect(again.envelope).toMatchObject({ ok: false, reason: "model-review-retired" });
-    expect(JSON.stringify(again.envelope)).toContain("Separate model review has been removed");
+    expect(JSON.stringify(again.envelope)).toContain("Manual review requests have been removed");
 
     // Chat: no refresh action, control or proposal; the confirmed-action path refuses an unknown operation.
     expect(Object.keys(CHAT_TASK_ACTIONS).filter(one => /refresh/.test(one))).toEqual([]);

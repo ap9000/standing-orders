@@ -775,6 +775,10 @@ export async function invokeHeldAgent(
         store.recordRunProcess(runId, pid, clock(), false, heldWitness);
         runOptions.onSpawn?.(pid);
       },
+      onSpawnFailed: () => {
+        if (heldWitness !== undefined) store.finishUnspawnedProcess(heldWitness, clock());
+        runOptions.onSpawnFailed?.();
+      },
       onContainer: info => {
         nativeHeld = true;
         if (heldWitness !== undefined) store.recordRunContainer(heldWitness, info.backend, info.id, info.identity);

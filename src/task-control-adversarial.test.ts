@@ -13,6 +13,8 @@ import { witnessedRunner, preserveObservedProcesses } from "./process-custody.js
 import { WorktreePool } from "./worktree.js";
 import { storeEvidence } from "./evidence.js";
 import { writeStoreSeed } from "../test/store-seed.js";
+import { addApprover } from "./scope.js";
+import { runOperate } from "./operate.js";
 
 const roots: string[] = [];
 const stores: Store[] = [];
@@ -336,5 +338,99 @@ describe("operator review: cancellation cannot cross custody boundaries", () => 
     await exited;
     expect(f.store.settleQuiescentStops(new Date())).toBe(1);
     expect(f.store.requestReview(f.id, "operator", new Date())).toMatchObject({ ok: true, attempt: 2 });
+  });
+});
+
+describe("a failed or interrupted spawn never leaves a run unprovable", () => {
+  const witnesses = (f: ReturnType<typeof fixture>) => f.store.raw().prepare("SELECT id,pid,exited_at FROM run_process WHERE run=? ORDER BY id").all(f.id);
+  const live = async () => {
+    const child = spawn(process.execPath, ["-e", "setInterval(()=>{},100);process.send('ready')"], { stdio: ["ignore", "ignore", "ignore", "ipc"], detached: true });
+    children.push(child);
+    await new Promise<void>((resolve, reject) => { child.once("message", () => resolve()); child.once("error", reject); });
+    return child;
+  };
+  const gone = async () => {
+    const child = spawn(process.execPath, ["-e", ""], { stdio: "ignore", detached: true });
+    await new Promise<void>(resolve => child.once("exit", () => resolve()));
+    return child.pid!;
+  };
+
+  test("c1: a failed spawn settles its witness as never started, even when the transport then throws", async () => {
+    const f = fixture();
+    const crashing = witnessedRunner(f.store, f.id, () => new Date(), async (file, args, options) => {
+      await run(file, args, options);
+      throw new Error("the transport crashed after the spawn failed");
+    });
+    // ENOENT: the OS returned no pid.
+    await expect(crashing(join(f.root, "no-such-executable"), [], { processGroup: true })).rejects.toThrow("transport crashed");
+    // A throw from the spawn call itself.
+    await expect(crashing(process.execPath, ["bad\0argument"], { processGroup: true })).rejects.toThrow("transport crashed");
+    const rows = witnesses(f);
+    expect(rows.length).toBe(2);
+    expect(rows.every(row => row.pid === null && typeof row.exited_at === "string")).toBe(true);
+    f.store.finishRun(f.id, { outcome: "failed", now: new Date() });
+    expect(f.store.stopQuiescenceProblem(f.id)).toBeNull();
+  });
+
+  test("c2: reconcile settles a pid-less witness once the run finished and its process groups are gone, with a ledger entry", async () => {
+    const f = fixture();
+    f.store.recordRunProcess(f.id, await gone(), new Date());
+    const orphan = f.store.reserveRunProcess(f.id, new Date());
+    // An open run never settles.
+    expect(f.store.settleUnspawnedWitnesses(new Date())).toBe(0);
+    f.store.finishRun(f.id, { outcome: "built", now: new Date() });
+    expect(f.store.stopQuiescenceProblem(f.id)).toContain("incomplete spawn witness");
+    expect(f.store.settleUnspawnedWitnesses(new Date())).toBe(1);
+    expect(witnesses(f).every(row => typeof row.exited_at === "string")).toBe(true);
+    expect(f.store.stopQuiescenceProblem(f.id)).toBeNull();
+    const entry = f.store.actionLedger({ repos: null }).find(one => one.action === "process witness settled");
+    expect(entry).toMatchObject({ runId: f.id, taskId: "draft", outcome: "never started", detail: expect.stringContaining(`witness ${orphan}`) });
+    expect(f.store.settleUnspawnedWitnesses(new Date())).toBe(0);
+  });
+
+  test("c2: reconcile leaves a pid-less witness while a process group of the run lives, or when it is the run's only witness", async () => {
+    const f = fixture();
+    f.store.reserveRunProcess(f.id, new Date());
+    f.store.finishRun(f.id, { outcome: "built", now: new Date() });
+    expect(f.store.settleUnspawnedWitnesses(new Date())).toBe(0);
+    const child = await live();
+    f.store.recordRunProcess(f.id, child.pid!, new Date());
+    // Even a recorded exit is rechecked against the live group.
+    f.store.raw().prepare("UPDATE run_process SET exited_at=? WHERE run=? AND pid=?").run(new Date().toISOString(), f.id, child.pid!);
+    expect(f.store.settleUnspawnedWitnesses(new Date())).toBe(0);
+    expect(f.store.stopQuiescenceProblem(f.id)).toContain("incomplete spawn witness");
+  });
+
+  test("c3: run settle records the approver's reason and refuses while a process of the run is alive", async () => {
+    const f = fixture();
+    const added = addApprover(f.store, "alex", new Date());
+    if (!added.ok) throw new Error("approver");
+    const child = await live();
+    f.store.recordRunProcess(f.id, child.pid!, new Date());
+    f.store.reserveRunProcess(f.id, new Date());
+    f.store.finishRun(f.id, { outcome: "built", now: new Date() });
+    let lines: string[] = [];
+    const settle = async (...extra: string[]) => {
+      lines = [];
+      const code = await runOperate("run", ["settle", String(f.id), ...extra, "--json"], line => lines.push(line), { databaseFile: join(f.root, "orders.db") });
+      return { code, body: JSON.parse(lines.join("\n")) as Record<string, unknown> };
+    };
+    const why = "The release check's runner crashed between reserving and recording its spawn; checked ps by hand.";
+    expect((await settle("--why", why)).body).toMatchObject({ ok: false, reason: "usage" });
+    expect((await settle("--why", why, "--as", "alex", "--token", "wrong")).body).toMatchObject({ ok: false, reason: "not-an-approver" });
+    expect((await settle("--as", "alex", "--token", added.token)).body).toMatchObject({ ok: false, reason: "usage" });
+    const refused = await settle("--why", why, "--as", "alex", "--token", added.token);
+    expect(refused.body).toMatchObject({ ok: false, reason: "alive" });
+    expect(f.store.stopQuiescenceProblem(f.id)).not.toBeNull();
+    const exited = new Promise<void>(resolve => child.once("exit", () => resolve()));
+    child.kill("SIGKILL");
+    await exited;
+    const settled = await settle("--why", why, "--as", "alex", "--token", added.token);
+    expect(settled.code).toBe(0);
+    expect(settled.body).toMatchObject({ ok: true, run: f.id, repeated: false });
+    expect(f.store.stopQuiescenceProblem(f.id)).toBeNull();
+    const entry = f.store.actionLedger({ repos: null }).find(one => one.action === "process witness settled by approver");
+    expect(entry).toMatchObject({ actor: "alex", runId: f.id, detail: why });
+    expect((await settle("--why", why, "--as", "alex", "--token", added.token)).body).toMatchObject({ ok: true, repeated: true });
   });
 });
