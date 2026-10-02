@@ -63,20 +63,20 @@ export type ResolvedMate =
         | "unconfigured"
         | "direct-api"
         | "no-projects"
-        | "session-mismatch"
-        | "thread-mismatch";
+        | "busy"
+        | "no-session";
       said: string | null;
     };
 
 /**
  * The session and thread a paired phone speaks in: the approver's live
  * session when it is compatible (same generation, same membership
- * credential, same ceiling), else one minted under the very terms the
- * console and CLI state for membership chat (no dollar ceiling, this
- * ceiling digest) — and only when NO session is live, because minting
- * ends the previous one and an unrelated console conversation is not
- * this phone's to end. The same rule for the thread: reused when its
- * ceiling matches, never closed from here.
+ * credential, same ceiling), else a fresh one minted under the very terms
+ * the console and CLI state for membership chat (no dollar ceiling, this
+ * ceiling digest). An incompatible session or thread left open on the
+ * computer is replaced rather than refused, so a message from the phone
+ * always gets an answer — except while a turn is still running there,
+ * which is "busy": the message waits its turn instead of ending it.
  */
 export function resolveChannelMate(
   store: Store,
@@ -115,21 +115,19 @@ export function resolveChannelMate(
   if (!verified.ok) return { ok: false, reason: "unpaired", said: null };
   const who = verified.who;
   const credentialKey = subscriptionCredentialKey(config.provider);
-  const mismatch =
-    "Your open chat session on the computer covers different projects or another provider. Finish or end it there, then message here again. Nothing was changed.";
   let session = store.activeMateSession(who.name);
-  if (
+  const liveThread = store.liveMateThreadFor(who.name);
+  const sessionMismatch =
     session !== null &&
     (session.approverGeneration !== who.generation ||
       session.credentialKey !== credentialKey ||
-      session.ceilingDigest !== who.ceilingDigest)
-  ) {
-    return { ok: false, reason: "session-mismatch", said: mismatch };
-  }
-  const liveThread = store.liveMateThreadFor(who.name);
-  if (liveThread !== null && liveThread.ceilingDigest !== who.ceilingDigest)
-    return { ok: false, reason: "thread-mismatch", said: mismatch };
-  if (session === null) {
+      session.ceilingDigest !== who.ceilingDigest);
+  const threadMismatch =
+    liveThread !== null && liveThread.ceilingDigest !== who.ceilingDigest;
+  // Replacing either would end a turn still running on the computer.
+  if ((sessionMismatch || threadMismatch) && store.liveMateTurnFor(who.name) !== null)
+    return { ok: false, reason: "busy", said: null };
+  if (session === null || sessionMismatch) {
     const termsDigest = createHash("sha256")
       .update(`0\n${who.ceilingDigest}`)
       .digest("hex");
@@ -146,10 +144,13 @@ export function resolveChannelMate(
     );
     session = store.getMateSession(id);
     if (session === null)
-      return { ok: false, reason: "session-mismatch", said: mismatch };
+      return { ok: false, reason: "no-session", said: couldNotAnswerText("a new chat session couldn't be started") };
   }
+  // openMateThread closes a thread kept under another ceiling.
   const thread =
-    liveThread ?? store.openMateThread(who.name, who.ceilingDigest, now).thread;
+    threadMismatch || liveThread === null
+      ? store.openMateThread(who.name, who.ceilingDigest, now).thread
+      : liveThread;
   return {
     ok: true,
     who,
@@ -173,6 +174,11 @@ export function mirrorToTaskChat(store: Store, who: VerifiedApprover, taskId: st
   } catch {
     // The task chat is a copy; the phone's own conversation already has it.
   }
+}
+
+/** The one short message a person gets when their question could not be answered. */
+export function couldNotAnswerText(reason: string): string {
+  return `I couldn't answer that just now: ${reason}. Ask again, or open the console.`;
 }
 
 export function tooLongText(length: number): string {

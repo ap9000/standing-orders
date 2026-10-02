@@ -1857,7 +1857,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     // separately proves cookie, approver standing and password; instance bot
     // settings remain outside this exact allowlist.
     if ((request.method === "GET" && path === "/settings/telegram") ||
-      (request.method === "POST" && ["/settings/telegram/pair", "/settings/telegram/unpair"].includes(path))) return true;
+      (request.method === "POST" && ["/settings/telegram/pair", "/settings/telegram/unpair", "/settings/telegram/retry"].includes(path))) return true;
     // Coding routes require an instance operator, then prove saved ownership and project access.
     if (path === "/code" || path.startsWith("/code/")) return true;
     if((request.method==='GET'&&/^\/chat\/action\/[0-9]{1,15}$/.test(path))||(request.method==='POST'&&/^\/chat\/proposal\/[0-9]{1,15}\/(confirm|dismiss)$/.test(path))){
@@ -4270,7 +4270,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       // The settings view holds no secret (a pairing code only appears in
       // the response to Pair, which stays script-free), so it joins the
       // workspace like every other settings page.
-      return sendScreen(response, 200, screen("Telegram", telegramSettingsHtml(store, botId, who.name, who.session.csrf), { chrome: chromeFor(project, "settings") }));
+      return sendScreen(response, 200, screen("Telegram", telegramSettingsHtml(store, botId, who.name, who.session.csrf, { now }), { chrome: chromeFor(project, "settings") }));
     }
     if (url.pathname === "/settings/teams") {
       if (who.via !== "cookie" || who.role !== "approver" || restricted() || !options.configDir) return refuse(response, who, 403, "An installation approver can connect Teams.", "/settings");
@@ -7754,6 +7754,12 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       return redirect(response,"/settings/slack");
     }
 
+    if (url.pathname === "/settings/telegram/retry") {
+      // The signed-in person's own unsent replies only: already written and fenced on the pairing; this sends them again now.
+      if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "An approver can retry their own replies.", "/settings");
+      store.retryTelegramReplies(who.name, now);
+      return redirect(response, "/settings/telegram");
+    }
     if (url.pathname === "/settings/telegram/pair" || url.pathname === "/settings/telegram/unpair") {
       // The person's own pairing, under their password: a code minted for
       // them alone, or their own chats revoked. Teammates' pairings are

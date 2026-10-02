@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.11 — 2026-10-02
+
+- **The Telegram bot always answers.** Replies and notifications go out from
+  the service itself, never from inside a build. If it can't answer, it says
+  why in plain words, and a session mix-up starts a fresh conversation instead
+  of refusing.
+
 ## 0.9.10 — 2026-10-02
 
 - **Chat reads like a teammate.** Short messages, outcome first, with real

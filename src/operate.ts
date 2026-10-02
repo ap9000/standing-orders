@@ -1,3 +1,4 @@
+import { UNSENT_REPLY_MS } from "./telegram-settings.js";
 import { maybeTriggerRepair } from "./dispose.js";
 import { CHECK_LEVEL_HINTS, CHECK_LEVEL_WORDS, isCheckLevel, liveQuickCommand, projectCheckLevel, quickVerifyKey, setProjectCheckLevel, setTaskCheckLevel, suggestQuickCommand } from "./check-levels.js";
 import { fileAddTestsTask, followUpChecksOf, requestFollowUpChecks, runFollowUpCheck, runWaitingChecks } from "./result-follow-ups.js";
@@ -172,6 +173,8 @@ import {
   hashPairingCode,
   loadBotToken,
   mintPairingCode,
+  networkFence,
+  networkFenceLine,
   redactToken,
   saveBotToken,
   PAIRING_TTL_MS,
@@ -352,6 +355,8 @@ export type OperateOptions = {
   gitRunner?: CommandRunner;
   /** Injected by tests: the Telegram Bot API. Production dials the real one. */
   telegramTransport?: TelegramTransport;
+  /** Injected by tests: the environment checked for a fenced network before Telegram is reached (default: this process's, with the real transport). */
+  telegramEnv?: Record<string, string | undefined>;
   publishExec?: PublishExec;
   /** Injected by tests: the stop fence a watch would set. */
   shouldStop?: () => boolean;
@@ -1009,6 +1014,7 @@ export async function runOperate(
       ...(options.agentRunner === undefined ? {} : { agentRunner: options.agentRunner }),
       ...(options.gitRunner === undefined ? {} : { gitRunner: options.gitRunner }),
       ...(options.telegramTransport === undefined ? {} : { telegramTransport: options.telegramTransport }),
+      ...(options.telegramEnv === undefined ? {} : { telegramEnv: options.telegramEnv }),
       ...(options.publishExec === undefined ? {} : { publishExec: options.publishExec }),
       ...(options.dispatchAdapter === undefined ? {} : { dispatchAdapter: options.dispatchAdapter }),
       ...(options.flowTriggerIo === undefined ? {} : { flowTriggerIo: options.flowTriggerIo }),
@@ -1061,6 +1067,7 @@ type Context = {
   agentRunner?: CommandRunner;
   gitRunner?: CommandRunner;
   telegramTransport?: TelegramTransport;
+  telegramEnv?: Record<string, string | undefined>;
   /** Injected by tests: what `publish` runs for git and gh. */
   publishExec?: PublishExec;
   mateSeams?: MateCliSeams;
@@ -8176,6 +8183,60 @@ type WatchLoopResult =
   | { ok: false; reason: "watch-busy" | "lease-lost" | "reconciliation-failed" | "loop-failed"; detail: string; ticks: number; built: number; broke: number };
 
 /** The start repair runs once per process, not once per project loop. */
+/**
+ * The Telegram follower: one actor on the wire that sends notifications and
+ * replies and reads what arrives, all over the same transport. Null when no
+ * bot token is saved, or when this process's network is fenced (it says so
+ * once instead of failing every send).
+ */
+function startTelegramFollower(args: {
+  context: Context;
+  publicUrl: string | undefined;
+  signal: AbortSignal;
+  progress: (line: string) => void;
+  label: string;
+  died: { prefix: string; then: string };
+  owner?: string;
+}): Promise<FollowReport | null> | null {
+  const { context, progress, label } = args;
+  const source = loadBotToken(process.env, context.telegramTokenFile);
+  if (source === null) return null;
+  const fence = networkFence(context.telegramEnv ?? (context.telegramTransport === undefined ? process.env : {}));
+  if (fence !== null) {
+    progress(networkFenceLine(fence));
+    return null;
+  }
+  const transport = context.telegramTransport ?? createTransport(source.token);
+  // v98: with a public hooks address (Tailscale Funnel covers /hooks), Telegram pushes updates to it instead.
+  const pushUrl = telegramPushUrl(readHooksBase(dirname(context.databaseFile)));
+  return followBridge(context.store, {
+    push: pushUrl === null ? null : { url: pushUrl, secret: telegramHookSecret(dirname(context.databaseFile), true)! },
+    readProjects: telegramReadProjects(context),
+    canDeliver: telegramCanDeliver(context, source.token),
+    conversation: telegramConversation(context, args.publicUrl === undefined ? {} : { serverOrigin: args.publicUrl }),
+    botId: source.botId,
+    transport,
+    signal: args.signal,
+    ...(args.owner === undefined ? {} : { owner: args.owner }),
+    onCycle: cycle => {
+      // progress(), not write(): under --json this line went to stdout
+      // BESIDE the final envelope — the one stdout contamination in the
+      // watch (round-4 finding 12).
+      progress(
+        `${label} sent ${cycle.sent}, answered ${cycle.answered}, paired ${cycle.paired}` +
+          ((cycle.statusReplies ?? 0) > 0 ? `, status replies ${cycle.statusReplies}` : "") +
+          ((cycle.chatQueued ?? 0) > 0 ? `, chat received ${cycle.chatQueued}` : "") +
+          ((cycle.chatAnswered ?? 0) > 0 ? `, chat replied ${cycle.chatAnswered}` : "") +
+          ((cycle.chatConfirmed ?? 0) > 0 ? `, chat confirmed ${cycle.chatConfirmed}` : "") +
+          (cycle.problems.length > 0 ? ` — ${cycle.problems.length} problem(s): ${cycle.problems[0]!.slice(0, 200)}` : ""),
+      );
+    },
+  }).catch(error => {
+    progress(`${args.died.prefix}the telegram follower died — ${describe(error)}; ${args.died.then}`);
+    return null;
+  });
+}
+
 let staleStatusesRepaired = false;
 
 async function runWatchLoop(args: {
@@ -8195,6 +8256,8 @@ async function runWatchLoop(args: {
   containmentLines?: (effective: EffectiveContainment) => readonly string[];
   /** Shared by every project loop of one service, for fair scheduling. */
   passes?: ProjectPasses;
+  /** The service sends and receives Telegram itself; this loop never touches the bot. */
+  serviceBridge?: boolean;
 }): Promise<WatchLoopResult> {
   const { context, flags, runner, token, repo, progress } = args;
   const { store } = context;
@@ -8281,40 +8344,13 @@ async function runWatchLoop(args: {
   // moment they arrive, and answering bumps the wake sequence, so the very
   // loop below wakes and resumes the freed task — phone to build, seconds.
   // The poll lease keeps this the only live poller; a cron `bridge
-  // telegram` overlapping it loses the lease race and reports busy.
-  let follower: Promise<FollowReport | null> | null = null;
-  const followSource = loadBotToken(process.env, context.telegramTokenFile);
-  if (followSource !== null) {
-    const transport = context.telegramTransport ?? createTransport(followSource.token);
-    const publicUrl = text(flags, "public-url");
-    // v98: with a public hooks address (Tailscale Funnel covers /hooks), Telegram pushes updates to it instead.
-    const pushUrl = telegramPushUrl(readHooksBase(dirname(context.databaseFile)));
-    follower = followBridge(store, {
-      push: pushUrl === null ? null : { url: pushUrl, secret: telegramHookSecret(dirname(context.databaseFile), true)! },
-      readProjects: telegramReadProjects(context),
-      canDeliver: telegramCanDeliver(context, followSource.token),
-      conversation: telegramConversation(context, publicUrl === undefined ? {} : { serverOrigin: publicUrl }),
-      botId: followSource.botId,
-      transport,
-      signal: followController.signal,
-      onCycle: cycle => {
-        // progress(), not write(): under --json this line went to stdout
-        // BESIDE the final envelope — the one stdout contamination in the
-        // watch (round-4 finding 12).
-        progress(
-          `watch: bridge sent ${cycle.sent}, answered ${cycle.answered}, paired ${cycle.paired}` +
-            ((cycle.statusReplies ?? 0) > 0 ? `, status replies ${cycle.statusReplies}` : "") +
-            ((cycle.chatQueued ?? 0) > 0 ? `, chat received ${cycle.chatQueued}` : "") +
-            ((cycle.chatAnswered ?? 0) > 0 ? `, chat replied ${cycle.chatAnswered}` : "") +
-            ((cycle.chatConfirmed ?? 0) > 0 ? `, chat confirmed ${cycle.chatConfirmed}` : "") +
-            (cycle.problems.length > 0 ? ` — ${cycle.problems.length} problem(s): ${cycle.problems[0]!.slice(0, 200)}` : ""),
-        );
-      },
-    }).catch(error => {
-      progress(`watch: the telegram follower died — ${describe(error)}; taps wait for the next watch`);
-      return null;
-    });
-  }
+  // telegram` overlapping it loses the lease race and reports busy. Under
+  // `up` the service runs the one follower itself and project loops leave
+  // Telegram to it.
+  const serviceBridge = args.serviceBridge === true;
+  const follower: Promise<FollowReport | null> | null = serviceBridge
+    ? null
+    : startTelegramFollower({ context, publicUrl: text(flags, "public-url"), signal: followController.signal, progress, label: "watch: bridge", died: { prefix: "watch: ", then: "taps wait for the next watch" } });
 
   const slackFollower = followSlack({store,dir:dirname(context.databaseFile),signal:followController.signal,
     readProjects:telegramReadProjects(context),evidenceRoot:context.evidenceRoot,
@@ -8600,7 +8636,7 @@ async function runWatchLoop(args: {
       // pass is the fallback shape for a watch started before a token existed.
       if (follower === null && now - lastBridge >= bridgeEveryMs) {
         lastBridge = now;
-        const source = loadBotToken(process.env, context.telegramTokenFile);
+        const source = serviceBridge ? null : loadBotToken(process.env, context.telegramTokenFile);
         const dir = dirname(context.databaseFile);
         // Exactly ONE service carries the pages — the chosen primary, or
         // the sensible implicit one. Telegram keeps draining taps and
@@ -9495,6 +9531,7 @@ async function upCommand(
       onFollowController: controller => followControllers.push(controller),
       containmentLines,
       passes: projectPasses,
+      serviceBridge: true,
       onReady: () => {
         markReady();
         if (bind) progress(`${prefix(repo)}builder connected — queued work can start`);
@@ -9517,6 +9554,32 @@ async function upCommand(
   };
 
   await Promise.all(repos.map(repo => launchRepo(repo, false)));
+
+  // Telegram: one follower for the whole service, never one per project
+  // loop. Replies and notifications go out from it, over the same transport
+  // in the same cycle (Oct 2: a reply sent by a project loop's own follower
+  // failed "fetch failed" while notifications went out). A token saved
+  // while the service runs connects within seconds; a follower that dies
+  // is started again.
+  const telegramController = new AbortController();
+  followControllers.push(telegramController);
+  const telegramSupervisor = (async (): Promise<void> => {
+    const pause = (ms: number) => new Promise<void>(resolvePause => {
+      const timer = setTimeout(done, ms);
+      function done(): void { clearTimeout(timer); telegramController.signal.removeEventListener("abort", done); resolvePause(); }
+      telegramController.signal.addEventListener("abort", done, { once: true });
+    });
+    while (!stopping && !telegramController.signal.aborted) {
+      const follower = startTelegramFollower({
+        context, publicUrl: text(flags, "public-url"), signal: telegramController.signal, progress, label: "telegram:",
+        died: { prefix: "", then: "starting it again" }, owner: `service-${randomUUID()}`,
+      });
+      if (follower !== null) await follower;
+      // Without a token (or on a fenced network) look again shortly; the fence line is said once.
+      if (follower === null && loadBotToken(process.env, context.telegramTokenFile) !== null) break;
+      await pause(follower === null ? 2_000 : 5_000);
+    }
+  })();
 
   const dynamicCeiling = resolveCeiling(repos, projectRoots).ceiling;
   const rejected = new Set<string>();
@@ -9645,6 +9708,7 @@ async function upCommand(
   await stopped;
   await registrySupervisor;
   await Promise.all([...loopResults.values()]);
+  await telegramSupervisor;
   clearInterval(runnerHeartbeat);
   if (runTimer !== undefined) clearTimeout(runTimer);
   if (graceTimer !== undefined) clearTimeout(graceTimer);
@@ -9696,6 +9760,7 @@ async function upCommand(
  *   bridge telegram token [<bot-token>|--clear]   set the credential file
  *   bridge telegram status
  *   bridge telegram digest [--every 30m|2h|24h | --off]   away mode: routine facts batch, decisions still page
+ *   bridge telegram retry                send unsent assistant replies again now
  *
  * The bot token comes from ${TOKEN_ENV} or the credential file this command
  * writes (0600, beside the database). Cron the pass right after tick; a
@@ -9716,7 +9781,15 @@ async function bridgeCommand(
   if (demoFence !== null) return demoFence;
   const [channel, action] = positional;
   if (channel !== "telegram") {
-    return fail(write, json, "bridge", "usage", "`toolroll bridge telegram [pair|unpair|token|status|digest]`", EXIT.usage);
+    return fail(write, json, "bridge", "usage", "`toolroll bridge telegram [pair|unpair|token|status|digest|retry]`", EXIT.usage);
+  }
+
+  if (action === "retry") {
+    // Replies already written and fenced on the pairing like every send: this only moves their next attempt to now.
+    const retried = store.retryTelegramReplies(null, clock());
+    return succeed(write, json, "bridge retry", { retried }, () => [
+      retried === 0 ? "No unsent Telegram replies." : `Sending ${retried} Telegram ${retried === 1 ? "reply" : "replies"} again on the next bridge pass.`,
+    ]);
   }
 
   if (action === "token") {
@@ -9864,6 +9937,8 @@ async function bridgeCommand(
       EXIT.refused,
     );
   }
+  const fenced = networkFence(context.telegramEnv ?? (context.telegramTransport === undefined ? process.env : {}));
+  if (fenced !== null) return fail(write, json, "bridge", "network-fenced", networkFenceLine(fenced), EXIT.refused);
   const transport = context.telegramTransport ?? createTransport(source.token);
 
   // --follow: stay on the wire. One long-poll actor holds the poll lease;
@@ -10658,7 +10733,18 @@ async function statusCommand(
   const projects = projectBuildsStatus(context);
   const projectsLine = projects.length === 0 ? null
     : `Builds by project: ${projects.slice(0, 8).map(one => `${one.name} ${one.running} of ${one.limit}`).join(", ")}${projects.length > 8 ? ", …" : ""}`;
-  return succeed(context.write, context.json, command, { ...status, projects, ...update, ...integrations, ...updateWaiting }, () => [...(waiting === null ? [] : [waiting.words]), ...renderInstallationStatus(status), ...(projectsLine === null ? [] : [projectsLine]), ...(line === null ? [] : [line]), ...(brokenLine === null ? [] : [brokenLine])]);
+  // A Telegram reply written but still not sent after two minutes, with its Retry.
+  const unsent = context.store.unsentTelegramReplies(null, null, new Date(context.clock().getTime() - UNSENT_REPLY_MS));
+  const unsentLine = unsentRepliesLine(unsent);
+  const unsentReplies = unsent.length === 0 ? {} : { unsentReplies: unsent.map(one => ({ ...one, retry: "toolroll bridge telegram retry" })) };
+  return succeed(context.write, context.json, command, { ...status, projects, ...update, ...integrations, ...updateWaiting, ...unsentReplies }, () => [...(waiting === null ? [] : [waiting.words]), ...(unsentLine === null ? [] : [unsentLine]), ...renderInstallationStatus(status), ...(projectsLine === null ? [] : [projectsLine]), ...(line === null ? [] : [line]), ...(brokenLine === null ? [] : [brokenLine])]);
+}
+
+function unsentRepliesLine(unsent: readonly { since: string; error: string | null }[]): string | null {
+  if (unsent.length === 0) return null;
+  const oldest = unsent[0]!;
+  const what = unsent.length === 1 ? "A Telegram reply hasn't" : `${unsent.length} Telegram replies haven't`;
+  return `${what} been sent since ${oldest.since.slice(11, 16)} UTC${oldest.error === null ? "" : ` (${oldest.error})`}. Retry: toolroll bridge telegram retry`;
 }
 
 /** Each known project's running builds against its limit: its own number, never past its workers' capacity. */
