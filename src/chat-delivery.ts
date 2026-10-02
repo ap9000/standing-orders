@@ -33,7 +33,8 @@ import { answerChatFlowPrompt, applyChatFlowTap, flowDecisionParts } from "./cha
 import { connectChannel, FLOW_WORDS, takeChannelMessage, watchedChannel } from "./chat-inbox.js";
 import { triggerConfigOf } from "./flow-triggers.js";
 import { telegramProgressCard } from "./telegram-progress.js";
-import { enqueueEveningDigests, isTaskFact, needsPerson, quietCardView, readyPingView } from "./chat-quiet.js";
+import { enqueueEveningDigests, finishedView, isTaskFact, needsPerson, quietCardView } from "./chat-quiet.js";
+import { BATCH_MS, chatText, shortTitle } from "./chat-voice.js";
 import { phoneText, PHONE_HELP, phoneCommand, phoneStatus, phoneTaskView, phoneTaskChoices, phoneTaskListText, resolvePhoneTask, phoneFocusText, PHONE_NO_MATCH, PHONE_BACK_TO_LEAD } from "./telegram-status.js";
 import { applyRoomInbound, conversationRow, roomCardApprover, roomCommand, roomGrantAllowed, roomMessagesAfter, roomMessageText, teamDomain } from "./chat-rooms.js";
 import { isTelegramProgressNotification, proposalTaskOf, type Store } from "./store.js";
@@ -744,7 +745,7 @@ function planQuietCard(options: ChatDeliveryOptions, binding: ChatBinding, notif
   const { state, store, identity } = options;
   if (notification.taskRef === null || notification.taskId === null) return;
   const card = store.chatCardFor(`${state.channel}:${binding.id}`, notification.taskRef, store.getTask(notification.taskId)?.createdAt ?? notification.createdAt, now);
-  const view = quietCardView(store, card.tasks, now, options.evidenceRoot);
+  const view = quietCardView(store, card.tasks, now, options.evidenceRoot, binding.approver);
   if (view === null) return;
   const content: ChatContent = { text: view.text, link: view.link, ...(card.tasks.length === 1 ? { task: notification.taskId } : {}) };
   const shown = chatHash(JSON.stringify(content));
@@ -760,6 +761,32 @@ function planQuietCard(options: ChatDeliveryOptions, binding: ChatBinding, notif
   state.plan(id, [content], now);
   const part = state.prepare("SELECT id FROM chat_part WHERE event=?").get(id);
   if (part !== undefined) store.setChatCardMessage(card.id, String(part.id), shown);
+}
+
+/** Finished work: the result joins this person's open batch (two minutes from its first), and the batch's one
+ * message is planned once, then repainted in place as more results land. */
+function planFinished(options: ChatDeliveryOptions, binding: ChatBinding, taskRef: number, run: number, now: Date): void {
+  const { state, store, identity } = options;
+  const batch = store.chatBatchFor(`${state.channel}:${binding.id}`, taskRef, run, now, BATCH_MS);
+  const view = finishedView(store, batch, now, options.evidenceRoot, binding.approver);
+  if (view === null) return;
+  // A single result keeps its task and run, so a reply to it names that work.
+  const single = batch.items.length === 1 ? batch.items[0]! : null;
+  const task = single === null ? null : store.refById(single.taskRef)?.externalId ?? null;
+  const content: ChatContent = { text: view.text, link: view.link, ...(task === null ? {} : { task }), ...(single?.run == null ? {} : { run: single.run }) };
+  const shown = chatHash(JSON.stringify(content));
+  if (batch.message !== null) {
+    if (batch.digest === shown) return;
+    state.prepare("UPDATE chat_part SET payload=?,state='pending',created=?,next_at=NULL WHERE id=? AND state!='dropped'").run(JSON.stringify(content), now.toISOString(), Number(batch.message));
+    store.setChatBatchMessage(batch.id, batch.message, shown);
+    return;
+  }
+  const id = chatHash(`${state.channel}:batch:${binding.id}:${batch.id}`);
+  state.enqueue({ id, installation: identity.installation, binding: binding.id, kind: "notice", channel: binding.channel, member: binding.member,
+    ts: "", thread: "", payload: "{}", created: now.toISOString() });
+  state.plan(id, [content], now);
+  const part = state.prepare("SELECT id FROM chat_part WHERE event=?").get(id);
+  if (part !== undefined) store.setChatBatchMessage(batch.id, String(part.id), shown);
 }
 
 /** One progress card per exact result; separate urgent facts retain their own review link. */
@@ -814,10 +841,7 @@ export async function planChatNotifications(
           planQuietCard(options, binding, notification, now);
           if (!needsPerson(notification)) return;
           if (notification.kind === "run-finished" && run) {
-            const ping = readyPingView(store, store.getRun(run.id)!, notification.taskId!, notification.project!, now, options.evidenceRoot);
-            state.enqueue({ id, installation: identity.installation, binding: binding.id, kind: "notice", channel: binding.channel, member: binding.member,
-              ts: "", thread: "", payload: "{}", created: now.toISOString() });
-            state.plan(id, [{ text: ping.text, task: notification.taskId!, run: run.id, link: ping.link }], now);
+            planFinished(options, binding, notification.taskRef!, run.id, now);
             return;
           }
         }
@@ -829,6 +853,7 @@ export async function planChatNotifications(
             notification.project,
             now,
             options.evidenceRoot,
+            binding.approver,
           );
           const content: ChatContent = {
             text: card.text,
@@ -910,10 +935,11 @@ export async function planChatNotifications(
             id,
             [
               {
-                text: phoneText(
-                  `${notification.subject}\n\n${notification.body}`,
+                // Never the task's id or a "— revision" suffix (chat-voice.ts).
+                text: chatText(phoneText(
+                  notification.body === "" ? notification.subject : `${notification.subject}\n\n${notification.body}`,
                   2500,
-                ),
+                ), notification.taskId === null ? [] : [{ id: notification.taskId, title: shortTitle(store.getTask(notification.taskId)?.title, notification.taskId) }]),
                 ...(notification.taskId ? { task: notification.taskId } : {}),
                 ...(run ? { run: run.id } : {}),
                 ...(notification.link

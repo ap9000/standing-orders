@@ -1,0 +1,414 @@
+/**
+ * Chat reads like a teammate talking (2026-10-02): nobody is told about their
+ * own completions, cancels or approvals; finished work landing within two
+ * minutes is one message edited in place; no chat text carries a task id,
+ * "— revision" or "Marked complete by" its reader; release checks and
+ * replaced tasks stay quiet; a deploy says one "is live" line; the Telegram
+ * bot is named Toolroll. The facts come from the real mutations and the
+ * transports are scripted; nothing live is claimed.
+ */
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { openStore, type Store } from "./store.js";
+import { addApprover, approve, propose } from "./scope.js";
+import { register } from "./runner.js";
+import { acquire, completeFenced } from "./claim.js";
+import { withActor } from "./actor.js";
+import { storeEvidence } from "./evidence.js";
+import { sealVerificationReceipt } from "./verification-evidence.js";
+import { verifyApproverStanding } from "./principal.js";
+import { assignmentOf, checkAssignmentAsOperator } from "./assignment.js";
+import { telegramProgressCard } from "./telegram-progress.js";
+import { quietCardView } from "./chat-quiet.js";
+import { bridgePass, followBridge, hashPairingCode, mintPairingCode, PAIRING_TTL_MS, type TelegramTransport } from "./telegram.js";
+import { SlackState, slackHash } from "./slack-state.js";
+import { deliverSlackPart, planSlackNotifications, type SlackChatOptions } from "./slack-chat.js";
+import type { SlackApi } from "./slack-api.js";
+import { batchLine, BOT_NAME, chatText, nameTelegramBot, shortTitle } from "./chat-voice.js";
+import { notifyVersionLive, RUNNER_VERSIONS_FILE } from "./releases.js";
+
+const T0 = new Date("2026-10-02T09:00:00.000Z");
+const at = (ms: number) => new Date(T0.getTime() + ms);
+const BOT = "777000";
+const ALEX_CHAT = 4242;
+const BOB_CHAT = 5353;
+const REPO = "/projects/alpha";
+const ORIGIN = "https://console.example";
+const RUNNER = "worker-1";
+const TTL = 10 * 365 * 24 * 3600 * 1000;
+const legacy = { route: { routeDigest: "legacy", phase: "build" as const, provider: "claude", model: null, chosen: "legacy" as const } };
+
+/** The six titles from the Oct 2 Telegram screenshot, ids and "— revision" included. */
+const SIX = [
+  ["faster-tests-2", "Faster tests — revision"],
+  ["cleanup-r2", "Cleanup of the old status words (cleanup-r2) — revision"],
+  ["accents-3", "Search ignores accents — revision"],
+  ["chat-voice-4", "Chat reads like a teammate"],
+  ["pr-open-5", "Pull requests open reliably — revision"],
+  ["gallery-6", "Flow gallery shows sharing"],
+] as const;
+
+/** No chat text may carry these: a task id, a revision suffix, or the reader's own completion. */
+function expectClean(texts: readonly string[], reader: string, ids: readonly string[] = SIX.map(one => one[0])): void {
+  for (const text of texts) {
+    expect(text).not.toMatch(/—\s*revision/i);
+    expect(text).not.toContain(`Marked complete by ${reader}`);
+    for (const id of ids) expect(text, `${id} in ${JSON.stringify(text)}`).not.toContain(id);
+  }
+}
+
+function scriptedTelegram() {
+  const calls: { method: string; params: Record<string, unknown> }[] = [];
+  let next = 100;
+  let name = "StandingOrders";
+  const transport: TelegramTransport = async (method, params) => {
+    calls.push({ method, params });
+    if (method === "getUpdates") return { ok: true, result: [] };
+    if (method === "getMyName") return { ok: true, result: { name } };
+    if (method === "setMyName") { name = String(params["name"]); return { ok: true, result: true }; }
+    if (method === "sendMessage" || method === "editMessageText") return { ok: true, result: { message_id: method === "editMessageText" ? params["message_id"] : next++ } };
+    return { ok: true, result: true };
+  };
+  const inChat = (chat: number) => calls.filter(call => String(call.params["chat_id"]) === String(chat));
+  /** A new message that can buzz: not the silent task card. */
+  const pings = (chat: number) => inChat(chat).filter(call => call.method === "sendMessage" && call.params["disable_notification"] !== true);
+  const shown = (chat: number) => inChat(chat).filter(call => call.method === "sendMessage" || call.method === "editMessageText").map(call => String(call.params["text"]));
+  /** What a message says now: its last edit, or what was sent. */
+  const current = (chat: number, messageId: number) => {
+    const edits = inChat(chat).filter(call => call.method === "editMessageText" && call.params["message_id"] === messageId);
+    return edits.length > 0 ? edits.at(-1)! : calls.find(call => call.method === "sendMessage" && String(call.params["chat_id"]) === String(chat) && calls.filter(one => one.method === "sendMessage").indexOf(call) + 100 === messageId)!;
+  };
+  const sentId = (call: { method: string; params: Record<string, unknown> }) => calls.filter(one => one.method === "sendMessage").indexOf(call) + 100;
+  const buttons = (call: { params: Record<string, unknown> }) =>
+    ((call.params["reply_markup"] as { inline_keyboard?: { text: string; url?: string }[][] } | undefined)?.inline_keyboard ?? []).flat();
+  return { transport, calls, pings, shown, current, sentId, buttons, name: () => name, rename: (to: string) => { name = to; }, reset: () => { calls.length = 0; } };
+}
+
+describe("short human titles and plain chat words", () => {
+  test("titles drop \"— revision\" and ids and stay within 60 characters", () => {
+    expect(shortTitle("Faster tests — revision", "faster-tests-2")).toBe("Faster tests");
+    expect(shortTitle("Release 0.9.9: lighter tests (release-099b)", "release-099")).toBe("Release 0.9.9: lighter tests");
+    expect(shortTitle("Stop charging tax twice at checkout (fix-checkout-tax)", "fix-checkout-tax")).toBe("Stop charging tax twice at checkout");
+    expect(shortTitle("Fix login—revision 2")).toBe("Fix login");
+    expect(shortTitle("Pre-revision checks stay")).toBe("Pre-revision checks stay");
+    expect(shortTitle("Tidy the changelog", "tidy")).toBe("Tidy the changelog");
+    expect(shortTitle("release-099b", "release-099b")).toBe("Release 099b");
+    const long = shortTitle("Make the evening digest group finished work by project and explain every failure in plain words");
+    expect(long.length).toBeLessThanOrEqual(60);
+    expect(long.endsWith("…")).toBe(true);
+  });
+
+  test("pushed words never carry the task id, a revision suffix or \"Replaced by <id>\"", () => {
+    expect(chatText("Release 0.9.9 — revision\nReplaced by release-099b.", ["release-099"])).toBe("Release 0.9.9\nReplaced by a newer task.");
+    expect(chatText("alpha-1 stalled after 3 straight failures", [{ id: "alpha-1", title: "Guard the payout path" }])).toBe("Guard the payout path stalled after 3 straight failures");
+    expect(chatText("keep it tidy", ["tidy"])).toBe("keep it tidy");
+  });
+
+  test("one finished task is one or two short sentences, outcome first; several are one line with the names", () => {
+    const fact = (summary: string, headline = "Ready for review", checks: "passed" | "failed" | null = "passed") => ({ summary, headline, checks, report: false, completedBy: null });
+    expect(batchLine([fact("Search now ignores accents")])).toBe("Search now ignores accents is ready. Your tests passed. Take a look?");
+    expect(batchLine([fact("Faster tests", "Failed", "failed")])).toBe("Faster tests is built, but its tests failed. It waits for you: retry or ask for changes.");
+    expect(batchLine([fact("Faster tests"), fact("Cleanup"), fact("Search ignores accents"), fact("API keys rotate")]))
+      .toBe("4 tasks finished: faster tests, cleanup, search ignores accents, …");
+    expect(batchLine([fact("Faster tests"), fact("Cleanup", "Failed", "failed")])).toBe("2 tasks finished: faster tests, cleanup.\nTests failed on cleanup; it waits for you.");
+  });
+});
+
+describe("chat voice on Telegram", () => {
+  let dir: string;
+  let store: Store;
+  let now: Date;
+  let serial = 0;
+  let alexToken = "";
+
+  const pairAs = (who: string, chat: number, updateId: number) => {
+    const code = mintPairingCode();
+    store.createTelegramPairing({ codeHash: hashPairingCode(code), approver: who, by: who, ttlMs: PAIRING_TTL_MS }, now);
+    expect(store.consumeTelegramPairing({ codeHash: hashPairingCode(code), botId: BOT, chatId: String(chat), userId: String(chat), updateId }, now).ok).toBe(true);
+  };
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "so-chat-voice-"));
+    store = openStore(join(dir, "orders.db"));
+    now = T0;
+    serial = 0;
+    const alex = addApprover(store, "alex", now);
+    if (!alex.ok) throw new Error("bootstrap failed");
+    alexToken = alex.token;
+    expect(addApprover(store, "bob", now, { name: "alex", token: alexToken }).ok).toBe(true);
+    register(store, { name: RUNNER, host: "test", capacity: 9, repos: [REPO], now, newToken: () => `tok-${RUNNER}` });
+    pairAs("alex", ALEX_CHAT, 1);
+    pairAs("bob", BOB_CHAT, 2);
+  });
+  afterEach(() => { store.close(); rmSync(dir, { recursive: true, force: true }); });
+
+  const pass = (script: ReturnType<typeof scriptedTelegram>) =>
+    bridgePass(store, { botId: BOT, transport: script.transport, clock: () => now, readProjects: async () => [REPO], conversation: { evidenceRoot: dir, phoneOrigin: () => ORIGIN } });
+  const placed = (id: string, title: string) => {
+    store.createTask({ id, title }, now);
+    const ref = store.refFor("built-in", id).id;
+    store.placeTask(ref, REPO, {}, now);
+    return ref;
+  };
+  /** One attempt that saves a result: its run-finished fact is the "finished" update. */
+  const built = (ref: number) => {
+    const lease = `lease-${++serial}`;
+    const took = acquire(store, ref, RUNNER, { now, token: `tok-${RUNNER}`, newLeaseId: () => lease, ttlMs: TTL });
+    if (!took.ok) throw new Error(`claim refused: ${took.reason}`);
+    const run = store.startRun({ taskRef: ref, leaseId: lease, runner: RUNNER, branch: "so/t", worktree: "/pool/t", ...legacy, now });
+    store.finishRun(run, { outcome: "built", committed: true, now });
+    expect(completeFenced(store, lease, "done", now).ok).toBe(true);
+    return run;
+  };
+
+  test("c1: nobody is told about their own completion, cancel or approval — the lead acting for them included; others still are", async () => {
+    const script = scriptedTelegram();
+    const done = placed("ship-notes-7", "Ship the release notes");
+    const dropped = placed("old-banner-8", "Remove the old banner");
+    const approved = placed("tidy-docs-9", "Tidy the docs");
+    await pass(script);
+    script.reset();
+
+    // A result is saved, then alex marks it complete before the bridge comes round: alex hears nothing about it.
+    now = at(10_000);
+    built(done);
+    // Marking a result complete (console, chat or CLI) records the person's act; the worker already closed the claim.
+    withActor({ account: "alex", lead: false }, () => store.noteTaskAct(done, "completed", now));
+    // alex cancels one task; alex's lead token approves another (it acts as alex).
+    withActor({ account: "alex", lead: false }, () => store.cancelTask("old-banner-8", now, "No longer needed"));
+    withActor({ account: "alex", lead: true }, () => {
+      store.noteTaskAct(approved, "approved", now);
+      store.enqueueNotification({ dedupeKey: "approved:tidy-docs-9", kind: "scope-approved", subject: "Approved", body: "Approved by the lead.", source: { taskRef: approved } }, now);
+    });
+    await pass(script);
+    await pass(script);
+    // No new message reaches alex; the tasks' one silent card may only be repainted.
+    expect(script.pings(ALEX_CHAT)).toEqual([]);
+    expect(script.shown(ALEX_CHAT).join("\n")).not.toMatch(/Ship the release notes needs|is ready|Approved|Cancelled|Marked complete/);
+    expect(store.settledBy(done)).toBe("alex");
+    expect(store.settledBy(dropped)).toBe("alex");
+    // bob is told: the finished work pings once.
+    expect(script.pings(BOB_CHAT)).toHaveLength(1);
+    expect(String(script.pings(BOB_CHAT)[0]!.params["text"])).toContain("Ship the release notes");
+    // A later fact on a task alex settled still says nothing to alex.
+    now = at(20_000);
+    store.enqueueNotification({ dedupeKey: "late:ship-notes-7", kind: "attempts-exhausted", pushClass: "attention", subject: "Late fact", body: "fixture", source: { taskRef: done } }, now);
+    await pass(script);
+    expect(script.pings(ALEX_CHAT)).toEqual([]);
+    expectClean([...script.shown(ALEX_CHAT), ...script.shown(BOB_CHAT)], "bob", ["ship-notes-7", "old-banner-8", "tidy-docs-9"]);
+  });
+
+  test("c2: six completions within two minutes are one message, edited in place as it grows; a seventh later starts a new one", async () => {
+    const script = scriptedTelegram();
+    const refs = SIX.map(([id, title]) => placed(id, title));
+    await pass(script);
+    for (const [index, ref] of refs.entries()) {
+      now = at(index * 20_000);
+      built(ref);
+      await pass(script);
+    }
+    // One silent card for the six tasks filed together, and exactly one finished-work message.
+    const pings = script.pings(ALEX_CHAT);
+    expect(pings).toHaveLength(1);
+    const batch = script.sentId(pings[0]!);
+    const latest = script.current(ALEX_CHAT, batch);
+    expect(String(latest.params["text"])).toMatch(/^6 tasks finished: faster tests, cleanup of the old status words, search ignores accents, …/);
+    expect(script.buttons(latest)).toEqual([{ text: "Open", url: `${ORIGIN}/tasks` }]);
+    expect(script.calls.filter(call => call.method === "editMessageText" && call.params["message_id"] === batch).length).toBeGreaterThanOrEqual(5);
+    // Every receipt is settled: nothing is waiting to be re-sent.
+    const binding = store.liveTelegramBindingFor(BOT, String(ALEX_CHAT))!;
+    expect(store.telegramDeliveries(binding).filter(row => row.kind === "run-finished").every(row => row.deliveredAt !== null)).toBe(true);
+
+    // Outside the window, the next finished task is its own message, and it says what happened.
+    now = at(5 * 60_000);
+    const seventh = placed("export-btn-10", "Rename the export button — revision");
+    await pass(script);
+    now = at(6 * 60_000);
+    built(seventh);
+    await pass(script);
+    expect(script.pings(ALEX_CHAT)).toHaveLength(2); // the six's one message, then the seventh's own line (its card is silent)
+    const last = script.pings(ALEX_CHAT).at(-1)!;
+    expect(String(last.params["text"])).toMatch(/^Rename the export button /);
+    expect(script.buttons(last)[0]).toMatchObject({ text: "Open result" });
+    expectClean(script.shown(ALEX_CHAT), "alex", [...SIX.map(one => one[0]), "export-btn-10"]);
+  });
+
+  test("c3: a result the reader marked complete never says \"Marked complete by\" them; anyone else still reads who did", () => {
+    for (const phase of ["build", "plan", "review"] as const) store.setPhaseConfig("installation", phase, "claude", "sonnet", "alex", now);
+    const ref = placed("ready-11", "Keep the guard readable — revision");
+    propose(store, { taskId: "ready-11", goal: "Keep the guard readable", touches: ["src/guard.ts"], acceptance: [{ id: "c1", statement: "The guard stays readable.", how: null, evidence: ["check"] }], now });
+    expect(approve(store, "ready-11", "alex", now, store.getScope("ready-11")!.digest, alexToken).ok).toBe(true);
+    const authority = store.routeAuthorityFor(ref, "builder");
+    if (!authority?.ok) throw new Error("route fixture");
+    const run = store.startRun({ taskRef: ref, leaseId: "l-ready", runner: RUNNER, branch: "so/ready-11", worktree: "/pool/ready-11", route: authority.stamp, now });
+    store.stampRun(run, { scopeDigest: store.getScope("ready-11")!.digest, baseRevision: "b".repeat(40) });
+    store.recordOutcomeFacts(run, { headRevision: "a".repeat(40), handoff: "The guard reads well." });
+    store.finishRun(run, { outcome: "built", committed: true, now });
+    store.setTaskState("ready-11", "done", now);
+    store.saveProofVerdict(run, "verified", [], now, [{ id: "c1", statement: "The guard stays readable.", requiredEvidence: ["check"], state: "pass", detail: [], answered: [], review: null }] as never, "verified");
+    store.setVerifyCommand({ repo: REPO, command: "npm test", timeoutMs: 300_000, approvedBy: "alex" }, now);
+    storeEvidence(store, dir, run, "check-log", "checks.txt", Buffer.from("1 test passed"), "npm test", now, { captureStatus: "ok" });
+    sealVerificationReceipt(store, dir, run, "a".repeat(40), store.liveVerifyCommand(REPO)!, { configured: true, ran: true, exitCode: 0 }, now);
+    const who = verifyApproverStanding(store, "alex", store.accountOf("alex")!.generation, [REPO]);
+    if (!who.ok) throw new Error("approver fixture");
+    const receipt = assignmentOf(store, "ready-11", now, { principal: "operator", repos: [REPO] }, dir)!.receipt!;
+    // The console's door, with no command actor: the act is still recorded as alex's.
+    expect(checkAssignmentAsOperator(store, "ready-11", receipt.digest, who.who, now, dir).ok).toBe(true);
+    expect(store.settledBy(ref)).toBe("alex");
+
+    const forAlex = telegramProgressCard(store, store.getRun(run)!, "ready-11", REPO, now, dir, "alex");
+    const forBob = telegramProgressCard(store, store.getRun(run)!, "ready-11", REPO, now, dir, "bob");
+    expect(forAlex.text).toContain("✅ Complete\nMarked complete.");
+    expect(forBob.text).toContain("Marked complete by alex.");
+    const card = quietCardView(store, [ref], now, dir, "alex")!;
+    expectClean([forAlex.text, card.text], "alex", ["ready-11"]);
+    expect(card.text.split("\n")[0]).toBe("Keep the guard readable");
+    // And alex's chat is not pinged about it at all.
+    const fact = store.listNotifications("all").find(row => row.taskRef === ref && row.kind === "run-finished")!;
+    expect(store.pingAllowed(fact, "alex")).toBe(false);
+    expect(store.pingAllowed(fact, "bob")).toBe(true);
+  });
+
+  test("release checks and replaced tasks never ping", async () => {
+    const script = scriptedTelegram();
+    const check = placed("release-check-12", "Release check for 0.9.9");
+    const replaced = placed("release-099", "Release 0.9.9");
+    placed("release-099b", "Release 0.9.9 again");
+    await pass(script);
+    script.reset();
+    // The release check's run carries the release flag; its result is quiet.
+    now = at(10_000);
+    const run = built(check);
+    store.handle.prepare("INSERT INTO run_check (run, release, recorded_at) VALUES (?, 1, ?)").run(run, now.toISOString());
+    await pass(script);
+    expect(script.pings(ALEX_CHAT)).toEqual([]);
+    // A replaced task is quiet: no "Stopped · Release 0.9.9 … Replaced by release-099b".
+    expect(withActor({ account: "bob", lead: false }, () => store.setTaskState("release-099", "cancelled", now, {}, "Replaced", "release-099b"))).toMatchObject({ ok: true });
+    await pass(script);
+    expect(script.pings(ALEX_CHAT)).toEqual([]);
+    expect(store.neverPings(replaced)).toBe(true);
+    expect(store.neverPings(check)).toBe(true);
+    expectClean(script.shown(ALEX_CHAT), "alex", ["release-check-12", "release-099"]);
+  });
+
+  test("c4: pairing names the bot Toolroll; on upgrade a bot still called StandingOrders is renamed once, any other name is kept", async () => {
+    const script = scriptedTelegram();
+    // Pairing through the bot: "/pair <code>" in a private chat.
+    const code = mintPairingCode();
+    store.createTelegramPairing({ codeHash: hashPairingCode(code), approver: "alex", by: "alex", ttlMs: PAIRING_TTL_MS }, now);
+    let queued = true;
+    const pairing: TelegramTransport = async (method, params) => {
+      if (method !== "getUpdates" || !queued) return script.transport(method, params);
+      queued = false;
+      return { ok: true, result: [{ update_id: 90, message: { message_id: 1, chat: { id: 6464, type: "private" }, from: { id: 6464 }, text: `/pair ${code}` } }] };
+    };
+    const paired = await bridgePass(store, { botId: BOT, transport: pairing, clock: () => now, readProjects: async () => [REPO] });
+    expect(paired).toMatchObject({ ok: true, report: { paired: 1 } });
+    expect(script.name()).toBe(BOT_NAME);
+    expect(script.calls.filter(call => call.method === "setMyName")).toEqual([{ method: "setMyName", params: { name: "Toolroll" } }]);
+
+    // Upgrade: the follower renames only the old name.
+    script.rename("StandingOrders");
+    expect(await nameTelegramBot(script.transport, "upgrade")).toBe(true);
+    expect(script.name()).toBe("Toolroll");
+    expect(await nameTelegramBot(script.transport, "upgrade")).toBe(false);
+    script.rename("Our build bot");
+    expect(await nameTelegramBot(script.transport, "upgrade")).toBe(false);
+    expect(script.name()).toBe("Our build bot");
+
+    // The long-running follower does it once at start, beside the "/" menu.
+    script.rename("Standing Orders");
+    script.reset();
+    const stop = new AbortController();
+    const followed = followBridge(store, { botId: BOT, transport: async (method, params) => {
+      const answer = await script.transport(method, params);
+      if (method === "getUpdates") stop.abort();
+      return answer;
+    }, clock: () => now, signal: stop.signal, readProjects: async () => [REPO], conversation: { evidenceRoot: dir, phoneOrigin: () => ORIGIN } });
+    await followed;
+    expect(script.name()).toBe("Toolroll");
+    expect(script.calls.filter(call => call.method === "setMyName")).toHaveLength(1);
+    // A refused or failing call never blocks anything.
+    expect(await nameTelegramBot(async () => { throw new Error("offline"); }, "pairing")).toBe(false);
+  });
+
+  test("a deploy sends one \"is live\" line to each operator, once per version; a fresh install is not news", async () => {
+    expect(notifyVersionLive(store, dir, "0.9.9", now)).toBe(0);
+    writeFileSync(join(dir, RUNNER_VERSIONS_FILE), JSON.stringify([{ runner: RUNNER, version: "0.9.8", at: T0.toISOString() }]));
+    writeFileSync(join(dir, "latest-release.json"), JSON.stringify({ checkedAt: T0.toISOString(), release: { version: "0.9.9", notes: "## Release 0.9.9: lighter tests, cleaner status\n\n- more", url: "https://example.invalid", security: false } }));
+    const queued = notifyVersionLive(store, dir, "0.9.9", now);
+    expect(queued).toBeGreaterThanOrEqual(1);
+    expect(notifyVersionLive(store, dir, "0.9.9", now)).toBe(0);
+    const script = scriptedTelegram();
+    await pass(script);
+    const lines = script.shown(ALEX_CHAT).filter(text => text.includes("is live"));
+    expect(lines).toEqual(["Toolroll 0.9.9 is live: lighter tests, cleaner status."]);
+  });
+});
+
+describe("chat voice on Slack (the shared path Discord and Teams use)", () => {
+  let dir: string;
+  let store: Store;
+  let now: Date;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "so-chat-voice-slack-"));
+    store = openStore(join(dir, "state.db"));
+    now = T0;
+    expect(addApprover(store, "alex", now).ok).toBe(true);
+  });
+  afterEach(() => { store.close(); rmSync(dir, { recursive: true, force: true }); vi.restoreAllMocks(); });
+
+  test("c1, c2, c3: six results in two minutes are one post edited in place, own completions say nothing, and no text carries an id", async () => {
+    const identity = { installation: "installation-test", team: "TTEST", app: "ATEST", bot: "UBOT", workspace: "Test workspace" };
+    const state = new SlackState(store);
+    const calls: { method: string; args: Record<string, unknown> }[] = [];
+    let ts = 100;
+    const api: SlackApi = vi.fn(async (method, args = {}) => {
+      calls.push({ method, args });
+      if (method === "users.info") return { user: { id: "UTEST", team_id: "TTEST", deleted: false, is_bot: false } };
+      if (method === "conversations.info") return { channel: { id: "DTEST", is_im: true, user: "UTEST" } };
+      if (method === "chat.postMessage") return { ts: `1789700000.${String(ts++).padStart(6, "0")}` };
+      if (method === "chat.update") return { ts: args["ts"] };
+      return {};
+    });
+    const options: SlackChatOptions = { store, identity, api, owner: "test", readProjects: async () => [REPO], evidenceRoot: join(dir, "evidence"), current: () => true, origin: () => ORIGIN, clock: () => now };
+    state.lease(identity.installation, "test", T0);
+    const pairing = state.pairing(identity.installation, "alex", store.accountOf("alex")!.generation, T0);
+    expect(state.pair(identity, slackHash(pairing), "UTEST", "DTEST", T0)).not.toBeNull();
+    const pass = async () => {
+      state.lease(identity.installation, "test", now);
+      await planSlackNotifications(options);
+      for (let i = 0; i < 40 && (await deliverSlackPart(options)); i++);
+    };
+    now = at(1_000);
+    const refs = SIX.map(([id, title]) => {
+      store.createTask({ id, title }, now);
+      const ref = store.refFor("built-in", id).id;
+      store.placeTask(ref, REPO, {}, now);
+      return ref;
+    });
+    await pass();
+    for (const [index, ref] of refs.entries()) {
+      now = at(2_000 + index * 20_000);
+      const run = store.startRun({ taskRef: ref, leaseId: `l-${index}`, runner: RUNNER, branch: "so/t", worktree: "/pool/t", ...legacy, now });
+      store.finishRun(run, { outcome: "built", committed: true, now });
+      await pass();
+    }
+    const posts = calls.filter(call => call.method === "chat.postMessage");
+    // The tasks' one shared card, then one finished-work post.
+    expect(posts).toHaveLength(2);
+    const batchTs = "1789700000.000101";
+    const batchEdits = calls.filter(call => call.method === "chat.update" && call.args["ts"] === batchTs);
+    expect(batchEdits.length).toBeGreaterThanOrEqual(5);
+    expect(String(batchEdits.at(-1)!.args["text"])).toMatch(/^6 tasks finished: faster tests, /);
+    // alex completes one in the console: nothing new in alex's chat.
+    const before = calls.length;
+    now = at(200_000);
+    withActor({ account: "alex", lead: false }, () => store.setTaskState("faster-tests-2", "done", now));
+    await pass();
+    expect(calls.slice(before).filter(call => call.method === "chat.postMessage" || call.method === "chat.update")).toEqual([]);
+    const texts = calls.filter(call => call.method === "chat.postMessage" || call.method === "chat.update").map(call => String(call.args["text"]));
+    expectClean(texts, "alex");
+  });
+});

@@ -270,7 +270,8 @@ export function phoneTaskView(store: Store, repos: readonly string[], id: string
 }
 
 /** Concise display only: authorization uses the stored full project identity. */
-export function notificationIdentity(row: Pick<Notification, "project" | "taskId">): string {
+/** Where a fact belongs: its project and, given one, the task's short title — never the task's id. */
+export function notificationIdentity(row: Pick<Notification, "project" | "taskId">, title?: string): string {
   if (row.project === null) return "";
-  return `${projectLabel(row.project)}${row.taskId === null ? "" : ` / ${plain(row.taskId, 64)}`} · `;
+  return `${projectLabel(row.project)}${row.taskId === null || title === undefined ? "" : ` / ${plain(title, 64)}`} · `;
 }

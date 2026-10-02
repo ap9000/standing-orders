@@ -8,7 +8,8 @@ import { assignmentOf, type AssignmentSnapshot } from "./assignment.js";
 import { chatResultHref, chatControlHref } from "./chat-controls.js";
 import { phoneText, projectLabel, type PhoneTaskLink } from "./telegram-status.js";
 import type { Run, Store } from "./store.js";
-import { assignmentStatusFacts, headlineEmoji, pullRequestFactOf, requirementsOf, statusDetailLines, taskStatusOf, type ChecksFact, type TaskStatusFacts } from "./task-status.js";
+import { assignmentStatusFacts, headlineEmoji, pullRequestFactOf, requirementsOf, statusDetailLines, taskStatusOf, type ChecksFact, type TaskStatus, type TaskStatusFacts } from "./task-status.js";
+import { shortTitle } from "./chat-voice.js";
 import { manualReviewOnly } from "./proof.js";
 import { failedCheckExit } from "./workspace-ui.js";
 
@@ -27,7 +28,8 @@ function assignmentFor(store: Store, run: Run, taskId: string, project: string, 
   }
 }
 
-export function telegramProgressCard(store: Store, run: Run, taskId: string, project: string, now = new Date(), root?: string): { text: string; entities: ProgressEntity[]; link: PhoneTaskLink; next: string } {
+/** `viewer`: the person whose chat shows the card. Their own act is never told back to them. */
+export function telegramProgressCard(store: Store, run: Run, taskId: string, project: string, now = new Date(), root?: string, viewer?: string): { text: string; entities: ProgressEntity[]; link: PhoneTaskLink; next: string; status: TaskStatus; facts: TaskStatusFacts } {
   const built = run.finishedAt !== null && (run.outcome === "built" || run.outcome === "no-change");
   const assignment = built ? assignmentFor(store, run, taskId, project, now, root) : null;
   const publication = store.publicationForRun(run.id);
@@ -70,20 +72,24 @@ export function telegramProgressCard(store: Store, run: Run, taskId: string, pro
   } else {
     facts = { stage: "failed", reason: "The build stopped before it finished. Inspect the blocker, then retry." };
   }
+  // "Marked complete by <you>" (or by your lead, which signs in as you) is never told back to you.
+  const completer = assignment?.completion?.actor.replace(/^(?:operator|coordinator|lead):/, "") ?? null;
+  if (viewer !== undefined && facts.completedBy != null && (completer === viewer || facts.completedBy === viewer)) facts = { ...facts, completedBy: null };
   const status = taskStatusOf(facts);
   const checkProgress = store.checkProgress(run.id);
   const progress = status.headline === "Building" && checkProgress !== null ? [`● ${checkProgress.line}`] : [];
-  const title = phoneText(store.getTask(taskId)?.title ?? taskId, 88);
+  // A short human title: never "— revision" or an id (chat-voice.ts).
+  const title = shortTitle(store.getTask(taskId)?.title, taskId);
   const heading = `${headlineEmoji(status.headline)} ${status.headline}`;
   const next = phoneText(status.sentence, 200);
   // A person's acceptance is its own recorded decision; it never changes a check.
   const acceptance = store.proofAcceptance(run.id) === null ? [] : [manualReviewOnly(store.proofVerdictFor(run.id))
     ? "Accepted by a person · Recorded checks unchanged" : "Accepted with an exception · Recorded checks unchanged"];
   const rows = [...statusDetailLines(status), ...progress, ...acceptance];
-  const text = [title, heading, next, ...(rows.length === 0 ? [] : ["", ...rows]), "", `${projectLabel(project)} · #${run.id}`].join("\n");
+  const text = [title, heading, next, ...(rows.length === 0 ? [] : ["", ...rows]), "", projectLabel(project)].join("\n");
   const failedChecks = status.details.some(one => one.key === "checks" && (one.mark === "failed" || one.mark === "note"));
   const recovery = operatorHold !== undefined || accessBlocked || (!built && run.outcome !== null);
-  return { text, next, entities: [{ type: "bold", offset: 0, length: title.length }, { type: "bold", offset: title.length + 1, length: heading.length }],
+  return { text, next, status, facts, entities: [{ type: "bold", offset: 0, length: title.length }, { type: "bold", offset: title.length + 1, length: heading.length }],
     link: { label: built ? "Open result" : "Open task", path: recovery
       ? chatControlHref("recovery", taskId) : built ? chatResultHref(taskId, run.id, failedChecks ? "checks" : "summary") : chatControlHref("task", taskId) } };
 }

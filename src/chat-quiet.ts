@@ -7,9 +7,10 @@
 import { assignmentOf } from "./assignment.js";
 import { chatControlHref } from "./chat-controls.js";
 import { telegramProgressCard, type ProgressEntity } from "./telegram-progress.js";
-import { assignmentStatusFacts, headlineEmoji, replacedWords, taskStatusOf, type Headline } from "./task-status.js";
+import { assignmentStatusFacts, headlineEmoji, taskStatusOf, type Headline } from "./task-status.js";
+import { batchLine, shortTitle, type FinishedFact } from "./chat-voice.js";
 import { phoneText, projectLabel, type PhoneTaskLink } from "./telegram-status.js";
-import { isLifecycleNotification, type Notification, type Run, type Store } from "./store.js";
+import { isLifecycleNotification, type ChatBatch, type Notification, type Run, type Store } from "./store.js";
 
 export type QuietView = { text: string; entities: ProgressEntity[]; link: PhoneTaskLink };
 
@@ -55,24 +56,26 @@ const BEFORE_RUN: Record<string, { icon: string; status: string }> = {
 
 type TaskLine = { title: string; icon: string; status: string; project: string; view: QuietView };
 
-function taskLine(store: Store, taskRef: number, now: Date, root?: string): TaskLine | null {
+function taskLine(store: Store, taskRef: number, now: Date, root?: string, viewer?: string): TaskLine | null {
   const ref = store.refById(taskRef);
   if (ref === null || ref.repo === null) return null;
   const task = store.getTask(ref.externalId);
-  const title = phoneText(task?.title ?? ref.externalId, 88);
-  // Replaced, never "Cancelled": the card names its successor and links to it.
+  // A short human title: never "— revision" or an id (chat-voice.ts).
+  const title = shortTitle(task?.title, ref.externalId);
+  // Replaced, never "Cancelled": the card says a newer task took over and links to it, without either id.
   const successor = task?.state === "cancelled" ? store.replacementOf(ref.externalId) : null;
   if (successor !== null) {
-    const heading = `${headlineEmoji("Stopped")} ${replacedWords(successor)}`;
-    const text = [title, heading, "", `${projectLabel(ref.repo)} · ${ref.externalId}`].join("\n");
-    return { title, icon: headlineEmoji("Stopped"), status: replacedWords(successor), project: ref.repo, view: {
+    const words = "Replaced by a newer task";
+    const heading = `${headlineEmoji("Stopped")} ${words}`;
+    const text = [title, heading, "", projectLabel(ref.repo)].join("\n");
+    return { title, icon: headlineEmoji("Stopped"), status: words, project: ref.repo, view: {
       text, entities: [{ type: "bold", offset: 0, length: title.length }, { type: "bold", offset: title.length + 1, length: heading.length }],
-      link: { label: `Open ${phoneText(successor, 40)}`, path: chatControlHref("task", successor) },
+      link: { label: "Open the new task", path: chatControlHref("task", successor) },
     } };
   }
   const run = cardRun(store, taskRef);
   if (run !== null) {
-    const view = telegramProgressCard(store, run, ref.externalId, ref.repo, now, root);
+    const view = telegramProgressCard(store, run, ref.externalId, ref.repo, now, root, viewer);
     const heading = view.entities[1] === undefined ? "" : view.text.slice(view.entities[1].offset, view.entities[1].offset + view.entities[1].length);
     const split = heading.indexOf(" ");
     return { title, icon: heading.slice(0, split), status: heading.slice(split + 1), project: ref.repo, view };
@@ -80,7 +83,7 @@ function taskLine(store: Store, taskRef: number, now: Date, root?: string): Task
   const fact = store.latestTaskFact(taskRef);
   const words = task?.state === "cancelled" ? BEFORE_RUN["task-cancelled"]! : BEFORE_RUN[fact?.kind ?? ""] ?? BEFORE_RUN["task-filed"]!;
   const heading = `${words.icon} ${words.status}`;
-  const text = [title, heading, "", `${projectLabel(ref.repo)} · ${ref.externalId}`].join("\n");
+  const text = [title, heading, "", projectLabel(ref.repo)].join("\n");
   return { title, icon: words.icon, status: words.status, project: ref.repo, view: {
     text, entities: [{ type: "bold", offset: 0, length: title.length }, { type: "bold", offset: title.length + 1, length: heading.length }],
     link: { label: "Open task", path: chatControlHref("task", ref.externalId) },
@@ -88,8 +91,8 @@ function taskLine(store: Store, taskRef: number, now: Date, root?: string): Task
 }
 
 /** The card's words now: one task's progress card, or one line per task when several were filed together. */
-export function quietCardView(store: Store, taskRefs: readonly number[], now: Date, root?: string): QuietView | null {
-  const lines = taskRefs.map(ref => taskLine(store, ref, now, root)).filter((one): one is TaskLine => one !== null);
+export function quietCardView(store: Store, taskRefs: readonly number[], now: Date, root?: string, viewer?: string): QuietView | null {
+  const lines = taskRefs.map(ref => taskLine(store, ref, now, root, viewer)).filter((one): one is TaskLine => one !== null);
   if (lines.length === 0) return null;
   if (lines.length === 1) return lines[0]!.view;
   const heading = `${lines.length} tasks`;
@@ -98,14 +101,30 @@ export function quietCardView(store: Store, taskRefs: readonly number[], now: Da
   return { text, entities: [{ type: "bold", offset: 0, length: heading.length }], link: { label: "Open tasks", path: "/tasks" } };
 }
 
-/** The one ping for a Ready result: its state and title, what to do next, and a link to that exact result. */
-export function readyPingView(store: Store, run: Run, taskId: string, project: string, now: Date, root?: string): QuietView {
-  const card = telegramProgressCard(store, run, taskId, project, now, root);
-  const [title = "", shown = ""] = card.entities.map(one => card.text.slice(one.offset, one.offset + one.length));
-  const heading = shown;
-  const next = card.next;
-  const first = `${heading} · ${title}`;
-  return { text: next === "" ? first : `${first}\n${next}`, entities: [{ type: "bold", offset: 0, length: heading.length }], link: card.link };
+/** One finished result in a person's words, with the link to that exact result. */
+function finishedOf(store: Store, taskRef: number, runId: number | null, now: Date, root?: string, viewer?: string): { fact: FinishedFact; link: PhoneTaskLink } | null {
+  const ref = store.refById(taskRef);
+  const run = runId === null ? null : store.getRun(runId);
+  if (ref === null || ref.repo === null || run === null) return null;
+  const card = telegramProgressCard(store, run, ref.externalId, ref.repo, now, root, viewer);
+  const checks = card.facts.checks ?? null;
+  return { link: card.link, fact: {
+    summary: shortTitle(store.getTask(ref.externalId)?.title, ref.externalId),
+    headline: card.status.headline,
+    checks: checks === null ? null : checks.level === "off" && checks.status !== "passed" ? "off"
+      : checks.status === "passed" || checks.status === "failed" || checks.status === "not-run" ? checks.status : null,
+    report: card.facts.report === true,
+    completedBy: card.facts.completedBy ?? null,
+  } };
+}
+
+/** The finished-work message: one result says what happened and links to it; several within two minutes
+ * become "4 tasks finished: …" with one Open button. Null when none of them can be read any more. */
+export function finishedView(store: Store, batch: Pick<ChatBatch, "items">, now: Date, root?: string, viewer?: string): QuietView | null {
+  const finished = batch.items.map(one => finishedOf(store, one.taskRef, one.run, now, root, viewer)).filter((one): one is NonNullable<typeof one> => one !== null);
+  if (finished.length === 0) return null;
+  const text = batchLine(finished.map(one => one.fact));
+  return { text, entities: [], link: finished.length === 1 ? finished[0]!.link : { label: "Open", path: "/tasks" } };
 }
 
 // ---- the evening digest ----------------------------------------------------------
@@ -126,7 +145,7 @@ export function eveningDigestText(store: Store, account: string, now: Date, root
   const since = new Date(now.getTime() - 86_400_000).toISOString();
   const recent = new Date(now.getTime() - 14 * 86_400_000).toISOString();
   const visible = (row: Notification) => row.project !== null && store.accountCanAccess(account, row.project);
-  const title = (taskId: string) => phoneText(store.getTask(taskId)?.title ?? taskId, 80);
+  const title = (taskId: string) => shortTitle(store.getTask(taskId)?.title, taskId);
   const finished = new Map<string, string>(), failed = new Map<string, string>(), waits = new Map<string, string>();
   const facts = store.taskFactsSince(recent).filter(visible);
   for (const row of facts) {
