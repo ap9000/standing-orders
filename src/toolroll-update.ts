@@ -30,7 +30,7 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { DatabaseSync } from "node:sqlite";
 import { createRequire } from "node:module";
-import { clearWords, durableJson, LINGERING_LIMIT_MS, lingeringRun, lingeringWords, settleLeftoverRecords, sqliteLock, stoppedWaitingWords, verifiedDatabaseBackup, type LingeringRun } from "./desktop-update.js";
+import { clearWords, durableJson, LINGERING_LIMIT_MS, lingeringRun, lingeringWords, settleLeftoverRecords, sqliteLock, desktopUpdateWaitingOf, stoppedWaitingWords, updateWaitingWords, verifiedDatabaseBackup, type LingeringRun, type UpdateWaiting } from "./desktop-update.js";
 import { activeUpdateWork, freezeUpdateGate, installUpdateGate, removeUpdateGate, updateAdmissionPaused, updateGateOwned } from "./desktop-update-gate.js";
 import { assertCodingUpdateStopped, backupCodingCatalog, codingCatalogExists, removeCodingUpdateGate } from "./coding-update.js";
 import { installLaunchdService, launchdPlist, stopLaunchdService, writeFileDurably, type SupervisorRunner } from "./daemon.js";
@@ -959,23 +959,45 @@ export function runtimeUpdateStatus(stateDir: string): RuntimeUpdateStatus {
 }
 /** An update that is waiting, what on, and the one action that clears it: for `toolroll status` and the console.
  * `inTheWay` asks whether a finished run still holds it up; a stopped update whose run has since cleared says nothing. */
-export type UpdateWaiting = { version: string; stopped: boolean; run: number | null; on: string; action: string | null; words: string; short: string };
+export type { UpdateWaiting };
 export function updateWaitingOf(stateDir: string, inTheWay: (run: number) => boolean): UpdateWaiting | null {
   let j: RuntimeUpdateJournal | null;
   try { j = readRuntimeUpdate(stateDir); } catch { return null; }
   if (!j || j.kind !== "update") return null;
   const version = j.to.version;
-  if (j.phase === "draining" && !j.waiting) {
-    const on = "running work to finish";
-    const words = `Update to ${version} is waiting for ${on}. New work is paused.`;
-    return { version, stopped: false, run: null, on, action: null, words, short: words };
-  }
-  const w = j.waiting;
-  if (!w || !(j.phase === "draining" || j.phase === "refused") || !inTheWay(w.run)) return null;
-  const stopped = j.phase === "refused";
-  const next = w.action ? ` If nothing of it is running, run ${w.action}${stopped ? ", then update again" : ""}.` : stopped ? " Update again once it has stopped." : "";
-  return { version, stopped, run: w.run, on: w.on, action: w.action, words: `Update to ${version} ${stopped ? "stopped waiting" : "is waiting"}: ${w.on}.${next}`,
-    short: `Update to ${version} is waiting on run #${w.run}.${next}` };
+  if (j.phase === "draining") return updateWaitingWords({ app: false, version, stopped: false, lingering: j.waiting ?? null });
+  if (j.phase !== "refused" || !j.waiting || !inTheWay(j.waiting.run)) return null;
+  return updateWaitingWords({ app: false, version, stopped: true, lingering: j.waiting });
+}
+/** An updater that ended while letting work finish (a crash, a kill, the Mac restarting) leaves new work paused with
+ * nobody left to lift the pause. With no updater holding the update, the pause is lifted here and the update says it
+ * stopped. Nothing was switched before the backup, so nothing else needs putting back. The background worker's
+ * reconcile, `toolroll status` and the console run this. Returns what it said, or null. */
+export function releaseStalledUpdate(stateDir: string, now: Date): string | null {
+  let j: RuntimeUpdateJournal | null;
+  try { j = readRuntimeUpdate(stateDir); } catch { return null; }
+  if (!j || j.phase !== "draining") return null;
+  const lock = sqliteLock(join(j.stageDir, "worker.sqlite"));
+  if (!lock) return null;
+  try {
+    // An updater may have moved on, or a resumed one replaced it, between the first read and the lock.
+    const held = readRuntimeUpdate(stateDir);
+    if (!held || held.id !== j.id || held.phase !== "draining") return null;
+    try { ungate(held); } catch { /* no pause yet, or the database is unreadable: the journal still says it stopped */ }
+    if (held.kind === "update") rmSync(join(held.stageDir, "runtime"), { recursive: true, force: true });
+    const noun = held.kind === "update" ? "update" : "rollback";
+    const words = `The ${noun} to ${held.to.version} stopped: its updater ended before running work finished. Nothing was changed; new work resumed. Run toolroll ${noun === "update" ? "update" : "update --rollback"} to try again.`;
+    save(held, "refused", words, now);
+    try { ledger(held.databaseFile, now, held.actor, `toolroll ${noun} stopped`, "refused", `${held.from.version} → ${held.to.version}: the updater ended while draining`); } catch { /* the journal still says what happened */ }
+    return words;
+  } finally { lock.close(); }
+}
+/** What `toolroll status` and the console show: a stalled `toolroll update` released first, then this installation's
+ * waiting update, `toolroll update`'s or the desktop app's. */
+export function waitingUpdate(databaseFile: string, inTheWay: (run: number) => boolean, now: Date, desktopStates?: readonly string[]): UpdateWaiting | null {
+  const stateDir = dirname(databaseFile);
+  try { releaseStalledUpdate(stateDir, now); } catch { /* an unreadable record is shown as it is */ }
+  return updateWaitingOf(stateDir, inTheWay) ?? desktopUpdateWaitingOf(databaseFile, inTheWay, desktopStates);
 }
 export function markWhatsNewSeen(stateDir: string): void {
   const j = readRuntimeUpdate(stateDir);

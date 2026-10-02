@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, chmodSync, copyFileSync, cpSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { backup, DatabaseSync } from "node:sqlite";
 import { createRequire } from "node:module";
@@ -29,6 +30,8 @@ export type UpdateJournal = {
   serviceInterrupted?: boolean;
   replacementOccurred?: boolean;
   retryableRecovery?: boolean;
+  /** The finished run the update is waiting on (or stopped waiting on). Absent while it waits on ordinary work. */
+  waiting?: LingeringRun & { since: string };
 };
 type ServiceState = { state: string; stale?: boolean };
 export type UpdateHooks = {
@@ -155,6 +158,59 @@ export const lingeringWords = (l: LingeringRun) => l.action ? `${l.on}. If nothi
 export const stoppedWaitingWords = (l: LingeringRun) => `Stopped waiting after 2 minutes. ${l.on}. ${clearWords(l)} New work resumed; nothing was changed.`;
 /** The next step once an update has stopped on `l`. */
 export const clearWords = (l: LingeringRun) => l.action ? `If nothing of it is running, run ${l.action}, then update again.` : "Update again once it has stopped.";
+
+/** An update that is waiting or stopped, what on, and the one action that clears it: for `toolroll status` and the
+ * console. `app`: the desktop app's update rather than `toolroll update`. */
+export type UpdateWaiting = { app: boolean; version: string; stopped: boolean; run: number | null; on: string; action: string | null; words: string; short: string };
+export function updateWaitingWords(o: { app: boolean; version: string; stopped: boolean; lingering: LingeringRun | null }): UpdateWaiting {
+  const { app, version, stopped, lingering: l } = o;
+  const update = `${app ? "App update" : "Update"} to ${version}`;
+  if (!l) {
+    const on = "running work to finish";
+    const words = `${update} is waiting for ${on}. New work is paused.`;
+    return { app, version, stopped: false, run: null, on, action: null, words, short: words };
+  }
+  const next = l.action ? ` If nothing of it is running, run ${l.action}${stopped ? ", then update again" : ""}.` : stopped ? " Update again once it has stopped." : "";
+  return { app, version, stopped, run: l.run, on: l.on, action: l.action,
+    words: `${update} ${stopped ? "stopped waiting" : "is waiting"}: ${l.on}.${next}`,
+    short: `${update} ${stopped ? `stopped: run #${l.run} is in the way` : `is waiting on run #${l.run}`}.${next}` };
+}
+/** An app updater that ended while letting work finish, with no automatic recovery coming to resume it, leaves new
+ * work paused with nobody left to lift the pause. Nothing was stopped or swapped yet, so the pause is lifted here and
+ * the update says it stopped. Returns what it said, or null. */
+export function releaseStalledDesktopUpdate(stateDir: string): string | null {
+  let j: UpdateJournal | null;
+  try { j = readUpdateJournal(stateDir); } catch { return null; }
+  if (!j || j.phase !== "draining" || j.serviceInterrupted || j.replacementOccurred) return null;
+  const status = desktopUpdateStatus(stateDir);
+  if (status.running || status.automaticRecovery) return null;
+  const lock = workerLock(j);
+  if (!lock) return null;
+  try {
+    const held = readUpdateJournal(stateDir);
+    if (!held || held.id !== j.id || held.phase !== "draining" || held.serviceInterrupted || held.replacementOccurred || bundleHash(held.old.path) !== held.old.hash) return null;
+    const db = connect(held.databaseFile);
+    try { removeUpdateGate(db, held.id); } finally { db.close(); }
+    const words = `The app update to ${held.next.version} stopped: its updater ended before running work finished. Nothing was changed; new work resumed. Update again from the app.`;
+    held.error = "The updater ended while letting work finish.";
+    save(held, "cancelled", words);
+    return words;
+  } finally { lock.close(); }
+}
+/** The desktop app's update, when it is waiting on work in `databaseFile`'s installation, or stopped on a run still in
+ * the way. An app updater that ended mid-drain is released first, as `toolroll update`'s is. */
+export function desktopUpdateWaitingOf(databaseFile: string, inTheWay: (run: number) => boolean, stateDirs: readonly string[] = [dirname(databaseFile), join(homedir(), "Library", "Application Support", "Standing Orders")]): UpdateWaiting | null {
+  for (const stateDir of new Set(stateDirs.map(dir => resolve(dir)))) {
+    let j: UpdateJournal | null;
+    try { j = readUpdateJournal(stateDir); } catch { continue; }
+    if (!j || resolve(j.databaseFile) !== resolve(databaseFile)) continue;
+    try { if (releaseStalledDesktopUpdate(stateDir)) j = readUpdateJournal(stateDir)!; } catch { /* shown as last saved */ }
+    const version = j.next.version;
+    if (j.phase === "draining") return updateWaitingWords({ app: true, version, stopped: false, lingering: j.waiting ?? null });
+    if (j.phase === "cancelled" && j.waiting && inTheWay(j.waiting.run)) return updateWaitingWords({ app: true, version, stopped: true, lingering: j.waiting });
+  }
+  return null;
+}
 
 /** The same settling reconcile the background worker runs: a finished run's leftover record of a process that never
  * started settles once the run's process groups are proven gone. A record nothing can prove either way stays. */
@@ -499,7 +555,6 @@ export async function runDesktopUpdate(stateDir: string, hooks: UpdateHooks = {}
     }
     checkpoint("draining", "Waiting for current work to finish. New work is paused; no task will be killed for this update.");
     const now = hooks.now ?? (() => new Date());
-    let lingeringSince: number | null = null;
     for (;;) {
       if (restoreRequested(j) || updateStopRequested(j)) { await cancel(); return; }
       assertConfig(j);
@@ -512,9 +567,11 @@ export async function runDesktopUpdate(stateDir: string, hooks: UpdateHooks = {}
         // A finished run's leftover record settles here first, as the background worker would settle it.
         if (idle) settleLeftoverRecords(checking, now());
         const lingering = idle ? lingeringRun(checking) : null;
-        if (!lingering && idle && freezeUpdateGate(checking, j.id)) break;
-        lingeringSince = lingering ? lingeringSince ?? now().getTime() : null;
-        if (lingering && now().getTime() - lingeringSince! >= LINGERING_LIMIT_MS) stuck = lingering;
+        if (!lingering && idle && freezeUpdateGate(checking, j.id)) { delete j.waiting; break; }
+        // Saved, so a resumed updater keeps counting from when it began, and status can say what it waits on.
+        if (!lingering) delete j.waiting;
+        else if (j.waiting?.run !== lingering.run || j.waiting.on !== lingering.on) j.waiting = { ...lingering, since: now().toISOString() };
+        if (j.waiting && now().getTime() - Date.parse(j.waiting.since) >= LINGERING_LIMIT_MS) stuck = lingering;
         else save(j, "draining", lingering ? `New work is paused. Waiting for run #${lingering.run}: ${lingeringWords(lingering)} No process is being killed.` : `Waiting for current work: ${active.runs} runs, ${active.claims} leases, ${active.conversations} chat requests, ${active.sessions} sessions, ${active.stopping} shutdowns, ${active.coding} coding sessions, ${active.codingDeliveries} unconfirmed messages. Nothing is being cancelled.`);
       } finally { checking.close(); }
       // Waiting longer proves nothing more: new work resumes, and the one thing in the way is named.

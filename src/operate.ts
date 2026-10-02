@@ -75,7 +75,7 @@ import { pullRequestLines, runTaskMergeCommand, runTaskOutcomeCommand } from "./
 
 import { homedir, hostname, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { updateWaitingOf } from "./toolroll-update.js";
+import { releaseStalledUpdate, waitingUpdate } from "./toolroll-update.js";
 import {
   openStore,
   openStoreNoMigrate,
@@ -4887,6 +4887,8 @@ async function reconcileCommand(
   // thrown spawn) settles once its run's process groups are proven gone.
   store.settleUnspawnedWitnesses(clock());
   store.settleQuiescentStops(clock());
+  // An update whose updater ended while letting work finish must not leave new work paused.
+  try { releaseStalledUpdate(dirname(context.databaseFile), clock()); } catch { /* status and the console say it */ }
   for (const one of recovered) {
     for (const leaseId of one.claims) {
       // Lease ids are unique forever, so each recovery is its own episode.
@@ -10607,8 +10609,8 @@ async function statusCommand(
   const brokenLine = integrationsBrokenLine(brokenIntegrations);
   const integrations = brokenIntegrations.length === 0 ? {} : { integrations: { broken: brokenIntegrations.map(one => ({ key: one.key, name: one.name, fix: one.action.kind === "fix" ? one.action.words : null })) } };
   // An update waiting, on what, and the action: before anything else, as it holds up new work.
-  const waiting = updateWaitingOf(dirname(context.databaseFile), run => context.store.stopQuiescenceProblem(run) !== null);
-  const updateWaiting = waiting === null ? {} : { updateWaiting: { version: waiting.version, stopped: waiting.stopped, run: waiting.run, on: waiting.on, action: waiting.action } };
+  const waiting = waitingUpdate(context.databaseFile, run => context.store.stopQuiescenceProblem(run) !== null, context.clock());
+  const updateWaiting = waiting === null ? {} : { updateWaiting: { app: waiting.app, version: waiting.version, stopped: waiting.stopped, run: waiting.run, on: waiting.on, action: waiting.action } };
   const projects = projectBuildsStatus(context);
   const projectsLine = projects.length === 0 ? null
     : `Builds by project: ${projects.slice(0, 8).map(one => `${one.name} ${one.running} of ${one.limit}`).join(", ")}${projects.length > 8 ? ", …" : ""}`;

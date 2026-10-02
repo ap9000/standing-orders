@@ -21,7 +21,7 @@ export const UPDATES_CSS = `.updates{max-width:640px;min-width:0;overflow-wrap:a
   `.updates ol.update-steps li[data-state=failed]{color:var(--so-danger);font-weight:600}.updates ol.update-steps li[data-state=failed]::before{background:var(--so-danger);border-color:var(--so-danger)}` +
   `.updates ol.update-steps .step-detail{grid-column:2;font-weight:400;color:var(--so-muted);font-size:.8125rem;margin-top:2px}` +
   `.updates .whats-new ul{margin:10px 0 0;padding-left:18px}.updates .whats-new li{margin:4px 0}.updates .whats-new form{margin:14px 0 0}` +
-  `.updates .update-problem{color:var(--so-danger)}.updates .stamp{margin:10px 0 0}.updates code{white-space:nowrap}.updates [data-update-outcome=waiting] code,.updates .step-detail code{white-space:normal;overflow-wrap:anywhere}` +
+  `.updates .update-problem{color:var(--so-danger)}.updates .stamp{margin:10px 0 0}.updates code{white-space:nowrap}.updates [data-update-outcome=stopped] code,.updates .step-detail code{white-space:normal;overflow-wrap:anywhere}` +
   `@media (prefers-reduced-motion:no-preference){.updates ol.update-steps li[data-state=now]::before{animation:update-pulse 1.6s ease-in-out infinite}}@keyframes update-pulse{50%{box-shadow:0 0 0 7px color-mix(in srgb,var(--so-info) 6%,transparent)}}` +
   `@media (max-width:600px){.updates .update-actions{display:grid}.updates .update-actions button{width:100%;min-height:44px}.updates .step-up{max-width:none}.updates .step-up input{min-height:44px}}`;
 
@@ -62,7 +62,7 @@ function outcomeHtml(j: RuntimeUpdateJournal): string {
   if (j.phase === "complete") return j.kind === "rollback" ? `<div class="card" data-update-outcome="rolled-back"><h2>Back on ${e(j.to.version)}</h2><p class="meta">${e(j.detail)}</p></div>` : "";
   if (j.phase === "cancelled") return `<div class="card" data-update-outcome="cancelled"><h2>Update cancelled</h2><p class="meta">Nothing changed.</p></div>`;
   // Stopped on a finished run it can't show has ended: what is in the way and the one command, nothing more.
-  if (j.phase === "refused" && j.waiting) return `<div class="card" data-update-outcome="waiting"><h2>Update to ${e(j.to.version)} is waiting on run #${e(j.waiting.run)}</h2>` +
+  if (j.phase === "refused" && j.waiting) return `<div class="card" data-update-outcome="stopped"><h2>Update to ${e(j.to.version)} stopped: run #${e(j.waiting.run)} is in the way</h2>` +
     `<p>${e(j.waiting.on)}. New work resumed.</p>` + (j.waiting.action ? `<p class="meta">If nothing of it is running, run <code>${e(j.waiting.action)}</code>, then update again.</p>` : `<p class="meta">Update again once it has stopped.</p>`) + `</div>`;
   const title = j.phase === "refused" ? `Didn't update to ${e(j.to.version)}` : j.phase === "restored" ? `Update to ${e(j.to.version)} didn't finish` : "The update needs attention";
   return `<div class="card" data-update-outcome="${e(j.phase)}"><h2>${title}</h2><p class="${j.phase === "needs-attention" ? "update-problem" : ""}" role="alert">${e(j.detail)}</p>` +

@@ -10,7 +10,7 @@ import { openStore } from "./store.js";
 import { updateAdmissionPaused, UPDATE_PAUSED } from "./desktop-update-gate.js";
 import {
   checkProvenance, findSigstoreVerifier, lastCompletedUpdate, launchRuntimeUpdate, machineSystem, prepareRuntimeUpdate, pruneRuntimes, readRuntimeUpdate, releaseNotes, requestRuntimeUpdateCancel, resumeRuntimeUpdate, runtimeUpdateStatus, markWhatsNewSeen,
-  startRuntimeRollback, startRuntimeUpdate, updateWaitingOf, PROVENANCE_ISSUER, PROVENANCE_REPOSITORY, PROVENANCE_WORKFLOW, UPDATE_JOB_LABEL, UPDATE_STEPS, type RuntimePhase, type UpdateSystem,
+  releaseStalledUpdate, startRuntimeRollback, startRuntimeUpdate, updateWaitingOf, waitingUpdate, PROVENANCE_ISSUER, PROVENANCE_REPOSITORY, PROVENANCE_WORKFLOW, UPDATE_JOB_LABEL, UPDATE_STEPS, type RuntimePhase, type UpdateSystem,
 } from "./toolroll-update.js";
 import { REGISTRY, setUpdateChecks } from "./releases.js";
 import { runUpdateCommand } from "./toolroll-update-cli.js";
@@ -1392,7 +1392,7 @@ test("u1: a record nothing can prove: within 2 minutes it stops waiting, new wor
     // Status and the console say the same thing while it is still in the way.
     expect(updateWaitingOf(f.stateDir, stillInTheWay(f))).toMatchObject({ stopped: true, run, action: `toolroll run settle ${run} --why "it is not running"` });
     const html = updatesHtml({ current: "0.6.0", latest: { version: "0.7.0" }, method: { kind: "npm", updateCommand: "npm install -g toolroll@latest" }, journal: j, running: false, whatsNew: null, rollbackTo: null, csrf: "x" }, {});
-    expect(html).toContain(`Update to 0.7.0 is waiting on run #${run}`);
+    expect(html).toContain(`Update to 0.7.0 stopped: run #${run} is in the way`);
     expect(html).toContain(`<code>toolroll run settle ${run} --why &quot;it is not running&quot;</code>`);
     expect(html).not.toMatch(/witness|unproven/i);
     // Once settled, nothing is in the way and nothing more is said.
@@ -1436,13 +1436,46 @@ test("u2: toolroll status and every console page show a waiting update, what it 
     const cookie = (await fetch(`${base}/login`, { method: "POST", body: new URLSearchParams({ name: "alex", token: alex.token }), redirect: "manual" }))
       .headers.getSetCookie().map(one => one.split(";")[0]!).find(one => one.startsWith("standing-orders_session="))!;
     const page = await (await fetch(`${base}/settings`, { headers: { cookie } })).text();
-    expect(page).toContain(`Update to 0.7.0 is waiting on run #${run}. If nothing of it is running, run toolroll run settle ${run} --why &quot;it is not running&quot;, then update again.`);
+    expect(page).toContain(`Update to 0.7.0 stopped: run #${run} is in the way. If nothing of it is running, run toolroll run settle ${run} --why &quot;it is not running&quot;, then update again.`);
     // Settings → Updates says it once, in its card, not again in a banner.
     const updates = await (await fetch(`${base}/settings/updates`, { headers: { cookie } })).text();
-    expect(updates).toContain(`Update to 0.7.0 is waiting on run #${run}`);
+    expect(updates).toContain(`Update to 0.7.0 stopped: run #${run} is in the way`);
     expect(updates).not.toContain("update-waiting");
   } finally {
     if (server.listening) await new Promise<void>(done => server.close(() => done()));
     store.close(); f.close();
+  }
+}, 30_000);
+
+test("u1: an updater that ends while work finishes never leaves new work paused: status, the console and the worker lift it", async () => {
+  for (const by of ["status", "worker", "console"] as const) {
+    const f = fixture();
+    try {
+      f.startRun();
+      // While the updater is alive nothing is lifted under it.
+      await expect(f.start({ sleep: async () => {
+        expect(releaseStalledUpdate(f.stateDir, new Date())).toBeNull();
+        throw Object.assign(Error("crash"), { simulatedCrash: true });
+      } }, "when-idle")).rejects.toThrow("crash");
+      expect(f.paused()).toBe(true);
+      expect(updateWaitingOf(f.stateDir, () => true)?.words).toBe("Update to 0.7.0 is waiting for running work to finish. New work is paused.");
+      const said = "The update to 0.7.0 stopped: its updater ended before running work finished. Nothing was changed; new work resumed. Run toolroll update to try again.";
+      if (by === "status") {
+        const lines: string[] = [];
+        expect(await runOperate("status", [], line => lines.push(line), { databaseFile: f.databaseFile, releaseIo: { fetch: async () => { throw new Error("offline"); } } } as never)).toBe(0);
+        expect(lines.join("\n")).not.toMatch(/New work is paused|Update to 0\.7\.0/);
+      } else if (by === "worker") {
+        const lines: string[] = [];
+        await runOperate("reconcile", ["--json"], line => lines.push(line), { databaseFile: f.databaseFile } as never);
+      } else expect(waitingUpdate(f.databaseFile, () => true, new Date(), [])).toBeNull();
+      expect(f.paused()).toBe(false);
+      const j = readRuntimeUpdate(f.stateDir)!;
+      expect([j.phase, j.detail]).toEqual(["refused", said]);
+      expect(existsSync(join(j.stageDir, "runtime"))).toBe(false);
+      expect(f.ledger().map(e => [e.action, e.outcome])).toEqual([["toolroll update stopped", "refused"]]);
+      for (const link of f.links) expect(readlinkSync(link)).toBe(join(f.oldDist, "bin.js"));
+      // A later resume finds nothing to continue; a new update starts clean.
+      expect((await resumeRuntimeUpdate(f.stateDir, f.system)).message).toBe("No update is in progress.");
+    } finally { f.close(); }
   }
 }, 30_000);

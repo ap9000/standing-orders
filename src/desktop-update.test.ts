@@ -9,11 +9,12 @@ import { DatabaseSync } from "node:sqlite";
 import { openStore, SCHEMA_VERSION } from "./store.js";
 import { loadOrCreateDesktopConfig, writeDesktopConfig, pairDesktopLogin, desktopServiceCommand } from "./desktop-host.js";
 import { bundleHash } from "./desktop-bundle.js";
-import { previewDesktopUpdate, prepareDesktopUpdate, runDesktopUpdate, readUpdateJournal, desktopUpdateStatus, requestUpdateRestore, requestUpdateStop, durableJson, type UpdateHooks, type UpdateJournal } from "./desktop-update.js";
+import { previewDesktopUpdate, prepareDesktopUpdate, runDesktopUpdate, readUpdateJournal, desktopUpdateStatus, requestUpdateRestore, requestUpdateStop, durableJson, desktopUpdateWaitingOf, type UpdateHooks, type UpdateJournal } from "./desktop-update.js";
 import { superviseDesktopUpdate, runUpdateAttempt, updateRecoveryDefinition, armUpdateRecovery } from "./desktop-update-recovery.js";
 import { launchdPlist } from "./daemon.js";
 import { installUpdateGate, removeUpdateGate, updateAdmissionPaused, freezeUpdateGate, UPDATE_PAUSED } from "./desktop-update-gate.js";
 import { CodingWorkspace } from "./coding-workspace.js";
+import { runOperate } from "./operate.js";
 
 vi.mock("node:child_process", { spy: true });
 
@@ -781,6 +782,8 @@ test("a finished run's leftover record with no process id: the app update stops 
     await runDesktopUpdate(f.state, { ...f.hooks, now: () => new Date(clock), sleep: async ms => {
       waits++;
       expect(readUpdateJournal(f.state)?.detail).toContain(`toolroll run settle ${id} --why "it is not running"`);
+      expect(desktopUpdateWaitingOf(f.config.databaseFile, () => true)).toMatchObject({ app: true, stopped: false, run: id,
+        short: `App update to 0.4.3 is waiting on run #${id}. If nothing of it is running, run toolroll run settle ${id} --why "it is not running".` });
       clock += ms;
     } });
     const done = readUpdateJournal(f.state)!;
@@ -790,8 +793,37 @@ test("a finished run's leftover record with no process id: the app update stops 
     expect(done.detail).not.toMatch(/witness|unproven/i);
     expect(bundleHash(f.installed)).toBe(j.old.hash); expect(f.calls).toEqual([]);
     const after = f.db(); expect(updateAdmissionPaused(after)).toBe(false); after.close();
+    // toolroll status names the stopped app update first, while the run is still in the way.
+    const lines: string[] = [];
+    expect(await runOperate("status", [], line => lines.push(line), { databaseFile: f.config.databaseFile, releaseIo: { fetch: async () => { throw new Error("offline"); } } } as never)).toBe(0);
+    expect(lines.join("\n").split("\n")[0]).toBe(`App update to 0.4.3 stopped waiting: Run #${id} finished, but Toolroll has no process ID for one of its processes, so it can't confirm that process ended. If nothing of it is running, run toolroll run settle ${id} --why "it is not running", then update again.`);
+    expect(desktopUpdateWaitingOf(f.config.databaseFile, () => true)?.short).toBe(`App update to 0.4.3 stopped: run #${id} is in the way. If nothing of it is running, run toolroll run settle ${id} --why "it is not running", then update again.`);
+    expect(desktopUpdateWaitingOf(f.config.databaseFile, () => false)).toBeNull();
   } finally { f.close(); }
 });
+
+test("an app updater that ends while work finishes never leaves new work paused, and status says the update stopped", async () => {
+  const f = fixture();
+  try {
+    await f.prepare();
+    const db = f.db();
+    db.exec("INSERT INTO task_ref(backend,external_id) VALUES('builtin','retained')");
+    const ref = db.prepare("SELECT id FROM task_ref WHERE external_id='retained'").get()!.id;
+    db.prepare("INSERT INTO run(task_ref,lease_id,runner,role,started_at) VALUES(?,'live','fixture','reviewer',?)").run(ref, new Date().toISOString()); db.close();
+    await expect(runDesktopUpdate(f.state, { ...f.hooks, sleep: async () => {
+      // Waiting on running work, said in status; never lifted under a live updater.
+      expect(desktopUpdateWaitingOf(f.config.databaseFile, () => true)?.words).toBe("App update to 0.4.3 is waiting for running work to finish. New work is paused.");
+      throw Object.assign(Error("crash"), { simulatedCrash: true });
+    } })).rejects.toThrow("crash");
+    const paused = f.db(); expect(updateAdmissionPaused(paused)).toBe(true); paused.close();
+    const lines: string[] = [];
+    expect(await runOperate("status", [], line => lines.push(line), { databaseFile: f.config.databaseFile, releaseIo: { fetch: async () => { throw new Error("offline"); } } } as never)).toBe(0);
+    expect(lines.join("\n")).not.toMatch(/New work is paused/);
+    const after = f.db(); expect(updateAdmissionPaused(after)).toBe(false); after.close();
+    expect(readUpdateJournal(f.state)).toMatchObject({ phase: "cancelled", detail: "The app update to 0.4.3 stopped: its updater ended before running work finished. Nothing was changed; new work resumed. Update again from the app." });
+    expect(bundleHash(f.installed)).not.toBe(bundleHash(f.candidate)); expect(f.calls).toEqual([]);
+  } finally { f.close(); }
+}, 30_000);
 
 test.each([
   "single reused PID", "absent group", "populated group", "unknown group", "unknown birth",

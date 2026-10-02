@@ -303,7 +303,7 @@ import { STORAGE_CSS, storageHtml } from "./storage-ui.js";
 import { bytesWords, parseCleanup } from "./storage.js";
 import { checkoutPlan, cleanCheckouts, discardCheckout, previewDigest } from "./checkout-cleanup.js";
 import { UPDATES_CSS, newerThan, updateStepsHtml, updatesHtml, updatesScript } from "./toolroll-update-ui.js";
-import { abandonRuntimeUpdate, launchRuntimeUpdate, markWhatsNewSeen, prepareRuntimeUpdate, requestRuntimeUpdateCancel, runningWorkWords, runtimeUpdateStatus, runtimeUpdateTerminal, currentRuntime, updateWaitingOf, type When } from "./toolroll-update.js";
+import { abandonRuntimeUpdate, launchRuntimeUpdate, markWhatsNewSeen, prepareRuntimeUpdate, requestRuntimeUpdateCancel, runningWorkWords, runtimeUpdateStatus, runtimeUpdateTerminal, currentRuntime, releaseStalledUpdate, waitingUpdate, type When } from "./toolroll-update.js";
 import { latestVersionNow } from "./releases.js";
 import { RETENTION_KINDS, lastSweepAt, parsePeriod, periodChoices, retentionPlan, type RetentionKind } from "./retention.js";
 import { EXPORT_CSS, dataExportHtml } from "./export-ui.js";
@@ -4112,6 +4112,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     if (url.pathname === "/settings/updates") {
       const databaseFile = store.databaseFile();
       if (who.via !== "cookie" || !store.isInstanceOperator(who.name) || databaseFile === null) return refuse(response, who, 403, "An instance operator updates Toolroll.", "/settings");
+      releaseStalledUpdate(dirname(databaseFile), clock());
       const status = runtimeUpdateStatus(dirname(databaseFile));
       if (url.searchParams.get("fragment") === "steps") return respond(response, 200, "text/html; charset=utf-8", status.journal ? updateStepsHtml(status.journal, status.running) : `<div id="update-live" data-done="1"></div>`);
       const active = status.journal !== null && !runtimeUpdateTerminal(status.journal.phase);
@@ -5285,10 +5286,10 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       })(),
       ...(() => {
         const databaseFile = store.databaseFile();
-        // Settings → Updates says it in full; every other page names it once.
-        if (!actor || databaseFile === null || !store.isInstanceOperator(actor) || facts?.returnTo?.startsWith("/settings/updates")) return {};
-        const waiting = updateWaitingOf(dirname(databaseFile), run => store.stopQuiescenceProblem(run) !== null);
-        return waiting === null ? {} : { updateWaiting: { words: waiting.short } };
+        // Settings → Updates says a `toolroll update` in full; every other page (and the app's update everywhere) names it once.
+        if (!actor || databaseFile === null || !store.isInstanceOperator(actor)) return {};
+        const waiting = waitingUpdate(databaseFile, run => store.stopQuiescenceProblem(run) !== null, clock());
+        return waiting === null || (!waiting.app && facts?.returnTo?.startsWith("/settings/updates")) ? {} : { updateWaiting: { words: waiting.short } };
       })(),
       ...(liveMode === null || liveModeTerms === null
         ? {}
