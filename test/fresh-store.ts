@@ -53,15 +53,17 @@ const ident = (name: string): string => `"${name.replaceAll('"', '""')}"`;
 
 /** One transaction recreating a database: every schema object in creation
  * order, then every row through SQLite's own `quote()` so types and blobs
- * survive. Virtual-table shadow tables come from their CREATE VIRTUAL TABLE;
- * only their rows are replayed. */
+ * survive. Virtual-table shadow tables, and their rows, come from their CREATE
+ * VIRTUAL TABLE. */
 function replayOf(db: Database): string {
   const objects = db.prepare("SELECT type, name, sql FROM sqlite_schema ORDER BY rowid").all()
     .map(row => ({ type: String(row["type"]), name: String(row["name"]), sql: row["sql"] === null ? null : String(row["sql"]) }));
   const virtual = objects.filter(one => one.type === "table" && /^CREATE VIRTUAL TABLE/i.test(one.sql ?? "")).map(one => one.name);
   const shadow = (name: string): boolean => virtual.some(table => name.startsWith(`${table}_`));
   const ddl = objects.filter(one => one.sql !== null && one.name !== "sqlite_sequence" && !shadow(one.name)).map(one => one.sql!);
-  const tables = objects.filter(one => one.type === "table" && !virtual.includes(one.name)).map(one => one.name);
+  // Shadow tables are left out too: their CREATE VIRTUAL TABLE makes them, and SQLite's defensive mode (Node 24's
+  // default) refuses any write to them ("table memory_search_data may not be modified").
+  const tables = objects.filter(one => one.type === "table" && !virtual.includes(one.name) && !shadow(one.name)).map(one => one.name);
   const rows = tables.flatMap(table => {
     const columns = db.prepare(`PRAGMA table_info(${ident(table)})`).all().map(column => `quote(${ident(String(column["name"]))})`);
     return db.prepare(`SELECT 'INSERT OR REPLACE INTO ' || ? || ' VALUES(' || ${columns.join(" || ',' || ")} || ')' AS sql FROM ${ident(table)}`)
