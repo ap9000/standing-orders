@@ -637,6 +637,12 @@ async function processConversations(
 type SendResult = { ok: true; messageId: string | null } | { ok: false; error: string; retryAfter?: number };
 type OutboundSender = (text: string, keyboard?: InlineButton[][], messageRows?: readonly TelegramDelivery[], entities?: ProgressEntity[], silent?: boolean) => Promise<SendResult>;
 
+/** A fact's own next-action button row under the trusted origin read now; none without one. */
+function factButton(phoneOrigin: (() => string | null) | undefined, link: string): InlineButton[] | null {
+  try { return phoneLinkButton(phoneOrigin?.() ?? null, { label: factLinkLabel(link), path: link }); }
+  catch { return null; }
+}
+
 /** A view's buttons on one row: its link, then any others ([Merge] [Look first]); none without a trusted origin. */
 function viewKeyboard(phoneOrigin: (() => string | null) | undefined, view: QuietView): InlineButton[][] {
   try {
@@ -859,16 +865,20 @@ async function deliverOutboxTo(
         // Any update for this person joins their open batch: one message, edited in place while it grows.
         const batch = store.chatBatchFor(fact.destination, fact.taskRef, readyRun?.id ?? store.telegramProgressRun(fact)?.id ?? null, clock(), BATCH_MS,
           readyRun !== null ? null : fact.id);
-        const view = finishedView(store, batch, clock(), evidenceRoot, binding.approver);
-        if (view === null) return { ok: true, receipt: receiptFor(botId, binding.chatId, card.messageId) };
         // A lone update that is not finished work goes out exactly as it always has; a later one edits it in place.
-        if (batch.message === null && readyRun === null && batch.items.length === 1) {
+        const lone = batch.items.length === 1 && batch.items[0]!.notification !== null;
+        if (batch.message === null && lone) {
           const sent = await deliverOne(store, botId, binding, sender, fact, clock, phoneOrigin, evidenceRoot, projects);
           const placed = store.telegramMessageOf(fact.id, fact.destination);
           if (placed !== null) store.setChatBatchMessage(batch.id, placed, "");
           return sent;
         }
-        const keyboard = viewKeyboard(phoneOrigin, view);
+        const view = finishedView(store, batch, clock(), evidenceRoot, binding.approver);
+        // Nothing in the batch reads as a line: the update that needs this person still reaches them on its own.
+        if (view === null) return deliverOne(store, botId, binding, sender, fact, clock, phoneOrigin, evidenceRoot, projects);
+        // While a lone update is still the only item, its edit keeps that update's own action button.
+        const own = lone && fact.link !== null ? factButton(phoneOrigin, fact.link) : null;
+        const keyboard = own !== null ? [own] : viewKeyboard(phoneOrigin, view);
         const shown = createHash("sha256").update(JSON.stringify([view.text, keyboard])).digest("hex");
         if (batch.message !== null) {
           if (batch.digest === shown) {
@@ -1020,11 +1030,7 @@ async function deliverOne(
     const words = chatText(`${alreadyAccepted ? "Acceptance recorded" : notification.subject}${body === "" ? "" : `\n\n${body}`}`, task);
     // The task's title once: in front, unless the words already name it.
     const parts = split(`${notificationIdentity(notification, title !== undefined && mentions(words, title) ? undefined : title)}${words}`);
-    let button: InlineButton[] | null = null;
-    if (notification.link !== null && !alreadyAccepted && current) {
-      try { button = phoneLinkButton(phoneOrigin?.() ?? null, { label: factLinkLabel(notification.link), path: notification.link }); }
-      catch { button = null; }
-    }
+    const button = notification.link !== null && !alreadyAccepted && current ? factButton(phoneOrigin, notification.link) : null;
     // A flow card waiting on a decision (v86): Approve, Edit, Send back on the last part, for this visit only.
     const visit = FLOW_DECIDE_KEY.exec(notification.dedupeKey);
     const waiting = visit === null ? null : flowDecisionAt(store, Number(visit[1]), Number(visit[2]));

@@ -765,12 +765,12 @@ function planQuietCard(options: ChatDeliveryOptions, binding: ChatBinding, notif
 
 /** Any update for this person joins their open batch (two minutes from its first), and the batch's one message
  * is planned once, then repainted in place as more updates land. `notification`: an update that is not a finished
- * result (null for one that is). */
-function planFinished(options: ChatDeliveryOptions, binding: ChatBinding, taskRef: number, run: number | null, now: Date, notification: number | null = null): void {
+ * result (null for one that is). False when nothing in the batch reads as a line, so the update goes out on its own. */
+function planFinished(options: ChatDeliveryOptions, binding: ChatBinding, taskRef: number, run: number | null, now: Date, notification: number | null = null): boolean {
   const { state, store, identity } = options;
   const batch = store.chatBatchFor(`${state.channel}:${binding.id}`, taskRef, run, now, BATCH_MS, notification);
   const view = finishedView(store, batch, now, options.evidenceRoot, binding.approver);
-  if (view === null) return;
+  if (view === null) return false;
   // A single update keeps its task and run, so a reply to it names that work.
   const single = batch.items.length === 1 ? batch.items[0]! : null;
   const task = single === null ? null : store.refById(single.taskRef)?.externalId ?? null;
@@ -778,10 +778,10 @@ function planFinished(options: ChatDeliveryOptions, binding: ChatBinding, taskRe
     ...(task === null ? {} : { task }), ...(single?.run == null ? {} : { run: single.run }) };
   const shown = chatHash(JSON.stringify(content));
   if (batch.message !== null) {
-    if (batch.digest === shown) return;
+    if (batch.digest === shown) return true;
     state.prepare("UPDATE chat_part SET payload=?,state='pending',created=?,next_at=NULL WHERE id=? AND state!='dropped'").run(JSON.stringify(content), now.toISOString(), Number(batch.message));
     store.setChatBatchMessage(batch.id, batch.message, shown);
-    return;
+    return true;
   }
   const id = chatHash(`${state.channel}:batch:${binding.id}:${batch.id}`);
   state.enqueue({ id, installation: identity.installation, binding: binding.id, kind: "notice", channel: binding.channel, member: binding.member,
@@ -789,6 +789,7 @@ function planFinished(options: ChatDeliveryOptions, binding: ChatBinding, taskRe
   state.plan(id, [content], now);
   const part = state.prepare("SELECT id FROM chat_part WHERE event=?").get(id);
   if (part !== undefined) store.setChatBatchMessage(batch.id, String(part.id), shown);
+  return true;
 }
 
 /** One progress card per exact result; separate urgent facts retain their own review link. */
@@ -843,13 +844,11 @@ export async function planChatNotifications(
           planQuietCard(options, binding, notification, now);
           if (!needsPerson(notification)) return;
           if (notification.kind === "run-finished" && run) {
-            planFinished(options, binding, notification.taskRef!, run.id, now);
-            return;
+            if (planFinished(options, binding, notification.taskRef!, run.id, now)) return;
           }
           // Every other update for this person within two minutes joins the same one message.
-          if (notification.kind !== "run-finished" && joinsBatch(notification)) {
-            planFinished(options, binding, notification.taskRef!, run?.id ?? null, now, notification.id);
-            return;
+          else if (notification.kind !== "run-finished" && joinsBatch(notification)) {
+            if (planFinished(options, binding, notification.taskRef!, run?.id ?? null, now, notification.id)) return;
           }
         }
         if (!quiet && run && notification.taskId && notification.project !== null && isTelegramProgressNotification(notification)) {

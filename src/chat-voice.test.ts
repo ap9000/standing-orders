@@ -156,7 +156,7 @@ describe("chat voice on Telegram", () => {
     pairAs("alex", ALEX_CHAT, 1);
     pairAs("bob", BOB_CHAT, 2);
   });
-  afterEach(() => { store.close(); rmSync(dir, { recursive: true, force: true }); });
+  afterEach(() => { store.close(); rmSync(dir, { recursive: true, force: true }); vi.restoreAllMocks(); });
 
   const pass = (script: ReturnType<typeof scriptedTelegram>) =>
     bridgePass(store, { botId: BOT, transport: script.transport, clock: () => now, readProjects: async () => [REPO], conversation: { evidenceRoot: dir, phoneOrigin: () => ORIGIN } });
@@ -334,6 +334,48 @@ describe("chat voice on Telegram", () => {
     expect(latest).toMatch(/^2 updates: guard the payout path failed, ship the release notes needs you\.\n/);
     expect(latest).toContain("Guard the payout path stopped before it finished");
     expectClean(script.shown(ALEX_CHAT), "alex", ["payout-13", "notes-14"]);
+  });
+
+  test("c2: a lone failure that no batch line can read still sends a new message", async () => {
+    const script = scriptedTelegram();
+    const stuck = placed("payout-18", "Guard the payout path — revision");
+    await pass(script);
+    script.reset();
+    now = at(10_000);
+    store.enqueueNotification({ dedupeKey: "exhausted:payout-18", kind: "attempts-exhausted", pushClass: "attention", subject: "payout-18 stalled after 3 straight failures",
+      body: "The last attempt failed its checks.", source: { taskRef: stuck } }, now);
+    // Its task reads as no batch line (its placement is unknown to the batch view): the update still goes out.
+    const refById = store.refById.bind(store);
+    vi.spyOn(store, "refById").mockImplementation(id => { const ref = refById(id); return ref !== null && id === stuck ? { ...ref, repo: null } : ref; });
+    expect(finishedView(store, { items: [{ taskRef: stuck, run: null, notification: store.listNotifications("all").find(row => row.kind === "attempts-exhausted")!.id }] }, now, dir, "alex")).toBeNull();
+    await pass(script);
+    expect(script.pings(ALEX_CHAT)).toHaveLength(1);
+    expect(String(script.pings(ALEX_CHAT)[0]!.params["text"])).toContain("stalled after 3 straight failures");
+    expectClean(script.shown(ALEX_CHAT), "alex", ["payout-18"]);
+  });
+
+  test("c2: while a lone update is still the only item, its edit keeps that update's own button", async () => {
+    const script = scriptedTelegram();
+    const stuck = placed("payout-19", "Guard the payout path");
+    await pass(script);
+    script.reset();
+    now = at(10_000);
+    store.enqueueNotification({ dedupeKey: "exhausted:payout-19", kind: "attempts-exhausted", pushClass: "attention", subject: "payout-19 stalled after 3 straight failures",
+      body: "fixture", source: { taskRef: stuck }, link: "/t/payout-19#retry" }, now);
+    await pass(script);
+    expect(script.pings(ALEX_CHAT)).toHaveLength(1);
+    const first = script.pings(ALEX_CHAT)[0]!;
+    const own = script.buttons(first);
+    expect(own).toHaveLength(1);
+    now = at(40_000);
+    store.enqueueNotification({ dedupeKey: "exhausted:payout-19:2", kind: "attempts-exhausted", pushClass: "attention", subject: "payout-19 stalled again",
+      body: "fixture", source: { taskRef: stuck }, link: "/t/payout-19#retry" }, now);
+    await pass(script);
+    expect(script.pings(ALEX_CHAT)).toHaveLength(1);
+    const edits = script.calls.filter(call => call.method === "editMessageText" && String(call.params["chat_id"]) === String(ALEX_CHAT));
+    expect(edits).toHaveLength(1);
+    expect(String(edits[0]!.params["text"])).toContain("stalled again");
+    expect(script.buttons(edits[0]!)).toEqual(own);
   });
 
   test("c1: a security alert always pings, even about a task the reader settled, a release check or a replaced task", async () => {
@@ -534,5 +576,44 @@ describe("chat voice on Slack (the shared path Discord and Teams use)", () => {
     expect(String(edits.at(-1)!.args["text"])).toMatch(/^2 updates: search ignores accents failed, flow gallery shows sharing failed\.\n2 failed; they wait for you\.$/);
     const texts = calls.filter(call => call.method === "chat.postMessage" || call.method === "chat.update").map(call => String(call.args["text"]));
     expectClean(texts, "alex");
+  });
+
+  test("c2: a lone failure that no batch line can read still gets its own post", async () => {
+    const identity = { installation: "installation-test", team: "TTEST", app: "ATEST", bot: "UBOT", workspace: "Test workspace" };
+    const state = new SlackState(store);
+    const calls: { method: string; args: Record<string, unknown> }[] = [];
+    let ts = 100;
+    const api: SlackApi = vi.fn(async (method, args = {}) => {
+      calls.push({ method, args });
+      if (method === "users.info") return { user: { id: "UTEST", team_id: "TTEST", deleted: false, is_bot: false } };
+      if (method === "conversations.info") return { channel: { id: "DTEST", is_im: true, user: "UTEST" } };
+      if (method === "chat.postMessage") return { ts: `1789700000.${String(ts++).padStart(6, "0")}` };
+      if (method === "chat.update") return { ts: args["ts"] };
+      return {};
+    });
+    const options: SlackChatOptions = { store, identity, api, owner: "test", readProjects: async () => [REPO], evidenceRoot: join(dir, "evidence"), current: () => true, origin: () => ORIGIN, clock: () => now };
+    state.lease(identity.installation, "test", T0);
+    const pairing = state.pairing(identity.installation, "alex", store.accountOf("alex")!.generation, T0);
+    expect(state.pair(identity, slackHash(pairing), "UTEST", "DTEST", T0)).not.toBeNull();
+    const pass = async () => {
+      state.lease(identity.installation, "test", now);
+      await planSlackNotifications(options);
+      for (let i = 0; i < 40 && (await deliverSlackPart(options)); i++);
+    };
+    now = at(1_000);
+    store.createTask({ id: "payout-20", title: "Guard the payout path — revision" }, now);
+    const ref = store.refFor("built-in", "payout-20").id;
+    store.placeTask(ref, REPO, {}, now);
+    await pass();
+    const before = calls.length;
+    now = at(10_000);
+    store.enqueueNotification({ dedupeKey: "exhausted:payout-20", kind: "attempts-exhausted", pushClass: "attention", subject: "payout-20 stalled after 3 straight failures",
+      body: "fixture", source: { taskRef: ref } }, now);
+    const refById = store.refById.bind(store);
+    vi.spyOn(store, "refById").mockImplementation(id => { const one = refById(id); return one !== null && id === ref ? { ...one, repo: null } : one; });
+    await pass();
+    const posts = calls.slice(before).filter(call => call.method === "chat.postMessage").map(call => String(call.args["text"]));
+    expect(posts.some(text => text.includes("stalled after 3 straight failures"))).toBe(true);
+    expectClean(posts, "alex", ["payout-20"]);
   });
 });
