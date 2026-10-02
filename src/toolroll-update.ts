@@ -152,6 +152,21 @@ const journalFile = (stateDir: string) => join(stateDir, "toolroll-update.json")
 /** The last completed update, kept apart from the journal: what `--rollback` returns from. */
 const lastUpdateFile = (stateDir: string) => join(stateDir, "toolroll-update.last.json");
 const cancelFile = (j: RuntimeUpdateJournal) => join(j.stageDir, "cancel-request.json");
+/** An updater on its way to this update before it holds the lock: the console's job once launched (launchd may not
+ * have started it yet), or a resume about to drive it. */
+const startingFile = (j: RuntimeUpdateJournal) => join(j.stageDir, "updater-starting.json");
+/** How long a launched or resuming updater is expected to take to start and hold the lock. */
+export const UPDATER_START_MS = 2 * 60_000;
+function markStarting(j: RuntimeUpdateJournal, state: "launched" | "resuming", now: Date): void {
+  durableJson(startingFile(j), { id: j.id, state, at: now.toISOString() });
+}
+function updaterStarting(j: RuntimeUpdateJournal, now: Date): boolean {
+  try {
+    const mark = JSON.parse(readFileSync(startingFile(j), "utf8")) as { id?: string; at?: string };
+    const age = now.getTime() - Date.parse(mark.at ?? "");
+    return mark.id === j.id && age >= 0 && age < UPDATER_START_MS;
+  } catch { return false; }
+}
 const sha = (bytes: Uint8Array | string, algorithm = "sha256") => createHash(algorithm).update(bytes).digest("hex");
 const fileHash = (file: string) => sha(readFileSync(file));
 const quote = (s: string) => '"' + s.replaceAll('"', '""') + '"';
@@ -677,6 +692,7 @@ export async function resumeRuntimeUpdate(stateDir: string, system: UpdateSystem
   const j = readRuntimeUpdate(stateDir);
   if (id !== undefined && j?.id !== id) return { ok: true, phase: j?.phase ?? "complete", message: "The update this job was started for is no longer the saved one. Nothing was changed.", journal: j };
   if (!j || runtimeUpdateTerminal(j.phase)) return { ok: true, phase: j?.phase ?? "complete", message: "No update is in progress.", journal: j };
+  markStarting(j, "resuming", system.now());
   return driveRuntimeUpdate(j, system);
 }
 
@@ -720,6 +736,15 @@ const cancelRequested = (j: RuntimeUpdateJournal) => existsSync(cancelFile(j));
 async function driveRuntimeUpdate(j: RuntimeUpdateJournal, system: UpdateSystem): Promise<UpdateOutcome> {
   const lock = sqliteLock(join(j.stageDir, "worker.sqlite"), 1000);
   if (!lock) return { ok: false, phase: j.phase, message: `An updater is already working on the update to ${j.to.version}.`, journal: j };
+  // What was read before the lock may be out of date: a stalled update released, or a cancel, in between.
+  let saved: RuntimeUpdateJournal | null = null;
+  try { saved = readRuntimeUpdate(j.stateDir); } catch { saved = null; }
+  if (saved?.id === j.id) {
+    if (runtimeUpdateTerminal(saved.phase)) { lock.close(); return { ok: saved.phase === "complete" || saved.phase === "cancelled", phase: saved.phase, message: saved.detail, journal: saved }; }
+    Object.assign(j, saved);
+  }
+  // The lock now says an updater is here; the starting mark has done its job.
+  rmSync(startingFile(j), { force: true });
   const at = (phase: RuntimePhase) => UPDATE_STEPS.indexOf(phase as UpdateStep);
   const step = (phase: RuntimePhase, detail: string) => { save(j, phase, detail, system.now()); system.checkpoint?.(phase); };
   const noun = j.kind === "update" ? "update" : "rollback";
@@ -983,6 +1008,8 @@ export function releaseStalledUpdate(stateDir: string, now: Date): string | null
     // An updater may have moved on, or a resumed one replaced it, between the first read and the lock.
     const held = readRuntimeUpdate(stateDir);
     if (!held || held.id !== j.id || held.phase !== "draining") return null;
+    // A job launched or a resume under way has not taken the lock yet: it continues this update; nothing is lifted under it.
+    if (updaterStarting(held, now)) return null;
     try { ungate(held); } catch { /* no pause yet, or the database is unreadable: the journal still says it stopped */ }
     if (held.kind === "update") rmSync(join(held.stageDir, "runtime"), { recursive: true, force: true });
     const noun = held.kind === "update" ? "update" : "rollback";
@@ -1190,10 +1217,13 @@ async function npmPrefixBin(run: SupervisorRunner): Promise<string | null> {
   return isAbsolute(prefix) ? join(prefix, "bin") : null;
 }
 
-export async function launchRuntimeUpdate(args: { databaseFile: string; id: string; dist?: string }, seams: { home?: string; run?: SupervisorRunner; platform?: NodeJS.Platform; npmBin?: () => Promise<string | null> } = {}): Promise<void> {
+export async function launchRuntimeUpdate(args: { databaseFile: string; id: string; dist?: string }, seams: { home?: string; run?: SupervisorRunner; platform?: NodeJS.Platform; npmBin?: () => Promise<string | null>; now?: () => Date } = {}): Promise<void> {
   const dist = args.dist ?? dirname(fileURLToPath(import.meta.url));
   const command = [process.execPath, join(dist, "bin.js"), "update", "--resume", "--id", args.id, "--db", args.databaseFile];
   const stateDir = dirname(args.databaseFile);
+  // Pending until launchd starts the job and it holds the lock: nothing releases the update meanwhile.
+  const saved = readRuntimeUpdate(stateDir);
+  if (saved?.id === args.id && !runtimeUpdateTerminal(saved.phase)) markStarting(saved, "launched", (seams.now ?? (() => new Date()))());
   const log = join(stateDir, "toolroll-update.log");
   if ((seams.platform ?? process.platform) === "darwin") {
     const home = seams.home ?? homedir();

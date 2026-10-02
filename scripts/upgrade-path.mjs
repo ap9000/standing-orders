@@ -22,11 +22,14 @@
  *
  *   node scripts/upgrade-path.mjs [--candidate <checkout with dist>] [--versions 0.9.4,0.9.5,0.9.6] [--keep]
  *
- * Needs npm and the registry (reads only). Exits 1 when any version fails.
+ * Needs npm and the registry (reads only). A published release never changes, so
+ * each is installed from npm once into a cache (TOOLROLL_UPGRADE_CACHE, or
+ * ~/.cache/toolroll-upgrade-path) and copied into every home after. Exits 1
+ * when any version fails.
  */
 import { execFileSync, spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { homedir, hostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -240,6 +243,32 @@ function envFor(home, prefix) {
     TOOLROLL_NO_UPDATE_CHECK: "1", npm_config_update_notifier: "false", npm_config_fund: "false", npm_config_audit: "false" };
 }
 
+/** Where each published release is installed once: `<cache>/<version>` is a whole npm global prefix. */
+const CACHE = process.env.TOOLROLL_UPGRADE_CACHE ?? join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), "toolroll-upgrade-path");
+/** `toolroll@version` installed globally under `prefix`: from the cache, or from npm into the cache first. Says which. */
+export function installPublished(version, prefix, env, { cache = CACHE, install = (into) => must(sh("npm", ["install", "--global", "--prefix", into, `toolroll@${version}`, "--no-audit", "--no-fund", "--no-color"], { env }), `npm install -g toolroll@${version}`) } = {}) {
+  if (!/^\d+\.\d+\.\d+$/.test(version)) throw Error(`${version} is not a release version.`);
+  const kept = join(cache, version), whole = join(kept, ".complete");
+  const cached = existsSync(whole);
+  if (!cached) {
+    mkdirSync(cache, { recursive: true });
+    // Whole or not at all: installed aside, then renamed into place. An interrupted one is installed again.
+    if (existsSync(kept) && !existsSync(whole)) rmSync(kept, { recursive: true, force: true });
+    const part = mkdtempSync(join(cache, `${version}.part-`));
+    try {
+      install(part);
+      writeFileSync(join(part, ".complete"), version);
+      try { renameSync(part, kept); } catch (error) { if (!existsSync(whole)) throw error; }
+    } finally { rmSync(part, { recursive: true, force: true }); }
+  }
+  // npm links global commands relatively, so the copy runs from where it lands. On APFS a clone is the quick copy.
+  if (existsSync(prefix)) throw Error(`${prefix} already exists.`);
+  const cloned = process.platform === "darwin" && sh("cp", ["-cR", kept, prefix]).status === 0;
+  if (!cloned) { rmSync(prefix, { recursive: true, force: true }); cpSync(kept, prefix, { recursive: true, verbatimSymlinks: true }); }
+  rmSync(join(prefix, ".complete"), { force: true });
+  return cached ? "cached" : "installed";
+}
+
 async function onePath(version, { candidate, candidateDist, candidateVersion, tarball, work }) {
   const home = join(work, `home-${version}`);
   const prefix = join(home, "global"), stateDir = join(home, ".toolroll");
@@ -247,7 +276,7 @@ async function onePath(version, { candidate, candidateDist, candidateVersion, ta
   const env = envFor(home, prefix);
   const steps = [];
   const step = (name, fn) => { const at = Date.now(); try { const value = fn(); steps.push(`${name} (${Math.round((Date.now() - at) / 1000)} s)`); return value; } catch (error) { throw Object.assign(error, { step: name }); } };
-  step("npm i -g", () => must(sh("npm", ["install", "--global", "--prefix", prefix, `toolroll@${version}`, "--no-audit", "--no-fund", "--no-color"], { env }), `npm install -g toolroll@${version}`));
+  step("npm i -g", () => installPublished(version, prefix, env));
   const installed = realpathSync(join(prefix, "lib", "node_modules", "toolroll", "dist"));
   const seeded = step("database", () => child("seed", { dist: installed, stateDir, repo: join(home, "projects", "shop") }, env, `${version}'s database`));
   // The same database and installation, kept apart for the npm route.

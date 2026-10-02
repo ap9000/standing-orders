@@ -10,7 +10,7 @@ import { openStore } from "./store.js";
 import { updateAdmissionPaused, UPDATE_PAUSED } from "./desktop-update-gate.js";
 import {
   checkProvenance, findSigstoreVerifier, lastCompletedUpdate, launchRuntimeUpdate, machineSystem, prepareRuntimeUpdate, pruneRuntimes, readRuntimeUpdate, releaseNotes, requestRuntimeUpdateCancel, resumeRuntimeUpdate, runtimeUpdateStatus, markWhatsNewSeen,
-  releaseStalledUpdate, startRuntimeRollback, startRuntimeUpdate, updateWaitingOf, waitingUpdate, PROVENANCE_ISSUER, PROVENANCE_REPOSITORY, PROVENANCE_WORKFLOW, UPDATE_JOB_LABEL, UPDATE_STEPS, type RuntimePhase, type UpdateSystem,
+  releaseStalledUpdate, startRuntimeRollback, startRuntimeUpdate, updateWaitingOf, waitingUpdate, PROVENANCE_ISSUER, PROVENANCE_REPOSITORY, PROVENANCE_WORKFLOW, UPDATE_JOB_LABEL, UPDATER_START_MS, UPDATE_STEPS, type RuntimePhase, type UpdateSystem,
 } from "./toolroll-update.js";
 import { REGISTRY, setUpdateChecks } from "./releases.js";
 import { runUpdateCommand } from "./toolroll-update-cli.js";
@@ -1476,6 +1476,72 @@ test("u1: an updater that ends while work finishes never leaves new work paused:
       for (const link of f.links) expect(readlinkSync(link)).toBe(join(f.oldDist, "bin.js"));
       // A later resume finds nothing to continue; a new update starts clean.
       expect((await resumeRuntimeUpdate(f.stateDir, f.system)).message).toBe("No update is in progress.");
+    } finally { f.close(); }
+  }
+}, 30_000);
+
+test("u1: Settings → Updates still opens when a stalled update cannot be released", async () => {
+  const f = fixture();
+  const store = openStore(f.databaseFile);
+  const alex = addApprover(store, "alex", new Date());
+  if (!alex.ok) throw new Error("alex");
+  const server = createDecisionServer({ store, evidenceRoot: join(f.root, "evidence"), updates: { latest: async () => ({ version: "0.7.0" }), current: "0.6.0", dist: f.oldDist } });
+  try {
+    f.startRun();
+    await expect(f.start({ sleep: async () => { throw Object.assign(Error("crash"), { simulatedCrash: true }); } }, "when-idle")).rejects.toThrow("crash");
+    const stage = () => readRuntimeUpdate(f.stateDir)!.stageDir;
+    // Its saved copy cannot be replaced: releasing the update fails.
+    rmSync(join(stage(), "update.json")); mkdirSync(join(stage(), "update.json", "in-the-way"), { recursive: true });
+    expect(() => releaseStalledUpdate(f.stateDir, new Date())).toThrow();
+    await new Promise<void>(done => server.listen(0, "127.0.0.1", done));
+    const address = server.address();
+    if (address === null || typeof address !== "object") throw new Error("listen");
+    const base = `http://127.0.0.1:${address.port}`;
+    const cookie = (await fetch(`${base}/login`, { method: "POST", body: new URLSearchParams({ name: "alex", token: alex.token }), redirect: "manual" }))
+      .headers.getSetCookie().map(one => one.split(";")[0]!).find(one => one.startsWith("standing-orders_session="))!;
+    const page = await fetch(`${base}/settings/updates`, { headers: { cookie } });
+    expect(page.status).toBe(200);
+    expect(await page.text()).toContain("New work is paused. Waiting for running T-1 (Keep my work) to finish.");
+  } finally {
+    if (server.listening) await new Promise<void>(done => server.close(() => done()));
+    store.close(); f.close();
+  }
+}, 30_000);
+
+test("u1: a job launched or a resume starting on a draining update is never released under it", async () => {
+  for (const by of ["launched", "resuming"] as const) {
+    const f = fixture();
+    try {
+      f.startRun();
+      await expect(f.start({ sleep: async () => { throw Object.assign(Error("crash"), { simulatedCrash: true }); } }, "when-idle")).rejects.toThrow("crash");
+      const j = readRuntimeUpdate(f.stateDir)!;
+      const at = new Date();
+      if (by === "launched") {
+        const run = async (_file: string, args: readonly string[]) => ({ code: args[0] === "print" ? 113 : 0, stdout: "", stderr: "", timedOut: false });
+        await launchRuntimeUpdate({ databaseFile: f.databaseFile, id: j.id, dist: f.oldDist }, { home: join(f.root, "home"), run: run as never, platform: "darwin", now: () => at });
+      } else {
+        // The resume takes the lock and drains; a poll from status or the console then finds the lock held.
+        await expect(resumeRuntimeUpdate(f.stateDir, { ...f.system, now: () => at, sleep: async () => {
+          expect(releaseStalledUpdate(f.stateDir, at)).toBeNull();
+          throw Object.assign(Error("crash"), { simulatedCrash: true });
+        } }, j.id)).rejects.toThrow("crash");
+        // Its mark went once it held the lock: an updater that dies after that is released at once.
+        expect(releaseStalledUpdate(f.stateDir, at)).not.toBeNull();
+        expect(f.paused()).toBe(false);
+        continue;
+      }
+      // Launched, not yet started by launchd: nothing is lifted, however often status or the console polls.
+      expect(releaseStalledUpdate(f.stateDir, at)).toBeNull();
+      expect(releaseStalledUpdate(f.stateDir, new Date(at.getTime() + UPDATER_START_MS - 1000))).toBeNull();
+      expect(f.paused()).toBe(true);
+      expect(readRuntimeUpdate(f.stateDir)!.phase).toBe("draining");
+      // A job that never started is not waited on forever.
+      expect(releaseStalledUpdate(f.stateDir, new Date(at.getTime() + UPDATER_START_MS))).not.toBeNull();
+      expect(f.paused()).toBe(false);
+      // And a job that starts after all finds the update stopped and does not drive it.
+      const late = await resumeRuntimeUpdate(f.stateDir, f.system, j.id);
+      expect(late.message).toBe("No update is in progress.");
+      expect(f.paused()).toBe(false);
     } finally { f.close(); }
   }
 }, 30_000);

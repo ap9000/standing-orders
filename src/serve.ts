@@ -4112,7 +4112,8 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     if (url.pathname === "/settings/updates") {
       const databaseFile = store.databaseFile();
       if (who.via !== "cookie" || !store.isInstanceOperator(who.name) || databaseFile === null) return refuse(response, who, 403, "An instance operator updates Toolroll.", "/settings");
-      releaseStalledUpdate(dirname(databaseFile), clock());
+      // A record it cannot release is shown as it is; the page never fails over it.
+      try { releaseStalledUpdate(dirname(databaseFile), clock()); } catch { /* shown as last saved */ }
       const status = runtimeUpdateStatus(dirname(databaseFile));
       if (url.searchParams.get("fragment") === "steps") return respond(response, 200, "text/html; charset=utf-8", status.journal ? updateStepsHtml(status.journal, status.running) : `<div id="update-live" data-done="1"></div>`);
       const active = status.journal !== null && !runtimeUpdateTerminal(status.journal.phase);
