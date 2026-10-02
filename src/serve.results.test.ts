@@ -1133,16 +1133,23 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     const read = async () => ((await (await fetch(url(`/review?result=t-runcheck&run=${run}&format=workspace`), { headers: { cookie } })).json()) as import("./browser-workspace.js").BrowserWorkspace).view as import("./browser-workspace.js").BrowserResultView;
     const selected = (await read()).selected!;
     expect(selected.acts).toMatchObject({ primary: "run-checks", secondary: "accept", line: null });
-    expect(selected.runChecks).toEqual({ action: `/r/${run}/checks`, level: "full", returnTo: `/review?result=t-runcheck&run=${run}` });
+    expect(selected.runChecks).toEqual({ action: `/r/${run}/checks`, level: "full", returnTo: `/review?result=t-runcheck&run=${run}&tab=checks` });
     expect(selected.decision).toMatchObject({ label: "Accept without checks", ready: false });
     // Run checks posts to the run's own follow-up act; once one is waiting, it isn't offered again.
     const csrf = csrfOf(await (await fetch(url(`/review?result=t-runcheck&run=${run}`), { headers: { cookie } })).text());
     const asked = await post(cookie, selected.runChecks!.action, { csrf, level: "full", return: selected.runChecks!.returnTo });
     expect(asked.status).toBe(303);
-    expect(asked.headers.get("location")).toBe(`/review?result=t-runcheck&run=${run}#follow-ups`);
+    // Back on the result's Checks tab, at an anchor that is there and showing.
+    expect(asked.headers.get("location")).toBe(`/review?result=t-runcheck&run=${run}&tab=checks#follow-ups`);
+    const landed = (await (await fetch(url(`/review?result=t-runcheck&run=${run}&tab=checks&format=workspace`), { headers: { cookie } })).json() as import("./browser-workspace.js").BrowserWorkspace).view as import("./browser-workspace.js").BrowserResultView;
+    const checksView = landed.selected!.panel!.views.find(one => one.key === "checks")!;
+    expect(checksView.html).toContain('id="follow-ups"');
+    expect(landed.selected!.panel!.tabs.find(one => one.active)?.key).toBe("checks");
+    // While they're queued or running, no Accept is ink: a disabled Checks running leads, Accept without checks in outline.
     const after = (await read()).selected!;
     expect(after.runChecks).toBeNull();
-    expect(after.acts.primary).toBe("accept");
+    expect(after.acts).toEqual({ primary: "checks-running", secondary: "accept", line: null });
+    expect(after.decision).toMatchObject({ label: "Accept without checks", ready: false });
   });
 
   test("a missing or unreadable proof reads Accept without checks, and Accept never posts publish", async () => {

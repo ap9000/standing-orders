@@ -168,7 +168,7 @@ for (const state of STATES) {
         check(`${label}: exactly one ink act, ${state.ink}, never navigation`, f.ink.length === 1 && f.ink[0].act === state.ink && f.primaries === 1 && (f.ink[0].tag !== 'A' || f.ink[0].href === '#request-changes'), JSON.stringify(f.ink));
         check(`${label}: the outline act beside it is ${state.second}`, f.row.length === 2 && f.row[1].act === state.second && (state.secondText === undefined || f.row[1].text === state.secondText), f.row.map(one => `${one.act} "${one.text}"`).join(','));
         check(`${label}: ${state.line === null ? 'no can\'t-accept line' : 'one line says why first'}`, state.line === null ? !f.cantAccept : f.cantAccept && f.line === state.line, f.line ?? '');
-        check(`${label}: the status card holds no acts, one sentence`, f.statusButtons === 0 && f.sentence !== null && !/[.!?]\s+\S/.test(f.sentence.replace(/\b(e\.g|i\.e)\./g, '')), f.sentence ?? '');
+        check(`${label}: the status card holds no acts, one bounded sentence`, f.statusButtons === 0 && f.sentence !== null && f.sentence.length <= 141 && !/[.!?]\s+\S/.test(f.sentence.replace(/\b(e\.g|i\.e)\./g, '')), f.sentence ?? '');
         check(`${label}: titled with the task; no sideways scroll`, f.title !== null && !/^Build #/.test(f.title) && !f.wide, f.title ?? '');
         if (where === 'desk') {
           const [a, b] = f.row;
@@ -180,6 +180,34 @@ for (const state of STATES) {
       }
       if (where === 'phone') await page.locator('[data-result-decision]').scrollIntoViewIfNeeded();
       await shot(page, `${state.key}-${where}-${scheme}`, `${where === 'desk' ? 'Desktop' : 'Phone'} ${scheme}, ${state.key}: one ink act (${state.ink})${state.line === null ? '' : ' after the can\'t-accept line'} (synthetic)`);
+      await ctx.close();
+    }
+  }
+}
+
+// ---- Run checks: back on an anchor that exists; while they run, no Accept is ink --
+{
+  const { ctx, page } = await signedIn(DESK, 'light');
+  await openResult(page, `/review?result=rounding-check&run=${checkRun}`);
+  await Promise.all([page.waitForNavigation(), page.locator('[data-ink-act="run-checks"]').click()]);
+  await page.locator('[data-result-status]').first().waitFor({ timeout: 15_000 });
+  const landed = new URL(page.url());
+  const anchor = await page.evaluate(() => { const el = document.getElementById(location.hash.slice(1)); return el === null ? null : { visible: el.getClientRects().length > 0, top: Math.round(el.getBoundingClientRect().top) }; });
+  check('Run checks returns to an anchor that exists and shows', landed.hash !== '' && anchor !== null && anchor.visible && landed.searchParams.get('tab') === 'checks', `${landed.pathname}${landed.search}${landed.hash} ${JSON.stringify(anchor)}`);
+  await ctx.close();
+  for (const [where, viewport] of [['desk', DESK], ['phone', PHONE]]) {
+    for (const scheme of ['light', 'dark']) {
+      const { ctx, page } = await signedIn(viewport, scheme);
+      await openResult(page, `/review?result=rounding-check&run=${checkRun}`);
+      const f = await actsOf(page);
+      const label = `checks-running ${where} ${scheme}`;
+      if (scheme === 'light') {
+        const disabled = await page.locator('[data-ink-act="checks-running"]').isDisabled().catch(() => false);
+        check(`${label}: no Accept is ink; a disabled Checks running leads`, f.ink.length === 1 && f.ink[0].act === 'checks-running' && f.ink[0].text === 'Checks running' && disabled, JSON.stringify(f.ink));
+        check(`${label}: Accept without checks sits beside it, in outline`, f.row.length === 2 && f.row[1].act === 'accept' && f.row[1].text === 'Accept without checks', f.row.map(one => `${one.act} "${one.text}"`).join(','));
+      }
+      if (where === 'phone') await page.locator('[data-result-decision]').scrollIntoViewIfNeeded();
+      await shot(page, `checks-running-${where}-${scheme}`, `${where === 'desk' ? 'Desktop' : 'Phone'} ${scheme}, checks running: disabled Checks running ink, Accept without checks outline (synthetic)`);
       await ctx.close();
     }
   }

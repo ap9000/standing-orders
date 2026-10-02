@@ -22941,12 +22941,14 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
   const checksRunning = checks?.running != null || (followUps?.checks.some(one => one.state === "waiting" || one.state === "running") ?? false);
   const runChecks = canRetryReview && csrf !== "" && followUps !== null && (followUps.full || followUps.quick) && !checksRunning &&
     (checks === undefined || checks.status === "not-run" || checks.status === "unavailable")
-    ? { action: `/r/${run.id}/checks`, level: followUps.full ? "full" as const : "quick" as const, returnTo: `${here}&run=${run.id}` } : null;
+    // Back on this result's Checks tab, where #follow-ups shows the run it started.
+    ? { action: `/r/${run.id}/checks`, level: followUps.full ? "full" as const : "quick" as const, returnTo: `${here}&run=${run.id}&tab=checks` } : null;
   const need = panel.panel.need;
   const nextKind = selected.next?.kind;
   const acts = resultActsOf({
     accept: decision === null ? null : { ready: decision.ready },
     runChecks: runChecks !== null,
+    checksRunning,
     blocked,
     canRequest: panel.panel.canRequest && panel.panel.request !== null,
     need: need === null || need.accept != null ? null : need.rebuild != null ? "rebuild" : need.confirm !== null ? "confirm-stopped" : null,
@@ -24639,7 +24641,7 @@ function resultNeedAction(need: BrowserNeedAction, o: ResultPanelOptions, canReq
 function conciseOutcomeOf(conclusion: string): string {
   const flat = oneLineOf(conclusion, 2_000);
   const sentence = /^[\s\S]*?[.!?](?=\s|$)/.exec(flat)?.[0] ?? flat;
-  const bounded = sentence.length <= 180 ? sentence : `${sentence.slice(0, 180).replace(/\s+\S*$/, "")}…`;
+  const bounded = sentence.length <= 140 ? sentence : `${sentence.slice(0, 140).replace(/\s+\S*$/, "")}…`;
   return bounded.trim();
 }
 

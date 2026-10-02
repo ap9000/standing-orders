@@ -4,22 +4,26 @@
  * in one line before them.
  *
  *   everything met                      → Accept
+ *   checks queued or running            → Checks running (disabled), then Accept without checks
  *   checks didn't run, a check exists   → Run checks, then Accept without checks
  *   report and changes disagree,
- *   or the proof is refuted             → Request changes, then Accept (as allowed)
+ *   or the proof is refuted             → Request changes, then Accept (as allowed);
+ *                                         never Accept as ink, even with no form here
  *   a Needs you form resolves it        → that form (Build again, Confirm it stopped)
  *   saved notes or a failing PR         → Revise / Draft a repair task
  *
  * Accepting means what it always meant: the same forms post to the same
  * endpoints. This only decides which one is ink. */
 
-export type ResultActKind = "accept" | "run-checks" | "request-changes" | "rebuild" | "confirm-stopped" | "revise" | "draft-repair";
+export type ResultActKind = "accept" | "checks-running" | "run-checks" | "request-changes" | "rebuild" | "confirm-stopped" | "revise" | "draft-repair";
 
 export type ResultActFacts = {
   /** An Accept this page can post (Mark complete, or the person's acceptance); `ready`: every requirement met and checks passed. */
   accept: { ready: boolean } | null;
   /** The checks didn't run, the project has one, and this person may run it. */
   runChecks: boolean;
+  /** Checks on this result are queued or running. */
+  checksRunning: boolean;
   /** Why it can't be accepted yet (cantAcceptYetOf), or null. */
   blocked: string | null;
   /** The feedback form is on this page. */
@@ -44,9 +48,9 @@ export function resultActsOf(facts: ResultActFacts): ResultActs {
   const accept = facts.accept === null ? null : "accept" as const;
   if (facts.need !== null) return { primary: facts.need, secondary: request, line: null };
   if (facts.next !== null) return { primary: facts.next, secondary: accept ?? request, line: null };
-  if (facts.blocked !== null) {
-    return request !== null ? { primary: request, secondary: accept, line: facts.blocked } : { primary: accept, secondary: null, line: facts.blocked };
-  }
+  // Can't be accepted yet: Accept is never the ink act, even when the feedback form isn't here.
+  if (facts.blocked !== null) return { primary: request, secondary: accept, line: facts.blocked };
+  if (facts.checksRunning) return { primary: "checks-running", secondary: accept ?? request, line: null };
   if (facts.accept === null) return { primary: null, secondary: request, line: null };
   if (facts.accept.ready) return { primary: "accept", secondary: request, line: null };
   if (facts.runChecks) return { primary: "run-checks", secondary: "accept", line: null };

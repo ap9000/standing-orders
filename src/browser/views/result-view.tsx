@@ -196,8 +196,7 @@ function Decision({ selected, csrf }: { selected: Selected; csrf: string }) {
   const accept = complete === null ? need?.accept ?? null : null;
   const shown = [acts.primary, acts.secondary].filter((one): one is ResultActKind => one !== null);
   const why = shown.includes("accept") ? decision?.why ?? null : null;
-  const noted = acts.primary === "revise" || acts.primary === "draft-repair" ? next?.title ?? null : null;
-  const line = acts.line ?? why ?? noted;
+  const line = acts.line ?? why;
   const act = (kind: ResultActKind, ink: boolean): ReactNode => {
     const variant = ink ? "attention" as const : "outline" as const;
     const mark = { "data-act": kind, ...(ink ? { "data-ink-act": kind, "data-primary-action": "" } : {}) };
@@ -219,6 +218,8 @@ function Decision({ selected, csrf }: { selected: Selected; csrf: string }) {
           {accept.note !== null && <Input type="text" name="note" maxLength={500} required aria-label={accept.note} placeholder={accept.note} className="h-11 w-64 phone:w-full" />}
           <Button type="submit" variant={variant} className={wide} {...mark} data-accept-result><Check className="phone:hidden" />{decision.label}</Button>
         </form>;
+      case "checks-running":
+        return <Button key={kind} type="button" variant={variant} disabled aria-disabled="true" className={wide} {...mark}>Checks running</Button>;
       case "run-checks":
         if (selected.runChecks === null) return null;
         return <form key={kind} method="post" action={selected.runChecks.action} className="phone:w-full">
@@ -238,15 +239,18 @@ function Decision({ selected, csrf }: { selected: Selected; csrf: string }) {
         return next === null ? null : <Html key={kind} html={next.control} className="so-result-next phone:w-full" />;
     }
   };
-  if (shown.length === 0) return null;
+  if (shown.length === 0 && next === null) return null;
   return <Card data-result-decision={acts.primary ?? "none"} aria-label="Decision"
-    className="gap-2 phone:sticky phone:bottom-[-20px] phone:z-10 phone:-mx-4 phone:gap-2 phone:rounded-none phone:border-x-0 phone:px-4 phone:pb-[max(14px,env(safe-area-inset-bottom))] phone:shadow-[0_-4px_16px_rgb(0_0_0/.08)]">
+    className={cn("gap-2 phone:gap-2", shown.length > 0 && "phone:sticky phone:bottom-[-20px] phone:z-10 phone:-mx-4 phone:rounded-none phone:border-x-0 phone:px-4 phone:pb-[max(14px,env(safe-area-inset-bottom))] phone:shadow-[0_-4px_16px_rgb(0_0_0/.08)]")}>
     {line !== null && <p className="flex max-w-[75ch] gap-2 text-[13px]" data-decision-why {...(acts.line === null ? {} : { "data-cant-accept": "" })}>
       <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" aria-hidden="true" />{line}</p>}
-    <div className="flex flex-wrap items-center gap-2 phone:flex-col phone:items-stretch" data-result-acts>
+    {/* What comes next (notes ready, CI failing, a contest to compare, no build): one line, whatever the acts. */}
+    {next !== null && <p className="max-w-[75ch] text-[13px]" data-next-action={next.kind}>
+      <span className="font-semibold">{next.title}.</span> <span className="text-muted-foreground">{next.detail}</span></p>}
+    {shown.length > 0 && <div className="flex flex-wrap items-center gap-2 phone:flex-col phone:items-stretch" data-result-acts>
       {acts.primary !== null && act(acts.primary, true)}
       {acts.secondary !== null && act(acts.secondary, false)}
-    </div>
+    </div>}
     {decision !== null && shown.includes("accept") && <p className="max-w-[75ch] text-[13px] text-muted-foreground" data-decision-effect>{decision.effect}</p>}
   </Card>;
 }
