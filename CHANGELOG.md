@@ -11,6 +11,12 @@
 - **Reviewing a result shows the change before Accept.** Each thing you check
   comes with its evidence and Looks right / Not right; Accept says "Accept
   without checks" when they didn't run, and what accepting does.
+- **Your lead tells you what it's doing.** A task your lead is handling says
+  "Your lead is on it" instead of waiting on you, and short updates from your
+  lead arrive in chat.
+- **Updates over 0.9.11 work.** Stopping the service no longer leaves the
+  coding server's record behind, and a deploy or update that fails after
+  stopping it puts the previous version back on its own.
 
 ## 0.9.11 — 2026-10-02
 
