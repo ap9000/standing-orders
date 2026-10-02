@@ -148,14 +148,15 @@ const OLD_NAME = /standing\s*-?\s*orders/i;
  * StandingOrders is renamed, so a name a person chose later is kept. Best effort: a refused or failed call
  * leaves the old name and never blocks pairing or delivery. Returns whether a rename was sent and accepted.
  */
-export async function nameTelegramBot(transport: TelegramTransport, when: "pairing" | "upgrade"): Promise<boolean> {
+export async function nameTelegramBot(transport: TelegramTransport, when: "pairing" | "upgrade", signal?: AbortSignal): Promise<boolean> {
   try {
-    const current = await transport("getMyName", {});
+    const current = await transport("getMyName", {}, signal);
     const name = current.ok ? (current.result as { name?: unknown } | undefined)?.name : undefined;
     const shown = typeof name === "string" ? name : null;
     if (shown === BOT_NAME) return false;
     if (when === "upgrade" && (shown === null || !OLD_NAME.test(shown))) return false;
-    const set = await transport("setMyName", { name: BOT_NAME });
+    if (signal?.aborted) return false;
+    const set = await transport("setMyName", { name: BOT_NAME }, signal);
     return set.ok;
   } catch {
     return false;

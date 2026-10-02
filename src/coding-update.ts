@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
 import { chmodSync, closeSync, fsyncSync, lstatSync, openSync } from 'node:fs';
+import { hostname } from 'node:os';
 import type { DatabaseSync } from 'node:sqlite';
 import { sqliteRuntime } from './sqlite-runtime.js';
+import { processMayBeAlive } from './process-liveness.js';
 import type { Database } from './store.js';
 
 const gatePrefix = 'so_coding_update_';
@@ -79,6 +81,53 @@ export function assertCodingUpdateStopped(orders: Database): void {
   withCatalog(orders, undefined, true, db => {
     const owner = db.prepare('SELECT token,pid,native_pid,clean FROM coding_owner WHERE singleton=1').get();
     if (!owner || owner['clean'] !== 1 || owner['token'] !== '' || owner['pid'] !== 0 || owner['native_pid'] !== null) throw Error('The coding server has not verified agent and tool shutdown. No app was replaced.');
+  });
+}
+
+/** What a stale owner record named when an updater released it, for its ledger. */
+export type ReleasedCodingOwner = { pid: number; nativePid: number | null };
+
+/** A runtime killed before its close (deploys over 0.9.11, Oct 2) leaves the
+ * owner record naming a dead process, and every later swap refuses. Only an
+ * updater that has itself proved each process of the stopped service gone may
+ * release it here, and only while nothing the catalog records still lives:
+ * the agent, its tools, a session or an unconfirmed message. Returns what it
+ * released, or null when the record was already released by an ordinary stop;
+ * anything unproven keeps the ordinary refusal. */
+export function releaseStaleCodingOwner(orders: Database, stoppedPids: readonly number[], alive: (pid: number, group: boolean) => boolean = processMayBeAlive): ReleasedCodingOwner | null {
+  return withCatalog(orders, null, false, db => {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const owner = db.prepare('SELECT token,pid,native_pid,clean FROM coding_owner WHERE singleton=1').get()!;
+      const pid = Number(owner['pid']), nativePid = owner['native_pid'] === null ? null : Number(owner['native_pid']);
+      if (owner['token'] === '' && pid === 0 && nativePid === null && owner['clean'] === 1) { db.exec('ROLLBACK'); return null; }
+      const refuse = (why: string): never => { throw Error(`The coding server has not verified agent and tool shutdown (${why}). No app was replaced.`); };
+      // A record its own server released while recovery was still required stays as it is: that needs a person's check.
+      if (owner['token'] === '' || !Number.isSafeInteger(pid) || pid <= 0) refuse('its saved record needs a recovery check');
+      if (!stoppedPids.includes(pid)) refuse(`process ${pid} is not one this update stopped`);
+      if (alive(pid, false)) refuse(`process ${pid} is still running`);
+      // The agent runs in its own process group: a service killed by launchd can leave it behind.
+      if (nativePid !== null && alive(nativePid, true)) refuse(`the agent process ${nativePid} is still running`);
+      const custody = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='coding_custody'").get()
+        ? db.prepare('SELECT payload FROM coding_custody WHERE singleton=1').get() : undefined;
+      if (custody) {
+        let c: { pid?: unknown; group?: unknown; descendants?: unknown; observationUnknown?: unknown; container?: unknown; host?: unknown };
+        try { c = JSON.parse(String(custody['payload'])); } catch { c = {}; }
+        const processes = Array.isArray(c.descendants) ? c.descendants as { pid: unknown; group: unknown }[] : null;
+        if (c.host !== hostname() || c.container || c.observationUnknown !== false || processes === null) refuse("the agent's tool processes could not be accounted for");
+        const recorded = [...(c.pid === null ? [] : [{ pid: c.pid, group: c.group }]), ...processes!];
+        for (const one of recorded) {
+          if (!Number.isSafeInteger(one.pid) || Number(one.pid) <= 0) refuse("the agent's tool processes could not be accounted for");
+          if (alive(Number(one.pid), one.group === true)) refuse(`the agent's process ${String(one.pid)} is still running`);
+        }
+      }
+      const sessions = Number(db.prepare("SELECT count(*) n FROM coding_session WHERE json_extract(document,'$.status') IN ('starting','working','needs-input','stopping','uncertain') OR json_extract(document,'$.turnId') IS NOT NULL").get()?.['n']);
+      const deliveries = Number(db.prepare("SELECT count(*) n FROM coding_submission WHERE status IN ('preparing','pending','uncertain')").get()?.['n']);
+      if (sessions > 0 || deliveries > 0) refuse(`${sessions} coding session(s) and ${deliveries} unconfirmed message(s) were still active`);
+      db.prepare("UPDATE coding_owner SET token='',pid=0,native_pid=NULL,clean=1 WHERE singleton=1 AND token=?").run(owner['token'] as string);
+      db.exec('COMMIT');
+      return { pid, nativePid };
+    } catch (error) { try { db.exec('ROLLBACK'); } catch { /* already ended */ } throw error; }
   });
 }
 

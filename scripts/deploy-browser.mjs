@@ -17,14 +17,15 @@
 // the service.
 import { DatabaseSync, backup } from "node:sqlite";
 import { deploymentCandidate } from "./deploy-candidate.mjs";
-import { chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, openSync, closeSync, fsyncSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, openSync, closeSync, fsyncSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { randomUUID, createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { deployStateDir, loadNames, stagedPackageName } from "./deploy-paths.mjs";
-import { loadCodingDeploymentRuntime, observeCodingDeployment, backupCodingDeployment, verifyCodingDeploymentBackup, assertCodingDeploymentStopped } from "./deploy-coding.mjs";
+import { loadCodingDeploymentRuntime, observeCodingDeployment, backupCodingDeployment, verifyCodingDeploymentBackup, assertCodingDeploymentStopped, releaseStaleCodingDeployment, ledgerStaleCodingRelease } from "./deploy-coding.mjs";
+import { recoverFailedDeployment, waitUntilHealthy, exitOnSignals } from "./deploy-recovery.mjs";
 
 // Every direct connection waits at the same bounded lock boundary as Store.
 // This queues a brief competing writer; no transaction body is replayed.
@@ -70,10 +71,12 @@ function requireTrue(value, message) { if (!value) { console.error(`✗ ${messag
 if (!Number.isInteger(runId) || runId < 1) requireTrue(false, "Name the verified builder run: --run <id>.");
 
 // ---- installed runtime (old) and candidate runtime (new) ---------------------
-const livePlist = readFileSync(plist, "utf8");
+// Recovery runs after the swap may have written the new definition: it starts the one saved at preparation.
+const livePlist = readFileSync(phaseWanted === "recover" && flag("stage") ? join(flag("stage"), "browser.saved.plist") : plist, "utf8");
 const priorDist = (livePlist.match(/<string>([^<]*\/dist)\/cli\.js<\/string>/) ?? [])[1];
 requireTrue(priorDist && existsSync(priorDist), `The live service definition at ${plist} names no installed runtime.`);
 const publicUrl = (livePlist.match(/<string>--public-url<\/string>\s*<string>([^<]+)<\/string>/) ?? [])[1] ?? null;
+const servicePort = (livePlist.match(/<string>--port<\/string>\s*<string>(\d+)<\/string>/) ?? [])[1] ?? "4180";
 const load = async (root, name) => import(pathToFileURL(join(root, name)).href);
 const oldRt = { store: await load(priorDist, "store.js"), gate: await load(priorDist, "desktop-update-gate.js"), evidence: await load(priorDist, "verification-evidence.js"), update: await load(priorDist, "desktop-update.js") };
 oldRt.coding = await loadCodingDeploymentRuntime(priorDist);
@@ -186,21 +189,85 @@ const productionDependencies = root => execFileSync("npm", ["ls", "--omit=dev", 
  * again before every later phase, once per process. */
 let cleanBuild = null;
 process.on("exit", () => { if (cleanBuild?.scratch) rmSync(cleanBuild.scratch, { recursive: true, force: true }); });
-// A refusal after new work was paused but before the swap stopped anything (a rehearsal that
-// fails, a backup that doesn't verify) must not leave the plane paused: lift this deployment's
-// own pause and retire its journal, so the next deploy starts afresh.
-process.on("exit", code => {
-  if (code === 0 || !existsSync(journalFile)) return;
+// A failed deployment must not leave the plane paused or down. A refusal before the swap stopped
+// anything (a rehearsal that fails, a backup that doesn't verify) lifts this deployment's own
+// pause. A failure after the old service was proved stopped (a coding check, a migration, a
+// service that will not load) starts the previous service again from its saved definition — on
+// the verified backup when the live database was migrated past what it reads — waits for it to
+// answer, and lifts the pause too. Ctrl-C and a kill take the same path. A restore that cannot
+// finish leaves the service stopped and names the command that resumes it.
+let recoveryAttempted = false;
+function recoverJournal() {
+  if (recoveryAttempted || !existsSync(journalFile)) return true;
+  recoveryAttempted = true;
   let r;
-  try { r = readJournal(); } catch { return; }
-  if (!["admission-paused", "frozen", "backup-verified", "rehearsed"].includes(r.phase)) return;
+  try { r = readJournal(); } catch { return false; }
   try {
-    const db = openDeploymentDatabase(database);
-    try { if (oldRt.gate.updateGateOwned(db, r.id)) oldRt.gate.removeUpdateGate(db, r.id); } finally { db.close(); }
-    r.phase = "released"; r.updatedAt = new Date().toISOString(); oldRt.update.durableJson(journalFile, r);
-    console.error("New work resumed: the deployment stopped before the swap and lifted its pause.");
-  } catch (error) { console.error(`✗ New work is still paused (update ${r.id}): ${error.message}`); }
-});
+    const words = recoverFailedDeployment(r.phase, {
+      stopProved: () => stopProved(r),
+      restoreBackup: () => restoreDeploymentBackup(r),
+      restoreService: () => restorePriorService(r),
+      removeGate: () => {
+        const db = openDeploymentDatabase(database);
+        try { if (oldRt.gate.updateGateOwned(db, r.id)) oldRt.gate.removeUpdateGate(db, r.id); } finally { db.close(); }
+      },
+      mark: phase => { r.phase = phase; r.updatedAt = new Date().toISOString(); oldRt.update.durableJson(journalFile, r); },
+    }, { previousRuntimeCompatible: r.schema === r.nextSchema && r.rehearsal?.previousRuntimeCompatible === true });
+    if (words) console.error(words);
+    else if (!["preparing", "released", "deployed"].includes(r.phase)) console.error(`The deployment stopped at ${r.phase}, where the old service is not proved stopped or the new one may be running. New work stays paused (update ${r.id}); inspect ${journalFile}.`);
+    return words !== null || ["released", "deployed"].includes(r.phase);
+  } catch (error) {
+    console.error(`✗ The previous service was not started again (update ${r.id}, at ${r.phase}): ${error.message}`);
+    console.error(`  The previous service is not confirmed running and new work stays paused. Once the cause is fixed, run: node ${fileURLToPath(import.meta.url)} --run ${runId} --stage ${stageDir} --phase recover`);
+    return false;
+  }
+}
+process.on("exit", code => { if (code !== 0) recoverJournal(); });
+exitOnSignals();
+const alive = pid => spawnSync("/bin/ps", ["-p", String(pid), "-o", "pid="], { encoding: "utf8" }).status !== 1;
+/** Interrupted while the old service was stopping: every process recorded for it is gone and launchd no longer has it. */
+function stopProved(r) {
+  const pids = [...new Set([r.oldService?.supervisor, ...(r.oldService?.children ?? []), r.stoppingService?.supervisor, ...(r.stoppingService?.children ?? [])])];
+  return pids.length > 0 && pids.every(pid => Number.isInteger(pid) && pid > 1 && !alive(pid)) &&
+    spawnSync("/bin/launchctl", ["print", `gui/${uid}/${label}`], { encoding: "utf8" }).status !== 0;
+}
+/** The verified backup, taken before the swap, in place of a live database the candidate migrated. The live files
+ * are copied aside first (nothing is running to write them), so nothing written since is lost. Returns that copy. */
+function restoreDeploymentBackup(r) {
+  if (!existsSync(r.backup) || sha(readFileSync(r.backup)) !== r.backupSha256) throw Error(`the verified backup ${r.backup} is missing or changed; the migrated database was left as it is`);
+  const kept = join(stageDir, `orders.kept.${randomUUID().slice(0, 8)}.db`);
+  for (const suffix of ["", "-wal"]) if (existsSync(database + suffix)) { copyFileSync(database + suffix, kept + suffix); chmodSync(kept + suffix, 0o600); fsyncFile(kept + suffix); }
+  const temp = `${database}.${randomUUID()}.restore`;
+  try {
+    copyFileSync(r.backup, temp); chmodSync(temp, 0o600); fsyncFile(temp);
+    for (const suffix of ["-wal", "-shm"]) rmSync(database + suffix, { force: true });
+    renameSync(temp, database); fsyncFile(dirname(database));
+  } finally { rmSync(temp, { force: true }); }
+  // The backup predates a stale coding owner this deployment released; the ledger keeps saying so.
+  if (r.codingOwnerReleased) { const db = openDeploymentDatabase(database); try { ledgerStaleCodingRelease(db, r.codingOwnerReleased); } finally { db.close(); } }
+  return kept;
+}
+function fsyncFile(path) { const fd = openSync(path, "r"); try { fsyncSync(fd); } finally { closeSync(fd); } }
+/** The previous definition, loaded again once its processes were proved gone, and only on the schema it runs.
+ * Restored means it runs from its runtime and answers /healthz. */
+function restorePriorService(r) {
+  const check = openDeploymentDatabase(database, { readOnly: true });
+  let version;
+  try { version = check.prepare("SELECT version FROM schema_version").get().version; } finally { check.close(); }
+  if (version !== r.schema) throw Error(`the live database is at schema ${version} and the previous runtime runs schema ${r.schema}; it was not started on it`);
+  spawnSync("/bin/launchctl", ["bootout", `gui/${uid}/${label}`], { encoding: "utf8" });
+  writeFileSync(plist, livePlist);
+  const booted = spawnSync("/bin/launchctl", ["bootstrap", `gui/${uid}`, plist], { encoding: "utf8" });
+  if (booted.status !== 0) throw Error(`launchctl bootstrap failed: ${booted.stderr}`);
+  const answers = () => {
+    try {
+      if (service(priorDist) === null) return false;
+      const health = spawnSync("/usr/bin/curl", ["-fsS", "-m", "2", `http://127.0.0.1:${servicePort}/healthz`], { encoding: "utf8" });
+      return health.status === 0 && JSON.parse(health.stdout).status === "ok";
+    } catch { return false; }
+  };
+  if (!waitUntilHealthy(answers)) throw Error(`the previous service was loaded but did not answer http://127.0.0.1:${servicePort}/healthz within 90 seconds`);
+}
 /** A clean checkout of the commit, its dependencies installed from the
  * committed lockfile (npm verifies every package against the lockfile's
  * integrity hash), and dist built there. Nothing from the worktree's
@@ -377,6 +444,12 @@ async function swap() {
   await verifyServiceStopped(oldPids);
   await ensureCodingBackup(oldRt.coding, r);
   save(r, "stopped");
+  // An older runtime killed before its close left its coding owner record behind: with every old
+  // process proved gone, the candidate's own check releases it (ledgered) instead of failing here.
+  // The staged runtime is the proved candidate; its own coding module decides.
+  const candidateCoding = await loadCodingDeploymentRuntime(nextDist);
+  const released = (() => { const db = openDeploymentDatabase(database); try { return releaseStaleCodingDeployment(candidateCoding, database, db, oldPids, r); } finally { db.close(); } })();
+  if (released) { save(r, "stopped"); say(`• released the stopped service's coding record (process ${released.pid})`); }
   // Migrate the live database with the new runtime (a no-op for a same-schema build).
   let db = openDeploymentDatabase(database);
   let before;
@@ -423,10 +496,9 @@ async function swap() {
     verifyCodingBackup(coding, r);
     const stopped = openDeploymentDatabase(database, { readOnly: true });
     try { assertCodingDeploymentStopped(coding, database, stopped, r); } finally { stopped.close(); }
-    writeFileSync(plist, livePlist);
-    spawnSync("/bin/launchctl", ["bootstrap", `gui/${uid}`, plist], { encoding: "utf8" });
-    save(r, "restored");
-    requireTrue(false, "The new service did not come up; the previous definition was restored. The update gate is still installed — inspect and rerun --phase finish or remove it.");
+    // The new runtime may have written the live database: recovery puts the backup back when the previous runtime cannot read it.
+    save(r, "start-failed");
+    requireTrue(false, "The new service did not come up.");
   }
   r.newService = live;
   save(r, "started");
@@ -518,7 +590,12 @@ function pruneStaged(keep) {
 // candidate against the plane's records first. Nothing is staged, and no
 // service is touched, until its approved check passed and its exact result is complete.
 const phases = { stage, prepare, rehearse, swap, finish };
-requireTrue(phaseWanted === "all" || phases[phaseWanted], "Use --phase stage|prepare|rehearse|swap|finish, or omit it for all.");
+requireTrue(phaseWanted === "all" || phaseWanted === "recover" || phases[phaseWanted], "Use --phase stage|prepare|rehearse|swap|finish|recover, or omit it for all.");
+// Putting the previous service back needs no approval of the candidate: it resumes this deployment's own recovery.
+if (phaseWanted === "recover") {
+  requireTrue(flag("stage") && existsSync(journalFile), "--phase recover resumes a failed deployment: pass --stage <dir> of one.");
+  process.exit(recoverJournal() ? 0 : 1);
+}
 const proven = (() => { const db = openDeploymentDatabase(database, { readOnly: true }); try { return facts(db); } finally { db.close(); } })();
 say(`Candidate ${short} — task ${proven.taskId}, run ${runId}, checks passed, marked complete by ${proven.completion.actor}.`);
 say(`Installed runtime: ${priorDist}`);

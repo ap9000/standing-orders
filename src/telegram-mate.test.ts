@@ -14,6 +14,7 @@ import { TEAMMATE_TEMPLATES } from "./teammates.js";
 import { replyToAsker } from "./teammate-desk.js";
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { execFileSync } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -2004,6 +2005,45 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       store = openStore(file);
       expect(store.listTelegramConversations(BOT)).toEqual([expect.objectContaining({ state: "done", outcome: "answered", replyMessageId: "100" })]);
     });
+
+    test("stopping the service releases the coding owner record within seconds while the follower still has a chat turn in flight", async () => {
+      // Oct 2: deploys over 0.9.11 stopped the service, every pid was gone, and orders.db.coding.sqlite still named the
+      // killed `up` as its owner: the stop waited behind the Telegram follower's turn and launchd killed it first.
+      stub();
+      await exec("git", ["init", "-q", "-b", "main"], { cwd: repo });
+      await exec("git", ["-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-q", "--allow-empty", "-m", "first"], { cwd: repo });
+      await saveRepos(join(dir, "repos.json"), [repo]);
+      writeFileSync(join(dir, "up-login.txt"), `alex ${token}\n`, { mode: 0o600 });
+      store.close();
+      let release: () => void = () => {};
+      const held = new Promise<void>(resolve => (release = resolve));
+      answers.push({ text: "Still thinking.", before: () => held });
+      script.updates.push([textUpdate(2, "how do things stand?")]);
+      const lines: string[] = [];
+      const port = 45000 + (process.pid % 2000);
+      const running = runOperate("up", ["--repo", repo, "--port", String(port), "--for", "600000"], line => lines.push(line),
+        { databaseFile: file, telegramTransport: script.transport, mateSeams: { subscriptionRunner: runner }, upSeams: { terminal: false, env: {}, openBrowser: () => {} } });
+      const owner = () => {
+        const catalog = new DatabaseSync(`${file}.coding.sqlite`, { readOnly: true });
+        try { return catalog.prepare("SELECT token, pid, native_pid, clean FROM coding_owner").get(); } finally { catalog.close(); }
+      };
+      try {
+        const deadline = Date.now() + 30_000;
+        while (requests.length === 0 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+        expect(requests, lines.join("\n")).toHaveLength(1);
+        expect(owner()).toMatchObject({ token: expect.stringMatching(/^.{36}$/), pid: process.pid });
+        const stoppedAt = Date.now();
+        process.emit("SIGTERM");
+        while (owner()?.["token"] !== "" && Date.now() - stoppedAt < 10_000) await new Promise(resolve => setTimeout(resolve, 20));
+        expect(owner()).toEqual({ token: "", pid: 0, native_pid: null, clean: 1 });
+        expect(Date.now() - stoppedAt).toBeLessThan(4_000);
+        // The rest of the stop is bounded too, while the turn still runs.
+        expect(await running, lines.join("\n")).toBe(EXIT.ok);
+        expect(Date.now() - stoppedAt).toBeLessThan(15_000);
+      } finally {
+        release();
+      }
+    }, 60_000);
 
     test("a process inside a coding agent's sandbox never takes the bridge: it says why and sends nothing (c1)", async () => {
       stub();

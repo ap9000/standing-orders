@@ -593,9 +593,10 @@ export async function followBridge(
       // the picker first. Best effort; typed commands work either way.
       if (!commandsListed && options.conversation !== undefined) {
         commandsListed = true;
-        try { await transport("setMyCommands", { commands: TELEGRAM_COMMANDS }); } catch { /* typed commands still work */ }
+        // Both carry the stop signal: a stop never waits on a slow Bot API for them.
+        try { await transport("setMyCommands", { commands: TELEGRAM_COMMANDS }, signal); } catch { /* typed commands still work */ }
         // After an upgrade, a bot still called StandingOrders becomes Toolroll, once per start; any other name is kept.
-        await nameTelegramBot(transport, "upgrade");
+        await nameTelegramBot(transport, "upgrade", signal);
       }
       const startedAt = Date.now();
       const report: BridgeReport = { sent: 0, answered: 0, paired: 0, ignored: 0, backlog: false, problems: [] };

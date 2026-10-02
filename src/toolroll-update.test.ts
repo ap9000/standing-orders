@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, randomUUID, sign, type KeyObject } from "node:crypto";
 import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
@@ -337,6 +337,39 @@ test("c1: a rollback that fails its health check puts the catalog back as it was
   } finally { f.close(); }
 });
 
+test("an update over a runtime killed before releasing the coding workspace releases its record once its processes are gone, and completes", async () => {
+  // Oct 2: 0.9.11 was stopped, every pid was gone, and the catalog still named its `up` child: every swap refused.
+  const f = fixture({ coding: true });
+  try {
+    const d = new DatabaseSync(f.codingFile); try { d.prepare("UPDATE coding_owner SET token=?, pid=4242, native_pid=999991, clean=0").run(randomUUID()); } finally { d.close(); }
+    const outcome = await f.start();
+    expect(outcome.phase, outcome.message).toBe("complete");
+    expect(f.coding("SELECT token, pid, native_pid, clean FROM coding_owner")).toEqual([",0,,1"]);
+    expect(outcome.journal!.codingOwnerReleased).toEqual({ pid: 4242, nativePid: 999991 });
+    expect(f.ledger().map(e => [e.action, e.outcome])).toEqual([["toolroll coding owner released", "released"], ["toolroll updated", "complete"]]);
+    expect(f.paused()).toBe(false);
+  } finally { f.close(); }
+});
+
+test("a stale coding owner the update did not stop, or whose agent still runs, is never released: the service starts again unchanged", async () => {
+  // The agent runs detached, in its own process group: a killed service can leave it behind.
+  const agent = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
+  try {
+    for (const stale of [{ pid: 4343, agent: null }, { pid: 4242, agent: agent.pid! }]) {
+      const f = fixture({ coding: true });
+      try {
+        const d = new DatabaseSync(f.codingFile); try { d.prepare("UPDATE coding_owner SET token=?, pid=?, native_pid=?, clean=0").run(randomUUID(), stale.pid, stale.agent); } finally { d.close(); }
+        const outcome = await f.start();
+        expect(outcome.phase).toBe("refused");
+        expect(outcome.message).toMatch(stale.agent === null ? /process 4343 is not one this update stopped/ : /the agent process \d+ is still running/);
+        expect(f.coding("SELECT pid FROM coding_owner")).toEqual([String(stale.pid)]);
+        expect(f.calls).toEqual(["install", "stop", "restart"]);
+        expect(f.paused()).toBe(false);
+      } finally { f.close(); }
+    }
+  } finally { agent.kill(); }
+});
+
 test("c2: the one-off update job has no RunAtLoad, starts by kickstart, and resumes only its journal id", async () => {
   const f = fixture();
   try {
@@ -411,6 +444,17 @@ test("c3: restoreDatabase runs only after the stopped service's process is gone 
     expect(launchctl.state.log.filter(verb => verb !== "print")).toEqual(["disable", "bootout", "enable", "bootstrap", "kickstart", "disable", "bootout", "enable", "bootstrap", "kickstart"]);
     // The waits happened at the launchd boundary too: print was polled until the label disappeared.
     expect(launchctl.state.log.filter(verb => verb === "print").length).toBeGreaterThanOrEqual(6);
+  } finally { f.close(); }
+});
+
+test("the stopped service's processes include its `up` child, the one that owns the coding catalog", async () => {
+  const f = fixture();
+  try {
+    const run = async (file: string, args: readonly string[]) => file === "pgrep"
+      ? { code: 0, stdout: `${args[1] === "4242" ? "4300\n" : ""}`, stderr: "", timedOut: false }
+      : { code: 0, stdout: "com.toolroll.browser = {\n\tstate = running\n\tpid = 4242\n}", stderr: "", timedOut: false };
+    const machine = machineSystem(join(f.root, "home"), {}, { run: run as never });
+    expect(await machine.servicePids(f.unit)).toEqual([4242, 4300]);
   } finally { f.close(); }
 });
 

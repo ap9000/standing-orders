@@ -149,7 +149,7 @@ if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).
   const plan = planFor(changed, { full: full || changed.length === 0, versionBumps, schemaFiles });
   // Toolroll's own checkout carries the upgrade path; another project's release check has none.
   const upgrade = plan.upgrade && existsSync(join("scripts", "upgrade-path.mjs"));
-  console.log(`Release check against ${base === null ? "nothing (origin/main unknown)" : `origin/main ${base.slice(0, 12)}`} (${changed.length} changed files): ${plan.why}${upgrade ? `; the upgrade path from the last 3 releases (${plan.upgradeWhy})` : ""}.`);
+  console.log(`Release check against ${base === null ? "nothing (origin/main unknown)" : `origin/main ${base.slice(0, 12)}`} (${changed.length} changed files): ${plan.why}${upgrade ? `; the upgrade path from the last 3 releases and 0.9.11 (${plan.upgradeWhy})` : ""}.`);
   if (planOnly) process.exit(0);
 
   const memory = watchMemory();

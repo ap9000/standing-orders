@@ -16,18 +16,24 @@
  *   - `npm i -g`: the packed candidate installed over the release, then its
  *     `toolroll status` opens the database.
  *
+ * A release with a coding workspace first opens its own coding catalog in a
+ * process that is then killed, as launchd kills a service that outlasts its
+ * exit window: the candidate's deploy check must release that stale owner
+ * record before `toolroll update` (deploys over 0.9.11, Oct 2). 0.9.11 stays
+ * on the path whatever the newest three are.
+ *
  * Each must succeed with no manual step. Afterwards every completed task is
  * still complete with the same digest, every table a fresh candidate database
  * has exists, and (after `toolroll update`) the leftover record is settled.
  *
- *   node scripts/upgrade-path.mjs [--candidate <checkout with dist>] [--versions 0.9.4,0.9.5,0.9.6] [--keep]
+ *   node scripts/upgrade-path.mjs [--candidate <checkout with dist>] [--versions 0.9.9,0.9.10,0.9.11] [--keep]
  *
  * Needs npm and the registry (reads only). A published release never changes, so
  * each is installed from npm once into a cache (TOOLROLL_UPGRADE_CACHE, or
  * ~/.cache/toolroll-upgrade-path) and copied into every home after. Exits 1
  * when any version fails.
  */
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, hostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -47,6 +53,14 @@ export function lastPublished(versions, count = 3) {
   const key = v => v.split(".").map(Number);
   release.sort((a, b) => { const [x, y] = [key(a), key(b)]; for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] - y[i]; return 0; });
   return release.slice(-count);
+}
+
+/** Releases always on the path. 0.9.11's service could be killed before it released the coding workspace (Oct 2). */
+export const PINNED_RELEASES = Object.freeze(["0.9.11"]);
+
+/** The newest `count` published versions and every pinned one, oldest first. */
+export function upgradeVersions(published, count = 3) {
+  return lastPublished([...new Set([...lastPublished(published, count), ...PINNED_RELEASES])], Infinity);
 }
 
 /** Tables a fresh database has that `actual` lacks. */
@@ -194,6 +208,50 @@ async function stage({ candidateDist, stateDir, databaseFile, from, version, tar
   return { id: j.id, to: j.to.dist };
 }
 
+/** The installed release opens its own coding catalog and holds it until this process is killed. */
+async function hold({ dist, databaseFile }) {
+  const { CodingWorkspace } = await load(dist, "coding-workspace.js");
+  new CodingWorkspace({ database: `${databaseFile}.coding.sqlite`, worktreeRoot: join(dirname(databaseFile), "coding-worktrees") });
+  process.stdout.write(`\n${JSON.stringify({ held: process.pid })}\n`);
+  setInterval(() => {}, 1 << 30);
+  return new Promise(() => {});
+}
+
+/** The candidate's deploy check over the killed release's catalog: refused as it stands, released once the killed
+ * process is proved gone, then the ordinary shutdown check passes. */
+async function release({ candidate, candidateDist, databaseFile, pid }) {
+  const { DatabaseSync } = await import("node:sqlite");
+  const coding = await load(candidateDist, "coding-update.js");
+  const { releaseStaleCodingDeployment } = await import(pathToFileURL(join(candidate, "scripts", "deploy-coding.mjs")).href);
+  const db = new DatabaseSync(databaseFile);
+  try {
+    db.exec("PRAGMA busy_timeout=5000");
+    let refused = false;
+    try { coding.assertCodingUpdateStopped(db); } catch { refused = true; }
+    if (!refused) throw Error("the killed release left no owner record behind, so there was nothing stale to release");
+    const released = releaseStaleCodingDeployment(coding, databaseFile, db, [pid], {});
+    if (released?.pid !== pid) throw Error(`the stale owner record was not released (${JSON.stringify(released)})`);
+    coding.assertCodingUpdateStopped(db);
+    return { released };
+  } finally { db.close(); }
+}
+
+/** Start `hold` under the release, then kill it the way launchd does past its exit window, and wait for the exit. */
+async function killedCodingOwner(payload, env) {
+  const held = spawn(process.execPath, ["--no-warnings", SELF, "--hold", JSON.stringify(payload)], { env, stdio: ["ignore", "pipe", "pipe"] });
+  const exited = new Promise(done => held.once("exit", done));
+  let out = "", err = "";
+  held.stderr.on("data", chunk => { err += chunk; });
+  const pid = await new Promise((ready, failed) => {
+    const timer = setTimeout(() => failed(Error("the release's coding workspace did not open within a minute")), 60_000);
+    held.stdout.on("data", chunk => { out += chunk; const found = /\{"held":(\d+)\}/.exec(out); if (found) { clearTimeout(timer); ready(Number(found[1])); } });
+    held.once("exit", code => { clearTimeout(timer); failed(Error(`the release's coding workspace did not open (exit ${code}):\n${tail(err)}`)); });
+  }).catch(async error => { held.kill("SIGKILL"); await exited; throw error; });
+  held.kill("SIGKILL");
+  await exited;
+  return pid;
+}
+
 /** Read the database the way the candidate shows it: completed tasks, tables, and the leftover record. */
 async function inspect({ candidateDist, databaseFile, evidenceRoot, completed, leftoverRun }) {
   const { DatabaseSync } = await import("node:sqlite");
@@ -279,6 +337,14 @@ async function onePath(version, { candidate, candidateDist, candidateVersion, ta
   step("npm i -g", () => installPublished(version, prefix, env));
   const installed = realpathSync(join(prefix, "lib", "node_modules", "toolroll", "dist"));
   const seeded = step("database", () => child("seed", { dist: installed, stateDir, repo: join(home, "projects", "shop") }, env, `${version}'s database`));
+  if (existsSync(join(installed, "coding-workspace.js"))) {
+    const at = Date.now();
+    try {
+      const pid = await killedCodingOwner({ dist: installed, databaseFile: seeded.databaseFile }, env);
+      child("release", { candidate, candidateDist, databaseFile: seeded.databaseFile, pid }, env, "releasing the killed release's coding owner record");
+    } catch (error) { throw Object.assign(error, { step: "stale coding owner" }); }
+    steps.push(`stale coding owner released (${Math.round((Date.now() - at) / 1000)} s)`);
+  }
   // The same database and installation, kept apart for the npm route.
   const npmHome = join(work, `home-${version}-npm`), npmPrefix = join(npmHome, "global"), npmState = join(npmHome, ".toolroll");
   cpSync(home, npmHome, { recursive: true, verbatimSymlinks: true });
@@ -325,7 +391,7 @@ async function main() {
   if (!existsSync(join(candidateDist, "bin.js"))) throw Error(`${candidate} has no built dist; build it first.`);
   const candidateVersion = JSON.parse(readFileSync(join(candidate, "package.json"), "utf8")).version;
   const versions = flag("versions")?.split(",").filter(Boolean)
-    ?? lastPublished(JSON.parse(must(sh("npm", ["view", "toolroll", "versions", "--json"]), "npm view toolroll versions")));
+    ?? upgradeVersions(JSON.parse(must(sh("npm", ["view", "toolroll", "versions", "--json"]), "npm view toolroll versions")));
   const work = realpathSync(mkdtempSync(join(tmpdir(), "upgrade-path-")));
   console.log(`Upgrade path: ${versions.join(", ")} → ${candidateVersion} (${candidate})`);
   let failed = 0;
@@ -349,7 +415,7 @@ async function main() {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === SELF) {
-  const modes = { seed, facts, stage, inspect };
+  const modes = { seed, facts, stage, inspect, hold, release };
   const mode = Object.keys(modes).find(name => args[0] === `--${name}`);
   if (mode) {
     modes[mode](JSON.parse(args[1])).then(value => { process.stdout.write(`\n${JSON.stringify(value)}\n`); }, error => { process.stderr.write(`${error?.stack ?? error}\n`); process.exitCode = 1; });

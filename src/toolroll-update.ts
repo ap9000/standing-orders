@@ -32,7 +32,8 @@ import type { DatabaseSync } from "node:sqlite";
 import { createRequire } from "node:module";
 import { clearWords, durableJson, LINGERING_LIMIT_MS, lingeringRun, lingeringWords, settleLeftoverRecords, sqliteLock, desktopUpdateWaitingOf, stoppedWaitingWords, updateWaitingWords, verifiedDatabaseBackup, type LingeringRun, type UpdateWaiting } from "./desktop-update.js";
 import { activeUpdateWork, freezeUpdateGate, installUpdateGate, removeUpdateGate, updateAdmissionPaused, updateGateOwned } from "./desktop-update-gate.js";
-import { assertCodingUpdateStopped, backupCodingCatalog, codingCatalogExists, removeCodingUpdateGate } from "./coding-update.js";
+import { processMayBeAlive } from "./process-liveness.js";
+import { assertCodingUpdateStopped, backupCodingCatalog, codingCatalogExists, releaseStaleCodingOwner, removeCodingUpdateGate, type ReleasedCodingOwner } from "./coding-update.js";
 import { installLaunchdService, launchdPlist, stopLaunchdService, writeFileDurably, type SupervisorRunner } from "./daemon.js";
 import { NAME } from "./names.js";
 import { isNewer, REGISTRY } from "./releases.js";
@@ -96,6 +97,8 @@ export type RuntimeUpdateJournal = {
   /** The restore put the backup back: a retried restore never puts it back again (what was written since belongs to
    * the restored version and would be lost), and it keeps a fresh copy aside before every attempt until then. */
   restoredDatabase?: boolean;
+  /** A stale coding owner record this run released after proving its processes gone. */
+  codingOwnerReleased?: ReleasedCodingOwner;
   seen?: boolean;
   /** The finished run the update is waiting on (or stopped waiting on): what is in the way and the command that
    * clears it. Absent while it waits on ordinary running work. */
@@ -783,7 +786,15 @@ async function driveRuntimeUpdate(j: RuntimeUpdateJournal, system: UpdateSystem)
       await stopServices(j, system, unit, watches);
       refuseWhileWatching(j, system);
       const db = new (sqlite().DatabaseSync)(j.databaseFile, { readOnly: true });
-      try { assertCodingUpdateStopped(db); } finally { db.close(); }
+      try {
+        // An older runtime killed before its close left its owner record behind: released once its processes are proved gone.
+        const released = releaseStaleCodingOwner(db, [...j.service?.pids ?? [], ...(j.watches ?? []).flatMap(w => w.pids)], (pid, group) => system.processAlive(pid) || processMayBeAlive(pid, group));
+        if (released !== null) {
+          j.codingOwnerReleased = released;
+          ledger(j.databaseFile, system.now(), j.actor, "toolroll coding owner released", "released", `${j.from.version} stopped without releasing the coding workspace; process ${released.pid}${released.nativePid === null ? "" : ` and agent ${released.nativePid}`} proved gone`);
+        }
+        assertCodingUpdateStopped(db);
+      } finally { db.close(); }
       const backup = join(j.stageDir, existsSync(join(j.stageDir, "orders.backup.db")) ? `orders.backup.${randomUUID()}.db` : "orders.backup.db");
       j.backupHash = await verifiedDatabaseBackup(j.databaseFile, backup, j.id, async () => { await codingBackup(j); }); j.backupPath = backup;
       save(j, "backing-up", "Database and coding catalog backed up.", system.now());
@@ -1145,7 +1156,10 @@ export function machineSystem(home = homedir(), env: Record<string, string | und
     servicePids: async unit => {
       const printed = await supervise("launchctl", ["print", `${domain}/${labelOf(unit)}`]);
       const pid = Number(printed.stdout.match(/\n\s*pid = (\d+)/)?.[1]);
-      return printed.code === 0 && pid > 1 ? [pid] : [];
+      if (printed.code !== 0 || !(pid > 1)) return [];
+      // Its `up` child too: the process that owns the coding catalog, so its exit is proved as well.
+      const children = await supervise("pgrep", ["-P", String(pid)]);
+      return [pid, ...(children.code === 0 ? children.stdout.trim().split(/\s+/).map(Number).filter(one => Number.isSafeInteger(one) && one > 1) : [])];
     },
     stopService: async unit => {
       // As long as a watch's toolroll up takes to exit.
