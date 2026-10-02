@@ -251,7 +251,21 @@ CREATE TABLE IF NOT EXISTS project_mute (
 const SECURITY_KINDS = new Set(["secret-detected", "security-release"]);
 /** A failure that leaves nothing for the lead to try: the attempts are spent. */
 const SPENT_KINDS = new Set(["attempts-exhausted", "plan-attempts-exhausted"]);
+/** What stops a finished run reading stopped (Store.stopQuiescenceFact). */
+export type StopFactKind = "open" | "alive" | "elsewhere" | "unprovable" | "unknown";
 export type TaskAct = "filed" | "approved" | "cancelled" | "completed" | "asked";
+/** Store.stopQuiescenceFact, read safely: a deploy proves completion with this code over the INSTALLED runtime's store,
+ * which may predate the method. There the older stopQuiescenceProblem decides, and its words give the kind. */
+export function stopFactOf(store: Pick<Store, "stopQuiescenceProblem"> & Partial<Pick<Store, "stopQuiescenceFact">>, runId: number): { run: number; kind: StopFactKind; problem: string } | null {
+  if (typeof store.stopQuiescenceFact === "function") return store.stopQuiescenceFact(runId);
+  const problem = store.stopQuiescenceProblem(runId);
+  if (problem === null) return null;
+  const kind: StopFactKind = /still open|does not exist/.test(problem) ? "open"
+    : /another host/.test(problem) ? "elsewhere"
+    : /may still be running|still has|held by|has not finished|still has members/.test(problem) ? "alive"
+    : /cannot be proven|could not be established|incomplete native/.test(problem) ? "unknown" : "unprovable";
+  return { run: Number(/run #(\d+)/.exec(problem)?.[1] ?? runId), kind, problem };
+}
 export type TaskActRow = { act: TaskAct; account: string; lead: boolean; person: string | null; why: string | null; at: string };
 
 /** Settings → Integrations (no version bump): each integration's last check. `outcome` is ok, failed, or absent (the check found
@@ -12012,6 +12026,11 @@ export class Store {
     this.db.prepare("UPDATE worktree SET setup_digest = ? WHERE path = ?").run(digest, path);
   }
 
+  /** The checkout no longer holds what its setup made (its dependencies were dropped): the next lease runs setup again. */
+  forgetWorktreeSetup(path: string): void {
+    this.db.prepare("UPDATE worktree SET setup_digest = NULL WHERE path = ?").run(path);
+  }
+
   // ---- verify command (Priority 2) ---------------------------------------
 
   /**
@@ -15205,6 +15224,20 @@ export class Store {
     return Number(row?.["n"] ?? 0);
   }
 
+  /** Why a finished result can't be built again on the same filing: it was
+   * verified, attested or accepted, or its branch was published (revised
+   * through its pull request). Null when `requeueTask` may run it again. */
+  finalResultReason(runId: number): "accepted-result" | "published" | null {
+    const verdict = this.proofVerdictFor(runId);
+    if (verdict !== null && (verdict.verdict === "verified" || verdict.verdict === "attested")) return "accepted-result";
+    if (this.proofAcceptance(runId) !== null) return "accepted-result";
+    // An intent that never pushed is not a publication; a pushed or
+    // opened branch is, and is revised through its pull request.
+    const publication = this.publicationForRun(runId);
+    if (publication !== null && (publication.state === "pushed" || publication.state === "opened")) return "published";
+    return null;
+  }
+
   requeueTask(
     taskId: string,
     by: string,
@@ -15249,13 +15282,8 @@ export class Store {
           if (incidents.length === 0) return { ok: false as const, reason: "not-stalled" as const };
         } else {
           rejectedRun = Number(last["id"]);
-          const verdict = this.proofVerdictFor(rejectedRun);
-          if (verdict !== null && (verdict.verdict === "verified" || verdict.verdict === "attested")) return { ok: false as const, reason: "accepted-result" as const };
-          if (this.proofAcceptance(rejectedRun) !== null) return { ok: false as const, reason: "accepted-result" as const };
-          // An intent that never pushed is not a publication; a pushed or
-          // opened branch is, and is revised through its pull request.
-          const publication = this.publicationForRun(rejectedRun);
-          if (publication !== null && (publication.state === "pushed" || publication.state === "opened")) return { ok: false as const, reason: "published" as const };
+          const final = this.finalResultReason(rejectedRun);
+          if (final !== null) return { ok: false as const, reason: final };
         }
       } else if (incidents.length === 0 && state !== "failed") {
         return { ok: false as const, reason: "not-stalled" as const };
@@ -25294,17 +25322,29 @@ export class Store {
   /** Every owned run must have ended, and every retained local process
    * witness must be absent. Read-only probes never authorize PID kills. */
   stopQuiescenceProblem(runId: number): string | null {
+    return this.stopQuiescenceFact(runId)?.problem ?? null;
+  }
+
+  /** The same answer as stopQuiescenceProblem, with which run it names and
+   * what kind of answer it is (needs-you.ts reads it): `alive` while
+   * something of the run may still be running, `elsewhere` when only
+   * another computer can tell, `unprovable` when nothing is known to run
+   * but its exit was never recorded, `unknown` when this computer can't
+   * check at all (both are what `run settle` resolves; only the first may
+   * be called not running). */
+  stopQuiescenceFact(runId: number): { run: number; kind: StopFactKind; problem: string } | null {
+    const fact = (run: number, kind: StopFactKind, problem: string) => ({ run, kind, problem });
     const ids = this.ownedRunsOf(runId);
-    if (ids.length === 0) return `run #${runId} does not exist`;
+    if (ids.length === 0) return fact(runId, "open", `run #${runId} does not exist`);
     for (const id of ids) {
       const run = this.getRun(id)!;
-      if (run.outcome === null) return `run #${id} is still open`;
-      if (ownedProcessCount(runOwnerTag(this, id)) > 0) return `run #${id} still has an owned subprocess`;
+      if (run.outcome === null) return fact(id, "open", `run #${id} is still open`);
+      if (ownedProcessCount(runOwnerTag(this, id)) > 0) return fact(id, "alive", `run #${id} still has an owned subprocess`);
       const held = this.heldSessionOf(id);
-      if (held !== null && held.endedAt === null) return `run #${id}'s held supervisor has not finished shutdown`;
+      if (held !== null && held.endedAt === null) return fact(id, "alive", `run #${id}'s held supervisor has not finished shutdown`);
       const witnesses = this.db.prepare("SELECT * FROM run_process WHERE run = ? ORDER BY id").all(id);
       if (run.providerStartedAt !== null && witnesses.length === 0) {
-        return `run #${id} may have spawned before its process witness was recorded; exit is unproven`;
+        return fact(id, "unprovable", `run #${id} may have spawned before its process witness was recorded; exit is unproven`);
       }
       for (const witness of witnesses) {
         if (witness["exited_at"] !== null) continue;
@@ -25315,32 +25355,41 @@ export class Store {
         // object alike are gone. Every other case keeps the conservative
         // road below.
         if (provenDeadByBootChange({ host, bootId })) continue;
-        if (host !== hostname()) return `run #${id}'s process belongs to another host; exit is unproven here`;
+        if (host !== hostname()) return fact(id, "elsewhere", `run #${id}'s process belongs to another host; exit is unproven here`);
         const backend = witness["containment"] === null || witness["containment"] === undefined ? null : String(witness["containment"]);
         const container = witness["container"] === null || witness["container"] === undefined ? null : String(witness["container"]);
         if (backend !== null || container !== null) {
-          if (backend === null || container === null) return `run #${id} has incomplete native containment custody`;
+          if (backend === null || container === null) return fact(id, "unknown", `run #${id} has incomplete native containment custody`);
           if (witness["container_empty_at"] !== null) continue;
           // A native witness settles ONLY on the OS's word: the object is
           // proven empty, or it is gone (an OS object is removable only
           // when empty). A transport exit never proved it.
           const state = containerEmptiness(backend, container, process.platform, witness["container_identity"] == null ? null : String(witness["container_identity"]));
-          if (state === "populated") return `run #${id}'s ${backend} object ${container} still has members`;
-          if (state === "unknown") return `run #${id}'s ${backend} object ${container} cannot be proven empty from here`;
+          if (state === "populated") return fact(id, "alive", `run #${id}'s ${backend} object ${container} still has members`);
+          if (state === "unknown") return fact(id, "unknown", `run #${id}'s ${backend} object ${container} cannot be proven empty from here`);
           continue;
         }
-        if (witness["pid"] === null) return `run #${id} has an incomplete spawn witness; exit is unproven`;
+        if (witness["pid"] === null) return fact(id, "unprovable", `run #${id} has an incomplete spawn witness; exit is unproven`);
         const pid = Number(witness["pid"]);
-        if (processMayBeAlive(pid, witness["process_group"] === 1, { observedAt: witness["observed_at"], finishedAt: run.finishedAt })) return `run #${id}'s process ${pid} may still be running`;
+        if (processMayBeAlive(pid, witness["process_group"] === 1, { observedAt: witness["observed_at"], finishedAt: run.finishedAt })) return fact(id, "alive", `run #${id}'s process ${pid} may still be running`);
       }
       if (run.worktree !== null) {
         try {
           const occupied = worktreeProcessOccupancy(run.worktree);
-          if (occupied.held) return `run #${id}'s workspace is still held by process ${occupied.by}`;
-        } catch { return `run #${id}'s workspace occupancy could not be established`; }
+          if (occupied.held) return fact(id, "alive", `run #${id}'s workspace is still held by process ${occupied.by}`);
+        } catch {
+          // An unreadable workspace note is no proof either way; an approver's recorded word settles it.
+          if (!this.workspaceConfirmedByApprover(id)) return fact(id, "unknown", `run #${id}'s workspace occupancy could not be established`);
+        }
       }
     }
     return null;
+  }
+
+  /** `run settle` recorded an approver's word that a run whose workspace
+   * note couldn't be read has stopped. */
+  private workspaceConfirmedByApprover(runId: number): boolean {
+    return this.db.prepare("SELECT 1 FROM action_ledger WHERE run_id = ? AND action = 'workspace settled by approver' LIMIT 1").get(runId) !== undefined;
   }
 
   reserveRunProcess(runId: number, now: Date, group = true): number {
@@ -25357,6 +25406,10 @@ export class Store {
     const rows = only === undefined
       ? this.db.prepare("SELECT * FROM run_process WHERE run = ? AND exited_at IS NULL").all(runId)
       : this.db.prepare("SELECT * FROM run_process WHERE run = ? AND pid = ? AND process_group = ? AND exited_at IS NULL").all(runId, only.pid, only.group ? 1 : 0);
+    // A finished run's witness gets the same proof the deploy's quiescence
+    // check uses: ESRCH, or a process now holding the pid that was born after
+    // the run ended. An open run has no finish time, so only ESRCH counts.
+    const finishedAt = this.getRun(runId)?.finishedAt ?? null;
     let recorded = 0;
     for (const row of rows) {
       const host = String(row["host"]), bootId = row["boot_id"] == null ? null : String(row["boot_id"]);
@@ -25368,9 +25421,8 @@ export class Store {
         if (backend !== null || container !== null) {
           gone = backend !== null && container !== null && (row["container_empty_at"] != null || containerEmptiness(backend, container, process.platform, row["container_identity"] == null ? null : String(row["container_identity"])) === "empty");
         } else {
-          // Do not borrow the run's finish time or guess a legacy spawn time.
-          // With no historical witness argument only ESRCH proves absence.
-          gone = row["pid"] != null && !processMayBeAlive(Number(row["pid"]), row["process_group"] === 1);
+          gone = row["pid"] != null && !processMayBeAlive(Number(row["pid"]), row["process_group"] === 1,
+            finishedAt === null ? undefined : { observedAt: row["observed_at"], finishedAt });
         }
       }
       if (gone) recorded += Number(this.db.prepare(`UPDATE run_process SET exited_at = ?
@@ -25379,6 +25431,24 @@ export class Store {
         .run(now.toISOString(), row["id"], runId, row["pid"], row["host"], row["process_group"], row["observed_at"], row["boot_id"], row["containment"], row["container"], row["container_identity"]).changes);
     }
     return recorded;
+  }
+
+  /** The reconcile road for a finished run whose process outlived its
+   * finish: once each process is provably gone, its exit is recorded, so
+   * the task stops waiting on a person by itself. A run that can't be proven
+   * yet stays open and is passed over, never holding newer runs behind it:
+   * every finished run is visited, a batch at a time. Never signals. */
+  recordFinishedRunExits(now: Date, batch = 200): number {
+    const page = this.db.prepare(`SELECT DISTINCT p.run FROM run_process p JOIN run r ON r.id = p.run
+      WHERE p.exited_at IS NULL AND p.host = ? AND p.run > ? AND r.outcome IS NOT NULL AND r.finished_at IS NOT NULL
+      ORDER BY p.run LIMIT ?`);
+    let recorded = 0;
+    for (let after = 0; ;) {
+      const runs = page.all(hostname(), after, batch).map(row => Number(row["run"]));
+      for (const run of runs) recorded += this.recordRunProcessExits(run, now);
+      if (runs.length < batch) return recorded;
+      after = runs[runs.length - 1]!;
+    }
   }
 
   finishUnspawnedProcess(witness: number, now: Date): void {
@@ -25464,10 +25534,36 @@ export class Store {
           return alive(`run #${args.runId}'s ${String(row["containment"])} object ${String(row["container"])} still has members`);
         }
       }
-      if (open.length === 0) return { ok: true as const, witnesses: [], repeated: true };
+      // A workspace still held by a live process refuses; one whose note can't
+      // be read is settled by the approver's word, in the ledger.
+      let workspace = false;
+      if (run.worktree !== null) {
+        try {
+          const occupied = worktreeProcessOccupancy(run.worktree);
+          if (occupied.held) return alive(`run #${args.runId}'s workspace is still held by process ${occupied.by}`);
+        } catch { workspace = !this.workspaceConfirmedByApprover(args.runId); }
+      }
+      const ref = this.refById(run.taskRef);
+      if (workspace) {
+        this.recordAction({ at: now.toISOString(), actor: args.by, repo: ref?.repo ?? null, taskId: ref?.externalId ?? null, runId: args.runId,
+          action: "workspace settled by approver", outcome: run.worktree ?? "", source: "request", detail: args.why });
+      }
+      // A run that may have spawned before any witness was written has none
+      // to settle: the approver's word is recorded as one ended witness.
+      if (rows.length === 0 && run.providerStartedAt !== null) {
+        const id = Number(this.db.prepare("INSERT INTO run_process (run,host,process_group,observed_at,boot_id,exited_at) VALUES (?,?,0,?,?,?)")
+          .run(args.runId, hostname(), now.toISOString(), currentBootId(), now.toISOString()).lastInsertRowid);
+        this.recordAction({ at: now.toISOString(), actor: args.by, repo: ref?.repo ?? null, taskId: ref?.externalId ?? null, runId: args.runId,
+          action: "process witness settled by approver", outcome: `witness ${id}`, source: "request", detail: args.why });
+        this.settleQuiescentStops(now);
+        return { ok: true as const, witnesses: [id], repeated: false };
+      }
+      if (open.length === 0) {
+        if (workspace) this.settleQuiescentStops(now);
+        return { ok: true as const, witnesses: [], repeated: !workspace };
+      }
       const ids = open.map(row => Number(row["id"]));
       for (const id of ids) this.db.prepare("UPDATE run_process SET exited_at = ? WHERE id = ? AND run = ? AND exited_at IS NULL").run(now.toISOString(), id, args.runId);
-      const ref = this.refById(run.taskRef);
       this.recordAction({ at: now.toISOString(), actor: args.by, repo: ref?.repo ?? null, taskId: ref?.externalId ?? null, runId: args.runId,
         action: "process witness settled by approver", outcome: `witness ${ids.join(", ")}`, source: "request", detail: args.why });
       this.settleQuiescentStops(now);

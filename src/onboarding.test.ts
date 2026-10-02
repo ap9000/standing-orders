@@ -186,7 +186,9 @@ test("with no agent signed in, Chat shows the install-and-sign-in command for th
   expect(await (await fetch(`${base}/lead/status`, { headers: { cookie } })).json()).toMatchObject({ lead: "off", agent: false });
   // The person runs the command; the next check finds it and the lead turns on.
   signedIn = "claude";
-  await new Promise(done => setTimeout(done, 4100));
+  // The next check is due 4 s on: move the clock, not the wall.
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(Date.now() + 4100);
   expect(await (await fetch(`${base}/lead/status`, { headers: { cookie } })).json()).toMatchObject({ lead: "on", agent: true });
   expect(store.getChatConfig()?.provider).toBe("claude-subscription");
   expect((await fetch(`${base}/lead/status`, { redirect: "manual" })).status).toBe(303);
@@ -206,7 +208,9 @@ test("Settings → Lead: one line, the full form under Advanced, and a lead turn
     body: new URLSearchParams({ csrf, return: "/settings/lead", off: "1", token: password }) });
   expect(off.headers.get("location")).toMatch(/^\/settings\/lead\?said=/);
   expect(store.getChatConfig()).toBeNull();
-  await new Promise(done => setTimeout(done, 4100));
+  // The next check is due 4 s on: move the clock, not the wall.
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(Date.now() + 4100);
   expect(await (await fetch(`${base}/lead/status`, { headers: { cookie } })).json()).toMatchObject({ lead: "off", agent: true });
   expect(store.getChatConfig()).toBeNull();
   // One tap turns it back on with the signed-in agent; no password, it spends no dollars.

@@ -11,6 +11,8 @@ export function browserWorkActionHref(item: WorkIndexItem): string | null {
   const { taskId, runId, decisionId } = action.target;
   if (decisionId !== null) return `/d/${decisionId}`;
   if (action.code === 'inspect-decisions') return '/';
+  if (action.code === 'sign-in') return '/settings#providers';
+  if (action.code === 'confirm-stopped') return `/t/${encodeURIComponent(item.rootId)}#confirm-stopped`;
   if (action.code === 'open-result' && runId !== null) return chatResultHref(taskId, runId);
   if (action.code === 'open-pr' && /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+$/.test(item.publicationUrl ?? '')) return item.publicationUrl!;
   if (runId !== null && (action.code === 'open-pr' || action.code === 'retry-review')) {

@@ -155,6 +155,9 @@ export function reviewPlane(store: Store, now: Date, canSee: (repo: string | nul
     WHERE task.updated_at <= ? AND (task.state IN ('queued', 'running') OR (task.state = 'done' AND task.updated_at >= ?)) ORDER BY task.updated_at LIMIT 500`).all(waited, readyFrom);
   for (const row of tasks) {
     if (!canSee(str(row["repo"]))) continue;
+    // A version a later revision replaced never waits on its own.
+    const family = store.taskFamilyOf(String(row["id"]), null, true);
+    if (family !== null && family.current.id !== String(row["id"])) continue;
     const snapshot = taskWaitSnapshot(store, String(row["id"]), now);
     if (snapshot === null || (snapshot.reason !== "needs-person" && snapshot.reason !== "ready")) continue;
     const days = Math.floor((now.getTime() - Date.parse(String(row["updated_at"]))) / 86_400_000);

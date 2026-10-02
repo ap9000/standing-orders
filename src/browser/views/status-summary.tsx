@@ -6,7 +6,7 @@
 import { AlertTriangle, Check, ChevronRight, Circle, CircleDot, X } from "lucide-react";
 import type { ReactNode } from "react";
 import type { DetailMark, HeadlineTone, StatusDetail, TaskStatus } from "../../task-status.js";
-import { cn } from "../components/ui/index.js";
+import { Button, Input, cn } from "../components/ui/index.js";
 
 export const HEADLINE_DOT: Record<HeadlineTone, string> = {
   neutral: "bg-muted-foreground", live: "bg-info", attention: "bg-attention",
@@ -80,4 +80,29 @@ export function HeadlineBadge({ label, tone, className, ...rest }: { label: stri
     headline === "attention" ? "bg-attention-soft text-attention" : "bg-neutral-soft text-neutral-ink", className)}>
     <span aria-hidden="true" className={cn("size-1.5 shrink-0 rounded-full", headline === "ready" ? "bg-transparent ring-[1.5px] ring-inset ring-success" : HEADLINE_DOT[headline])} />{label}
   </span>;
+}
+
+/** Confirm it stopped, behind the password: the one form for the task and
+ * result pages (an approver's act, the same record as `toolroll run settle`).
+ * `checked`: Toolroll can't check the build, so the approver says they did. */
+export function ConfirmStoppedForm({ form, csrf, label = "Confirm it stopped" }: { form: { action: string; run: number; returnTo?: string; checked?: boolean }; csrf: string; label?: string }) {
+  return <form method="post" action={form.action} id="confirm-stopped" data-confirm-stopped={form.run} className="flex flex-wrap items-center gap-2 phone:w-full">
+    <input type="hidden" name="csrf" value={csrf} />
+    <input type="hidden" name="run" value={String(form.run)} />
+    {form.returnTo !== undefined && <input type="hidden" name="return" value={form.returnTo} />}
+    {form.checked === true && <label className="flex min-h-11 items-center gap-2 text-sm phone:w-full">
+      <input type="checkbox" name="checked" value="yes" required className="size-4" />Nothing from build #{form.run} is running
+    </label>}
+    <Input type="password" name="token" autoComplete="current-password" required aria-label="Your password" placeholder="Your password" className="h-9 w-44 phone:h-11 phone:w-full" />
+    <Button type="submit" variant="attention" className="phone:w-full">{label}</Button>
+  </form>;
+}
+
+/** Build again, for a result built to an earlier plan: one filled button, the
+ * task page's requeue (it runs again on the same filing, under the current plan). */
+export function RebuildForm({ action, csrf, label = "Build again" }: { action: string; csrf: string; label?: string }) {
+  return <form method="post" action={action} data-rebuild className="phone:w-full">
+    <input type="hidden" name="csrf" value={csrf} />
+    <Button type="submit" variant="attention" className="phone:w-full" data-primary-action>{label}</Button>
+  </form>;
 }

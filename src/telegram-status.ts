@@ -4,7 +4,7 @@ import { manualReviewOnly } from "./proof.js";
  * No provider calls, repository access, new workflow state, or inferred success. */
 import { diagnoseTaskDispatch, withDispatchDiagnoses, type DispatchDiagnosis } from "./dispatch.js";
 import type { Notification, Store } from "./store.js";
-import { COMPLETION_ACTION } from "./result-completion.js";
+import { familyCompleted } from "./result-completion.js";
 import { plainReasonOf, stageOfDispatch, taskStatusOf, type TaskStatus } from "./task-status.js";
 import { CHAT_CONTROLS, chatControlHref, chatResultHref, type ChatControl } from "./chat-controls.js";
 
@@ -58,8 +58,8 @@ export function projectLabel(repo: string): string {
 
 /** The shared headline (task-status.ts) for a dispatch diagnosis on the phone. */
 function headlineFor(store: Store, id: string, d: DispatchDiagnosis): TaskStatus {
-  const completed = d.code === "complete" && store.handle.prepare("SELECT 1 FROM action_ledger WHERE task_id = ? AND action = ? AND source = 'work' LIMIT 1")
-    .get(store.taskFamilyOf(id, null, true)?.root.id ?? id, COMPLETION_ACTION) !== undefined;
+  // Any version of a completed family reads Complete, as taskWaitSnapshot says.
+  const completed = d.code === "complete" && familyCompleted(store, id);
   const read = stageOfDispatch(d, { completed });
   const finished = read.stage === "finished" || read.stage === "complete" || read.stage === "failed";
   return taskStatusOf({ stage: read.stage, ...(read.need === undefined ? {} : { need: read.need }), reason: finished ? null : plainReasonOf(read.stage, d.code, d.detail),

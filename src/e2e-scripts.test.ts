@@ -48,6 +48,10 @@ if (args.includes("--groups")) { console.log(JSON.stringify(Object.keys(GROUPS).
 const group = option("--group"), out = option("--output"), only = option("--only") === null ? null : new RegExp(option("--only"), "i");
 const dir = process.env.STAND_IN_DIR, mark = name => join(dir, name.replace(/\W+/g, "-"));
 mkdirSync(out, { recursive: true });
+// What a browser leaves in the temp folder (a profile), and how long the group holds its slot.
+const start = Date.now();
+writeFileSync(join(process.env.TMPDIR, "playwright_chromiumdev_profile-stand-in"), "x");
+await new Promise(done => setTimeout(done, Number(process.env.STAND_IN_HOLD_MS ?? 0)));
 if (group === "gamma" && !existsSync(mark("gamma-crashed"))) {
   writeFileSync(mark("gamma-crashed"), "");
   if (process.env.STAND_IN_LEAVES === "1") {
@@ -74,7 +78,7 @@ for (const [name, needs] of [...GROUPS[group], ["No browser errors on any page",
   results.push({ name, needs, state: ok ? "passed" : "failed", ...(ok ? {} : { error: "Timed out after 1 s waiting for the card" }) });
   console.log((ok ? "PASS  " : "FAIL  ") + name);
 }
-appendFileSync(join(dir, "runs.jsonl"), JSON.stringify({ group, out, ran: results.filter(one => one.state !== "not selected").map(one => one.name), ...(leftover === null ? {} : { leftoverAlive }) }) + "\n");
+appendFileSync(join(dir, "runs.jsonl"), JSON.stringify({ group, out, ran: results.filter(one => one.state !== "not selected").map(one => one.name), tmp: process.env.TMPDIR, start, end: Date.now(), ...(leftover === null ? {} : { leftoverAlive }) }) + "\n");
 const kept = results.filter(one => one.state !== "not selected");
 writeFileSync(join(out, "report.json"), JSON.stringify({ results: kept }));
 writeFileSync(join(out, "report.md"), "# " + group + "\n" + kept.map(one => "- " + one.state + " " + one.name).join("\n") + "\n");
@@ -85,18 +89,18 @@ describe("e2e-parallel.mjs", () => {
   let dir: string | null = null;
   afterEach(() => { if (dir !== null) rmSync(dir, { recursive: true, force: true }); dir = null; });
 
-  const runParallel = (env: Record<string, string> = {}) => {
+  const runParallel = (env: Record<string, string> = {}, extra: string[] = []) => {
     dir = mkdtempSync(join(tmpdir(), "so-e2e-parallel-"));
     const script = join(dir, "stand-in-e2e.mjs");
     writeFileSync(script, STAND_IN);
     let stdout: string, code = 0;
     try {
-      stdout = execFileSync(process.execPath, [resolve("scripts/e2e-parallel.mjs"), script, "--output", join(dir, "out")], { encoding: "utf8", env: { ...process.env, NODE_OPTIONS: "", STAND_IN_DIR: dir, STAND_IN_BIN: resolve("dist/bin.js"), ...env } });
+      stdout = execFileSync(process.execPath, [resolve("scripts/e2e-parallel.mjs"), script, "--output", join(dir, "out"), ...extra], { encoding: "utf8", env: { ...process.env, NODE_OPTIONS: "", STAND_IN_DIR: dir, STAND_IN_BIN: resolve("dist/bin.js"), ...env } });
     } catch (error) {
       const failed = error as { status: number; stdout: string };
       stdout = failed.stdout; code = failed.status;
     }
-    const runs = readFileSync(join(dir, "runs.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line) as { group: string; out: string; ran: string[]; leftoverAlive?: boolean });
+    const runs = readFileSync(join(dir, "runs.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line) as { group: string; out: string; ran: string[]; tmp: string; start: number; end: number; leftoverAlive?: boolean });
     return { stdout, code, runs };
   };
 
@@ -120,6 +124,16 @@ describe("e2e-parallel.mjs", () => {
     // The lines the release check's progress reader matches stay as they were.
     expect(stdout).toMatch(/^✅ alpha\s+[0-9.]+ min$/m);
     expect(stdout).toMatch(/^3 of 3 groups passed \(2 flaky journeys\) in /m);
+  });
+
+  test("groups run at most as many at once as allowed, each in a temp folder of its own that goes when it ends", () => {
+    const { code, stdout, runs } = runParallel({ STAND_IN_HOLD_MS: "150" }, ["--at-once", "1"]);
+    expect(code).toBe(0);
+    expect(stdout).toMatch(/^Running 3 groups, at most 1 at once \([0-9.]+ GB available, about 400 MB each\): alpha, beta, gamma$/m);
+    const spans = [...runs].sort((a, b) => a.start - b.start);
+    for (let at = 1; at < spans.length; at++) expect(spans[at]!.start).toBeGreaterThanOrEqual(spans[at - 1]!.end);
+    expect(new Set(runs.map(one => one.tmp)).size).toBe(runs.length);
+    for (const one of runs) { expect(one.tmp.startsWith(tmpdir())).toBe(true); expect(existsSync(one.tmp)).toBe(false); }
   });
 
   test("a console error from a journey that passed is never retried away: the whole group runs again and fails", () => {

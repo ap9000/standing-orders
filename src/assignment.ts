@@ -6,7 +6,7 @@ import { currentActor, withActor } from "./actor.js";
 import { replacedWords } from "./task-status.js";
 import { COMPLETION_ACTION, familyChangedFiles } from "./result-completion.js";
 import { homedir } from "node:os";
-import { readSchemaVersion, type Store, type ProofVerdictRow, type ProofAcceptanceRow, type Artifact } from "./store.js";
+import { readSchemaVersion, stopFactOf, type Store, type ProofVerdictRow, type ProofAcceptanceRow, type Artifact } from "./store.js";
 import { approvalOf } from "./scope.js";
 import { openWorkDecisionOf, taskWorkSummaryOf, workDecisionAction, type WorkAction, type WorkSummaryAccess } from "./work-summary.js";
 import { evidenceRoot, readVerifiedArtifact, readVerifiedReport } from "./evidence.js";
@@ -17,6 +17,8 @@ import { historicalAssessmentReason } from "./assignment-presentation.js";
 import { runCheckLevel, type CheckLevel } from "./check-levels.js";
 import { followUpChecksOf, withFollowUps } from "./result-follow-ups.js";
 import { buildReviewOf, findingWords, type BuildReviewView } from "./review-switch.js";
+import { NEEDS, WAITS, processNeedOf, type NeedKey, type WaitKey } from "./needs-you.js";
+import { assignmentStageOf } from "./task-status.js";
 
 export type AssignmentAccess = WorkSummaryAccess;
 export type AssignmentOwner = { kind: "coordinator" | "lead"; id: string; label: string };
@@ -57,6 +59,8 @@ export type AssignmentSnapshot = {
    * pending, HIGH findings, suggested follow-ups (MEDIUM/LOW), or not reviewed. */
   review: BuildReviewView | null;
   deployment: { status: "not-recorded" };
+  /** What this assignment asks of a person, or waits for when no person can act (needs-you.ts). */
+  need?: { key: NeedKey; build: number | null } | { wait: WaitKey; build: number | null } | null;
 };
 
 /** Status-first handoff for routine reads. Fetch get_assignment only when
@@ -207,7 +211,9 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
   let detail = work.status.detail;
   let primaryAction = work.primaryAction;
   const live = work.liveRunId !== null || work.status.token === "running";
-  const processProblem = result === null ? null : store.stopQuiescenceProblem(result.id);
+  const processFact = result === null ? null : stopFactOf(store, result.id);
+  const processProblem = processFact?.problem ?? null;
+  let need: AssignmentSnapshot["need"] = null;
   // The exact completed result, scope, family and custody fences apply to
   // every deliverable. Human acceptance remains its own recorded authority;
   // it never changes a machine verdict or supplies a missing report.
@@ -228,10 +234,22 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
     primaryAction = successor === null ? { code: "inspect-task", label: "View assignment", target: { taskId: current.id, runId: null, decisionId: null }, access: "read", retry: "read-again" }
       : { code: "inspect-task", label: `Open ${successor}`, target: { taskId: successor, runId: null, decisionId: null }, access: "read", retry: "read-again" };
   }
-  else if (!live && processProblem !== null && result !== null) {
-    state = "needs-decision";
-    detail = processProblem;
-    primaryAction = { code: "inspect-run", label: "Inspect run", target: { taskId: current.id, runId: result.id, decisionId: null }, access: "read", retry: "read-again" };
+  else if (!live && processFact !== null && result !== null) {
+    // Toolroll can't confirm the build stopped. A person confirms it when
+    // nothing of it may still run; otherwise the work waits, needing no one.
+    const process = processNeedOf(processFact)!;
+    if ("need" in process) {
+      state = "needs-decision";
+      detail = NEEDS[process.need].sentence({ build: process.build });
+      primaryAction = { code: "confirm-stopped", label: NEEDS[process.need].action.label, target: { taskId: current.id, runId: process.build, decisionId: null },
+        access: access.principal === "operator" ? "operator-control" : "operator-handoff", retry: "refresh-before-acting" };
+      need = { key: process.need, build: process.build };
+    } else {
+      state = "working";
+      detail = WAITS[process.wait]({ build: process.build });
+      primaryAction = { code: "inspect-run", label: "View the build", target: { taskId: current.id, runId: process.build, decisionId: null }, access: "read", retry: "read-again" };
+      need = { wait: process.wait, build: process.build };
+    }
   }
   else if (current.state === "done" && questions.length > 0 && work.status.tone !== "problem" &&
     !["stopping", "stopped", "review-failed", "review-exhausted"].includes(work.status.token) &&
@@ -273,6 +291,14 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
       ? completionKind === null ? "The research report is missing or incomplete. Inspect the saved report before checking this handoff."
         : "The saved report is awaiting resolution of its current scope or hold."
       : "Inspect the saved result and resolve its remaining execution or scope issue.";
+    // Built to an earlier plan: the result page can't resolve it (accepting would leave it stuck), building again can.
+    if (current.state === "done" && result !== null && scope !== null && scope.termsProblem == null && approvalOf(scope).approved && !!result.scopeDigest && scope.digest !== result.scopeDigest &&
+      store.activeHolds(current.refId, now).length === 0 && unfinished === null && store.currentLiveLease(current.refId, now) === null && store.finalResultReason(result.id) === null) {
+      detail = NEEDS.rebuild.sentence({ build: result.id });
+      primaryAction = { code: "retry-task", label: NEEDS.rebuild.action.label, target: { taskId: current.id, runId: result.id, decisionId: null },
+        access: access.principal === "operator" ? "operator-control" : "operator-handoff", retry: "refresh-before-acting" };
+      need = { key: "rebuild", build: result.id };
+    }
   }
   if (earlierActive.length > 0) {
     attention.push(`${earlierActive.length} earlier task version${earlierActive.length === 1 ? " is" : "s are"} still active.`);
@@ -286,6 +312,12 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
     }
   }
   if (state === "needs-decision") attention.push(detail);
+  // Every Needs you action wears its need's own words (needs-you.ts), on every surface.
+  if (state === "needs-decision" && primaryAction !== null && need === null) {
+    const read = assignmentStageOf({ state, primaryAction, review }, { token: work.status.token, views: work.status.views });
+    // A result review keeps its own, more specific words (See what is missing, Open the failed check).
+    if (read.stage === "needs-you" && read.need !== undefined && read.need !== "other" && read.need !== "review-result") primaryAction = { ...primaryAction, label: NEEDS[read.need].action.label };
+  }
   if (receipt !== null) {
     if (finishedBuild && receipt.checks.status !== "passed") attention.push(receipt.checks.detail);
     if (proof?.verdict !== "verified") attention.push(...(proof?.reasons ?? []).filter(reason => !historicalAssessmentReason(reason)));
@@ -322,7 +354,7 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
   return { version: 1, rootId: family.root.id, activeTaskId: current.id, repo: current.repo, title: family.root.title,
     state, detail, primaryAction, attention: [...new Set(attention)], attempts, owner, receipt, savedContext, completion, handoff,
     publication: publication === null ? null : { state: publication.state, prUrl: publication.prUrl, remoteState: publication.remoteState },
-    review, deployment: { status: "not-recorded" } };
+    review, deployment: { status: "not-recorded" }, ...(need === null ? {} : { need }) };
 }
 
 type MutationResult = { ok: true; assignment: AssignmentSnapshot } | { ok: false; reason: string; message: string };

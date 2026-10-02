@@ -34,12 +34,12 @@ test("v54 keeps scopes, access grants and signed mode bytes; it grants no planne
     expect(upgraded.raw().prepare("SELECT * FROM plan_authorization").all()).toEqual([]);
     expect(modeTermsFromJson(String(modes[0]!.terms_json))).toMatchObject({ planAuto: false, reviewAuto: false });
     upgraded.close();
-    const before = readFileSync(file); openStore(file).close(); expect(readFileSync(file)).toEqual(before);
+    const before = readFileSync(file); openStore(file).close(); expect(readFileSync(file).equals(before)).toBe(true);
     const damaged = new DatabaseSync(file);
     damaged.exec("DROP TABLE service_cursor; UPDATE schema_version SET version=54; ALTER TABLE approver DROP COLUMN projects_json");
     damaged.close();
     const broken = readFileSync(file);
     expect(() => openStore(file)).toThrow("refusing to widen access");
-    expect(readFileSync(file)).toEqual(broken);
+    expect(readFileSync(file).equals(broken)).toBe(true);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

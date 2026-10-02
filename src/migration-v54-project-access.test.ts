@@ -36,12 +36,12 @@ test("v53 upgrades with unchanged account and invite authority; reopening is byt
     upgraded.close();
     const before = readFileSync(file);
     openStore(file).close();
-    expect(readFileSync(file)).toEqual(before);
+    expect(readFileSync(file).equals(before)).toBe(true);
     const damaged = new DatabaseSync(file);
     damaged.exec("ALTER TABLE approver DROP COLUMN projects_json");
     damaged.close();
     const damagedBytes = readFileSync(file);
     expect(() => openStore(file)).toThrow("refusing to widen access");
-    expect(readFileSync(file)).toEqual(damagedBytes);
+    expect(readFileSync(file).equals(damagedBytes)).toBe(true);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

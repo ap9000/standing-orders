@@ -112,6 +112,7 @@ export function Home({ home }: { home: BrowserHome }) {
               <HeadlineBadge label={item.label} tone={item.tone} className="mt-px" />
             </div>
             {item.detail !== "" && <p className="text-[12.5px] leading-snug text-muted-foreground [overflow-wrap:anywhere]">{item.detail}</p>}
+            {item.action != null && <a href={item.action.href} data-catch-up-action className="mt-0.5 inline-flex h-8 w-fit items-center rounded-md bg-attention px-3 text-[12.5px] font-semibold text-on-attention hover:bg-[var(--so-signal-hover)] phone:h-11 phone:w-full phone:justify-center">{item.action.label}</a>}
             <p className="text-[12px] text-muted-foreground">{item.project !== null && <>{item.project} · </>}<time dateTime={item.at} className="tabular-nums">{threadWhen(item.at)}</time></p>
           </li>)}
         </ul>}

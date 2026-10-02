@@ -8,6 +8,14 @@
  *   - the browser journeys (every flows-e2e and app-e2e group) only when the
  *     change touches something a page shows: the console, the server that
  *     renders it, the e2e scripts, or dependencies
+ *   - the upgrade path (scripts/upgrade-path.mjs) only when the change can break
+ *     an update from an installed release: the store, a file that defines a
+ *     table (*_SCHEMA), what a newly switched worker or the deploy's facts
+ *     check reads first (assignment, dispatch, work-summary, review-switch),
+ *     the updaters, or the deploy scripts. Each of the last 3 published
+ *     releases, with a realistic database, moves to this candidate through the
+ *     deploy's facts check, `toolroll update` and `npm i -g` with no manual
+ *     step (needs the npm registry; each release is installed once and cached)
  *   - nothing more for docs, evidence and design notes
  *
  * A package.json or package-lock.json whose only change is the project's own
@@ -17,7 +25,9 @@
  * Everything starts at once: typecheck, build and the unit tests (whose setup
  * waits for this build rather than building again); the journeys start when
  * the build is done, flows-e2e and app-e2e each in parallel groups
- * (scripts/e2e-parallel.mjs).
+ * (scripts/e2e-parallel.mjs). Together they run at most as many browser groups
+ * at once as the memory available allows (~400 MB each, at most 6;
+ * check-memory.mjs), and the summary records the peak memory.
  *
  * The base is origin/main, fetched fresh; files are compared, not ancestry.
  * No difference from main (or no main) means everything runs. `--full` (or TOOLROLL_FULL_CHECK=1) runs
@@ -29,6 +39,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { availableMemory, browserSlots, memoryWords, watchMemory } from "./check-memory.mjs";
 
 const args = process.argv.slice(2);
 const full = args.includes("--full") || process.env.TOOLROLL_FULL_CHECK === "1";
@@ -58,6 +69,13 @@ const BROWSER = [
   /^src\/(mobile-viewport|guarded-html|ledger-view|guides|work-index|lead-status)\.ts$/, /\.css$/, /tailwind/,
   /^scripts\/(app-e2e|flows-e2e|e2e-kit|e2e-parallel|browser-build|postbuild)\.mjs$/, /^package(-lock)?\.json$/,
 ];
+/** Changes an installed release's update to this candidate can trip on (besides any file defining a *_SCHEMA). */
+const UPGRADE = [
+  /^src\/store\.ts$/, /^src\/(assignment|dispatch|work-summary|review-switch)[^/]*\.ts$/,
+  /^src\/(toolroll|desktop|coding)-update[^/]*\.ts$/, /^scripts\/(deploy-[^/]+|upgrade-path)\.mjs$/,
+];
+/** Whether `text` (a source file) defines a table: a `*_SCHEMA` constant. */
+export const definesSchema = text => /^(?:export\s+)?const\s+[A-Z0-9_]+_SCHEMA\b/m.test(text);
 /** Changes no test reads. */
 const NOTHING = [/\.md$/, /^docs\//, /^evidence\//, /^design\//, /^output\//, /^LICENSE$/, /\.png$/];
 /** Where a release bumps the project's own version. */
@@ -80,17 +98,20 @@ export function versionOnly(file, before, after) {
   try { return rest(before) === rest(after); } catch { return false; }
 }
 
-export function planFor(changed, { full: all = false, versionBumps = [] } = {}) {
-  if (all) return { unit: "all", browser: true, why: "a full check was asked for" };
+export function planFor(changed, { full: all = false, versionBumps = [], schemaFiles = [] } = {}) {
+  if (all) return { unit: "all", browser: true, upgrade: true, upgradeWhy: "a full check", why: "a full check was asked for" };
   const bumped = changed.filter(file => versionBumps.includes(file));
   const bump = bumped.length === 0 ? "" : `; only the version changed in ${bumped.join(" and ")}`;
   const code = changed.filter(file => !NOTHING.some(re => re.test(file)) && !bumped.includes(file));
-  if (code.length === 0) return { unit: "none", browser: false, why: bumped.length === 0 ? "only docs, evidence or design notes changed" : `nothing a test reads changed${bump}` };
+  if (code.length === 0) return { unit: "none", browser: false, upgrade: false, why: bumped.length === 0 ? "only docs, evidence or design notes changed" : `nothing a test reads changed${bump}` };
   const wholeUnit = code.find(file => WHOLE_UNIT.some(re => re.test(file)));
   const page = code.find(file => BROWSER.some(re => re.test(file)));
+  const upgrade = code.find(file => !/\.test\.[cm]?[jt]s$/.test(file) && (UPGRADE.some(re => re.test(file)) || schemaFiles.includes(file)));
   return {
     unit: wholeUnit !== undefined ? "all" : "related",
     browser: page !== undefined,
+    upgrade: upgrade !== undefined,
+    ...(upgrade !== undefined ? { upgradeWhy: `${upgrade} changed` } : {}),
     why: [
       wholeUnit !== undefined ? `every unit test (${wholeUnit} changed)` : "unit tests related to the change",
       page !== undefined ? `browser journeys (${page} changed)` : "no browser journeys (nothing a page shows changed)",
@@ -106,6 +127,16 @@ const run = (label, command, argv, dir, env = {}) => new Promise(done => {
   for (const stream of [child.stdout, child.stderr]) stream.on("data", chunk => chunks.push(chunk));
   child.on("close", code => { writeFileSync(log, Buffer.concat(chunks)); done({ label, code: code ?? 1, log, ms: Date.now() - at }); });
 });
+/**
+ * The browser groups the two journey runs may hold at once, shared out: each gets at least one, and with room for
+ * only one in all they run one after the other.
+ */
+export function journeyShares(slots) {
+  if (slots <= 1) return { flows: 1, app: 1, together: false };
+  const flows = Math.floor(slots / 2);
+  return { flows, app: slots - flows, together: true };
+}
+
 const took = ms => ms < 60_000 ? `${Math.round(ms / 1000)} s` : `${Math.round(ms / 6000) / 10} min`;
 
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
@@ -114,10 +145,14 @@ if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).
   const changed = base === null ? [] : git("diff", "--name-only", base, "HEAD").split("\n").filter(Boolean);
   const versionBumps = base === null ? [] : VERSIONED.filter(file => changed.includes(file) && versionOnly(file, tryGit("show", `${base}:${file}`), tryGit("show", `HEAD:${file}`)));
   // No main to compare with, or nothing differs from it (a release of main itself): check everything.
-  const plan = planFor(changed, { full: full || changed.length === 0, versionBumps });
-  console.log(`Release check against ${base === null ? "nothing (origin/main unknown)" : `origin/main ${base.slice(0, 12)}`} (${changed.length} changed files): ${plan.why}.`);
+  const schemaFiles = changed.filter(file => /\.[cm]?[jt]s$/.test(file) && existsSync(file) && definesSchema(readFileSync(file, "utf8")));
+  const plan = planFor(changed, { full: full || changed.length === 0, versionBumps, schemaFiles });
+  // Toolroll's own checkout carries the upgrade path; another project's release check has none.
+  const upgrade = plan.upgrade && existsSync(join("scripts", "upgrade-path.mjs"));
+  console.log(`Release check against ${base === null ? "nothing (origin/main unknown)" : `origin/main ${base.slice(0, 12)}`} (${changed.length} changed files): ${plan.why}${upgrade ? `; the upgrade path from the last 3 releases (${plan.upgradeWhy})` : ""}.`);
   if (planOnly) process.exit(0);
 
+  const memory = watchMemory();
   const dir = mkdtempSync(join(tmpdir(), "release-check-"));
   // The unit tests' setup (test/ensure-build.ts) waits for this file: the build's outcome.
   const built = join(dir, "build-outcome");
@@ -141,24 +176,32 @@ if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).
   const journeys = build.then(one => {
     held = plan.browser && (one.code !== 0 || (typed !== null && typed.code !== 0));
     if (!plan.browser || held) return [];
-    return Promise.all([
-      run("flows", process.execPath, ["scripts/e2e-parallel.mjs", "scripts/flows-e2e.mjs"], dir),
-      run("app", process.execPath, ["scripts/e2e-parallel.mjs", "scripts/app-e2e.mjs", "--skip-build"], dir),
-    ]);
+    const shares = journeyShares(browserSlots(availableMemory()));
+    const flows = () => run("flows", process.execPath, ["scripts/e2e-parallel.mjs", "scripts/flows-e2e.mjs", "--at-once", String(shares.flows)], dir);
+    const app = () => run("app", process.execPath, ["scripts/e2e-parallel.mjs", "scripts/app-e2e.mjs", "--skip-build", "--at-once", String(shares.app)], dir);
+    return shares.together ? Promise.all([flows(), app()]) : flows().then(async one => [one, await app()]);
   });
+  // The upgrade path packs the built candidate: it starts once the build passed.
+  let upgradeHeld = false;
+  const upgraded = build.then(one => {
+    upgradeHeld = upgrade && one.code !== 0;
+    return upgrade && !upgradeHeld ? [run("upgrade", process.execPath, ["scripts/upgrade-path.mjs"], dir)] : [];
+  }).then(list => Promise.all(list));
   const first = await Promise.all([typecheck, build]);
-  const results = [...await Promise.all(units), ...await journeys];
+  const results = [...await Promise.all(units), ...await journeys, ...await upgraded];
   for (const one of [...first, ...results]) { console.log(`== ${one.label}`); console.log(readFileSync(one.log, "utf8")); }
   console.log("== summary");
   console.log(`plan: ${plan.why}`);
   for (const one of first.filter(each => each.code !== 0)) console.log(`${one.label}: exit ${one.code}`);
   for (const one of results) {
     console.log(`${one.label}: exit ${one.code}`);
-    const lines = readFileSync(one.log, "utf8").split("\n").filter(line => /FAIL|Test Files|passed, /.test(line));
+    const lines = readFileSync(one.log, "utf8").split("\n").filter(line => /FAIL|Test Files|passed, |^[✓✗] |^upgrade path:/.test(line));
     for (const line of lines.slice(-5)) console.log(line);
   }
   if (held) console.log("browser journeys not run: the typecheck or build failed");
+  if (upgradeHeld) console.log("upgrade path not run: the build failed");
   if (results.length === 0 && first.every(one => one.code === 0)) console.log("typecheck and build passed; nothing else to run");
   console.log(`took: ${[...first, ...results].map(one => `${one.label} ${took(one.ms)}`).join(", ")}; whole check ${took(Date.now() - started)}`);
+  console.log(memoryWords(memory.stop()));
   process.exitCode = [...first, ...results].some(one => one.code !== 0) ? 1 : 0;
 }

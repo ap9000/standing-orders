@@ -143,6 +143,10 @@ export type BrowserTaskView = {
   statusHtml: string;
   /** The approval ceremony or its updated terms, exactly as signed. */
   approval: string;
+  /** Confirm it stopped, behind the password, when the status asks for it. */
+  confirmStopped?: { action: string; run: number; checked?: boolean } | null;
+  /** Build again, in place, when the status asks for it (a result built to an earlier plan). */
+  rebuild?: { action: string } | null;
   /** Server cards that may need a person now (stop/resume, scope prompt, plan, live attempt). */
   lead: { key: string; html: string }[];
   questions: string;
@@ -209,9 +213,18 @@ export type BrowserResultPanel = {
   request: string | null;
   /** A browser session may attach feedback to this result's sealed diff. */
   canRequest: boolean;
+  /** Needs you: the one action that resolves it, first and filled; `confirm` posts behind the password. */
+  need: BrowserNeedAction | null;
   /** The feedback section holds only the closed form (no notes, revisions or history). */
   requestQuiet: boolean;
 };
+/** A Needs you action: a link, (Confirm it stopped) a form behind the password, (Build again) one
+ * button, or (on the result itself) Accept, which records the person's acceptance; `note` asks why
+ * when the evidence disagrees. */
+export type BrowserNeedAction = { label: string; href: string | null; confirm: { action: string; run: number; returnTo: string; checked?: boolean } | null;
+  accept?: { action: string; run: number; returnTo: string; note: string | null } | null;
+  /** Build again (a result built to an earlier plan): one button, the task page's requeue. */
+  rebuild?: { action: string } | null };
 export type BrowserResultView = {
   kind: 'result';
   results: { title: string; href: string; at: string; status: { label: string; tone: StatusTone } | null; notes: string[]; current: boolean; needsYou: boolean }[];
@@ -388,6 +401,8 @@ export type BrowserCatchUpTab = 'needs-you' | 'ready' | 'running' | 'all';
 export type BrowserCatchUpItem = {
   id: string; title: string; href: string; project: string | null; tab: Exclude<BrowserCatchUpTab, 'all'> | 'finished';
   label: string; tone: StatusTone; detail: string; at: string;
+  /** Needs you: the one action that resolves it. */
+  action?: { label: string; href: string } | null;
 };
 /** Plan-window use stands in for spend: subscriptions don't bill per run. */
 export type BrowserHome = {

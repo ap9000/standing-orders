@@ -11,15 +11,18 @@
  * output) is an amber note on its own row with one action; the exact
  * technical reason stays one tap away in `why`. */
 import type { AssignmentSnapshot } from "./assignment.js";
+import { CODE_NEED, NEEDS, needSentence, waitSentence, type NeedAction, type NeedContext, type NeedKey, type WaitKey } from "./needs-you.js";
+export type { NeedKey, WaitKey } from "./needs-you.js";
 
 /** A cancelled task with a successor reads "Replaced by <id>" everywhere, never "Cancelled". */
 export const replacedWords = (successor: string): string => `Replaced by ${successor}`;
 const REPLACED = /^Replaced by \S+/;
-export const HEADLINES = ["Queued", "Planning", "Needs you", "Building", "Ready for review", "Complete", "Failed", "Stopped"] as const;
+/** Waiting: a reason no person can act on, worded as what it waits for (needs-you.ts). */
+export const HEADLINES = ["Queued", "Planning", "Needs you", "Waiting", "Building", "Ready for review", "Complete", "Failed", "Stopped"] as const;
 export type Headline = (typeof HEADLINES)[number];
 export type HeadlineTone = "neutral" | "live" | "attention" | "ready" | "success" | "danger";
 export const HEADLINE_TONE: Readonly<Record<Headline, HeadlineTone>> = {
-  Queued: "neutral", Planning: "live", "Needs you": "attention", Building: "live",
+  Queued: "neutral", Planning: "live", "Needs you": "attention", Waiting: "neutral", Building: "live",
   "Ready for review": "ready", Complete: "success", Failed: "danger", Stopped: "neutral",
 };
 
@@ -29,10 +32,12 @@ export type DetailKey = "checks" | "pull-request" | "requirements" | "evidence";
 export type DetailMark = "ok" | "running" | "none" | "note" | "failed";
 export type StatusAction = { label: string; href: string | null };
 export type StatusDetail = { key: DetailKey; label: string; text: string; mark: DetailMark; href: string | null; action: StatusAction | null; why: string | null };
-export type TaskStatus = { headline: Headline; tone: HeadlineTone; sentence: string; details: StatusDetail[]; primaryAction: StatusAction | null; why: string[] };
+/** `need`: what a Needs you asks for and the one action that resolves it; null under every other headline. */
+export type TaskStatus = { headline: Headline; tone: HeadlineTone; sentence: string; details: StatusDetail[]; primaryAction: StatusAction | null; why: string[];
+  need?: { key: NeedKey; action: NeedAction } | null };
 
 /** `reviewing`: the one automatic review (build-review.ts) is reading a finished build; it reads Building, not a headline of its own. */
-export type TaskStage = "queued" | "planning" | "needs-you" | "building" | "checking" | "reviewing" | "finished" | "complete" | "failed" | "stopped";
+export type TaskStage = "queued" | "planning" | "needs-you" | "waiting" | "building" | "checking" | "reviewing" | "finished" | "complete" | "failed" | "stopped";
 export type ChecksFact = {
   status: "passed" | "failed" | "running" | "not-run" | "unavailable"; exitCode: number | null; head: string | null;
   /** The check level that ran (check-levels.ts). Off never reads Ready; a quick pass says so. */
@@ -50,8 +55,12 @@ export type PullRequestFact = {
 };
 export type TaskStatusFacts = {
   stage: TaskStage;
-  /** Needs you: what a person is asked for. The sentence names it. */
-  need?: "approval" | "answer" | "sign-in" | "other";
+  /** Needs you: what a person is asked for (needs-you.ts). The sentence names it. */
+  need?: NeedKey;
+  /** Waiting: what the work waits for when no person can act. */
+  wait?: WaitKey;
+  /** The build or agent a need's sentence names. */
+  needContext?: NeedContext;
   /** The recorded reason in plain words, when the stage has one. */
   reason?: string | null;
   /** A research report rather than a code change. */
@@ -75,6 +84,7 @@ export function headlineOf(facts: Pick<TaskStatusFacts, "stage" | "checks" | "re
     case "queued": return "Queued";
     case "planning": return "Planning";
     case "needs-you": return "Needs you";
+    case "waiting": return "Waiting";
     case "building": case "checking": case "reviewing": return "Building";
     case "finished":
       if (facts.report) return "Ready for review";
@@ -93,10 +103,9 @@ function sentenceOf(headline: Headline, facts: TaskStatusFacts): string {
   switch (headline) {
     case "Queued": return reason ?? "Waiting for a worker.";
     case "Planning": return reason ?? "The lead is writing the plan.";
-    // An approval always reads the same way; the plan itself names the work.
-    case "Needs you": return facts.need === "approval" ? "Review the plan and approve it to start." : reason ?? (facts.need === "answer" ? "Answer the question so the work can continue."
-      : facts.need === "sign-in" ? "Sign in again; the task starts on its own after."
-      : "Something needs your decision before the work can continue.");
+    // One plain sentence per need (needs-you.ts); a recorded reason only where the need keeps one.
+    case "Needs you": return needSentence(facts.need ?? "other", reason, facts.needContext);
+    case "Waiting": return waitSentence(facts.wait, reason, facts.needContext);
     case "Building": return facts.stage === "checking" ? "Checks are running on the change."
       : facts.stage === "reviewing" ? "Reviewing the change before it reaches you." : reason ?? "An agent is working on it.";
     case "Ready for review":
@@ -176,8 +185,12 @@ function detailsOf(headline: Headline, facts: TaskStatusFacts): StatusDetail[] {
 
 export function taskStatusOf(facts: TaskStatusFacts): TaskStatus {
   const headline = headlineOf(facts);
+  // Every Needs you carries the one action that resolves it, worded the same everywhere.
+  const need = headline === "Needs you" ? { key: facts.need ?? "other", action: NEEDS[facts.need ?? "other"].action } : null;
+  const ownWords = need !== null && (need.key === "other" || need.key === "review-result") && facts.action != null;
+  const primaryAction = need === null || ownWords ? facts.action ?? null : { label: need.action.label, href: facts.action?.href ?? null };
   return { headline, tone: HEADLINE_TONE[headline], sentence: sentenceOf(headline, facts), details: detailsOf(headline, facts),
-    primaryAction: facts.action ?? null, why: [...new Set(facts.why ?? [])].filter(one => one.trim() !== "") };
+    primaryAction, why: [...new Set(facts.why ?? [])].filter(one => one.trim() !== ""), need };
 }
 
 // ---- reading the existing projections ----------------------------------------
@@ -191,6 +204,7 @@ const CODE_STAGE: Readonly<Record<string, [TaskStage, TaskStatusFacts["need"]?]>
   "signed-out": ["needs-you", "sign-in"],
   "needs-approval": ["needs-you", "approval"],
   "waiting-decision": ["needs-you", "answer"], "decision-queue": ["needs-you", "answer"],
+  "build-stopping": ["waiting"], "other-computer": ["waiting"],
   stopping: ["stopped"], stopped: ["stopped"], paused: ["stopped"], cancelled: ["stopped"],
   failed: ["failed"], "waiting-incident": ["failed"], "checks-failed": ["failed"],
   "ready-to-check": ["finished"], "ready-to-review": ["finished"], "report-ready": ["finished"], "no-change": ["finished"],
@@ -209,10 +223,10 @@ export function plainReasonOf(stage: TaskStage, code: string, detail: string | n
 
 export function stageOfCode(code: string, options: { needsPerson?: boolean; planning?: boolean; operatorHold?: boolean } = {}): { stage: TaskStage; need?: TaskStatusFacts["need"] } {
   if (code === "running" && options.planning) return { stage: "planning" };
-  if (code === "held") return options.operatorHold === false ? { stage: "needs-you", need: "other" } : { stage: "stopped" };
+  if (code === "held") return options.operatorHold === false ? { stage: "needs-you", need: "hold" } : { stage: "stopped" };
   const known = CODE_STAGE[code];
   if (known !== undefined) return known[1] === undefined ? { stage: known[0] } : { stage: known[0], need: known[1] };
-  return options.needsPerson === false ? { stage: "queued" } : { stage: "needs-you", need: "other" };
+  return options.needsPerson === false ? { stage: "queued" } : { stage: "needs-you", need: CODE_NEED[code] ?? "other" };
 }
 
 /** The pull request as the task page's follower reports it, or the bare publication row. */
@@ -236,7 +250,10 @@ export function pullRequestFactOf(publication: { state: string; prNumber?: numbe
 
 /** The assignment's stage. The work status, when the caller read one, names
  * the exact reason (a running planner, a pause, a failed attempt, a sign-in). */
-export function assignmentStageOf(assignment: Pick<AssignmentSnapshot, "state" | "primaryAction"> & { review?: AssignmentSnapshot["review"] }, work?: { token: string; views?: readonly string[] } | null, planning = false): { stage: TaskStage; need?: TaskStatusFacts["need"] } {
+export function assignmentStageOf(assignment: Pick<AssignmentSnapshot, "state" | "primaryAction"> & { review?: AssignmentSnapshot["review"]; need?: AssignmentSnapshot["need"] }, work?: { token: string; views?: readonly string[] } | null, planning = false): { stage: TaskStage; need?: TaskStatusFacts["need"]; wait?: WaitKey } {
+  // The assignment's own reading (a build Toolroll can't confirm stopped) comes first.
+  const own = assignment.need ?? null;
+  if (own !== null && (assignment.state === "working" || assignment.state === "needs-decision")) return "wait" in own ? { stage: "waiting", wait: own.wait } : { stage: "needs-you", need: own.key };
   switch (assignment.state) {
     case "cancelled": return { stage: "stopped" };
     case "complete": return { stage: "complete" };
@@ -250,14 +267,17 @@ export function assignmentStageOf(assignment: Pick<AssignmentSnapshot, "state" |
     case "needs-decision": {
       const action = assignment.primaryAction?.code;
       if (action === "approve-scope") return { stage: "needs-you", need: "approval" };
-      if (action === "answer-decision" || action === "inspect-decisions") return { stage: "needs-you", need: "answer" };
+      if (action === "answer-decision") return { stage: "needs-you", need: "answer" };
+      if (action === "inspect-decisions") return { stage: "needs-you", need: "questions" };
       const token = work?.token ?? "";
       // A failed attempt is Failed. A saved result that still needs a decision
       // (its scope, a hold, a process exit) is Needs you, even if its checks
       // failed: the decision is the next step, and the Checks row says the rest.
       if (token === "failed" || token === "waiting-incident") return { stage: "failed" };
       const read = stageOfCode(token, { needsPerson: true, operatorHold: action === "unhold" });
-      return read.stage === "stopped" ? read : { stage: "needs-you", need: read.need ?? "other" };
+      if (read.stage === "stopped" || read.stage === "waiting") return read;
+      // A saved result that isn't ready keeps its own reading; a task's dispatch reason names its need.
+      return { stage: "needs-you", need: read.need ?? "other" };
     }
   }
 }
@@ -285,11 +305,12 @@ export function assignmentStatusFacts(assignment: AssignmentSnapshot, options: {
   pullRequest?: PullRequestFact | null; action?: StatusAction | null; links?: TaskStatusFacts["links"];
   evidence?: TaskStatusFacts["evidence"]; why?: readonly string[];
 } = {}): TaskStatusFacts {
-  const { stage, need } = assignmentStageOf(assignment, options.work ?? null, options.planning ?? false);
+  const { stage, need, wait } = assignmentStageOf(assignment, options.work ?? null, options.planning ?? false);
+  const build = assignment.need?.build ?? null;
   const receipt = assignment.receipt;
   const finished = stage === "finished" || stage === "complete";
   // A saved result's rows show whenever it is the reason a person is needed, too.
-  const withResult = finished || stage === "failed" || (stage === "needs-you" && receipt !== null);
+  const withResult = finished || stage === "failed" || ((stage === "needs-you" || stage === "waiting") && receipt !== null);
   const report = receipt?.completionKind === "research-report";
   const checks: ChecksFact | null = receipt === null || !withResult ? null
     : { status: receipt.checks.status, exitCode: receipt.checks.exitCode, head: receipt.head,
@@ -299,11 +320,11 @@ export function assignmentStatusFacts(assignment: AssignmentSnapshot, options: {
     : publication === null ? (withResult && !report ? { state: "none" as const, number: null, url: null, ci: null, error: null } : null)
     : pullRequestFactOf(publication);
   // Ready, Complete and Failed speak for themselves; every other stage keeps its recorded reason.
-  const reason = stage === "needs-you" || stage === "stopped" || stage === "queued" || (stage === "failed" && checks?.status !== "failed")
+  const reason = stage === "needs-you" || stage === "waiting" || stage === "stopped" || stage === "queued" || (stage === "failed" && checks?.status !== "failed")
     ? stage === "stopped" && assignment.state === "cancelled" ? REPLACED.test(assignment.detail) ? assignment.detail : "Cancelled. Nothing else will run." : plainReasonOf(stage, options.work?.token ?? "", options.work?.detail ?? assignment.detail)
     : null;
   return {
-    stage, ...(need === undefined ? {} : { need }), reason, report,
+    stage, ...(need === undefined ? {} : { need }), ...(wait === undefined ? {} : { wait }), ...(build === null ? {} : { needContext: { build } }), reason, report,
     checks,
     pullRequest: withResult ? pullRequest : null,
     requirements: withResult ? requirementsOf(receipt?.proof?.matrix) : null,
@@ -337,7 +358,7 @@ export function statusDetailLines(status: TaskStatus): string[] {
 
 /** The headline's emoji for chat cards (colour is never the only signal: the words follow). */
 export function headlineEmoji(headline: Headline): string {
-  return ({ Queued: "🕓", Planning: "📝", "Needs you": "👋", Building: "⏳", "Ready for review": "✅", Complete: "✅", Failed: "❌", Stopped: "⏹" } as const)[headline];
+  return ({ Queued: "🕓", Planning: "📝", "Needs you": "👋", Waiting: "⏸", Building: "⏳", "Ready for review": "✅", Complete: "✅", Failed: "❌", Stopped: "⏹" } as const)[headline];
 }
 
 const escapeHtml = (value: string): string => value.replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]!);
@@ -379,7 +400,7 @@ export function stageOfDispatch(d: { code: string; condition: string; action: st
   options: { completed?: boolean } = {}): { stage: TaskStage; need?: TaskStatusFacts["need"] } {
   if (d.code === "reviewing") return { stage: "reviewing" };
   if (d.code === "complete" || d.code.startsWith("review-")) return { stage: options.completed ? "complete" : "finished" };
-  if (d.code === "proof-refuted") return /approved check failed|checks failed/i.test(d.detail ?? "") ? { stage: "failed" } : { stage: "needs-you", need: "other" };
-  if (d.code === "needs-verification") return { stage: "needs-you", need: "other" };
+  if (d.code === "proof-refuted") return /approved check failed|checks failed/i.test(d.detail ?? "") ? { stage: "failed" } : { stage: "needs-you", need: "review-result" };
+  if (d.code === "needs-verification") return { stage: "needs-you", need: "review-result" };
   return stageOfCode(d.code, { needsPerson: d.condition === "waiting" && d.action !== null, planning: d.condition === "running" && d.role === "planner", operatorHold: d.action === "unhold" });
 }

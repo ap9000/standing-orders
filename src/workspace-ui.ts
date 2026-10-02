@@ -414,7 +414,7 @@ const DISPATCH_ACTION_LABELS: Record<DispatchAction, string> = {
   "place-task": "Choose a project",
   "write-scope": "Define the task",
   "select-agent": "Choose an agent",
-  "approve-scope": "Review plan",
+  "approve-scope": "Approve plan",
   "answer-decision": "Answer the question",
   unhold: "Review hold",
   "inspect-hold": "Review hold",

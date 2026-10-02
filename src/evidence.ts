@@ -73,6 +73,15 @@ export const RETENTION_NOTE = "REMOVED-BY-RETENTION";
  * proof manifest's byte cap, since these are binary images, not JSON. */
 export const SCREENSHOT_BYTE_CAP = 5 * 1024 * 1024;
 
+/** Check evidence lives in the run's evidence, never on the branch: images a
+ * build adds under this folder are left out of its commit. */
+export const WORKTREE_EVIDENCE_DIR = "evidence/";
+const IMAGE_PATH = /\.(?:png|jpe?g|gif|webp|bmp|ico|tiff?|avif|heic)$/i;
+const BINARY_PATH = /\.(?:pdf|zip|gz|tgz|tar|7z|woff2?|ttf|otf|eot|mp4|mov|webm|mp3|wav|sqlite3?|db|wasm|bin|jar|exe|dll|so|dylib)$/i;
+export function isImagePath(path: string): boolean { return IMAGE_PATH.test(path); }
+/** Images and other files that are never read as text, judged by name alone. */
+export function isBinaryAssetPath(path: string): boolean { return IMAGE_PATH.test(path) || BINARY_PATH.test(path); }
+
 /** Bytes each kind may store. Originals can be any size; the record says what was cut. */
 /** Bound one captured stream to `cap` bytes keeping its beginning and, mostly,
  * its end: a test runner's summary and failure list come last, and that is

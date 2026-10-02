@@ -84,6 +84,7 @@ export function telegramProgressCard(store: Store, run: Run, taskId: string, pro
   const failedChecks = status.details.some(one => one.key === "checks" && (one.mark === "failed" || one.mark === "note"));
   const recovery = operatorHold !== undefined || accessBlocked || (!built && run.outcome !== null);
   return { text, next, entities: [{ type: "bold", offset: 0, length: title.length }, { type: "bold", offset: title.length + 1, length: heading.length }],
-    link: { label: built ? "Open result" : "Open task", path: recovery
+    // Needs you: the button names the action that resolves it.
+    link: { label: status.need != null && status.need.key !== "other" && status.need.key !== "review-result" ? status.need.action.label : built ? "Open result" : "Open task", path: recovery
       ? chatControlHref("recovery", taskId) : built ? chatResultHref(taskId, run.id, failedChecks ? "checks" : "summary") : chatControlHref("task", taskId) } };
 }

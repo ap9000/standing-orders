@@ -77,10 +77,10 @@ describe("parallel builds from the service's builder", () => {
   let lines: string[] = [];
 
   const git = (args: string[], cwd = repo) => exec("git", args, { cwd });
-  const run = (argv: string[], agent: Runner) => {
+  const run = (argv: string[], agent: Runner, shouldStop?: () => boolean) => {
     const [command = "", ...rest] = argv;
     lines = [];
-    return runOperate(command, rest, line => lines.push(line), { databaseFile: db, agentRunner: agent });
+    return runOperate(command, rest, line => lines.push(line), { databaseFile: db, agentRunner: agent, ...(shouldStop === undefined ? {} : { shouldStop }) });
   };
   const payload = () => {
     const opens = lines.map((line, index) => ({ line, index })).filter(one => one.line.startsWith("{"));
@@ -131,11 +131,25 @@ describe("parallel builds from the service's builder", () => {
     return { runnerToken, approverToken };
   };
 
-  const watch = (runnerToken: string, forMs: number, agent: Runner) =>
-    run(["watch", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool,
-      "--for", String(forMs), "--tick-every", "3600000", "--bridge-every", "3600000", "--reconcile-every", "3600000", "--json"], agent);
+  /** The watch stops the moment every named task is done (or on its own signal): the
+   * test waits for that event, and `--for` is only a safety cap a loaded machine never meets. */
+  const watch = async (runnerToken: string, forMs: number, agent: Runner, done: string[] = []) => {
+    let observer: ReturnType<typeof openStore> | null = null;
+    const stop = done.length === 0 ? undefined : () => {
+      observer ??= openStore(db);
+      return done.every(id => observer!.getTask(id)?.state === "done");
+    };
+    try {
+      return await run(["watch", "--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", pool,
+        "--for", String(forMs), "--tick-every", "3600000", "--bridge-every", "3600000", "--reconcile-every", "3600000", "--json"], agent, stop);
+    } finally {
+      observer?.close();
+    }
+  };
 
-  /** Holds each build open until `together` have started (or a bound passes), and records the most at once. */
+  /** Holds each build open until `together` have started, or until no other build has
+   * started for a short grace after the latest one (every lane the watch would open
+   * starts in the same first pass), and records the most at once. */
   const overlapping = (together: number, holdMs: number) => {
     const seen = { active: 0, peak: 0, started: 0, checkouts: new Set<string>() };
     const agent: Runner = async (_file, args, options) => {
@@ -144,8 +158,12 @@ describe("parallel builds from the service's builder", () => {
       seen.active++;
       seen.started++;
       seen.peak = Math.max(seen.peak, seen.active);
-      const until = Date.now() + 8_000;
-      while (Date.now() < until && seen.started < together) await sleep(20);
+      let lastStarted = seen.started;
+      let quietSince = Date.now();
+      while (seen.started < together && Date.now() - quietSince < 2_000) {
+        await sleep(20);
+        if (seen.started !== lastStarted) { lastStarted = seen.started; quietSince = Date.now(); }
+      }
       await sleep(holdMs);
       await writeFile(join(cwd, "guard.ts"), "export const guarded = true;\n");
       await concludeDone(cwd, args);
@@ -164,7 +182,7 @@ describe("parallel builds from the service's builder", () => {
     const { runnerToken } = await setup(3, ["t-1", "t-2"]);
     const { seen, agent } = overlapping(2, 300);
 
-    expect(await watch(runnerToken, 6_000, agent), lines.join("\n")).toBe(EXIT.ok);
+    expect(await watch(runnerToken, 60_000, agent, ["t-1", "t-2"]), lines.join("\n")).toBe(EXIT.ok);
 
     expect(seen.peak).toBe(2);
     expect(seen.checkouts.size).toBe(2);
@@ -186,7 +204,7 @@ describe("parallel builds from the service's builder", () => {
     // Three would start together if anything let them; hold the first two long enough to see.
     const { seen, agent } = overlapping(3, 0);
 
-    expect(await watch(runnerToken, 14_000, agent), lines.join("\n")).toBe(EXIT.ok);
+    expect(await watch(runnerToken, 60_000, agent, ["t-1", "t-2", "t-3"]), lines.join("\n")).toBe(EXIT.ok);
 
     expect(seen.peak).toBe(2);
     expect(seen.started).toBe(3);
@@ -202,7 +220,7 @@ describe("parallel builds from the service's builder", () => {
     expect(await run(["project", "concurrency", "1", "--repo", repo, "--as", "alex", "--token", approverToken, "--json"], idle)).toBe(EXIT.ok);
     const { seen, agent } = overlapping(2, 0);
 
-    expect(await watch(runnerToken, 12_000, agent), lines.join("\n")).toBe(EXIT.ok);
+    expect(await watch(runnerToken, 60_000, agent, ["t-1", "t-2"]), lines.join("\n")).toBe(EXIT.ok);
 
     expect(seen.peak).toBe(1);
     expect(await stateOf("t-1")).toBe("done");
@@ -267,7 +285,7 @@ describe("parallel builds from the service's builder", () => {
       await concludeDone(cwd, args);
       return { ...OK, stdout: AGENT_SAID };
     };
-    expect(await watch(runnerToken, 4_000, resumes), lines.join("\n")).toBe(EXIT.ok);
+    expect(await watch(runnerToken, 60_000, resumes, ["t-stop"]), lines.join("\n")).toBe(EXIT.ok);
     expect(resumedFrom).toBe(worktree);
     expect(await stateOf("t-stop")).toBe("done");
     const after = openStore(db);

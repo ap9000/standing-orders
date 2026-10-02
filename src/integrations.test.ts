@@ -184,11 +184,12 @@ test("a render never waits on an integration check: the page answers while every
   try {
       const cookie = (await fetch(`${base}/login`, { method: "POST", body: new URLSearchParams({ name: "alex", token: alex.token }), redirect: "manual" }))
         .headers.getSetCookie().map(one => one.split(";")[0]!).find(one => one.startsWith("standing-orders_session="))!;
-      const began = Date.now();
-      const response = await fetch(`${base}/settings/integrations`, { headers: { cookie }, signal: AbortSignal.timeout(3_000) });
+      // Every check hangs forever, so a page that waited on one would never
+      // answer: the "Checking" page itself is the proof, not a wall-clock
+      // window a loaded machine can miss. The abort only bounds a regression.
+      const response = await fetch(`${base}/settings/integrations`, { headers: { cookie }, signal: AbortSignal.timeout(30_000) });
       expect(response.status).toBe(200);
       const page = await response.text();
-      expect(Date.now() - began).toBeLessThan(2_000);
       expect(started).toBeGreaterThan(0);
       expect(page).toContain("<h1>Integrations</h1>");
       expect(page).toMatch(/data-integration="telegram" data-state="connected"/);

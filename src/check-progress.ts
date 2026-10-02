@@ -170,9 +170,10 @@ export class CheckProgressTracker {
       return;
     }
 
-    // scripts/e2e-parallel.mjs: "Running 7 groups at once: console, task, …", then every group's
-    // lines as "[group] [app] …", then "✅ group  3.1 min" per group and "N of M groups passed …".
-    const starting = /^Running ([0-9]+) groups at once: (.+)$/.exec(line);
+    // scripts/e2e-parallel.mjs: "Running 7 groups, at most 4 at once (12.0 GB available, about 400 MB each): console,
+    // task, …" (before: "Running 7 groups at once: …"), then every group's lines as "[group] [app] …", then
+    // "✅ group  3.1 min" per group and "N of M groups passed …".
+    const starting = /^Running ([0-9]+) groups(?:, at most [0-9]+)? at once(?: \([^)]*\))?: (.+)$/.exec(line);
     if (starting !== null) {
       const total = safeCount(starting[1]);
       const names = starting[2]!.split(",").map(one => one.trim()).filter(one => one !== "");

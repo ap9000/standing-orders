@@ -13,7 +13,9 @@ import { reviewFactsOf, workStatusOf, type DisplayStatus, type WorkFacts, type W
 export type WorkPrincipal = "operator" | "coordinator";
 export type WorkTarget = { taskId: string; runId: number | null; decisionId: number | null };
 export type WorkAction = {
-  code: DispatchAction | "inspect-task" | "inspect-run" | "inspect-stop" | "inspect-decisions" | "reconcile-run" | "open-pr";
+  /** `confirm-stopped`: an approver confirms a finished build stopped (behind the password);
+   * `sign-in`: the agent's sign-in, in Settings. */
+  code: DispatchAction | "inspect-task" | "inspect-run" | "inspect-stop" | "inspect-decisions" | "reconcile-run" | "open-pr" | "confirm-stopped" | "sign-in";
   label: string;
   target: WorkTarget;
   access: "read" | "operator-control" | "proposal-only" | "operator-handoff";

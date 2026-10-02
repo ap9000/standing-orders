@@ -1,4 +1,0 @@
-
-> standing-orders@0.4.3 build
-> tsc -p tsconfig.build.json && node scripts/postbuild.mjs
-

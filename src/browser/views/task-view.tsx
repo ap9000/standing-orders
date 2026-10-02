@@ -11,7 +11,7 @@ import type { BrowserTaskDetailGroup, BrowserTaskFact, BrowserTaskSection, Brows
 import { GuardedHtml } from "../guarded-html.js";
 import { Journey } from "../first-run.js";
 import { Badge, Button, Card, cn } from "../components/ui/index.js";
-import { StatusDetails, StatusHeadline, StatusWhy } from "./status-summary.js";
+import { ConfirmStoppedForm, RebuildForm, StatusDetails, StatusHeadline, StatusWhy } from "./status-summary.js";
 
 /** A link to a fold (#scope, #holds, #task-actions) opens it and every fold
  * around it, on arrival and on in-page links alike. */
@@ -41,14 +41,17 @@ function Html({ html, className }: { html: string; className?: string }) {
 /** One headline, one sentence and one action; the details sit quietly
  * underneath (task-status.ts). Never a red card: only Failed wears red, on
  * its dot. */
-function StatusCard({ card, approval }: { card: AssignmentCard; approval: string }) {
+function StatusCard({ card, approval, confirm, rebuild, csrf }: { card: AssignmentCard; approval: string; confirm: BrowserTaskView["confirmStopped"]; rebuild: BrowserTaskView["rebuild"]; csrf: string }) {
   return <Card data-task-status data-work-status={card.token} data-headline={card.status.headline} aria-label="Task status">
     <div className="flex flex-wrap items-center gap-x-4 gap-y-3 phone:gap-y-2.5">
       <div className="min-w-0 flex-1 basis-64">
         <StatusHeadline status={card.status} />
         <p className="mt-1.5 text-sm text-muted-foreground phone:mt-1 phone:leading-[1.35]">{card.status.sentence}</p>
       </div>
-      {card.action !== null && <Button asChild variant={card.status.headline === "Needs you" ? "attention" : "default"} className="phone:w-full">
+      {/* Confirm it stopped asks for the password right here, in place of a link. */}
+      {confirm != null && csrf !== "" ? <ConfirmStoppedForm form={confirm} csrf={csrf} label={card.action?.label ?? "Confirm it stopped"} />
+        : rebuild != null && csrf !== "" ? <RebuildForm action={rebuild.action} csrf={csrf} label={card.action?.label ?? "Build again"} />
+        : card.action !== null && <Button asChild variant={card.status.headline === "Needs you" ? "attention" : "default"} className="phone:w-full">
         <a href={card.action.href} data-primary-action {...(card.action.openResult ? { "data-open-result": "" } : {})}>{card.action.label}<ArrowRight /></a>
       </Button>}
     </div>
@@ -216,7 +219,7 @@ export function TaskDetails({ view }: { view: BrowserTaskView }) {
 /** The page: title, status card, what needs a person, then the thread. With
  * `details` (no Details panel beside it, e.g. a page without the shell's
  * panel), the Details content follows the thread. */
-export function TaskView({ view, chat = null, details = true }: { view: BrowserTaskView; chat?: ThreadChat | null; details?: boolean }) {
+export function TaskView({ view, chat = null, details = true, csrf = "" }: { view: BrowserTaskView; chat?: ThreadChat | null; details?: boolean; csrf?: string }) {
   useRevealHashTarget();
   return <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 phone:gap-3">
     <header className="flex flex-col gap-3 pb-1 phone:gap-2 phone:pb-0">
@@ -247,7 +250,7 @@ export function TaskView({ view, chat = null, details = true }: { view: BrowserT
     {view.journey != null && <Journey steps={view.journey} />}
 
     {view.status !== null
-      ? <StatusCard card={view.status} approval={view.approval} />
+      ? <StatusCard card={view.status} approval={view.approval} confirm={view.confirmStopped ?? null} rebuild={view.rebuild ?? null} csrf={csrf} />
       : <>{<Html html={view.statusHtml} />}{view.approval !== "" && <Html html={view.approval} className="so-task-approval" />}</>}
 
     {view.lead.map(block => <Html key={block.key} html={block.html} className={`so-task-lead so-task-lead--${block.key}`} />)}

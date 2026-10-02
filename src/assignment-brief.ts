@@ -1,5 +1,6 @@
 /** A bounded catch-up over saved project/task records, not conversation memory.
  * Callers authenticate first and pass their current project ceiling. */
+import { browserWorkActionHref } from './browser-crew.js';
 import { createHash } from "node:crypto";
 import type { AssignmentAccess, AssignmentSnapshot } from "./assignment.js";
 import { workIndexPage } from "./work-index.js";
@@ -16,6 +17,8 @@ export type AssignmentCatchUp = {
     detail: string; goal: string | null; updatedAt: string; runId: number | null; resultRunId: number | null;
     outcome: string | null; checks: { status: string; exitCode: number | null; detail: string } | null;
     nextAction: AssignmentSnapshot["primaryAction"]; attention: string[];
+    /** Where the next action leads in the console (navigation only). */
+    nextHref?: string | null;
     decisions: { id: number; runId: number; question: string; state: string; overdue: boolean; choice: string | null }[];
   }[];
   projects: { repo: string; knowledge: {
@@ -89,7 +92,7 @@ export function assignmentCatchUp(store: Store, now: Date, access: AssignmentAcc
         runId: item.liveRunId ?? item.unfinishedRunId ?? item.resultRunId, resultRunId: item.resultRunId,
         outcome: saved?.["handoff"] == null ? null : text(String(saved["handoff"]), 400),
         checks: item.resultRunId === null ? null : { status: "not-read", exitCode: null, detail: "Saved checks were not revalidated. Use assignment show to inspect them." },
-        nextAction: item.primaryAction, attention: attention.slice(0, 3).map(one => text(one, 160)),
+        nextAction: item.primaryAction, nextHref: browserWorkActionHref(item), attention: attention.slice(0, 3).map(one => text(one, 160)),
         decisions: decisions.map(row => ({ id: Number(row["id"]), runId: Number(row["run"]), question: text(String(row["question"]), 240), state: String(row["state"]),
           overdue: row["state"] !== "answered" && row["deadline"] !== null && String(row["deadline"]) <= now.toISOString(), choice: row["choice"] == null ? null : text(String(row["choice"]), 80) })),
       };

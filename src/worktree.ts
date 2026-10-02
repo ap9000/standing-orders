@@ -32,6 +32,7 @@ import { currentBootId, provenDeadByBootChange } from "./boot-identity.js";
 import type { Run, Store, WorktreeRow } from "./store.js";
 import { HANDOFF_PREFIX, MAILBOX_SUFFIX, looksLikeProtocolFile, readMailbox } from "./evidence.js";
 import { parseHandoff } from "./decision.js";
+import { diskBytes } from "./storage.js";
 
 export type Runner = (
   file: string,
@@ -94,6 +95,9 @@ export const MARKER = ".standing-orders-lease";
 
 /** Checkouts this process is leasing or removing right now: a lease and storage retention never overlap on one. */
 const busy = new Map<string, "leasing" | "removing">();
+
+/** What a kept checkout drops once its run ends (only where .gitignore hides it): dependencies and build output. */
+export const SLIM_NAMES: readonly string[] = ["node_modules", "dist", "build", "out", ".next", ".nuxt", ".svelte-kit", ".turbo", ".parcel-cache", "coverage", "target"];
 
 /** Creating a worktree copies a tree; it is local work but not instant. */
 export const WORKTREE_TIMEOUT_MS = 60_000;
@@ -742,6 +746,38 @@ export class WorktreePool {
       } finally { busy.delete(row.path); }
     }
     return { removed, kept };
+  }
+
+  /**
+   * Drop a let-go, idle checkout's dependencies and build output: the folders .gitignore hides that are named like
+   * them (SLIM_NAMES). Its work, tracked or untracked, is untouched. The setup stamp goes first, so the next lease
+   * runs the project's setup again and restores them. `wanted` is asked again right before anything goes; `deps`
+   * false keeps node_modules (no setup would restore it).
+   */
+  async slim(row: WorktreeRow, wanted: (row: WorktreeRow) => boolean, deps = true): Promise<{ ok: true; dropped: string[]; bytes: number } | { ok: false; message: string }> {
+    const idle = (now: WorktreeRow | null) => now !== null && now.runner === null && now.releasedAt !== null && now.releasedAt === row.releasedAt && !this.inUse(row.path).held;
+    if (busy.has(row.path) || !existsSync(row.path) || !idle(this.store.getWorktree(row.path))) return { ok: false, message: `${row.path} is in use` };
+    const listed = await this.runner(GIT, [...READ_ONLY, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"], { cwd: row.path, timeoutMs: WORKTREE_TIMEOUT_MS });
+    if (listed.code !== 0) return { ok: false, message: `git couldn't list ${row.path}` };
+    const drop = listed.stdout.split("\0").filter(one => one.endsWith("/")).map(one => one.slice(0, -1))
+      .filter(one => { const name = one.split("/").at(-1)!; return SLIM_NAMES.includes(name) && (deps || name !== "node_modules"); });
+    if (drop.length === 0) return { ok: true, dropped: [], bytes: 0 };
+    busy.set(row.path, "removing");
+    const note = join(row.path, MARKER);
+    let held = false;
+    try {
+      const now = this.store.getWorktree(row.path);
+      if (!idle(now) || !wanted(now!)) return { ok: false, message: `${row.path} is in use` };
+      // Held while it slims: another process's lease sees this process in it.
+      try { writeFileSync(note, `${process.pid} storage-retention slimming ${currentBootId() ?? "unknown"} ${hostname()}\n`, "utf8"); held = true; } catch { return { ok: false, message: `${row.path} couldn't be held` }; }
+      const sizes = diskBytes(drop.map(one => join(row.path, one)));
+      this.store.forgetWorktreeSetup(row.path);
+      for (const one of drop) rmSync(join(row.path, one), { recursive: true, force: true, maxRetries: 3 });
+      return { ok: true, dropped: drop, bytes: [...sizes.values()].reduce((sum, one) => sum + one, 0) };
+    } finally {
+      if (held) rmSync(note, { force: true });
+      busy.delete(row.path);
+    }
   }
 
   /**

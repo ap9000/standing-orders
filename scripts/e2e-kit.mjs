@@ -6,8 +6,8 @@
  *
  * A run makes a world, runs named checks (each may need earlier ones), and
  * writes a report: `output/e2e/<name>-<time>/report.md`, with a screenshot of
- * every open page when a check fails. Its workspace is removed when every
- * check passed, unless --keep.
+ * every open page when a check fails. Its workspace is removed when it ends,
+ * whatever the outcome, unless --keep.
  *
  * Options every run takes: --only <pattern> (just the checks whose names
  * match), --keep, --playwright <index.mjs>, --output <dir>.
@@ -301,10 +301,11 @@ export async function world(name, { seed, env = {} } = {}) {
     writeFileSync(join(out, "report.json"), JSON.stringify(report, null, 2) + "\n");
     writeFileSync(join(out, "report.md"), [`# ${title} — ${passed} passed, ${bad} failed, ${skipped} skipped (${report.minutes} min)`, "",
       ...results.map(one => `- ${one.state === "passed" ? "✅" : one.state === "failed" ? "❌" : "⏭️"} ${one.name}${one.seconds === undefined ? "" : ` — ${one.seconds} s`}${one.error ? `\n  - ${one.error.split("\n")[0]}` : ""}${one.state === "skipped" ? `\n  - skipped: ${one.because.join(", ")}` : ""}`),
-      "", `Workspace: ${root}`, `Logs and screenshots: ${out}`, ""].join("\n"));
+      "", `Workspace: ${root}${flag("--keep") ? "" : " (removed; --keep keeps it)"}`, `Logs and screenshots: ${out}`, ""].join("\n"));
     say(`${passed} passed, ${bad} failed, ${skipped} skipped — ${join(out, "report.md")}`);
     if (unstopped !== null) say(`left running: ${unstopped}`);
-    if (!flag("--keep") && bad === 0) rmSync(root, { recursive: true, force: true });
+    // The world goes whatever the outcome (the report, logs and screenshots stay in the output folder); --keep keeps it.
+    if (!flag("--keep")) rmSync(root, { recursive: true, force: true, maxRetries: 3 });
     process.exitCode = bad === 0 && unstopped === null ? 0 : 1;
   }
 
