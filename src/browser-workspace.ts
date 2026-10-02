@@ -213,7 +213,7 @@ export type BrowserResultPanel = {
   attention: string[];
   /** Requirements only a person can confirm, in plain words, and the one
    * Accept that records the decision (null when it is not offered here). */
-  youCheck: { lines: string[]; accept: { action: string; run: number; returnTo: string } | null } | null;
+  youCheck: { lines: string[]; items: BrowserCheckItem[]; accept: { action: string; run: number; returnTo: string } | null } | null;
   /** Storage limits on saved output (shortened logs or diffs): shown on request. */
   limits: string[];
   tabs: { key: BrowserResultTab; label: string; count: string; href: string; active: boolean }[];
@@ -228,6 +228,17 @@ export type BrowserResultPanel = {
   /** The feedback section holds only the closed form (no notes, revisions or history). */
   requestQuiet: boolean;
 };
+/** One "You check this one" item and the evidence to judge it by: the
+ * changed lines it cites (or, citing none, the change's own first lines),
+ * its screenshots, and the agent's note. Wrapped text, never sideways. */
+export type BrowserCheckItem = {
+  id: string; statement: string; words: string; note: string | null;
+  excerpts: { path: string; cited: boolean; lines: { kind: "addition" | "deletion" | "context"; line: number | null; text: string }[]; more: number }[];
+  shots: { src: string; href: string; caption: string }[];
+};
+/** The result's one decision: what Accept is called, why it isn't plain
+ * Accept, and what pressing it does. */
+export type BrowserResultDecision = { label: "Accept" | "Accept without checks"; ready: boolean; why: string | null; effect: string; sentence: string };
 /** A Needs you action: a link, (Confirm it stopped) a form behind the password, (Build again) one
  * button, or (on the result itself) Accept, which records the person's acceptance; `note` asks why
  * when the evidence disagrees. */
@@ -250,6 +261,8 @@ export type BrowserResultView = {
     problem: string | null;
     next: { kind: string; title: string; detail: string; control: string } | null;
     complete: { action: string; receipt: string; run: number } | null;
+    /** Words for the result's Accept: Mark complete when offered, else the Needs you acceptance. */
+    decision: BrowserResultDecision | null;
     checks: { detail: string; problem: boolean; logHref: string | null } | null;
     /** The signed scope; null when none was filed. */
     intent: { approval: string; html: string } | null;
