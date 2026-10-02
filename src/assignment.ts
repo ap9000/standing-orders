@@ -14,6 +14,7 @@ import { verificationEvidence } from "./verification-evidence.js";
 import { reproveApprover, type VerifiedApprover } from "./principal.js";
 import { noteAssignmentStatus } from "./assignment-status.js";
 import { historicalAssessmentReason } from "./assignment-presentation.js";
+import { manualReviewOnly } from "./proof.js";
 import { runCheckLevel, type CheckLevel } from "./check-levels.js";
 import { followUpChecksOf, withFollowUps } from "./result-follow-ups.js";
 import { buildReviewOf, findingWords, type BuildReviewView } from "./review-switch.js";
@@ -446,6 +447,52 @@ export function checkAssignmentAsOperator(store: Store, taskId: string, receiptD
     if (current === null || !store.accountCanAccess(who.name, current.repo)) return { ok: false, reason: "not-found", message: "No assignment is available in your projects." };
     return acknowledgeCurrent(store, current, receiptDigest, `operator:${who.name}`, now, root, access);
   }));
+}
+
+/** The acceptance's own ledger act, as a separate Accept request records it. */
+export const ACCEPT_ACTION = "task accept-proof";
+
+/** Only a person's check stands between this result and done: its proof is short for that alone, and nobody accepted it. */
+export function personCheckPending(receipt: AssignmentReceipt | null): boolean {
+  return receipt !== null && receipt.proofAcceptance === null && manualReviewOnly(receipt.proof === null ? null : { verdict: receipt.proof.verdict, reasons: receipt.proof.reasons, matrix: receipt.proof.matrix });
+}
+
+type Finished = { ok: true } | { ok: false; reason: string; message: string };
+class Undone extends Error { constructor(readonly result: { ok: false; reason: string; message: string }) { super(result.message); } }
+
+/** Accept and finish: the person's acceptance of the exact result they read and its completion, in one
+ * transaction. The records are the two a separate Accept and Mark complete leave: the acceptance (with its
+ * ledger act), then the completion of the receipt that acceptance produces, under the same digest. `receiptDigest`
+ * is the receipt as read, before accepting; any other change refuses both, and a refused completion keeps
+ * no acceptance. An acceptance already on record is kept as it is. `finish` completes the accepted receipt
+ * (Mark complete by default; Complete and open a pull request passes its own). */
+export function acceptAndCompleteAsOperator(store: Store, taskId: string, input: { runId: number; receiptDigest: string; note: string | null },
+  who: VerifiedApprover, now: Date, root = evidenceRoot(homedir()),
+  finish: (digest: string) => Finished = digest => checkAssignmentAsOperator(store, taskId, digest, who, now, root)): Finished {
+  try {
+    return withActor(currentActor() ?? { account: who.name, lead: false }, () => store.transact((): Finished => {
+      if (!reproveApprover(store, who).ok) return { ok: false, reason: "unauthenticated", message: "Sign in again before accepting this result." };
+      const access: AssignmentAccess = { principal: "operator", repos: who.repos };
+      const before = assignmentOf(store, taskId, now, access, root);
+      if (before === null || !store.accountCanAccess(who.name, before.repo)) return { ok: false, reason: "not-found", message: "No assignment is available in your projects." };
+      const receipt = before.receipt;
+      if (receipt === null || receipt.runId !== input.runId || !/^[a-f0-9]{64}$/.test(input.receiptDigest) || receipt.digest !== input.receiptDigest) {
+        return { ok: false, reason: "stale", message: "This result changed. Open the current result before accepting it." };
+      }
+      if (receipt.proofAcceptance === null) {
+        store.acceptProof(receipt.runId, who.name, input.note, now);
+        store.recordAction({ at: now.toISOString(), actor: who.name, repo: before.repo, taskId, runId: null, action: ACCEPT_ACTION, outcome: "accepted", source: "request" });
+      }
+      const accepted = assignmentOf(store, taskId, now, access, root)?.receipt ?? null;
+      if (accepted === null || accepted.runId !== input.runId) throw new Undone({ ok: false, reason: "stale", message: "This result changed. Open the current result before accepting it." });
+      const done = finish(accepted.digest);
+      if (!done.ok) throw new Undone(done);
+      return done;
+    }));
+  } catch (error) {
+    if (error instanceof Undone) return error.result;
+    throw error;
+  }
 }
 
 function noteAssignmentHandoff(store: Store, assignment: AssignmentSnapshot, now: Date): void {

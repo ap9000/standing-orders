@@ -13,7 +13,7 @@ import type { Ask } from './needs-you.js';
 import type { WorkIndexGroup } from './work-index.js';
 import type { AssignmentCard } from './assignment-ui.js';
 import type { TaskStatus } from './task-status.js';
-import type { ResultActs } from './result-acts.js';
+import type { AcceptLabel, ResultActFacts, ResultActs } from './result-acts.js';
 import type { FirstRunStep, FirstTaskSuggestion, JourneyStep } from './first-run.js';
 
 export type BrowserProject = { name: string; path: string; href: string; knowledgeHref: string };
@@ -219,6 +219,8 @@ export type BrowserResultPanel = {
   /** Requirements only a person can confirm, in plain words, and the one
    * Accept that records the decision (null when it is not offered here). */
   youCheck: { lines: string[]; items: BrowserCheckItem[]; accept: { action: string; run: number; returnTo: string } | null } | null;
+  /** The Requirements row's counts, so it updates as the person answers their checks (null when it doesn't count them). */
+  requirements?: { met: number; total: number; yours: number } | null;
   /** Storage limits on saved output (shortened logs or diffs): shown on request. */
   limits: string[];
   tabs: { key: BrowserResultTab; label: string; count: string; href: string; active: boolean }[];
@@ -242,8 +244,10 @@ export type BrowserCheckItem = {
   shots: { src: string; href: string; caption: string }[];
 };
 /** The result's one decision: what Accept is called, why it isn't plain
- * Accept, and what pressing it does. */
-export type BrowserResultDecision = { label: "Accept" | "Accept without checks"; ready: boolean; why: string | null; effect: string; sentence: string };
+ * Accept and finish, and what pressing it does. `base`: the same words before
+ * the person's own checks, which the page adds as they answer them. */
+export type BrowserResultDecision = { label: AcceptLabel; ready: boolean; why: string | null; effect: string; sentence: string;
+  base?: { label: AcceptLabel; ready: boolean; why: string | null } };
 /** A Needs you action: a link, (Confirm it stopped) a form behind the password, (Build again) one
  * button, or (on the result itself) Accept, which records the person's acceptance; `note` asks why
  * when the evidence disagrees. */
@@ -265,8 +269,10 @@ export type BrowserResultView = {
     status: { label: string; tone: StatusTone; token: string };
     problem: string | null;
     next: { kind: string; title: string; detail: string; control: string } | null;
-    complete: { action: string; receipt: string; run: number } | null;
-    /** Words for the result's Accept: Mark complete when offered, else the Needs you acceptance. */
+    /** Accept and finish: the exact receipt read; `accept` when the one request also records the person's acceptance
+     * (`note`: the words over the reason field it asks for, or null for none). */
+    complete: { action: string; receipt: string; run: number; accept?: { note: string | null } | null } | null;
+    /** Words for the result's Accept: Accept and finish when offered, else the Needs you acceptance. */
     decision: BrowserResultDecision | null;
     checks: { detail: string; problem: boolean; logHref: string | null } | null;
     /** A refuted result's recorded disagreements: the headline when the report doesn't match the changes (null when a
@@ -276,6 +282,8 @@ export type BrowserResultView = {
     mismatch: { headline: string | null; rows: { text: string; path: string | null; lines: string | null; href: string | null; absent: boolean; noteLabel: string | null }[]; said: string[] } | null;
     /** The one ink act that resolves the result, the one outline act beside it, and why it can't be accepted yet (result-acts.ts). */
     acts: ResultActs;
+    /** The facts the acts were chosen from, so the page chooses again as the person answers their checks. */
+    actFacts?: ResultActFacts;
     /** Run checks on this result's commit: the project's check, when it didn't run. */
     runChecks: { action: string; level: "quick" | "full"; returnTo: string } | null;
     /** The raw run record, under Details: its facts and the full record. */

@@ -35,7 +35,7 @@ import {
 import { readVerifiedArtifact, scanForSecrets } from "./evidence.js";
 import { readAuthModeStrict } from "./keys.js";
 import { parseProof } from "./proof.js";
-import { assignmentOf, checkAssignmentAsOperator } from "./assignment.js";
+import { acceptAndCompleteAsOperator, assignmentOf, checkAssignmentAsOperator, personCheckPending } from "./assignment.js";
 import { getDecision, recordDecision, retireDecision } from "./project-memory.js";
 import { resumeTaskStop, taskControlOf } from "./task-control.js";
 import { addToolTo, catalogTool, projectToolsOf, removeToolFrom, toolCommandLine, validateToolSpec, type ToolSpec } from "./project-tools.js";
@@ -133,7 +133,7 @@ export const CHAT_ACTIONS = {
   decision_record: { label: "Record decision", protected: false, password: false },
   decision_retire: { label: "Retire decision", protected: false, password: false },
   scope_approve: { label: "Approve work", protected: true, password: true },
-  result_accept: { label: "Mark complete", protected: true, password: false },
+  result_accept: { label: "Accept and finish", protected: true, password: false },
   task_cancel: { label: "Cancel task", protected: true, password: false },
   task_resume: { label: "Resume task", protected: true, password: true },
 } as const;
@@ -1246,14 +1246,12 @@ export function executeSharedAction(
         )
           throw Error("The comparison terms changed. Nothing was approved.");
       } else if (payload.operation === "result_accept") {
-        const completed = checkAssignmentAsOperator(
-          store,
-          task!,
-          String(payload.state["receipt"] ?? ""),
-          who,
-          now,
-          options.root,
-        );
+        // Accept and finish, as on the result page: a check only the person makes is accepted in the same transaction.
+        const receipt = String(payload.state["receipt"] ?? "");
+        const current = assignmentOf(store, task!, now, { principal: "operator", repos: who.repos }, options.root)?.receipt ?? null;
+        const completed = personCheckPending(current) && current !== null && current.digest === receipt
+          ? acceptAndCompleteAsOperator(store, task!, { runId: current.runId, receiptDigest: receipt, note: null }, who, now, options.root)
+          : checkAssignmentAsOperator(store, task!, receipt, who, now, options.root);
         if (!completed.ok) throw Error(completed.message);
       } else if (payload.operation === "task_cancel") {
         const result = withActor({ account: who.name, lead: false }, () => store.cancelTask(task!, now));
@@ -1281,7 +1279,7 @@ export function executeSharedAction(
         payload.operation === "skill_test"
           ? "Skill test created. Existing approval rules apply."
           : payload.operation === "result_accept"
-              ? "Marked complete. The recorded checks are unchanged."
+              ? "Accepted and finished. The recorded checks are unchanged."
               : payload.operation === "scope_approve"
                 ? "The exact work is approved."
                 : payload.operation === "task_cancel"

@@ -3,7 +3,9 @@
  * most one outline act beside it. A result that can't be accepted says why
  * in one line before them.
  *
- *   everything met                      → Accept
+ *   everything met                      → Accept and finish
+ *   a "You check this one" unanswered   → the next check, then Accept without your check
+ *   a check you marked Not right        → Request changes, then Accept anyway
  *   checks queued or running            → Checks running (disabled), then Accept without checks
  *   checks didn't run, a check exists   → Run checks, then Accept without checks
  *   report and changes disagree,
@@ -12,16 +14,17 @@
  *   a Needs you form resolves it        → that form (Build again, Confirm it stopped)
  *   saved notes or a failing PR         → Revise / Draft a repair task
  *
- * Accepting means what it always meant: the same forms post to the same
- * endpoints. This only decides which one is ink. */
+ * Accepting finishes the task in one request (Accept and finish): the person's
+ * acceptance, when one is owed, and the completion together. This only decides
+ * which act is ink; the page recomputes it as the person answers each check. */
 
 /** The words over the reason field an Accept of a refuted result requires. */
 export const ACCEPT_NEEDS_REASON = "Accepting needs a reason";
 
-export type ResultActKind = "accept" | "checks-running" | "run-checks" | "request-changes" | "rebuild" | "confirm-stopped" | "revise" | "draft-repair";
+export type ResultActKind = "accept" | "next-check" | "checks-running" | "run-checks" | "request-changes" | "rebuild" | "confirm-stopped" | "revise" | "draft-repair";
 
 export type ResultActFacts = {
-  /** An Accept this page can post (Mark complete, or the person's acceptance); `ready`: every requirement met and checks passed. */
+  /** An Accept this page can post (Accept and finish, or the person's acceptance alone); `ready`: every requirement met and checks passed. */
   accept: { ready: boolean } | null;
   /** The checks didn't run, the project has one, and this person may run it. */
   runChecks: boolean;
@@ -35,6 +38,10 @@ export type ResultActFacts = {
   need: "rebuild" | "confirm-stopped" | null;
   /** Saved notes ready to become a revision, or a failing pull request's repair. */
   next: "revise" | "draft-repair" | null;
+  /** "You check this one" items not answered yet on this page. */
+  unanswered?: number;
+  /** Items the person marked Not right. */
+  notRight?: number;
 };
 
 export type ResultActs = {
@@ -53,9 +60,31 @@ export function resultActsOf(facts: ResultActFacts): ResultActs {
   if (facts.next !== null) return { primary: facts.next, secondary: accept ?? request, line: null };
   // Can't be accepted yet: Accept is never the ink act, even when the feedback form isn't here.
   if (facts.blocked !== null) return { primary: request, secondary: accept, line: facts.blocked };
+  // The person's own checks come first: the next one is ink until each is answered.
+  if (accept !== null && (facts.unanswered ?? 0) > 0) return { primary: "next-check", secondary: accept, line: null };
+  if (accept !== null && (facts.notRight ?? 0) > 0) return { primary: request, secondary: accept, line: null };
   if (facts.checksRunning) return { primary: "checks-running", secondary: accept ?? request, line: null };
   if (facts.accept === null) return { primary: null, secondary: request, line: null };
   if (facts.accept.ready) return { primary: "accept", secondary: request, line: null };
   if (facts.runChecks) return { primary: "run-checks", secondary: "accept", line: null };
   return { primary: "accept", secondary: request, line: null };
+}
+
+/** The words a result's Accept wears and the one line before it, given the
+ * server's words for everything but the person's own checks (`base`) and how
+ * those stand on this page: an unanswered check names itself; a check marked
+ * Not right says so; otherwise the base words stand. */
+export type AcceptLabel = "Accept and finish" | "Accept without checks" | "Accept without your check" | "Accept anyway";
+export function acceptWithChecksOf(base: { label: AcceptLabel; ready: boolean; why: string | null }, checks: { unanswered: readonly string[]; notRight: readonly string[] }): { label: AcceptLabel; ready: boolean; why: string | null } {
+  const named = (all: readonly string[]): string => `“${all[0]!.replace(/[.!?]+$/, "")}”${all.length > 1 ? ` and ${all.length - 1} more` : ""}`;
+  if (checks.unanswered.length > 0) return { label: "Accept without your check", ready: false, why: `Not checked yet: ${named(checks.unanswered)}.` };
+  if (checks.notRight.length > 0) return { label: "Accept anyway", ready: false, why: `You marked ${named(checks.notRight)} not right.` };
+  return base;
+}
+
+/** The Requirements row as the person answers their checks: each Looks right is met, each answer leaves "You check". */
+export function requirementsWordsOf(req: { met: number; total: number; yours: number }, looked: number, notRight: number): { text: string; done: boolean; short: boolean } {
+  const met = req.met + looked;
+  const yours = Math.max(0, req.yours - looked - notRight);
+  return { text: `${met} of ${req.total} met${yours > 0 ? ` · You check ${yours}` : ""}`, done: met === req.total, short: req.total - met - yours > 0 };
 }

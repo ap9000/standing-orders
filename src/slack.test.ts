@@ -952,17 +952,17 @@ describe("Slack shared chat", () => {
     draft({ ...payload });
     await drain();
     const c = latestCard();
-    expect(String(sends().at(-1)?.args["text"])).toContain("Mark complete: Clarify Slack progress");
+    expect(String(sends().at(-1)?.args["text"])).toContain("Accept and finish: Clarify Slack progress");
     await tap(c.token, c.ts);
     const armed = sends().at(-1)!;
     expect(String(armed.args["text"])).toContain("This records that you handled this exact result. Confirm?");
-    expect(JSON.stringify(armed.args["blocks"])).toContain("Yes, mark complete");
+    expect(JSON.stringify(armed.args["blocks"])).toContain("Yes, accept and finish");
     expect(assignmentOf(store, "sample", now, { principal: "operator", repos: projects }, join(dir, "evidence"))?.state).toBe("ready-to-check");
     const yes = state.db.prepare("SELECT token FROM slack_action WHERE part=? AND phase='yes' AND consumed IS NULL").get(c.id)!;
     await tap(String(yes.token), c.ts);
     expect(assignmentOf(store, "sample", now, { principal: "operator", repos: projects }, join(dir, "evidence"))).toMatchObject({ state: "complete", completion: { actor: "operator:alex" } });
     expect(store.proofAcceptance(run)).toBeNull();
-    expect(String(sends().at(-1)?.args["text"])).toContain("Marked complete.");
+    expect(String(sends().at(-1)?.args["text"])).toContain("Accepted and finished.");
     expect(store.getMateProposal(c.proposal)?.outcome).toMatchObject({ ok: true, via: "slack" });
   });
 

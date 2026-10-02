@@ -18,7 +18,7 @@
  */
 
 import type { DispatchAction, DispatchDiagnosis } from "./dispatch.js";
-import { ACCEPT_NEEDS_REASON } from "./result-acts.js";
+import { ACCEPT_NEEDS_REASON, type AcceptLabel } from "./result-acts.js";
 export { ACCEPT_NEEDS_REASON };
 import { GOAL_ASSESSMENT_PENDING, manualReviewOnly, plainReasonWords, type ProofVerdict } from "./proof.js";
 import type { ReviewRetryState, TaskState } from "./store.js";
@@ -541,22 +541,22 @@ export function lastErrorLineOf(log: string): { line: number; text: string } | n
 export const RESULT_DECISION_SENTENCE = "Review the change, then accept it or ask for changes.";
 
 /** What the result page's Accept says, from facts it already shows: the
- * recorded checks, the requirements not met, the ones a person still checks,
- * whether the saved proof reads, and what the button posts. "Accept" only when everything is met and the
- * checks passed; otherwise "Accept without checks" and one line naming what.
+ * recorded checks, the requirements not met, whether the saved proof reads,
+ * and what the button posts. "Accept and finish" only when everything is met
+ * and the checks passed; otherwise "Accept without checks" and one line naming
+ * what. The person's own checks are the page's to add (acceptWithChecksOf).
  * `effect` says what pressing it does, in the action's own terms. */
 export type AcceptFacts = {
   checks: "passed" | "failed" | "not-run" | "off" | "running" | "unavailable" | null;
   unmet: number;
-  yours: number;
-  /** `complete`: marks the exact result complete; `accept`: records a person's acceptance only. */
+  /** `complete`: accepts and finishes the exact result in one request; `accept`: records a person's acceptance only (nothing here can finish it). */
   action: "complete" | "accept";
   /** `pull-request`: one can be opened from the task after; `off`: publishing isn't set up; `other`: neither is said. Accept itself never publishes. */
   publishing: "pull-request" | "off" | "other";
   /** False when the saved proof is missing or can't be read: nothing on record says what was met. */
   proof: boolean;
 };
-export type AcceptWords = { label: "Accept" | "Accept without checks"; ready: boolean; why: string | null; effect: string };
+export type AcceptWords = { label: AcceptLabel; ready: boolean; why: string | null; effect: string };
 
 export function acceptWordsOf(facts: AcceptFacts): AcceptWords {
   const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
@@ -565,15 +565,14 @@ export function acceptWordsOf(facts: AcceptFacts): AcceptWords {
     ...(facts.checks === "passed" ? [] : [facts.checks === "failed" ? "checks failed" : facts.checks === "off" ? "checks are off for this project"
       : facts.checks === "running" ? "checks are still running" : facts.checks === "unavailable" ? "saved checks can't be read" : "checks didn't run"]),
     ...(facts.unmet > 0 ? [`${plural(facts.unmet, "requirement isn't", "requirements aren't")} met`] : []),
-    ...(facts.yours > 0 ? [`${plural(facts.yours, "item still needs", "items still need")} your check`] : []),
   ];
   const ready = parts.length === 0;
   const joined = parts.length <= 1 ? parts.join("") : `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}`;
-  const effect = facts.action === "accept" ? "Records that you accept it. You mark it complete next."
-    : facts.publishing === "pull-request" ? "Marks it complete. No pull request opens; you can open one from the task after."
-    : facts.publishing === "off" ? "Marks it complete. The branch stays; publishing isn't set up."
-    : "Marks it complete. Nothing is published.";
-  return { label: ready ? "Accept" : "Accept without checks", ready, why: ready ? null : `${joined.charAt(0).toUpperCase()}${joined.slice(1)}.`, effect };
+  const effect = facts.action === "accept" ? "Records that you accept it. The task stays open."
+    : facts.publishing === "pull-request" ? "Finishes the task. No pull request opens; you can open one from the task after."
+    : facts.publishing === "off" ? "Finishes the task. The branch stays; publishing isn't set up."
+    : "Finishes the task. Nothing is published.";
+  return { label: ready ? "Accept and finish" : "Accept without checks", ready, why: ready ? null : `${joined.charAt(0).toUpperCase()}${joined.slice(1)}.`, effect };
 }
 
 export function resultHeadlineOf<T extends DisplayStatus>(status: T): T {

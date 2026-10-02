@@ -521,7 +521,7 @@ export async function deliverSlackPart(
             }))
           : []),
         ...linkButton(options.origin(), content.link),
-        // [Look first] beside [Merge] or [Mark complete]: each button's own action id.
+        // [Look first] beside [Merge] or [Accept and finish]: each button's own action id.
         ...(content.also ?? []).flatMap((one, index) => linkButton(options.origin(), one).map(button => ({ ...button, action_id: `toolroll_link_${index + 2}` }))),
       ];
     const target = content.edit ?? row.message;

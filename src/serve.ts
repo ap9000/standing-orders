@@ -56,7 +56,7 @@ import { knowledgeHtml, knowledgeContextHtml, KNOWLEDGE_CSS, decisionsHtml, memo
 import { listDecisions, recordDecision, retireDecision, searchMemory } from "./project-memory.js";
 import { decideProposal, listProposals, memoryStatus } from "./memory-pass.js";
 import { learningHtml } from "./workspace-ui.js";
-import { resultActsOf } from "./result-acts.js";
+import { acceptWithChecksOf, resultActsOf, type ResultActFacts } from "./result-acts.js";
 import { createSessionEndpoint } from './session-server.js';
 import { handleTeamHttp } from './team-http.js';
 import { teamWorkspaceHtml } from './team-ui.js';
@@ -65,7 +65,7 @@ import { prepareWorkspaceRevision, WorkspaceValidatorCache } from "./workspace-r
 import { workIndexPage, workCountsByProject, WorkIndexCursorError, WORK_INDEX_MAX_LIMIT, type WorkIndexPage, type WorkIndexItem, type WorkIndexGroup } from "./work-index.js";
 import { leadActivity } from "./lead-voice.js";
 import { openWorkDecisionOf } from "./work-summary.js";
-import { assignmentOf, checkAssignmentAsOperator, type AssignmentSnapshot } from './assignment.js';
+import { acceptAndCompleteAsOperator, assignmentOf, checkAssignmentAsOperator, personCheckPending, type AssignmentSnapshot } from './assignment.js';
 import type { DemoExchange, DemoLead } from "./demo.js";
 import { demoChatHtml, demoThreadHtml, DEMO_CHAT_SCRIPT, type DemoResultView } from "./demo-chat.js";
 import type { PublishExec } from './publish.js';
@@ -76,7 +76,7 @@ import { checkPublishing, completeAndOpenPullRequest, mergeAsPerson, pullRequest
 import { leadBriefHtml, LEAD_CONTEXT_CSS } from './lead-context.js';
 import { assignmentCatchUp } from './assignment-brief.js';
 import { assignmentActionHref, assignmentCardOf, assignmentStatusOf, assignmentSummaryHtml, assignmentWithEvidence, ASSIGNMENT_CSS } from './assignment-ui.js';
-import { assignmentStageOf, pullRequestFactOf, stageOfCode, stageOfDispatch, statusDetailsHtml, statusIconSvg, statusWhyHtml, taskStatusOf, TASK_STATUS_CSS, type PullRequestFact, type TaskStatus } from './task-status.js';
+import { assignmentStageOf, pullRequestFactOf, requirementsOf, stageOfCode, stageOfDispatch, statusDetailsHtml, statusIconSvg, statusWhyHtml, taskStatusOf, TASK_STATUS_CSS, type PullRequestFact, type TaskStatus } from './task-status.js';
 import { ASKS, ASK_LABEL, NEEDS, NO_REASON_RECORDED, failedAttemptSentence, isInternalErrorReason, latestFinishedAttempt, runReasonWords, type Ask } from './needs-you.js';
 import { assignmentPresentationOf, historicalAssessmentReason, shortenedMaterialReason } from './assignment-presentation.js';
 import type { TaskFamily } from "./store.js";
@@ -3775,6 +3775,8 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       })();
       const roomId = url.searchParams.get('conversation');
       const resultLink = (href: string) => roomId ? href + '&conversation=' + encodeURIComponent(roomId) : href;
+      // Accept and finish is here: the one act that accepts the person's own checks and finishes the task.
+      const finishes = resultRun !== null && who.role === 'approver' && focusTask?.assignment?.state === 'ready-to-check' && focusTask.assignment.receipt?.runId === resultRun.id;
       const resultPanel =
         resultRun === null
           ? null
@@ -3788,9 +3790,9 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
               hrefFor: one => resultLink(chatResultHref(focusTask?.id ?? "", resultRun.id, one)),
               returnTo: resultLink(chatResultHref(focusTask?.id ?? "", resultRun.id)),
               back: { href: roomId ? "/chat?conversation=" + encodeURIComponent(roomId) : taskChatHref(focusTask?.id ?? ""), label: "Back to chat" },
-            }) + (who.role === 'approver' && focusTask?.assignment?.state === 'ready-to-check'
-              && focusTask.assignment.receipt?.runId === resultRun.id
-              ? completionForm(focusTask.assignment.receipt.taskId, resultRun.id, focusTask.assignment.receipt.digest, who.session.csrf, pullRequestTargetOf(resultRun.id)) : '');
+              finishes,
+            }) + (finishes && focusTask?.assignment?.receipt != null
+              ? completionForm(focusTask.assignment.receipt.taskId, resultRun.id, focusTask.assignment.receipt.digest, who.session.csrf, pullRequestTargetOf(resultRun.id), personCheckPending(focusTask.assignment.receipt)) : '');
       const focusProblem = requestedTask !== null && focusTask === null
         ? "That task is not available in this workspace."
         : requestedResult !== null && focusTask !== null && resultRun === null
@@ -10864,6 +10866,22 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
         const current = assignmentOf(store, taskId, now, { principal: "operator", repos: principal.repos }, evidenceRoot);
         if (current === null || current.receipt?.taskId !== taskId || !/^[0-9]{1,15}$/.test(namedRun) || current.receipt.runId !== Number(namedRun)) {
           return taskScreen(response, who, taskId, "This result changed. Open the current result before marking it complete.", 409);
+        }
+        if (body.get("accept") === "1") {
+          // Accept and finish: the person's acceptance and the completion of what it accepted, in one request
+          // and one transaction. The receipt named is the one read, before accepting.
+          const rawNote = (body.get("note") ?? "").trim();
+          let note: string | null = null;
+          if (rawNote !== "") {
+            const validated = validateNote(rawNote);
+            if (!validated.ok) return taskScreen(response, who, taskId, validated.problem, 400);
+            note = validated.note;
+          }
+          const publish = body.get("publish") === "1";
+          const finished = acceptAndCompleteAsOperator(store, taskId, { runId: Number(namedRun), receiptDigest: digest, note }, principal, now, evidenceRoot,
+            publish ? accepted => completeAndOpenPullRequest(store, { taskId, digest: accepted, runId: Number(namedRun), who: principal, root: evidenceRoot }, now) : undefined);
+          if (!finished.ok) return taskScreen(response, who, taskId, finished.message, 409);
+          return redirect(response, publish ? `${taskHref(familyOf(taskId)?.root.id ?? taskId)}#merge` : body.get("return") === null ? reviewHref(taskId, Number(namedRun)) : safeReturn(body.get("return")));
         }
         if (body.get("publish") === "1") {
           // "Complete and open a pull request": the same exact-receipt completion, plus the owed PR for this
@@ -22974,23 +22992,30 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
   const contest = view.contest === null ? "" : `<p class="row"><a href="/contest/${view.contest.id}">${view.contest.state === "pick-wait" ? `compare the ${contestNoun(view.contest.kind)} and pick →` : `the ${contestNoun(view.contest.kind)} (${escape(view.contest.state)}) →`}</a></p>`;
   parts.push(`<div id="verification" data-cockpit-section="result">` + panel.html + contest + `</div>`);
 
-  const complete = assignment?.state === "ready-to-check" && assignment.receipt !== null && canRetryReview && csrf !== ""
-    ? { action: `${taskHref(view.taskId)}/complete`, receipt: assignment.receipt.digest, run: run.id } : null;
-  if (complete !== null) parts.push(completionForm(view.taskId, run.id, complete.receipt, csrf, view.detail?.pullRequestTo ?? null));
-  // The one decision, after the evidence: Accept only when every requirement is met and the checks passed.
-  const acceptsHere = complete !== null || panel.panel.need?.accept != null;
-  const matrix = proof === null || proof.proofProblem !== null ? [] : proof.matrix;
   const blocked = cantAcceptYetOf(proof?.verdict ?? null, proof?.reasons ?? [], accepted);
-  const words = !acceptsHere ? null : { sentence: RESULT_DECISION_SENTENCE, ...acceptWordsOf({
+  const youCheck = panel.panel.youCheck;
+  // Accept and finish posts the completion; when an acceptance is owed (the person's own checks, or a reason a
+  // report that doesn't match its changes asks for), the same request records it first.
+  const owed = accepted ? null : youCheck?.accept != null ? { note: null } : panel.panel.need?.accept != null ? { note: panel.panel.need.accept.note }
+    : blocked === ACCEPT_NEEDS_REASON ? { note: "Why is this safe to accept?" } : null;
+  const complete = assignment?.state === "ready-to-check" && assignment.receipt !== null && canRetryReview && csrf !== ""
+    ? { action: `${taskHref(view.taskId)}/complete`, receipt: assignment.receipt.digest, run: run.id, accept: owed } : null;
+  if (complete !== null) parts.push(completionForm(view.taskId, run.id, complete.receipt, csrf, view.detail?.pullRequestTo ?? null, owed !== null));
+  // The one decision, after the evidence: Accept and finish only when every requirement is met and the checks passed.
+  const acceptsHere = complete !== null || panel.panel.need?.accept != null || youCheck?.accept != null;
+  const matrix = proof === null || proof.proofProblem !== null ? [] : proof.matrix;
+  const unanswered = accepted || youCheck == null ? [] : youCheck.items.length > 0 ? youCheck.items.map(one => one.statement === "" ? one.words : one.statement) : youCheck.lines;
+  const base = !acceptsHere ? null : acceptWordsOf({
     checks: checks === undefined ? null : checks.running != null ? "running" : checks.level === "off" && checks.status !== "passed" ? "off" : checks.status,
     unmet: matrix.filter(row => row.state !== "pass" && row.state !== "manual-review").length,
-    yours: complete === null || accepted ? 0 : panel.panel.youCheck?.lines.length ?? 0,
     action: complete !== null ? "complete" : "accept",
     publishing: view.detail?.publishing ?? "other",
     proof: proof !== null && proof.proof !== null && proof.proofProblem === null,
-  }) };
-  // Refuted: plain Accept stays as allowed, in outline, and the one line before the acts (acts.line) says why.
-  const decision = words === null || blocked === null ? words : { ...words, label: "Accept" as const, ready: false };
+  });
+  // Refuted: plain Accept and finish stays as allowed, in outline, and the one line before the acts (acts.line) says why.
+  const settled = base === null || blocked === null ? base : { ...base, label: "Accept and finish" as const, ready: false };
+  const decision = settled === null ? null : { sentence: RESULT_DECISION_SENTENCE, ...settled, ...acceptWithChecksOf(settled, { unanswered, notRight: [] }),
+    base: { label: settled.label, ready: settled.ready, why: settled.why } };
   // Run checks: no check ran on this result (or its saved one can't be read), the project has one, and an approver may run it.
   const followUps = view.detail.followUps ?? null;
   const checksRunning = checks?.running != null || (followUps?.checks.some(one => one.state === "waiting" || one.state === "running") ?? false);
@@ -23000,15 +23025,18 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
     ? { action: `/r/${run.id}/checks`, level: followUps.full ? "full" as const : "quick" as const, returnTo: `${here}&run=${run.id}&tab=checks` } : null;
   const need = panel.panel.need;
   const nextKind = selected.next?.kind;
-  const acts = resultActsOf({
-    accept: decision === null ? null : { ready: decision.ready },
+  const actFacts: ResultActFacts = {
+    accept: settled === null ? null : { ready: settled.ready },
     runChecks: runChecks !== null,
     checksRunning,
     blocked,
     canRequest: panel.panel.canRequest && panel.panel.request !== null,
     need: need === null || need.accept != null ? null : need.rebuild != null ? "rebuild" : need.confirm !== null ? "confirm-stopped" : null,
     next: nextKind === "revise" || nextKind === "draft-repair" ? nextKind : null,
-  });
+    unanswered: settled === null ? 0 : unanswered.length,
+    notRight: 0,
+  };
+  const acts = resultActsOf(actFacts);
 
   // A refuted result's card lists every recorded disagreement, each tied to its lines; when the report itself doesn't
   // match the changes (not a failed check), that is the headline.
@@ -23053,19 +23081,20 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
   return {
     html: `<section class="cockpit-detail">${parts.join("\n")}</section>`,
     selected: {
-      ...selected, complete, decision, panel: panel.panel, contest, acts, runChecks, mismatch,
+      ...selected, complete, decision, panel: panel.panel, contest, acts, actFacts, runChecks, mismatch,
       checks: checks === undefined ? null : { detail: checks.detail, problem: checks.status === "failed" || checks.status === "unavailable", logHref: checks.logArtifactId === null ? null : `/r/${run.id}/evidence/${checks.logArtifactId}` },
     },
   };
 }
 
-function completionForm(taskId: string, runId: number, digest: string, csrf: string, pullRequestTo: string | null = null): string {
-  const hidden = `<input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="receipt" value="${escape(digest)}"><input type="hidden" name="run" value="${runId}">`;
+function completionForm(taskId: string, runId: number, digest: string, csrf: string, pullRequestTo: string | null = null, accept = false): string {
+  // Accept and finish, in one request: with an acceptance owed (the person's own checks), the same post records it first.
+  const hidden = `<input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="receipt" value="${escape(digest)}"><input type="hidden" name="run" value="${runId}">${accept ? `<input type="hidden" name="accept" value="1">` : ""}`;
   if (pullRequestTo !== null) {
-    // With pull requests set up: the PR is the primary road, a bare completion the quiet one beside it.
-    return `<form method="post" action="${taskHref(taskId)}/complete" class="card result-complete">${hidden}<p class="meta">After inspecting the work, mark this result complete. A pull request opens on ${escape(pullRequestTo)} from this exact commit.</p><div class="result-complete-actions"><button type="submit" name="publish" value="1" style="min-height:44px">Complete and open a pull request</button><button type="submit" class="secondary" style="min-height:44px">Complete only</button></div></form>`;
+    // With pull requests set up: the PR is the primary road, a bare finish the quiet one beside it.
+    return `<form method="post" action="${taskHref(taskId)}/complete" class="card result-complete">${hidden}<p class="meta">Finishes the task. A pull request opens on ${escape(pullRequestTo)} from this exact commit when you ask for one.</p><div class="result-complete-actions"><button type="submit" name="publish" value="1" style="min-height:44px">Complete and open a pull request</button><button type="submit" class="secondary" style="min-height:44px">Accept and finish</button></div></form>`;
   }
-  return `<form method="post" action="${taskHref(taskId)}/complete" class="card result-complete">${hidden}<p class="meta">After inspecting the work, mark this result complete. Checks stay unchanged; nothing is published or deployed.</p><button type="submit" style="min-height:44px">Mark complete</button></form>`;
+  return `<form method="post" action="${taskHref(taskId)}/complete" class="card result-complete">${hidden}<p class="meta">Finishes the task. Checks stay unchanged; nothing is published or deployed.</p><button type="submit" style="min-height:44px">Accept and finish</button></form>`;
 }
 
 /** What the task page shows about a result's pull request: the view, or the offer to open one. */
@@ -24198,6 +24227,8 @@ type ResultPanelOptions = {
   headStatus?: boolean;
   /** The cockpit renders its own next-action card: no panel action. */
   action?: boolean;
+  /** Accept and finish sits beside the panel: it records the person's own checks too, so the panel offers no separate Accept. */
+  finishes?: boolean;
 };
 
 /** The revision form's binding (repair 2026-09-14): the exact ids of the
@@ -24300,9 +24331,10 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
     items: personCheckItems(proof!, patchOk ? patch.text : null, shown, runId),
     accept: acceptable && need?.accept == null ? { action: `${taskHref(detail.taskId)}/accept-proof`, run: run.id, returnTo: o.returnTo } : null,
   };
+  const youCheckForm = youCheck?.accept != null && o.finishes !== true ? youCheck.accept : null;
   const youCheckHtml = youCheck === null ? "" :
     `<div class="result-you-check" data-result-you-check="${youCheck.lines.length}"><ul>${youCheck.lines.map(one => `<li>${escape(one)}</li>`).join("")}</ul>` +
-    (youCheck.accept === null ? "" : `<form method="post" action="${escape(youCheck.accept.action)}"><input type="hidden" name="csrf" value="${escape(o.csrf)}"><input type="hidden" name="run" value="${youCheck.accept.run}"><input type="hidden" name="return" value="${escape(youCheck.accept.returnTo)}"><button type="submit" data-accept-result>Accept</button></form>`) +
+    (youCheckForm === null ? "" : `<form method="post" action="${escape(youCheckForm.action)}"><input type="hidden" name="csrf" value="${escape(o.csrf)}"><input type="hidden" name="run" value="${youCheckForm.run}"><input type="hidden" name="return" value="${escape(youCheckForm.returnTo)}"><button type="submit" data-accept-result>Accept</button></form>`) +
     `</div>`;
   const attentionHtml =
     attention.length === 0
@@ -24610,6 +24642,8 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
     reviewHistory: REVIEW_TOKENS.has(status.token) ? status.detail : null,
     attention: attention.filter(one => !shortenedMaterialReason(one)).map(plainReasonWords),
     youCheck,
+    // The same counts as the Requirements row (a refuted report verifies none of them, and says Unverified).
+    requirements: proof === null || proof.verdict === "refuted" ? null : requirementsOf(proof.matrix),
     limits: attention.filter(one => shortenedMaterialReason(one)),
     tabs: RESULT_TABS.map(tab => ({ key: tab.key, label: tab.key === "checks" && proof?.matrix.some(row => row.assessment !== undefined) ? "Requirements" : tab.label, count: tabCounts[tab.key], href: o.hrefFor(tab.key), active: tab.key === o.tab })),
     views: [{ key: "summary", html: summaryParts.join("\n") }, { key: "changes", html: changeParts.join("\n") }, { key: "checks", html: checkParts.join("\n") }],

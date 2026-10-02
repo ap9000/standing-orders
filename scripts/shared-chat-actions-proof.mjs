@@ -243,16 +243,16 @@ try {
         );
       } else await page.locator("[name=confirm]").check();
       await page
-        .getByRole("button", { name: "Mark complete", exact: true })
+        .getByRole("button", { name: "Accept and finish", exact: true })
         .scrollIntoViewIfNeeded();
       await shot(page, name + "-confirm");
       await click(
         page,
-        page.getByRole("button", { name: "Mark complete", exact: true }),
+        page.getByRole("button", { name: "Accept and finish", exact: true }),
       );
       await page
         .getByText(
-          "Marked complete. The recorded checks are unchanged.",
+          "Accepted and finished. The recorded checks are unchanged.",
           { exact: true },
         )
         .waitFor();
