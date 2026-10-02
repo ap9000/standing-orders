@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { acceptWordsOf, lastErrorLineOf, reportMismatchesOf } from "./workspace-ui.js";
-import { failedAttemptSentence, latestFailedAttempt, NO_REASON_RECORDED, RUN_REASON_WORDS } from "./needs-you.js";
+import { failedAttemptSentence, INTERNAL_ERROR, isInternalErrorReason, latestFinishedAttempt, NO_REASON_RECORDED, RUN_REASON_WORDS } from "./needs-you.js";
 
 describe("the result's Accept words", () => {
   test("Accept only when every requirement is met and the checks passed, and never says it publishes", () => {
@@ -85,16 +85,37 @@ describe("what went wrong with a failed attempt, in one line", () => {
     expect(failedAttemptSentence("lane 3 binary drifted out of its attested range")).toBe("Lane 3 binary drifted out of its attested range.");
   });
 
-  test("the latest failed attempt, whatever order the runs come in; planning and reviewing are not attempts", () => {
+  test("the latest finished attempt, whatever its outcome and whatever order the runs come in; planning, reviewing and unfinished runs are not it", () => {
     const runs = [
-      { id: 7, role: "builder", outcome: "failed", reason: "timeout" },
-      { id: 9, role: "reviewer", outcome: "failed", reason: "reviewer-error" },
-      { id: 8, role: "builder", outcome: "failed", reason: "acceptance" },
-      { id: 10, role: "builder", outcome: "built", reason: null },
+      { id: 7, role: "builder", outcome: "failed", reason: "timeout", finishedAt: "t" },
+      { id: 9, role: "reviewer", outcome: "failed", reason: "reviewer-error", finishedAt: "t" },
+      { id: 8, role: "builder", outcome: "failed", reason: "acceptance", finishedAt: "t" },
+      { id: 10, role: "builder", outcome: "built", reason: null, finishedAt: "t" },
+      { id: 11, role: "builder", outcome: null, reason: null, finishedAt: null },
     ];
-    expect(latestFailedAttempt(runs)?.id).toBe(8);
-    expect(latestFailedAttempt([...runs].reverse())?.id).toBe(8);
-    expect(latestFailedAttempt(runs.filter(one => one.outcome !== "failed"))).toBeNull();
+    // A newer attempt that didn't fail is still the one described: never an older failure.
+    expect(latestFinishedAttempt(runs)?.id).toBe(10);
+    expect(latestFinishedAttempt([...runs].reverse())?.id).toBe(10);
+    expect(latestFinishedAttempt(runs.filter(one => one.id !== 10))?.id).toBe(8);
+    expect(latestFinishedAttempt(runs.filter(one => one.finishedAt === null))).toBeNull();
+  });
+
+  test("a recorded reason is one plain line: its first line only, about 140 characters at most; machine output reads as an internal error", () => {
+    expect(failedAttemptSentence("the worker lost its lease\nthen it tried again")).toBe("The worker lost its lease.");
+    const long = failedAttemptSentence(`the build ${"kept on going ".repeat(20)}`);
+    expect(long.length).toBeLessThanOrEqual(140);
+    expect(long).toMatch(/^The build kept on going .*going…$/);
+    for (const machine of [
+      "Error: spawn claude ENOENT",
+      "TypeError: Cannot read properties of undefined (reading 'id')\n    at runTask (/Users/me/so/dist/worker.js:120:7)",
+      "could not open /Users/me/.config/standing-orders/state.db",
+      "the patch for src/ledger.ts did not apply",
+      "worker.js:120 threw",
+    ]) {
+      expect(isInternalErrorReason(machine), machine).toBe(true);
+      expect(failedAttemptSentence(machine)).toBe(INTERNAL_ERROR);
+    }
+    for (const words of ["timeout", "lane 3 binary drifted out of its attested range", "decision:12"]) expect(isInternalErrorReason(words), words).toBe(false);
   });
 
   test("a failing check ends on its last error line, numbered as in the saved log", () => {

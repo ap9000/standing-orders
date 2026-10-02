@@ -401,7 +401,7 @@ export function workIndexPage(store: Store, now: Date, access: WorkSummaryAccess
     'running_count',running_count,'completed_count',completed_count,'queued',queued,'done_recently',done_recently)) FROM project_totals) row_json FROM totals
   UNION ALL SELECT 1,0,0,0,0,0,0,0,0,0,json_object('root_ref',root_ref,'root_id',root_id,'id',id,'root_title',root_title,'repo',repo,
     'state',state,'created_at',created_at,'family_updated',family_updated,'version_count',version_count,'earlier_active',earlier_active,
-    'earlier_id',earlier_id,'broken',broken,'live_run',live_run,'result_id',page_result_id,'result_outcome',(SELECT outcome FROM run WHERE id=page_result_id),'failed_reason',(SELECT substr(reason,1,200) FROM run WHERE task_ref=page.ref_id AND outcome='failed' AND role NOT IN ('planner','reviewer') ORDER BY id DESC LIMIT 1),
+    'earlier_id',earlier_id,'broken',broken,'live_run',live_run,'result_id',page_result_id,'result_outcome',(SELECT outcome FROM run WHERE id=page_result_id),'attempt_reason',(SELECT substr(reason,1,1000) FROM run WHERE task_ref IN (SELECT ref_id FROM members WHERE root_ref=page.root_ref) AND finished_at IS NOT NULL AND role NOT IN ('planner','reviewer') ORDER BY id DESC LIMIT 1),
     'publication_url',(SELECT pr_url FROM publication WHERE run=page_result_id),
     'result_role',(SELECT role FROM run WHERE id=page_result_id),'live_role',(SELECT role FROM run WHERE id=page.live_run),
     'check_status',(SELECT status FROM run_check WHERE run=page_result_id),
@@ -528,8 +528,8 @@ function itemOf(row: Row, principal: WorkSummaryAccess['principal'], probe?: (ta
   const successor = code === 'cancelled' ? s(row, 'replaced_by') : null;
   if (successor !== null) { detail = `${replacedWords(successor)}.`; actionLabel = `Open ${successor}`; }
   if (code === 'terminal-dependency' && s(row, 'dependency_id') !== null) detail = `${s(row, 'dependency_id')} ${s(row, 'dependency_state') === 'cancelled' ? 'was cancelled' : 'failed'} before it finished.`;
-  // A failed task says its latest failed attempt's recorded reason (not its latest result's), or that none was recorded.
-  if (code === 'failed') detail = failedAttemptSentence(s(row, 'failed_reason'));
+  // A failed task says the latest finished attempt across its whole family, whatever its outcome: its recorded reason, or that none was recorded.
+  if (code === 'failed') detail = failedAttemptSentence(s(row, 'attempt_reason'));
   if (code === 'result-needs-attention' && n(row, 'custody_unresolved')) detail = 'A process exit is not recorded. Open the result to check whether its work has stopped.';
   if (code === 'result-needs-attention' && ['built', 'no-change'].includes(s(row, 'result_outcome') ?? '')) { actionCode = 'open-result'; actionLabel = 'Open result'; }
   if (process !== null && 'need' in process) { actionCode = 'confirm-stopped'; actionLabel = NEEDS[process.need].action.label; }

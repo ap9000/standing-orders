@@ -77,7 +77,7 @@ import { leadBriefHtml, LEAD_CONTEXT_CSS } from './lead-context.js';
 import { assignmentCatchUp } from './assignment-brief.js';
 import { assignmentActionHref, assignmentCardOf, assignmentStatusOf, assignmentSummaryHtml, assignmentWithEvidence, ASSIGNMENT_CSS } from './assignment-ui.js';
 import { assignmentStageOf, pullRequestFactOf, stageOfCode, stageOfDispatch, statusDetailsHtml, statusIconSvg, statusWhyHtml, taskStatusOf, TASK_STATUS_CSS, type PullRequestFact, type TaskStatus } from './task-status.js';
-import { ASKS, ASK_LABEL, NEEDS, NO_REASON_RECORDED, failedAttemptSentence, latestFailedAttempt, runReasonWords, type Ask } from './needs-you.js';
+import { ASKS, ASK_LABEL, NEEDS, NO_REASON_RECORDED, failedAttemptSentence, isInternalErrorReason, latestFinishedAttempt, runReasonWords, type Ask } from './needs-you.js';
 import { assignmentPresentationOf, historicalAssessmentReason, shortenedMaterialReason } from './assignment-presentation.js';
 import type { TaskFamily } from "./store.js";
 import { ledgerBody } from "./ledger-view.js";
@@ -6080,11 +6080,12 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     return { taskId: rootId, view: null, offer: { taskId: receipt.taskId, runId: receipt.runId, digest: receipt.digest }, target };
   }
 
-  /** What went wrong with the latest failed attempt, in one line: a failing check's last error line (linked to that
-   * line in its saved log), else the attempt's recorded reason in plain words, else that no reason was recorded. Only
-   * log lines are linked: never the run record, which for a failed attempt is this task's own page. */
+  /** What went wrong with the latest finished attempt (whatever its outcome, never an older failure), in one line: a
+   * failing check's last error line (linked to that line in its saved log), else the attempt's recorded reason in plain
+   * words, else that no reason was recorded. A reason that is machine output reads as an internal error, its detail
+   * behind a link to that line of the attempt's record; nothing links to this task's own page. */
   function failureOf(runs: readonly Run[], assignment: AssignmentSnapshot | null): { line: string; link: { label: string; href: string } | null } {
-    const last = latestFailedAttempt(runs);
+    const last = latestFinishedAttempt(runs);
     if (last === null) return { line: NO_REASON_RECORDED, link: null };
     const receipt = assignment?.receipt?.runId === last.id ? assignment.receipt : null;
     if (receipt !== null && receipt.checks.status === "failed" && receipt.checks.logArtifactId !== null) {
@@ -6093,11 +6094,12 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       try { read = artifact === null ? null : readVerifiedArtifact(evidenceRoot, artifact); } catch { read = null; }
       const found = read !== null && read.ok ? lastErrorLineOf(read.content.toString("utf8")) : null;
       if (found !== null) {
-        return { line: oneLineOf(found.text, 240), link: { label: `Check output, line ${found.line}`,
+        return { line: oneLineOf(found.text, 140), link: { label: `Check output, line ${found.line}`,
           href: `${reviewHref(receipt.taskId)}&run=${last.id}&tab=checks#check-log-L${found.line}` } };
       }
     }
-    return { line: failedAttemptSentence(last.reason), link: null };
+    return { line: failedAttemptSentence(last.reason),
+      link: isInternalErrorReason(last.reason) ? { label: "The recorded error", href: `/r/${last.id}?record=1#run-reason-detail` } : null };
   }
 
   function taskScreen(
@@ -6121,13 +6123,14 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     if (scopeDraft !== undefined) presentedData.scopeDraft = scopeDraft;
     if (cancelDraft !== undefined) presentedData.cancelDraft = cancelDraft;
     (presentedData as { pullRequest?: TaskPullRequest | null }).pullRequest = taskPullRequestOf(taskId, who);
-    presentedData.failure = failureOf(data.runs, data.assignment ?? null);
     // The thread reads the whole family: the original, its revisions, and every attempt across them.
     if (family !== null && family.problem === null) {
       presentedData.family = { root: { id: family.root.id, title: family.root.title, createdAt: family.root.createdAt, goal: store.getScope(family.root.id)?.goal ?? null },
         versions: family.versions.map(one => ({ id: one.id, title: one.title, state: one.state })),
         runs: family.versions.flatMap(version => version.id === data.task.id ? data.runs.map(run => ({ ...run, taskId: version.id })) : store.runsFor(version.refId).map(run => ({ ...run, taskId: version.id }))) };
     }
+    // What went wrong reads the family's latest finished attempt, as the Tasks row does.
+    presentedData.failure = failureOf(presentedData.family?.runs ?? data.runs, data.assignment ?? null);
     const paneProject = restricted() ? store.lookupRef(taskId)?.repo ?? null : who.via === "cookie" ? who.session.project : null;
     const page = taskPage(
       paneProject === null && !unscopedMode
@@ -23154,8 +23157,9 @@ function phaseWords(phase: string): string {
   return PHASE_WORDS[phase] ?? "the agent is working";
 }
 
+/** A recorded reason in one plain line; machine output (a stack trace, a path, "Error:" text) waits on the run record. */
 function reasonWords(reason: string): string {
-  return runReasonWords(reason);
+  return isInternalErrorReason(reason) ? "stopped with an internal error" : oneLineOf(runReasonWords(reason.trim().split(/\r?\n/, 1)[0] ?? ""), 140);
 }
 
 const INCIDENT_WORDS: Record<string, string> = {
@@ -24751,7 +24755,7 @@ function runFactsRows(run: Run, taskId: string, live: boolean, route: RouteStamp
     ["quality", qualityModeTitle(run.qualityMode ?? "default")],
     ["outcome", live ? "running" : (run.outcome ?? "never finished")],
     ["phase", live && run.phase !== null ? phaseWords(run.phase) : null],
-    ["reason", run.reason === null ? null : reasonWords(run.reason)],
+    ["reason", run.reason === null ? null : isInternalErrorReason(run.reason) ? "stopped with an internal error (below)" : reasonWords(run.reason)],
     ["runner", run.runner, true],
     ["branch", run.branch, true],
     ["model", run.model, true],
@@ -24782,7 +24786,11 @@ function runFactsRows(run: Run, taskId: string, live: boolean, route: RouteStamp
           `<p class="row"><span class="meta" style="min-width:8.5rem">${escape(label)}</span> ` +
           `<span${mono === true ? ` class="mono"` : ""}>${escape(value)}</span></p>`,
       )
-      .join("\n") + elapsed
+      .join("\n") + elapsed +
+    // Machine output (a stack trace, a path, "Error:" text) reads as an internal error everywhere else; its detail is here, as recorded.
+    (run.reason !== null && isInternalErrorReason(run.reason)
+      ? `<p class="row"><span class="meta" style="min-width:8.5rem">recorded error</span></p><pre class="mono" id="run-reason-detail" style="white-space:pre-wrap;overflow-wrap:anywhere">${escape(run.reason)}</pre>`
+      : "")
   );
 }
 

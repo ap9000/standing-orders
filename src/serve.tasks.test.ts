@@ -21,6 +21,7 @@ import { routeOfTask } from "./agentconfig.js";
 import { projectRoute } from "./phase-routing.js";
 import { Window } from "happy-dom";
 import { presented, T0, stylesOf, renderedHtmlOf, workspaceOf } from "../test/serve-kit.js";
+import { diagnoseTaskDispatch } from "./dispatch.js";
 
 describe("stage 5 — the tournament comparison screen and the pick ceremony, over real HTTP", () => {
   let store: Store;
@@ -1988,6 +1989,47 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(retried.status).toBe(303);
     expect(store.getTask("t-broke")?.state).toBe("queued");
     expect(store.listSteerNotes(ref).map(one => one.note)).toEqual(["Keep the flag's tests; only remove the branches."]);
+  });
+
+  test("a failed task describes its latest finished attempt, whatever its outcome, across the whole revision family; machine output reads as an internal error with its detail behind the link", async () => {
+    // A newer attempt that didn't fail is the one described, never the older failure.
+    const ref = seed("t-later", "later");
+    const old = store.startRun({ taskRef: ref, leaseId: "lease-later-1", runner: "night-shift-1", provider: "claude", branch: "standing-orders/t-later", worktree: "/pool/t-later", now: T0, ...presented(store, ref, "builder") });
+    store.finishRun(old, { outcome: "failed", reason: "timeout", now: T0 });
+    const newer = store.startRun({ taskRef: ref, leaseId: "lease-later-2", runner: "night-shift-1", provider: "claude", branch: "standing-orders/t-later", worktree: "/pool/t-later", now: T0, ...presented(store, ref, "builder") });
+    store.finishRun(newer, { outcome: "no-change", now: T0 });
+    store.setTaskState("t-later", "failed", T0);
+    // A revision with no attempt of its own reads its family's latest attempt: the original's, a stack trace.
+    const root = seed("t-fam", "family");
+    const trace = "TypeError: Cannot read properties of undefined (reading 'id')\n    at runTask (/Users/me/so/dist/worker.js:120:7)";
+    const rootRun = store.startRun({ taskRef: root, leaseId: "lease-fam", runner: "night-shift-1", provider: "claude", branch: "standing-orders/t-fam", worktree: "/pool/t-fam", now: T0, ...presented(store, root, "builder") });
+    store.finishRun(rootRun, { outcome: "failed", reason: trace, now: T0 });
+    const brief = store.saveArtifact({ run: rootRun, kind: "revision-brief", key: "fam.json", bytesOriginal: 2, bytesStored: 2, truncated: false, sha256: "a".repeat(64), capture: "synthetic lineage fixture" }, T0);
+    const child = seed("t-fam-r", "family, revised");
+    store.markRevision(child, "t-fam", brief);
+    store.setTaskState("t-fam", "failed", T0);
+    store.setTaskState("t-fam-r", "failed", T0);
+    await boot();
+    const cookie = await login();
+    const later = workspaceOf(await (await fetch(url("/t/t-later"), { headers: { cookie } })).text()).view as import("./browser-workspace.js").BrowserTaskView;
+    expect(later.failure).toEqual({ line: "No reason was recorded for this attempt.", link: null });
+    expect(diagnoseTaskDispatch(store, "t-later", T0)?.detail).toBe("No reason was recorded for this attempt.");
+
+    const html = await (await fetch(url("/t/t-fam"), { headers: { cookie } })).text();
+    const view = workspaceOf(html).view as import("./browser-workspace.js").BrowserTaskView;
+    expect(view.failure).toEqual({ line: "The attempt stopped with an internal error.", link: { label: "The recorded error", href: `/r/${rootRun}?record=1#run-reason-detail` } });
+    expect(renderedHtmlOf(html)).not.toContain("TypeError");
+    for (const id of ["t-fam", "t-fam-r"]) expect(diagnoseTaskDispatch(store, id, T0)?.detail).toBe("The attempt stopped with an internal error.");
+    // The detail waits on the attempt's record, at the link's anchor, as recorded.
+    const record = await (await fetch(url(`/r/${rootRun}?record=1`), { headers: { cookie } })).text();
+    expect(record).toContain(`id="run-reason-detail"`);
+    expect(record).toContain("TypeError: Cannot read properties of undefined (reading &#39;id&#39;)");
+
+    const rows = (workspaceOf(await (await fetch(url("/work"), { headers: { cookie } })).text()).view as import("./browser-workspace.js").BrowserTasksView).rows;
+    expect(rows.find(row => row.id === "t-later")?.detail).toBe("No reason was recorded for this attempt.");
+    const family = rows.filter(row => row.id === "t-fam" || row.id === "t-fam-r");
+    expect(family.length).toBe(1);
+    expect(family[0]?.detail).toBe("The attempt stopped with an internal error.");
   });
 
   test("a failed attempt with no recorded reason says so, and Retry without a note is the plain requeue", async () => {
