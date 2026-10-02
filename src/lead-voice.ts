@@ -25,6 +25,8 @@ export const LEAD_CLAIMED = "lead is on it";
 export const LEAD_IDLE_MS = 2 * 3_600_000;
 /** The lead's acts that hand the task back: done, handed to a person, or cancelled. */
 export const LEAD_ENDS = ["task completed", "task handed to a person", "task cancelled"] as const;
+/** Acts by anyone that end a claim: a completed or cancelled task is nobody's to be on. */
+const DONE_ACTS_SQL = "'completed','cancelled'";
 export const LEAD_SAY_MAX = 300;
 /** Lines one batched message keeps; the oldest go first. */
 const BATCH_LINES = 8;
@@ -36,6 +38,8 @@ const ENDS_SQL = LEAD_ENDS.map(one => `'${one}'`).join(",");
 export const LEAD_CLAIM_SQL = `COALESCE((SELECT CASE
       WHEN EXISTS(SELECT 1 FROM action_ledger e WHERE e.task_id IN (SELECT m.id FROM ordered m WHERE m.root_ref = c.root_ref)
         AND e.id > claim.id AND e.actor = claim.actor AND e.action IN (${ENDS_SQL})) THEN 0
+      WHEN EXISTS(SELECT 1 FROM task_act t WHERE t.task_ref IN (SELECT m.ref_id FROM ordered m WHERE m.root_ref = c.root_ref)
+        AND t.act IN (${DONE_ACTS_SQL}) AND t.at >= claim.at) THEN 0
       WHEN (SELECT MAX(a.at) FROM action_ledger a WHERE a.task_id IN (SELECT m.id FROM ordered m WHERE m.root_ref = c.root_ref)
         AND a.id >= claim.id AND a.actor = claim.actor) > $leadIdleSince THEN 1 ELSE 2 END
     FROM action_ledger claim WHERE claim.id = (SELECT MAX(id) FROM action_ledger WHERE task_id = c.root_id AND action = '${LEAD_CLAIMED}' AND actor = $leadOf)), 0)`;
@@ -135,18 +139,29 @@ export function leadClaim(store: Store, actor: Actor, taskId: string, now: Date)
   return { ok: true, root, claim: leadClaimOf(store, taskId, now, actor.account)! };
 }
 
-/** Where a task's chat card lives: its newest version's own attempt (the card every-update chat edits), else that
+/** Where a task's chat card lives: the family's newest attempt (the card every-update chat edits), else its newest
  * version. Null for a task with no reference. */
 function cardSource(store: Store, root: string): { run: number } | { taskRef: number } | null {
   const refs = familyOf(store, root).ids.map(id => store.lookupRef(id)).filter(ref => ref !== null).sort((a, b) => b.id - a.id);
   const newest = refs[0];
   if (newest === undefined) return null;
-  const run = store.runsFor(newest.id).find(one => one.role === "builder" && one.contestant === null);
-  return run === undefined ? { taskRef: newest.id } : { run: run.id };
+  const runs = refs.flatMap(ref => store.runsFor(ref.id)).filter(one => one.role === "builder" && one.contestant === null);
+  const run = runs.reduce<number | null>((top, one) => top === null || one.id > top ? one.id : top, null);
+  return run === null ? { taskRef: newest.id } : { run };
+}
+
+/** Whether anyone completed or cancelled the task family (since `since`, when given), or its newest version is
+ * cancelled however that happened: a finished task is nobody's to be on. */
+function familyEnded(store: Store, ids: readonly string[], since: string | null): boolean {
+  const refs = ids.map(id => store.lookupRef(id)).filter(ref => ref !== null).sort((a, b) => b.id - a.id);
+  if (refs[0] === undefined) return false;
+  if (store.getTask(refs[0].externalId)?.state === "cancelled") return true;
+  return store.handle.prepare(`SELECT 1 AS hit FROM task_act WHERE task_ref IN (${refs.map(() => "?").join(",")}) AND act IN (${DONE_ACTS_SQL})
+    AND at >= ? LIMIT 1`).get(...refs.map(ref => ref.id), since ?? "") !== undefined;
 }
 
 /** Whether `viewer`'s own lead has this task now: on it, lapsed after two quiet hours (it says so), or null (never
- * claimed by their lead, or it completed it, handed it on or cancelled it since). Another person's lead never counts. */
+ * claimed by their lead, handed on by it since, or completed or cancelled by anyone). Another person's lead never counts. */
 export function leadClaimOf(store: Store, taskId: string, now: Date, viewer: string | null | undefined): LeadClaim | null {
   if (viewer == null || viewer === "") return null;
   try {
@@ -158,6 +173,7 @@ export function leadClaimOf(store: Store, taskId: string, now: Date, viewer: str
     const args = [...ids, Number(claim["id"]), String(claim["actor"])];
     // Completed, handed on or cancelled by the lead since its claim: the claim is over.
     if (store.handle.prepare(`SELECT 1 AS hit FROM action_ledger WHERE ${family} AND action IN (${ENDS_SQL}) LIMIT 1`).get(...args) !== undefined) return null;
+    if (familyEnded(store, ids, String(claim["at"]))) return null;
     const latest = store.handle.prepare(`SELECT MAX(at) AS at FROM action_ledger WHERE ${family}`).get(...args);
     const lastActedAt = String(latest?.["at"] ?? claim["at"]);
     return { state: Date.parse(lastActedAt) > now.getTime() - LEAD_IDLE_MS ? "on-it" : "lapsed",
@@ -182,9 +198,9 @@ export function enqueueLeadLapses(store: Store, now: Date): number {
       const taskId = String(row["task_id"]);
       const claim = leadClaimOf(store, taskId, now, owner);
       if (claim?.state !== "lapsed") continue;
-      const { root } = familyOf(store, taskId);
-      const state = store.getTask(root)?.state;
-      if (state === undefined || state === "cancelled") continue;
+      const { root, ids } = familyOf(store, taskId);
+      // A completed or cancelled task never repaints as back with them.
+      if (store.getTask(root) === null || familyEnded(store, ids, null)) continue;
       const source = cardSource(store, root);
       if (source === null) continue;
       // The owner's lead let it go: only its owner's card hears of it (store.pingAllowed).

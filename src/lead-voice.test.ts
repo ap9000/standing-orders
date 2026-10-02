@@ -18,7 +18,8 @@ import { quietCardView } from "./chat-quiet.js";
 import { workIndexPage } from "./work-index.js";
 import { installationStatus, renderInstallationStatus } from "./lead-status.js";
 import { runOperate } from "./operate.js";
-import { LEAD_IDLE_MS, agoWords, enqueueLeadLapses, leadActivity, leadActivityLine } from "./lead-voice.js";
+import { LEAD_IDLE_MS, agoWords, enqueueLeadLapses, leadActivity, leadActivityLine, leadClaimOf } from "./lead-voice.js";
+import { withActor } from "./actor.js";
 import { LEAD_LAPSED, LEAD_ON_IT } from "./task-status.js";
 import { finishedLine } from "./chat-voice.js";
 import { GUIDES } from "./guides.js";
@@ -217,6 +218,41 @@ describe("your lead tells you what it's doing", () => {
     expect((await cli(["task", "state", "cleanup", "done", "--token", token, "--json"])).code).toBe(0);
     expect(store.actionLedger({ repos: [REPO], taskId: "cleanup" }).map(one => one.action)).toContain("task completed");
     expect(row("cleanup").status.detail).not.toBe(LEAD_ON_IT);
+  });
+
+  test("c2: the person completing or cancelling the task ends the lead's claim, and it never repaints as back with them", async () => {
+    const token = await mintLead();
+    failedTask("cleanup", "Clean up old flags");
+    failedTask("flags", "Drop flags");
+    for (const id of ["cleanup", "flags"]) expect((await cli(["assignment", "claim", id, "--token", token, "--json"])).code).toBe(0);
+    expect(needsYou()).toEqual([]);
+    now = new Date(T0.getTime() + minutes(5));
+    // Alex, not the lead: completes one, cancels the other.
+    expect((await cli(["task", "state", "cleanup", "done", "--as", "alex", "--token", alexPassword, "--json"])).code).toBe(0);
+    expect(store.actionLedger({ repos: [REPO], taskId: "cleanup" }).map(one => one.action)).not.toContain("task completed");
+    expect(withActor({ account: "alex", lead: false }, () => store.cancelTask("flags", now)).ok).toBe(true);
+    expect(leadClaimOf(store, "cleanup", now, "alex")).toBeNull();
+    expect(leadClaimOf(store, "flags", now, "alex")).toBeNull();
+    expect(row("cleanup").status.detail).not.toBe(LEAD_ON_IT);
+    // Two quiet hours later neither finished task comes back to Needs you.
+    now = new Date(T0.getTime() + LEAD_IDLE_MS + minutes(10));
+    expect(enqueueLeadLapses(store, now)).toBe(0);
+  });
+
+  test("c2: the claim repaints the newest attempt's card, not the first", async () => {
+    const token = await mintLead();
+    failedTask("release-0912", "Release 0.9.12");
+    const first = failedRun("release-0912");
+    expect(store.setTaskState("release-0912", "queued", now).ok).toBe(true);
+    const lease = `lease-${++serial}`;
+    expect(acquire(store, ref("release-0912"), RUNNER, { now, token: `tok-${RUNNER}`, newLeaseId: () => lease, ttlMs: TTL }).ok).toBe(true);
+    const second = store.startRun({ taskRef: ref("release-0912"), leaseId: lease, runner: RUNNER, branch: "so/t", worktree: "/pool/t", ...legacy, now });
+    store.finishRun(second, { outcome: "failed", reason: "agent", now });
+    expect(completeFenced(store, lease, "failed", now).ok).toBe(true);
+    expect(second).toBeGreaterThan(first);
+    expect((await cli(["assignment", "claim", "release-0912", "--token", token, "--json"])).code).toBe(0);
+    const repaint = store.handle.prepare("SELECT id FROM notification WHERE kind = 'lead-on-it' ORDER BY id DESC LIMIT 1").get();
+    expect(store.notificationById(Number(repaint?.["id"]))?.run).toBe(second);
   });
 
   test("c3: status and the console Home show what the lead is doing and when it last acted", async () => {
