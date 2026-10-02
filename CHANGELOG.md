@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.13 — 2026-10-02
+
+- **One page per result.** Every build's result has one page, titled with its
+  task, with exactly one main action: Accept, Run checks, or Request changes.
+  A result that can't be accepted says why in one line.
+
 ## 0.9.12 — 2026-10-02
 
 - **Approving a plan fits one phone screen.** The plan shows up front in plain
