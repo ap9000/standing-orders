@@ -1,9 +1,10 @@
 /**
  * Closing out what a run started. When a run ends, whatever its outcome, anything still running in its process
  * groups — the provider's own group and every process or group the run was seen to start — is stopped: SIGTERM, then
- * SIGKILL for whatever is still there after 10 s. Completing or cancelling a task does the same for anything still
- * running from its checkout (not a person's: nothing at a terminal). Each stop is in the ledger, naming what was
- * stopped.
+ * SIGKILL for whatever is still there after 10 s. Completing or cancelling a task does the same for what Toolroll left
+ * running from its checkout: what a finished run started (descends from one of its processes) or an orphan (its parent
+ * gone), never one with a live parent Toolroll did not start (a deploy, a person's agent or shell). Each stop is in
+ * the ledger, naming what was stopped.
  *
  * Never the live service: this process, its ancestors and their process groups are never targets.
  *
@@ -198,13 +199,55 @@ export function processesIn(paths: readonly string[]): Map<string, number[]> {
   return found;
 }
 
+/**
+ * Of the processes running from a finished checkout (`inside`), the ones Toolroll left there: each descends from a
+ * process a finished run started (`roots`), or is an orphan (its parent is pid 1), or is the child of one that goes.
+ * Never one with a live parent Toolroll didn't start — a deploy the lead runs from the checkout, a person's agent or
+ * its tools — nor anything at a terminal or protected.
+ */
+export function checkoutTargets(census: readonly ProcessRow[], inside: ReadonlySet<number>, roots: ReadonlySet<number>, guard: { pids: ReadonlySet<number>; groups: ReadonlySet<number> }): ProcessRow[] {
+  const byPid = new Map(census.map(row => [row.pid, row]));
+  const fromRun = (row: ProcessRow) => {
+    for (let at: ProcessRow | undefined = row, hops = 0; at !== undefined && at.pid > 1 && hops < 64; at = byPid.get(at.ppid), hops++) {
+      if (roots.has(at.pid)) return true;
+    }
+    return false;
+  };
+  const verdict = new Map<number, boolean>();
+  const left = (row: ProcessRow): boolean => {
+    const known = verdict.get(row.pid);
+    if (known !== undefined) return known;
+    verdict.set(row.pid, false);
+    const parent = byPid.get(row.ppid);
+    const ours = inside.has(row.pid) && !row.terminal && !guard.pids.has(row.pid) && !guard.groups.has(row.pgid)
+      && (row.ppid === 1 || fromRun(row) || (parent !== undefined && left(parent)));
+    verdict.set(row.pid, ours);
+    return ours;
+  };
+  return census.filter(left);
+}
+
+/** The processes finished runs on this host started that are still the same process: what a leftover may descend from. */
+function finishedRunProcesses(store: Store, census: readonly ProcessRow[]): Set<number> {
+  const byPid = new Map(census.map(row => [row.pid, row]));
+  const roots = new Set<number>();
+  const rows = store.handle.prepare(`SELECT p.pid AS pid, p.observed_at AS observed_at FROM run_process p JOIN run r ON r.id = p.run
+    WHERE p.exited_at IS NULL AND p.pid IS NOT NULL AND p.host = ? AND r.outcome IS NOT NULL`).all(hostname());
+  for (const row of rows) {
+    const now = byPid.get(Number(row["pid"]));
+    const observedAt = Date.parse(String(row["observed_at"]));
+    if (now !== undefined && Number.isFinite(observedAt) && now.bornAt <= observedAt + BIRTH_SLACK_MS) roots.add(now.pid);
+  }
+  return roots;
+}
+
 /** Checkouts this process already closed out since their task finished (path and when). */
 const closed = new Set<string>();
 
 /**
- * Completing or cancelling a task closes out its checkout: anything still running from it is stopped (SIGTERM, then
- * SIGKILL after the grace), in the ledger. `finished` lists the checkouts whose task is complete or cancelled, with
- * when it finished; each is looked at once per finish.
+ * Completing or cancelling a task closes out its checkout: what Toolroll left running from it (`checkoutTargets`) is
+ * stopped (SIGTERM, then SIGKILL after the grace), in the ledger. `finished` lists the checkouts whose task is
+ * complete or cancelled, with when it finished; each is looked at once per finish.
  */
 export async function closeOutCheckouts(store: Store, clock: () => Date, finished: readonly { row: WorktreeRow; taskId: string | null; finishedAt: string }[], options: CloseoutOptions & { find?: typeof processesIn } = {}): Promise<{ path: string; done: Stopped }[]> {
   const fresh = finished.filter(one => !closed.has(`${one.row.path}\u0000${one.finishedAt}`) && existsSync(one.row.path) && one.row.runner === null);
@@ -217,9 +260,7 @@ export async function closeOutCheckouts(store: Store, clock: () => Date, finishe
     const pids = new Set(inside.get(one.row.path) ?? []);
     if (pids.size === 0) continue;
     try { census ??= (options.census ?? (() => processCensus()))(); } catch { return out; }
-    const guard = protectedProcesses(census);
-    // A process at a terminal is a person's (a shell, an editor), not something the run left behind.
-    const targets = census.filter(row => pids.has(row.pid) && !row.terminal && !guard.pids.has(row.pid) && !guard.groups.has(row.pgid));
+    const targets = checkoutTargets(census, pids, finishedRunProcesses(store, census), protectedProcesses(census));
     if (targets.length === 0) continue;
     const done = await stopProcesses(targets, options);
     census = null;

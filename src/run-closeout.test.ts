@@ -15,7 +15,7 @@ import { run } from "./exec.js";
 import { WorktreePool } from "./worktree.js";
 import { COMPLETION_ACTION } from "./result-completion.js";
 import { finishedCheckouts } from "./checkout-cleanup.js";
-import { closeOutCheckouts, closeOutRuns, closeoutTargets, parseCensus, processesIn, protectedProcesses, type ProcessRow } from "./run-closeout.js";
+import { checkoutTargets, closeOutCheckouts, closeOutRuns, closeoutTargets, parseCensus, processesIn, protectedProcesses, type ProcessRow } from "./run-closeout.js";
 
 let dir: string, store: Store, repo: string;
 const spawned: number[] = [];
@@ -68,6 +68,27 @@ test("a run's targets: its processes and groups as they were seen, not a reused 
   expect(closeoutTargets(census, witnesses, protectedProcesses(census)).map(one => one.pid)).toEqual([500, 501, 601]);
 });
 
+test("from a finished checkout, only what a finished run started or an orphan is a target — never a deploy or a person's agent", () => {
+  const seen = 1_000_000;
+  const at = (pid: number, ppid: number, name: string, terminal = false): ProcessRow => ({ pid, ppid, pgid: pid, bornAt: seen, name, terminal });
+  const census = [
+    at(process.pid, 1, "node"),            // the live service
+    at(100, 1, "Terminal"), at(101, 100, "zsh", true), at(102, 101, "claude", true),
+    at(103, 102, "bash"),                  // the lead's tool shell: no terminal of its own
+    at(104, 103, "node"),                  // deploy-browser.mjs, run by the lead from the checkout
+    at(200, 1, "node"),                    // a finished run's provider
+    at(201, 200, "sh"), at(202, 201, "node"), // a server the run started
+    at(300, 1, "node"), at(301, 300, "esbuild"), // a server left behind (its run's process gone) and its child
+    at(400, 1, "Code"), at(401, 400, "node"),  // a person's editor and its language server
+    at(500, 1, "vim", true),               // at a terminal
+    at(600, process.pid, "node"),          // started by the live service, not by a run
+  ];
+  const inside = new Set([102, 103, 104, 202, 300, 301, 401, 500, 600]);
+  expect(checkoutTargets(census, inside, new Set([200]), protectedProcesses(census)).map(one => one.pid)).toEqual([202, 300, 301]);
+  // With no finished run alive, only orphans and their children go.
+  expect(checkoutTargets(census, inside, new Set(), protectedProcesses(census)).map(one => one.pid)).toEqual([300, 301]);
+});
+
 test("when a run ends, what is still in its process group is stopped — SIGTERM, then SIGKILL — and the ledger says what", async () => {
   store.createTask({ id: "leaves-servers", title: "leaves servers" }, new Date());
   const ref = store.refFor("built-in", "leaves-servers").id;
@@ -116,7 +137,7 @@ test("a run still open is left alone", async () => {
   expect(alive(child.pid!)).toBe(true);
 });
 
-test("completing a task stops what still runs from its checkout, once, and says so in the ledger", async () => {
+test("completing a task stops what Toolroll left running from its checkout, once, and says so in the ledger; never a deploy run from it", async () => {
   const git = (args: string[]) => run("git", args, { cwd: repo });
   await git(["init", "-q", "-b", "main"]);
   await git(["config", "user.email", "test@example.com"]);
@@ -146,10 +167,17 @@ test("completing a task stops what still runs from its checkout, once, and says 
   // lsof (or /proc) finds it by its working directory.
   expect(await until(() => (processesIn([leased.worktree.path]).get(leased.worktree.path) ?? []).includes(server.pid!))).toBe(true);
 
-  const census = () => (alive(server.pid!) ? [row(server.pid!, server.pid!, Date.now() - 1_000)] : []);
+  // A deploy the lead runs from the same checkout: its parent is alive and not Toolroll's, so it stays.
+  const deploy = spawn("sleep", ["300"], { cwd: leased.worktree.path, detached: true, stdio: "ignore" });
+  spawned.push(deploy.pid!);
+  expect(await until(() => (processesIn([leased.worktree.path]).get(leased.worktree.path) ?? []).includes(deploy.pid!))).toBe(true);
+
+  const census = () => [{ ...row(deploy.pid!, deploy.pid!, Date.now() - 1_000), ppid: process.pid }, ...(alive(server.pid!) ? [row(server.pid!, server.pid!, Date.now() - 1_000)] : [])];
   const closed = await closeOutCheckouts(store, () => new Date(), finished, { graceMs: 2_000, census });
   expect(closed.map(one => one.path)).toEqual([leased.worktree.path]);
+  expect(closed[0]!.done.stopped.map(one => one.pid)).toEqual([server.pid]);
   expect(await until(() => !alive(server.pid!))).toBe(true);
+  expect(alive(deploy.pid!)).toBe(true);
   expect(store.actionLedger({ repos: null }).find(one => one.action === "checkout processes stopped")).toMatchObject({ taskId: "serves",
     detail: expect.stringContaining(`its task finished; stopped 1 process in 1 group: sleep (${server.pid})`) });
   // Looked at once per finish.
