@@ -184,9 +184,10 @@ export function runReasonWords(reason: string): string {
 
 /** The latest finished build attempt among a task's runs (any order), whatever its outcome: planning and reviewing
  * are not attempts, and an older failure never stands in for a newer attempt. */
-export function latestFinishedAttempt<T extends { id: number; role: string; finishedAt: string | null }>(runs: readonly T[]): T | null {
+export function latestFinishedAttempt<T extends { id: number; role: string; finishedAt: string | null; outcome?: string | null }>(runs: readonly T[]): T | null {
   let latest: T | null = null;
-  for (const run of runs) if (run.finishedAt !== null && run.role !== "planner" && run.role !== "reviewer" && (latest === null || run.id > latest.id)) latest = run;
+  // Ended means a finish time or an outcome: a reconcile can mark a run failed without stamping finished_at.
+  for (const run of runs) if ((run.finishedAt !== null || (run.outcome ?? null) !== null) && run.role !== "planner" && run.role !== "reviewer" && (latest === null || run.id > latest.id)) latest = run;
   return latest;
 }
 
@@ -202,11 +203,10 @@ export function isInternalErrorReason(reason: string | null | undefined): boolea
   if (text === "" || RUN_REASON_WORDS[text] !== undefined) return false;
   return /\b[A-Za-z]*(?:Error|Exception):/.test(text) // Error:, TypeError:, SomeException:
     || /^\s*at\s+\S+/m.test(text) && /\n/.test(text) // a stack frame below the first line
-    || /(?:^|[\s(“"'])(?:~|\.{1,2})?\/[\w.@-]+\/?/.test(text) // /Users/…, ./src, ~/x
+    // An absolute path of two or more segments (/Users/…, ~/x/y): plain sentences may name a project file (src/ledger.ts).
+    || /(?:^|[\s(“"'])~?\/(?:[\w.@-]+\/)+[\w.@-]+/.test(text)
     || /[A-Za-z]:\\/.test(text) // C:\…
-    || /\b[\w.@-]+\/[\w./@-]*\.[A-Za-z]{1,5}\b/.test(text) // src/ledger.ts
-    || /\.[cm]?[jt]sx?:\d+/.test(text) // ledger.ts:14
-    || /\bE[A-Z]{3,}\b/.test(text); // ENOENT, EACCES
+    || /\.[cm]?[jt]sx?:\d+/.test(text); // ledger.ts:14
 }
 
 /** A failed attempt in one plain line: its recorded reason in words (first line only, about 140 characters at most),

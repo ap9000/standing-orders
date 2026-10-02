@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.14 — 2026-10-02
+
+- **Results and failures say what went wrong.** A result whose report doesn't
+  match its saved changes says so in its headline and lists each mismatch,
+  with its requirements shown as unverified; accepting it asks for a reason. A
+  failed task shows its latest attempt's reason in one plain line (or that
+  none was recorded), linked to the log, with Retry as its one action.
+
 ## 0.9.13 — 2026-10-02
 
 - **One page per result.** Every build's result has one page, titled with its

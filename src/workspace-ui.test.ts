@@ -98,6 +98,8 @@ describe("what went wrong with a failed attempt, in one line", () => {
     expect(latestFinishedAttempt([...runs].reverse())?.id).toBe(10);
     expect(latestFinishedAttempt(runs.filter(one => one.id !== 10))?.id).toBe(8);
     expect(latestFinishedAttempt(runs.filter(one => one.finishedAt === null))).toBeNull();
+    // A run a reconcile marked failed without a finish time still ended: it is the latest attempt.
+    expect(latestFinishedAttempt([...runs, { id: 12, role: "builder", outcome: "failed", reason: "orphaned", finishedAt: null }])?.id).toBe(12);
   });
 
   test("a recorded reason is one plain line: its first line only, about 140 characters at most; machine output reads as an internal error", () => {
@@ -109,13 +111,13 @@ describe("what went wrong with a failed attempt, in one line", () => {
       "Error: spawn claude ENOENT",
       "TypeError: Cannot read properties of undefined (reading 'id')\n    at runTask (/Users/me/so/dist/worker.js:120:7)",
       "could not open /Users/me/.config/standing-orders/state.db",
-      "the patch for src/ledger.ts did not apply",
       "worker.js:120 threw",
     ]) {
       expect(isInternalErrorReason(machine), machine).toBe(true);
       expect(failedAttemptSentence(machine)).toBe(INTERNAL_ERROR);
     }
-    for (const words of ["timeout", "lane 3 binary drifted out of its attested range", "decision:12"]) expect(isInternalErrorReason(words), words).toBe(false);
+    for (const words of ["timeout", "lane 3 binary drifted out of its attested range", "decision:12", "the ENV file was missing", "EOF before the plan finished",
+      "see docs/setup.md first", "the patch for src/ledger.ts did not apply"]) expect(isInternalErrorReason(words), words).toBe(false);
   });
 
   test("a failing check ends on its last error line, numbered as in the saved log", () => {
