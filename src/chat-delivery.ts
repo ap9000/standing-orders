@@ -844,7 +844,10 @@ export async function planChatNotifications(
           planQuietCard(options, binding, notification, now);
           if (!needsPerson(notification)) return;
           if (notification.kind === "run-finished" && run) {
-            if (planFinished(options, binding, notification.taskRef!, run.id, now)) return;
+            // Finished work goes out only as the batch line; one left out on purpose (a release check, a replaced
+            // task, the reader's own completion) stays quiet rather than falling through to another message.
+            planFinished(options, binding, notification.taskRef!, run.id, now);
+            return;
           }
           // Every other update for this person within two minutes joins the same one message.
           else if (notification.kind !== "run-finished" && joinsBatch(notification)) {

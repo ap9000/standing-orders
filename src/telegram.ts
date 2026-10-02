@@ -874,8 +874,12 @@ async function deliverOutboxTo(
           return sent;
         }
         const view = finishedView(store, batch, clock(), evidenceRoot, binding.approver);
-        // Nothing in the batch reads as a line: the update that needs this person still reaches them on its own.
-        if (view === null) return deliverOne(store, botId, binding, sender, fact, clock, phoneOrigin, evidenceRoot, projects);
+        // Nothing in the batch reads as a line. Finished work left out on purpose (a release check, a replaced task,
+        // the reader's own completion) stays quiet; any other update that needs this person still reaches them alone.
+        if (view === null) {
+          if (readyRun !== null) return { ok: true, receipt: receiptFor(botId, binding.chatId, card.messageId) };
+          return deliverOne(store, botId, binding, sender, fact, clock, phoneOrigin, evidenceRoot, projects);
+        }
         // While a lone update is still the only item, its edit keeps that update's own action button.
         const own = lone && fact.link !== null ? factButton(phoneOrigin, fact.link) : null;
         const keyboard = own !== null ? [own] : viewKeyboard(phoneOrigin, view);
