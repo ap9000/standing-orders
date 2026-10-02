@@ -21,6 +21,7 @@ import { routeOfTask } from "./agentconfig.js";
 import { projectRoute } from "./phase-routing.js";
 import { Window } from "happy-dom";
 import { presented, T0, stylesOf, renderedHtmlOf, workspaceOf } from "../test/serve-kit.js";
+import { diagnoseTaskDispatch } from "./dispatch.js";
 
 describe("stage 5 — the tournament comparison screen and the pick ceremony, over real HTTP", () => {
   let store: Store;
@@ -1296,7 +1297,7 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(task).toContain('name="operation" value="unlink"');
     expect(task).not.toContain('name="operation" value="retry"');
     expect(task).not.toContain(">plan first</button>");
-    expect(task).not.toContain("hold next attempt");
+    expect(task).not.toContain("Hold the next attempt");
     expect(task).not.toContain("No approved scope yet");
     expect(task).not.toContain('<details class="section" id="waits-for"');
     const css = await stylesOf(task, base);
@@ -1906,9 +1907,9 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     // A stalled task's primary act is the retry; hold rides beside it with its reason.
     const barHtml = html.slice(bar, html.indexOf("</div>", bar));
     expect(barHtml).toContain('<span class="primary"><form method="post" action="/t/t-shape/requeue"');
-    expect(barHtml).toContain("<button type=\"submit\">hold next attempt</button>");
+    expect(barHtml).toContain("<button type=\"submit\">Hold the next attempt</button>");
     expect(barHtml).toContain('name="reason"');
-    expect(barHtml.indexOf('name="reason"')).toBeLessThan(barHtml.indexOf("hold next attempt"));
+    expect(barHtml.indexOf('name="reason"')).toBeLessThan(barHtml.indexOf("Hold the next attempt"));
     // The rail is the property list, one row grammar for every key fact.
     const rail = railOf(html);
     expect(rail).toContain('<div class="card props">');
@@ -1924,7 +1925,7 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(html.lastIndexOf('<details class="arm-danger">')).toBeGreaterThan(html.lastIndexOf('<details class="section"'));
   });
 
-  test("hold is 'hold next attempt'; while an attempt runs, retry says when it becomes available instead of offering a deferred button", async () => {
+  test("hold is 'Hold the next attempt'; while an attempt runs, retry says when it becomes available instead of offering a deferred button", async () => {
     const ref = seed("t-verbs", "with verbs");
     // Stalled AND live: a failed earlier attempt with an unresolved
     // incident, and a live claim right now.
@@ -1934,7 +1935,7 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     await boot();
     const cookie = await login();
     const html = await (await fetch(url("/t/t-verbs"), { headers: { cookie } })).text();
-    expect(html).toContain("<button type=\"submit\">hold next attempt</button>");
+    expect(html).toContain("<button type=\"submit\">Hold the next attempt</button>");
     // Said once (commit-3 review, finding 3), and only where a retry applies.
     expect(renderedHtmlOf(html).split("retry becomes available after this attempt finishes").length - 1).toBe(1);
     expect(workspaceOf(html).pageHtml!.split("retry becomes available after this attempt finishes").length - 1).toBe(1);
@@ -1944,12 +1945,107 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     const ref2 = seed("t-fine", "just running");
     live("t-fine", ref2);
     const fine = await (await fetch(url("/t/t-fine"), { headers: { cookie } })).text();
-    expect(fine).toContain("hold next attempt");
+    expect(fine).toContain("Hold the next attempt");
     expect(fine).not.toContain("retry becomes available");
     expect(fine).not.toContain('action="/t/t-fine/requeue"');
     // The attempts ledger row: chip, then one mono meta run with the
     // unmeasured word for the live attempt.
     expect(html).toContain("unmeasured so far");
+  });
+
+  test("a failed task says what went wrong in one line, its one ink act is Retry itself, and nothing links back to its own page", async () => {
+    const ref = seed("t-broke", "broke");
+    // The agent never started, so nothing of it can still be running: the page reads plain Failed.
+    const earlier = store.startRun({ taskRef: ref, leaseId: "lease-broke-1", runner: "night-shift-1", provider: "claude", branch: "standing-orders/t-broke", worktree: "/pool/t-broke", now: T0, ...presented(store, ref, "builder") });
+    store.finishRun(earlier, { outcome: "failed", reason: "timeout", now: T0 });
+    const failedRun = store.startRun({ taskRef: ref, leaseId: "lease-broke-2", runner: "night-shift-1", provider: "claude", branch: "standing-orders/t-broke", worktree: "/pool/t-broke", now: T0, ...presented(store, ref, "builder") });
+    store.finishRun(failedRun, { outcome: "failed", reason: "acceptance", now: T0 });
+    store.setTaskState("t-broke", "failed", T0);
+    await boot();
+    const cookie = await login();
+    const html = await (await fetch(url("/t/t-broke"), { headers: { cookie } })).text();
+    const view = workspaceOf(html).view as import("./browser-workspace.js").BrowserTaskView;
+    // The latest failed attempt's reason, in words: never the code as stored, never an earlier attempt's.
+    const said = "The result didn't meet its signed requirements.";
+    expect(view.status).toMatchObject({ status: { headline: "Failed", sentence: said }, action: null });
+    // No check log, so no log lines to link: never the run record, which would bring the person back here.
+    expect(view.failure).toEqual({ line: said, link: null });
+    expect(renderedHtmlOf(html)).not.toMatch(/“acceptance”|recorded reason “/);
+    expect(view.retry).toEqual({ action: "/t/t-broke/requeue" });
+    // The Tasks list says the same, in vermilion's problem line.
+    const rows = (workspaceOf(await (await fetch(url("/work"), { headers: { cookie } })).text()).view as import("./browser-workspace.js").BrowserTasksView).rows;
+    expect(rows.find(row => row.id === "t-broke")?.detail).toBe(said);
+    // No "review its incident", said once: Task options names the reason without its own Review and retry link, and offers no second ink retry.
+    const options = view.manage.find(one => one.id === "task-diagnostics")!.html;
+    expect(html).not.toContain("review its incident");
+    expect(options).not.toContain('href="/t/t-broke#task-actions"');
+    expect(options).not.toContain('<span class="primary">');
+    expect(options).toContain("<button type=\"submit\">Hold the next attempt</button>");
+
+    // Retry with a note: the same requeue, and the note reaches the next attempt as steering.
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(html)?.[1] ?? "";
+    const retried = await fetch(url("/t/t-broke/requeue"), { method: "POST", headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf, note: "Keep the flag's tests; only remove the branches." }), redirect: "manual" });
+    expect(retried.status).toBe(303);
+    expect(store.getTask("t-broke")?.state).toBe("queued");
+    expect(store.listSteerNotes(ref).map(one => one.note)).toEqual(["Keep the flag's tests; only remove the branches."]);
+  });
+
+  test("a failed task describes its latest finished attempt, whatever its outcome, across the whole revision family; machine output reads as an internal error with its detail behind the link", async () => {
+    // A newer attempt that didn't fail is the one described, never the older failure.
+    const ref = seed("t-later", "later");
+    const old = store.startRun({ taskRef: ref, leaseId: "lease-later-1", runner: "night-shift-1", provider: "claude", branch: "standing-orders/t-later", worktree: "/pool/t-later", now: T0, ...presented(store, ref, "builder") });
+    store.finishRun(old, { outcome: "failed", reason: "timeout", now: T0 });
+    const newer = store.startRun({ taskRef: ref, leaseId: "lease-later-2", runner: "night-shift-1", provider: "claude", branch: "standing-orders/t-later", worktree: "/pool/t-later", now: T0, ...presented(store, ref, "builder") });
+    store.finishRun(newer, { outcome: "no-change", now: T0 });
+    store.setTaskState("t-later", "failed", T0);
+    // A revision with no attempt of its own reads its family's latest attempt: the original's, a stack trace.
+    const root = seed("t-fam", "family");
+    const trace = "TypeError: Cannot read properties of undefined (reading 'id')\n    at runTask (/Users/me/so/dist/worker.js:120:7)";
+    const rootRun = store.startRun({ taskRef: root, leaseId: "lease-fam", runner: "night-shift-1", provider: "claude", branch: "standing-orders/t-fam", worktree: "/pool/t-fam", now: T0, ...presented(store, root, "builder") });
+    store.finishRun(rootRun, { outcome: "failed", reason: trace, now: T0 });
+    const brief = store.saveArtifact({ run: rootRun, kind: "revision-brief", key: "fam.json", bytesOriginal: 2, bytesStored: 2, truncated: false, sha256: "a".repeat(64), capture: "synthetic lineage fixture" }, T0);
+    const child = seed("t-fam-r", "family, revised");
+    store.markRevision(child, "t-fam", brief);
+    store.setTaskState("t-fam", "failed", T0);
+    store.setTaskState("t-fam-r", "failed", T0);
+    await boot();
+    const cookie = await login();
+    const later = workspaceOf(await (await fetch(url("/t/t-later"), { headers: { cookie } })).text()).view as import("./browser-workspace.js").BrowserTaskView;
+    expect(later.failure).toEqual({ line: "No reason was recorded for this attempt.", link: null });
+    expect(diagnoseTaskDispatch(store, "t-later", T0)?.detail).toBe("No reason was recorded for this attempt.");
+
+    const html = await (await fetch(url("/t/t-fam"), { headers: { cookie } })).text();
+    const view = workspaceOf(html).view as import("./browser-workspace.js").BrowserTaskView;
+    expect(view.failure).toEqual({ line: "The attempt stopped with an internal error.", link: { label: "The recorded error", href: `/r/${rootRun}?record=1#run-reason-detail` } });
+    expect(renderedHtmlOf(html)).not.toContain("TypeError");
+    for (const id of ["t-fam", "t-fam-r"]) expect(diagnoseTaskDispatch(store, id, T0)?.detail).toBe("The attempt stopped with an internal error.");
+    // The detail waits on the attempt's record, at the link's anchor, as recorded.
+    const record = await (await fetch(url(`/r/${rootRun}?record=1`), { headers: { cookie } })).text();
+    expect(record).toContain(`id="run-reason-detail"`);
+    expect(record).toContain("TypeError: Cannot read properties of undefined (reading &#39;id&#39;)");
+
+    const rows = (workspaceOf(await (await fetch(url("/work"), { headers: { cookie } })).text()).view as import("./browser-workspace.js").BrowserTasksView).rows;
+    expect(rows.find(row => row.id === "t-later")?.detail).toBe("No reason was recorded for this attempt.");
+    const family = rows.filter(row => row.id === "t-fam" || row.id === "t-fam-r");
+    expect(family.length).toBe(1);
+    expect(family[0]?.detail).toBe("The attempt stopped with an internal error.");
+  });
+
+  test("a failed attempt with no recorded reason says so, and Retry without a note is the plain requeue", async () => {
+    const ref = seed("t-silent", "silent");
+    const run = store.startRun({ taskRef: ref, leaseId: "lease-silent", runner: "night-shift-1", provider: "claude", branch: "standing-orders/t-silent", worktree: "/pool/t-silent", now: T0, ...presented(store, ref, "builder") });
+    store.finishRun(run, { outcome: "failed", now: T0 });
+    store.setTaskState("t-silent", "failed", T0);
+    await boot();
+    const cookie = await login();
+    const html = await (await fetch(url("/t/t-silent"), { headers: { cookie } })).text();
+    expect((workspaceOf(html).view as import("./browser-workspace.js").BrowserTaskView).failure?.line).toBe("No reason was recorded for this attempt.");
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(html)?.[1] ?? "";
+    const retried = await fetch(url("/t/t-silent/requeue"), { method: "POST", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf }), redirect: "manual" });
+    expect(retried.status).toBe(303);
+    expect(store.getTask("t-silent")?.state).toBe("queued");
+    expect(store.listSteerNotes(ref)).toEqual([]);
   });
 });
 

@@ -121,3 +121,102 @@ export const CODE_NEED: Readonly<Record<string, NeedKey>> = {
   "no-build-record": "review-result", "verification-needed": "review-result", "evidence-mismatch": "review-result",
   "record-incomplete": "review-result", "evidence-damaged": "review-result",
 };
+
+/** A stopped run's recorded reason code, in words (the run record, the thread, a failed task's status). */
+export const RUN_REASON_WORDS: Readonly<Record<string, string>> = {
+  agent: "the agent failed",
+  "agent-reported": "the agent reported it could not finish",
+  "no-op": "nothing changed when something should have",
+  "no-handoff": "the agent stopped before handing off; its work was kept and it is being resumed",
+  "moved-head": "the branch moved underneath the build",
+  "moved-branch": "the branch moved underneath the build",
+  timeout: "ran out of time",
+  git: "a git step failed",
+  "malformed-decision": "the agent's question was malformed",
+  "malformed-plan": "the plan was malformed",
+  fenced: "another worker took the task over",
+  unapproved: "the scope was not approved",
+  "scope-changed": "the scope changed after approval",
+  capability: "a requirement was missing",
+  setup: "the workspace preparation step failed",
+  "provider-init": "the agent could not start",
+  "commit-failure": "the commit failed",
+  "protected-branch": "refused to touch a protected branch",
+  "wrong-branch": "the checkout was on the wrong branch",
+  "not-leased": "the lease was not valid",
+  "no-claim": "the lease was not valid",
+  "not-yours": "the lease was not valid",
+  "no-run-record": "the run record was missing",
+  "missing-mailbox": "the resume mailbox could not be read",
+  "unreadable-mailbox": "the resume mailbox could not be read",
+  "revision-brief": "the revision brief could not be read",
+  "repaired-park": "resumed from a parked question",
+  stopped: "stopped by the operator",
+  acceptance: "the result didn't meet its signed requirements",
+  evidence: "its evidence could not be saved",
+  interrupted: "the attempt was interrupted",
+  orphaned: "the attempt lost its worker",
+  "retryable-infra": "a temporary problem on the machine stopped it",
+  unknown: "the attempt stopped unexpectedly",
+  "spawn-failed": "the agent process could not start",
+  "provider-protocol": "the agent's reply could not be read",
+  "auth-expired": "the agent's sign-in expired",
+  "budget-unenforceable": "its spending limit could not be enforced",
+  "stale-source": "the request changed while the plan was being made",
+  "stale-approval": "the approval no longer matched the scope",
+  "source-invalid": "the plan's source could not be recorded",
+  "external-closed": "the linked issue was closed while it was being built",
+  "repair-admission": "the repair could not start",
+  "reviewer-error": "the review failed",
+  "malformed-report": "the scout's report was malformed",
+  "attempts-exhausted": "it failed too many times in a row",
+};
+
+/** A run's recorded reason in words. A recorded code is never shown as it is
+ * stored: one with no words of its own reads as an unexpected stop; a reason
+ * already written as words (it has a space) is said as written. */
+export function runReasonWords(reason: string): string {
+  const known = RUN_REASON_WORDS[reason];
+  if (known !== undefined) return known;
+  if (reason.startsWith("decision:")) return "the agent asked a question";
+  return /\s/.test(reason.trim()) ? reason.trim() : "the attempt stopped unexpectedly";
+}
+
+/** The latest finished build attempt among a task's runs (any order), whatever its outcome: planning and reviewing
+ * are not attempts, and an older failure never stands in for a newer attempt. */
+export function latestFinishedAttempt<T extends { id: number; role: string; finishedAt: string | null; outcome?: string | null }>(runs: readonly T[]): T | null {
+  let latest: T | null = null;
+  // Ended means a finish time or an outcome: a reconcile can mark a run failed without stamping finished_at.
+  for (const run of runs) if ((run.finishedAt !== null || (run.outcome ?? null) !== null) && run.role !== "planner" && run.role !== "reviewer" && (latest === null || run.id > latest.id)) latest = run;
+  return latest;
+}
+
+export const NO_REASON_RECORDED = "No reason was recorded for this attempt.";
+export const INTERNAL_ERROR = "The attempt stopped with an internal error.";
+/** About as long as one plain line reads. */
+export const REASON_LINE_LIMIT = 140;
+
+/** A recorded reason that is machine output, not words: a stack trace, a file path or "Error:" text. Its detail
+ * belongs behind a link, never in the line itself. */
+export function isInternalErrorReason(reason: string | null | undefined): boolean {
+  const text = reason?.trim() ?? "";
+  if (text === "" || RUN_REASON_WORDS[text] !== undefined) return false;
+  return /\b[A-Za-z]*(?:Error|Exception):/.test(text) // Error:, TypeError:, SomeException:
+    || /^\s*at\s+\S+/m.test(text) && /\n/.test(text) // a stack frame below the first line
+    // An absolute path of two or more segments (/Users/…, ~/x/y): plain sentences may name a project file (src/ledger.ts).
+    || /(?:^|[\s(“"'])~?\/(?:[\w.@-]+\/)+[\w.@-]+/.test(text)
+    || /[A-Za-z]:\\/.test(text) // C:\…
+    || /\.[cm]?[jt]sx?:\d+/.test(text); // ledger.ts:14
+}
+
+/** A failed attempt in one plain line: its recorded reason in words (first line only, about 140 characters at most),
+ * that it stopped with an internal error when the reason is machine output, or that none was recorded. */
+export function failedAttemptSentence(reason: string | null | undefined): string {
+  const code = reason?.trim() ?? "";
+  if (code === "") return NO_REASON_RECORDED;
+  if (isInternalErrorReason(code)) return INTERNAL_ERROR;
+  const words = runReasonWords(code.split(/\r?\n/, 1)[0]!.trim()).replace(/\s+/g, " ").replace(/[.\s]+$/, "");
+  const line = words.length <= REASON_LINE_LIMIT ? words
+    : `${words.slice(0, REASON_LINE_LIMIT - 1).replace(/\s+\S*$/, "").replace(/[,;:\s]+$/, "")}…`;
+  return `${line.charAt(0).toUpperCase()}${line.slice(1)}${line.endsWith("…") ? "" : "."}`;
+}

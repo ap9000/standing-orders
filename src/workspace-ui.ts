@@ -18,7 +18,9 @@
  */
 
 import type { DispatchAction, DispatchDiagnosis } from "./dispatch.js";
-import { GOAL_ASSESSMENT_PENDING, manualReviewOnly, type ProofVerdict } from "./proof.js";
+import { ACCEPT_NEEDS_REASON } from "./result-acts.js";
+export { ACCEPT_NEEDS_REASON };
+import { GOAL_ASSESSMENT_PENDING, manualReviewOnly, plainReasonWords, type ProofVerdict } from "./proof.js";
 import type { ReviewRetryState, TaskState } from "./store.js";
 import type { TaskControlView } from "./task-control.js";
 import { plainReasonOf, stageOfCode, taskStatusOf, workToneOf } from "./task-status.js";
@@ -443,9 +445,96 @@ const VERIFIED_RESULT = new Set(["ready-to-review", "pr-opened", "merge-observed
  * shows it before Request changes, its one ink act. */
 export function cantAcceptYetOf(verdict: ProofVerdict | null, reasons: readonly string[], accepted: boolean): string | null {
   if (accepted || verdict !== "refuted") return null;
+  // A mismatch is the status card's own headline; here only what accepting takes.
   return evidenceProblemOf(verdict, reasons) === "checks-failed"
     ? "Can't accept yet: the project's check failed on these changes."
-    : "Can't accept yet: what the agent reported doesn't match the changes it saved.";
+    : ACCEPT_NEEDS_REASON;
+}
+
+/** The result's headline while its report disagrees with its saved changes. */
+export const MISMATCH_HEADLINE = "The report doesn't match the changes";
+
+/** One way the report disagrees with the saved changes, in plain words: the
+ * file and lines it concerns when they are in the saved changes, or
+ * `inChanges: false` for a file the report names that the changes don't have.
+ * `reason` is the recorded words it says plainly. */
+export type ReportMismatch = { text: string; path: string | null; lines: { from: number; to: number } | null; inChanges: boolean | null;
+  /** The report's own note (1-based) the disagreement is about, when it names one. */
+  note: number | null; reason: string };
+
+const OVERCLAIMED = /^claimed changed paths? not in the sealed diff: ([\s\S]+)$/;
+const RESTATED = /^criterion "([^"]+)" was signed as "[\s\S]*" and the proof restates it as "([\s\S]*)"$/;
+const CONTRADICTED_BY_CAVEAT = /^criterion "([^"]+)" is marked met, but caveat [0-9]+ admits an exception to it: ([\s\S]*)$/;
+const NOTE_NUMBER = /^caveat ([0-9]+) /;
+const CONTRADICTED_BY_REVIEW = /^(?:reviewer:)?[^\s"]+ contradicts criterion "([^"]+)": [\s\S]*$/i;
+
+/** Each recorded way a refuted report disagrees with its saved changes, said
+ * plainly and tied to the changed lines it concerns. `changes` maps each
+ * changed file to the lines of its first change (null when it has no line
+ * changes, a binary file say). Presentation only: the verdict is unchanged. */
+export function reportMismatchesOf(reasons: readonly string[],
+  criteria: readonly { id: string; statement: string; answered: readonly { kind: string; ref: string }[]; state?: string; detail?: readonly string[] }[],
+  changes: ReadonlyMap<string, { from: number; to: number } | null>): ReportMismatch[] {
+  const named = (id: string): string => {
+    const statement = criteria.find(one => one.id === id)?.statement.trim() ?? "";
+    if (statement === "") return `requirement ${id}`;
+    return `“${statement.length > 90 ? `${statement.slice(0, 90).replace(/\s+\S*$/, "")}…` : statement}”`;
+  };
+  // The first file the requirement cites that the saved changes have.
+  const place = (id: string): Pick<ReportMismatch, "path" | "lines" | "inChanges"> => {
+    const path = criteria.find(one => one.id === id)?.answered.find(ref => ref.kind === "changed-path" && changes.has(ref.ref))?.ref ?? null;
+    return path === null ? { path: null, lines: null, inChanges: null } : { path, lines: changes.get(path) ?? null, inChanges: true };
+  };
+  const rows = reasons.flatMap((reason): ReportMismatch[] => {
+    const over = OVERCLAIMED.exec(reason);
+    if (over !== null) return over[1]!.split(", ").map(path => ({ text: "The report says it changed", path, lines: null, inChanges: changes.has(path), note: null, reason }));
+    const restated = RESTATED.exec(reason);
+    if (restated !== null) return [{ text: `The report rewords ${named(restated[1]!)} as “${restated[2]}”`, ...place(restated[1]!), note: null, reason }];
+    const caveat = CONTRADICTED_BY_CAVEAT.exec(reason);
+    const note = /^criterion "[^"]+" is marked met, but caveat ([0-9]+) /.exec(reason)?.[1] ?? NOTE_NUMBER.exec(reason)?.[1] ?? null;
+    if (caveat !== null) return [{ text: `The report marks ${named(caveat[1]!)} met, but its own note says: ${caveat[2]}`, ...place(caveat[1]!), note: Number(note), reason }];
+    const review = CONTRADICTED_BY_REVIEW.exec(reason);
+    if (review !== null) return [{ text: plainReasonWords(reason), ...place(review[1]!), note: null, reason }];
+    const unsigned = UNSIGNED_NOTE.exec(reason);
+    if (unsigned !== null) return [{ text: `The report's note ${unsigned[1]} is about ${unsigned[2]}, which isn't one of the signed requirements: ${unsigned[3]}`, path: null, lines: null, inChanges: null, note: Number(unsigned[1]), reason }];
+    if (FAILED_CHECK.test(reason)) return [];
+    return [{ text: sentenceOf(plainReasonWords(reason)), path: null, lines: null, inChanges: null, note: note === null ? null : Number(note), reason }];
+  });
+  // Evidence a requirement cites that doesn't hold, unless a reason above already says so.
+  const evidence = criteria.flatMap(one => one.state !== "failed" && one.state !== "missing" ? [] : (one.detail ?? [])
+    .filter(detail => !reasons.includes(detail) && !/is waiting for the final check|requires manual-review evidence|is marked met, but caveat|was signed as/.test(detail))
+    .map((detail): ReportMismatch => {
+      const lead = [`criterion "${one.id}"'s `, `criterion "${one.id}" `].find(prefix => detail.startsWith(prefix));
+      const rest = lead === undefined ? detail : detail.slice(lead.length);
+      return { text: `${sentenceOf(named(one.id))}: ${rest}`, ...place(one.id), note: null, reason: detail };
+    }));
+  return [...rows, ...evidence];
+}
+
+const UNSIGNED_NOTE = /^caveat ([0-9]+) names ("[^"]*"(?:, "[^"]*")*), (?:a criterion the proof authored|which is no signed)[\s\S]*?: ([\s\S]*)$/;
+
+/** A sentence starts with a capital letter. */
+function sentenceOf(text: string): string {
+  return text === "" ? text : `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
+}
+
+/** The line a failing check ended on: the last line of its error output that
+ * names an error, else the last line it printed, with its 1-based number in
+ * the saved log. Null when the log printed nothing. */
+export function lastErrorLineOf(log: string): { line: number; text: string } | null {
+  const lines = log.split("\n");
+  const printed = (text: string): boolean => text.trim() !== "" && !/^\$ /.test(text) && !/^\(exit -?[0-9]+\)$/.test(text.trim()) && !/^--- (stdout|stderr) ---$/.test(text.trim());
+  const stderr = lines.findIndex(text => text.trim() === "--- stderr ---");
+  const pick = (from: number, to: number): { line: number; text: string } | null => {
+    let last: number | null = null;
+    for (let index = to - 1; index >= from; index -= 1) {
+      if (!printed(lines[index]!)) continue;
+      if (/error|fail|✗|✕|×|assert|exception|panic|cannot|not found/i.test(lines[index]!)) return { line: index + 1, text: lines[index]!.trim() };
+      last ??= index;
+    }
+    return last === null ? null : { line: last + 1, text: lines[last]!.trim() };
+  };
+  return (stderr >= 0 ? pick(stderr + 1, lines.length) : null) ?? pick(0, stderr >= 0 ? stderr : lines.length);
 }
 
 /** The result page's own sentence when the decision is on it. */

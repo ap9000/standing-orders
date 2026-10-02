@@ -13,9 +13,9 @@ import { GuardedHtml } from "../guarded-html.js";
 import {
   Badge, Button, Card, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger, Input, cn,
 } from "../components/ui/index.js";
-import type { ResultActKind } from "../../result-acts.js";
+import { ACCEPT_NEEDS_REASON, type ResultActKind } from "../../result-acts.js";
 import { toneOf } from "./tone.js";
-import { ConfirmStoppedForm, RebuildForm, StatusDetails, StatusHeadline, statusWhyLines } from "./status-summary.js";
+import { ConfirmStoppedForm, HEADLINE_DOT, RebuildForm, StatusDetails, StatusHeadline, statusWhyLines } from "./status-summary.js";
 
 type Selected = NonNullable<BrowserResultView["selected"]>;
 
@@ -81,20 +81,35 @@ function StatusCard({ selected }: { selected: Selected }) {
   // A form that resolves a Needs you (Build again, Confirm it stopped) keeps the need's own sentence; otherwise what happened.
   const needForm = acts.primary === "rebuild" || acts.primary === "confirm-stopped";
   const sentence = selected.noRun ?? (panel !== null && !needForm ? panel.outcome : status?.sentence ?? panel?.outcome ?? "");
+  const mismatch = selected.mismatch;
+  // A disagreement the mismatch rows already name is said once, there.
   const caveats = [...new Set([
     ...(status === null && checks?.problem === true ? [checks.detail] : []),
     ...(selected.problem === null ? [] : [selected.problem]),
     ...(panel?.attention ?? []),
-  ])];
+  ])].filter(one => mismatch === null || !mismatch.said.includes(one));
   const failed = status?.headline === "Failed";
   return <Card data-result-status={selected.status.token} data-headline={status?.headline ?? selected.status.label} aria-label="Result status">
     <div className="min-w-0">
-      {status !== null ? <StatusHeadline status={status} />
+      {/* The blocking fact is the headline: the report doesn't match the changes. */}
+      {mismatch?.headline != null ? <h2 className="flex items-center gap-2.5 text-lg font-semibold leading-snug" data-mismatch-headline>
+            <span aria-hidden="true" className={cn("size-2.5 shrink-0 rounded-full", status === null ? DOT[tone] : HEADLINE_DOT[status.tone])} />{mismatch.headline}
+          </h2>
+        : status !== null ? <StatusHeadline status={status} />
         : <h2 className="flex items-center gap-2.5 text-lg font-semibold leading-snug">
             <span aria-hidden="true" className={cn("size-2.5 shrink-0 rounded-full", DOT[tone])} />{selected.status.label}
           </h2>}
       {sentence !== "" && <p className="mt-1.5 max-w-[75ch] text-sm text-muted-foreground" data-result-sentence>{sentence}</p>}
     </div>
+    {mismatch !== null && mismatch.rows.length > 0 && <ul aria-label="What doesn't match" className="flex flex-col gap-1.5 border-t border-border pt-3 text-[13px] phone:pt-2" data-mismatches={mismatch.rows.length}>
+      {mismatch.rows.map((one, index) => <li key={index} data-mismatch className="flex gap-2">
+        <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" aria-hidden="true" />
+        <span className="min-w-0 [overflow-wrap:anywhere]">
+          {one.text}{one.path !== null && one.absent && <> <code className="font-mono text-xs">{one.path}</code> <span className="text-muted-foreground" data-mismatch-absent>— not in the saved changes</span></>}
+          {one.href !== null && (one.path !== null || one.noteLabel !== null) && <> · <a href={one.href} data-mismatch-lines className={cn("font-medium text-foreground/80 underline decoration-border underline-offset-4 hover:decoration-muted-foreground phone:-my-3 phone:inline-block phone:py-3", one.path !== null && "font-mono text-xs")}>{one.path !== null ? `${one.path}${one.lines === null ? "" : `, ${one.lines}`}` : one.noteLabel}</a></>}
+        </span>
+      </li>)}
+    </ul>}
     {status !== null && <StatusDetails status={status} />}
     {caveats.length > 0 && <ul className="flex flex-col gap-1 text-[13px]" aria-label="Caveats" data-result-attention={caveats.length}>
       {caveats.map(one => <li key={one} data-caveat className="flex gap-2">
@@ -196,7 +211,9 @@ function Decision({ selected, csrf }: { selected: Selected; csrf: string }) {
   const accept = complete === null ? need?.accept ?? null : null;
   const shown = [acts.primary, acts.secondary].filter((one): one is ResultActKind => one !== null);
   const why = shown.includes("accept") ? decision?.why ?? null : null;
-  const line = acts.line ?? why;
+  // "Accepting needs a reason" labels the reason field when that field is here; it isn't said twice.
+  const reasonHere = shown.includes("accept") && complete === null && accept?.note != null;
+  const line = acts.line === ACCEPT_NEEDS_REASON && reasonHere ? null : acts.line ?? why;
   const act = (kind: ResultActKind, ink: boolean): ReactNode => {
     const variant = ink ? "attention" as const : "outline" as const;
     const mark = { "data-act": kind, ...(ink ? { "data-ink-act": kind, "data-primary-action": "" } : {}) };
@@ -211,11 +228,19 @@ function Decision({ selected, csrf }: { selected: Selected; csrf: string }) {
           <Button type="submit" variant={variant} className={wide} {...mark}><Check className="phone:hidden" />{decision.label}</Button>
         </form>;
         if (accept === null) return null;
+        // Accepting a refuted result takes a reason: its field sits directly above Accept, under its own words.
+        if (accept.note !== null) return <form key={kind} method="post" action={accept.action} className="flex w-full max-w-sm flex-col items-start gap-2 phone:max-w-none" data-accept-with-reason>
+          <input type="hidden" name="csrf" value={csrf} />
+          <input type="hidden" name="run" value={String(accept.run)} />
+          <input type="hidden" name="return" value={accept.returnTo} />
+          <label htmlFor="accept-reason" className="text-[13px] font-medium" data-accept-needs-reason>{ACCEPT_NEEDS_REASON}</label>
+          <Input id="accept-reason" type="text" name="note" maxLength={500} required placeholder={accept.note} className="h-11 w-full" />
+          <Button type="submit" variant={variant} className={wide} {...mark} data-accept-result><Check className="phone:hidden" />{decision.label}</Button>
+        </form>;
         return <form key={kind} method="post" action={accept.action} className="flex flex-wrap items-center gap-2 phone:w-full">
           <input type="hidden" name="csrf" value={csrf} />
           <input type="hidden" name="run" value={String(accept.run)} />
           <input type="hidden" name="return" value={accept.returnTo} />
-          {accept.note !== null && <Input type="text" name="note" maxLength={500} required aria-label={accept.note} placeholder={accept.note} className="h-11 w-64 phone:w-full" />}
           <Button type="submit" variant={variant} className={wide} {...mark} data-accept-result><Check className="phone:hidden" />{decision.label}</Button>
         </form>;
       case "checks-running":
@@ -247,7 +272,7 @@ function Decision({ selected, csrf }: { selected: Selected; csrf: string }) {
     {/* What comes next (notes ready, CI failing, a contest to compare, no build): one line, whatever the acts. */}
     {next !== null && <p className="max-w-[75ch] text-[13px]" data-next-action={next.kind}>
       <span className="font-semibold">{next.title}.</span> <span className="text-muted-foreground">{next.detail}</span></p>}
-    {shown.length > 0 && <div className="flex flex-wrap items-center gap-2 phone:flex-col phone:items-stretch" data-result-acts>
+    {shown.length > 0 && <div className={cn("flex flex-wrap items-center gap-2 phone:flex-col phone:items-stretch", reasonHere && "flex-col items-start gap-3")} data-result-acts>
       {acts.primary !== null && act(acts.primary, true)}
       {acts.secondary !== null && act(acts.secondary, false)}
     </div>}

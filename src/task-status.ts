@@ -67,7 +67,8 @@ export type TaskStatusFacts = {
   report?: boolean;
   checks?: ChecksFact | null;
   pullRequest?: PullRequestFact | null;
-  requirements?: { met: number; total: number; yours: number } | null;
+  /** `unverified`: the report is refuted, so no requirement counts as met however it was marked. */
+  requirements?: { met: number; total: number; yours: number; unverified?: boolean } | null;
   evidence?: { shortened: number; missing: number; damaged: number } | null;
   completedBy?: string | null;
   action?: StatusAction | null;
@@ -169,7 +170,8 @@ function detailsOf(headline: Headline, facts: TaskStatusFacts): StatusDetail[] {
     else row("pull-request", "Pull request", `${name} open`, "none", { href: github });
   }
   const req = facts.requirements;
-  if (req != null && req.total > 0) {
+  if (req != null && req.total > 0 && req.unverified === true) row("requirements", "Requirements", "Unverified", "none");
+  else if (req != null && req.total > 0) {
     const unmet = req.total - req.met - req.yours;
     const text = `${req.met} of ${req.total} met${req.yours > 0 ? ` · You check ${req.yours}` : ""}`;
     row("requirements", "Requirements", text, unmet > 0 ? problem(headline) : req.met === req.total ? "ok" : "none",
@@ -310,6 +312,11 @@ export function requirementsOf(matrix: readonly { state: string; assessment?: { 
   return { met: matrix.filter(met).length, total: matrix.length, yours: matrix.filter(row => !met(row) && row.state === "manual-review").length };
 }
 
+/** A refuted report verifies none of its requirements, whatever it marked met (a person's acceptance doesn't change that). */
+export function unverifiedWhenRefuted(requirements: NonNullable<TaskStatusFacts["requirements"]> | null, verdict: string | null | undefined): NonNullable<TaskStatusFacts["requirements"]> | null {
+  return requirements === null || verdict !== "refuted" ? requirements : { ...requirements, unverified: true };
+}
+
 /** Saved evidence health from the receipt's artifact list and its caveats. */
 export function evidenceOf(receipt: AssignmentSnapshot["receipt"], problems: readonly string[] = receipt?.caveats ?? []): NonNullable<TaskStatusFacts["evidence"]> | null {
   if (receipt === null) return null;
@@ -347,7 +354,7 @@ export function assignmentStatusFacts(assignment: AssignmentSnapshot, options: {
     stage, ...(need === undefined ? {} : { need }), ...(wait === undefined ? {} : { wait }), ...(build === null ? {} : { needContext: { build } }), reason, report,
     checks,
     pullRequest: withResult ? pullRequest : null,
-    requirements: withResult ? requirementsOf(receipt?.proof?.matrix) : null,
+    requirements: withResult ? unverifiedWhenRefuted(requirementsOf(receipt?.proof?.matrix), receipt?.proof?.verdict) : null,
     evidence: withResult ? options.evidence ?? evidenceOf(receipt, [...(receipt?.caveats ?? []), ...assignment.attention]) : null,
     completedBy: assignment.completion === null ? null : assignment.completion.lead === true ? "the lead" : assignment.completion.actor.replace(/^(?:operator|coordinator|lead):/, ""),
     action: options.action ?? null,

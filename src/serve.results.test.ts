@@ -1413,10 +1413,58 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
         }
       } finally { await win.happyDOM.close(); }
     }
-    // It can't be accepted as it stands: one line says why, Request changes is the one ink act, and Accept with a reason stays allowed in outline.
+    // It can't be accepted as it stands: the headline says the report doesn't match, Request changes is the one ink act, and Accept needs a reason, in outline.
     const view = ((await (await fetch(url(`/review?result=t-caveat&run=${run}&format=workspace`), { headers: { cookie } })).json()) as import("./browser-workspace.js").BrowserWorkspace).view as import("./browser-workspace.js").BrowserResultView;
-    expect(view.selected!.acts).toEqual({ primary: "request-changes", secondary: "accept", line: "Can't accept yet: what the agent reported doesn't match the changes it saved." });
+    expect(view.selected!.acts).toEqual({ primary: "request-changes", secondary: "accept", line: "Accepting needs a reason" });
+    expect(view.selected!.mismatch).toMatchObject({ headline: "The report doesn't match the changes", rows: [{ text: reason, path: null, href: null, absent: false }] });
+    expect(view.selected!.mismatch!.said).toContain(reason);
+    expect(view.selected!.panel!.status!.details.find(one => one.key === "requirements")).toMatchObject({ text: "Unverified", mark: "none" });
     expect(view.selected!.panel!.need).toMatchObject({ href: null, accept: { note: "Why is this safe to accept?" } });
+  });
+
+  test("a report that doesn't match its saved changes: the headline says so, each mismatch names its lines or that the file isn't in the changes, and requirements read Unverified", async () => {
+    const ref = seed("t-mismatch", "Fix the payout rounding drift", "/repo/main", { acceptance: [{ id: "c1", statement: "It works", evidence: ["check", "changed-path"] }] });
+    const cited = row("c1", "It works", "pass", [{ kind: "check", ref: "npm test" }, { kind: "changed-path", ref: "src/a.ts" }]);
+    const run = build("t-mismatch", ref, {
+      ...RICH,
+      proof: { ...RICH.proof, changed: ["src/a.ts", "src/ledger.ts"] },
+      verdict: { verdict: "refuted" as const, matrix: [cited], reasons: [
+        "claimed changed path not in the sealed diff: src/ledger.ts",
+        'criterion "c1" is marked met, but caveat 1 admits an exception to it: Only the USD path was exercised.',
+      ] },
+    });
+    await boot();
+    const cookie = await login();
+    const view = ((await (await fetch(url(`/review?result=t-mismatch&run=${run}&format=workspace`), { headers: { cookie } })).json()) as import("./browser-workspace.js").BrowserWorkspace).view as import("./browser-workspace.js").BrowserResultView;
+    const mismatch = view.selected!.mismatch!;
+    expect(mismatch.headline).toBe("The report doesn't match the changes");
+    expect(mismatch.rows).toEqual([
+      { text: "The report says it changed", path: "src/ledger.ts", lines: null, href: null, absent: true, noteLabel: null },
+      { text: "The report marks “It works” met, but its own note says: Only the USD path was exercised.", path: "src/a.ts", lines: "line 2", absent: false, noteLabel: null,
+        href: `/review?result=t-mismatch&run=${run}&tab=changes#${diffFileAnchor("src/a.ts")}-L1` },
+    ]);
+    expect(view.selected!.panel!.status!.details.find(one => one.key === "requirements")).toMatchObject({ text: "Unverified", mark: "none" });
+    expect(view.selected!.acts.line).toBe("Accepting needs a reason");
+    // The link lands: the Changes tab's change starts at that anchor.
+    const changes = await (await fetch(url(`/review?result=t-mismatch&run=${run}&tab=changes`), { headers: { cookie } })).text();
+    expect(changes).toContain(`<section class="diff-hunk" id="${diffFileAnchor("src/a.ts")}-L1">`);
+  });
+
+  test("every refuted result lists what went wrong in its card: a failed check keeps its own headline, and a requirement whose evidence doesn't hold is named", async () => {
+    const ref = seed("t-refuted-check", "Fix the payout rounding drift", "/repo/main", { acceptance: [{ id: "c1", statement: "It works", evidence: ["check", "changed-path"] }, { id: "c2", statement: "The dashboard renders", evidence: ["screenshot"] }] });
+    const shot = 'criterion "c2"\'s screenshot evidence "evidence/dash.png" could not be verified: not a PNG';
+    const run = build("t-refuted-check", ref, {
+      ...RICH,
+      verdict: { verdict: "refuted" as const, matrix: [row("c1", "It works", "pass", [{ kind: "changed-path", ref: "src/a.ts" }]), row("c2", "The dashboard renders", "failed", [{ kind: "screenshot", ref: "evidence/dash.png" }], [shot])],
+        reasons: ["the repository's approved verification command exited 1"] },
+    });
+    await boot();
+    const cookie = await login();
+    const view = ((await (await fetch(url(`/review?result=t-refuted-check&run=${run}&format=workspace`), { headers: { cookie } })).json()) as import("./browser-workspace.js").BrowserWorkspace).view as import("./browser-workspace.js").BrowserResultView;
+    const mismatch = view.selected!.mismatch!;
+    expect(mismatch.headline).toBeNull();
+    expect(mismatch.rows).toEqual([{ text: "“The dashboard renders”: screenshot evidence \"evidence/dash.png\" could not be verified: not a PNG", path: null, lines: null, href: null, absent: false, noteLabel: null }]);
+    expect(mismatch.said).toContain(shot);
   });
 
   test("package 3 c2: a tampered screenshot, a shortened check log, a failed change-summary capture, and an unverifiable report are named in the open, never rendered, never called validated; an investigation's report is escaped text", async () => {

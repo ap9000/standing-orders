@@ -3,7 +3,7 @@
  * the Failed headline alone. */
 import { describe, expect, test } from "vitest";
 import {
-  HEADLINES, assignmentStatusFacts, headlineOf, pullRequestFactOf, stageOfCode, stageOfDispatch, statusDetailLines, statusDetailsHtml, taskStatusOf,
+  HEADLINES, assignmentStatusFacts, headlineOf, unverifiedWhenRefuted, pullRequestFactOf, stageOfCode, stageOfDispatch, statusDetailLines, statusDetailsHtml, taskStatusOf,
   type ChecksFact, type PullRequestFact, type TaskStage, type TaskStatusFacts,
 } from "./task-status.js";
 import type { AssignmentSnapshot } from "./assignment.js";
@@ -237,5 +237,15 @@ describe("reading the existing projections", () => {
     expect(taskStatusOf(assignmentStatusFacts(working, { work: { token: "signed-out", detail: "Claude needs you to sign in again." } })).headline).toBe("Needs you");
     expect(taskStatusOf(assignmentStatusFacts(working, { work: { token: "queued" } })).headline).toBe("Queued");
     expect(taskStatusOf(assignmentStatusFacts(working, { work: { token: "running" }, planning: true })).headline).toBe("Planning");
+  });
+});
+
+describe("requirements while the report is refuted", () => {
+  test("read Unverified, never a green tick, whatever the report marked met", () => {
+    const requirements = unverifiedWhenRefuted({ met: 2, total: 2, yours: 0 }, "refuted");
+    const row = taskStatusOf({ stage: "needs-you", need: "review-result", requirements }).details.find(one => one.key === "requirements");
+    expect(row).toMatchObject({ text: "Unverified", mark: "none" });
+    expect(unverifiedWhenRefuted({ met: 2, total: 2, yours: 0 }, "verified")).toEqual({ met: 2, total: 2, yours: 0 });
+    expect(taskStatusOf({ stage: "finished", requirements: { met: 2, total: 2, yours: 0 } }).details.find(one => one.key === "requirements")).toMatchObject({ text: "2 of 2 met", mark: "ok" });
   });
 });

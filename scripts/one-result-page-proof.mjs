@@ -141,8 +141,9 @@ const actsOf = page => page.evaluate(() => {
     ink: ink.map(el => ({ act: el.getAttribute('data-ink-act'), tag: el.tagName, href: el.getAttribute('href'), text: el.textContent.trim(), bg: getComputedStyle(el).backgroundColor })),
     row: row.map(el => ({ act: el.getAttribute('data-act'), text: el.textContent.trim(), ...box(el) })),
     primaries: [...document.querySelectorAll('[data-primary-action]')].filter(visible).length,
-    line: document.querySelector('[data-decision-why]')?.textContent.trim() ?? null,
-    cantAccept: document.querySelector('[data-cant-accept]') !== null,
+    // A mismatch's "Accepting needs a reason" is the label over the reason field when that field is here.
+    line: document.querySelector('[data-decision-why]')?.textContent.trim() ?? document.querySelector('[data-accept-needs-reason]')?.textContent.trim() ?? null,
+    cantAccept: document.querySelector('[data-cant-accept], [data-accept-needs-reason]') !== null,
     sentence: document.querySelector('[data-result-sentence]')?.textContent.trim() ?? null,
     statusButtons: document.querySelectorAll('[data-result-status] button, [data-result-status] .ui-button, [data-result-status] a[data-primary-action]').length,
     title: document.querySelector('h1')?.textContent.trim() ?? null,
@@ -152,7 +153,7 @@ const actsOf = page => page.evaluate(() => {
 });
 
 const STATES = [
-  { key: 'mismatch', task: 'range-filter', run: mismatchRun, ink: 'request-changes', line: "Can't accept yet: what the agent reported doesn't match the changes it saved.", second: 'accept', secondText: 'Accept' },
+  { key: 'mismatch', task: 'range-filter', run: mismatchRun, ink: 'request-changes', line: "Accepting needs a reason", second: 'accept', secondText: 'Accept' },
   { key: 'run-checks', task: 'rounding-check', run: checkRun, ink: 'run-checks', line: null, second: 'accept', secondText: 'Accept without checks' },
   { key: 'accept', task: 'csv-header', run: csvRun, ink: 'accept', line: null, second: 'request-changes' },
 ];

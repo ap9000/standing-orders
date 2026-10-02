@@ -280,7 +280,8 @@ describe("Confirm it stopped, end to end", () => {
     const words = assignmentPresentationOf(stale).taskStatus;
     expect(words).toMatchObject({ headline: "Needs you", sentence: `Build #${runs["unverified"]} was made to an earlier plan. Build it again to the current plan.` });
     expect(stale.primaryAction).toMatchObject({ code: "retry-task", label: "Build again" });
-    expect(assignmentActionHref(stale)).toMatch(/^\/t\/unverified[?#].*task-actions$/);
+    // Build again is the task's status card itself, at the top of its page: no anchor into Task options.
+    expect(assignmentActionHref(stale)).toBe("/t/unverified?version=unverified");
     const result = (workspaceOf(await page(`/review?result=unverified&run=${runs["unverified"]}`)).view as Extract<BrowserWorkspace["view"], { kind: "result" }>).selected!.panel!;
     expect(result.status?.headline).toBe("Needs you");
     expect(result.need).toMatchObject({ label: "Build again", href: null, rebuild: { action: "/t/unverified/requeue" } });

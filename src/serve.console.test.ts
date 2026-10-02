@@ -1124,7 +1124,7 @@ describe("the operations console", () => {
     // run page from the task, the chat's own result view from chat).
     expect(task).toContain('href="/review?result=t-receipt">Open result →</a>');
     expect(task).toContain('href="/chat?task=t-receipt">Discuss in chat →</a>');
-    expect(task).not.toContain("hold next attempt");
+    expect(task).not.toContain("Hold the next attempt");
 
     const chat = await (await fetch(url("/chat?task=t-receipt"), { headers: { cookie } })).text();
     expect(chat).toContain('data-card-kind="result-receipt"');

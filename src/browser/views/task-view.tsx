@@ -10,7 +10,7 @@ import type { AssignmentCard } from "../../assignment-ui.js";
 import type { BrowserTaskDetailGroup, BrowserTaskFact, BrowserTaskSection, BrowserTaskThreadItem, BrowserTaskView } from "../../browser-workspace.js";
 import { GuardedHtml } from "../guarded-html.js";
 import { Journey } from "../first-run.js";
-import { Badge, Button, Card, cn } from "../components/ui/index.js";
+import { Badge, Button, Card, Input, cn } from "../components/ui/index.js";
 import { ConfirmStoppedForm, RebuildForm, StatusDetails, StatusHeadline, StatusWhy } from "./status-summary.js";
 
 /** A link to a fold (#scope, #holds, #task-actions) opens it and every fold
@@ -38,19 +38,35 @@ function Html({ html, className }: { html: string; className?: string }) {
   return <GuardedHtml html={html} immutable {...(className === undefined ? {} : { className })} />;
 }
 
+/** Retry itself, on the failed card: the task page's requeue (branch and workspace kept), with an optional note for the next attempt. */
+function RetryForm({ action, csrf }: { action: string; csrf: string }) {
+  return <form method="post" action={action} data-retry className="flex flex-wrap items-center gap-2 phone:w-full">
+    <input type="hidden" name="csrf" value={csrf} />
+    <Input type="text" name="note" maxLength={500} aria-label="Note for the next attempt (optional)" placeholder="Note for the next attempt (optional)" className="h-9 w-64 phone:h-11 phone:w-full" />
+    <Button type="submit" className="phone:w-full" data-primary-action>Retry, keeping the branch and workspace</Button>
+  </form>;
+}
+
 /** One headline, one sentence and one action; the details sit quietly
- * underneath (task-status.ts). Never a red card: only Failed wears red, on
- * its dot. */
-function StatusCard({ card, confirm, rebuild, csrf }: { card: AssignmentCard; confirm: BrowserTaskView["confirmStopped"]; rebuild: BrowserTaskView["rebuild"]; csrf: string }) {
-  return <Card data-task-status data-work-status={card.token} data-headline={card.status.headline} aria-label="Task status">
+ * underneath (task-status.ts). Only Failed wears vermilion: its dot and, at
+ * half strength, its border; its sentence is what went wrong, with the log
+ * lines one tap away. */
+function StatusCard({ card, confirm, rebuild, retry, failure, csrf }: { card: AssignmentCard; confirm: BrowserTaskView["confirmStopped"]; rebuild: BrowserTaskView["rebuild"];
+  retry: BrowserTaskView["retry"]; failure: BrowserTaskView["failure"]; csrf: string }) {
+  const failed = card.status.headline === "Failed";
+  return <Card data-task-status data-work-status={card.token} data-headline={card.status.headline} aria-label="Task status" className={cn(failed && "border-destructive/50")}>
     <div className="flex flex-wrap items-center gap-x-4 gap-y-3 phone:gap-y-2.5">
       <div className="min-w-0 flex-1 basis-64">
         <StatusHeadline status={card.status} />
-        <p className="mt-1.5 text-sm text-muted-foreground phone:mt-1 phone:leading-[1.35]">{card.status.sentence}</p>
+        <p className="mt-1.5 text-sm text-muted-foreground phone:mt-1 phone:leading-[1.35]" {...(failed ? { "data-failure-reason": "" } : {})}>
+          <span className="[overflow-wrap:anywhere]">{card.status.sentence}</span>
+          {failed && failure?.link != null && <> <a href={failure.link.href} data-failure-log className="whitespace-nowrap font-medium text-foreground/80 underline decoration-border underline-offset-4 hover:decoration-muted-foreground phone:-my-3 phone:inline-block phone:py-3">{failure.link.label}</a></>}
+        </p>
       </div>
       {/* Confirm it stopped asks for the password right here, in place of a link. */}
       {confirm != null && csrf !== "" ? <ConfirmStoppedForm form={confirm} csrf={csrf} label={card.action?.label ?? "Confirm it stopped"} />
         : rebuild != null && csrf !== "" ? <RebuildForm action={rebuild.action} csrf={csrf} label={card.action?.label ?? "Build again"} />
+        : retry != null && csrf !== "" ? <RetryForm action={retry.action} csrf={csrf} />
         : card.action !== null && <Button asChild variant={card.status.headline === "Needs you" ? "attention" : "default"} className="phone:w-full">
         <a href={card.action.href} data-primary-action {...(card.action.openResult ? { "data-open-result": "" } : {})}>{card.action.label}<ArrowRight /></a>
       </Button>}
@@ -249,7 +265,7 @@ export function TaskView({ view, chat = null, details = true, csrf = "" }: { vie
     {view.journey != null && <Journey steps={view.journey} />}
 
     {view.status !== null
-      ? <StatusCard card={view.status} confirm={view.confirmStopped ?? null} rebuild={view.rebuild ?? null} csrf={csrf} />
+      ? <StatusCard card={view.status} confirm={view.confirmStopped ?? null} rebuild={view.rebuild ?? null} retry={view.retry ?? null} failure={view.failure ?? null} csrf={csrf} />
       : <Html html={view.statusHtml} />}
 
     {/* The approval is its own section under the status, never a card inside it. */}

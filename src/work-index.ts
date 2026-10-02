@@ -15,7 +15,7 @@ import { plainReasonOf, replacedWords, stageOfCode, taskStatusOf, workToneOf, ty
 import { isCheckLevel } from './check-levels.js';
 import { MARKER } from './worktree.js';
 import { withFollowUps } from './result-follow-ups.js';
-import { ASKS, NEED_ASK, NEEDS, processNeedOf, type Ask, type NeedKey, type WaitKey } from './needs-you.js';
+import { ASKS, NEED_ASK, NEEDS, failedAttemptSentence, processNeedOf, type Ask, type NeedKey, type WaitKey } from './needs-you.js';
 import { LEAD_CLAIM_SQL, LEAD_IDLE_MS } from './lead-voice.js';
 
 export type WorkIndexCounts = Record<WorkView, number>;
@@ -401,7 +401,7 @@ export function workIndexPage(store: Store, now: Date, access: WorkSummaryAccess
     'running_count',running_count,'completed_count',completed_count,'queued',queued,'done_recently',done_recently)) FROM project_totals) row_json FROM totals
   UNION ALL SELECT 1,0,0,0,0,0,0,0,0,0,json_object('root_ref',root_ref,'root_id',root_id,'id',id,'root_title',root_title,'repo',repo,
     'state',state,'created_at',created_at,'family_updated',family_updated,'version_count',version_count,'earlier_active',earlier_active,
-    'earlier_id',earlier_id,'broken',broken,'live_run',live_run,'result_id',page_result_id,'result_outcome',(SELECT outcome FROM run WHERE id=page_result_id),
+    'earlier_id',earlier_id,'broken',broken,'live_run',live_run,'result_id',page_result_id,'result_outcome',(SELECT outcome FROM run WHERE id=page_result_id),'attempt_reason',(SELECT substr(reason,1,1000) FROM run WHERE task_ref IN (SELECT ref_id FROM members WHERE root_ref=page.root_ref) AND (finished_at IS NOT NULL OR outcome IS NOT NULL) AND role NOT IN ('planner','reviewer') ORDER BY id DESC LIMIT 1),
     'publication_url',(SELECT pr_url FROM publication WHERE run=page_result_id),
     'result_role',(SELECT role FROM run WHERE id=page_result_id),'live_role',(SELECT role FROM run WHERE id=page.live_run),
     'check_status',(SELECT status FROM run_check WHERE run=page_result_id),
@@ -493,7 +493,7 @@ function itemOf(row: Row, principal: WorkSummaryAccess['principal'], probe?: (ta
     'decision-queue': ['Needs your decision', 'The decision queue is full.', 'inspect-decisions', 'Review open questions'],
     'result-needs-attention': ['Needs your decision', 'Inspect the saved result and resolve its remaining execution or scope issue.', 'inspect-run', 'Inspect run'],
     'process-needs-attention': ['Needs your decision', 'A process exit is not recorded. Open the attempt to check whether its work has stopped.', 'inspect-run', 'Inspect run'],
-    failed: ['Needs your decision', 'The last attempt stopped; review its incident before retrying.', 'retry-task', 'Review and retry'],
+    failed: ['Needs your decision', 'The last attempt stopped.', 'retry-task', 'Review and retry'],
     'vanished-run': ['Needs your decision', 'An unfinished attempt has no current live claim.', 'reconcile-run', 'Check the unfinished attempt'],
     stopping: ['Needs your decision', 'Stopping. The work so far is kept.', 'inspect-stop', 'View stop details'],
     stopped: ['Needs your decision', 'Paused by a person. The work so far is kept.', 'resume-run', 'Review pause'],
@@ -528,6 +528,8 @@ function itemOf(row: Row, principal: WorkSummaryAccess['principal'], probe?: (ta
   const successor = code === 'cancelled' ? s(row, 'replaced_by') : null;
   if (successor !== null) { detail = `${replacedWords(successor)}.`; actionLabel = `Open ${successor}`; }
   if (code === 'terminal-dependency' && s(row, 'dependency_id') !== null) detail = `${s(row, 'dependency_id')} ${s(row, 'dependency_state') === 'cancelled' ? 'was cancelled' : 'failed'} before it finished.`;
+  // A failed task says the latest finished attempt across its whole family, whatever its outcome: its recorded reason, or that none was recorded.
+  if (code === 'failed') detail = failedAttemptSentence(s(row, 'attempt_reason'));
   if (code === 'result-needs-attention' && n(row, 'custody_unresolved')) detail = 'A process exit is not recorded. Open the result to check whether its work has stopped.';
   if (code === 'result-needs-attention' && ['built', 'no-change'].includes(s(row, 'result_outcome') ?? '')) { actionCode = 'open-result'; actionLabel = 'Open result'; }
   if (process !== null && 'need' in process) { actionCode = 'confirm-stopped'; actionLabel = NEEDS[process.need].action.label; }
