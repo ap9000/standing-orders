@@ -674,7 +674,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     now = new Date(T0.getTime() + TURN_WALL_CLOCK_MS + CONVERSATION_CLAIM_MS + 60_000);
     expect(await pass()).toMatchObject({ ok: true, report: { chatRefused: 1 } });
     expect(requests).toHaveLength(1);
-    expect(script.texts()).toEqual([expect.stringContaining("the assistant's reply did not complete (crashed). Nothing was changed.")]);
+    expect(script.texts()).toEqual(["I couldn't answer that just now: the assistant's reply did not complete (crashed). Ask again, or open the console."]);
     expect(store.listTelegramConversations(BOT)[0]).toMatchObject({ state: "failed", outcome: "replayed:crashed" });
   });
 
@@ -722,7 +722,9 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       script.fault = () => "throw";
       script.updates.push([textUpdate(2, "add a payout limit")]);
       const first = await pass();
-      expect(first).toMatchObject({ ok: true, report: { chatQueued: 1, problems: [expect.stringContaining("is waiting to be sent: Telegram transport failed; delivery may be uncertain")] } });
+      // The person is told once, in plain words; on a dead wire that notice is lost too, and said so.
+      expect(first).toMatchObject({ ok: true, report: { chatQueued: 1, problems: [expect.stringContaining("notice for update 2 could not be sent"), expect.stringContaining("is waiting to be sent: Telegram transport failed; delivery may be uncertain")] } });
+      expect(String(script.calls.find(call => call.method === "sendMessage:failed" && String(call.params["text"]).startsWith("I couldn't"))?.params["text"])).toBe("I couldn't answer that just now: my reply may not have reached Telegram. Ask again, or open the console.");
       expect(first.ok && first.report.chatAnswered).toBeFalsy();
       expect(row()).toMatchObject({ state: "queued", outcome: "delivering", replyMessageId: null, nextAttemptAt: new Date(now.getTime() + PART_RETRY_MS[0]).toISOString() });
       expect(row().turn).not.toBeNull();
@@ -732,14 +734,15 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       expect(parts()[1]!.keyboard!.flat().map(one => one.text)).toEqual(["Confirm", "Dismiss"]);
       const tokens = parts()[1]!.keyboard!.flat().map(one => one.callback_data);
       expect(tokens.map(one => store.getTelegramProposalAction(one)?.messageId)).toEqual([null, null]);
-      expect(script.attempts()).toHaveLength(1);
+      expect(script.attempts()).toHaveLength(2);
       expect(requests).toHaveLength(2);
-      // Too early: nothing is claimed. Then a second lost answer, counted again, with the longer wait.
+      // Too early: nothing is claimed. Then a second lost answer, counted again, with the longer wait — and no second notice.
       later(1_000);
       expect(await pass()).toMatchObject({ ok: true, report: { problems: [] } });
-      expect(script.attempts()).toHaveLength(1);
+      expect(script.attempts()).toHaveLength(2);
       later(PART_RETRY_MS[0]);
       expect(await pass()).toMatchObject({ ok: true, report: { problems: [expect.stringContaining("delivery may be uncertain")] } });
+      expect(script.attempts()).toHaveLength(3);
       expect(parts()[0]).toMatchObject({ state: "pending", attempts: 2, uncertain: 2, nextAttemptAt: new Date(now.getTime() + PART_RETRY_MS[1]).toISOString() });
       // The wire returns: both parts go out in order, once each, and only now is the row done — with no third model call and no second turn.
       script.fault = null;
@@ -898,7 +901,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       expect(await pass()).toMatchObject({ ok: true, report: { chatRefused: 1 } });
       expect(requests).toHaveLength(1);
       // Ending the session from the console superseded the running turn; that is the word the phone gets, not a silent restart.
-      expect(script.texts()).toEqual([expect.stringContaining("the assistant's reply did not complete (superseded). Nothing was changed.")]);
+      expect(script.texts()).toEqual(["I couldn't answer that just now: the assistant's reply did not complete (superseded). Ask again, or open the console."]);
       expect(store.listTelegramConversations(BOT)[0]).toMatchObject({ state: "failed", outcome: "replayed:superseded", session: original.id });
       expect(store.handle.prepare("SELECT COUNT(*) AS n FROM mate_turn").get()?.["n"]).toBe(1);
       expect(store.listTelegramConversationParts(store.listTelegramConversations(BOT)[0]!.id)).toEqual([]);
@@ -951,18 +954,55 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     expect(store.getMateProposal(proposal.id)?.outcome).toMatchObject({ ok: true, via: "telegram" });
   });
 
-  test("a busy engine defers the phone's message instead of failing it; an incompatible console session is never ended from the phone", async () => {
-    // A console session over a narrower ceiling is live: the phone refuses, the session stands.
+  test("a session mismatch starts a fresh lead session and the person gets an answer; while a console turn runs the message waits instead (c2)", async () => {
+    // Oct 1: a console session over another ceiling refused the phone ("refused:session-mismatch") and nothing was sent.
     const me = who();
     store.mintMateSession({ approver: "alex", approverGeneration: me.generation, credentialKey: subscriptionCredentialKey("claude-subscription"), ceilingMicrousd: 0, ceilingDigest: ceilingDigestOf([repo, "/elsewhere"]), termsDigest: "t".repeat(64) }, now);
-    const foreign = store.activeMateSession("alex")!;
-    script.updates.push([textUpdate(2, "hello")]);
+    const stale = store.activeMateSession("alex")!;
+    answers.push({ text: "Toolroll 0.9.9 is the latest." });
+    script.updates.push([textUpdate(2, "what's the latest update of toolroll include")]);
+    expect(await pass()).toMatchObject({ ok: true, report: { chatQueued: 1, chatAnswered: 1 } });
+    expect(script.texts()).toEqual(["Toolroll 0.9.9 is the latest."]);
+    const fresh = store.activeMateSession("alex")!;
+    expect(fresh.id).not.toBe(stale.id);
+    expect(fresh).toMatchObject({ ceilingDigest: me.ceilingDigest, endedAt: null });
+    expect(store.getMateSession(stale.id)?.endedAt).not.toBeNull();
+    expect(store.listTelegramConversations(BOT).at(-1)).toMatchObject({ state: "done", outcome: "answered", session: fresh.id });
+    expect(requests).toHaveLength(1);
+    // A mismatched session with a turn still running on the computer is not ended under it: the message waits.
+    store.mintMateSession({ approver: "alex", approverGeneration: me.generation, credentialKey: subscriptionCredentialKey("claude-subscription"), ceilingMicrousd: 0, ceilingDigest: ceilingDigestOf([repo, "/elsewhere"]), termsDigest: "t".repeat(64) }, now);
+    const busy = store.activeMateSession("alex")!;
+    const busyThread = store.openMateThread("alex", ceilingDigestOf([repo, "/elsewhere"]), now).thread;
+    const console = store.openMateTurn({ approver: "alex", session: busy.id, thread: busyThread.id, credentialKey: subscriptionCredentialKey("claude-subscription"), reservedMicrousd: 0, dailyTurns: 50, weeklyCeilingMicrousd: 0, deadlineMs: 60_000 }, now);
+    if (!console.ok) throw new Error(console.reason);
+    const consoleStarted = store.startMateTurn(console.id, now);
+    if (!consoleStarted.ok) throw new Error("start");
+    script.updates.push([textUpdate(4, "and before that?")]);
+    expect(await pass()).toMatchObject({ ok: true, report: { chatQueued: 1 } });
+    expect(store.listTelegramConversations(BOT).at(-1)).toMatchObject({ state: "queued", outcome: "busy" });
+    expect(store.getMateTurn(console.id)?.state).toBe("running");
+    expect(store.getMateSession(busy.id)?.endedAt).toBeNull();
+    expect(store.finalizeMateTurn(console.id, consoleStarted.generation, { state: "answered", settledMicrousd: 0, tokensIn: 1, tokensOut: 1 }, now)).toBe(true);
+    answers.push({ text: "0.9.8 before it." });
+    now = new Date(now.getTime() + 6_000);
+    expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1 } });
+    expect(script.texts().at(-1)).toBe("0.9.8 before it.");
+    expect(store.getMateSession(busy.id)?.endedAt).not.toBeNull();
+    // Nobody waits forever: a message that stays blocked is answered in plain words once it gives up.
+    store.mintMateSession({ approver: "alex", approverGeneration: me.generation, credentialKey: subscriptionCredentialKey("claude-subscription"), ceilingMicrousd: 0, ceilingDigest: ceilingDigestOf([repo, "/elsewhere"]), termsDigest: "t".repeat(64) }, now);
+    const stuck = store.activeMateSession("alex")!;
+    const stuckTurn = store.openMateTurn({ approver: "alex", session: stuck.id, thread: store.openMateThread("alex", ceilingDigestOf([repo, "/elsewhere"]), now).thread.id, credentialKey: subscriptionCredentialKey("claude-subscription"), reservedMicrousd: 0, dailyTurns: 50, weeklyCeilingMicrousd: 0, deadlineMs: 60 * 60_000 }, now);
+    if (!stuckTurn.ok || !store.startMateTurn(stuckTurn.id, now).ok) throw new Error("start");
+    script.updates.push([textUpdate(5, "still there?")]);
+    expect(await pass()).toMatchObject({ ok: true, report: { chatQueued: 1 } });
+    now = new Date(now.getTime() + 11 * 60_000);
     expect(await pass()).toMatchObject({ ok: true, report: { chatRefused: 1 } });
-    expect(script.texts()[0]).toContain("covers different projects or another provider");
-    expect(store.activeMateSession("alex")?.id).toBe(foreign.id);
-    expect(store.getMateSession(foreign.id)?.endedAt).toBeNull();
-    expect(requests).toEqual([]);
-    store.endMateSession(foreign.id, "alex", now);
+    expect(script.texts().at(-1)).toBe("I couldn't answer that just now: the assistant stayed busy with another message. Ask again, or open the console.");
+    expect(store.listTelegramConversations(BOT).at(-1)).toMatchObject({ state: "failed", outcome: "busy:gave-up" });
+  });
+
+  test("a busy engine defers the phone's message instead of failing it", async () => {
+    const me = who();
     // A turn already running on the console: the phone's message waits its turn.
     answers.push({ text: "Hi." });
     const session = store.mintMateSession({ approver: "alex", approverGeneration: me.generation, credentialKey: subscriptionCredentialKey("claude-subscription"), ceilingMicrousd: 0, ceilingDigest: me.ceilingDigest, termsDigest: "t".repeat(64) }, now);
@@ -1625,7 +1665,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       expect(Number(store.handle.prepare("SELECT COUNT(*) AS n FROM mate_turn_evidence").get()?.["n"])).toBe(0);
       expect(parts()).toEqual([]);
       expect(script.documents()).toHaveLength(0);
-      expect(script.texts().at(-1)).toMatch(/^The assistant's reply did not complete: /);
+      expect(script.texts().at(-1)).toMatch(/^I couldn't answer that just now: the assistant's reply did not complete \(.+\)\. Ask again, or open the console\.$/);
       // The same ask, answered: the model is told which records cannot travel and why; only the verified image is sent.
       askForImages(run, "One screenshot follows; five saved captures could not be verified.");
       expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1, problems: [] } });
@@ -1865,6 +1905,62 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       expect(String(script.sends().at(-1)!.params["text"])).toContain(NO_PHONE_LINK);
       store = openStore(file);
       expect(store.listTelegramConversations(BOT).map(one => one.state)).toEqual(["done", "done", "done"]);
+    });
+
+    test("a reply goes out from the service's bridge cycle while a project watch runs the bridge, never beside the long poll — and a reply that can't go out tells the person (c1, c3)", async () => {
+      // Oct 2: the lead's reply failed "fetch failed; delivery may be uncertain" for minutes while notifications from the
+      // same process went out. The reply was sent beside the long poll on a connection of its own; notifications go out
+      // between polls. The wire here refuses exactly that: any send while a getUpdates is in flight fails like fetch did.
+      stub();
+      await saveRepos(join(dir, "repos.json"), [repo]);
+      await exec("git", ["init", "-q", "-b", "main"], { cwd: repo });
+      await exec("git", ["-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-q", "--allow-empty", "-m", "first"], { cwd: repo });
+      const runnerToken = register(store, { name: "builder-1", host: "test", capacity: 9, repos: [repo], now: new Date() }).token;
+      store.close();
+      let polling = 0;
+      const besidePoll: string[] = [];
+      const fenced: TelegramTransport = async (method, params, signal, upload) => {
+        if (method === "getUpdates") {
+          polling++;
+          try {
+            const answer = await script.transport(method, params, signal, upload);
+            await new Promise(resolve => setTimeout(resolve, 40));
+            return answer;
+          } finally { polling--; }
+        }
+        if (method.startsWith("send") && polling > 0) {
+          besidePoll.push(String(params["text"]));
+          return { ok: false, description: "fetch failed", uncertain: true };
+        }
+        return script.transport(method, params, signal, upload);
+      };
+      // The answer is written while a long poll is in flight.
+      const duringPoll = async () => { while (polling === 0) await new Promise(resolve => setTimeout(resolve, 2)); };
+      answers.push({ text: "Toolroll 0.9.9: lighter tests, shared dependencies, a clear Needs you.", before: duringPoll });
+      script.updates.push([textUpdate(2, "what's the latest update of toolroll include")]);
+      const lines: string[] = [];
+      const observer = openStore(file);
+      const done = () => observer.listTelegramConversations(BOT).some(one => one.state === "done" || one.state === "failed");
+      const code = await runOperate("watch", ["--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", join(dir, "pool"), "--for", "60000", "--tick-every", "3600000", "--bridge-every", "3600000", "--reconcile-every", "3600000"],
+        line => lines.push(line), { databaseFile: file, now: new Date(), telegramTransport: fenced, mateSeams: { subscriptionRunner: runner }, shouldStop: done }).finally(() => observer.close());
+      expect(code, lines.join("\n")).toBe(EXIT.ok);
+      expect(besidePoll, lines.join("\n")).toEqual([]);
+      expect(script.texts()).toEqual(["Toolroll 0.9.9: lighter tests, shared dependencies, a clear Needs you."]);
+      store = openStore(file);
+      expect(store.listTelegramConversations(BOT)).toEqual([expect.objectContaining({ state: "done", outcome: "answered", replyMessageId: "100" })]);
+      expect(lines.join("\n")).toContain("chat replied 1");
+
+      // A reply Telegram will not take: the person hears so once, in plain words, and the reply stays queued to retry.
+      store.close();
+      script.fault = params => String(params["text"]).startsWith("I couldn't") ? null : { ok: false, description: "Bad Request: message is too long" };
+      answers.push({ text: "Here is a long answer." });
+      script.updates.push([textUpdate(3, "and the one before?")]);
+      const told = () => script.texts().some(text => text.startsWith("I couldn't"));
+      expect(await runOperate("watch", ["--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", join(dir, "pool"), "--for", "60000", "--tick-every", "3600000", "--bridge-every", "3600000", "--reconcile-every", "3600000"],
+        () => {}, { databaseFile: file, now: new Date(), telegramTransport: fenced, mateSeams: { subscriptionRunner: runner }, shouldStop: told })).toBe(EXIT.ok);
+      expect(script.texts().at(-1)).toBe("I couldn't answer that just now: Telegram didn't accept my reply. Ask again, or open the console.");
+      store = openStore(file);
+      expect(store.listTelegramConversations(BOT).at(-1)).toMatchObject({ state: "queued", outcome: "delivering" });
     });
   });
 });

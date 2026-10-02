@@ -1,3 +1,4 @@
+import { UNSENT_REPLY_MS } from "./telegram-settings.js";
 import { maybeTriggerRepair } from "./dispose.js";
 import { CHECK_LEVEL_HINTS, CHECK_LEVEL_WORDS, isCheckLevel, liveQuickCommand, projectCheckLevel, quickVerifyKey, setProjectCheckLevel, setTaskCheckLevel, suggestQuickCommand } from "./check-levels.js";
 import { fileAddTestsTask, followUpChecksOf, requestFollowUpChecks, runFollowUpCheck, runWaitingChecks } from "./result-follow-ups.js";
@@ -9693,6 +9694,7 @@ async function upCommand(
  *   bridge telegram token [<bot-token>|--clear]   set the credential file
  *   bridge telegram status
  *   bridge telegram digest [--every 30m|2h|24h | --off]   away mode: routine facts batch, decisions still page
+ *   bridge telegram retry                send unsent assistant replies again now
  *
  * The bot token comes from ${TOKEN_ENV} or the credential file this command
  * writes (0600, beside the database). Cron the pass right after tick; a
@@ -9713,7 +9715,15 @@ async function bridgeCommand(
   if (demoFence !== null) return demoFence;
   const [channel, action] = positional;
   if (channel !== "telegram") {
-    return fail(write, json, "bridge", "usage", "`toolroll bridge telegram [pair|unpair|token|status|digest]`", EXIT.usage);
+    return fail(write, json, "bridge", "usage", "`toolroll bridge telegram [pair|unpair|token|status|digest|retry]`", EXIT.usage);
+  }
+
+  if (action === "retry") {
+    // Replies already written and fenced on the pairing like every send: this only moves their next attempt to now.
+    const retried = store.retryTelegramReplies(null, clock());
+    return succeed(write, json, "bridge retry", { retried }, () => [
+      retried === 0 ? "No unsent Telegram replies." : `Sending ${retried} Telegram ${retried === 1 ? "reply" : "replies"} again on the next bridge pass.`,
+    ]);
   }
 
   if (action === "token") {
@@ -10655,7 +10665,18 @@ async function statusCommand(
   const projects = projectBuildsStatus(context);
   const projectsLine = projects.length === 0 ? null
     : `Builds by project: ${projects.slice(0, 8).map(one => `${one.name} ${one.running} of ${one.limit}`).join(", ")}${projects.length > 8 ? ", …" : ""}`;
-  return succeed(context.write, context.json, command, { ...status, projects, ...update, ...integrations, ...updateWaiting }, () => [...(waiting === null ? [] : [waiting.words]), ...renderInstallationStatus(status), ...(projectsLine === null ? [] : [projectsLine]), ...(line === null ? [] : [line]), ...(brokenLine === null ? [] : [brokenLine])]);
+  // A Telegram reply written but still not sent after two minutes, with its Retry.
+  const unsent = context.store.unsentTelegramReplies(null, null, new Date(context.clock().getTime() - UNSENT_REPLY_MS));
+  const unsentLine = unsentRepliesLine(unsent);
+  const unsentReplies = unsent.length === 0 ? {} : { unsentReplies: unsent.map(one => ({ ...one, retry: "toolroll bridge telegram retry" })) };
+  return succeed(context.write, context.json, command, { ...status, projects, ...update, ...integrations, ...updateWaiting, ...unsentReplies }, () => [...(waiting === null ? [] : [waiting.words]), ...(unsentLine === null ? [] : [unsentLine]), ...renderInstallationStatus(status), ...(projectsLine === null ? [] : [projectsLine]), ...(line === null ? [] : [line]), ...(brokenLine === null ? [] : [brokenLine])]);
+}
+
+function unsentRepliesLine(unsent: readonly { since: string; error: string | null }[]): string | null {
+  if (unsent.length === 0) return null;
+  const oldest = unsent[0]!;
+  const what = unsent.length === 1 ? "A Telegram reply hasn't" : `${unsent.length} Telegram replies haven't`;
+  return `${what} been sent since ${oldest.since.slice(11, 16)} UTC${oldest.error === null ? "" : ` (${oldest.error})`}. Retry: toolroll bridge telegram retry`;
 }
 
 /** Each known project's running builds against its limit: its own number, never past its workers' capacity. */

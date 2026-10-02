@@ -292,6 +292,14 @@ export async function processChatEvent(
         repos,
         now,
       );
+      if (!resolved.ok && resolved.reason === "busy") {
+        state.defer(
+          event.id,
+          "Assistant is answering another message",
+          new Date(now.getTime() + 5000),
+        );
+        return true;
+      }
       if (!resolved.ok) {
         state.plan(
           event.id,

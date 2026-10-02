@@ -235,7 +235,7 @@ export function createTransport(token: string, timeoutMs = 30_000): TelegramTran
     } catch (error) {
       return {
         ok: false,
-        description: scrub(error instanceof Error ? error.message : String(error), token),
+        description: scrub(transportError(error), token),
         uncertain: true,
       };
     } finally {
@@ -243,6 +243,17 @@ export function createTransport(token: string, timeoutMs = 30_000): TelegramTran
       signal?.removeEventListener("abort", onAbort);
     }
   };
+}
+
+/** fetch's own message ("fetch failed") with the reason under it, e.g. "fetch failed (EMFILE: too many open files)". */
+export function transportError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const cause = error instanceof Error ? (error as { cause?: unknown }).cause : undefined;
+  if (cause === undefined || cause === null) return message;
+  const code = typeof (cause as { code?: unknown }).code === "string" ? (cause as { code: string }).code : null;
+  const detail = cause instanceof Error ? cause.message : String(cause);
+  const why = code !== null && !detail.includes(code) ? `${code}: ${detail}` : detail;
+  return why === "" || why === message ? message : `${message} (${why.slice(0, 160)})`;
 }
 
 /** The multipart body: every param a field (objects as JSON), the file last. Exported for the adapter's own test only. */
@@ -474,11 +485,15 @@ export async function followBridge(
   // turn must not stall the long poll, and each cycle's lease re-acquire is
   // the renewal that keeps this the only live poller meanwhile. One
   // processor at a time; its counts land on the totals when it finishes.
+  // It only persists the reply: the cycle sends it, in the same slot as
+  // notifications, so a reply never needs a connection of its own beside
+  // the long poll (Oct 2: replies failed "fetch failed" for minutes while
+  // notifications from the same process went out).
   let inFlight: Promise<void> | null = null;
   const kick = (): void => {
     if (inFlight !== null || options.conversation === undefined || options.readProjects === undefined) return;
     const report: BridgeReport = { sent: 0, answered: 0, paired: 0, ignored: 0, backlog: false, problems: [] };
-    inFlight = processConversations(store, botId, transport, owner, clock, report, options.readProjects, options.conversation, signal)
+    inFlight = processConversations(store, botId, transport, owner, clock, report, options.readProjects, options.conversation, signal, "turns")
       .catch(error => { report.problems.push(`telegram chat: ${error instanceof Error ? error.message : String(error)}`); })
       .finally(() => {
         inFlight = null;
@@ -560,13 +575,18 @@ export async function followBridge(
         await deliverOutbox(store, botId, transport, owner, clock, report, options.readProjects, options.canDeliver, options.conversation?.phoneOrigin, options.conversation?.evidenceRoot);
         await deliverTeam(store, botId, transport, clock, report, options.readProjects, options.canDeliver, options.conversation?.phoneOrigin);
       }
+      // Replies the turn worker has planned go out here, like notifications.
+      if (options.conversation !== undefined && options.readProjects !== undefined) {
+        await processConversations(store, botId, transport, owner, clock, report, options.readProjects, options.conversation, signal, "replies");
+      }
       // Pushed updates first (some may wait from before a fall back), then — only while
       // Telegram isn't pushing — ask for more.
       const pushed = await drainInbox({ store, botId, transport, clock, report, readProjects: options.readProjects, conversation: options.conversation, projects: null }, owner, lease.generation);
       if (pushed > 0) report.pushed = pushed;
       if (!pushing()) {
+        // While a turn is running, poll briefly so its reply is sent within a second or two of being written.
         await drainUpdates(
-          store, botId, transport, owner, lease.generation, lease.cursor, clock, report, pollSeconds, signal, options.readProjects, options.conversation,
+          store, botId, transport, owner, lease.generation, lease.cursor, clock, report, inFlight === null ? pollSeconds : 1, signal, options.readProjects, options.conversation,
         );
         // A push address nobody here wants any more (the public address was removed): take it down, so asking works again.
         if (report.webhookActive === true && push === null) await transport("deleteWebhook", { drop_pending_updates: false }, signal);
@@ -582,12 +602,13 @@ export async function followBridge(
       if (report.chatQueued !== undefined) total.chatQueued = (total.chatQueued ?? 0) + report.chatQueued;
       if (report.chatRefused !== undefined) total.chatRefused = (total.chatRefused ?? 0) + report.chatRefused;
       if (report.chatConfirmed !== undefined) total.chatConfirmed = (total.chatConfirmed ?? 0) + report.chatConfirmed;
+      if (report.chatAnswered !== undefined) total.chatAnswered = (total.chatAnswered ?? 0) + report.chatAnswered;
       total.problems.push(...report.problems);
-      if (report.sent > 0 || report.answered > 0 || report.paired > 0 || (report.statusReplies ?? 0) > 0 || (report.chatQueued ?? 0) > 0 || (report.chatRefused ?? 0) > 0 || (report.chatConfirmed ?? 0) > 0 || report.problems.length > 0) {
+      if (report.sent > 0 || report.answered > 0 || report.paired > 0 || (report.statusReplies ?? 0) > 0 || (report.chatQueued ?? 0) > 0 || (report.chatAnswered ?? 0) > 0 || (report.chatRefused ?? 0) > 0 || (report.chatConfirmed ?? 0) > 0 || report.problems.length > 0) {
         options.onCycle?.(report);
       }
 
-      if (report.problems.length > 0 && report.sent === 0 && report.answered === 0) {
+      if (report.problems.length > 0 && report.sent === 0 && report.answered === 0 && (report.chatAnswered ?? 0) === 0) {
         // The wire is down. Back off; the counter resets on the first clean cycle.
         if (!signal.aborted) {
           await wait(FOLLOW_BACKOFF_MS[Math.min(failures, FOLLOW_BACKOFF_MS.length - 1)] as number);
@@ -603,14 +624,23 @@ export async function followBridge(
       const took = Date.now() - startedAt;
       // While Telegram pushes (v98) there is no long poll to wait on: a pushed update waits at most this long.
       const floor = pushing() ? PUSH_IDLE_MS : FOLLOW_IDLE_FLOOR_MS;
-      if (!signal.aborted && report.sent === 0 && report.answered === 0 && took < floor) {
+      if (!signal.aborted && report.sent === 0 && report.answered === 0 && (report.chatAnswered ?? 0) === 0 && took < floor) {
         await wait(floor - took);
       }
     }
   } finally {
     // A turn in flight finishes on its own bounds (the engine's wall clock);
     // its reply is fenced on the claim and the channel like every other part.
-    if (inFlight !== null) await inFlight;
+    if (inFlight !== null) {
+      await inFlight;
+      // Its reply was written for the cycle that will not come: send it now, while the lease is still ours.
+      if (options.conversation !== undefined && options.readProjects !== undefined) {
+        const report: BridgeReport = { sent: 0, answered: 0, paired: 0, ignored: 0, backlog: false, problems: [] };
+        await processConversations(store, botId, transport, owner, clock, report, options.readProjects, options.conversation, undefined, "replies").catch(() => {});
+        if (report.chatAnswered !== undefined) total.chatAnswered = (total.chatAnswered ?? 0) + report.chatAnswered;
+        total.problems.push(...report.problems);
+      }
+    }
     store.releaseBridgeLease(botId, owner, clock());
   }
 
@@ -620,10 +650,10 @@ export async function followBridge(
 /** The queued turns for one bot, counted onto the pass's report. */
 async function processConversations(
   store: Store, botId: string, transport: TelegramTransport, owner: string, clock: () => Date, report: BridgeReport,
-  readProjects: TelegramReadProjects, conversation: TelegramConversationOptions, signal?: AbortSignal,
+  readProjects: TelegramReadProjects, conversation: TelegramConversationOptions, signal?: AbortSignal, only?: "turns" | "replies",
 ): Promise<void> {
   const chat = { answered: 0, refused: 0, problems: [] as string[] };
-  await processTelegramConversations({ store, botId, transport, owner, clock, readProjects, options: conversation, report: chat, ...(signal === undefined ? {} : { signal }) });
+  await processTelegramConversations({ store, botId, transport, owner, clock, readProjects, options: conversation, report: chat, ...(signal === undefined ? {} : { signal }), ...(only === undefined ? {} : { only }) });
   if (chat.answered > 0) report.chatAnswered = (report.chatAnswered ?? 0) + chat.answered;
   if (chat.refused > 0) report.chatRefused = (report.chatRefused ?? 0) + chat.refused;
   report.problems.push(...chat.problems);
