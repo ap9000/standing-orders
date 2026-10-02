@@ -113,6 +113,7 @@ Usage
   toolroll connect          save a private connection to your central service
   toolroll lead             named leads on the connected service
   toolroll lead token       mint your lead agent's credential: its own work pings nobody
+  toolroll lead say "<text>"  (the lead) one short message in its person's chat
   toolroll conversation     shared and private conversations on that service
   toolroll chat --lead <id> --conversation <id>  central chat (use --local for local chat)
 

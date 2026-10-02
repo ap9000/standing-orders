@@ -434,6 +434,8 @@ export type BrowserHome = {
   agents: BrowserHomeAgent[]; counts: BrowserHomeCount[];
   planUse: { name: string; window: string; percent: number; detail: string; tone: 'neutral' | 'warning' | 'danger' }[];
   catchUp: BrowserCatchUpItem[]; allHref: string;
+  /** What this person's lead is doing now and when it last acted (lead-voice.ts); its task when it named one. */
+  lead?: { doing: string; at: string; href: string | null } | null;
 };
 
 /** `sandbox`: the demo command, offered beside the sign-in command while no agent is signed in. `intro`: how it works,

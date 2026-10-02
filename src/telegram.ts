@@ -32,6 +32,7 @@ import { isLifecycleNotification, isTelegramProgressNotification, TELEGRAM_HOLD_
 import { telegramProgressCard, type ProgressEntity } from "./telegram-progress.js";
 import { enqueueEveningDigests, finishedView, isTaskFact, joinsBatch, needsPerson, quietCardView, type QuietView } from "./chat-quiet.js";
 import { BATCH_MS, chatText, chatTitle, factLinkLabel, mentions, nameTelegramBot } from "./chat-voice.js";
+import { LEAD_SAY_KIND, enqueueLeadLapses, leadSayEarlier, leadSayText } from "./lead-voice.js";
 import { applyTeamInbound, deliverTeamChats, teamCommand } from "./telegram-team.js";
 import { applyFlowReply, applyFlowTap, FLOW_DECIDE_KEY, flowButtons, flowDecisionAt } from "./telegram-flow.js";
 import { connectChannel, FLOW_WORDS, takeChannelMessage, watchedChannel } from "./chat-inbox.js";
@@ -741,6 +742,8 @@ async function deliverOutbox(
   const now = clock();
   // An evening digest someone asked for is due: record it as their own notification, delivered below.
   try { enqueueEveningDigests(store, now, evidenceRoot); } catch { report.problems.push("evening digest could not be prepared"); }
+  // A lead claim that went two hours quiet repaints its owner's card back to the task's real state.
+  enqueueLeadLapses(store, now);
   const digestDue = digest.everyMs === null || digest.lastSentAt === null || now.getTime() >= new Date(digest.lastSentAt).getTime() + digest.everyMs;
   // Every paired person is a destination of their own: each binding claims
   // and settles its own rows under its own ceiling, in turn.
@@ -966,8 +969,31 @@ async function deliverOutboxTo(
       }
       return fact.kind === "acceptance-evidence" ? imageSender(fact) : deliverOne(store, botId, binding, sender, fact, clock, phoneOrigin, evidenceRoot, projects);
     };
+    /** The lead's words (lead-voice.ts): one message; a later say within two minutes edits it in place. */
+    const leadSayOutcome = async (fact: TelegramDelivery): Promise<{ ok: true; receipt: string | null } | { ok: false; error: string }> => {
+      const words = leadSayText(fact);
+      const button = fact.link === null ? null : factButton(phoneOrigin, fact.link);
+      const keyboard = button === null ? [] : [button];
+      const earlier = leadSayEarlier(store, fact).map(id => store.telegramMessageOf(id, fact.destination)).find(one => one !== null) ?? null;
+      if (earlier !== null) {
+        const problem = (await readAccess()) ?? fence();
+        if (problem !== null) return { ok: false, error: problem };
+        const edited = await editProgress(transport, binding.chatId, earlier, words, keyboard);
+        if (edited.ok) {
+          store.recordTelegramMessage(fact, binding, earlier, clock());
+          const after = (await readAccess()) ?? fence();
+          return after === null ? { ok: true, receipt: receiptFor(botId, binding.chatId, earlier) } : { ok: false, error: after };
+        }
+        if (edited.retryAfter !== undefined) store.deferTelegram(botId, new Date(clock().getTime() + edited.retryAfter * 1000).toISOString());
+        // Only Telegram's definitive missing/uneditable answer permits a new message.
+        if (!edited.replace) return edited;
+      }
+      const sent = await sender(words, keyboard.length === 0 ? undefined : keyboard, [fact]);
+      return sent.ok ? { ok: true, receipt: receiptFor(botId, binding.chatId, sent.messageId) } : sent;
+    };
     let outcome: { ok: true; receipt: string | null } | { ok: false; error: string };
-    if (quiet && rows.length === 1 && isTaskFact(row)) outcome = await quietOutcome(row);
+    if (rows.length === 1 && row.kind === LEAD_SAY_KIND) outcome = await leadSayOutcome(row);
+    else if (quiet && rows.length === 1 && isTaskFact(row)) outcome = await quietOutcome(row);
     else {
       // A failure or decision still gets its own alert. Refresh an existing
       // card first so it does not keep saying the build is running.
