@@ -4882,6 +4882,10 @@ async function reconcileCommand(
   }
 
   const recovered = recoverDead(store, clock());
+  // A finished run's processes that have since gone get their exits recorded,
+  // so "can't confirm this run's process has stopped" clears by itself. The
+  // first pass after start also repairs runs an older build left open.
+  store.recordFinishedRunExits(clock());
   // A witness reserved for a spawn that never made a process (a crash or a
   // thrown spawn) settles once its run's process groups are proven gone.
   store.settleUnspawnedWitnesses(clock());

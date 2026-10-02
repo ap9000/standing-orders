@@ -19,6 +19,7 @@ import { disposeBuildOutcome } from "./dispose.js";
 import { requestTaskStop, resumeTaskStop, taskControlOf, stopRequestedFor } from "./task-control.js";
 import { diagnoseTaskDispatch } from "./dispatch.js";
 import { taskReadinessBlocker } from "./dispatch.js";
+import { workIndexPage } from "./work-index.js";
 
 const T0 = new Date("2026-09-12T08:00:00.000Z");
 vi.mock("node:child_process", { spy: true });
@@ -484,3 +485,70 @@ describe("safe task stop and resume (v52)", () => {
 function reapLease(store: Store, leaseId: string): void {
   store.raw().prepare("UPDATE claim SET released_at = ?, released_by = 'reaped' WHERE lease_id = ?").run(T0.toISOString(), leaseId);
 }
+
+describe("a finished run's processes settle by themselves", () => {
+  let store: Store;
+  const access = { principal: "operator" as const, repos: [REPO] };
+  beforeEach(() => {
+    store = openStore(":memory:");
+    register(store, { name: "runner-a", host: "test", capacity: 9, repos: [REPO], now: T0, newToken: () => tok("runner-a") });
+  });
+  afterEach(() => store.close());
+
+  /** A built result whose recorded process was still alive when its run finished. */
+  function finishedWithLiveProcess(taskId: string): number {
+    store.createTask({ id: taskId, title: `work ${taskId}` }, T0);
+    const taskRef = store.refFor("built-in", taskId).id;
+    store.placeTask(taskRef, REPO);
+    approveScopeFor(store, taskId);
+    const runId = store.startRun({ taskRef, leaseId: `l-${taskId}`, runner: "runner-a", branch: `standing-orders/${taskId}`, worktree: `/pool/${taskId}`, now: T0, ...presented(store, taskRef) });
+    store.stampRun(runId, { scopeDigest: store.getScope(taskId)!.digest, baseRevision: "1".repeat(40) });
+    store.recordOutcomeFacts(runId, { headRevision: "a".repeat(40), handoff: "Done." });
+    store.recordRunProcess(runId, 4682, T0, true);
+    store.finishRun(runId, { outcome: "built", committed: true, now: later(1_000) });
+    store.setTaskState(taskId, "done", later(1_000));
+    return runId;
+  }
+  const item = (taskId: string) => workIndexPage(store, later(5_000), access).items.find(one => one.rootId === taskId)!;
+
+  test("once its process is gone the reconcile records the exit and the task leaves Needs you", () => {
+    const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+    try {
+      const runId = finishedWithLiveProcess("t-outlived");
+      expect(item("t-outlived").status.label).toBe("Needs you");
+      expect(item("t-outlived").status.detail).toBe("Toolroll can't confirm this run's process has stopped. Open it to check.");
+      // Still alive: nothing is recorded.
+      expect(store.recordFinishedRunExits(later(2_000))).toBe(0);
+      kill.mockImplementation(() => { throw Object.assign(new Error("gone"), { code: "ESRCH" }); });
+      expect(store.recordFinishedRunExits(later(3_000))).toBe(1);
+      expect(store.raw().prepare("SELECT exited_at FROM run_process WHERE run = ?").get(runId)?.["exited_at"]).toBe(later(3_000).toISOString());
+      expect(store.stopQuiescenceProblem(runId)).toBeNull();
+      expect(item("t-outlived").status.label).toBe("Ready for review");
+      expect(store.recordFinishedRunExits(later(4_000))).toBe(0);
+      expect(kill.mock.calls.every(([, signal]) => signal === 0)).toBe(true);
+    } finally { kill.mockRestore(); }
+  });
+
+  test("a pid now held by a process born after the run finished settles, as deploy's check already says; an older one stays", () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { value: "darwin" });
+    const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+    const ps = vi.mocked(childProcess.execFileSync).mockReturnValue("Sat Sep 12 07:59:00 2026\n");
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-09-15T00:00:00.000Z"));
+    try {
+      const runId = finishedWithLiveProcess("t-reused-pid");
+      // Born before the run finished: it may be the run's own process.
+      expect(store.recordFinishedRunExits(later(2_000))).toBe(0);
+      expect(store.stopQuiescenceProblem(runId)).toContain("may still be running");
+      expect(item("t-reused-pid").status.label).toBe("Needs you");
+      // Born after: the pid was reused, so the run's process is gone.
+      ps.mockReturnValue("Mon Sep 14 14:33:43 2026\n");
+      expect(store.stopQuiescenceProblem(runId)).toBeNull();
+      expect(store.recordFinishedRunExits(later(3_000))).toBe(1);
+      expect(item("t-reused-pid").status.label).toBe("Ready for review");
+    } finally {
+      kill.mockRestore(); ps.mockReset(); clock.mockRestore();
+      Object.defineProperty(process, "platform", platform);
+    }
+  });
+});

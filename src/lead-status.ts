@@ -4,7 +4,7 @@ import { COMPLETION_ACTION } from "./result-completion.js";
 import { windowLabel, type LimitWindow } from "./provider-limits.js";
 import { openAuthPauses, signInCommand, signInReason } from "./provider-auth.js";
 import { BUILT_IN, checkSuitesOf, type RunCheckSuite, type Store } from "./store.js";
-import { workIndexPage } from "./work-index.js";
+import { workIndexPage, workReadyForReview } from "./work-index.js";
 
 export type CheckSummary = {
   status: "passed" | "failed" | "not-run" | "unknown";
@@ -135,8 +135,12 @@ export function taskWaitSnapshot(store: Store, taskId: string, now: Date, watche
     if (state !== "done") return answer("Ready", "Review result", true, 0, "ready");
   }
 
-  const completion = result === undefined ? undefined : store.handle.prepare(`SELECT 1 AS hit FROM action_ledger INDEXED BY work_completion
-    WHERE task_id = ? AND action = ? AND source = 'work' AND run_id = ? LIMIT 1`).get(taskId, COMPLETION_ACTION, Number(result["id"]));
+  // Completion is recorded on the family's root against its current
+  // version's result: a completed family is Complete from any of its tasks.
+  const family = state === "done" ? store.taskFamilyOf(taskId, null, true) : null;
+  const familyResult = family !== null && family.current.id !== taskId ? latestResult(store, family.current.refId) : result;
+  const completion = familyResult === undefined ? undefined : store.handle.prepare(`SELECT 1 AS hit FROM action_ledger INDEXED BY work_completion
+    WHERE task_id IN (?, ?) AND action = ? AND source = 'work' AND run_id = ? LIMIT 1`).get(taskId, family?.root.id ?? taskId, COMPLETION_ACTION, Number(familyResult["id"]));
   if (state === "done" && completion !== undefined) return answer("Complete", "No action needed", true, 0, "complete");
   if (state === "done") return answer("Ready", "Review result", true, 0, "ready");
   if (state === "failed" || state === "cancelled") return answer("Failed", state === "cancelled" ? "Review cancellation" : "Inspect failure", true, 1, "failed");
@@ -235,22 +239,10 @@ export function installationStatus(store: Store, now: Date): InstallationStatus 
     if (queuedTasks.length < 8) queuedTasks.push({ task: String(row["id"]), reason });
   }
 
-  const waitingCount = Number(store.handle.prepare(`SELECT COUNT(*) AS n FROM task INDEXED BY task_by_state
-    JOIN task_ref AS ref INDEXED BY sqlite_autoindex_task_ref_1 ON ref.backend = ? AND ref.external_id = task.id
-    WHERE task.state = 'done' AND EXISTS (SELECT 1 FROM run INDEXED BY work_result
-      WHERE run.task_ref = ref.id AND run.finished_at IS NOT NULL AND run.role IN ('builder','scout'))
-      AND NOT EXISTS (SELECT 1 FROM action_ledger INDEXED BY work_completion
-        WHERE action_ledger.task_id = task.id AND action_ledger.action = ? AND action_ledger.source = 'work'
-          AND action_ledger.run_id = (SELECT id FROM run INDEXED BY work_result WHERE task_ref = ref.id AND finished_at IS NOT NULL AND role IN ('builder','scout') ORDER BY id DESC LIMIT 1))`)
-    .get(BUILT_IN, COMPLETION_ACTION)?.["n"] ?? 0);
-  const waitingRows = store.handle.prepare(`SELECT task.id AS task, result.id, ${CHECK_COLUMNS}
-    FROM task INDEXED BY task_done_recent
-    JOIN task_ref AS ref INDEXED BY sqlite_autoindex_task_ref_1 ON ref.backend = ? AND ref.external_id = task.id
-    JOIN run AS result ON result.id = (SELECT id FROM run INDEXED BY work_result WHERE task_ref = ref.id AND finished_at IS NOT NULL AND role IN ('builder','scout') ORDER BY id DESC LIMIT 1)
-    LEFT JOIN run_check AS rc ON rc.run = result.id
-    WHERE task.state = 'done' AND NOT EXISTS (SELECT 1 FROM action_ledger INDEXED BY work_completion
-      WHERE action_ledger.task_id = task.id AND action_ledger.action = ? AND action_ledger.source = 'work' AND action_ledger.run_id = result.id)
-    ORDER BY task.updated_at DESC, task.id DESC LIMIT 5`).all(BUILT_IN, COMPLETION_ACTION);
+  // One per family, from the same projection as the Tasks list: a completed
+  // family (root or any revision) and a superseded version never count.
+  const ready = workReadyForReview(store, now, { principal: "operator", repos: null, includeUnplaced: true }, 5);
+  const checkRow = (run: number) => store.handle.prepare(`SELECT ${CHECK_COLUMNS} FROM run_check AS rc WHERE rc.run = ?`).get(run);
 
   // Run ids grow with time, so the newest finished release check is the
   // first finished row down the partial index.
@@ -269,7 +261,7 @@ export function installationStatus(store: Store, now: Date): InstallationStatus 
       reasons: [...reasons].map(([reason, count]) => ({ reason, count })).sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason)),
       tasks: queuedTasks,
     },
-    waitingForReview: { count: waitingCount, results: waitingRows.map(row => ({ task: String(row["task"]), run: Number(row["id"]), check: checkOf(row) })) },
+    waitingForReview: { count: ready.count, results: ready.results.map(one => ({ task: one.taskId, run: one.run, check: checkOf(checkRow(one.run)) })) },
     releaseCheck: release === undefined ? null : { task: String(release["task"]), run: Number(release["id"]), finishedAt: release["finished_at"] == null ? null : String(release["finished_at"]), check: checkOf(release) },
     planWindows: store.handle.prepare(`SELECT provider, window, used_percent, window_minutes, resets_at, reached, plan, observed_at
       FROM provider_limit INDEXED BY sqlite_autoindex_provider_limit_1 ORDER BY provider, window`).all().map(row => ({

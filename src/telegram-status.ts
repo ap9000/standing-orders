@@ -58,8 +58,11 @@ export function projectLabel(repo: string): string {
 
 /** The shared headline (task-status.ts) for a dispatch diagnosis on the phone. */
 function headlineFor(store: Store, id: string, d: DispatchDiagnosis): TaskStatus {
-  const completed = d.code === "complete" && store.handle.prepare("SELECT 1 FROM action_ledger WHERE task_id = ? AND action = ? AND source = 'work' LIMIT 1")
-    .get(store.taskFamilyOf(id, null, true)?.root.id ?? id, COMPLETION_ACTION) !== undefined;
+  // Complete once the family's root records completion of this version's latest result.
+  const completed = d.code === "complete" && store.handle.prepare(`SELECT 1 FROM action_ledger WHERE task_id = ? AND action = ? AND source = 'work'
+    AND run_id = (SELECT run.id FROM run JOIN task_ref ref ON ref.id = run.task_ref WHERE ref.backend = 'built-in' AND ref.external_id = ?
+      AND run.finished_at IS NOT NULL AND run.role IN ('builder','scout') ORDER BY run.id DESC LIMIT 1) LIMIT 1`)
+    .get(store.taskFamilyOf(id, null, true)?.root.id ?? id, COMPLETION_ACTION, id) !== undefined;
   const read = stageOfDispatch(d, { completed });
   const finished = read.stage === "finished" || read.stage === "complete" || read.stage === "failed";
   return taskStatusOf({ stage: read.stage, ...(read.need === undefined ? {} : { need: read.need }), reason: finished ? null : plainReasonOf(read.stage, d.code, d.detail),

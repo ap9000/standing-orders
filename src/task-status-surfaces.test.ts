@@ -17,10 +17,14 @@ import { sealVerificationReceipt } from "./verification-evidence.js";
 import { createDecisionServer } from "./serve.js";
 import { savePublishing, completeAndOpenPullRequest, followPullRequests } from "./pull-request-flow.js";
 import { verifyApproverByPassword } from "./principal.js";
-import { assignmentOf } from "./assignment.js";
+import { assignmentOf, checkAssignmentAsOperator } from "./assignment.js";
 import { telegramProgressCard } from "./telegram-progress.js";
-import { installationStatus, renderInstallationStatus } from "./lead-status.js";
+import { installationStatus, renderInstallationStatus, taskWaitSnapshot } from "./lead-status.js";
+import { phoneStatus, phoneTaskChoices } from "./telegram-status.js";
+import { workIndexPage } from "./work-index.js";
 import { HEADLINES } from "./task-status.js";
+import { assignmentTaskStatusOf } from "./assignment-presentation.js";
+import { taskWorkSummaryOf } from "./work-summary.js";
 import type { BrowserWorkspace } from "./browser-workspace.js";
 
 const NOW = new Date("2026-10-01T12:00:00.000Z");
@@ -114,6 +118,22 @@ beforeAll(async () => {
     if (!authority?.ok) throw new Error("route");
     store.startRun({ taskRef: ref, leaseId: claim.claim.leaseId, runner: "builder-1", branch: "toolroll/order-history-export", worktree: "/pool/x", route: authority.stamp, now: ago(12) });
   }
+  // Seen Oct 2: a task and both its revisions, the family marked complete.
+  {
+    built("review-once", "Review each build once", ago(250));
+    const revise = (id: string, source: string, at: Date) => {
+      const brief = storeEvidence(store, root, runs[source]!, "revision-brief", `${id}.json`, Buffer.from(`{"revises":"${source}"}`), "revision brief", at, { captureStatus: "ok" });
+      built(id, "Review each build once", at);
+      store.markRevision(store.lookupRef(id)!.id, source, brief);
+    };
+    revise("review-once-2", "review-once", ago(240));
+    revise("review-once-3", "review-once-2", ago(230));
+    const who = verifyApproverByPassword(store, "sam", password, [REPO]);
+    if (!who.ok) throw new Error("who");
+    const family = assignmentOf(store, "review-once", ago(220), { principal: "operator", repos: [REPO] }, root)!;
+    if (family.activeTaskId !== "review-once-3") throw new Error("family");
+    if (!checkAssignmentAsOperator(store, "review-once", family.receipt!.digest, who.who, ago(220), root).ok) throw new Error("complete review-once");
+  }
   filed("gift-card-balance", "Show gift card balance at checkout", ago(18), false);
   filed("wishlist-share-link", "Share a wishlist by link", ago(5));
 
@@ -134,7 +154,7 @@ afterAll(async () => {
 
 const EXPECTED: Record<string, string> = {
   "fix-checkout-tax": "Complete", "search-typo-tolerance": "Ready for review", "coupon-stacking": "Failed", "faster-product-images": "Complete",
-  "order-history-export": "Building", "gift-card-balance": "Needs you", "wishlist-share-link": "Queued",
+  "order-history-export": "Building", "gift-card-balance": "Needs you", "wishlist-share-link": "Queued", "review-once": "Complete",
 };
 
 describe("one headline on every surface", () => {
@@ -210,5 +230,53 @@ describe("one headline on every surface", () => {
     const lines = renderInstallationStatus(status);
     expect(lines).toContain("Tasks:");
     expect(lines.some(line => /^ {2}Complete {9}Stop charging tax twice at checkout \(fix-checkout-tax\) — Marked complete by sam\.$/.test(line))).toBe(true);
+  });
+
+  test("a completed task and its revisions count 0 in Ready for review: status, the console and chat", async () => {
+    const status = installationStatus(store, NOW);
+    expect(status.waitingForReview.count).toBe(1);
+    expect(status.waitingForReview.results.map(one => one.task)).toEqual(["search-typo-tolerance"]);
+    expect(renderInstallationStatus(status)).toContain(`Ready for review: 1 — search-typo-tolerance (#${runs["search-typo-tolerance"]})`);
+    // Any version of the family reads Complete, and only the current one is a task of its own.
+    for (const id of ["review-once", "review-once-2", "review-once-3"]) expect(taskWaitSnapshot(store, id, NOW)?.outcome, id).toBe("Complete");
+    expect(status.tasks.filter(one => one.task.startsWith("review-once")).map(one => one.headline)).toEqual(["Complete"]);
+    // The console: Home's counts, Catch up, and the Tasks list.
+    const home = workspaceOf(await page("/chat")).home!;
+    expect(home.counts.find(one => one.key === "ready")!.value).toBe(1);
+    expect(home.catchUp.filter(one => one.id.startsWith("review-once")).map(one => [one.tab, one.label])).toEqual([["finished", "Complete"]]);
+    const tasks = workspaceOf(await page("/work")).view as Extract<BrowserWorkspace["view"], { kind: "tasks" }>;
+    expect(tasks.rows.filter(row => row.status.label === "Ready for review").map(row => row.id)).toEqual(["search-typo-tolerance"]);
+    // Chat: the status reply, the task picker and the result card.
+    const reply = phoneStatus(store, [REPO], NOW);
+    // Four finished families; the task and its two revisions are one of them.
+    expect(reply).toContain("Finished · 4");
+    expect(reply.match(/— Ready for review$/gm)).toHaveLength(1);
+    expect(phoneTaskChoices(store, [REPO], NOW, "review").map(one => [one.id, one.label])).toEqual([["review-once", "Complete"]]);
+    const card = telegramProgressCard(store, store.getRun(runs["review-once-3"]!)!, "review-once-3", REPO, NOW, root);
+    expect(card.text.split("\n")[1]).toBe("✅ Complete");
+  });
+
+  test("every status count equals what assignment show says", async () => {
+    const access = { principal: "operator" as const, repos: [REPO] };
+    const work = workIndexPage(store, NOW, access, { limit: 100 });
+    // assignment show's state, and its headline through task-status.ts.
+    const shown = work.items.map(one => {
+      const assignment = assignmentOf(store, one.rootId, NOW, access, root)!;
+      const work = taskWorkSummaryOf(store, assignment.activeTaskId, NOW, access)!.status;
+      return { id: one.rootId, state: assignment.state, headline: assignmentTaskStatusOf(assignment, { workStatus: work }).headline };
+    });
+    const headlines = (headline: string) => shown.filter(one => one.headline === headline).length;
+    expect(headlines("Complete")).toBe(3);
+    expect(headlines("Ready for review")).toBe(1);
+    expect(Object.fromEntries(work.items.map(one => [one.rootId, [one.assignmentState, one.status.label]])))
+      .toEqual(Object.fromEntries(shown.map(one => [one.id, [one.state, one.headline]])));
+    const status = installationStatus(store, NOW);
+    expect(status.waitingForReview.count).toBe(headlines("Ready for review"));
+    expect(Object.fromEntries(status.tasks.map(one => [one.task, one.headline]))).toEqual(Object.fromEntries(shown.map(one => [one.id, one.headline])));
+    expect(work.totals.completed).toBe(headlines("Complete"));
+    expect(work.totals["needs-you"]).toBe(shown.filter(one => one.state === "needs-decision" || one.state === "ready-to-check").length);
+    const home = workspaceOf(await page("/chat")).home!;
+    expect(home.counts.find(one => one.key === "ready")!.value).toBe(headlines("Ready for review"));
+    expect(home.counts.find(one => one.key === "waiting")!.value).toBe(headlines("Needs you") + headlines("Failed"));
   });
 });

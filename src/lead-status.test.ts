@@ -237,7 +237,10 @@ describe("lead status commands", () => {
       { reason: "needs a scope", count: 1 },
       { reason: "on hold", count: 1 },
     ]));
-    expect(body.waitingForReview).toMatchObject({ count: 1, results: [{ task: "ready-result", run: releaseRun }] });
+    // A result with no approved scope or commit is not Ready for review: the
+    // count reads the same projection as the Tasks list, which says Needs you.
+    expect(body.waitingForReview).toEqual({ count: 0, results: [] });
+    expect(body.tasks.find((one: { task: string }) => one.task === "ready-result")?.headline).toBe("Needs you");
     expect(body.releaseCheck).toMatchObject({ task: "ready-result", run: releaseRun, check: { status: "passed", exitCode: 0 } });
     expect(body.releaseCheck.check.suites).toEqual([
       { name: "Typecheck", status: "passed", exitCode: 0 },
@@ -256,7 +259,7 @@ describe("lead status commands", () => {
     expect(report.length - taskLines.length - 1).toBeLessThanOrEqual(12);
     expect(report).toEqual(expect.arrayContaining([
       `Building: 1 — running-check (#${runningRun}, running checks)`,
-      `Ready for review: 1 — ready-result (#${releaseRun})`,
+      "Ready for review: none",
       `Release check: ready-result #${releaseRun} — passed (exit 0)`,
       "  Suites: Typecheck passed (exit 0); Tests passed (exit 0)",
       "Plan windows: codex team — 5-hour 42%",
