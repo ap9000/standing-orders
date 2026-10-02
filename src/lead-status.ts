@@ -155,7 +155,7 @@ export function taskWaitSnapshot(store: Store, taskId: string, now: Date, watche
     const next = holdKind === "operator" ? "Remove hold" : holdKind === "revision" ? "Review plan" : holdKind === "stop" ? "Resume or close attempt" : holdKind === "contest" ? "Choose a result" : "Review task";
     return answer("Needs a person", next, true, 1, "needs-person");
   }
-  if (task["plan"] === "drafted") return answer("Needs a person", "Review plan", true, 1, "needs-person");
+  if (task["plan"] === "drafted") return answer("Needs a person", "Approve plan", true, 1, "needs-person");
   if (Number(task["strikes"] ?? 0) >= 3) return answer("Needs a person", "Review repeated failures", true, 1, "needs-person");
   // An admitted attempt is already the work being watched. Its immutable
   // approval snapshot lives on the run, so a damaged or later-edited current

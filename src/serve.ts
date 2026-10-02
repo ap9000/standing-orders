@@ -4,7 +4,7 @@ import { ADD_TESTS_ACTION, followUpChecksOf, requestFollowUpChecks, fileAddTests
 import { CHECK_LEVEL_WORDS, isCheckLevel, liveQuickCommand, projectCheckLevel, quickVerifyKey, setProjectCheckLevel, suggestQuickCommand, type CheckLevel } from './check-levels.js';
 import { repositoryContextHtml } from './repository-context-ui.js';
 import { browserAssetsAvailable, browserWorkspaceDocument, serveBrowserAsset } from './browser-shell.js';
-import { browserCrewOf, browserCrewFromIndex, browserWorkActionHref, browserProjectsOf, browserNavigationOf, type BrowserWorkspace, type BrowserChatLink, type BrowserTasksView, type BrowserLimits, type BrowserSettingsView, type BrowserTaskView, type BrowserTaskFact, type BrowserTaskSection, type BrowserTaskThreadItem, type BrowserTaskDetailGroup, type BrowserHome, type BrowserHomeCount, type BrowserCatchUpItem, type BrowserProjectsView, type BrowserProjectRow, type BrowserResultPanel, type BrowserResultView, type BrowserActionCard, type BrowserSignIn, type BrowserUpdateNotice, type BrowserUpdates, type BrowserFirstRun, type BrowserPhoneCard } from './browser-workspace.js';
+import { browserCrewOf, browserCrewFromIndex, browserWorkActionHref, browserProjectsOf, browserNavigationOf, type BrowserWorkspace, type BrowserChatLink, type BrowserTasksView, type BrowserLimits, type BrowserSettingsView, type BrowserTaskView, type BrowserTaskFact, type BrowserTaskSection, type BrowserTaskThreadItem, type BrowserTaskDetailGroup, type BrowserHome, type BrowserHomeCount, type BrowserCatchUpItem, type BrowserProjectsView, type BrowserProjectRow, type BrowserResultPanel, type BrowserResultView, type BrowserNeedAction, type BrowserActionCard, type BrowserSignIn, type BrowserUpdateNotice, type BrowserUpdates, type BrowserFirstRun, type BrowserPhoneCard } from './browser-workspace.js';
 import { configureLeadFollow, leadFollowStatus, runLeadFollowPass } from './lead-follow.js';
 import { startMaintenance } from './maintenance.js';
 import { codingHandoffPreview, createCodingHandoff } from './coding-handoff.js';
@@ -73,8 +73,8 @@ import { hasDisguisedText } from './decision.js';
 import { checkPublishing, completeAndOpenPullRequest, mergeAsPerson, pullRequestBlocker, publishingOf, saveMergeSettings, savePublishing, newestPullRequestOf, MERGE_METHODS, type MergeMethod, type PullRequestView } from './pull-request-flow.js';
 import { leadBriefHtml, LEAD_CONTEXT_CSS } from './lead-context.js';
 import { assignmentCatchUp } from './assignment-brief.js';
-import { assignmentCardOf, assignmentStatusOf, assignmentSummaryHtml, assignmentWithEvidence, ASSIGNMENT_CSS } from './assignment-ui.js';
-import { assignmentStageOf, pullRequestFactOf, stageOfCode, stageOfDispatch, statusDetailsHtml, statusIconSvg, statusWhyHtml, taskStatusOf, TASK_STATUS_CSS, type PullRequestFact } from './task-status.js';
+import { assignmentActionHref, assignmentCardOf, assignmentStatusOf, assignmentSummaryHtml, assignmentWithEvidence, ASSIGNMENT_CSS } from './assignment-ui.js';
+import { assignmentStageOf, pullRequestFactOf, stageOfCode, stageOfDispatch, statusDetailsHtml, statusIconSvg, statusWhyHtml, taskStatusOf, TASK_STATUS_CSS, type PullRequestFact, type TaskStatus } from './task-status.js';
 import { assignmentPresentationOf, historicalAssessmentReason, shortenedMaterialReason } from './assignment-presentation.js';
 import type { TaskFamily } from "./store.js";
 import { ledgerBody } from "./ledger-view.js";
@@ -1871,7 +1871,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     }
     const read = new Set(["/settings/flows", "/settings/skills", "/settings/knowledge", "/settings", "/settings/learning", "/recipes", "/recipes/run", "/recipes/start", "/recipes/new", "/recipes/edit", "/recipes/from-task", "/recipes/preview", "/recipes/export", "/", "/inbox", "/work", "/projects", "/people", "/ledger", "/ledger/export", "/next", "/board", "/tasks", "/tasks/new", "/runs", "/review", "/done", "/routines", "/menu"]);
     const write = new Set(["/settings/flows/on", "/settings/skills/import", "/settings/skills/change", "/settings/skills/revise", "/settings/knowledge/change", "/settings/knowledge/refresh", "/settings/learning/change", "/recipes/prepare", "/recipes/preview", "/recipes/import", "/recipes/save", "/recipes/launch", "/projects/select", "/tasks/add", "/routines/add"]);
-    const task = matchTaskPath(path, request.method === "GET" ? "(/evidence)?$" : "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|next|reopen|steer|accept-proof|accept-revision|reject-revision|route|retry-review|complete|merge|stop|resume-arm|resume)$");
+    const task = matchTaskPath(path, request.method === "GET" ? "(/evidence)?$" : "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|next|reopen|steer|accept-proof|accept-revision|reject-revision|route|retry-review|complete|merge|confirm-stopped|stop|resume-arm|resume)$");
     const resource = request.method === "GET"
       ? /^\/(?:r|d)\/[0-9]{1,15}(?:\/evidence\/[0-9]{1,15})?$/.test(path) || /^\/routines\/[0-9]{1,15}$/.test(path) || path === "/flows" || /^\/flows\/[0-9]{1,15}(\/insights|\/export|\/runs\/[0-9]{1,15}\/[0-9]{1,15})?$/.test(path) || path === "/flows/new" || /^\/flows\/new\/[a-z-]{1,40}$/.test(path)
       : /^\/d\/[0-9]{1,15}\/answer$/.test(path) || /^\/routines\/[0-9]{1,15}\/(approve|refresh|pause|resume|run-now)$/.test(path) || path === "/flows/new" || /^\/flows\/new\/[a-z-]{1,40}$/.test(path) || path === "/flows/import" || /^\/flows\/[0-9]{1,15}\/(save|cards|archive|scripts)$/.test(path) || /^\/flows\/[0-9]{1,15}\/cards\/[0-9]{1,15}\/(move|decide|cancel|comment|assign|watch)$/.test(path) || /^\/flows\/[0-9]{1,15}\/triggers(\/[0-9]{1,15}\/(pause|resume|remove|check|press|renew|secret|share|unshare))?$/.test(path) || /^\/r\/[0-9]{1,15}\/(note|comment|revise|draft-repair|checks|add-tests)$/.test(path);
@@ -5203,6 +5203,10 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     const catchUp = all.items.filter(one => tabOf(one.assignmentState) !== "finished" || one.updatedAt >= weekAgo).slice(0, 40).map(one => ({
       id: one.rootId, title: one.title, href: taskHref(one.rootId), project: one.repo === null ? null : projectName(one.repo), tab: tabOf(one.assignmentState),
       label: one.status.label, tone: one.status.tone, detail: one.status.detail, at: one.updatedAt,
+      action: (() => {
+        const href = one.status.label === "Needs you" && one.primaryAction !== null ? browserWorkActionHref(one) : null;
+        return href === null ? null : { label: one.primaryAction!.label, href };
+      })(),
     }));
     const windows = who.via === "cookie" && store.isInstanceOperator(who.name) ? limitsView(store.providerLimits(), [], { project: projectName, teammate: id => `Teammate ${id}` }, now) : null;
     return {
@@ -8660,7 +8664,32 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       return attendMutation(response, who, attendAct.taskId, attendAct.verb, body, now);
     }
 
-    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|block|unblock|repair-dependency|next|reopen|steer|follow-up|accept-proof|accept-revision|reject-revision|route|retry-review|complete|merge|stop|resume-arm|resume)$");
+    const act = matchTaskPath(url.pathname, "/(hold|unhold|requeue|cancel|scope|approve|plan|plan-edit|block|unblock|repair-dependency|next|reopen|steer|follow-up|accept-proof|accept-revision|reject-revision|route|retry-review|complete|merge|confirm-stopped|stop|resume-arm|resume)$");
+    if (act !== null && act.verb === "confirm-stopped") {
+      // Confirming a finished build stopped is an approver's act behind the password, typed again — the same
+      // record as `toolroll run settle`, refused while anything of the run may still be running.
+      const back = taskHref(act.taskId);
+      if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "Only an approver can confirm a build stopped.", back);
+      const ref = store.lookupRef(act.taskId);
+      if (ref === null || !visible(ref.repo)) return refuse(response, who, 404, "no such task", "/tasks");
+      const named = (body.get("run") ?? "").trim();
+      const run = /^[0-9]{1,15}$/.test(named) ? store.getRun(Number(named)) : null;
+      const runTask = run === null ? null : store.externalIdFor(run.taskRef);
+      if (run === null || runTask === null || familyOf(runTask)?.root.id !== (familyOf(act.taskId)?.root.id ?? act.taskId)) {
+        return taskScreen(response, who, act.taskId, "That build isn't part of this task.", 409);
+      }
+      if (!authenticateApprover(store, who.name, body.get("token") ?? "", ref.repo).ok || !store.accountCanAccess(who.name, ref.repo)) {
+        return taskScreen(response, who, act.taskId, "That password didn't match. Nothing changed.", 403);
+      }
+      const settled = store.settleRunWitnessesByApprover({ runId: run.id, by: who.name, why: "Confirmed in the console that nothing from this build is running." }, now);
+      if (!settled.ok) {
+        return taskScreen(response, who, act.taskId, settled.reason === "alive" || settled.reason === "still-running"
+          ? `Something from build #${run.id} may still be running, so it can't be confirmed stopped yet.` : `Build #${run.id} can't be confirmed stopped.`, 409);
+      }
+      bustBadge();
+      const to = resultReturnTarget(body.get("return"), run.id);
+      return redirect(response, body.get("return") ? to : back);
+    }
     if (act !== null && act.verb === "merge") {
       // Merging is a person's act behind their password, typed again: a browser session, an approver, the exact
       // result's pull request. The flow re-reads GitHub before merging and records who merged in the ledger.
@@ -16878,7 +16907,7 @@ function taskChatApproval(focus: TaskChatFocus, csrf: string): string {
     `<p class="chat-plan-outcome">${escape(oneLineOf(scope.goal, 200))}</p>` +
     `<p class="chat-plan-facts">${facts.map(escape).join(" · ")}</p>` +
     `<details class="chat-approval">` +
-    `<summary data-primary-action><span class="button-link">Review plan</span></summary>` +
+    `<summary data-primary-action><span class="button-link">Approve plan</span></summary>` +
     `<form method="post" action="${taskHref(focus.executionId)}/approve" class="chat-approval-form approve-form">` +
     `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
     `<input type="hidden" name="nonce" value="${escape(approval.nonce)}">` +
@@ -16911,7 +16940,7 @@ function taskChatLiveRegion(focus: TaskChatFocus, csrf: string, fragment = false
   const approvalContent = (inert && focus.approval !== null && focus.plan !== "requested"
       ? `<section class="card chat-action-card"><span class="eyebrow">approval ready</span><h2>Finish the current chat response first</h2><p class="meta">The secure approval step appears here as soon as this response lands.</p></section>`
       : fragment && focus.approval !== null && focus.plan !== "requested"
-        ? `<section class="card chat-action-card chat-refresh-action"><a class="button-link" href="${escape(approvalHref)}" data-primary-action>Review plan</a></section>`
+        ? `<section class="card chat-action-card chat-refresh-action"><a class="button-link" href="${escape(approvalHref)}" data-primary-action>Approve plan</a></section>`
         : taskChatApproval(focus, csrf));
   const approvalCard = focus.approval !== null && focus.dispatch?.action !== "approve-scope"
     ? `<details class="task-secondary-approval"><summary>Updated approval terms</summary>${approvalContent}</details>` : approvalContent;
@@ -21777,7 +21806,7 @@ function taskBodyParts(data: {
           `<p class="meta"><strong>Plan first</strong> drafts it from the repository, or <a href="#scope">write it yourself</a>.</p></div>`
       : "";
   const approvalHtml = dependencyChoiceNeeded || approveForm === "" ? "" : data.dispatch?.action === "approve-scope"
-    ? `<details class="task-plan-review"><summary data-primary-action><span class="button-link">Review plan</span></summary>${approveForm}</details>`
+    ? `<details class="task-plan-review"><summary data-primary-action><span class="button-link">Approve plan</span></summary>${approveForm}</details>`
     : `<details class="task-secondary-approval"><summary>Updated approval terms</summary>${approveForm}</details>`;
   const optionsHtml = `${identity}${dispatchStatus}${dependencyChoiceNeeded ? "" : actsBar}`;
   const optionsOpen = data.assignment?.primaryAction?.code === "unhold" || data.assignment?.primaryAction?.code === "retry-task";
@@ -21985,6 +22014,8 @@ function taskBodyParts(data: {
     status: data.assignment != null && assignmentOptions !== null ? assignmentCardOf(data.assignment, assignmentOptions) : null,
     statusHtml,
     approval: approvalHtml,
+    confirmStopped: data.csrf !== "" && data.assignment?.primaryAction?.code === "confirm-stopped" && data.assignment.primaryAction.target.runId !== null
+      ? { action: `${taskHref(data.assignment.rootId)}/confirm-stopped`, run: data.assignment.primaryAction.target.runId } : null,
     // The plan, progress and plan changes are thread entries now; the rest still needs a person here.
     lead: [
       { key: "history", html: data.history ?? "" }, { key: "control", html: controlHtml }, { key: "problem", html: problemHtml },
@@ -23849,6 +23880,8 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
     evidence: { damaged: facts.evidenceHealth.damaged, missing: facts.evidenceHealth.missing, shortened: facts.evidenceHealth.shortened }, links: resultLinks });
   const taskStatus = presentation?.taskStatus ?? null;
   const status = presentation?.status ?? resultHeadlineOf(receiptStatusOf(receipt));
+  // Needs you: the action that resolves it comes first; Request changes stays beside it, never alone.
+  const need = needActionOf(current, taskStatus, o.csrf, o.returnTo);
   const stored = receiptStatusOf(receipt, null);
   const humanReview = manualReviewOnly(proof === null ? null : { ...proof, verdict: proof.verdict ?? "" });
   const directAssessment = proof?.matrix.some(row => row.assessment !== undefined) === true;
@@ -23923,7 +23956,8 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
   // account waits behind a disclosure in Summary so nothing is said twice.
   const conclusion = plainConclusionOf(receipt.summary ?? (run.outcome === "no-change" ? "The agent found that no repository change was needed." : "The build finished without a concise handoff."));
   const outcome = conciseOutcomeOf(conclusion);
-  const action = o.action === false ? "" : resultPrimaryAction(detail, o, prUrl);
+  // A failing pull request keeps its repair draft beside the need's action.
+  const action = o.action === false ? "" : need !== null ? resultNeedAction(need, o, detail.canAnnotate) + (detail.ciFailing && o.csrf !== "" ? resultPrimaryAction(detail, o, prUrl) : "") : resultPrimaryAction(detail, o, prUrl);
 
   // ---- summary: the deliverable first ----------------------------------
   const summaryParts: string[] = [];
@@ -24223,9 +24257,29 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
     learning: detail.learning ?? "",
     request: detail.skillTest ? null : requestParts.join("\n"),
     canRequest: detail.canAnnotate && o.csrf !== "",
+    need,
     requestQuiet: detail.canAnnotate && o.csrf !== "" && detail.comments.length === 0 && (detail.pastComments?.length ?? 0) === 0 && detail.revisions.length === 0,
   };
   return { html, panel };
+}
+
+/** A Needs you result's one action (needs-you.ts): a link to the act that resolves it, or Confirm it
+ * stopped behind the password. Null under every other headline. */
+function needActionOf(assignment: AssignmentSnapshot | null, status: TaskStatus | null, csrf: string, returnTo: string): BrowserNeedAction | null {
+  if (assignment === null || status === null || status.headline !== "Needs you" || status.need == null) return null;
+  const action = assignment.primaryAction;
+  const confirm = action?.code === "confirm-stopped" && action.target.runId !== null && csrf !== ""
+    ? { action: `${taskHref(assignment.rootId)}/confirm-stopped`, run: action.target.runId, returnTo } : null;
+  return { label: status.need.action.label, href: assignmentActionHref(assignment) ?? taskHref(assignment.rootId), confirm };
+}
+
+/** The server page's form of the same: the need's action first, Request changes as the quiet second. */
+function resultNeedAction(need: BrowserNeedAction, o: ResultPanelOptions, canRequest: boolean): string {
+  const control = need.confirm !== null
+    ? `<form method="post" action="${escape(need.confirm.action)}" id="confirm-stopped" class="confirm-stopped"><input type="hidden" name="csrf" value="${escape(o.csrf)}"><input type="hidden" name="run" value="${need.confirm.run}"><input type="hidden" name="return" value="${escape(need.confirm.returnTo)}">` +
+      `<label>Your password<input type="password" name="token" autocomplete="current-password" required></label><button type="submit" style="min-height:44px">${escape(need.label)}</button></form>`
+    : `<a class="button-link" href="${escape(need.href ?? "#")}" data-primary-action>${escape(need.label)}</a>`;
+  return `<div class="result-action" data-result-action="need">${control}${canRequest && o.csrf !== "" ? `<a class="result-feedback-link" href="#request-changes">Request changes</a>` : ""}</div>`;
 }
 
 /** The outcome in one bounded sentence (repair 2026-09-14): the handoff's

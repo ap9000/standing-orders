@@ -53,9 +53,11 @@ export function assignmentPresentationOf(assignment: AssignmentSnapshot, options
   // rank stay the existing projection's (pages and tests key off them).
   const shared = { label: taskStatus.headline, tone: workToneOf(taskStatus.headline), detail: taskStatus.sentence, action: null };
   const needsYou = taskStatus.headline === 'Needs you';
+  // Waiting needs no one: never listed under Needs you.
+  const waiting = taskStatus.headline === 'Waiting';
   const status: WorkStatus = state === 'working'
     ? { ...shared, token: `assignment-${state}`,
-      views: [...new Set([...(work?.views?.filter(view => view !== 'completed') ?? ['all' as const]), ...(needsYou ? ['needs-you' as const] : [])])], rank: needsYou ? 0 : work?.rank ?? 2 }
+      views: [...new Set([...(work?.views?.filter(view => view !== 'completed' && !(waiting && view === 'needs-you')) ?? ['all' as const]), ...(needsYou ? ['needs-you' as const] : [])])], rank: needsYou ? 0 : waiting ? 2 : work?.rank ?? 2 }
     : { ...shared, token: `assignment-${state}`,
       views: state === 'ready-to-check' || state === 'needs-decision' ? ['all', 'needs-you'] : state === 'complete' ? ['all', 'completed']
         : state === 'checking' && work?.views?.includes('running') ? ['all', 'running'] : ['all'],

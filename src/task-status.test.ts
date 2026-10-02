@@ -94,7 +94,7 @@ describe("the brief's states", () => {
 
   test("a sign-in pause is Needs you", () => {
     expect(stageOfCode("signed-out")).toEqual({ stage: "needs-you", need: "sign-in" });
-    expect(taskStatusOf({ stage: "needs-you", need: "sign-in" })).toMatchObject({ headline: "Needs you", sentence: "Sign in again; the task starts on its own after." });
+    expect(taskStatusOf({ stage: "needs-you", need: "sign-in" })).toMatchObject({ headline: "Needs you", sentence: "Your agent needs you to sign in again. The task starts on its own after.", primaryAction: { label: "Sign in again", href: null } });
   });
 
   test("queued and planning", () => {

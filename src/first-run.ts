@@ -138,11 +138,13 @@ export type JourneyStep = { key: JourneyKey; label: string; state: "done" | "cur
  * (task-status.ts). Waiting for a worker before approval is still the plan; after approval it is the build. `built`:
  * the build finished with a result.
  */
-export function firstTaskJourney(read: { stage: "queued" | "planning" | "needs-you" | "building" | "checking" | "reviewing" | "finished" | "complete" | "failed" | "stopped"; need?: string | undefined }, approved: boolean, built = false): JourneyStep[] {
+export function firstTaskJourney(read: { stage: "queued" | "planning" | "needs-you" | "waiting" | "building" | "checking" | "reviewing" | "finished" | "complete" | "failed" | "stopped"; need?: string | undefined }, approved: boolean, built = false): JourneyStep[] {
   const at: { index: number; stuck: boolean } =
     read.stage === "finished" || read.stage === "complete" ? { index: 5, stuck: false }
     : read.stage === "checking" || read.stage === "reviewing" ? { index: 3, stuck: false }
     : read.stage === "building" ? { index: 2, stuck: false }
+    // Waiting on nothing a person does: the build finished and is settling.
+    : read.stage === "waiting" ? { index: built ? 3 : 2, stuck: false }
     : read.stage === "needs-you" && read.need === "approval" ? { index: 1, stuck: false }
     : read.stage === "planning" ? { index: 0, stuck: false }
     : read.stage === "queued" ? { index: approved ? 2 : 0, stuck: false }

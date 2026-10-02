@@ -6,7 +6,7 @@
 import { AlertTriangle, Check, ChevronRight, Circle, CircleDot, X } from "lucide-react";
 import type { ReactNode } from "react";
 import type { DetailMark, HeadlineTone, StatusDetail, TaskStatus } from "../../task-status.js";
-import { cn } from "../components/ui/index.js";
+import { Button, Input, cn } from "../components/ui/index.js";
 
 export const HEADLINE_DOT: Record<HeadlineTone, string> = {
   neutral: "bg-muted-foreground", live: "bg-info", attention: "bg-attention",
@@ -80,4 +80,16 @@ export function HeadlineBadge({ label, tone, className, ...rest }: { label: stri
     headline === "attention" ? "bg-attention-soft text-attention" : "bg-neutral-soft text-neutral-ink", className)}>
     <span aria-hidden="true" className={cn("size-1.5 shrink-0 rounded-full", headline === "ready" ? "bg-transparent ring-[1.5px] ring-inset ring-success" : HEADLINE_DOT[headline])} />{label}
   </span>;
+}
+
+/** Confirm it stopped, behind the password: the one form for the task and
+ * result pages (an approver's act, the same record as `toolroll run settle`). */
+export function ConfirmStoppedForm({ form, csrf, label = "Confirm it stopped" }: { form: { action: string; run: number; returnTo?: string }; csrf: string; label?: string }) {
+  return <form method="post" action={form.action} id="confirm-stopped" data-confirm-stopped={form.run} className="flex flex-wrap items-center gap-2 phone:w-full">
+    <input type="hidden" name="csrf" value={csrf} />
+    <input type="hidden" name="run" value={String(form.run)} />
+    {form.returnTo !== undefined && <input type="hidden" name="return" value={form.returnTo} />}
+    <Input type="password" name="token" autoComplete="current-password" required aria-label="Your password" placeholder="Your password" className="h-9 w-44 phone:h-11 phone:w-full" />
+    <Button type="submit" variant="attention" className="phone:w-full">{label}</Button>
+  </form>;
 }

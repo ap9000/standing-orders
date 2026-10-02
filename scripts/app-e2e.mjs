@@ -320,7 +320,7 @@ await journey("console", APPROVAL_RULES, [], async () => {
     cli(["task", "hold", id, "--reason", "e2e: approval rules only", ...auth]);
     cli(["task", "scope", id, "--goal", "Rename the helper in src/math.js.", "--acceptance", "the helper is renamed|check", ...auth]);
     await page.goto(`${base}/t/${id}`);
-    const review = page.locator("summary", { hasText: /Review plan|Updated approval terms/ }).first();
+    const review = page.locator("summary", { hasText: /Approve plan|Review plan|Updated approval terms/ }).first();
     if (await review.count() > 0) await review.click();
     const form = page.locator("form#approve");
     await form.waitFor({ timeout: 15_000 });
@@ -483,7 +483,7 @@ async function plannerDrafted(id, what, ready = ref => ref?.plan === "drafted") 
 /** Approve a task's scope on its page: open the plan, type the password again, approve. */
 async function approveOnPage(id) {
   await page.goto(`${base}/t/${id}`);
-  const review = page.locator("summary", { hasText: /Review plan|Updated approval terms/ }).first();
+  const review = page.locator("summary", { hasText: /Approve plan|Review plan|Updated approval terms/ }).first();
   if (await review.count() > 0) await review.click();
   const form = page.locator("form#approve");
   await form.waitFor({ timeout: 15_000 });
@@ -573,7 +573,7 @@ await journey("task", "Send it back asking for more than the plan allows: the pl
   if (!/multiply/i.test(`${scope.goal}\n${scope.acceptance_json}`)) throw new Error(`the updated plan leaves multiply out: ${scope.goal.slice(0, 300)}`);
   // What a person reviews: the change to the plan and why, on desktop and on a phone.
   await page.goto(`${base}/t/${child}`);
-  const review = page.locator("summary", { hasText: /Review plan|Updated approval terms/ }).first();
+  const review = page.locator("summary", { hasText: /Approve plan|Review plan|Updated approval terms/ }).first();
   if (await review.count() > 0) await review.click();
   const amended = page.locator("#contract-amendment");
   await amended.waitFor({ timeout: 15_000 });
@@ -582,7 +582,7 @@ await journey("task", "Send it back asking for more than the plan allows: the pl
   await shot("plan-amended");
   const phone = await signIn("alex", { width: 390, height: 844 }, "dark");
   await phone.goto(`${base}/t/${child}`);
-  const phoneReview = phone.locator("summary", { hasText: /Review plan|Updated approval terms/ }).first();
+  const phoneReview = phone.locator("summary", { hasText: /Approve plan|Review plan|Updated approval terms/ }).first();
   if (await phoneReview.count() > 0) await phoneReview.click();
   await phone.locator("#contract-amendment").scrollIntoViewIfNeeded();
   await phone.screenshot({ path: join(w.out, "plan-amended-phone.png") });

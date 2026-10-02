@@ -8983,7 +8983,7 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     expect(layout).toBeGreaterThan(bar);
     expect(page).toContain('<strong>approve exactly this:</strong>');
     expect(page).not.toContain('ready to run · approve');
-    expect(page).toContain('<summary data-primary-action><span class="button-link">Review plan</span></summary>');
+    expect(page).toContain('<summary data-primary-action><span class="button-link">Approve plan</span></summary>');
     expect(page).toContain('href="#scope">Edit details</a>');
     // One short status, then every exact term before confirmation.
     const orient = page.indexOf('<p class="meta approval-orient" data-approval-orient>');
@@ -9531,7 +9531,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     // inside that review, and Approve & start is the only submit.
     expect(html).toContain('<section class="card chat-action-card chat-plan" id="task-chat-action" data-approval="');
     expect(html).toContain('<p class="chat-plan-outcome">do a</p><p class="chat-plan-facts">0 paths · 1 check · Auto permissions</p>');
-    expect(html).toContain('<summary data-primary-action><span class="button-link">Review plan</span></summary>');
+    expect(html).toContain('<summary data-primary-action><span class="button-link">Approve plan</span></summary>');
     expect(html).not.toContain("your next step");
     expect(html).not.toContain("approve to start");
     expect(html).not.toContain("Nothing builds until you approve");
@@ -9545,7 +9545,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(html).not.toContain('data-card-kind="fleet-overview"');
     const csrf = csrfFrom(html);
     const safeFragment = await (await fetch(url("/chat/task-status?task=a"), { headers: { cookie } })).text();
-    expect(safeFragment).toContain('data-primary-action>Review plan</a>');
+    expect(safeFragment).toContain('data-primary-action>Approve plan</a>');
     expect(safeFragment).not.toContain('type="password"');
 
     const nonce = /name="nonce" value="([0-9a-f]+)"/.exec(html)?.[1];
@@ -10212,7 +10212,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(lens["fragments"]).toBeUndefined();
     const lensFragments = (await status(cookie, "?task=a&version=stale"))["fragments"] as Record<string, string | null>;
     expect(lensFragments["live"]).toContain('id="task-chat-live"');
-    expect(lensFragments["live"]).toContain('data-primary-action>Review plan</a>');
+    expect(lensFragments["live"]).toContain('data-primary-action>Approve plan</a>');
     expect(lensFragments["live"]).not.toContain('type="password"');
     expect(lensFragments["live"]).not.toContain('name="nonce"');
     // The task keeps its own thread (v77): the lead conversation's message
@@ -13863,11 +13863,11 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     store.finishRun(run, { outcome: "parked", now: earlier });
     const cookie = await login();
     const work = await page(cookie, "/work");
-    expect(work).toContain(`class="work-action" data-primary-action href="/d/${decision}">Answer question →</a>`);
+    expect(work).toContain(`class="work-action" data-primary-action href="/d/${decision}">Answer the question →</a>`);
     expect(work).toContain('data-work-status="assignment-needs-decision"');
     const task = await page(cookie, "/t/t-question");
     expect(task).toContain('data-work-diagnostic="no-worker-online"');
-    expect(task).toContain(`href="/d/${decision}" data-primary-action>Answer question</a>`);
+    expect(task).toContain(`href="/d/${decision}" data-primary-action>Answer the question</a>`);
     expect(task).toContain('id="task-questions"');
   });
 
@@ -14142,14 +14142,14 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
         expect(exactTask.action, path).toBe(task.action);
       }
     };
-    await agree(id, "needs-approval", "Review plan");
+    await agree(id, "needs-approval", "Approve plan");
     const beforeApproval = await page(cookie, `/t/${id}`);
     expect(beforeApproval).toContain(`<p class="scope-paths"><strong>touches</strong> ${allowed}</p>`);
     const css = await stylesOf(beforeApproval, base);
     expect(css).toContain('#scope .recap, #scope .scope-paths, .approval-goal { overflow-wrap: anywhere; }');
     expect(beforeApproval).toContain('<h1 class="task-main-title">Keep the full allowed path visible</h1>');
     approve(store, id, "alex", now, store.getScope(id)!.digest, approverToken);
-    await agree(id, "no-worker-registered", "Check connection");
+    await agree(id, "no-worker-registered", "Connect a builder");
     const blocker = seedTask('t-before-status', 'First task', alpha);
     store.addEdge(id, 't-before-status');
     await agree(id, 'waiting-dependency', 'View task details');
@@ -14186,7 +14186,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const signed = store.getScope('t-scope-status')!;
     propose(store, { taskId: 't-scope-status', goal: 'Changed request', touches: signed.touches, acceptance: signed.acceptance, now });
     store.unhold(heldRef);
-    await agree('t-scope-status', 'needs-approval', 'Review plan');
+    await agree('t-scope-status', 'needs-approval', 'Approve plan');
     expect(store.getScope('t-scope-status')!.approvedDigest).toBe(signed.approvedDigest);
     store.setTaskState('t-scope-status', 'failed', now);
     await agree('t-scope-status', 'failed', 'Review and retry');
@@ -14197,7 +14197,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const oldResultScope = store.getScope('t-status-check')!;
     propose(store, { taskId: 't-status-check', goal: 'A new scope after the failed check', touches: oldResultScope.touches, acceptance: oldResultScope.acceptance, now });
     store.setTaskState('t-status-check', 'queued', now);
-    await agree('t-status-check', 'needs-approval', 'Review plan');
+    await agree('t-status-check', 'needs-approval', 'Approve plan');
     expect(await page(cookie, '/t/t-status-check')).toContain('<details class="task-previous-result"><summary>Previous result</summary>');
   });
 

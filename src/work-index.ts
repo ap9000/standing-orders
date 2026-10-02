@@ -11,6 +11,7 @@ import type { WorkStatus, WorkView } from './workspace-ui.js';
 import { plainReasonOf, replacedWords, stageOfCode, taskStatusOf, workToneOf, type ChecksFact } from './task-status.js';
 import { isCheckLevel } from './check-levels.js';
 import { withFollowUps } from './result-follow-ups.js';
+import { NEEDS, processNeedOf, type NeedKey, type WaitKey } from './needs-you.js';
 
 export type WorkIndexCounts = Record<WorkView, number>;
 export type WorkIndexItem = {
@@ -347,7 +348,14 @@ export function workIndexPage(store: Store, now: Date, access: WorkSummaryAccess
   const nextCursor = selected.length > limit && last !== undefined ? Buffer.from(JSON.stringify({ version: 1, scope,
     rank: n(last, 'rank'), at: s(last, 'sort_at'), root: n(last, 'root_ref') })).toString('base64url') : null;
   const projects = (JSON.parse(String(rows[0]?.['row_json'] ?? '[]')) as Row[]).map(row => ({ repo: s(row, 'repo'), totals: counts(row), queued: n(row, 'queued'), doneRecently: n(row, 'done_recently') }));
-  return { items: page.map(row => itemOf(row, access.principal)), projects, totals: rows[0] === undefined ? { ...EMPTY } : counts(rows[0]), nextCursor, limit, view };
+  // The list can't see processes; a row whose build Toolroll can't confirm stopped asks the store, as the task page does.
+  const probe = (taskId: string) => {
+    const ref = store.lookupRef(taskId);
+    if (ref === null) return null;
+    for (const run of store.runsFor(ref.id)) { const fact = store.stopQuiescenceFact(run.id); if (fact !== null && fact.kind !== 'open') return fact; }
+    return null;
+  };
+  return { items: page.map(row => itemOf(row, access.principal, probe)), projects, totals: rows[0] === undefined ? { ...EMPTY } : counts(rows[0]), nextCursor, limit, view };
 }
 
 export function workCountsByProject(store: Store, now: Date, access: WorkSummaryAccess): WorkProjectCounts[] {
@@ -377,9 +385,17 @@ function listChecksOf(own: 'passed' | 'failed' | null, level: string | null, fol
   return { status: read.status, exitCode: null, head: null, level: read.level, running: read.running };
 }
 
-function itemOf(row: Row, principal: WorkSummaryAccess['principal']): WorkIndexItem {
+/** Index codes that wait on a person, as their need (needs-you.ts); dispatch codes come from task-status's own table. */
+const INDEX_NEED: Readonly<Record<string, NeedKey>> = {
+  'earlier-active': 'earlier-version', 'process-needs-attention': 'confirm-stopped', 'invalid-scope': 'define-task', 'decision-queue': 'questions',
+};
+
+function itemOf(row: Row, principal: WorkSummaryAccess['principal'], probe?: (taskId: string) => { run: number; kind: 'open' | 'alive' | 'elsewhere' | 'unprovable' } | null): WorkIndexItem {
   const code = String(row['code']), id = String(row['id']);
-  const need = n(row, 'needs') === 1, running = n(row, 'family_running') === 1;
+  const custody = code === 'process-needs-attention' || (code === 'result-needs-attention' && n(row, 'custody_unresolved') === 1);
+  const process = custody && probe !== undefined ? processNeedOf(probe(id)) : null;
+  const waiting = process !== null && 'wait' in process;
+  const need = n(row, 'needs') === 1 && !waiting, running = n(row, 'family_running') === 1;
   const assignmentState: AssignmentSnapshot['state'] = code === 'complete' ? 'complete' : code === 'ready-to-check' ? 'ready-to-check'
     : code === 'cancelled' ? 'cancelled' : need ? 'needs-decision' : 'working';
   const words: Record<string, [string, string, WorkAction['code'] | null, string]> = {
@@ -405,7 +421,7 @@ function itemOf(row: Row, principal: WorkSummaryAccess['principal']): WorkIndexI
     'needs-scope': ['Needs your decision', 'Define the task before a worker can start.', 'write-scope', 'Define the task'],
     'invalid-scope': ['Needs your decision', 'The saved task scope cannot be read safely.', 'write-scope', 'Review scope'],
     'needs-agent-profile': ['Needs your decision', 'Choose an available agent for this task.', 'select-agent', 'Choose an agent'],
-    'needs-approval': ['Needs your decision', 'Review the current plan before a worker can start.', 'approve-scope', 'Review plan'],
+    'needs-approval': ['Needs your decision', 'Review the current plan before a worker can start.', 'approve-scope', 'Approve plan'],
     'missing-requirement': ['Needs your decision', 'A required capability is missing or expired.', 'repair-capability', 'Review missing requirement'],
     'no-worker-registered': ['Needs your decision', 'No connected builder includes this project.', 'start-worker', 'Check connection'],
     'no-worker-online': ['Needs your decision', 'The builder has stopped checking in.', 'start-worker', 'Check connection'],
@@ -430,26 +446,37 @@ function itemOf(row: Row, principal: WorkSummaryAccess['principal']): WorkIndexI
   if (code === 'terminal-dependency' && s(row, 'dependency_id') !== null) detail = `${s(row, 'dependency_id')} ${s(row, 'dependency_state') === 'cancelled' ? 'was cancelled' : 'failed'} before it finished.`;
   if (code === 'result-needs-attention' && n(row, 'custody_unresolved')) detail = 'A process exit is not recorded. Open the result to check whether its work has stopped.';
   if (code === 'result-needs-attention' && ['built', 'no-change'].includes(s(row, 'result_outcome') ?? '')) { actionCode = 'open-result'; actionLabel = 'Open result'; }
+  if (process !== null && 'need' in process) { actionCode = 'confirm-stopped'; actionLabel = NEEDS['confirm-stopped'].action.label; }
+  else if (custody && probe === undefined) { actionCode = 'confirm-stopped'; actionLabel = NEEDS['confirm-stopped'].action.label; }
+  if (code === 'signed-out') { actionCode = 'sign-in'; actionLabel = NEEDS['sign-in'].action.label; }
   if (actionCode === null) { actionCode = code === 'running' ? 'inspect-run' : 'inspect-task'; actionLabel = code === 'running' ? 'Watch the build' : 'View task details'; }
   const read = actionCode !== null && ['inspect-task', 'inspect-run', 'inspect-stop', 'inspect-decisions', 'open-result'].includes(actionCode);
   const primaryAction: WorkAction | null = actionCode === null ? null : { code: actionCode, label: actionLabel,
     target: { taskId: successor ?? (code === 'earlier-active' ? s(row, 'earlier_id') ?? id : actionCode === 'answer-decision' ? s(row, 'question_task') ?? id : id),
       runId: actionCode === 'answer-decision' ? n(row, 'question_run') || null : actionCode === 'inspect-run' && code === 'running' ? n(row, 'live_run') || null : actionCode === 'open-result' || actionCode === 'inspect-run' ? n(row, 'result_id') || null
-        : actionCode === 'reconcile-run' ? n(row, 'unfinished') || null : ['resume-run', 'inspect-stop'].includes(actionCode) ? n(row, 'stop_run') || null : null,
+        : actionCode === 'reconcile-run' ? n(row, 'unfinished') || null : ['resume-run', 'inspect-stop'].includes(actionCode) ? n(row, 'stop_run') || null
+        : actionCode === 'confirm-stopped' ? process?.build ?? (n(row, 'result_id') || null) : null,
       decisionId: actionCode === 'answer-decision' ? n(row, 'question_id') || null : null },
     access: read ? 'read' : principal === 'operator' ? 'operator-control' : ['answer-decision', 'write-scope', 'unhold'].includes(actionCode) ? 'proposal-only' : 'operator-handoff',
     retry: actionCode === 'reconcile-run' ? 'reconcile-before-retry' : read ? 'read-again' : 'refresh-before-acting' };
   // The one shared status: the headline and sentence every surface uses.
-  const reading = stageOfCode(code, { needsPerson: need, planning: s(row, 'live_role') === 'planner', operatorHold: s(row, 'hold_kind') === 'operator' });
+  const coded = stageOfCode(code, { needsPerson: need, planning: s(row, 'live_role') === 'planner', operatorHold: s(row, 'hold_kind') === 'operator' });
+  const reading: { stage: typeof coded.stage; need?: NeedKey | undefined; wait?: WaitKey | undefined } = process !== null
+    ? 'wait' in process ? { stage: 'waiting', wait: process.wait } : { stage: 'needs-you', need: 'confirm-stopped' }
+    : custody ? { stage: 'needs-you', need: 'confirm-stopped' }
+    : coded.stage === 'needs-you' && (coded.need === undefined || coded.need === 'other') && INDEX_NEED[code] !== undefined ? { stage: 'needs-you', need: INDEX_NEED[code] } : coded;
   const checkStatus = s(row, 'check_status'), verdict = s(row, 'proof_verdict');
   const finished = reading.stage === 'finished' || reading.stage === 'complete';
   const own = checkStatus === 'failed' || n(row, 'proof_failed_check') === 1 ? 'failed' as const : checkStatus === 'passed' || verdict === 'verified' ? 'passed' as const : null;
-  const shared = taskStatusOf({ stage: reading.stage, ...(reading.need === undefined ? {} : { need: reading.need }),
+  const shared = taskStatusOf({ stage: reading.stage, ...(reading.need === undefined ? {} : { need: reading.need }), ...(reading.wait === undefined ? {} : { wait: reading.wait }),
+    ...(process === null ? {} : { needContext: { build: process.build } }),
     reason: finished ? null : plainReasonOf(reading.stage, code, detail || null), report: s(row, 'result_role') === 'scout',
     checks: !finished ? null : listChecksOf(own, s(row, 'check_level'), row['check_follows']),
     completedBy: code !== 'complete' ? null : n(row, 'completed_by_lead') === 1 ? 'the lead' : String(row['checked_actor']).replace(/^(?:operator|coordinator|lead):/, '') });
   label = shared.headline;
   detail = shared.sentence;
+  // Every Needs you action wears its need's own words.
+  if (shared.need != null && shared.need.key !== 'other' && shared.need.key !== 'review-result' && primaryAction !== null) { actionLabel = shared.need.action.label; primaryAction.label = actionLabel; }
   const views: WorkView[] = ['all'];
   if (need) views.push('needs-you');
   if (running) views.push('running');

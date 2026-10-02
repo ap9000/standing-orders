@@ -12,7 +12,7 @@ import {
   Badge, Button, Card, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger, cn,
 } from "../components/ui/index.js";
 import { toneOf } from "./tone.js";
-import { StatusDetails, StatusHeadline, StatusWhy } from "./status-summary.js";
+import { ConfirmStoppedForm, StatusDetails, StatusHeadline, StatusWhy } from "./status-summary.js";
 
 type Selected = NonNullable<BrowserResultView["selected"]>;
 
@@ -65,6 +65,7 @@ function ResultsMenu({ view }: { view: BrowserResultView }) {
 function StatusCard({ selected, csrf }: { selected: Selected; csrf: string }) {
   const { panel, complete, checks, next } = selected;
   const status = panel?.status ?? null;
+  const need = panel?.need ?? null;
   const tone = toneOf(selected.status.tone);
   return <Card data-result-status={selected.status.token} data-headline={status?.headline ?? selected.status.label} aria-label="Result status">
     <div className="flex flex-wrap items-center gap-x-4 gap-y-3">
@@ -78,7 +79,10 @@ function StatusCard({ selected, csrf }: { selected: Selected; csrf: string }) {
           ? <p className="mt-1.5 text-sm">{panel.outcome}</p>
           : <p className="mt-1.5 text-sm"><span className="font-semibold">{panel.heading}.</span> <span className="text-muted-foreground">{panel.outcome}</span></p>)}
       </div>
-      {(complete !== null || panel?.canRequest === true) && <div className="flex flex-wrap items-center gap-2 phone:w-full">
+      {(complete !== null || need !== null || panel?.canRequest === true) && <div className="flex flex-wrap items-center gap-2 phone:w-full">
+        {/* Needs you: the action that resolves it leads, filled; Request changes is never alone. */}
+        {need !== null && (need.confirm !== null ? <ConfirmStoppedForm form={need.confirm} csrf={csrf} label={need.label} />
+          : need.href !== null && <Button asChild variant="attention" className="phone:w-full"><a href={need.href} data-primary-action data-need-action>{need.label}</a></Button>)}
         {complete !== null && <form method="post" action={complete.action} className="phone:flex-1">
           <input type="hidden" name="csrf" value={csrf} />
           <input type="hidden" name="receipt" value={complete.receipt} />

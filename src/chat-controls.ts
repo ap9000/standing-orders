@@ -4,7 +4,7 @@
 export const CHAT_CONTROLS = {
   task: { label: "Open task", target: "task" },
   approval: { label: "Review & start", target: "task" },
-  planning: { label: "Review plan", target: "task" },
+  planning: { label: "Approve plan", target: "task" },
   recovery: { label: "Review recovery options", target: "task" },
   cancel: { label: "Cancel task", target: "task" },
   result: { label: "Open result", target: "task" },
