@@ -170,6 +170,7 @@ export const RUN_REASON_WORDS: Readonly<Record<string, string>> = {
   "reviewer-error": "the review failed",
   "malformed-report": "the scout's report was malformed",
   "attempts-exhausted": "it failed too many times in a row",
+  "plan-revised": "the plan changed, so a fresh attempt took over",
 };
 
 /** A run's recorded reason in words. A recorded code is never shown as it is
@@ -219,4 +220,67 @@ export function failedAttemptSentence(reason: string | null | undefined): string
   const line = words.length <= REASON_LINE_LIMIT ? words
     : `${words.slice(0, REASON_LINE_LIMIT - 1).replace(/\s+\S*$/, "").replace(/[,;:\s]+$/, "")}…`;
   return `${line.charAt(0).toUpperCase()}${line.slice(1)}${line.endsWith("…") ? "" : "."}`;
+}
+
+/** What to change before the next attempt, by a stopped run's recorded reason: one plain suggestion, the note Retry
+ * starts with. A reason with no suggestion of its own gets the general one. */
+const STOP_SUGGESTIONS: Readonly<Record<string, string>> = {
+  acceptance: "Before handing off, check each signed requirement against the changes.",
+  timeout: "Split the work into smaller steps, or name the one part to finish first.",
+  "no-op": "Say exactly which files or behaviour should change.",
+  agent: "Say what to do differently this time, or name the part to try first.",
+  "agent-reported": "Answer what the agent said it was missing, or narrow the task.",
+  "provider-init": "Check the agent is signed in and installed, then retry.",
+  "spawn-failed": "Check the agent is signed in and installed, then retry.",
+  "auth-expired": "Sign the agent in again, then retry.",
+  "provider-protocol": "Retry as it is; if it stops the same way, try another agent.",
+  setup: "Fix the project's setup step, then retry.",
+  git: "Make sure the project's branch is clean and reachable, then retry.",
+  "commit-failure": "Make sure the project's commit hooks pass, then retry.",
+  "moved-head": "Retry: the next attempt starts from where the branch is now.",
+  "moved-branch": "Retry: the next attempt starts from where the branch is now.",
+  "retryable-infra": "Retry as it is.",
+  interrupted: "Retry as it is.",
+  orphaned: "Retry as it is.",
+  capability: "Add what the project is missing, then retry.",
+  "attempts-exhausted": "Say what to do differently this time, or narrow the task.",
+};
+export const GENERAL_SUGGESTION = "Say what to do differently this time.";
+
+export function stopSuggestionOf(reason: string | null | undefined): string {
+  const code = reason?.trim() ?? "";
+  return STOP_SUGGESTIONS[code] ?? GENERAL_SUGGESTION;
+}
+
+/** A signed requirement in the middle of a sentence: its first letter lowered unless it starts a name or an acronym. */
+function inSentence(statement: string): string {
+  const plain = statement.trim().replace(/[.\s]+$/, "");
+  return /^[A-Z][a-z]/.test(plain) ? `${plain.charAt(0).toLowerCase()}${plain.slice(1)}` : plain;
+}
+
+/** The suggestion for a requirement the result missed: make sure of it before handing off. */
+export function missedRequirementSuggestion(statement: string): string {
+  return `Before handing off, make sure ${inSentence(statement)}.`;
+}
+
+/** The suggestion for a check that failed on the result: make it pass, starting with the line it ended on. */
+export function failingCheckSuggestion(line: string): string {
+  return `Make the check pass. It ended on: ${line.replace(/[.\s]+$/, "")}.`;
+}
+
+/** What a failed attempt missed, in plain words: what failed (the missed requirement, the failing check's line or the
+ * stop reason), the evidence line behind it, and one suggestion of what to change (Retry's note starts with it). */
+export type FailureExplanation = {
+  kind: "requirement" | "check" | "reason";
+  line: string;
+  evidence: string | null;
+  suggestion: string;
+  link: { label: string; href: string } | null;
+};
+
+/** The line for a missed requirement: “Missed: <statement>”, cut to one line. */
+export function missedRequirementLine(statement: string): string {
+  const plain = statement.trim().replace(/\s+/g, " ").replace(/[.\s]+$/, "");
+  const cut = plain.length <= REASON_LINE_LIMIT - 10 ? plain : `${plain.slice(0, REASON_LINE_LIMIT - 11).replace(/\s+\S*$/, "")}…`;
+  return `Missed a requirement: ${cut}${cut.endsWith("…") ? "" : "."}`;
 }

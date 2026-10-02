@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
-import { acceptWordsOf, lastErrorLineOf, reportMismatchesOf } from "./workspace-ui.js";
-import { failedAttemptSentence, INTERNAL_ERROR, isInternalErrorReason, latestFinishedAttempt, NO_REASON_RECORDED, RUN_REASON_WORDS } from "./needs-you.js";
+import { acceptWordsOf, buildProgressOf, earlierAttemptsWords, lastErrorLineOf, missedRequirementOf, reportMismatchesOf } from "./workspace-ui.js";
+import { failedAttemptSentence, failingCheckSuggestion, GENERAL_SUGGESTION, INTERNAL_ERROR, isInternalErrorReason, latestFinishedAttempt, missedRequirementLine, missedRequirementSuggestion, NO_REASON_RECORDED, RUN_REASON_WORDS, stopSuggestionOf } from "./needs-you.js";
 
 describe("the result's Accept words", () => {
   test("Accept only when every requirement is met and the checks passed, and never says it publishes", () => {
@@ -126,5 +126,55 @@ describe("what went wrong with a failed attempt, in one line", () => {
     // Nothing on stderr: the last line it printed that names a failure.
     expect(lastErrorLineOf("$ npm test\n(exit 1)\n\n--- stdout ---\n1 failed\ndone\n\n--- stderr ---\n")).toEqual({ line: 5, text: "1 failed" });
     expect(lastErrorLineOf("$ npm test\n(exit 1)\n\n--- stdout ---\n\n--- stderr ---\n")).toBeNull();
+  });
+});
+
+describe("what a failed attempt missed, and what to change", () => {
+  test("the first missed requirement, with the evidence line in plain words and the suggestion Retry starts with", () => {
+    const missed = missedRequirementOf([
+      { id: "c1", statement: "The export keeps every column.", state: "pass", detail: [] },
+      { id: "c2", statement: "No reference to LEGACY_PAYOUT remains in the codebase.", state: "failed",
+        detail: ['criterion "c2" is marked met, but caveat 1 admits an exception to it: c2: src/admin.ts still reads it.'] },
+      { id: "c3", statement: "Docs say how.", state: "missing", detail: [] },
+    ]);
+    expect(missed).toEqual({ id: "c2", statement: "No reference to LEGACY_PAYOUT remains in the codebase.", evidence: "The agent's own note says: src/admin.ts still reads it." });
+    expect(missedRequirementLine(missed!.statement)).toBe("Missed a requirement: No reference to LEGACY_PAYOUT remains in the codebase.");
+    expect(missedRequirementSuggestion(missed!.statement)).toBe("Before handing off, make sure no reference to LEGACY_PAYOUT remains in the codebase.");
+    // An acronym keeps its capitals; a person's own check is not a miss.
+    expect(missedRequirementSuggestion("CSV headers stay quoted.")).toBe("Before handing off, make sure CSV headers stay quoted.");
+    expect(missedRequirementOf([{ id: "c1", statement: "Reads well.", state: "manual-review", detail: [] }])).toBeNull();
+    expect(missedRequirementOf([{ id: "c1", statement: "Docs say how.", state: "missing", detail: [] }])?.evidence).toBe("The agent's report doesn't answer it.");
+  });
+
+  test("a failing check's line and a stop reason each come with one suggestion", () => {
+    expect(failingCheckSuggestion("FAIL settle rounds half-cents.")).toBe("Make the check pass. It ended on: FAIL settle rounds half-cents.");
+    expect(stopSuggestionOf("timeout")).toBe("Split the work into smaller steps, or name the one part to finish first.");
+    expect(stopSuggestionOf("something-new")).toBe(GENERAL_SUGGESTION);
+    expect(stopSuggestionOf(null)).toBe(GENERAL_SUGGESTION);
+    expect(RUN_REASON_WORDS["plan-revised"]).toBe("the plan changed, so a fresh attempt took over");
+  });
+});
+
+describe("how far along a live build is", () => {
+  const steps = (states: ("pending" | "current" | "completed" | "blocked")[], note: string | null = null) =>
+    states.map((state, index) => ({ description: `Step ${index + 1} words.`, state, note: state === "blocked" ? note : null }));
+
+  test("Step N of M names the step in progress, else the first one not done", () => {
+    expect(buildProgressOf(steps(["completed", "current", "pending"]))).toEqual({ step: 2, total: 3, line: "Step 2 of 3: Step 2 words.", stuck: null });
+    expect(buildProgressOf(steps(["completed", "pending", "pending"]))?.line).toBe("Step 2 of 3: Step 2 words.");
+    expect(buildProgressOf(steps(["completed", "completed"]))?.line).toBe("All 2 steps done. Finishing up.");
+    expect(buildProgressOf([])).toBeNull();
+    expect(buildProgressOf(null)).toBeNull();
+  });
+
+  test("a blocked step says it is stuck and why: its note, else the step itself", () => {
+    expect(buildProgressOf(steps(["completed", "current", "blocked"], "the staging flag is off")))
+      .toEqual({ step: 2, total: 3, line: "Step 2 of 3: Step 2 words.", stuck: { step: 3, why: "the staging flag is off", line: "Stuck on step 3: the staging flag is off." } });
+    expect(buildProgressOf(steps(["completed", "blocked", "pending"]))?.stuck?.line).toBe("Stuck on step 2: Step 2 words.");
+  });
+
+  test("earlier stopped attempts are one line", () => {
+    expect(earlierAttemptsWords(1)).toBe("1 earlier attempt stopped");
+    expect(earlierAttemptsWords(2)).toBe("2 earlier attempts stopped");
   });
 });

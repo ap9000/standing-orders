@@ -220,6 +220,8 @@ export function resultReturnTarget(raw: string | null | undefined, runId: number
     if (review !== null && (review[1] === undefined || Number(review[1]) === runId)) return raw;
     const chat = /^\/chat\?task=([A-Za-z0-9._~%-]{1,200})&result=([0-9]{1,15})(?:&conversation=[A-Za-z0-9-]{1,128})?$/.exec(raw);
     if (chat !== null && Number(chat[2]) === runId) return raw;
+    // The task page that offered Run checks in place.
+    if (/^\/t\/[A-Za-z0-9._~%-]{1,200}$/.test(raw)) return raw;
   }
   return `/r/${runId}`;
 }

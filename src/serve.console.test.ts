@@ -145,7 +145,8 @@ describe("the operations console", () => {
     // Evidence above mechanics: the ledger precedes the scope section.
     expect(page.indexOf("attempts")).toBeLessThan(page.indexOf(">scope<"));
 
-    const runView = await (await fetch(url(`/r/${codexRun}`), { headers: { cookie } })).text();
+    // A failed build's /r/<id> opens its result page; the run record itself is ?record=1.
+    const runView = await (await fetch(url(`/r/${codexRun}?record=1`), { headers: { cookie } })).text();
     expect(runView).toContain("unmeasured");
     expect(runView).toContain("tokens, not prices");
   });

@@ -22,6 +22,7 @@ import { projectRoute } from "./phase-routing.js";
 import { Window } from "happy-dom";
 import { presented, T0, stylesOf, renderedHtmlOf, workspaceOf } from "../test/serve-kit.js";
 import { diagnoseTaskDispatch } from "./dispatch.js";
+import { createDemoSandbox } from "./demo.js";
 
 describe("stage 5 — the tournament comparison screen and the pick ceremony, over real HTTP", () => {
   let store: Store;
@@ -1968,10 +1969,16 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     // The latest failed attempt's reason, in words: never the code as stored, never an earlier attempt's.
     const said = "The result didn't meet its signed requirements.";
     expect(view.status).toMatchObject({ status: { headline: "Failed", sentence: said }, action: null });
-    // No check log, so no log lines to link: never the run record, which would bring the person back here.
-    expect(view.failure).toEqual({ line: said, link: null });
+    // No check log and no saved report: the stop reason, one suggestion of what to change, and the build's own result
+    // page (never the run record, which would bring the person back here).
+    const suggestion = "Before handing off, check each signed requirement against the changes.";
+    expect(view.failure).toEqual({ line: said, evidence: null, suggestion, link: { label: `See build #${failedRun}`, href: `/review?result=t-broke&run=${failedRun}` } });
     expect(renderedHtmlOf(html)).not.toMatch(/“acceptance”|recorded reason “/);
-    expect(view.retry).toEqual({ action: "/t/t-broke/requeue" });
+    // Retry stays the one ink act, its note already holding the suggestion.
+    expect(view.retry).toEqual({ action: "/t/t-broke/requeue", note: suggestion });
+    // That build's page works: its result page, not Not found, and /r/<id> opens it.
+    expect((await fetch(url(`/review?result=t-broke&run=${failedRun}`), { headers: { cookie } })).status).toBe(200);
+    expect((await fetch(url(`/r/${failedRun}`), { headers: { cookie }, redirect: "manual" })).headers.get("location")).toBe(`/review?result=t-broke&run=${failedRun}`);
     // The Tasks list says the same, in vermilion's problem line.
     const rows = (workspaceOf(await (await fetch(url("/work"), { headers: { cookie } })).text()).view as import("./browser-workspace.js").BrowserTasksView).rows;
     expect(rows.find(row => row.id === "t-broke")?.detail).toBe(said);
@@ -2012,12 +2019,14 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     await boot();
     const cookie = await login();
     const later = workspaceOf(await (await fetch(url("/t/t-later"), { headers: { cookie } })).text()).view as import("./browser-workspace.js").BrowserTaskView;
-    expect(later.failure).toEqual({ line: "No reason was recorded for this attempt.", link: null });
+    expect(later.failure).toMatchObject({ line: "No reason was recorded for this attempt.", evidence: null, suggestion: "Say what to do differently this time.", link: { href: `/review?result=t-later&run=${newer}` } });
+    // Its latest attempt finished with no change; it is still the page of what failed.
+    expect((await fetch(url(`/review?result=t-later&run=${newer}`), { headers: { cookie } })).status).toBe(200);
     expect(diagnoseTaskDispatch(store, "t-later", T0)?.detail).toBe("No reason was recorded for this attempt.");
 
     const html = await (await fetch(url("/t/t-fam"), { headers: { cookie } })).text();
     const view = workspaceOf(html).view as import("./browser-workspace.js").BrowserTaskView;
-    expect(view.failure).toEqual({ line: "The attempt stopped with an internal error.", link: { label: "The recorded error", href: `/r/${rootRun}?record=1#run-reason-detail` } });
+    expect(view.failure).toMatchObject({ line: "The attempt stopped with an internal error.", link: { label: "The recorded error", href: `/r/${rootRun}?record=1#run-reason-detail` } });
     expect(renderedHtmlOf(html)).not.toContain("TypeError");
     for (const id of ["t-fam", "t-fam-r"]) expect(diagnoseTaskDispatch(store, id, T0)?.detail).toBe("The attempt stopped with an internal error.");
     // The detail waits on the attempt's record, at the link's anchor, as recorded.
@@ -2572,5 +2581,72 @@ describe("the board's order view (operator request): the one place a drag does a
     // The queue page itself is unchanged: same region, same handles.
     const queue = await (await fetch(`${base}/queue`, { headers: { cookie } })).text();
     expect(queue).toContain('class="queue-handle"');
+  });
+});
+
+describe("failures say what failed and builds say how far along: the demo's own failed and building tasks", () => {
+  let made: ReturnType<typeof createDemoSandbox>;
+  let server: Server;
+  let base: string;
+  let cookie: string;
+
+  beforeEach(async () => {
+    made = createDemoSandbox(new Date());
+    made.lead.stop();
+    server = createDecisionServer({ store: made.store, evidenceRoot: made.evidenceRoot, clock: () => new Date(), repos: made.seed.repos });
+    await new Promise<void>(ready => server.listen(0, "127.0.0.1", ready));
+    const address = server.address();
+    if (typeof address !== "object" || address === null) throw new Error("no address");
+    base = `http://127.0.0.1:${address.port}`;
+    const signedIn = await fetch(`${base}/login`, { method: "POST", body: new URLSearchParams({ name: "demo", token: made.seed.login.password }), redirect: "manual" });
+    cookie = (signedIn.headers.get("set-cookie") ?? "").split(";")[0] as string;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(done => server.close(() => done()));
+    made.store.close();
+    rmSync(made.sandbox, { recursive: true, force: true });
+  });
+
+  const view = async (path: string) => workspaceOf(await (await fetch(`${base}${path}`, { headers: { cookie } })).text()).view as import("./browser-workspace.js").BrowserTaskView;
+  const runsOf = (task: string) => made.store.runsFor(made.store.lookupRef(task)!.id);
+
+  test("the failed task names the requirement it missed and its evidence, Retry's note holds what to change, and its build has a page", async () => {
+    const failed = await view("/t/retire-legacy-flag");
+    const run = runsOf("retire-legacy-flag").find(one => one.outcome === "failed")!.id;
+    expect(failed.status!.status).toMatchObject({ headline: "Failed", sentence: "Missed a requirement: No reference to LEGACY_PAYOUT remains in the codebase." });
+    expect(failed.failure).toEqual({
+      line: "Missed a requirement: No reference to LEGACY_PAYOUT remains in the codebase.",
+      evidence: "The agent's own note says: src/admin/overrides.ts still reads LEGACY_PAYOUT for the per-merchant override toggle, so one reference remains.",
+      suggestion: "Before handing off, make sure no reference to LEGACY_PAYOUT remains in the codebase.",
+      link: { label: `See build #${run}`, href: `/review?result=retire-legacy-flag&run=${run}` },
+    });
+    expect(failed.retry).toEqual({ action: "/t/retire-legacy-flag/requeue", note: failed.failure!.suggestion });
+    // The demo runs no checks, so no row offers them, and nothing leads to Chat.
+    expect(JSON.stringify(failed.status)).not.toContain("/chat?");
+    expect(failed.runChecks).toBeNull();
+    // Its build record and result page are there, and Chat says the same thing.
+    expect((await fetch(`${base}/review?result=retire-legacy-flag&run=${run}`, { headers: { cookie } })).status).toBe(200);
+    expect((await fetch(`${base}/r/${run}`, { headers: { cookie }, redirect: "manual" })).headers.get("location")).toBe(`/review?result=retire-legacy-flag&run=${run}`);
+    const chat = await (await fetch(`${base}/chat?task=retire-legacy-flag`, { headers: { cookie } })).text();
+    expect(chat).toContain("Missed a requirement: No reference to LEGACY_PAYOUT remains in the codebase.");
+    expect(chat).not.toMatch(/href="\/chat\?task=retire-legacy-flag&amp;result=[0-9]+&amp;tab=checks#follow-ups"/);
+  });
+
+  test("the building task says which step it is on and which it is stuck on, and its earlier stopped attempt is one quiet line", async () => {
+    const building = await view("/t/harden-webhook-retries");
+    expect(building.status!.status.headline).toBe("Building");
+    expect(building.status!.status.sentence).toBe("Step 3 of 6: Enforce the limiter before dispatch.");
+    expect(building.progress).toEqual({ line: "Step 3 of 6: Enforce the limiter before dispatch.", stuck: {
+      step: 4, why: "the flag is off in the staging deploy target — confirming before enforcing",
+      line: "Stuck on step 4: the flag is off in the staging deploy target — confirming before enforcing.",
+      action: { label: "Send the agent a note", href: "#steering" } } });
+    // The act lands somewhere real: the Steering fold with its note form.
+    expect(building.manage.some(one => one.id === "steering")).toBe(true);
+    const stopped = runsOf("harden-webhook-retries").find(one => one.role === "builder" && one.outcome === "refused")!;
+    expect(building.earlier).toEqual({ summary: "1 earlier attempt stopped", attempts: [{ label: `Build #${stopped.id}`, href: `/r/${stopped.id}`, text: "The plan changed, so a fresh attempt took over." }] });
+    // Not a red mark in the thread beside the healthy build.
+    expect(building.thread!.some(one => one.key === `run-${stopped.id}`)).toBe(false);
+    expect(building.thread!.some(one => one.kind === "progress" && /^Building/.test(one.title))).toBe(true);
   });
 });

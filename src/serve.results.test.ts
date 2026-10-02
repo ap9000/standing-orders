@@ -102,7 +102,8 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
       checkLog?: string;
       screenshot?: { path: string; caption: string };
       verdict?: { verdict: "verified" | "attested" | "short" | "refuted"; reasons?: string[]; matrix?: import("./proof.js").CriterionMatrixRow[]; machineVerdict?: "verified" | "attested" | "short" | "refuted" };
-      outcome?: "built" | "no-change";
+      outcome?: "built" | "no-change" | "failed";
+      reason?: string;
       finishedAt?: Date;
     } = {},
   ): number => {
@@ -137,8 +138,8 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
       store.saveProofVerdict(run, parts.verdict.verdict, parts.verdict.reasons ?? [], when, parts.verdict.matrix ?? [], parts.verdict.machineVerdict ?? null);
     }
     store.recordOutcomeFacts(run, { headRevision: "b".repeat(40), handoff: `handoff of ${id}` });
-    store.finishRun(run, { outcome: parts.outcome ?? "built", committed: true, now: when });
-    store.setTaskState(id, "done", when);
+    store.finishRun(run, { outcome: parts.outcome ?? "built", committed: true, now: when, ...(parts.reason === undefined ? {} : { reason: parts.reason }) });
+    store.setTaskState(id, parts.outcome === "failed" ? "failed" : "done", when);
     return run;
   };
 
@@ -1150,6 +1151,65 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(after.runChecks).toBeNull();
     expect(after.acts).toEqual({ primary: "checks-running", secondary: "accept", line: null });
     expect(after.decision).toMatchObject({ label: "Accept without checks", ready: false });
+  });
+
+  test("a failed build has a working result page: what it missed, its diff and checks, Retry with the suggestion, and Run checks that stays put", async () => {
+    const statement = "No reference to LEGACY remains in the codebase.";
+    const patch = "diff --git a/src/flag.ts b/src/flag.ts\n--- a/src/flag.ts\n+++ b/src/flag.ts\n@@ -1,2 +1 @@\n-export const LEGACY = true;\n export const NEXT = true;\n";
+    const run = build("t-fail", seed("t-fail", "Retire the flag", "/repo/main", { acceptance: [{ id: "c1", statement, evidence: ["changed-path"] }] }), {
+      patch, stat: [{ path: "src/flag.ts", additions: 0, deletions: 1 }], handoff: { conclusion: "Removed the flag from src/flag.ts." },
+      verdict: { verdict: "refuted", reasons: [], matrix: [row("c1", statement, "failed", [{ kind: "changed-path", ref: "src/flag.ts" }],
+        ['criterion "c1" is marked met, but caveat 1 admits an exception to it: c1: src/admin.ts still reads LEGACY for the override toggle.'])] },
+      outcome: "failed", reason: "acceptance",
+    });
+    await boot();
+    store.setVerifyCommand({ repo: "/repo/main", command: "npm test", timeoutMs: 300_000, approvedBy: "alex" }, new Date());
+    const cookie = await login();
+    const suggestion = "Before handing off, make sure no reference to LEGACY remains in the codebase.";
+    const page = `/review?result=t-fail&run=${run}`;
+    // The task card names the miss, its evidence line and the build's page; Retry's note starts with the suggestion.
+    const task = workspaceOf(await (await fetch(url("/t/t-fail"), { headers: { cookie } })).text()).view as import("./browser-workspace.js").BrowserTaskView;
+    expect(task.failure).toEqual({ line: `Missed a requirement: ${statement}`, evidence: "The agent's own note says: src/admin.ts still reads LEGACY for the override toggle.",
+      suggestion, link: { label: `See build #${run}`, href: page } });
+    expect(task.retry).toEqual({ action: "/t/t-fail/requeue", note: suggestion });
+    // No status row leads to Chat: Run checks is in place, posting here and coming back here.
+    expect(JSON.stringify(task.status)).not.toContain("/chat?");
+    expect(task.runChecks).toEqual({ action: `/r/${run}/checks`, level: "full", returnTo: "/t/t-fail" });
+    expect(task.status!.status.details.find(one => one.key === "checks")?.action).toEqual({ label: "Run checks", href: `/r/${run}/checks` });
+
+    // /r/<id> opens that page; the page is there, with the diff, the checks and the failure, and no Accept.
+    const redirected = await fetch(url(`/r/${run}`), { headers: { cookie }, redirect: "manual" });
+    expect(redirected.headers.get("location")).toBe(page);
+    expect((await fetch(url(`/r/${run}?record=1`), { headers: { cookie } })).status).toBe(200);
+    const read = async () => ((await (await fetch(url(`${page}&format=workspace`), { headers: { cookie } })).json()) as import("./browser-workspace.js").BrowserWorkspace).view as import("./browser-workspace.js").BrowserResultView;
+    const selected = (await read()).selected!;
+    expect(selected.status).toMatchObject({ label: "Failed" });
+    expect(selected.panel!.status).toMatchObject({ headline: "Failed", sentence: `Missed a requirement: ${statement}` });
+    // What it missed is said once, plainly: the recorded wording isn't repeated as a caveat.
+    expect(selected.panel!.attention.join(" ")).not.toContain("caveat 1 admits");
+    expect(selected.failure).toEqual({ line: `Missed a requirement: ${statement}`, evidence: task.failure!.evidence, suggestion, link: null, retry: { action: "/t/t-fail/requeue" } });
+    expect(selected.acts).toEqual({ primary: "retry", secondary: "run-checks", line: null });
+    expect(selected.decision).toBeNull();
+    expect(selected.complete).toBeNull();
+    expect(selected.panel!.views.find(one => one.key === "changes")!.html).toContain("src/flag.ts");
+    expect(selected.panel!.views.some(one => one.key === "checks")).toBe(true);
+    expect(JSON.stringify(selected.panel!.status)).not.toContain("/chat?");
+
+    // Run checks from the task page comes back to the task page; from here it stays on this page's Checks.
+    const csrf = csrfOf(await (await fetch(url("/t/t-fail"), { headers: { cookie } })).text());
+    const fromTask = await post(cookie, task.runChecks!.action, { csrf, level: "full", return: task.runChecks!.returnTo });
+    expect(fromTask.status).toBe(303);
+    expect(fromTask.headers.get("location")).toBe("/t/t-fail");
+    expect((await read()).selected!.acts).toEqual({ primary: "retry", secondary: "checks-running", line: null });
+    expect(selected.runChecks).toEqual({ action: `/r/${run}/checks`, level: "full", returnTo: `${page}&tab=checks` });
+    const again = await post(cookie, selected.runChecks!.action, { csrf, level: "full", return: selected.runChecks!.returnTo });
+    expect(again.headers.get("location")).toBe(`${page}&tab=checks#follow-ups`);
+
+    // Retried, the task moves on; the build's page still opens, now without Retry.
+    expect((await post(cookie, "/t/t-fail/requeue", { csrf })).status).toBe(303);
+    const after = (await read()).selected!;
+    expect(after.failure).toMatchObject({ line: `Missed a requirement: ${statement}`, retry: null });
+    expect(after.acts.primary).not.toBe("retry");
   });
 
   test("a missing or unreadable proof reads Accept without checks, and Accept never posts publish", async () => {

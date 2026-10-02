@@ -97,10 +97,12 @@ export type AssignmentCard = {
 
 export function assignmentCardOf(assignment: AssignmentSnapshot, options: AssignmentCardOptions = {}): AssignmentCard {
   const receipt = assignment.receipt;
-  const links = receipt === null ? {} : { result: options.resultHref ?? chatResultHref(receipt.taskId, receipt.runId), checks: chatResultHref(receipt.taskId, receipt.runId, 'checks'),
+  // The checks live on the one result page (a failed build has one too), where Run checks runs in place; never Chat,
+  // which would only lead back to this card.
+  const checksPage = receipt === null ? null : `/review?result=${encodeURIComponent(receipt.taskId)}&run=${receipt.runId}&tab=checks`;
+  const links = receipt === null ? {} : { result: options.resultHref ?? chatResultHref(receipt.taskId, receipt.runId), checks: checksPage,
     pullRequest: `/t/${encodeURIComponent(assignment.rootId)}#merge`,
-    // Run checks lives with the result's checks; the row's action leads there.
-    ...(receipt.completionKind === 'research-report' ? {} : { runChecks: `${chatResultHref(receipt.taskId, receipt.runId, 'checks')}#follow-ups` }) };
+    ...(receipt.completionKind === 'research-report' ? {} : { runChecks: `${checksPage}#follow-ups` }) };
   const presentation = assignmentPresentationOf(assignment, { ...options, links });
   const { status, diagnostics, taskStatus } = presentation;
   const href = assignment.primaryAction?.code === 'open-result' && options.resultHref !== undefined ? options.resultHref : assignmentActionHref(assignment);
@@ -121,12 +123,12 @@ export function assignmentCardOf(assignment: AssignmentSnapshot, options: Assign
   };
 }
 
-export function assignmentSummaryHtml(assignment: AssignmentSnapshot, options: AssignmentCardOptions & { compact?: boolean } = {}): string {
+export function assignmentSummaryHtml(assignment: AssignmentSnapshot, options: AssignmentCardOptions & { compact?: boolean; sentence?: string | undefined } = {}): string {
   const card = assignmentCardOf(assignment, options);
   const tone = card.status.tone;
   return `<section class="${options.compact ? 'assignment-summary' : 'card assignment-summary'}" aria-label="assignment progress" data-assignment="${escape(assignment.rootId)}" data-work-status="${card.token}" data-tone="${card.tone}" data-headline="${escape(card.status.headline)}" data-headline-tone="${tone}"${options.compact ? '' : ' data-task-status'}>` +
     (options.compact ? `<span class="status-line" data-work-status="${card.token}" data-tone="${card.tone}"><i class="status-dot" aria-hidden="true"></i><span class="status-label">${card.label}</span></span>` : `<h2 class="assignment-state status-headline"><i aria-hidden="true"></i>${escape(card.label)}</h2>`) +
-    `<p class="meta assignment-detail status-sentence">${escape(card.status.sentence)}</p>` +
+    `<p class="meta assignment-detail status-sentence">${escape(options.sentence ?? card.status.sentence)}</p>` +
     (card.action === null ? '' : `<a class="${options.compact ? 'work-action' : 'button-link'}" href="${escape(card.action.href)}"${card.action.openResult ? ' data-open-result' : ''}${options.compact ? '' : ' data-primary-action'}>${escape(card.action.label)}${options.compact ? ' →' : ''}</a>`) +
     (options.compact ? '' : statusDetailsHtml(card.status)) +
     statusWhyHtml(card.status, card.reasons, card.diagnostics) +

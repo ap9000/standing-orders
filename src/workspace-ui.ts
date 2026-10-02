@@ -708,3 +708,48 @@ export function learningHtml(view: import('./project-learning.js').LearningView,
   const history = view.events.map(ev => `<article class="card" data-learning-event="${e(ev.action)}"><p><strong>${e(({ assessment: ({ propose: 'Learning suggested', none: 'No lesson needed', unassessed: 'Learning not assessed', invalid: 'Learning assessment invalid' } as Record<string,string>)[ev.after] ?? 'Learning not assessed', proposal: 'Suggestion recorded', adopt: 'Lesson adopted', disable: 'Lesson disabled', reset: 'Learning reset', enable: 'Reuse enabled', pause: 'Reuse paused', reuse: 'Run context saved', failure: 'Learning issue', capture: 'Capture finished' } as Record<string,string>)[ev.action] ?? ev.action)}</strong>${ev.action === "reuse" ? ` · ${e(ev.after)}` : ""}</p><p class="meta"><time datetime="${e(ev.at)}">${e(ev.at.replace("T", " ").replace(/\.\d+Z$/, " UTC"))}</time> · ${e(ev.actor)}${ev.run === null ? '' : ` · <a href="/r/${ev.run}">Run #${ev.run}</a>${ev.outcome === null ? "" : ` · ${e(ev.outcome)}`}`}</p><details><summary>Details</summary><p>${e(ev.before)} → ${e(ev.after)}</p><p>${e(ev.reason)}</p>${ev.lesson === null ? '' : `<p>Lesson #${ev.lesson}</p>`}<ul>${evidence(ev.evidence, ev.run)}</ul>${ev.snapshot === null ? "" : `<details><summary>Exact context</summary><pre>${e(ev.snapshot)}</pre></details>`}</details></article>`).join('');
   return `<section class="learning">${view.damaged ? '<p class="problem" role="alert">Some lessons no longer verify and are excluded from reuse.</p>' : ''}<p>${view.enabled ? 'Use adopted lessons: on' : 'Use adopted lessons: off'}</p>${act(view.enabled ? 'pause' : 'enable', view.enabled ? 'Pause reuse' : 'Enable reuse')}${cards || '<p>No lessons yet. Reviews may suggest useful advice here.</p>'}<details><summary>Reset learning</summary><p>Disable all adopted lessons and future reuse. Keep history, code, approvals and active run snapshots.</p>${act('reset', 'Reset learning')}</details><h2>Changes</h2>${history || '<p>No learning changes yet.</p>'}${view.next === null ? '' : `<a class="button-link" href="/settings/learning?repo=${encodeURIComponent(view.repo)}&before=${view.next}">Older changes</a>`}</section>`;
 }
+
+/** The first signed requirement a finished attempt missed (failed or unanswered; a person's own check is not a miss),
+ * with the evidence line behind it in plain words. Null when every requirement held. */
+export function missedRequirementOf(matrix: readonly { id: string; statement: string; state: string; detail: readonly string[] }[]):
+  { id: string; statement: string; evidence: string | null } | null {
+  const missed = matrix.find(row => row.state === "failed") ?? matrix.find(row => row.state === "missing") ?? null;
+  if (missed === null) return null;
+  const detail = missed.detail.find(one => !/is waiting for the final check/.test(one)) ?? missed.detail[0] ?? null;
+  return { id: missed.id, statement: missed.statement, evidence: detail === null ? (missed.state === "missing" ? "The agent's report doesn't answer it." : null) : requirementEvidenceWords(missed.id, detail) };
+}
+
+/** A matrix row's recorded detail as a sentence a person reads: the agent's own note when one admits the miss. */
+function requirementEvidenceWords(id: string, detail: string): string {
+  const caveat = CONTRADICTED_BY_CAVEAT.exec(detail);
+  // The note often names its requirement first ("c1: …"); the line already says which requirement it is.
+  if (caveat !== null && caveat[1] === id) return sentenceOf(`The agent's own note says: ${caveat[2]!.trim().replace(new RegExp(`^${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*[:—-]\\s*`), "")}`);
+  const lead = [`criterion "${id}"'s `, `criterion "${id}" `].find(prefix => detail.startsWith(prefix));
+  return sentenceOf(plainReasonWords(lead === undefined ? detail : detail.slice(lead.length)));
+}
+
+/** One milestone of a live build's plan, as the agent last reported it. */
+export type BuildStep = { description: string; state: "pending" | "current" | "completed" | "blocked"; note: string | null };
+/** Where a live build is: the step it is on ("Step 3 of 6: …"), and the step it is stuck on with why, if any. */
+export type BuildProgress = { step: number; total: number; line: string; stuck: { step: number; why: string; line: string } | null };
+
+const stepWords = (text: string): string => text.trim().replace(/\s+/g, " ").replace(/[.\s]+$/, "");
+
+/** A live build's progress: the step in progress (else the first one not done) as "Step N of M: <step>", and a
+ * blocked step as "Stuck on step N: <why>" (its note, else the step itself). Null with no plan steps. */
+export function buildProgressOf(steps: readonly BuildStep[] | null | undefined): BuildProgress | null {
+  if (steps == null || steps.length === 0) return null;
+  const total = steps.length;
+  const blocked = steps.findIndex(one => one.state === "blocked");
+  const why = blocked < 0 ? null : stepWords(steps[blocked]!.note ?? steps[blocked]!.description);
+  const stuck = blocked < 0 || why === null ? null : { step: blocked + 1, why, line: `Stuck on step ${blocked + 1}: ${why}.` };
+  const current = steps.findIndex(one => one.state === "current");
+  const at = current >= 0 ? current : steps.findIndex(one => one.state !== "completed");
+  if (at < 0) return { step: total, total, line: `All ${total} steps done. Finishing up.`, stuck };
+  return { step: at + 1, total, line: `Step ${at + 1} of ${total}: ${stepWords(steps[at]!.description)}.`, stuck };
+}
+
+/** Earlier attempts that stopped before the one now running, in one quiet line. */
+export function earlierAttemptsWords(count: number): string {
+  return `${count} earlier attempt${count === 1 ? "" : "s"} stopped`;
+}

@@ -152,7 +152,8 @@ function detailsOf(headline: Headline, facts: TaskStatusFacts): StatusDetail[] {
     else if (checks.status === "running") row("checks", "Checks", "Running", "running");
     else if (checks.level === "off") row("checks", "Checks", "Off for this project", "none", runChecks === null ? {} : { action: runChecks });
     else if (checks.status === "not-run") row("checks", "Checks", "Didn't run", "none", runChecks === null ? {} : { action: runChecks });
-    else row("checks", "Checks", "Couldn't be read", "note", { action: { label: "Open the result", href: facts.links?.result ?? null } });
+    // A saved check that can't be read is run again where that is possible.
+    else row("checks", "Checks", "Couldn't be read", "note", { action: runChecks ?? { label: "Open the result", href: facts.links?.result ?? null } });
   }
   const pr = facts.pullRequest;
   if (pr != null) {

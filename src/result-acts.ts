@@ -11,6 +11,8 @@
  *                                         never Accept as ink, even with no form here
  *   a Needs you form resolves it        → that form (Build again, Confirm it stopped)
  *   saved notes or a failing PR         → Revise / Draft a repair task
+ *   a failed build                      → Retry (its note starts with what to change), then Run checks when they
+ *                                         didn't run; never Accept: a failed build is not a result to accept
  *
  * Accepting means what it always meant: the same forms post to the same
  * endpoints. This only decides which one is ink. */
@@ -18,7 +20,7 @@
 /** The words over the reason field an Accept of a refuted result requires. */
 export const ACCEPT_NEEDS_REASON = "Accepting needs a reason";
 
-export type ResultActKind = "accept" | "checks-running" | "run-checks" | "request-changes" | "rebuild" | "confirm-stopped" | "revise" | "draft-repair";
+export type ResultActKind = "retry" | "accept" | "checks-running" | "run-checks" | "request-changes" | "rebuild" | "confirm-stopped" | "revise" | "draft-repair";
 
 export type ResultActFacts = {
   /** An Accept this page can post (Mark complete, or the person's acceptance); `ready`: every requirement met and checks passed. */
@@ -35,6 +37,8 @@ export type ResultActFacts = {
   need: "rebuild" | "confirm-stopped" | null;
   /** Saved notes ready to become a revision, or a failing pull request's repair. */
   next: "revise" | "draft-repair" | null;
+  /** A failed build: `retry` when the task can be retried from here. */
+  failed?: { retry: boolean } | null;
 };
 
 export type ResultActs = {
@@ -49,6 +53,10 @@ export type ResultActs = {
 export function resultActsOf(facts: ResultActFacts): ResultActs {
   const request = facts.canRequest ? "request-changes" as const : null;
   const accept = facts.accept === null ? null : "accept" as const;
+  if (facts.failed != null) {
+    const checks = facts.runChecks && !facts.checksRunning ? "run-checks" as const : facts.checksRunning ? "checks-running" as const : null;
+    return facts.failed.retry ? { primary: "retry", secondary: checks, line: null } : { primary: checks, secondary: null, line: null };
+  }
   if (facts.need !== null) return { primary: facts.need, secondary: request, line: null };
   if (facts.next !== null) return { primary: facts.next, secondary: accept ?? request, line: null };
   // Can't be accepted yet: Accept is never the ink act, even when the feedback form isn't here.
