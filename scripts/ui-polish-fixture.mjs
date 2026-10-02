@@ -138,7 +138,7 @@ const PROOF = {
 };
 
 /** A real RGB PNG with a faint gradient — past the 320×200 floor. */
-function encodePng(width, height, rgb) {
+export function encodePng(width, height, rgb) {
   const table = new Int32Array(256);
   for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; table[n] = c; }
   const crc32 = buf => { let c = -1; for (const byte of buf) c = table[(c ^ byte) & 0xff] ^ (c >>> 8); return (c ^ -1) >>> 0; };

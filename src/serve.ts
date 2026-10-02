@@ -4,7 +4,7 @@ import { ADD_TESTS_ACTION, followUpChecksOf, requestFollowUpChecks, fileAddTests
 import { CHECK_LEVEL_WORDS, isCheckLevel, liveQuickCommand, projectCheckLevel, quickVerifyKey, setProjectCheckLevel, suggestQuickCommand, type CheckLevel } from './check-levels.js';
 import { repositoryContextHtml } from './repository-context-ui.js';
 import { browserAssetsAvailable, browserWorkspaceDocument, serveBrowserAsset } from './browser-shell.js';
-import { browserCrewOf, browserCrewFromIndex, browserWorkActionHref, browserProjectsOf, browserNavigationOf, type BrowserWorkspace, type BrowserChatLink, type BrowserTasksView, type BrowserLimits, type BrowserSettingsView, type BrowserTaskView, type BrowserTaskFact, type BrowserTaskSection, type BrowserTaskThreadItem, type BrowserTaskDetailGroup, type BrowserHome, type BrowserHomeCount, type BrowserCatchUpItem, type BrowserProjectsView, type BrowserProjectRow, type BrowserResultPanel, type BrowserResultView, type BrowserNeedAction, type BrowserActionCard, type BrowserSignIn, type BrowserUpdateNotice, type BrowserUpdates, type BrowserFirstRun, type BrowserPhoneCard } from './browser-workspace.js';
+import { browserCrewOf, browserCrewFromIndex, browserWorkActionHref, browserProjectsOf, browserNavigationOf, type BrowserWorkspace, type BrowserChatLink, type BrowserTasksView, type BrowserLimits, type BrowserSettingsView, type BrowserTaskView, type BrowserTaskFact, type BrowserTaskSection, type BrowserTaskThreadItem, type BrowserTaskDetailGroup, type BrowserHome, type BrowserHomeCount, type BrowserCatchUpItem, type BrowserProjectsView, type BrowserProjectRow, type BrowserResultPanel, type BrowserCheckItem, type BrowserResultView, type BrowserNeedAction, type BrowserActionCard, type BrowserSignIn, type BrowserUpdateNotice, type BrowserUpdates, type BrowserFirstRun, type BrowserPhoneCard } from './browser-workspace.js';
 import { configureLeadFollow, leadFollowStatus, runLeadFollowPass } from './lead-follow.js';
 import { startMaintenance } from './maintenance.js';
 import { codingHandoffPreview, createCodingHandoff } from './coding-handoff.js';
@@ -167,7 +167,7 @@ import { recipeFromForm, recipeLibraryHtml, recipeEditorHtml, workflowPreviewHtm
 import { EVIDENCE_CAPS, readVerifiedArtifact, readVerifiedReport, readVerifiedProofForRun, storeEvidence, writeEvidenceFile, scanForSecrets, type ReportView } from "./evidence.js";
 import { GOAL_ASSESSMENT_PENDING, reviewConflict, manualReviewOnly, manualReviewCriterionOf, personCheckWords, plainReasonWords, dispatchStatusToken, passFraction, semanticCoverage, coverageWords, coverageStateWords, type ProofVerdict, type CriterionMatrixRow, type CriterionEvidenceRef } from "./proof.js";
 import {
-  WORK_VIEWS, REVIEW_TOKENS, parseWorkView, resultStatusOf, resultHeadlineOf, receiptHeadingOf, receiptPublicationWords, reviewFactsOf, workStatusOf, primaryDestinationOf, needsPerson, dispatchActionLabel,
+  WORK_VIEWS, REVIEW_TOKENS, RESULT_DECISION_SENTENCE, acceptWordsOf, parseWorkView, resultStatusOf, resultHeadlineOf, receiptHeadingOf, receiptPublicationWords, reviewFactsOf, workStatusOf, primaryDestinationOf, needsPerson, dispatchActionLabel,
   type WorkView, type WorkFacts, type WorkStatus, type DisplayStatus, type PublicationFacts, type ReviewFacts,
 } from "./workspace-ui.js";
 import { PRICED_BUILD_MODELS } from "./pricing.js";
@@ -11292,6 +11292,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       terminal,
       publication,
       pullRequestTo: pullRequestTargetOf(run.id),
+      publishing: pullRequestTargetOf(run.id) !== null ? "pull-request" : publishingOf(store, store.refById(run.taskRef)?.repo ?? null).on ? "other" : "off",
       ciFailing: publication !== null && publication.prNumber !== null && store.hasOpenCiEpisode(publication.githubRepo, publication.prNumber),
       files,
       outsideTouches: files.filter(one => one.outsideTouches).map(one => one.path),
@@ -12807,7 +12808,7 @@ ${THEME_DARK}
   /* Thumbnails, never a full-width poster: auto-fill leaves a lone
      screenshot at thumbnail size (UI polish 2026-09-13). */
   .receipt-visuals { display: grid; grid-template-columns: repeat(auto-fill, minmax(8rem, 14rem)); gap: .55rem; margin-top: .75rem; }
-  .receipt-shot { display: grid; gap: .35rem; color: var(--muted-foreground); font-size: .7rem; text-decoration: none; }
+  .receipt-shot { display: grid; gap: .35rem; color: var(--muted-foreground); font-size: .75rem; text-decoration: none; }
   .receipt-shot img { display: block; width: 100%; aspect-ratio: 16 / 10; object-fit: cover; border: 1px solid var(--glass-border); border-radius: calc(var(--radius) - 3px); background: var(--muted); }
   @media (hover: hover) and (pointer: fine) { .receipt-shot:hover { color: var(--foreground); } }
   .receipt-caveats, .receipt-coverage { margin-top: .8rem; padding: .7rem .8rem; border-left: 1px solid var(--border); border-radius: 0 calc(var(--radius) - 3px) calc(var(--radius) - 3px) 0; background: color-mix(in srgb, var(--muted) 62%, transparent); font-size: .78rem; }
@@ -12940,7 +12941,7 @@ ${THEME_DARK}
   }
   .diff-file[open] > summary::before { transform: rotate(45deg) translateY(-.1rem); }
   .diff-file-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 500 .75rem/1.4 var(--font-mono); }
-  .diff-file-counts { display: inline-flex; gap: .45rem; flex: none; margin-left: auto; font: 500 .68rem/1 var(--font-mono); }
+  .diff-file-counts { display: inline-flex; gap: .45rem; flex: none; margin-left: auto; font: 500 .75rem/1 var(--font-mono); }
   .diff-file-counts b { color: var(--success); font-weight: 500; }
   .diff-file-counts i { color: var(--destructive); font-style: normal; }
   .diff-rename { margin: 0; padding: .4rem .85rem; border-top: 1px solid var(--glass-border); }
@@ -12948,12 +12949,12 @@ ${THEME_DARK}
   .diff-hunk-head {
     overflow-x: auto; padding: .42rem .85rem; border-top: 1px solid var(--glass-border); border-bottom: 1px solid var(--glass-border);
     background: color-mix(in srgb, var(--running) 8%, var(--card)); color: color-mix(in srgb, var(--running) 72%, var(--foreground));
-    font: 500 .68rem/1.4 var(--font-mono); white-space: pre;
+    font: 500 .75rem/1.4 var(--font-mono); white-space: pre;
   }
   .diff-lines { max-width: 100%; overflow-x: auto; background: color-mix(in srgb, var(--background) 48%, var(--card)); }
   .diff-line {
     display: grid; grid-template-columns: 2rem 3.2rem 3.2rem minmax(max-content, 1fr); align-items: stretch;
-    min-width: max-content; min-height: 1.8rem; font: 400 .72rem/1.55 var(--font-mono);
+    min-width: max-content; min-height: 1.8rem; font: 400 .75rem/1.55 var(--font-mono);
   }
   @media (hover: hover) and (pointer: fine) { .diff-line:hover { background: color-mix(in srgb, var(--foreground) 4%, transparent); } }
   .diff-line code { display: flex; min-width: 0; padding: .3rem .75rem .3rem .6rem; color: inherit; white-space: pre; }
@@ -14954,6 +14955,15 @@ button { min-height: 44px; }
   /* The title sits beside the grip and wraps within its own box; the
      chips flow after it, never above the name. */
   .queue-card p.row > a:first-of-type { flex: 1 1 12rem; min-width: 0; }
+}
+/* A phone reads a long changed line wrapped, never scrolled sideways: the
+   line keeps its numbers and marker, the code column takes what is left. */
+@media (max-width: 760px) {
+  .diff-lines { overflow-x: visible; }
+  .diff-line, .diff-review .diff-line { min-width: 0; grid-template-columns: 2.75rem 2.65rem 2.65rem minmax(0, 1fr); }
+  .diff-review[data-mode="view"] .diff-line { grid-template-columns: 0 2.65rem 2.65rem minmax(0, 1fr); }
+  .diff-line code { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .diff-hunk-head { overflow-x: visible; white-space: pre-wrap; overflow-wrap: anywhere; }
 }
 @media (max-width: 30rem) {
   .dependency-repair-actions .dependency-repair-replace { grid-template-columns: minmax(0, 1fr); }
@@ -22652,7 +22662,7 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
     taskHref: taskHref(view.taskId), chatHref: taskChatHref(view.taskId),
     status: { label: status.label, tone: status.tone, token: status.token },
     problem: view.detail === null ? view.historyProblem : null,
-    next: reviewNextActionOf(view, csrf), complete: null, checks: null, intent: intentView, noRun: null, panel: null, contest: "",
+    next: reviewNextActionOf(view, csrf), complete: null, decision: null, checks: null, intent: intentView, noRun: null, panel: null, contest: "",
     notes: view.notes.map(one => ({ author: one.author, at: one.createdAt, note: one.note })),
   };
 
@@ -22693,8 +22703,18 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
   parts.push(`<div id="verification" data-cockpit-section="result">` + panel.html + contest + `</div>`);
 
   const complete = assignment?.state === "ready-to-check" && assignment.receipt !== null && canRetryReview && csrf !== ""
-    ? { action: `${taskHref(view.taskId)}/complete`, receipt: assignment.receipt.digest, run: run.id } : null;
+    ? { action: `${taskHref(view.taskId)}/complete`, receipt: assignment.receipt.digest, run: run.id, publish: (view.detail?.pullRequestTo ?? null) !== null } : null;
   if (complete !== null) parts.push(completionForm(view.taskId, run.id, complete.receipt, csrf, view.detail?.pullRequestTo ?? null));
+  // The one decision, after the evidence: Accept only when every requirement is met and the checks passed.
+  const acceptsHere = complete !== null || panel.panel.need?.accept != null;
+  const matrix = proof === null || proof.proofProblem !== null ? [] : proof.matrix;
+  const decision = !acceptsHere ? null : { sentence: RESULT_DECISION_SENTENCE, ...acceptWordsOf({
+    checks: checks === undefined ? null : checks.running != null ? "running" : checks.level === "off" && checks.status !== "passed" ? "off" : checks.status,
+    unmet: matrix.filter(row => row.state !== "pass" && row.state !== "manual-review").length,
+    yours: complete === null || accepted ? 0 : panel.panel.youCheck?.lines.length ?? 0,
+    action: complete !== null ? "complete" : "accept",
+    publishing: view.detail?.publishing ?? "other",
+  }) };
 
   if (view.notes.length > 0) {
     parts.push(
@@ -22707,7 +22727,7 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
   return {
     html: `<section class="cockpit-detail">${parts.join("\n")}</section>`,
     selected: {
-      ...selected, complete, panel: panel.panel, contest,
+      ...selected, complete, decision, panel: panel.panel, contest,
       checks: checks === undefined ? null : { detail: checks.detail, problem: checks.status === "failed" || checks.status === "unavailable", logHref: checks.logArtifactId === null ? null : `/r/${run.id}/evidence/${checks.logArtifactId}` },
     },
   };
@@ -23814,6 +23834,8 @@ const chatResultHref = (taskId: string, runId: number, tab: ResultTab = "summary
 type ResultDetail = {
   /** Where "Complete and open a pull request" opens one; null when only "Mark complete" is offered. */
   pullRequestTo?: string | null;
+  /** What completing publishes: a pull request, nothing because publishing isn't set up, or neither said. */
+  publishing?: "pull-request" | "off" | "other";
   learning?: string;
   skillTest?: boolean;
   rootId?: string;
@@ -23974,6 +23996,7 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
   const acceptable = personChecks.length > 0 && humanReview && o.csrf !== "" && (current != null || detail.assignment == null);
   const youCheck: BrowserResultPanel["youCheck"] = personChecks.length === 0 ? null : {
     lines: [...new Set(personChecks)],
+    items: personCheckItems(proof!, patchOk ? patch.text : null, shown, runId),
     accept: acceptable && need?.accept == null ? { action: `${taskHref(detail.taskId)}/accept-proof`, run: run.id, returnTo: o.returnTo } : null,
   };
   const youCheckHtml = youCheck === null ? "" :
@@ -24295,6 +24318,38 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
     requestQuiet: detail.canAnnotate && o.csrf !== "" && detail.comments.length === 0 && (detail.pastComments?.length ?? 0) === 0 && detail.revisions.length === 0,
   };
   return { html, panel };
+}
+
+/** Changed lines shown beside one "You check this one" item: at most this many per file, three files. */
+const CHECK_EXCERPT_LINES = 12;
+
+/** Each requirement only a person can confirm, with the evidence to judge
+ * it by, inline: the changed lines in the files it cites (citing none, the
+ * change's first file, labelled as not cited), the screenshots it cites
+ * (none cited: every validated one), and the agent's own note. */
+function personCheckItems(proof: ProofBundleView, patchText: string | null, shots: readonly ResultScreenshot[], runId: number): BrowserCheckItem[] {
+  const rows = proof.matrix.filter(row => row.state === "manual-review");
+  if (rows.length === 0) return proof.reasons.some(reason => manualReviewCriterionOf(reason) !== null)
+    ? [{ id: "you-check", statement: "", words: personCheckWords(null), note: null, excerpts: [], shots: [] }] : [];
+  const diff = patchText === null ? null : parseReviewDiff(patchText);
+  const excerptOf = (file: ReviewDiffFile, cited: boolean): BrowserCheckItem["excerpts"][number] => {
+    const changed = file.hunks.flatMap(hunk => hunk.lines).filter((line): line is ReviewDiffLine & { kind: "addition" | "deletion" } => line.kind === "addition" || line.kind === "deletion");
+    return { path: file.path, cited, lines: changed.slice(0, CHECK_EXCERPT_LINES).map(line => ({ kind: line.kind, line: line.newLine ?? line.oldLine, text: line.text })), more: Math.max(0, changed.length - CHECK_EXCERPT_LINES) };
+  };
+  return rows.map(row => {
+    const refs = row.answered ?? [];
+    const paths = refs.filter(one => one.kind === "changed-path").map(one => one.ref);
+    const files = diff === null ? [] : paths.length > 0 ? diff.files.filter(file => paths.includes(file.path)).map(file => excerptOf(file, true))
+      : diff.files.slice(0, 1).map(file => excerptOf(file, false));
+    const cited = refs.filter(one => one.kind === "screenshot").map(one => one.ref);
+    const pictures = cited.length > 0 ? shots.filter(shot => cited.includes(shot.path)) : shots;
+    const notes = refs.filter(one => one.kind === "manual-review").map(one => one.ref.trim()).filter(one => one !== "");
+    return {
+      id: row.id, statement: row.statement, words: personCheckWords(row.statement), note: notes.length === 0 ? null : notes.join(" "),
+      excerpts: files.filter(one => one.lines.length > 0).slice(0, 3),
+      shots: pictures.slice(0, 4).map(shot => ({ src: `/r/${runId}/evidence/${shot.artifactId}`, href: `/r/${runId}/evidence/${shot.artifactId}`, caption: shot.caption })),
+    };
+  });
 }
 
 /** A Needs you result's one action (needs-you.ts): a link to the act that resolves it, or Confirm it

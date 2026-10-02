@@ -287,7 +287,7 @@ function storedResultStatusOf(result: ResultFacts | null, publication: Publicati
     };
   }
   if (result.verdict === "short" && humanReview) {
-    return { token: "verification-needed", label: "Ready to inspect", detail: withPublication("The remaining requirements need a person's inspection. Open the result and record your decision."), tone: "attention", action: { label: "Inspect the result", kind: "open-review" } };
+    return { token: "verification-needed", label: "Ready to inspect", detail: withPublication("The remaining requirements need a person's inspection."), tone: "attention", action: { label: "Inspect the result", kind: "open-review" } };
   }
   if (result.verdict === "short") {
     return {
@@ -438,6 +438,42 @@ const VERIFIED_RESULT = new Set(["ready-to-review", "pr-opened", "merge-observed
 /** A finished result's display status in the shared headline's words: a
  * failed project check is Failed, a result missing its record needs a
  * person, every other saved result is Ready for review. Token and action stay. */
+/** The result page's own sentence when the decision is on it. */
+export const RESULT_DECISION_SENTENCE = "Review the change, then accept it or ask for changes.";
+
+/** What the result page's Accept says, from facts it already shows: the
+ * recorded checks, the requirements not met, the ones a person still checks,
+ * and what the button posts. "Accept" only when everything is met and the
+ * checks passed; otherwise "Accept without checks" and one line naming what.
+ * `effect` says what pressing it does, in the action's own terms. */
+export type AcceptFacts = {
+  checks: "passed" | "failed" | "not-run" | "off" | "running" | "unavailable" | null;
+  unmet: number;
+  yours: number;
+  /** `complete`: marks the exact result complete; `accept`: records a person's acceptance only. */
+  action: "complete" | "accept";
+  /** `pull-request`: completing opens one; `off`: publishing isn't set up; `other`: neither is said. */
+  publishing: "pull-request" | "off" | "other";
+};
+export type AcceptWords = { label: "Accept" | "Accept without checks"; ready: boolean; why: string | null; effect: string };
+
+export function acceptWordsOf(facts: AcceptFacts): AcceptWords {
+  const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
+  const parts = [
+    ...(facts.checks === "passed" ? [] : [facts.checks === "failed" ? "checks failed" : facts.checks === "off" ? "checks are off for this project"
+      : facts.checks === "running" ? "checks are still running" : facts.checks === "unavailable" ? "saved checks can't be read" : "checks didn't run"]),
+    ...(facts.unmet > 0 ? [`${plural(facts.unmet, "requirement isn't", "requirements aren't")} met`] : []),
+    ...(facts.yours > 0 ? [`${plural(facts.yours, "item still needs", "items still need")} your check`] : []),
+  ];
+  const ready = parts.length === 0;
+  const joined = parts.length <= 1 ? parts.join("") : `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}`;
+  const effect = facts.action === "accept" ? "Records that you accept it. You mark it complete next."
+    : facts.publishing === "pull-request" ? "Marks it complete and opens a pull request."
+    : facts.publishing === "off" ? "Marks it complete. The branch stays; publishing isn't set up."
+    : "Marks it complete.";
+  return { label: ready ? "Accept" : "Accept without checks", ready, why: ready ? null : `${joined.charAt(0).toUpperCase()}${joined.slice(1)}.`, effect };
+}
+
 export function resultHeadlineOf<T extends DisplayStatus>(status: T): T {
   const read = RESULT_NEEDS_YOU.has(status.token) ? { stage: "needs-you" as const, need: "other" as const }
     : status.token === "checks-failed" ? { stage: "failed" as const } : { stage: "finished" as const };
