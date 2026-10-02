@@ -59,6 +59,20 @@ export const NEEDS: Readonly<Record<NeedKey, Need>> = {
   other: { sentence: () => "Open the task to see what it needs from you.", action: { code: "inspect-task", label: "Open the task" }, useReason: always },
 };
 
+/** What a waiting task asks of a person, in three kinds the Tasks list groups
+ * by: a choice to make, a result to accept or send back, or something in the
+ * way to clear. Decide comes first. */
+export type Ask = "decide" | "review" | "unblock";
+export const ASKS: readonly Ask[] = ["decide", "review", "unblock"];
+export const ASK_LABEL: Readonly<Record<Ask, string>> = { decide: "Decide", review: "Review", unblock: "Unblock" };
+export const NEED_ASK: Readonly<Record<NeedKey, Ask>> = {
+  approval: "decide", card: "decide", answer: "decide", questions: "decide", "choose-project": "decide", "define-task": "decide",
+  "fix-request": "decide", "choose-agent": "decide",
+  "review-result": "review", rebuild: "review",
+  "sign-in": "unblock", "confirm-stopped": "unblock", "check-stopped": "unblock", hold: "unblock", "fix-dependency": "unblock",
+  "add-requirement": "unblock", "connect-builder": "unblock", "start-builder": "unblock", vanished: "unblock", "earlier-version": "unblock", other: "unblock",
+};
+
 export const WAITS: Readonly<Record<WaitKey, (context: NeedContext) => string>> = {
   "build-stopping": context => `Waiting for ${build(context)} to stop. Nothing is needed from you.`,
   "other-computer": context => `Waiting for the computer that ran ${build(context)} to confirm it stopped.`,

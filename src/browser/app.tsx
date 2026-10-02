@@ -594,6 +594,14 @@ function useTaskThreadChat(controller: ReturnType<typeof useWorkspace>): ThreadC
  * link can still scroll the window (the browser jumps to the section before the
  * panes exist), which left the page above the screen and blank on a phone. Put
  * the window back, and bring the section into view inside its pane instead. */
+/** A demo database says so once: the whole sentence on a desk, one line on a phone. */
+function DemoNotice({ demo }: { demo: BrowserWorkspace["demo"] }) {
+  if (demo === undefined) return null;
+  return <Alert className="so-demo-notice" data-demo-notice title={demo.text}>
+    <span className="so-demo-notice-full">{demo.text}</span><span className="so-demo-notice-short">{demo.short}</span>
+  </Alert>;
+}
+
 function useWindowStaysPut() {
   useEffect(() => {
     const settle = () => { if (window.scrollX !== 0 || window.scrollY !== 0) window.scrollTo(0, 0); };
@@ -643,6 +651,9 @@ export function WorkspaceApp({ initial }: { initial: BrowserWorkspace }) {
   const hidePanel = pageOnly && !docked && !hasWork && (FULL_WIDTH_PAGES.has(pathname) || pathname.startsWith("/code/") || workspace.view?.kind === "flow");
   const [dismissedUpdate, setDismissedUpdate] = useState<string | null>(null);
   const update = workspace.update !== undefined && workspace.update.version !== dismissedUpdate ? workspace.update : null;
+  // The demo notice scrolls away with a page; a chat keeps it above.
+  const demo = workspace.demo;
+  const pageScrolls = !workspace.team && !(workspace.conversation && !docked && taskView === null);
   useEffect(notifyWorkspaceRendered, []);
   useWindowStaysPut();
   return <><Toaster /><div className={`so-workspace${hidePanel ? " so-workspace--single" : ""}${docked || taskView !== null ? " so-workspace--docked" : ""}${taskView !== null ? " so-workspace--details" : ""}`} data-workspace-shell data-workspace-phone-view={phoneView} data-workspace-has-result={workspace.result !== null}>
@@ -658,7 +669,8 @@ export function WorkspaceApp({ initial }: { initial: BrowserWorkspace }) {
         {docked && <Button variant="secondary" size="sm" className="so-phone-work-button" onClick={() => { setPanelTab("chat"); setPhoneView("work"); }}><Icon name="chat" />Ask</Button>}
         {taskView !== null && <Button variant="secondary" size="sm" className="so-phone-work-button" data-open-details onClick={() => setPhoneView("work")}>Details</Button>}
       </header>
-      {(workspace.notices.length > 0 || (workspace.signIn?.length ?? 0) > 0 || update !== null) && <div className="so-workspace-notices">
+      {(workspace.notices.length > 0 || (workspace.signIn?.length ?? 0) > 0 || update !== null || (demo !== undefined && !pageScrolls)) && <div className="so-workspace-notices">
+        {!pageScrolls && <DemoNotice demo={demo} />}
         {workspace.signIn?.map(item => <Alert key={item.provider} className="so-sign-in" data-sign-in={item.provider}>
           <p className="so-sign-in-title">{item.title}</p>
           <p className="so-sign-in-detail">Run <code>{item.command}</code> on this computer, then resume.{item.detail === "" ? "" : ` ${item.detail}`}</p>
@@ -679,7 +691,7 @@ export function WorkspaceApp({ initial }: { initial: BrowserWorkspace }) {
         </Alert>}
       </div>}
       <main id="workspace-main" className="so-main-content" tabIndex={-1}>
-        {workspace.team ? <TeamChat initial={workspace.team} user={workspace.user} csrf={workspace.csrf} onSnapshot={setTeamSnapshot} /> : workspace.conversation && !docked && taskView === null ? <LeadChat controller={controller} /> : <div className="so-page-content" data-workspace-page>{isChat && workspace.firstRun && <FirstRun firstRun={workspace.firstRun} />}{workspace.view ? <ViewHost view={workspace.view} csrf={workspace.csrf} taskChat={taskChat} taskDetails={false} /> : <GuardedHtml html={initial.pageHtml ?? ""} immutable />}</div>}
+        {workspace.team ? <TeamChat initial={workspace.team} user={workspace.user} csrf={workspace.csrf} onSnapshot={setTeamSnapshot} /> : workspace.conversation && !docked && taskView === null ? <LeadChat controller={controller} /> : <div className="so-page-content" data-workspace-page><DemoNotice demo={demo} />{isChat && workspace.firstRun && <FirstRun firstRun={workspace.firstRun} />}{workspace.view ? <ViewHost view={workspace.view} csrf={workspace.csrf} taskChat={taskChat} taskDetails={false} /> : <GuardedHtml html={initial.pageHtml ?? ""} immutable />}</div>}
       </main>
     </div>
     {docked && <aside className="so-supporting-panel so-ask-panel" data-workspace-detail aria-label="Ask">

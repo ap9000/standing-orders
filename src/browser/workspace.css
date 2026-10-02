@@ -116,6 +116,8 @@ body:has(.so-workspace) { margin: 0; padding: 0; background: var(--so-ground); o
 .so-workspace-header h1, .so-header-title { font-size: 14px; font-weight: 600; line-height: 1.3; letter-spacing: -.01em; margin: 0; flex-shrink: 0; }
 .so-focus-label { font-size: 12px; color: var(--so-muted); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; min-width: 0; margin-left: 3px; }
 .so-workspace-notices { padding: 12px 28px 0; display: grid; gap: 8px; flex-shrink: 0; }
+.so-demo-notice-short { display: none; }
+.so-page-content > .so-demo-notice { margin-bottom: 16px; }
 .so-sign-in { background: var(--so-warning-soft); color: var(--so-ink); display: grid; grid-template-columns: 1fr auto; column-gap: 12px; align-items: center; }
 .so-sign-in p { margin: 0; grid-column: 1; }
 .so-sign-in-title { font-weight: 650; color: var(--so-warning); }
@@ -620,6 +622,10 @@ body:has(.so-workspace) { margin: 0; padding: 0; background: var(--so-ground); o
   .so-work-panel-header, .so-supporting-panel--detail .so-work-panel-header { min-height: 52px; padding-top: max(4px, env(safe-area-inset-top)); padding-bottom: 4px; }
   .so-workspace-notices { padding: var(--so-phone-row) var(--so-phone-gutter) 0; gap: 6px; }
   .so-workspace-notices .ui-alert { padding: 7px 10px; line-height: 1.35; }
+  .so-demo-notice { padding: 7px 10px; line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .so-demo-notice-full { display: none; }
+  .so-demo-notice-short { display: inline; }
+  .so-page-content > .so-demo-notice { margin-bottom: var(--so-phone-gap); }
   .so-work-detail-content, .so-page-content { padding: var(--so-phone-gap) var(--so-phone-gutter) 20px; }
   /* The approval's sticky act meets the screen's bottom edge, not the page's 20px end padding. */
   .so-page-content .approval-sheet[data-sticky] .approval-act, .so-work-detail-content .approval-sheet[data-sticky] .approval-act { bottom: -20px; }

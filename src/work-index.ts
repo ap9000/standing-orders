@@ -15,7 +15,7 @@ import { plainReasonOf, replacedWords, stageOfCode, taskStatusOf, workToneOf, ty
 import { isCheckLevel } from './check-levels.js';
 import { MARKER } from './worktree.js';
 import { withFollowUps } from './result-follow-ups.js';
-import { NEEDS, processNeedOf, type NeedKey, type WaitKey } from './needs-you.js';
+import { ASKS, NEED_ASK, NEEDS, processNeedOf, type Ask, type NeedKey, type WaitKey } from './needs-you.js';
 
 export type WorkIndexCounts = Record<WorkView, number>;
 export type WorkIndexItem = {
@@ -37,18 +37,24 @@ export type WorkIndexItem = {
   resultOutcome: string | null;
   publicationUrl: string | null;
   status: WorkStatus;
+  /** What a Needs you row asks of a person (needs-you.ts); null for every other row. */
+  ask: Ask | null;
   primaryAction: WorkAction | null;
   completion: { actor: string; at: string; digest: string } | null;
   evidence: 'recorded';
 };
 export type WorkIndexOptions = { view?: WorkView; limit?: number; cursor?: string | null; project?: string | null; state?: TaskState; leadId?: string };
-export type WorkIndexPage = { items: WorkIndexItem[]; totals: WorkIndexCounts; projects: WorkProjectCounts[]; nextCursor: string | null; limit: number; view: WorkView };
+/** How the list is grouped: the Needs you rows by their ask, then building, then the rest. */
+export type WorkIndexGroup = Ask | 'building' | 'rest';
+export type WorkIndexGroupCounts = Record<WorkIndexGroup, number>;
+export type WorkIndexPage = { items: WorkIndexItem[]; totals: WorkIndexCounts; groups: WorkIndexGroupCounts; projects: WorkProjectCounts[]; nextCursor: string | null; limit: number; view: WorkView };
 export type WorkProjectCounts = { repo: string | null; totals: WorkIndexCounts; queued: number; doneRecently: number };
 
 export const WORK_INDEX_PAGE_LIMIT = 40;
 export const WORK_INDEX_MAX_LIMIT = 100;
 
 const EMPTY: WorkIndexCounts = { all: 0, 'needs-you': 0, running: 0, completed: 0 };
+const NO_GROUPS: WorkIndexGroupCounts = { decide: 0, review: 0, unblock: 0, building: 0, rest: 0 };
 const FAMILY_PROBLEM = 'Task history is unavailable or incomplete. This task is shown separately.';
 const VIEWS: readonly WorkView[] = ['all', 'needs-you', 'running', 'completed'];
 type Row = Record<string, unknown>;
@@ -63,6 +69,25 @@ const s = (row: Row, key: string) => row[key] == null ? null : String(row[key]);
 const GATE_PAUSE_ON_TASK = pauseOnTaskProviders('p', 'c.ref_id');
 
 type StopFact = NonNullable<ReturnType<Store['stopQuiescenceFact']>>;
+/** Index codes that wait on a person, as their need (needs-you.ts); dispatch codes come from task-status's own table. */
+const INDEX_NEED: Readonly<Record<string, NeedKey>> = {
+  'earlier-active': 'earlier-version', 'process-needs-attention': 'confirm-stopped', 'invalid-scope': 'define-task', 'decision-queue': 'questions',
+};
+/** Every index code that can wait on a person. */
+const PERSON_CODES = ['history-problem', 'earlier-active', 'ready-to-check', 'waiting-decision', 'decision-queue', 'result-needs-attention',
+  'process-needs-attention', 'failed', 'vanished-run', 'stopping', 'stopped', 'held', 'waiting-incident', 'terminal-dependency', 'needs-project',
+  'needs-scope', 'invalid-scope', 'needs-agent-profile', 'needs-approval', 'missing-requirement', 'no-worker-registered', 'no-worker-online', 'signed-out'];
+/** A code's ask: a saved result is Review (unless its build may still run), otherwise its need's ask. */
+export function askOfCode(code: string, custody = false): Ask {
+  if (custody) return 'unblock';
+  if (code === 'ready-to-check' || code === 'result-needs-attention') return 'review';
+  return NEED_ASK[INDEX_NEED[code] ?? stageOfCode(code, { needsPerson: true }).need ?? 'other'];
+}
+const codesOf = (ask: Ask) => PERSON_CODES.filter(code => askOfCode(code) === ask).map(code => `'${code}'`).join(',');
+/** The ask as its place in the list (ASKS order), read by the same code the row's status reads. */
+const ASK_RANK = `CASE WHEN code IN (${codesOf('decide')}) THEN 0 WHEN code IN (${codesOf('review')}) AND NOT custody_unresolved THEN 1 ELSE 2 END`;
+/** Where a row sits in the list: Decide, Review, Unblock, then building, then the rest by recency. */
+const ORDER = `(CASE WHEN rank=0 THEN ask_rank WHEN rank=1 THEN 3 ELSE 4 END)`;
 /** A row whose build may still be running (the store's reading, custodyReadings): Waiting, not Needs you. */
 const CUSTODY_WAITS = `(custody_unresolved AND code IN ('process-needs-attention','result-needs-attention') AND ref_id IN (SELECT value FROM json_each($waitingCustody)))`;
 const PROJECTION = `WITH RECURSIVE admitted AS MATERIALIZED (
@@ -246,6 +271,7 @@ const PROJECTION = `WITH RECURSIVE admitted AS MATERIALIZED (
   SELECT c.*,code NOT IN ('cancelled','complete','running','updating','retry-scheduled','waiting-dependency','worker-at-capacity','planning-ready','scouting-ready','queued') AND NOT ${CUSTODY_WAITS} needs,
     CASE WHEN code='complete' THEN 3 WHEN code='cancelled' THEN 4 WHEN code='running' THEN 1
       WHEN ${CUSTODY_WAITS} OR code IN ('updating','retry-scheduled','waiting-dependency','worker-at-capacity','planning-ready','scouting-ready','queued') THEN 2 ELSE 0 END rank,
+    ${ASK_RANK} ask_rank,
     CASE WHEN code='complete' THEN completed.at ELSE family_updated END sort_at,
     completed.actor checked_actor,completed.at checked_at,completed.outcome checked_digest
   FROM classified c LEFT JOIN action_ledger completed ON completed.id=c.checked_id WHERE ($state IS NULL OR c.state=$state) AND ($leadId IS NULL OR EXISTS(SELECT 1 FROM team_task_owner own WHERE own.task_ref=c.root_ref AND own.lead=$leadId))
@@ -313,12 +339,18 @@ function counts(row: Row): WorkIndexCounts {
   return { all: n(row, 'all_count'), 'needs-you': n(row, 'needs_count'), running: n(row, 'running_count'), completed: n(row, 'completed_count') };
 }
 const TOTALS = `COUNT(*) all_count,COALESCE(SUM(needs),0) needs_count,COALESCE(SUM(family_running),0) running_count,COALESCE(SUM(code='complete'),0) completed_count`;
+const GROUP_TOTALS = `COALESCE(SUM(rank=0 AND ask_rank=0),0) decide_count,COALESCE(SUM(rank=0 AND ask_rank=1),0) review_count,COALESCE(SUM(rank=0 AND ask_rank=2),0) unblock_count,`
+  + `COALESCE(SUM(rank=1),0) building_count,COALESCE(SUM(rank>1),0) rest_count`;
+function groupCounts(row: Row): WorkIndexGroupCounts {
+  return { decide: n(row, 'decide_count'), review: n(row, 'review_count'), unblock: n(row, 'unblock_count'), building: n(row, 'building_count'), rest: n(row, 'rest_count') };
+}
 
 export class WorkIndexCursorError extends Error {
   constructor() { super('This work page cursor is invalid or belongs to a different view.'); this.name = 'WorkIndexCursorError'; }
 }
 
-type Cursor = { version: 1; scope: string; rank: number; at: string; root: number };
+/** `rank`: the row's place in the list (ORDER), not its status rank. */
+type Cursor = { version: 2; scope: string; rank: number; at: string; root: number };
 function cursorScope(access: WorkSummaryAccess, options: WorkIndexOptions, view: WorkView): string {
   return createHash('sha256').update(JSON.stringify({ principal: access.principal,
     repos: access.repos === null ? null : [...new Set(access.repos)].sort(),
@@ -330,7 +362,7 @@ function readCursor(value: string | null | undefined, scope: string): Cursor | n
   try {
     if (value.length > 1024 || !/^[\w-]+$/.test(value)) throw Error();
     const c = JSON.parse(Buffer.from(value, 'base64url').toString()) as Cursor;
-    if (c.version !== 1 || c.scope !== scope || !Number.isSafeInteger(c.rank) || c.rank < 0 || c.rank > 4 ||
+    if (c.version !== 2 || c.scope !== scope || !Number.isSafeInteger(c.rank) || c.rank < 0 || c.rank > 4 ||
       !Number.isSafeInteger(c.root) || c.root < 1 || typeof c.at !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(c.at)) throw Error();
     return c;
   } catch { throw new WorkIndexCursorError(); }
@@ -351,16 +383,16 @@ export function workIndexPage(store: Store, now: Date, access: WorkSummaryAccess
   const scope = cursorScope(access, options, view), cursor = readCursor(options.cursor, scope);
   const filter = view === 'needs-you' ? 'needs=1' : view === 'running' ? 'family_running=1' : view === 'completed' ? "code='complete'" : '1';
   const rows = store.handle.prepare(`${projection}, selected_page AS MATERIALIZED (
-    SELECT * FROM ranked WHERE ${filter} AND ($cursorRoot=0 OR rank>$cursorRank OR
-      (rank=$cursorRank AND (sort_at<$cursorAt OR (sort_at=$cursorAt AND root_ref<$cursorRoot))))
-    ORDER BY rank,sort_at DESC,root_ref DESC LIMIT $limit
-  ), page AS (SELECT p.*,COALESCE(p.result_id,(SELECT id FROM run WHERE task_ref=p.ref_id AND finished_at IS NOT NULL AND role IN ('builder','scout') ORDER BY id DESC LIMIT 1)) page_result_id FROM selected_page p), totals AS (SELECT ${TOTALS} FROM ranked), project_totals AS (
+    SELECT * FROM ranked WHERE ${filter} AND ($cursorRoot=0 OR
+      ${ORDER}>$cursorRank OR (${ORDER}=$cursorRank AND (sort_at<$cursorAt OR (sort_at=$cursorAt AND root_ref<$cursorRoot))))
+    ORDER BY ${ORDER},sort_at DESC,root_ref DESC LIMIT $limit
+  ), page AS (SELECT p.*,COALESCE(p.result_id,(SELECT id FROM run WHERE task_ref=p.ref_id AND finished_at IS NOT NULL AND role IN ('builder','scout') ORDER BY id DESC LIMIT 1)) page_result_id FROM selected_page p), totals AS (SELECT ${TOTALS},${GROUP_TOTALS} FROM ranked), project_totals AS (
     SELECT repo,${TOTALS},SUM(state='queued' AND family_running=0) queued,
       SUM(state='done' AND family_running=0 AND updated_at>=$recent) done_recently FROM ranked GROUP BY repo
   )
   SELECT 0 record_kind,totals.*,(SELECT json_group_array(json_object('repo',repo,'all_count',all_count,'needs_count',needs_count,
     'running_count',running_count,'completed_count',completed_count,'queued',queued,'done_recently',done_recently)) FROM project_totals) row_json FROM totals
-  UNION ALL SELECT 1,0,0,0,0,json_object('root_ref',root_ref,'root_id',root_id,'id',id,'root_title',root_title,'repo',repo,
+  UNION ALL SELECT 1,0,0,0,0,0,0,0,0,0,json_object('root_ref',root_ref,'root_id',root_id,'id',id,'root_title',root_title,'repo',repo,
     'state',state,'created_at',created_at,'family_updated',family_updated,'version_count',version_count,'earlier_active',earlier_active,
     'earlier_id',earlier_id,'broken',broken,'live_run',live_run,'result_id',page_result_id,'result_outcome',(SELECT outcome FROM run WHERE id=page_result_id),
     'publication_url',(SELECT pr_url FROM publication WHERE run=page_result_id),
@@ -370,7 +402,7 @@ export function workIndexPage(store: Store, now: Date, access: WorkSummaryAccess
     'check_follows',(SELECT json_group_array(q.outcome||' '||COALESCE((SELECT substr(f.outcome,instr(f.outcome,':')+1) FROM action_ledger f WHERE f.repo IS page.repo AND f.run_id=page_result_id
       AND f.action='checks finished' AND f.outcome LIKE q.id||':%' LIMIT 1),'open')) FROM (SELECT id,outcome FROM action_ledger WHERE repo IS page.repo AND run_id=page_result_id AND action='checks requested' ORDER BY id) q),
     'proof_verdict',(SELECT COALESCE(machine_verdict,verdict) FROM proof_verdict WHERE run=page_result_id),
-    'proof_failed_check',(SELECT verdict='refuted' AND reasons_json LIKE '%approved verification command exited%' FROM proof_verdict WHERE run=page_result_id),'code',code,'needs',needs,'family_running',family_running,'rank',rank,'sort_at',sort_at,
+    'proof_failed_check',(SELECT verdict='refuted' AND reasons_json LIKE '%approved verification command exited%' FROM proof_verdict WHERE run=page_result_id),'code',code,'needs',needs,'family_running',family_running,'rank',rank,'ask_rank',ask_rank,'list_order',${ORDER},'sort_at',sort_at,
     'checked_actor',checked_actor,'checked_at',checked_at,'checked_digest',checked_digest,'question_id',question_id,
     'dependency_id',dependency_id,'dependency_state',dependency_state,'custody_unresolved',custody_unresolved,'hold_kind',hold_kind,'hold_reason',substr(hold_reason,1,300),'stop_run',stop_run,'unfinished',unfinished,'signed_out',signed_out,
     'question_run',(SELECT run FROM decision WHERE id=page.question_id),'replaced_by',(SELECT successor FROM task_replacement WHERE task_ref=page.ref_id),
@@ -379,15 +411,16 @@ export function workIndexPage(store: Store, now: Date, access: WorkSummaryAccess
     .all({ ...parameters(now, access, options, custody), $cursorRoot: cursor?.root ?? 0, $cursorRank: cursor?.rank ?? 0, $cursorAt: cursor?.at ?? '', $limit: limit + 1, $recent: new Date(now.getTime()-86_400_000).toISOString() });
   const selected = rows.slice(1).map(row => JSON.parse(String(row['row_json'])) as Row);
   const page = selected.slice(0, limit), last = page.at(-1);
-  const nextCursor = selected.length > limit && last !== undefined ? Buffer.from(JSON.stringify({ version: 1, scope,
-    rank: n(last, 'rank'), at: s(last, 'sort_at'), root: n(last, 'root_ref') })).toString('base64url') : null;
+  const nextCursor = selected.length > limit && last !== undefined ? Buffer.from(JSON.stringify({ version: 2, scope,
+    rank: n(last, 'list_order'), at: s(last, 'sort_at'), root: n(last, 'root_ref') })).toString('base64url') : null;
   const projects = (JSON.parse(String(rows[0]?.['row_json'] ?? '[]')) as Row[]).map(row => ({ repo: s(row, 'repo'), totals: counts(row), queued: n(row, 'queued'), doneRecently: n(row, 'done_recently') }));
   // A row whose build Toolroll can't confirm stopped reads the store's own answer, as the task page does.
   const probe = (taskId: string) => {
     const ref = store.lookupRef(taskId);
     return ref === null ? null : custody.readings.get(ref.id) ?? null;
   };
-  return { items: page.map(row => itemOf(row, access.principal, probe)), projects, totals: rows[0] === undefined ? { ...EMPTY } : counts(rows[0]), nextCursor, limit, view };
+  return { items: page.map(row => itemOf(row, access.principal, probe)), projects, totals: rows[0] === undefined ? { ...EMPTY } : counts(rows[0]),
+    groups: rows[0] === undefined ? { ...NO_GROUPS } : groupCounts(rows[0]), nextCursor, limit, view };
 }
 
 export function workCountsByProject(store: Store, now: Date, access: WorkSummaryAccess): WorkProjectCounts[] {
@@ -430,11 +463,6 @@ function listChecksOf(own: 'passed' | 'failed' | null, level: string | null, fol
   if (own === null && read.status === 'not-run' && ran !== 'off' && read.running === null) return null;
   return { status: read.status, exitCode: null, head: null, level: read.level, running: read.running };
 }
-
-/** Index codes that wait on a person, as their need (needs-you.ts); dispatch codes come from task-status's own table. */
-const INDEX_NEED: Readonly<Record<string, NeedKey>> = {
-  'earlier-active': 'earlier-version', 'process-needs-attention': 'confirm-stopped', 'invalid-scope': 'define-task', 'decision-queue': 'questions',
-};
 
 function itemOf(row: Row, principal: WorkSummaryAccess['principal'], probe?: (taskId: string) => StopFact | null): WorkIndexItem {
   const code = String(row['code']), id = String(row['id']);
@@ -534,6 +562,7 @@ function itemOf(row: Row, principal: WorkSummaryAccess['principal'], probe?: (ta
     resultOutcome: s(row, 'result_outcome'), publicationUrl: s(row, 'publication_url'),
     status: { token: `assignment-${assignmentState}`, label, detail, tone: workToneOf(shared.headline),
       action: primaryAction === null ? null : { label: actionLabel, kind: actionCode === 'open-result' ? 'open-result' : 'open-task' }, views, rank: n(row, 'rank') },
+    ask: need ? ASKS[n(row, 'ask_rank')] ?? 'unblock' : null,
     primaryAction, completion: code === 'complete' ? { actor: String(row['checked_actor']), at: String(row['checked_at']), digest: String(row['checked_digest']) } : null,
     evidence: 'recorded' };
 }
