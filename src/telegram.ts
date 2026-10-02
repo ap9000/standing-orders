@@ -245,6 +245,32 @@ export function createTransport(token: string, timeoutMs = 30_000): TelegramTran
   };
 }
 
+/**
+ * Why this process can't reach Telegram the way the service does, or null.
+ * A coding agent's sandbox fences the network: Codex says so in its own
+ * variables, and Claude Code's sandbox routes traffic through a proxy on
+ * this computer, which curl uses and Node's fetch does not — so sends fail
+ * "fetch failed" while curl works (Oct 2). Builds, checks and agents also
+ * get a database of their own, so none of them can hold the live bridge;
+ * this keeps an agent-launched `watch` or `bridge` from holding it either.
+ */
+export function networkFence(env: Record<string, string | undefined>): string | null {
+  const set = (name: string): boolean => (env[name] ?? "") !== "";
+  if (set("CODEX_SANDBOX_NETWORK_DISABLED") || set("CODEX_SANDBOX")) return "a Codex sandbox";
+  const agent = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"].some(set);
+  const loopbackProxy = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"].some(name => {
+    const value = env[name] ?? "";
+    if (value === "") return false;
+    try { return /^(?:localhost|127\.\d+\.\d+\.\d+|\[::1\])$/i.test(new URL(value.includes("://") ? value : `http://${value}`).hostname); } catch { return false; }
+  });
+  return agent && loopbackProxy ? "a Claude Code sandbox" : null;
+}
+
+/** The plain line a fenced process says instead of polling or sending. */
+export function networkFenceLine(reason: string): string {
+  return `Telegram: not connecting from here — this process runs inside ${reason}, which blocks its network. Replies and notifications go out from the Toolroll service.`;
+}
+
 /** fetch's own message ("fetch failed") with the reason under it, e.g. "fetch failed (EMFILE: too many open files)". */
 export function transportError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);

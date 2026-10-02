@@ -1907,7 +1907,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       expect(store.listTelegramConversations(BOT).map(one => one.state)).toEqual(["done", "done", "done"]);
     });
 
-    test("a reply goes out from the service's bridge cycle while a project watch runs the bridge, never beside the long poll — and a reply that can't go out tells the person (c1, c3)", async () => {
+    test("a reply goes out in the bridge cycle like notifications, never beside the long poll — and a reply that can't go out tells the person (c1, c3)", async () => {
       // Oct 2: the lead's reply failed "fetch failed; delivery may be uncertain" for minutes while notifications from the
       // same process went out. The reply was sent beside the long poll on a connection of its own; notifications go out
       // between polls. The wire here refuses exactly that: any send while a getUpdates is in flight fails like fetch did.
@@ -1961,6 +1961,62 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       expect(script.texts().at(-1)).toBe("I couldn't answer that just now: Telegram didn't accept my reply. Ask again, or open the console.");
       store = openStore(file);
       expect(store.listTelegramConversations(BOT).at(-1)).toMatchObject({ state: "queued", outcome: "delivering" });
+    });
+
+    test("under up, the service's own follower sends the reply while project watches run; no project loop touches the bot (c1)", async () => {
+      // Oct 2: "[bentoportfolio] watch: bridge …" — the reply went out from a project loop's own follower. Now the service
+      // runs the one follower; every send happens while the bridge is held by the service, and no project loop logs a bridge line.
+      stub();
+      const second = join(dir, "second");
+      mkdirSync(second);
+      for (const one of [repo, second]) {
+        await exec("git", ["init", "-q", "-b", "main"], { cwd: one });
+        await exec("git", ["-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-q", "--allow-empty", "-m", "first"], { cwd: one });
+      }
+      await saveRepos(join(dir, "repos.json"), [repo, second]);
+      writeFileSync(join(dir, "up-login.txt"), `alex ${token}\n`, { mode: 0o600 });
+      store.close();
+      const observer = openStore(file);
+      const holders: string[] = [];
+      const traced: TelegramTransport = async (method, params, signal, upload) => {
+        if (method.startsWith("send")) holders.push(String(observer.handle.prepare("SELECT owner FROM bridge_lease WHERE bot_id = ?").get(BOT)?.["owner"]));
+        return script.transport(method, params, signal, upload);
+      };
+      answers.push({ text: "Toolroll 0.9.9: lighter tests, shared dependencies, a clear Needs you." });
+      script.updates.push([textUpdate(2, "what's the latest update of toolroll include")]);
+      const lines: string[] = [];
+      const port = 43000 + (process.pid % 2000);
+      let ended = false;
+      const running = runOperate("up", ["--repo", repo, "--repo", second, "--port", String(port), "--for", "60000"], line => lines.push(line),
+        { databaseFile: file, telegramTransport: traced, mateSeams: { subscriptionRunner: runner }, upSeams: { terminal: false, env: {}, openBrowser: () => {} } }).finally(() => { ended = true; });
+      try {
+        const deadline = Date.now() + 30_000;
+        while (!ended && !observer.listTelegramConversations(BOT).some(one => one.state === "done" || one.state === "failed") && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+      } finally {
+        process.emit("SIGINT");
+        expect(await running, lines.join("\n")).toBe(EXIT.ok);
+        observer.close();
+      }
+      expect(script.texts(), lines.join("\n")).toEqual(["Toolroll 0.9.9: lighter tests, shared dependencies, a clear Needs you."]);
+      expect(holders).toEqual([expect.stringMatching(/^service-/)]);
+      expect(lines.join("\n")).toContain("telegram: sent 0, answered 0, paired 0, chat replied 1");
+      expect(lines.filter(line => line.includes("watch: bridge"))).toEqual([]);
+      store = openStore(file);
+      expect(store.listTelegramConversations(BOT)).toEqual([expect.objectContaining({ state: "done", outcome: "answered", replyMessageId: "100" })]);
+    });
+
+    test("a process inside a coding agent's sandbox never takes the bridge: it says why and sends nothing (c1)", async () => {
+      stub();
+      await saveRepos(join(dir, "repos.json"), [repo]);
+      store.close();
+      script.updates.push([textUpdate(2, "hello")]);
+      const lines: string[] = [];
+      const fenced = { CODEX_SANDBOX: "seatbelt" };
+      expect(await runOperate("bridge", ["telegram"], line => lines.push(line), { databaseFile: file, now, telegramTransport: script.transport, telegramEnv: fenced, mateSeams: { subscriptionRunner: runner } })).toBe(EXIT.refused);
+      expect(lines.join("\n")).toContain("Telegram: not connecting from here — this process runs inside a Codex sandbox, which blocks its network. Replies and notifications go out from the Toolroll service.");
+      expect(script.calls).toEqual([]);
+      store = openStore(file);
+      expect(store.handle.prepare("SELECT COUNT(*) AS n FROM bridge_lease").get()?.["n"]).toBe(0);
     });
   });
 });
