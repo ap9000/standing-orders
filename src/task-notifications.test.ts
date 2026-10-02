@@ -688,9 +688,9 @@ describe("lifecycle facts through the Telegram transport", () => {
     const first = await pass(script);
     expect(first).toMatchObject({ ok: true, report: { sent: 3, problems: ["notification 7: Notification project is not currently authorized and enrolled"] } });
     expect(script.texts()).toEqual([
-      "alpha / old-1 · old-1 parked a decision\n\nfixture",
-      "alpha / alpha-1 · New task: Guard the payout path\n\nFiled and waiting in the queue.",
-      "beta / beta-1 · New task: Rotate the API keys\n\nFiled and waiting in the queue.",
+      "alpha · Old work parked a decision\n\nfixture",
+      "alpha · New task: Guard the payout path\n\nFiled and waiting in the queue.",
+      "beta · New task: Rotate the API keys\n\nFiled and waiting in the queue.",
     ]);
     // Exactly one url button per lifecycle fact, minted under the trusted origin; the decision keeps its own tap keyboard.
     expect(script.sends().slice(1).map(send => script.buttons(send).map(button => [button.text, button.url]))).toEqual([
@@ -728,7 +728,7 @@ describe("lifecycle facts through the Telegram transport", () => {
     now = later(35_000);
     expect(await pass(script)).toMatchObject({ ok: true, report: { sent: 2 } });
     expect(store.pendingForAttention().filter(isLifecycleNotification)).toEqual([]);
-    expect(script.texts().at(-1)).toContain(`alpha · #${run}`);
+    expect(script.texts().at(-1)!.split("\n").at(-1)).toBe("alpha");
     expect(script.texts().at(-1)).toContain("⏳ Building");
     const edits = script.calls.filter(call => call.method === "editMessageText");
     expect(edits).toHaveLength(1);
@@ -764,7 +764,7 @@ describe("lifecycle facts through the Telegram transport", () => {
     store.hold(a1, "waiting on the vendor sandbox", null, now);
     const script = scriptedTransport();
     expect(await pass(script)).toMatchObject({ ok: true, report: { sent: 2, problems: [] } });
-    expect(script.texts().at(-1)).toBe("alpha / alpha-1 · Paused\n\nThe next attempt waits until the hold is released. An attempt already running is not stopped by this.");
+    expect(script.texts().at(-1)).toBe("alpha / Guard the payout path · Paused\n\nThe next attempt waits until the hold is released. An attempt already running is not stopped by this.");
     expect(script.buttons(script.sends().at(-1)!)).toEqual([{ text: "Open task", url: `${ORIGIN}/t/alpha-1` }]);
   });
 
@@ -786,9 +786,10 @@ describe("lifecycle facts through the Telegram transport", () => {
     expect(text).not.toContain("ghp_");
     expect(text).not.toContain(botShape);
     expect(text).not.toContain("123456:");
-    expect(text.match(/\[sensitive text hidden\]/g)).toHaveLength(4);
-    expect(text).toContain("alpha / short-secret");
-    expect(text).toContain("beta / long-secret");
+    expect(text.match(/\[sensitive text hidden\]/g)!.length).toBeGreaterThanOrEqual(4);
+    // A chat names a task by its short title, never its id.
+    expect(text).not.toMatch(/short-secret|long-secret|bot-secret/);
+    expect(text).toContain("alpha · New task:");
     if (mode === "single") {
       expect(script.buttons(script.sends()[0]!)).toEqual([{ text: "Open task", url: `${ORIGIN}/chat?task=short-secret` }]);
     }
@@ -812,16 +813,16 @@ describe("lifecycle facts through the Telegram transport", () => {
     expect(await pass(script)).toMatchObject({ ok: true, report: { sent: 3, digests: 1 } });
     expect(script.texts()).toHaveLength(2);
     expect(script.texts()[0]).toMatch(/^digest — 2 routine fact\(s\)/);
-    expect(script.texts()[0]).toContain("• alpha / alpha-1 · New task: Guard the payout path\n    Filed and waiting in the queue.");
-    expect(script.texts()[0]).toContain(`• alpha / alpha-1 · Attempt #${run} started\n    Building on claude.`);
+    expect(script.texts()[0]).toContain("• alpha · New task: Guard the payout path\n    Filed and waiting in the queue.");
+    expect(script.texts()[0]).toContain(`• alpha / Guard the payout path · Attempt #${run} started\n    Building on claude.`);
     expect(script.texts()[0]).not.toContain("beta-1");
-    expect(script.texts()[1]).toBe("alpha / alpha-1 · alpha-1 stalled after 3 straight failures\n\nfixture");
+    expect(script.texts()[1]).toBe("alpha · Guard the payout path stalled after 3 straight failures\n\nfixture");
     expect(script.sends().every(send => send.params["reply_markup"] === undefined)).toBe(true);
     // The window (anchored by the flush above) elapses: the remaining routine fact goes as one digest, plain text.
     now = later(63_000);
     expect(await pass(script)).toMatchObject({ ok: true, report: { sent: 1, digests: 1 } });
     expect(script.texts().at(-1)).toContain("digest — 1 routine fact(s)");
-    expect(script.texts().at(-1)).toContain("beta / beta-1 · New task: Rotate the API keys");
+    expect(script.texts().at(-1)).toContain("beta · New task: Rotate the API keys");
   });
 
   test("revoked project and pairing access retain the facts with their reason; a re-pairing carries what no phone ever received", async () => {
@@ -856,10 +857,11 @@ describe("lifecycle facts through the Telegram transport", () => {
     // Every fact reaches the new destination once, in id order — including the one the old chat already had.
     expect(await pass(script)).toMatchObject({ ok: true, report: { sent: 4, problems: [] } });
     expect(script.texts().slice(-3, -1)).toEqual([
-      "alpha / alpha-1 · New task: Guard the payout path\n\nFiled and waiting in the queue.",
-      "beta / beta-1 · New task: Rotate the API keys\n\nFiled and waiting in the queue.",
+      "alpha · New task: Guard the payout path\n\nFiled and waiting in the queue.",
+      "beta · New task: Rotate the API keys\n\nFiled and waiting in the queue.",
     ]);
-    expect(script.texts().at(-1)).toContain(`alpha · #${run}`);
+    // The card ends with its project; no task or attempt id.
+    expect(script.texts().at(-1)!.split("\n").at(-1)).toBe("alpha");
     expect(script.texts().at(-1)).toContain("○ Checks · Didn't run");
     expect(script.calls.filter(call => call.method === "editMessageText")).toHaveLength(1);
     expect(script.buttons(script.sends().at(-1)!)).toEqual([{ text: "Open result", url: `${ORIGIN}/chat?task=alpha-1&result=${run}` }]);

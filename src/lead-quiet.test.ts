@@ -214,7 +214,7 @@ describe("pings follow responsibility", () => {
     expect(store.pingAllowed(fact, "alex")).toBe(true);
   });
 
-  test("c2: a cancellation with a successor reads \"Replaced by <id>\" with a link on the card, the task status and in chat, never \"Cancelled\"", async () => {
+  test("c2: a cancellation with a successor reads \"Replaced by <id>\" with a link on the task status, \"Replaced by a newer task\" on the chat card, never \"Cancelled\"; chat is never pinged", async () => {
     const script = scriptedTelegram();
     store.setNotificationPreference("alex", { mode: "all" }, "alex", now);
     for (const [id, title] of [["release-096", "Release 0.9.6"], ["release-096b", "Release 0.9.6 again"]] as const) {
@@ -228,18 +228,14 @@ describe("pings follow responsibility", () => {
     expect((await cli(["task", "state", "release-096", "cancelled", "--replaced-by", "release-096b", "--json"])).body).toMatchObject({ ok: true, replacedBy: "release-096b" });
     expect(store.replacementOf("release-096")).toBe("release-096b");
 
-    // Chat: the message says Replaced by, and its one button opens the successor.
+    // Chat: a replaced task never pings (chat voice, 2026-10-02); the console keeps the fact.
     await pass(script);
-    const sent = script.shown(ALEX_CHAT);
-    expect(sent).toHaveLength(1);
-    expect(String(sent[0]!.params["text"])).toContain("Replaced by release-096b");
-    expect(String(sent[0]!.params["text"])).not.toMatch(/cancel/i);
-    expect(script.buttons(sent[0]!)[0]?.url).toBe(`https://console.example${chatControlHref("task", "release-096b")}`);
-    // The quiet card (one message per task) says the same, with the same link.
+    expect(script.shown(ALEX_CHAT)).toEqual([]);
+    // The quiet card (one message per task) says a newer task took over and links to it, without either id.
     const card = quietCardView(store, [ref("release-096")], now)!;
-    expect(card.text).toContain("Replaced by release-096b");
-    expect(card.text).not.toMatch(/cancel/i);
-    expect(card.link).toEqual({ label: "Open release-096b", path: chatControlHref("task", "release-096b") });
+    expect(card.text).toContain("Replaced by a newer task");
+    expect(card.text).not.toMatch(/cancel|release-096/i);
+    expect(card.link).toEqual({ label: "Open the new task", path: chatControlHref("task", "release-096b") });
 
     // The task page and the Tasks list read the same status, with the successor one tap away.
     expect(diagnoseTaskDispatch(store, "release-096", now)).toMatchObject({ code: "cancelled", summary: "Replaced by release-096b" });

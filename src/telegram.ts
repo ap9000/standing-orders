@@ -30,7 +30,8 @@ import { join } from "node:path";
 import { validateNote } from "./decision.js";
 import { isLifecycleNotification, isTelegramProgressNotification, TELEGRAM_HOLD_REASONS, type Store, type Decision, type Notification, type TelegramBinding, type TelegramDelivery } from "./store.js";
 import { telegramProgressCard, type ProgressEntity } from "./telegram-progress.js";
-import { enqueueEveningDigests, isTaskFact, needsPerson, quietCardView, readyPingView } from "./chat-quiet.js";
+import { enqueueEveningDigests, finishedView, isTaskFact, joinsBatch, needsPerson, quietCardView, type QuietView } from "./chat-quiet.js";
+import { BATCH_MS, chatText, chatTitle, factLinkLabel, mentions, nameTelegramBot } from "./chat-voice.js";
 import { applyTeamInbound, deliverTeamChats, teamCommand } from "./telegram-team.js";
 import { applyFlowReply, applyFlowTap, FLOW_DECIDE_KEY, flowButtons, flowDecisionAt } from "./telegram-flow.js";
 import { connectChannel, FLOW_WORDS, takeChannelMessage, watchedChannel } from "./chat-inbox.js";
@@ -552,6 +553,8 @@ export async function followBridge(
       if (!commandsListed && options.conversation !== undefined) {
         commandsListed = true;
         try { await transport("setMyCommands", { commands: TELEGRAM_COMMANDS }); } catch { /* typed commands still work */ }
+        // After an upgrade, a bot still called StandingOrders becomes Toolroll, once per start; any other name is kept.
+        await nameTelegramBot(transport, "upgrade");
       }
       const startedAt = Date.now();
       const report: BridgeReport = { sent: 0, answered: 0, paired: 0, ignored: 0, backlog: false, problems: [] };
@@ -634,16 +637,19 @@ async function processConversations(
 type SendResult = { ok: true; messageId: string | null } | { ok: false; error: string; retryAfter?: number };
 type OutboundSender = (text: string, keyboard?: InlineButton[][], messageRows?: readonly TelegramDelivery[], entities?: ProgressEntity[], silent?: boolean) => Promise<SendResult>;
 
-/** The one button a plain fact may carry: its machine-minted console path
- * under the trusted origin read now — the same road `/task` uses. The label
- * names where the path goes; nothing in it comes from the fact's text. */
-function factLinkLabel(path: string): string {
-  if (/^\/review\?result=[^&]+&run=\d+&tab=checks$/.test(path)) return "Inspect result";
-  if (/^\/t\/[^?#]+#merge$/.test(path)) return "Merge";
-  if (/^\/chat\?task=[^&]+&result=/.test(path)) return "Open result";
-  if (/^\/(?:chat\?task=|t\/)/.test(path)) return "Open task";
-  if (/^\/d\//.test(path)) return "Open decision";
-  return "Open console";
+/** A fact's own next-action button row under the trusted origin read now; none without one. */
+function factButton(phoneOrigin: (() => string | null) | undefined, link: string): InlineButton[] | null {
+  try { return phoneLinkButton(phoneOrigin?.() ?? null, { label: factLinkLabel(link), path: link }); }
+  catch { return null; }
+}
+
+/** A view's buttons on one row: its link, then any others ([Merge] [Look first]); none without a trusted origin. */
+function viewKeyboard(phoneOrigin: (() => string | null) | undefined, view: QuietView): InlineButton[][] {
+  try {
+    const origin = phoneOrigin?.() ?? null;
+    const row = [view.link, ...(view.also ?? [])].flatMap(link => phoneLinkButton(origin, link) ?? []);
+    return row.length === 0 ? [] : [row];
+  } catch { return []; }
 }
 
 /** Team-conversation traffic to the chats that follow one — after the outbox, under the same delivery switch, never a problem to raise when nothing follows anything. */
@@ -800,7 +806,7 @@ async function deliverOutboxTo(
       if (problem !== null) return { ok: false, error: problem };
       const messageId = store.telegramProgressMessage(binding, progressRun);
       if (messageId === null && onlyExisting) return null;
-      const card = telegramProgressCard(store, store.getRun(progressRun.id)!, row.taskId, row.project, clock(), evidenceRoot);
+      const card = telegramProgressCard(store, store.getRun(progressRun.id)!, row.taskId, row.project, clock(), evidenceRoot, binding.approver);
       let button: InlineButton[] | null = null;
       try { button = phoneLinkButton(phoneOrigin?.() ?? null, card.link); } catch { /* No trusted origin. */ }
       const keyboard = button === null ? [] : [button];
@@ -822,7 +828,7 @@ async function deliverOutboxTo(
       const problem = (await readAccess()) ?? fence();
       if (problem !== null) return { ok: false, error: problem };
       const card = store.chatCardFor(fact.destination, fact.taskRef, store.getTask(fact.taskId)?.createdAt ?? fact.createdAt, clock());
-      const view = quietCardView(store, card.tasks, clock(), evidenceRoot);
+      const view = quietCardView(store, card.tasks, clock(), evidenceRoot, binding.approver);
       if (view === null) return { ok: true, messageId: card.message };
       let button: InlineButton[] | null = null;
       try { button = phoneLinkButton(phoneOrigin?.() ?? null, view.link); } catch { /* No trusted origin. */ }
@@ -855,11 +861,46 @@ async function deliverOutboxTo(
       if (!card.ok) return card;
       if (!needsPerson(fact)) return { ok: true, receipt: receiptFor(botId, binding.chatId, card.messageId) };
       const readyRun = fact.kind === "run-finished" ? store.telegramProgressRun(fact) : null;
-      if (readyRun !== null) {
-        const ping = readyPingView(store, store.getRun(readyRun.id)!, fact.taskId, fact.project, clock(), evidenceRoot);
-        let button: InlineButton[] | null = null;
-        try { button = phoneLinkButton(phoneOrigin?.() ?? null, ping.link); } catch { /* No trusted origin. */ }
-        const sent = await sender(ping.text, button === null ? undefined : [button], [fact], ping.entities);
+      if (readyRun !== null || (fact.kind !== "run-finished" && joinsBatch(fact))) {
+        // Any update for this person joins their open batch: one message, edited in place while it grows.
+        const batch = store.chatBatchFor(fact.destination, fact.taskRef, readyRun?.id ?? store.telegramProgressRun(fact)?.id ?? null, clock(), BATCH_MS,
+          readyRun !== null ? null : fact.id);
+        // A lone update that is not finished work goes out exactly as it always has; a later one edits it in place.
+        const lone = batch.items.length === 1 && batch.items[0]!.notification !== null;
+        if (batch.message === null && lone) {
+          const sent = await deliverOne(store, botId, binding, sender, fact, clock, phoneOrigin, evidenceRoot, projects);
+          const placed = store.telegramMessageOf(fact.id, fact.destination);
+          if (placed !== null) store.setChatBatchMessage(batch.id, placed, "");
+          return sent;
+        }
+        const view = finishedView(store, batch, clock(), evidenceRoot, binding.approver);
+        // Nothing in the batch reads as a line: the update that needs this person still reaches them on its own.
+        if (view === null) return deliverOne(store, botId, binding, sender, fact, clock, phoneOrigin, evidenceRoot, projects);
+        // While a lone update is still the only item, its edit keeps that update's own action button.
+        const own = lone && fact.link !== null ? factButton(phoneOrigin, fact.link) : null;
+        const keyboard = own !== null ? [own] : viewKeyboard(phoneOrigin, view);
+        const shown = createHash("sha256").update(JSON.stringify([view.text, keyboard])).digest("hex");
+        if (batch.message !== null) {
+          if (batch.digest === shown) {
+            store.recordTelegramMessage(fact, binding, batch.message, clock());
+            return { ok: true, receipt: receiptFor(botId, binding.chatId, batch.message) };
+          }
+          const problem = (await readAccess()) ?? fence();
+          if (problem !== null) return { ok: false, error: problem };
+          const edited = await editProgress(transport, binding.chatId, batch.message, view.text, keyboard);
+          if (edited.ok) {
+            store.setChatBatchMessage(batch.id, batch.message, shown);
+            store.recordTelegramMessage(fact, binding, batch.message, clock());
+            const after = (await readAccess()) ?? fence();
+            return after === null ? { ok: true, receipt: receiptFor(botId, binding.chatId, batch.message) } : { ok: false, error: after };
+          }
+          if (edited.retryAfter !== undefined) store.deferTelegram(botId, new Date(clock().getTime() + edited.retryAfter * 1000).toISOString());
+          // Only Telegram's definitive missing/uneditable answer permits a new message.
+          if (!edited.replace) return edited;
+        }
+        const sent = await sender(view.text, keyboard.length === 0 ? undefined : keyboard, [fact]);
+        const placed = sent.ok ? sent.messageId : store.telegramMessageOf(fact.id, fact.destination);
+        if (placed !== null) store.setChatBatchMessage(batch.id, placed, shown);
         return sent.ok ? { ok: true, receipt: receiptFor(botId, binding.chatId, sent.messageId) } : sent;
       }
       return fact.kind === "acceptance-evidence" ? imageSender(fact) : deliverOne(store, botId, binding, sender, fact, clock, phoneOrigin, evidenceRoot, projects);
@@ -873,7 +914,7 @@ async function deliverOutboxTo(
       const updated = progress ? await updateProgress(false) : null;
       outcome = updated !== null ? updated.ok ? { ok: true as const, receipt: receiptFor(botId, binding.chatId, updated.messageId) } : updated
         : rows[0]!.kind === "acceptance-evidence" ? await imageSender(rows[0]!) : batched
-        ? await deliverDigest(botId, binding, sender, rows, digest.lastSentAt, clock)
+        ? await deliverDigest(botId, binding, sender, rows, digest.lastSentAt, clock, taskId => chatTitle(store, taskId))
         : await deliverOne(store, botId, binding, sender, rows[0]!, clock, phoneOrigin, evidenceRoot, projects);
     }
     const finalProblem = outcome.ok ? (await readAccess()) ?? fence() : null;
@@ -904,31 +945,34 @@ function isUrgent(notification: Notification): boolean {
 /** The digest text: a header with the count and the window, then one
  * fact per entry — its subject, then its body's first line, indented.
  * Plain text, no buttons: nothing in a digest is tappable. */
-export function digestText(rows: readonly Notification[], since: string | null, now: Date): string {
+export function digestText(rows: readonly Notification[], since: string | null, now: Date, titleOf?: (taskId: string) => string): string {
   const window = since === null ? "" : ` since ${since.slice(0, 16).replace("T", " ")}`;
   const lines = [`digest — ${rows.length} routine fact(s)${window} (as of ${now.toISOString().slice(0, 16).replace("T", " ")})`, ""];
   for (const row of rows) {
-    lines.push(digestEntry(row));
+    lines.push(digestEntry(row, titleOf));
   }
   return lines.join("\n");
 }
 
-function digestEntry(row: Notification): string {
+function digestEntry(row: Notification, titleOf?: (taskId: string) => string): string {
+  const title = row.taskId === null ? undefined : titleOf?.(row.taskId);
+  const task = row.taskId === null ? [] : [{ id: row.taskId, ...(title === undefined ? {} : { title }) }];
+  const subject = chatText(row.subject, task);
   const first = row.body.split("\n").map(one => one.trim()).find(one => one !== "");
   const body = first === undefined ? "" : `\n    ${first.length > 200 ? `${first.slice(0, 200).replace(/[\uD800-\uDBFF]$/, "")}…` : first}`;
-  return `• ${notificationIdentity(row)}${row.subject}${body}`;
+  return `• ${notificationIdentity(row, title !== undefined && mentions(subject, title) ? undefined : title)}${subject}${chatText(body, task)}`;
 }
 
 async function deliverDigest(
   botId: string, binding: TelegramBinding, sender: OutboundSender,
-  rows: readonly TelegramDelivery[], since: string | null, clock: () => Date,
+  rows: readonly TelegramDelivery[], since: string | null, clock: () => Date, titleOf?: (taskId: string) => string,
 ): Promise<{ ok: true; receipt: string | null } | { ok: false; error: string }> {
-  const text = digestText(rows, since, clock());
+  const text = digestText(rows, since, clock(), titleOf);
   // Track the exact rows represented by each text part. A split row may bind
   // several messages; a digest message may bind several rows.
   let offset = text.indexOf("\n\n") + 2;
   const spans = rows.map(row => {
-    const length = digestEntry(row).length;
+    const length = digestEntry(row, titleOf).length;
     const span = { row, start: offset, end: offset + length };
     offset += length + 1;
     return span;
@@ -980,12 +1024,13 @@ async function deliverOne(
       else if (!packet.isCurrent) { body = "A newer result is current. Request its evidence before accepting."; current = false; }
       else body = `${packet.text}\n\n${notification.body}`;
     }
-    const parts = split(`${notificationIdentity(notification)}${alreadyAccepted ? "Acceptance recorded" : notification.subject}\n\n${body}`);
-    let button: InlineButton[] | null = null;
-    if (notification.link !== null && !alreadyAccepted && current) {
-      try { button = phoneLinkButton(phoneOrigin?.() ?? null, { label: factLinkLabel(notification.link), path: notification.link }); }
-      catch { button = null; }
-    }
+    // A short title, never the task's id or a "— revision" suffix (chat-voice.ts).
+    const title = notification.taskId === null ? undefined : chatTitle(store, notification.taskId);
+    const task = notification.taskId === null ? [] : [{ id: notification.taskId, ...(title === undefined ? {} : { title }) }];
+    const words = chatText(`${alreadyAccepted ? "Acceptance recorded" : notification.subject}${body === "" ? "" : `\n\n${body}`}`, task);
+    // The task's title once: in front, unless the words already name it.
+    const parts = split(`${notificationIdentity(notification, title !== undefined && mentions(words, title) ? undefined : title)}${words}`);
+    const button = notification.link !== null && !alreadyAccepted && current ? factButton(phoneOrigin, notification.link) : null;
     // A flow card waiting on a decision (v86): Approve, Edit, Send back on the last part, for this visit only.
     const visit = FLOW_DECIDE_KEY.exec(notification.dedupeKey);
     const waiting = visit === null ? null : flowDecisionAt(store, Number(visit[1]), Number(visit[2]));
@@ -1487,6 +1532,8 @@ function applyMessage(context: Context, update: Update, effects: Effect[]): void
       text: `paired: this chat now answers as ${approver}\n\nSend /status to check recent work, /task <id> for one task, or /help for your options.`,
       link_preview_options: { is_disabled: true },
     });
+    // The bot is Toolroll in every chat list from here on (best effort; pairing never waits on it).
+    await nameTelegramBot(transport, "pairing");
   });
 }
 

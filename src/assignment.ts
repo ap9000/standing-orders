@@ -412,7 +412,9 @@ function acknowledgeCurrent(store: Store, current: AssignmentSnapshot, receiptDi
     store.recordAction({ at: now.toISOString(), actor, repo: current.repo,
       taskId: current.rootId, runId: receipt.runId, action: CHECK_ACTION, outcome: receiptDigest, source: "work" });
     const ref = store.lookupRef(current.rootId);
-    if (ref !== null) store.noteTaskAct(ref.id, "completed", now);
+    // Whose act this is, even outside a command that named its person: the operator who marked it.
+    const by = currentActor() ?? (actor.startsWith("operator:") ? { account: actor.slice("operator:".length), lead: false } : null);
+    if (ref !== null) store.noteTaskAct(ref.id, "completed", now, undefined, by);
     store.bumpWake();
   }
   const assignment = assignmentOf(store, current.rootId, now, access, root)!;

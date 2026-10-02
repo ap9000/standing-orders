@@ -391,6 +391,7 @@ export async function deliverDiscordPart(
             }))
           : []),
         ...link(options.origin(), content.link),
+        ...(content.also ?? []).flatMap(one => link(options.origin(), one)),
       ];
     let target = content.edit ?? row.message;
     if (target && content.image && row.uploaded) {
