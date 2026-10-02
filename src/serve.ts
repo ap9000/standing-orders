@@ -61,7 +61,7 @@ import { handleTeamHttp } from './team-http.js';
 import { teamWorkspaceHtml } from './team-ui.js';
 import { createTeamRuntime } from './team-runtime.js';
 import { prepareWorkspaceRevision, WorkspaceValidatorCache } from "./workspace-revision.js";
-import { workIndexPage, workCountsByProject, WorkIndexCursorError, WORK_INDEX_MAX_LIMIT, type WorkIndexPage, type WorkIndexItem } from "./work-index.js";
+import { workIndexPage, workCountsByProject, WorkIndexCursorError, WORK_INDEX_MAX_LIMIT, type WorkIndexPage, type WorkIndexItem, type WorkIndexGroup } from "./work-index.js";
 import { openWorkDecisionOf } from "./work-summary.js";
 import { assignmentOf, checkAssignmentAsOperator, type AssignmentSnapshot } from './assignment.js';
 import type { DemoExchange, DemoLead } from "./demo.js";
@@ -75,7 +75,7 @@ import { leadBriefHtml, LEAD_CONTEXT_CSS } from './lead-context.js';
 import { assignmentCatchUp } from './assignment-brief.js';
 import { assignmentActionHref, assignmentCardOf, assignmentStatusOf, assignmentSummaryHtml, assignmentWithEvidence, ASSIGNMENT_CSS } from './assignment-ui.js';
 import { assignmentStageOf, pullRequestFactOf, stageOfCode, stageOfDispatch, statusDetailsHtml, statusIconSvg, statusWhyHtml, taskStatusOf, TASK_STATUS_CSS, type PullRequestFact, type TaskStatus } from './task-status.js';
-import { NEEDS } from './needs-you.js';
+import { ASKS, ASK_LABEL, NEEDS, type Ask } from './needs-you.js';
 import { assignmentPresentationOf, historicalAssessmentReason, shortenedMaterialReason } from './assignment-presentation.js';
 import type { TaskFamily } from "./store.js";
 import { ledgerBody } from "./ledger-view.js";
@@ -5075,7 +5075,6 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       const pageHtml = s.body;
       const extras = s.workspace ?? {};
       const notices = [...(extras.notices ?? [])];
-      if (s.chrome.demo) notices.unshift(DEMO_BANNER);
       if (s.chrome.modeBanner) notices.push(s.chrome.modeBanner.words);
       if (s.chrome.updateWaiting) notices.push(s.chrome.updateWaiting.words);
       let crew: Pick<BrowserWorkspace, 'crew' | 'crewTruncated'> = { crew: [], crewTruncated: false };
@@ -5085,9 +5084,11 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
           : browserCrewOf(store, clock(), { principal: 'operator', repos: managedRepos(), includeUnplaced: false }, { evidenceRoot, project });
       } catch { notices.push('Crew updates are unavailable. Open Tasks to inspect saved work.'); }
       // "Wake me only for these": the navigation carries the count of tasks
-      // waiting on a person across everything this person may see.
+      // waiting on a person behind its Tasks link — the open project's, or
+      // everything this person may see — so it matches that page's Needs you tab.
       let needsYou = 0;
-      try { needsYou = (requestFacts.workCounts ?? workCountsByProject(store, clock(), workAccess())).reduce((sum, one) => sum + one.totals['needs-you'], 0); }
+      try { needsYou = (requestFacts.workCounts ?? workCountsByProject(store, clock(), workAccess()))
+        .filter(one => s.chrome?.project == null || one.repo === s.chrome.project).reduce((sum, one) => sum + one.totals['needs-you'], 0); }
       catch { needsYou = 0; }
       // The person's own project and task conversations (v77), for the
       // sidebar's chat list; a thread whose project is out of view is left out.
@@ -5118,6 +5119,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
         projects: browserProjectsOf(s.chrome.projects ?? []), ...crew,
         conversation, ...(extras.team ? { team: extras.team } : {}), focus: extras.focus ?? null, result: extras.result ?? null,
         catchUpHtml: extras.catchUpHtml ?? '', controlsHtml: extras.controlsHtml ?? '', notices, view: extras.view ?? null,
+        ...(s.chrome.demo ? { demo: { text: DEMO_BANNER, short: DEMO_BANNER_SHORT } } : {}),
         pageHtml: extras.pageHtml === undefined ? (conversation === null ? pageHtml : null) : extras.pageHtml,
         navigation: [...browserNavigationOf(currentPath, s.chrome.project, needsYou), { label: 'Workspace tools', href: '/menu', active: path.pathname === '/menu' }],
         chats,
@@ -12314,6 +12316,8 @@ function agentsStripHtml(view: RouteView | null, taskId: string): string {
 
 /** The demo's one-line promise, on every page. */
 const DEMO_BANNER = `Demo: a scripted lead and sample projects. Nothing calls a model, reaches outside or spends. For your own project, run ${START_COMMAND} in its folder.`;
+/** The demo notice on a phone: one line. */
+const DEMO_BANNER_SHORT = "Demo: sample projects. Nothing calls a model or spends.";
 
 /** Every character that could open a tag or an attribute, dead at the sink. */
 function escape(text: string): string {
@@ -15099,6 +15103,7 @@ const INBOX_TABS_CSS = '.inbox-tabs{display:inline-flex;gap:2px;max-width:100%;o
   '.inbox-tabs a[aria-current="page"]{background:var(--so-paper);color:var(--so-ink);box-shadow:var(--so-pill-shadow)}' +
   '.inbox-tab-count{min-width:18px;padding:0 5px;border-radius:9999px;font:500 11px/18px var(--so-mono,ui-monospace,monospace);font-variant-numeric:tabular-nums;text-align:center}' +
   '.inbox-tab-count--needs{background:var(--so-signal);color:var(--so-on-signal)}' +
+  '.inbox-ask{margin:18px 0 0}.inbox-ask>h2{display:flex;align-items:baseline;gap:8px;margin:0 0 4px;font-size:15px;font-weight:600}.inbox-ask>h2 .count{font:500 12px var(--so-mono,ui-monospace,monospace);font-variant-numeric:tabular-nums;color:var(--so-muted)}.inbox-ask h3{font-size:13px;font-weight:600;margin:12px 0 4px}' +
   '.inbox-unread{display:none;position:absolute;top:4px;right:3px;width:6px;height:6px;border-radius:50%;background:var(--so-signal)}' +
   '@media (max-width:760px){.inbox-tabs{display:flex;width:100%}.inbox-tabs a{flex:1;justify-content:center;min-height:44px;padding:0 6px}.inbox-unread{display:block}}';
 const WORKSPACE_STYLE = styleAsset(STYLE + INBOX_TABS_CSS + APPROVAL_RULES_CSS + SPEND_CSS + RETENTION_CSS + STORAGE_CSS + UPDATES_CSS + LIMITS_CSS + MONITORING_CSS + INTEGRATIONS_CSS + BACKUP_CSS + EXPORT_CSS + PROJECT_DELETE_CSS + POLICY_CSS + EVIDENCE_PACK_CSS + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KITS_CSS + STARTERS_CSS + GALLERY_CSS + SSO_CSS + CREDENTIALS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + TASK_STATUS_CSS + LEAD_CONTEXT_CSS + PULL_REQUEST_SETTINGS_CSS + CHECK_SETTINGS_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
@@ -16049,13 +16054,17 @@ function inboxPage(chrome: Chrome, data: {
     rows.map(one => `<p class="row"><a href="${taskHref(one.taskId)}">${escape(one.title)}</a>${chip(one.repo)} <span class="meta">${escape(one.detail)}</span></p>`).join("\n");
   const ready = (data.ready ?? []).length === 0 ? "" : `<h2>ready to review</h2>` + listRows(data.ready ?? []);
   const running = (data.running ?? []).length === 0 ? "" : `<h2>running now</h2>` + listRows(data.running ?? []);
-  const counts: Record<InboxTab, number> = {
-    "needs-you": data.decisions.length + data.approvals.length + data.requeueables.length + data.cancelledBlockers.length + data.gaps.length,
+  const asks = { decide: data.decisions.length + data.approvals.length, unblock: data.requeueables.length + data.cancelledBlockers.length + data.gaps.length };
+  const counts: Record<InboxTab, number> & typeof asks = { ...asks,
+    "needs-you": asks.decide + asks.unblock,
     ready: data.needsVerification.length + (data.ready ?? []).length,
     running: (data.running ?? []).length,
     all: 0,
   };
   counts.all = counts["needs-you"] + counts.ready + counts.running;
+  // Each ask is a small heading with its count over its sections (their own headings one step down).
+  const askGroup = (ask: Ask, count: number, sections: string[]): string => count === 0 ? ""
+    : `<section class="inbox-ask" data-ask="${ask}"><h2>${ASK_LABEL[ask]} <span class="count">${count}</span></h2>${sections.join("").replace(/<(\/?)h2>/g, "<$1h3>")}</section>`;
   const tabs = data.tab === undefined ? "" : `<nav class="inbox-tabs" aria-label="Inbox views">` + INBOX_TABS.map(one =>
     `<a href="/inbox?tab=${one.id}"${one.id === tab ? ` aria-current="page"` : ""} data-inbox-tab="${one.id}">${one.label}` +
     `<span class="inbox-tab-count${one.id === "needs-you" && counts[one.id] > 0 ? " inbox-tab-count--needs" : ""}">${counts[one.id]}</span>` +
@@ -16070,14 +16079,11 @@ function inboxPage(chrome: Chrome, data: {
     wizard,
     empty || !shows("needs-you") ? "" : `<p><a class="new-task" style="display:inline-block" href="/next">clear the queue \u2192 one thing at a time</a></p>`,
     empty && data.wizard === null && shows("needs-you") && counts.all === 0 ? `<div class="card"><p><strong>Nothing needs you.</strong></p><p class="meta">The queue is either working or waiting on its own timers. <a href="/board">Watch the board</a> or <a href="/activity">read the activity report</a>.</p></div>` : tabEmpty,
-    shows("needs-you") ? decisions : "",
-    shows("needs-you") ? approvals : "",
-    shows("needs-you") ? requeueables : "",
-    shows("ready") ? needsVerification : "",
-    shows("ready") ? ready : "",
+    // What waits on a person, grouped by what it asks: Decide, then Review, then Unblock.
+    shows("needs-you") ? askGroup("decide", counts.decide, [approvals, decisions]) : "",
+    shows("ready") ? askGroup("review", counts.ready, [needsVerification, ready]) : "",
+    shows("needs-you") ? askGroup("unblock", counts.unblock, [requeueables, cancelled, gaps]) : "",
     shows("running") ? running : "",
-    shows("needs-you") ? cancelled : "",
-    shows("needs-you") ? gaps : "",
     data.rollup
       ? `<p class="meta">requirement gaps are checked one project at a time \u2014 open a project to see and fill its gaps · <a href="/projects">open a project</a></p>`
       : "",
@@ -18635,6 +18641,8 @@ function workDiagnosticsHtml(diagnostics: WorkStatus["diagnostics"]): string {
   return (diagnostics ?? []).map(one => `<p class="work-detail" data-work-diagnostic="${escape(one.token)}"><strong>${escape(one.label)}</strong> · ${escape(one.detail)}</p>`).join("");
 }
 
+const TASK_GROUP_LABEL: Readonly<Record<WorkIndexGroup, string>> = { ...ASK_LABEL, building: 'Building', rest: 'Recent' };
+
 function workPage(
   chrome: Chrome,
   data: { view: WorkView; projectFilter?: string; work: WorkIndexPage; previous: boolean; multiProject: boolean; now: Date; limits?: BrowserLimits | null },
@@ -18679,6 +18687,10 @@ function workPage(
   const view: BrowserTasksView = {
     kind: 'tasks',
     tabs: WORK_VIEWS.map(one => ({ label: one.label, href: href(one.key), count: data.work.totals[one.key], active: one.key === data.view })),
+    needsYou: data.work.totals['needs-you'],
+    groups: data.view !== 'all' && data.view !== 'needs-you' ? null
+      : ([...ASKS, ...(data.view === 'all' ? ['building', 'rest'] as const : [])] as WorkIndexGroup[])
+        .map(key => ({ key, label: TASK_GROUP_LABEL[key], count: data.work.groups[key] })).filter(one => one.count > 0),
     rows: data.work.items.map(row => {
       const target = row.primaryAction?.target;
       const actionHref = row.primaryAction?.code === 'open-result' && target?.runId != null
@@ -18690,6 +18702,7 @@ function workPage(
         project: data.multiProject || row.repo === null ? (row.repo === null ? 'Unplaced' : projectName(row.repo)) : null,
         age: relativeAge(row.updatedAt, data.now),
         status: { label: row.status.label, tone: row.status.tone, token: row.status.token },
+        ask: row.ask, group: row.ask ?? (row.status.rank === 1 ? 'building' : 'rest'),
         action: actionHref === null || row.primaryAction === null ? null : { label: row.primaryAction.label, href: actionHref },
         detail: needsYouDetail ? row.status.detail : null,
         problem: row.familyProblem,
