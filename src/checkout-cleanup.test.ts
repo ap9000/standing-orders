@@ -17,6 +17,7 @@ import { COMPLETION_ACTION } from "./result-completion.js";
 import { WorktreePool } from "./worktree.js";
 import { checkoutPlan, cleanCheckouts, deployedRelease, releaseOf, slimKeptCheckouts, taskStatuses, whyWords } from "./checkout-cleanup.js";
 import { parseCleanup } from "./storage.js";
+import { lockDigest, promoteInstall } from "./shared-deps.js";
 
 const DAY = 86_400_000;
 let dir: string, file: string, repo: string, store: Store, pool: WorktreePool;
@@ -216,6 +217,51 @@ test("toolroll storage clean previews without removing anything, and --yes remov
   expect(store.actionLedger({ repos: null }).find(one => one.action === "test temp folders removed")).toMatchObject({ actor: "alex", source: "request", detail: expect.stringContaining("2 older than a day") });
   expect(store.checkoutCleanup()).toBe("7d");
   expect(await branchExists("toolroll/three")).toBe(true);
+});
+
+test("toolroll storage lists shared dependencies and how many checkouts use each; storage clean removes one no checkout uses", async () => {
+  const alex = addApprover(store, "alex", T0);
+  if (!alex.ok) throw new Error("alex");
+  writeFileSync(join(repo, "package.json"), '{"name":"thing"}\n');
+  writeFileSync(join(repo, "package-lock.json"), '{"lockfileVersion":3,"packages":{}}\n');
+  writeFileSync(join(repo, ".gitignore"), "node_modules/\n");
+  await run("git", ["add", "."], { cwd: repo });
+  await run("git", ["commit", "-qm", "lockfile"], { cwd: repo });
+  const finished = await task("finished", "completed");
+  const working = await task("working", "queued");
+  const deps = join(dir, "deps");
+  const install = (checkout: string) => { mkdirSync(join(checkout, "node_modules", "pad"), { recursive: true }); writeFileSync(join(checkout, "node_modules", ".package-lock.json"), "{}"); };
+  // The finished task's checkout made one copy; the working one links a copy of its own key.
+  install(finished);
+  expect(promoteInstall({ root: deps, repo, worktree: finished, key: "1".repeat(24), lock: lockDigest(finished)!, node: "v22", setupDigest: "s", now: T0 })).toBe("link");
+  install(working);
+  expect(promoteInstall({ root: deps, repo, worktree: working, key: "2".repeat(24), lock: lockDigest(working)!, node: "v24", setupDigest: "s", now: T0 })).toBe("link");
+  // Nothing has linked either for a while: only use keeps a copy now.
+  for (const key of ["1", "2"]) utimesSync(join(deps, key.repeat(24), "ready.json"), new Date(0), new Date(0));
+  store.close();
+  let lines: string[] = [];
+  const cli = async (argv: string[]) => { lines = []; const code = await runOperate("storage", argv, line => { lines.push(line); }, { databaseFile: file, evidenceRoot: join(dir, "evidence") }); return { code, out: lines.join("\n") }; };
+  try {
+    const summary = await cli([]);
+    expect(summary.out).toMatch(/Shared dependencies +\S+ \S+ +\(2\)/);
+    expect(summary.out).toContain("11111111: 1 checkout uses it");
+    expect(summary.out).toContain("22222222: 1 checkout uses it");
+    expect(JSON.parse((await cli(["--json"])).out).shared).toMatchObject([{ checkouts: 1 }, { checkouts: 1 }]);
+    // The finished checkout goes, and with it the only use of the copy it linked.
+    expect((await cli(["clean"])).out).toContain("Would remove 1 shared dependency install no checkout uses");
+    const removed = await cli(["clean", "--yes", "--as", "alex", "--token", alex.token]);
+    expect(removed.out).toContain("Removed 1 checkout");
+    expect(removed.out).toContain("Removed 1 shared dependency install no checkout used");
+    expect(existsSync(join(deps, "1".repeat(24)))).toBe(false);
+    expect(existsSync(join(deps, "2".repeat(24), "node_modules", "pad"))).toBe(true);
+    // A checkout whose lockfile a copy was installed from uses it even without the link.
+    rmSync(join(working, "node_modules"), { recursive: true });
+    expect((await cli(["clean"])).out).not.toContain("shared dependency");
+  } finally {
+    store = openStore(file);
+    await run("chmod", ["-R", "u+w", deps]);
+  }
+  expect(store.actionLedger({ repos: null }).filter(one => one.action === "shared dependencies removed").map(one => one.detail)).toEqual([expect.stringContaining("1".repeat(24))]);
 });
 
 test("a checkout in use can't be discarded", async () => {

@@ -104,6 +104,20 @@ import {
   type MilestoneState,
 } from "./plan.js";
 import { maybeSettleRepairChain } from "./dispose.js";
+import { detachShared, linkInto, linkedKey, promoteInstall, readyCopy, sharedDepsRoot, sharingFor } from "./shared-deps.js";
+
+/** Where this store keeps shared dependencies; null for an in-memory store, which shares nothing. */
+function sharedDepsRootOf(store: Store): string | null {
+  const file = store.databaseFile();
+  return file === null ? null : sharedDepsRoot(file);
+}
+
+/** The one line an agent needs when its node_modules is a shared copy: it is read-only, and how to get its own. */
+function sharedDepsBrief(store: Store, worktree: string): string {
+  const root = sharedDepsRootOf(store);
+  return root === null || linkedKey(worktree, root) === null ? "" :
+    "node_modules here links a shared, read-only install. If you change package.json or the lockfile, replace it with your own install first: `rm -rf node_modules && npm install`.\n";
+}
 
 export type Runner = (
   file: string,
@@ -966,6 +980,19 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
           message: "runner custody lapsed before the setup spawn — the lease, the runner, or its repo binding no longer stands",
         };
       }
+      // Shared dependencies: a checkout whose lockfile already has an installed
+      // copy links it instead of installing its own; a setup that is about to
+      // run never reaches through an old link into a shared copy.
+      const depsRoot = sharedDepsRootOf(store);
+      const sharing = depsRoot === null ? null : sharingFor({ repo: leased.repo, worktree, setup: setupWanted });
+      if (depsRoot !== null) detachShared(worktree, depsRoot);
+      if (depsRoot !== null && sharing !== null) {
+        const ready = readyCopy(depsRoot, sharing.key);
+        if (ready !== null && linkInto(worktree, ready) !== null) {
+          store.stampWorktreeSetup(worktree, setupWanted.digest);
+          return null;
+        }
+      }
       const runSetup = request.setup ?? run;
       const shell = approvedCommandShell(setupWanted.command);
       // Setup runs under the stop watch (v52), owned by this run: an
@@ -996,6 +1023,9 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
           reason: "setup",
           message: `the approved setup for ${leased.repo} ${made.timedOut ? `ran past ${Math.round(setupWanted.timeoutMs / 60_000)}m` : `exited ${made.code}`} — ${redactSecretText(firstLine(made.stderr)) || "no stderr"}; no agent spawns in a checkout whose setup failed`,
         };
+      }
+      if (depsRoot !== null && sharing !== null) {
+        promoteInstall({ root: depsRoot, repo: leased.repo, worktree, ...sharing, setupDigest: setupWanted.digest, now: (request.clock ?? (() => now))() });
       }
       store.stampWorktreeSetup(worktree, setupWanted.digest);
     }
@@ -1455,7 +1485,7 @@ export async function build(store: Store, request: BuildRequest): Promise<BuildR
       ? null
       : { revision: planRevisionNumber, hash: planRevisionHash, milestones, progress, proposal },
     scope === null ? [] : flowGoalCuts(store, scope.taskId, scope.goal),
-  ) + `\nCanonical signed rubric: ${rubric}. Its statement fields are exact; evidence requirements are separate fields. Do not edit this input. The lead or user reads these criteria directly; no restatement is needed.\n`;
+  ) + `\nCanonical signed rubric: ${rubric}. Its statement fields are exact; evidence requirements are separate fields. Do not edit this input. The lead or user reads these criteria directly; no restatement is needed.\n` + sharedDepsBrief(store, worktree);
 
   // THE HELD BRANCH (Phase 2, v2 S0d + v6 W8): ownership transfers to the
   // coordinator at the spawn point. Everything build() armed that its
@@ -2624,8 +2654,46 @@ async function settleProof(
       checkLog.push(attemptLog(label, configured.command, result));
       return result;
     };
-    const first = await runVerification("Project check · attempt 1");
-    if (first.notFound || first.timedOut) {
+    // A checkout still linking a shared copy that no longer matches its
+    // package.json or lockfile (the task changed them, or the copy changed)
+    // gets its own install before the check: the link goes and the live
+    // approved setup runs here. The shared copy itself is never touched.
+    type OwnInstall = "custody-lost" | "own-install-failed" | "setup-changed-files" | null;
+    const ownInstallIfChanged = async (): Promise<OwnInstall> => {
+      const depsRoot = sharedDepsRootOf(store);
+      if (depsRoot === null || repo === null) return null;
+      const linked = linkedKey(worktree, depsRoot);
+      const live = linked === null ? null : store.liveWorktreeSetup(repo);
+      if (linked === null || live === null) return null;
+      if (sharingFor({ repo, worktree, setup: live })?.key === linked && readyCopy(depsRoot, linked) !== null) return null;
+      if (!store.proveRunnerCustodyForSpawn(runId, now())) return "custody-lost";
+      detachShared(worktree, depsRoot);
+      const label = "Own install · approved project setup (package.json or lockfile changed)";
+      const setupShell = approvedCommandShell(live.command);
+      const installed = await underStopWatch(store, runId, () => runWithIsolatedDatabase(witnessedRunner(store, runId, now, request.setup ?? run), setupShell.file, setupShell.args, {
+        cwd: worktree,
+        timeoutMs: live.timeoutMs,
+        processGroup: true,
+        owner: runOwnerTag(store, runId),
+        beforeSpawn: () => !stopRequestedFor(store, runId, request.shouldStop),
+        onSpawn: pid => {
+          request.onProviderSpawn?.(pid);
+          if (stopRequestedFor(store, runId, request.shouldStop)) throw new Error("the attempt was stopped before spawn custody completed");
+        },
+        envAllowlist: SETUP_ENV_ALLOWLIST,
+        omitEnv: SETUP_ENV_DENYLIST,
+      }));
+      checkOutcomes.push(attemptOutcome(label, installed));
+      noteCheckSuite(label, installed);
+      checkLog.push(attemptLog(label, live.command, installed));
+      if (installed.notFound || installed.timedOut || installed.code !== 0) return "own-install-failed";
+      return await sealedTreeState(request.git ?? run) === "clean" ? null : "setup-changed-files";
+    };
+    const ownInstall = await ownInstallIfChanged();
+    const first = ownInstall === null ? await runVerification("Project check · attempt 1") : null;
+    if (first === null) {
+      verifyCommand = { configured: true, ran: false, attemptFailed: true, failure: ownInstall ?? "own-install-failed" };
+    } else if (first.notFound || first.timedOut) {
       verifyCommand = { configured: true, ran: false, attemptFailed: true, failure: first.timedOut ? "timed-out" : "spawn-failed" };
     } else if (!verificationExecutableMissing(first)) {
       verifyCommand = { configured: true, ran: true, exitCode: first.code };

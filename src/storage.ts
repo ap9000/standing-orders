@@ -8,6 +8,7 @@
 import { spawnSync } from "node:child_process";
 import { lstatSync, readdirSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { DEPS_FOLDER, sharedCopies } from "./shared-deps.js";
 import type { Store } from "./store.js";
 
 /** Settings → Storage: when a finished task's clean checkout is removed. One row, or none (the default). */
@@ -100,6 +101,7 @@ export function storageReport(store: Store, databaseFile: string, checkoutNote?:
   const lines: StorageLine[] = [
     { what: "Database", bytes: take(name => name.startsWith(base)) },
     { what: "Build checkouts", bytes: take(name => name === "worktrees"), count: checkouts.length, ...(checkoutNote === undefined ? {} : { note: checkoutNote }) },
+    { what: "Shared dependencies", bytes: take(name => name === DEPS_FOLDER), count: sharedCopies(join(folder, DEPS_FOLDER)).length, note: "one install per lockfile, linked into checkouts" },
     { what: "Staged releases", bytes: take(name => name === "staged-upgrades"), count: staged, note: "a deploy keeps the release it installed, the one before and the newest few" },
     { what: "Evidence", bytes: take(name => name === "evidence"), note: "the audit record of every run; kept" },
     { what: "Backups", bytes: take(name => name === "backups") },

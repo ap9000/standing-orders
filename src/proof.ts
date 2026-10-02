@@ -672,6 +672,7 @@ export type VerifyCommandFacts =
         | "dependency-missing"
         | "setup-stale"
         | "setup-failed"
+        | "own-install-failed"
         | "tracked-files-changed"
         | "setup-changed-files"
         | "checkout-moved"
@@ -1043,6 +1044,8 @@ function verificationFailureWords(failure: Extract<VerifyCommandFacts, { ran: fa
           return "automatic recovery stopped because the project setup or check changed";
         case "setup-failed":
           return "the approved setup command failed during automatic recovery";
+        case "own-install-failed":
+          return "the checkout's own dependency install failed after its package.json or lockfile changed";
         case "tracked-files-changed":
           return "automatic recovery stopped because tracked files no longer matched the built result";
         case "setup-changed-files":

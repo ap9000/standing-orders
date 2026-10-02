@@ -9,6 +9,7 @@ import { evidencePack, exportDay, ledgerExportChunks, standaloneEvidenceHtml, ty
 import { matchesOutsideCheckpoint } from "./ledger-chain.js";
 import { CLEANUP_CHOICES, bytesWords, cleanupWords, diskBytes, parseCleanup, storageReport } from "./storage.js";
 import { removeStaleTestTemp, tempRoots, testTempFolders } from "./test-temp.js";
+import { removeShared, sharedDepsRoot, sharedUse, unusedShared, type SharedUse } from "./shared-deps.js";
 import { checkoutPlan, cleanCheckouts, discardCheckout, finishedCheckouts, slimKeptCheckouts, whyWords, type CheckoutItem, type CheckoutPlan } from "./checkout-cleanup.js";
 import { closeOutCheckouts, closeOutRuns, stoppedWords } from "./run-closeout.js";
 import { MIN_DAYS, RETENTION_KINDS, countWords, dailyRetention, isRetentionKind, lastSweepAt, parsePeriod, periodLabel, periodWords, retentionPlan, sweepWords, type RetentionKind, type RetentionSweep } from "./retention.js";
@@ -13412,14 +13413,25 @@ async function storageCommand(positional: readonly string[], flags: Map<string, 
   };
   const leftoverLine = (temp: ReturnType<typeof leftovers>) => temp.count === 0 ? "Test temp folders: none." :
     `Test temp folders: ${temp.count}; ${temp.stale === 0 ? "none older than a day." : `${temp.stale} older than a day: toolroll storage clean removes them.`}`;
+  // Shared dependencies (shared-deps.ts): one install per lockfile, linked into checkouts.
+  const depsRoot = sharedDepsRoot(context.databaseFile);
+  const checkoutRows = () => store.listWorktrees().map(row => ({ path: row.path, repo: row.repo }));
+  const sharedFacts = (copies: readonly SharedUse[]) => {
+    const sizes = diskBytes(copies.map(one => one.dir));
+    return copies.map(one => ({ key: one.key, repo: one.repo, path: one.dir, bytes: sizes.get(one.dir) ?? 0, checkouts: one.checkouts.length, usedBy: one.checkouts, retired: one.retired, node: one.node, createdAt: one.createdAt, usedAt: one.usedAt }));
+  };
+  const sharedLine = (one: ReturnType<typeof sharedFacts>[number]) =>
+    `  ${bytesWords(one.bytes).padStart(8)}  ${projectName(one.repo)} ${one.key.slice(0, 8)}: ${one.checkouts === 1 ? "1 checkout uses it" : `${one.checkouts} checkouts use it`}${one.retired ? " (changed after install; never linked again)" : ""}`;
 
   if (action === undefined) {
     const plan = await checkoutPlan(store, pool, context.clock(), { manual: true });
     const report = storageReport(store, context.databaseFile, plan.go.length === 0 ? "nothing to clean up" : `about ${bytesWords(plan.freeBytes)} to clean up`);
     const { staleBytes: _, ...temp } = leftovers(false);
-    return succeed(context.write, context.json, "storage", { ...report, checkouts: checkoutSummary(plan), testTemp: temp }, () => [
+    const shared = sharedFacts(sharedUse(depsRoot, checkoutRows()));
+    return succeed(context.write, context.json, "storage", { ...report, checkouts: checkoutSummary(plan), testTemp: temp, shared }, () => [
       `${report.folder}: ${bytesWords(report.total)}`,
-      ...report.lines.map(one => `  ${one.what.padEnd(17)} ${bytesWords(one.bytes).padStart(8)}${one.count === undefined ? "" : `  (${one.count})`}${one.note === undefined ? "" : `  ${one.note}`}`),
+      ...report.lines.map(one => `  ${one.what.padEnd(19)} ${bytesWords(one.bytes).padStart(8)}${one.count === undefined ? "" : `  (${one.count})`}${one.note === undefined ? "" : `  ${one.note}`}`),
+      ...(shared.length === 0 ? [] : ["Shared dependencies:", ...shared.map(sharedLine)]),
       ...summary(plan),
       leftoverLine({ ...temp, staleBytes: 0 }),
     ]);
@@ -13441,9 +13453,15 @@ async function storageCommand(positional: readonly string[], flags: Map<string, 
     if (!flags.has("yes")) {
       const plan = await checkoutPlan(store, pool, context.clock(), { manual: true });
       const temp = leftovers(true);
-      const anything = plan.go.length > 0 || temp.stale > 0;
-      return succeed(context.write, context.json, command, { preview: true, go: plan.go, stay: plan.stay, freeBytes: plan.freeBytes, testTemp: temp }, () => [
+      // A shared copy goes when no checkout uses it, counting the checkouts this clean-up would remove.
+      const leaving = new Set(plan.go.map(one => one.path));
+      const unused = unusedShared(depsRoot, checkoutRows().filter(row => !leaving.has(row.path)), context.clock());
+      const sharedGo = sharedFacts(unused.copies);
+      const sharedBytes = sharedGo.reduce((sum, one) => sum + one.bytes, 0);
+      const anything = plan.go.length > 0 || temp.stale > 0 || sharedGo.length > 0;
+      return succeed(context.write, context.json, command, { preview: true, go: plan.go, stay: plan.stay, freeBytes: plan.freeBytes, testTemp: temp, sharedGo, sharedFreeBytes: sharedBytes }, () => [
         ...(plan.go.length === 0 ? [anything ? "No checkouts to clean up." : "Nothing to clean up."] : [`Would remove ${plan.go.length} checkout${plan.go.length === 1 ? "" : "s"}, freeing about ${bytesWords(plan.freeBytes)} (their branches stay):`, ...plan.go.map(itemLine)]),
+        ...(sharedGo.length === 0 ? [] : [`Would remove ${sharedGo.length} shared dependency install${sharedGo.length === 1 ? "" : "s"} no checkout uses, about ${bytesWords(sharedBytes)}:`, ...sharedGo.map(sharedLine)]),
         ...(plan.stay.length === 0 ? [] : [`Stays (${plan.stay.length}):`, ...plan.stay.map(itemLine)]),
         ...(temp.stale === 0 ? [] : [`Would remove ${temp.stale} test temp folder${temp.stale === 1 ? "" : "s"} older than a day, about ${bytesWords(temp.staleBytes)}.`]),
         anything ? "Nothing was removed. Run toolroll storage clean --yes to remove them." : "Nothing was removed.",
@@ -13458,9 +13476,19 @@ async function storageCommand(positional: readonly string[], flags: Map<string, 
       store.recordAction({ at: context.clock().toISOString(), actor, repo: null, taskId: null, runId: null, action: "test temp folders removed", outcome: "removed", source: "request",
         detail: `${swept.removed.length} older than a day, about ${bytesWords(temp.staleBytes)}${swept.failed.length === 0 ? "" : `; ${swept.failed.length} couldn't be removed`}` });
     }
-    return succeed(context.write, context.json, command, { removed: done.removed, kept: done.kept, freedBytes: done.freed, testTempRemoved: swept.removed.length, testTempFailed: swept.failed }, () => [
-      done.removed.length === 0 ? (swept.removed.length === 0 ? "Nothing to clean up." : "No checkouts to clean up.") : `Removed ${done.removed.length} checkout${done.removed.length === 1 ? "" : "s"}, about ${bytesWords(done.freed)}; their branches stay.`,
+    // After the checkouts go: a shared copy none of the remaining ones uses goes too.
+    const unused = unusedShared(depsRoot, checkoutRows(), context.clock());
+    const sharedRemoved = sharedFacts(unused.copies).filter(one => removeShared(one.path));
+    for (const one of sharedRemoved) {
+      store.recordAction({ at: context.clock().toISOString(), actor, repo: one.repo, taskId: null, runId: null, action: "shared dependencies removed", outcome: "removed", source: "request",
+        detail: `${one.key} (about ${bytesWords(one.bytes)}); no checkout used it` });
+    }
+    for (const debris of unused.debris) removeShared(debris);
+    const sharedFreed = sharedRemoved.reduce((sum, one) => sum + one.bytes, 0);
+    return succeed(context.write, context.json, command, { removed: done.removed, kept: done.kept, freedBytes: done.freed, testTempRemoved: swept.removed.length, testTempFailed: swept.failed, sharedRemoved, sharedFreedBytes: sharedFreed }, () => [
+      done.removed.length === 0 ? (swept.removed.length === 0 && sharedRemoved.length === 0 ? "Nothing to clean up." : "No checkouts to clean up.") : `Removed ${done.removed.length} checkout${done.removed.length === 1 ? "" : "s"}, about ${bytesWords(done.freed)}; their branches stay.`,
       ...done.removed.map(itemLine),
+      ...(sharedRemoved.length === 0 ? [] : [`Removed ${sharedRemoved.length} shared dependency install${sharedRemoved.length === 1 ? "" : "s"} no checkout used, about ${bytesWords(sharedFreed)}.`, ...sharedRemoved.map(sharedLine)]),
       ...done.kept.map(one => `  kept ${one.path} (${whyWords({ why: one.why })})`),
       ...(swept.removed.length === 0 ? [] : [`Removed ${swept.removed.length} test temp folder${swept.removed.length === 1 ? "" : "s"} older than a day, about ${bytesWords(temp.staleBytes)}.`]),
       ...(swept.failed.length === 0 ? [] : [`Couldn't remove ${swept.failed.length} test temp folder${swept.failed.length === 1 ? "" : "s"}: ${swept.failed.slice(0, 3).join(", ")}${swept.failed.length > 3 ? " …" : ""}`]),
