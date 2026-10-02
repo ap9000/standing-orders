@@ -1551,6 +1551,12 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
 
     const draftHtml = await (await fetch(url(`/t/${trigger.draftTaskId}`), { headers: { cookie } })).text();
     expect(draftHtml).toContain("Automatic recovery");
+    // The repair's approval says what it fixes in one sentence, the
+    // criterion as words; the machine brief ("Unmet: c1") stays in Details.
+    expect(draftHtml).toContain(`<p class="approval-revision">Fixes what build #${run} missed: it works.</p>`);
+    const sheetMain = draftHtml.slice(draftHtml.indexOf('class="approve-form approval-sheet"'), draftHtml.indexOf('<details class="approval-details">'));
+    expect(sheetMain).not.toContain("Unmet");
+    expect(sheetMain).not.toContain("inherited terms");
 
     // Historical repair records stay readable on their task pages. They do
     // not add a second assessment-based stage to the current inbox.
@@ -2048,12 +2054,14 @@ describe("the phase route on the console (v47): one projection on the task page,
     // The ceremony restates the agents where the yes is given — and never
     // the volatile availability.
     const ceremony = /<form method="post" action="\/t\/payouts\/approve"(.*?)<\/form>/s.exec(html)?.[1] ?? "";
-    expect(ceremony).toContain('<p class="approval-label">agents</p>');
-    expect(ceremony).toContain("claude · sonnet plans; claude · opus builds and repairs");
-    expect(ceremony).toContain("These exact agents are part of what you approve");
-    // Plain-English risk consequence, and the runtime mechanics closed away.
-    expect(ceremony).toContain("High risk: every active role — planner, builder, and repair — uses the strongest agent you have configured.");
-    expect(ceremony).toContain('<details class="agents-runtime"><summary>Runtime limits</summary>');
+    // One plain line of who builds in view; the full route in Details.
+    expect(ceremony).toContain('<p class="approval-who">Builder Claude Opus · Planner Claude Sonnet</p>');
+    const details = ceremony.slice(ceremony.indexOf('<details class="approval-details"><summary>Details</summary>'));
+    expect(details).toContain("<h3>Why these agents</h3><p>claude · sonnet plans; claude · opus builds and repairs</p>");
+    expect(details).toContain("These exact agents are part of what you approve");
+    // Plain-English risk consequence, and the runtime mechanics folded away.
+    expect(details).toContain("High risk: every active role — planner, builder, and repair — uses the strongest agent you have configured.");
+    expect(details).toContain("<h3>Runtime limits</h3>");
     expect(ceremony).not.toContain("--dangerously");
     // No duplicate provider · model chip beside the agents summary.
     expect(ceremony).not.toMatch(/<span class="approval-chip">claude · opus<\/span>/);
@@ -2168,9 +2176,10 @@ describe("the phase route on the console (v47): one projection on the task page,
     expect(strip.replace(/<[^>]+>/g, " ")).not.toMatch(JARGON);
     // Package 2: the approval card is a section — the concise plan, then
     // the Review plan disclosure over the exact terms.
-    const approvalCard = /<section class="card chat-action-card chat-plan" id="task-chat-action"[^>]*>(.*?)<\/details><\/section>/s.exec(chat)?.[0] ?? "";
-    expect(approvalCard).toContain("High risk · stronger configured agents");
-    expect(approvalCard).toContain('<p class="approval-label">agents</p>');
+    const approvalCard = /<section class="card chat-action-card chat-plan" id="task-chat-action"[^>]*>(.*?)<\/form><\/section>/s.exec(chat)?.[0] ?? "";
+    expect(approvalCard).toContain('<p class="approval-who">Builder Claude Opus · Planner Claude Sonnet</p>');
+    expect(approvalCard).toContain("High risk: every active role");
+    expect(approvalCard).toContain("<h3>Why these agents</h3>");
     expect(approvalCard).not.toContain("codex · gpt-5-codex");
     expect(approvalCard).not.toContain("not yet checked");
   });
@@ -2229,6 +2238,22 @@ describe("the phase route on the console (v47): one projection on the task page,
     const summary = "claude · sonnet plans; claude · opus builds and repairs";
     const risk = "High risk: every active role — planner, builder, and repair — uses the strongest agent you have configured.";
     const ceremonyOf = (html: string, action: string): string => new RegExp(`<form method="post" action="${action}"(.*?)<\\/form>`, "s").exec(html)?.[1] ?? "";
+    // The task page and chat share the approval sheet: who builds in one
+    // line before the password, the exact route and limits in Details.
+    const sheet = (ceremony: string): void => {
+      const whoAt = ceremony.indexOf('<p class="approval-who">Builder Claude Opus · Planner Claude Sonnet</p>');
+      const passwordAt = ceremony.indexOf('name="token"');
+      const detailsAt = ceremony.indexOf('<details class="approval-details"><summary>Details</summary>');
+      expect(whoAt).toBeGreaterThan(-1);
+      expect(passwordAt).toBeGreaterThan(whoAt);
+      expect(detailsAt).toBeGreaterThan(passwordAt);
+      expect(ceremony.slice(detailsAt)).toContain(`<h3>Why these agents</h3><p>${summary}</p>`);
+      expect(ceremony.slice(detailsAt)).toContain(risk);
+      expect(ceremony.slice(detailsAt)).toContain("<h3>Runtime limits</h3>");
+      expect(ceremony).not.toContain("<details open");
+      expect(ceremony).not.toContain("not yet checked");
+      expect(ceremony.replace(/<[^>]+>/g, " ")).not.toMatch(/--dangerously|config set|task route/);
+    };
     const check = (ceremony: string): void => {
       const agentsAt = ceremony.indexOf('<p class="approval-label">agents</p>');
       const passwordAt = ceremony.indexOf('name="token"');
@@ -2241,8 +2266,8 @@ describe("the phase route on the console (v47): one projection on the task page,
       expect(ceremony).not.toContain("not yet checked");
       expect(ceremony.replace(/<[^>]+>/g, " ")).not.toMatch(/--dangerously|config set|task route/);
     };
-    check(ceremonyOf(await page(cookie, "/t/payouts"), "\\/t\\/payouts\\/approve"));
-    check(ceremonyOf(await page(cookie, "/chat?task=payouts"), "\\/t\\/payouts\\/approve"));
+    sheet(ceremonyOf(await page(cookie, "/t/payouts"), "\\/t\\/payouts\\/approve"));
+    sheet(ceremonyOf(await page(cookie, "/chat?task=payouts"), "\\/t\\/payouts\\/approve"));
     const next = await page(cookie, "/next");
     expect(next).toContain("the last thing waiting on you");
     check(ceremonyOf(next, "\\/t\\/payouts\\/approve"));

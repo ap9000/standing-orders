@@ -41,7 +41,7 @@ function Html({ html, className }: { html: string; className?: string }) {
 /** One headline, one sentence and one action; the details sit quietly
  * underneath (task-status.ts). Never a red card: only Failed wears red, on
  * its dot. */
-function StatusCard({ card, approval, confirm, rebuild, csrf }: { card: AssignmentCard; approval: string; confirm: BrowserTaskView["confirmStopped"]; rebuild: BrowserTaskView["rebuild"]; csrf: string }) {
+function StatusCard({ card, confirm, rebuild, csrf }: { card: AssignmentCard; confirm: BrowserTaskView["confirmStopped"]; rebuild: BrowserTaskView["rebuild"]; csrf: string }) {
   return <Card data-task-status data-work-status={card.token} data-headline={card.status.headline} aria-label="Task status">
     <div className="flex flex-wrap items-center gap-x-4 gap-y-3 phone:gap-y-2.5">
       <div className="min-w-0 flex-1 basis-64">
@@ -56,7 +56,6 @@ function StatusCard({ card, approval, confirm, rebuild, csrf }: { card: Assignme
       </Button>}
     </div>
     <StatusDetails status={card.status} />
-    {approval !== "" && <Html html={approval} className="so-task-approval" />}
     {(card.notices !== null || card.reasons.length > 0 || card.diagnostics.length > 0 || card.status.why.length > 0 || card.status.details.some(one => one.why !== null)) &&
       <div className="flex flex-col gap-1 border-t border-border pt-3 text-[13px] phone:pt-2 phone:leading-[1.35]">
       <StatusWhy status={card.status} extra={[...card.reasons, ...card.diagnostics.map(one => `${one.label} · ${one.detail}`)]} />
@@ -250,8 +249,11 @@ export function TaskView({ view, chat = null, details = true, csrf = "" }: { vie
     {view.journey != null && <Journey steps={view.journey} />}
 
     {view.status !== null
-      ? <StatusCard card={view.status} approval={view.approval} confirm={view.confirmStopped ?? null} rebuild={view.rebuild ?? null} csrf={csrf} />
-      : <>{<Html html={view.statusHtml} />}{view.approval !== "" && <Html html={view.approval} className="so-task-approval" />}</>}
+      ? <StatusCard card={view.status} confirm={view.confirmStopped ?? null} rebuild={view.rebuild ?? null} csrf={csrf} />
+      : <Html html={view.statusHtml} />}
+
+    {/* The approval is its own section under the status, never a card inside it. */}
+    {view.approval !== "" && <Html html={view.approval} className="so-task-approval" />}
 
     {view.lead.map(block => <Html key={block.key} html={block.html} className={`so-task-lead so-task-lead--${block.key}`} />)}
 

@@ -924,19 +924,18 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(html).toContain('aria-label="current task"');
     expect(html).toContain('href="/chat?task=a" class="active" aria-current="page">Ask</a>');
     expect(html).toContain('aria-label="assignment progress"');
-    // Package 2 (revised on the operator's screenshot feedback): a concise
-    // plan leads — Plan ready, the outcome, one line of counts — ONE
-    // Review plan action opens the exact terms, the password words live
-    // inside that review, and Approve & start is the only submit.
+    // The chat card is the task page's approval sheet: the plan open as
+    // plain rows, one line of who builds, and Approve & start as the only
+    // submit; no opener and no paragraph explaining the ceremony.
     expect(html).toContain('<section class="card chat-action-card chat-plan" id="task-chat-action" data-approval="');
-    expect(html).toContain('<p class="chat-plan-outcome">do a</p><p class="chat-plan-facts">0 paths · 1 check · Auto permissions</p>');
-    expect(html).toContain('<summary data-primary-action><span class="button-link">Approve plan</span></summary>');
+    expect(html).toContain('<div class="approval-row"><dt>Goal</dt><dd><p class="approval-goal">do a</p></dd></div>');
+    expect(html).toContain('<div class="approval-row"><dt>Done when</dt>');
+    expect(html).not.toContain('<span class="button-link">Approve plan</span></summary>');
     expect(html).not.toContain("your next step");
     expect(html).not.toContain("approve to start");
-    expect(html).not.toContain("Nothing builds until you approve");
-    expect(html).not.toContain("The full exact terms, then");
-    expect(html).toContain('<p class="meta chat-approval-lead">These are the exact terms. Nothing builds until your password approves them.</p>');
-    expect(html.match(/<button type="submit">Approve & start<\/button>/g)).toHaveLength(1);
+    expect(html).not.toContain("These are the exact terms");
+    expect(html).toContain('<a class="approval-link" href="/t/a#scope">Edit plan</a><a class="approval-link" href="/chat">Not now</a>');
+    expect(html.match(/<button type="submit" data-primary-action>Approve & start<\/button>/g)).toHaveLength(1);
     expect(html).toContain('action="/t/a/approve"');
     expect(html).toContain('name="return" value="/chat?task=a"');
     expect(html).toContain('data-poll="0"');
@@ -1908,7 +1907,8 @@ describe("scout tasks and the digest card on the console (mate arc §10)", () =>
     expect(page).toContain(">scout<");
     expect(page).toContain("delivers a report, never a branch");
     // Said INSIDE the ceremony: the yes buys a report, not a branch.
-    expect(page).toContain("approving sends a read-only session");
+    expect(page).toContain("Read-only: it reports back and changes nothing in the repository.");
+    expect(page).toContain("An agent investigates without changing the repository. You'll hear when its report is ready.");
 
     // The report lands as evidence; the page renders it only once verified.
     sealScopeFixture(store, taskId, approverToken);

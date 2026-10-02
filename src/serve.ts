@@ -6009,6 +6009,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
               raceTerms: view.raceTerms ?? null,
               revision: view.revision ?? null,
               coordinator: view.coordinator ?? null,
+              repairChain: view.repairChain ?? null,
             },
       decisions: (view?.decisions ?? store.decisionsForTask(ref.id))
         .filter(one => one.state === "open" || one.state === "expired")
@@ -11970,6 +11971,223 @@ function acceptanceCeremonyHtml(criteria: readonly AcceptanceCriterion[]): strin
   );
 }
 
+/** "claude" + "opus" → "Claude Opus"; "claude-opus-5-5" → "Claude Opus 5.5"; anything else keeps its exact id. */
+function agentNameWords(provider: string, model: string | null): string {
+  const name = providerName(provider);
+  if (model === null || model === "" || model === "default") return name;
+  const bare = model.startsWith(`${provider}-`) ? model.slice(provider.length + 1) : model;
+  const title = (word: string): string => `${word[0]!.toUpperCase()}${word.slice(1)}`;
+  if (/^[a-z]+$/.test(bare)) return `${name} ${title(bare)}`;
+  const versioned = /^([a-z]+)-(\d+(?:-\d+)*)$/.exec(bare);
+  if (versioned !== null) return `${name} ${title(versioned[1]!)} ${versioned[2]!.replace(/-/g, ".")}`;
+  return `${name} ${model}`;
+}
+
+/** The permission a sealed profile grants, in two or three words. */
+function permissionWordsOf(profile: Scope["profile"] | null | undefined): string | null {
+  if (profile === null || profile === undefined) return null;
+  return profile.provider === "claude"
+    ? profile.permissionArgv === "bypassPermissions" ? "Full access" : "Auto permissions"
+    : profile.provider === "gemini"
+      ? profile.approvalArgv === "yolo" ? "Full access" : "Auto permissions"
+      : profile.sandboxMode === "danger-full-access" ? "Full access" : "Workspace sandbox";
+}
+
+/** One plain sentence for a revision (approval critique, Oct 2):
+ * "Fixes what build #9 missed: <criterion>." The notes, paths and lineage
+ * stay in the Details fold. */
+function revisionSentence(revision: Extract<RevisionView, { sourceRun: number }>, acceptance: readonly AcceptanceCriterion[]): string {
+  const build = `build #${revision.sourceRun}`;
+  if (revision.kind === "ci-repair") return `Fixes the checks that failed in ${build}.`;
+  const clean = (text: string): string => oneLineOf(text, 280).replace(/[.\s]+$/, "");
+  if (revision.kind === "criterion-repair") {
+    const ids = revision.comments.flatMap(one => (/Unmet: ([^.]+)\./.exec(one.note)?.[1] ?? "").split(",").map(id => id.trim()).filter(id => id !== ""));
+    const missed = ids.map(id => acceptance.find(one => one.id === id)?.statement ?? null).filter((one): one is string => one !== null);
+    if (missed.length > 0) return `Fixes what ${build} missed: ${missed.map(clean).join("; ")}.`;
+  }
+  const notes = revision.comments.map(one => clean(one.note)).filter(one => one !== "");
+  return notes.length === 0 ? `Revises ${build}.` : `Fixes what ${build} missed: ${notes.join("; ")}.`;
+}
+
+/** A planner's amendment, said plainly and kept in view: approving binds
+ * the amended terms, so this is never folded away. */
+function approvalAmendmentHtml(view: PlanContractView | null | undefined): string {
+  if (view === null || view === undefined || "problem" in view || !view.filed && view.revision !== true || view.changes.length === 0) return "";
+  const line = (change: ContractChange): string => {
+    switch (change.field) {
+      case "goal": return `Goal was: ${escape(change.before)}`;
+      case "outOfScope": return change.after === null ? "No longer rules anything out" : change.before === null ? `Now rules out: ${escape(change.after)}` : `Won't touch was: ${escape(change.before)}`;
+      case "touches": return `${change.kind === "added" ? "Adds the path" : "Drops the path"} <span class="mono">${escape(change.path)}</span>`;
+      case "acceptance": return change.kind === "added" ? `Adds a check: ${escape(change.after?.statement ?? "")}` : change.kind === "removed" ? `Drops a check: ${escape(change.before?.statement ?? "")}` : `Rewords a check: ${escape(change.after?.statement ?? "")}`;
+    }
+  };
+  const count = `${view.changes.length} change${view.changes.length === 1 ? "" : "s"}`;
+  return (
+    `<div class="approval-amendment" id="contract-amendment">` +
+    `<p><strong>${view.revision === true ? `The plan makes ${count} from your notes` : `The plan makes ${count} to what you filed`}</strong></p>` +
+    `<ul>${view.changes.map(one => `<li>${line(one)}</li>`).join("")}</ul>` +
+    (view.amendment === null ? "" : `<p class="meta">Why: ${escape(view.amendment)}</p>`) +
+    `</div>`
+  );
+}
+
+/**
+ * The approval sheet (approval critique, Oct 2): the plan open, in plain
+ * rows — Goal, Changes, Won't touch, Done when — one line of who builds,
+ * one Approve & start beside the password, and every remaining signed
+ * term (lineage, routing, runtime limits, the seal) in one Details fold.
+ * Presentation only: the same hidden fields, nonce, digest and password
+ * post to the same route, and the task page and chat card share it.
+ */
+function approvalSheetHtml(input: {
+  surface: "task" | "chat";
+  action: string;
+  csrf: string;
+  nonce: string;
+  digest: string;
+  returnTo: string | null;
+  scope: Scope;
+  planDocument: string | null;
+  planContract: PlanContractView | null | undefined;
+  revision: Extract<RevisionView, { sourceRun: number }> | null;
+  revisionSourceHref: string;
+  /** A machine-drafted repair: the build it repairs. */
+  repairChain: RepairChainRow | null;
+  raceTerms: TournamentTerms | null;
+  route: RouteView | null | undefined;
+  coordinator: { label: string; filedAgo: string | null } | null;
+  deliverable: "branch" | "report";
+  editHref: string;
+  notNowHref: string;
+  sticky: boolean;
+}): string {
+  const { scope, route, raceTerms } = input;
+  // A machine-drafted repair appends its brief to the signed goal; the row
+  // shows the goal and one sentence says what the repair fixes. The whole
+  // signed goal stays in Details.
+  const repairText = / — (repair exactly the unmet criteria named below; a comment cannot widen the scope\. Unmet: ([^.]+)\.|Collect only the missing observations for ([^.]+)\. .*|Diagnose the saved failed project check and repair within the original scope\. .*)$/s.exec(scope.goal);
+  const goalShown = repairText === null ? scope.goal : scope.goal.slice(0, repairText.index);
+  const statementsOf = (ids: string): string => ids.split(",").map(id => id.trim()).map(id => scope.acceptance.find(one => one.id === id)?.statement ?? id).map(one => one.replace(/[.\s]+$/, "")).join("; ");
+  const repairBuild = input.revision?.sourceRun ?? input.repairChain?.sourceRun ?? null;
+  const builtBy = repairBuild === null ? "the last build" : `build #${repairBuild}`;
+  const sentence = input.revision !== null && (repairText === null || input.revision.comments.length > 0) ? revisionSentence(input.revision, scope.acceptance)
+    : repairText === null ? null
+    : repairText[2] !== undefined ? `Fixes what ${builtBy} missed: ${statementsOf(repairText[2])}.`
+    : repairText[3] !== undefined ? `Collects the evidence ${builtBy} was missing for: ${statementsOf(repairText[3])}. The saved code stays the same.`
+    : `Fixes the checks that failed in ${builtBy}.`;
+  const plan = input.planDocument === null ? null : parseExecutionPlanDocument(input.planDocument);
+  const milestones = plan !== null && plan.ok ? plan.document.milestones : [];
+  const permission = permissionWordsOf(scope.profile);
+  const money = (micro: number): string => `$${(micro / 1_000_000).toFixed(2)}`;
+  const row = (label: string, body: string): string => `<div class="approval-row"><dt>${label}</dt><dd>${body}</dd></div>`;
+  const changes =
+    (milestones.length > 0 ? `<ol class="approval-steps">${milestones.map(one => `<li>${escape(one)}</li>`).join("")}</ol>` : "") +
+    (scope.touches.length > 0
+      ? `<p>Only in these paths:</p>${approvalPathsHtml(scope.touches)}`
+      : `<p${milestones.length > 0 ? ` class="meta"` : ""}>Any file in the project.</p>`);
+  const doneWhen = scope.acceptance.length === 0
+    ? `<p>You decide when you review the result.</p>`
+    : `<ul class="approval-done">${scope.acceptance.map(one => `<li>${escape(one.statement)}</li>`).join("")}</ul>`;
+  // Who builds, in one line: the builder and planner by name, the cap, and full access when granted.
+  const legs = route?.projection?.legs ?? [];
+  const legOf = (phase: Phase) => legs.find(one => one.phase === phase);
+  const who: string[] = [];
+  const builder = legOf("build");
+  if (raceTerms === null) {
+    if (builder !== undefined) who.push(`Builder ${agentNameWords(builder.provider, builder.model)}`);
+    else if (route?.legacy != null) who.push(`Builder ${agentNameWords(route.legacy.provider, route.legacy.model)}`);
+    else if (scope.profile != null) who.push(`Builder ${agentNameWords(scope.profile.provider, scope.profile.model)}`);
+  }
+  const planner = legOf("plan");
+  if (planner !== undefined) who.push(`Planner ${agentNameWords(planner.provider, planner.model)}`);
+  if (scope.budgetMicrousd !== null) who.push(`Cap ${money(scope.budgetMicrousd)} per attempt`);
+  if (permission === "Full access") who.push("Full access");
+  const race = raceTerms === null
+    ? ""
+    : `<p class="approval-race">${raceTerms.n} agents build this separately: ${raceTerms.agents.map(one => escape(agentNameWords(one.provider, one.model))).join(" and ")}. ` +
+      (raceTerms.kind === "comparison"
+        ? "No dollar cap; you compare the results and pick one.</p>"
+        : `Each may spend ${money(raceTerms.perAgentBudgetMicrousd)} plus a ${money(raceTerms.overrunReserveMicrousd)} reserve, ${money(raceTerms.totalBudgetMicrousd)} in all; you compare the results and pick one.</p>`);
+  const after = input.deliverable === "report"
+    ? "An agent investigates without changing the repository. You'll hear when its report is ready."
+    : raceTerms !== null
+      ? "Each agent starts in its own branch. You'll hear when the results are ready to compare."
+      : "An agent starts in its own branch. You'll hear when it's ready to review.";
+  const submit = raceTerms === null ? "Approve & start" : raceTerms.kind === "comparison" ? "Approve comparison" : "Approve tournament";
+
+  // Everything else the digest binds, one tap away.
+  const detail = (title: string, body: string, attrs = ""): string => body === "" ? "" : `<section class="approval-detail"${attrs}><h3>${title}</h3>${body}</section>`;
+  const revisionDetail = input.revision === null ? "" : detail("Earlier build",
+    `<div class="revision-card" data-revision-feedback>` +
+    `<p><a href="${escape(input.revisionSourceHref)}"${input.surface === "chat" ? " data-revision-source" : ""}>${input.surface === "chat" ? `Original result: build #${input.revision.sourceRun} →` : `build #${input.revision.sourceRun}`}</a></p>` +
+    (input.revision.comments.length === 0 ? "" : `<ul>${input.revision.comments.map(one => `<li>${one.path === null ? "" : `<span class="mono">${escape(one.path)}${one.line === null ? "" : `:${one.line}`}</span> · `}${escape(one.note)} <span class="meta">— ${escape(one.author)}</span></li>`).join("")}</ul>`) +
+    revisionLineageHtml(input.revision.lineage) +
+    `</div>`);
+  const contract = input.planContract;
+  const contractDetail = input.planDocument === null || approvalAmendmentHtml(contract) !== "" ? ""
+    : contract === null || contract === undefined ? `<p class="meta">No record compares this plan with what was filed. Check the rows above against your request.</p>`
+    : "problem" in contract ? `<p class="meta">${escape(contract.problem)} · <a href="/r/${contract.run}">run ${contract.run}</a></p>`
+    : !contract.filed && contract.revision !== true ? `<p class="meta">Nothing was filed before planning, so every term is the planner's proposal.</p>`
+    : `<p class="meta">${contract.revision === true ? "Same terms as the previous version." : "The plan keeps exactly what you filed."} <a href="/r/${contract.run}">Planning run ${contract.run}</a></p>`;
+  const criteriaDetail = scope.acceptance.length === 0 ? ""
+    : `<ul class="approval-signed-criteria">${scope.acceptance.map(one => `<li><code>${escape(one.id)}</code> ${escape(one.statement)} <span class="meta">needs ${one.evidence.map(escape).join(", ")}</span></li>`).join("")}</ul>`;
+  const projection = route?.projection ?? null;
+  const agentsDetail = route === null || route === undefined ? ""
+    : projection === null
+      ? route.legacy === null ? "" : `<p>${escape(agentsSummaryWords(route))}</p>`
+      : `<p>${escape(projection.summary)}</p>` +
+        `<p class="meta">${escape(riskTitle(route.riskLevel))}: ${escape(riskConsequence(route.riskLevel))}. Uses ${escape(projection.postureWords)}.</p>` +
+        (projection.demands.length === 0 ? "" : `<ul class="meta">${projection.demands.map(one => `<li>${escape(one)}</li>`).join("")}</ul>`) +
+        `<dl class="approval-roles">${projection.legs.map(leg =>
+          `<div><dt>${escape(ROLE_NOUN[leg.phase])}</dt><dd><span class="mono">${escape(leg.provider)} · ${escape(leg.model)}</span> <span class="meta">${escape(chosenWords(leg))}</span>` +
+          `<ul>${leg.reasons.map(reason => `<li>${escape(reason)}</li>`).join("")}${leg.problem === null ? "" : `<li><strong>${escape(leg.problem)}</strong></li>`}</ul></dd></div>`).join("")}</dl>` +
+        `<p class="meta">These exact agents are part of what you approve. Changing any of them asks for a fresh approval.</p>`;
+  const limits =
+    profileWords(scope) +
+    `<p class="meta">Checks level: ${escape(qualityModeTitle(scope.qualityMode ?? "default"))}${permission === null ? "" : ` · ${escape(permission)}`}</p>` +
+    (scope.budgetMicrousd === null ? "" : `<p class="meta">Each build attempt has a ${money(scope.budgetMicrousd)} agent-reported usage cap. On a subscription this limits work; it is not an API charge.</p>`);
+  const details =
+    `<details class="approval-details"><summary>Details</summary>` +
+    revisionDetail +
+    (repairText === null ? "" : detail("Signed goal", `<p>${escape(scope.goal)}</p>`)) +
+    detail("Plan record", contractDetail) +
+    detail("Signed criteria", criteriaDetail) +
+    detail("Why these agents", agentsDetail, ` id="${input.surface === "task" ? "approval-agents" : "chat-approval-agents"}"`) +
+    detail("Runtime limits", limits) +
+    (scope.candidate ? detail("Saved commit", `<p><code class="approval-commit">${escape(scope.candidate)}</code></p>`) : "") +
+    detail("Seal", `<p class="meta">Approval binds to this exact wording. <span class="seal mono">signs ${shortDigest(scope.digest)}</span></p>`) +
+    `</details>`;
+
+  return (
+    `<form method="post" action="${input.action}" class="approve-form approval-sheet"${input.surface === "task" ? ` id="approve"` : ""}${input.sticky ? " data-sticky" : ""}>` +
+    `<input type="hidden" name="csrf" value="${escape(input.csrf)}">` +
+    `<input type="hidden" name="nonce" value="${escape(input.nonce)}">` +
+    `<input type="hidden" name="digest" value="${escape(input.digest)}">` +
+    (input.returnTo === null ? "" : `<input type="hidden" name="return" value="${escape(input.returnTo)}">`) +
+    `<input type="text" name="username" autocomplete="username" class="visually-hidden" tabindex="-1" aria-hidden="true">` +
+    `<h2 class="approval-sheet-title">${input.deliverable === "report" ? "The investigation" : "The plan"}</h2>` +
+    (sentence === null ? "" : `<p class="approval-revision">${escape(sentence)}</p>`) +
+    (input.coordinator === null ? "" : `<p class="approval-note">An agent filed this: <span class="mono">${escape(input.coordinator.label)}</span>${input.coordinator.filedAgo === null ? "" : `, ${escape(input.coordinator.filedAgo)}`}. Nothing runs until you approve, and approving runs its request.</p>`) +
+    (input.deliverable === "report" ? `<p class="approval-note">Read-only: it reports back and changes nothing in the repository.</p>` : "") +
+    `<dl class="approval-rows">` +
+    row("Goal", `<p class="approval-goal">${escape(goalShown)}</p>`) +
+    row("Changes", changes) +
+    row("Won’t touch", `<p>${scope.outOfScope === null ? "Nothing is ruled out." : escape(scope.outOfScope)}</p>`) +
+    row("Done when", doneWhen) +
+    `</dl>` +
+    approvalAmendmentHtml(contract) +
+    race +
+    (who.length === 0 ? "" : `<p class="approval-who">${who.map(escape).join(" · ")}</p>`) +
+    `<div class="approval-act" id="${input.surface === "task" ? "approval-confirm" : "chat-approval-confirm"}">` +
+    `<label class="approval-password"><span class="visually-hidden">Your password</span><input type="password" name="token" autocomplete="current-password" placeholder="Your password"></label>` +
+    `<button type="submit" data-primary-action>${submit}</button></div>` +
+    `<p class="approval-after">${after}</p>` +
+    `<p class="approval-secondary"><a class="approval-link" href="${escape(input.editHref)}">Edit plan</a><a class="approval-link" href="${escape(input.notNowHref)}">Not now</a></p>` +
+    details +
+    `</form>`
+  );
+}
+
 /**
  * THE CONSENT DOOR (v48): whether a yes can be given on this scope right
  * now — one answer for the task page, the focused chat, and /next, so no
@@ -13491,7 +13709,9 @@ ${THEME_DARK}
   .approval-title { display: grid; gap: .15rem; }
   .approval-kicker { color: var(--muted-foreground); font: 500 .66rem/1.3 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; }
   .approval-title strong { font-size: 1.05rem; letter-spacing: -.02em; }
-  .approval-label { margin: .9rem 0 .2rem; color: var(--muted-foreground); font: 500 .66rem/1.3 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; }
+  .approval-label { display: block; margin: .9rem 0 .2rem; color: var(--muted-foreground); font: 500 12px/1.4 var(--font-sans); }
+  .approval-label::first-letter, .planner-plan .eyebrow::first-letter { text-transform: uppercase; }
+  .planner-plan .eyebrow { font: 500 12px/1.4 var(--font-sans); letter-spacing: 0; text-transform: none; }
   .approval-goal { margin: 0; font-size: 1rem; line-height: 1.55; white-space: pre-wrap; }
   .approval-boundaries { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem; margin-top: .75rem; }
   .approval-boundary { padding: .7rem .8rem; border: 1px solid var(--glass-border); border-radius: calc(var(--radius) - 3px); background: color-mix(in srgb, var(--muted) 45%, transparent); }
@@ -13577,6 +13797,66 @@ ${THEME_DARK}
   .approval-confirm { scroll-margin-top: 5rem; }
   .approval-paths { margin: 0; padding: 0; list-style: none; display: grid; gap: .15rem; }
   .approval-paths li { color: var(--muted-foreground); font-size: .8rem; overflow-wrap: anywhere; }
+  /* The approval sheet (approval critique, Oct 2): the plan open in plain
+     rows, who builds in one line, one Approve & start beside the password,
+     and every other signed term in one Details fold at the end. Sentence
+     case, Geist, 12px and up; prose capped at 75ch. */
+  .approval-sheet { display: grid; gap: 16px; margin: 0; padding: 20px; border: 1px solid var(--border); border-radius: 10px; background: var(--card); }
+  .approval-sheet.approve-form > :not(input) { margin: 0; }
+  .approval-sheet-title { margin: 0; font-size: 15px; font-weight: 600; line-height: 1.4; letter-spacing: -.01em; }
+  .approval-revision, .approval-note, .approval-race { max-width: 75ch; font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
+  .approval-note { color: var(--muted-foreground); }
+  .approval-rows { display: grid; gap: 14px; margin: 0; }
+  .approval-row { display: grid; grid-template-columns: 7.5rem minmax(0, 1fr); gap: 16px; }
+  .approval-row dt { margin: 0; color: var(--muted-foreground); font-size: 13px; font-weight: 500; line-height: 1.6; }
+  .approval-row dd { min-width: 0; max-width: 75ch; margin: 0; font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
+  .approval-row dd p, .approval-sheet .approval-goal { margin: 0; font-size: 14px; line-height: 1.6; }
+  .approval-row dd :is(ol, ul) { display: grid; gap: 4px; margin: 0; padding-left: 1.25rem; }
+  .approval-row dd ol + p { margin-top: 6px; }
+  .approval-row dd .approval-paths { margin-top: 2px; padding-left: 0; }
+  .approval-row dd .approval-paths li { font-size: 13px; }
+  .approval-amendment { max-width: 75ch; padding: 12px 14px; border-radius: 8px; background: var(--muted); font-size: 14px; line-height: 1.55; overflow-wrap: anywhere; }
+  .approval-amendment p { margin: 0; }
+  .approval-amendment ul { display: grid; gap: 4px; margin: 6px 0; padding-left: 1.25rem; }
+  .approval-who { max-width: 75ch; color: var(--muted-foreground); font-size: 13px; line-height: 1.5; }
+  .approval-act { display: grid; grid-template-columns: minmax(0, 20rem) auto; justify-content: start; align-items: center; gap: 8px; }
+  .approval-password { margin: 0; }
+  .approval-act input[type=password] { margin: 0; font-family: var(--font-sans); }
+  .approval-act button { margin: 0; min-height: 2.125rem; white-space: nowrap; }
+  .approval-after { max-width: 75ch; color: var(--muted-foreground); font-size: 13px; line-height: 1.5; }
+  .approval-secondary { display: flex; flex-wrap: wrap; gap: 8px; }
+  .approval-link { display: inline-flex; align-items: center; min-height: 32px; padding: 0 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); color: var(--foreground); font-size: 13px; font-weight: 500; text-decoration: none; }
+  .approval-link + .approval-link { border-color: transparent; background: none; color: var(--muted-foreground); }
+  @media (hover: hover) and (pointer: fine) { .approval-link:hover { background: var(--muted); color: var(--foreground); } }
+  details.approval-details { margin: 0; padding: 0; border: 0; border-top: 1px solid var(--border); border-radius: 0; background: none; }
+  details.approval-details[open] { padding-bottom: 0; }
+  .approval-details > summary { display: flex; align-items: center; min-height: 40px; padding: 4px 0 0; font-size: 13px; }
+  .approval-detail { max-width: 75ch; margin: 12px 0 0; font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
+  .approval-detail h3 { margin: 0 0 4px; font-size: 13px; font-weight: 600; letter-spacing: 0; text-transform: none; }
+  .approval-detail p, .approval-detail ul, .approval-detail dl { margin: 4px 0; }
+  .approval-detail ul { padding-left: 1.25rem; }
+  .approval-detail .revision-card { margin: 0; padding: 0; border: 0; background: none; }
+  .approval-roles { display: grid; gap: 8px; }
+  .approval-roles > div { display: grid; grid-template-columns: 6rem minmax(0, 1fr); gap: 12px; }
+  .approval-roles dt { color: var(--muted-foreground); font-weight: 500; }
+  .approval-roles dd { margin: 0; }
+  .approval-roles dd ul { margin: 2px 0 0; color: var(--muted-foreground); }
+  .chat-plan .approval-sheet { padding: 0; border: 0; background: none; }
+  @media (max-width: 760px) {
+    .approval-sheet { gap: 12px; padding: 14px; }
+    .approval-row { grid-template-columns: 1fr; gap: 2px; }
+    .approval-act { grid-template-columns: 1fr; }
+    .approval-act input[type=password], .approval-act button { min-height: 44px; font-size: 16px; }
+    .approval-act button { width: 100%; }
+    /* The one act stays under the thumb: sticky at the bottom, clear of the home indicator. */
+    .approval-sheet[data-sticky] .approval-act {
+      position: sticky; bottom: 0; z-index: 20; margin: 0 -14px; padding: 10px 14px calc(10px + env(safe-area-inset-bottom, 0px));
+      border-top: 1px solid var(--border); background: var(--card);
+    }
+    .approval-link { min-height: 44px; padding: 0 16px; }
+    .approval-details > summary { min-height: 44px; }
+    .approval-roles > div { grid-template-columns: 1fr; gap: 2px; }
+  }
   .run-facts-details { margin-top: 1.25rem; }
   .run-facts-details > summary { display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
   .run-facts-details > summary .meta { font-size: .75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -13810,7 +14090,7 @@ ${THEME_DARK}
   .result-pin[open] > summary::before { content: "▾"; }
   .result-pin > summary .meta { font-weight: 400; }
   .result-pin .diff-comment-target { margin: .25rem 0 .5rem; }
-  .chat-approval-section, .revision-card, .revision-lineage, .task-history, .diff-comment p { min-width: 0; overflow-wrap: anywhere; }
+  .revision-card, .revision-lineage, .task-history, .diff-comment p { min-width: 0; overflow-wrap: anywhere; }
   .result-feedback-history > summary, .task-history > summary, .task-history a { display: inline-flex; align-items: center; min-height: 44px; padding: .25rem .5rem; }
   .task-history > summary::before { content: "▸"; margin-right: .35rem; }
   .task-history[open] > summary::before { content: "▾"; }
@@ -14275,11 +14555,10 @@ ${THEME_DARK}
   .check-progress[data-final="passed"] { color: var(--success); }
   .check-progress[data-final="failed"] { color: var(--destructive); }
   .check-progress[data-final="unknown"] { color: var(--warning); }
-  .receipt-actions [data-primary-action], .task-plan-review .button-link { min-height: 44px; }
+  .receipt-actions [data-primary-action] { min-height: 44px; }
   .task-status-reason { margin-top: .75rem; }
   .task-status-reason summary, .task-status-details > summary { color: var(--muted-foreground); }
   .task-status-details > summary { min-height: 44px; }
-  .task-plan-review > summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; font-weight: 650; }
   .task-status-details, #task-control-details { margin: 1rem 0; }
   .task-control-copy { min-width: 0; overflow-wrap: anywhere; }
   [data-primary-action] { max-width: 100%; }
@@ -14294,16 +14573,9 @@ ${THEME_DARK}
   .chat-action-card > summary strong { font-size: .92rem; }
   .chat-action-card > summary small { color: var(--muted-foreground); font-size: .68rem; font-weight: 400; }
   .chat-action-card[open] > summary { border-bottom: 1px solid var(--border); }
-  .chat-approval-form { display: grid; gap: .85rem; padding: 1.05rem; }
-  .chat-approval-section { display: grid; gap: .3rem; }
-  .chat-approval-section > p, .chat-approval-section > pre { margin: 0; }
-  .chat-approval-form .approval-boundaries { margin: 0; }
   .chat-run-details { padding: .65rem .75rem; border: 1px solid var(--border); border-radius: calc(var(--radius) - 3px); background: color-mix(in srgb,var(--muted) 45%,transparent); }
   .chat-run-details > summary { color: var(--muted-foreground); cursor: pointer; font-size: .68rem; }
   .chat-run-details > .meta { margin-bottom: 0; }
-  .chat-approval-form .approval-confirm { align-items: end; margin-top: .15rem; }
-  .chat-approval-form .approval-confirm label { flex: 1 1 18rem; }
-  .chat-approval-form .approval-confirm button { min-height: 2.65rem; }
   .chat-decisions { display: grid; gap: .7rem; }
   .chat-section-head { margin: .15rem .15rem 0; }
   .chat-section-head h2 { margin: .2rem 0 0; font-size: 1rem; }
@@ -14500,15 +14772,6 @@ ${THEME_DARK}
   /* The concise plan (package 2): a title, the outcome, one line of
      counts and limits, then one Review plan disclosure over the unchanged
      exact-terms form. */
-  .chat-plan-head h2 { margin: 0; font-size: 1rem; letter-spacing: -.025em; }
-  .chat-plan-outcome { margin: .65rem 0 .55rem; font-size: .88rem; line-height: 1.5; overflow-wrap: anywhere; }
-  .chat-plan-facts { margin: 0; color: var(--muted-foreground); font-size: .74rem; line-height: 1.5; overflow-wrap: anywhere; }
-  .chat-plan > details.chat-approval { margin: .85rem 0 0; padding: .85rem 0 0; border: 0; border-top: 1px solid var(--border); border-radius: 0; background: transparent; }
-  .chat-plan > details.chat-approval > summary { display: flex; align-items: center; gap: .75rem; cursor: pointer; list-style: none; }
-  .chat-plan > details.chat-approval > summary::-webkit-details-marker { display: none; }
-  .chat-plan > details.chat-approval > summary .button-link { flex: 0 0 auto; white-space: nowrap; min-height: 44px; }
-  .chat-plan > details.chat-approval > .chat-approval-form { padding: .85rem 0 0; }
-  .chat-plan .chat-approval-lead { margin: 0 0 .85rem; }
   .chat-approval-stale { margin: .75rem 0 0; }
   .chat-approval-stale a { font-weight: 600; }
   form.approve-form[data-stale="1"] .approval-confirm { opacity: .55; }
@@ -14638,10 +14901,6 @@ ${THEME_DARK}
     .chat-action-card > summary { align-items: flex-start; padding: .85rem; }
     .chat-action-card > summary .button-link { min-height: 2.1rem; padding-inline: .6rem; font-size: .65rem; white-space: nowrap; }
     .chat-action-card > summary small { max-width: 14rem; }
-    .chat-approval-form { padding: .85rem; }
-    .chat-approval-form .approval-boundaries { grid-template-columns: 1fr; }
-    .chat-approval-form .approval-confirm { display: grid; }
-    .chat-approval-form .approval-confirm button { width: 100%; }
     .chat-budget { gap: .3rem; margin: .65rem 0 .9rem; }
     .chat-budget > span { padding: .25rem .48rem; }
     .chat-budget > span:first-child { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
@@ -16651,6 +16910,8 @@ type TaskChatFocus = {
     raceTerms: TournamentTerms | null;
     revision: RevisionView | null;
     coordinator: { label: string; filedAgo: string | null } | null;
+    /** The repair chain row when this task is a machine-drafted repair. */
+    repairChain: RepairChainRow | null;
   } | null;
   decisions: (Decision & { taskId: string; repo: string | null })[];
   publication: Publication | null;
@@ -16886,78 +17147,32 @@ function taskChatApproval(focus: TaskChatFocus, csrf: string): string {
   if (approval.nonce === "") {
     return `<section class="card chat-action-card" id="task-chat-action"><span class="eyebrow">approval needs attention</span><h2>The agent setup isn’t ready yet</h2>${profileWords(scope)}<a class="button-link" href="${taskHref(focus.id)}#scope">Fix the agent setup →</a></section>`;
   }
-  const profile = scope.profile ?? null;
-  const permission =
-    profile === null
-      ? null
-      : profile.provider === "claude"
-        ? profile.permissionArgv === "bypassPermissions" ? "Full access" : "Auto permissions"
-        : profile.provider === "gemini"
-          ? profile.approvalArgv === "yolo" ? "Full access" : "Auto permissions"
-          : profile.sandboxMode === "danger-full-access" ? "Full access" : "Workspace sandbox";
-  const revision = approval.revision === null
-    ? ""
-    : `<div class="chat-approval-section"><span class="approval-label">${approval.revision.kind === "ci-repair" ? "CI repair" : approval.revision.kind === "criterion-repair" ? "criterion repair" : "revision notes"}</span>` +
-      (approval.revision.comments.length === 0 ? "" : `<ul class="recap">${approval.revision.comments.map(one => `<li>${one.path === null ? "" : `<span class="mono">${escape(one.path)}${one.line === null ? "" : `:${one.line}`}</span> · `}${escape(one.note)} <span class="meta">— ${escape(one.author)}</span></li>`).join("")}</ul>`) +
-      // The link back (package 3): the original result stays on record
-      // and one tap away from the revision it produced, in both directions.
-      `<p class="meta"><a href="${escape(chatResultHref(focus.id, approval.revision.sourceRun))}" data-revision-source>Original result: build #${approval.revision.sourceRun} →</a></p>` +
-      revisionLineageHtml(approval.revision.lineage) +
-      `</div>`;
-  const race = approval.raceTerms === null
-    ? ""
-    : `<div class="chat-approval-section"><span class="approval-label">${approval.raceTerms.kind === "comparison" ? "comparison" : "tournament"}</span>` +
-      `<p>${approval.raceTerms.agents.length} agents build independently: ${approval.raceTerms.agents.map(one => `<span class="mono">${escape(one.provider)} · ${escape(one.model)}</span>`).join(" vs ")}.</p>` +
-      (approval.raceTerms.kind === "comparison"
-        ? `<p class="meta">No dollar caps; every result and its evidence is kept for you to compare.</p>`
-        : `<p class="meta">$${(approval.raceTerms.perAgentBudgetMicrousd / 1_000_000).toFixed(2)} per agent plus $${(approval.raceTerms.overrunReserveMicrousd / 1_000_000).toFixed(2)} reserve; $${(approval.raceTerms.totalBudgetMicrousd / 1_000_000).toFixed(2)} total.</p>`) +
-      `</div>`;
-  // The concise plan (package 2, revised on the operator's screenshot
-  // feedback and AGENTS.md): a short title, the outcome in one bounded
-  // line, one compact line of counts and limits, and ONE Review plan
-  // action — no eyebrow, no second sentence saying the same thing, no
-  // footer. Every word is a signed fact the exact terms below restate in
-  // full; the password and approval instructions live inside the
-  // expanded review, where Approve & start is the only submit.
-  const plan = approval.planDocument === null ? null : parseExecutionPlanDocument(approval.planDocument);
-  const milestones = plan !== null && plan.ok ? plan.document.milestones : [];
-  const count = (n: number, singular: string): string => `${n} ${singular}${n === 1 ? "" : "s"}`;
-  const facts: string[] = [
-    milestones.length > 0 ? count(milestones.length, "step") : count(scope.touches.length, "path"),
-    count(scope.acceptance.length, "check"),
-  ];
-  if (approval.deliverable === "report") facts.push("Report only");
-  if (scope.budgetMicrousd !== null) facts.push(`$${(scope.budgetMicrousd / 1_000_000).toFixed(2)} attempt cap`);
-  if (permission !== null) facts.push(permission);
-  if (approval.raceTerms !== null) facts.push(`${approval.raceTerms.agents.length}-agent ${approval.raceTerms.kind}`);
+  // The same sheet as the task page (approval critique, Oct 2): the plan
+  // open in plain rows, one Approve & start, the rest in Details.
   return (
     `<section class="card chat-action-card chat-plan" id="task-chat-action" data-approval="${escape(approval.digest)}">` +
-    `<p class="chat-plan-outcome">${escape(oneLineOf(scope.goal, 200))}</p>` +
-    `<p class="chat-plan-facts">${facts.map(escape).join(" · ")}</p>` +
-    `<details class="chat-approval">` +
-    `<summary data-primary-action><span class="button-link">Approve plan</span></summary>` +
-    `<form method="post" action="${taskHref(focus.executionId)}/approve" class="chat-approval-form approve-form">` +
-    `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
-    `<input type="hidden" name="nonce" value="${escape(approval.nonce)}">` +
-    `<input type="hidden" name="digest" value="${escape(approval.digest)}">` +
-    `<input type="hidden" name="return" value="${escape(returnTo)}">` +
-    `<input type="text" name="username" autocomplete="username" class="visually-hidden" tabindex="-1" aria-hidden="true">` +
-    `<p class="meta chat-approval-lead">These are the exact terms. Nothing builds until your password approves them.${approval.coordinator === null ? "" : ` Filed by <span class="mono">${escape(approval.coordinator.label)}</span>${approval.coordinator.filedAgo === null ? "" : ` · ${escape(approval.coordinator.filedAgo)}`}.`}</p>` +
-    (approval.planDocument === null ? "" : `<div class="chat-approval-section"><span class="approval-label">proposed plan</span>${executionPlanHtml(approval.planDocument, true)}${planContractHtml(approval.planContract, "ceremony")}</div>`) +
-    (approval.deliverable === "report" ? `<p class="meta"><span class="badge">report only</span> This investigates and reports back without changing the repository.</p>` : "") +
-    `<div class="chat-approval-section"><span class="approval-label">goal</span><p class="approval-goal">${escape(scope.goal)}</p></div>` +
-    `<div class="approval-boundaries"><div class="approval-boundary"><p class="approval-label">not this</p><p>${scope.outOfScope === null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p></div>` +
-    `<div class="approval-boundary"><p class="approval-label">may touch</p>${approvalPathsHtml(scope.touches)}</div></div>` +
-    acceptanceCeremonyHtml(scope.acceptance) + revision + race +
-    `<div class="approval-chips"><span class="approval-chip">quality · <strong>${escape(qualityModeTitle(scope.qualityMode ?? "default"))}</strong></span>` +
-    (permission === null ? "" : `<span class="approval-chip">${escape(permission)}</span>`) +
-    (scope.budgetMicrousd === null ? "" : `<span class="approval-chip">$${(scope.budgetMicrousd / 1_000_000).toFixed(2)} attempt cap</span>`) +
-    (focus.route === null || focus.route.projection === null ? "" : `<span class="approval-chip">${escape(riskTitle(focus.route.riskLevel))} · ${escape(focus.route.projection.postureWords)}</span>`) +
-    `</div>` +
-    agentsCeremonyHtml(focus.route) +
-    runtimeDetailsHtml(scope) +
-    `<div class="approval-confirm"><label>Your password <span class="meta">— confirms this exact scope</span><input type="password" name="token" autocomplete="current-password" placeholder="Password"></label>` +
-    `<button type="submit">Approve & start</button></div></form></details></section>`
+    approvalSheetHtml({
+      surface: "chat",
+      action: `${taskHref(focus.executionId)}/approve`,
+      csrf,
+      nonce: approval.nonce,
+      digest: approval.digest,
+      returnTo,
+      scope,
+      planDocument: approval.planDocument,
+      planContract: approval.planDocument === null ? null : approval.planContract,
+      revision: approval.revision,
+      revisionSourceHref: approval.revision === null ? "" : chatResultHref(focus.id, approval.revision.sourceRun),
+      repairChain: approval.repairChain,
+      raceTerms: approval.raceTerms,
+      route: focus.route,
+      coordinator: approval.coordinator,
+      deliverable: approval.deliverable,
+      editHref: `${taskHref(focus.id)}#${approval.planDocument === null ? "scope" : "plan-edit"}`,
+      notNowHref: "/chat",
+      sticky: false,
+    }) +
+    `</section>`
   );
 }
 
@@ -21101,6 +21316,10 @@ function taskBodyParts(data: {
       : approval.approved
         ? "approved"
         : "review before starting";
+  // While the approval sheet is open it states any amendment; the plan
+  // card does not repeat it (one #contract-amendment on the page).
+  const sheetStatesContract = scope !== null && !approval.approved && data.plan === "drafted" && data.dispatch?.action !== "repair-dependency" &&
+    !(data.revision != null && "problem" in data.revision) && scope.profileState !== "unresolved" && consentDoorOf(scope, data.route).open;
   const planCard =
     data.planDocument === null
       ? data.plan === "requested"
@@ -21115,10 +21334,10 @@ function taskBodyParts(data: {
         (approval.approved ? `<p class="meta">The agent can adapt this route when evidence changes; your approved outcome stays fixed.</p>` : "") +
         `</div><span class="plan-lock">${planStanding}</span>${approval.approved ? `</summary><div class="planner-plan-body">` : `</div>`}` +
         executionPlanHtml(displayedPlanDocument ?? data.planDocument) +
-        (approval.approved ? "" : planContractHtml(data.planContract ?? null, "full")) +
+        (approval.approved || sheetStatesContract ? "" : planContractHtml(data.planContract ?? null, "full")) +
         (data.csrf === "" || data.planSha == null || approval.approved
           ? ""
-          : `<details class="plan-editor"><summary>Edit plan</summary><form method="post" action="${taskHref(task.id)}/plan-edit">` +
+          : `<details class="plan-editor" id="plan-edit"><summary>Edit plan</summary><form method="post" action="${taskHref(task.id)}/plan-edit">` +
             `<input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="saw-plan" value="${escape(data.planSha)}">` +
             `<label>plan details <span class="meta">Keep the five headings. Approval locks this version for the build.</span>` +
             `<textarea name="plan-document" rows="14">${escape(data.planDocument)}</textarea></label>` +
@@ -21152,21 +21371,10 @@ function taskBodyParts(data: {
   // The approval form restates every field the digest binds — an operator
   // approves what is on this form, not what is elsewhere on the page — and
   // requires the token typed again. The session got you here; only the
-  // token agrees.
-  // The ceremony is the page's first card when a scope waits for its yes
-  // (task page pass): it states the wait, restates every term the digest
-  // binds, and puts the approve act above the fold — the consent-sheet
-  // shape. An unapprovable scope gets the problem and the edit road
-  // instead of a password it cannot use.
-  const approvalProfile = scope?.profile ?? null;
-  const approvalPermission =
-    approvalProfile === null
-      ? null
-      : approvalProfile.provider === "claude"
-        ? approvalProfile.permissionArgv === "bypassPermissions" ? "Full access" : "Auto permissions"
-        : approvalProfile.provider === "gemini"
-          ? approvalProfile.approvalArgv === "yolo" ? "Full access" : "Auto permissions"
-          : approvalProfile.sandboxMode === "danger-full-access" ? "Full access" : "Workspace sandbox";
+  // token agrees. The sheet shows the plan open in plain rows with one
+  // Approve & start; the rest of the signed terms sit in its Details fold.
+  // An unapprovable scope gets the problem and the edit road instead of a
+  // password it cannot use.
   const consentDoor = consentDoorOf(scope, data.route);
   const revisionInApproval = scope !== null && !approval.approved && data.plan !== "requested" &&
     scope.profileState !== "unresolved" && consentDoor.open && data.dispatch?.action !== "repair-dependency" &&
@@ -21182,79 +21390,27 @@ function taskBodyParts(data: {
             `<p class="ceremony-road"><a class="button-link" href="#scope">edit the scope to fix it →</a></p></div>`
         : !consentDoor.open
           ? consentClosedHtml(task.id, consentDoor, "task")
-        : [
-          `<form method="post" action="${taskHref(task.id)}/approve" class="card approve-form approval-card" id="approve">`,
-          `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
-          `<input type="hidden" name="nonce" value="${escape(data.nonce)}">`,
-          `<input type="hidden" name="digest" value="${escape(data.approvalDigest ?? scope.digest)}">`,
-          `<input type="text" name="username" autocomplete="username" class="visually-hidden" tabindex="-1" aria-hidden="true">`,
-          `<div class="ceremony-head"><span class="approval-title"><strong>approve exactly this:</strong></span><a href="#scope">Edit details</a></div>`,
-          // No duplicate summary card or skip-ahead approval action.
-          // Every signed term still follows, before password confirmation.
-          `<p class="meta approval-orient" data-approval-orient>Nothing starts until you approve.</p>`,
-          `<div class="approval-terms" id="approval-terms">`,
-          // The deliverable INSIDE the ceremony (mate arc §10): a yes on a
-          // scout task authorizes a read-only session and a report, never
-          // a branch — said where the signature is given.
-          data.deliverable === "report"
-            ? `<p class="meta"><span class="badge">scout</span> approving sends a read-only session to investigate this goal and deliver a report — no branch, nothing changes in the repository</p>`
-            : "",
-          // The filer INSIDE the ceremony (MCP spec v6): a coordinator's
-          // request is signed knowing whose it is — and until this
-          // signature, nothing plans, claims, or runs it.
-          data.coordinator === null || data.coordinator === undefined
-            ? ""
-            : `<p class="meta">filed by <span class="mono">${escape(data.coordinator.label)}</span>${data.coordinator.filedAgo === null ? "" : ` \u00b7 ${escape(data.coordinator.filedAgo)}`} — an agent asked for this; nothing plans, claims, or runs until you sign, and your signature runs THEIR request</p>`,
-          `<p class="approval-label">goal</p><p class="approval-goal">${escape(scope.goal)}</p>`,
-          scope.candidate ? `<p class="approval-label">Saved commit</p><p style="overflow-wrap:anywhere"><code>${escape(scope.candidate)}</code></p>` : "",
-          revisionCard,
-          `<div class="approval-boundaries">`,
-          `<div class="approval-boundary"><p class="approval-label">not this</p><p>${scope.outOfScope === null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p></div>`,
-          `<div class="approval-boundary"><p class="approval-label">touches</p>${approvalPathsHtml(scope.touches)}</div>`,
-          `</div>`,
-          acceptanceCeremonyHtml(scope.acceptance),
-          // The contract amendment INSIDE the ceremony (contract handoff,
-          // task 1): what the yes accepts that the operator did not file.
-          data.plan === "drafted" ? planContractHtml(data.planContract ?? null, "ceremony") : "",
-          `</div>`,
-          `<div class="approval-chips"><span class="approval-chip">quality · <strong>${escape(qualityModeTitle(scope.qualityMode ?? "default"))}</strong></span>` +
-            (approvalPermission === null ? "" : `<span class="approval-chip">${escape(approvalPermission)}</span>`) +
-            `</div>`,
-          // The revision feedback above includes its lineage: the source,
-          // carried terms, re-resolved terms, and grants that never inherit.
-          // The AGENTS inside the ceremony (v47/v48): who plans, builds,
-          // repairs, and reviews, and why — said where the yes is given, in
-          // the same block chat and /next show. Availability is volatile and
-          // stays outside these terms; the runtime limits the profile seals
-          // are one tap away, never in the way.
-          agentsCeremonyHtml(data.route),
-          runtimeDetailsHtml(scope),
-          scope.budgetMicrousd === null
-            ? ""
-            : `<p class="meta">each build attempt has a $${(scope.budgetMicrousd / 1_000_000).toFixed(2)} agent-reported usage cap — on a subscription this is a work limiter, not an API charge</p>`,
-          // One yes covers BOTH documents (finding 31): the race terms are
-          // restated on the same card the password signs, or they are not
-          // approved at all.
-          data.raceTerms === null || data.raceTerms === undefined
-            ? ""
-            : data.raceTerms.kind === "comparison"
-              ? `<p><strong>and this comparison:</strong></p>` +
-                `<p class="recap" style="margin-top:0">${data.raceTerms.n} agents build this independently — ` +
-                `${data.raceTerms.agents.map(agent => `${escape(agent.provider)} · ${escape(agent.model)}`).join("  vs  ")}. ` +
-                `No dollar caps exist on a comparison — each agent runs until it finishes or stops making progress; ` +
-                `spend lands measured only where the harness reports dollars (` +
-                `${data.raceTerms.agents.filter(agent => agent.provider === "claude").length} of ${data.raceTerms.n} lanes here). ` +
-                `You will compare the results and pick one.</p>`
-              : `<p><strong>and this tournament:</strong></p>` +
-                `<p class="recap" style="margin-top:0">${data.raceTerms.n} agents build this independently — ` +
-                `${data.raceTerms.agents.map(agent => `${escape(agent.provider)} · ${escape(agent.model)}`).join("  vs  ")}. ` +
-                `Each may spend $${(data.raceTerms.perAgentBudgetMicrousd / 1_000_000).toFixed(2)} plus a ` +
-                `$${(data.raceTerms.overrunReserveMicrousd / 1_000_000).toFixed(2)} overrun reserve; the whole tournament is capped at ` +
-                `$${(data.raceTerms.totalBudgetMicrousd / 1_000_000).toFixed(2)}. You will compare the results and pick one.</p>`,
-          `<div class="approval-confirm" id="approval-confirm"><label>Your password <span class="meta">— confirms exactly the terms above</span><input type="password" name="token" autocomplete="current-password" placeholder="Password"></label>`,
-          `<div class="sticky-actions"><button type="submit">${data.raceTerms === null || data.raceTerms === undefined ? "Approve & start" : data.raceTerms.kind === "comparison" ? "Approve comparison" : "Approve tournament"}</button></div></div>`,
-          `</form>`,
-        ].join("\n");
+        : approvalSheetHtml({
+          surface: "task",
+          action: `${taskHref(task.id)}/approve`,
+          csrf: data.csrf,
+          nonce: data.nonce,
+          digest: data.approvalDigest ?? scope.digest,
+          returnTo: null,
+          scope,
+          planDocument: data.plan === "drafted" ? data.planDocument : null,
+          planContract: data.plan === "drafted" ? data.planContract ?? null : null,
+          revision: data.revision == null || "problem" in data.revision ? null : data.revision,
+          revisionSourceHref: data.revision == null || "problem" in data.revision ? "" : `/r/${data.revision.sourceRun}`,
+          repairChain: data.repairChain ?? null,
+          raceTerms: data.raceTerms ?? null,
+          route: data.route,
+          coordinator: data.coordinator ?? null,
+          deliverable: data.deliverable ?? "branch",
+          editHref: data.csrf !== "" && data.planSha != null && data.planDocument !== null ? "#plan-edit" : "#scope",
+          notNowHref: "/work",
+          sticky: data.dispatch?.action === "approve-scope",
+        });
 
   // The attended road (Phase 2E): beside the approval, never replacing it.
   // The mint button leads to the CONFIRM screen where every term renders
@@ -21834,7 +21990,7 @@ function taskBodyParts(data: {
           `<p class="meta"><strong>Plan first</strong> drafts it from the repository, or <a href="#scope">write it yourself</a>.</p></div>`
       : "";
   const approvalHtml = dependencyChoiceNeeded || approveForm === "" ? "" : data.dispatch?.action === "approve-scope"
-    ? `<details class="task-plan-review"><summary data-primary-action><span class="button-link">Approve plan</span></summary>${approveForm}</details>`
+    ? `<section class="task-plan-review" aria-label="Approve the plan">${approveForm}</section>`
     : `<details class="task-secondary-approval"><summary>Updated approval terms</summary>${approveForm}</details>`;
   const optionsHtml = `${identity}${dispatchStatus}${dependencyChoiceNeeded ? "" : actsBar}`;
   const optionsOpen = data.assignment?.primaryAction?.code === "unhold" || data.assignment?.primaryAction?.code === "retry-task";

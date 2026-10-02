@@ -1775,12 +1775,17 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     try {
       revisionWindow.document.body.innerHTML = revisionTask;
       const reviewPlan = revisionWindow.document.querySelector('.task-plan-review')!;
+      // One sentence in view, before the password: what this fixes, in the person's own words.
+      const sentence = reviewPlan.querySelector('.approval-revision')!;
+      expect(sentence.textContent).toMatch(new RegExp(`^Fixes what build #${run} missed: `));
+      expect(sentence.textContent).toContain("Name the helper");
+      expect(reviewPlan.innerHTML.indexOf('class="approval-revision"')).toBeLessThan(reviewPlan.innerHTML.indexOf('type="password"'));
+      // The exact batch, with its paths, in the Details fold.
       const feedback = reviewPlan.querySelector('[data-revision-feedback]')!;
       expect(feedback?.textContent).toContain(feedbackNote);
       expect(feedback?.textContent).toContain("Name the helper.");
       expect(feedback?.textContent).toContain("src/a.ts:2");
-      expect(feedback?.closest('details')).toBe(reviewPlan);
-      expect(reviewPlan.innerHTML.indexOf(feedbackNote)).toBeLessThan(reviewPlan.innerHTML.indexOf('type="password"'));
+      expect(feedback?.closest('details')).toBe(reviewPlan.querySelector('details.approval-details'));
       expect(revisionWindow.document.querySelectorAll('[data-revision-feedback]')).toHaveLength(1);
     } finally { await revisionWindow.happyDOM.close(); }
     const revisionChat = await read(`/chat?task=${revisionId}`);
