@@ -21,7 +21,7 @@ import { sealVerificationReceipt } from "./verification-evidence.js";
 import { verifyApproverStanding } from "./principal.js";
 import { assignmentOf, checkAssignmentAsOperator } from "./assignment.js";
 import { telegramProgressCard } from "./telegram-progress.js";
-import { quietCardView } from "./chat-quiet.js";
+import { finishedView, quietCardView } from "./chat-quiet.js";
 import { bridgePass, followBridge, hashPairingCode, mintPairingCode, PAIRING_TTL_MS, type TelegramTransport } from "./telegram.js";
 import { SlackState, slackHash } from "./slack-state.js";
 import { deliverSlackPart, planSlackNotifications, type SlackChatOptions } from "./slack-chat.js";
@@ -89,7 +89,12 @@ function scriptedTelegram() {
 describe("short human titles and plain chat words", () => {
   test("titles drop \"— revision\" and ids and stay within 60 characters", () => {
     expect(shortTitle("Faster tests — revision", "faster-tests-2")).toBe("Faster tests");
-    expect(shortTitle("Release 0.9.9: lighter tests (release-099b)", "release-099")).toBe("Release 0.9.9: lighter tests");
+    // Only real task ids go: another task's id when the store knows it, and the task's own.
+    expect(shortTitle("Release 0.9.9: lighter tests (release-099b)", "release-099", token => token === "release-099b")).toBe("Release 0.9.9: lighter tests");
+    expect(shortTitle("Release 0.9.9: lighter tests (release-099b)", "release-099")).toBe("Release 0.9.9: lighter tests (release-099b)");
+    // Words with digits are words: node-20, utf-8, v2, 0.9.9.
+    expect(shortTitle("Move CI to node-20 and read utf-8 names", "ci-node-3")).toBe("Move CI to node-20 and read utf-8 names");
+    expect(shortTitle("Ship v2 of the API (ci-node-3)", "ci-node-3", () => false)).toBe("Ship v2 of the API");
     expect(shortTitle("Stop charging tax twice at checkout (fix-checkout-tax)", "fix-checkout-tax")).toBe("Stop charging tax twice at checkout");
     expect(shortTitle("Fix login—revision 2")).toBe("Fix login");
     expect(shortTitle("Pre-revision checks stay")).toBe("Pre-revision checks stay");
@@ -108,7 +113,17 @@ describe("short human titles and plain chat words", () => {
 
   test("one finished task is one or two short sentences, outcome first; several are one line with the names", () => {
     const fact = (summary: string, headline = "Ready for review", checks: "passed" | "failed" | null = "passed") => ({ summary, headline, checks, report: false, completedBy: null });
-    expect(batchLine([fact("Search now ignores accents")])).toBe("Search now ignores accents is ready. Your tests passed. Take a look?");
+    expect(batchLine([fact("Search now ignores accents")])).toBe("Search now ignores accents is ready. Your tests passed. Mark it complete?");
+    expect(batchLine([{ ...fact("Search now ignores accents"), pullRequest: true }])).toBe("Search now ignores accents is ready. Your tests passed. Merge it?");
+    // The lead says "I" for what it did.
+    expect(batchLine([{ ...fact("Search now ignores accents"), lead: true, pullRequest: true }])).toBe("I finished search now ignores accents. Your tests passed. Merge it?");
+    expect(batchLine([{ ...fact("Faster tests", "Failed", "failed"), lead: true }])).toBe("I built faster tests, but its tests failed. It waits for you: retry or ask for changes.");
+    expect(batchLine([{ ...fact("Faster tests", "Complete", null), lead: true, completedBy: "alex" }])).toBe("I marked faster tests complete.");
+    // Updates that are not finished work share the message too.
+    const update = (summary: string, phrase: string, headline = "Needs you") => ({ ...fact(summary, headline, null), update: { words: `${summary} · words`, phrase } });
+    expect(batchLine([update("Cleanup", "has a plan to review")])).toBe("Cleanup · words");
+    expect(batchLine([fact("Faster tests"), update("Cleanup", "has a plan to review"), update("Accents", "failed", "Failed")]))
+      .toBe("3 updates: faster tests is ready, cleanup has a plan to review, accents failed.\nAccents stopped before it finished, and 1 needs your decision; they wait for you.");
     expect(batchLine([fact("Faster tests", "Failed", "failed")])).toBe("Faster tests is built, but its tests failed. It waits for you: retry or ask for changes.");
     expect(batchLine([fact("Faster tests"), fact("Cleanup"), fact("Search ignores accents"), fact("API keys rotate")]))
       .toBe("4 tasks finished: faster tests, cleanup, search ignores accents, …");
@@ -234,22 +249,28 @@ describe("chat voice on Telegram", () => {
     expectClean(script.shown(ALEX_CHAT), "alex", [...SIX.map(one => one[0]), "export-btn-10"]);
   });
 
-  test("c3: a result the reader marked complete never says \"Marked complete by\" them; anyone else still reads who did", () => {
+  /** A saved result whose tests passed, Ready for a person. */
+  const readyResult = (id: string, title: string) => {
     for (const phase of ["build", "plan", "review"] as const) store.setPhaseConfig("installation", phase, "claude", "sonnet", "alex", now);
-    const ref = placed("ready-11", "Keep the guard readable — revision");
-    propose(store, { taskId: "ready-11", goal: "Keep the guard readable", touches: ["src/guard.ts"], acceptance: [{ id: "c1", statement: "The guard stays readable.", how: null, evidence: ["check"] }], now });
-    expect(approve(store, "ready-11", "alex", now, store.getScope("ready-11")!.digest, alexToken).ok).toBe(true);
+    const ref = placed(id, title);
+    propose(store, { taskId: id, goal: title, touches: ["src/guard.ts"], acceptance: [{ id: "c1", statement: "The guard stays readable.", how: null, evidence: ["check"] }], now });
+    expect(approve(store, id, "alex", now, store.getScope(id)!.digest, alexToken).ok).toBe(true);
     const authority = store.routeAuthorityFor(ref, "builder");
     if (!authority?.ok) throw new Error("route fixture");
-    const run = store.startRun({ taskRef: ref, leaseId: "l-ready", runner: RUNNER, branch: "so/ready-11", worktree: "/pool/ready-11", route: authority.stamp, now });
-    store.stampRun(run, { scopeDigest: store.getScope("ready-11")!.digest, baseRevision: "b".repeat(40) });
+    const run = store.startRun({ taskRef: ref, leaseId: `l-${id}`, runner: RUNNER, branch: `so/${id}`, worktree: `/pool/${id}`, route: authority.stamp, now });
+    store.stampRun(run, { scopeDigest: store.getScope(id)!.digest, baseRevision: "b".repeat(40) });
     store.recordOutcomeFacts(run, { headRevision: "a".repeat(40), handoff: "The guard reads well." });
     store.finishRun(run, { outcome: "built", committed: true, now });
-    store.setTaskState("ready-11", "done", now);
+    store.setTaskState(id, "done", now);
     store.saveProofVerdict(run, "verified", [], now, [{ id: "c1", statement: "The guard stays readable.", requiredEvidence: ["check"], state: "pass", detail: [], answered: [], review: null }] as never, "verified");
     store.setVerifyCommand({ repo: REPO, command: "npm test", timeoutMs: 300_000, approvedBy: "alex" }, now);
     storeEvidence(store, dir, run, "check-log", "checks.txt", Buffer.from("1 test passed"), "npm test", now, { captureStatus: "ok" });
     sealVerificationReceipt(store, dir, run, "a".repeat(40), store.liveVerifyCommand(REPO)!, { configured: true, ran: true, exitCode: 0 }, now);
+    return { ref, run };
+  };
+
+  test("c3: a result the reader marked complete never says \"Marked complete by\" them; anyone else still reads who did", () => {
+    const { ref, run } = readyResult("ready-11", "Keep the guard readable — revision");
     const who = verifyApproverStanding(store, "alex", store.accountOf("alex")!.generation, [REPO]);
     if (!who.ok) throw new Error("approver fixture");
     const receipt = assignmentOf(store, "ready-11", now, { principal: "operator", repos: [REPO] }, dir)!.receipt!;
@@ -268,6 +289,96 @@ describe("chat voice on Telegram", () => {
     const fact = store.listNotifications("all").find(row => row.taskRef === ref && row.kind === "run-finished")!;
     expect(store.pingAllowed(fact, "alex")).toBe(false);
     expect(store.pingAllowed(fact, "bob")).toBe(true);
+  });
+
+  test("a ready result offers its real next step and a look first: [Mark complete] or, with a pull request, [Merge]", async () => {
+    const script = scriptedTelegram();
+    await pass(script);
+    script.reset();
+    const { ref, run } = readyResult("guard-12", "Keep the guard readable");
+    await pass(script);
+    const pings = script.pings(BOB_CHAT);
+    expect(pings).toHaveLength(1);
+    expect(String(pings[0]!.params["text"])).toBe("Keep the guard readable is ready. Your tests passed. Mark it complete?");
+    expect(script.buttons(pings[0]!)).toEqual([
+      { text: "Mark complete", url: `${ORIGIN}/chat?task=guard-12&result=${run}` },
+      { text: "Look first", url: `${ORIGIN}/chat?task=guard-12&result=${run}&tab=changes` },
+    ]);
+    // An open pull request: the ask is "Merge it?", and [Merge] opens the task's merge control.
+    vi.spyOn(store, "publicationForRun").mockReturnValue({ state: "opened", prNumber: 3, prUrl: "https://github.com/o/r/pull/3", remoteState: "OPEN" } as never);
+    const view = finishedView(store, { items: [{ taskRef: ref, run, notification: null }] }, now, dir, "bob")!;
+    expect(view.text).toBe("Keep the guard readable is ready. Your tests passed. Merge it?");
+    expect([view.link, ...(view.also ?? [])].map(one => one.label)).toEqual(["Merge", "Look first"]);
+    expect(view.link.path).toBe("/t/guard-12#merge");
+    vi.restoreAllMocks();
+  });
+
+  test("c2: any updates within two minutes share one message — a lone failure goes out as before, then finished work joins it", async () => {
+    const script = scriptedTelegram();
+    const stuck = placed("payout-13", "Guard the payout path — revision");
+    const notes = placed("notes-14", "Ship the release notes");
+    await pass(script);
+    now = at(10_000);
+    store.enqueueNotification({ dedupeKey: "exhausted:payout-13", kind: "attempts-exhausted", pushClass: "attention", subject: "payout-13 stalled after 3 straight failures",
+      body: "The last attempt failed its checks.", source: { taskRef: stuck } }, now);
+    await pass(script);
+    expect(script.pings(ALEX_CHAT)).toHaveLength(1);
+    const first = script.pings(ALEX_CHAT)[0]!;
+    expect(String(first.params["text"])).toContain("Guard the payout path stalled after 3 straight failures");
+    now = at(70_000);
+    built(notes);
+    await pass(script);
+    // Still one message: it now says both, edited in place.
+    expect(script.pings(ALEX_CHAT)).toHaveLength(1);
+    const latest = String(script.current(ALEX_CHAT, script.sentId(first)).params["text"]);
+    expect(latest).toMatch(/^2 updates: guard the payout path failed, ship the release notes needs you\.\n/);
+    expect(latest).toContain("Guard the payout path stopped before it finished");
+    expectClean(script.shown(ALEX_CHAT), "alex", ["payout-13", "notes-14"]);
+  });
+
+  test("c1: a security alert always pings, even about a task the reader settled, a release check or a replaced task", async () => {
+    const script = scriptedTelegram();
+    const check = placed("release-check-15", "Release check for 0.9.9");
+    await pass(script);
+    script.reset();
+    now = at(10_000);
+    const run = built(check);
+    store.handle.prepare("INSERT INTO run_check (run, release, recorded_at) VALUES (?, 1, ?)").run(run, now.toISOString());
+    withActor({ account: "alex", lead: false }, () => store.noteTaskAct(check, "completed", now));
+    expect(store.neverPings(check)).toBe(true);
+    expect(store.settledBy(check)).toBe("alex");
+    await pass(script);
+    expect(script.pings(ALEX_CHAT)).toEqual([]);
+    withActor({ account: "alex", lead: false }, () => store.enqueueNotification({ dedupeKey: "secret:release-check-15", kind: "secret-detected", pushClass: "attention",
+      subject: "A secret was found in saved evidence", body: "It was withheld. Rotate the key.", source: { taskRef: check } }, now));
+    const fact = store.listNotifications("all").find(row => row.kind === "secret-detected")!;
+    expect(store.pingAllowed(fact, "alex")).toBe(true);
+    await pass(script);
+    expect(script.pings(ALEX_CHAT)).toHaveLength(1);
+    expect(String(script.pings(ALEX_CHAT)[0]!.params["text"])).toContain("A secret was found in saved evidence");
+  });
+
+  test("c1: settling older work never silences a newer revision: its failure still reaches the person", async () => {
+    const script = scriptedTelegram();
+    const base = placed("search-16", "Search ignores accents");
+    withActor({ account: "alex", lead: false }, () => store.noteTaskAct(base, "completed", now));
+    expect(store.settledBy(base)).toBe("alex");
+    now = at(60_000);
+    const revision = placed("search-17", "Search ignores accents — revision");
+    store.handle.prepare("UPDATE task_ref SET revision_of = ? WHERE id = ?").run("search-16", revision);
+    expect(store.settledBy(revision)).toBeNull();
+    await pass(script);
+    script.reset();
+    now = at(90_000);
+    store.enqueueNotification({ dedupeKey: "exhausted:search-17", kind: "attempts-exhausted", pushClass: "attention", subject: "search-17 stalled after 3 straight failures",
+      body: "fixture", source: { taskRef: revision } }, now);
+    await pass(script);
+    expect(script.pings(ALEX_CHAT)).toHaveLength(1);
+    expectClean(script.shown(ALEX_CHAT), "alex", ["search-16", "search-17"]);
+    // Completing the revision (recorded on its root, after it was filed) settles it for alex.
+    now = at(120_000);
+    withActor({ account: "alex", lead: false }, () => store.noteTaskAct(base, "completed", now));
+    expect(store.settledBy(revision)).toBe("alex");
   });
 
   test("release checks and replaced tasks never ping", async () => {
@@ -408,6 +519,19 @@ describe("chat voice on Slack (the shared path Discord and Teams use)", () => {
     withActor({ account: "alex", lead: false }, () => store.setTaskState("faster-tests-2", "done", now));
     await pass();
     expect(calls.slice(before).filter(call => call.method === "chat.postMessage" || call.method === "chat.update")).toEqual([]);
+    // Updates that are not finished work batch too: two failures a few seconds apart are one post, edited in place.
+    now = at(400_000);
+    store.enqueueNotification({ dedupeKey: "exhausted:accents-3", kind: "attempts-exhausted", pushClass: "attention", subject: "accents-3 stalled after 3 straight failures",
+      body: "fixture", source: { taskRef: refs[2]! } }, now);
+    await pass();
+    now = at(430_000);
+    store.enqueueNotification({ dedupeKey: "exhausted:gallery-6", kind: "attempts-exhausted", pushClass: "attention", subject: "gallery-6 stalled after 3 straight failures",
+      body: "fixture", source: { taskRef: refs[5]! } }, now);
+    await pass();
+    const later = calls.slice(before).filter(call => call.method === "chat.postMessage");
+    expect(later).toHaveLength(1);
+    const edits = calls.slice(before).filter(call => call.method === "chat.update" && call.args["ts"] === "1789700000.000102");
+    expect(String(edits.at(-1)!.args["text"])).toMatch(/^2 updates: search ignores accents failed, flow gallery shows sharing failed\.\n2 failed; they wait for you\.$/);
     const texts = calls.filter(call => call.method === "chat.postMessage" || call.method === "chat.update").map(call => String(call.args["text"]));
     expectClean(texts, "alex");
   });

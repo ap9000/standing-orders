@@ -33,8 +33,8 @@ import { answerChatFlowPrompt, applyChatFlowTap, flowDecisionParts } from "./cha
 import { connectChannel, FLOW_WORDS, takeChannelMessage, watchedChannel } from "./chat-inbox.js";
 import { triggerConfigOf } from "./flow-triggers.js";
 import { telegramProgressCard } from "./telegram-progress.js";
-import { enqueueEveningDigests, finishedView, isTaskFact, needsPerson, quietCardView } from "./chat-quiet.js";
-import { BATCH_MS, chatText, shortTitle } from "./chat-voice.js";
+import { enqueueEveningDigests, finishedView, isTaskFact, joinsBatch, needsPerson, quietCardView } from "./chat-quiet.js";
+import { BATCH_MS, chatText, chatTitle } from "./chat-voice.js";
 import { phoneText, PHONE_HELP, phoneCommand, phoneStatus, phoneTaskView, phoneTaskChoices, phoneTaskListText, resolvePhoneTask, phoneFocusText, PHONE_NO_MATCH, PHONE_BACK_TO_LEAD } from "./telegram-status.js";
 import { applyRoomInbound, conversationRow, roomCardApprover, roomCommand, roomGrantAllowed, roomMessagesAfter, roomMessageText, teamDomain } from "./chat-rooms.js";
 import { isTelegramProgressNotification, proposalTaskOf, type Store } from "./store.js";
@@ -763,17 +763,19 @@ function planQuietCard(options: ChatDeliveryOptions, binding: ChatBinding, notif
   if (part !== undefined) store.setChatCardMessage(card.id, String(part.id), shown);
 }
 
-/** Finished work: the result joins this person's open batch (two minutes from its first), and the batch's one
- * message is planned once, then repainted in place as more results land. */
-function planFinished(options: ChatDeliveryOptions, binding: ChatBinding, taskRef: number, run: number, now: Date): void {
+/** Any update for this person joins their open batch (two minutes from its first), and the batch's one message
+ * is planned once, then repainted in place as more updates land. `notification`: an update that is not a finished
+ * result (null for one that is). */
+function planFinished(options: ChatDeliveryOptions, binding: ChatBinding, taskRef: number, run: number | null, now: Date, notification: number | null = null): void {
   const { state, store, identity } = options;
-  const batch = store.chatBatchFor(`${state.channel}:${binding.id}`, taskRef, run, now, BATCH_MS);
+  const batch = store.chatBatchFor(`${state.channel}:${binding.id}`, taskRef, run, now, BATCH_MS, notification);
   const view = finishedView(store, batch, now, options.evidenceRoot, binding.approver);
   if (view === null) return;
-  // A single result keeps its task and run, so a reply to it names that work.
+  // A single update keeps its task and run, so a reply to it names that work.
   const single = batch.items.length === 1 ? batch.items[0]! : null;
   const task = single === null ? null : store.refById(single.taskRef)?.externalId ?? null;
-  const content: ChatContent = { text: view.text, link: view.link, ...(task === null ? {} : { task }), ...(single?.run == null ? {} : { run: single.run }) };
+  const content: ChatContent = { text: view.text, link: view.link, ...(view.also === undefined ? {} : { also: view.also }),
+    ...(task === null ? {} : { task }), ...(single?.run == null ? {} : { run: single.run }) };
   const shown = chatHash(JSON.stringify(content));
   if (batch.message !== null) {
     if (batch.digest === shown) return;
@@ -842,6 +844,11 @@ export async function planChatNotifications(
           if (!needsPerson(notification)) return;
           if (notification.kind === "run-finished" && run) {
             planFinished(options, binding, notification.taskRef!, run.id, now);
+            return;
+          }
+          // Every other update for this person within two minutes joins the same one message.
+          if (notification.kind !== "run-finished" && joinsBatch(notification)) {
+            planFinished(options, binding, notification.taskRef!, run?.id ?? null, now, notification.id);
             return;
           }
         }
@@ -939,7 +946,7 @@ export async function planChatNotifications(
                 text: chatText(phoneText(
                   notification.body === "" ? notification.subject : `${notification.subject}\n\n${notification.body}`,
                   2500,
-                ), notification.taskId === null ? [] : [{ id: notification.taskId, title: shortTitle(store.getTask(notification.taskId)?.title, notification.taskId) }]),
+                ), notification.taskId === null ? [] : [{ id: notification.taskId, title: chatTitle(store, notification.taskId) }]),
                 ...(notification.taskId ? { task: notification.taskId } : {}),
                 ...(run ? { run: run.id } : {}),
                 ...(notification.link

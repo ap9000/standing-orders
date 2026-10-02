@@ -30,8 +30,8 @@ import { join } from "node:path";
 import { validateNote } from "./decision.js";
 import { isLifecycleNotification, isTelegramProgressNotification, TELEGRAM_HOLD_REASONS, type Store, type Decision, type Notification, type TelegramBinding, type TelegramDelivery } from "./store.js";
 import { telegramProgressCard, type ProgressEntity } from "./telegram-progress.js";
-import { enqueueEveningDigests, finishedView, isTaskFact, needsPerson, quietCardView } from "./chat-quiet.js";
-import { BATCH_MS, chatText, mentions, nameTelegramBot, shortTitle } from "./chat-voice.js";
+import { enqueueEveningDigests, finishedView, isTaskFact, joinsBatch, needsPerson, quietCardView, type QuietView } from "./chat-quiet.js";
+import { BATCH_MS, chatText, chatTitle, factLinkLabel, mentions, nameTelegramBot } from "./chat-voice.js";
 import { applyTeamInbound, deliverTeamChats, teamCommand } from "./telegram-team.js";
 import { applyFlowReply, applyFlowTap, FLOW_DECIDE_KEY, flowButtons, flowDecisionAt } from "./telegram-flow.js";
 import { connectChannel, FLOW_WORDS, takeChannelMessage, watchedChannel } from "./chat-inbox.js";
@@ -637,16 +637,13 @@ async function processConversations(
 type SendResult = { ok: true; messageId: string | null } | { ok: false; error: string; retryAfter?: number };
 type OutboundSender = (text: string, keyboard?: InlineButton[][], messageRows?: readonly TelegramDelivery[], entities?: ProgressEntity[], silent?: boolean) => Promise<SendResult>;
 
-/** The one button a plain fact may carry: its machine-minted console path
- * under the trusted origin read now — the same road `/task` uses. The label
- * names where the path goes; nothing in it comes from the fact's text. */
-function factLinkLabel(path: string): string {
-  if (/^\/review\?result=[^&]+&run=\d+&tab=checks$/.test(path)) return "Inspect result";
-  if (/^\/t\/[^?#]+#merge$/.test(path)) return "Merge";
-  if (/^\/chat\?task=[^&]+&result=/.test(path)) return "Open result";
-  if (/^\/(?:chat\?task=|t\/)/.test(path)) return "Open task";
-  if (/^\/d\//.test(path)) return "Open decision";
-  return "Open console";
+/** A view's buttons on one row: its link, then any others ([Merge] [Look first]); none without a trusted origin. */
+function viewKeyboard(phoneOrigin: (() => string | null) | undefined, view: QuietView): InlineButton[][] {
+  try {
+    const origin = phoneOrigin?.() ?? null;
+    const row = [view.link, ...(view.also ?? [])].flatMap(link => phoneLinkButton(origin, link) ?? []);
+    return row.length === 0 ? [] : [row];
+  } catch { return []; }
 }
 
 /** Team-conversation traffic to the chats that follow one — after the outbox, under the same delivery switch, never a problem to raise when nothing follows anything. */
@@ -858,14 +855,20 @@ async function deliverOutboxTo(
       if (!card.ok) return card;
       if (!needsPerson(fact)) return { ok: true, receipt: receiptFor(botId, binding.chatId, card.messageId) };
       const readyRun = fact.kind === "run-finished" ? store.telegramProgressRun(fact) : null;
-      if (readyRun !== null) {
-        // Finished work joins this person's open batch: one message, edited in place while it grows.
-        const batch = store.chatBatchFor(fact.destination, fact.taskRef, readyRun.id, clock(), BATCH_MS);
+      if (readyRun !== null || (fact.kind !== "run-finished" && joinsBatch(fact))) {
+        // Any update for this person joins their open batch: one message, edited in place while it grows.
+        const batch = store.chatBatchFor(fact.destination, fact.taskRef, readyRun?.id ?? store.telegramProgressRun(fact)?.id ?? null, clock(), BATCH_MS,
+          readyRun !== null ? null : fact.id);
         const view = finishedView(store, batch, clock(), evidenceRoot, binding.approver);
         if (view === null) return { ok: true, receipt: receiptFor(botId, binding.chatId, card.messageId) };
-        let button: InlineButton[] | null = null;
-        try { button = phoneLinkButton(phoneOrigin?.() ?? null, view.link); } catch { /* No trusted origin. */ }
-        const keyboard = button === null ? [] : [button];
+        // A lone update that is not finished work goes out exactly as it always has; a later one edits it in place.
+        if (batch.message === null && readyRun === null && batch.items.length === 1) {
+          const sent = await deliverOne(store, botId, binding, sender, fact, clock, phoneOrigin, evidenceRoot, projects);
+          const placed = store.telegramMessageOf(fact.id, fact.destination);
+          if (placed !== null) store.setChatBatchMessage(batch.id, placed, "");
+          return sent;
+        }
+        const keyboard = viewKeyboard(phoneOrigin, view);
         const shown = createHash("sha256").update(JSON.stringify([view.text, keyboard])).digest("hex");
         if (batch.message !== null) {
           if (batch.digest === shown) {
@@ -885,7 +888,7 @@ async function deliverOutboxTo(
           // Only Telegram's definitive missing/uneditable answer permits a new message.
           if (!edited.replace) return edited;
         }
-        const sent = await sender(view.text, button === null ? undefined : [button], [fact]);
+        const sent = await sender(view.text, keyboard.length === 0 ? undefined : keyboard, [fact]);
         const placed = sent.ok ? sent.messageId : store.telegramMessageOf(fact.id, fact.destination);
         if (placed !== null) store.setChatBatchMessage(batch.id, placed, shown);
         return sent.ok ? { ok: true, receipt: receiptFor(botId, binding.chatId, sent.messageId) } : sent;
@@ -901,7 +904,7 @@ async function deliverOutboxTo(
       const updated = progress ? await updateProgress(false) : null;
       outcome = updated !== null ? updated.ok ? { ok: true as const, receipt: receiptFor(botId, binding.chatId, updated.messageId) } : updated
         : rows[0]!.kind === "acceptance-evidence" ? await imageSender(rows[0]!) : batched
-        ? await deliverDigest(botId, binding, sender, rows, digest.lastSentAt, clock, taskId => shortTitle(store.getTask(taskId)?.title, taskId))
+        ? await deliverDigest(botId, binding, sender, rows, digest.lastSentAt, clock, taskId => chatTitle(store, taskId))
         : await deliverOne(store, botId, binding, sender, rows[0]!, clock, phoneOrigin, evidenceRoot, projects);
     }
     const finalProblem = outcome.ok ? (await readAccess()) ?? fence() : null;
@@ -1012,7 +1015,7 @@ async function deliverOne(
       else body = `${packet.text}\n\n${notification.body}`;
     }
     // A short title, never the task's id or a "— revision" suffix (chat-voice.ts).
-    const title = notification.taskId === null ? undefined : shortTitle(store.getTask(notification.taskId)?.title, notification.taskId);
+    const title = notification.taskId === null ? undefined : chatTitle(store, notification.taskId);
     const task = notification.taskId === null ? [] : [{ id: notification.taskId, ...(title === undefined ? {} : { title }) }];
     const words = chatText(`${alreadyAccepted ? "Acceptance recorded" : notification.subject}${body === "" ? "" : `\n\n${body}`}`, task);
     // The task's title once: in front, unless the words already name it.

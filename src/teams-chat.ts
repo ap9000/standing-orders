@@ -173,7 +173,7 @@ export async function deliverTeamsPart(options: TeamsChatOptions): Promise<boole
       const flow = content.flow ? chatFlowButtons(state, row.id, now).map(one => ({ type: "Action.Submit", title: one.label, data: { so: one.token }, ...(one.action === "approve" ? { style: "positive" } : {}) })) : [];
       // A teammate's question (v93): its options, then "Answer in words".
       const asked = content.question ? chatQuestionButtons(state, row.id, now).map(one => ({ type: "Action.Submit", title: one.label.slice(0, 80), data: { so: one.token } })) : [];
-      actions = [...flow, ...asked, ...openUrlAction(options.origin(), content.link)];
+      actions = [...flow, ...asked, ...openUrlAction(options.origin(), content.link), ...(content.also ?? []).flatMap(one => openUrlAction(options.origin(), one))];
     }
     const target = content.edit ?? row.message;
     const body = actions.length || content.proposal ? teamsCard(text, actions) : { type: "message", text, textFormat: "plain" };

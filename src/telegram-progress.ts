@@ -9,7 +9,7 @@ import { chatResultHref, chatControlHref } from "./chat-controls.js";
 import { phoneText, projectLabel, type PhoneTaskLink } from "./telegram-status.js";
 import type { Run, Store } from "./store.js";
 import { assignmentStatusFacts, headlineEmoji, pullRequestFactOf, requirementsOf, statusDetailLines, taskStatusOf, type ChecksFact, type TaskStatus, type TaskStatusFacts } from "./task-status.js";
-import { shortTitle } from "./chat-voice.js";
+import { chatTitle } from "./chat-voice.js";
 import { manualReviewOnly } from "./proof.js";
 import { failedCheckExit } from "./workspace-ui.js";
 
@@ -29,7 +29,7 @@ function assignmentFor(store: Store, run: Run, taskId: string, project: string, 
 }
 
 /** `viewer`: the person whose chat shows the card. Their own act is never told back to them. */
-export function telegramProgressCard(store: Store, run: Run, taskId: string, project: string, now = new Date(), root?: string, viewer?: string): { text: string; entities: ProgressEntity[]; link: PhoneTaskLink; next: string; status: TaskStatus; facts: TaskStatusFacts } {
+export function telegramProgressCard(store: Store, run: Run, taskId: string, project: string, now = new Date(), root?: string, viewer?: string): { text: string; entities: ProgressEntity[]; link: PhoneTaskLink; next: string; status: TaskStatus; facts: TaskStatusFacts; completedByLead: boolean } {
   const built = run.finishedAt !== null && (run.outcome === "built" || run.outcome === "no-change");
   const assignment = built ? assignmentFor(store, run, taskId, project, now, root) : null;
   const publication = store.publicationForRun(run.id);
@@ -79,7 +79,7 @@ export function telegramProgressCard(store: Store, run: Run, taskId: string, pro
   const checkProgress = store.checkProgress(run.id);
   const progress = status.headline === "Building" && checkProgress !== null ? [`● ${checkProgress.line}`] : [];
   // A short human title: never "— revision" or an id (chat-voice.ts).
-  const title = shortTitle(store.getTask(taskId)?.title, taskId);
+  const title = chatTitle(store, taskId);
   const heading = `${headlineEmoji(status.headline)} ${status.headline}`;
   const next = phoneText(status.sentence, 200);
   // A person's acceptance is its own recorded decision; it never changes a check.
@@ -89,7 +89,7 @@ export function telegramProgressCard(store: Store, run: Run, taskId: string, pro
   const text = [title, heading, next, ...(rows.length === 0 ? [] : ["", ...rows]), "", projectLabel(project)].join("\n");
   const failedChecks = status.details.some(one => one.key === "checks" && (one.mark === "failed" || one.mark === "note"));
   const recovery = operatorHold !== undefined || accessBlocked || (!built && run.outcome !== null);
-  return { text, next, status, facts, entities: [{ type: "bold", offset: 0, length: title.length }, { type: "bold", offset: title.length + 1, length: heading.length }],
+  return { text, next, status, facts, completedByLead: assignment?.completion?.lead === true, entities: [{ type: "bold", offset: 0, length: title.length }, { type: "bold", offset: title.length + 1, length: heading.length }],
     link: { label: built ? "Open result" : "Open task", path: recovery
       ? chatControlHref("recovery", taskId) : built ? chatResultHref(taskId, run.id, failedChecks ? "checks" : "summary") : chatControlHref("task", taskId) } };
 }
