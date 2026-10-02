@@ -271,6 +271,40 @@ describe("the builder's gates", () => {
     }
   });
 
+  test("images a build adds under evidence/ stay out of its commit, on disk, with a plain message", async () => {
+    const { mkdirSync } = await import('node:fs');
+    const { run } = await import('./exec.js');
+    const sh = (...args: string[]) => execFileSync('git', ['-C', wt, ...args], { encoding: 'utf8', env: {
+      ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x',
+    } }).trim();
+    sh('init', '-q', '-b', 'main'); sh('config', 'user.name', 't'); sh('config', 'user.email', 't@x');
+    writeSync2(join2(wt, '.gitignore'), '.evidence/\n');
+    writeSync2(join2(wt, 'README.md'), 'base\n');
+    sh('add', '.'); sh('commit', '-q', '-m', 'base');
+    sh('checkout', '-q', '-b', 'feat/a');
+    approveScope(); claimIt();
+    const png = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.alloc(2048, 1)]);
+    const buildingAgent: Runner = async (file, args, options) => {
+      mkdirSync(join2(wt, 'src'), { recursive: true }); writeSync2(join2(wt, 'src', 'guard.ts'), 'export const guard = true;\n');
+      mkdirSync(join2(wt, 'evidence', 't-1'), { recursive: true });
+      writeSync2(join2(wt, 'evidence', 't-1', 'desktop.png'), png); writeSync2(join2(wt, 'evidence', 't-1', 'phone.jpg'), png);
+      writeSync2(join2(wt, 'evidence', 't-1', 'journey.txt'), 'journey passed\n');
+      return agent(file, args, options);
+    };
+    const actualGit: Runner = async (file, args, options) => {
+      if (options?.cwd === REPO && args.includes('symbolic-ref')) return { ...OK, stdout: 'main\n' };
+      return run(file, args, { ...options, cwd: options?.cwd === REPO ? wt : options?.cwd });
+    };
+    const req = request({ agent: buildingAgent, git: actualGit });
+    const result = await build(store, req);
+    const words = "Left 2 images under evidence/ out of the commit: screenshots belong in the run's evidence, not the repository.";
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: true, committed: true, summary: expect.stringContaining(words) });
+    expect(sh('ls-tree', '-r', '--name-only', 'HEAD').split('\n').sort()).toEqual(['.gitignore', 'README.md', 'evidence/t-1/journey.txt', 'src/guard.ts']);
+    expect(readFileSync(join2(wt, 'evidence', 't-1', 'desktop.png'))).toEqual(png);
+    expect(store.handle.prepare("SELECT note FROM run_note WHERE run = ?").all(req.runId as number).map(row => String(row["note"]))).toContain(words);
+    expect(agentCalls.at(-1)?.join(" ")).toContain("Save screenshots and journey output only under evidence/");
+  });
+
   test("a rerun (task regate) dispatches through the builder with no agent call and reruns the check on the last head (v70)", async () => {
     const { regateTask } = await import("./dispose.js");
     approveScope();

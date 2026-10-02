@@ -809,6 +809,8 @@ export type CriterionCoverage = {
    * context: eligible only with the same text, verified ancestry, and
    * byte-identical relevant code. Never a judgement on this run. */
   priorSupport: "eligible" | "invalid" | "none";
+  /** The change's images and other binary files in one line, when it has any. */
+  assets?: string;
 };
 
 /** v40: the three words an evidence reviewer can say about one signed
@@ -1000,7 +1002,7 @@ function assessCapturedEvidence(input: AdjudicateInput): AdjudicateResult {
       id: criterion.id, statement: criterion.statement, requiredEvidence: criterion.evidence,
       assessment: { evidenceState, detail }, state: evidenceState === "pass" ? "missing" : evidenceState,
       detail: [...detail, `criterion "${criterion.id}" awaits independent goal assessment`], answered, review: null,
-      ...(coverage === undefined ? {} : { coverage: { state: coverage.state, inherited: coverage.inherited, items: [...coverage.items], gaps: [...coverage.gaps], priorSupport: coverage.priorSupport } }),
+      ...(coverage === undefined ? {} : { coverage: { state: coverage.state, inherited: coverage.inherited, items: [...coverage.items], gaps: [...coverage.gaps], priorSupport: coverage.priorSupport, ...(coverage.assets === undefined ? {} : { assets: coverage.assets }) } }),
     };
   });
   return { machineVerdict, verdict: machineVerdict === "refuted" ? "refuted" : "short", matrix,
@@ -1109,7 +1111,7 @@ export function adjudicate(input: AdjudicateInput): AdjudicateResult {
       // must show, never a silent "judged from the patch".
       const coverage: CriterionCoverage = found === undefined
         ? { state: "gap", inherited: false, items: [], gaps: ["the sealed review context carries no coverage entry for this criterion"], priorSupport: "none" }
-        : { state: found.state, inherited: found.inherited, items: [...found.items], gaps: [...found.gaps], priorSupport: found.priorSupport };
+        : { state: found.state, inherited: found.inherited, items: [...found.items], gaps: [...found.gaps], priorSupport: found.priorSupport, ...(found.assets === undefined ? {} : { assets: found.assets }) };
       return { ...row, coverage };
     });
 

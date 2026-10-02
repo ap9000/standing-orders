@@ -67,6 +67,8 @@ import {
   captureBaseTree,
   evidenceRoot,
   handoffName,
+  isImagePath,
+  WORKTREE_EVIDENCE_DIR,
   storeHandoffArtifact,
   type HandoffArtifact,
   looksLikeProtocolFile,
@@ -2162,7 +2164,8 @@ export async function settleProviderOutcome(captured: CapturedBuild, result: Age
   // result is that commit, sealed below against the task's original base.
   const made = finishesKeptWork
     ? await keptWorkResult(captured, baseRevision, handoff.conclusion)
-    : await commit(git, worktree, branch, taskId, scope as Scope, handoff.conclusion, request.attended === undefined ? scope?.candidate ?? null : null);
+    : await commit(git, worktree, branch, taskId, scope as Scope, handoff.conclusion, request.attended === undefined ? scope?.candidate ?? null : null,
+      words => store.addRunNote(request.runId, "Toolroll", words, clock()));
   if (made.ok && made.parked === undefined && made.committed) {
     const newHead = await git(GIT, ["--no-optional-locks", "rev-parse", "HEAD"], { cwd: worktree });
     if (newHead.code === 0) {
@@ -2812,7 +2815,7 @@ async function settleProof(
         now,
       });
       if (captureResult !== null) {
-        reviewContext = captureResult.inventory.coverage.map(one => ({ id: one.id, state: one.state, inherited: one.inherited, items: one.items, gaps: one.gaps, priorSupport: one.priorSupport }));
+        reviewContext = captureResult.inventory.coverage.map(one => ({ id: one.id, state: one.state, inherited: one.inherited, items: one.items, gaps: one.gaps, priorSupport: one.priorSupport, ...(one.assets === undefined ? {} : { assets: one.assets }) }));
       }
     } catch {
       reviewContext = approvedCriteria.map(one => ({ id: one.id, state: "gap" as const, inherited: false, items: [], gaps: ["the review context could not be captured"], priorSupport: "none" as const }));
@@ -3689,9 +3692,12 @@ function brief(
     "  changed-file inventory or final check results. This applies to no-change",
     "  results too. Put useful caveats in the short handoff; do not invent evidence.",
     "  Run focused checks for your edits. The machine runs the approved full check.",
+    "  Save screenshots and journey output only under evidence/ (the run's",
+    "  evidence folder). They are never committed: images added there are left",
+    "  out of the commit, so do not save them anywhere else in the repository.",
     "  If screenshots are required, capture the actual candidate and list them in",
     `  ${proof}: { "version": 1, "screenshots": [`,
-    '    { "path": "<repository-relative PNG or JPEG>", "caption": "<what it shows>" } ] }.',
+    '    { "path": "<evidence/… PNG or JPEG>", "caption": "<what it shows>" } ] }.',
     `  List at most ${PROOF_LIMITS.screenshots} screenshots, with paths/captions under ${PROOF_LIMITS.evidenceRef} UTF-8 bytes,`,
     "  on one line each; no absolute paths or dot segments. Images must be real,",
     "  at least 320 by 200 pixels. A list is optional; missing required images",
@@ -3824,6 +3830,7 @@ async function commit(
   scope: Scope,
   summary: string,
   preparedCandidate: string | null = null,
+  notice?: (words: string) => void,
 ): Promise<BuildResult> {
   const status = await git(GIT, ["--no-optional-locks", "status", "--porcelain"], { cwd: worktree });
   if (status.code !== 0) {
@@ -3852,6 +3859,19 @@ async function commit(
     { cwd: worktree },
   );
   if (add.code !== 0) return { ok: false, reason: "commit-failure", message: firstLine(add.stderr) };
+
+  // Screenshots belong to the run's evidence, not the branch. Images added
+  // under evidence/ are unstaged and left on disk, where the proof can still
+  // name them; an exact prepared candidate is compared whole instead.
+  if (preparedCandidate === null) {
+    const stripped = await stripEvidenceImages(git, worktree);
+    if (!stripped.ok) return { ok: false, reason: "commit-failure", message: stripped.message };
+    if (stripped.notice !== null) {
+      notice?.(stripped.notice);
+      summary = `${summary}\n\n${stripped.notice}`;
+      if (!stripped.staged) return { ok: true, committed: false, branch, summary };
+    }
+  }
 
   // Setup can create untracked files as well as edit tracked manifests.
   // Re-prove the whole staged tree after the normal path exclusions, before
@@ -3887,6 +3907,25 @@ async function commit(
   }
 
   return { ok: true, committed: true, branch, summary };
+}
+
+/** The plain words for images left out of a commit. */
+export function evidenceImagesNotice(paths: readonly string[]): string {
+  return `Left ${paths.length} image${paths.length === 1 ? "" : "s"} under ${WORKTREE_EVIDENCE_DIR} out of the commit: screenshots belong in the run's evidence, not the repository.`;
+}
+
+/** Unstage images newly added under evidence/; the files stay on disk. */
+async function stripEvidenceImages(git: Runner, worktree: string): Promise<{ ok: true; notice: string | null; staged: boolean } | { ok: false; message: string }> {
+  const added = await git(GIT, ["--no-optional-locks", "diff", "--cached", "--name-only", "-z", "--no-renames", "--diff-filter=A", "--", WORKTREE_EVIDENCE_DIR], { cwd: worktree });
+  if (added.code !== 0) return { ok: false, message: firstLine(added.stderr) };
+  const images = added.stdout.split("\0").filter(path => path !== "" && isImagePath(path));
+  if (images.length === 0) return { ok: true, notice: null, staged: true };
+  for (let at = 0; at < images.length; at += 200) {
+    const removed = await git(GIT, ["rm", "--cached", "--quiet", "--", ...images.slice(at, at + 200).map(path => `:(literal)${path}`)], { cwd: worktree });
+    if (removed.code !== 0) return { ok: false, message: firstLine(removed.stderr) };
+  }
+  const rest = await git(GIT, ["--no-optional-locks", "diff", "--cached", "--quiet"], { cwd: worktree });
+  return { ok: true, notice: evidenceImagesNotice(images), staged: rest.code !== 0 };
 }
 
 /**

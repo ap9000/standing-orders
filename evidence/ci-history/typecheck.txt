@@ -1,6 +1,0 @@
-$ npm run typecheck
-
-> standing-orders@0.4.3 typecheck
-> tsc --noEmit
-
-exit=0
