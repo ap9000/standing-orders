@@ -158,6 +158,10 @@ export type BrowserTaskView = {
   confirmStopped?: { action: string; run: number; checked?: boolean } | null;
   /** Build again, in place, when the status asks for it (a result built to an earlier plan). */
   rebuild?: { action: string } | null;
+  /** A failed task's recorded reason in one line (the run's reason, the failing check's last error line, or that none was
+   * recorded) and where its log lines are; and Retry itself, with an optional note. */
+  failure?: { line: string; link: { label: string; href: string } | null } | null;
+  retry?: { action: string } | null;
   /** Server cards that may need a person now (stop/resume, scope prompt, plan, live attempt). */
   lead: { key: string; html: string }[];
   questions: string;
@@ -265,6 +269,10 @@ export type BrowserResultView = {
     /** Words for the result's Accept: Mark complete when offered, else the Needs you acceptance. */
     decision: BrowserResultDecision | null;
     checks: { detail: string; problem: boolean; logHref: string | null } | null;
+    /** The report disagrees with the saved changes: the headline that says so, each disagreement in plain
+     * words with the changed lines it concerns (`absent`: a file the changes don't have), and the recorded
+     * words they already say, so no caveat repeats them. Null otherwise. */
+    mismatch: { headline: string; rows: { text: string; path: string | null; lines: string | null; href: string | null; absent: boolean; noteLabel: string | null }[]; said: string[] } | null;
     /** The one ink act that resolves the result, the one outline act beside it, and why it can't be accepted yet (result-acts.ts). */
     acts: ResultActs;
     /** Run checks on this result's commit: the project's check, when it didn't run. */

@@ -89,7 +89,9 @@ function TaskRow({ row }: { row: BrowserTasksView["rows"][number] }) {
         {row.project && <span aria-hidden="true">·</span>}
         <span className="tabular-nums">{row.age}</span>
       </p>
-      {row.detail && <p className="mt-1 text-[12.5px] text-muted-foreground phone:col-span-full phone:leading-[1.35]">{row.detail}</p>}
+      {/* A failed row's problem line is vermilion; every other detail stays muted. */}
+      {row.detail && <p className={cn("mt-1 text-[12.5px] phone:col-span-full phone:leading-[1.35]", row.status.label === "Failed" ? "text-destructive" : "text-muted-foreground")}
+        {...(row.status.label === "Failed" ? { "data-problem-line": "" } : {})}>{row.detail}</p>}
       {row.problem && <p className="mt-1 text-[12.5px] text-muted-foreground phone:col-span-full phone:leading-[1.35]">{row.problem}</p>}
       {row.notes.map(note => <p key={note} className="mt-1 text-[12.5px] text-muted-foreground phone:col-span-full phone:leading-[1.35]">{note}</p>)}
     </div>

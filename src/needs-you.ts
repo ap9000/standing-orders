@@ -121,3 +121,50 @@ export const CODE_NEED: Readonly<Record<string, NeedKey>> = {
   "no-build-record": "review-result", "verification-needed": "review-result", "evidence-mismatch": "review-result",
   "record-incomplete": "review-result", "evidence-damaged": "review-result",
 };
+
+/** A stopped run's recorded reason code, in words (the run record, the thread, a failed task's status). */
+export const RUN_REASON_WORDS: Readonly<Record<string, string>> = {
+  agent: "the agent failed",
+  "agent-reported": "the agent reported it could not finish",
+  "no-op": "nothing changed when something should have",
+  "no-handoff": "the agent stopped before handing off; its work was kept and it is being resumed",
+  "moved-head": "the branch moved underneath the build",
+  "moved-branch": "the branch moved underneath the build",
+  timeout: "ran out of time",
+  git: "a git step failed",
+  "malformed-decision": "the agent's question was malformed",
+  "malformed-plan": "the plan was malformed",
+  fenced: "another worker took the task over",
+  unapproved: "the scope was not approved",
+  "scope-changed": "the scope changed after approval",
+  capability: "a requirement was missing",
+  setup: "the workspace preparation step failed",
+  "provider-init": "the agent could not start",
+  "commit-failure": "the commit failed",
+  "protected-branch": "refused to touch a protected branch",
+  "wrong-branch": "the checkout was on the wrong branch",
+  "not-leased": "the lease was not valid",
+  "no-claim": "the lease was not valid",
+  "not-yours": "the lease was not valid",
+  "no-run-record": "the run record was missing",
+  "missing-mailbox": "the resume mailbox could not be read",
+  "unreadable-mailbox": "the resume mailbox could not be read",
+  "revision-brief": "the revision brief could not be read",
+  "repaired-park": "resumed from a parked question",
+  stopped: "stopped by the operator",
+};
+
+/** A run's recorded reason in words; a code with no words of its own is said as recorded. */
+export function runReasonWords(reason: string): string {
+  return RUN_REASON_WORDS[reason] ?? `stopped with the recorded reason “${reason}”`;
+}
+
+export const NO_REASON_RECORDED = "No reason was recorded for this attempt.";
+
+/** A failed attempt in one line: its recorded reason, or that none was recorded. */
+export function failedAttemptSentence(reason: string | null | undefined): string {
+  const code = reason?.trim() ?? "";
+  if (code === "") return NO_REASON_RECORDED;
+  const words = runReasonWords(code);
+  return `${words.charAt(0).toUpperCase()}${words.slice(1)}.`;
+}

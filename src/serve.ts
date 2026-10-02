@@ -77,7 +77,7 @@ import { leadBriefHtml, LEAD_CONTEXT_CSS } from './lead-context.js';
 import { assignmentCatchUp } from './assignment-brief.js';
 import { assignmentActionHref, assignmentCardOf, assignmentStatusOf, assignmentSummaryHtml, assignmentWithEvidence, ASSIGNMENT_CSS } from './assignment-ui.js';
 import { assignmentStageOf, pullRequestFactOf, stageOfCode, stageOfDispatch, statusDetailsHtml, statusIconSvg, statusWhyHtml, taskStatusOf, TASK_STATUS_CSS, type PullRequestFact, type TaskStatus } from './task-status.js';
-import { ASKS, ASK_LABEL, NEEDS, type Ask } from './needs-you.js';
+import { ASKS, ASK_LABEL, NEEDS, NO_REASON_RECORDED, failedAttemptSentence, runReasonWords, type Ask } from './needs-you.js';
 import { assignmentPresentationOf, historicalAssessmentReason, shortenedMaterialReason } from './assignment-presentation.js';
 import type { TaskFamily } from "./store.js";
 import { ledgerBody } from "./ledger-view.js";
@@ -169,7 +169,7 @@ import { recipeFromForm, recipeLibraryHtml, recipeEditorHtml, workflowPreviewHtm
 import { EVIDENCE_CAPS, readVerifiedArtifact, readVerifiedReport, readVerifiedProofForRun, storeEvidence, writeEvidenceFile, scanForSecrets, type ReportView } from "./evidence.js";
 import { GOAL_ASSESSMENT_PENDING, reviewConflict, manualReviewOnly, manualReviewCriterionOf, personCheckWords, plainReasonWords, dispatchStatusToken, passFraction, semanticCoverage, coverageWords, coverageStateWords, type ProofVerdict, type CriterionMatrixRow, type CriterionEvidenceRef } from "./proof.js";
 import {
-  WORK_VIEWS, REVIEW_TOKENS, RESULT_DECISION_SENTENCE, acceptWordsOf, cantAcceptYetOf, parseWorkView, resultStatusOf, resultHeadlineOf, receiptHeadingOf, receiptPublicationWords, reviewFactsOf, workStatusOf, primaryDestinationOf, needsPerson, dispatchActionLabel,
+  WORK_VIEWS, REVIEW_TOKENS, RESULT_DECISION_SENTENCE, acceptWordsOf, cantAcceptYetOf, evidenceProblemOf, lastErrorLineOf, reportMismatchesOf, ACCEPT_NEEDS_REASON, MISMATCH_HEADLINE, parseWorkView, resultStatusOf, resultHeadlineOf, receiptHeadingOf, receiptPublicationWords, reviewFactsOf, workStatusOf, primaryDestinationOf, needsPerson, dispatchActionLabel,
   type WorkView, type WorkFacts, type WorkStatus, type DisplayStatus, type PublicationFacts, type ReviewFacts,
 } from "./workspace-ui.js";
 import { PRICED_BUILD_MODELS } from "./pricing.js";
@@ -6080,6 +6080,26 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     return { taskId: rootId, view: null, offer: { taskId: receipt.taskId, runId: receipt.runId, digest: receipt.digest }, target };
   }
 
+  /** What went wrong with the last attempt, in one line: a failing check's last error line (linked to that line in
+   * its saved log), else the run's recorded reason (linked to its record), else that no reason was recorded. */
+  function failureOf(taskId: string, runs: readonly Run[], assignment: AssignmentSnapshot | null): { line: string; link: { label: string; href: string } | null } {
+    const last = runs.filter(run => run.role !== "planner" && run.role !== "reviewer" && run.finishedAt !== null).sort((a, b) => b.id - a.id)[0];
+    if (last === undefined) return { line: NO_REASON_RECORDED, link: null };
+    const build = { label: `Build #${last.id}`, href: `/r/${last.id}` };
+    const checks = assignment?.receipt?.runId === last.id ? assignment.receipt.checks : null;
+    if (checks?.status === "failed" && checks.logArtifactId !== null) {
+      const artifact = store.artifactsFor(last.id).find(one => one.id === checks.logArtifactId) ?? null;
+      let read: ReturnType<typeof readVerifiedArtifact> | null = null;
+      try { read = artifact === null ? null : readVerifiedArtifact(evidenceRoot, artifact); } catch { read = null; }
+      const found = read !== null && read.ok ? lastErrorLineOf(read.content.toString("utf8")) : null;
+      if (found !== null) {
+        return { line: oneLineOf(found.text, 240), link: { label: `Check output, line ${found.line}`,
+          href: `${reviewHref(assignment?.receipt?.taskId ?? taskId)}&run=${last.id}&tab=checks#check-log-L${found.line}` } };
+      }
+    }
+    return { line: last.outcome === "failed" ? failedAttemptSentence(last.reason) : NO_REASON_RECORDED, link: build };
+  }
+
   function taskScreen(
     response: ServerResponse,
     who: Who,
@@ -6101,6 +6121,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     if (scopeDraft !== undefined) presentedData.scopeDraft = scopeDraft;
     if (cancelDraft !== undefined) presentedData.cancelDraft = cancelDraft;
     (presentedData as { pullRequest?: TaskPullRequest | null }).pullRequest = taskPullRequestOf(taskId, who);
+    presentedData.failure = failureOf(data.task.id, data.runs, data.assignment ?? null);
     // The thread reads the whole family: the original, its revisions, and every attempt across them.
     if (family !== null && family.problem === null) {
       presentedData.family = { root: { id: family.root.id, title: family.root.title, createdAt: family.root.createdAt, goal: store.getScope(family.root.id)?.goal ?? null },
@@ -10305,9 +10326,17 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
         return redirect(response, taskHref(taskId));
       }
       case "requeue": {
+        // Retry may carry a note for the next attempt: the same steering note, checked before anything changes.
+        const note = (body.get("note") ?? "").trim();
+        if (note !== "" && who.via !== "cookie") return refuse(response, who, 403, "steering is a browser session's act");
+        if (note !== "" && !validateNote(note).ok) return taskScreen(response, who, taskId, "that note will not store, so nothing was retried", 400);
         const requeued = store.requeueTask(taskId, who.name, now);
         if (!requeued.ok) {
           return taskScreen(response, who, taskId, `not requeued: ${requeued.reason}`, 409);
+        }
+        if (note !== "") {
+          const filed = store.fileSteerNote(taskId, verifiedAuthor(who.name), note, now);
+          if (!filed.ok) return taskScreen(response, who, taskId, "Retried. The note wasn't saved; add it under Steering.", 409);
         }
         // Allow-listed return only — never an arbitrary URL from the form.
         return redirect(response, body.get("return") === "inbox" ? "/inbox" : body.get("return") === "next" ? "/next" : taskHref(taskId));
@@ -20775,6 +20804,8 @@ function revisionLineageHtml(lineage: RevisionLineage | null): string {
 function taskBodyParts(data: {
   /** Until the first Ready result: show the task's way there (onboarding). */
   guide?: boolean;
+  /** The last attempt's recorded reason in one line and its log lines, shown when the task failed. */
+  failure?: { line: string; link: { label: string; href: string } | null } | null;
   assignment?: AssignmentSnapshot | null;
   checkProgress?: CheckProgress | null;
   rootId?: string;
@@ -21047,7 +21078,8 @@ function taskBodyParts(data: {
           case "approve-scope": return ` <a href="#approve">Review and sign the exact scope</a>.`;
           case "answer-decision": return ` <a href="#decisions">Answer the waiting question</a>.`;
           case "unhold": return ` Use <strong>Remove hold</strong> when it can continue.`;
-          case "retry-task": return ` Review the incident, then use <strong>retry</strong> below.`;
+          // The reason is the detail itself; Retry is the status card's own act, said once.
+          case "retry-task": return "";
           case "repair-capability": return ` <a href="/caps">Repair the requirement</a>.`;
           case "repair-dependency":
             return blocker?.admitted === true
@@ -21092,7 +21124,8 @@ function taskBodyParts(data: {
             `<p><a href="/system">See connection status →</a></p></div></details>`
           );
         }
-        const href = taskRecoveryHref(task.id, diagnosis);
+        // Never a link to this page's own acts: Retry sits on the status card and below.
+        const href = diagnosis.action === "retry-task" ? null : taskRecoveryHref(task.id, diagnosis);
         return href === null ? "" : `<a class="button-link dispatch-action-link" href="${href}">${escape(dispatchActionLabel(diagnosis))}</a>`;
       })();
       const positive = diagnosis.code === "running" || diagnosis.code === "ready" || diagnosis.code === "planning-ready" || diagnosis.code === "scouting-ready";
@@ -21908,9 +21941,11 @@ function taskBodyParts(data: {
   // hold (the hold governs the NEXT start), and requeue refuses while a
   // claim is live — so the words say exactly when each becomes real.
   const canPlan = data.plan === null && !approval.approved && !data.claimed && task.state === "queued" && (data.coordinator === null || data.coordinator === undefined);
+  // A failed task's status card carries Retry itself (the same requeue); here it would be a second ink act.
+  const cardRetries = task.state === "failed" && data.assignment != null && data.csrf !== "";
   const primaryAct =
-    stopControlsActive ? null : stalled && !data.claimed
-      ? { html: act("requeue", "retry — branch and workspace kept"), why: "resolves the incidents, clears the failed attempts, and queues the task again; the preserved branch and workspace are NOT erased", whyClass: "retry" }
+    stopControlsActive || cardRetries ? null : stalled && !data.claimed
+      ? { html: act("requeue", "Retry, keeping the branch and workspace"), why: "Resolves the incidents, clears the failed attempts and queues the task again. The branch and workspace are kept.", whyClass: "retry" }
       : canPlan
         ? { html: act("plan", "plan first"), why: "plan first sends an agent to read the repository, ask you questions, and propose a scope — nothing builds until you approve it", whyClass: "plan" }
         : data.plan === "requested"
@@ -21922,7 +21957,7 @@ function taskBodyParts(data: {
     `<form method="post" action="${taskHref(task.id)}/hold" class="inline act-hold">` +
     `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
     `<input type="text" name="reason" class="inline" placeholder="reason (optional)" aria-label="hold reason">` +
-    `<button type="submit">hold next attempt</button></form>`;
+    `<button type="submit">Hold the next attempt</button></form>`;
   const canHold = task.state === "queued" || task.state === "running" || task.state === "failed";
   const actsBar = [
     `<span id="task-actions"></span><div class="acts-bar">`,
@@ -21939,7 +21974,7 @@ function taskBodyParts(data: {
     `</div>`,
     primaryAct === null ? "" : `<p class="meta acts-why acts-why-${primaryAct.whyClass}">${primaryAct.why}</p>`,
     data.claimed && !stopControlsActive
-      ? `<p class="meta acts-why">a worker is building this right now — <em>hold next attempt</em> stops the one after it; cancel waits for the current build to finish${
+      ? `<p class="meta acts-why">a worker is building this right now — <em>Hold the next attempt</em> stops the one after it; cancel waits for the current build to finish${
           stalled ? "; retry becomes available after this attempt finishes" : ""
         }</p>`
       : "",
@@ -22161,7 +22196,7 @@ function taskBodyParts(data: {
       : run.outcome === null ? "Attempt never finished"
       : `${noun[0]!.toUpperCase()}${noun.slice(1)} ${run.outcome}`;
     thread.push({ key: `run-${run.id}`, at: run.finishedAt ?? run.startedAt, kind: "result", who: "agent", author: run.runner,
-      title: `${title}${revision}`, text: run.handoff === null ? (run.reason === null || run.outcome === "built" ? null : reasonWords(run.reason)) : oneLineOf(run.handoff, 600),
+      title: `${title}${revision}`, text: run.handoff === null ? (run.outcome === "failed" ? failedAttemptSentence(run.reason) : run.reason === null || run.outcome === "built" ? null : reasonWords(run.reason)) : oneLineOf(run.handoff, 600),
       link: href, html: "",
       more: previousResult !== null && run.id === newestBuilt?.id && run.taskId === task.id ? { summary: "Result details", html: previousResult.html } : null });
   }
@@ -22244,6 +22279,10 @@ function taskBodyParts(data: {
   // needs a person, then facts, then folds; the mechanics under Manage.
   const MANAGE = new Set(["steering", "waits-for", "holds"]);
   const finished = task.state === "done" || task.state === "cancelled";
+  // Failed: the card says what went wrong in one line, and its one act is Retry itself (the same requeue), never a link to this page.
+  const statusCard = data.assignment != null && assignmentOptions !== null ? assignmentCardOf(data.assignment, assignmentOptions) : null;
+  const failedCard = statusCard?.status.headline === "Failed";
+  const retry = failedCard && task.state === "failed" && !data.claimed && !stopControlsActive && data.csrf !== "" ? { action: `${taskHref(task.id)}/requeue` } : null;
   const view: BrowserTaskView = {
     kind: "task",
     id: task.id,
@@ -22255,8 +22294,10 @@ function taskBodyParts(data: {
       { label: "Ask", href: taskChatHref(data.rootId ?? task.id), active: false },
     ],
     version: data.versionLabel == null ? null : { label: data.versionLabel, current: { label: "Current work", href: taskHref(data.rootId ?? task.id) } },
-    status: data.assignment != null && assignmentOptions !== null ? assignmentCardOf(data.assignment, assignmentOptions) : null,
+    status: statusCard === null ? null : failedCard ? { ...statusCard, action: retry === null ? statusCard.action : null, status: { ...statusCard.status, sentence: data.failure?.line ?? statusCard.status.sentence } } : statusCard,
     statusHtml,
+    failure: failedCard ? data.failure ?? null : null,
+    retry,
     approval: approvalHtml,
     confirmStopped: data.csrf !== "" && data.assignment?.primaryAction?.code === "confirm-stopped" && data.assignment.primaryAction.target.runId !== null
       ? { action: `${taskHref(data.assignment.rootId)}/confirm-stopped`, run: data.assignment.primaryAction.target.runId, checked: needsCheck(data.assignment) } : null,
@@ -22872,7 +22913,7 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
     problem: view.detail === null ? view.historyProblem : null,
     next: reviewNextActionOf(view, csrf), complete: null, decision: null, checks: null, intent: intentView, noRun: null, panel: null, contest: "",
     notes: view.notes.map(one => ({ author: one.author, at: one.createdAt, note: one.note })),
-    acts: { primary: null, secondary: null, line: null }, runChecks: null,
+    acts: { primary: null, secondary: null, line: null }, runChecks: null, mismatch: null,
     // The raw run record lives under Details now (2026-10-02): /r/<id> for this result redirects here.
     record: run === null ? null : { build: run.id, href: `/r/${run.id}?record=1`, facts: [
       { label: "Agent", value: [run.provider, run.model].filter(Boolean).join(" · ") },
@@ -22955,6 +22996,33 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
     next: nextKind === "revise" || nextKind === "draft-repair" ? nextKind : null,
   });
 
+  // The report disagrees with its saved changes: the status card says so first, each disagreement tied to its lines.
+  const mismatch = proof === null || accepted || proof.verdict !== "refuted" || evidenceProblemOf(proof.verdict, proof.reasons) !== "mismatched" ? null : (() => {
+    const patch = view.detail?.terminal?.patch ?? null;
+    const files = patch === null || "problem" in patch ? [] : parseReviewDiff(patch.text).files;
+    // Each file's first change: the lines it added (else every line it shows), and where that change starts (its link target).
+    const hunkStart = new Map<string, number>();
+    const changes = new Map(files.map(file => {
+      const shown = file.hunks[0]?.lines.filter(line => line.newLine !== null && line.kind !== "meta") ?? [];
+      if (shown[0]?.newLine != null) hunkStart.set(file.path, shown[0].newLine);
+      const added = shown.filter(line => line.kind === "addition");
+      const lines = (added.length > 0 ? added : shown).map(line => line.newLine as number);
+      return [file.path, lines.length === 0 ? null : { from: Math.min(...lines), to: Math.max(...lines) }] as const;
+    }));
+    const changesHref = `${here}&run=${run.id}&tab=changes`;
+    return {
+      headline: MISMATCH_HEADLINE,
+      rows: reportMismatchesOf(proof.reasons, proof.matrix, changes).map(one => ({
+        text: one.text, path: one.path, absent: one.inChanges === false,
+        lines: one.lines === null ? null : one.lines.from === one.lines.to ? `line ${one.lines.from}` : `lines ${one.lines.from}–${one.lines.to}`,
+        href: one.path !== null && one.inChanges === true ? `${changesHref}#${diffFileAnchor(one.path)}${hunkStart.has(one.path) ? `-L${hunkStart.get(one.path)}` : ""}`
+          : one.note !== null && (proof.proof?.caveats.length ?? 0) >= one.note ? `${here}&run=${run.id}#report-note-${one.note}` : null,
+        noteLabel: one.path === null && one.note !== null ? `The report, note ${one.note}` : null,
+      })),
+      said: [...new Set(proof.reasons.flatMap(reason => [reason, plainReasonWords(reason)]))],
+    };
+  })();
+
   if (view.notes.length > 0) {
     parts.push(
       `<section class="card cockpit-section" data-cockpit-section="notes"><h3>operator notes</h3>` +
@@ -22966,7 +23034,7 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
   return {
     html: `<section class="cockpit-detail">${parts.join("\n")}</section>`,
     selected: {
-      ...selected, complete, decision, panel: panel.panel, contest, acts, runChecks,
+      ...selected, complete, decision, panel: panel.panel, contest, acts, runChecks, mismatch,
       checks: checks === undefined ? null : { detail: checks.detail, problem: checks.status === "failed" || checks.status === "unavailable", logHref: checks.logArtifactId === null ? null : `/r/${run.id}/evidence/${checks.logArtifactId}` },
     },
   };
@@ -23070,39 +23138,8 @@ function phaseWords(phase: string): string {
   return PHASE_WORDS[phase] ?? "the agent is working";
 }
 
-const REASON_WORDS: Record<string, string> = {
-  agent: "the agent failed",
-  "agent-reported": "the agent reported it could not finish",
-  "no-op": "nothing changed when something should have",
-  "no-handoff": "the agent stopped before handing off; its work was kept and it is being resumed",
-  "moved-head": "the branch moved underneath the build",
-  "moved-branch": "the branch moved underneath the build",
-  timeout: "ran out of time",
-  git: "a git step failed",
-  "malformed-decision": "the agent's question was malformed",
-  "malformed-plan": "the plan was malformed",
-  fenced: "another worker took the task over",
-  unapproved: "the scope was not approved",
-  "scope-changed": "the scope changed after approval",
-  capability: "a requirement was missing",
-  setup: "the workspace preparation step failed",
-  "provider-init": "the agent could not start",
-  "commit-failure": "the commit failed",
-  "protected-branch": "refused to touch a protected branch",
-  "wrong-branch": "the checkout was on the wrong branch",
-  "not-leased": "the lease was not valid",
-  "no-claim": "the lease was not valid",
-  "not-yours": "the lease was not valid",
-  "no-run-record": "the run record was missing",
-  "missing-mailbox": "the resume mailbox could not be read",
-  "unreadable-mailbox": "the resume mailbox could not be read",
-  "revision-brief": "the revision brief could not be read",
-  "repaired-park": "resumed from a parked question",
-  stopped: "stopped by the operator",
-};
-
 function reasonWords(reason: string): string {
-  return REASON_WORDS[reason] ?? "stopped — the build records have the detail";
+  return runReasonWords(reason);
 }
 
 const INCIDENT_WORDS: Record<string, string> = {
@@ -23711,8 +23748,11 @@ function reviewDiffHtml(
       : counts.additions === null || counts.deletions === null
         ? `<span class="diff-file-counts">binary</span>`
         : `<span class="diff-file-counts"><b>+${counts.additions}</b><i>−${counts.deletions}</i></span>`;
-    const hunks = one.hunks.map(hunk =>
-      `<section class="diff-hunk"><div class="diff-hunk-head">${escape(hunk.header)}</div>` +
+    const fileAnchor = anchors.get(one.path);
+    // Each change is a link target of its own (#<file anchor>-L<first new line>): a result names the exact lines.
+    const hunks = one.hunks.map(hunk => {
+      const first = hunk.lines.find(line => line.newLine !== null && line.kind !== "meta")?.newLine ?? null;
+      return `<section class="diff-hunk"${fileAnchor === undefined || first === null ? "" : ` id="${fileAnchor}-L${first}"`}><div class="diff-hunk-head">${escape(hunk.header)}</div>` +
       `<div class="diff-lines">${hunk.lines.map(line => {
         const lineNumber = line.newLine ?? line.oldLine;
         const side = line.newLine === null && line.oldLine !== null ? "old" : "new";
@@ -23725,8 +23765,8 @@ function reviewDiffHtml(
           `<span class="diff-gutter">${line.oldLine ?? ""}</span><span class="diff-gutter">${line.newLine ?? ""}</span>` +
           `<code><b aria-hidden="true">${marker}</b>${escape(line.text)}</code></div>`
         );
-      }).join("")}</div></section>`
-    ).join("");
+      }).join("")}</div></section>`;
+    }).join("");
     const anchor = anchors.get(one.path);
     return (
       `<details class="diff-file"${fileIndex === 0 ? " open" : ""}${anchor === undefined ? "" : ` id="${anchor}"`}>` +
@@ -23760,7 +23800,9 @@ function checkLogHtml(log: NonNullable<ProofBundleView["checkLog"]>, runId: numb
     return `<p class="problem" data-check-log="damaged"${attributes}>The check log no longer verifies (${escape(log.problem)}). Its output is not shown, and there is nothing to download.</p>`;
   }
   return (
-    `<details data-check-log="${log.truncated ? "shortened" : "ok"}"${attributes}><summary>Check output${log.truncated ? ` (shortened — ${log.bytesStored} of ${log.bytesOriginal} bytes stored)` : ""}</summary><pre class="mono" style="overflow-x:auto;max-height:18rem">${escape(log.text)}</pre></details>` +
+    `<details data-check-log="${log.truncated ? "shortened" : "ok"}"${attributes}><summary>Check output${log.truncated ? ` (shortened — ${log.bytesStored} of ${log.bytesOriginal} bytes stored)` : ""}</summary><pre class="mono" style="overflow-x:auto;max-height:18rem">${
+      // Each line is a link target (#check-log-L<n>): a failed task names the exact line its check ended on.
+      log.text.split("\n").map((line, index) => `<span id="check-log-L${index + 1}">${escape(line)}</span>`).join("\n")}</pre></details>` +
     storedDownloadLink(runId, log.artifactId, "check log", log.truncated)
   );
 }
@@ -24295,6 +24337,8 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
     ...(conclusion !== outcome ? [`<p class="recap">${escape(conclusion)}</p>`] : []),
     ...(handoff !== null && handoff.changes.length > 0 ? [`<ul class="result-changes">${handoff.changes.map(one => `<li>${escape(one)}</li>`).join("")}</ul>`] : []),
     ...(handoff !== null && handoff.verification.length > 0 ? [`<p class="meta">Checked by the agent:</p><ul class="result-changes" data-cockpit-source="agent-words">${handoff.verification.map(one => `<li>${escape(one)}</li>`).join("")}</ul>`] : []),
+    // The report's own notes, each a link target (#report-note-<n>) a mismatch can point at.
+    ...(proof?.proof == null || proof.proof.caveats.length === 0 ? [] : [`<p class="meta">Its notes:</p><ol class="result-changes" data-report-notes>${proof.proof.caveats.map((one, index) => `<li id="report-note-${index + 1}">${escape(one)}</li>`).join("")}</ol>`]),
   ];
   if (agentAccount.length > 0) summaryParts.push(`<details class="result-notes" data-result-notes-agent><summary>What the agent reported</summary>${agentAccount.join("")}</details>`);
   // MEDIUM and LOW never block: suggested follow-ups, on request.

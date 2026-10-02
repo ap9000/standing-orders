@@ -42,7 +42,8 @@ export function assignmentActionHref(assignment: AssignmentSnapshot): string | n
   if (runId !== null && (action.code === 'inspect-run' || action.code === 'reconcile-run')) return `/r/${runId}`;
   const anchor = action.code === 'approve-scope' ? '#approve'
     : action.code === 'inspect-stop' || action.code === 'resume-run' ? '#task-control'
-    : action.code === 'unhold' || action.code === 'retry-task' ? '#task-actions'
+    // Retry (and Build again) is the task's status card itself, at the top: no anchor to its options.
+    : action.code === 'unhold' ? '#task-actions'
     : action.code === 'write-scope' || action.code === 'select-agent' ? '#scope'
     : action.code === 'inspect-hold' ? '#holds'
     : action.code === 'start-worker' || action.code === 'repair-dependency' ? '#run-status' : '';

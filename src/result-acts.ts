@@ -15,6 +15,9 @@
  * Accepting means what it always meant: the same forms post to the same
  * endpoints. This only decides which one is ink. */
 
+/** The words over the reason field an Accept of a refuted result requires. */
+export const ACCEPT_NEEDS_REASON = "Accepting needs a reason";
+
 export type ResultActKind = "accept" | "checks-running" | "run-checks" | "request-changes" | "rebuild" | "confirm-stopped" | "revise" | "draft-repair";
 
 export type ResultActFacts = {

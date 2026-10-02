@@ -14,6 +14,7 @@ import { plannerSourceProblemOf } from "./planner-source.js";
 import { authPauseOf, authWaitOf, providerName, signInReason } from "./provider-auth.js";
 import { REVIEW_TOKENS, resultStatusOf, reviewFactsOf } from "./workspace-ui.js";
 import { replacedWords } from "./task-status.js";
+import { failedAttemptSentence } from "./needs-you.js";
 import { buildReviewOf } from "./review-switch.js";
 import { BUILT_IN, parseCapabilityKey, type ChatSnapshot, type ReviewRequestOrigin, type ReviewRetryState, type Store, type TaskState } from "./store.js";
 
@@ -339,7 +340,11 @@ export function diagnoseTaskDispatch(store: Store, taskId: string, now: Date): D
     return successor === null ? answer("cancelled", "terminal", "Cancelled", "Nothing else will run for this task.")
       : answer("cancelled", "terminal", replacedWords(successor), `${replacedWords(successor)}. Nothing else will run for this task.`);
   }
-  if (task.state === "failed") return answer("failed", "terminal", "Needs a retry", "The last attempt stopped; review its incident, then retry it.", { action: "retry-task" });
+  if (task.state === "failed") {
+    // The failed attempt's own recorded reason, or that none was recorded: never "review its incident".
+    const last = store.runsFor(ref.id).find(run => run.role !== "planner" && run.role !== "reviewer" && run.finishedAt !== null);
+    return answer("failed", "terminal", "Needs a retry", failedAttemptSentence(last?.outcome === "failed" ? last.reason : null), { action: "retry-task" });
+  }
   if (store.hasLiveClaim(ref.id, now)) return answer("running", "running", "Running now", "A worker owns the current live claim.");
   if (task.state === "running") return answer("vanished-run", "waiting", "Build vanished", "The task says running, but no current claim owns it; reconcile it before retrying.", { action: "retry-task" });
   if (updateAdmissionPaused(store.raw())) return answer("updating", "waiting", "Waiting for app update", UPDATE_PAUSED);

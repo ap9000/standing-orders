@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { resultActsOf, type ResultActFacts } from "./result-acts.js";
+import { ACCEPT_NEEDS_REASON, resultActsOf, type ResultActFacts } from "./result-acts.js";
 import { cantAcceptYetOf } from "./workspace-ui.js";
 
 const base: ResultActFacts = { accept: null, runChecks: false, checksRunning: false, blocked: null, canRequest: true, need: null, next: null };
-const MISMATCH = "Can't accept yet: what the agent reported doesn't match the changes it saved.";
+// A mismatch is the status card's headline; the line before the acts only says what accepting takes.
+const MISMATCH = ACCEPT_NEEDS_REASON;
 
 describe("the result page's one ink act", () => {
   it("everything met: Accept, with Request changes beside it", () => {

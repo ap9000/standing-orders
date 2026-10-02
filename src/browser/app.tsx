@@ -607,7 +607,10 @@ function useWindowStaysPut() {
     const settle = () => { if (window.scrollX !== 0 || window.scrollY !== 0) window.scrollTo(0, 0); };
     const reveal = () => {
       const id = decodeURIComponent(window.location.hash.slice(1));
-      if (id !== "" && id !== "workspace-main") document.getElementById(id)?.scrollIntoView({ block: "start" });
+      const target = id === "" || id === "workspace-main" ? null : document.getElementById(id);
+      // A link to exact lines inside a folded file (a result's mismatch, a check log) opens its folds first.
+      for (let node = target?.parentElement ?? null; node !== null; node = node.parentElement) if (node instanceof HTMLDetailsElement) node.open = true;
+      target?.scrollIntoView({ block: "start" });
       settle();
     };
     const frame = requestAnimationFrame(reveal);
