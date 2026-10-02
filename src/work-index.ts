@@ -361,7 +361,7 @@ export function workCountsByProject(store: Store, now: Date, access: WorkSummary
 /** Families whose headline is Ready for review, newest first: the Tasks
  * list's own rows, so a completed family (root or any revision), a failed
  * check and a superseded version never count. */
-export function workReadyForReview(store: Store, now: Date, access: WorkSummaryAccess, limit = 5): { count: number; results: { rootId: string; taskId: string; run: number }[] } {
+export function workReadyForReview(store: Store, now: Date, access: WorkSummaryAccess, limit = 5): { count: number; results: { rootId: string; taskId: string; run: number | null }[] } {
   const ready: WorkIndexItem[] = [];
   let cursor: string | null = null;
   do {
@@ -369,7 +369,7 @@ export function workReadyForReview(store: Store, now: Date, access: WorkSummaryA
     ready.push(...page.items.filter(one => one.status.label === 'Ready for review'));
     cursor = page.nextCursor;
   } while (cursor !== null);
-  return { count: ready.length, results: ready.slice(0, Math.max(0, limit)).map(one => ({ rootId: one.rootId, taskId: one.activeTaskId, run: one.resultRunId ?? 0 })) };
+  return { count: ready.length, results: ready.slice(0, Math.max(0, limit)).map(one => ({ rootId: one.rootId, taskId: one.activeTaskId, run: one.resultRunId })) };
 }
 
 /** Labels stay navigation, never an authorization to mutate. Full task
@@ -406,7 +406,7 @@ function itemOf(row: Row, principal: WorkSummaryAccess['principal']): WorkIndexI
     'waiting-decision': ['Needs your decision', 'An unanswered question is waiting.', n(row, 'question_id') ? 'answer-decision' : 'inspect-decisions', 'Answer question'],
     'decision-queue': ['Needs your decision', 'The decision queue is full.', 'inspect-decisions', 'Review open questions'],
     'result-needs-attention': ['Needs your decision', 'Inspect the saved result and resolve its remaining execution or scope issue.', 'inspect-run', 'Inspect run'],
-    'process-needs-attention': ['Needs your decision', "Toolroll can't confirm this run's process has stopped. Open it to check.", 'inspect-run', 'Inspect run'],
+    'process-needs-attention': ['Needs your decision', 'A process exit is not recorded. Open the attempt to check whether its work has stopped.', 'inspect-run', 'Inspect run'],
     failed: ['Needs your decision', 'The last attempt stopped; review its incident before retrying.', 'retry-task', 'Review and retry'],
     'vanished-run': ['Needs your decision', 'An unfinished attempt has no current live claim.', 'reconcile-run', 'Check the unfinished attempt'],
     stopping: ['Needs your decision', 'Stopping. The work so far is kept.', 'inspect-stop', 'View stop details'],
@@ -442,7 +442,7 @@ function itemOf(row: Row, principal: WorkSummaryAccess['principal']): WorkIndexI
   const successor = code === 'cancelled' ? s(row, 'replaced_by') : null;
   if (successor !== null) { detail = `${replacedWords(successor)}.`; actionLabel = `Open ${successor}`; }
   if (code === 'terminal-dependency' && s(row, 'dependency_id') !== null) detail = `${s(row, 'dependency_id')} ${s(row, 'dependency_state') === 'cancelled' ? 'was cancelled' : 'failed'} before it finished.`;
-  if (code === 'result-needs-attention' && n(row, 'custody_unresolved')) detail = words['process-needs-attention']![1];
+  if (code === 'result-needs-attention' && n(row, 'custody_unresolved')) detail = 'A process exit is not recorded. Open the result to check whether its work has stopped.';
   if (code === 'result-needs-attention' && ['built', 'no-change'].includes(s(row, 'result_outcome') ?? '')) { actionCode = 'open-result'; actionLabel = 'Open result'; }
   if (actionCode === null) { actionCode = code === 'running' ? 'inspect-run' : 'inspect-task'; actionLabel = code === 'running' ? 'Watch the build' : 'View task details'; }
   const read = actionCode !== null && ['inspect-task', 'inspect-run', 'inspect-stop', 'inspect-decisions', 'open-result'].includes(actionCode);

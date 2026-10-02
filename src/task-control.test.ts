@@ -20,6 +20,7 @@ import { requestTaskStop, resumeTaskStop, taskControlOf, stopRequestedFor } from
 import { diagnoseTaskDispatch } from "./dispatch.js";
 import { taskReadinessBlocker } from "./dispatch.js";
 import { workIndexPage } from "./work-index.js";
+import { repairStaleStatuses } from "./lead-status.js";
 
 const T0 = new Date("2026-09-12T08:00:00.000Z");
 vi.mock("node:child_process", { spy: true });
@@ -516,7 +517,7 @@ describe("a finished run's processes settle by themselves", () => {
     try {
       const runId = finishedWithLiveProcess("t-outlived");
       expect(item("t-outlived").status.label).toBe("Needs you");
-      expect(item("t-outlived").status.detail).toBe("Toolroll can't confirm this run's process has stopped. Open it to check.");
+      expect(item("t-outlived").status.detail).toBe("A process exit is not recorded. Open the result to check whether its work has stopped.");
       // Still alive: nothing is recorded.
       expect(store.recordFinishedRunExits(later(2_000))).toBe(0);
       kill.mockImplementation(() => { throw Object.assign(new Error("gone"), { code: "ESRCH" }); });
@@ -526,6 +527,41 @@ describe("a finished run's processes settle by themselves", () => {
       expect(item("t-outlived").status.label).toBe("Ready for review");
       expect(store.recordFinishedRunExits(later(4_000))).toBe(0);
       expect(kill.mock.calls.every(([, signal]) => signal === 0)).toBe(true);
+    } finally { kill.mockRestore(); }
+  });
+
+  test("a run that can't be proven yet is passed over; newer runs behind it still settle", () => {
+    const alive = 4682;
+    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number) => {
+      if (Math.abs(pid) === alive) return true;
+      throw Object.assign(new Error("gone"), { code: "ESRCH" });
+    }) as typeof process.kill);
+    try {
+      const stuck = finishedWithLiveProcess("t-still-alive");
+      const newer = ["t-gone-1", "t-gone-2", "t-gone-3"].map(id => {
+        const runId = finishedWithLiveProcess(id);
+        store.raw().prepare("UPDATE run_process SET pid = ? WHERE run = ?").run(9_000 + runId, runId);
+        return runId;
+      });
+      // One run a batch: the unprovable oldest must not hold the rest back.
+      expect(store.recordFinishedRunExits(later(2_000), 1)).toBe(3);
+      for (const runId of newer) expect(store.stopQuiescenceProblem(runId)).toBeNull();
+      expect(store.raw().prepare("SELECT exited_at FROM run_process WHERE run = ?").get(stuck)?.["exited_at"]).toBeNull();
+      expect(item("t-still-alive").status.label).toBe("Needs you");
+      for (const id of ["t-gone-1", "t-gone-2", "t-gone-3"]) expect(item(id).status.label).toBe("Ready for review");
+    } finally { kill.mockRestore(); }
+  });
+
+  test("the repair on start clears what an older build left open", () => {
+    const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+    try {
+      for (const id of ["t-old-1", "t-old-2", "t-old-3"]) finishedWithLiveProcess(id);
+      expect(["t-old-1", "t-old-2", "t-old-3"].map(id => item(id).status.label)).toEqual(["Needs you", "Needs you", "Needs you"]);
+      // The upgrade happens after those processes are long gone.
+      kill.mockImplementation(() => { throw Object.assign(new Error("gone"), { code: "ESRCH" }); });
+      expect(repairStaleStatuses(store, later(2_000))).toEqual({ exitsRecorded: 3, readyForReview: 3 });
+      expect(["t-old-1", "t-old-2", "t-old-3"].map(id => item(id).status.label)).toEqual(["Ready for review", "Ready for review", "Ready for review"]);
+      expect(repairStaleStatuses(store, later(3_000))).toEqual({ exitsRecorded: 0, readyForReview: 3 });
     } finally { kill.mockRestore(); }
   });
 

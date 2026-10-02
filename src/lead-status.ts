@@ -1,6 +1,6 @@
 /** Cheap lead-facing status. Every fact comes from indexed SQLite records;
  * this module never opens a repository, retained evidence, or a live log. */
-import { COMPLETION_ACTION } from "./result-completion.js";
+import { familyCompleted } from "./result-completion.js";
 import { windowLabel, type LimitWindow } from "./provider-limits.js";
 import { openAuthPauses, signInCommand, signInReason } from "./provider-auth.js";
 import { BUILT_IN, checkSuitesOf, type RunCheckSuite, type Store } from "./store.js";
@@ -34,7 +34,7 @@ export type InstallationStatus = {
     tasks: { task: string; run: number; phase: string }[];
   };
   queued: { count: number; reasons: { reason: string; count: number }[]; tasks: { task: string; reason: string }[] };
-  waitingForReview: { count: number; results: { task: string; run: number; check: CheckSummary }[] };
+  waitingForReview: { count: number; results: { task: string; run: number | null; check: CheckSummary }[] };
   releaseCheck: { task: string; run: number; finishedAt: string | null; check: CheckSummary } | null;
   planWindows: (LimitWindow & { provider: string; plan: string | null; observedAt: string })[];
   /** Providers whose sign-in stopped working: their dispatch is paused. */
@@ -135,13 +135,9 @@ export function taskWaitSnapshot(store: Store, taskId: string, now: Date, watche
     if (state !== "done") return answer("Ready", "Review result", true, 0, "ready");
   }
 
-  // Completion is recorded on the family's root against its current
-  // version's result: a completed family is Complete from any of its tasks.
-  const family = state === "done" ? store.taskFamilyOf(taskId, null, true) : null;
-  const familyResult = family !== null && family.current.id !== taskId ? latestResult(store, family.current.refId) : result;
-  const completion = familyResult === undefined ? undefined : store.handle.prepare(`SELECT 1 AS hit FROM action_ledger INDEXED BY work_completion
-    WHERE task_id IN (?, ?) AND action = ? AND source = 'work' AND run_id = ? LIMIT 1`).get(taskId, family?.root.id ?? taskId, COMPLETION_ACTION, Number(familyResult["id"]));
-  if (state === "done" && completion !== undefined) return answer("Complete", "No action needed", true, 0, "complete");
+  // A completed family is Complete from any of its tasks.
+  const completed = state === "done" && familyCompleted(store, taskId);
+  if (completed) return answer("Complete", "No action needed", true, 0, "complete");
   if (state === "done") return answer("Ready", "Review result", true, 0, "ready");
   if (state === "failed" || state === "cancelled") return answer("Failed", state === "cancelled" ? "Review cancellation" : "Inspect failure", true, 1, "failed");
 
@@ -199,6 +195,16 @@ function queueReason(row: Record<string, unknown>): string {
 }
 
 /** Whole-installation status, deliberately aggregated and bounded. */
+/** The one-off repair on start. An older build left finished runs' process
+ * exits unrecorded and counted completed families as waiting; nothing about
+ * a status is stored, so recording every exit that can now be proven and
+ * re-deriving each open task's headline from the shared projection clears
+ * them. What can't be proven stays as it was. */
+export function repairStaleStatuses(store: Store, now: Date): { exitsRecorded: number; readyForReview: number } {
+  const exitsRecorded = store.recordFinishedRunExits(now);
+  return { exitsRecorded, readyForReview: workReadyForReview(store, now, { principal: "operator", repos: null, includeUnplaced: true }, 0).count };
+}
+
 export function installationStatus(store: Store, now: Date): InstallationStatus {
   const runningRows = store.handle.prepare(`SELECT run.id, run.role, run.phase, ref.external_id AS task
     FROM run INDEXED BY work_unfinished
@@ -261,7 +267,7 @@ export function installationStatus(store: Store, now: Date): InstallationStatus 
       reasons: [...reasons].map(([reason, count]) => ({ reason, count })).sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason)),
       tasks: queuedTasks,
     },
-    waitingForReview: { count: ready.count, results: ready.results.map(one => ({ task: one.taskId, run: one.run, check: checkOf(checkRow(one.run)) })) },
+    waitingForReview: { count: ready.count, results: ready.results.map(one => ({ task: one.taskId, run: one.run, check: checkOf(one.run === null ? undefined : checkRow(one.run)) })) },
     releaseCheck: release === undefined ? null : { task: String(release["task"]), run: Number(release["id"]), finishedAt: release["finished_at"] == null ? null : String(release["finished_at"]), check: checkOf(release) },
     planWindows: store.handle.prepare(`SELECT provider, window, used_percent, window_minutes, resets_at, reached, plan, observed_at
       FROM provider_limit INDEXED BY sqlite_autoindex_provider_limit_1 ORDER BY provider, window`).all().map(row => ({
@@ -291,7 +297,7 @@ export function renderInstallationStatus(status: InstallationStatus): string[] {
   }
   lines.push(status.running.count === 0 ? "Building: none" : `Building: ${status.running.count} — ${status.running.tasks.map(one => `${one.task} (#${one.run}, ${one.phase})`).join(", ")}${status.running.count > status.running.tasks.length ? ", …" : ""}`);
   lines.push(status.queued.count === 0 ? "Queued: none" : `Queued: ${status.queued.count} — ${status.queued.tasks.map(one => `${one.task} (${one.reason})`).join(", ")}${status.queued.count > status.queued.tasks.length ? ", …" : ""}`);
-  lines.push(status.waitingForReview.count === 0 ? "Ready for review: none" : `Ready for review: ${status.waitingForReview.count} — ${status.waitingForReview.results.map(one => `${one.task} (#${one.run})`).join(", ")}${status.waitingForReview.count > status.waitingForReview.results.length ? ", …" : ""}`);
+  lines.push(status.waitingForReview.count === 0 ? "Ready for review: none" : `Ready for review: ${status.waitingForReview.count} — ${status.waitingForReview.results.map(one => one.run === null ? one.task : `${one.task} (#${one.run})`).join(", ")}${status.waitingForReview.count > status.waitingForReview.results.length ? ", …" : ""}`);
   if (status.releaseCheck === null) {
     lines.push("Release check: none recorded");
   } else {

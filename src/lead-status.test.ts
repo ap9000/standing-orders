@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { renderTaskWait, taskWaitSnapshot } from "./lead-status.js";
+import { installationStatus, renderInstallationStatus, renderTaskWait, taskWaitSnapshot } from "./lead-status.js";
 import { runOperate } from "./operate.js";
 import { BUILT_IN, openStore, type Store } from "./store.js";
 
@@ -266,5 +266,18 @@ describe("lead status commands", () => {
     ]));
     expect(report.find(line => line.startsWith("Queued: 2 —"))).toContain("held-task (on hold)");
     expect(report.find(line => line.startsWith("Queued: 2 —"))).toContain("needs-scope (needs a scope)");
+  });
+
+  test("a ready task with no saved result run is named without a run number", () => {
+    const store = openStore(":memory:");
+    try {
+      const status = installationStatus(store, NOW);
+      const lines = renderInstallationStatus({ ...status, waitingForReview: { count: 2, results: [
+        { task: "no-result", run: null, check: { status: "unknown", exitCode: null, suites: [] } },
+        { task: "with-result", run: 41, check: { status: "passed", exitCode: 0, suites: [] } },
+      ] } });
+      expect(lines).toContain("Ready for review: 2 — no-result, with-result (#41)");
+      expect(lines.join("\n")).not.toContain("#0");
+    } finally { store.close(); }
   });
 });

@@ -25386,15 +25386,20 @@ export class Store {
 
   /** The reconcile road for a finished run whose process outlived its
    * finish: once each process is provably gone, its exit is recorded, so
-   * the task stops waiting on a person by itself. Whatever cannot be proven
-   * stays open. Never signals. */
-  recordFinishedRunExits(now: Date, limit = 200): number {
-    const runs = this.db.prepare(`SELECT DISTINCT p.run FROM run_process p JOIN run r ON r.id = p.run
-      WHERE p.exited_at IS NULL AND p.host = ? AND r.outcome IS NOT NULL AND r.finished_at IS NOT NULL
-      ORDER BY p.run LIMIT ?`).all(hostname(), limit);
+   * the task stops waiting on a person by itself. A run that can't be proven
+   * yet stays open and is passed over, never holding newer runs behind it:
+   * every finished run is visited, a batch at a time. Never signals. */
+  recordFinishedRunExits(now: Date, batch = 200): number {
+    const page = this.db.prepare(`SELECT DISTINCT p.run FROM run_process p JOIN run r ON r.id = p.run
+      WHERE p.exited_at IS NULL AND p.host = ? AND p.run > ? AND r.outcome IS NOT NULL AND r.finished_at IS NOT NULL
+      ORDER BY p.run LIMIT ?`);
     let recorded = 0;
-    for (const row of runs) recorded += this.recordRunProcessExits(Number(row["run"]), now);
-    return recorded;
+    for (let after = 0; ;) {
+      const runs = page.all(hostname(), after, batch).map(row => Number(row["run"]));
+      for (const run of runs) recorded += this.recordRunProcessExits(run, now);
+      if (runs.length < batch) return recorded;
+      after = runs[runs.length - 1]!;
+    }
   }
 
   finishUnspawnedProcess(witness: number, now: Date): void {

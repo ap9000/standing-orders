@@ -20,7 +20,7 @@ import { verifyApproverByPassword } from "./principal.js";
 import { assignmentOf, checkAssignmentAsOperator } from "./assignment.js";
 import { telegramProgressCard } from "./telegram-progress.js";
 import { installationStatus, renderInstallationStatus, taskWaitSnapshot } from "./lead-status.js";
-import { phoneStatus, phoneTaskChoices } from "./telegram-status.js";
+import { phoneStatus, phoneTask, phoneTaskChoices } from "./telegram-status.js";
 import { workIndexPage } from "./work-index.js";
 import { HEADLINES } from "./task-status.js";
 import { assignmentTaskStatusOf } from "./assignment-presentation.js";
@@ -252,6 +252,8 @@ describe("one headline on every surface", () => {
     expect(reply).toContain("Finished · 4");
     expect(reply.match(/— Ready for review$/gm)).toHaveLength(1);
     expect(phoneTaskChoices(store, [REPO], NOW, "review").map(one => [one.id, one.label])).toEqual([["review-once", "Complete"]]);
+    // The task view of the root and of each revision, superseded or current.
+    for (const id of ["review-once", "review-once-2", "review-once-3"]) expect(phoneTask(store, [REPO], id, NOW).split("\n")[4], id).toBe("Complete");
     const card = telegramProgressCard(store, store.getRun(runs["review-once-3"]!)!, "review-once-3", REPO, NOW, root);
     expect(card.text.split("\n")[1]).toBe("✅ Complete");
   });
