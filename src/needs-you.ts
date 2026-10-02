@@ -8,7 +8,7 @@
 
 /** What a person is asked for. */
 export type NeedKey =
-  | "approval" | "card" | "answer" | "questions" | "sign-in" | "confirm-stopped" | "hold"
+  | "approval" | "card" | "answer" | "questions" | "sign-in" | "confirm-stopped" | "check-stopped" | "hold"
   | "choose-project" | "define-task" | "fix-request" | "choose-agent" | "fix-dependency" | "add-requirement"
   | "connect-builder" | "start-builder" | "vanished" | "review-result" | "earlier-version" | "other";
 /** What the work waits for when no person can act. */
@@ -39,6 +39,8 @@ export const NEEDS: Readonly<Record<NeedKey, Need>> = {
   questions: { sentence: () => "Too many questions are open. Answer one so this task can start.", action: { code: "inspect-decisions", label: "Answer questions" } },
   "sign-in": { sentence: context => `${context.provider ?? "Your agent"} needs you to sign in again. The task starts on its own after.`, action: { code: "sign-in", label: "Sign in again" }, useReason: reason => /sign in|API key/i.test(reason) },
   "confirm-stopped": { sentence: context => `Toolroll can't confirm ${build(context)} stopped. Nothing from it is running.`, action: { code: "confirm-stopped", label: "Confirm it stopped" } },
+  // Toolroll can't look at all: never "nothing is running"; the person checks, says so, then confirms.
+  "check-stopped": { sentence: context => `Toolroll can't check whether ${build(context)} stopped. Make sure nothing from it is running, then confirm.`, action: { code: "confirm-stopped", label: "Confirm it stopped" } },
   hold: { sentence: () => "A hold is keeping this task from starting. Review it to release it.", action: { code: "inspect-hold", label: "Review hold" } },
   "choose-project": { sentence: () => "Choose a project so a builder can start.", action: { code: "place-task", label: "Choose a project" } },
   "define-task": { sentence: () => "Say what the task should do so it can be planned.", action: { code: "write-scope", label: "Define the task" } },
@@ -50,7 +52,7 @@ export const NEEDS: Readonly<Record<NeedKey, Need>> = {
   "connect-builder": { sentence: () => "No builder works on this project yet. Connect one so the task can start.", action: { code: "start-worker", label: "Connect a builder" } },
   "start-builder": { sentence: () => "The builder for this project is offline. Start it and the task begins on its own.", action: { code: "start-worker", label: "Start the builder" } },
   vanished: { sentence: context => `${Build(context)} stopped without finishing. Check it, then retry.`, action: { code: "reconcile-run", label: "Check the build" } },
-  "review-result": { sentence: () => "Review the result, then mark it complete or ask for changes.", action: { code: "open-result", label: "Review result" } },
+  "review-result": { sentence: () => "Check the result, then accept it or ask for changes.", action: { code: "open-result", label: "Review result" } },
   "earlier-version": { sentence: () => "An earlier version of this task still needs you. Finish it first.", action: { code: "inspect-task", label: "Open earlier version" } },
   other: { sentence: () => "Open the task to see what it needs from you.", action: { code: "inspect-task", label: "Open the task" }, useReason: always },
 };
@@ -84,11 +86,13 @@ export function waitSentence(key: WaitKey | undefined, reason: string | null, co
 }
 
 /** A finished run Toolroll can't prove stopped (store.stopQuiescenceFact):
- * a person can confirm it only when nothing of it may still be running. */
-export function processNeedOf(fact: { run: number; kind: "open" | "alive" | "elsewhere" | "unprovable" } | null):
-  { need: "confirm-stopped"; build: number } | { wait: WaitKey; build: number } | null {
+ * a person can confirm it only when nothing of it may still be running.
+ * `unknown`: Toolroll can't check, so the person confirms they checked. */
+export function processNeedOf(fact: { run: number; kind: "open" | "alive" | "elsewhere" | "unprovable" | "unknown" } | null):
+  { need: "confirm-stopped" | "check-stopped"; build: number } | { wait: WaitKey; build: number } | null {
   if (fact === null) return null;
   if (fact.kind === "unprovable") return { need: "confirm-stopped", build: fact.run };
+  if (fact.kind === "unknown") return { need: "check-stopped", build: fact.run };
   return { wait: fact.kind === "elsewhere" ? "other-computer" : "build-stopping", build: fact.run };
 }
 

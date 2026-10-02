@@ -9,7 +9,7 @@ import type { ReactNode } from "react";
 import type { BrowserResultPanel, BrowserResultView } from "../../browser-workspace.js";
 import { GuardedHtml } from "../guarded-html.js";
 import {
-  Badge, Button, Card, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger, cn,
+  Badge, Button, Card, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger, Input, cn,
 } from "../components/ui/index.js";
 import { toneOf } from "./tone.js";
 import { ConfirmStoppedForm, StatusDetails, StatusHeadline, StatusWhy } from "./status-summary.js";
@@ -81,7 +81,14 @@ function StatusCard({ selected, csrf }: { selected: Selected; csrf: string }) {
       </div>
       {(complete !== null || need !== null || panel?.canRequest === true) && <div className="flex flex-wrap items-center gap-2 phone:w-full">
         {/* Needs you: the action that resolves it leads, filled; Request changes is never alone. */}
-        {need !== null && (need.confirm !== null ? <ConfirmStoppedForm form={need.confirm} csrf={csrf} label={need.label} />
+        {need !== null && (need.accept != null ? <form method="post" action={need.accept.action} className="flex flex-wrap items-center gap-2 phone:w-full">
+            <input type="hidden" name="csrf" value={csrf} />
+            <input type="hidden" name="run" value={String(need.accept.run)} />
+            <input type="hidden" name="return" value={need.accept.returnTo} />
+            {need.accept.note !== null && <Input type="text" name="note" maxLength={500} required aria-label={need.accept.note} placeholder={need.accept.note} className="h-9 w-56 phone:h-11 phone:w-full" />}
+            <Button type="submit" variant="attention" className="phone:w-full" data-primary-action data-accept-result><Check />{need.label}</Button>
+          </form>
+          : need.confirm !== null ? <ConfirmStoppedForm form={need.confirm} csrf={csrf} label={need.label} />
           : need.href !== null && <Button asChild variant="attention" className="phone:w-full"><a href={need.href} data-primary-action data-need-action>{need.label}</a></Button>)}
         {complete !== null && <form method="post" action={complete.action} className="phone:flex-1">
           <input type="hidden" name="csrf" value={csrf} />

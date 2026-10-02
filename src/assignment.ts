@@ -240,10 +240,10 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
     const process = processNeedOf(processFact)!;
     if ("need" in process) {
       state = "needs-decision";
-      detail = NEEDS["confirm-stopped"].sentence({ build: process.build });
-      primaryAction = { code: "confirm-stopped", label: NEEDS["confirm-stopped"].action.label, target: { taskId: current.id, runId: process.build, decisionId: null },
+      detail = NEEDS[process.need].sentence({ build: process.build });
+      primaryAction = { code: "confirm-stopped", label: NEEDS[process.need].action.label, target: { taskId: current.id, runId: process.build, decisionId: null },
         access: access.principal === "operator" ? "operator-control" : "operator-handoff", retry: "refresh-before-acting" };
-      need = { key: "confirm-stopped", build: process.build };
+      need = { key: process.need, build: process.build };
     } else {
       state = "working";
       detail = WAITS[process.wait]({ build: process.build });

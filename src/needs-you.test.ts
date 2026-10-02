@@ -4,7 +4,8 @@
  * incomplete spawn witness; exit is unproven" with only Request changes. */
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Server } from "node:http";
@@ -16,7 +17,8 @@ import { openStore, type Store } from "./store.js";
 import { register } from "./runner.js";
 import { addApprover, approve, propose } from "./scope.js";
 import { storeEvidence } from "./evidence.js";
-import { createDecisionServer } from "./serve.js";
+import { MARKER } from "./worktree.js";
+import { createDecisionServer, needActionOf } from "./serve.js";
 import { assignmentOf, type AssignmentSnapshot } from "./assignment.js";
 import { assignmentPresentationOf } from "./assignment-presentation.js";
 import { workIndexPage } from "./work-index.js";
@@ -89,6 +91,10 @@ describe("every reason", () => {
     expect(processNeedOf({ run: 9, kind: "alive" })).toEqual({ wait: "build-stopping", build: 9 });
     expect(processNeedOf({ run: 9, kind: "open" })).toEqual({ wait: "build-stopping", build: 9 });
     expect(processNeedOf({ run: 9, kind: "elsewhere" })).toEqual({ wait: "other-computer", build: 9 });
+    // Toolroll can't look at all: the person checks; it never says nothing is running.
+    expect(processNeedOf({ run: 9, kind: "unknown" })).toEqual({ need: "check-stopped", build: 9 });
+    expect(taskStatusOf({ stage: "needs-you", need: "check-stopped", needContext: { build: 2175 } }).sentence)
+      .toBe("Toolroll can't check whether build #2175 stopped. Make sure nothing from it is running, then confirm.");
     expect(processNeedOf(null)).toBeNull();
     expect(taskStatusOf({ stage: "needs-you", need: "confirm-stopped", needContext: { build: 2175 } }).sentence)
       .toBe("Toolroll can't confirm build #2175 stopped. Nothing from it is running.");
@@ -110,6 +116,8 @@ describe("Confirm it stopped, end to end", () => {
     fetch(`${base}${path}`, { method: "POST", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(fields), redirect: "manual" });
   const assignment = (id: string) => assignmentOf(store, id, NOW, { principal: "operator", repos: [REPO] }, root)!;
   const witness = (run: number, pid: number | null) => store.raw().prepare("INSERT INTO run_process (run, pid, host, process_group, observed_at) VALUES (?, ?, ?, 0, ?)").run(run, pid, hostname(), NOW.toISOString());
+  const ended = (run: number) => store.raw().prepare("INSERT INTO run_process (run, pid, host, process_group, observed_at, exited_at) VALUES (?, NULL, ?, 0, ?, ?)").run(run, hostname(), NOW.toISOString(), NOW.toISOString());
+  const listed = (view: "all" | "needs-you" = "all") => workIndexPage(store, NOW, { principal: "operator", repos: [REPO] }, { view });
 
   const worktreeFor = (id: string) => { const path = join(dir, `wt-${id}`); execFileSync("mkdir", ["-p", path]); return path; };
   /** A finished build whose project check passed: Ready once Toolroll knows it stopped. */
@@ -157,6 +165,19 @@ describe("Confirm it stopped, end to end", () => {
     built("no-record", "Rotate the log format");
     // Something of it may still be running: this very test process.
     witness(built("still-alive", "Cache the product list"), process.pid);
+    // Toolroll can't look: its workspace note can't be read, or its OS object never finished being recorded.
+    const unreadable = built("unreadable", "Trim the image cache");
+    ended(unreadable);
+    mkdirSync(join(store.getRun(unreadable)!.worktree!, MARKER));
+    const halfContained = built("half-contained", "Resize the thumbnails");
+    store.raw().prepare("INSERT INTO run_process (run, pid, host, process_group, observed_at, containment) VALUES (?, NULL, ?, 0, ?, 'job-object')").run(halfContained, hostname(), NOW.toISOString());
+    // Its process is gone but its exit was never written down: the store settles it on reading, so must the list.
+    witness(built("exited-quietly", "Bump the font size"), spawnSync("true").pid!);
+    // Stopped, but no verdict was recorded and it was built to an earlier plan: the result itself is where a person accepts it.
+    const unverified = built("unverified", "Rename the checkout button");
+    ended(unverified);
+    store.raw().prepare("DELETE FROM proof_verdict WHERE run = ?").run(unverified);
+    store.raw().prepare("UPDATE run SET scope_digest = ? WHERE id = ?").run("0".repeat(32), unverified);
     server = createDecisionServer({ store, evidenceRoot: root, repo: REPO, clock: () => new Date() });
     await new Promise<void>(done => server.listen(0, "127.0.0.1", done));
     const address = server.address();
@@ -192,7 +213,75 @@ describe("Confirm it stopped, end to end", () => {
     const task = workspaceOf(await page("/t/spawn-gap")).view as Extract<BrowserWorkspace["view"], { kind: "task" }>;
     expect(task.status?.status.headline).toBe("Needs you");
     expect(task.status?.action?.label).toBe("Confirm it stopped");
-    expect(task.confirmStopped).toEqual({ action: "/t/spawn-gap/confirm-stopped", run: runs["spawn-gap"] });
+    expect(task.confirmStopped).toEqual({ action: "/t/spawn-gap/confirm-stopped", run: runs["spawn-gap"], checked: false });
+  });
+
+  test("a build Toolroll can't check says so, and confirming asks the person to say they checked", async () => {
+    for (const id of ["unreadable", "half-contained"]) {
+      expect(store.stopQuiescenceFact(runs[id]!)?.kind, id).toBe("unknown");
+      const status = assignmentPresentationOf(assignment(id)).taskStatus;
+      expect(status.headline, id).toBe("Needs you");
+      expect(status.sentence, id).toBe(`Toolroll can't check whether build #${runs[id]} stopped. Make sure nothing from it is running, then confirm.`);
+      expect(status.sentence, id).not.toContain("Nothing from it is running");
+      const task = workspaceOf(await page(`/t/${id}`)).view as Extract<BrowserWorkspace["view"], { kind: "task" }>;
+      expect(task.confirmStopped, id).toEqual({ action: `/t/${id}/confirm-stopped`, run: runs[id], checked: true });
+      const result = workspaceOf(await page(`/review?result=${id}&run=${runs[id]}`)).view as Extract<BrowserWorkspace["view"], { kind: "result" }>;
+      expect(result.selected!.panel!.need?.confirm?.checked, id).toBe(true);
+      expect(listed("needs-you").items.find(one => one.rootId === id)?.status.detail, id).toContain("can't check");
+      // Never one click: without the tick it is refused, and nothing changes.
+      const html = await page(`/t/${id}`);
+      const unticked = await post(`/t/${id}/confirm-stopped`, { csrf: csrfOf(html), run: String(runs[id]), token: password });
+      expect(unticked.status, id).toBe(409);
+      expect(store.stopQuiescenceFact(runs[id]!)?.kind, id).toBe("unknown");
+      const confirmed = await post(`/t/${id}/confirm-stopped`, { csrf: csrfOf(html), run: String(runs[id]), token: password, checked: "yes" });
+      expect(confirmed.status, id).toBe(303);
+      expect(store.stopQuiescenceFact(runs[id]!), id).toBeNull();
+      expect(assignmentPresentationOf(assignment(id)).taskStatus.headline, id).toBe("Ready for review");
+      expect(listed().items.find(one => one.rootId === id)?.status.label, id).toBe("Ready for review");
+    }
+  });
+
+  test("a workspace still held by a live process can't be confirmed stopped", () => {
+    const run = built("held-workspace", "Compress the logs");
+    ended(run);
+    writeFileSync(join(store.getRun(run)!.worktree!, MARKER), `${process.pid} builder-1 group\n`);
+    expect(store.stopQuiescenceFact(run)?.kind).toBe("alive");
+    expect(store.settleRunWitnessesByApprover({ runId: run, by: "sam", why: "test" }, NOW)).toMatchObject({ ok: false, reason: "alive" });
+  });
+
+  test("Waiting rows are not counted as Needs you, and settled custody leaves it", () => {
+    const all = listed();
+    const needsView = listed("needs-you");
+    expect(needsView.items.map(one => one.rootId)).not.toContain("still-alive");
+    expect(all.totals["needs-you"]).toBe(all.items.filter(one => one.status.views.includes("needs-you")).length);
+    expect(all.totals["needs-you"]).toBe(needsView.items.length);
+    // The process exited without a recorded exit: the store reads it stopped, so the list reads it Ready, as the task page does.
+    expect(store.stopQuiescenceFact(runs["exited-quietly"]!)).toBeNull();
+    const quiet = all.items.find(one => one.rootId === "exited-quietly")!;
+    expect(quiet.status.label).toBe("Ready for review");
+    expect(quiet.primaryAction?.code).not.toBe("confirm-stopped");
+    expect(assignmentPresentationOf(assignment("exited-quietly")).taskStatus.headline).toBe("Ready for review");
+  });
+
+  test("on the result itself, the action is never a link back to the same page", async () => {
+    // Built to an earlier plan: the result page sends the person to the task, where the plan is.
+    const result = workspaceOf(await page(`/review?result=unverified&run=${runs["unverified"]}`)).view as Extract<BrowserWorkspace["view"], { kind: "result" }>;
+    const panel = result.selected!.panel!;
+    expect(panel.status?.headline).toBe("Needs you");
+    expect(panel.need).toMatchObject({ label: "Open the task", href: "/t/unverified", confirm: null });
+    expect(panel.canRequest).toBe(true);
+    // A result to review leads with Accept, which records the person's acceptance; once accepted, the task.
+    const read = assignment("unverified");
+    const status = taskStatusOf({ stage: "needs-you", need: "review-result" });
+    const facts = { humanReview: false, run: runs["unverified"]!, action: "/t/unverified/accept-proof" };
+    expect(needActionOf(read, status, "csrf", "/back", { ...facts, accepted: false }))
+      .toMatchObject({ label: "Accept with exception", href: null, accept: { action: "/t/unverified/accept-proof", run: runs["unverified"], note: "Why is this safe to accept?" } });
+    expect(needActionOf(read, status, "csrf", "/back", { ...facts, humanReview: true, accepted: false })?.accept?.note).toBeNull();
+    expect(needActionOf(read, status, "csrf", "/back", { ...facts, accepted: true })).toMatchObject({ label: "Open the task", href: "/t/unverified" });
+    const html = await page("/t/unverified");
+    const accepted = await post("/t/unverified/accept-proof", { csrf: csrfOf(html), run: String(runs["unverified"]), note: "Checked the button label by hand." });
+    expect(accepted.status).toBe(303);
+    expect(store.proofAcceptance(runs["unverified"]!)).not.toBeNull();
   });
 
   test("a build that may still be running is Waiting, never Needs you, and can't be confirmed", async () => {

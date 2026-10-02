@@ -1,6 +1,9 @@
 /** Paginated, permission-bound summaries of saved task facts. These reads do
- * not verify artifacts, inspect processes, or authorize task operations. */
+ * not verify artifacts or authorize task operations; a build Toolroll can't
+ * yet confirm stopped is read through the store's own read-only probe. */
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { readProjectAccess } from './project-access.js';
 import { pauseOnTaskProviders, providerName, signInReason } from './provider-auth.js';
 import type { ProviderId } from './provider.js';
@@ -10,6 +13,7 @@ import type { WorkAction, WorkSummaryAccess } from './work-summary.js';
 import type { WorkStatus, WorkView } from './workspace-ui.js';
 import { plainReasonOf, replacedWords, stageOfCode, taskStatusOf, workToneOf, type ChecksFact } from './task-status.js';
 import { isCheckLevel } from './check-levels.js';
+import { MARKER } from './worktree.js';
 import { withFollowUps } from './result-follow-ups.js';
 import { NEEDS, processNeedOf, type NeedKey, type WaitKey } from './needs-you.js';
 
@@ -58,6 +62,9 @@ const s = (row: Row, key: string) => row[key] == null ? null : String(row[key]);
 /** A gate note counts only while its pause is on one of the task's current providers. */
 const GATE_PAUSE_ON_TASK = pauseOnTaskProviders('p', 'c.ref_id');
 
+type StopFact = NonNullable<ReturnType<Store['stopQuiescenceFact']>>;
+/** A row whose build may still be running (the store's reading, custodyReadings): Waiting, not Needs you. */
+const CUSTODY_WAITS = `(custody_unresolved AND code IN ('process-needs-attention','result-needs-attention') AND ref_id IN (SELECT value FROM json_each($waitingCustody)))`;
 const PROJECTION = `WITH RECURSIVE admitted AS MATERIALIZED (
   SELECT t.id, t.title, t.state, t.created_at, t.updated_at, r.id ref_id, r.repo,
     r.revision_of, r.revision_brief_artifact, r.assigned_runner, r.plan,
@@ -93,7 +100,8 @@ const PROJECTION = `WITH RECURSIVE admitted AS MATERIALIZED (
     (SELECT id FROM run WHERE task_ref=a.ref_id AND outcome IS NULL ORDER BY id DESC LIMIT 1) unfinished,
     CASE WHEN a.state='done' THEN (SELECT id FROM run WHERE task_ref=a.ref_id AND finished_at IS NOT NULL AND role IN ('builder','scout') ORDER BY id DESC LIMIT 1) END result_id,
     (SELECT h.id FROM hold h WHERE h.task_ref=a.ref_id AND (h.until IS NULL OR h.until>$now) ORDER BY h.held_at,h.id LIMIT 1) hold_id,
-    q.decision_id,cu.task_ref IS NOT NULL custody_unresolved
+    q.decision_id,(cu.task_ref IS NOT NULL OR a.ref_id IN (SELECT value FROM json_each($workspaceCustody)))
+      AND a.ref_id NOT IN (SELECT value FROM json_each($settledCustody)) custody_unresolved
   FROM admitted a LEFT JOIN lineage l ON l.ref_id=a.ref_id
   LEFT JOIN questions q ON q.task_ref=a.ref_id LEFT JOIN custody cu ON cu.task_ref=a.ref_id
 ), family_heads AS MATERIALIZED (
@@ -235,9 +243,9 @@ const PROJECTION = `WITH RECURSIVE admitted AS MATERIALIZED (
     ELSE 'queued' END code
   FROM checked f
 ), ranked AS MATERIALIZED (
-  SELECT c.*,code NOT IN ('cancelled','complete','running','updating','retry-scheduled','waiting-dependency','worker-at-capacity','planning-ready','scouting-ready','queued') needs,
+  SELECT c.*,code NOT IN ('cancelled','complete','running','updating','retry-scheduled','waiting-dependency','worker-at-capacity','planning-ready','scouting-ready','queued') AND NOT ${CUSTODY_WAITS} needs,
     CASE WHEN code='complete' THEN 3 WHEN code='cancelled' THEN 4 WHEN code='running' THEN 1
-      WHEN code IN ('updating','retry-scheduled','waiting-dependency','worker-at-capacity','planning-ready','scouting-ready','queued') THEN 2 ELSE 0 END rank,
+      WHEN ${CUSTODY_WAITS} OR code IN ('updating','retry-scheduled','waiting-dependency','worker-at-capacity','planning-ready','scouting-ready','queued') THEN 2 ELSE 0 END rank,
     CASE WHEN code='complete' THEN completed.at ELSE family_updated END sort_at,
     completed.actor checked_actor,completed.at checked_at,completed.outcome checked_digest
   FROM classified c LEFT JOIN action_ledger completed ON completed.id=c.checked_id WHERE ($state IS NULL OR c.state=$state) AND ($leadId IS NULL OR EXISTS(SELECT 1 FROM team_task_owner own WHERE own.task_ref=c.root_ref AND own.lead=$leadId))
@@ -270,8 +278,33 @@ function registerValidators(store: Store): string {
   return projection;
 }
 
-function parameters(now: Date, access: WorkSummaryAccess, options: WorkIndexOptions) {
-  return { $now: now.toISOString(), $alive: new Date(now.getTime() - 180_000).toISOString(),
+/** The list can't see processes: each task whose build Toolroll can't yet
+ * confirm stopped, as the store reads it now (the task page's own reading).
+ * Null when it has since settled; `open` runs are the classification's own.
+ * `workspace`: a finished task whose last build's workspace note is still
+ * there, which only the store can read (a held or unreadable workspace). */
+function custodyReadings(store: Store): { readings: Map<number, StopFact | null>; workspace: Set<number> } {
+  const refs = store.handle.prepare(`SELECT r.task_ref FROM held_session h JOIN run r ON r.id=h.run WHERE h.ended_at IS NULL
+    UNION SELECT r.task_ref FROM run r WHERE r.provider_started_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM run_process p WHERE p.run=r.id)
+    UNION SELECT r.task_ref FROM run_process p JOIN run r ON r.id=p.run WHERE p.exited_at IS NULL AND p.container_empty_at IS NULL`).all().map(row => Number(row['task_ref']));
+  const noted = store.handle.prepare(`SELECT r.task_ref,r.worktree FROM task t JOIN task_ref tr ON tr.external_id=t.id
+    JOIN run r ON r.id=(SELECT MAX(id) FROM run WHERE task_ref=tr.id AND role IN ('builder','scout') AND finished_at IS NOT NULL)
+    WHERE t.state='done' AND r.worktree IS NOT NULL`).all()
+    .filter(row => existsSync(join(String(row['worktree']), MARKER))).map(row => Number(row['task_ref']));
+  const readings = new Map<number, StopFact | null>();
+  for (const ref of new Set([...refs, ...noted])) {
+    let found: StopFact | null = null;
+    for (const run of store.runsFor(ref)) { const fact = store.stopQuiescenceFact(run.id); if (fact !== null && fact.kind !== 'open') { found = fact; break; } }
+    readings.set(ref, found);
+  }
+  return { readings, workspace: new Set(noted) };
+}
+
+function parameters(now: Date, access: WorkSummaryAccess, options: WorkIndexOptions, custody: ReturnType<typeof custodyReadings>) {
+  const ids = (keep: (ref: number, fact: StopFact | null) => boolean) => JSON.stringify([...custody.readings].filter(([ref, fact]) => keep(ref, fact)).map(([ref]) => ref));
+  return { $settledCustody: ids((_, fact) => fact === null), $waitingCustody: ids((_, fact) => fact !== null && 'wait' in (processNeedOf(fact) ?? {})),
+    $workspaceCustody: ids((ref, fact) => fact !== null && custody.workspace.has(ref)),
+    $now: now.toISOString(), $alive: new Date(now.getTime() - 180_000).toISOString(),
     $all: access.repos === null ? 1 : 0, $repos: JSON.stringify(access.repos ?? []),
     $unplaced: access.principal === 'operator' && access.includeUnplaced === true ? 1 : 0,
     $projectSet: options.project != null ? 1 : 0, $project: options.project ?? null, $state: options.state ?? null, $leadId: options.leadId ?? null };
@@ -312,6 +345,7 @@ function readCursor(value: string | null | undefined, scope: string): Cursor | n
  * Cursors bind the admitted scope, project and view, never broaden access. */
 export function workIndexPage(store: Store, now: Date, access: WorkSummaryAccess, options: WorkIndexOptions = {}): WorkIndexPage {
   const projection = registerValidators(store);
+  const custody = custodyReadings(store);
   const view = VIEWS.includes(options.view ?? 'all') ? options.view ?? 'all' : 'all';
   const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(WORK_INDEX_MAX_LIMIT, Math.floor(options.limit!))) : WORK_INDEX_PAGE_LIMIT;
   const scope = cursorScope(access, options, view), cursor = readCursor(options.cursor, scope);
@@ -342,18 +376,16 @@ export function workIndexPage(store: Store, now: Date, access: WorkSummaryAccess
     'question_run',(SELECT run FROM decision WHERE id=page.question_id),'replaced_by',(SELECT successor FROM task_replacement WHERE task_ref=page.ref_id),
     'completed_by_lead',(SELECT lead FROM task_act WHERE task_ref=page.root_ref AND act='completed' ORDER BY id DESC LIMIT 1),
     'question_task',(SELECT r.external_id FROM decision d JOIN run ON run.id=d.run JOIN task_ref r ON r.id=run.task_ref WHERE d.id=page.question_id)) FROM page`)
-    .all({ ...parameters(now, access, options), $cursorRoot: cursor?.root ?? 0, $cursorRank: cursor?.rank ?? 0, $cursorAt: cursor?.at ?? '', $limit: limit + 1, $recent: new Date(now.getTime()-86_400_000).toISOString() });
+    .all({ ...parameters(now, access, options, custody), $cursorRoot: cursor?.root ?? 0, $cursorRank: cursor?.rank ?? 0, $cursorAt: cursor?.at ?? '', $limit: limit + 1, $recent: new Date(now.getTime()-86_400_000).toISOString() });
   const selected = rows.slice(1).map(row => JSON.parse(String(row['row_json'])) as Row);
   const page = selected.slice(0, limit), last = page.at(-1);
   const nextCursor = selected.length > limit && last !== undefined ? Buffer.from(JSON.stringify({ version: 1, scope,
     rank: n(last, 'rank'), at: s(last, 'sort_at'), root: n(last, 'root_ref') })).toString('base64url') : null;
   const projects = (JSON.parse(String(rows[0]?.['row_json'] ?? '[]')) as Row[]).map(row => ({ repo: s(row, 'repo'), totals: counts(row), queued: n(row, 'queued'), doneRecently: n(row, 'done_recently') }));
-  // The list can't see processes; a row whose build Toolroll can't confirm stopped asks the store, as the task page does.
+  // A row whose build Toolroll can't confirm stopped reads the store's own answer, as the task page does.
   const probe = (taskId: string) => {
     const ref = store.lookupRef(taskId);
-    if (ref === null) return null;
-    for (const run of store.runsFor(ref.id)) { const fact = store.stopQuiescenceFact(run.id); if (fact !== null && fact.kind !== 'open') return fact; }
-    return null;
+    return ref === null ? null : custody.readings.get(ref.id) ?? null;
   };
   return { items: page.map(row => itemOf(row, access.principal, probe)), projects, totals: rows[0] === undefined ? { ...EMPTY } : counts(rows[0]), nextCursor, limit, view };
 }
@@ -362,7 +394,7 @@ export function workCountsByProject(store: Store, now: Date, access: WorkSummary
   const projection = registerValidators(store);
   return store.handle.prepare(`${projection} SELECT repo,${TOTALS},SUM(state='queued' AND family_running=0) queued,
     SUM(state='done' AND family_running=0 AND updated_at>=$recent) done_recently FROM ranked GROUP BY repo ORDER BY repo`)
-    .all({ ...parameters(now, access, {}), $recent: new Date(now.getTime()-86_400_000).toISOString() })
+    .all({ ...parameters(now, access, {}, custodyReadings(store)), $recent: new Date(now.getTime()-86_400_000).toISOString() })
     .map(row => ({ repo: s(row, 'repo'), totals: counts(row), queued: n(row, 'queued'), doneRecently: n(row, 'done_recently') }));
 }
 
@@ -390,7 +422,7 @@ const INDEX_NEED: Readonly<Record<string, NeedKey>> = {
   'earlier-active': 'earlier-version', 'process-needs-attention': 'confirm-stopped', 'invalid-scope': 'define-task', 'decision-queue': 'questions',
 };
 
-function itemOf(row: Row, principal: WorkSummaryAccess['principal'], probe?: (taskId: string) => { run: number; kind: 'open' | 'alive' | 'elsewhere' | 'unprovable' } | null): WorkIndexItem {
+function itemOf(row: Row, principal: WorkSummaryAccess['principal'], probe?: (taskId: string) => StopFact | null): WorkIndexItem {
   const code = String(row['code']), id = String(row['id']);
   const custody = code === 'process-needs-attention' || (code === 'result-needs-attention' && n(row, 'custody_unresolved') === 1);
   const process = custody && probe !== undefined ? processNeedOf(probe(id)) : null;
@@ -446,7 +478,7 @@ function itemOf(row: Row, principal: WorkSummaryAccess['principal'], probe?: (ta
   if (code === 'terminal-dependency' && s(row, 'dependency_id') !== null) detail = `${s(row, 'dependency_id')} ${s(row, 'dependency_state') === 'cancelled' ? 'was cancelled' : 'failed'} before it finished.`;
   if (code === 'result-needs-attention' && n(row, 'custody_unresolved')) detail = 'A process exit is not recorded. Open the result to check whether its work has stopped.';
   if (code === 'result-needs-attention' && ['built', 'no-change'].includes(s(row, 'result_outcome') ?? '')) { actionCode = 'open-result'; actionLabel = 'Open result'; }
-  if (process !== null && 'need' in process) { actionCode = 'confirm-stopped'; actionLabel = NEEDS['confirm-stopped'].action.label; }
+  if (process !== null && 'need' in process) { actionCode = 'confirm-stopped'; actionLabel = NEEDS[process.need].action.label; }
   else if (custody && probe === undefined) { actionCode = 'confirm-stopped'; actionLabel = NEEDS['confirm-stopped'].action.label; }
   if (code === 'signed-out') { actionCode = 'sign-in'; actionLabel = NEEDS['sign-in'].action.label; }
   if (actionCode === null) { actionCode = code === 'running' ? 'inspect-run' : 'inspect-task'; actionLabel = code === 'running' ? 'Watch the build' : 'View task details'; }
@@ -462,7 +494,7 @@ function itemOf(row: Row, principal: WorkSummaryAccess['principal'], probe?: (ta
   // The one shared status: the headline and sentence every surface uses.
   const coded = stageOfCode(code, { needsPerson: need, planning: s(row, 'live_role') === 'planner', operatorHold: s(row, 'hold_kind') === 'operator' });
   const reading: { stage: typeof coded.stage; need?: NeedKey | undefined; wait?: WaitKey | undefined } = process !== null
-    ? 'wait' in process ? { stage: 'waiting', wait: process.wait } : { stage: 'needs-you', need: 'confirm-stopped' }
+    ? 'wait' in process ? { stage: 'waiting', wait: process.wait } : { stage: 'needs-you', need: process.need }
     : custody ? { stage: 'needs-you', need: 'confirm-stopped' }
     : coded.stage === 'needs-you' && (coded.need === undefined || coded.need === 'other') && INDEX_NEED[code] !== undefined ? { stage: 'needs-you', need: INDEX_NEED[code] } : coded;
   const checkStatus = s(row, 'check_status'), verdict = s(row, 'proof_verdict');

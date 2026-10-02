@@ -8681,6 +8681,10 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       if (!authenticateApprover(store, who.name, body.get("token") ?? "", ref.repo).ok || !store.accountCanAccess(who.name, ref.repo)) {
         return taskScreen(response, who, act.taskId, "That password didn't match. Nothing changed.", 403);
       }
+      // When Toolroll can't check at all, the approver also says they checked: never a one-click confirmation.
+      if (store.stopQuiescenceFact(run.id)?.kind === "unknown" && body.get("checked") !== "yes") {
+        return taskScreen(response, who, act.taskId, `Make sure nothing from build #${run.id} is running, then tick the box to confirm.`, 409);
+      }
       const settled = store.settleRunWitnessesByApprover({ runId: run.id, by: who.name, why: "Confirmed in the console that nothing from this build is running." }, now);
       if (!settled.ok) {
         return taskScreen(response, who, act.taskId, settled.reason === "alive" || settled.reason === "still-running"
@@ -22015,7 +22019,7 @@ function taskBodyParts(data: {
     statusHtml,
     approval: approvalHtml,
     confirmStopped: data.csrf !== "" && data.assignment?.primaryAction?.code === "confirm-stopped" && data.assignment.primaryAction.target.runId !== null
-      ? { action: `${taskHref(data.assignment.rootId)}/confirm-stopped`, run: data.assignment.primaryAction.target.runId } : null,
+      ? { action: `${taskHref(data.assignment.rootId)}/confirm-stopped`, run: data.assignment.primaryAction.target.runId, checked: needsCheck(data.assignment) } : null,
     // The plan, progress and plan changes are thread entries now; the rest still needs a person here.
     lead: [
       { key: "history", html: data.history ?? "" }, { key: "control", html: controlHtml }, { key: "problem", html: problemHtml },
@@ -23880,10 +23884,12 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
     evidence: { damaged: facts.evidenceHealth.damaged, missing: facts.evidenceHealth.missing, shortened: facts.evidenceHealth.shortened }, links: resultLinks });
   const taskStatus = presentation?.taskStatus ?? null;
   const status = presentation?.status ?? resultHeadlineOf(receiptStatusOf(receipt));
-  // Needs you: the action that resolves it comes first; Request changes stays beside it, never alone.
-  const need = needActionOf(current, taskStatus, o.csrf, o.returnTo);
   const stored = receiptStatusOf(receipt, null);
   const humanReview = manualReviewOnly(proof === null ? null : { ...proof, verdict: proof.verdict ?? "" });
+  // Needs you: the action that resolves it comes first; Request changes stays beside it, never alone.
+  // On the result itself, "Review result" would link here: accepting it is what resolves it.
+  const need = needActionOf(current, taskStatus, o.csrf, o.returnTo, {
+    accepted: proof?.accepted != null, humanReview, run: run.id, action: `${taskHref(detail.taskId)}/accept-proof` });
   const directAssessment = proof?.matrix.some(row => row.assessment !== undefined) === true;
   const awaitingGoalReview = directAssessment && proof?.reasons.length === 1 && proof.reasons[0] === GOAL_ASSESSMENT_PENDING;
   const assessmentReasons = directAssessment ? new Set(proof!.matrix.flatMap(row => row.review ? [`${row.review.author} ${row.review.judgement === "contradicts" ? "contradicts" : "needs more evidence for"} criterion "${row.id}": ${row.review.note}`] : [])) : new Set<string>();
@@ -23940,7 +23946,7 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
   const acceptable = personChecks.length > 0 && humanReview && o.csrf !== "" && (current != null || detail.assignment == null);
   const youCheck: BrowserResultPanel["youCheck"] = personChecks.length === 0 ? null : {
     lines: [...new Set(personChecks)],
-    accept: acceptable ? { action: `${taskHref(detail.taskId)}/accept-proof`, run: run.id, returnTo: o.returnTo } : null,
+    accept: acceptable && need?.accept == null ? { action: `${taskHref(detail.taskId)}/accept-proof`, run: run.id, returnTo: o.returnTo } : null,
   };
   const youCheckHtml = youCheck === null ? "" :
     `<div class="result-you-check" data-result-you-check="${youCheck.lines.length}"><ul>${youCheck.lines.map(one => `<li>${escape(one)}</li>`).join("")}</ul>` +
@@ -24265,18 +24271,34 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
 
 /** A Needs you result's one action (needs-you.ts): a link to the act that resolves it, or Confirm it
  * stopped behind the password. Null under every other headline. */
-function needActionOf(assignment: AssignmentSnapshot | null, status: TaskStatus | null, csrf: string, returnTo: string): BrowserNeedAction | null {
+export function needActionOf(assignment: AssignmentSnapshot | null, status: TaskStatus | null, csrf: string, returnTo: string,
+  result?: { accepted: boolean; humanReview: boolean; run: number; action: string }): BrowserNeedAction | null {
   if (assignment === null || status === null || status.headline !== "Needs you" || status.need == null) return null;
   const action = assignment.primaryAction;
+  if (result !== undefined) {
+    if (status.need.key === "review-result" && !result.accepted && csrf !== "") return { label: result.humanReview ? "Accept result" : "Accept with exception", href: null, confirm: null,
+      accept: { action: result.action, run: result.run, returnTo, note: result.humanReview ? null : "Why is this safe to accept?" } };
+    // Never a link back to this same result: the task page holds the act that resolves it.
+    const here = (action?.code === "open-result" || action?.code === "inspect-run") && action.target.runId === result.run;
+    if (status.need.key === "review-result" || here) return { label: "Open the task", href: taskHref(assignment.rootId), confirm: null };
+  }
   const confirm = action?.code === "confirm-stopped" && action.target.runId !== null && csrf !== ""
-    ? { action: `${taskHref(assignment.rootId)}/confirm-stopped`, run: action.target.runId, returnTo } : null;
+    ? { action: `${taskHref(assignment.rootId)}/confirm-stopped`, run: action.target.runId, returnTo, checked: needsCheck(assignment) } : null;
   return { label: status.need.action.label, href: assignmentActionHref(assignment) ?? taskHref(assignment.rootId), confirm };
 }
 
+/** A build Toolroll can't check at all: the approver ticks that they checked before confirming. */
+const needsCheck = (assignment: AssignmentSnapshot): boolean => assignment.need != null && "key" in assignment.need && assignment.need.key === "check-stopped";
+
 /** The server page's form of the same: the need's action first, Request changes as the quiet second. */
 function resultNeedAction(need: BrowserNeedAction, o: ResultPanelOptions, canRequest: boolean): string {
-  const control = need.confirm !== null
+  const control = need.accept != null
+    ? `<form method="post" action="${escape(need.accept.action)}" class="accept-result"><input type="hidden" name="csrf" value="${escape(o.csrf)}"><input type="hidden" name="run" value="${need.accept.run}"><input type="hidden" name="return" value="${escape(need.accept.returnTo)}">` +
+      (need.accept.note === null ? "" : `<input type="text" name="note" maxlength="500" required placeholder="${escape(need.accept.note)}" aria-label="${escape(need.accept.note)}">`) +
+      `<button type="submit" data-primary-action data-accept-result style="min-height:44px">${escape(need.label)}</button></form>`
+    : need.confirm !== null
     ? `<form method="post" action="${escape(need.confirm.action)}" id="confirm-stopped" class="confirm-stopped"><input type="hidden" name="csrf" value="${escape(o.csrf)}"><input type="hidden" name="run" value="${need.confirm.run}"><input type="hidden" name="return" value="${escape(need.confirm.returnTo)}">` +
+      (need.confirm.checked === true ? `<label><input type="checkbox" name="checked" value="yes" required> Nothing from build #${need.confirm.run} is running</label>` : "") +
       `<label>Your password<input type="password" name="token" autocomplete="current-password" required></label><button type="submit" style="min-height:44px">${escape(need.label)}</button></form>`
     : `<a class="button-link" href="${escape(need.href ?? "#")}" data-primary-action>${escape(need.label)}</a>`;
   return `<div class="result-action" data-result-action="need">${control}${canRequest && o.csrf !== "" ? `<a class="result-feedback-link" href="#request-changes">Request changes</a>` : ""}</div>`;
