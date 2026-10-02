@@ -30,12 +30,16 @@ async function waitFor(predicate: () => boolean, ms: number): Promise<boolean> {
   return predicate();
 }
 
-/** A root that spawns a detached grandchild writing a tick file forever, records both pids, then exits or lingers. */
+/**
+ * A root that spawns a detached grandchild writing a tick file forever, records both pids, then exits or lingers.
+ * A tick that can't be written (a scanner briefly holding the file) is skipped: it must not end the grandchild,
+ * or a sibling that should keep running stops on its own.
+ */
 const ESCAPING_ROOT = `
 import { spawn } from "node:child_process";
 import { writeFileSync } from "node:fs";
 const dir = process.env.SO_DIR;
-const child = spawn(process.execPath, ["-e", "setInterval(() => require('node:fs').appendFileSync(process.env.SO_DIR + '/ticks.log', 'tick\\\\n'), 20)"], { stdio: "ignore", detached: true, windowsHide: true, env: process.env });
+const child = spawn(process.execPath, ["-e", "setInterval(() => { try { require('node:fs').appendFileSync(process.env.SO_DIR + '/ticks.log', 'tick\\\\n'); } catch {} }, 20)"], { stdio: "ignore", detached: true, windowsHide: true, env: process.env });
 child.unref();
 writeFileSync(dir + "/pids.json", JSON.stringify({ root: process.pid, escaped: child.pid }));
 if (process.env.SO_MODE === "exit") { setTimeout(() => process.exit(0), 300); }
@@ -56,6 +60,13 @@ describe("native containment (Windows Job Object)", { timeout: 40_000 }, () => {
     if (native && capability !== null) pinContainment(effectiveContainment("required", capability));
   });
   afterEach(() => { resetContainmentForTests(); rmSync(dir, { recursive: true, force: true }); });
+
+  /** Whether a running ticker writes again: the file's length, read through the file, grows within the deadline. */
+  const grows = async (file: string, ms = 10_000): Promise<boolean> => {
+    const length = (): number | null => { try { return readFileSync(file).length; } catch { return null; } };
+    let before: number | null = null;
+    return waitFor(() => { const now = length(); if (now === null) return false; if (before === null) { before = now; return false; } return now > before; }, ms);
+  };
 
   const stableAfterSettlement = async (file: string): Promise<boolean> => {
     const before = existsSync(file) ? statSync(file).size : 0;
@@ -106,9 +117,10 @@ describe("native containment (Windows Job Object)", { timeout: 40_000 }, () => {
     expect(stopped.containment).toMatchObject({ backend: "job-object", empty: true });
     expect(await waitFor(() => !alive(pidsA.root) && !alive(pidsA.escaped), 5_000)).toBe(true);
     expect(await stableAfterSettlement(join(a, "ticks.log"))).toBe(true);
+    // The sibling still writes after A has settled: wait for its next tick, not a fixed window a loaded runner can miss.
+    expect(await grows(join(b, "ticks.log"))).toBe(true);
     expect(alive(pidsB.root)).toBe(true);
     expect(alive(pidsB.escaped)).toBe(true);
-    expect(await stableAfterSettlement(join(b, "ticks.log"))).toBe(false);
     expect(terminateOwnedProcesses("run:B")).toBe(1);
     const stoppedB = await runB;
     expect(stoppedB.timedOut).toBe(false);
