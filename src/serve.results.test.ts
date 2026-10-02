@@ -1132,7 +1132,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     for (const [task, run] of [["t-noproof", missing], ["t-badproof", damaged]] as const) {
       const selected = (await read(task, run)).selected!;
       expect(selected.decision).toMatchObject({ label: "Accept without checks", ready: false });
-      expect(selected.decision!.why).toMatch(/^The saved proof couldn't be read/);
+      expect(selected.decision!.why).toMatch(/^Nothing on record says what was met/);
       expect(selected.complete).not.toHaveProperty("publish");
     }
   });
@@ -1156,7 +1156,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(html).toContain('Mark complete</button>');
     expect(html).toContain('Checks stay unchanged; nothing is published or deployed.');
     const decision = ((await (await fetch(url(`/review?result=t-complete&run=${run}&format=workspace`), { headers: { cookie } })).json()) as import("./browser-workspace.js").BrowserWorkspace).view as import("./browser-workspace.js").BrowserResultView;
-    expect(decision.selected!.decision).toMatchObject({ label: "Accept without checks", ready: false, why: "The saved proof couldn't be read and checks failed." });
+    expect(decision.selected!.decision).toMatchObject({ label: "Accept without checks", ready: false, why: "Nothing on record says what was met and checks failed." });
     const receipt = /name="receipt" value="([a-f0-9]{64})"/.exec(html)?.[1];
     expect(receipt).toBeDefined();
     const csrf = csrfOf(html);

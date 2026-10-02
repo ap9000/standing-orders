@@ -10,8 +10,8 @@ describe("the result's Accept words", () => {
 
   test("a missing or unreadable proof is Accept without checks, and says so", () => {
     expect(acceptWordsOf({ checks: "passed", unmet: 0, yours: 0, action: "complete", publishing: "off", proof: false }))
-      .toMatchObject({ label: "Accept without checks", ready: false, why: "The saved proof couldn't be read." });
-    expect(acceptWordsOf({ checks: "not-run", unmet: 0, yours: 0, action: "complete", publishing: "off", proof: false }).why).toBe("The saved proof couldn't be read and checks didn't run.");
+      .toMatchObject({ label: "Accept without checks", ready: false, why: "Nothing on record says what was met." });
+    expect(acceptWordsOf({ checks: "not-run", unmet: 0, yours: 0, action: "complete", publishing: "off", proof: false }).why).toBe("Nothing on record says what was met and checks didn't run.");
   });
 
   test("Accept without checks names what is missing in one line", () => {

@@ -462,7 +462,7 @@ export type AcceptWords = { label: "Accept" | "Accept without checks"; ready: bo
 export function acceptWordsOf(facts: AcceptFacts): AcceptWords {
   const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
   const parts = [
-    ...(facts.proof ? [] : ["the saved proof couldn't be read"]),
+    ...(facts.proof ? [] : ["nothing on record says what was met"]),
     ...(facts.checks === "passed" ? [] : [facts.checks === "failed" ? "checks failed" : facts.checks === "off" ? "checks are off for this project"
       : facts.checks === "running" ? "checks are still running" : facts.checks === "unavailable" ? "saved checks can't be read" : "checks didn't run"]),
     ...(facts.unmet > 0 ? [`${plural(facts.unmet, "requirement isn't", "requirements aren't")} met`] : []),

@@ -14779,7 +14779,7 @@ ${THEME_DARK}
      exact-terms form. */
   .chat-approval-stale { margin: .75rem 0 0; }
   .chat-approval-stale a { font-weight: 600; }
-  form.approve-form[data-stale="1"] .approval-confirm { opacity: .55; }
+  form.approve-form[data-stale="1"] .approval-confirm, form.approve-form[data-stale="1"] .approval-act { opacity: .55; }
   .proposal-filed { display: flex; align-items: center; flex-wrap: wrap; gap: .6rem; margin: .5rem 0 0; }
   .chat-thinking { display: flex; align-items: center; gap: .75rem; padding: .75rem .85rem; }
   .chat-thinking p { flex: 1; margin: 0; }
