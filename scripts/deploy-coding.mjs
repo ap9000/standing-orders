@@ -85,7 +85,12 @@ export function releaseStaleCodingDeployment(candidate, database, orders, stoppe
   const released = candidate.releaseStaleCodingOwner(orders, stoppedPids);
   if (released === null) return null;
   record.codingOwnerReleased = released;
-  orders.prepare("INSERT INTO action_ledger(at,actor,repo,task_id,run_id,action,outcome,source,detail) VALUES (?,'deploy',NULL,NULL,NULL,'coding owner released','released','policy',?)")
-    .run(new Date().toISOString(), `The stopped service did not release the coding workspace; process ${released.pid}${released.nativePid === null ? '' : ` and agent ${released.nativePid}`} proved gone`);
+  ledgerStaleCodingRelease(orders, released);
   return released;
+}
+
+/** The ledger entry for a release. A deployment that puts the database backup back writes it again. */
+export function ledgerStaleCodingRelease(orders, released, at = new Date().toISOString()) {
+  orders.prepare("INSERT INTO action_ledger(at,actor,repo,task_id,run_id,action,outcome,source,detail) VALUES (?,'deploy',NULL,NULL,NULL,'coding owner released','released','policy',?)")
+    .run(at, `The stopped service did not release the coding workspace; process ${released.pid}${released.nativePid === null ? '' : ` and agent ${released.nativePid}`} proved gone`);
 }

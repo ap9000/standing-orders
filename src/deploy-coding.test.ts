@@ -186,7 +186,14 @@ test('browser phase wiring verifies the coding backup before stop and custody be
   expect(rollback.indexOf('await verifyServiceStopped(failedPids)')).toBeLessThan(rollback.indexOf('assertCodingDeploymentStopped(coding'));
   expect(rollback.lastIndexOf('await verifyServiceStopped(failedPids)')).toBeGreaterThan(rollback.indexOf('await loadCodingDeploymentRuntime(nextDist)'));
   expect(rollback.lastIndexOf('await verifyServiceStopped(failedPids)')).toBeLessThan(rollback.indexOf('assertCodingDeploymentStopped(coding'));
-  expect(rollback.indexOf('assertCodingDeploymentStopped(coding')).toBeLessThan(rollback.indexOf('restorePriorService()'));
+  // Custody is proved before the failed start is handed to the exit recovery, which puts the backup and the previous service back.
+  expect(rollback.indexOf('assertCodingDeploymentStopped(coding')).toBeLessThan(rollback.indexOf('save(r, "start-failed")'));
+  expect(rollback).not.toContain('restorePriorService(');
+  const restart = source.slice(source.indexOf('function restorePriorService('), source.indexOf('/** A clean checkout of the commit'));
+  expect(restart.indexOf('version !== r.schema')).toBeLessThan(restart.indexOf('"bootstrap"'));
+  expect(restart.indexOf('"bootstrap"')).toBeLessThan(restart.indexOf('waitUntilHealthy(answers)'));
+  expect(restart).toContain('/healthz');
+  expect(source).toContain('process.on("exit", code => { if (code !== 0) recoverJournal(); });\nexitOnSignals();');
   const finish = source.slice(source.indexOf('async function finish('));
   expect(finish.indexOf('await ensureCodingBackup(coding')).toBeLessThan(finish.indexOf('await fetch('));
   expect(finish.lastIndexOf('await ensureCodingBackup(coding')).toBeGreaterThan(finish.indexOf('await sleep('));
@@ -197,7 +204,7 @@ test('browser phase wiring verifies the coding backup before stop and custody be
   const replace = swap.slice(swap.indexOf('// Migration loads asynchronously'), swap.indexOf('writeFileSync(plist, nextPlist)'));
   expect(replace.indexOf('await ensureCodingBackup(')).toBeLessThan(replace.indexOf('await verifyServiceStopped('));
   expect(replace.indexOf('verifyCodingBackup(')).toBeGreaterThan(replace.lastIndexOf('await '));
-  const restore = rollback.slice(0, rollback.indexOf('restorePriorService()'));
+  const restore = rollback.slice(0, rollback.indexOf('save(r, "start-failed")'));
   expect(restore.indexOf('await ensureCodingBackup(')).toBeLessThan(restore.lastIndexOf('await verifyServiceStopped('));
   expect(restore.indexOf('verifyCodingBackup(')).toBeGreaterThan(restore.lastIndexOf('await '));
   expect(swap.lastIndexOf('await ensureCodingBackup(await loadCodingDeploymentRuntime(nextDist), r)')).toBeGreaterThan(swap.indexOf('save(r, "started")'));
@@ -208,9 +215,11 @@ test('browser phase wiring verifies the coding backup before stop and custody be
   expect(swap.indexOf('loadCodingDeploymentRuntime(nextDist)')).toBeLessThan(release);
   expect(release).toBeLessThan(swap.indexOf('assertCodingDeploymentStopped(oldRt.coding'));
   // Any failure after that restores the old service and lifts this deployment's own pause on exit.
-  const exit = source.slice(source.indexOf('process.on("exit", code =>'), source.indexOf('function restorePriorService('));
+  const exit = source.slice(source.indexOf('function recoverJournal('), source.indexOf('function restorePriorService('));
   expect(exit).toContain('recoverFailedDeployment(r.phase, {');
-  expect(exit).toContain('restoreService: restorePriorService');
+  expect(exit).toContain('restoreBackup: () => restoreDeploymentBackup(r)');
+  expect(exit).toContain('restoreService: () => restorePriorService(r)');
+  expect(exit).toContain('--phase recover');
   expect(exit).toContain('oldRt.gate.removeUpdateGate(db, r.id)');
 });
 
