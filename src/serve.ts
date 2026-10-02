@@ -75,6 +75,7 @@ import { leadBriefHtml, LEAD_CONTEXT_CSS } from './lead-context.js';
 import { assignmentCatchUp } from './assignment-brief.js';
 import { assignmentActionHref, assignmentCardOf, assignmentStatusOf, assignmentSummaryHtml, assignmentWithEvidence, ASSIGNMENT_CSS } from './assignment-ui.js';
 import { assignmentStageOf, pullRequestFactOf, stageOfCode, stageOfDispatch, statusDetailsHtml, statusIconSvg, statusWhyHtml, taskStatusOf, TASK_STATUS_CSS, type PullRequestFact, type TaskStatus } from './task-status.js';
+import { NEEDS } from './needs-you.js';
 import { assignmentPresentationOf, historicalAssessmentReason, shortenedMaterialReason } from './assignment-presentation.js';
 import type { TaskFamily } from "./store.js";
 import { ledgerBody } from "./ledger-view.js";
@@ -22020,6 +22021,8 @@ function taskBodyParts(data: {
     approval: approvalHtml,
     confirmStopped: data.csrf !== "" && data.assignment?.primaryAction?.code === "confirm-stopped" && data.assignment.primaryAction.target.runId !== null
       ? { action: `${taskHref(data.assignment.rootId)}/confirm-stopped`, run: data.assignment.primaryAction.target.runId, checked: needsCheck(data.assignment) } : null,
+    rebuild: data.csrf !== "" && data.assignment?.primaryAction?.code === "retry-task" && data.assignment.need != null && "key" in data.assignment.need && data.assignment.need.key === "rebuild"
+      ? { action: `${taskHref(data.assignment.rootId)}/requeue` } : null,
     // The plan, progress and plan changes are thread entries now; the rest still needs a person here.
     lead: [
       { key: "history", html: data.history ?? "" }, { key: "control", html: controlHtml }, { key: "problem", html: problemHtml },
@@ -23889,7 +23892,9 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
   // Needs you: the action that resolves it comes first; Request changes stays beside it, never alone.
   // On the result itself, "Review result" would link here: accepting it is what resolves it.
   const need = needActionOf(current, taskStatus, o.csrf, o.returnTo, {
-    accepted: proof?.accepted != null, humanReview, run: run.id, action: `${taskHref(detail.taskId)}/accept-proof` });
+    accepted: proof?.accepted != null, humanReview, run: run.id, action: `${taskHref(detail.taskId)}/accept-proof`,
+    // What Store.finalResultReason refuses: a verified, attested, accepted or published result.
+    rebuildable: proof?.accepted == null && proof?.verdict !== "verified" && proof?.verdict !== "attested" && !(detail.publication !== null && ["pushed", "opened"].includes(detail.publication.state)) });
   const directAssessment = proof?.matrix.some(row => row.assessment !== undefined) === true;
   const awaitingGoalReview = directAssessment && proof?.reasons.length === 1 && proof.reasons[0] === GOAL_ASSESSMENT_PENDING;
   const assessmentReasons = directAssessment ? new Set(proof!.matrix.flatMap(row => row.review ? [`${row.review.author} ${row.review.judgement === "contradicts" ? "contradicts" : "needs more evidence for"} criterion "${row.id}": ${row.review.note}`] : [])) : new Set<string>();
@@ -24272,14 +24277,20 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
 /** A Needs you result's one action (needs-you.ts): a link to the act that resolves it, or Confirm it
  * stopped behind the password. Null under every other headline. */
 export function needActionOf(assignment: AssignmentSnapshot | null, status: TaskStatus | null, csrf: string, returnTo: string,
-  result?: { accepted: boolean; humanReview: boolean; run: number; action: string }): BrowserNeedAction | null {
+  result?: { accepted: boolean; humanReview: boolean; run: number; action: string; rebuildable?: boolean }): BrowserNeedAction | null {
   if (assignment === null || status === null || status.headline !== "Needs you" || status.need == null) return null;
   const action = assignment.primaryAction;
+  const rebuild = { href: null, confirm: null, rebuild: { action: `${taskHref(assignment.rootId)}/requeue` } };
+  // Built to an earlier plan: Build again, in place (the task page's requeue).
+  if (action?.code === "retry-task" && status.need.key === "rebuild" && csrf !== "") return { label: status.need.action.label, ...rebuild };
   if (result !== undefined) {
     if (status.need.key === "review-result" && !result.accepted && csrf !== "") return { label: result.humanReview ? "Accept result" : "Accept with exception", href: null, confirm: null,
       accept: { action: result.action, run: result.run, returnTo, note: result.humanReview ? null : "Why is this safe to accept?" } };
-    // Never a link back to this same result: the task page holds the act that resolves it.
+    // The task page sends the person here: never back to it. What this page can do leads — Accept
+    // a check only a person can make, or Build again a result that may run again.
     const here = (action?.code === "open-result" || action?.code === "inspect-run") && action.target.runId === result.run;
+    if (here && csrf !== "" && !result.accepted && result.humanReview) return { label: "Accept result", href: null, confirm: null, accept: { action: result.action, run: result.run, returnTo, note: null } };
+    if (here && csrf !== "" && result.rebuildable === true) return { label: NEEDS.rebuild.action.label, ...rebuild };
     if (status.need.key === "review-result" || here) return { label: "Open the task", href: taskHref(assignment.rootId), confirm: null };
   }
   const confirm = action?.code === "confirm-stopped" && action.target.runId !== null && csrf !== ""
@@ -24296,6 +24307,8 @@ function resultNeedAction(need: BrowserNeedAction, o: ResultPanelOptions, canReq
     ? `<form method="post" action="${escape(need.accept.action)}" class="accept-result"><input type="hidden" name="csrf" value="${escape(o.csrf)}"><input type="hidden" name="run" value="${need.accept.run}"><input type="hidden" name="return" value="${escape(need.accept.returnTo)}">` +
       (need.accept.note === null ? "" : `<input type="text" name="note" maxlength="500" required placeholder="${escape(need.accept.note)}" aria-label="${escape(need.accept.note)}">`) +
       `<button type="submit" data-primary-action data-accept-result style="min-height:44px">${escape(need.label)}</button></form>`
+    : need.rebuild != null
+    ? `<form method="post" action="${escape(need.rebuild.action)}" class="rebuild"><input type="hidden" name="csrf" value="${escape(o.csrf)}"><button type="submit" data-primary-action data-rebuild style="min-height:44px">${escape(need.label)}</button></form>`
     : need.confirm !== null
     ? `<form method="post" action="${escape(need.confirm.action)}" id="confirm-stopped" class="confirm-stopped"><input type="hidden" name="csrf" value="${escape(o.csrf)}"><input type="hidden" name="run" value="${need.confirm.run}"><input type="hidden" name="return" value="${escape(need.confirm.returnTo)}">` +
       (need.confirm.checked === true ? `<label><input type="checkbox" name="checked" value="yes" required> Nothing from build #${need.confirm.run} is running</label>` : "") +

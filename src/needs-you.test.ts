@@ -173,7 +173,7 @@ describe("Confirm it stopped, end to end", () => {
     store.raw().prepare("INSERT INTO run_process (run, pid, host, process_group, observed_at, containment) VALUES (?, NULL, ?, 0, ?, 'job-object')").run(halfContained, hostname(), NOW.toISOString());
     // Its process is gone but its exit was never written down: the store settles it on reading, so must the list.
     witness(built("exited-quietly", "Bump the font size"), spawnSync("true").pid!);
-    // Stopped, but no verdict was recorded and it was built to an earlier plan: the result itself is where a person accepts it.
+    // Stopped, but no verdict was recorded and it was built to an earlier plan: building again resolves it, accepting would not.
     const unverified = built("unverified", "Rename the checkout button");
     ended(unverified);
     store.raw().prepare("DELETE FROM proof_verdict WHERE run = ?").run(unverified);
@@ -264,24 +264,38 @@ describe("Confirm it stopped, end to end", () => {
   });
 
   test("on the result itself, the action is never a link back to the same page", async () => {
-    // Built to an earlier plan: the result page sends the person to the task, where the plan is.
-    const result = workspaceOf(await page(`/review?result=unverified&run=${runs["unverified"]}`)).view as Extract<BrowserWorkspace["view"], { kind: "result" }>;
-    const panel = result.selected!.panel!;
-    expect(panel.status?.headline).toBe("Needs you");
-    expect(panel.need).toMatchObject({ label: "Open the task", href: "/t/unverified", confirm: null });
-    expect(panel.canRequest).toBe(true);
-    // A result to review leads with Accept, which records the person's acceptance; once accepted, the task.
-    const read = assignment("unverified");
-    const status = taskStatusOf({ stage: "needs-you", need: "review-result" });
+    // Built to an earlier plan: accepting would leave it stuck. Both pages lead with Build again, in place.
+    const stale = assignment("unverified");
+    const words = assignmentPresentationOf(stale).taskStatus;
+    expect(words).toMatchObject({ headline: "Needs you", sentence: `Build #${runs["unverified"]} was made to an earlier plan. Build it again to the current plan.` });
+    expect(stale.primaryAction).toMatchObject({ code: "retry-task", label: "Build again" });
+    expect(assignmentActionHref(stale)).toMatch(/^\/t\/unverified[?#].*task-actions$/);
+    const result = (workspaceOf(await page(`/review?result=unverified&run=${runs["unverified"]}`)).view as Extract<BrowserWorkspace["view"], { kind: "result" }>).selected!.panel!;
+    expect(result.status?.headline).toBe("Needs you");
+    expect(result.need).toMatchObject({ label: "Build again", href: null, rebuild: { action: "/t/unverified/requeue" } });
+    expect(result.canRequest).toBe(true);
+    const task = workspaceOf(await page("/t/unverified")).view as Extract<BrowserWorkspace["view"], { kind: "task" }>;
+    expect(task.rebuild).toEqual({ action: "/t/unverified/requeue" });
+    expect(task.status?.action?.label).toBe("Build again");
+    expect(task.status?.action?.href).not.toContain("/review");
+
+    // A result to review leads with Accept, the act this page holds; once accepted, the task.
+    const here = { ...stale, primaryAction: { ...stale.primaryAction!, code: "open-result" as const } };
     const facts = { humanReview: false, run: runs["unverified"]!, action: "/t/unverified/accept-proof" };
-    expect(needActionOf(read, status, "csrf", "/back", { ...facts, accepted: false }))
+    const review = taskStatusOf({ stage: "needs-you", need: "review-result" });
+    expect(needActionOf(here, review, "csrf", "/back", { ...facts, accepted: false }))
       .toMatchObject({ label: "Accept with exception", href: null, accept: { action: "/t/unverified/accept-proof", run: runs["unverified"], note: "Why is this safe to accept?" } });
-    expect(needActionOf(read, status, "csrf", "/back", { ...facts, humanReview: true, accepted: false })?.accept?.note).toBeNull();
-    expect(needActionOf(read, status, "csrf", "/back", { ...facts, accepted: true })).toMatchObject({ label: "Open the task", href: "/t/unverified" });
-    const html = await page("/t/unverified");
-    const accepted = await post("/t/unverified/accept-proof", { csrf: csrfOf(html), run: String(runs["unverified"]), note: "Checked the button label by hand." });
-    expect(accepted.status).toBe(303);
-    expect(store.proofAcceptance(runs["unverified"]!)).not.toBeNull();
+    expect(needActionOf(here, review, "csrf", "/back", { ...facts, humanReview: true, accepted: false })?.accept?.note).toBeNull();
+    expect(needActionOf(here, review, "csrf", "/back", { ...facts, accepted: true })).toMatchObject({ label: "Open the task", href: "/t/unverified" });
+    // Whatever else the task page sends the person here for, this page leads with what it can do, never a link back:
+    // Accept a check only a person can make, or Build again a result that may run again.
+    const other = taskStatusOf({ stage: "needs-you", need: "other" });
+    expect(needActionOf(here, other, "csrf", "/back", { ...facts, humanReview: true, accepted: false })).toMatchObject({ label: "Accept result", accept: { note: null } });
+    expect(needActionOf(here, other, "csrf", "/back", { ...facts, accepted: false, rebuildable: true })).toMatchObject({ label: "Build again", href: null, rebuild: { action: "/t/unverified/requeue" } });
+
+    const rebuilt = await post("/t/unverified/requeue", { csrf: csrfOf(await page("/t/unverified")) });
+    expect(rebuilt.status).toBe(303);
+    expect(store.getTask("unverified")?.state).toBe("queued");
   });
 
   test("a build that may still be running is Waiting, never Needs you, and can't be confirmed", async () => {

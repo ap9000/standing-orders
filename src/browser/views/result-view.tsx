@@ -12,7 +12,7 @@ import {
   Badge, Button, Card, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger, Input, cn,
 } from "../components/ui/index.js";
 import { toneOf } from "./tone.js";
-import { ConfirmStoppedForm, StatusDetails, StatusHeadline, StatusWhy } from "./status-summary.js";
+import { ConfirmStoppedForm, RebuildForm, StatusDetails, StatusHeadline, StatusWhy } from "./status-summary.js";
 
 type Selected = NonNullable<BrowserResultView["selected"]>;
 
@@ -88,6 +88,7 @@ function StatusCard({ selected, csrf }: { selected: Selected; csrf: string }) {
             {need.accept.note !== null && <Input type="text" name="note" maxLength={500} required aria-label={need.accept.note} placeholder={need.accept.note} className="h-9 w-56 phone:h-11 phone:w-full" />}
             <Button type="submit" variant="attention" className="phone:w-full" data-primary-action data-accept-result><Check />{need.label}</Button>
           </form>
+          : need.rebuild != null ? <RebuildForm action={need.rebuild.action} csrf={csrf} label={need.label} />
           : need.confirm !== null ? <ConfirmStoppedForm form={need.confirm} csrf={csrf} label={need.label} />
           : need.href !== null && <Button asChild variant="attention" className="phone:w-full"><a href={need.href} data-primary-action data-need-action>{need.label}</a></Button>)}
         {complete !== null && <form method="post" action={complete.action} className="phone:flex-1">

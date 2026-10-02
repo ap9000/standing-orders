@@ -15207,6 +15207,20 @@ export class Store {
     return Number(row?.["n"] ?? 0);
   }
 
+  /** Why a finished result can't be built again on the same filing: it was
+   * verified, attested or accepted, or its branch was published (revised
+   * through its pull request). Null when `requeueTask` may run it again. */
+  finalResultReason(runId: number): "accepted-result" | "published" | null {
+    const verdict = this.proofVerdictFor(runId);
+    if (verdict !== null && (verdict.verdict === "verified" || verdict.verdict === "attested")) return "accepted-result";
+    if (this.proofAcceptance(runId) !== null) return "accepted-result";
+    // An intent that never pushed is not a publication; a pushed or
+    // opened branch is, and is revised through its pull request.
+    const publication = this.publicationForRun(runId);
+    if (publication !== null && (publication.state === "pushed" || publication.state === "opened")) return "published";
+    return null;
+  }
+
   requeueTask(
     taskId: string,
     by: string,
@@ -15251,13 +15265,8 @@ export class Store {
           if (incidents.length === 0) return { ok: false as const, reason: "not-stalled" as const };
         } else {
           rejectedRun = Number(last["id"]);
-          const verdict = this.proofVerdictFor(rejectedRun);
-          if (verdict !== null && (verdict.verdict === "verified" || verdict.verdict === "attested")) return { ok: false as const, reason: "accepted-result" as const };
-          if (this.proofAcceptance(rejectedRun) !== null) return { ok: false as const, reason: "accepted-result" as const };
-          // An intent that never pushed is not a publication; a pushed or
-          // opened branch is, and is revised through its pull request.
-          const publication = this.publicationForRun(rejectedRun);
-          if (publication !== null && (publication.state === "pushed" || publication.state === "opened")) return { ok: false as const, reason: "published" as const };
+          const final = this.finalResultReason(rejectedRun);
+          if (final !== null) return { ok: false as const, reason: final };
         }
       } else if (incidents.length === 0 && state !== "failed") {
         return { ok: false as const, reason: "not-stalled" as const };

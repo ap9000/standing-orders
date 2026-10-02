@@ -291,6 +291,14 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
       ? completionKind === null ? "The research report is missing or incomplete. Inspect the saved report before checking this handoff."
         : "The saved report is awaiting resolution of its current scope or hold."
       : "Inspect the saved result and resolve its remaining execution or scope issue.";
+    // Built to an earlier plan: the result page can't resolve it (accepting would leave it stuck), building again can.
+    if (current.state === "done" && result !== null && scope !== null && scope.termsProblem == null && approvalOf(scope).approved && !!result.scopeDigest && scope.digest !== result.scopeDigest &&
+      store.activeHolds(current.refId, now).length === 0 && unfinished === null && store.currentLiveLease(current.refId, now) === null && store.finalResultReason(result.id) === null) {
+      detail = NEEDS.rebuild.sentence({ build: result.id });
+      primaryAction = { code: "retry-task", label: NEEDS.rebuild.action.label, target: { taskId: current.id, runId: result.id, decisionId: null },
+        access: access.principal === "operator" ? "operator-control" : "operator-handoff", retry: "refresh-before-acting" };
+      need = { key: "rebuild", build: result.id };
+    }
   }
   if (earlierActive.length > 0) {
     attention.push(`${earlierActive.length} earlier task version${earlierActive.length === 1 ? " is" : "s are"} still active.`);

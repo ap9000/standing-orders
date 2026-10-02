@@ -13879,16 +13879,20 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const chat = await page(cookie, `/chat?task=t-copy&result=${run}`);
     const youCheck = /<div class="result-you-check" data-result-you-check="1">[\s\S]*?<\/div>/.exec(chat)?.[0] ?? "";
     expect(youCheck).toContain("<li>You check this one: Empty state is clear</li>");
-    expect(youCheck).toContain('action="/t/t-copy/accept-proof"');
-    expect(youCheck).toContain("data-accept-result>Accept</button>");
+    // The one Accept leads, as the Needs you action: the task page's action sends the person here, never back.
+    const need = /<div class="result-action" data-result-action="need">[\s\S]*?<\/div>/.exec(chat)?.[0] ?? "";
+    expect(need).toContain('action="/t/t-copy/accept-proof"');
+    expect(need).toContain("data-accept-result style=\"min-height:44px\">Accept result</button>");
+    expect(need).not.toContain('name="note"');
+    expect(chat.match(/<button[^>]*data-accept-result/g)).toHaveLength(1);
     // Said once, in a person's words: never the record's criterion vocabulary.
     expect(chat.match(/<li>You check this one/g)).toHaveLength(1);
     for (const html of [chat, await page(cookie, "/t/t-copy")]) {
       expect(html).not.toContain("requires manual-review evidence");
       expect(html).not.toContain("an operator must accept");
     }
-    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(youCheck)?.[1] ?? "";
-    const back = /name="return" value="([^"]+)"/.exec(youCheck)?.[1]?.replaceAll("&amp;", "&") ?? "";
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(need)?.[1] ?? "";
+    const back = /name="return" value="([^"]+)"/.exec(need)?.[1]?.replaceAll("&amp;", "&") ?? "";
     expect(back).toBe(`/chat?task=t-copy&result=${run}`);
     const accepted = await fetch(url("/t/t-copy/accept-proof"), { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ csrf, run: String(run), return: back }), redirect: "manual" });
     expect(accepted.status).toBe(303);

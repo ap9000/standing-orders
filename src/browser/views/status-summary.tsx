@@ -97,3 +97,12 @@ export function ConfirmStoppedForm({ form, csrf, label = "Confirm it stopped" }:
     <Button type="submit" variant="attention" className="phone:w-full">{label}</Button>
   </form>;
 }
+
+/** Build again, for a result built to an earlier plan: one filled button, the
+ * task page's requeue (it runs again on the same filing, under the current plan). */
+export function RebuildForm({ action, csrf, label = "Build again" }: { action: string; csrf: string; label?: string }) {
+  return <form method="post" action={action} data-rebuild className="phone:w-full">
+    <input type="hidden" name="csrf" value={csrf} />
+    <Button type="submit" variant="attention" className="phone:w-full" data-primary-action>{label}</Button>
+  </form>;
+}

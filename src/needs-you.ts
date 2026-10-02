@@ -10,7 +10,7 @@
 export type NeedKey =
   | "approval" | "card" | "answer" | "questions" | "sign-in" | "confirm-stopped" | "check-stopped" | "hold"
   | "choose-project" | "define-task" | "fix-request" | "choose-agent" | "fix-dependency" | "add-requirement"
-  | "connect-builder" | "start-builder" | "vanished" | "review-result" | "earlier-version" | "other";
+  | "connect-builder" | "start-builder" | "vanished" | "review-result" | "rebuild" | "earlier-version" | "other";
 /** What the work waits for when no person can act. */
 export type WaitKey = "build-stopping" | "other-computer" | "card-reply" | "card-time" | "card-ci";
 
@@ -18,7 +18,7 @@ export type WaitKey = "build-stopping" | "other-computer" | "card-reply" | "card
 export type NeedActionCode =
   | "approve-scope" | "approve-card" | "answer-decision" | "inspect-decisions" | "sign-in" | "confirm-stopped" | "inspect-hold"
   | "place-task" | "write-scope" | "select-agent" | "repair-dependency" | "repair-capability" | "start-worker" | "reconcile-run"
-  | "open-result" | "inspect-task";
+  | "open-result" | "retry-task" | "inspect-task";
 export type NeedAction = { code: NeedActionCode; label: string };
 /** `build`: the run a sentence names; `provider`: the agent that signed out. */
 export type NeedContext = { build?: number | null; provider?: string | null };
@@ -53,6 +53,8 @@ export const NEEDS: Readonly<Record<NeedKey, Need>> = {
   "start-builder": { sentence: () => "The builder for this project is offline. Start it and the task begins on its own.", action: { code: "start-worker", label: "Start the builder" } },
   vanished: { sentence: context => `${Build(context)} stopped without finishing. Check it, then retry.`, action: { code: "reconcile-run", label: "Check the build" } },
   "review-result": { sentence: () => "Check the result, then accept it or ask for changes.", action: { code: "open-result", label: "Review result" } },
+  // Accepting it would not help: it was built to terms that are no longer the plan.
+  rebuild: { sentence: context => `${Build(context)} was made to an earlier plan. Build it again to the current plan.`, action: { code: "retry-task", label: "Build again" } },
   "earlier-version": { sentence: () => "An earlier version of this task still needs you. Finish it first.", action: { code: "inspect-task", label: "Open earlier version" } },
   other: { sentence: () => "Open the task to see what it needs from you.", action: { code: "inspect-task", label: "Open the task" }, useReason: always },
 };
