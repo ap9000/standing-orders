@@ -74,3 +74,23 @@ export function assertCodingDeploymentStopped(runtime, database, orders, record 
   const path = observeCodingDeployment(runtime, database, record);
   if (path !== null) runtime.assertCodingUpdateStopped(orders);
 }
+
+// An older runtime killed before its close leaves its owner record behind
+// (deploys over 0.9.11, Oct 2). Only after the caller proved every old service
+// process gone does the candidate runtime's own check release it, and the
+// release is written to the ledger. A candidate without that check, or a
+// record it cannot prove stale, leaves the ordinary shutdown refusal in place.
+export function releaseStaleCodingDeployment(candidate, database, orders, stoppedPids, record) {
+  if (!exists(`${database}.coding.sqlite`) || typeof candidate?.releaseStaleCodingOwner !== 'function') return null;
+  const released = candidate.releaseStaleCodingOwner(orders, stoppedPids);
+  if (released === null) return null;
+  record.codingOwnerReleased = released;
+  ledgerStaleCodingRelease(orders, released);
+  return released;
+}
+
+/** The ledger entry for a release. A deployment that puts the database backup back writes it again. */
+export function ledgerStaleCodingRelease(orders, released, at = new Date().toISOString()) {
+  orders.prepare("INSERT INTO action_ledger(at,actor,repo,task_id,run_id,action,outcome,source,detail) VALUES (?,'deploy',NULL,NULL,NULL,'coding owner released','released','policy',?)")
+    .run(at, `The stopped service did not release the coding workspace; process ${released.pid}${released.nativePid === null ? '' : ` and agent ${released.nativePid}`} proved gone`);
+}

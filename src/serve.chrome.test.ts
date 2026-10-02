@@ -248,14 +248,17 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     const ceremonyEnd = page.indexOf("</form>", ceremonyMarker);
     expect(ceremonyMarker).toBeGreaterThan(-1);
     const approveForm = page.slice(ceremonyStart, ceremonyEnd);
-    const ceremonyAcceptance = approveForm.indexOf(">acceptance<");
-    const ceremonySeal = approveForm.indexOf('<div class="approval-confirm" id="approval-confirm">');
+    // Plain sentences under "Done when" before the password; the ids and
+    // evidence kinds in the Details fold, never in the main view.
+    const ceremonyAcceptance = approveForm.indexOf("<dt>Done when</dt>");
+    const ceremonySeal = approveForm.indexOf('<div class="approval-act" id="approval-confirm">');
     expect(ceremonyAcceptance).toBeGreaterThan(-1);
     expect(ceremonyAcceptance).toBeLessThan(ceremonySeal);
-    expect(approveForm).toContain("<code>c1</code> The payout guard rejects a negative amount.");
-    expect(approveForm).toContain("[requires: check]");
-    expect(approveForm).toContain("<code>c2</code> The settings panel still opens.");
-    expect(approveForm).toContain("[requires: screenshot]");
+    expect(approveForm).toContain('<ul class="approval-done"><li>The payout guard rejects a negative amount.</li><li>The settings panel still opens.</li></ul>');
+    const rows = approveForm.slice(0, approveForm.indexOf('<details class="approval-details">'));
+    expect(rows).not.toMatch(/\bc[12]\b|requires:/);
+    expect(approveForm).toContain('<code>c1</code> The payout guard rejects a negative amount. <span class="meta">needs check</span>');
+    expect(approveForm).toContain('<code>c2</code> The settings panel still opens. <span class="meta">needs screenshot</span>');
     // No competing primary: exactly one submit button inside the ceremony form.
     expect((approveForm.match(/<button type="submit"/g) ?? []).length).toBe(1);
     // Advisory `how` never renders inside the ceremony form itself — only
@@ -944,7 +947,7 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     expect(board.headers.get("location")).toBe("/board");
   });
 
-  test("a scope waiting for approval has one Review plan action, with exact terms and the approve act inside", async () => {
+  test("a scope waiting for approval shows its plan open as plain rows, one Approve & start, and the rest in one Details fold", async () => {
     const cookie = await login();
     const home = await (await fetch(url("/inbox"), { headers: { cookie } })).text();
     await fetch(url("/projects/open"), {
@@ -959,7 +962,7 @@ describe("the project switcher (board pass): one tap from any screen, forms with
       proposedAt: T0.toISOString(), digest: "", approvedAt: null, approvedBy: null, approvedDigest: null,
     });
     const page = await (await fetch(url("/t/t-yes"), { headers: { cookie } })).text();
-    const ceremony = page.indexOf('<form method="post" action="/t/t-yes/approve" class="card approve-form approval-card" id="approve">');
+    const ceremony = page.indexOf('<form method="post" action="/t/t-yes/approve" class="approve-form approval-sheet" id="approve" data-sticky>');
     const title = page.indexOf('<h1 class="task-main-title">needs the yes</h1>');
     expect(title).toBeGreaterThan(0);
     const bar = page.indexOf('<div class="acts-bar">');
@@ -967,30 +970,33 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     expect(ceremony).toBeGreaterThan(title);
     expect(bar).toBeGreaterThan(ceremony);
     expect(layout).toBeGreaterThan(bar);
-    expect(page).toContain('<strong>approve exactly this:</strong>');
     expect(page).not.toContain('ready to run · approve');
-    expect(page).toContain('<summary data-primary-action><span class="button-link">Approve plan</span></summary>');
-    expect(page).toContain('href="#scope">Edit details</a>');
-    // One short status, then every exact term before confirmation.
-    const orient = page.indexOf('<p class="meta approval-orient" data-approval-orient>');
-    const terms = page.indexOf('<div class="approval-terms" id="approval-terms">');
-    const confirm = page.indexOf('<div class="approval-confirm" id="approval-confirm">');
-    expect(orient).toBeGreaterThan(ceremony);
-    expect(terms).toBeGreaterThan(orient);
-    expect(confirm).toBeGreaterThan(terms);
-    expect(page).toContain("Nothing starts until you approve.");
-    expect(page).not.toContain("every term is shown in full.");
-    expect(page).not.toContain("Approve after reading ↓");
-    expect(page.slice(terms, confirm)).toContain('<p class="approval-goal">the goal</p>');
-    expect(page.slice(terms, confirm)).toContain('<ul class="approval-paths"><li><span class="mono">src/a.ts</span></li></ul>');
-    expect(page.slice(terms, confirm)).toContain("not that");
+    // The plan is open in its own section: no opener, no "approve exactly this".
+    expect(page).toContain('<section class="task-plan-review" aria-label="Approve the plan"><form method="post" action="/t/t-yes/approve"');
+    expect(page).not.toContain('<span class="button-link">Approve plan</span></summary>');
+    expect(page).not.toContain("approve exactly this:");
+    // Plain rows, then who builds, then the one act, its after-line and the secondary acts; Details last.
+    const rows = page.indexOf('<dl class="approval-rows">');
+    const confirm = page.indexOf('<div class="approval-act" id="approval-confirm">');
+    const details = page.indexOf('<details class="approval-details"><summary>Details</summary>');
+    expect(rows).toBeGreaterThan(ceremony);
+    expect(confirm).toBeGreaterThan(rows);
+    expect(details).toBeGreaterThan(confirm);
+    expect(page.slice(ceremony, page.indexOf("</form>", ceremony)).match(/<button type="submit"/g)).toHaveLength(1);
+    expect(page).toContain('<button type="submit" data-primary-action>Approve & start</button></div><p class="approval-after">An agent starts in its own branch. You&#39;ll hear when it&#39;s ready to review.</p>'.replace(/&#39;/g, "'"));
+    expect(page).toContain('<a class="approval-link" href="#scope">Edit plan</a><a class="approval-link" href="/work">Not now</a>');
+    expect(page.slice(rows, confirm)).toContain('<div class="approval-row"><dt>Goal</dt><dd><p class="approval-goal">the goal</p></dd></div>');
+    expect(page.slice(rows, confirm)).toContain('<ul class="approval-paths"><li><span class="mono">src/a.ts</span></li></ul>');
+    expect(page.slice(rows, confirm)).toContain("<dt>Won’t touch</dt><dd><p>not that</p></dd>");
+    // No hashes in the main view: the seal is in Details.
+    expect(page.slice(ceremony, details)).not.toContain("signs ");
+    expect(page.slice(details, page.indexOf("</form>", details))).toContain("<h3>Seal</h3>");
     // The recipe road rides with the scope section, off the title-to-action path.
     expect(page.indexOf("Reuse this scope as a recipe")).toBeGreaterThan(page.indexOf('<details class="section" id="scope"'));
     // Both views stay one tap apart.
     expect(page).toContain('<a href="/t/t-yes" class="active" aria-current="page">Overview</a><a href="/chat?task=t-yes">Ask</a>');
     expect(page).toContain('name="username" autocomplete="username" class="visually-hidden"');
     expect(page).toContain('<details class="section" id="scope"><summary><h2>scope</h2></summary>');
-    expect(page).toContain("approve exactly this:");
     // No other act wears primary while the ceremony leads; the old
     // "needs your approval" card is gone (the ceremony says it).
     expect(page.slice(bar, page.indexOf("</div>", bar))).not.toContain('class="primary"');

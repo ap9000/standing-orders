@@ -75,6 +75,9 @@ export type TaskStatusFacts = {
   links?: { result?: string | null; checks?: string | null; pullRequest?: string | null; runChecks?: string | null };
   /** Exact technical reasons, shown only on request. */
   why?: readonly string[];
+  /** The person's lead took this on (lead-voice.ts): "on-it" reads "Your lead is on it" and needs nobody; "lapsed"
+   * (two hours without a lead act) is back with the person, and says so. */
+  lead?: "on-it" | "lapsed" | null;
 };
 
 const short = (sha: string | null): string | null => sha !== null && /^[a-f0-9]{7,40}$/.test(sha) ? sha.slice(0, 7) : null;
@@ -183,13 +186,30 @@ function detailsOf(headline: Headline, facts: TaskStatusFacts): StatusDetail[] {
   return rows;
 }
 
+/** What the lead's claim says, in place of "waits for you" (lead-voice.ts). */
+export const LEAD_ON_IT = "Your lead is on it.";
+export const LEAD_LAPSED = "Your lead hasn't acted on this for 2 hours, so it's back with you.";
+/** The headlines a lead's claim speaks for: the ones that would otherwise wait on a person. */
+const LEAD_HEADLINES: ReadonlySet<Headline> = new Set(["Needs you", "Failed", "Ready for review", "Stopped"]);
+
+function leadSentence(headline: Headline, facts: TaskStatusFacts): string {
+  const sha = short(facts.checks?.head ?? null);
+  // A failed check stays said: the claim changes who acts next, never the result.
+  if (headline === "Failed" && facts.checks?.status === "failed") return `${facts.checks.level === "quick" ? "Quick checks" : "Checks"} failed${sha === null ? "" : ` on ${sha}`}. ${LEAD_ON_IT}`;
+  return LEAD_ON_IT;
+}
+
 export function taskStatusOf(facts: TaskStatusFacts): TaskStatus {
-  const headline = headlineOf(facts);
+  const read = headlineOf(facts);
+  const lead = facts.lead != null && LEAD_HEADLINES.has(read) ? facts.lead : null;
+  // The lead has it: nothing waits on the person, so a Needs you reads Waiting.
+  const headline: Headline = lead === "on-it" && read === "Needs you" ? "Waiting" : read;
   // Every Needs you carries the one action that resolves it, worded the same everywhere.
   const need = headline === "Needs you" ? { key: facts.need ?? "other", action: NEEDS[facts.need ?? "other"].action } : null;
   const ownWords = need !== null && (need.key === "other" || need.key === "review-result") && facts.action != null;
   const primaryAction = need === null || ownWords ? facts.action ?? null : { label: need.action.label, href: facts.action?.href ?? null };
-  return { headline, tone: HEADLINE_TONE[headline], sentence: sentenceOf(headline, facts), details: detailsOf(headline, facts),
+  const sentence = lead === "on-it" ? leadSentence(headline, facts) : lead === "lapsed" ? `${LEAD_LAPSED} ${sentenceOf(headline, facts)}` : sentenceOf(headline, facts);
+  return { headline, tone: HEADLINE_TONE[headline], sentence, details: detailsOf(headline, facts),
     primaryAction, why: [...new Set(facts.why ?? [])].filter(one => one.trim() !== ""), need };
 }
 
@@ -333,6 +353,7 @@ export function assignmentStatusFacts(assignment: AssignmentSnapshot, options: {
     action: options.action ?? null,
     ...(options.links === undefined ? {} : { links: options.links }),
     why: options.why ?? [],
+    ...(assignment.lead == null ? {} : { lead: assignment.lead.state }),
   };
 }
 

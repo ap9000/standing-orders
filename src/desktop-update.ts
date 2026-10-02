@@ -11,7 +11,8 @@ import { run } from "./exec.js";
 import { readSchemaVersion, SCHEMA_VERSION, Store } from "./store.js";
 import { activeUpdateWork, freezeUpdateGate, installUpdateGate, removeUpdateGate, updateAdmissionPaused } from "./desktop-update-gate.js";
 import { currentDesktopAccess } from "./desktop-access.js";
-import { assertCodingUpdateStopped, backupCodingCatalog, codingCatalogExists } from "./coding-update.js";
+import { assertCodingUpdateStopped, backupCodingCatalog, codingCatalogExists, releaseStaleCodingOwner, type ReleasedCodingOwner } from "./coding-update.js";
+import { processMayBeAlive } from "./process-liveness.js";
 
 /** Loaded on first use (as backup.ts and store.ts do), so modules that only import this one (the console,
  * and tests that load it in a browser-like environment) never need `node:sqlite` itself. */
@@ -32,6 +33,10 @@ export type UpdateJournal = {
   retryableRecovery?: boolean;
   /** The finished run the update is waiting on (or stopped waiting on). Absent while it waits on ordinary work. */
   waiting?: LingeringRun & { since: string };
+  /** The service's supervisor and controller, recorded before it is stopped: the processes proved gone afterwards. */
+  stoppedPids?: number[];
+  /** A stale coding owner record this update released after proving those processes gone. */
+  codingOwnerReleased?: ReleasedCodingOwner;
 };
 type ServiceState = { state: string; stale?: boolean };
 export type UpdateHooks = {
@@ -47,6 +52,8 @@ export type UpdateHooks = {
   /** Fault injection for state-machine tests, never selectable by a CLI flag. */
   checkpoint?: (phase: Phase) => void;
   otherControllers?: (bundle: DesktopBundle, stateDir: string) => Promise<boolean>;
+  /** Whether a recorded service process still runs (tests). */
+  processAlive?: (pid: number) => boolean;
 };
 export const updateTerminal = (phase: string) => ["complete", "restored", "cancelled"].includes(phase);
 const terminal = updateTerminal;
@@ -89,6 +96,7 @@ export function readUpdateJournal(stateDir: string, retainedReceipt?: string): U
   if (!validBundle(j.old) || !validBundle(j.next) || j.old.bundleId !== j.next.bundleId || !isAbsolute(j.databaseFile) || !/^[a-f0-9]{64}$/.test(j.configHash) || typeof j.wasRunning !== "boolean" || (j.backupPath && (dirname(j.backupPath) !== j.workDir || !/^orders\.backup(?:\.[a-f0-9-]{36})?\.db$/.test(basename(j.backupPath)))) || (j.backupHash && !/^[a-f0-9]{64}$/.test(j.backupHash))) throw Error("The saved update paths or build identities are invalid. Nothing was changed.");
   if (j.replacementOccurred !== undefined && typeof j.replacementOccurred !== "boolean") throw Error("The recorded replacement state is invalid. Nothing was changed.");
   if (j.codingCatalogExpected !== undefined && typeof j.codingCatalogExpected !== "boolean") throw Error("The recorded coding catalog presence is invalid. Nothing was changed.");
+  if (j.stoppedPids !== undefined && (!Array.isArray(j.stoppedPids) || !j.stoppedPids.every(pid => Number.isSafeInteger(pid) && pid > 1))) throw Error("The recorded service processes are invalid. Nothing was changed.");
   if ((j.codingBackupPath === undefined) !== (j.codingBackupHash === undefined) || (j.codingBackupPath && (dirname(j.codingBackupPath) !== j.workDir || !/^coding\.backup(?:\.[a-f0-9-]{36})?\.sqlite$/.test(basename(j.codingBackupPath)))) || (j.codingBackupHash && !/^[a-f0-9]{64}$/.test(j.codingBackupHash))) throw Error("The retained coding backup paths or identity are invalid. Nothing was changed.");
   for (const directory of [dirname(j.workDir), j.workDir]) {
     const stat = lstatSync(directory);
@@ -418,6 +426,29 @@ function assertDesktopCodingStopped(j: UpdateJournal, db: DatabaseSync): void {
   assertCodingUpdateStopped(db);
 }
 
+/** The service's own processes, from its supervisor's status file: read before the stop, never after. */
+function servicePids(stateDir: string): number[] {
+  try {
+    const status = JSON.parse(readFileSync(join(stateDir, "controller-supervisor.json"), "utf8")) as { supervisorPid?: unknown; controllerPid?: unknown };
+    return [status.supervisorPid, status.controllerPid].filter((pid): pid is number => Number.isSafeInteger(pid) && Number(pid) > 1);
+  } catch { return []; }
+}
+
+/** An older app killed before its close leaves the coding owner record behind. Once the stopped service's processes
+ * are proved gone, it is released here (and recorded in the ledger); anything unproven keeps the ordinary refusal. */
+function releaseDesktopCodingOwner(j: UpdateJournal, db: DatabaseSync, alive: (pid: number) => boolean): void {
+  assertCodingCatalogPresent(j);
+  const released = releaseStaleCodingOwner(db, j.stoppedPids ?? [], (pid, group) => alive(pid) || processMayBeAlive(pid, group));
+  if (released === null) return;
+  j.codingOwnerReleased = released;
+  save(j, j.phase, j.detail);
+  const ledger = connect(j.databaseFile);
+  try {
+    ledger.prepare("INSERT INTO action_ledger(at,actor,repo,task_id,run_id,action,outcome,source,detail) VALUES (?,'desktop update',NULL,NULL,NULL,'coding owner released','released','policy',?)")
+      .run(new Date().toISOString(), `${j.old.version} stopped without releasing the coding workspace; process ${released.pid}${released.nativePid === null ? "" : ` and agent ${released.nativePid}`} proved gone`);
+  } finally { ledger.close(); }
+}
+
 function assertCodingBackup(j: UpdateJournal): void {
   assertCodingCatalogPresent(j);
   if (j.codingBackupPath || j.codingBackupHash) {
@@ -589,13 +620,21 @@ export async function runDesktopUpdate(stateDir: string, hooks: UpdateHooks = {}
     if (actual !== j.old.hash && actual !== j.next.hash) throw Error("The installed app changed after preview. Nothing was replaced.");
     const current = actual === j.old.hash ? j.old : atInstalled(j.next, j);
     j.serviceInterrupted = true;
+    // Recorded once, before the first stop: a resumed update keeps the processes it first saw.
+    if (j.stoppedPids === undefined) j.stoppedPids = servicePids(j.stateDir);
     checkpoint("stopping", "Current work is finished. Stopping the background service for the update.");
     await control("stop", current, j);
     const stopped = await status(current, j);
     if (["running", "loaded"].includes(stopped.state)) throw Error("The background service did not stop. No app swap was attempted.");
+    const alive = hooks.processAlive ?? (pid => processMayBeAlive(pid, false));
+    for (let waited = 0; j.stoppedPids.some(alive); waited += 250) {
+      if (waited >= 60_000) throw Error(`The background service is still running (process ${j.stoppedPids.filter(alive).join(", ")}) after it was stopped. No app swap was attempted.`);
+      await sleep(250);
+    }
     const afterStop = connect(j.databaseFile, true);
     try {
       if (Object.values(activeUpdateWork(afterStop)).some(n => n !== 0) || afterStop.prepare("SELECT 1 FROM watch_lease WHERE expires_at>? LIMIT 1").get(new Date().toISOString())) throw Error("A worker or active operation still uses this database. Stop the other controller before continuing the update.");
+      releaseDesktopCodingOwner(j, afterStop, alive);
       assertDesktopCodingStopped(j, afterStop);
     } finally { afterStop.close(); }
     assertConfig(j);

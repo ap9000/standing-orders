@@ -237,7 +237,7 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
     invocation: `assignment ${action}`,
     synopsis: action === "show" ? "read the root, current work, owner and exact receipt"
       : action === "updates" ? "read durable updates after a cursor; save nextCursor after processing"
-      : action === "claim" ? "record coordinator lead ownership; grants no approval or execution authority"
+      : action === "claim" ? "record lead ownership; with the lead token the task reads \"Your lead is on it\" and leaves Needs you until done, handed over, or 2 hours idle; grants no approval or execution authority"
       : action === "brief" ? "catch up from current assignments and project knowledge in the local database"
       : action === "inbox" ? "receive or replay a saved batch of lead status updates"
       : action === "ack" ? "acknowledge delivery of an inbox batch; leaves task completion unchanged"
@@ -258,6 +258,13 @@ export const COMMAND_GUIDE: readonly CommandRow[] = [
   })),
   operator("task state", "set a task's state by hand — an operator correction, not a workflow step (--replaced-by <id> with cancelled)"),
   operator("lead token", "mint the lead's credential behind your password (--revoke ends it): its own work pings nobody"),
+  { invocation: "lead say", synopsis: "as the lead: one short message in its person's chat from \"Your lead\"; several within two minutes are one message",
+    audience: "agent", agentMayInvoke: true, mutation: "unkeyed",
+    positionals: [{ name: "text", required: true, meaning: "one short line in plain words" }],
+    flags: [jsonFlag, dbFlag,
+      { name: "task", takesValue: true, meaning: "the task it is about" },
+      { name: "token", takesValue: true, meaning: "the lead token (or TOOLROLL_LEAD_TOKEN)" }],
+    notableReasons: ["usage", "unknown-task", "unauthenticated"] },
   { invocation: "task block", synopsis: "make one task wait for another", audience: "agent", agentMayInvoke: true, mutation: "keyed",
     positionals: [{ name: "id", required: true, meaning: "the waiting task" }],
     flags: [jsonFlag, dbFlag, keyFlag, { name: "on", takesValue: true, meaning: "the blocker's id" }],

@@ -144,8 +144,8 @@ describe("the web decision view", () => {
 
     // The approval card restates the tournament and binds the JOINT digest.
     const page = await (await fetch(url("/t/t-1"), { headers: { cookie } })).text();
-    expect(page).toContain("and this tournament:");
-    expect(page).toContain("2 agents build this independently");
+    expect(page).toContain('<p class="approval-race">2 agents build this separately: ');
+    expect(page).toContain('<button type="submit" data-primary-action>Approve tournament</button>');
     const digest = /name="digest" value="([0-9a-f]{64})"/.exec(page)?.[1];
     const nonce = /name="nonce" value="([^"]+)"/.exec(page)?.[1];
     if (digest === undefined || nonce === undefined) throw new Error(`no approval form: ${page.slice(page.indexOf("approve-form"), page.indexOf("approve-form") + 600)}`);

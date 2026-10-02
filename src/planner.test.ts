@@ -1283,8 +1283,7 @@ describe("the filed contract reaches planning and survives it", () => {
     expect(lines.join("\n")).toContain("filed contract: preserved exactly by the plan — approval binds the terms you filed");
     const web = await openConsole(approverToken);
     const taskPage = await web.page("/t/dark");
-    expect(taskPage).toContain("preserved exactly");
-    expect(taskPage).toContain("the plan reproduces the filed goal, exclusions, touches, and acceptance criteria");
+    expect(taskPage).toContain("The plan keeps exactly what you filed.");
     expect(taskPage).not.toContain("amendment proposed");
     await web.close();
 
@@ -1376,11 +1375,10 @@ describe("the filed contract reaches planning and survives it", () => {
     expect(shown).toContain("criterion c3 removed");
     const web = await openConsole(approverToken);
     const taskPage = await web.page("/t/dark");
-    expect(taskPage).toContain("amendment proposed");
-    expect(taskPage).toContain("4 changes to what you filed");
-    expect(taskPage).toContain("approving binds the AMENDED terms");
+    expect(taskPage).toContain("The plan makes 4 changes to what you filed");
+    expect(taskPage).toContain('id="contract-amendment"');
     expect(taskPage).toContain(reason);
-    expect(taskPage).toContain("contract-change-removed");
+    expect(taskPage).toContain("Drops a check:");
     expect(taskPage).toContain("No new runtime dependency is added.");
     expect(taskPage).toContain("src/prefs.ts");
     const next = await web.page("/next");
@@ -1556,7 +1554,7 @@ describe("the filed contract reaches planning and survives it", () => {
     await run(["task", "show", "dark"], replying([]));
     expect(lines.join("\n")).toContain("filed contract: none — the planner drafted every term from the title and repository");
     const web = await openConsole(approverToken);
-    expect(await web.page("/t/dark")).toContain("no scope was filed before planning");
+    expect(await web.page("/t/dark")).toContain("Nothing was filed before planning");
     await web.close();
   });
 

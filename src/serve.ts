@@ -4,7 +4,7 @@ import { ADD_TESTS_ACTION, followUpChecksOf, requestFollowUpChecks, fileAddTests
 import { CHECK_LEVEL_WORDS, isCheckLevel, liveQuickCommand, projectCheckLevel, quickVerifyKey, setProjectCheckLevel, suggestQuickCommand, type CheckLevel } from './check-levels.js';
 import { repositoryContextHtml } from './repository-context-ui.js';
 import { browserAssetsAvailable, browserWorkspaceDocument, serveBrowserAsset } from './browser-shell.js';
-import { browserCrewOf, browserCrewFromIndex, browserWorkActionHref, browserProjectsOf, browserNavigationOf, type BrowserWorkspace, type BrowserChatLink, type BrowserTasksView, type BrowserLimits, type BrowserSettingsView, type BrowserTaskView, type BrowserTaskFact, type BrowserTaskSection, type BrowserTaskThreadItem, type BrowserTaskDetailGroup, type BrowserHome, type BrowserHomeCount, type BrowserCatchUpItem, type BrowserProjectsView, type BrowserProjectRow, type BrowserResultPanel, type BrowserResultView, type BrowserNeedAction, type BrowserActionCard, type BrowserSignIn, type BrowserUpdateNotice, type BrowserUpdates, type BrowserFirstRun, type BrowserPhoneCard } from './browser-workspace.js';
+import { browserCrewOf, browserCrewFromIndex, browserWorkActionHref, browserProjectsOf, browserNavigationOf, type BrowserWorkspace, type BrowserChatLink, type BrowserTasksView, type BrowserLimits, type BrowserSettingsView, type BrowserTaskView, type BrowserTaskFact, type BrowserTaskSection, type BrowserTaskThreadItem, type BrowserTaskDetailGroup, type BrowserHome, type BrowserHomeCount, type BrowserCatchUpItem, type BrowserProjectsView, type BrowserProjectRow, type BrowserResultPanel, type BrowserCheckItem, type BrowserResultView, type BrowserNeedAction, type BrowserActionCard, type BrowserSignIn, type BrowserUpdateNotice, type BrowserUpdates, type BrowserFirstRun, type BrowserPhoneCard } from './browser-workspace.js';
 import { configureLeadFollow, leadFollowStatus, runLeadFollowPass } from './lead-follow.js';
 import { startMaintenance } from './maintenance.js';
 import { codingHandoffPreview, createCodingHandoff } from './coding-handoff.js';
@@ -61,7 +61,8 @@ import { handleTeamHttp } from './team-http.js';
 import { teamWorkspaceHtml } from './team-ui.js';
 import { createTeamRuntime } from './team-runtime.js';
 import { prepareWorkspaceRevision, WorkspaceValidatorCache } from "./workspace-revision.js";
-import { workIndexPage, workCountsByProject, WorkIndexCursorError, WORK_INDEX_MAX_LIMIT, type WorkIndexPage, type WorkIndexItem } from "./work-index.js";
+import { workIndexPage, workCountsByProject, WorkIndexCursorError, WORK_INDEX_MAX_LIMIT, type WorkIndexPage, type WorkIndexItem, type WorkIndexGroup } from "./work-index.js";
+import { leadActivity } from "./lead-voice.js";
 import { openWorkDecisionOf } from "./work-summary.js";
 import { assignmentOf, checkAssignmentAsOperator, type AssignmentSnapshot } from './assignment.js';
 import type { DemoExchange, DemoLead } from "./demo.js";
@@ -75,7 +76,7 @@ import { leadBriefHtml, LEAD_CONTEXT_CSS } from './lead-context.js';
 import { assignmentCatchUp } from './assignment-brief.js';
 import { assignmentActionHref, assignmentCardOf, assignmentStatusOf, assignmentSummaryHtml, assignmentWithEvidence, ASSIGNMENT_CSS } from './assignment-ui.js';
 import { assignmentStageOf, pullRequestFactOf, stageOfCode, stageOfDispatch, statusDetailsHtml, statusIconSvg, statusWhyHtml, taskStatusOf, TASK_STATUS_CSS, type PullRequestFact, type TaskStatus } from './task-status.js';
-import { NEEDS } from './needs-you.js';
+import { ASKS, ASK_LABEL, NEEDS, type Ask } from './needs-you.js';
 import { assignmentPresentationOf, historicalAssessmentReason, shortenedMaterialReason } from './assignment-presentation.js';
 import type { TaskFamily } from "./store.js";
 import { ledgerBody } from "./ledger-view.js";
@@ -167,7 +168,7 @@ import { recipeFromForm, recipeLibraryHtml, recipeEditorHtml, workflowPreviewHtm
 import { EVIDENCE_CAPS, readVerifiedArtifact, readVerifiedReport, readVerifiedProofForRun, storeEvidence, writeEvidenceFile, scanForSecrets, type ReportView } from "./evidence.js";
 import { GOAL_ASSESSMENT_PENDING, reviewConflict, manualReviewOnly, manualReviewCriterionOf, personCheckWords, plainReasonWords, dispatchStatusToken, passFraction, semanticCoverage, coverageWords, coverageStateWords, type ProofVerdict, type CriterionMatrixRow, type CriterionEvidenceRef } from "./proof.js";
 import {
-  WORK_VIEWS, REVIEW_TOKENS, parseWorkView, resultStatusOf, resultHeadlineOf, receiptHeadingOf, receiptPublicationWords, reviewFactsOf, workStatusOf, primaryDestinationOf, needsPerson, dispatchActionLabel,
+  WORK_VIEWS, REVIEW_TOKENS, RESULT_DECISION_SENTENCE, acceptWordsOf, parseWorkView, resultStatusOf, resultHeadlineOf, receiptHeadingOf, receiptPublicationWords, reviewFactsOf, workStatusOf, primaryDestinationOf, needsPerson, dispatchActionLabel,
   type WorkView, type WorkFacts, type WorkStatus, type DisplayStatus, type PublicationFacts, type ReviewFacts,
 } from "./workspace-ui.js";
 import { PRICED_BUILD_MODELS } from "./pricing.js";
@@ -706,8 +707,12 @@ class PersistentSessions extends Map<string, Session> {
   hashOf(session: Session): string | null { const id = this.ids.get(session); return id === undefined ? null : PersistentSessions.hash(id); }
 }
 
-/** The console's server, and the one-time sign-in link `up` opens: a path on this server, or null for no such approver. */
-export type DecisionServer = Server & { mintSignInLink(account: string): string | null };
+/** The console's server, and the one-time sign-in link `up` opens: a path on this server, or null for no such approver.
+ * closeCoding starts the coding shutdown on its own, ahead of the rest of a stop; close() awaits the same promise. */
+export type DecisionServer = Server & { mintSignInLink(account: string): string | null; closeCoding(): Promise<void> };
+
+/** How long a stop waits for teammates and the lead's follow pass before closing anyway. */
+export const SHUTDOWN_WAIT_MS = 5_000;
 
 export function createDecisionServer(options: ServeOptions): DecisionServer {
   const { store, evidenceRoot } = options;
@@ -2190,7 +2195,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
           needsVerification: store
             .listCompletedWorkScoped(project, 10, admission)
             .filter(one => visible(one.repo) && (one.proofVerdict === "short" || one.proofVerdict === "refuted") && !one.proofAccepted &&
-              assignmentOf(store, one.taskId, now, { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) }, evidenceRoot) === null)
+              assignmentOf(store, one.taskId, now, workAccess(), evidenceRoot) === null)
             .map(one => ({
               taskId: one.taskId,
               title: one.title,
@@ -2564,7 +2569,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       // Admission binds BEFORE the SQL limit (the done page's own rule),
       // and every row is re-proved against the ceiling before ranking.
       const resultRow = (row: CompletedWorkRow) => {
-        const assignment = assignmentOf(store, row.taskId, now, { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) }, evidenceRoot);
+        const assignment = assignmentOf(store, row.taskId, now, workAccess(), evidenceRoot);
         return { ...row, proofReasons: row.runId === null ? [] : store.proofVerdictFor(row.runId)?.reasons ?? [], ciFailing: ciFailingFor(row.runId, row.prNumber),
           assignment: assignment?.activeTaskId === row.taskId && (assignment.receipt?.runId ?? null) === row.runId ? assignment : null };
       };
@@ -3116,7 +3121,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     // v103: a task's evidence pack, as a printable page or JSON (the whole family, sealed ledger entries included).
     const evidence = matchTaskPath(url.pathname, "/evidence$");
     if (evidence !== null) {
-      const access = { principal: "operator" as const, repos: admissionList(), includeUnplaced: visible(null) };
+      const access = workAccess();
       const family = store.taskFamilyOf(evidence.taskId, access.repos, access.includeUnplaced);
       if (family === null || !visible(family.root.repo)) return refuse(response, who, 404, "no such task", "/tasks");
       if (evidence.taskId !== family.root.id) return redirect(response, `${taskHref(family.root.id)}/evidence${url.search}`);
@@ -3136,7 +3141,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       if (from === null || last === null) return refuse(response, who, 400, "Choose a start and end day.", "/ledger");
       const to = new Date(Date.parse(last) + 86_400_000).toISOString();
       if (to <= from || Date.parse(to) - Date.parse(from) > 366 * 86_400_000) return refuse(response, who, 400, "Choose a range of a year or less, ending on or after its start.", "/ledger");
-      const access = { principal: "operator" as const, repos: admissionList(), includeUnplaced: visible(null) };
+      const access = workAccess();
       store.recordAction({ at: now.toISOString(), actor: who.name, repo: null, taskId: null, runId: null, action: "ledger exported", outcome: "exported", source: "access",
         detail: `${from.slice(0, 10)} to ${last.slice(0, 10)}` });
       // A piece at a time (a page of entries, or one pack), yielding between them, and stopping if the reader's access
@@ -3836,7 +3841,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       if (repos.length > 0) {
         try {
           fleetSnapshot = store.chatSnapshot(repos, now);
-          const summaries = workIndexPage(store, now, { principal: 'operator', repos, includeUnplaced: false }, { limit: 100 }).items;
+          const summaries = workIndexPage(store, now, { principal: 'operator', repos, includeUnplaced: false, viewer: who.name }, { limit: 100 }).items;
           fleetSnapshot.assignmentStates = Object.fromEntries(summaries.flatMap(value =>
             [value.rootId, value.activeTaskId].map(id => [id, { state: value.assignmentState, label: value.status.label, detail: value.status.detail }])));
           fleetSnapshot.attentionCount = needsYouBadge(null);
@@ -5075,7 +5080,6 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       const pageHtml = s.body;
       const extras = s.workspace ?? {};
       const notices = [...(extras.notices ?? [])];
-      if (s.chrome.demo) notices.unshift(DEMO_BANNER);
       if (s.chrome.modeBanner) notices.push(s.chrome.modeBanner.words);
       if (s.chrome.updateWaiting) notices.push(s.chrome.updateWaiting.words);
       let crew: Pick<BrowserWorkspace, 'crew' | 'crewTruncated'> = { crew: [], crewTruncated: false };
@@ -5085,9 +5089,11 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
           : browserCrewOf(store, clock(), { principal: 'operator', repos: managedRepos(), includeUnplaced: false }, { evidenceRoot, project });
       } catch { notices.push('Crew updates are unavailable. Open Tasks to inspect saved work.'); }
       // "Wake me only for these": the navigation carries the count of tasks
-      // waiting on a person across everything this person may see.
+      // waiting on a person behind its Tasks link — the open project's, or
+      // everything this person may see — so it matches that page's Needs you tab.
       let needsYou = 0;
-      try { needsYou = (requestFacts.workCounts ?? workCountsByProject(store, clock(), workAccess())).reduce((sum, one) => sum + one.totals['needs-you'], 0); }
+      try { needsYou = (requestFacts.workCounts ?? workCountsByProject(store, clock(), workAccess()))
+        .filter(one => s.chrome?.project == null || one.repo === s.chrome.project).reduce((sum, one) => sum + one.totals['needs-you'], 0); }
       catch { needsYou = 0; }
       // The person's own project and task conversations (v77), for the
       // sidebar's chat list; a thread whose project is out of view is left out.
@@ -5118,6 +5124,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
         projects: browserProjectsOf(s.chrome.projects ?? []), ...crew,
         conversation, ...(extras.team ? { team: extras.team } : {}), focus: extras.focus ?? null, result: extras.result ?? null,
         catchUpHtml: extras.catchUpHtml ?? '', controlsHtml: extras.controlsHtml ?? '', notices, view: extras.view ?? null,
+        ...(s.chrome.demo ? { demo: { text: DEMO_BANNER, short: DEMO_BANNER_SHORT } } : {}),
         pageHtml: extras.pageHtml === undefined ? (conversation === null ? pageHtml : null) : extras.pageHtml,
         navigation: [...browserNavigationOf(currentPath, s.chrome.project, needsYou), { label: 'Workspace tools', href: '/menu', active: path.pathname === '/menu' }],
         chats,
@@ -5185,7 +5192,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
    * phase, four counts, plan-window use (never dollars: subscriptions don't
    * bill per run) and Catch up's items, each tagged with its tab. Reads only. */
   function chatHomeOf(who: Who, repos: readonly string[], now: Date): BrowserHome {
-    const access = { principal: "operator" as const, repos: admissionList(), includeUnplaced: visible(null) };
+    const access = workAccess();
     const admitted = (repo: string | null) => repo === null ? visible(null) : repos.includes(repo);
     const agents = store.liveRuns(now).filter(run => admitted(run.repo)).map(run => {
       const root = familyOf(run.taskId)?.root ?? null;
@@ -5214,8 +5221,13 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       })(),
     }));
     const windows = who.via === "cookie" && store.isInstanceOperator(who.name) ? limitsView(store.providerLimits(), [], { project: projectName, teammate: id => `Teammate ${id}` }, now) : null;
+    // One line: what this person's lead is doing now and when it last acted.
+    const activity = leadActivity(store, who.name);
+    const leadTask = activity?.taskId == null ? null : store.lookupRef(activity.taskId);
+    const lead = activity === null ? null : { doing: activity.doing, at: activity.at,
+      href: leadTask == null || !admitted(leadTask.repo) ? null : taskHref(familyOf(activity.taskId!)?.root.id ?? activity.taskId!) };
     return {
-      agents, counts, catchUp, allHref: "/work",
+      agents, counts, catchUp, allHref: "/work", ...(lead === null ? {} : { lead }),
       planUse: (windows?.tiles ?? []).map(one => ({ name: one.name, window: one.window, percent: one.percent, detail: one.detail, tone: one.tone })),
     };
   }
@@ -5317,7 +5329,8 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
   }
 
   function workAccess() {
-    return { principal: 'operator' as const, repos: admissionList(), includeUnplaced: visible(null) };
+    // The reader's own lead's claims read "Your lead is on it" (lead-voice.ts); nobody else's.
+    return { principal: 'operator' as const, repos: admissionList(), includeUnplaced: visible(null), viewer: requestContext.getStore()?.actor ?? null };
   }
   // All project counts are read together. No task artifacts or processes are
   // inspected to paint a badge or a project switcher.
@@ -5446,7 +5459,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     const earlierLive = task.family === undefined ? [] : earlierLiveVersions(task.family, now);
     if (earlierLive.length > 0 && !status.views.includes("running")) status.views = [...status.views, "running"];
     const otherActive = new Set([...(task.family?.otherActive.map(one => one.id) ?? []), ...earlierLive]).size;
-    const recordedAssignment = task.family === undefined ? null : assignmentOf(store, task.id, now, { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) }, evidenceRoot);
+    const recordedAssignment = task.family === undefined ? null : assignmentOf(store, task.id, now, workAccess(), evidenceRoot);
     const assignment = freshAssignment(recordedAssignment, result ?? null);
     const assignmentStatus = assignment === null ? status : assignmentStatusOf(assignment, status);
     if (status.views.includes("running") && !assignmentStatus.views.includes("running")) assignmentStatus.views = [...assignmentStatus.views, "running"];
@@ -5692,7 +5705,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     const planRevisions = ref === null ? null : revisionLedgerOf(ref.id);
     const milestoneProgress = ref === null ? null : progressOf(ref.id, planRevisions?.current?.document ?? null);
     const family = familyOf(taskId);
-    const recordedAssignment = family?.current.id !== taskId ? null : assignmentOf(store, taskId, now, { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) }, evidenceRoot);
+    const recordedAssignment = family?.current.id !== taskId ? null : assignmentOf(store, taskId, now, workAccess(), evidenceRoot);
     const assignment = freshAssignment(recordedAssignment, completion?.receipt ?? null);
     const progressRun = runs.find(one => runIsLive(one))?.id ?? completion?.runId ?? null;
     return {
@@ -5980,7 +5993,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       title: family.root.title,
       state: task.state,
       status: view?.status ?? workRowOf({ ...task, repo: ref.repo }, now).status,
-      assignment: view?.assignment ?? assignmentOf(store, task.id, now, { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) }, evidenceRoot),
+      assignment: view?.assignment ?? assignmentOf(store, task.id, now, workAccess(), evidenceRoot),
       project: ref.repo === null ? null : projectName(ref.repo),
       now,
       dispatch: diagnoseTaskDispatch(store, taskId, now),
@@ -6009,6 +6022,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
               raceTerms: view.raceTerms ?? null,
               revision: view.revision ?? null,
               coordinator: view.coordinator ?? null,
+              repairChain: view.repairChain ?? null,
             },
       decisions: (view?.decisions ?? store.decisionsForTask(ref.id))
         .filter(one => one.state === "open" || one.state === "expired")
@@ -6047,7 +6061,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       return { taskId: rootId, view: { ...view, canMerge: view.canMerge && who.role === "approver" && who.via === "cookie" }, offer: null, target, fact };
     }
     if (!publishing.on || who.via !== "cookie" || who.role !== "approver") return null;
-    const assignment = assignmentOf(store, taskId, clock(), { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) }, evidenceRoot);
+    const assignment = assignmentOf(store, taskId, clock(), workAccess(), evidenceRoot);
     const receipt = assignment?.receipt ?? null;
     if (assignment?.state !== "complete" || receipt === null || store.publicationForRun(receipt.runId) !== null || pullRequestBlocker(store, receipt.runId) !== null) return null;
     return { taskId: rootId, view: null, offer: { taskId: receipt.taskId, runId: receipt.runId, digest: receipt.digest }, target };
@@ -11284,7 +11298,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       run,
       receipt,
       assignment: (() => {
-        const value = assignmentOf(store, taskId, now, { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) }, evidenceRoot);
+        const value = assignmentOf(store, taskId, now, workAccess(), evidenceRoot);
         return value?.receipt?.runId === run.id && value.activeTaskId === taskId ? freshAssignment(value, receipt) : null;
       })(),
       handoff,
@@ -11292,6 +11306,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       terminal,
       publication,
       pullRequestTo: pullRequestTargetOf(run.id),
+      publishing: pullRequestTargetOf(run.id) !== null ? "pull-request" : publishingOf(store, store.refById(run.taskRef)?.repo ?? null).on ? "other" : "off",
       ciFailing: publication !== null && publication.prNumber !== null && store.hasOpenCiEpisode(publication.githubRepo, publication.prNumber),
       files,
       outsideTouches: files.filter(one => one.outsideTouches).map(one => one.path),
@@ -11477,6 +11492,19 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     });
   });
   // Keep native process custody until shutdown has verified agent/tool exit.
+  // Coding custody does not depend on teammates or the lead's follow pass, so
+  // it closes at once and never waits behind a model turn: a stop must release
+  // the owner record well inside the service's exit window (Oct 2: deploys
+  // over 0.9.11 found it still held by a killed process).
+  let codingClosing: Promise<void> | null = null;
+  const closeCoding = (): Promise<void> => {
+    leadClosing = true;
+    return codingClosing ??= Promise.resolve().then(() => coding?.close());
+  };
+  const bounded = (work: Promise<unknown> | undefined): Promise<void> => new Promise<void>(done => {
+    const timer = setTimeout(done, SHUTDOWN_WAIT_MS);
+    void Promise.resolve(work).catch(() => {}).finally(() => { clearTimeout(timer); done(); });
+  });
   const closeServer = server.close.bind(server);
   server.close = ((callback?: (error?: Error) => void) => {
     leadClosing = true;
@@ -11485,13 +11513,13 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     for (const stream of chatStreams) stream.end();
     chatStreams.clear();
     flowRooms.close();
-    void (async () => { await team.close(); await leadMaintenance?.stop(); await coding?.close(); })().then(() => closeServer(callback)).catch(error => {
+    void Promise.all([closeCoding(), bounded(team.close()), bounded(leadMaintenance?.stop())]).then(() => closeServer(callback)).catch(error => {
       if (callback) callback(error instanceof Error ? error : Error('Coding session shutdown failed.'));
       else server.emit('error', error);
     });
     return server;
   }) as Server['close'];
-  return Object.assign(server, { mintSignInLink });
+  return Object.assign(server, { mintSignInLink, closeCoding });
 }
 
 // ---- path plumbing ---------------------------------------------------------
@@ -11970,6 +11998,223 @@ function acceptanceCeremonyHtml(criteria: readonly AcceptanceCriterion[]): strin
   );
 }
 
+/** "claude" + "opus" → "Claude Opus"; "claude-opus-5-5" → "Claude Opus 5.5"; anything else keeps its exact id. */
+function agentNameWords(provider: string, model: string | null): string {
+  const name = providerName(provider);
+  if (model === null || model === "" || model === "default") return name;
+  const bare = model.startsWith(`${provider}-`) ? model.slice(provider.length + 1) : model;
+  const title = (word: string): string => `${word[0]!.toUpperCase()}${word.slice(1)}`;
+  if (/^[a-z]+$/.test(bare)) return `${name} ${title(bare)}`;
+  const versioned = /^([a-z]+)-(\d+(?:-\d+)*)$/.exec(bare);
+  if (versioned !== null) return `${name} ${title(versioned[1]!)} ${versioned[2]!.replace(/-/g, ".")}`;
+  return `${name} ${model}`;
+}
+
+/** The permission a sealed profile grants, in two or three words. */
+function permissionWordsOf(profile: Scope["profile"] | null | undefined): string | null {
+  if (profile === null || profile === undefined) return null;
+  return profile.provider === "claude"
+    ? profile.permissionArgv === "bypassPermissions" ? "Full access" : "Auto permissions"
+    : profile.provider === "gemini"
+      ? profile.approvalArgv === "yolo" ? "Full access" : "Auto permissions"
+      : profile.sandboxMode === "danger-full-access" ? "Full access" : "Workspace sandbox";
+}
+
+/** One plain sentence for a revision (approval critique, Oct 2):
+ * "Fixes what build #9 missed: <criterion>." The notes, paths and lineage
+ * stay in the Details fold. */
+function revisionSentence(revision: Extract<RevisionView, { sourceRun: number }>, acceptance: readonly AcceptanceCriterion[]): string {
+  const build = `build #${revision.sourceRun}`;
+  if (revision.kind === "ci-repair") return `Fixes the checks that failed in ${build}.`;
+  const clean = (text: string): string => oneLineOf(text, 280).replace(/[.\s]+$/, "");
+  if (revision.kind === "criterion-repair") {
+    const ids = revision.comments.flatMap(one => (/Unmet: ([^.]+)\./.exec(one.note)?.[1] ?? "").split(",").map(id => id.trim()).filter(id => id !== ""));
+    const missed = ids.map(id => acceptance.find(one => one.id === id)?.statement ?? null).filter((one): one is string => one !== null);
+    if (missed.length > 0) return `Fixes what ${build} missed: ${missed.map(clean).join("; ")}.`;
+  }
+  const notes = revision.comments.map(one => clean(one.note)).filter(one => one !== "");
+  return notes.length === 0 ? `Revises ${build}.` : `Fixes what ${build} missed: ${notes.join("; ")}.`;
+}
+
+/** A planner's amendment, said plainly and kept in view: approving binds
+ * the amended terms, so this is never folded away. */
+function approvalAmendmentHtml(view: PlanContractView | null | undefined): string {
+  if (view === null || view === undefined || "problem" in view || !view.filed && view.revision !== true || view.changes.length === 0) return "";
+  const line = (change: ContractChange): string => {
+    switch (change.field) {
+      case "goal": return `Goal was: ${escape(change.before)}`;
+      case "outOfScope": return change.after === null ? "No longer rules anything out" : change.before === null ? `Now rules out: ${escape(change.after)}` : `Won't touch was: ${escape(change.before)}`;
+      case "touches": return `${change.kind === "added" ? "Adds the path" : "Drops the path"} <span class="mono">${escape(change.path)}</span>`;
+      case "acceptance": return change.kind === "added" ? `Adds a check: ${escape(change.after?.statement ?? "")}` : change.kind === "removed" ? `Drops a check: ${escape(change.before?.statement ?? "")}` : `Rewords a check: ${escape(change.after?.statement ?? "")}`;
+    }
+  };
+  const count = `${view.changes.length} change${view.changes.length === 1 ? "" : "s"}`;
+  return (
+    `<div class="approval-amendment" id="contract-amendment">` +
+    `<p><strong>${view.revision === true ? `The plan makes ${count} from your notes` : `The plan makes ${count} to what you filed`}</strong></p>` +
+    `<ul>${view.changes.map(one => `<li>${line(one)}</li>`).join("")}</ul>` +
+    (view.amendment === null ? "" : `<p class="meta">Why: ${escape(view.amendment)}</p>`) +
+    `</div>`
+  );
+}
+
+/**
+ * The approval sheet (approval critique, Oct 2): the plan open, in plain
+ * rows — Goal, Changes, Won't touch, Done when — one line of who builds,
+ * one Approve & start beside the password, and every remaining signed
+ * term (lineage, routing, runtime limits, the seal) in one Details fold.
+ * Presentation only: the same hidden fields, nonce, digest and password
+ * post to the same route, and the task page and chat card share it.
+ */
+function approvalSheetHtml(input: {
+  surface: "task" | "chat";
+  action: string;
+  csrf: string;
+  nonce: string;
+  digest: string;
+  returnTo: string | null;
+  scope: Scope;
+  planDocument: string | null;
+  planContract: PlanContractView | null | undefined;
+  revision: Extract<RevisionView, { sourceRun: number }> | null;
+  revisionSourceHref: string;
+  /** A machine-drafted repair: the build it repairs. */
+  repairChain: RepairChainRow | null;
+  raceTerms: TournamentTerms | null;
+  route: RouteView | null | undefined;
+  coordinator: { label: string; filedAgo: string | null } | null;
+  deliverable: "branch" | "report";
+  editHref: string;
+  notNowHref: string;
+  sticky: boolean;
+}): string {
+  const { scope, route, raceTerms } = input;
+  // A machine-drafted repair appends its brief to the signed goal; the row
+  // shows the goal and one sentence says what the repair fixes. The whole
+  // signed goal stays in Details.
+  const repairText = / — (repair exactly the unmet criteria named below; a comment cannot widen the scope\. Unmet: ([^.]+)\.|Collect only the missing observations for ([^.]+)\. .*|Diagnose the saved failed project check and repair within the original scope\. .*)$/s.exec(scope.goal);
+  const goalShown = repairText === null ? scope.goal : scope.goal.slice(0, repairText.index);
+  const statementsOf = (ids: string): string => ids.split(",").map(id => id.trim()).map(id => scope.acceptance.find(one => one.id === id)?.statement ?? id).map(one => one.replace(/[.\s]+$/, "")).join("; ");
+  const repairBuild = input.revision?.sourceRun ?? input.repairChain?.sourceRun ?? null;
+  const builtBy = repairBuild === null ? "the last build" : `build #${repairBuild}`;
+  const sentence = input.revision !== null && (repairText === null || input.revision.comments.length > 0) ? revisionSentence(input.revision, scope.acceptance)
+    : repairText === null ? null
+    : repairText[2] !== undefined ? `Fixes what ${builtBy} missed: ${statementsOf(repairText[2])}.`
+    : repairText[3] !== undefined ? `Collects the evidence ${builtBy} was missing for: ${statementsOf(repairText[3])}. The saved code stays the same.`
+    : `Fixes the checks that failed in ${builtBy}.`;
+  const plan = input.planDocument === null ? null : parseExecutionPlanDocument(input.planDocument);
+  const milestones = plan !== null && plan.ok ? plan.document.milestones : [];
+  const permission = permissionWordsOf(scope.profile);
+  const money = (micro: number): string => `$${(micro / 1_000_000).toFixed(2)}`;
+  const row = (label: string, body: string): string => `<div class="approval-row"><dt>${label}</dt><dd>${body}</dd></div>`;
+  const changes =
+    (milestones.length > 0 ? `<ol class="approval-steps">${milestones.map(one => `<li>${escape(one)}</li>`).join("")}</ol>` : "") +
+    (scope.touches.length > 0
+      ? `<p>Only in these paths:</p>${approvalPathsHtml(scope.touches)}`
+      : `<p${milestones.length > 0 ? ` class="meta"` : ""}>Any file in the project.</p>`);
+  const doneWhen = scope.acceptance.length === 0
+    ? `<p>You decide when you review the result.</p>`
+    : `<ul class="approval-done">${scope.acceptance.map(one => `<li>${escape(one.statement)}</li>`).join("")}</ul>`;
+  // Who builds, in one line: the builder and planner by name, the cap, and full access when granted.
+  const legs = route?.projection?.legs ?? [];
+  const legOf = (phase: Phase) => legs.find(one => one.phase === phase);
+  const who: string[] = [];
+  const builder = legOf("build");
+  if (raceTerms === null) {
+    if (builder !== undefined) who.push(`Builder ${agentNameWords(builder.provider, builder.model)}`);
+    else if (route?.legacy != null) who.push(`Builder ${agentNameWords(route.legacy.provider, route.legacy.model)}`);
+    else if (scope.profile != null) who.push(`Builder ${agentNameWords(scope.profile.provider, scope.profile.model)}`);
+  }
+  const planner = legOf("plan");
+  if (planner !== undefined) who.push(`Planner ${agentNameWords(planner.provider, planner.model)}`);
+  if (scope.budgetMicrousd !== null) who.push(`Cap ${money(scope.budgetMicrousd)} per attempt`);
+  if (permission === "Full access") who.push("Full access");
+  const race = raceTerms === null
+    ? ""
+    : `<p class="approval-race">${raceTerms.n} agents build this separately: ${raceTerms.agents.map(one => escape(agentNameWords(one.provider, one.model))).join(" and ")}. ` +
+      (raceTerms.kind === "comparison"
+        ? "No dollar cap; you compare the results and pick one.</p>"
+        : `Each may spend ${money(raceTerms.perAgentBudgetMicrousd)} plus a ${money(raceTerms.overrunReserveMicrousd)} reserve, ${money(raceTerms.totalBudgetMicrousd)} in all; you compare the results and pick one.</p>`);
+  const after = input.deliverable === "report"
+    ? "An agent investigates without changing the repository. You'll hear when its report is ready."
+    : raceTerms !== null
+      ? "Each agent starts in its own branch. You'll hear when the results are ready to compare."
+      : "An agent starts in its own branch. You'll hear when it's ready to review.";
+  const submit = raceTerms === null ? "Approve & start" : raceTerms.kind === "comparison" ? "Approve comparison" : "Approve tournament";
+
+  // Everything else the digest binds, one tap away.
+  const detail = (title: string, body: string, attrs = ""): string => body === "" ? "" : `<section class="approval-detail"${attrs}><h3>${title}</h3>${body}</section>`;
+  const revisionDetail = input.revision === null ? "" : detail("Earlier build",
+    `<div class="revision-card" data-revision-feedback>` +
+    `<p><a href="${escape(input.revisionSourceHref)}"${input.surface === "chat" ? " data-revision-source" : ""}>${input.surface === "chat" ? `Original result: build #${input.revision.sourceRun} →` : `build #${input.revision.sourceRun}`}</a></p>` +
+    (input.revision.comments.length === 0 ? "" : `<ul>${input.revision.comments.map(one => `<li>${one.path === null ? "" : `<span class="mono">${escape(one.path)}${one.line === null ? "" : `:${one.line}`}</span> · `}${escape(one.note)} <span class="meta">— ${escape(one.author)}</span></li>`).join("")}</ul>`) +
+    revisionLineageHtml(input.revision.lineage) +
+    `</div>`);
+  const contract = input.planContract;
+  const contractDetail = input.planDocument === null || approvalAmendmentHtml(contract) !== "" ? ""
+    : contract === null || contract === undefined ? `<p class="meta">No record compares this plan with what was filed. Check the rows above against your request.</p>`
+    : "problem" in contract ? `<p class="meta">${escape(contract.problem)} · <a href="/r/${contract.run}">run ${contract.run}</a></p>`
+    : !contract.filed && contract.revision !== true ? `<p class="meta">Nothing was filed before planning, so every term is the planner's proposal.</p>`
+    : `<p class="meta">${contract.revision === true ? "Same terms as the previous version." : "The plan keeps exactly what you filed."} <a href="/r/${contract.run}">Planning run ${contract.run}</a></p>`;
+  const criteriaDetail = scope.acceptance.length === 0 ? ""
+    : `<ul class="approval-signed-criteria">${scope.acceptance.map(one => `<li><code>${escape(one.id)}</code> ${escape(one.statement)} <span class="meta">needs ${one.evidence.map(escape).join(", ")}</span></li>`).join("")}</ul>`;
+  const projection = route?.projection ?? null;
+  const agentsDetail = route === null || route === undefined ? ""
+    : projection === null
+      ? route.legacy === null ? "" : `<p>${escape(agentsSummaryWords(route))}</p>`
+      : `<p>${escape(projection.summary)}</p>` +
+        `<p class="meta">${escape(riskTitle(route.riskLevel))}: ${escape(riskConsequence(route.riskLevel))}. Uses ${escape(projection.postureWords)}.</p>` +
+        (projection.demands.length === 0 ? "" : `<ul class="meta">${projection.demands.map(one => `<li>${escape(one)}</li>`).join("")}</ul>`) +
+        `<dl class="approval-roles">${projection.legs.map(leg =>
+          `<div><dt>${escape(ROLE_NOUN[leg.phase])}</dt><dd><span class="mono">${escape(leg.provider)} · ${escape(leg.model)}</span> <span class="meta">${escape(chosenWords(leg))}</span>` +
+          `<ul>${leg.reasons.map(reason => `<li>${escape(reason)}</li>`).join("")}${leg.problem === null ? "" : `<li><strong>${escape(leg.problem)}</strong></li>`}</ul></dd></div>`).join("")}</dl>` +
+        `<p class="meta">These exact agents are part of what you approve. Changing any of them asks for a fresh approval.</p>`;
+  const limits =
+    profileWords(scope) +
+    `<p class="meta">Checks level: ${escape(qualityModeTitle(scope.qualityMode ?? "default"))}${permission === null ? "" : ` · ${escape(permission)}`}</p>` +
+    (scope.budgetMicrousd === null ? "" : `<p class="meta">Each build attempt has a ${money(scope.budgetMicrousd)} agent-reported usage cap. On a subscription this limits work; it is not an API charge.</p>`);
+  const details =
+    `<details class="approval-details"><summary>Details</summary>` +
+    revisionDetail +
+    (repairText === null ? "" : detail("Signed goal", `<p>${escape(scope.goal)}</p>`)) +
+    detail("Plan record", contractDetail) +
+    detail("Signed criteria", criteriaDetail) +
+    detail("Why these agents", agentsDetail, ` id="${input.surface === "task" ? "approval-agents" : "chat-approval-agents"}"`) +
+    detail("Runtime limits", limits) +
+    (scope.candidate ? detail("Saved commit", `<p><code class="approval-commit">${escape(scope.candidate)}</code></p>`) : "") +
+    detail("Seal", `<p class="meta">Approval binds to this exact wording. <span class="seal mono">signs ${shortDigest(scope.digest)}</span></p>`) +
+    `</details>`;
+
+  return (
+    `<form method="post" action="${input.action}" class="approve-form approval-sheet"${input.surface === "task" ? ` id="approve"` : ""}${input.sticky ? " data-sticky" : ""}>` +
+    `<input type="hidden" name="csrf" value="${escape(input.csrf)}">` +
+    `<input type="hidden" name="nonce" value="${escape(input.nonce)}">` +
+    `<input type="hidden" name="digest" value="${escape(input.digest)}">` +
+    (input.returnTo === null ? "" : `<input type="hidden" name="return" value="${escape(input.returnTo)}">`) +
+    `<input type="text" name="username" autocomplete="username" class="visually-hidden" tabindex="-1" aria-hidden="true">` +
+    `<h2 class="approval-sheet-title">${input.deliverable === "report" ? "The investigation" : "The plan"}</h2>` +
+    (sentence === null ? "" : `<p class="approval-revision">${escape(sentence)}</p>`) +
+    (input.coordinator === null ? "" : `<p class="approval-note">An agent filed this: <span class="mono">${escape(input.coordinator.label)}</span>${input.coordinator.filedAgo === null ? "" : `, ${escape(input.coordinator.filedAgo)}`}. Nothing runs until you approve, and approving runs its request.</p>`) +
+    (input.deliverable === "report" ? `<p class="approval-note">Read-only: it reports back and changes nothing in the repository.</p>` : "") +
+    `<dl class="approval-rows">` +
+    row("Goal", `<p class="approval-goal">${escape(goalShown)}</p>`) +
+    row("Changes", changes) +
+    row("Won’t touch", `<p>${scope.outOfScope === null ? "Nothing is ruled out." : escape(scope.outOfScope)}</p>`) +
+    row("Done when", doneWhen) +
+    `</dl>` +
+    approvalAmendmentHtml(contract) +
+    race +
+    (who.length === 0 ? "" : `<p class="approval-who">${who.map(escape).join(" · ")}</p>`) +
+    `<div class="approval-act" id="${input.surface === "task" ? "approval-confirm" : "chat-approval-confirm"}">` +
+    `<label class="approval-password"><span class="visually-hidden">Your password</span><input type="password" name="token" autocomplete="current-password" placeholder="Your password"></label>` +
+    `<button type="submit" data-primary-action>${submit}</button></div>` +
+    `<p class="approval-after">${after}</p>` +
+    `<p class="approval-secondary"><a class="approval-link" href="${escape(input.editHref)}">Edit plan</a><a class="approval-link" href="${escape(input.notNowHref)}">Not now</a></p>` +
+    details +
+    `</form>`
+  );
+}
+
 /**
  * THE CONSENT DOOR (v48): whether a yes can be given on this scope right
  * now — one answer for the task page, the focused chat, and /next, so no
@@ -12314,6 +12559,8 @@ function agentsStripHtml(view: RouteView | null, taskId: string): string {
 
 /** The demo's one-line promise, on every page. */
 const DEMO_BANNER = `Demo: a scripted lead and sample projects. Nothing calls a model, reaches outside or spends. For your own project, run ${START_COMMAND} in its folder.`;
+/** The demo notice on a phone: one line. */
+const DEMO_BANNER_SHORT = "Demo: sample projects. Nothing calls a model or spends.";
 
 /** Every character that could open a tag or an attribute, dead at the sink. */
 function escape(text: string): string {
@@ -12807,7 +13054,7 @@ ${THEME_DARK}
   /* Thumbnails, never a full-width poster: auto-fill leaves a lone
      screenshot at thumbnail size (UI polish 2026-09-13). */
   .receipt-visuals { display: grid; grid-template-columns: repeat(auto-fill, minmax(8rem, 14rem)); gap: .55rem; margin-top: .75rem; }
-  .receipt-shot { display: grid; gap: .35rem; color: var(--muted-foreground); font-size: .7rem; text-decoration: none; }
+  .receipt-shot { display: grid; gap: .35rem; color: var(--muted-foreground); font-size: .75rem; text-decoration: none; }
   .receipt-shot img { display: block; width: 100%; aspect-ratio: 16 / 10; object-fit: cover; border: 1px solid var(--glass-border); border-radius: calc(var(--radius) - 3px); background: var(--muted); }
   @media (hover: hover) and (pointer: fine) { .receipt-shot:hover { color: var(--foreground); } }
   .receipt-caveats, .receipt-coverage { margin-top: .8rem; padding: .7rem .8rem; border-left: 1px solid var(--border); border-radius: 0 calc(var(--radius) - 3px) calc(var(--radius) - 3px) 0; background: color-mix(in srgb, var(--muted) 62%, transparent); font-size: .78rem; }
@@ -12940,7 +13187,7 @@ ${THEME_DARK}
   }
   .diff-file[open] > summary::before { transform: rotate(45deg) translateY(-.1rem); }
   .diff-file-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 500 .75rem/1.4 var(--font-mono); }
-  .diff-file-counts { display: inline-flex; gap: .45rem; flex: none; margin-left: auto; font: 500 .68rem/1 var(--font-mono); }
+  .diff-file-counts { display: inline-flex; gap: .45rem; flex: none; margin-left: auto; font: 500 .75rem/1 var(--font-mono); }
   .diff-file-counts b { color: var(--success); font-weight: 500; }
   .diff-file-counts i { color: var(--destructive); font-style: normal; }
   .diff-rename { margin: 0; padding: .4rem .85rem; border-top: 1px solid var(--glass-border); }
@@ -12948,12 +13195,12 @@ ${THEME_DARK}
   .diff-hunk-head {
     overflow-x: auto; padding: .42rem .85rem; border-top: 1px solid var(--glass-border); border-bottom: 1px solid var(--glass-border);
     background: color-mix(in srgb, var(--running) 8%, var(--card)); color: color-mix(in srgb, var(--running) 72%, var(--foreground));
-    font: 500 .68rem/1.4 var(--font-mono); white-space: pre;
+    font: 500 .75rem/1.4 var(--font-mono); white-space: pre;
   }
   .diff-lines { max-width: 100%; overflow-x: auto; background: color-mix(in srgb, var(--background) 48%, var(--card)); }
   .diff-line {
     display: grid; grid-template-columns: 2rem 3.2rem 3.2rem minmax(max-content, 1fr); align-items: stretch;
-    min-width: max-content; min-height: 1.8rem; font: 400 .72rem/1.55 var(--font-mono);
+    min-width: max-content; min-height: 1.8rem; font: 400 .75rem/1.55 var(--font-mono);
   }
   @media (hover: hover) and (pointer: fine) { .diff-line:hover { background: color-mix(in srgb, var(--foreground) 4%, transparent); } }
   .diff-line code { display: flex; min-width: 0; padding: .3rem .75rem .3rem .6rem; color: inherit; white-space: pre; }
@@ -13491,7 +13738,9 @@ ${THEME_DARK}
   .approval-title { display: grid; gap: .15rem; }
   .approval-kicker { color: var(--muted-foreground); font: 500 .66rem/1.3 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; }
   .approval-title strong { font-size: 1.05rem; letter-spacing: -.02em; }
-  .approval-label { margin: .9rem 0 .2rem; color: var(--muted-foreground); font: 500 .66rem/1.3 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; }
+  .approval-label { display: block; margin: .9rem 0 .2rem; color: var(--muted-foreground); font: 500 12px/1.4 var(--font-sans); }
+  .approval-label::first-letter, .planner-plan .eyebrow::first-letter { text-transform: uppercase; }
+  .planner-plan .eyebrow { font: 500 12px/1.4 var(--font-sans); letter-spacing: 0; text-transform: none; }
   .approval-goal { margin: 0; font-size: 1rem; line-height: 1.55; white-space: pre-wrap; }
   .approval-boundaries { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem; margin-top: .75rem; }
   .approval-boundary { padding: .7rem .8rem; border: 1px solid var(--glass-border); border-radius: calc(var(--radius) - 3px); background: color-mix(in srgb, var(--muted) 45%, transparent); }
@@ -13577,6 +13826,66 @@ ${THEME_DARK}
   .approval-confirm { scroll-margin-top: 5rem; }
   .approval-paths { margin: 0; padding: 0; list-style: none; display: grid; gap: .15rem; }
   .approval-paths li { color: var(--muted-foreground); font-size: .8rem; overflow-wrap: anywhere; }
+  /* The approval sheet (approval critique, Oct 2): the plan open in plain
+     rows, who builds in one line, one Approve & start beside the password,
+     and every other signed term in one Details fold at the end. Sentence
+     case, Geist, 12px and up; prose capped at 75ch. */
+  .approval-sheet { display: grid; gap: 16px; margin: 0; padding: 20px; border: 1px solid var(--border); border-radius: 10px; background: var(--card); }
+  .approval-sheet.approve-form > :not(input) { margin: 0; }
+  .approval-sheet-title { margin: 0; font-size: 15px; font-weight: 600; line-height: 1.4; letter-spacing: -.01em; }
+  .approval-revision, .approval-note, .approval-race { max-width: 75ch; font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
+  .approval-note { color: var(--muted-foreground); }
+  .approval-rows { display: grid; gap: 14px; margin: 0; }
+  .approval-row { display: grid; grid-template-columns: 7.5rem minmax(0, 1fr); gap: 16px; }
+  .approval-row dt { margin: 0; color: var(--muted-foreground); font-size: 13px; font-weight: 500; line-height: 1.6; }
+  .approval-row dd { min-width: 0; max-width: 75ch; margin: 0; font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
+  .approval-row dd p, .approval-sheet .approval-goal { margin: 0; font-size: 14px; line-height: 1.6; }
+  .approval-row dd :is(ol, ul) { display: grid; gap: 4px; margin: 0; padding-left: 1.25rem; }
+  .approval-row dd ol + p { margin-top: 6px; }
+  .approval-row dd .approval-paths { margin-top: 2px; padding-left: 0; }
+  .approval-row dd .approval-paths li { font-size: 13px; }
+  .approval-amendment { max-width: 75ch; padding: 12px 14px; border-radius: 8px; background: var(--muted); font-size: 14px; line-height: 1.55; overflow-wrap: anywhere; }
+  .approval-amendment p { margin: 0; }
+  .approval-amendment ul { display: grid; gap: 4px; margin: 6px 0; padding-left: 1.25rem; }
+  .approval-who { max-width: 75ch; color: var(--muted-foreground); font-size: 13px; line-height: 1.5; }
+  .approval-act { display: grid; grid-template-columns: minmax(0, 20rem) auto; justify-content: start; align-items: center; gap: 8px; }
+  .approval-password { margin: 0; }
+  .approval-act input[type=password] { margin: 0; font-family: var(--font-sans); }
+  .approval-act button { margin: 0; min-height: 2.125rem; white-space: nowrap; }
+  .approval-after { max-width: 75ch; color: var(--muted-foreground); font-size: 13px; line-height: 1.5; }
+  .approval-secondary { display: flex; flex-wrap: wrap; gap: 8px; }
+  .approval-link { display: inline-flex; align-items: center; min-height: 32px; padding: 0 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); color: var(--foreground); font-size: 13px; font-weight: 500; text-decoration: none; }
+  .approval-link + .approval-link { border-color: transparent; background: none; color: var(--muted-foreground); }
+  @media (hover: hover) and (pointer: fine) { .approval-link:hover { background: var(--muted); color: var(--foreground); } }
+  details.approval-details { margin: 0; padding: 0; border: 0; border-top: 1px solid var(--border); border-radius: 0; background: none; }
+  details.approval-details[open] { padding-bottom: 0; }
+  .approval-details > summary { display: flex; align-items: center; min-height: 40px; padding: 4px 0 0; font-size: 13px; }
+  .approval-detail { max-width: 75ch; margin: 12px 0 0; font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
+  .approval-detail h3 { margin: 0 0 4px; font-size: 13px; font-weight: 600; letter-spacing: 0; text-transform: none; }
+  .approval-detail p, .approval-detail ul, .approval-detail dl { margin: 4px 0; }
+  .approval-detail ul { padding-left: 1.25rem; }
+  .approval-detail .revision-card { margin: 0; padding: 0; border: 0; background: none; }
+  .approval-roles { display: grid; gap: 8px; }
+  .approval-roles > div { display: grid; grid-template-columns: 6rem minmax(0, 1fr); gap: 12px; }
+  .approval-roles dt { color: var(--muted-foreground); font-weight: 500; }
+  .approval-roles dd { margin: 0; }
+  .approval-roles dd ul { margin: 2px 0 0; color: var(--muted-foreground); }
+  .chat-plan .approval-sheet { padding: 0; border: 0; background: none; }
+  @media (max-width: 760px) {
+    .approval-sheet { gap: 12px; padding: 14px; }
+    .approval-row { grid-template-columns: 1fr; gap: 2px; }
+    .approval-act { grid-template-columns: 1fr; }
+    .approval-act input[type=password], .approval-act button { min-height: 44px; font-size: 16px; }
+    .approval-act button { width: 100%; }
+    /* The one act stays under the thumb: sticky at the bottom, clear of the home indicator. */
+    .approval-sheet[data-sticky] .approval-act {
+      position: sticky; bottom: 0; z-index: 20; margin: 0 -14px; padding: 10px 14px calc(10px + env(safe-area-inset-bottom, 0px));
+      border-top: 1px solid var(--border); background: var(--card);
+    }
+    .approval-link { min-height: 44px; padding: 0 16px; }
+    .approval-details > summary { min-height: 44px; }
+    .approval-roles > div { grid-template-columns: 1fr; gap: 2px; }
+  }
   .run-facts-details { margin-top: 1.25rem; }
   .run-facts-details > summary { display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
   .run-facts-details > summary .meta { font-size: .75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -13810,7 +14119,7 @@ ${THEME_DARK}
   .result-pin[open] > summary::before { content: "▾"; }
   .result-pin > summary .meta { font-weight: 400; }
   .result-pin .diff-comment-target { margin: .25rem 0 .5rem; }
-  .chat-approval-section, .revision-card, .revision-lineage, .task-history, .diff-comment p { min-width: 0; overflow-wrap: anywhere; }
+  .revision-card, .revision-lineage, .task-history, .diff-comment p { min-width: 0; overflow-wrap: anywhere; }
   .result-feedback-history > summary, .task-history > summary, .task-history a { display: inline-flex; align-items: center; min-height: 44px; padding: .25rem .5rem; }
   .task-history > summary::before { content: "▸"; margin-right: .35rem; }
   .task-history[open] > summary::before { content: "▾"; }
@@ -14275,11 +14584,10 @@ ${THEME_DARK}
   .check-progress[data-final="passed"] { color: var(--success); }
   .check-progress[data-final="failed"] { color: var(--destructive); }
   .check-progress[data-final="unknown"] { color: var(--warning); }
-  .receipt-actions [data-primary-action], .task-plan-review .button-link { min-height: 44px; }
+  .receipt-actions [data-primary-action] { min-height: 44px; }
   .task-status-reason { margin-top: .75rem; }
   .task-status-reason summary, .task-status-details > summary { color: var(--muted-foreground); }
   .task-status-details > summary { min-height: 44px; }
-  .task-plan-review > summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; font-weight: 650; }
   .task-status-details, #task-control-details { margin: 1rem 0; }
   .task-control-copy { min-width: 0; overflow-wrap: anywhere; }
   [data-primary-action] { max-width: 100%; }
@@ -14294,16 +14602,9 @@ ${THEME_DARK}
   .chat-action-card > summary strong { font-size: .92rem; }
   .chat-action-card > summary small { color: var(--muted-foreground); font-size: .68rem; font-weight: 400; }
   .chat-action-card[open] > summary { border-bottom: 1px solid var(--border); }
-  .chat-approval-form { display: grid; gap: .85rem; padding: 1.05rem; }
-  .chat-approval-section { display: grid; gap: .3rem; }
-  .chat-approval-section > p, .chat-approval-section > pre { margin: 0; }
-  .chat-approval-form .approval-boundaries { margin: 0; }
   .chat-run-details { padding: .65rem .75rem; border: 1px solid var(--border); border-radius: calc(var(--radius) - 3px); background: color-mix(in srgb,var(--muted) 45%,transparent); }
   .chat-run-details > summary { color: var(--muted-foreground); cursor: pointer; font-size: .68rem; }
   .chat-run-details > .meta { margin-bottom: 0; }
-  .chat-approval-form .approval-confirm { align-items: end; margin-top: .15rem; }
-  .chat-approval-form .approval-confirm label { flex: 1 1 18rem; }
-  .chat-approval-form .approval-confirm button { min-height: 2.65rem; }
   .chat-decisions { display: grid; gap: .7rem; }
   .chat-section-head { margin: .15rem .15rem 0; }
   .chat-section-head h2 { margin: .2rem 0 0; font-size: 1rem; }
@@ -14500,18 +14801,9 @@ ${THEME_DARK}
   /* The concise plan (package 2): a title, the outcome, one line of
      counts and limits, then one Review plan disclosure over the unchanged
      exact-terms form. */
-  .chat-plan-head h2 { margin: 0; font-size: 1rem; letter-spacing: -.025em; }
-  .chat-plan-outcome { margin: .65rem 0 .55rem; font-size: .88rem; line-height: 1.5; overflow-wrap: anywhere; }
-  .chat-plan-facts { margin: 0; color: var(--muted-foreground); font-size: .74rem; line-height: 1.5; overflow-wrap: anywhere; }
-  .chat-plan > details.chat-approval { margin: .85rem 0 0; padding: .85rem 0 0; border: 0; border-top: 1px solid var(--border); border-radius: 0; background: transparent; }
-  .chat-plan > details.chat-approval > summary { display: flex; align-items: center; gap: .75rem; cursor: pointer; list-style: none; }
-  .chat-plan > details.chat-approval > summary::-webkit-details-marker { display: none; }
-  .chat-plan > details.chat-approval > summary .button-link { flex: 0 0 auto; white-space: nowrap; min-height: 44px; }
-  .chat-plan > details.chat-approval > .chat-approval-form { padding: .85rem 0 0; }
-  .chat-plan .chat-approval-lead { margin: 0 0 .85rem; }
   .chat-approval-stale { margin: .75rem 0 0; }
   .chat-approval-stale a { font-weight: 600; }
-  form.approve-form[data-stale="1"] .approval-confirm { opacity: .55; }
+  form.approve-form[data-stale="1"] .approval-confirm, form.approve-form[data-stale="1"] .approval-act { opacity: .55; }
   .proposal-filed { display: flex; align-items: center; flex-wrap: wrap; gap: .6rem; margin: .5rem 0 0; }
   .chat-thinking { display: flex; align-items: center; gap: .75rem; padding: .75rem .85rem; }
   .chat-thinking p { flex: 1; margin: 0; }
@@ -14638,10 +14930,6 @@ ${THEME_DARK}
     .chat-action-card > summary { align-items: flex-start; padding: .85rem; }
     .chat-action-card > summary .button-link { min-height: 2.1rem; padding-inline: .6rem; font-size: .65rem; white-space: nowrap; }
     .chat-action-card > summary small { max-width: 14rem; }
-    .chat-approval-form { padding: .85rem; }
-    .chat-approval-form .approval-boundaries { grid-template-columns: 1fr; }
-    .chat-approval-form .approval-confirm { display: grid; }
-    .chat-approval-form .approval-confirm button { width: 100%; }
     .chat-budget { gap: .3rem; margin: .65rem 0 .9rem; }
     .chat-budget > span { padding: .25rem .48rem; }
     .chat-budget > span:first-child { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
@@ -14955,6 +15243,15 @@ button { min-height: 44px; }
      chips flow after it, never above the name. */
   .queue-card p.row > a:first-of-type { flex: 1 1 12rem; min-width: 0; }
 }
+/* A phone reads a long changed line wrapped, never scrolled sideways: the
+   line keeps its numbers and marker, the code column takes what is left. */
+@media (max-width: 760px) {
+  .diff-lines { overflow-x: visible; }
+  .diff-line, .diff-review .diff-line { min-width: 0; grid-template-columns: 2.75rem 2.65rem 2.65rem minmax(0, 1fr); }
+  .diff-review[data-mode="view"] .diff-line { grid-template-columns: 0 2.65rem 2.65rem minmax(0, 1fr); }
+  .diff-line code { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .diff-hunk-head { overflow-x: visible; white-space: pre-wrap; overflow-wrap: anywhere; }
+}
 @media (max-width: 30rem) {
   .dependency-repair-actions .dependency-repair-replace { grid-template-columns: minmax(0, 1fr); }
   .dependency-repair-actions .dependency-repair-replace > button[type=submit] { width: 100%; }
@@ -15099,6 +15396,7 @@ const INBOX_TABS_CSS = '.inbox-tabs{display:inline-flex;gap:2px;max-width:100%;o
   '.inbox-tabs a[aria-current="page"]{background:var(--so-paper);color:var(--so-ink);box-shadow:var(--so-pill-shadow)}' +
   '.inbox-tab-count{min-width:18px;padding:0 5px;border-radius:9999px;font:500 11px/18px var(--so-mono,ui-monospace,monospace);font-variant-numeric:tabular-nums;text-align:center}' +
   '.inbox-tab-count--needs{background:var(--so-signal);color:var(--so-on-signal)}' +
+  '.inbox-ask{margin:18px 0 0}.inbox-ask>h2{display:flex;align-items:baseline;gap:8px;margin:0 0 4px;font-size:15px;font-weight:600}.inbox-ask>h2 .count{font:500 12px var(--so-mono,ui-monospace,monospace);font-variant-numeric:tabular-nums;color:var(--so-muted)}.inbox-ask h3{font-size:13px;font-weight:600;margin:12px 0 4px}' +
   '.inbox-unread{display:none;position:absolute;top:4px;right:3px;width:6px;height:6px;border-radius:50%;background:var(--so-signal)}' +
   '@media (max-width:760px){.inbox-tabs{display:flex;width:100%}.inbox-tabs a{flex:1;justify-content:center;min-height:44px;padding:0 6px}.inbox-unread{display:block}}';
 const WORKSPACE_STYLE = styleAsset(STYLE + INBOX_TABS_CSS + APPROVAL_RULES_CSS + SPEND_CSS + RETENTION_CSS + STORAGE_CSS + UPDATES_CSS + LIMITS_CSS + MONITORING_CSS + INTEGRATIONS_CSS + BACKUP_CSS + EXPORT_CSS + PROJECT_DELETE_CSS + POLICY_CSS + EVIDENCE_PACK_CSS + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KITS_CSS + STARTERS_CSS + GALLERY_CSS + SSO_CSS + CREDENTIALS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + TASK_STATUS_CSS + LEAD_CONTEXT_CSS + PULL_REQUEST_SETTINGS_CSS + CHECK_SETTINGS_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
@@ -16049,13 +16347,17 @@ function inboxPage(chrome: Chrome, data: {
     rows.map(one => `<p class="row"><a href="${taskHref(one.taskId)}">${escape(one.title)}</a>${chip(one.repo)} <span class="meta">${escape(one.detail)}</span></p>`).join("\n");
   const ready = (data.ready ?? []).length === 0 ? "" : `<h2>ready to review</h2>` + listRows(data.ready ?? []);
   const running = (data.running ?? []).length === 0 ? "" : `<h2>running now</h2>` + listRows(data.running ?? []);
-  const counts: Record<InboxTab, number> = {
-    "needs-you": data.decisions.length + data.approvals.length + data.requeueables.length + data.cancelledBlockers.length + data.gaps.length,
+  const asks = { decide: data.decisions.length + data.approvals.length, unblock: data.requeueables.length + data.cancelledBlockers.length + data.gaps.length };
+  const counts: Record<InboxTab, number> & typeof asks = { ...asks,
+    "needs-you": asks.decide + asks.unblock,
     ready: data.needsVerification.length + (data.ready ?? []).length,
     running: (data.running ?? []).length,
     all: 0,
   };
   counts.all = counts["needs-you"] + counts.ready + counts.running;
+  // Each ask is a small heading with its count over its sections (their own headings one step down).
+  const askGroup = (ask: Ask, count: number, sections: string[]): string => count === 0 ? ""
+    : `<section class="inbox-ask" data-ask="${ask}"><h2>${ASK_LABEL[ask]} <span class="count">${count}</span></h2>${sections.join("").replace(/<(\/?)h2>/g, "<$1h3>")}</section>`;
   const tabs = data.tab === undefined ? "" : `<nav class="inbox-tabs" aria-label="Inbox views">` + INBOX_TABS.map(one =>
     `<a href="/inbox?tab=${one.id}"${one.id === tab ? ` aria-current="page"` : ""} data-inbox-tab="${one.id}">${one.label}` +
     `<span class="inbox-tab-count${one.id === "needs-you" && counts[one.id] > 0 ? " inbox-tab-count--needs" : ""}">${counts[one.id]}</span>` +
@@ -16070,14 +16372,11 @@ function inboxPage(chrome: Chrome, data: {
     wizard,
     empty || !shows("needs-you") ? "" : `<p><a class="new-task" style="display:inline-block" href="/next">clear the queue \u2192 one thing at a time</a></p>`,
     empty && data.wizard === null && shows("needs-you") && counts.all === 0 ? `<div class="card"><p><strong>Nothing needs you.</strong></p><p class="meta">The queue is either working or waiting on its own timers. <a href="/board">Watch the board</a> or <a href="/activity">read the activity report</a>.</p></div>` : tabEmpty,
-    shows("needs-you") ? decisions : "",
-    shows("needs-you") ? approvals : "",
-    shows("needs-you") ? requeueables : "",
-    shows("ready") ? needsVerification : "",
-    shows("ready") ? ready : "",
+    // What waits on a person, grouped by what it asks: Decide, then Review, then Unblock.
+    shows("needs-you") ? askGroup("decide", counts.decide, [approvals, decisions]) : "",
+    shows("ready") ? askGroup("review", counts.ready, [needsVerification, ready]) : "",
+    shows("needs-you") ? askGroup("unblock", counts.unblock, [requeueables, cancelled, gaps]) : "",
     shows("running") ? running : "",
-    shows("needs-you") ? cancelled : "",
-    shows("needs-you") ? gaps : "",
     data.rollup
       ? `<p class="meta">requirement gaps are checked one project at a time \u2014 open a project to see and fill its gaps · <a href="/projects">open a project</a></p>`
       : "",
@@ -16651,6 +16950,8 @@ type TaskChatFocus = {
     raceTerms: TournamentTerms | null;
     revision: RevisionView | null;
     coordinator: { label: string; filedAgo: string | null } | null;
+    /** The repair chain row when this task is a machine-drafted repair. */
+    repairChain: RepairChainRow | null;
   } | null;
   decisions: (Decision & { taskId: string; repo: string | null })[];
   publication: Publication | null;
@@ -16886,78 +17187,32 @@ function taskChatApproval(focus: TaskChatFocus, csrf: string): string {
   if (approval.nonce === "") {
     return `<section class="card chat-action-card" id="task-chat-action"><span class="eyebrow">approval needs attention</span><h2>The agent setup isn’t ready yet</h2>${profileWords(scope)}<a class="button-link" href="${taskHref(focus.id)}#scope">Fix the agent setup →</a></section>`;
   }
-  const profile = scope.profile ?? null;
-  const permission =
-    profile === null
-      ? null
-      : profile.provider === "claude"
-        ? profile.permissionArgv === "bypassPermissions" ? "Full access" : "Auto permissions"
-        : profile.provider === "gemini"
-          ? profile.approvalArgv === "yolo" ? "Full access" : "Auto permissions"
-          : profile.sandboxMode === "danger-full-access" ? "Full access" : "Workspace sandbox";
-  const revision = approval.revision === null
-    ? ""
-    : `<div class="chat-approval-section"><span class="approval-label">${approval.revision.kind === "ci-repair" ? "CI repair" : approval.revision.kind === "criterion-repair" ? "criterion repair" : "revision notes"}</span>` +
-      (approval.revision.comments.length === 0 ? "" : `<ul class="recap">${approval.revision.comments.map(one => `<li>${one.path === null ? "" : `<span class="mono">${escape(one.path)}${one.line === null ? "" : `:${one.line}`}</span> · `}${escape(one.note)} <span class="meta">— ${escape(one.author)}</span></li>`).join("")}</ul>`) +
-      // The link back (package 3): the original result stays on record
-      // and one tap away from the revision it produced, in both directions.
-      `<p class="meta"><a href="${escape(chatResultHref(focus.id, approval.revision.sourceRun))}" data-revision-source>Original result: build #${approval.revision.sourceRun} →</a></p>` +
-      revisionLineageHtml(approval.revision.lineage) +
-      `</div>`;
-  const race = approval.raceTerms === null
-    ? ""
-    : `<div class="chat-approval-section"><span class="approval-label">${approval.raceTerms.kind === "comparison" ? "comparison" : "tournament"}</span>` +
-      `<p>${approval.raceTerms.agents.length} agents build independently: ${approval.raceTerms.agents.map(one => `<span class="mono">${escape(one.provider)} · ${escape(one.model)}</span>`).join(" vs ")}.</p>` +
-      (approval.raceTerms.kind === "comparison"
-        ? `<p class="meta">No dollar caps; every result and its evidence is kept for you to compare.</p>`
-        : `<p class="meta">$${(approval.raceTerms.perAgentBudgetMicrousd / 1_000_000).toFixed(2)} per agent plus $${(approval.raceTerms.overrunReserveMicrousd / 1_000_000).toFixed(2)} reserve; $${(approval.raceTerms.totalBudgetMicrousd / 1_000_000).toFixed(2)} total.</p>`) +
-      `</div>`;
-  // The concise plan (package 2, revised on the operator's screenshot
-  // feedback and AGENTS.md): a short title, the outcome in one bounded
-  // line, one compact line of counts and limits, and ONE Review plan
-  // action — no eyebrow, no second sentence saying the same thing, no
-  // footer. Every word is a signed fact the exact terms below restate in
-  // full; the password and approval instructions live inside the
-  // expanded review, where Approve & start is the only submit.
-  const plan = approval.planDocument === null ? null : parseExecutionPlanDocument(approval.planDocument);
-  const milestones = plan !== null && plan.ok ? plan.document.milestones : [];
-  const count = (n: number, singular: string): string => `${n} ${singular}${n === 1 ? "" : "s"}`;
-  const facts: string[] = [
-    milestones.length > 0 ? count(milestones.length, "step") : count(scope.touches.length, "path"),
-    count(scope.acceptance.length, "check"),
-  ];
-  if (approval.deliverable === "report") facts.push("Report only");
-  if (scope.budgetMicrousd !== null) facts.push(`$${(scope.budgetMicrousd / 1_000_000).toFixed(2)} attempt cap`);
-  if (permission !== null) facts.push(permission);
-  if (approval.raceTerms !== null) facts.push(`${approval.raceTerms.agents.length}-agent ${approval.raceTerms.kind}`);
+  // The same sheet as the task page (approval critique, Oct 2): the plan
+  // open in plain rows, one Approve & start, the rest in Details.
   return (
     `<section class="card chat-action-card chat-plan" id="task-chat-action" data-approval="${escape(approval.digest)}">` +
-    `<p class="chat-plan-outcome">${escape(oneLineOf(scope.goal, 200))}</p>` +
-    `<p class="chat-plan-facts">${facts.map(escape).join(" · ")}</p>` +
-    `<details class="chat-approval">` +
-    `<summary data-primary-action><span class="button-link">Approve plan</span></summary>` +
-    `<form method="post" action="${taskHref(focus.executionId)}/approve" class="chat-approval-form approve-form">` +
-    `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
-    `<input type="hidden" name="nonce" value="${escape(approval.nonce)}">` +
-    `<input type="hidden" name="digest" value="${escape(approval.digest)}">` +
-    `<input type="hidden" name="return" value="${escape(returnTo)}">` +
-    `<input type="text" name="username" autocomplete="username" class="visually-hidden" tabindex="-1" aria-hidden="true">` +
-    `<p class="meta chat-approval-lead">These are the exact terms. Nothing builds until your password approves them.${approval.coordinator === null ? "" : ` Filed by <span class="mono">${escape(approval.coordinator.label)}</span>${approval.coordinator.filedAgo === null ? "" : ` · ${escape(approval.coordinator.filedAgo)}`}.`}</p>` +
-    (approval.planDocument === null ? "" : `<div class="chat-approval-section"><span class="approval-label">proposed plan</span>${executionPlanHtml(approval.planDocument, true)}${planContractHtml(approval.planContract, "ceremony")}</div>`) +
-    (approval.deliverable === "report" ? `<p class="meta"><span class="badge">report only</span> This investigates and reports back without changing the repository.</p>` : "") +
-    `<div class="chat-approval-section"><span class="approval-label">goal</span><p class="approval-goal">${escape(scope.goal)}</p></div>` +
-    `<div class="approval-boundaries"><div class="approval-boundary"><p class="approval-label">not this</p><p>${scope.outOfScope === null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p></div>` +
-    `<div class="approval-boundary"><p class="approval-label">may touch</p>${approvalPathsHtml(scope.touches)}</div></div>` +
-    acceptanceCeremonyHtml(scope.acceptance) + revision + race +
-    `<div class="approval-chips"><span class="approval-chip">quality · <strong>${escape(qualityModeTitle(scope.qualityMode ?? "default"))}</strong></span>` +
-    (permission === null ? "" : `<span class="approval-chip">${escape(permission)}</span>`) +
-    (scope.budgetMicrousd === null ? "" : `<span class="approval-chip">$${(scope.budgetMicrousd / 1_000_000).toFixed(2)} attempt cap</span>`) +
-    (focus.route === null || focus.route.projection === null ? "" : `<span class="approval-chip">${escape(riskTitle(focus.route.riskLevel))} · ${escape(focus.route.projection.postureWords)}</span>`) +
-    `</div>` +
-    agentsCeremonyHtml(focus.route) +
-    runtimeDetailsHtml(scope) +
-    `<div class="approval-confirm"><label>Your password <span class="meta">— confirms this exact scope</span><input type="password" name="token" autocomplete="current-password" placeholder="Password"></label>` +
-    `<button type="submit">Approve & start</button></div></form></details></section>`
+    approvalSheetHtml({
+      surface: "chat",
+      action: `${taskHref(focus.executionId)}/approve`,
+      csrf,
+      nonce: approval.nonce,
+      digest: approval.digest,
+      returnTo,
+      scope,
+      planDocument: approval.planDocument,
+      planContract: approval.planDocument === null ? null : approval.planContract,
+      revision: approval.revision,
+      revisionSourceHref: approval.revision === null ? "" : chatResultHref(focus.id, approval.revision.sourceRun),
+      repairChain: approval.repairChain,
+      raceTerms: approval.raceTerms,
+      route: focus.route,
+      coordinator: approval.coordinator,
+      deliverable: approval.deliverable,
+      editHref: `${taskHref(focus.id)}#${approval.planDocument === null ? "scope" : "plan-edit"}`,
+      notNowHref: "/chat",
+      sticky: false,
+    }) +
+    `</section>`
   );
 }
 
@@ -18635,6 +18890,8 @@ function workDiagnosticsHtml(diagnostics: WorkStatus["diagnostics"]): string {
   return (diagnostics ?? []).map(one => `<p class="work-detail" data-work-diagnostic="${escape(one.token)}"><strong>${escape(one.label)}</strong> · ${escape(one.detail)}</p>`).join("");
 }
 
+const TASK_GROUP_LABEL: Readonly<Record<WorkIndexGroup, string>> = { ...ASK_LABEL, building: 'Building', rest: 'Recent' };
+
 function workPage(
   chrome: Chrome,
   data: { view: WorkView; projectFilter?: string; work: WorkIndexPage; previous: boolean; multiProject: boolean; now: Date; limits?: BrowserLimits | null },
@@ -18679,6 +18936,10 @@ function workPage(
   const view: BrowserTasksView = {
     kind: 'tasks',
     tabs: WORK_VIEWS.map(one => ({ label: one.label, href: href(one.key), count: data.work.totals[one.key], active: one.key === data.view })),
+    needsYou: data.work.totals['needs-you'],
+    groups: data.view !== 'all' && data.view !== 'needs-you' ? null
+      : ([...ASKS, ...(data.view === 'all' ? ['building', 'rest'] as const : [])] as WorkIndexGroup[])
+        .map(key => ({ key, label: TASK_GROUP_LABEL[key], count: data.work.groups[key] })).filter(one => one.count > 0),
     rows: data.work.items.map(row => {
       const target = row.primaryAction?.target;
       const actionHref = row.primaryAction?.code === 'open-result' && target?.runId != null
@@ -18690,6 +18951,7 @@ function workPage(
         project: data.multiProject || row.repo === null ? (row.repo === null ? 'Unplaced' : projectName(row.repo)) : null,
         age: relativeAge(row.updatedAt, data.now),
         status: { label: row.status.label, tone: row.status.tone, token: row.status.token },
+        ask: row.ask, group: row.ask ?? (row.status.rank === 1 ? 'building' : 'rest'),
         action: actionHref === null || row.primaryAction === null ? null : { label: row.primaryAction.label, href: actionHref },
         detail: needsYouDetail ? row.status.detail : null,
         problem: row.familyProblem,
@@ -21101,6 +21363,10 @@ function taskBodyParts(data: {
       : approval.approved
         ? "approved"
         : "review before starting";
+  // While the approval sheet is open it states any amendment; the plan
+  // card does not repeat it (one #contract-amendment on the page).
+  const sheetStatesContract = scope !== null && !approval.approved && data.plan === "drafted" && data.dispatch?.action !== "repair-dependency" &&
+    !(data.revision != null && "problem" in data.revision) && scope.profileState !== "unresolved" && consentDoorOf(scope, data.route).open;
   const planCard =
     data.planDocument === null
       ? data.plan === "requested"
@@ -21115,10 +21381,10 @@ function taskBodyParts(data: {
         (approval.approved ? `<p class="meta">The agent can adapt this route when evidence changes; your approved outcome stays fixed.</p>` : "") +
         `</div><span class="plan-lock">${planStanding}</span>${approval.approved ? `</summary><div class="planner-plan-body">` : `</div>`}` +
         executionPlanHtml(displayedPlanDocument ?? data.planDocument) +
-        (approval.approved ? "" : planContractHtml(data.planContract ?? null, "full")) +
+        (approval.approved || sheetStatesContract ? "" : planContractHtml(data.planContract ?? null, "full")) +
         (data.csrf === "" || data.planSha == null || approval.approved
           ? ""
-          : `<details class="plan-editor"><summary>Edit plan</summary><form method="post" action="${taskHref(task.id)}/plan-edit">` +
+          : `<details class="plan-editor" id="plan-edit"><summary>Edit plan</summary><form method="post" action="${taskHref(task.id)}/plan-edit">` +
             `<input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="saw-plan" value="${escape(data.planSha)}">` +
             `<label>plan details <span class="meta">Keep the five headings. Approval locks this version for the build.</span>` +
             `<textarea name="plan-document" rows="14">${escape(data.planDocument)}</textarea></label>` +
@@ -21152,21 +21418,10 @@ function taskBodyParts(data: {
   // The approval form restates every field the digest binds — an operator
   // approves what is on this form, not what is elsewhere on the page — and
   // requires the token typed again. The session got you here; only the
-  // token agrees.
-  // The ceremony is the page's first card when a scope waits for its yes
-  // (task page pass): it states the wait, restates every term the digest
-  // binds, and puts the approve act above the fold — the consent-sheet
-  // shape. An unapprovable scope gets the problem and the edit road
-  // instead of a password it cannot use.
-  const approvalProfile = scope?.profile ?? null;
-  const approvalPermission =
-    approvalProfile === null
-      ? null
-      : approvalProfile.provider === "claude"
-        ? approvalProfile.permissionArgv === "bypassPermissions" ? "Full access" : "Auto permissions"
-        : approvalProfile.provider === "gemini"
-          ? approvalProfile.approvalArgv === "yolo" ? "Full access" : "Auto permissions"
-          : approvalProfile.sandboxMode === "danger-full-access" ? "Full access" : "Workspace sandbox";
+  // token agrees. The sheet shows the plan open in plain rows with one
+  // Approve & start; the rest of the signed terms sit in its Details fold.
+  // An unapprovable scope gets the problem and the edit road instead of a
+  // password it cannot use.
   const consentDoor = consentDoorOf(scope, data.route);
   const revisionInApproval = scope !== null && !approval.approved && data.plan !== "requested" &&
     scope.profileState !== "unresolved" && consentDoor.open && data.dispatch?.action !== "repair-dependency" &&
@@ -21182,79 +21437,27 @@ function taskBodyParts(data: {
             `<p class="ceremony-road"><a class="button-link" href="#scope">edit the scope to fix it →</a></p></div>`
         : !consentDoor.open
           ? consentClosedHtml(task.id, consentDoor, "task")
-        : [
-          `<form method="post" action="${taskHref(task.id)}/approve" class="card approve-form approval-card" id="approve">`,
-          `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
-          `<input type="hidden" name="nonce" value="${escape(data.nonce)}">`,
-          `<input type="hidden" name="digest" value="${escape(data.approvalDigest ?? scope.digest)}">`,
-          `<input type="text" name="username" autocomplete="username" class="visually-hidden" tabindex="-1" aria-hidden="true">`,
-          `<div class="ceremony-head"><span class="approval-title"><strong>approve exactly this:</strong></span><a href="#scope">Edit details</a></div>`,
-          // No duplicate summary card or skip-ahead approval action.
-          // Every signed term still follows, before password confirmation.
-          `<p class="meta approval-orient" data-approval-orient>Nothing starts until you approve.</p>`,
-          `<div class="approval-terms" id="approval-terms">`,
-          // The deliverable INSIDE the ceremony (mate arc §10): a yes on a
-          // scout task authorizes a read-only session and a report, never
-          // a branch — said where the signature is given.
-          data.deliverable === "report"
-            ? `<p class="meta"><span class="badge">scout</span> approving sends a read-only session to investigate this goal and deliver a report — no branch, nothing changes in the repository</p>`
-            : "",
-          // The filer INSIDE the ceremony (MCP spec v6): a coordinator's
-          // request is signed knowing whose it is — and until this
-          // signature, nothing plans, claims, or runs it.
-          data.coordinator === null || data.coordinator === undefined
-            ? ""
-            : `<p class="meta">filed by <span class="mono">${escape(data.coordinator.label)}</span>${data.coordinator.filedAgo === null ? "" : ` \u00b7 ${escape(data.coordinator.filedAgo)}`} — an agent asked for this; nothing plans, claims, or runs until you sign, and your signature runs THEIR request</p>`,
-          `<p class="approval-label">goal</p><p class="approval-goal">${escape(scope.goal)}</p>`,
-          scope.candidate ? `<p class="approval-label">Saved commit</p><p style="overflow-wrap:anywhere"><code>${escape(scope.candidate)}</code></p>` : "",
-          revisionCard,
-          `<div class="approval-boundaries">`,
-          `<div class="approval-boundary"><p class="approval-label">not this</p><p>${scope.outOfScope === null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p></div>`,
-          `<div class="approval-boundary"><p class="approval-label">touches</p>${approvalPathsHtml(scope.touches)}</div>`,
-          `</div>`,
-          acceptanceCeremonyHtml(scope.acceptance),
-          // The contract amendment INSIDE the ceremony (contract handoff,
-          // task 1): what the yes accepts that the operator did not file.
-          data.plan === "drafted" ? planContractHtml(data.planContract ?? null, "ceremony") : "",
-          `</div>`,
-          `<div class="approval-chips"><span class="approval-chip">quality · <strong>${escape(qualityModeTitle(scope.qualityMode ?? "default"))}</strong></span>` +
-            (approvalPermission === null ? "" : `<span class="approval-chip">${escape(approvalPermission)}</span>`) +
-            `</div>`,
-          // The revision feedback above includes its lineage: the source,
-          // carried terms, re-resolved terms, and grants that never inherit.
-          // The AGENTS inside the ceremony (v47/v48): who plans, builds,
-          // repairs, and reviews, and why — said where the yes is given, in
-          // the same block chat and /next show. Availability is volatile and
-          // stays outside these terms; the runtime limits the profile seals
-          // are one tap away, never in the way.
-          agentsCeremonyHtml(data.route),
-          runtimeDetailsHtml(scope),
-          scope.budgetMicrousd === null
-            ? ""
-            : `<p class="meta">each build attempt has a $${(scope.budgetMicrousd / 1_000_000).toFixed(2)} agent-reported usage cap — on a subscription this is a work limiter, not an API charge</p>`,
-          // One yes covers BOTH documents (finding 31): the race terms are
-          // restated on the same card the password signs, or they are not
-          // approved at all.
-          data.raceTerms === null || data.raceTerms === undefined
-            ? ""
-            : data.raceTerms.kind === "comparison"
-              ? `<p><strong>and this comparison:</strong></p>` +
-                `<p class="recap" style="margin-top:0">${data.raceTerms.n} agents build this independently — ` +
-                `${data.raceTerms.agents.map(agent => `${escape(agent.provider)} · ${escape(agent.model)}`).join("  vs  ")}. ` +
-                `No dollar caps exist on a comparison — each agent runs until it finishes or stops making progress; ` +
-                `spend lands measured only where the harness reports dollars (` +
-                `${data.raceTerms.agents.filter(agent => agent.provider === "claude").length} of ${data.raceTerms.n} lanes here). ` +
-                `You will compare the results and pick one.</p>`
-              : `<p><strong>and this tournament:</strong></p>` +
-                `<p class="recap" style="margin-top:0">${data.raceTerms.n} agents build this independently — ` +
-                `${data.raceTerms.agents.map(agent => `${escape(agent.provider)} · ${escape(agent.model)}`).join("  vs  ")}. ` +
-                `Each may spend $${(data.raceTerms.perAgentBudgetMicrousd / 1_000_000).toFixed(2)} plus a ` +
-                `$${(data.raceTerms.overrunReserveMicrousd / 1_000_000).toFixed(2)} overrun reserve; the whole tournament is capped at ` +
-                `$${(data.raceTerms.totalBudgetMicrousd / 1_000_000).toFixed(2)}. You will compare the results and pick one.</p>`,
-          `<div class="approval-confirm" id="approval-confirm"><label>Your password <span class="meta">— confirms exactly the terms above</span><input type="password" name="token" autocomplete="current-password" placeholder="Password"></label>`,
-          `<div class="sticky-actions"><button type="submit">${data.raceTerms === null || data.raceTerms === undefined ? "Approve & start" : data.raceTerms.kind === "comparison" ? "Approve comparison" : "Approve tournament"}</button></div></div>`,
-          `</form>`,
-        ].join("\n");
+        : approvalSheetHtml({
+          surface: "task",
+          action: `${taskHref(task.id)}/approve`,
+          csrf: data.csrf,
+          nonce: data.nonce,
+          digest: data.approvalDigest ?? scope.digest,
+          returnTo: null,
+          scope,
+          planDocument: data.plan === "drafted" ? data.planDocument : null,
+          planContract: data.plan === "drafted" ? data.planContract ?? null : null,
+          revision: data.revision == null || "problem" in data.revision ? null : data.revision,
+          revisionSourceHref: data.revision == null || "problem" in data.revision ? "" : `/r/${data.revision.sourceRun}`,
+          repairChain: data.repairChain ?? null,
+          raceTerms: data.raceTerms ?? null,
+          route: data.route,
+          coordinator: data.coordinator ?? null,
+          deliverable: data.deliverable ?? "branch",
+          editHref: data.csrf !== "" && data.planSha != null && data.planDocument !== null ? "#plan-edit" : "#scope",
+          notNowHref: "/work",
+          sticky: data.dispatch?.action === "approve-scope",
+        });
 
   // The attended road (Phase 2E): beside the approval, never replacing it.
   // The mint button leads to the CONFIRM screen where every term renders
@@ -21834,7 +22037,7 @@ function taskBodyParts(data: {
           `<p class="meta"><strong>Plan first</strong> drafts it from the repository, or <a href="#scope">write it yourself</a>.</p></div>`
       : "";
   const approvalHtml = dependencyChoiceNeeded || approveForm === "" ? "" : data.dispatch?.action === "approve-scope"
-    ? `<details class="task-plan-review"><summary data-primary-action><span class="button-link">Approve plan</span></summary>${approveForm}</details>`
+    ? `<section class="task-plan-review" aria-label="Approve the plan">${approveForm}</section>`
     : `<details class="task-secondary-approval"><summary>Updated approval terms</summary>${approveForm}</details>`;
   const optionsHtml = `${identity}${dispatchStatus}${dependencyChoiceNeeded ? "" : actsBar}`;
   const optionsOpen = data.assignment?.primaryAction?.code === "unhold" || data.assignment?.primaryAction?.code === "retry-task";
@@ -22652,7 +22855,7 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
     taskHref: taskHref(view.taskId), chatHref: taskChatHref(view.taskId),
     status: { label: status.label, tone: status.tone, token: status.token },
     problem: view.detail === null ? view.historyProblem : null,
-    next: reviewNextActionOf(view, csrf), complete: null, checks: null, intent: intentView, noRun: null, panel: null, contest: "",
+    next: reviewNextActionOf(view, csrf), complete: null, decision: null, checks: null, intent: intentView, noRun: null, panel: null, contest: "",
     notes: view.notes.map(one => ({ author: one.author, at: one.createdAt, note: one.note })),
   };
 
@@ -22695,6 +22898,17 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
   const complete = assignment?.state === "ready-to-check" && assignment.receipt !== null && canRetryReview && csrf !== ""
     ? { action: `${taskHref(view.taskId)}/complete`, receipt: assignment.receipt.digest, run: run.id } : null;
   if (complete !== null) parts.push(completionForm(view.taskId, run.id, complete.receipt, csrf, view.detail?.pullRequestTo ?? null));
+  // The one decision, after the evidence: Accept only when every requirement is met and the checks passed.
+  const acceptsHere = complete !== null || panel.panel.need?.accept != null;
+  const matrix = proof === null || proof.proofProblem !== null ? [] : proof.matrix;
+  const decision = !acceptsHere ? null : { sentence: RESULT_DECISION_SENTENCE, ...acceptWordsOf({
+    checks: checks === undefined ? null : checks.running != null ? "running" : checks.level === "off" && checks.status !== "passed" ? "off" : checks.status,
+    unmet: matrix.filter(row => row.state !== "pass" && row.state !== "manual-review").length,
+    yours: complete === null || accepted ? 0 : panel.panel.youCheck?.lines.length ?? 0,
+    action: complete !== null ? "complete" : "accept",
+    publishing: view.detail?.publishing ?? "other",
+    proof: proof !== null && proof.proof !== null && proof.proofProblem === null,
+  }) };
 
   if (view.notes.length > 0) {
     parts.push(
@@ -22707,7 +22921,7 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
   return {
     html: `<section class="cockpit-detail">${parts.join("\n")}</section>`,
     selected: {
-      ...selected, complete, panel: panel.panel, contest,
+      ...selected, complete, decision, panel: panel.panel, contest,
       checks: checks === undefined ? null : { detail: checks.detail, problem: checks.status === "failed" || checks.status === "unavailable", logHref: checks.logArtifactId === null ? null : `/r/${run.id}/evidence/${checks.logArtifactId}` },
     },
   };
@@ -23814,6 +24028,8 @@ const chatResultHref = (taskId: string, runId: number, tab: ResultTab = "summary
 type ResultDetail = {
   /** Where "Complete and open a pull request" opens one; null when only "Mark complete" is offered. */
   pullRequestTo?: string | null;
+  /** Where publishing stands: a pull request can be opened, publishing isn't set up, or neither said. Accept never publishes. */
+  publishing?: "pull-request" | "off" | "other";
   learning?: string;
   skillTest?: boolean;
   rootId?: string;
@@ -23974,6 +24190,7 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
   const acceptable = personChecks.length > 0 && humanReview && o.csrf !== "" && (current != null || detail.assignment == null);
   const youCheck: BrowserResultPanel["youCheck"] = personChecks.length === 0 ? null : {
     lines: [...new Set(personChecks)],
+    items: personCheckItems(proof!, patchOk ? patch.text : null, shown, runId),
     accept: acceptable && need?.accept == null ? { action: `${taskHref(detail.taskId)}/accept-proof`, run: run.id, returnTo: o.returnTo } : null,
   };
   const youCheckHtml = youCheck === null ? "" :
@@ -24295,6 +24512,38 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
     requestQuiet: detail.canAnnotate && o.csrf !== "" && detail.comments.length === 0 && (detail.pastComments?.length ?? 0) === 0 && detail.revisions.length === 0,
   };
   return { html, panel };
+}
+
+/** Changed lines shown beside one "You check this one" item: at most this many per file, three files. */
+const CHECK_EXCERPT_LINES = 12;
+
+/** Each requirement only a person can confirm, with the evidence to judge
+ * it by, inline: the changed lines in the files it cites (citing none, the
+ * change's first file, labelled as not cited), the screenshots it cites
+ * (none cited: every validated one), and the agent's own note. */
+function personCheckItems(proof: ProofBundleView, patchText: string | null, shots: readonly ResultScreenshot[], runId: number): BrowserCheckItem[] {
+  const rows = proof.matrix.filter(row => row.state === "manual-review");
+  if (rows.length === 0) return proof.reasons.some(reason => manualReviewCriterionOf(reason) !== null)
+    ? [{ id: "you-check", statement: "", words: personCheckWords(null), note: null, excerpts: [], shots: [] }] : [];
+  const diff = patchText === null ? null : parseReviewDiff(patchText);
+  const excerptOf = (file: ReviewDiffFile, cited: boolean): BrowserCheckItem["excerpts"][number] => {
+    const changed = file.hunks.flatMap(hunk => hunk.lines).filter((line): line is ReviewDiffLine & { kind: "addition" | "deletion" } => line.kind === "addition" || line.kind === "deletion");
+    return { path: file.path, cited, lines: changed.slice(0, CHECK_EXCERPT_LINES).map(line => ({ kind: line.kind, line: line.newLine ?? line.oldLine, text: line.text })), more: Math.max(0, changed.length - CHECK_EXCERPT_LINES) };
+  };
+  return rows.map(row => {
+    const refs = row.answered ?? [];
+    const paths = refs.filter(one => one.kind === "changed-path").map(one => one.ref);
+    const files = diff === null ? [] : paths.length > 0 ? diff.files.filter(file => paths.includes(file.path)).map(file => excerptOf(file, true))
+      : diff.files.slice(0, 1).map(file => excerptOf(file, false));
+    const cited = refs.filter(one => one.kind === "screenshot").map(one => one.ref);
+    const pictures = cited.length > 0 ? shots.filter(shot => cited.includes(shot.path)) : shots;
+    const notes = refs.filter(one => one.kind === "manual-review").map(one => one.ref.trim()).filter(one => one !== "");
+    return {
+      id: row.id, statement: row.statement, words: personCheckWords(row.statement), note: notes.length === 0 ? null : notes.join(" "),
+      excerpts: files.filter(one => one.lines.length > 0).slice(0, 3),
+      shots: pictures.slice(0, 4).map(shot => ({ src: `/r/${runId}/evidence/${shot.artifactId}`, href: `/r/${runId}/evidence/${shot.artifactId}`, caption: shot.caption })),
+    };
+  });
 }
 
 /** A Needs you result's one action (needs-you.ts): a link to the act that resolves it, or Confirm it

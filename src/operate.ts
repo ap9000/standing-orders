@@ -107,6 +107,7 @@ import { pushPass } from "./push.js";
 import { chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, openSync, readFileSync, readSync, realpathSync, renameSync, unlinkSync, writeSync, writeFileSync, mkdirSync } from "node:fs";
 import { BRANCH_PREFIX, envTwins, envValue, existingOrFirst, namedPath, taskBranches } from "./names.js";
 import { claimActor, currentActor, parseLeadToken, withActor, type Actor } from "./actor.js";
+import { leadClaim, leadSay, noteLeadWork } from "./lead-voice.js";
 import { createServer as createNetServer } from "node:net";
 import { spawn as spawnChild } from "node:child_process";
 import { envelopeJson } from "./envelope.js";
@@ -826,6 +827,8 @@ export const OPERATE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "replaced-by", "replaces",
   // Check levels: a project's level, the quick command, a task's choice.
   "quick", "level", "checks",
+  // lead say: the task the lead's words are about.
+  "task",
 ]);
 export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "json", "yes", "all", "local", "history", "latest-watch", "dry-run", "file", "allow-paid-fallback",
@@ -1233,6 +1236,8 @@ async function dispatch(
       if (positional[0] === "concurrency") return projectConcurrencyCommand(positional, flags, context);
       return runProjectCommand(positional, flags, context);
     case "assignment":
+      // The person's own lead (its lead token) claims as the lead; coordinator credentials keep their own path.
+      if (positional[0] === "claim" && currentActor()?.lead === true && !flags.has("token-env") && !flags.has("token-file")) return leadClaimCommand(positional, flags, context);
       return runAssignmentCommand(positional, flags, context);
     case "knowledge":
       return runKnowledgeCommand(positional, flags, { ...context, now: context.clock() });
@@ -8237,6 +8242,9 @@ function startTelegramFollower(args: {
   });
 }
 
+/** How long a stopping service waits for the aborted Telegram follower. */
+const TELEGRAM_STOP_WAIT_MS = 5_000;
+
 let staleStatusesRepaired = false;
 
 async function runWatchLoop(args: {
@@ -9461,6 +9469,10 @@ async function upCommand(
     stopping = true;
     resolveStopped();
     for (const controller of followControllers) controller.abort();
+    // The coding owner record is released first, whatever else is still
+    // finishing: launchd kills a service that outlasts its exit window, and a
+    // killed process cannot release it. Its outcome is read again at close.
+    console_.server.closeCoding().catch(() => {});
     const building = store.liveClaimCount(runnerName, clock());
     if (building > 0) {
       progress(`Stopping: ${building} build(s) running. Waiting up to ${Math.round(stopGraceMs / 1000)}s for them to finish; any still running then is saved and resumes when the builder starts again.`);
@@ -9567,7 +9579,9 @@ async function upCommand(
     const pause = (ms: number) => new Promise<void>(resolvePause => {
       const timer = setTimeout(done, ms);
       function done(): void { clearTimeout(timer); telegramController.signal.removeEventListener("abort", done); resolvePause(); }
-      telegramController.signal.addEventListener("abort", done, { once: true });
+      // An aborted signal never fires again: without this a stop waited the whole pause.
+      if (telegramController.signal.aborted) done();
+      else telegramController.signal.addEventListener("abort", done, { once: true });
     });
     while (!stopping && !telegramController.signal.aborted) {
       const follower = startTelegramFollower({
@@ -9708,7 +9722,14 @@ async function upCommand(
   await stopped;
   await registrySupervisor;
   await Promise.all([...loopResults.values()]);
-  await telegramSupervisor;
+  // The follower was aborted with the stop. A send or a chat turn it is still
+  // finishing keeps its own durable record; the service does not wait past
+  // this for it.
+  await new Promise<void>(done => {
+    const timer = setTimeout(done, TELEGRAM_STOP_WAIT_MS);
+    const finish = (): void => { clearTimeout(timer); done(); };
+    void telegramSupervisor.then(finish, finish);
+  });
   clearInterval(runnerHeartbeat);
   if (runTimer !== undefined) clearTimeout(runTimer);
   if (graceTimer !== undefined) clearTimeout(graceTimer);
@@ -10715,7 +10736,9 @@ async function statusCommand(
     if (!allowed.has(name)) return fail(context.write, context.json, command, "usage", `--${name} is not a status option.`, EXIT.usage);
   }
   if (positional.length > 0) return fail(context.write, context.json, command, "usage", "Use `toolroll status [--json]`.", EXIT.usage);
-  const status = installationStatus(context.store, context.clock());
+  // Whose lead the status line follows: the lead's own person, else the remembered login; nobody shows no lead.
+  const viewer = currentActor()?.account ?? readLoginFile(join(dirname(context.databaseFile), UP_LOGIN_FILE))?.name ?? null;
+  const status = installationStatus(context.store, context.clock(), viewer);
   // One line, only when a newer Toolroll exists; offline or switched off says nothing.
   const current = PACKAGE_VERSION;
   const method = installMethod(context.installBin);
@@ -10864,6 +10887,25 @@ function taskCommand(
     return EXIT.ok;
   }
 
+  // The lead's work on a task it took on counts as acting on it (lead-voice.ts): its claim stays fresh.
+  const actor = currentActor();
+  if (actor?.lead === true && rest[0] !== undefined && LEAD_WORK_VERBS.has(action)) {
+    const noted = (code: number): number => { if (code === EXIT.ok) noteLeadWork(context.store, actor, rest[0]!, action, context.clock()); return code; };
+    const done = taskAction(action, rest, flags, context);
+    return typeof done === "number" ? noted(done) : done.then(noted);
+  }
+  return taskAction(action, rest, flags, context);
+}
+
+/** Task verbs that are the lead working on a task, not reading it. */
+const LEAD_WORK_VERBS: ReadonlySet<string> = new Set(["state", "steer", "reopen", "requeue", "regate", "repair", "resume", "stop", "scope", "approve", "plan", "checks", "revise", "hold", "unhold", "route", "require"]);
+
+function taskAction(
+  action: string,
+  rest: readonly string[],
+  flags: Map<string, string | true>,
+  context: Context,
+): number | Promise<number> {
   switch (action) {
     case "complete":
     case "revise":
@@ -11754,8 +11796,9 @@ function askTask(positional: readonly string[], flags: Map<string, string | true
 async function leadCommand(positional: readonly string[], flags: Map<string, string | true>, context: Context): Promise<number> {
   const { store, write, json } = context;
   const [action, ...extra] = positional;
+  if (action === "say") return leadSayCommand(extra, flags, context);
   const command = "lead token";
-  if (action !== "token" || extra.length > 0) return fail(write, json, `lead ${action ?? ""}`.trim(), "usage", "`toolroll lead token [--revoke] --as <you> --token <password>`", EXIT.usage);
+  if (action !== "token" || extra.length > 0) return fail(write, json, `lead ${action ?? ""}`.trim(), "usage", "`toolroll lead token [--revoke] --as <you> --token <password>` · `toolroll lead say \"<text>\" [--task <id>]` with the lead token", EXIT.usage);
   for (const name of flags.keys()) if (!["as", "token", "revoke", "db", "json"].includes(name)) return fail(write, json, command, "usage", `--${name} is not a lead token option.`, EXIT.usage);
   if (currentActor()?.lead === true) return fail(write, json, command, "refused", "A lead cannot mint lead tokens. The person it acts for runs this with their password.", EXIT.refused);
   const acting = await askCredentials(flags, context);
@@ -11775,6 +11818,37 @@ async function leadCommand(positional: readonly string[], flags: Map<string, str
     "Your lead passes it as --token <it> (or TOOLROLL_LEAD_TOKEN) on task and assignment commands. Its own work pings nobody;",
     "it reaches you when the lead asks you (task ask), when it fails with nothing left to try, or for a security alert.",
   ]);
+}
+
+/** `lead say "<text>" [--task <id>]` with the lead token: one short message in its person's chat from "Your lead".
+ * Several within two minutes are one message. */
+function leadSayCommand(positional: readonly string[], flags: Map<string, string | true>, context: Context): number {
+  const { store, write, json } = context;
+  const command = "lead say";
+  for (const name of flags.keys()) if (!["task", "db", "json"].includes(name)) return fail(write, json, command, "usage", `--${name} is not a lead say option.`, EXIT.usage);
+  const task = flags.get("task");
+  if (positional.length === 0 || task === true) return fail(write, json, command, "usage", "`toolroll lead say \"<what you're doing>\" [--task <id>]` with the lead token", EXIT.usage);
+  const actor = currentActor();
+  if (actor?.lead !== true) return fail(write, json, command, "unauthenticated", "Only the lead speaks as the lead: pass its lead token (--token or TOOLROLL_LEAD_TOKEN).", EXIT.refused);
+  const said = leadSay(store, actor, positional.join(" "), task ?? null, context.clock());
+  if (!said.ok) return fail(write, json, command, said.reason, said.message, said.reason === "usage" ? EXIT.usage : EXIT.refused);
+  return succeed(write, json, command, { owner: actor.account, task: task ?? null, joined: said.joined, notification: said.notification },
+    () => [said.joined ? `Added to your last message to ${actor.account}.` : `Told ${actor.account}.`]);
+}
+
+/** `assignment claim <task>` with the lead token: the task reads "Your lead is on it" and leaves Needs you until the
+ * lead completes it, hands it on (task ask), or two hours pass with no lead act on it. */
+function leadClaimCommand(positional: readonly string[], flags: Map<string, string | true>, context: Context): number {
+  const { store, write, json } = context;
+  const command = "assignment claim";
+  for (const name of flags.keys()) if (!["db", "json"].includes(name)) return fail(write, json, command, "usage", `--${name} is not an assignment claim option.`, EXIT.usage);
+  const id = positional[1];
+  if (id === undefined || positional.length !== 2) return fail(write, json, command, "usage", "assignment claim takes exactly one task id.", EXIT.usage);
+  const actor = currentActor()!;
+  const claimed = leadClaim(store, actor, id, context.clock());
+  if (!claimed.ok) return fail(write, json, command, claimed.reason, claimed.message, claimed.reason === "usage" ? EXIT.usage : EXIT.refused);
+  return succeed(write, json, command, { task: id, root: claimed.root, lead: claimed.claim },
+    () => [`${id} is yours: it reads "Your lead is on it" until you complete it, hand it on with task ask, or go two hours without acting on it.`]);
 }
 
 function blockTask(

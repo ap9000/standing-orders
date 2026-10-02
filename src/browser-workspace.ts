@@ -9,6 +9,8 @@ import type { Store } from './store.js';
 import type { WorkSummaryAccess } from './work-summary.js';
 import { workIndexPage, type WorkIndexItem, type WorkIndexPage } from './work-index.js';
 import type { StatusTone } from './workspace-ui.js';
+import type { Ask } from './needs-you.js';
+import type { WorkIndexGroup } from './work-index.js';
 import type { AssignmentCard } from './assignment-ui.js';
 import type { TaskStatus } from './task-status.js';
 import type { FirstRunStep, FirstTaskSuggestion, JourneyStep } from './first-run.js';
@@ -53,9 +55,16 @@ export type BrowserLink = { label: string; href: string };
 export type BrowserTasksView = {
   kind: 'tasks';
   tabs: (BrowserLink & { count: number; active: boolean })[];
+  /** Tasks waiting on a person in this view's scope ("3 need you" beside the title). */
+  needsYou: number;
+  /** All and Needs you list their rows in these groups, in this order (empty ones left out); null: one plain list. */
+  groups: { key: BrowserTaskGroup; label: string; count: number }[] | null;
   rows: {
     id: string; title: string; href: string; project: string | null; age: string;
     status: { label: string; tone: StatusTone; token: string };
+    /** What a Needs you row asks (its chip); null for every other row. */
+    ask: Ask | null;
+    group: BrowserTaskGroup;
     action: BrowserLink | null; detail: string | null; problem: string | null; notes: string[];
   }[];
   empty: { text: string; action: BrowserLink | null } | null;
@@ -66,6 +75,7 @@ export type BrowserTasksView = {
   limits: BrowserLimits | null;
 };
 /** One limit: a plan's usage window ("Claude · 5-hour, 48%") or a monthly budget ("shop · Budget, $4.20 of $10"). */
+export type BrowserTaskGroup = WorkIndexGroup;
 export type BrowserLimitTile = {
   key: string; name: string; window: string; value: string; unit: string; percent: number;
   detail: string; tone: 'neutral' | 'warning' | 'danger'; marks: number[]; title: string | null; href: string | null;
@@ -203,7 +213,7 @@ export type BrowserResultPanel = {
   attention: string[];
   /** Requirements only a person can confirm, in plain words, and the one
    * Accept that records the decision (null when it is not offered here). */
-  youCheck: { lines: string[]; accept: { action: string; run: number; returnTo: string } | null } | null;
+  youCheck: { lines: string[]; items: BrowserCheckItem[]; accept: { action: string; run: number; returnTo: string } | null } | null;
   /** Storage limits on saved output (shortened logs or diffs): shown on request. */
   limits: string[];
   tabs: { key: BrowserResultTab; label: string; count: string; href: string; active: boolean }[];
@@ -218,6 +228,17 @@ export type BrowserResultPanel = {
   /** The feedback section holds only the closed form (no notes, revisions or history). */
   requestQuiet: boolean;
 };
+/** One "You check this one" item and the evidence to judge it by: the
+ * changed lines it cites (or, citing none, the change's own first lines),
+ * its screenshots, and the agent's note. Wrapped text, never sideways. */
+export type BrowserCheckItem = {
+  id: string; statement: string; words: string; note: string | null;
+  excerpts: { path: string; cited: boolean; lines: { kind: "addition" | "deletion" | "context"; line: number | null; text: string }[]; more: number }[];
+  shots: { src: string; href: string; caption: string }[];
+};
+/** The result's one decision: what Accept is called, why it isn't plain
+ * Accept, and what pressing it does. */
+export type BrowserResultDecision = { label: "Accept" | "Accept without checks"; ready: boolean; why: string | null; effect: string; sentence: string };
 /** A Needs you action: a link, (Confirm it stopped) a form behind the password, (Build again) one
  * button, or (on the result itself) Accept, which records the person's acceptance; `note` asks why
  * when the evidence disagrees. */
@@ -240,6 +261,8 @@ export type BrowserResultView = {
     problem: string | null;
     next: { kind: string; title: string; detail: string; control: string } | null;
     complete: { action: string; receipt: string; run: number } | null;
+    /** Words for the result's Accept: Mark complete when offered, else the Needs you acceptance. */
+    decision: BrowserResultDecision | null;
     checks: { detail: string; problem: boolean; logHref: string | null } | null;
     /** The signed scope; null when none was filed. */
     intent: { approval: string; html: string } | null;
@@ -384,6 +407,8 @@ export type BrowserWorkspace = {
   refreshSeconds?: number;
   /** Providers whose sign-in stopped working: their work waits (one per provider). */
   signIn?: BrowserSignIn[];
+  /** A demo database: the notice that says so, scrolling with the page (`short`: its one line on a phone). */
+  demo?: { text: string; short: string };
   /** A newer Toolroll exists: a quiet notice for an operator, until they dismiss this version. */
   update?: BrowserUpdateNotice;
   /** Chat's first run, until the first Ready result: the three steps and first tasks to try. */
@@ -409,6 +434,8 @@ export type BrowserHome = {
   agents: BrowserHomeAgent[]; counts: BrowserHomeCount[];
   planUse: { name: string; window: string; percent: number; detail: string; tone: 'neutral' | 'warning' | 'danger' }[];
   catchUp: BrowserCatchUpItem[]; allHref: string;
+  /** What this person's lead is doing now and when it last acted (lead-voice.ts); its task when it named one. */
+  lead?: { doing: string; at: string; href: string | null } | null;
 };
 
 /** `sandbox`: the demo command, offered beside the sign-in command while no agent is signed in. `intro`: how it works,

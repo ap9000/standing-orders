@@ -1,12 +1,13 @@
-/** A finished result, rebuilt with shadcn/ui: its status, outcome and the
- * one or two things to do with it first, then Summary / Changes / Checks,
- * then the feedback form. The list of results sits one tap away in the
+/** A finished result, rebuilt with shadcn/ui: its status and what changed in
+ * the agent's words, then each item a person checks with its evidence, then
+ * the decision (Accept, and what accepting does), then Summary / Changes /
+ * Checks and the feedback form. The list of results sits one tap away in the
  * header instead of beside the result. Tab contents, the diff and the
  * feedback form stay the server's own HTML; the page script binds to the
  * same data attributes and ids it always has. */
 import { AlertTriangle, Check, ChevronDown, ChevronRight } from "lucide-react";
-import type { ReactNode } from "react";
-import type { BrowserResultPanel, BrowserResultView } from "../../browser-workspace.js";
+import { useState, type ReactNode } from "react";
+import type { BrowserCheckItem, BrowserResultPanel, BrowserResultView } from "../../browser-workspace.js";
 import { GuardedHtml } from "../guarded-html.js";
 import {
   Badge, Button, Card, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger, Input, cn,
@@ -63,7 +64,7 @@ function ResultsMenu({ view }: { view: BrowserResultView }) {
 }
 
 function StatusCard({ selected, csrf }: { selected: Selected; csrf: string }) {
-  const { panel, complete, checks, next } = selected;
+  const { panel, checks, next, decision } = selected;
   const status = panel?.status ?? null;
   const need = panel?.need ?? null;
   const tone = toneOf(selected.status.tone);
@@ -74,36 +75,23 @@ function StatusCard({ selected, csrf }: { selected: Selected; csrf: string }) {
           : <h2 className="flex items-center gap-2.5 text-lg font-semibold leading-snug">
               <span aria-hidden="true" className={cn("size-2.5 shrink-0 rounded-full", DOT[tone])} />{selected.status.label}
             </h2>}
-        {status !== null && <p className="mt-1.5 text-sm text-muted-foreground">{status.sentence}</p>}
+        {status !== null && <p className="mt-1.5 text-sm text-muted-foreground" data-result-sentence>{decision?.sentence ?? status.sentence}</p>}
         {panel !== null && (status !== null
           ? <p className="mt-1.5 text-sm">{panel.outcome}</p>
           : <p className="mt-1.5 text-sm"><span className="font-semibold">{panel.heading}.</span> <span className="text-muted-foreground">{panel.outcome}</span></p>)}
       </div>
-      {(complete !== null || need !== null || panel?.canRequest === true) && <div className="flex flex-wrap items-center gap-2 phone:w-full">
-        {/* Needs you: the action that resolves it leads, filled; Request changes is never alone. */}
-        {need !== null && (need.accept != null ? <form method="post" action={need.accept.action} className="flex flex-wrap items-center gap-2 phone:w-full">
-            <input type="hidden" name="csrf" value={csrf} />
-            <input type="hidden" name="run" value={String(need.accept.run)} />
-            <input type="hidden" name="return" value={need.accept.returnTo} />
-            {need.accept.note !== null && <Input type="text" name="note" maxLength={500} required aria-label={need.accept.note} placeholder={need.accept.note} className="h-9 w-56 phone:h-11 phone:w-full" />}
-            <Button type="submit" variant="attention" className="phone:w-full" data-primary-action data-accept-result><Check />{need.label}</Button>
-          </form>
-          : need.rebuild != null ? <RebuildForm action={need.rebuild.action} csrf={csrf} label={need.label} />
+      {/* Needs you without an acceptance: the action that resolves it leads, filled; Request changes is never alone.
+          An Accept waits for the decision, after the evidence. */}
+      {((need !== null && need.accept == null) || (decision === null && panel?.canRequest === true)) && <div className="flex flex-wrap items-center gap-2 phone:w-full">
+        {need !== null && need.accept == null && (need.rebuild != null ? <RebuildForm action={need.rebuild.action} csrf={csrf} label={need.label} />
           : need.confirm !== null ? <ConfirmStoppedForm form={need.confirm} csrf={csrf} label={need.label} />
           : need.href !== null && <Button asChild variant="attention" className="phone:w-full"><a href={need.href} data-primary-action data-need-action>{need.label}</a></Button>)}
-        {complete !== null && <form method="post" action={complete.action} className="phone:flex-1">
-          <input type="hidden" name="csrf" value={csrf} />
-          <input type="hidden" name="receipt" value={complete.receipt} />
-          <input type="hidden" name="run" value={String(complete.run)} />
-          <Button type="submit" className="phone:w-full"><Check />Mark complete</Button>
-        </form>}
-        {panel?.canRequest === true && <Button asChild variant="outline" className="phone:flex-1"><a href="#request-changes">Request changes</a></Button>}
+        {decision === null && panel?.canRequest === true && <Button asChild variant="outline" className="phone:flex-1"><a href="#request-changes">Request changes</a></Button>}
       </div>}
     </div>
 
     {status !== null && <StatusDetails status={status} />}
     {checks?.logHref != null && <p className="text-[13px] text-muted-foreground"><a href={checks.logHref} className="underline decoration-border underline-offset-4 hover:text-foreground">Check output</a></p>}
-    {complete !== null && <p className="text-[13px] text-muted-foreground">Marking it complete changes no checks and publishes nothing.</p>}
     {status === null && checks?.problem === true && <p className="rounded-md bg-muted px-3 py-2 text-[13px] text-foreground">{checks.detail}</p>}
     {selected.problem !== null && <p className={cn("rounded-md px-3 py-2 text-[13px]", status?.headline === "Failed" ? "bg-destructive-soft text-destructive" : "bg-muted text-foreground")}>{selected.problem}</p>}
     {status !== null && <StatusWhy status={status} />}
@@ -116,15 +104,6 @@ function StatusCard({ selected, csrf }: { selected: Selected; csrf: string }) {
       <Html html={next.control} className="so-result-next" />
     </div>}
 
-    {panel?.youCheck != null && <div className="flex flex-wrap items-center gap-3 rounded-md bg-muted px-4 py-3" data-result-you-check={panel.youCheck.lines.length}>
-      <ul className="flex min-w-0 flex-1 basis-56 flex-col gap-1 text-sm">{panel.youCheck.lines.map(one => <li key={one}>{one}</li>)}</ul>
-      {panel.youCheck.accept !== null && <form method="post" action={panel.youCheck.accept.action} className="phone:w-full">
-        <input type="hidden" name="csrf" value={csrf} />
-        <input type="hidden" name="run" value={String(panel.youCheck.accept.run)} />
-        <input type="hidden" name="return" value={panel.youCheck.accept.returnTo} />
-        <Button type="submit" className="phone:w-full" data-accept-result><Check />Accept</Button>
-      </form>}
-    </div>}
     {panel !== null && panel.attention.length > 0 && <ul className="flex flex-col gap-1.5 rounded-md bg-warning-soft px-4 py-3 text-[13px]" data-result-attention={panel.attention.length}>
       {panel.attention.map(one => <li key={one} className="flex gap-2"><AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" aria-hidden="true" /><span>{one}</span></li>)}
     </ul>}
@@ -133,6 +112,117 @@ function StatusCard({ selected, csrf }: { selected: Selected; csrf: string }) {
     </Fold>}
     {panel?.reviewHistory != null && <Fold summary="Review history"><p className="text-[13px] text-muted-foreground">{panel.reviewHistory}</p></Fold>}
     {selected.noRun !== null && <p className="text-sm text-muted-foreground">{selected.noRun} <a href={selected.taskHref} className="font-medium underline underline-offset-4">Open the task</a></p>}
+  </Card>;
+}
+
+/** Not right: the request form opens with the item quoted, ready for the why. */
+function requestChange(statement: string) {
+  const form = document.getElementById("comment-form");
+  const box = form?.querySelector<HTMLTextAreaElement>("textarea[name=note]") ?? null;
+  const shell = form?.closest("details") ?? null;
+  if (shell !== null && !shell.open) shell.open = true;
+  if (box === null) { window.location.hash = "request-changes"; return; }
+  const quote = `Not right: “${statement}” — `;
+  if (!box.value.includes(quote)) box.value = box.value.trim() === "" ? quote : `${box.value.trimEnd()}\n\n${quote}`;
+  box.dispatchEvent(new Event("input", { bubbles: true }));
+  box.scrollIntoView({ block: "center", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" });
+  box.focus();
+  box.setSelectionRange(box.value.length, box.value.length);
+}
+
+/** The changed lines an item cites, wrapped: a phone never scrolls sideways to read them. */
+function Excerpt({ excerpt, changesHref }: { excerpt: BrowserCheckItem["excerpts"][number]; changesHref: string | null }) {
+  return <figure className="overflow-hidden rounded-md border border-border" data-check-excerpt={excerpt.path}>
+    <figcaption className="flex flex-wrap items-baseline gap-x-2 border-b border-border bg-muted px-3 py-1.5 text-xs text-muted-foreground">
+      <span className="font-mono text-foreground [overflow-wrap:anywhere]">{excerpt.path}</span>
+      {!excerpt.cited && <span>first changed file</span>}
+    </figcaption>
+    <ol className="font-mono text-xs leading-relaxed">
+      {excerpt.lines.map((line, index) => <li key={index} data-kind={line.kind}
+        className={cn("grid grid-cols-[2.5rem_1rem_minmax(0,1fr)] px-1 py-0.5", line.kind === "addition" ? "bg-success-soft" : line.kind === "deletion" ? "bg-destructive-soft" : "")}>
+        <span className="select-none pr-2 text-right text-muted-foreground tabular-nums">{line.line ?? ""}</span>
+        <span aria-hidden="true" className="select-none text-muted-foreground">{line.kind === "addition" ? "+" : line.kind === "deletion" ? "−" : " "}</span>
+        <code className="whitespace-pre-wrap rounded-none bg-transparent p-0 font-mono text-xs text-foreground [overflow-wrap:anywhere]"><span className="sr-only">{line.kind === "addition" ? "Added: " : line.kind === "deletion" ? "Removed: " : ""}</span>{line.text}</code>
+      </li>)}
+    </ol>
+    {excerpt.more > 0 && <p className="border-t border-border px-3 py-1.5 text-xs text-muted-foreground">
+      {excerpt.more} more changed line{excerpt.more === 1 ? "" : "s"}{changesHref === null ? "" : <> in <a href={changesHref} data-result-goto="changes" className="underline underline-offset-4">Changes</a></>}
+    </p>}
+  </figure>;
+}
+
+/** "You check this one": each item with its evidence inline, then Looks right or Not right.
+ * Looks right on the last item records the person's acceptance (the same accept-proof as
+ * ever) when it is offered here; until then the marks are only on this page. */
+function CheckItems({ panel, csrf, chatHref }: { panel: BrowserResultPanel; csrf: string; chatHref: string }) {
+  const youCheck = panel.youCheck!;
+  const items = youCheck.items.length > 0 ? youCheck.items : youCheck.lines.map((words, index) => ({ id: `line-${index}`, statement: "", words, note: null, excerpts: [], shots: [] }));
+  const [looked, setLooked] = useState<ReadonlySet<string>>(new Set());
+  const accept = youCheck.accept;
+  const changesHref = panel.tabs.find(tab => tab.key === "changes")?.href ?? null;
+  return <Card aria-labelledby="you-check-title" data-result-you-check={items.length} className="gap-0 p-0 phone:gap-0 phone:p-0">
+    <h2 id="you-check-title" className="px-5 pb-1 pt-4 text-[15px] font-semibold phone:px-4">{items.length === 1 ? "You check this one" : `You check these ${items.length}`}</h2>
+    <ul className="divide-y divide-border">
+      {items.map(item => {
+        const done = looked.has(item.id);
+        const last = !done && items.every(one => one.id === item.id || looked.has(one.id));
+        return <li key={item.id} data-check-item={item.id} data-looks-right={done ? "1" : undefined} className="flex flex-col gap-3 px-5 py-4 phone:px-4">
+          <p className="max-w-[75ch] text-sm font-medium">{item.statement === "" ? item.words : item.statement}</p>
+          {item.note !== null && <p className="max-w-[75ch] text-[13px] text-muted-foreground">The agent says: {item.note}</p>}
+          {item.excerpts.map(one => <Excerpt key={one.path} excerpt={one} changesHref={changesHref} />)}
+          {item.shots.length > 0 && <ul className="flex flex-wrap gap-2" aria-label="Screenshots">
+            {item.shots.map(shot => <li key={shot.src}><a href={shot.href} className="block overflow-hidden rounded-md border border-border hover:border-muted-foreground" title={shot.caption}>
+              <img src={shot.src} alt={shot.caption} loading="lazy" className="h-24 w-auto max-w-[12rem] object-cover phone:h-20" />
+            </a></li>)}
+          </ul>}
+          <div className="flex flex-wrap gap-2">
+            {accept !== null && last
+              ? <Button type="submit" form="you-check-accept" variant="outline" className="min-h-11 phone:flex-1" data-looks-right data-accept-result><Check />Looks right</Button>
+              : <Button variant="outline" aria-pressed={done} className="min-h-11 aria-pressed:bg-success-soft aria-pressed:text-success phone:flex-1" data-looks-right
+                  onClick={() => setLooked(previous => { const next = new Set(previous); if (next.has(item.id)) next.delete(item.id); else next.add(item.id); return next; })}><Check />Looks right</Button>}
+            {panel.canRequest
+              ? <Button variant="ghost" className="min-h-11 phone:flex-1" data-not-right onClick={() => requestChange(item.statement === "" ? item.words : item.statement)}>Not right</Button>
+              : <Button asChild variant="ghost" className="min-h-11 phone:flex-1"><a href={chatHref} data-not-right>Not right</a></Button>}
+          </div>
+        </li>;
+      })}
+    </ul>
+    {accept !== null && <form id="you-check-accept" method="post" action={accept.action} hidden>
+      <input type="hidden" name="csrf" value={csrf} />
+      <input type="hidden" name="run" value={String(accept.run)} />
+      <input type="hidden" name="return" value={accept.returnTo} />
+    </form>}
+  </Card>;
+}
+
+/** The decision, after the evidence: Accept (ink) only when every requirement is met and the
+ * checks passed; otherwise Accept without checks (outline) and one line naming what. Under it,
+ * what pressing it does. Sticky at the bottom on a phone. */
+function Decision({ selected, csrf }: { selected: Selected; csrf: string }) {
+  const decision = selected.decision!;
+  const complete = selected.complete;
+  const accept = complete === null ? selected.panel?.need?.accept ?? null : null;
+  const canRequest = selected.panel?.canRequest === true;
+  return <Card data-result-decision={decision.ready ? "accept" : "accept-without-checks"} aria-label="Decision"
+    className="gap-2 phone:sticky phone:bottom-[-20px] phone:z-10 phone:gap-2 phone:rounded-b-none phone:pb-[max(14px,env(safe-area-inset-bottom))] phone:shadow-[0_-4px_16px_rgb(0_0_0/.08)]">
+    {decision.why !== null && <p className="flex max-w-[75ch] gap-2 text-[13px]" data-decision-why><AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" aria-hidden="true" />{decision.why}</p>}
+    <div className={cn("flex flex-wrap items-center gap-2", accept?.note == null && "phone:grid phone:grid-cols-2")}>
+      {complete !== null && <form method="post" action={complete.action} className="phone:w-full">
+        <input type="hidden" name="csrf" value={csrf} />
+        <input type="hidden" name="receipt" value={complete.receipt} />
+        <input type="hidden" name="run" value={String(complete.run)} />
+        <Button type="submit" variant={decision.ready ? "default" : "outline"} className="min-h-11 phone:w-full" data-primary-action><Check className="phone:hidden" />{decision.label}</Button>
+      </form>}
+      {accept !== null && <form method="post" action={accept.action} className="flex flex-wrap items-center gap-2 phone:w-full phone:flex-1">
+        <input type="hidden" name="csrf" value={csrf} />
+        <input type="hidden" name="run" value={String(accept.run)} />
+        <input type="hidden" name="return" value={accept.returnTo} />
+        {accept.note !== null && <Input type="text" name="note" maxLength={500} required aria-label={accept.note} placeholder={accept.note} className="h-11 w-64 phone:w-full" />}
+        <Button type="submit" variant={decision.ready ? "default" : "outline"} className="min-h-11 phone:w-full" data-primary-action data-accept-result><Check className="phone:hidden" />{decision.label}</Button>
+      </form>}
+      {canRequest && <Button asChild variant="secondary" className="min-h-11 phone:w-full"><a href="#request-changes">Request changes</a></Button>}
+    </div>
+    <p className="max-w-[75ch] text-[13px] text-muted-foreground" data-decision-effect>{decision.effect}</p>
   </Card>;
 }
 
@@ -226,6 +316,8 @@ export function ResultView({ view, csrf }: { view: BrowserResultView; csrf: stri
           </Card>
       : <>
           <StatusCard selected={selected} csrf={csrf} />
+          {selected.panel?.youCheck != null && <CheckItems panel={selected.panel} csrf={csrf} chatHref={selected.chatHref} />}
+          {selected.decision !== null && <Decision selected={selected} csrf={csrf} />}
           {selected.panel !== null && <Panel panel={selected.panel} />}
           {selected.contest !== "" && <Html html={selected.contest} />}
           <Details selected={selected} />

@@ -12,7 +12,8 @@ import { openStore, type Store } from "./store.js";
 import { addApprover } from "./scope.js";
 import { createDecisionServer } from "./serve.js";
 import { advanceFlows, flowDefinitionOf } from "./flow-engine.js";
-import { validateFlowDefinition, withinHours } from "./flows.js";
+import { flowFromSteps, validateFlowDefinition, withinHours } from "./flows.js";
+import { addFlowTriggerTo, runFlowTriggers, type TriggerIo } from "./flow-triggers.js";
 import { starterForWork, starterOf, startersFor, switchOnStarter, STARTER_FLOWS } from "./flow-starters.js";
 import { startersHtml } from "./flow-starters-ui.js";
 
@@ -169,6 +170,24 @@ describe("starter flows", () => {
       server.closeAllConnections();
       await new Promise<void>(resolve => server.close(() => resolve()));
     }
+  });
+
+  test("one failing CI run files one card and one task, however many triggers watch the checks", async () => {
+    const ci = switchOnStarter(store, starterOf("ci-fix")!, repo, "alex", T0, dir) as { flow: number };
+    // A second checks trigger on the same flow, and a second flow that also fixes CI.
+    expect(addFlowTriggerTo(store, store.getFlow(ci.flow)!, { kind: "github", watch: "checks", branch: "main" }, "alex", T0, dir)).toMatchObject({ ok: true });
+    const other = store.createFlow({ repo, name: "Fix CI again", definitionJson: JSON.stringify(flowFromSteps(starterOf("ci-fix")!.steps, null)), by: "alex" }, T0);
+    expect(addFlowTriggerTo(store, store.getFlow(other)!, { kind: "github", watch: "checks", branch: "main" }, "alex", T0, dir)).toMatchObject({ ok: true });
+    const failed = { name: "CI", conclusion: "failure", head_branch: "main", head_sha: "0123456789abcdef", display_title: "Release 0.9.10", created_at: "2026-09-30T09:05:00Z", html_url: "https://github.com/alex/shop/actions/runs/1" };
+    const io: TriggerIo = { gh: async () => ({ code: 0, stdout: JSON.stringify({ workflow_runs: [failed] }), stderr: "", timedOut: false, notFound: false }), fetch, dir };
+    const later = new Date("2026-09-30T09:10:00.000Z");
+    expect(await runFlowTriggers(store, repo, later, io)).toMatchObject({ added: 1, checked: 3, problems: [] });
+    expect([...store.flowCards(ci.flow, true), ...store.flowCards(other, true)].map(one => one.title)).toEqual(["Checks failed on main: CI"]);
+    expect(store.activeFlowTriggers(repo).filter(one => one.lastOutcome?.includes("already a card in “Fix failing CI”"))).toHaveLength(2);
+    // The next check finds the same failing run and makes nothing.
+    expect(await runFlowTriggers(store, repo, new Date("2026-09-30T09:20:00.000Z"), io)).toMatchObject({ added: 0, problems: [] });
+    expect(advanceFlows(store, repo, later).filed).toHaveLength(1);
+    expect(advanceFlows(store, repo, later).filed).toHaveLength(0);
   });
 
   test("the page reads in plain words when nothing can be switched on here", () => {

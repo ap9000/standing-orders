@@ -16,6 +16,8 @@ import { storeEvidence } from "./evidence.js";
 import { createDecisionServer } from "./serve.js";
 import { Window } from "happy-dom";
 import { presented, stylesOf, workspaceOf, sealScopeFixture } from "../test/serve-kit.js";
+import type { BrowserWorkspace } from "./browser-workspace.js";
+import { workIndexPage } from "./work-index.js";
 
 describe("workspace package 1: one navigation shell, Work views, and one truthful status projection", () => {
   let store: Store;
@@ -386,7 +388,10 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
         return { token: status.getAttribute('data-work-status')!, label, action: actions[0]!.textContent!.replace(/ →$/, '') };
       } finally { await window.happyDOM.close(); }
     };
-    const agree = async (taskId: string, token: string, action?: string): Promise<void> => {
+    // `act`: where the page itself resolves the wait (the approval sheet's
+    // Approve & start), the opened task and chat show that act; the list and
+    // the safe status fragment keep the navigation label.
+    const agree = async (taskId: string, token: string, action?: string, act?: string): Promise<void> => {
       const work = await readStanding(await page(cookie, "/work"), taskId);
       const assignmentState = ["ready", "waiting-dependency", "running"].includes(token) ? "working" : "needs-decision";
       expect(work.token).toBe(`assignment-${assignmentState}`);
@@ -395,14 +400,14 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
       const recordedResult = ["checks-failed", "verification-needed"].includes(token);
       if (action !== undefined) expect(work.action).toBe(recordedResult ? "Open result" : action);
       const task = await readStanding(await page(cookie, `/t/${taskId}`));
-      expect(task).toEqual({ ...work, action: action ?? work.action });
+      expect(task).toEqual({ ...work, action: act ?? action ?? work.action });
       for (const path of [`/chat?task=${taskId}`, `/chat/task-status?task=${taskId}`]) {
         const exactTask = await readStanding(await page(cookie, path));
         expect(exactTask.token, path).toBe(`assignment-${assignmentState}`);
-        expect(exactTask.action, path).toBe(task.action);
+        expect(exactTask.action, path).toBe(act !== undefined && path.startsWith("/chat/task-status") ? action ?? work.action : task.action);
       }
     };
-    await agree(id, "needs-approval", "Approve plan");
+    await agree(id, "needs-approval", "Approve plan", "Approve & start");
     const beforeApproval = await page(cookie, `/t/${id}`);
     expect(beforeApproval).toContain(`<p class="scope-paths"><strong>touches</strong> ${allowed}</p>`);
     const css = await stylesOf(beforeApproval, base);
@@ -446,7 +451,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const signed = store.getScope('t-scope-status')!;
     propose(store, { taskId: 't-scope-status', goal: 'Changed request', touches: signed.touches, acceptance: signed.acceptance, now });
     store.unhold(heldRef);
-    await agree('t-scope-status', 'needs-approval', 'Approve plan');
+    await agree('t-scope-status', 'needs-approval', 'Approve plan', 'Approve & start');
     expect(store.getScope('t-scope-status')!.approvedDigest).toBe(signed.approvedDigest);
     store.setTaskState('t-scope-status', 'failed', now);
     await agree('t-scope-status', 'failed', 'Review and retry');
@@ -457,7 +462,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const oldResultScope = store.getScope('t-status-check')!;
     propose(store, { taskId: 't-status-check', goal: 'A new scope after the failed check', touches: oldResultScope.touches, acceptance: oldResultScope.acceptance, now });
     store.setTaskState('t-status-check', 'queued', now);
-    await agree('t-status-check', 'needs-approval', 'Approve plan');
+    await agree('t-status-check', 'needs-approval', 'Approve plan', 'Approve & start');
     expect(await page(cookie, '/t/t-status-check')).toContain('<details class="task-previous-result"><summary>Previous result</summary>');
   });
 
@@ -604,11 +609,24 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
       ...Object.fromEntries(["t-checks", "t-mismatch", "t-missing", "t-attested", "t-accepted", "t-verified", "t-pr", "t-merged"].map(id => [id, { token: "assignment-needs-decision", views: ["all", "needs-you"], label: "Needs you" }])),
     });
     expect(rows.length).toBe(14);
-    // All sorts what needs a person first, then live work, then queued
-    // and waiting, then finished, then cancelled — and lists every one.
+    // All lists what needs a person first, grouped by its ask (Decide, Review,
+    // Unblock), then live work, then the rest by recency — and lists every one.
     const order = rows.map(row => row.token);
     expect(order.indexOf("assignment-working")).toBeGreaterThan(order.lastIndexOf("assignment-needs-decision"));
-    expect(order.indexOf("assignment-cancelled")).toBe(order.length - 1);
+    const tasks = workspaceOf(all).view as Extract<BrowserWorkspace["view"], { kind: "tasks" }>;
+    expect(tasks.groups).toEqual([{ key: "review", label: "Review", count: 8 }, { key: "unblock", label: "Unblock", count: 2 }, { key: "building", label: "Building", count: 1 }, { key: "rest", label: "Recent", count: 3 }]);
+    expect(tasks.rows.map(row => row.group)).toEqual([...Array(8).fill("review"), "unblock", "unblock", "building", "rest", "rest", "rest"]);
+    expect(Object.fromEntries(tasks.rows.map(row => [row.id, row.ask]))).toMatchObject({ "t-checks": "review", "t-held": "unblock", "t-failed": "unblock", "t-live": null, "t-cancelled": null, "t-builder": null });
+    expect(tasks.needsYou).toBe(10);
+    // Paging keeps that order across pages.
+    const access = { principal: "operator" as const, repos: [alpha, beta] };
+    const paged: string[] = [];
+    for (let cursor: string | null = null, guard = 0; guard < 10; guard++) {
+      const one = workIndexPage(store, now, access, { limit: 3, cursor });
+      paged.push(...one.items.map(item => item.rootId));
+      if ((cursor = one.nextCursor) === null) break;
+    }
+    expect(paged).toEqual(tasks.rows.map(row => row.id));
     // Finished results are not Complete until the lead or user marks the exact result complete.
     expect(countsOf(all)).toEqual({ All: 14, "Needs you": 10, Building: 1, Complete: 0 });
     // Each view lists exactly its members, and marks itself active.
@@ -621,6 +639,10 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
       expect(rowsOf(html).map(row => row.id).sort(), view).toEqual([...expected].sort());
       expect(html, view).toMatch(new RegExp(`<a href="/work\\?view=${view}" class="active" aria-current="page"[^>]*>`));
     }
+    // Needs you groups by the ask alone; Building and Complete are one plain list.
+    const needing = workspaceOf(await page(cookie, "/work?view=needs-you")).view as Extract<BrowserWorkspace["view"], { kind: "tasks" }>;
+    expect(needing.groups?.map(one => one.key)).toEqual(["review", "unblock"]);
+    expect((workspaceOf(await page(cookie, "/work?view=running")).view as typeof needing).groups).toBeNull();
     // Summary rows keep exact task links; saved evidence and all attempts
     // are read on the task page, without asserting fresh checks here.
     expect(all).toContain('<a class="work-title" href="/t/t-checks">Escape quotes</a>');

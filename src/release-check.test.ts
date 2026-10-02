@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpat
 import { availableParallelism, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { definesSchema, journeyShares, planFor, versionOnly } from "../scripts/release-check.mjs";
-import { completionProblems, installPublished, lastPublished, missingTables } from "../scripts/upgrade-path.mjs";
+import { completionProblems, installPublished, lastPublished, missingTables, upgradeVersions } from "../scripts/upgrade-path.mjs";
 import { GROUP_BYTES, browserSlots, limiter, memoryWords, parseMeminfo, parseVmStat, watchMemory } from "../scripts/check-memory.mjs";
 
 const pkg = (version: string, dependencies: Record<string, string> = { zod: "^3.23.0" }) => JSON.stringify({ name: "toolroll", version, type: "module", dependencies }, null, 2) + "\n";
@@ -137,6 +137,16 @@ describe("the upgrade path step", () => {
 
   test("the last 3 published releases, oldest first; a prerelease is not one", () => {
     expect(lastPublished(["0.9.10", "0.9.4", "0.9.9-beta.1", "0.9.8", "0.10.0", "0.9.9"])).toEqual(["0.9.9", "0.9.10", "0.10.0"]);
+  });
+
+  test("0.9.11 stays on the upgrade path beside the newest three: its service could die holding the coding workspace", () => {
+    expect(upgradeVersions(["0.9.8", "0.9.9", "0.9.10", "0.9.11"])).toEqual(["0.9.9", "0.9.10", "0.9.11"]);
+    expect(upgradeVersions(["0.9.10", "0.9.11", "0.9.12", "0.9.13", "0.10.0"])).toEqual(["0.9.11", "0.9.12", "0.9.13", "0.10.0"]);
+    // The step that frees what a killed 0.9.11 left behind runs before `toolroll update`.
+    const path = readFileSync("scripts/upgrade-path.mjs", "utf8");
+    const onePath = path.slice(path.indexOf("async function onePath("));
+    expect(onePath.indexOf("killedCodingOwner(")).toBeGreaterThan(-1);
+    expect(onePath.indexOf("killedCodingOwner(")).toBeLessThan(onePath.indexOf('step("toolroll update"'));
   });
 
   test("a completed task must stay complete under the same digest, and every fresh table must exist", () => {

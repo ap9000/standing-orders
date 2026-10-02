@@ -1,0 +1,154 @@
+import { test, expect } from 'vitest';
+import { spawnSync } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
+import * as fs from 'node:fs';
+import { copyFileSync, mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { fileURLToPath } from 'node:url';
+import { recoverFailedDeployment, waitUntilHealthy } from '../scripts/deploy-recovery.mjs';
+import { ledgerStaleCodingRelease } from '../scripts/deploy-coding.mjs';
+
+/** The effects a failed browser deployment may take, recorded in order. */
+function effects(stopProved = false) {
+  const done: string[] = [];
+  return {
+    done,
+    stopProved: () => { done.push('prove stop'); return stopProved; },
+    restoreBackup: () => { done.push('restore backup'); return '/stage/orders.kept.1.db'; },
+    restoreService: () => { done.push('restore service'); },
+    removeGate: () => { done.push('remove gate'); },
+    mark: (phase: string) => { done.push(`mark ${phase}`); },
+  };
+}
+
+test('a deploy that fails after proving the old service stopped starts it again and lifts its own pause', () => {
+  // Oct 2: two deploys over 0.9.11 failed after the bootout and left the plane down until restored by hand.
+  const e = effects();
+  expect(recoverFailedDeployment('stopped', e)).toMatch(/previous service is running again and new work resumed\.$/);
+  expect(e.done).toEqual(['restore service', 'mark restored', 'remove gate', 'mark released']);
+  // The previous service is already running again: only the pause is left to lift.
+  const restored = effects();
+  expect(recoverFailedDeployment('restored', restored)).toMatch(/new work resumed/);
+  expect(restored.done).toEqual(['remove gate', 'mark released']);
+});
+
+test('once the live database was migrated, the verified backup goes back before the previous service starts', () => {
+  for (const phase of ['migrating', 'migrated', 'start-failed']) {
+    const e = effects();
+    expect(recoverFailedDeployment(phase, e)).toMatch(/put back from the backup taken before the update; what the live database held is kept at \/stage\/orders\.kept\.1\.db/);
+    expect(e.done).toEqual(['restore backup', 'mark backup-restored', 'restore service', 'mark restored', 'remove gate', 'mark released']);
+  }
+  // A same-schema candidate whose rehearsal proved the previous runtime reads its database keeps it.
+  const compatible = effects();
+  expect(recoverFailedDeployment('migrated', compatible, { previousRuntimeCompatible: true })).not.toMatch(/backup/);
+  expect(compatible.done).toEqual(['restore service', 'mark restored', 'remove gate', 'mark released']);
+  // Resumed after the backup went back but before the service answered: the backup is not put back twice.
+  const resumed = effects();
+  recoverFailedDeployment('backup-restored', resumed);
+  expect(resumed.done).toEqual(['restore service', 'mark restored', 'remove gate', 'mark released']);
+});
+
+test('a backup that cannot go back leaves the service stopped and the pause in place', () => {
+  const e = { ...effects(), restoreBackup: () => { throw Error('the verified backup is missing or changed'); } };
+  expect(() => recoverFailedDeployment('migrated', e)).toThrow('missing or changed');
+  expect(e.done).toEqual([]);
+});
+
+test('a previous service that does not load or answer keeps the pause and says so', () => {
+  const e = { ...effects(), restoreService: () => { throw Error('did not answer /healthz within 90 seconds'); } };
+  expect(() => recoverFailedDeployment('stopped', e)).toThrow('/healthz');
+  expect(e.done).toEqual([]);
+});
+
+test('a refusal before the swap only lifts the pause; an unproven stop or a starting service is left for a person', () => {
+  for (const phase of ['admission-paused', 'frozen', 'backup-verified', 'rehearsed']) {
+    const e = effects();
+    expect(recoverFailedDeployment(phase, e)).toMatch(/stopped before the swap/);
+    expect(e.done).toEqual(['remove gate', 'mark released']);
+  }
+  for (const phase of ['starting', 'started', 'healthy', 'deployed', 'released', 'preparing']) {
+    const e = effects();
+    expect(recoverFailedDeployment(phase, e)).toBeNull();
+    expect(e.done).toEqual([]);
+  }
+  const unproven = effects(false);
+  expect(recoverFailedDeployment('stopping', unproven)).toBeNull();
+  expect(unproven.done).toEqual(['prove stop']);
+  // Interrupted while waiting for the old service to exit, after it had: it is put back like any stopped service.
+  const proven = effects(true);
+  expect(recoverFailedDeployment('stopping', proven)).toMatch(/running again/);
+  expect(proven.done).toEqual(['prove stop', 'restore service', 'mark restored', 'remove gate', 'mark released']);
+});
+
+test('the restored service counts only once it answers', () => {
+  const answers = [false, false, true];
+  let pauses = 0;
+  expect(waitUntilHealthy(() => answers.shift()!, { attempts: 5, pause: () => { pauses++; } })).toBe(true);
+  expect(pauses).toBe(2);
+  pauses = 0;
+  expect(waitUntilHealthy(() => false, { attempts: 3, pause: () => { pauses++; } })).toBe(false);
+  expect(pauses).toBe(2);
+});
+
+test('Ctrl-C or a kill runs the same exit recovery, and a second signal waits for it', () => {
+  const module = fileURLToPath(new URL('../scripts/deploy-recovery.mjs', import.meta.url));
+  // The child recovers synchronously at exit, as deploy-browser does; it signals itself twice while waiting.
+  const child = `
+    const { exitOnSignals, sleepSync } = await import(${JSON.stringify(module)});
+    exitOnSignals();
+    process.on('exit', code => {
+      process.kill(process.pid, 'SIGINT');
+      sleepSync(50);
+      process.stdout.write('recovered at exit ' + code);
+    });
+    process.kill(process.pid, process.argv[1]);
+    setInterval(() => {}, 1000);`;
+  for (const [signal, code] of [['SIGTERM', 143], ['SIGINT', 130]] as const) {
+    const run = spawnSync(process.execPath, ['--input-type=module', '-e', child, signal], { encoding: 'utf8', timeout: 10_000 });
+    expect(run.stdout).toBe(`recovered at exit ${code}`);
+    expect(run.status).toBe(code);
+  }
+});
+
+/** deploy-browser's exact backup restore, run against scratch files without its launchd entry point. */
+function backupRestore(stageDir: string, database: string) {
+  const source = readFileSync(resolve('scripts/deploy-browser.mjs'), 'utf8');
+  const body = source.slice(source.indexOf('function restoreDeploymentBackup('), source.indexOf('/** The previous definition, loaded again'));
+  const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
+  const open = (file: string, options = {}) => new DatabaseSync(file, options);
+  return new Function('fs', 'sha', 'join', 'dirname', 'randomUUID', 'stageDir', 'database', 'openDeploymentDatabase', 'ledgerStaleCodingRelease',
+    `const { existsSync, readFileSync, copyFileSync, chmodSync, rmSync, renameSync, openSync, fsyncSync, closeSync } = fs;\n${body}\nreturn restoreDeploymentBackup;`)(
+    fs, sha, join, dirname, randomUUID, stageDir, database, open, ledgerStaleCodingRelease) as (r: object) => string;
+}
+
+test('a migrated database is replaced by the verified backup, and what it held is kept aside', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'deploy-restore-')), database = join(dir, 'orders.db'), backupFile = join(dir, 'orders.backup.db');
+  try {
+    const before = new DatabaseSync(backupFile);
+    before.exec("CREATE TABLE schema_version(version INTEGER); INSERT INTO schema_version VALUES(7); CREATE TABLE action_ledger(at,actor,repo,task_id,run_id,action,outcome,source,detail)");
+    before.close();
+    copyFileSync(backupFile, database);
+    // The candidate migrated the live database and it still holds an uncheckpointed write.
+    const live = new DatabaseSync(database);
+    live.exec("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; UPDATE schema_version SET version=8; CREATE TABLE added(x)");
+    const restore = backupRestore(dir, database);
+    const r = { backup: backupFile, backupSha256: createHash('sha256').update(readFileSync(backupFile)).digest('hex'), codingOwnerReleased: { pid: 4242, nativePid: null } };
+    expect(() => restore({ ...r, backupSha256: '0'.repeat(64) })).toThrow('missing or changed');
+    // A changed backup puts nothing back: the migrated database, its WAL included, is as it was.
+    expect(live.prepare('SELECT version FROM schema_version').get()?.version).toBe(8);
+    expect(fs.existsSync(`${database}-wal`)).toBe(true);
+    live.close();
+    const kept = restore(r);
+    expect(fs.existsSync(`${database}-wal`)).toBe(false);
+    const restored = new DatabaseSync(database, { readOnly: true });
+    expect(restored.prepare('SELECT version FROM schema_version').get()?.version).toBe(7);
+    // The backup predates the stale-owner release, so the release is ledgered again.
+    expect(restored.prepare('SELECT detail FROM action_ledger').get()?.detail).toMatch(/process 4242 proved gone/);
+    restored.close();
+    const aside = new DatabaseSync(kept, { readOnly: true });
+    expect(aside.prepare('SELECT version FROM schema_version').get()?.version).toBe(8);
+    aside.close();
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});

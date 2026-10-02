@@ -436,8 +436,9 @@ await journey("console", "Spend: the month's cost shows by project and person; a
   await page.setViewportSize({ width: 1440, height: 900 });
   const csv = await page.request.get(`${base}/spend?format=csv`);
   if (csv.status() !== 200 || !(await csv.text()).includes("time_utc,kind,project,person")) throw new Error(`the CSV: ${csv.status()}`);
-  // Tasks shows the budget as a tile, and, once Claude has run here, the plan's windows as Claude said them.
+  // Tasks folds usage to one line on a desk; a click shows the budget as a tile, and, once Claude has run here, the plan's windows as Claude said them.
   await page.goto(`${base}/work`);
+  await page.locator('[data-usage-summary]').click({ timeout: 15_000 });
   await page.locator('[data-limit^="budget:"]').first().waitFor({ timeout: 15_000 });
   const claudeRan = rows("SELECT 1 FROM run WHERE provider = 'claude' AND tokens_in IS NOT NULL LIMIT 1").length > 0;
   if (claudeRan && await page.locator('[data-limit^="claude:"]').count() === 0) throw new Error(`Claude ran but Tasks shows no Claude window: ${JSON.stringify(rows("SELECT * FROM provider_limit"))}`);
@@ -525,14 +526,17 @@ await journey("task", "Claude builds it, the project's checks pass, and the resu
   await page.goto(`${base}/review?result=${encodeURIComponent(firstTask)}&run=${run.id}&project=${encodeURIComponent(repo)}`);
   const panel = page.locator("[data-result-panel]").first();
   await panel.waitFor({ timeout: 20_000 });
-  // What a person sees: "Checks passed" on the result, and the saved check exited 0.
-  const status = await page.locator("[data-result-status]").first().innerText();
-  if (!/Checks passed/.test(status)) throw new Error(`the result says: ${status.slice(0, 200)}`);
+  // What a person sees: checks passed on the result, and the decision after the evidence says what accepting does
+  // (plain Accept when every requirement is met; the planner may have left one for a person to check).
+  const status = await page.locator('[data-result-status] [data-status-detail="checks"]').first().innerText();
+  if (!/Passed/.test(status)) throw new Error(`the result's checks say: ${status.slice(0, 200)}`);
   const checks = "passed";
+  const decision = await page.locator("[data-result-decision]").first().innerText();
+  if (!/^Accept( without checks)?$/m.test(decision) || !/Marks it complete/.test(decision)) throw new Error(`the decision says: ${decision.slice(0, 200)}`);
   await page.locator('a[data-result-tab="changes"]').click();
   await until("the changed files", async () => /src\/math\.js/.test(await page.locator("body").innerText()), { timeoutMs: 10_000, everyMs: 500 });
   await shot("result-changes");
-  await Promise.all([page.waitForNavigation(), page.locator(`form[action="/t/${firstTask}/complete"] button`).click()]);
+  await Promise.all([page.waitForNavigation(), page.locator(`[data-result-decision] form[action="/t/${firstTask}/complete"] button`).click()]);
   await until("the result to read complete", async () => (await page.locator('[data-result-status="assignment-complete"]').count()) > 0, { timeoutMs: 15_000, everyMs: 500 });
   const ledger = rows(`SELECT action, source FROM action_ledger WHERE task_id = '${firstTask}' AND action = 'assignment handoff checked'`);
   if (ledger.length !== 1) throw new Error(`the ledger has ${ledger.length} completion rows`);
@@ -1639,9 +1643,9 @@ await journey("pages", "The demo lead: type a request, approve, see it build to 
         await Promise.all([visitor.waitForNavigation(), visitor.press('input[name="token"]', "Enter")]);
         await visitor.goto(`${started.url}/chat`);
         const banner = await visitor.locator("body").innerText();
-        if (!/Nothing calls a model, reaches outside or spends\./.test(banner)) throw new Error(`the demo banner: ${banner.slice(0, 300)}`);
-        // The demo hands off: its banner says how to start on a real project.
-        if (!/For your own project, run npx toolroll up in its folder\./.test(banner)) throw new Error(`the demo banner doesn't hand off: ${banner.slice(0, 300)}`);
+        // A phone gets the one-line banner (a terminal command is no use there); a desk gets the full one, which hands off.
+        if (!(width === 1440 ? /Nothing calls a model, reaches outside or spends\./ : /Nothing calls a model or spends\./).test(banner)) throw new Error(`the demo banner: ${banner.slice(0, 300)}`);
+        if (width === 1440 && !/For your own project, run npx toolroll up in its folder\./.test(banner)) throw new Error(`the demo banner doesn't hand off: ${banner.slice(0, 300)}`);
         if (width === 1440) {
           await visitor.locator(".demo-hint").waitFor();
           if (await visitor.locator(".demo-suggestions button").count() < 2) throw new Error("the first visit shows no suggestions");

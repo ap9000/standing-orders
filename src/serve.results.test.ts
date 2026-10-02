@@ -1070,6 +1070,73 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(after).not.toContain('action="/t/t-pr/merge"');
   });
 
+  test("the result page shows each item to check with its evidence before the decision, and Accept says what it does", async () => {
+    const statement = "The empty state reads clearly on a phone";
+    const long = `  return "${"Nothing to review yet — new results land here when a build finishes. ".repeat(3).trim()}";`;
+    const ref = seed("t-look", "Clarify the empty state", "/repo/main", { acceptance: [{ id: "c1", statement, evidence: ["manual-review"] }] });
+    const reason = 'criterion "c1" requires manual-review evidence — an operator must accept it before this can verify';
+    const run = build("t-look", ref, {
+      patch: `diff --git a/src/empty.ts b/src/empty.ts\n--- a/src/empty.ts\n+++ b/src/empty.ts\n@@ -1,3 +1,3 @@\n export function emptyWords() {\n-  return "No results";\n+${long}\n }\n`,
+      stat: [{ path: "src/empty.ts", additions: 1, deletions: 1 }],
+      handoff: { conclusion: "Rewrote the empty state so it says where results come from." },
+      screenshot: { path: "evidence/empty.png", caption: "Empty state at 390px" },
+      proof: {
+        version: 1,
+        criteria: [{ id: "c1", statement, verdict: "met", how: "Looked at it at 390px.", evidence: [{ kind: "manual-review", ref: "Open Results with nothing in it at 390px." }] }],
+        checks: [], changed: ["src/empty.ts"], caveats: [], screenshots: [{ path: "evidence/empty.png", caption: "Empty state at 390px" }],
+      },
+      verdict: { verdict: "short", reasons: [reason], matrix: [row("c1", statement, "manual-review", [{ kind: "changed-path", ref: "src/empty.ts" }, { kind: "screenshot", ref: "evidence/empty.png" }, { kind: "manual-review", ref: "Open Results with nothing in it at 390px." }], [reason])] },
+    });
+    await boot();
+    store.stampRun(run, { scopeDigest: store.getScope("t-look")!.digest });
+    const cookie = await login();
+    const read = async () => ((await (await fetch(url(`/review?result=t-look&run=${run}&format=workspace`), { headers: { cookie } })).json()) as import("./browser-workspace.js").BrowserWorkspace).view as import("./browser-workspace.js").BrowserResultView;
+    const first = (await read()).selected!;
+    const item = first.panel!.youCheck!.items[0]!;
+    expect(item).toMatchObject({ id: "c1", statement, note: "Open Results with nothing in it at 390px." });
+    // The changed lines it cites, whole: wrapping is the page's job, never a cut.
+    expect(item.excerpts).toEqual([{ path: "src/empty.ts", cited: true, more: 0, lines: [{ kind: "deletion", line: 2, text: '  return "No results";' }, { kind: "addition", line: 2, text: long }] }]);
+    expect(item.shots).toHaveLength(1);
+    expect(item.shots[0]!.src).toMatch(new RegExp(`^/r/${run}/evidence/[0-9]+$`));
+    expect(first.panel!.youCheck!.accept).toMatchObject({ action: "/t/t-look/accept-proof", run });
+    // Checks didn't run and the item is still the person's: Accept without checks, naming both, and what it does.
+    expect(first.decision).toEqual({ label: "Accept without checks", ready: false, why: "Checks didn't run and 1 item still needs your check.",
+      effect: "Marks it complete. The branch stays; publishing isn't set up.", sentence: "Review the change, then accept it or ask for changes." });
+    expect(first.complete).toMatchObject({ action: "/t/t-look/complete", run });
+    expect(first.complete).not.toHaveProperty("publish");
+    const csrf = csrfOf(await (await fetch(url(`/review?result=t-look&run=${run}`), { headers: { cookie } })).text());
+    // Looks right records the same acceptance as ever; the verdict stays as recorded.
+    const verdict = store.proofVerdictFor(run);
+    expect((await post(cookie, "/t/t-look/accept-proof", { csrf, run: String(run), return: `/review?result=t-look&run=${run}` })).status).toBe(303);
+    expect(store.proofAcceptance(run)?.approver).toBe("alex");
+    const second = (await read()).selected!;
+    expect(second.panel!.youCheck).toBeNull();
+    expect(second.decision).toMatchObject({ label: "Accept without checks", why: "Checks didn't run." });
+    // Accept is the exact-receipt completion: the old receipt is refused, the current one completes.
+    expect(second.complete!.receipt).not.toBe(first.complete!.receipt);
+    expect((await post(cookie, "/t/t-look/complete", { csrf, run: String(run), receipt: first.complete!.receipt })).status).toBe(409);
+    expect((await post(cookie, "/t/t-look/complete", { csrf, run: String(run), receipt: second.complete!.receipt })).status).toBe(303);
+    expect(store.proofVerdictFor(run)).toEqual(verdict);
+    expect((await read()).selected!.decision).toBeNull();
+  });
+
+  test("a missing or unreadable proof reads Accept without checks, and Accept never posts publish", async () => {
+    const patch = "diff --git a/z b/z\n--- a/z\n+++ b/z\n@@ -1 +1 @@\n-a\n+b\n";
+    const missing = build("t-noproof", seed("t-noproof", "No proof on record"), { patch, stat: [{ path: "z", additions: 1, deletions: 1 }], verdict: { verdict: "verified" } });
+    const damaged = build("t-badproof", seed("t-badproof", "A proof that can't be read"), { patch, stat: [{ path: "z", additions: 1, deletions: 1 }], proof: { version: 99 }, verdict: { verdict: "verified" } });
+    await boot();
+    store.stampRun(missing, { scopeDigest: store.getScope("t-noproof")!.digest });
+    store.stampRun(damaged, { scopeDigest: store.getScope("t-badproof")!.digest });
+    const cookie = await login();
+    const read = async (task: string, run: number) => ((await (await fetch(url(`/review?result=${task}&run=${run}&format=workspace`), { headers: { cookie } })).json()) as import("./browser-workspace.js").BrowserWorkspace).view as import("./browser-workspace.js").BrowserResultView;
+    for (const [task, run] of [["t-noproof", missing], ["t-badproof", damaged]] as const) {
+      const selected = (await read(task, run)).selected!;
+      expect(selected.decision).toMatchObject({ label: "Accept without checks", ready: false });
+      expect(selected.decision!.why).toMatch(/^Nothing on record says what was met/);
+      expect(selected.complete).not.toHaveProperty("publish");
+    }
+  });
+
   test("mark complete binds the exact saved result and preserves check failures and publication authority", async () => {
     const ref = seed("t-complete", "Keep the payout total accurate");
     const historical = build("t-complete", ref, { patch: "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-before\n+earlier\n", handoff: { conclusion: "Saved the earlier payout correction." } });
@@ -1088,6 +1155,8 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(html).toContain('1 needs your attention');
     expect(html).toContain('Mark complete</button>');
     expect(html).toContain('Checks stay unchanged; nothing is published or deployed.');
+    const decision = ((await (await fetch(url(`/review?result=t-complete&run=${run}&format=workspace`), { headers: { cookie } })).json()) as import("./browser-workspace.js").BrowserWorkspace).view as import("./browser-workspace.js").BrowserResultView;
+    expect(decision.selected!.decision).toMatchObject({ label: "Accept without checks", ready: false, why: "Nothing on record says what was met and checks failed." });
     const receipt = /name="receipt" value="([a-f0-9]{64})"/.exec(html)?.[1];
     expect(receipt).toBeDefined();
     const csrf = csrfOf(html);
@@ -1775,12 +1844,17 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     try {
       revisionWindow.document.body.innerHTML = revisionTask;
       const reviewPlan = revisionWindow.document.querySelector('.task-plan-review')!;
+      // One sentence in view, before the password: what this fixes, in the person's own words.
+      const sentence = reviewPlan.querySelector('.approval-revision')!;
+      expect(sentence.textContent).toMatch(new RegExp(`^Fixes what build #${run} missed: `));
+      expect(sentence.textContent).toContain("Name the helper");
+      expect(reviewPlan.innerHTML.indexOf('class="approval-revision"')).toBeLessThan(reviewPlan.innerHTML.indexOf('type="password"'));
+      // The exact batch, with its paths, in the Details fold.
       const feedback = reviewPlan.querySelector('[data-revision-feedback]')!;
       expect(feedback?.textContent).toContain(feedbackNote);
       expect(feedback?.textContent).toContain("Name the helper.");
       expect(feedback?.textContent).toContain("src/a.ts:2");
-      expect(feedback?.closest('details')).toBe(reviewPlan);
-      expect(reviewPlan.innerHTML.indexOf(feedbackNote)).toBeLessThan(reviewPlan.innerHTML.indexOf('type="password"'));
+      expect(feedback?.closest('details')).toBe(reviewPlan.querySelector('details.approval-details'));
       expect(revisionWindow.document.querySelectorAll('[data-revision-feedback]')).toHaveLength(1);
     } finally { await revisionWindow.happyDOM.close(); }
     const revisionChat = await read(`/chat?task=${revisionId}`);

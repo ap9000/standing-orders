@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.9.12 — 2026-10-02
+
+- **Approving a plan fits one phone screen.** The plan shows up front in plain
+  rows (Goal, Changes, Won't touch, Done when) with one Approve & start, pinned
+  to the bottom on phones, and a line saying what happens next. The fine print
+  sits under Details.
+- **Tasks puts what needs you first.** Waiting work is grouped as Decide,
+  Review and Unblock, each with a solid ink chip, and usage folds to one line.
+- **Reviewing a result shows the change before Accept.** Each thing you check
+  comes with its evidence and Looks right / Not right; Accept says "Accept
+  without checks" when they didn't run, and what accepting does.
+- **Your lead tells you what it's doing.** A task your lead is handling says
+  "Your lead is on it" instead of waiting on you, and short updates from your
+  lead arrive in chat.
+- **Updates over 0.9.11 work.** Stopping the service no longer leaves the
+  coding server's record behind, and a deploy or update that fails after
+  stopping it puts the previous version back on its own.
+
 ## 0.9.11 — 2026-10-02
 
 - **The Telegram bot always answers.** Replies and notifications go out from

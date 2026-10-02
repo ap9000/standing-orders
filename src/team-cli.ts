@@ -209,7 +209,7 @@ function render(reply: TeamResponse, listing?: 'leads' | 'conversations'): strin
 export async function maybeRunTeamCommand(argv: readonly string[], write: (line: string) => void, options: TeamCliOptions = {}): Promise<number | null> {
   const command = argv[0];
   // `lead token` is local: the credential a lead agent acts with on this computer.
-  if (command === 'lead' && argv[1] === 'token') return null;
+  if (command === 'lead' && (argv[1] === 'token' || argv[1] === 'say')) return null;
   if (!['connect', 'lead', 'conversation', 'chat', 'brief'].includes(command ?? '') && !argv.includes('--profile')) return null;
   const json = argv.includes('--json');
   let secret = '';

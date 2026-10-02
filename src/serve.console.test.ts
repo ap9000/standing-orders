@@ -304,14 +304,18 @@ describe("the operations console", () => {
     expect(page).toContain("inherited terms, as they stand now: High risk · Strict / release quality · auto permissions · $2.00 attempt cap · its exclusions · 1 path limit · 2 criteria");
     expect(page).toContain("never inherited: the source&#39;s approval, attended sessions, publication and merge grants");
     expect(page).toContain("re-resolved for this approval: the agents route and the fallback chain");
-    expect(page).toContain("quality · <strong>Strict / release</strong>");
-    expect(page).toContain('<span class="approval-chip">Auto permissions</span>');
-    expect(page).not.toContain('<span class="approval-chip">Full access</span>');
+    expect(page).toContain("Checks level: Strict / release · Auto permissions");
+    // Auto permissions: the one line names who builds and the cap, never "Full access".
+    expect(page).toContain('<p class="approval-who">Builder Claude Sonnet · Planner Claude Sonnet · Cap $2.00 per attempt</p>');
     expect(page).toContain("also refuse zero");
-    const approveForm = /<form method="post" action="[^"]*\/approve" class="card approve-form approval-card" id="approve">(.*?)<\/form>/s.exec(page)?.[1] ?? "";
-    expect(approveForm).toContain("High risk");
-    expect(approveForm).toContain(lineage);
-    expect(approveForm).toContain("never inherited");
+    const approveForm = /<form method="post" action="[^"]*\/approve" class="approve-form approval-sheet" id="approve"[^>]*>(.*?)<\/form>/s.exec(page)?.[1] ?? "";
+    // One sentence in view; the lineage and inherited terms in Details.
+    expect(approveForm).toContain(`<p class="approval-revision">Fixes what build #${run} missed: `);
+    const details = approveForm.slice(approveForm.indexOf('<details class="approval-details">'));
+    expect(details).toContain("High risk");
+    expect(details).toContain(lineage);
+    expect(details).toContain("never inherited");
+    expect(approveForm.slice(0, approveForm.indexOf('<details class="approval-details">'))).not.toContain("inherited");
 
     // Chat: the same words, from the same projection.
     const chat = await (await fetch(url(`/chat?task=${encodeURIComponent(childId)}`), { headers: { cookie } })).text();
@@ -319,7 +323,7 @@ describe("the operations console", () => {
     expect(chat).toContain("inherited terms, as they stand now: High risk · Strict / release quality");
     expect(chat).toContain("never inherited: the source&#39;s approval");
     expect(chat).toContain("also refuse zero");
-    expect(chat).toContain("quality · <strong>Strict / release</strong>");
+    expect(chat).toContain("Checks level: Strict / release · Auto permissions");
 
     // The CI draft on a published run of the same source reads the same.
     const pub = store.createPublicationIntent(
@@ -341,9 +345,9 @@ describe("the operations console", () => {
     expect(ciPage).toContain("CI repair");
     expect(ciPage).toContain(lineage);
     expect(ciPage).toContain("inherited terms, as they stand now: High risk · Strict / release quality · auto permissions · $2.00 attempt cap");
-    expect(ciPage).toContain("quality · <strong>Strict / release</strong>");
-    expect(ciPage).toContain('<span class="approval-chip">Auto permissions</span>');
-    expect(ciPage).not.toContain('<span class="approval-chip">Full access</span>');
+    expect(ciPage).toContain(`<p class="approval-revision">Fixes the checks that failed in build #${run}.</p>`);
+    expect(ciPage).toContain("Checks level: Strict / release · Auto permissions");
+    expect(ciPage).not.toMatch(/<p class="approval-who">[^<]*Full access/);
 
     // A batch drafted against a scope digest the source no longer carries
     // refuses in words and consumes nothing: the road's own seal re-reads
@@ -1488,7 +1492,7 @@ describe("console v2: projects, the ceiling, and the workspace", () => {
     expect(created.headers.get("location")).toBe("/t/add-a-rate-limiter");
 
     const screen = await (await fetch(url("/t/add-a-rate-limiter"), { headers: { cookie } })).text();
-    expect(screen).toContain("approve exactly this:");
+    expect(screen).toContain('class="approve-form approval-sheet"');
     // The master pane lists it, marked current.
     expect(screen).toContain('class="item current"');
   });
@@ -1694,7 +1698,7 @@ describe("the board — the pipeline as lanes, live in place", () => {
     expect(store.lookupRef("planned-from-create")?.plan).toBe("requested");
     const page = await (await fetch(url("/t/planned-from-create"), { headers: { cookie } })).text();
     expect(page).toContain("planning requested");
-    expect(page).not.toContain("approve exactly this");
+    expect(page).not.toContain("approval-sheet");
     expect(page).toContain('<details class="section" id="scope"><summary><h2>scope</h2></summary>');
   });
 
@@ -1750,7 +1754,7 @@ describe("the board — the pipeline as lanes, live in place", () => {
     const screen = await (await fetch(url("/t/t-plan"), { headers: { cookie } })).text();
     expect(screen).toContain("planning requested");
     expect(screen).not.toContain(">plan first<");
-    expect(screen).not.toContain("approve exactly this");
+    expect(screen).not.toContain("approval-sheet");
 
     const board = await (await fetch(url("/board"), { headers: { cookie } })).text();
     expect(board).toContain("planning next");
@@ -1801,7 +1805,7 @@ describe("the board — the pipeline as lanes, live in place", () => {
     expect(drafted).toContain("risks &amp; mitigations");
     expect(drafted).toContain("proof of done");
     expect(drafted).toContain("Edit plan");
-    expect(drafted).toContain("approve exactly this:");
+    expect(drafted).toContain('class="approve-form approval-sheet"');
     expect(drafted).toContain("The negotiated goal");
     expect(drafted).not.toContain('data-card-kind="result-receipt"');
 
@@ -2774,7 +2778,7 @@ describe("quick capture — from thought to the approve card in two steps", () =
       const screen = await (await fetch(`${base}${where}`, { headers: { cookie } })).text();
       // Step two IS the approval: the scope is written, the password waits.
       expect(screen).toContain("Reject unsigned payloads");
-      expect(screen).toContain("approve exactly this:");
+      expect(screen).toContain('class="approve-form approval-sheet"');
       expect(screen).toContain('type="password"');
     } finally {
       await new Promise<void>(resolve => server.close(() => resolve()));
@@ -2850,7 +2854,7 @@ describe("the roll-up inbox — every project, one ceiling, links only", () => {
       const detail = await fetch(`${base}/t/t-main`, { headers: { cookie }, redirect: "manual" });
       expect(detail.status).toBe(200);
       const detailHtml = await detail.text();
-      expect(detailHtml).toContain("approve exactly this:");
+      expect(detailHtml).toContain('class="approve-form approval-sheet"');
       expect(renderedHtmlOf(detailHtml)).not.toContain("t-side"); // no cross-project native list pane
       expect(workspaceOf(detailHtml).crew.map(one => one.id).sort()).toEqual(['t-main', 't-side']);
       expect(detailHtml).not.toContain('t-secret'); // neither fallback nor admitted crew leaks foreign work
