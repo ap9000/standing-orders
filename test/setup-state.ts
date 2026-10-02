@@ -1,7 +1,8 @@
-import { afterAll } from "vitest";
+import { afterAll, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { freshStoreOpener } from "./fresh-store.js";
 
 // Runs before each test file's imports. A reporting command, subprocess, or
 // failed fixture must never fall back to the developer's control-plane state.
@@ -18,6 +19,11 @@ process.env.STANDING_ORDERS_DB = join(state, "orders.db");
 process.env.XDG_CONFIG_HOME = join(state, "config");
 // No test asks npm or GitHub for the latest release; the update tests script their own.
 process.env.TOOLROLL_NO_UPDATE_CHECK = "1";
+// Fresh databases start from one copy per test file instead of rerunning every migration.
+vi.mock("../src/store.js", async importOriginal => {
+  const real = await importOriginal<typeof import("../src/store.js")>();
+  return { ...real, openStore: freshStoreOpener(real.openStore, mkdtempSync(join(state, "fresh-"))) };
+});
 afterAll(() => {
   for (const [name, value] of Object.entries(before)) {
     if (value === undefined) delete process.env[name];

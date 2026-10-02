@@ -72,6 +72,6 @@ describe("v72 one Telegram binding per person", () => {
     broken.close();
     const before = readFileSync(file);
     expect(() => openStore(file)).toThrow(problem);
-    expect(readFileSync(file)).toEqual(before);
+    expect(readFileSync(file).equals(before)).toBe(true);
   });
 });

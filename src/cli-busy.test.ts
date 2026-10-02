@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -113,15 +113,26 @@ describe("CLI database contention", () => {
     const store = openStore(file);
     const writer = await holdWriter(file, null);
     const lines: string[] = [];
-    const started = performance.now();
+    // An injected clock: the write budget is counted in performance.now()
+    // readings, and each reading here moves a second. The 15-second bound is
+    // spent exactly — in about 15 real 100 ms lock attempts — however loaded
+    // the machine is. The short-write test above keeps the real wait.
+    let clock = 0;
+    const now = vi.spyOn(performance, "now").mockImplementation(() => (clock += 1_000));
+    let code: number;
+    let elapsed: number;
+    try {
+      const started = performance.now();
+      code = await main(
+        ["task", "add", "Must not be saved", "--id", "still-busy", "--key", "busy-failure", "--db", file, "--json"],
+        line => lines.push(line),
+        { operate: { openDatabase: () => store } },
+      );
+      elapsed = performance.now() - started;
+    } finally {
+      now.mockRestore();
+    }
 
-    const code = await main(
-      ["task", "add", "Must not be saved", "--id", "still-busy", "--key", "busy-failure", "--db", file, "--json"],
-      line => lines.push(line),
-      { operate: { openDatabase: () => store } },
-    );
-
-    const elapsed = performance.now() - started;
     expect(code).toBe(EXIT.failed);
     expect(JSON.parse(lines.join("\n"))).toMatchObject({
       ok: false,
@@ -140,5 +151,5 @@ describe("CLI database contention", () => {
     } finally {
       reopened.close();
     }
-  }, 30_000);
+  });
 });

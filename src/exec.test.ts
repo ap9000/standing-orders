@@ -162,15 +162,19 @@ describe("the provider process group (M6.12)", () => {
     expect(result.timedOut).toBe(true);
     const grandPid = Number(/"thread_id":"(\d+)"/.exec(result.stdout)?.[1]);
     expect(Number.isInteger(grandPid)).toBe(true);
-    // The grandchild must be gone (give the kernel a beat to reap).
-    await new Promise(resolve => setTimeout(resolve, 300));
-    let alive = true;
-    try {
-      process.kill(grandPid, 0);
-    } catch {
-      alive = false;
-    }
-    expect(alive).toBe(false);
+    // The grandchild must be gone. Wait for the kernel to reap it rather
+    // than for a fixed beat a loaded machine can outlast; the bound only
+    // ends a regression where it survives.
+    const alive = (): boolean => {
+      try {
+        process.kill(grandPid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    for (const deadline = Date.now() + 10_000; alive() && Date.now() < deadline;) await new Promise(resolve => setTimeout(resolve, 20));
+    expect(alive()).toBe(false);
   });
 
   test("terminateLiveProviders ends a live provider now; the run settles as the failure it is", async () => {
