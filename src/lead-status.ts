@@ -5,6 +5,8 @@ import { windowLabel, type LimitWindow } from "./provider-limits.js";
 import { openAuthPauses, signInCommand, signInReason } from "./provider-auth.js";
 import { BUILT_IN, checkSuitesOf, type RunCheckSuite, type Store } from "./store.js";
 import { workIndexPage, workReadyForReview } from "./work-index.js";
+import { currentActor } from "./actor.js";
+import { leadActivity, leadActivityLine } from "./lead-voice.js";
 
 export type CheckSummary = {
   status: "passed" | "failed" | "not-run" | "unknown";
@@ -41,6 +43,8 @@ export type InstallationStatus = {
   signIn: { provider: string; reason: string; command: string; since: string }[];
   /** The most urgent tasks with the shared headline and sentence (task-status.ts), as every other surface words them. */
   tasks: { task: string; title: string; headline: string; sentence: string }[];
+  /** What the person's lead is doing now and when it last acted (lead-voice.ts), as one line. */
+  lead: { owner: string; doing: string; at: string; task: string | null; line: string } | null;
 };
 
 const maybeNumber = (value: unknown): number | null => value === null || value === undefined || !Number.isInteger(Number(value)) ? null : Number(value);
@@ -283,6 +287,11 @@ export function installationStatus(store: Store, now: Date): InstallationStatus 
     signIn: pauses.map(one => ({ provider: one.provider, reason: signInReason(one), command: signInCommand(one), since: one.openedAt })),
     tasks: workIndexPage(store, now, { principal: "operator", repos: null, includeUnplaced: true }, { limit: 8 }).items
       .map(one => ({ task: one.rootId, title: one.title, headline: one.status.label, sentence: one.status.detail })),
+    lead: (() => {
+      // The lead of whoever asks (the lead itself asks as its person); otherwise the newest lead at work.
+      const activity = leadActivity(store, currentActor()?.account ?? null);
+      return activity === null ? null : { owner: activity.owner, doing: activity.doing, at: activity.at, task: activity.taskId, line: leadActivityLine(activity, now) };
+    })(),
   };
 }
 
@@ -290,6 +299,7 @@ export function renderInstallationStatus(status: InstallationStatus): string[] {
   const lines: string[] = [];
   // A paused provider comes first: it is the one thing a person must do.
   for (const one of status.signIn) lines.push(`${one.reason} — run \`${one.command}\`. Its tasks wait until then.`);
+  if (status.lead != null) lines.push(status.lead.line);
   // Each task's one headline, the same words as the console and chat cards.
   if (status.tasks.length > 0) {
     lines.push("Tasks:");
@@ -322,7 +332,7 @@ export function renderInstallationStatus(status: InstallationStatus): string[] {
       lines.push(`Plan windows: ${provider} — ${detail}`);
     }
   }
-  return lines.slice(0, 12 + status.signIn.length + (status.tasks.length === 0 ? 0 : status.tasks.length + 1));
+  return lines.slice(0, 12 + status.signIn.length + (status.lead == null ? 0 : 1) + (status.tasks.length === 0 ? 0 : status.tasks.length + 1));
 }
 
 export function renderTaskWait(snapshot: TaskWaitSnapshot, outcome: string = snapshot.outcome): string {

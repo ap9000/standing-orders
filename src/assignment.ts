@@ -19,6 +19,7 @@ import { followUpChecksOf, withFollowUps } from "./result-follow-ups.js";
 import { buildReviewOf, findingWords, type BuildReviewView } from "./review-switch.js";
 import { NEEDS, WAITS, processNeedOf, type NeedKey, type WaitKey } from "./needs-you.js";
 import { assignmentStageOf } from "./task-status.js";
+import { leadClaimOf, type LeadClaim } from "./lead-voice.js";
 
 export type AssignmentAccess = WorkSummaryAccess;
 export type AssignmentOwner = { kind: "coordinator" | "lead"; id: string; label: string };
@@ -61,6 +62,8 @@ export type AssignmentSnapshot = {
   deployment: { status: "not-recorded" };
   /** What this assignment asks of a person, or waits for when no person can act (needs-you.ts). */
   need?: { key: NeedKey; build: number | null } | { wait: WaitKey; build: number | null } | null;
+  /** The person's lead took it on (lead-voice.ts): "Your lead is on it" until done, handed on, or two quiet hours. */
+  lead?: LeadClaim | null;
 };
 
 /** Status-first handoff for routine reads. Fetch get_assignment only when
@@ -337,6 +340,7 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
         action: primaryAction === null ? null : { code: primaryAction.code, target: primaryAction.target },
         attention, receipt: receipt?.digest ?? null }), acknowledged: false } : null;
   const publication = result === null ? null : store.publicationForRun(result.id);
+  const lead = state === "complete" || state === "cancelled" ? null : leadClaimOf(store, family.root.id, now);
   // Existing saved inputs and output, read only after family admission. Keep
   // polling briefs small; full reads disclose exactly which excerpts are shortened.
   const planId = result?.planRevision == null ? null : store.getPlanRevision(result.planRevision)?.artifact;
@@ -354,7 +358,7 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
   return { version: 1, rootId: family.root.id, activeTaskId: current.id, repo: current.repo, title: family.root.title,
     state, detail, primaryAction, attention: [...new Set(attention)], attempts, owner, receipt, savedContext, completion, handoff,
     publication: publication === null ? null : { state: publication.state, prUrl: publication.prUrl, remoteState: publication.remoteState },
-    review, deployment: { status: "not-recorded" }, ...(need === null ? {} : { need }) };
+    review, deployment: { status: "not-recorded" }, ...(need === null ? {} : { need }), ...(lead === null ? {} : { lead }) };
 }
 
 type MutationResult = { ok: true; assignment: AssignmentSnapshot } | { ok: false; reason: string; message: string };

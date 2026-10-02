@@ -26704,7 +26704,10 @@ export class Store {
     // A security alert always pings, ahead of every rule below: own acts, settled, replaced or release-check tasks.
     if (SECURITY_KINDS.has(row.kind) || row.kind === "evening-digest") return true;
     if (row.recipient !== null && row.kind === "task-ask") return true;
+    // The lead's own words reach the person it speaks for, and its claim repaints only that person's card (lead-voice.ts).
+    if (row.kind === "lead-say") return row.recipient === account;
     const actor = this.notificationActor(row.id);
+    if (row.kind === "lead-on-it") return actor?.lead === true && actor.account === account;
     if (actor !== null && actor.account === account) return false;
     if (row.recipient !== null) return true;
     // A task this person (or their lead) completed or cancelled is settled for them: nothing more about it.

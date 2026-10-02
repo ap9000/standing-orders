@@ -21,6 +21,15 @@ function since(iso: string, now = Date.now()): string {
   return minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h${minutes % 60 === 0 ? "" : ` ${minutes % 60} min`}`;
 }
 
+/** "just now", "3 min ago", "2 h ago": when the lead last acted. */
+function ago(iso: string, now = Date.now()): string {
+  const minutes = Math.max(0, Math.floor((now - Date.parse(iso)) / 60_000));
+  if (!Number.isFinite(minutes) || minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  return hours < 24 ? `${hours} h ago` : Math.floor(hours / 24) === 1 ? "yesterday" : `${Math.floor(hours / 24)} days ago`;
+}
+
 const SEEN_KEY = "so-catch-up-seen";
 const stamp = (item: BrowserCatchUpItem) => `${item.id}@${item.at}`;
 const stored = (): boolean => { try { return window.localStorage.getItem(SEEN_KEY) !== null; } catch { return true; } };
@@ -54,6 +63,12 @@ export function Home({ home }: { home: BrowserHome }) {
   return <div className="so-home flex flex-col gap-6 phone:gap-4" data-home>
     <section aria-labelledby="home-now" data-home-now>
       <h2 id="home-now" className="mb-2.5 text-[14px] font-semibold tracking-[-0.01em]">Now</h2>
+      {home.lead != null && <p data-home-lead className="mb-2.5 flex min-w-0 items-baseline gap-1.5 text-[13px] leading-snug">
+        <span className="shrink-0 font-medium">Your lead:</span>
+        {home.lead.href === null ? <span className="min-w-0 truncate">{home.lead.doing}</span>
+          : <a href={home.lead.href} className="min-w-0 truncate hover:underline hover:underline-offset-4">{home.lead.doing}</a>}
+        <span className="shrink-0 text-muted-foreground">· <time dateTime={home.lead.at} className="tabular-nums">{ago(home.lead.at)}</time></span>
+      </p>}
       {home.agents.length === 0
         ? <p className="text-[13px] text-muted-foreground">No agent is working right now.</p>
         : <ul className="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-2 phone:-mx-4 phone:flex phone:snap-x phone:snap-mandatory phone:scroll-px-4 phone:overflow-x-auto phone:px-4 phone:pb-1 phone:[scrollbar-width:none]">

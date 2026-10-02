@@ -16,6 +16,7 @@ import { isCheckLevel } from './check-levels.js';
 import { MARKER } from './worktree.js';
 import { withFollowUps } from './result-follow-ups.js';
 import { NEEDS, processNeedOf, type NeedKey, type WaitKey } from './needs-you.js';
+import { LEAD_CLAIM_SQL, LEAD_IDLE_MS } from './lead-voice.js';
 
 export type WorkIndexCounts = Record<WorkView, number>;
 export type WorkIndexItem = {
@@ -242,13 +243,17 @@ const PROJECTION = `WITH RECURSIVE admitted AS MATERIALIZED (
     WHEN deliverable='report' THEN 'scouting-ready'
     ELSE 'queued' END code
   FROM checked f
+), claimed AS MATERIALIZED (
+  SELECT c.*,CASE WHEN code IN ('cancelled','complete') THEN 0 ELSE ${LEAD_CLAIM_SQL} END lead_claim FROM classified c
 ), ranked AS MATERIALIZED (
-  SELECT c.*,code NOT IN ('cancelled','complete','running','updating','retry-scheduled','waiting-dependency','worker-at-capacity','planning-ready','scouting-ready','queued') AND NOT ${CUSTODY_WAITS} needs,
+  -- A task the person's lead is on (lead-voice.ts) waits on nobody: it leaves Needs you until the claim ends or lapses.
+  SELECT c.*,code NOT IN ('cancelled','complete','running','updating','retry-scheduled','waiting-dependency','worker-at-capacity','planning-ready','scouting-ready','queued') AND NOT ${CUSTODY_WAITS} AND lead_claim<>1 needs,
+    code NOT IN ('cancelled','complete','running','updating','retry-scheduled','waiting-dependency','worker-at-capacity','planning-ready','scouting-ready','queued') AND NOT ${CUSTODY_WAITS} person_need,
     CASE WHEN code='complete' THEN 3 WHEN code='cancelled' THEN 4 WHEN code='running' THEN 1
       WHEN ${CUSTODY_WAITS} OR code IN ('updating','retry-scheduled','waiting-dependency','worker-at-capacity','planning-ready','scouting-ready','queued') THEN 2 ELSE 0 END rank,
     CASE WHEN code='complete' THEN completed.at ELSE family_updated END sort_at,
     completed.actor checked_actor,completed.at checked_at,completed.outcome checked_digest
-  FROM classified c LEFT JOIN action_ledger completed ON completed.id=c.checked_id WHERE ($state IS NULL OR c.state=$state) AND ($leadId IS NULL OR EXISTS(SELECT 1 FROM team_task_owner own WHERE own.task_ref=c.root_ref AND own.lead=$leadId))
+  FROM claimed c LEFT JOIN action_ledger completed ON completed.id=c.checked_id WHERE ($state IS NULL OR c.state=$state) AND ($leadId IS NULL OR EXISTS(SELECT 1 FROM team_task_owner own WHERE own.task_ref=c.root_ref AND own.lead=$leadId))
 )`;
 
 const registered = new WeakMap<object, string>();
@@ -307,7 +312,8 @@ function parameters(now: Date, access: WorkSummaryAccess, options: WorkIndexOpti
     $now: now.toISOString(), $alive: new Date(now.getTime() - 180_000).toISOString(),
     $all: access.repos === null ? 1 : 0, $repos: JSON.stringify(access.repos ?? []),
     $unplaced: access.principal === 'operator' && access.includeUnplaced === true ? 1 : 0,
-    $projectSet: options.project != null ? 1 : 0, $project: options.project ?? null, $state: options.state ?? null, $leadId: options.leadId ?? null };
+    $projectSet: options.project != null ? 1 : 0, $project: options.project ?? null, $state: options.state ?? null, $leadId: options.leadId ?? null,
+    $leadIdleSince: new Date(now.getTime() - LEAD_IDLE_MS).toISOString() };
 }
 function counts(row: Row): WorkIndexCounts {
   return { all: n(row, 'all_count'), 'needs-you': n(row, 'needs_count'), running: n(row, 'running_count'), completed: n(row, 'completed_count') };
@@ -370,7 +376,7 @@ export function workIndexPage(store: Store, now: Date, access: WorkSummaryAccess
     'check_follows',(SELECT json_group_array(q.outcome||' '||COALESCE((SELECT substr(f.outcome,instr(f.outcome,':')+1) FROM action_ledger f WHERE f.repo IS page.repo AND f.run_id=page_result_id
       AND f.action='checks finished' AND f.outcome LIKE q.id||':%' LIMIT 1),'open')) FROM (SELECT id,outcome FROM action_ledger WHERE repo IS page.repo AND run_id=page_result_id AND action='checks requested' ORDER BY id) q),
     'proof_verdict',(SELECT COALESCE(machine_verdict,verdict) FROM proof_verdict WHERE run=page_result_id),
-    'proof_failed_check',(SELECT verdict='refuted' AND reasons_json LIKE '%approved verification command exited%' FROM proof_verdict WHERE run=page_result_id),'code',code,'needs',needs,'family_running',family_running,'rank',rank,'sort_at',sort_at,
+    'proof_failed_check',(SELECT verdict='refuted' AND reasons_json LIKE '%approved verification command exited%' FROM proof_verdict WHERE run=page_result_id),'code',code,'needs',needs,'person_need',person_need,'lead_claim',lead_claim,'family_running',family_running,'rank',rank,'sort_at',sort_at,
     'checked_actor',checked_actor,'checked_at',checked_at,'checked_digest',checked_digest,'question_id',question_id,
     'dependency_id',dependency_id,'dependency_state',dependency_state,'custody_unresolved',custody_unresolved,'hold_kind',hold_kind,'hold_reason',substr(hold_reason,1,300),'stop_run',stop_run,'unfinished',unfinished,'signed_out',signed_out,
     'question_run',(SELECT run FROM decision WHERE id=page.question_id),'replaced_by',(SELECT successor FROM task_replacement WHERE task_ref=page.ref_id),
@@ -442,6 +448,9 @@ function itemOf(row: Row, principal: WorkSummaryAccess['principal'], probe?: (ta
   const process = custody && probe !== undefined ? processNeedOf(probe(id)) : null;
   const waiting = process !== null && 'wait' in process;
   const need = n(row, 'needs') === 1 && !waiting, running = n(row, 'family_running') === 1;
+  // The lead's claim (lead-voice.ts): the row still reads its own stage, worded "Your lead is on it".
+  const lead = n(row, 'lead_claim') === 1 ? 'on-it' as const : n(row, 'lead_claim') === 2 ? 'lapsed' as const : null;
+  const personNeed = (n(row, 'person_need') === 1 || need) && !waiting;
   const assignmentState: AssignmentSnapshot['state'] = code === 'complete' ? 'complete' : code === 'ready-to-check' ? 'ready-to-check'
     : code === 'cancelled' ? 'cancelled' : need ? 'needs-decision' : 'working';
   const words: Record<string, [string, string, WorkAction['code'] | null, string]> = {
@@ -506,7 +515,7 @@ function itemOf(row: Row, principal: WorkSummaryAccess['principal'], probe?: (ta
     access: read ? 'read' : principal === 'operator' ? 'operator-control' : ['answer-decision', 'write-scope', 'unhold'].includes(actionCode) ? 'proposal-only' : 'operator-handoff',
     retry: actionCode === 'reconcile-run' ? 'reconcile-before-retry' : read ? 'read-again' : 'refresh-before-acting' };
   // The one shared status: the headline and sentence every surface uses.
-  const coded = stageOfCode(code, { needsPerson: need, planning: s(row, 'live_role') === 'planner', operatorHold: s(row, 'hold_kind') === 'operator' });
+  const coded = stageOfCode(code, { needsPerson: personNeed, planning: s(row, 'live_role') === 'planner', operatorHold: s(row, 'hold_kind') === 'operator' });
   const reading: { stage: typeof coded.stage; need?: NeedKey | undefined; wait?: WaitKey | undefined } = process !== null
     ? 'wait' in process ? { stage: 'waiting', wait: process.wait } : { stage: 'needs-you', need: process.need }
     : custody ? { stage: 'needs-you', need: 'confirm-stopped' }
@@ -518,7 +527,8 @@ function itemOf(row: Row, principal: WorkSummaryAccess['principal'], probe?: (ta
     ...(process === null ? {} : { needContext: { build: process.build } }),
     reason: finished ? null : plainReasonOf(reading.stage, code, detail || null), report: s(row, 'result_role') === 'scout',
     checks: !finished ? null : listChecksOf(own, s(row, 'check_level'), row['check_follows']),
-    completedBy: code !== 'complete' ? null : n(row, 'completed_by_lead') === 1 ? 'the lead' : String(row['checked_actor']).replace(/^(?:operator|coordinator|lead):/, '') });
+    completedBy: code !== 'complete' ? null : n(row, 'completed_by_lead') === 1 ? 'the lead' : String(row['checked_actor']).replace(/^(?:operator|coordinator|lead):/, ''),
+    ...(lead === null ? {} : { lead }) });
   label = shared.headline;
   detail = shared.sentence;
   // Every Needs you action wears its need's own words.

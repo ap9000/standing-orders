@@ -153,6 +153,7 @@ function lineOf(store: Store, item: ChatBatch["items"][number], now: Date, root?
     pullRequest,
     // The lead speaks as "I" for what it did: the work it filed or approved, or the completion it recorded.
     lead: card.status.headline === "Complete" ? card.completedByLead : store.leadWorkOf(item.taskRef) !== null,
+    ...(card.facts.lead === "on-it" ? { leadOnIt: true } : {}),
   };
   // A result ready for a person offers its real next step, then a look first.
   if (asksToFinish(fact)) return { fact, also: [{ label: READY_ACTIONS.look, path: chatResultHref(ref.externalId, run.id, "changes") }],

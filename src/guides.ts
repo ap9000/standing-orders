@@ -105,6 +105,15 @@ login, so your housekeeping never pings them.
   or for a security alert.
 - Hand a task to a person: \`task ask <id> --person <name> --why "<what
   they need to do>"\` — one message, and the task is theirs from then on.
+- Tell your person what you are doing, at milestones: \`lead say "<one
+  short line>" [--task <id>]\` when you start work, when you are handling a
+  failure, and when you are done. Plain words ("Fixing the release check's
+  failing test"); several within two minutes become one message.
+- Take on a task you are fixing: \`assignment claim <id>\`. It reads "Your
+  lead is on it" instead of waiting for them and leaves Needs you until you
+  complete it, hand it over with \`task ask\`, or go two hours without
+  acting on it (then it is back with them, and says so). Claim a failure
+  before you start on it, and \`lead say\` what you are doing.
 - Re-filing (a release check re-gated as \`release-<name>b\`): \`task add
   "<title>" --id <new> --replaces <old>\`, or \`task state <old> cancelled
   --replaced-by <new>\`. The old task reads "Replaced by <new>", never

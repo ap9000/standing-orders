@@ -62,6 +62,7 @@ import { teamWorkspaceHtml } from './team-ui.js';
 import { createTeamRuntime } from './team-runtime.js';
 import { prepareWorkspaceRevision, WorkspaceValidatorCache } from "./workspace-revision.js";
 import { workIndexPage, workCountsByProject, WorkIndexCursorError, WORK_INDEX_MAX_LIMIT, type WorkIndexPage, type WorkIndexItem } from "./work-index.js";
+import { leadActivity } from "./lead-voice.js";
 import { openWorkDecisionOf } from "./work-summary.js";
 import { assignmentOf, checkAssignmentAsOperator, type AssignmentSnapshot } from './assignment.js';
 import type { DemoExchange, DemoLead } from "./demo.js";
@@ -5214,8 +5215,13 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       })(),
     }));
     const windows = who.via === "cookie" && store.isInstanceOperator(who.name) ? limitsView(store.providerLimits(), [], { project: projectName, teammate: id => `Teammate ${id}` }, now) : null;
+    // One line: what this person's lead is doing now and when it last acted.
+    const activity = leadActivity(store, who.name);
+    const leadTask = activity?.taskId == null ? null : store.lookupRef(activity.taskId);
+    const lead = activity === null ? null : { doing: activity.doing, at: activity.at,
+      href: leadTask == null || !admitted(leadTask.repo) ? null : taskHref(familyOf(activity.taskId!)?.root.id ?? activity.taskId!) };
     return {
-      agents, counts, catchUp, allHref: "/work",
+      agents, counts, catchUp, allHref: "/work", ...(lead === null ? {} : { lead }),
       planUse: (windows?.tiles ?? []).map(one => ({ name: one.name, window: one.window, percent: one.percent, detail: one.detail, tone: one.tone })),
     };
   }

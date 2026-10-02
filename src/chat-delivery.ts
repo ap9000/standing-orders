@@ -35,6 +35,7 @@ import { triggerConfigOf } from "./flow-triggers.js";
 import { telegramProgressCard } from "./telegram-progress.js";
 import { enqueueEveningDigests, finishedView, isTaskFact, joinsBatch, needsPerson, quietCardView } from "./chat-quiet.js";
 import { BATCH_MS, chatText, chatTitle } from "./chat-voice.js";
+import { LEAD_SAY_KIND, leadSayEarlier, leadSayText } from "./lead-voice.js";
 import { phoneText, PHONE_HELP, phoneCommand, phoneStatus, phoneTaskView, phoneTaskChoices, phoneTaskListText, resolvePhoneTask, phoneFocusText, PHONE_NO_MATCH, PHONE_BACK_TO_LEAD } from "./telegram-status.js";
 import { applyRoomInbound, conversationRow, roomCardApprover, roomCommand, roomGrantAllowed, roomMessagesAfter, roomMessageText, teamDomain } from "./chat-rooms.js";
 import { isTelegramProgressNotification, proposalTaskOf, type Store } from "./store.js";
@@ -848,6 +849,21 @@ export async function planChatNotifications(
         // Only when I'm needed (the default): the task's one card is edited in place, and a new message
         // follows only when this person is needed. Every step keeps the branches below unchanged.
         const quiet = !personal && isTaskFact(notification) && store.notificationPreference(binding.approver).mode === "quiet";
+        if (notification.kind === LEAD_SAY_KIND) {
+          // The lead's words (lead-voice.ts): one message, repainted in place when a later say joins it.
+          const content: ChatContent = { text: leadSayText(notification),
+            ...(notification.link ? { link: { label: "Open", path: notification.link } } : {}) };
+          const earlier = leadSayEarlier(store, notification).map(one => state.prepare("SELECT id FROM chat_part WHERE event=?")
+            .get(chatHash(`${options.state.channel}:notice:${binding.id}:${one}`))).find(one => one !== undefined);
+          if (earlier !== undefined) {
+            state.prepare("UPDATE chat_part SET payload=?,state='pending',created=?,next_at=NULL WHERE id=? AND state!='dropped'").run(JSON.stringify(content), now.toISOString(), Number(earlier.id));
+            return;
+          }
+          state.enqueue({ id, installation: identity.installation, binding: binding.id, kind: "notice", channel: binding.channel, member: binding.member,
+            ts: "", thread: "", payload: "{}", created: now.toISOString() });
+          state.plan(id, [content], now);
+          return;
+        }
         if (quiet) {
           planQuietCard(options, binding, notification, now);
           if (!needsPerson(notification)) return;
