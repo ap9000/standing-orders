@@ -290,19 +290,22 @@ describe("Confirm it stopped, end to end", () => {
     expect(task.status?.action?.label).toBe("Build again");
     expect(task.status?.action?.href).not.toContain("/review");
 
-    // A result to review leads with Accept, the act this page holds; once accepted, the task.
+    // A result to review leads with Accept, the act this page holds; once accepted, no act here at all (never a link back to the task).
     const here = { ...stale, primaryAction: { ...stale.primaryAction!, code: "open-result" as const } };
     const facts = { humanReview: false, run: runs["unverified"]!, action: "/t/unverified/accept-proof" };
     const review = taskStatusOf({ stage: "needs-you", need: "review-result" });
     expect(needActionOf(here, review, "csrf", "/back", { ...facts, accepted: false }))
       .toMatchObject({ label: "Accept with exception", href: null, accept: { action: "/t/unverified/accept-proof", run: runs["unverified"], note: "Why is this safe to accept?" } });
     expect(needActionOf(here, review, "csrf", "/back", { ...facts, humanReview: true, accepted: false })?.accept?.note).toBeNull();
-    expect(needActionOf(here, review, "csrf", "/back", { ...facts, accepted: true })).toMatchObject({ label: "Open the task", href: "/t/unverified" });
+    expect(needActionOf(here, review, "csrf", "/back", { ...facts, accepted: true })).toBeNull();
     // Whatever else the task page sends the person here for, this page leads with what it can do, never a link back:
     // Accept a check only a person can make, or Build again a result that may run again.
     const other = taskStatusOf({ stage: "needs-you", need: "other" });
     expect(needActionOf(here, other, "csrf", "/back", { ...facts, humanReview: true, accepted: false })).toMatchObject({ label: "Accept result", accept: { note: null } });
     expect(needActionOf(here, other, "csrf", "/back", { ...facts, accepted: false, rebuildable: true })).toMatchObject({ label: "Build again", href: null, rebuild: { action: "/t/unverified/requeue" } });
+    // A report that doesn't match its saved changes (a refuted proof): Accept with a reason stays allowed here, never "Open the task".
+    expect(needActionOf(here, other, "csrf", "/back", { ...facts, accepted: false, refuted: true })).toMatchObject({ label: "Accept with exception", href: null, accept: { note: "Why is this safe to accept?" } });
+    expect(needActionOf(here, other, "csrf", "/back", { ...facts, accepted: false })).toBeNull();
 
     const rebuilt = await post("/t/unverified/requeue", { csrf: csrfOf(await page("/t/unverified")) });
     expect(rebuilt.status).toBe(303);

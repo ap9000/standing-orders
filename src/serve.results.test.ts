@@ -306,12 +306,12 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(html).toContain('data-review-task="t-ours"');
     const olderRun = store.runsFor(store.lookupRef("t-older")!.id)[0]!.id;
     const oursRun = store.runsFor(store.lookupRef("t-ours")!.id)[0]!.id;
-    expect(queue).toContain(`class="cockpit-row current" href="/review?result=t-ours&amp;run=${oursRun}&amp;project=%2Frepo%2Fmain" aria-current="page"`);
+    expect(queue).toContain(`class="cockpit-row current" href="/review?result=t-ours&amp;run=${oursRun}" aria-current="page"`);
 
     // A stable deep link selects, and the row it names is current.
     const picked = await (await fetch(url("/review?result=t-older"), { headers: { cookie } })).text();
     expect(picked).toContain('data-review-task="t-older"');
-    expect(queueOf(picked)).toContain(`class="cockpit-row current" href="/review?result=t-older&amp;run=${olderRun}&amp;project=%2Frepo%2Fmain"`);
+    expect(queueOf(picked)).toContain(`class="cockpit-row current" href="/review?result=t-older&amp;run=${olderRun}"`);
     expect(picked).not.toContain("is in view here");
     // The rebuilt page reads the same result: the list with its current row,
     // the panel's script hooks, and every tab body as the fallback's markup.
@@ -319,7 +319,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     const review = read.view as import("./browser-workspace.js").BrowserResultView;
     expect(review.kind).toBe("result");
     expect(review.results.map(one => one.title)).toEqual(["ours — the <b>title</b>", "older, needs eyes"]);
-    expect(review.results.find(one => one.current)?.href).toBe(`/review?result=t-older&run=${olderRun}&project=%2Frepo%2Fmain`);
+    expect(review.results.find(one => one.current)?.href).toBe(`/review?result=t-older&run=${olderRun}`);
     expect(review.attention).toBe(2);
     expect(review.selected).toMatchObject({ taskId: "t-older", build: olderRun, taskHref: "/t/t-older", status: { label: "Needs you" } });
     const panel = review.selected!.panel!;
@@ -1104,6 +1104,9 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
       effect: "Marks it complete. The branch stays; publishing isn't set up.", sentence: "Review the change, then accept it or ask for changes." });
     expect(first.complete).toMatchObject({ action: "/t/t-look/complete", run });
     expect(first.complete).not.toHaveProperty("publish");
+    // No check to run on this project: Accept without checks is the one ink act, never a link.
+    expect(first.acts.primary).toBe("accept");
+    expect(first.runChecks).toBeNull();
     const csrf = csrfOf(await (await fetch(url(`/review?result=t-look&run=${run}`), { headers: { cookie } })).text());
     // Looks right records the same acceptance as ever; the verdict stays as recorded.
     const verdict = store.proofVerdictFor(run);
@@ -1118,6 +1121,35 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect((await post(cookie, "/t/t-look/complete", { csrf, run: String(run), receipt: second.complete!.receipt })).status).toBe(303);
     expect(store.proofVerdictFor(run)).toEqual(verdict);
     expect((await read()).selected!.decision).toBeNull();
+  });
+
+  test("checks that didn't run on a project that has one: Run checks is the one ink act, Accept without checks beside it", async () => {
+    const patch = "diff --git a/z b/z\n--- a/z\n+++ b/z\n@@ -1 +1 @@\n-a\n+b\n";
+    const run = build("t-runcheck", seed("t-runcheck", "Check the rounding"), { patch, stat: [{ path: "z", additions: 1, deletions: 1 }], handoff: { conclusion: "Rounded at cent precision." } });
+    await boot();
+    store.stampRun(run, { scopeDigest: store.getScope("t-runcheck")!.digest });
+    store.setVerifyCommand({ repo: "/repo/main", command: "npm test", timeoutMs: 300_000, approvedBy: "alex" }, new Date());
+    const cookie = await login();
+    const read = async () => ((await (await fetch(url(`/review?result=t-runcheck&run=${run}&format=workspace`), { headers: { cookie } })).json()) as import("./browser-workspace.js").BrowserWorkspace).view as import("./browser-workspace.js").BrowserResultView;
+    const selected = (await read()).selected!;
+    expect(selected.acts).toMatchObject({ primary: "run-checks", secondary: "accept", line: null });
+    expect(selected.runChecks).toEqual({ action: `/r/${run}/checks`, level: "full", returnTo: `/review?result=t-runcheck&run=${run}&tab=checks` });
+    expect(selected.decision).toMatchObject({ label: "Accept without checks", ready: false });
+    // Run checks posts to the run's own follow-up act; once one is waiting, it isn't offered again.
+    const csrf = csrfOf(await (await fetch(url(`/review?result=t-runcheck&run=${run}`), { headers: { cookie } })).text());
+    const asked = await post(cookie, selected.runChecks!.action, { csrf, level: "full", return: selected.runChecks!.returnTo });
+    expect(asked.status).toBe(303);
+    // Back on the result's Checks tab, at an anchor that is there and showing.
+    expect(asked.headers.get("location")).toBe(`/review?result=t-runcheck&run=${run}&tab=checks#follow-ups`);
+    const landed = (await (await fetch(url(`/review?result=t-runcheck&run=${run}&tab=checks&format=workspace`), { headers: { cookie } })).json() as import("./browser-workspace.js").BrowserWorkspace).view as import("./browser-workspace.js").BrowserResultView;
+    const checksView = landed.selected!.panel!.views.find(one => one.key === "checks")!;
+    expect(checksView.html).toContain('id="follow-ups"');
+    expect(landed.selected!.panel!.tabs.find(one => one.active)?.key).toBe("checks");
+    // While they're queued or running, no Accept is ink: a disabled Checks running leads, Accept without checks in outline.
+    const after = (await read()).selected!;
+    expect(after.runChecks).toBeNull();
+    expect(after.acts).toEqual({ primary: "checks-running", secondary: "accept", line: null });
+    expect(after.decision).toMatchObject({ label: "Accept without checks", ready: false });
   });
 
   test("a missing or unreadable proof reads Accept without checks, and Accept never posts publish", async () => {
@@ -1156,7 +1188,9 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(html).toContain('Mark complete</button>');
     expect(html).toContain('Checks stay unchanged; nothing is published or deployed.');
     const decision = ((await (await fetch(url(`/review?result=t-complete&run=${run}&format=workspace`), { headers: { cookie } })).json()) as import("./browser-workspace.js").BrowserWorkspace).view as import("./browser-workspace.js").BrowserResultView;
-    expect(decision.selected!.decision).toMatchObject({ label: "Accept without checks", ready: false, why: "Nothing on record says what was met and checks failed." });
+    expect(decision.selected!.decision).toMatchObject({ label: "Accept", ready: false, why: "Nothing on record says what was met and checks failed." });
+    // The one ink act resolves it: Request changes, after one line saying why; Accept stays as allowed, in outline.
+    expect(decision.selected!.acts).toEqual({ primary: "request-changes", secondary: "accept", line: "Can't accept yet: the project's check failed on these changes." });
     const receipt = /name="receipt" value="([a-f0-9]{64})"/.exec(html)?.[1];
     expect(receipt).toBeDefined();
     const csrf = csrfOf(html);
@@ -1237,7 +1271,15 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     await boot();
     const cookie = await login();
     const read = async (path: string) => (await fetch(url(path), { headers: { cookie } })).text();
-    const pages = { task: await read("/t/t-shared"), chat: await read("/chat?task=t-shared"), detail: await read(`/chat?task=t-shared&result=${run}`), run: await read(`/r/${run}`), review: await read("/review?result=t-shared") };
+    const pages = { task: await read("/t/t-shared"), chat: await read("/chat?task=t-shared"), detail: await read(`/chat?task=t-shared&result=${run}`), run: await read(`/r/${run}?record=1`), review: await read("/review?result=t-shared") };
+    // One result page: the build's own link opens the task's result page, keeping the tab; the run record stays one tap away under Details.
+    const redirected = await fetch(url(`/r/${run}?tab=checks`), { headers: { cookie }, redirect: "manual" });
+    expect(redirected.status).toBe(303);
+    expect(redirected.headers.get("location")).toBe(`/review?result=t-shared&run=${run}&tab=checks`);
+    const one = ((await (await fetch(url(`/review?result=t-shared&run=${run}&format=workspace`), { headers: { cookie } })).json()) as import("./browser-workspace.js").BrowserWorkspace).view as import("./browser-workspace.js").BrowserResultView;
+    expect(one.selected!.title).toBe("one result, five surfaces");
+    expect(one.selected!.record).toMatchObject({ build: run, href: `/r/${run}?record=1` });
+    expect(one.results.every(row => !row.href.includes("project="))).toBe(true);
     const expected = { run: String(run), head: "b".repeat(12), base: "a".repeat(12), "head-source": "sealed diff", checks: "1/1", caveats: "1", evidence: "ok", publication: "none" };
     for (const [name, html] of Object.entries(pages)) {
       const stamped = factsOf(html);
@@ -1322,7 +1364,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     const run = build("t-simple-result", ref, { patch: PATCH, handoff: RICH.handoff });
     await boot();
     const cookie = await login();
-    const html = await (await fetch(url(`/r/${run}`), { headers: { cookie } })).text();
+    const html = await (await fetch(url(`/r/${run}?record=1`), { headers: { cookie } })).text();
     const win = new Window();
     try {
       win.document.body.innerHTML = html;
@@ -1353,7 +1395,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     });
     await boot();
     const cookie = await login();
-    for (const path of [`/r/${run}`, `/chat?task=t-caveat&result=${run}`, "/review?result=t-caveat"]) {
+    for (const path of [`/r/${run}?record=1`, `/chat?task=t-caveat&result=${run}`, "/review?result=t-caveat"]) {
       const html = await (await fetch(url(path), { headers: { cookie } })).text();
       const win = new Window();
       try {
@@ -1368,10 +1410,13 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
         expect(originalCaveats?.textContent).toContain(caveat);
         if (path.startsWith('/review')) {
           expect(win.document.querySelector('[data-result-tab=checks]')).not.toBeNull();
-          expect(html).not.toContain('Why is this safe to accept?');
         }
       } finally { await win.happyDOM.close(); }
     }
+    // It can't be accepted as it stands: one line says why, Request changes is the one ink act, and Accept with a reason stays allowed in outline.
+    const view = ((await (await fetch(url(`/review?result=t-caveat&run=${run}&format=workspace`), { headers: { cookie } })).json()) as import("./browser-workspace.js").BrowserWorkspace).view as import("./browser-workspace.js").BrowserResultView;
+    expect(view.selected!.acts).toEqual({ primary: "request-changes", secondary: "accept", line: "Can't accept yet: what the agent reported doesn't match the changes it saved." });
+    expect(view.selected!.panel!.need).toMatchObject({ href: null, accept: { note: "Why is this safe to accept?" } });
   });
 
   test("package 3 c2: a tampered screenshot, a shortened check log, a failed change-summary capture, and an unverifiable report are named in the open, never rendered, never called validated; an investigation's report is escaped text", async () => {
@@ -1478,7 +1523,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     for (const id of ["broken-result", "cross-result", "no-build-history"]) {
       const html = await (await fetch(url(`/review?result=${id}`), { headers: { cookie } })).text();
       const selectedRun = store.runsFor(store.lookupRef(id)!.id)[0]?.id;
-      expect(html).toContain(`class="cockpit-row current" href="/review?result=${id}${selectedRun === undefined ? "" : `&amp;run=${selectedRun}`}&amp;project=%2Frepo%2Fmain"`);
+      expect(html).toContain(`class="cockpit-row current" href="/review?result=${id}${selectedRun === undefined ? "" : `&amp;run=${selectedRun}`}"`);
       expect(html).toContain(`data-review-task="${id}"`);
       expect(html).toContain("History unavailable");
       expect(html).toContain("This task is shown separately.");

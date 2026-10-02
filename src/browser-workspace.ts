@@ -13,6 +13,7 @@ import type { Ask } from './needs-you.js';
 import type { WorkIndexGroup } from './work-index.js';
 import type { AssignmentCard } from './assignment-ui.js';
 import type { TaskStatus } from './task-status.js';
+import type { ResultActs } from './result-acts.js';
 import type { FirstRunStep, FirstTaskSuggestion, JourneyStep } from './first-run.js';
 
 export type BrowserProject = { name: string; path: string; href: string; knowledgeHref: string };
@@ -264,6 +265,12 @@ export type BrowserResultView = {
     /** Words for the result's Accept: Mark complete when offered, else the Needs you acceptance. */
     decision: BrowserResultDecision | null;
     checks: { detail: string; problem: boolean; logHref: string | null } | null;
+    /** The one ink act that resolves the result, the one outline act beside it, and why it can't be accepted yet (result-acts.ts). */
+    acts: ResultActs;
+    /** Run checks on this result's commit: the project's check, when it didn't run. */
+    runChecks: { action: string; level: "quick" | "full"; returnTo: string } | null;
+    /** The raw run record, under Details: its facts and the full record. */
+    record: { build: number; href: string; facts: { label: string; value: string }[] } | null;
     /** The signed scope; null when none was filed. */
     intent: { approval: string; html: string } | null;
     noRun: string | null;

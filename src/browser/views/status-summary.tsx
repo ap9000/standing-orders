@@ -55,9 +55,14 @@ export function StatusDetails({ status }: { status: TaskStatus }) {
   </ul>;
 }
 
+/** The exact recorded reasons behind a status, each once. */
+export function statusWhyLines(status: TaskStatus, extra: readonly string[] = []): string[] {
+  return [...new Set([...status.details.flatMap(one => one.why === null ? [] : [`${one.label}: ${one.why}`]), ...status.why, ...extra])];
+}
+
 /** The exact recorded reasons, one tap away. */
 export function StatusWhy({ status, extra = [] }: { status: TaskStatus; extra?: readonly string[] }) {
-  const lines = [...new Set([...status.details.flatMap(one => one.why === null ? [] : [`${one.label}: ${one.why}`]), ...status.why, ...extra])];
+  const lines = statusWhyLines(status, extra);
   if (lines.length === 0) return null;
   return <details className="group text-[13px]" data-status-why>
     <summary className="flex cursor-pointer list-none items-center gap-1.5 py-1 font-medium text-muted-foreground hover:text-foreground phone:min-h-11 [&::-webkit-details-marker]:hidden">
@@ -100,9 +105,9 @@ export function ConfirmStoppedForm({ form, csrf, label = "Confirm it stopped" }:
 
 /** Build again, for a result built to an earlier plan: one filled button, the
  * task page's requeue (it runs again on the same filing, under the current plan). */
-export function RebuildForm({ action, csrf, label = "Build again" }: { action: string; csrf: string; label?: string }) {
+export function RebuildForm({ action, csrf, label = "Build again", className }: { action: string; csrf: string; label?: string; className?: string }) {
   return <form method="post" action={action} data-rebuild className="phone:w-full">
     <input type="hidden" name="csrf" value={csrf} />
-    <Button type="submit" variant="attention" className="phone:w-full" data-primary-action>{label}</Button>
+    <Button type="submit" variant="attention" className={cn("phone:w-full", className)} data-primary-action>{label}</Button>
   </form>;
 }

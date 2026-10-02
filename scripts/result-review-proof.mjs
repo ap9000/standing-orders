@@ -172,7 +172,7 @@ for (const scheme of ['light', 'dark']) {
     check('c1 desk: Looks right and Not right are on the item', await page.locator('[data-check-item="c1"] [data-looks-right]').count() === 1 && await page.locator('[data-check-item="c1"] [data-not-right]').count() === 1);
     check('c2 desk: Accept without checks, naming what', f.label === 'Accept without checks' && f.why === "Checks didn't run and 1 item still needs your check.", `${f.label} / ${f.why}`);
     check('c2 desk: says what accepting does', f.effect === "Marks it complete. The branch stays; publishing isn't set up.", f.effect);
-    check('the result page says its own sentence', f.sentence === 'Review the change, then accept it or ask for changes.', f.sentence);
+    check('the status card says what happened in one sentence', f.sentence === 'Rewrote the empty Results copy so a first-time user knows results arrive when a build finishes.', f.sentence);
     check('desk: no text under 12px in the result', f.small.length === 0, f.small.join(', '));
     check('desk: decision and item controls are 44px', f.targets.every(h => h >= 44), f.targets.join(','));
   }

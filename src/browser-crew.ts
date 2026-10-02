@@ -16,7 +16,7 @@ export function browserWorkActionHref(item: WorkIndexItem): string | null {
   if (action.code === 'open-result' && runId !== null) return chatResultHref(taskId, runId);
   if (action.code === 'open-pr' && /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+$/.test(item.publicationUrl ?? '')) return item.publicationUrl!;
   if (runId !== null && (action.code === 'open-pr' || action.code === 'retry-review')) {
-    return `/review?result=${encodeURIComponent(taskId)}&run=${runId}${item.repo === null ? '' : '&project=' + encodeURIComponent(item.repo)}`;
+    return `/review?result=${encodeURIComponent(taskId)}&run=${runId}`;
   }
   if (runId !== null && (action.code === 'inspect-run' || action.code === 'reconcile-run')) return `/r/${runId}`;
   const anchor = action.code === 'approve-scope' ? '#approve'

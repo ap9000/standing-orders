@@ -6,7 +6,7 @@
  * URLs), so Back and bookmarks work. Usage folds to one line on a desk and
  * sits below the list on a phone, so the first task is near the top. */
 import { ArrowRight, ChevronDown, Ellipsis, Inbox, LayoutGrid, ListTodo, Plus, Repeat, Sparkles, Code2, ListOrdered, Briefcase } from "lucide-react";
-import { useId, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import type { BrowserLimits, BrowserLimitTile, BrowserTasksView } from "../../browser-workspace.js";
 import { ASK_LABEL } from "../../needs-you.js";
 import { Button, Card, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, cn } from "../components/ui/index.js";
@@ -132,6 +132,31 @@ function UsageToggle({ limits, open, onToggle, controls }: { limits: BrowserLimi
   </button>;
 }
 
+/** A strip that scrolls sideways (the view tabs on a phone): the edge that has more fades out,
+ * so a cut-off tab reads as "scroll for more" rather than clipped. */
+function ScrollStrip({ label, className, children }: { label: string; className: string; children: ReactNode }) {
+  const ref = useRef<HTMLElement>(null);
+  const [more, setMore] = useState({ before: false, after: false });
+  useEffect(() => {
+    const strip = ref.current;
+    if (strip === null) return;
+    const measure = () => setMore(was => {
+      const now = { before: strip.scrollLeft > 1, after: strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 1 };
+      return now.before === was.before && now.after === was.after ? was : now;
+    });
+    measure();
+    strip.addEventListener("scroll", measure, { passive: true });
+    const resized = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    resized?.observe(strip);
+    return () => { strip.removeEventListener("scroll", measure); resized?.disconnect(); };
+  }, []);
+  const fade = more.before || more.after
+    ? `linear-gradient(to right, ${more.before ? "transparent, #000 28px" : "#000"}, ${more.after ? "#000 calc(100% - 40px), transparent" : "#000"})` : undefined;
+  return <nav ref={ref} aria-label={label} className={cn("[scrollbar-width:none] [&::-webkit-scrollbar]:hidden", className)}
+    data-scrolls={more.before || more.after ? (more.after ? "more" : "end") : undefined}
+    style={fade === undefined ? undefined : { maskImage: fade, WebkitMaskImage: fade }}>{children}</nav>;
+}
+
 export function TasksView({ view }: { view: BrowserTasksView }) {
   const [usageOpen, setUsageOpen] = useState(false);
   const usageId = useId();
@@ -154,7 +179,7 @@ export function TasksView({ view }: { view: BrowserTasksView }) {
     </div>
     {limits && usageOpen && <LimitTiles limits={limits} id={usageId} className="phone:hidden" />}
     <div className="flex min-w-0 items-center">
-      <nav aria-label="Task views" className="-mx-1 min-w-0 max-w-full overflow-x-auto px-1 phone:-mr-4 phone:max-w-none phone:pr-4">
+      <ScrollStrip label="Task views" className="-mx-1 min-w-0 max-w-full overflow-x-auto px-1 phone:-mr-4 phone:max-w-none phone:pr-4">
         <ul className="inline-flex h-8 items-center gap-0.5 rounded-lg bg-muted p-0.5 phone:h-12">
           {view.tabs.map(tab => <li key={tab.href} className="h-full">
             <a href={tab.href} aria-current={tab.active ? "page" : undefined}
@@ -165,7 +190,7 @@ export function TasksView({ view }: { view: BrowserTasksView }) {
             </a>
           </li>)}
         </ul>
-      </nav>
+      </ScrollStrip>
     </div>
 
     {view.empty !== null ? <Card className="items-start py-10">
