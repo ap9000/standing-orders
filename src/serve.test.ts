@@ -7131,6 +7131,7 @@ describe("the continuation ceremony (Phase 2E, A4)", () => {
 
 
 describe("the viewer role (v29, L2): reads everything, acts on nothing", () => {
+  let viewerEvidence: string;
   let server: Server;
   let port: number;
   let store: Store;
@@ -7149,7 +7150,8 @@ describe("the viewer role (v29, L2): reads everything, acts on nothing", () => {
     store.raw().prepare("UPDATE approver SET role = 'viewer' WHERE name = 'vera'").run();
     (globalThis as { __viewerToken?: string }).__viewerToken = viewer.token;
     store.createTask({ id: "t-v", title: "watched" }, new Date());
-    server = createDecisionServer({ store, evidenceRoot: mkdtempSync(join(tmpdir(), "so-viewer-ev-")) });
+    viewerEvidence = mkdtempSync(join(tmpdir(), "so-viewer-ev-"));
+    server = createDecisionServer({ store, evidenceRoot: viewerEvidence });
     await new Promise<void>(pass => server.listen(0, "127.0.0.1", () => pass()));
     port = (server.address() as { port: number }).port;
   });
@@ -7157,6 +7159,7 @@ describe("the viewer role (v29, L2): reads everything, acts on nothing", () => {
   afterEach(async () => {
     await new Promise<void>(pass => server.close(() => pass()));
     store.close();
+    rmSync(viewerEvidence, { recursive: true, force: true });
   });
 
   const loginAs = async (name: string, token: string): Promise<string> => {

@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, test } from "vitest";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { availableParallelism, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { definesSchema, planFor, versionOnly } from "../scripts/release-check.mjs";
+import { definesSchema, journeyShares, planFor, versionOnly } from "../scripts/release-check.mjs";
 import { completionProblems, installPublished, lastPublished, missingTables } from "../scripts/upgrade-path.mjs";
+import { GROUP_BYTES, browserSlots, limiter, memoryWords, parseMeminfo, parseVmStat, watchMemory } from "../scripts/check-memory.mjs";
 
 const pkg = (version: string, dependencies: Record<string, string> = { zod: "^3.23.0" }) => JSON.stringify({ name: "toolroll", version, type: "module", dependencies }, null, 2) + "\n";
 const lock = (version: string, zod = "3.23.8") => JSON.stringify({
@@ -82,7 +83,7 @@ describe("node scripts/release-check.mjs --plan", () => {
     const summary = out.slice(out.indexOf("== summary"));
     expect(out).toContain("(2 changed files): every unit test (test/setup.ts changed); no browser journeys (nothing a page shows changed); only the version changed in package.json.");
     expect(summary.split("\n").slice(0, 4)).toEqual(["== summary", "plan: every unit test (test/setup.ts changed); no browser journeys (nothing a page shows changed); only the version changed in package.json", "unit: exit 0", " Test Files  1 passed (1) after ok, waited true"]);
-    expect(summary).toMatch(/\ntook: typecheck \d+ s, build \d+ s, unit \d+ s; whole check \d+ s\n$/);
+    expect(summary).toMatch(/\ntook: typecheck \d+ s, build \d+ s, unit \d+ s; whole check \d+ s\npeak memory: (the check's processes [0-9.]+ GB; )?the machine [0-9.]+ GB in use of [0-9.]+ GB \(lowest available [0-9.]+ GB\)\n$/);
   });
 
   test("a real dependency change still runs everything", () => {
@@ -144,5 +145,53 @@ describe("the upgrade path step", () => {
     expect(completionProblems(before, { a: { state: "ready-to-check", digest: null }, b: { state: "complete", digest: "other" } }))
       .toEqual(["a is ready-to-check, not complete", "b's completed result changed digest (d2 → other)", "c is gone"]);
     expect(missingTables(["build_review", "run", "task"], ["run", "task"])).toEqual(["build_review"]);
+  });
+});
+
+describe("checks fit memory", () => {
+  const MB = 1024 * 1024;
+  test("available memory: macOS free, inactive, speculative and purgeable pages; Linux MemAvailable", () => {
+    const vmStat = "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:      1000.\nPages active:   9000.\nPages inactive:  2000.\nPages speculative:  500.\nPages wired down:  700.\nPages purgeable:  100.\n";
+    expect(parseVmStat(vmStat)).toBe((1000 + 2000 + 500 + 100) * 16384);
+    expect(parseMeminfo("MemTotal:  16000000 kB\nMemFree:  100000 kB\nMemAvailable:  8000000 kB\n")).toBe(8000000 * 1024);
+    expect(parseMeminfo("MemTotal: 1 kB\n")).toBeNull();
+  });
+
+  test("browser groups: one per 400 MB available, at least 1, at most 6; shared between the two journey runs", () => {
+    expect(GROUP_BYTES).toBe(400 * MB);
+    expect([0, 399 * MB, 800 * MB, 1300 * MB, 2400 * MB, 64 * 1024 * MB].map(bytes => browserSlots(bytes))).toEqual([1, 1, 2, 3, 6, 6]);
+    expect(journeyShares(1)).toEqual({ flows: 1, app: 1, together: false });
+    expect(journeyShares(2)).toEqual({ flows: 1, app: 1, together: true });
+    expect(journeyShares(6)).toEqual({ flows: 3, app: 3, together: true });
+    expect(journeyShares(5)).toEqual({ flows: 2, app: 3, together: true });
+  });
+
+  test("a group starts only below the limit, and beyond the first only while there is room for it", async () => {
+    let running = 0, most = 0, room = true;
+    const slot = limiter(2, { room: () => room, everyMs: 5 });
+    const group = (ms: number) => slot(async () => { running += 1; most = Math.max(most, running); await new Promise(done => setTimeout(done, ms)); running -= 1; });
+    await Promise.all([1, 2, 3, 4, 5].map(() => group(20)));
+    expect(most).toBe(2);
+    // No room: one at a time, never none.
+    room = false; most = 0;
+    await Promise.all([1, 2, 3].map(() => group(10)));
+    expect(most).toBe(1);
+  });
+
+  test("the check log records peak memory", () => {
+    let free = 10 * 1024 * MB, mine = 1024 * MB;
+    const watch = watchMemory({ everyMs: 60_000, total: 16 * 1024 * MB, available: () => free, tree: () => mine });
+    free = 3 * 1024 * MB; mine = 5 * 1024 * MB;
+    const seen = watch.stop();
+    expect(seen).toEqual({ total: 16 * 1024 * MB, peakUsed: 13 * 1024 * MB, lowestAvailable: 3 * 1024 * MB, peakCheck: 5 * 1024 * MB });
+    expect(memoryWords(seen)).toBe("peak memory: the check's processes 5.0 GB; the machine 13.0 GB in use of 16.0 GB (lowest available 3.0 GB)");
+    expect(memoryWords({ ...seen, peakCheck: null })).toBe("peak memory: the machine 13.0 GB in use of 16.0 GB (lowest available 3.0 GB)");
+    expect(readFileSync(resolve("scripts/release-check.mjs"), "utf8")).toContain("console.log(memoryWords(memory.stop()));");
+  });
+
+  test("vitest runs at most half the cores", async () => {
+    const config = (await import("../vitest.config.ts")).default as { test: { maxWorkers: number } };
+    expect(config.test.maxWorkers).toBeLessThanOrEqual(Math.max(1, Math.floor(availableParallelism() / 2)));
+    expect(config.test.maxWorkers).toBeGreaterThanOrEqual(1);
   });
 });

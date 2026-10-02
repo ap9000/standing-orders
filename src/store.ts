@@ -12014,6 +12014,11 @@ export class Store {
     this.db.prepare("UPDATE worktree SET setup_digest = ? WHERE path = ?").run(digest, path);
   }
 
+  /** The checkout no longer holds what its setup made (its dependencies were dropped): the next lease runs setup again. */
+  forgetWorktreeSetup(path: string): void {
+    this.db.prepare("UPDATE worktree SET setup_digest = NULL WHERE path = ?").run(path);
+  }
+
   // ---- verify command (Priority 2) ---------------------------------------
 
   /**
