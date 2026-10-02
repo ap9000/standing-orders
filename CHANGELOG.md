@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.10 — 2026-10-02
+
+- **Chat reads like a teammate.** Short messages, outcome first, with real
+  choices: Merge or Mark complete, and Look first. Updates within two minutes
+  arrive as one message. You're never told about your own actions, release
+  checks and replaced tasks stay quiet, and a release sends one "is live" line.
+  The Telegram bot is named Toolroll.
+
 ## 0.9.9 — 2026-10-02
 
 - **Faster, lighter tests.** The unit suite runs about three times faster
