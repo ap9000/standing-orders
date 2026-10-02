@@ -254,6 +254,18 @@ const SPENT_KINDS = new Set(["attempts-exhausted", "plan-attempts-exhausted"]);
 /** What stops a finished run reading stopped (Store.stopQuiescenceFact). */
 export type StopFactKind = "open" | "alive" | "elsewhere" | "unprovable" | "unknown";
 export type TaskAct = "filed" | "approved" | "cancelled" | "completed" | "asked";
+/** Store.stopQuiescenceFact, read safely: a deploy proves completion with this code over the INSTALLED runtime's store,
+ * which may predate the method. There the older stopQuiescenceProblem decides, and its words give the kind. */
+export function stopFactOf(store: Pick<Store, "stopQuiescenceProblem"> & Partial<Pick<Store, "stopQuiescenceFact">>, runId: number): { run: number; kind: StopFactKind; problem: string } | null {
+  if (typeof store.stopQuiescenceFact === "function") return store.stopQuiescenceFact(runId);
+  const problem = store.stopQuiescenceProblem(runId);
+  if (problem === null) return null;
+  const kind: StopFactKind = /still open|does not exist/.test(problem) ? "open"
+    : /another host/.test(problem) ? "elsewhere"
+    : /may still be running|still has|held by|has not finished|still has members/.test(problem) ? "alive"
+    : /cannot be proven|could not be established|incomplete native/.test(problem) ? "unknown" : "unprovable";
+  return { run: Number(/run #(\d+)/.exec(problem)?.[1] ?? runId), kind, problem };
+}
 export type TaskActRow = { act: TaskAct; account: string; lead: boolean; person: string | null; why: string | null; at: string };
 
 /** Settings → Integrations (no version bump): each integration's last check. `outcome` is ok, failed, or absent (the check found

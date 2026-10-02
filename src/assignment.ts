@@ -6,7 +6,7 @@ import { currentActor, withActor } from "./actor.js";
 import { replacedWords } from "./task-status.js";
 import { COMPLETION_ACTION, familyChangedFiles } from "./result-completion.js";
 import { homedir } from "node:os";
-import { readSchemaVersion, type Store, type ProofVerdictRow, type ProofAcceptanceRow, type Artifact } from "./store.js";
+import { readSchemaVersion, stopFactOf, type Store, type ProofVerdictRow, type ProofAcceptanceRow, type Artifact } from "./store.js";
 import { approvalOf } from "./scope.js";
 import { openWorkDecisionOf, taskWorkSummaryOf, workDecisionAction, type WorkAction, type WorkSummaryAccess } from "./work-summary.js";
 import { evidenceRoot, readVerifiedArtifact, readVerifiedReport } from "./evidence.js";
@@ -211,7 +211,7 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
   let detail = work.status.detail;
   let primaryAction = work.primaryAction;
   const live = work.liveRunId !== null || work.status.token === "running";
-  const processFact = result === null ? null : store.stopQuiescenceFact(result.id);
+  const processFact = result === null ? null : stopFactOf(store, result.id);
   const processProblem = processFact?.problem ?? null;
   let need: AssignmentSnapshot["need"] = null;
   // The exact completed result, scope, family and custody fences apply to

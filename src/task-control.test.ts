@@ -516,8 +516,8 @@ describe("a finished run's processes settle by themselves", () => {
     const kill = vi.spyOn(process, "kill").mockReturnValue(true);
     try {
       const runId = finishedWithLiveProcess("t-outlived");
-      expect(item("t-outlived").status.label).toBe("Needs you");
-      expect(item("t-outlived").status.detail).toBe("A process exit is not recorded. Open the result to check whether its work has stopped.");
+      expect(item("t-outlived").status.label).toBe("Waiting");
+      expect(item("t-outlived").status.detail).toBe("Waiting for build #1 to stop. Nothing is needed from you.");
       // Still alive: nothing is recorded.
       expect(store.recordFinishedRunExits(later(2_000))).toBe(0);
       kill.mockImplementation(() => { throw Object.assign(new Error("gone"), { code: "ESRCH" }); });
@@ -547,7 +547,7 @@ describe("a finished run's processes settle by themselves", () => {
       expect(store.recordFinishedRunExits(later(2_000), 1)).toBe(3);
       for (const runId of newer) expect(store.stopQuiescenceProblem(runId)).toBeNull();
       expect(store.raw().prepare("SELECT exited_at FROM run_process WHERE run = ?").get(stuck)?.["exited_at"]).toBeNull();
-      expect(item("t-still-alive").status.label).toBe("Needs you");
+      expect(item("t-still-alive").status.label).toBe("Waiting");
       for (const id of ["t-gone-1", "t-gone-2", "t-gone-3"]) expect(item(id).status.label).toBe("Ready for review");
     } finally { kill.mockRestore(); }
   });
@@ -556,7 +556,7 @@ describe("a finished run's processes settle by themselves", () => {
     const kill = vi.spyOn(process, "kill").mockReturnValue(true);
     try {
       for (const id of ["t-old-1", "t-old-2", "t-old-3"]) finishedWithLiveProcess(id);
-      expect(["t-old-1", "t-old-2", "t-old-3"].map(id => item(id).status.label)).toEqual(["Needs you", "Needs you", "Needs you"]);
+      expect(["t-old-1", "t-old-2", "t-old-3"].map(id => item(id).status.label)).toEqual(["Waiting", "Waiting", "Waiting"]);
       // The upgrade happens after those processes are long gone.
       kill.mockImplementation(() => { throw Object.assign(new Error("gone"), { code: "ESRCH" }); });
       expect(repairStaleStatuses(store, later(2_000))).toEqual({ exitsRecorded: 3, readyForReview: 3 });
@@ -576,7 +576,7 @@ describe("a finished run's processes settle by themselves", () => {
       // Born before the run finished: it may be the run's own process.
       expect(store.recordFinishedRunExits(later(2_000))).toBe(0);
       expect(store.stopQuiescenceProblem(runId)).toContain("may still be running");
-      expect(item("t-reused-pid").status.label).toBe("Needs you");
+      expect(item("t-reused-pid").status.label).toBe("Waiting");
       // Born after: the pid was reused, so the run's process is gone.
       ps.mockReturnValue("Mon Sep 14 14:33:43 2026\n");
       expect(store.stopQuiescenceProblem(runId)).toBeNull();

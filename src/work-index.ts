@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { readProjectAccess } from './project-access.js';
 import { pauseOnTaskProviders, providerName, signInReason } from './provider-auth.js';
 import type { ProviderId } from './provider.js';
-import { scopeTermsProblem, type Store, type TaskState } from './store.js';
+import { scopeTermsProblem, stopFactOf, type Store, type TaskState } from './store.js';
 import type { AssignmentSnapshot } from './assignment.js';
 import type { WorkAction, WorkSummaryAccess } from './work-summary.js';
 import type { WorkStatus, WorkView } from './workspace-ui.js';
@@ -294,7 +294,7 @@ function custodyReadings(store: Store): { readings: Map<number, StopFact | null>
   const readings = new Map<number, StopFact | null>();
   for (const ref of new Set([...refs, ...noted])) {
     let found: StopFact | null = null;
-    for (const run of store.runsFor(ref)) { const fact = store.stopQuiescenceFact(run.id); if (fact !== null && fact.kind !== 'open') { found = fact; break; } }
+    for (const run of store.runsFor(ref)) { const fact = stopFactOf(store, run.id); if (fact !== null && fact.kind !== 'open') { found = fact; break; } }
     readings.set(ref, found);
   }
   return { readings, workspace: new Set(noted) };
