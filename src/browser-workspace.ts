@@ -250,7 +250,7 @@ export type BrowserResultView = {
     status: { label: string; tone: StatusTone; token: string };
     problem: string | null;
     next: { kind: string; title: string; detail: string; control: string } | null;
-    complete: { action: string; receipt: string; run: number; publish: boolean } | null;
+    complete: { action: string; receipt: string; run: number } | null;
     /** Words for the result's Accept: Mark complete when offered, else the Needs you acceptance. */
     decision: BrowserResultDecision | null;
     checks: { detail: string; problem: boolean; logHref: string | null } | null;

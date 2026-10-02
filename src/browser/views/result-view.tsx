@@ -211,7 +211,6 @@ function Decision({ selected, csrf }: { selected: Selected; csrf: string }) {
         <input type="hidden" name="csrf" value={csrf} />
         <input type="hidden" name="receipt" value={complete.receipt} />
         <input type="hidden" name="run" value={String(complete.run)} />
-        {complete.publish && <input type="hidden" name="publish" value="1" />}
         <Button type="submit" variant={decision.ready ? "default" : "outline"} className="min-h-11 phone:w-full" data-primary-action><Check className="phone:hidden" />{decision.label}</Button>
       </form>}
       {accept !== null && <form method="post" action={accept.action} className="flex flex-wrap items-center gap-2 phone:w-full phone:flex-1">

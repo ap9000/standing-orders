@@ -1080,6 +1080,11 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
       stat: [{ path: "src/empty.ts", additions: 1, deletions: 1 }],
       handoff: { conclusion: "Rewrote the empty state so it says where results come from." },
       screenshot: { path: "evidence/empty.png", caption: "Empty state at 390px" },
+      proof: {
+        version: 1,
+        criteria: [{ id: "c1", statement, verdict: "met", how: "Looked at it at 390px.", evidence: [{ kind: "manual-review", ref: "Open Results with nothing in it at 390px." }] }],
+        checks: [], changed: ["src/empty.ts"], caveats: [], screenshots: [{ path: "evidence/empty.png", caption: "Empty state at 390px" }],
+      },
       verdict: { verdict: "short", reasons: [reason], matrix: [row("c1", statement, "manual-review", [{ kind: "changed-path", ref: "src/empty.ts" }, { kind: "screenshot", ref: "evidence/empty.png" }, { kind: "manual-review", ref: "Open Results with nothing in it at 390px." }], [reason])] },
     });
     await boot();
@@ -1097,7 +1102,8 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     // Checks didn't run and the item is still the person's: Accept without checks, naming both, and what it does.
     expect(first.decision).toEqual({ label: "Accept without checks", ready: false, why: "Checks didn't run and 1 item still needs your check.",
       effect: "Marks it complete. The branch stays; publishing isn't set up.", sentence: "Review the change, then accept it or ask for changes." });
-    expect(first.complete).toMatchObject({ action: "/t/t-look/complete", run, publish: false });
+    expect(first.complete).toMatchObject({ action: "/t/t-look/complete", run });
+    expect(first.complete).not.toHaveProperty("publish");
     const csrf = csrfOf(await (await fetch(url(`/review?result=t-look&run=${run}`), { headers: { cookie } })).text());
     // Looks right records the same acceptance as ever; the verdict stays as recorded.
     const verdict = store.proofVerdictFor(run);
@@ -1112,6 +1118,23 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect((await post(cookie, "/t/t-look/complete", { csrf, run: String(run), receipt: second.complete!.receipt })).status).toBe(303);
     expect(store.proofVerdictFor(run)).toEqual(verdict);
     expect((await read()).selected!.decision).toBeNull();
+  });
+
+  test("a missing or unreadable proof reads Accept without checks, and Accept never posts publish", async () => {
+    const patch = "diff --git a/z b/z\n--- a/z\n+++ b/z\n@@ -1 +1 @@\n-a\n+b\n";
+    const missing = build("t-noproof", seed("t-noproof", "No proof on record"), { patch, stat: [{ path: "z", additions: 1, deletions: 1 }], verdict: { verdict: "verified" } });
+    const damaged = build("t-badproof", seed("t-badproof", "A proof that can't be read"), { patch, stat: [{ path: "z", additions: 1, deletions: 1 }], proof: { version: 99 }, verdict: { verdict: "verified" } });
+    await boot();
+    store.stampRun(missing, { scopeDigest: store.getScope("t-noproof")!.digest });
+    store.stampRun(damaged, { scopeDigest: store.getScope("t-badproof")!.digest });
+    const cookie = await login();
+    const read = async (task: string, run: number) => ((await (await fetch(url(`/review?result=${task}&run=${run}&format=workspace`), { headers: { cookie } })).json()) as import("./browser-workspace.js").BrowserWorkspace).view as import("./browser-workspace.js").BrowserResultView;
+    for (const [task, run] of [["t-noproof", missing], ["t-badproof", damaged]] as const) {
+      const selected = (await read(task, run)).selected!;
+      expect(selected.decision).toMatchObject({ label: "Accept without checks", ready: false });
+      expect(selected.decision!.why).toMatch(/^The saved proof couldn't be read/);
+      expect(selected.complete).not.toHaveProperty("publish");
+    }
   });
 
   test("mark complete binds the exact saved result and preserves check failures and publication authority", async () => {
@@ -1133,7 +1156,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(html).toContain('Mark complete</button>');
     expect(html).toContain('Checks stay unchanged; nothing is published or deployed.');
     const decision = ((await (await fetch(url(`/review?result=t-complete&run=${run}&format=workspace`), { headers: { cookie } })).json()) as import("./browser-workspace.js").BrowserWorkspace).view as import("./browser-workspace.js").BrowserResultView;
-    expect(decision.selected!.decision).toMatchObject({ label: "Accept without checks", ready: false, why: "Checks failed." });
+    expect(decision.selected!.decision).toMatchObject({ label: "Accept without checks", ready: false, why: "The saved proof couldn't be read and checks failed." });
     const receipt = /name="receipt" value="([a-f0-9]{64})"/.exec(html)?.[1];
     expect(receipt).toBeDefined();
     const csrf = csrfOf(html);

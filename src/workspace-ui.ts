@@ -443,7 +443,7 @@ export const RESULT_DECISION_SENTENCE = "Review the change, then accept it or as
 
 /** What the result page's Accept says, from facts it already shows: the
  * recorded checks, the requirements not met, the ones a person still checks,
- * and what the button posts. "Accept" only when everything is met and the
+ * whether the saved proof reads, and what the button posts. "Accept" only when everything is met and the
  * checks passed; otherwise "Accept without checks" and one line naming what.
  * `effect` says what pressing it does, in the action's own terms. */
 export type AcceptFacts = {
@@ -452,14 +452,17 @@ export type AcceptFacts = {
   yours: number;
   /** `complete`: marks the exact result complete; `accept`: records a person's acceptance only. */
   action: "complete" | "accept";
-  /** `pull-request`: completing opens one; `off`: publishing isn't set up; `other`: neither is said. */
+  /** `pull-request`: one can be opened from the task after; `off`: publishing isn't set up; `other`: neither is said. Accept itself never publishes. */
   publishing: "pull-request" | "off" | "other";
+  /** False when the saved proof is missing or can't be read: nothing on record says what was met. */
+  proof: boolean;
 };
 export type AcceptWords = { label: "Accept" | "Accept without checks"; ready: boolean; why: string | null; effect: string };
 
 export function acceptWordsOf(facts: AcceptFacts): AcceptWords {
   const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
   const parts = [
+    ...(facts.proof ? [] : ["the saved proof couldn't be read"]),
     ...(facts.checks === "passed" ? [] : [facts.checks === "failed" ? "checks failed" : facts.checks === "off" ? "checks are off for this project"
       : facts.checks === "running" ? "checks are still running" : facts.checks === "unavailable" ? "saved checks can't be read" : "checks didn't run"]),
     ...(facts.unmet > 0 ? [`${plural(facts.unmet, "requirement isn't", "requirements aren't")} met`] : []),
@@ -468,9 +471,9 @@ export function acceptWordsOf(facts: AcceptFacts): AcceptWords {
   const ready = parts.length === 0;
   const joined = parts.length <= 1 ? parts.join("") : `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}`;
   const effect = facts.action === "accept" ? "Records that you accept it. You mark it complete next."
-    : facts.publishing === "pull-request" ? "Marks it complete and opens a pull request."
+    : facts.publishing === "pull-request" ? "Marks it complete. No pull request opens; you can open one from the task after."
     : facts.publishing === "off" ? "Marks it complete. The branch stays; publishing isn't set up."
-    : "Marks it complete.";
+    : "Marks it complete. Nothing is published.";
   return { label: ready ? "Accept" : "Accept without checks", ready, why: ready ? null : `${joined.charAt(0).toUpperCase()}${joined.slice(1)}.`, effect };
 }
 

@@ -8,7 +8,10 @@
  * Headless Chromium at 390×844 is NOT physical iPhone Safari, and every
  * screenshot is synthetic fixture data.
  *
- *   node scripts/result-review-proof.mjs [--out evidence/result-review]
+ *   node scripts/result-review-proof.mjs [--out <dir>]
+ *
+ * Writes to a fresh temporary directory unless --out names one; never to
+ * ./evidence by default. Report paths are under that directory as given.
  *
  * Checks: the item, its evidence and Looks right / Not right come before the
  * decision; Accept reads "Accept without checks" with one line naming what
@@ -17,8 +20,8 @@
  * at least 12px; the decision's controls are 44px; Not right opens Request
  * changes quoting the item; the decision sticks to the bottom on a phone.
  * Build first. Exits 1 when a check fails. */
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { startFixture, encodePng } from './ui-polish-fixture.mjs';
@@ -31,7 +34,10 @@ import { sealVerificationReceipt } from '../dist/verification-evidence.js';
 
 const args = process.argv.slice(2);
 const at = args.indexOf('--out');
-const out = resolve(at === -1 ? 'evidence/result-review' : args[at + 1]);
+const named = at === -1 ? null : args[at + 1];
+if (at !== -1 && (named === undefined || named.startsWith('--'))) { console.error('--out needs a directory'); process.exit(2); }
+const shown = named ?? mkdtempSync(join(tmpdir(), 'result-review-'));
+const out = resolve(shown);
 mkdirSync(out, { recursive: true });
 
 /** Playwright is not a dependency: an installed copy, PLAYWRIGHT_MODULE, or one `npx playwright` left in the npm cache — whichever has its browser downloaded. */
@@ -132,7 +138,7 @@ async function open(viewport, colorScheme, task, run, tab = null) {
 async function shot(page, name, caption) {
   const path = join(out, `${name}.png`);
   await page.screenshot({ path });
-  report.screenshots.push({ path: `evidence/result-review/${name}.png`, caption });
+  report.screenshots.push({ path: join(shown, `${name}.png`), caption });
 }
 /** Layout facts in the page: order, overflow, sizes. */
 const facts = page => page.evaluate(() => {
@@ -225,6 +231,7 @@ for (const scheme of ['light', 'dark']) {
   const verdict = JSON.stringify(store.proofVerdictFor(emptyRun));
   await Promise.all([page.waitForNavigation(), page.locator('[data-result-decision] button[type="submit"]').click()]);
   check('c3 Accept marks the exact result complete and leaves the verdict unchanged', /Complete/.test(await page.locator('[data-result-status]').first().innerText()) && JSON.stringify(store.proofVerdictFor(emptyRun)) === verdict);
+  check('c3 Accept publishes nothing: no pull request is started', store.publicationForRun(emptyRun) === null);
   await ctx.close();
 }
 

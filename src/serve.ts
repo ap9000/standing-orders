@@ -22703,7 +22703,7 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
   parts.push(`<div id="verification" data-cockpit-section="result">` + panel.html + contest + `</div>`);
 
   const complete = assignment?.state === "ready-to-check" && assignment.receipt !== null && canRetryReview && csrf !== ""
-    ? { action: `${taskHref(view.taskId)}/complete`, receipt: assignment.receipt.digest, run: run.id, publish: (view.detail?.pullRequestTo ?? null) !== null } : null;
+    ? { action: `${taskHref(view.taskId)}/complete`, receipt: assignment.receipt.digest, run: run.id } : null;
   if (complete !== null) parts.push(completionForm(view.taskId, run.id, complete.receipt, csrf, view.detail?.pullRequestTo ?? null));
   // The one decision, after the evidence: Accept only when every requirement is met and the checks passed.
   const acceptsHere = complete !== null || panel.panel.need?.accept != null;
@@ -22714,6 +22714,7 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
     yours: complete === null || accepted ? 0 : panel.panel.youCheck?.lines.length ?? 0,
     action: complete !== null ? "complete" : "accept",
     publishing: view.detail?.publishing ?? "other",
+    proof: proof !== null && proof.proof !== null && proof.proofProblem === null,
   }) };
 
   if (view.notes.length > 0) {
@@ -23834,7 +23835,7 @@ const chatResultHref = (taskId: string, runId: number, tab: ResultTab = "summary
 type ResultDetail = {
   /** Where "Complete and open a pull request" opens one; null when only "Mark complete" is offered. */
   pullRequestTo?: string | null;
-  /** What completing publishes: a pull request, nothing because publishing isn't set up, or neither said. */
+  /** Where publishing stands: a pull request can be opened, publishing isn't set up, or neither said. Accept never publishes. */
   publishing?: "pull-request" | "off" | "other";
   learning?: string;
   skillTest?: boolean;
