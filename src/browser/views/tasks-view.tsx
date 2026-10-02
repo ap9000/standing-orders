@@ -65,11 +65,12 @@ export function usageSummary(limits: BrowserLimits): { key: string; text: string
   });
 }
 
+/** A waiting row's chip is ink (the primary fill, which an accent preset never recolours), naming the ask. */
 function TaskChip({ row }: { row: BrowserTasksView["rows"][number] }) {
   const place = "text-[12px] desk:col-start-1 desk:row-start-1 desk:justify-self-start phone:col-start-1 phone:row-start-2 phone:self-center";
   if (row.ask === null) return <HeadlineBadge label={row.status.label} tone={row.status.tone === "attention" ? "neutral" : row.status.tone} className={place} />;
   return <span data-ask={row.ask} title={row.status.label}
-    className={cn("inline-flex w-fit shrink-0 items-center whitespace-nowrap rounded-[5px] bg-attention px-1.5 py-px font-semibold leading-[18px] text-on-attention", place)}>
+    className={cn("inline-flex w-fit shrink-0 items-center whitespace-nowrap rounded-[5px] bg-primary px-1.5 py-px font-semibold leading-[18px] text-primary-foreground", place)}>
     {ASK_LABEL[row.ask]}
   </span>;
 }

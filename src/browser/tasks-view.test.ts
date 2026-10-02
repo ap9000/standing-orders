@@ -43,14 +43,17 @@ describe("the Tasks list", () => {
     const page = html(view());
     for (const [id, word] of [["plan", "Decide"], ["result", "Review"], ["offline", "Unblock"]]) {
       const one = page.match(new RegExp(`<li data-task="${id}"[^]*?</li>`))![0];
-      expect(one).toMatch(new RegExp(`data-ask="[a-z]+"[^>]*class="[^"]*bg-attention[^"]*text-on-attention[^"]*">${word}</span>`));
+      expect(one).toMatch(new RegExp(`data-ask="[a-z]+"[^>]*class="[^"]*bg-primary[^"]*text-primary-foreground[^"]*">${word}</span>`));
       expect(one).toMatch(/<a href="\/t\/[a-z]+" class="[^"]*font-semibold/);
       expect(one).not.toContain(">Needs you<");
+      // Ink, not the signal colour an accent preset can turn magenta.
+      expect(one).not.toContain("bg-attention");
     }
     for (const id of ["live", "old"]) {
       const one = page.match(new RegExp(`<li data-task="${id}"[^]*?</li>`))![0];
       expect(one).not.toContain("data-ask");
       expect(one).not.toContain("bg-attention");
+      expect(one).not.toContain("bg-primary");
       expect(one).toContain("bg-neutral-soft");
       expect(one).toMatch(/<a href="\/t\/[a-z]+" class="[^"]*font-medium/);
     }
