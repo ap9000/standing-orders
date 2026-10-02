@@ -56,6 +56,7 @@ import { knowledgeHtml, knowledgeContextHtml, KNOWLEDGE_CSS, decisionsHtml, memo
 import { listDecisions, recordDecision, retireDecision, searchMemory } from "./project-memory.js";
 import { decideProposal, listProposals, memoryStatus } from "./memory-pass.js";
 import { learningHtml } from "./workspace-ui.js";
+import { resultActsOf } from "./result-acts.js";
 import { createSessionEndpoint } from './session-server.js';
 import { handleTeamHttp } from './team-http.js';
 import { teamWorkspaceHtml } from './team-ui.js';
@@ -168,7 +169,7 @@ import { recipeFromForm, recipeLibraryHtml, recipeEditorHtml, workflowPreviewHtm
 import { EVIDENCE_CAPS, readVerifiedArtifact, readVerifiedReport, readVerifiedProofForRun, storeEvidence, writeEvidenceFile, scanForSecrets, type ReportView } from "./evidence.js";
 import { GOAL_ASSESSMENT_PENDING, reviewConflict, manualReviewOnly, manualReviewCriterionOf, personCheckWords, plainReasonWords, dispatchStatusToken, passFraction, semanticCoverage, coverageWords, coverageStateWords, type ProofVerdict, type CriterionMatrixRow, type CriterionEvidenceRef } from "./proof.js";
 import {
-  WORK_VIEWS, REVIEW_TOKENS, RESULT_DECISION_SENTENCE, acceptWordsOf, parseWorkView, resultStatusOf, resultHeadlineOf, receiptHeadingOf, receiptPublicationWords, reviewFactsOf, workStatusOf, primaryDestinationOf, needsPerson, dispatchActionLabel,
+  WORK_VIEWS, REVIEW_TOKENS, RESULT_DECISION_SENTENCE, acceptWordsOf, cantAcceptYetOf, parseWorkView, resultStatusOf, resultHeadlineOf, receiptHeadingOf, receiptPublicationWords, reviewFactsOf, workStatusOf, primaryDestinationOf, needsPerson, dispatchActionLabel,
   type WorkView, type WorkFacts, type WorkStatus, type DisplayStatus, type PublicationFacts, type ReviewFacts,
 } from "./workspace-ui.js";
 import { PRICED_BUILD_MODELS } from "./pricing.js";
@@ -1934,7 +1935,9 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     }
     // Exact result links carry their own read context. Check the stored
     // placement against both account and instance access before using it;
-    // viewing a result never changes the session's selected project.
+    // viewing a result never changes the session's selected project, and
+    // the page's project switch keeps showing the person's own choice.
+    const chosenProject = project;
     if (url.pathname === "/review" && url.searchParams.has("result")) {
       const wanted = url.searchParams.get("result") ?? "";
       const ref = wanted.length > 0 && wanted.length <= 64 && !hasForbiddenControls(wanted) ? store.lookupRef(wanted) : null;
@@ -2593,11 +2596,13 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       const selectedRow = wantedId === null ? ranked[0] ?? null : chosen;
       const csrf = who.via === "cookie" ? who.session.csrf : "";
       const expectedRun = url.searchParams.get("run");
+      // An exact link to a result this person can't see (or that never existed) reads the same either way.
+      if (expectedRun !== null && wantedId !== null && chosen === null) return refuse(response, who, 404, "No such result in your projects.", "/work");
       if (expectedRun !== null && (!/^[1-9]\d*$/.test(expectedRun) || selectedRow?.runId !== Number(expectedRun))) {
         return sendScreen(response, 409, screen("Result changed", '<h1>Result changed</h1><p>This acceptance link no longer matches the current result. Review the current task before accepting.</p><p class="refusal-back"><a class="button-link" href="/review">Review results</a></p>', { chrome: chromeFor(project, "runs") }));
       }
       const selected = selectedRow === null ? null : reviewCockpitViewOf(selectedRow, who, now);
-      const reviewPage = reviewCockpitPage(chromeFor(project, "runs"), {
+      const reviewPage = reviewCockpitPage(chromeFor(wantedId === null ? project : chosenProject, "runs"), {
           queue: ranked,
           queueCap: REVIEW_QUEUE_CAP,
           selected,
@@ -3276,6 +3281,14 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
           "application/json",
           JSON.stringify({ text: window.text, nextOffset: window.nextOffset, final: !live && window.eof }),
         );
+      }
+      // One result page (2026-10-02): a builder's finished result opens on
+      // its task's result page, titled with the task. The raw run record
+      // waits there under Details, and here with ?record=1.
+      if (url.searchParams.get("record") === null && !running && found.role === "builder" && (found.outcome === "built" || found.outcome === "no-change") &&
+          completedRowFor(taskId, null)?.runId === found.id) {
+        const tab = parseResultTab(url.searchParams.get("tab"));
+        return redirect(response, `${reviewHref(taskId, found.id)}${tab === "summary" ? "" : `&tab=${tab}`}`);
       }
       // Pollers exist only for a LIVE run — an orphaned null-outcome run
       // would otherwise be refetched forever (finding 15). The nonce is
@@ -10829,7 +10842,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
         }
         const completed = checkAssignmentAsOperator(store, taskId, digest, principal, now, evidenceRoot);
         if (!completed.ok) return taskScreen(response, who, taskId, completed.message, 409);
-        return redirect(response, reviewHref(taskId, Number(namedRun), taskRepoOf(ref.id)));
+        return redirect(response, reviewHref(taskId, Number(namedRun)));
       }
       case "retry-review": {
         return taskScreen(response, who, taskId, "Separate agent reviews have retired. Open the saved result to mark it complete or request a revision.", 410);
@@ -12678,7 +12691,7 @@ ${THEME_MAPPING}
     --font-mono: "Geist Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
     /* Phone spacing steps (760px and narrower): side gutter, gap under the
        header, gap between page blocks, between rows, and inside a card. */
-    --so-phone-gutter: 14px; --so-phone-gap: 12px; --so-phone-block: 14px; --so-phone-row: 8px; --so-phone-card: 12px;
+    --so-phone-gutter: 16px; --so-phone-gap: 12px; --so-phone-block: 14px; --so-phone-row: 8px; --so-phone-card: 12px;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
@@ -18866,9 +18879,9 @@ function statusActionHref(status: DisplayStatus, taskId: string, runId: number |
   if (status.action === null) return null;
   switch (status.action.kind) {
     case "open-result": return runId === null ? taskHref(taskId) : `/r/${runId}`;
-    case "open-review": return repo === undefined ? reviewHref(taskId) : reviewHref(taskId, runId, repo);
+    case "open-review": return repo === undefined ? reviewHref(taskId) : reviewHref(taskId, runId);
     case "open-run": return runId === null ? taskHref(taskId) : `/r/${runId}`;
-    case "open-pr": return safePrUrl(prUrl) ?? (repo === undefined ? reviewHref(taskId) : reviewHref(taskId, runId, repo));
+    case "open-pr": return safePrUrl(prUrl) ?? (repo === undefined ? reviewHref(taskId) : reviewHref(taskId, runId));
     case "open-task":
     default: return taskHref(taskId);
   }
@@ -18909,7 +18922,7 @@ function workPage(
   const rowHtml = (row: WorkIndexItem): string => {
     const target = row.primaryAction?.target;
     const actionHref = row.primaryAction?.code === 'open-result' && target?.runId != null
-      ? `/review?result=${encodeURIComponent(target.taskId)}&run=${target.runId}${row.repo === null ? '' : '&project=' + encodeURIComponent(row.repo)}`
+      ? `/review?result=${encodeURIComponent(target.taskId)}&run=${target.runId}`
       : browserWorkActionHref(row);
     const action = actionHref === null || row.primaryAction === null ? '' : `<a class="work-action" data-primary-action href="${escape(actionHref)}">${escape(row.primaryAction.label)} →</a>`;
     const project = data.multiProject || row.repo === null ? `<span class="project-label">${row.repo === null ? 'Unplaced' : escape(projectName(row.repo))}</span>` : '';
@@ -18943,7 +18956,7 @@ function workPage(
     rows: data.work.items.map(row => {
       const target = row.primaryAction?.target;
       const actionHref = row.primaryAction?.code === 'open-result' && target?.runId != null
-        ? `/review?result=${encodeURIComponent(target.taskId)}&run=${target.runId}${row.repo === null ? '' : '&project=' + encodeURIComponent(row.repo)}`
+        ? `/review?result=${encodeURIComponent(target.taskId)}&run=${target.runId}`
         : browserWorkActionHref(row);
       const needsYouDetail = (row.status.views.includes('needs-you') || row.status.label === 'Failed') && !['write-scope', 'approve-scope'].includes(row.primaryAction?.code ?? '') && row.status.label !== 'Ready for review' && row.status.detail !== row.status.label && row.status.detail !== row.familyProblem;
       return {
@@ -22577,8 +22590,10 @@ type ReviewCockpitView = {
   notes: { id: number; author: string; note: string; createdAt: string }[];
 };
 
-const reviewHref = (taskId: string, runId: number | null = null, repo: string | null = null): string =>
-  `/review?result=${encodeURIComponent(taskId)}${runId === null ? "" : `&run=${runId}`}${repo === null ? "" : `&project=${encodeURIComponent(repo)}`}`;
+/** The one result page's address: the task and its run, never a project path
+ * (the page finds the result's project itself and keeps the person's own). */
+const reviewHref = (taskId: string, runId: number | null = null): string =>
+  `/review?result=${encodeURIComponent(taskId)}${runId === null ? "" : `&run=${runId}`}`;
 
 /** The receipt's own proof-state word, so the cockpit and the task page
  * never disagree on the state's name or its precedence: the stored
@@ -22733,7 +22748,7 @@ function reviewCockpitPage(
               ? reasons.length === 0 ? "" : `<span class="cockpit-why">${escape(reasons[0] as string)}${reasons.length > 1 ? ` · +${reasons.length - 1} more` : ""}</span>`
               : `<span class="cockpit-why">${statusLineHtml(status)}</span>`;
             return (
-              `<li data-review-priority="${row.priority.band}"><a class="cockpit-row${current ? " current" : ""}" href="${escape(reviewHref(row.taskId, row.runId, row.repo))}"${current ? ` aria-current="page"` : ""}>` +
+              `<li data-review-priority="${row.priority.band}"><a class="cockpit-row${current ? " current" : ""}" href="${escape(reviewHref(row.taskId, row.runId))}"${current ? ` aria-current="page"` : ""}>` +
               `<span class="cockpit-row-head"><strong>${escape(row.title)}</strong></span>` +
               `<span class="cockpit-row-meta">${whenTime(row.completedAt)}${row.runId === null ? " · no build" : row.outcome === "no-change" ? " · no change" : ""}${row.prNumber === null ? "" : ` · PR #${row.prNumber}`}</span>` +
               (row.historyProblem ? `<span class="cockpit-why" data-history-problem>History unavailable</span>` : why) +
@@ -22766,7 +22781,7 @@ function reviewCockpitPage(
       const status = row.assignment == null ? null : assignmentPresentationOf(row.assignment).status;
       const reasons = row.priority.reasons;
       return {
-        title: row.title, href: reviewHref(row.taskId, row.runId, row.repo), at: row.completedAt,
+        title: row.title, href: reviewHref(row.taskId, row.runId), at: row.completedAt,
         status: status === null ? null : { label: status.label, tone: status.tone },
         notes: [...(row.historyProblem ? ["History unavailable"] : status === null && reasons.length > 0 ? [reasons[0] as string] : []), ...(status !== null && row.ciFailing ? ["CI is failing"] : [])],
         current: selected !== null && selected.taskId === row.taskId,
@@ -22857,6 +22872,15 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
     problem: view.detail === null ? view.historyProblem : null,
     next: reviewNextActionOf(view, csrf), complete: null, decision: null, checks: null, intent: intentView, noRun: null, panel: null, contest: "",
     notes: view.notes.map(one => ({ author: one.author, at: one.createdAt, note: one.note })),
+    acts: { primary: null, secondary: null, line: null }, runChecks: null,
+    // The raw run record lives under Details now (2026-10-02): /r/<id> for this result redirects here.
+    record: run === null ? null : { build: run.id, href: `/r/${run.id}?record=1`, facts: [
+      { label: "Agent", value: [run.provider, run.model].filter(Boolean).join(" · ") },
+      { label: "Worker", value: run.runner },
+      ...(run.branch === null ? [] : [{ label: "Branch", value: run.branch }]),
+      ...(run.finishedAt === null ? [] : [{ label: "Finished", value: when(run.finishedAt) }]),
+      ...(run.ranMinutes === null ? [] : [{ label: "Ran", value: `${run.ranMinutes} min` }]),
+    ] },
   };
 
   if (run === null || view.detail === null) {
@@ -22901,7 +22925,8 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
   // The one decision, after the evidence: Accept only when every requirement is met and the checks passed.
   const acceptsHere = complete !== null || panel.panel.need?.accept != null;
   const matrix = proof === null || proof.proofProblem !== null ? [] : proof.matrix;
-  const decision = !acceptsHere ? null : { sentence: RESULT_DECISION_SENTENCE, ...acceptWordsOf({
+  const blocked = cantAcceptYetOf(proof?.verdict ?? null, proof?.reasons ?? [], accepted);
+  const words = !acceptsHere ? null : { sentence: RESULT_DECISION_SENTENCE, ...acceptWordsOf({
     checks: checks === undefined ? null : checks.running != null ? "running" : checks.level === "off" && checks.status !== "passed" ? "off" : checks.status,
     unmet: matrix.filter(row => row.state !== "pass" && row.state !== "manual-review").length,
     yours: complete === null || accepted ? 0 : panel.panel.youCheck?.lines.length ?? 0,
@@ -22909,6 +22934,24 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
     publishing: view.detail?.publishing ?? "other",
     proof: proof !== null && proof.proof !== null && proof.proofProblem === null,
   }) };
+  // Refuted: plain Accept stays as allowed, in outline, and the one line before the acts (acts.line) says why.
+  const decision = words === null || blocked === null ? words : { ...words, label: "Accept" as const, ready: false };
+  // Run checks: no check ran on this result (or its saved one can't be read), the project has one, and an approver may run it.
+  const followUps = view.detail.followUps ?? null;
+  const checksRunning = checks?.running != null || (followUps?.checks.some(one => one.state === "waiting" || one.state === "running") ?? false);
+  const runChecks = canRetryReview && csrf !== "" && followUps !== null && (followUps.full || followUps.quick) && !checksRunning &&
+    (checks === undefined || checks.status === "not-run" || checks.status === "unavailable")
+    ? { action: `/r/${run.id}/checks`, level: followUps.full ? "full" as const : "quick" as const, returnTo: `${here}&run=${run.id}` } : null;
+  const need = panel.panel.need;
+  const nextKind = selected.next?.kind;
+  const acts = resultActsOf({
+    accept: decision === null ? null : { ready: decision.ready },
+    runChecks: runChecks !== null,
+    blocked,
+    canRequest: panel.panel.canRequest && panel.panel.request !== null,
+    need: need === null || need.accept != null ? null : need.rebuild != null ? "rebuild" : need.confirm !== null ? "confirm-stopped" : null,
+    next: nextKind === "revise" || nextKind === "draft-repair" ? nextKind : null,
+  });
 
   if (view.notes.length > 0) {
     parts.push(
@@ -22921,7 +22964,7 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
   return {
     html: `<section class="cockpit-detail">${parts.join("\n")}</section>`,
     selected: {
-      ...selected, complete, decision, panel: panel.panel, contest,
+      ...selected, complete, decision, panel: panel.panel, contest, acts, runChecks,
       checks: checks === undefined ? null : { detail: checks.detail, problem: checks.status === "failed" || checks.status === "unavailable", logHref: checks.logArtifactId === null ? null : `/r/${run.id}/evidence/${checks.logArtifactId}` },
     },
   };
@@ -24131,7 +24174,7 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
   // Needs you: the action that resolves it comes first; Request changes stays beside it, never alone.
   // On the result itself, "Review result" would link here: accepting it is what resolves it.
   const need = needActionOf(current, taskStatus, o.csrf, o.returnTo, {
-    accepted: proof?.accepted != null, humanReview, run: run.id, action: `${taskHref(detail.taskId)}/accept-proof`,
+    accepted: proof?.accepted != null, humanReview, run: run.id, action: `${taskHref(detail.taskId)}/accept-proof`, refuted: proof?.verdict === "refuted",
     // What Store.finalResultReason refuses: a verified, attested, accepted or published result.
     rebuildable: proof?.accepted == null && proof?.verdict !== "verified" && proof?.verdict !== "attested" && !(detail.publication !== null && ["pushed", "opened"].includes(detail.publication.state)) });
   const directAssessment = proof?.matrix.some(row => row.assessment !== undefined) === true;
@@ -24549,21 +24592,22 @@ function personCheckItems(proof: ProofBundleView, patchText: string | null, shot
 /** A Needs you result's one action (needs-you.ts): a link to the act that resolves it, or Confirm it
  * stopped behind the password. Null under every other headline. */
 export function needActionOf(assignment: AssignmentSnapshot | null, status: TaskStatus | null, csrf: string, returnTo: string,
-  result?: { accepted: boolean; humanReview: boolean; run: number; action: string; rebuildable?: boolean }): BrowserNeedAction | null {
+  result?: { accepted: boolean; humanReview: boolean; run: number; action: string; rebuildable?: boolean; refuted?: boolean }): BrowserNeedAction | null {
   if (assignment === null || status === null || status.headline !== "Needs you" || status.need == null) return null;
   const action = assignment.primaryAction;
   const rebuild = { href: null, confirm: null, rebuild: { action: `${taskHref(assignment.rootId)}/requeue` } };
   // Built to an earlier plan: Build again, in place (the task page's requeue).
   if (action?.code === "retry-task" && status.need.key === "rebuild" && csrf !== "") return { label: status.need.action.label, ...rebuild };
   if (result !== undefined) {
-    if (status.need.key === "review-result" && !result.accepted && csrf !== "") return { label: result.humanReview ? "Accept result" : "Accept with exception", href: null, confirm: null,
+    if ((status.need.key === "review-result" || result.refuted === true) && !result.accepted && csrf !== "") return { label: result.humanReview ? "Accept result" : "Accept with exception", href: null, confirm: null,
       accept: { action: result.action, run: result.run, returnTo, note: result.humanReview ? null : "Why is this safe to accept?" } };
     // The task page sends the person here: never back to it. What this page can do leads — Accept
     // a check only a person can make, or Build again a result that may run again.
     const here = (action?.code === "open-result" || action?.code === "inspect-run") && action.target.runId === result.run;
     if (here && csrf !== "" && !result.accepted && result.humanReview) return { label: "Accept result", href: null, confirm: null, accept: { action: result.action, run: result.run, returnTo, note: null } };
     if (here && csrf !== "" && result.rebuildable === true) return { label: NEEDS.rebuild.action.label, ...rebuild };
-    if (status.need.key === "review-result" || here) return { label: "Open the task", href: taskHref(assignment.rootId), confirm: null };
+    // Nothing here resolves it: no act at all, never a link back to the task (which sends the person here).
+    if (status.need.key === "review-result" || here) return null;
   }
   const confirm = action?.code === "confirm-stopped" && action.target.runId !== null && csrf !== ""
     ? { action: `${taskHref(assignment.rootId)}/confirm-stopped`, run: action.target.runId, returnTo, checked: needsCheck(assignment) } : null;

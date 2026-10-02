@@ -1,19 +1,21 @@
-/** A finished result, rebuilt with shadcn/ui: its status and what changed in
- * the agent's words, then each item a person checks with its evidence, then
- * the decision (Accept, and what accepting does), then Summary / Changes /
- * Checks and the feedback form. The list of results sits one tap away in the
- * header instead of beside the result. Tab contents, the diff and the
- * feedback form stay the server's own HTML; the page script binds to the
- * same data attributes and ids it always has. */
+/** The one result page, rebuilt with shadcn/ui and titled with the task: its
+ * status (one sentence, the facts, a line per caveat), then each item a person
+ * checks with its evidence, then the decision (exactly one ink act that
+ * resolves the result, never navigation), then Summary / Changes / Checks and
+ * the feedback form, then Details with the raw run record. The list of results
+ * sits one tap away in the header. Tab contents, the diff and the feedback
+ * form stay the server's own HTML; the page script binds to the same data
+ * attributes and ids it always has. */
 import { AlertTriangle, Check, ChevronDown, ChevronRight } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useState, type MouseEvent, type ReactNode } from "react";
 import type { BrowserCheckItem, BrowserResultPanel, BrowserResultView } from "../../browser-workspace.js";
 import { GuardedHtml } from "../guarded-html.js";
 import {
   Badge, Button, Card, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger, Input, cn,
 } from "../components/ui/index.js";
+import type { ResultActKind } from "../../result-acts.js";
 import { toneOf } from "./tone.js";
-import { ConfirmStoppedForm, RebuildForm, StatusDetails, StatusHeadline, StatusWhy } from "./status-summary.js";
+import { ConfirmStoppedForm, RebuildForm, StatusDetails, StatusHeadline, statusWhyLines } from "./status-summary.js";
 
 type Selected = NonNullable<BrowserResultView["selected"]>;
 
@@ -63,55 +65,43 @@ function ResultsMenu({ view }: { view: BrowserResultView }) {
   </DropdownMenu>;
 }
 
-function StatusCard({ selected, csrf }: { selected: Selected; csrf: string }) {
-  const { panel, checks, next, decision } = selected;
-  const status = panel?.status ?? null;
-  const need = panel?.need ?? null;
+/** The status card: the headline, one sentence, the facts rows, then any caveat as one line of its own.
+ * No acts here: the result's acts sit together in the decision row. */
+function StatusCard({ selected }: { selected: Selected }) {
+  const { panel, checks, acts } = selected;
+  // A fact row's action that only reopens this same page is dropped; links to its Checks tab or a section stay.
+  const same = (href: string | null): boolean => {
+    if (href === null) return false;
+    const to = new URL(href, window.location.origin);
+    return to.pathname === "/review" && to.searchParams.get("result") === selected.taskId && !to.searchParams.has("tab") && to.hash === "";
+  };
+  const status = panel?.status == null ? null
+    : { ...panel.status, details: panel.status.details.map(one => one.action !== null && same(one.action.href) ? { ...one, action: null } : one) };
   const tone = toneOf(selected.status.tone);
+  // A form that resolves a Needs you (Build again, Confirm it stopped) keeps the need's own sentence; otherwise what happened.
+  const needForm = acts.primary === "rebuild" || acts.primary === "confirm-stopped";
+  const sentence = selected.noRun ?? (panel !== null && !needForm ? panel.outcome : status?.sentence ?? panel?.outcome ?? "");
+  const caveats = [...new Set([
+    ...(status === null && checks?.problem === true ? [checks.detail] : []),
+    ...(selected.problem === null ? [] : [selected.problem]),
+    ...(panel?.attention ?? []),
+  ])];
+  const failed = status?.headline === "Failed";
   return <Card data-result-status={selected.status.token} data-headline={status?.headline ?? selected.status.label} aria-label="Result status">
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-3">
-      <div className="min-w-0 flex-1 basis-64">
-        {status !== null ? <StatusHeadline status={status} />
-          : <h2 className="flex items-center gap-2.5 text-lg font-semibold leading-snug">
-              <span aria-hidden="true" className={cn("size-2.5 shrink-0 rounded-full", DOT[tone])} />{selected.status.label}
-            </h2>}
-        {status !== null && <p className="mt-1.5 text-sm text-muted-foreground" data-result-sentence>{decision?.sentence ?? status.sentence}</p>}
-        {panel !== null && (status !== null
-          ? <p className="mt-1.5 text-sm">{panel.outcome}</p>
-          : <p className="mt-1.5 text-sm"><span className="font-semibold">{panel.heading}.</span> <span className="text-muted-foreground">{panel.outcome}</span></p>)}
-      </div>
-      {/* Needs you without an acceptance: the action that resolves it leads, filled; Request changes is never alone.
-          An Accept waits for the decision, after the evidence. */}
-      {((need !== null && need.accept == null) || (decision === null && panel?.canRequest === true)) && <div className="flex flex-wrap items-center gap-2 phone:w-full">
-        {need !== null && need.accept == null && (need.rebuild != null ? <RebuildForm action={need.rebuild.action} csrf={csrf} label={need.label} />
-          : need.confirm !== null ? <ConfirmStoppedForm form={need.confirm} csrf={csrf} label={need.label} />
-          : need.href !== null && <Button asChild variant="attention" className="phone:w-full"><a href={need.href} data-primary-action data-need-action>{need.label}</a></Button>)}
-        {decision === null && panel?.canRequest === true && <Button asChild variant="outline" className="phone:flex-1"><a href="#request-changes">Request changes</a></Button>}
-      </div>}
+    <div className="min-w-0">
+      {status !== null ? <StatusHeadline status={status} />
+        : <h2 className="flex items-center gap-2.5 text-lg font-semibold leading-snug">
+            <span aria-hidden="true" className={cn("size-2.5 shrink-0 rounded-full", DOT[tone])} />{selected.status.label}
+          </h2>}
+      {sentence !== "" && <p className="mt-1.5 max-w-[75ch] text-sm text-muted-foreground" data-result-sentence>{sentence}</p>}
     </div>
-
     {status !== null && <StatusDetails status={status} />}
-    {checks?.logHref != null && <p className="text-[13px] text-muted-foreground"><a href={checks.logHref} className="underline decoration-border underline-offset-4 hover:text-foreground">Check output</a></p>}
-    {status === null && checks?.problem === true && <p className="rounded-md bg-muted px-3 py-2 text-[13px] text-foreground">{checks.detail}</p>}
-    {selected.problem !== null && <p className={cn("rounded-md px-3 py-2 text-[13px]", status?.headline === "Failed" ? "bg-destructive-soft text-destructive" : "bg-muted text-foreground")}>{selected.problem}</p>}
-    {status !== null && <StatusWhy status={status} />}
-
-    {next !== null && <div className="flex flex-wrap items-center gap-3 rounded-md bg-muted px-4 py-3" data-next-action={next.kind}>
-      <div className="min-w-0 flex-1 basis-56">
-        <p className="text-sm font-semibold">{next.title}</p>
-        <p className="text-[13px] text-muted-foreground">{next.detail}</p>
-      </div>
-      <Html html={next.control} className="so-result-next" />
-    </div>}
-
-    {panel !== null && panel.attention.length > 0 && <ul className="flex flex-col gap-1.5 rounded-md bg-warning-soft px-4 py-3 text-[13px]" data-result-attention={panel.attention.length}>
-      {panel.attention.map(one => <li key={one} className="flex gap-2"><AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" aria-hidden="true" /><span>{one}</span></li>)}
+    {caveats.length > 0 && <ul className="flex flex-col gap-1 text-[13px]" aria-label="Caveats" data-result-attention={caveats.length}>
+      {caveats.map(one => <li key={one} data-caveat className="flex gap-2">
+        <AlertTriangle className={cn("mt-0.5 size-3.5 shrink-0", failed ? "text-destructive" : "text-warning")} aria-hidden="true" />
+        <span className="min-w-0 [overflow-wrap:anywhere]">{one}</span>
+      </li>)}
     </ul>}
-    {panel !== null && panel.limits.length > 0 && <Fold summary="What was shortened">
-      <ul className="flex flex-col gap-1 text-muted-foreground">{panel.limits.map(one => <li key={one}>{one}</li>)}</ul>
-    </Fold>}
-    {panel?.reviewHistory != null && <Fold summary="Review history"><p className="text-[13px] text-muted-foreground">{panel.reviewHistory}</p></Fold>}
-    {selected.noRun !== null && <p className="text-sm text-muted-foreground">{selected.noRun} <a href={selected.taskHref} className="font-medium underline underline-offset-4">Open the task</a></p>}
   </Card>;
 }
 
@@ -195,44 +185,70 @@ function CheckItems({ panel, csrf, chatHref }: { panel: BrowserResultPanel; csrf
   </Card>;
 }
 
-/** The decision, after the evidence: Accept (ink) only when every requirement is met and the
- * checks passed; otherwise Accept without checks (outline) and one line naming what. Under it,
- * what pressing it does. Sticky at the bottom on a phone. */
+/** The decision, after the evidence: exactly one ink act, the one that resolves the result (result-acts.ts),
+ * never a link elsewhere, and at most one outline act beside it, in one row with an 8px gap. A result that
+ * can't be accepted says why in one line first. Under them, what Accept does. On a phone it is a
+ * full-width dock at the bottom: the ink act over the outline one. */
 function Decision({ selected, csrf }: { selected: Selected; csrf: string }) {
-  const decision = selected.decision!;
+  const { acts, decision, next } = selected;
   const complete = selected.complete;
-  const accept = complete === null ? selected.panel?.need?.accept ?? null : null;
-  const canRequest = selected.panel?.canRequest === true;
-  return <Card data-result-decision={decision.ready ? "accept" : "accept-without-checks"} aria-label="Decision"
-    className="gap-2 phone:sticky phone:bottom-[-20px] phone:z-10 phone:gap-2 phone:rounded-b-none phone:pb-[max(14px,env(safe-area-inset-bottom))] phone:shadow-[0_-4px_16px_rgb(0_0_0/.08)]">
-    {decision.why !== null && <p className="flex max-w-[75ch] gap-2 text-[13px]" data-decision-why><AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" aria-hidden="true" />{decision.why}</p>}
-    <div className={cn("flex flex-wrap items-center gap-2", accept?.note == null && "phone:grid phone:grid-cols-2")}>
-      {complete !== null && <form method="post" action={complete.action} className="phone:w-full">
-        <input type="hidden" name="csrf" value={csrf} />
-        <input type="hidden" name="receipt" value={complete.receipt} />
-        <input type="hidden" name="run" value={String(complete.run)} />
-        <Button type="submit" variant={decision.ready ? "default" : "outline"} className="min-h-11 phone:w-full" data-primary-action><Check className="phone:hidden" />{decision.label}</Button>
-      </form>}
-      {accept !== null && <form method="post" action={accept.action} className="flex flex-wrap items-center gap-2 phone:w-full phone:flex-1">
-        <input type="hidden" name="csrf" value={csrf} />
-        <input type="hidden" name="run" value={String(accept.run)} />
-        <input type="hidden" name="return" value={accept.returnTo} />
-        {accept.note !== null && <Input type="text" name="note" maxLength={500} required aria-label={accept.note} placeholder={accept.note} className="h-11 w-64 phone:w-full" />}
-        <Button type="submit" variant={decision.ready ? "default" : "outline"} className="min-h-11 phone:w-full" data-primary-action data-accept-result><Check className="phone:hidden" />{decision.label}</Button>
-      </form>}
-      {canRequest && <Button asChild variant="secondary" className="min-h-11 phone:w-full"><a href="#request-changes">Request changes</a></Button>}
+  const need = selected.panel?.need ?? null;
+  const accept = complete === null ? need?.accept ?? null : null;
+  const shown = [acts.primary, acts.secondary].filter((one): one is ResultActKind => one !== null);
+  const why = shown.includes("accept") ? decision?.why ?? null : null;
+  const noted = acts.primary === "revise" || acts.primary === "draft-repair" ? next?.title ?? null : null;
+  const line = acts.line ?? why ?? noted;
+  const act = (kind: ResultActKind, ink: boolean): ReactNode => {
+    const variant = ink ? "attention" as const : "outline" as const;
+    const mark = { "data-act": kind, ...(ink ? { "data-ink-act": kind, "data-primary-action": "" } : {}) };
+    const wide = "min-h-11 phone:w-full";
+    switch (kind) {
+      case "accept":
+        if (decision === null) return null;
+        if (complete !== null) return <form key={kind} method="post" action={complete.action} className="phone:w-full">
+          <input type="hidden" name="csrf" value={csrf} />
+          <input type="hidden" name="receipt" value={complete.receipt} />
+          <input type="hidden" name="run" value={String(complete.run)} />
+          <Button type="submit" variant={variant} className={wide} {...mark}><Check className="phone:hidden" />{decision.label}</Button>
+        </form>;
+        if (accept === null) return null;
+        return <form key={kind} method="post" action={accept.action} className="flex flex-wrap items-center gap-2 phone:w-full">
+          <input type="hidden" name="csrf" value={csrf} />
+          <input type="hidden" name="run" value={String(accept.run)} />
+          <input type="hidden" name="return" value={accept.returnTo} />
+          {accept.note !== null && <Input type="text" name="note" maxLength={500} required aria-label={accept.note} placeholder={accept.note} className="h-11 w-64 phone:w-full" />}
+          <Button type="submit" variant={variant} className={wide} {...mark} data-accept-result><Check className="phone:hidden" />{decision.label}</Button>
+        </form>;
+      case "run-checks":
+        if (selected.runChecks === null) return null;
+        return <form key={kind} method="post" action={selected.runChecks.action} className="phone:w-full">
+          <input type="hidden" name="csrf" value={csrf} />
+          <input type="hidden" name="level" value={selected.runChecks.level} />
+          <input type="hidden" name="return" value={selected.runChecks.returnTo} />
+          <Button type="submit" variant={variant} className={wide} {...mark}>Run checks</Button>
+        </form>;
+      case "request-changes":
+        return <Button key={kind} asChild variant={variant} className={wide}><a href="#request-changes" {...mark}>Request changes</a></Button>;
+      case "rebuild":
+        return need?.rebuild == null ? null : <RebuildForm key={kind} action={need.rebuild.action} csrf={csrf} label={need.label} className="min-h-11" />;
+      case "confirm-stopped":
+        return need?.confirm == null ? null : <ConfirmStoppedForm key={kind} form={need.confirm} csrf={csrf} label={need.label} />;
+      case "revise":
+      case "draft-repair":
+        return next === null ? null : <Html key={kind} html={next.control} className="so-result-next phone:w-full" />;
+    }
+  };
+  if (shown.length === 0) return null;
+  return <Card data-result-decision={acts.primary ?? "none"} aria-label="Decision"
+    className="gap-2 phone:sticky phone:bottom-[-20px] phone:z-10 phone:-mx-4 phone:gap-2 phone:rounded-none phone:border-x-0 phone:px-4 phone:pb-[max(14px,env(safe-area-inset-bottom))] phone:shadow-[0_-4px_16px_rgb(0_0_0/.08)]">
+    {line !== null && <p className="flex max-w-[75ch] gap-2 text-[13px]" data-decision-why {...(acts.line === null ? {} : { "data-cant-accept": "" })}>
+      <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" aria-hidden="true" />{line}</p>}
+    <div className="flex flex-wrap items-center gap-2 phone:flex-col phone:items-stretch" data-result-acts>
+      {acts.primary !== null && act(acts.primary, true)}
+      {acts.secondary !== null && act(acts.secondary, false)}
     </div>
-    <p className="max-w-[75ch] text-[13px] text-muted-foreground" data-decision-effect>{decision.effect}</p>
+    {decision !== null && shown.includes("accept") && <p className="max-w-[75ch] text-[13px] text-muted-foreground" data-decision-effect>{decision.effect}</p>}
   </Card>;
-}
-
-function Fold({ summary, children }: { summary: ReactNode; children: ReactNode }) {
-  return <details className="group text-[13px]">
-    <summary className="flex cursor-pointer list-none items-center gap-1.5 py-1 font-medium text-muted-foreground hover:text-foreground phone:min-h-11 [&::-webkit-details-marker]:hidden">
-      <ChevronRight className="size-4 transition-transform group-open:rotate-90" aria-hidden="true" />{summary}
-    </summary>
-    <div className="pb-1 pl-5.5 pt-1">{children}</div>
-  </details>;
 }
 
 /** Summary / Changes / Checks. The tab links keep the page script's
@@ -259,17 +275,38 @@ function Panel({ panel }: { panel: BrowserResultPanel }) {
   </div>;
 }
 
+/** Secondary detail, one tap away: the scope, the notes, the recorded reasons, what was shortened,
+ * review history, and the raw run record (what /r/<id> used to open on its own). */
 function Details({ selected }: { selected: Selected }) {
   const learning = selected.panel?.learning ?? "";
+  const panel = selected.panel;
+  const why = panel?.status == null ? [] : statusWhyLines(panel.status);
+  const record = selected.record;
   const rows: { id: string; title: string; hint: string | null; count?: number; body: ReactNode }[] = [
     { id: "intent", title: "Approved scope", hint: selected.intent?.approval ?? null,
       body: selected.intent === null ? <p className="text-sm text-muted-foreground">No scope was filed for this task, so there is no approved goal or boundary to review.</p> : <Html html={selected.intent.html} className="so-result-intent" /> },
     ...(selected.notes.length === 0 ? [] : [{ id: "notes", title: "Notes", hint: null, count: selected.notes.length,
       body: <ul className="flex flex-col gap-2 text-sm">{selected.notes.map((one, index) => <li key={index}><span className="text-muted-foreground">{one.author} · {shortWhen(one.at)}</span> {one.note}</li>)}</ul> }]),
+    ...(why.length === 0 ? [] : [{ id: "why", title: "Recorded reasons", hint: null, count: why.length,
+      body: <div className="flex flex-col gap-1 text-[13px] text-muted-foreground" data-status-why>{why.map(one => <p key={one} className="[overflow-wrap:anywhere]">{one}</p>)}</div> }]),
+    ...(panel === null || panel.limits.length === 0 ? [] : [{ id: "limits", title: "What was shortened", hint: null, count: panel.limits.length,
+      body: <ul className="flex flex-col gap-1 text-[13px] text-muted-foreground">{panel.limits.map(one => <li key={one}>{one}</li>)}</ul> }]),
+    ...(panel?.reviewHistory == null ? [] : [{ id: "review-history", title: "Review history", hint: null,
+      body: <p className="text-[13px] text-muted-foreground">{panel.reviewHistory}</p> }]),
+    ...(record === null ? [] : [{ id: "run-record", title: "Run record", hint: `Build #${record.build}`,
+      body: <div className="flex flex-col gap-3 text-[13px]">
+        <dl className="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-x-3 gap-y-1.5">
+          {record.facts.map(one => <div key={one.label} className="contents"><dt className="text-muted-foreground">{one.label}</dt><dd className="min-w-0 [overflow-wrap:anywhere]">{one.value}</dd></div>)}
+        </dl>
+        <p className="flex flex-wrap gap-x-4 gap-y-1">
+          {selected.checks?.logHref != null && <a href={selected.checks.logHref} className={META_LINK}>Check output</a>}
+          <a href={record.href} className={META_LINK}>Full run record</a>
+        </p>
+      </div> }]),
   ];
   return <Card aria-label="Result details" className="gap-0 divide-y divide-border overflow-hidden p-0 phone:p-0">
     {learning !== "" && <div data-cockpit-section="learning"><Html html={learning} className="so-result-learning" /></div>}
-    {rows.map(row => <details key={row.id} className="group" data-cockpit-section={row.id}>
+    {rows.map(row => <details key={row.id} id={row.id} className="group scroll-mt-4" data-cockpit-section={row.id}>
       <summary className="flex cursor-pointer list-none items-center gap-2 px-5 py-3.5 hover:bg-accent/50 phone:min-h-12 phone:px-4 [&::-webkit-details-marker]:hidden">
         <ChevronRight className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-90" aria-hidden="true" />
         <h2 className="text-[15px] font-semibold">{row.title}</h2>
@@ -281,6 +318,19 @@ function Details({ selected }: { selected: Selected }) {
   </Card>;
 }
 
+/** A meta link: underlined quietly, and a 44px target on a phone without growing the line. */
+const META_LINK = "font-medium text-foreground/80 underline decoration-border underline-offset-4 hover:decoration-muted-foreground phone:inline-flex phone:min-h-11 phone:items-center";
+
+/** Build #: open the run record under Details and bring it into view. */
+function openRecord(event: MouseEvent<HTMLAnchorElement>) {
+  const record = document.getElementById("run-record");
+  if (!(record instanceof HTMLDetailsElement)) return;
+  event.preventDefault();
+  record.open = true;
+  record.scrollIntoView({ block: "start", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" });
+  history.replaceState(history.state, "", "#run-record");
+}
+
 export function ResultView({ view, csrf }: { view: BrowserResultView; csrf: string }) {
   const selected = view.selected;
   return <div className="mx-auto flex w-full max-w-4xl flex-col gap-4">
@@ -288,12 +338,12 @@ export function ResultView({ view, csrf }: { view: BrowserResultView; csrf: stri
       <div className="flex flex-wrap items-start gap-x-4 gap-y-3">
         <div className="min-w-0 flex-1 basis-72">
           <h1 className="text-[26px] font-semibold leading-tight tracking-tight phone:text-[22px]">{selected?.title ?? "Results"}</h1>
-          {selected !== null && <p className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-muted-foreground">
+          {selected !== null && <p className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-muted-foreground phone:gap-y-0" data-result-meta>
             {selected.project !== null && <><span className="font-medium text-foreground/80">{selected.project}</span><span aria-hidden="true">·</span></>}
-            {selected.build !== null && <><a href={`/r/${selected.build}`} className="hover:text-foreground hover:underline">Build #{selected.build}</a><span aria-hidden="true">·</span></>}
-            <a href={selected.taskHref} className="font-medium text-foreground/80 underline decoration-border underline-offset-4 hover:decoration-muted-foreground">Open task</a>
+            {selected.record !== null && <><a href="#run-record" onClick={openRecord} className={META_LINK}>Build #{selected.record.build}</a><span aria-hidden="true">·</span></>}
+            <a href={selected.taskHref} className={META_LINK}>Open task</a>
             <span aria-hidden="true">·</span>
-            <a href={selected.chatHref} className="font-medium text-foreground/80 underline decoration-border underline-offset-4 hover:decoration-muted-foreground">Discuss</a>
+            <a href={selected.chatHref} className={META_LINK}>Discuss</a>
           </p>}
         </div>
         {selected !== null && <ResultsMenu view={view} />}
@@ -315,9 +365,9 @@ export function ResultView({ view, csrf }: { view: BrowserResultView; csrf: stri
             </li>)}</ul>
           </Card>
       : <>
-          <StatusCard selected={selected} csrf={csrf} />
+          <StatusCard selected={selected} />
           {selected.panel?.youCheck != null && <CheckItems panel={selected.panel} csrf={csrf} chatHref={selected.chatHref} />}
-          {selected.decision !== null && <Decision selected={selected} csrf={csrf} />}
+          <Decision selected={selected} csrf={csrf} />
           {selected.panel !== null && <Panel panel={selected.panel} />}
           {selected.contest !== "" && <Html html={selected.contest} />}
           <Details selected={selected} />

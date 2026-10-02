@@ -523,7 +523,7 @@ await journey("task", "Claude builds it, the project's checks pass, and the resu
   const run = await builtAndChecked(firstTask);
   const diff = execFileSync("git", ["-C", repo, "diff", "main", `refs/heads/${rows(`SELECT branch FROM run WHERE id = ${run.id}`)[0].branch}`, "--", "src/math.js"], { encoding: "utf8" });
   if (!/subtract/.test(diff)) throw new Error(`the build's branch doesn't add subtract: ${diff.slice(0, 300)}`);
-  await page.goto(`${base}/review?result=${encodeURIComponent(firstTask)}&run=${run.id}&project=${encodeURIComponent(repo)}`);
+  await page.goto(`${base}/review?result=${encodeURIComponent(firstTask)}&run=${run.id}`);
   const panel = page.locator("[data-result-panel]").first();
   await panel.waitFor({ timeout: 20_000 });
   // What a person sees: checks passed on the result, and the decision after the evidence says what accepting does
@@ -546,7 +546,7 @@ await journey("task", "Claude builds it, the project's checks pass, and the resu
 /** On a result page, send the work back with a note; returns the new revision's id once the planner has updated its plan. */
 async function sendBack(id, note) {
   const run = latestBuild(id);
-  await page.goto(`${base}/review?result=${encodeURIComponent(id)}&run=${run.id}&project=${encodeURIComponent(repo)}`);
+  await page.goto(`${base}/review?result=${encodeURIComponent(id)}&run=${run.id}`);
   await page.locator('a[href="#request-changes"]').first().click();
   const box = page.locator('#comment-form textarea[name="note"]');
   await box.waitFor({ timeout: 10_000 });

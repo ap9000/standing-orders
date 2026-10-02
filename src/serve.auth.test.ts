@@ -1778,7 +1778,8 @@ describe("the continuation ceremony (Phase 2E, A4)", () => {
 
   test("a finished run offers continuation; the follow-up enters the SIGNED terms; the mint binds parent and head", async () => {
     const cookie = await login();
-    const page = await (await fetch(url(`/r/${parentRun}`), { headers: { cookie } })).text();
+    // The continuation lives with the raw run record (under the result page's Details).
+    const page = await (await fetch(url(`/r/${parentRun}?record=1`), { headers: { cookie } })).text();
     expect(page).toContain("Continue while you watch");
     const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(page)?.[1] as string;
 

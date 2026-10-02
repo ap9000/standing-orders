@@ -281,9 +281,9 @@ function storedResultStatusOf(result: ResultFacts | null, publication: Publicati
       label: "Result saved, but its record does not match",
       // A structural refutation is settled before the approved check is
       // weighed, so it says nothing about whether that check passed.
-      detail: withPublication("What the agent reported doesn't match the changes it saved. This doesn't say whether the project check passed."),
+      detail: withPublication("What the agent reported doesn't match the changes it saved."),
       tone: "problem",
-      action: { label: "Open the record", kind: "open-review" },
+      action: { label: "Open the result", kind: "open-review" },
     };
   }
   if (result.verdict === "short" && humanReview) {
@@ -438,6 +438,16 @@ const VERIFIED_RESULT = new Set(["ready-to-review", "pr-opened", "merge-observed
 /** A finished result's display status in the shared headline's words: a
  * failed project check is Failed, a result missing its record needs a
  * person, every other saved result is Ready for review. Token and action stay. */
+/** Why a result can't be accepted as it stands, in one plain line, or null
+ * when nothing refutes it (a person's acceptance settles it). The result page
+ * shows it before Request changes, its one ink act. */
+export function cantAcceptYetOf(verdict: ProofVerdict | null, reasons: readonly string[], accepted: boolean): string | null {
+  if (accepted || verdict !== "refuted") return null;
+  return evidenceProblemOf(verdict, reasons) === "checks-failed"
+    ? "Can't accept yet: the project's check failed on these changes."
+    : "Can't accept yet: what the agent reported doesn't match the changes it saved.";
+}
+
 /** The result page's own sentence when the decision is on it. */
 export const RESULT_DECISION_SENTENCE = "Review the change, then accept it or ask for changes.";
 

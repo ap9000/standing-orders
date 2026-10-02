@@ -166,7 +166,8 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const work = await page(cookie, "/work");
     const row = /<article class="work-row" data-task="t-navigation"[^>]*>([\s\S]*?)<\/article>/.exec(work)?.[1] ?? "";
     const link = /class="work-action" data-primary-action href="([^"]+)"/.exec(row)?.[1]?.replaceAll("&amp;", "&") ?? "";
-    expect(link).toBe(`/review?result=t-navigation&run=${run}&project=${encodeURIComponent(beta)}`);
+    // The one result page's address names the task and its run, never a project path.
+    expect(link).toBe(`/review?result=t-navigation&run=${run}`);
     expect(row).toContain(">Open result →</a>");
     const signedOut = await fetch(url(link), { redirect: "manual" });
     expect(signedOut.headers.get("location")).toBe(`/login?return=${encodeURIComponent(link)}`);
@@ -176,6 +177,8 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(response.status).toBe(200);
     const review = await response.text();
     expect(review).toContain(`data-result-run="${run}"`);
+    // The project switch keeps the person's own choice (All projects), not the result's project.
+    expect(review).toContain('<span class="name">all projects');
     expect(review).not.toContain("Check completed builds against their approved scope and evidence.");
     expect(review).not.toContain(`<span class="eyebrow">Build #${run}</span>`);
     expect(review).toContain(`Build #${run}`);
@@ -199,11 +202,13 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(old.status).toBe(200);
     expect(await old.text()).toContain('data-review-task="t-navigation"');
     await openProject(cookie, alpha);
-    expect((await fetch(url(link), { headers: { cookie }, redirect: "manual" })).status).toBe(200);
+    const elsewhere = await fetch(url(link), { headers: { cookie }, redirect: "manual" });
+    expect(elsewhere.status).toBe(200);
+    expect(await elsewhere.text()).toContain('<summary class="name">alpha');
     expect(await page(cookie, "/work")).toContain('<summary class="name">alpha');
     // A stale run or a mismatched project must never silently select another result.
     expect((await fetch(url(link.replace(`run=${run}`, `run=${run + 1}`)), { headers: { cookie } })).status).toBe(409);
-    expect((await fetch(url(link.replace(encodeURIComponent(beta), encodeURIComponent(alpha))), { headers: { cookie } })).status).toBe(404);
+    expect((await fetch(url(`${link}&project=${encodeURIComponent(alpha)}`), { headers: { cookie } })).status).toBe(404);
     const invite = store.mintInvite("approver", "alex", now, undefined, [alpha]);
     expect(store.consumeInviteAndCreateAccount({ tokenValue: invite.token, name: "member", credentialHash: hashPassword(memberPassword) }, now).ok).toBe(true);
     const member = await login("member", memberPassword);
@@ -654,8 +659,8 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(all).not.toContain("Checks passed");
     // Recorded result links preserve the exact task/run/project. Detailed
     // check and exception labels are resolved after opening the result.
-    expect(all).toContain(`href="/review?result=t-checks&amp;run=${store.runsFor(store.lookupRef("t-checks")!.id)[0]!.id}&amp;project=${encodeURIComponent(alpha)}">Open result →</a>`);
-    expect(all).toContain(`href="/review?result=t-accepted&amp;run=${store.runsFor(store.lookupRef("t-accepted")!.id)[0]!.id}&amp;project=${encodeURIComponent(alpha)}">Open result →</a>`);
+    expect(all).toContain(`href="/review?result=t-checks&amp;run=${store.runsFor(store.lookupRef("t-checks")!.id)[0]!.id}">Open result →</a>`);
+    expect(all).toContain(`href="/review?result=t-accepted&amp;run=${store.runsFor(store.lookupRef("t-accepted")!.id)[0]!.id}">Open result →</a>`);
     expect(await page(cookie, "/t/t-pr")).toContain('href="https://github.com/owner/repo/pull/482"');
     // Bad view values fall back to All; an unknown view is never an error.
     expect(await page(cookie, "/work?view=bogus")).toMatch(/<a href="\/work" class="active" aria-current="page"[^>]*>All/);
@@ -769,12 +774,17 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const cookie = await login();
     // A fresh session with two served projects has none open.
     expect(/<span class="name">all projects/.test(await page(cookie, "/work"))).toBe(true);
-    for (const [path, status] of [[`/r/${alphaRun}`, 200], [`/r/${betaRun}`, 200], [`/r/${outsideRun}`, 404], ["/r/999999", 404]] as const) {
+    // A builder's result opens on its one result page (titled with the task); its run record stays at ?record=1.
+    for (const [path, status, location] of [[`/r/${alphaRun}`, 303, `/review?result=t-alpha&run=${alphaRun}`], [`/r/${betaRun}`, 303, `/review?result=t-beta&run=${betaRun}`],
+      [`/r/${alphaRun}?record=1`, 200, null], [`/r/${outsideRun}`, 404, null], [`/r/${outsideRun}?record=1`, 404, null], ["/r/999999", 404, null]] as const) {
       const response = await fetch(url(path), { headers: { cookie }, redirect: "manual" });
       expect(response.status, path).toBe(status);
-      expect(response.headers.get("location"), path).toBeNull();
+      expect(response.headers.get("location"), path).toBe(location);
     }
-    const runPage = await page(cookie, `/r/${alphaRun}`);
+    const resultPage = await page(cookie, `/r/${alphaRun}`);
+    expect(resultPage).toContain('<span class="name">all projects');
+    expect(resultPage).toContain("alpha result");
+    const runPage = await page(cookie, `/r/${alphaRun}?record=1`);
     expect(runPage).toContain(`build #${alphaRun}`);
     expect(runPage).toContain("t-alpha");
     // Selected-result links keep working through the same door, and the
@@ -920,7 +930,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(memberWorkRows.every(id => id.startsWith("alpha-"))).toBe(true);
     expect(countsOf(memberHtml)).toEqual({ All: 201, "Needs you": 200, Building: 0, Complete: 0 });
     expect(nextOf(memberHtml)).not.toBeNull();
-    expect((await fetch(url(`/r/${run}`), { headers: { cookie: member2 }, redirect: "manual" })).status).toBe(200);
+    expect((await fetch(url(`/r/${run}?record=1`), { headers: { cookie: member2 }, redirect: "manual" })).status).toBe(200);
     await selectProject(member2, beta);
     expect(rowsOf(await page(member2, "/work")).map(row => row.id).sort()).toEqual(["beta-newest", "t-visible"]);
 
@@ -996,7 +1006,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
       const task = await page(cookie, "/t/t-rev");
       const chat = await page(cookie, "/chat?task=t-rev");
       const review = await page(cookie, "/review?result=t-rev");
-      const run = await page(cookie, `/r/${latest}`);
+      const run = await page(cookie, `/r/${latest}?record=1`);
       expect(statusOf(run)).toHaveLength(1); // The header says it once; Checks keeps the recorded verdict.
       // The title never repeats the box (concise revision): the h1 is the
       // bare title, and the receipt is the page's only status line.
@@ -1036,7 +1046,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(queuedTask).toContain("the agent's own claim — not checked");
     expect(rowsOf(await page(cookie, "/work")).find(row => row.id === "t-rev")?.views).toEqual(["all", "needs-you"]);
     // The older run keeps its own verdict: nothing masks a selected result.
-    const olderPage = await page(cookie, `/r/${older}`);
+    const olderPage = await page(cookie, `/r/${older}?record=1`);
     expect(/<header class="result-head">[\s\S]*?data-work-status="([^"]+)"/.exec(olderPage)?.[1]).toBe("ready-to-review");
     expect(olderPage).not.toContain("Waiting for review");
 
@@ -1122,7 +1132,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     // The failed check and its exact result link stay visible; its saved assessment is secondary.
     const failed = await page(cookie, `/t/t-checks`);
     expect(failed).toContain("check failed against this build (exit 1)");
-    expect(failed).toContain(`href="/review?result=t-checks&amp;run=${checks.run}&amp;project=${encodeURIComponent(alpha)}" data-primary-action>Open the failed check</a>`);
+    expect(failed).toContain(`href="/review?result=t-checks&amp;run=${checks.run}" data-primary-action>Open the failed check</a>`);
     expect(failed).not.toContain('<details class="proof-exception">');
     expect(failed).toContain('<summary>Previous assessment</summary>');
     expect(failed).not.toContain('<details class="receipt-history">');
@@ -1158,7 +1168,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(row).toContain('href="/t/t-checks"');
     expect(row).toContain('<span class="status-label">Needs you</span>');
     expect(row).not.toContain("Checks passed");
-    expect(row).toContain(`<a class="work-action" data-primary-action href="/review?result=t-checks&amp;run=${checks.run}&amp;project=${encodeURIComponent(alpha)}">Open result →</a>`);
+    expect(row).toContain(`<a class="work-action" data-primary-action href="/review?result=t-checks&amp;run=${checks.run}">Open result →</a>`);
     for (const id of ["t-rev", "t-queued"]) expect(work).toContain(`data-task="${id}"`);
     // The task page: the status box leads with the result's words, the
     // receipt agrees, and the title is the bare title — the words appear
@@ -1169,7 +1179,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(failed.match(/<h2 class="assignment-state status-headline"><i aria-hidden="true"><\/i>Needs you<\/h2>/g)).toHaveLength(1);
     expect(failed).toContain('data-work-status="assignment-needs-decision"');
     expect(failed).toContain("check failed against this build (exit 1)");
-    expect(failed).toContain(`href="/review?result=t-checks&amp;run=${checks.run}&amp;project=${encodeURIComponent(alpha)}" data-primary-action>Open the failed check</a>`);
+    expect(failed).toContain(`href="/review?result=t-checks&amp;run=${checks.run}" data-primary-action>Open the failed check</a>`);
     expect(failed).not.toContain('<details class="proof-exception">');
     expect(failed).toContain('<summary>Previous assessment</summary>');
     // A task without a result keeps its state chip in the title: the box
@@ -1179,7 +1189,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(queued).toContain('data-work-status="assignment-needs-decision"');
     expect(queued).toContain('<h2 class="assignment-state status-headline"><i aria-hidden="true"></i>Needs you</h2>');
     // This run remains the current result: task state is shared, while its saved verdict is retained.
-    const olderPage = await page(cookie, `/r/${older}`);
+    const olderPage = await page(cookie, `/r/${older}?record=1`);
     expect(/<header class="result-head">[\s\S]*?data-work-status="([^"]+)"/.exec(olderPage)?.[1]).toBe("assignment-needs-decision");
     expect(olderPage).toContain('data-proof-verdict="complete-verified"');
     // The signed terms stay exact on the task page: the approved goal, word
