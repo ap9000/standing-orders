@@ -1,0 +1,48 @@
+name: Windows containment repeat
+
+# The Windows Job Object exact-run stop test (c2), run back to back on one
+# runner until it fails or passes every time. Runs on pull requests that touch
+# Windows containment, and on demand (Actions → Run workflow) with a count.
+
+on:
+  pull_request:
+    paths:
+      - src/containment-windows.test.ts
+      - src/containment.ts
+      - src/exec.ts
+      - .github/workflows/windows-containment-repeat.yml
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: Consecutive runs
+        default: "20"
+
+jobs:
+  repeat:
+    name: Windows Job Object containment · c2 × ${{ inputs.runs || 20 }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      # The facility test runs with c2 so an unavailable backend fails instead of skipping c2.
+      - name: Run c2 back to back
+        shell: pwsh
+        run: |
+          $runs = [int]$env:RUNS
+          for ($i = 1; $i -le $runs; $i++) {
+            Write-Host "::group::run $i of $runs"
+            npx vitest run src/containment-windows.test.ts -t "reported truthfully|exact-run stop terminates the whole job"
+            $code = $LASTEXITCODE
+            Write-Host "::endgroup::"
+            if ($code -ne 0) { Write-Host "::error::c2 failed on run $i of $runs"; exit 1 }
+          }
+          Write-Host "c2 passed $runs times in a row"
+        env:
+          CI: "true"
+          SO_EXPECT_NATIVE_CONTAINMENT: "1"
+          RUNS: ${{ inputs.runs || 20 }}

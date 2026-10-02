@@ -418,7 +418,14 @@ function startZone(config: TriggerConfig, definition: FlowDefinition): string {
   return config.zone !== null && definition.stages.some(one => one.id === config.zone) ? config.zone : definition.start;
 }
 
-/** One outside thing into one card, at most once per trigger. Keys and control characters never reach a card. */
+/** The active flow that already made a card for this failing commit in a project, if any. */
+function checksCardOf(store: Store, repo: string, key: string): string | null {
+  const row = store.handle.prepare(`SELECT f.name FROM flow_trigger_event e JOIN flow_trigger t ON t.id = e.trigger JOIN flow f ON f.id = t.flow
+    WHERE f.repo = ? AND f.state = 'active' AND e.key = ? AND e.card IS NOT NULL LIMIT 1`).get(repo, key);
+  return row === undefined ? null : `“${String(row["name"])}”`;
+}
+
+/** One outside thing into one card, at most once per trigger (a failing run, once per project). Keys and control characters never reach a card. */
 function makeCard(store: Store, trigger: FlowTriggerRow, config: TriggerConfig, item: Incoming, by: string, now: Date): { made: Made; note: string | null; card: number | null } {
   const flow = store.getFlow(trigger.flow);
   const definition = flow === null ? null : flowDefinitionOf(flow);
@@ -430,7 +437,16 @@ function makeCard(store: Store, trigger: FlowTriggerRow, config: TriggerConfig, 
     store.recordFlowTriggerEvent(trigger.id, item.key, null, note, now);
     return { made: "skipped", note: `${item.source.label}: ${note}`, card: null };
   }
+  // Claimed inside the write lock: a worker and a console (or an old and a new worker) checking at once make one card.
   return store.transact(() => {
+    if (store.flowTriggerSaw(trigger.id, item.key)) return { made: "seen" as const, note: null, card: null };
+    // One failing run is one fix: a second trigger watching the same checks in this project leaves it to the first.
+    const filed = item.key.startsWith("checks:") ? checksCardOf(store, flow.repo, item.key) : null;
+    if (filed !== null) {
+      const note = `already a card in ${filed}`;
+      store.recordFlowTriggerEvent(trigger.id, item.key, null, note, now);
+      return { made: "skipped" as const, note: `${item.source.label}: ${note}`, card: null };
+    }
     const card = store.addFlowCard({ flow: flow.id, title: text.title, description: text.description, stage: startZone(config, definition), by, source: item.source }, now);
     store.recordFlowTriggerEvent(trigger.id, item.key, card, null, now);
     return { made: "added" as const, note: null, card };
