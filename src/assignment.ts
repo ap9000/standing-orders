@@ -340,7 +340,7 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
         action: primaryAction === null ? null : { code: primaryAction.code, target: primaryAction.target },
         attention, receipt: receipt?.digest ?? null }), acknowledged: false } : null;
   const publication = result === null ? null : store.publicationForRun(result.id);
-  const lead = state === "complete" || state === "cancelled" ? null : leadClaimOf(store, family.root.id, now);
+  const lead = state === "complete" || state === "cancelled" || access.principal !== "operator" ? null : leadClaimOf(store, family.root.id, now, access.viewer);
   // Existing saved inputs and output, read only after family admission. Keep
   // polling briefs small; full reads disclose exactly which excerpts are shortened.
   const planId = result?.planRevision == null ? null : store.getPlanRevision(result.planRevision)?.artifact;

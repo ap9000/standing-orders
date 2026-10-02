@@ -35,7 +35,7 @@ import { triggerConfigOf } from "./flow-triggers.js";
 import { telegramProgressCard } from "./telegram-progress.js";
 import { enqueueEveningDigests, finishedView, isTaskFact, joinsBatch, needsPerson, quietCardView } from "./chat-quiet.js";
 import { BATCH_MS, chatText, chatTitle } from "./chat-voice.js";
-import { LEAD_SAY_KIND, leadSayEarlier, leadSayText } from "./lead-voice.js";
+import { LEAD_SAY_KIND, enqueueLeadLapses, leadSayEarlier, leadSayText } from "./lead-voice.js";
 import { phoneText, PHONE_HELP, phoneCommand, phoneStatus, phoneTaskView, phoneTaskChoices, phoneTaskListText, resolvePhoneTask, phoneFocusText, PHONE_NO_MATCH, PHONE_BACK_TO_LEAD } from "./telegram-status.js";
 import { applyRoomInbound, conversationRow, roomCardApprover, roomCommand, roomGrantAllowed, roomMessagesAfter, roomMessageText, teamDomain } from "./chat-rooms.js";
 import { isTelegramProgressNotification, proposalTaskOf, type Store } from "./store.js";
@@ -817,6 +817,7 @@ export async function planChatNotifications(
   const registry = await options.readProjects();
   // An evening digest someone asked for is due: record it as their own notification, delivered below.
   try { enqueueEveningDigests(store, nowOf(options), options.evidenceRoot); } catch { /* Retried on the next pass. */ }
+  enqueueLeadLapses(store, nowOf(options));
   const cursor = Number(
     state
       .prepare("SELECT notification FROM chat_runtime WHERE installation=?")

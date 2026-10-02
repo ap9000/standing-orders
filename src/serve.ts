@@ -2191,7 +2191,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
           needsVerification: store
             .listCompletedWorkScoped(project, 10, admission)
             .filter(one => visible(one.repo) && (one.proofVerdict === "short" || one.proofVerdict === "refuted") && !one.proofAccepted &&
-              assignmentOf(store, one.taskId, now, { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) }, evidenceRoot) === null)
+              assignmentOf(store, one.taskId, now, workAccess(), evidenceRoot) === null)
             .map(one => ({
               taskId: one.taskId,
               title: one.title,
@@ -2565,7 +2565,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       // Admission binds BEFORE the SQL limit (the done page's own rule),
       // and every row is re-proved against the ceiling before ranking.
       const resultRow = (row: CompletedWorkRow) => {
-        const assignment = assignmentOf(store, row.taskId, now, { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) }, evidenceRoot);
+        const assignment = assignmentOf(store, row.taskId, now, workAccess(), evidenceRoot);
         return { ...row, proofReasons: row.runId === null ? [] : store.proofVerdictFor(row.runId)?.reasons ?? [], ciFailing: ciFailingFor(row.runId, row.prNumber),
           assignment: assignment?.activeTaskId === row.taskId && (assignment.receipt?.runId ?? null) === row.runId ? assignment : null };
       };
@@ -3117,7 +3117,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     // v103: a task's evidence pack, as a printable page or JSON (the whole family, sealed ledger entries included).
     const evidence = matchTaskPath(url.pathname, "/evidence$");
     if (evidence !== null) {
-      const access = { principal: "operator" as const, repos: admissionList(), includeUnplaced: visible(null) };
+      const access = workAccess();
       const family = store.taskFamilyOf(evidence.taskId, access.repos, access.includeUnplaced);
       if (family === null || !visible(family.root.repo)) return refuse(response, who, 404, "no such task", "/tasks");
       if (evidence.taskId !== family.root.id) return redirect(response, `${taskHref(family.root.id)}/evidence${url.search}`);
@@ -3137,7 +3137,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       if (from === null || last === null) return refuse(response, who, 400, "Choose a start and end day.", "/ledger");
       const to = new Date(Date.parse(last) + 86_400_000).toISOString();
       if (to <= from || Date.parse(to) - Date.parse(from) > 366 * 86_400_000) return refuse(response, who, 400, "Choose a range of a year or less, ending on or after its start.", "/ledger");
-      const access = { principal: "operator" as const, repos: admissionList(), includeUnplaced: visible(null) };
+      const access = workAccess();
       store.recordAction({ at: now.toISOString(), actor: who.name, repo: null, taskId: null, runId: null, action: "ledger exported", outcome: "exported", source: "access",
         detail: `${from.slice(0, 10)} to ${last.slice(0, 10)}` });
       // A piece at a time (a page of entries, or one pack), yielding between them, and stopping if the reader's access
@@ -3837,7 +3837,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       if (repos.length > 0) {
         try {
           fleetSnapshot = store.chatSnapshot(repos, now);
-          const summaries = workIndexPage(store, now, { principal: 'operator', repos, includeUnplaced: false }, { limit: 100 }).items;
+          const summaries = workIndexPage(store, now, { principal: 'operator', repos, includeUnplaced: false, viewer: who.name }, { limit: 100 }).items;
           fleetSnapshot.assignmentStates = Object.fromEntries(summaries.flatMap(value =>
             [value.rootId, value.activeTaskId].map(id => [id, { state: value.assignmentState, label: value.status.label, detail: value.status.detail }])));
           fleetSnapshot.attentionCount = needsYouBadge(null);
@@ -5186,7 +5186,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
    * phase, four counts, plan-window use (never dollars: subscriptions don't
    * bill per run) and Catch up's items, each tagged with its tab. Reads only. */
   function chatHomeOf(who: Who, repos: readonly string[], now: Date): BrowserHome {
-    const access = { principal: "operator" as const, repos: admissionList(), includeUnplaced: visible(null) };
+    const access = workAccess();
     const admitted = (repo: string | null) => repo === null ? visible(null) : repos.includes(repo);
     const agents = store.liveRuns(now).filter(run => admitted(run.repo)).map(run => {
       const root = familyOf(run.taskId)?.root ?? null;
@@ -5323,7 +5323,8 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
   }
 
   function workAccess() {
-    return { principal: 'operator' as const, repos: admissionList(), includeUnplaced: visible(null) };
+    // The reader's own lead's claims read "Your lead is on it" (lead-voice.ts); nobody else's.
+    return { principal: 'operator' as const, repos: admissionList(), includeUnplaced: visible(null), viewer: requestContext.getStore()?.actor ?? null };
   }
   // All project counts are read together. No task artifacts or processes are
   // inspected to paint a badge or a project switcher.
@@ -5452,7 +5453,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     const earlierLive = task.family === undefined ? [] : earlierLiveVersions(task.family, now);
     if (earlierLive.length > 0 && !status.views.includes("running")) status.views = [...status.views, "running"];
     const otherActive = new Set([...(task.family?.otherActive.map(one => one.id) ?? []), ...earlierLive]).size;
-    const recordedAssignment = task.family === undefined ? null : assignmentOf(store, task.id, now, { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) }, evidenceRoot);
+    const recordedAssignment = task.family === undefined ? null : assignmentOf(store, task.id, now, workAccess(), evidenceRoot);
     const assignment = freshAssignment(recordedAssignment, result ?? null);
     const assignmentStatus = assignment === null ? status : assignmentStatusOf(assignment, status);
     if (status.views.includes("running") && !assignmentStatus.views.includes("running")) assignmentStatus.views = [...assignmentStatus.views, "running"];
@@ -5698,7 +5699,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     const planRevisions = ref === null ? null : revisionLedgerOf(ref.id);
     const milestoneProgress = ref === null ? null : progressOf(ref.id, planRevisions?.current?.document ?? null);
     const family = familyOf(taskId);
-    const recordedAssignment = family?.current.id !== taskId ? null : assignmentOf(store, taskId, now, { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) }, evidenceRoot);
+    const recordedAssignment = family?.current.id !== taskId ? null : assignmentOf(store, taskId, now, workAccess(), evidenceRoot);
     const assignment = freshAssignment(recordedAssignment, completion?.receipt ?? null);
     const progressRun = runs.find(one => runIsLive(one))?.id ?? completion?.runId ?? null;
     return {
@@ -5986,7 +5987,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       title: family.root.title,
       state: task.state,
       status: view?.status ?? workRowOf({ ...task, repo: ref.repo }, now).status,
-      assignment: view?.assignment ?? assignmentOf(store, task.id, now, { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) }, evidenceRoot),
+      assignment: view?.assignment ?? assignmentOf(store, task.id, now, workAccess(), evidenceRoot),
       project: ref.repo === null ? null : projectName(ref.repo),
       now,
       dispatch: diagnoseTaskDispatch(store, taskId, now),
@@ -6053,7 +6054,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       return { taskId: rootId, view: { ...view, canMerge: view.canMerge && who.role === "approver" && who.via === "cookie" }, offer: null, target, fact };
     }
     if (!publishing.on || who.via !== "cookie" || who.role !== "approver") return null;
-    const assignment = assignmentOf(store, taskId, clock(), { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) }, evidenceRoot);
+    const assignment = assignmentOf(store, taskId, clock(), workAccess(), evidenceRoot);
     const receipt = assignment?.receipt ?? null;
     if (assignment?.state !== "complete" || receipt === null || store.publicationForRun(receipt.runId) !== null || pullRequestBlocker(store, receipt.runId) !== null) return null;
     return { taskId: rootId, view: null, offer: { taskId: receipt.taskId, runId: receipt.runId, digest: receipt.digest }, target };
@@ -11290,7 +11291,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       run,
       receipt,
       assignment: (() => {
-        const value = assignmentOf(store, taskId, now, { principal: "operator", repos: admissionList(), includeUnplaced: visible(null) }, evidenceRoot);
+        const value = assignmentOf(store, taskId, now, workAccess(), evidenceRoot);
         return value?.receipt?.runId === run.id && value.activeTaskId === taskId ? freshAssignment(value, receipt) : null;
       })(),
       handoff,

@@ -32,7 +32,7 @@ import { isLifecycleNotification, isTelegramProgressNotification, TELEGRAM_HOLD_
 import { telegramProgressCard, type ProgressEntity } from "./telegram-progress.js";
 import { enqueueEveningDigests, finishedView, isTaskFact, joinsBatch, needsPerson, quietCardView, type QuietView } from "./chat-quiet.js";
 import { BATCH_MS, chatText, chatTitle, factLinkLabel, mentions, nameTelegramBot } from "./chat-voice.js";
-import { LEAD_SAY_KIND, leadSayEarlier, leadSayText } from "./lead-voice.js";
+import { LEAD_SAY_KIND, enqueueLeadLapses, leadSayEarlier, leadSayText } from "./lead-voice.js";
 import { applyTeamInbound, deliverTeamChats, teamCommand } from "./telegram-team.js";
 import { applyFlowReply, applyFlowTap, FLOW_DECIDE_KEY, flowButtons, flowDecisionAt } from "./telegram-flow.js";
 import { connectChannel, FLOW_WORDS, takeChannelMessage, watchedChannel } from "./chat-inbox.js";
@@ -741,6 +741,8 @@ async function deliverOutbox(
   const now = clock();
   // An evening digest someone asked for is due: record it as their own notification, delivered below.
   try { enqueueEveningDigests(store, now, evidenceRoot); } catch { report.problems.push("evening digest could not be prepared"); }
+  // A lead claim that went two hours quiet repaints its owner's card back to the task's real state.
+  enqueueLeadLapses(store, now);
   const digestDue = digest.everyMs === null || digest.lastSentAt === null || now.getTime() >= new Date(digest.lastSentAt).getTime() + digest.everyMs;
   // Every paired person is a destination of their own: each binding claims
   // and settles its own rows under its own ceiling, in turn.

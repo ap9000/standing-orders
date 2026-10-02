@@ -5,10 +5,11 @@
  *
  * Every fact is an append-only ledger row under "lead for <owner>"; no table of its own. The chat message is an
  * ordinary notification addressed to the owner, so every chat delivers it with the usual receipts. */
-import { actorLabel, type Actor } from "./actor.js";
+import { actorLabel, withActor, type Actor } from "./actor.js";
 import { chatControlHref } from "./chat-controls.js";
 import { BATCH_MS, chatText, chatTitle } from "./chat-voice.js";
 import { BUILT_IN, type Notification, type Store } from "./store.js";
+import { LEAD_LAPSED } from "./task-status.js";
 import { phoneText as plain } from "./telegram-status.js";
 
 /** Who the person's chat says the lead's messages are from. */
@@ -16,6 +17,8 @@ export const LEAD_NAME = "Your lead";
 export const LEAD_SAY_KIND = "lead-say";
 /** Repaints the owner's task card when the lead takes a task on: it never makes a new message in quiet chat. */
 export const LEAD_ON_IT_KIND = "lead-on-it";
+/** Repaints the owner's task card when a claim lapses: the card reads its real state again, and says so. */
+export const LEAD_LAPSED_KIND = "lead-lapsed";
 export const LEAD_SAID = "lead said";
 export const LEAD_CLAIMED = "lead is on it";
 /** A claim lapses after this long without a lead act on the task. */
@@ -28,13 +31,14 @@ const BATCH_LINES = 8;
 
 const ENDS_SQL = LEAD_ENDS.map(one => `'${one}'`).join(",");
 
-/** The work index's reading of a claim, per row of its `classified` projection: 0 none, 1 on it, 2 lapsed. */
+/** The work index's reading of a claim, per row of its `classified` projection: 0 none, 1 on it, 2 lapsed. Only the
+ * viewer's own lead counts (`$leadOf`, "lead for <viewer>"; null for nobody): another person's lead is not yours. */
 export const LEAD_CLAIM_SQL = `COALESCE((SELECT CASE
       WHEN EXISTS(SELECT 1 FROM action_ledger e WHERE e.task_id IN (SELECT m.id FROM ordered m WHERE m.root_ref = c.root_ref)
         AND e.id > claim.id AND e.actor = claim.actor AND e.action IN (${ENDS_SQL})) THEN 0
       WHEN (SELECT MAX(a.at) FROM action_ledger a WHERE a.task_id IN (SELECT m.id FROM ordered m WHERE m.root_ref = c.root_ref)
         AND a.id >= claim.id AND a.actor = claim.actor) > $leadIdleSince THEN 1 ELSE 2 END
-    FROM action_ledger claim WHERE claim.id = (SELECT MAX(id) FROM action_ledger WHERE task_id = c.root_id AND action = '${LEAD_CLAIMED}')), 0)`;
+    FROM action_ledger claim WHERE claim.id = (SELECT MAX(id) FROM action_ledger WHERE task_id = c.root_id AND action = '${LEAD_CLAIMED}' AND actor = $leadOf)), 0)`;
 
 export type LeadClaim = { state: "on-it" | "lapsed"; owner: string; since: string; lastActedAt: string };
 export type LeadActivity = { owner: string; doing: string; at: string; taskId: string | null };
@@ -123,19 +127,32 @@ export function leadClaim(store: Store, actor: Actor, taskId: string, now: Date)
   store.transact(() => {
     const ledger = store.recordAction({ at: now.toISOString(), actor: actorLabel(actor), repo: task.repo, taskId: root, runId: null,
       action: LEAD_CLAIMED, outcome: "recorded", source: "work" });
-    // The owner's card for this task repaints to "Your lead is on it"; quiet chat sends nothing new.
+    // The owner's card for this task repaints to "Your lead is on it": quiet chat edits its card, and every-update
+    // chat edits the attempt's own card (the Failed alert), or follows it up when that message is gone.
     store.enqueueNotification({ dedupeKey: `lead-on-it:${ledger}`, kind: LEAD_ON_IT_KIND, subject: "Your lead is on it", body: "",
-      link: chatControlHref("task", taskId), source: { taskRef: task.refId } }, now);
+      link: chatControlHref("task", taskId), source: cardSource(store, root) ?? { taskRef: task.refId } }, now);
   });
-  return { ok: true, root, claim: leadClaimOf(store, taskId, now)! };
+  return { ok: true, root, claim: leadClaimOf(store, taskId, now, actor.account)! };
 }
 
-/** Whether the lead has this task now: on it, lapsed after two quiet hours (it says so), or null (never claimed,
- * or the lead completed it, handed it on or cancelled it since). */
-export function leadClaimOf(store: Store, taskId: string, now: Date): LeadClaim | null {
+/** Where a task's chat card lives: its newest version's own attempt (the card every-update chat edits), else that
+ * version. Null for a task with no reference. */
+function cardSource(store: Store, root: string): { run: number } | { taskRef: number } | null {
+  const refs = familyOf(store, root).ids.map(id => store.lookupRef(id)).filter(ref => ref !== null).sort((a, b) => b.id - a.id);
+  const newest = refs[0];
+  if (newest === undefined) return null;
+  const run = store.runsFor(newest.id).find(one => one.role === "builder" && one.contestant === null);
+  return run === undefined ? { taskRef: newest.id } : { run: run.id };
+}
+
+/** Whether `viewer`'s own lead has this task now: on it, lapsed after two quiet hours (it says so), or null (never
+ * claimed by their lead, or it completed it, handed it on or cancelled it since). Another person's lead never counts. */
+export function leadClaimOf(store: Store, taskId: string, now: Date, viewer: string | null | undefined): LeadClaim | null {
+  if (viewer == null || viewer === "") return null;
   try {
     const { root, ids } = familyOf(store, taskId);
-    const claim = store.handle.prepare("SELECT id, at, actor FROM action_ledger WHERE task_id = ? AND action = ? ORDER BY id DESC LIMIT 1").get(root, LEAD_CLAIMED);
+    const claim = store.handle.prepare("SELECT id, at, actor FROM action_ledger WHERE task_id = ? AND action = ? AND actor = ? ORDER BY id DESC LIMIT 1")
+      .get(root, LEAD_CLAIMED, `lead for ${viewer}`);
     if (claim === undefined) return null;
     const family = `task_id IN (${ids.map(() => "?").join(",")}) AND id >= ? AND actor = ?`;
     const args = [...ids, Number(claim["id"]), String(claim["actor"])];
@@ -151,6 +168,35 @@ export function leadClaimOf(store: Store, taskId: string, now: Date): LeadClaim 
   }
 }
 
+/** A claim that lapsed repaints its owner's card once per lapse: the card reads the task's real state again and
+ * says it is back with them. Run beside the evening digests on every chat pass; claims are found through their
+ * repaint rows (an indexed key range), so nothing scans the ledger. */
+export function enqueueLeadLapses(store: Store, now: Date): number {
+  let count = 0;
+  try {
+    const since = new Date(now.getTime() - 14 * 86_400_000).toISOString();
+    const claims = store.handle.prepare(`SELECT DISTINCT n.task_id, a.account FROM notification n JOIN notification_actor a ON a.notification = n.id AND a.lead = 1
+      WHERE n.dedupe_key >= 'lead-on-it:' AND n.dedupe_key < 'lead-on-it;' AND n.created_at >= ? AND n.task_id IS NOT NULL`).all(since);
+    for (const row of claims) {
+      const owner = String(row["account"]);
+      const taskId = String(row["task_id"]);
+      const claim = leadClaimOf(store, taskId, now, owner);
+      if (claim?.state !== "lapsed") continue;
+      const { root } = familyOf(store, taskId);
+      const state = store.getTask(root)?.state;
+      if (state === undefined || state === "cancelled") continue;
+      const source = cardSource(store, root);
+      if (source === null) continue;
+      // The owner's lead let it go: only its owner's card hears of it (store.pingAllowed).
+      if (withActor({ account: owner, lead: true }, () => store.enqueueNotification({ dedupeKey: `lead-lapsed:${root}:${owner}:${claim.lastActedAt}`,
+        kind: LEAD_LAPSED_KIND, subject: LEAD_LAPSED, body: "", link: chatControlHref("task", root), source }, now))) count++;
+    }
+  } catch {
+    // An older store being read by a newer build: nothing to repaint.
+  }
+  return count;
+}
+
 /** The lead's act on a task that a claim counts (a retry, a state change, a steer): one ledger row as the lead. */
 export function noteLeadWork(store: Store, actor: Actor, taskId: string, what: string, now: Date): void {
   if (!actor.lead) return;
@@ -164,22 +210,18 @@ const ACT_WORDS: Readonly<Record<string, string>> = {
   "task handed to a person": "handed on", [LEAD_CLAIMED]: "working on",
 };
 
-/** What the lead is doing now and when it last acted: its newest words (a say), else its newest act in words. `owner`
- * null reads the newest lead of any person. */
-export function leadActivity(store: Store, owner: string | null): LeadActivity | null {
+/** What `owner`'s own lead is doing now and when it last acted, both from its one newest act: its words when that
+ * was a say, else the act in words. Nobody (null) has no lead line: another person's lead is never "Your lead". */
+export function leadActivity(store: Store, owner: string | null | undefined): LeadActivity | null {
+  if (owner == null || owner === "") return null;
   try {
-    const who = owner === null ? "actor GLOB 'lead for ?*'" : "actor = ?";
-    const args = owner === null ? [] : [`lead for ${owner}`];
-    const last = store.handle.prepare(`SELECT id, at, actor, task_id, action, detail FROM action_ledger WHERE ${who} ORDER BY id DESC LIMIT 1`).get(...args);
+    const last = store.handle.prepare("SELECT id, at, actor, task_id, action, detail FROM action_ledger WHERE actor = ? ORDER BY id DESC LIMIT 1").get(`lead for ${owner}`);
     if (last === undefined) return null;
-    const actor = String(last["actor"]);
-    const told = store.handle.prepare(`SELECT at, task_id, action, detail FROM action_ledger WHERE actor = ? AND action IN (?, ?) ORDER BY id DESC LIMIT 1`).get(actor, LEAD_SAID, LEAD_CLAIMED);
-    const shown = told ?? last;
-    const task = shown["task_id"] == null ? null : String(shown["task_id"]);
+    const task = last["task_id"] == null ? null : String(last["task_id"]);
     const title = task === null ? "" : (() => { try { return ` ${chatTitle(store, task)}`; } catch { return ""; } })();
-    const doing = shown["action"] === LEAD_SAID && shown["detail"] != null ? chatText(String(shown["detail"]), task === null ? [] : [{ id: task, title: title.trim() }])
-      : `${ACT_WORDS[String(shown["action"])] ?? String(shown["action"]).replace(/^lead /, "")}${title}`;
-    return { owner: actor.replace(/^lead for /, ""), doing: doing.replace(/[.\s]+$/u, ""), at: String(last["at"]), taskId: task };
+    const doing = last["action"] === LEAD_SAID && last["detail"] != null ? chatText(String(last["detail"]), task === null ? [] : [{ id: task, title: title.trim() }])
+      : `${ACT_WORDS[String(last["action"])] ?? String(last["action"]).replace(/^lead /, "")}${title}`;
+    return { owner, doing: doing.replace(/[.\s]+$/u, ""), at: String(last["at"]), taskId: task };
   } catch {
     return null;
   }

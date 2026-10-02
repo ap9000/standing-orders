@@ -97,7 +97,8 @@ export function workSummaryOf(facts: WorkFacts, principal: WorkPrincipal, result
 }
 
 export type WorkSummaryAccess =
-  | { principal: "operator"; repos: readonly string[] | null; includeUnplaced?: boolean }
+  /** `viewer`: the person reading, whose own lead's claim (lead-voice.ts) a task reads as "Your lead is on it". */
+  | { principal: "operator"; repos: readonly string[] | null; includeUnplaced?: boolean; viewer?: string | null }
   | { principal: "coordinator"; repos: readonly string[] };
 
 /** Admission precedes reading question/proof bodies. Missing and foreign

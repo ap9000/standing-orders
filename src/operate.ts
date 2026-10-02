@@ -10720,7 +10720,9 @@ async function statusCommand(
     if (!allowed.has(name)) return fail(context.write, context.json, command, "usage", `--${name} is not a status option.`, EXIT.usage);
   }
   if (positional.length > 0) return fail(context.write, context.json, command, "usage", "Use `toolroll status [--json]`.", EXIT.usage);
-  const status = installationStatus(context.store, context.clock());
+  // Whose lead the status line follows: the lead's own person, else the remembered login; nobody shows no lead.
+  const viewer = currentActor()?.account ?? readLoginFile(join(dirname(context.databaseFile), UP_LOGIN_FILE))?.name ?? null;
+  const status = installationStatus(context.store, context.clock(), viewer);
   // One line, only when a newer Toolroll exists; offline or switched off says nothing.
   const current = PACKAGE_VERSION;
   const method = installMethod(context.installBin);

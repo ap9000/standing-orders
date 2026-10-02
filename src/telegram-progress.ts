@@ -78,7 +78,7 @@ export function telegramProgressCard(store: Store, run: Run, taskId: string, pro
   if (viewer !== undefined && facts.completedBy != null && (completer === viewer || facts.completedBy === viewer)) facts = { ...facts, completedBy: null };
   // The person's lead took it on: "Your lead is on it" rather than waiting for them (lead-voice.ts).
   if (facts.lead === undefined) {
-    const lead = leadClaimOf(store, taskId, now);
+    const lead = leadClaimOf(store, taskId, now, viewer);
     if (lead !== null) facts = { ...facts, lead: lead.state };
   }
   const status = taskStatusOf(facts);

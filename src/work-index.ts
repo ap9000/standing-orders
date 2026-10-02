@@ -313,7 +313,8 @@ function parameters(now: Date, access: WorkSummaryAccess, options: WorkIndexOpti
     $all: access.repos === null ? 1 : 0, $repos: JSON.stringify(access.repos ?? []),
     $unplaced: access.principal === 'operator' && access.includeUnplaced === true ? 1 : 0,
     $projectSet: options.project != null ? 1 : 0, $project: options.project ?? null, $state: options.state ?? null, $leadId: options.leadId ?? null,
-    $leadIdleSince: new Date(now.getTime() - LEAD_IDLE_MS).toISOString() };
+    $leadIdleSince: new Date(now.getTime() - LEAD_IDLE_MS).toISOString(),
+    $leadOf: access.principal === 'operator' && access.viewer != null && access.viewer !== '' ? `lead for ${access.viewer}` : null };
 }
 function counts(row: Row): WorkIndexCounts {
   return { all: n(row, 'all_count'), 'needs-you': n(row, 'needs_count'), running: n(row, 'running_count'), completed: n(row, 'completed_count') };

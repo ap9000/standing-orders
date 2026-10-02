@@ -1218,6 +1218,8 @@ export function isTelegramProgressNotification(row: Pick<Notification, "dedupeKe
   if (row.kind === "check-progress" && row.pushClass === "progress" && row.run !== null) return isLifecycleNotification(row);
   if (row.pushClass !== null) return false;
   if (row.kind === "build-failed" && row.run !== null && row.dedupeKey === `run:${row.run}:failed`) return true;
+  // The owner's lead took the attempt on, or let it lapse (lead-voice.ts): its card repaints in place.
+  if ((row.kind === "lead-on-it" || row.kind === "lead-lapsed") && row.run !== null) return true;
   return isLifecycleNotification(row) &&
     ["run-started", "run-phase", "run-finished", "review-requested", "review-finished", "run-stopping", "run-stopped", "run-resumed", "task-held", "task-released"].includes(row.kind);
 }
@@ -26707,7 +26709,7 @@ export class Store {
     // The lead's own words reach the person it speaks for, and its claim repaints only that person's card (lead-voice.ts).
     if (row.kind === "lead-say") return row.recipient === account;
     const actor = this.notificationActor(row.id);
-    if (row.kind === "lead-on-it") return actor?.lead === true && actor.account === account;
+    if (row.kind === "lead-on-it" || row.kind === "lead-lapsed") return actor?.lead === true && actor.account === account;
     if (actor !== null && actor.account === account) return false;
     if (row.recipient !== null) return true;
     // A task this person (or their lead) completed or cancelled is settled for them: nothing more about it.

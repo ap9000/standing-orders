@@ -209,7 +209,8 @@ export function repairStaleStatuses(store: Store, now: Date): { exitsRecorded: n
   return { exitsRecorded, readyForReview: workReadyForReview(store, now, { principal: "operator", repos: null, includeUnplaced: true }, 0).count };
 }
 
-export function installationStatus(store: Store, now: Date): InstallationStatus {
+/** `viewer`: the person asking (the lead asks as its person); null when nobody is known, which shows no lead. */
+export function installationStatus(store: Store, now: Date, viewer: string | null = currentActor()?.account ?? null): InstallationStatus {
   const runningRows = store.handle.prepare(`SELECT run.id, run.role, run.phase, ref.external_id AS task
     FROM run INDEXED BY work_unfinished
     JOIN task_ref AS ref ON ref.id = run.task_ref
@@ -285,11 +286,11 @@ export function installationStatus(store: Store, now: Date): InstallationStatus 
         observedAt: String(row["observed_at"]),
       })),
     signIn: pauses.map(one => ({ provider: one.provider, reason: signInReason(one), command: signInCommand(one), since: one.openedAt })),
-    tasks: workIndexPage(store, now, { principal: "operator", repos: null, includeUnplaced: true }, { limit: 8 }).items
+    tasks: workIndexPage(store, now, { principal: "operator", repos: null, includeUnplaced: true, viewer }, { limit: 8 }).items
       .map(one => ({ task: one.rootId, title: one.title, headline: one.status.label, sentence: one.status.detail })),
     lead: (() => {
-      // The lead of whoever asks (the lead itself asks as its person); otherwise the newest lead at work.
-      const activity = leadActivity(store, currentActor()?.account ?? null);
+      // Only the asker's own lead: another person's lead is never "Your lead".
+      const activity = leadActivity(store, viewer);
       return activity === null ? null : { owner: activity.owner, doing: activity.doing, at: activity.at, task: activity.taskId, line: leadActivityLine(activity, now) };
     })(),
   };
