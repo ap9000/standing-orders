@@ -8237,6 +8237,9 @@ function startTelegramFollower(args: {
   });
 }
 
+/** How long a stopping service waits for the aborted Telegram follower. */
+const TELEGRAM_STOP_WAIT_MS = 5_000;
+
 let staleStatusesRepaired = false;
 
 async function runWatchLoop(args: {
@@ -9461,6 +9464,10 @@ async function upCommand(
     stopping = true;
     resolveStopped();
     for (const controller of followControllers) controller.abort();
+    // The coding owner record is released first, whatever else is still
+    // finishing: launchd kills a service that outlasts its exit window, and a
+    // killed process cannot release it. Its outcome is read again at close.
+    console_.server.closeCoding().catch(() => {});
     const building = store.liveClaimCount(runnerName, clock());
     if (building > 0) {
       progress(`Stopping: ${building} build(s) running. Waiting up to ${Math.round(stopGraceMs / 1000)}s for them to finish; any still running then is saved and resumes when the builder starts again.`);
@@ -9567,7 +9574,9 @@ async function upCommand(
     const pause = (ms: number) => new Promise<void>(resolvePause => {
       const timer = setTimeout(done, ms);
       function done(): void { clearTimeout(timer); telegramController.signal.removeEventListener("abort", done); resolvePause(); }
-      telegramController.signal.addEventListener("abort", done, { once: true });
+      // An aborted signal never fires again: without this a stop waited the whole pause.
+      if (telegramController.signal.aborted) done();
+      else telegramController.signal.addEventListener("abort", done, { once: true });
     });
     while (!stopping && !telegramController.signal.aborted) {
       const follower = startTelegramFollower({
@@ -9708,7 +9717,14 @@ async function upCommand(
   await stopped;
   await registrySupervisor;
   await Promise.all([...loopResults.values()]);
-  await telegramSupervisor;
+  // The follower was aborted with the stop. A send or a chat turn it is still
+  // finishing keeps its own durable record; the service does not wait past
+  // this for it.
+  await new Promise<void>(done => {
+    const timer = setTimeout(done, TELEGRAM_STOP_WAIT_MS);
+    const finish = (): void => { clearTimeout(timer); done(); };
+    void telegramSupervisor.then(finish, finish);
+  });
   clearInterval(runnerHeartbeat);
   if (runTimer !== undefined) clearTimeout(runTimer);
   if (graceTimer !== undefined) clearTimeout(graceTimer);

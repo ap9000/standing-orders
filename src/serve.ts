@@ -706,8 +706,12 @@ class PersistentSessions extends Map<string, Session> {
   hashOf(session: Session): string | null { const id = this.ids.get(session); return id === undefined ? null : PersistentSessions.hash(id); }
 }
 
-/** The console's server, and the one-time sign-in link `up` opens: a path on this server, or null for no such approver. */
-export type DecisionServer = Server & { mintSignInLink(account: string): string | null };
+/** The console's server, and the one-time sign-in link `up` opens: a path on this server, or null for no such approver.
+ * closeCoding starts the coding shutdown on its own, ahead of the rest of a stop; close() awaits the same promise. */
+export type DecisionServer = Server & { mintSignInLink(account: string): string | null; closeCoding(): Promise<void> };
+
+/** How long a stop waits for teammates and the lead's follow pass before closing anyway. */
+export const SHUTDOWN_WAIT_MS = 5_000;
 
 export function createDecisionServer(options: ServeOptions): DecisionServer {
   const { store, evidenceRoot } = options;
@@ -11477,6 +11481,19 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     });
   });
   // Keep native process custody until shutdown has verified agent/tool exit.
+  // Coding custody does not depend on teammates or the lead's follow pass, so
+  // it closes at once and never waits behind a model turn: a stop must release
+  // the owner record well inside the service's exit window (Oct 2: deploys
+  // over 0.9.11 found it still held by a killed process).
+  let codingClosing: Promise<void> | null = null;
+  const closeCoding = (): Promise<void> => {
+    leadClosing = true;
+    return codingClosing ??= Promise.resolve().then(() => coding?.close());
+  };
+  const bounded = (work: Promise<unknown> | undefined): Promise<void> => new Promise<void>(done => {
+    const timer = setTimeout(done, SHUTDOWN_WAIT_MS);
+    void Promise.resolve(work).catch(() => {}).finally(() => { clearTimeout(timer); done(); });
+  });
   const closeServer = server.close.bind(server);
   server.close = ((callback?: (error?: Error) => void) => {
     leadClosing = true;
@@ -11485,13 +11502,13 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     for (const stream of chatStreams) stream.end();
     chatStreams.clear();
     flowRooms.close();
-    void (async () => { await team.close(); await leadMaintenance?.stop(); await coding?.close(); })().then(() => closeServer(callback)).catch(error => {
+    void Promise.all([closeCoding(), bounded(team.close()), bounded(leadMaintenance?.stop())]).then(() => closeServer(callback)).catch(error => {
       if (callback) callback(error instanceof Error ? error : Error('Coding session shutdown failed.'));
       else server.emit('error', error);
     });
     return server;
   }) as Server['close'];
-  return Object.assign(server, { mintSignInLink });
+  return Object.assign(server, { mintSignInLink, closeCoding });
 }
 
 // ---- path plumbing ---------------------------------------------------------

@@ -24,7 +24,8 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { deployStateDir, loadNames, stagedPackageName } from "./deploy-paths.mjs";
-import { loadCodingDeploymentRuntime, observeCodingDeployment, backupCodingDeployment, verifyCodingDeploymentBackup, assertCodingDeploymentStopped } from "./deploy-coding.mjs";
+import { loadCodingDeploymentRuntime, observeCodingDeployment, backupCodingDeployment, verifyCodingDeploymentBackup, assertCodingDeploymentStopped, releaseStaleCodingDeployment } from "./deploy-coding.mjs";
+import { recoverFailedDeployment } from "./deploy-recovery.mjs";
 
 // Every direct connection waits at the same bounded lock boundary as Store.
 // This queues a brief competing writer; no transaction body is replayed.
@@ -186,21 +187,34 @@ const productionDependencies = root => execFileSync("npm", ["ls", "--omit=dev", 
  * again before every later phase, once per process. */
 let cleanBuild = null;
 process.on("exit", () => { if (cleanBuild?.scratch) rmSync(cleanBuild.scratch, { recursive: true, force: true }); });
-// A refusal after new work was paused but before the swap stopped anything (a rehearsal that
-// fails, a backup that doesn't verify) must not leave the plane paused: lift this deployment's
-// own pause and retire its journal, so the next deploy starts afresh.
+// A failed deployment must not leave the plane paused or down. A refusal before the swap stopped
+// anything (a rehearsal that fails, a backup that doesn't verify) lifts this deployment's own
+// pause. A failure after the old service was proved stopped (a coding check, a migration, a
+// service that will not load) starts the previous service again from its saved definition and
+// lifts the pause too. Either way the journal is retired, so the next deploy starts afresh.
 process.on("exit", code => {
   if (code === 0 || !existsSync(journalFile)) return;
   let r;
   try { r = readJournal(); } catch { return; }
-  if (!["admission-paused", "frozen", "backup-verified", "rehearsed"].includes(r.phase)) return;
   try {
-    const db = openDeploymentDatabase(database);
-    try { if (oldRt.gate.updateGateOwned(db, r.id)) oldRt.gate.removeUpdateGate(db, r.id); } finally { db.close(); }
-    r.phase = "released"; r.updatedAt = new Date().toISOString(); oldRt.update.durableJson(journalFile, r);
-    console.error("New work resumed: the deployment stopped before the swap and lifted its pause.");
-  } catch (error) { console.error(`✗ New work is still paused (update ${r.id}): ${error.message}`); }
+    const words = recoverFailedDeployment(r.phase, {
+      restoreService: restorePriorService,
+      removeGate: () => {
+        const db = openDeploymentDatabase(database);
+        try { if (oldRt.gate.updateGateOwned(db, r.id)) oldRt.gate.removeUpdateGate(db, r.id); } finally { db.close(); }
+      },
+      mark: phase => { r.phase = phase; r.updatedAt = new Date().toISOString(); oldRt.update.durableJson(journalFile, r); },
+    });
+    if (words) console.error(words);
+  } catch (error) { console.error(`✗ The deployment could not put the previous service back (update ${r.id}, at ${r.phase}): ${error.message}`); }
 });
+/** The previous definition, loaded again. Only called once its processes were proved gone. */
+function restorePriorService() {
+  spawnSync("/bin/launchctl", ["bootout", `gui/${uid}/${label}`], { encoding: "utf8" });
+  writeFileSync(plist, livePlist);
+  const booted = spawnSync("/bin/launchctl", ["bootstrap", `gui/${uid}`, plist], { encoding: "utf8" });
+  if (booted.status !== 0) throw Error(`launchctl bootstrap failed: ${booted.stderr}`);
+}
 /** A clean checkout of the commit, its dependencies installed from the
  * committed lockfile (npm verifies every package against the lockfile's
  * integrity hash), and dist built there. Nothing from the worktree's
@@ -377,6 +391,12 @@ async function swap() {
   await verifyServiceStopped(oldPids);
   await ensureCodingBackup(oldRt.coding, r);
   save(r, "stopped");
+  // An older runtime killed before its close left its coding owner record behind: with every old
+  // process proved gone, the candidate's own check releases it (ledgered) instead of failing here.
+  // The staged runtime is the proved candidate; its own coding module decides.
+  const candidateCoding = await loadCodingDeploymentRuntime(nextDist);
+  const released = (() => { const db = openDeploymentDatabase(database); try { return releaseStaleCodingDeployment(candidateCoding, database, db, oldPids, r); } finally { db.close(); } })();
+  if (released) { save(r, "stopped"); say(`• released the stopped service's coding record (process ${released.pid})`); }
   // Migrate the live database with the new runtime (a no-op for a same-schema build).
   let db = openDeploymentDatabase(database);
   let before;
@@ -423,10 +443,9 @@ async function swap() {
     verifyCodingBackup(coding, r);
     const stopped = openDeploymentDatabase(database, { readOnly: true });
     try { assertCodingDeploymentStopped(coding, database, stopped, r); } finally { stopped.close(); }
-    writeFileSync(plist, livePlist);
-    spawnSync("/bin/launchctl", ["bootstrap", `gui/${uid}`, plist], { encoding: "utf8" });
+    restorePriorService();
     save(r, "restored");
-    requireTrue(false, "The new service did not come up; the previous definition was restored. The update gate is still installed — inspect and rerun --phase finish or remove it.");
+    requireTrue(false, "The new service did not come up; the previous service was started again and new work resumed.");
   }
   r.newService = live;
   save(r, "started");

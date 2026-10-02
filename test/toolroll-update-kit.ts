@@ -160,9 +160,11 @@ export function fixture(options: { coding?: boolean } = {}) {
 
 export function scriptedLaunchctl() {
   const state = { loaded: true, pid: 4242, pendingPrints: 0, log: [] as string[] };
-  const run = async (_file: string, args: readonly string[]) => {
-    state.log.push(args[0]!);
+  const run = async (file: string, args: readonly string[]) => {
     const ok = { code: 0, stdout: "", stderr: "", timedOut: false };
+    // The service's children: none in this script (pgrep exits 1 when it finds none).
+    if (file === "pgrep") return { ...ok, code: 1 };
+    state.log.push(args[0]!);
     if (args[0] === "print") {
       if (state.pendingPrints > 0 && --state.pendingPrints === 0) state.loaded = false;
       return state.loaded ? { ...ok, stdout: `com.toolroll.browser = {\n\tstate = running\n\tpid = ${state.pid}\n}` } : { ...ok, code: 113 };

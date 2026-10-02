@@ -65,6 +65,33 @@ test('an apparently stopped service cannot update until coding process cleanup i
   } finally { await coding.close(); f.close(); }
 });
 
+test('an update over an app killed before releasing the coding workspace releases its record once the service processes are gone, and completes', async () => {
+  // Oct 2: a stopped 0.9.11 left its owner record naming its dead controller, and every swap refused.
+  const f = fixture(), coding = codingFixture(f); let closed = false;
+  try {
+    await coding.close(); closed = true;
+    const db = new DatabaseSync(coding.file);
+    try {
+      db.prepare('UPDATE coding_owner SET token=?,pid=4243,native_pid=999991,clean=0').run(randomUUID());
+      db.prepare('UPDATE coding_custody SET payload=?').run(JSON.stringify({ pid: 999991, group: true, descendants: [{ pid: 999992, group: false }], observationUnknown: false, host: hostname() }));
+    } finally { db.close(); }
+    writeFileSync(join(f.state, 'controller-supervisor.json'), JSON.stringify({ version: 1, supervisorPid: 4242, controllerPid: 4243, phase: 'running' }));
+    await f.prepare();
+    const alive = new Set([4242, 4243]);
+    await runDesktopUpdate(f.state, { ...f.hooks, processAlive: pid => alive.has(pid),
+      service: async (action, app, journal) => { if (action === 'stop') alive.clear(); await f.hooks.service!(action, app, journal); } });
+    const done = readUpdateJournal(f.state)!;
+    expect(done.phase, done.error).toBe('complete');
+    expect(done.stoppedPids).toEqual([4242, 4243]);
+    expect(done.codingOwnerReleased).toEqual({ pid: 4243, nativePid: 999991 });
+    const after = new DatabaseSync(coding.file, { readOnly: true });
+    try { expect(after.prepare('SELECT token,pid,native_pid,clean FROM coding_owner').get()).toEqual({ token: '', pid: 0, native_pid: null, clean: 1 }); } finally { after.close(); }
+    const orders = f.db();
+    try { expect(orders.prepare("SELECT action,outcome FROM action_ledger WHERE action='coding owner released'").all()).toEqual([{ action: 'coding owner released', outcome: 'released' }]); } finally { orders.close(); }
+    expect(f.calls.filter(call => call === 'swap')).toHaveLength(1);
+  } finally { if (!closed) await coding.close(); f.close(); }
+});
+
 test('a retained coding backup changed after an interrupted update is not overwritten', async () => {
   const f = fixture(), coding = codingFixture(f);
   try {

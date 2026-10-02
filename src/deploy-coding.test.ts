@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process';
 import { openStore } from './store.js';
 import { CodingWorkspace } from './coding-workspace.js';
 import { installUpdateGate, freezeUpdateGate, removeUpdateGate, updateGateOwned } from './desktop-update-gate.js';
-import { loadCodingDeploymentRuntime, observeCodingDeployment, backupCodingDeployment, verifyCodingDeploymentBackup, assertCodingDeploymentStopped } from '../scripts/deploy-coding.mjs';
+import { loadCodingDeploymentRuntime, observeCodingDeployment, backupCodingDeployment, verifyCodingDeploymentBackup, assertCodingDeploymentStopped, releaseStaleCodingDeployment } from '../scripts/deploy-coding.mjs';
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'so-browser-coding-update-'));
@@ -186,7 +186,7 @@ test('browser phase wiring verifies the coding backup before stop and custody be
   expect(rollback.indexOf('await verifyServiceStopped(failedPids)')).toBeLessThan(rollback.indexOf('assertCodingDeploymentStopped(coding'));
   expect(rollback.lastIndexOf('await verifyServiceStopped(failedPids)')).toBeGreaterThan(rollback.indexOf('await loadCodingDeploymentRuntime(nextDist)'));
   expect(rollback.lastIndexOf('await verifyServiceStopped(failedPids)')).toBeLessThan(rollback.indexOf('assertCodingDeploymentStopped(coding'));
-  expect(rollback.indexOf('assertCodingDeploymentStopped(coding')).toBeLessThan(rollback.indexOf('writeFileSync(plist, livePlist)'));
+  expect(rollback.indexOf('assertCodingDeploymentStopped(coding')).toBeLessThan(rollback.indexOf('restorePriorService()'));
   const finish = source.slice(source.indexOf('async function finish('));
   expect(finish.indexOf('await ensureCodingBackup(coding')).toBeLessThan(finish.indexOf('await fetch('));
   expect(finish.lastIndexOf('await ensureCodingBackup(coding')).toBeGreaterThan(finish.indexOf('await sleep('));
@@ -197,10 +197,21 @@ test('browser phase wiring verifies the coding backup before stop and custody be
   const replace = swap.slice(swap.indexOf('// Migration loads asynchronously'), swap.indexOf('writeFileSync(plist, nextPlist)'));
   expect(replace.indexOf('await ensureCodingBackup(')).toBeLessThan(replace.indexOf('await verifyServiceStopped('));
   expect(replace.indexOf('verifyCodingBackup(')).toBeGreaterThan(replace.lastIndexOf('await '));
-  const restore = rollback.slice(0, rollback.indexOf('writeFileSync(plist, livePlist)'));
+  const restore = rollback.slice(0, rollback.indexOf('restorePriorService()'));
   expect(restore.indexOf('await ensureCodingBackup(')).toBeLessThan(restore.lastIndexOf('await verifyServiceStopped('));
   expect(restore.indexOf('verifyCodingBackup(')).toBeGreaterThan(restore.lastIndexOf('await '));
   expect(swap.lastIndexOf('await ensureCodingBackup(await loadCodingDeploymentRuntime(nextDist), r)')).toBeGreaterThan(swap.indexOf('save(r, "started")'));
+  // A stale owner is released only after every old pid is proved gone, by the staged candidate, before the stop is checked.
+  const release = swap.indexOf('releaseStaleCodingDeployment(candidateCoding');
+  expect(release).toBeGreaterThan(swap.indexOf('save(r, "stopped")'));
+  expect(swap.indexOf('await verifyServiceStopped(oldPids)')).toBeLessThan(release);
+  expect(swap.indexOf('loadCodingDeploymentRuntime(nextDist)')).toBeLessThan(release);
+  expect(release).toBeLessThan(swap.indexOf('assertCodingDeploymentStopped(oldRt.coding'));
+  // Any failure after that restores the old service and lifts this deployment's own pause on exit.
+  const exit = source.slice(source.indexOf('process.on("exit", code =>'), source.indexOf('function restorePriorService('));
+  expect(exit).toContain('recoverFailedDeployment(r.phase, {');
+  expect(exit).toContain('restoreService: restorePriorService');
+  expect(exit).toContain('oldRt.gate.removeUpdateGate(db, r.id)');
 });
 
 function browserDatabaseHelpers(snapshot: (db: DatabaseSync) => unknown = () => [], copy: typeof backup = backup) {
@@ -314,4 +325,52 @@ test('refused snapshot authority releases the read transaction without creating 
     original.exec('BEGIN'); original.exec('ROLLBACK');
     f.store.raw().exec('CREATE TABLE heartbeat_probe(value INTEGER)');
   } finally { original.close(); f.close(); }
+});
+
+test('a deploy over a runtime killed before its close releases the stale owner once its processes are proved gone, and ledgers it', async () => {
+  // Oct 2: 0.9.11 was booted out, every old pid was gone, and the catalog still named its `cli.js up` child.
+  const f = fixture();
+  const candidate = await loadCodingDeploymentRuntime(resolve('dist'));
+  const file = `${f.database}.coding.sqlite`;
+  const workspace = new CodingWorkspace({ database: file, worktreeRoot: join(f.root, 'worktrees') });
+  await workspace.close();
+  const db = new DatabaseSync(file);
+  try {
+    db.prepare('UPDATE coding_owner SET token=?,pid=999993,native_pid=999994,clean=0').run(randomUUID());
+    db.close();
+    const orders = f.store.raw();
+    expect(() => assertCodingDeploymentStopped(candidate, f.database, orders, f.record)).toThrow('not verified agent and tool shutdown');
+    // Not a process this deploy stopped: never released.
+    expect(() => releaseStaleCodingDeployment(candidate, f.database, orders, [999995], f.record)).toThrow('not one this update stopped');
+    expect(releaseStaleCodingDeployment(candidate, f.database, orders, [999992, 999993], f.record)).toEqual({ pid: 999993, nativePid: 999994 });
+    expect(f.record).toMatchObject({ codingOwnerReleased: { pid: 999993, nativePid: 999994 } });
+    assertCodingDeploymentStopped(candidate, f.database, orders, f.record);
+    expect(orders.prepare("SELECT actor,action,outcome FROM action_ledger WHERE action='coding owner released'").all()).toEqual([{ actor: 'deploy', action: 'coding owner released', outcome: 'released' }]);
+    // Already released by an ordinary stop: nothing to do, nothing ledgered twice.
+    expect(releaseStaleCodingDeployment(candidate, f.database, orders, [999993], f.record)).toBeNull();
+    // A candidate without the release keeps the ordinary refusal.
+    expect(releaseStaleCodingDeployment({}, f.database, orders, [999993], f.record)).toBeNull();
+  } finally { if (db.isOpen) db.close(); f.close(); }
+});
+
+test('a stale owner whose agent or session still lives is never released by a deploy', async () => {
+  const f = fixture();
+  const candidate = await loadCodingDeploymentRuntime(resolve('dist'));
+  const file = `${f.database}.coding.sqlite`;
+  const workspace = new CodingWorkspace({ database: file, worktreeRoot: join(f.root, 'worktrees') });
+  await workspace.close();
+  // The agent is detached into its own process group: a killed service can leave it running.
+  const agent = spawn('sleep', ['30'], { detached: true, stdio: 'ignore' });
+  try {
+    const db = new DatabaseSync(file);
+    try {
+      db.prepare('UPDATE coding_owner SET token=?,pid=999993,native_pid=?,clean=0').run(randomUUID(), agent.pid!);
+      expect(() => releaseStaleCodingDeployment(candidate, f.database, f.store.raw(), [999993], f.record)).toThrow(/agent process \d+ is still running/);
+      db.prepare('UPDATE coding_owner SET native_pid=NULL').run();
+      const session = { id: 'live', owner: 'alex', generation: 1, repo: f.root, status: 'working', turnId: 'turn-1' };
+      db.prepare('INSERT INTO coding_session(id,owner,generation,repo,document) VALUES(?,?,?,?,?)').run(session.id, session.owner, session.generation, session.repo, JSON.stringify(session));
+      expect(() => releaseStaleCodingDeployment(candidate, f.database, f.store.raw(), [999993], f.record)).toThrow('1 coding session(s)');
+      expect(db.prepare('SELECT pid FROM coding_owner').get()?.pid).toBe(999993);
+    } finally { db.close(); }
+  } finally { agent.kill(); f.close(); }
 });
