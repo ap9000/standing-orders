@@ -25389,6 +25389,10 @@ export class Store {
     const rows = only === undefined
       ? this.db.prepare("SELECT * FROM run_process WHERE run = ? AND exited_at IS NULL").all(runId)
       : this.db.prepare("SELECT * FROM run_process WHERE run = ? AND pid = ? AND process_group = ? AND exited_at IS NULL").all(runId, only.pid, only.group ? 1 : 0);
+    // A finished run's witness gets the same proof the deploy's quiescence
+    // check uses: ESRCH, or a process now holding the pid that was born after
+    // the run ended. An open run has no finish time, so only ESRCH counts.
+    const finishedAt = this.getRun(runId)?.finishedAt ?? null;
     let recorded = 0;
     for (const row of rows) {
       const host = String(row["host"]), bootId = row["boot_id"] == null ? null : String(row["boot_id"]);
@@ -25400,9 +25404,8 @@ export class Store {
         if (backend !== null || container !== null) {
           gone = backend !== null && container !== null && (row["container_empty_at"] != null || containerEmptiness(backend, container, process.platform, row["container_identity"] == null ? null : String(row["container_identity"])) === "empty");
         } else {
-          // Do not borrow the run's finish time or guess a legacy spawn time.
-          // With no historical witness argument only ESRCH proves absence.
-          gone = row["pid"] != null && !processMayBeAlive(Number(row["pid"]), row["process_group"] === 1);
+          gone = row["pid"] != null && !processMayBeAlive(Number(row["pid"]), row["process_group"] === 1,
+            finishedAt === null ? undefined : { observedAt: row["observed_at"], finishedAt });
         }
       }
       if (gone) recorded += Number(this.db.prepare(`UPDATE run_process SET exited_at = ?
@@ -25411,6 +25414,24 @@ export class Store {
         .run(now.toISOString(), row["id"], runId, row["pid"], row["host"], row["process_group"], row["observed_at"], row["boot_id"], row["containment"], row["container"], row["container_identity"]).changes);
     }
     return recorded;
+  }
+
+  /** The reconcile road for a finished run whose process outlived its
+   * finish: once each process is provably gone, its exit is recorded, so
+   * the task stops waiting on a person by itself. A run that can't be proven
+   * yet stays open and is passed over, never holding newer runs behind it:
+   * every finished run is visited, a batch at a time. Never signals. */
+  recordFinishedRunExits(now: Date, batch = 200): number {
+    const page = this.db.prepare(`SELECT DISTINCT p.run FROM run_process p JOIN run r ON r.id = p.run
+      WHERE p.exited_at IS NULL AND p.host = ? AND p.run > ? AND r.outcome IS NOT NULL AND r.finished_at IS NOT NULL
+      ORDER BY p.run LIMIT ?`);
+    let recorded = 0;
+    for (let after = 0; ;) {
+      const runs = page.all(hostname(), after, batch).map(row => Number(row["run"]));
+      for (const run of runs) recorded += this.recordRunProcessExits(run, now);
+      if (runs.length < batch) return recorded;
+      after = runs[runs.length - 1]!;
+    }
   }
 
   finishUnspawnedProcess(witness: number, now: Date): void {

@@ -307,7 +307,7 @@ import { runModelsCommand } from "./models-cli.js";
 import { updateAdmissionPaused, UPDATE_PAUSED } from "./desktop-update-gate.js";
 import { beads } from "./beads.js";
 import { githubIssues } from "./issues.js";
-import { installationStatus, renderInstallationStatus, renderTaskWait, taskWaitSnapshot } from "./lead-status.js";
+import { installationStatus, renderInstallationStatus, renderTaskWait, repairStaleStatuses, taskWaitSnapshot } from "./lead-status.js";
 import { latestRelease, newerRelease, notifySecurityRelease, recordRunnerVersion, startUpdateChecks, updateLine, type ReleaseIo } from "./releases.js";
 import { installMethod } from "./install-method.js";
 import { PACKAGE_VERSION } from "./version.js";
@@ -4883,6 +4883,9 @@ async function reconcileCommand(
   }
 
   const recovered = recoverDead(store, clock());
+  // A finished run's processes that have since gone get their exits recorded,
+  // so its task stops waiting on a person by itself.
+  store.recordFinishedRunExits(clock());
   // A witness reserved for a spawn that never made a process (a crash or a
   // thrown spawn) settles once its run's process groups are proven gone.
   store.settleUnspawnedWitnesses(clock());
@@ -8149,6 +8152,9 @@ type WatchLoopResult =
   | { ok: true; ticks: number; built: number; broke: number; incarnation: string }
   | { ok: false; reason: "watch-busy" | "lease-lost" | "reconciliation-failed" | "loop-failed"; detail: string; ticks: number; built: number; broke: number };
 
+/** The start repair runs once per process, not once per project loop. */
+let staleStatusesRepaired = false;
+
 async function runWatchLoop(args: {
   flags: Map<string, string | true>;
   context: Context;
@@ -8210,6 +8216,13 @@ async function runWatchLoop(args: {
   store.startWatchEpisode({ repo, runner, incarnation }, new Date());
   recordRunnerVersion(dirname(context.databaseFile), runner, PACKAGE_VERSION, new Date());
   args.onReady?.();
+  // Once per worker start, before any pass: statuses an older build left
+  // stale (unrecorded exits of finished runs) are re-derived and clear.
+  if (!staleStatusesRepaired) {
+    staleStatusesRepaired = true;
+    const repaired = repairStaleStatuses(store, new Date());
+    if (repaired.exitsRecorded > 0) progress(`watch: recorded ${repaired.exitsRecorded} finished process exit(s) left open by an earlier version`);
+  }
 
   // A false renewal is FATAL (arc 2 finding 15): the lease or the
   // credential is gone, and admitting one more pass would be work done for

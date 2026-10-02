@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { renderTaskWait, taskWaitSnapshot } from "./lead-status.js";
+import { installationStatus, renderInstallationStatus, renderTaskWait, taskWaitSnapshot } from "./lead-status.js";
 import { runOperate } from "./operate.js";
 import { BUILT_IN, openStore, type Store } from "./store.js";
 
@@ -237,7 +237,10 @@ describe("lead status commands", () => {
       { reason: "needs a scope", count: 1 },
       { reason: "on hold", count: 1 },
     ]));
-    expect(body.waitingForReview).toMatchObject({ count: 1, results: [{ task: "ready-result", run: releaseRun }] });
+    // A result with no approved scope or commit is not Ready for review: the
+    // count reads the same projection as the Tasks list, which says Needs you.
+    expect(body.waitingForReview).toEqual({ count: 0, results: [] });
+    expect(body.tasks.find((one: { task: string }) => one.task === "ready-result")?.headline).toBe("Needs you");
     expect(body.releaseCheck).toMatchObject({ task: "ready-result", run: releaseRun, check: { status: "passed", exitCode: 0 } });
     expect(body.releaseCheck.check.suites).toEqual([
       { name: "Typecheck", status: "passed", exitCode: 0 },
@@ -256,12 +259,25 @@ describe("lead status commands", () => {
     expect(report.length - taskLines.length - 1).toBeLessThanOrEqual(12);
     expect(report).toEqual(expect.arrayContaining([
       `Building: 1 — running-check (#${runningRun}, running checks)`,
-      `Ready for review: 1 — ready-result (#${releaseRun})`,
+      "Ready for review: none",
       `Release check: ready-result #${releaseRun} — passed (exit 0)`,
       "  Suites: Typecheck passed (exit 0); Tests passed (exit 0)",
       "Plan windows: codex team — 5-hour 42%",
     ]));
     expect(report.find(line => line.startsWith("Queued: 2 —"))).toContain("held-task (on hold)");
     expect(report.find(line => line.startsWith("Queued: 2 —"))).toContain("needs-scope (needs a scope)");
+  });
+
+  test("a ready task with no saved result run is named without a run number", () => {
+    const store = openStore(":memory:");
+    try {
+      const status = installationStatus(store, NOW);
+      const lines = renderInstallationStatus({ ...status, waitingForReview: { count: 2, results: [
+        { task: "no-result", run: null, check: { status: "unknown", exitCode: null, suites: [] } },
+        { task: "with-result", run: 41, check: { status: "passed", exitCode: 0, suites: [] } },
+      ] } });
+      expect(lines).toContain("Ready for review: 2 — no-result, with-result (#41)");
+      expect(lines.join("\n")).not.toContain("#0");
+    } finally { store.close(); }
   });
 });

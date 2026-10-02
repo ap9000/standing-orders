@@ -5198,14 +5198,15 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     const weekAgo = new Date(now.getTime() - 7 * 86_400_000).toISOString();
     const counts: BrowserHomeCount[] = [
       { key: "working", label: "Working now", value: agents.length, href: "/work?view=running" },
-      { key: "waiting", label: "Waiting on you", value: needs.items.filter(one => one.assignmentState === "needs-decision").length, href: "/work?view=needs-you" },
-      { key: "ready", label: "Ready to review", value: needs.items.filter(one => one.assignmentState === "ready-to-check").length, href: "/work?view=needs-you" },
+      // Each by its shared headline, as the Tasks list words it: a result whose checks failed waits on you, it isn't ready.
+      { key: "waiting", label: "Waiting on you", value: needs.items.filter(one => one.status.label !== "Ready for review").length, href: "/work?view=needs-you" },
+      { key: "ready", label: "Ready to review", value: needs.items.filter(one => one.status.label === "Ready for review").length, href: "/work?view=needs-you" },
       { key: "done", label: "Done this week", value: done.items.filter(one => (one.completion?.at ?? one.updatedAt) >= weekAgo).length, href: "/work?view=completed" },
     ];
-    const tabOf = (state: WorkIndexItem["assignmentState"]): BrowserCatchUpItem["tab"] =>
-      state === "needs-decision" ? "needs-you" : state === "ready-to-check" ? "ready" : state === "working" || state === "checking" ? "running" : "finished";
-    const catchUp = all.items.filter(one => tabOf(one.assignmentState) !== "finished" || one.updatedAt >= weekAgo).slice(0, 40).map(one => ({
-      id: one.rootId, title: one.title, href: taskHref(one.rootId), project: one.repo === null ? null : projectName(one.repo), tab: tabOf(one.assignmentState),
+    const tabOf = (one: WorkIndexItem): BrowserCatchUpItem["tab"] => one.assignmentState === "ready-to-check" ? one.status.label === "Ready for review" ? "ready" : "needs-you"
+      : one.assignmentState === "needs-decision" ? "needs-you" : one.assignmentState === "working" || one.assignmentState === "checking" ? "running" : "finished";
+    const catchUp = all.items.filter(one => tabOf(one) !== "finished" || one.updatedAt >= weekAgo).slice(0, 40).map(one => ({
+      id: one.rootId, title: one.title, href: taskHref(one.rootId), project: one.repo === null ? null : projectName(one.repo), tab: tabOf(one),
       label: one.status.label, tone: one.status.tone, detail: one.status.detail, at: one.updatedAt,
       action: (() => {
         const href = one.status.label === "Needs you" && one.primaryAction !== null ? browserWorkActionHref(one) : null;

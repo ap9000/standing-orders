@@ -9,6 +9,18 @@ import { readVerifiedArtifact } from "./evidence.js";
 /** The ledger action a person's (or lead's) completion of a result writes. */
 export const COMPLETION_ACTION = "assignment handoff checked";
 
+/** Whether a task's family is marked complete. Completion is recorded on the
+ * family's root against its current version's latest result, so the root, a
+ * superseded revision and the current version all read Complete together. */
+export function familyCompleted(store: Store, taskId: string): boolean {
+  const family = store.taskFamilyOf(taskId, null, true);
+  return store.handle.prepare(`SELECT 1 AS hit FROM action_ledger INDEXED BY work_completion
+    WHERE task_id IN (?, ?) AND action = ? AND source = 'work'
+      AND run_id = (SELECT run.id FROM run INDEXED BY work_result WHERE run.task_ref = ?
+        AND run.finished_at IS NOT NULL AND run.role IN ('builder','scout') ORDER BY run.id DESC LIMIT 1) LIMIT 1`)
+    .get(taskId, family?.root.id ?? taskId, COMPLETION_ACTION, family?.current.refId ?? store.lookupRef(taskId)?.id ?? -1) !== undefined;
+}
+
 /** The files a build changed, renames on both sides; null when the inventory can't be read whole. */
 export function changedFilesOf(store: Store, runId: number, root: string): string[] | null {
   const stat = store.artifactsFor(runId).find(one => one.kind === "diff-stat");

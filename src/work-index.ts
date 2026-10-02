@@ -398,6 +398,20 @@ export function workCountsByProject(store: Store, now: Date, access: WorkSummary
     .map(row => ({ repo: s(row, 'repo'), totals: counts(row), queued: n(row, 'queued'), doneRecently: n(row, 'done_recently') }));
 }
 
+/** Families whose headline is Ready for review, newest first: the Tasks
+ * list's own rows, so a completed family (root or any revision), a failed
+ * check and a superseded version never count. */
+export function workReadyForReview(store: Store, now: Date, access: WorkSummaryAccess, limit = 5): { count: number; results: { rootId: string; taskId: string; run: number | null }[] } {
+  const ready: WorkIndexItem[] = [];
+  let cursor: string | null = null;
+  do {
+    const page = workIndexPage(store, now, access, { view: 'needs-you', limit: WORK_INDEX_MAX_LIMIT, cursor });
+    ready.push(...page.items.filter(one => one.status.label === 'Ready for review'));
+    cursor = page.nextCursor;
+  } while (cursor !== null);
+  return { count: ready.length, results: ready.slice(0, Math.max(0, limit)).map(one => ({ rootId: one.rootId, taskId: one.activeTaskId, run: one.resultRunId })) };
+}
+
 /** Labels stay navigation, never an authorization to mutate. Full task
  * opening re-proves process custody, receipt bytes and approval terms. */
 /** The list's Checks: the build's own result, its level, and follow-up checks on the same commit (result-follow-ups.ts). */
