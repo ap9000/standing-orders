@@ -386,7 +386,10 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
         return { token: status.getAttribute('data-work-status')!, label, action: actions[0]!.textContent!.replace(/ →$/, '') };
       } finally { await window.happyDOM.close(); }
     };
-    const agree = async (taskId: string, token: string, action?: string): Promise<void> => {
+    // `act`: where the page itself resolves the wait (the approval sheet's
+    // Approve & start), the opened task and chat show that act; the list and
+    // the safe status fragment keep the navigation label.
+    const agree = async (taskId: string, token: string, action?: string, act?: string): Promise<void> => {
       const work = await readStanding(await page(cookie, "/work"), taskId);
       const assignmentState = ["ready", "waiting-dependency", "running"].includes(token) ? "working" : "needs-decision";
       expect(work.token).toBe(`assignment-${assignmentState}`);
@@ -395,14 +398,14 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
       const recordedResult = ["checks-failed", "verification-needed"].includes(token);
       if (action !== undefined) expect(work.action).toBe(recordedResult ? "Open result" : action);
       const task = await readStanding(await page(cookie, `/t/${taskId}`));
-      expect(task).toEqual({ ...work, action: action ?? work.action });
+      expect(task).toEqual({ ...work, action: act ?? action ?? work.action });
       for (const path of [`/chat?task=${taskId}`, `/chat/task-status?task=${taskId}`]) {
         const exactTask = await readStanding(await page(cookie, path));
         expect(exactTask.token, path).toBe(`assignment-${assignmentState}`);
-        expect(exactTask.action, path).toBe(task.action);
+        expect(exactTask.action, path).toBe(act !== undefined && path.startsWith("/chat/task-status") ? action ?? work.action : task.action);
       }
     };
-    await agree(id, "needs-approval", "Approve plan");
+    await agree(id, "needs-approval", "Approve plan", "Approve & start");
     const beforeApproval = await page(cookie, `/t/${id}`);
     expect(beforeApproval).toContain(`<p class="scope-paths"><strong>touches</strong> ${allowed}</p>`);
     const css = await stylesOf(beforeApproval, base);
@@ -446,7 +449,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const signed = store.getScope('t-scope-status')!;
     propose(store, { taskId: 't-scope-status', goal: 'Changed request', touches: signed.touches, acceptance: signed.acceptance, now });
     store.unhold(heldRef);
-    await agree('t-scope-status', 'needs-approval', 'Approve plan');
+    await agree('t-scope-status', 'needs-approval', 'Approve plan', 'Approve & start');
     expect(store.getScope('t-scope-status')!.approvedDigest).toBe(signed.approvedDigest);
     store.setTaskState('t-scope-status', 'failed', now);
     await agree('t-scope-status', 'failed', 'Review and retry');
@@ -457,7 +460,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const oldResultScope = store.getScope('t-status-check')!;
     propose(store, { taskId: 't-status-check', goal: 'A new scope after the failed check', touches: oldResultScope.touches, acceptance: oldResultScope.acceptance, now });
     store.setTaskState('t-status-check', 'queued', now);
-    await agree('t-status-check', 'needs-approval', 'Approve plan');
+    await agree('t-status-check', 'needs-approval', 'Approve plan', 'Approve & start');
     expect(await page(cookie, '/t/t-status-check')).toContain('<details class="task-previous-result"><summary>Previous result</summary>');
   });
 
