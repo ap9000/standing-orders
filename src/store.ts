@@ -174,7 +174,8 @@ CREATE TABLE IF NOT EXISTS monitoring_status (
  * every step, and an optional evening digest at a local HH:MM. `digest_on` is the local day the last evening
  * digest was considered, so each day is judged once. A task's card is the one chat message a destination keeps
  * for it (or for several tasks filed within a minute): `message` is the Telegram message id or the chat app's
- * part id, `digest` the text last shown, so an unchanged card is never re-sent. */
+ * part id, `digest` the text last shown, so an unchanged card is never re-sent. A `chat_batch` is one person's
+ * finished-work message: every result that lands within two minutes of its first joins it, edited in place. */
 const QUIET_CHAT_SCHEMA = `
 CREATE TABLE IF NOT EXISTS notification_preference (
   account    TEXT PRIMARY KEY,
@@ -201,6 +202,21 @@ CREATE TABLE IF NOT EXISTS chat_card_task (
   PRIMARY KEY (destination, task_ref)
 );
 CREATE INDEX IF NOT EXISTS chat_card_task_card ON chat_card_task(card);
+CREATE TABLE IF NOT EXISTS chat_batch (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  destination TEXT NOT NULL,
+  opened_at   TEXT NOT NULL,
+  message     TEXT,
+  digest      TEXT
+);
+CREATE INDEX IF NOT EXISTS chat_batch_destination ON chat_batch(destination, opened_at);
+CREATE TABLE IF NOT EXISTS chat_batch_item (
+  batch     INTEGER NOT NULL REFERENCES chat_batch(id),
+  task_ref  INTEGER NOT NULL,
+  run       INTEGER,
+  joined_at TEXT NOT NULL,
+  PRIMARY KEY (batch, task_ref)
+);
 `;
 
 /** Pings follow responsibility (no version bump: additive only). `lead_credential` is a lead token: an agent acting
@@ -1306,6 +1322,8 @@ export function isDigestTime(value: string): boolean {
 }
 /** The one chat message a destination keeps for a task, or for several tasks filed together. */
 export type ChatCard = { id: number; destination: string; anchorAt: string; message: string | null; digest: string | null; tasks: number[] };
+export type ChatBatch = { id: number; destination: string; openedAt: string; message: string | null; digest: string | null;
+  items: { taskRef: number; run: number | null; notification: number | null }[] };
 
 
 /**
@@ -5108,6 +5126,8 @@ function initializeStore(db: Database, file: string): Store {
   db.exec(POLICY_SCHEMA);
   db.exec(RUN_CHECK_SCHEMA);
   db.exec(QUIET_CHAT_SCHEMA);
+  // The update a batch line speaks for: its newest fact about that task (null: a finished result).
+  addColumn(db, "chat_batch_item", "notification", "INTEGER");
   db.exec(LEAD_QUIET_SCHEMA);
   mergeCheckTables(db);
   addColumn(db, "monitoring_status", "target", "TEXT");
@@ -18161,6 +18181,11 @@ export class Store {
     return Number(changes);
   }
 
+  notificationById(id: number): Notification | null {
+    const row = this.db.prepare("SELECT * FROM notification WHERE id = ?").get(id);
+    return row === undefined ? null : readNotification(row);
+  }
+
   notificationsAfter(id: number, limit = 100): Notification[] {
     return this.db.prepare("SELECT * FROM notification WHERE id>? ORDER BY id LIMIT ?").all(id, Math.max(1,Math.min(100,limit))).map(readNotification);
   }
@@ -26641,13 +26666,46 @@ export class Store {
    * and the evening digest keep every fact either way.
    */
   pingAllowed(row: Pick<Notification, "id" | "kind" | "recipient" | "project" | "taskRef">, account: string): boolean {
+    // A security alert always pings, ahead of every rule below: own acts, settled, replaced or release-check tasks.
     if (SECURITY_KINDS.has(row.kind) || row.kind === "evening-digest") return true;
     if (row.recipient !== null && row.kind === "task-ask") return true;
     const actor = this.notificationActor(row.id);
     if (actor !== null && actor.account === account) return false;
     if (row.recipient !== null) return true;
+    // A task this person (or their lead) completed or cancelled is settled for them: nothing more about it.
+    // Release checks and replaced or superseded tasks never ping anyone; a deploy says "is live" instead.
+    if (row.taskRef !== null && (this.settledBy(row.taskRef) === account || this.neverPings(row.taskRef))) return false;
     if (this.leadQuiet(row, actor)) return false;
     return row.project === null || this.db.prepare("SELECT 1 AS hit FROM project_mute WHERE account = ? AND repo = ?").get(account, row.project) === undefined;
+  }
+
+  /** Who last completed or cancelled this task, when that is still its latest act: null otherwise. A revision's
+   * completion is recorded on its root, so an act on a task it revises counts too, but only one made after this
+   * revision was filed: settling older work never silences a newer revision, whose failures still reach people. */
+  settledBy(taskRef: number): string | null {
+    const ancestors: number[] = [];
+    for (let at = 0, from = taskRef; at < 20; at++) {
+      const parent = this.db.prepare(`SELECT p.id FROM task_ref c JOIN task_ref p ON p.backend = c.backend AND p.external_id = c.revision_of AND p.repo IS c.repo
+        WHERE c.id = ?`).get(from);
+      if (parent === undefined || from === Number(parent["id"]) || ancestors.includes(Number(parent["id"]))) break;
+      from = Number(parent["id"]);
+      ancestors.push(from);
+    }
+    const filed = this.db.prepare("SELECT t.created_at FROM task_ref r JOIN task t ON t.id = r.external_id AND r.backend = ? WHERE r.id = ?").get(BUILT_IN, taskRef);
+    const since = filed === undefined || ancestors.length === 0 ? null : String(filed["created_at"]);
+    const last = since === null
+      ? this.db.prepare("SELECT act, account FROM task_act WHERE task_ref = ? ORDER BY id DESC LIMIT 1").get(taskRef)
+      : this.db.prepare(`SELECT act, account FROM task_act WHERE task_ref = ? OR (task_ref IN (${ancestors.map(() => "?").join(", ")}) AND at >= ?)
+          ORDER BY id DESC LIMIT 1`).get(taskRef, ...ancestors, since);
+    return last !== undefined && (last["act"] === "completed" || last["act"] === "cancelled") ? String(last["account"]) : null;
+  }
+
+  /** A release check, a replaced task, or one a revision superseded: its facts stay in the console. */
+  neverPings(taskRef: number): boolean {
+    return this.db.prepare(`SELECT 1 AS hit FROM task_ref r WHERE r.id = ? AND (
+        EXISTS (SELECT 1 FROM run JOIN run_check rc ON rc.run = run.id WHERE run.task_ref = r.id AND rc.release = 1)
+        OR EXISTS (SELECT 1 FROM task_replacement x WHERE x.task_ref = r.id)
+        OR EXISTS (SELECT 1 FROM task_ref c WHERE c.backend = r.backend AND c.revision_of = r.external_id AND c.repo IS r.repo))`).get(taskRef) !== undefined;
   }
 
   /** The lead's work, which messages nobody: unless it is a security alert or a failure with nothing left for the lead. */
@@ -26701,6 +26759,34 @@ export class Store {
   taskFactsSince(since: string, limit = 2000): Notification[] {
     return this.db.prepare("SELECT * FROM notification WHERE created_at >= ? AND task_ref IS NOT NULL AND project IS NOT NULL ORDER BY id DESC LIMIT ?")
       .all(since, limit).map(readNotification).reverse();
+  }
+
+  /** The one message this update joins: the destination's batch opened within `windowMs`, or a new one. A task
+   * has one line in it, saying its newest update (`notification`; null for a finished result). */
+  chatBatchFor(destination: string, taskRef: number, run: number | null, now: Date, windowMs: number, notification: number | null = null): ChatBatch {
+    return this.transact(() => {
+      const open = this.db.prepare("SELECT id FROM chat_batch WHERE destination = ? AND opened_at > ? AND opened_at <= ? ORDER BY id DESC LIMIT 1")
+        .get(destination, new Date(now.getTime() - windowMs).toISOString(), now.toISOString());
+      const batch = open !== undefined ? Number(open["id"])
+        : Number(this.db.prepare("INSERT INTO chat_batch (destination, opened_at) VALUES (?, ?)").run(destination, now.toISOString()).lastInsertRowid);
+      this.db.prepare(`INSERT INTO chat_batch_item (batch, task_ref, run, joined_at, notification) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (batch, task_ref) DO UPDATE SET run = excluded.run, notification = excluded.notification`).run(batch, taskRef, run, now.toISOString(), notification);
+      return this.chatBatch(batch)!;
+    });
+  }
+
+  chatBatch(id: number): ChatBatch | null {
+    const row = this.db.prepare("SELECT * FROM chat_batch WHERE id = ?").get(id);
+    if (row === undefined) return null;
+    const items = this.db.prepare("SELECT task_ref, run, notification FROM chat_batch_item WHERE batch = ? ORDER BY joined_at, task_ref").all(id)
+      .map(one => ({ taskRef: Number(one["task_ref"]), run: one["run"] == null ? null : Number(one["run"]),
+        notification: one["notification"] == null ? null : Number(one["notification"]) }));
+    return { id, destination: String(row["destination"]), openedAt: String(row["opened_at"]), message: row["message"] == null ? null : String(row["message"]),
+      digest: row["digest"] == null ? null : String(row["digest"]), items };
+  }
+
+  setChatBatchMessage(id: number, message: string, digest: string): void {
+    this.db.prepare("UPDATE chat_batch SET message = ?, digest = ? WHERE id = ?").run(message, digest, id);
   }
 
   /** The message now showing this card, and what it shows. */

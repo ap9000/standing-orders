@@ -114,7 +114,7 @@ describe("quiet chat on Telegram", () => {
     expect(sends[1]!.params["disable_notification"]).toBeUndefined();
     // The one ping, when the result is saved: its state in the assignment's own words, and that exact result.
     // (This fixture has no approved scope, so the assignment honestly asks for a decision rather than reading Ready.)
-    expect(String(sends[1]!.params["text"])).toMatch(/^\S+ [^\n]+ · Make status replies clear\n\S/u);
+    expect(String(sends[1]!.params["text"])).toBe("Make status replies clear needs your decision before it can continue.");
     expect(script.buttons(sends[1]!)).toEqual([{ text: "Open result", url: `${ORIGIN}/chat?task=status-replies&result=${run}` }]);
     // Every other step edited that one card (a step that reads the same as the last is not re-sent).
     const edits = script.edits();
@@ -274,7 +274,7 @@ describe("quiet chat on Slack (shared by Discord and Teams)", () => {
     const posts = calls.filter(call => call.method === "chat.postMessage");
     expect(posts).toHaveLength(2);
     expect(String(posts[0]!.args["text"])).toContain("Make status replies clear");
-    expect(String(posts[1]!.args["text"])).toMatch(/ · Make status replies clear/);
+    expect(String(posts[1]!.args["text"])).toBe("Make status replies clear needs your decision before it can continue.");
     const updates = calls.filter(call => call.method === "chat.update");
     expect(updates.length).toBeGreaterThanOrEqual(2);
     expect(new Set(updates.map(call => call.args["ts"]))).toEqual(new Set(["1789700000.000100"]));

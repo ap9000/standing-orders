@@ -311,7 +311,7 @@ import { updateAdmissionPaused, UPDATE_PAUSED } from "./desktop-update-gate.js";
 import { beads } from "./beads.js";
 import { githubIssues } from "./issues.js";
 import { installationStatus, renderInstallationStatus, renderTaskWait, repairStaleStatuses, taskWaitSnapshot } from "./lead-status.js";
-import { latestRelease, newerRelease, notifySecurityRelease, recordRunnerVersion, startUpdateChecks, updateLine, type ReleaseIo } from "./releases.js";
+import { latestRelease, newerRelease, notifySecurityRelease, notifyVersionLive, recordRunnerVersion, startUpdateChecks, updateLine, type ReleaseIo } from "./releases.js";
 import { installMethod } from "./install-method.js";
 import { PACKAGE_VERSION } from "./version.js";
 
@@ -8237,6 +8237,8 @@ async function runWatchLoop(args: {
   // attributes to this episode by runner and window, and `brief
   // --latest-watch` bounds itself to exactly it.
   store.startWatchEpisode({ repo, runner, incarnation }, new Date());
+  // A deploy's one chat line, "Toolroll <version> is live.", when this worker last ran an older version.
+  try { notifyVersionLive(store, dirname(context.databaseFile), PACKAGE_VERSION, new Date()); } catch { /* A display fact; never blocks the worker. */ }
   recordRunnerVersion(dirname(context.databaseFile), runner, PACKAGE_VERSION, new Date());
   args.onReady?.();
   // Once per worker start, before any pass: statuses an older build left
@@ -9573,6 +9575,7 @@ async function upCommand(
       });
   };
   observeReadiness();
+  try { notifyVersionLive(context.store, dirname(context.databaseFile), PACKAGE_VERSION, clock()); } catch { /* A display fact; never blocks the worker. */ }
   recordRunnerVersion(dirname(context.databaseFile), runnerName, PACKAGE_VERSION, clock());
   const runnerHeartbeat = setInterval(() => {
     const beat = heartbeatRunner(store, runnerName, runnerToken, clock());

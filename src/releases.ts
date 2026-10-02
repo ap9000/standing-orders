@@ -239,3 +239,32 @@ export async function latestVersionNow(io: { fetch?: typeof fetch } = {}): Promi
   if (typeof version !== "string" || !/^\d+\.\d+\.\d+$/.test(version)) throw new Error("npm did not name a version");
   return { version };
 }
+
+/** What a release says about itself in one line ("Release 0.9.9: lighter tests, cleaner status"), when its notes
+ * have such a line; null otherwise. */
+export function releaseSummary(notes: string, version: string): string | null {
+  const escaped = version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const line = new RegExp(`^\\s*(?:#{1,6}\\s*)?(?:Toolroll\\s+)?(?:Release\\s+)?v?${escaped}\\s*[:—–-]\\s*(.+?)\\s*$`, "im").exec(notes);
+  const summary = line?.[1]?.replace(/[*_`]/g, "").replace(/\s+/g, " ").replace(/[.\s]+$/, "").trim() ?? "";
+  if (summary === "") return null;
+  return summary.length <= 80 ? summary : `${summary.slice(0, 79).replace(/[\s,;:]+\S*$/, "")}…`;
+}
+
+/**
+ * A deploy says one thing in chat: "Toolroll 0.9.9 is live." (with the release's own one-line summary when its
+ * notes have one). Once per version, addressed to each instance operator, and only when a worker on this
+ * computer last ran an older version: a fresh install is not news. Call before recording this runner's version.
+ */
+export function notifyVersionLive(store: Store, dir: string, version: string, now: Date): number {
+  const before = runnerVersions(dir);
+  if (!VERSION.test(version) || !before.some(one => isNewer(version, one.version)) || before.some(one => isNewer(one.version, version))) return 0;
+  const cached = cachedRelease(dir);
+  const summary = cached?.version === version ? releaseSummary(cached.notes, version) : null;
+  const line = summary === null ? `Toolroll ${version} is live.` : `Toolroll ${version} is live: ${summary}.`;
+  let queued = 0;
+  for (const recipient of store.accountFacts().map(one => one.name).filter(name => store.isInstanceOperator(name))) {
+    if (store.enqueueNotification({ dedupeKey: `release:live:${version}:${recipient}`, kind: "version-live", subject: line, body: "",
+      recipient, source: { installation: true } }, now)) queued++;
+  }
+  return queued;
+}
