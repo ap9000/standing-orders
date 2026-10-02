@@ -8274,7 +8274,7 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
       {
         id: "c1", statement: "the limiter caps retries", requiredEvidence: ["check"], state: "pass", detail: [], answered: [{ kind: "check", ref: "npm test" }],
         review: { judgement: "upholds", note: "ctx-1 returns 3", author: "reviewer:codex" },
-        coverage: { state: "context", inherited: true, items: ["ctx-1"], gaps: [], priorSupport: "eligible" },
+        coverage: { state: "context", inherited: true, items: ["ctx-1"], gaps: [], priorSupport: "eligible", assets: "12 images, 3.4 MB, in the run's evidence" },
       },
       {
         id: "c2", statement: "the guard refuses a fourth attempt", requiredEvidence: ["check"], state: "pass", detail: [], answered: [{ kind: "check", ref: "npm test" }],
@@ -8309,6 +8309,10 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(gap?.textContent).toContain("src/guard.ts: 70000 bytes");
     expect(gap?.closest(".requirement-evidence")).toBeNull();
     expect(incomplete?.querySelector('[data-review-judgement="cannot-tell"]')?.closest(".requirement-evidence")).toBeNull();
+    // The change's images are one line under the requirement's details, never a missing file.
+    const assets = contextWindow.document.querySelectorAll('.requirement[data-criterion-id="c1"] [data-context-assets]');
+    expect([...assets].map(one => one.textContent)).toEqual(["12 images, 3.4 MB, in the run's evidence"]);
+    expect(assets[0]?.closest(".requirement-evidence")).not.toBeNull();
     await contextWindow.happyDOM.close();
     // The run page: the same projection under the evidence bundle.
     const runPage = await (await fetch(url(`/r/${run}`), { headers: { cookie } })).text();

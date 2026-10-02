@@ -32,6 +32,7 @@ Carry this check into Toolroll task acceptance criteria and review feedback for 
 - Let Toolroll run the unchanged approved full verification command once at the final machine gate for the candidate. Do not duplicate that full suite in the builder or lead inspection. A failed gate or changed candidate still needs fresh verification; never delete tests, add skips, or waive execution approvals or machine checks to save time.
 - Reuse valid evidence for unchanged code and the same agent session where already supported. Do not build new orchestration just to reduce test overhead. No new agent time limits.
 - Report the checks actually run, the exact candidate they cover, and any remaining gaps. Broaden checks only for a specific uncovered risk; say why.
+- Screenshots and journey output go in the run's evidence folder, `evidence/` (ignored by Git), never anywhere else in the working tree. Never commit them: the handoff leaves images added under `evidence/` out of the commit and says so.
 
 ## Keep the installed tool current
 

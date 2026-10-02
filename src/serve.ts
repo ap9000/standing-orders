@@ -11833,6 +11833,7 @@ function criterionMatrixHtml(
       (state !== "pass" || detail.length === 0 ? "" : `<div class="requirement-evidence-group"><strong>Verification notes</strong><ul>${detail.map(line => `<li>${escape(line)}</li>`).join("")}</ul></div>`) +
       reviewDetails +
       (coverage === undefined ? "" : `<p class="meta"${coverage.state === "gap" ? "" : ` data-context-coverage="${escape(coverage.state)}"`}>Review context: ${escape(coverageStateWords(coverage))}</p>`) +
+      (coverage?.assets === undefined ? "" : `<p class="meta" data-context-assets>${escape(coverage.assets)}</p>`) +
       `<p class="meta">Requirement ID: <code>${escape(row.id)}</code></p></div></details></li>`;
   }).join("");
   return `<div class="result-section criterion-matrix"><strong>Requirements · ${matrix.length}</strong><ol class="requirement-list">${rows}</ol></div>`;

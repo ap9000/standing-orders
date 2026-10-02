@@ -45,7 +45,7 @@ import { isVerificationReceipt } from "./verification-evidence.js";
 import { createHash } from "node:crypto";
 import { hasForbiddenControls } from "./decision.js";
 import type { ExecResult } from "./exec.js";
-import { EVIDENCE_CAPS, readVerifiedArtifact, redactSecretLines, scanForSecrets, storeEvidence } from "./evidence.js";
+import { EVIDENCE_CAPS, isBinaryAssetPath, isImagePath, readVerifiedArtifact, redactSecretLines, scanForSecrets, storeEvidence } from "./evidence.js";
 import { parseProof, type ApprovedCriterion, type CriterionJudgementWord, type ParsedProof } from "./proof.js";
 import type { Artifact, Store } from "./store.js";
 
@@ -199,6 +199,9 @@ export type CriterionContextCoverage = {
   items: string[];
   gaps: string[];
   priorSupport: "eligible" | "invalid" | "none";
+  /** One line for the change's images and other binary files, which are
+   * never read as text and so are neither items nor gaps. */
+  assets?: string;
 };
 
 export type ReviewContextInventory = {
@@ -512,7 +515,8 @@ export function parseReviewContext(raw: string): { ok: true; inventory: ReviewCo
     if (
       !str(c["id"], 64) || coverageIds.has(c["id"]) || (c["state"] !== "patch" && c["state"] !== "context" && c["state"] !== "gap") ||
       typeof c["inherited"] !== "boolean" || !strList(c["paths"], 200) || !strList(c["items"], r["schema"] === 3 ? contentLimits.items : 64) || !strList(c["gaps"], r["schema"] === 3 ? 400 : 64) ||
-      (c["priorSupport"] !== "eligible" && c["priorSupport"] !== "invalid" && c["priorSupport"] !== "none")
+      (c["priorSupport"] !== "eligible" && c["priorSupport"] !== "invalid" && c["priorSupport"] !== "none") ||
+      (c["assets"] !== undefined && !str(c["assets"], 300))
     ) {
       return { ok: false, problem: `coverage ${index}: malformed` };
     }
@@ -522,6 +526,7 @@ export function parseReviewContext(raw: string): { ok: true; inventory: ReviewCo
     coverage.push({
       id: c["id"], state: c["state"] as CriterionContextCoverage["state"], inherited: c["inherited"], paths: [...(c["paths"] as string[])],
       items: [...(c["items"] as string[])], gaps: [...(c["gaps"] as string[])], priorSupport: c["priorSupport"] as CriterionContextCoverage["priorSupport"],
+      ...(c["assets"] === undefined ? {} : { assets: c["assets"] as string }),
     });
   }
 
@@ -591,6 +596,29 @@ async function treeEntries(git: GitRunner, cwd: string, revision: string, paths:
     entries.set(path, { mode, type, object, size: sizeText === "-" ? null : Number(sizeText) });
   }
   return entries;
+}
+
+/** "12 images, 3.4 MB, in the run's evidence": every binary file at the head
+ * in one line. Files deleted by the change are not counted. */
+async function assetSummary(git: GitRunner, cwd: string, head: string, assets: ReadonlySet<string>): Promise<string | null> {
+  const sizes = new Map<string, number>();
+  const paths = [...assets].filter(safeContextPath);
+  for (let at = 0; at < paths.length; at += 500) {
+    const listed = await treeEntries(git, cwd, head, paths.slice(at, at + 500));
+    for (const [path, entry] of listed ?? []) if (regular(entry)) sizes.set(path, entry.size);
+  }
+  if (sizes.size === 0) return null;
+  const images = [...sizes.keys()].filter(isImagePath).length;
+  const others = sizes.size - images;
+  const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  const counted = [...(images > 0 ? [plural(images, "image")] : []), ...(others > 0 ? [plural(others, images > 0 ? "other binary file" : "binary file")] : [])].join(", ");
+  return `${counted}, ${assetBytesWords([...sizes.values()].reduce((sum, one) => sum + one, 0))}, in the run's evidence`;
+}
+
+function assetBytesWords(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${bytes} bytes`;
 }
 
 function regular(entry: TreeEntry | undefined): entry is TreeEntry & { size: number } {
@@ -898,11 +926,21 @@ export async function deriveReviewContext(
       else gapAll("capture-failed", "the committed source paths in the approved scope could not be listed");
     }
   }
+  // Files named as images or other binaries are never text context: they are
+  // counted in one summary line, never listed as gaps or held against the
+  // bounds. A text-named file that turns out not to be text stays a gap.
+  const assets = new Set<string>();
+  const textOnly = (paths: readonly string[]): string[] => paths.filter(path => {
+    if (!isBinaryAssetPath(path)) return true;
+    assets.add(path);
+    return false;
+  });
+  generalPaths.splice(0, generalPaths.length, ...textOnly(generalPaths));
   const specificFor = new Map<string, string[]>();
   for (const criterion of sourceProof?.criteria ?? []) {
     const cited = [...new Set(criterion.evidence.filter(one => one.kind === "changed-path").map(one => one.ref))].filter(safeContextPath).sort();
     const inherited = parentContext?.coverage.find(one => one.id === criterion.id)?.paths ?? [];
-    const combined = [...new Set([...cited, ...inherited])].filter(safeContextPath).sort();
+    const combined = textOnly([...new Set([...cited, ...inherited])].filter(safeContextPath).sort());
     if (combined.length > 0) specificFor.set(criterion.id, combined);
   }
   type Plan = { id: string; knownInSource: boolean; inherited: boolean; paths: string[]; changedText: boolean };
@@ -928,7 +966,7 @@ export async function deriveReviewContext(
   // A proof's path citations are relevance hints, not permission to omit other
   // changed files. Deliver new revision files and tests in full as supplemental
   // context without inventing criterion ownership or inheriting a judgement.
-  for (const path of args.patchPaths) {
+  for (const path of textOnly([...args.patchPaths])) {
     if (safeContextPath(path) && !relevance.has(path)) relevance.set(path, { criteria: new Set(), why: new Set(["candidate-changed-path"]) });
   }
   const candidates = [...relevance.keys()].sort((a, b) => {
@@ -1008,6 +1046,7 @@ export async function deriveReviewContext(
     }
   }
   inventory.items = [...itemsByPath.values()];
+  const assetLine = await assetSummary(git, args.worktree, args.head, assets);
 
   // 6. Prior review provenance — context, proved per criterion, never a verdict.
   const sourceDiff = sourceArtifacts.find(one => one.kind === "terminal-diff") ?? null;
@@ -1073,5 +1112,5 @@ export async function deriveReviewContext(
     const gapsFor = state === "gap" && relevantGaps.length === 0 ? [plan.paths.length === 0 ? "no relevant source paths are known" : "inherited context is incomplete"] : relevantGaps;
     return { id: plan.id, state, inherited: plan.inherited && lineage.sourceRun !== args.runId, paths: plan.paths, items, gaps: gapsFor, priorSupport };
   });
-  return finish(coverage);
+  return finish(assetLine === null ? coverage : coverage.map(one => ({ ...one, assets: assetLine })));
 }

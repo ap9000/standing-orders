@@ -22,3 +22,6 @@ design/styles/operations-ledger.css
 # Local browser artifacts and review/certification snapshots
 output/
 .playwright-cli/
+
+# Check evidence (screenshots, journey output) lives in the run's evidence, never the branch
+/evidence/

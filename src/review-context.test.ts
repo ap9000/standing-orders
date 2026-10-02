@@ -831,7 +831,7 @@ describe("inherited review context (v51)", () => {
       expect(inventory.coverage.find(one => one.id === "c4")).toMatchObject({ state: "gap", gaps: expect.arrayContaining([expect.stringMatching(/no sealed head/)]) });
     });
 
-    test("byte limits, binaries, and secrets are honest gaps: oversized and binary paths are never truncated, and a redacted item cannot support its criterion", async () => {
+    test("byte limits and secrets are honest gaps: oversized paths are never truncated, images are one summary line, and a redacted item cannot support its criterion", async () => {
       const bigBase = "// existing code\n".repeat(Math.ceil(REVIEW_CONTEXT_LIMITS.itemBytes / 17));
       const big = bigBase + "x".repeat(LEGACY_REVIEW_CONTEXT_LIMITS.itemBytes + 1) + "\n";
       const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
@@ -843,7 +843,7 @@ describe("inherited review context (v51)", () => {
       const inventory = (await capture(f))!.inventory;
       const reasons = new Map(inventory.gaps.map(one => [`${one.reason}:${one.path}`, one]));
       expect(inventory.gaps.some(one => one.path === "src/big.ts" && one.reason === "over-limit" && /exceeds the .*item limit/.test(one.detail))).toBe(true);
-      expect(reasons.get("binary:assets/dot.png")?.detail).toMatch(/not UTF-8 text/);
+      expect(inventory.gaps.some(one => one.path === "assets/dot.png")).toBe(false);
       expect(reasons.get("secret-redacted:src/guard.ts")?.criteria).toEqual(["c2", "c4"]);
       expect(inventory.items.some(one => one.path === "src/big.ts" || one.path === "assets/dot.png")).toBe(false);
       const guard = inventory.items.find(one => one.path === "src/guard.ts")!;
@@ -853,13 +853,32 @@ describe("inherited review context (v51)", () => {
       expect(guard.sha256).toBe(sha256(guard.content));
       expect(inventory.items.reduce((sum, one) => sum + one.bytes, 0)).toBeLessThanOrEqual(REVIEW_CONTEXT_LIMITS.aggregateBytes);
       // c2's only relevant path is redacted — a gap; c4 spans the oversized
-      // and binary paths (named on its row even though the patch touches
-      // one of its paths); c1 is untouched — still sealed context.
+      // path (named on its row even though the patch touches one of its
+      // paths); c1 is untouched — still sealed context. The image is never
+      // a gap: every row carries the same one-line summary instead.
       expect(inventory.coverage.find(one => one.id === "c2")).toMatchObject({ state: "gap", items: [guard.id] });
-      expect(inventory.coverage.find(one => one.id === "c4")?.gaps).toEqual(expect.arrayContaining([expect.stringMatching(/src\/big\.ts: .*item limit/), expect.stringMatching(/assets\/dot\.png: not UTF-8/)]));
+      expect(inventory.coverage.find(one => one.id === "c4")?.gaps).toEqual(expect.arrayContaining([expect.stringMatching(/src\/big\.ts: .*item limit/)]));
+      expect(inventory.coverage.flatMap(one => one.gaps).some(gap => gap.includes("dot.png"))).toBe(false);
+      expect(inventory.coverage.map(one => one.assets)).toEqual(inventory.coverage.map(() => `1 image, ${png.length} bytes, in the run's evidence`));
       expect(inventory.coverage.find(one => one.id === "c1")?.state).toBe("context");
       const artifact = f.store.artifactsFor(f.revisionRun).find(one => one.kind === "review-context")!;
       expect(artifact.redacted).toBe(true);
+    });
+
+    test("a change full of screenshots lists them as one summary line: no image is a missing file or held against the bounds", async () => {
+      const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+      const shots = Object.fromEntries(Array.from({ length: 55 }, (_, n) => [`evidence/feat/shot-${n}.png`, Buffer.concat([png, Buffer.alloc(1024 * 16)])]));
+      const f = await seed({ rootOnly: true, priorJudgements: [], extraSourceFiles: { ...shots, "evidence/feat/journey.jpg": png, "docs/manual.pdf": png } });
+      const inventory = (await capture(f))!.inventory;
+      expect(inventory.gaps.filter(one => /evidence\/|\.pdf/.test(one.detail))).toEqual([]);
+      expect(inventory.gaps.filter(one => one.reason === "item-cap")).toEqual([]);
+      expect(inventory.items.map(one => one.path).sort()).toEqual(["src/guard.ts", "src/limit.ts", "src/report.ts"]);
+      const bytes = Object.values(shots).reduce((sum, one) => sum + one.length, 0) + png.length * 2;
+      const line = `56 images, 1 other binary file, ${Math.round(bytes / 1024)} KB, in the run's evidence`;
+      expect(inventory.coverage.map(one => one.assets)).toEqual(inventory.coverage.map(() => line));
+      expect(inventory.coverage.flatMap(one => one.gaps)).toEqual([]);
+      expect(inventory.coverage.flatMap(one => one.paths).some(path => !path.startsWith("src/"))).toBe(false);
+      expect(parseReviewContext(serializeReviewContext(inventory))).toMatchObject({ ok: true, inventory: { coverage: inventory.coverage } });
     });
 
     test("the strict reader refuses an inventory whose item bytes no longer hash, and one that claims eligibility without proof", async () => {
