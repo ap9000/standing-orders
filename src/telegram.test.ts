@@ -28,6 +28,7 @@ import {
   telegramHookSecret,
   telegramPushUrl,
   type TelegramTransport,
+  networkFence,
 } from "./telegram.js";
 
 /** A task with no scope presents the bare word `legacy` for the exact pair
@@ -933,6 +934,18 @@ describe("the bot token's homes", () => {
     const error = `getUpdates https://api.telegram.org/bot${token}/getUpdates timed out`;
     expect(scrub(error, token)).not.toContain(token);
     expect(scrub(error, token)).toContain("…e123");
+  });
+});
+
+describe("a fenced network never holds the bridge", () => {
+  test("a coding agent's sandbox is known by Codex's variables or Claude Code's proxy on this computer; a person's own proxy is not a fence", () => {
+    expect(networkFence({ CODEX_SANDBOX: "seatbelt" })).toBe("a Codex sandbox");
+    expect(networkFence({ CODEX_SANDBOX_NETWORK_DISABLED: "1" })).toBe("a Codex sandbox");
+    expect(networkFence({ CLAUDECODE: "1", HTTPS_PROXY: "http://localhost:51234" })).toBe("a Claude Code sandbox");
+    expect(networkFence({ CLAUDE_CODE_ENTRYPOINT: "cli", all_proxy: "socks5h://127.0.0.1:51235" })).toBe("a Claude Code sandbox");
+    for (const env of [{}, { CLAUDECODE: "1" }, { HTTPS_PROXY: "http://127.0.0.1:7890" }, { CLAUDECODE: "1", HTTPS_PROXY: "http://proxy.corp.example:3128" }, { CODEX_SANDBOX: "" }]) {
+      expect(networkFence(env)).toBeNull();
+    }
   });
 });
 

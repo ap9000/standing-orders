@@ -25988,15 +25988,19 @@ export class Store {
    * under a claim that lapsed (a crash mid-turn), and not deferred past now.
    * One at a time per bot — the mate runs one turn per approver anyway.
    */
-  claimTelegramConversation(botId: string, owner: string, ttlMs: number, now: Date): TelegramConversation | null {
+  claimTelegramConversation(botId: string, owner: string, ttlMs: number, now: Date, only?: "turns" | "replies"): TelegramConversation | null {
     return this.transact(() => {
       const stamp = now.toISOString();
+      // "turns": still needs the assistant; "replies": the reply is planned and only sending remains.
+      const planned = "EXISTS (SELECT 1 FROM telegram_conversation_part p WHERE p.conversation = telegram_conversation.id)";
+      const which = only === "turns" ? `AND NOT ${planned}` : only === "replies" ? `AND ${planned}` : "";
       const row = this.db
         .prepare(
           `SELECT * FROM telegram_conversation
             WHERE bot_id = ? AND state IN ('queued','running')
               AND (claim_expires_at IS NULL OR claim_expires_at <= ?)
               AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+              ${which}
             ORDER BY id LIMIT 1`,
         )
         .get(botId, stamp, stamp);
@@ -26068,6 +26072,37 @@ export class Store {
           )
           .run(result.state, result.outcome, result.replyMessageId ?? null, stamp, id, owner, stamp);
     return Number(changes) === 1;
+  }
+
+  /**
+   * Replies the assistant wrote that still have not reached the person
+   * `since` ago or longer (status and the console show them with a Retry):
+   * the message's row, whose it is, when the oldest unsent part was
+   * written, and the last send error.
+   */
+  unsentTelegramReplies(botId: string | null, approver: string | null, since: Date): { conversation: number; approver: string; since: string; error: string | null }[] {
+    return this.db
+      .prepare(
+        `SELECT c.id, c.approver, MIN(p.created_at) AS since,
+           (SELECT q.last_error FROM telegram_conversation_part q WHERE q.conversation = c.id AND q.state = 'pending' ORDER BY q.ordinal LIMIT 1) AS error
+          FROM telegram_conversation c JOIN telegram_conversation_part p ON p.conversation = c.id AND p.state = 'pending'
+         WHERE c.state IN ('queued','running') AND (? IS NULL OR c.bot_id = ?) AND (? IS NULL OR c.approver = ?)
+         GROUP BY c.id HAVING MIN(p.created_at) <= ? ORDER BY c.id`,
+      )
+      .all(botId, botId, approver, approver, since.toISOString())
+      .map(row => ({ conversation: Number(row["id"]), approver: String(row["approver"]), since: String(row["since"]), error: row["error"] === null ? null : String(row["error"]) }));
+  }
+
+  /** Send unsent replies on the next bridge pass instead of waiting out their backoff; returns how many. */
+  retryTelegramReplies(approver: string | null, now: Date): number {
+    const { changes } = this.db
+      .prepare(
+        `UPDATE telegram_conversation SET next_attempt_at = ?
+          WHERE state = 'queued' AND (? IS NULL OR approver = ?)
+            AND EXISTS (SELECT 1 FROM telegram_conversation_part p WHERE p.conversation = telegram_conversation.id AND p.state = 'pending')`,
+      )
+      .run(now.toISOString(), approver, approver);
+    return Number(changes);
   }
 
   // ---- the outbound parts (v63) ------------------------------------------------

@@ -4,6 +4,9 @@
  * pairing, never anyone else's. */
 import type { Store } from "./store.js";
 
+/** How long a written reply may wait to be sent before it shows here with a Retry. */
+export const UNSENT_REPLY_MS = 2 * 60_000;
+
 const escape = (text: string) =>
   text
     .replaceAll("&", "&amp;")
@@ -17,7 +20,7 @@ export function telegramSettingsHtml(
   botId: string | null,
   who: string,
   csrf: string,
-  options: { code?: string; problem?: string } = {},
+  options: { code?: string; problem?: string; now?: Date } = {},
 ): string {
   const hidden = `<input type="hidden" name="csrf" value="${escape(csrf)}">`;
   const password =
@@ -34,6 +37,15 @@ export function telegramSettingsHtml(
     content = `<p><strong>${mine.length > 0 ? "Your phone is paired." : "Your phone is not paired."}</strong> ${
       others === 0 ? "No teammates are paired yet." : `${others} teammate${others === 1 ? " is" : "s are"} paired.`
     }</p>`;
+    // A reply the assistant wrote that has not reached this person's phone for two minutes.
+    const unsent = store.unsentTelegramReplies(botId, who, new Date((options.now ?? new Date()).getTime() - UNSENT_REPLY_MS));
+    if (unsent.length > 0) {
+      const oldest = unsent[0]!;
+      content +=
+        `<div class="card" role="status" data-unsent-replies><p><strong>${unsent.length === 1 ? "A reply hasn't reached your phone" : `${unsent.length} replies haven't reached your phone`}</strong></p>` +
+        `<p class="meta">Trying since ${escape(oldest.since.slice(11, 16))} UTC${oldest.error === null ? "" : `: ${escape(oldest.error)}`}</p>` +
+        `<form method="post" action="/settings/telegram/retry">${hidden}<button type="submit">Retry</button></form></div>`;
+    }
     if (options.code !== undefined) {
       content +=
         "<h2>Pair your phone</h2><p>Send this to the bot in a private Telegram chat within 10 minutes:</p>" +
