@@ -152,11 +152,41 @@ export const RUN_REASON_WORDS: Readonly<Record<string, string>> = {
   "revision-brief": "the revision brief could not be read",
   "repaired-park": "resumed from a parked question",
   stopped: "stopped by the operator",
+  acceptance: "the result didn't meet its signed requirements",
+  evidence: "its evidence could not be saved",
+  interrupted: "the attempt was interrupted",
+  orphaned: "the attempt lost its worker",
+  "retryable-infra": "a temporary problem on the machine stopped it",
+  unknown: "the attempt stopped unexpectedly",
+  "spawn-failed": "the agent process could not start",
+  "provider-protocol": "the agent's reply could not be read",
+  "auth-expired": "the agent's sign-in expired",
+  "budget-unenforceable": "its spending limit could not be enforced",
+  "stale-source": "the request changed while the plan was being made",
+  "stale-approval": "the approval no longer matched the scope",
+  "source-invalid": "the plan's source could not be recorded",
+  "external-closed": "the linked issue was closed while it was being built",
+  "repair-admission": "the repair could not start",
+  "reviewer-error": "the review failed",
+  "malformed-report": "the scout's report was malformed",
+  "attempts-exhausted": "it failed too many times in a row",
 };
 
-/** A run's recorded reason in words; a code with no words of its own is said as recorded. */
+/** A run's recorded reason in words. A recorded code is never shown as it is
+ * stored: one with no words of its own reads as an unexpected stop; a reason
+ * already written as words (it has a space) is said as written. */
 export function runReasonWords(reason: string): string {
-  return RUN_REASON_WORDS[reason] ?? `stopped with the recorded reason “${reason}”`;
+  const known = RUN_REASON_WORDS[reason];
+  if (known !== undefined) return known;
+  if (reason.startsWith("decision:")) return "the agent asked a question";
+  return /\s/.test(reason.trim()) ? reason.trim() : "the attempt stopped unexpectedly";
+}
+
+/** The latest failed build attempt among a task's runs (any order): planning and reviewing are not attempts. */
+export function latestFailedAttempt<T extends { id: number; role: string; outcome: string | null }>(runs: readonly T[]): T | null {
+  let latest: T | null = null;
+  for (const run of runs) if (run.outcome === "failed" && run.role !== "planner" && run.role !== "reviewer" && (latest === null || run.id > latest.id)) latest = run;
+  return latest;
 }
 
 export const NO_REASON_RECORDED = "No reason was recorded for this attempt.";

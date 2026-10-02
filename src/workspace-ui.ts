@@ -472,7 +472,8 @@ const CONTRADICTED_BY_REVIEW = /^(?:reviewer:)?[^\s"]+ contradicts criterion "([
  * plainly and tied to the changed lines it concerns. `changes` maps each
  * changed file to the lines of its first change (null when it has no line
  * changes, a binary file say). Presentation only: the verdict is unchanged. */
-export function reportMismatchesOf(reasons: readonly string[], criteria: readonly { id: string; statement: string; answered: readonly { kind: string; ref: string }[] }[],
+export function reportMismatchesOf(reasons: readonly string[],
+  criteria: readonly { id: string; statement: string; answered: readonly { kind: string; ref: string }[]; state?: string; detail?: readonly string[] }[],
   changes: ReadonlyMap<string, { from: number; to: number } | null>): ReportMismatch[] {
   const named = (id: string): string => {
     const statement = criteria.find(one => one.id === id)?.statement.trim() ?? "";
@@ -484,7 +485,7 @@ export function reportMismatchesOf(reasons: readonly string[], criteria: readonl
     const path = criteria.find(one => one.id === id)?.answered.find(ref => ref.kind === "changed-path" && changes.has(ref.ref))?.ref ?? null;
     return path === null ? { path: null, lines: null, inChanges: null } : { path, lines: changes.get(path) ?? null, inChanges: true };
   };
-  return reasons.flatMap((reason): ReportMismatch[] => {
+  const rows = reasons.flatMap((reason): ReportMismatch[] => {
     const over = OVERCLAIMED.exec(reason);
     if (over !== null) return over[1]!.split(", ").map(path => ({ text: "The report says it changed", path, lines: null, inChanges: changes.has(path), note: null, reason }));
     const restated = RESTATED.exec(reason);
@@ -494,8 +495,27 @@ export function reportMismatchesOf(reasons: readonly string[], criteria: readonl
     if (caveat !== null) return [{ text: `The report marks ${named(caveat[1]!)} met, but its own note says: ${caveat[2]}`, ...place(caveat[1]!), note: Number(note), reason }];
     const review = CONTRADICTED_BY_REVIEW.exec(reason);
     if (review !== null) return [{ text: plainReasonWords(reason), ...place(review[1]!), note: null, reason }];
-    return [{ text: plainReasonWords(reason), path: null, lines: null, inChanges: null, note: note === null ? null : Number(note), reason }];
+    const unsigned = UNSIGNED_NOTE.exec(reason);
+    if (unsigned !== null) return [{ text: `The report's note ${unsigned[1]} is about ${unsigned[2]}, which isn't one of the signed requirements: ${unsigned[3]}`, path: null, lines: null, inChanges: null, note: Number(unsigned[1]), reason }];
+    if (FAILED_CHECK.test(reason)) return [];
+    return [{ text: sentenceOf(plainReasonWords(reason)), path: null, lines: null, inChanges: null, note: note === null ? null : Number(note), reason }];
   });
+  // Evidence a requirement cites that doesn't hold, unless a reason above already says so.
+  const evidence = criteria.flatMap(one => one.state !== "failed" && one.state !== "missing" ? [] : (one.detail ?? [])
+    .filter(detail => !reasons.includes(detail) && !/is waiting for the final check|requires manual-review evidence|is marked met, but caveat|was signed as/.test(detail))
+    .map((detail): ReportMismatch => {
+      const lead = [`criterion "${one.id}"'s `, `criterion "${one.id}" `].find(prefix => detail.startsWith(prefix));
+      const rest = lead === undefined ? detail : detail.slice(lead.length);
+      return { text: `${sentenceOf(named(one.id))}: ${rest}`, ...place(one.id), note: null, reason: detail };
+    }));
+  return [...rows, ...evidence];
+}
+
+const UNSIGNED_NOTE = /^caveat ([0-9]+) names ("[^"]*"(?:, "[^"]*")*), (?:a criterion the proof authored|which is no signed)[\s\S]*?: ([\s\S]*)$/;
+
+/** A sentence starts with a capital letter. */
+function sentenceOf(text: string): string {
+  return text === "" ? text : `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
 }
 
 /** The line a failing check ended on: the last line of its error output that

@@ -269,10 +269,11 @@ export type BrowserResultView = {
     /** Words for the result's Accept: Mark complete when offered, else the Needs you acceptance. */
     decision: BrowserResultDecision | null;
     checks: { detail: string; problem: boolean; logHref: string | null } | null;
-    /** The report disagrees with the saved changes: the headline that says so, each disagreement in plain
-     * words with the changed lines it concerns (`absent`: a file the changes don't have), and the recorded
-     * words they already say, so no caveat repeats them. Null otherwise. */
-    mismatch: { headline: string; rows: { text: string; path: string | null; lines: string | null; href: string | null; absent: boolean; noteLabel: string | null }[]; said: string[] } | null;
+    /** A refuted result's recorded disagreements: the headline when the report doesn't match the changes (null when a
+     * failed check is the blocker, so the status keeps its own), each disagreement in plain words with the changed lines
+     * it concerns (`absent`: a file the changes don't have), and the recorded words they already say, so no caveat
+     * repeats them. Null otherwise. */
+    mismatch: { headline: string | null; rows: { text: string; path: string | null; lines: string | null; href: string | null; absent: boolean; noteLabel: string | null }[]; said: string[] } | null;
     /** The one ink act that resolves the result, the one outline act beside it, and why it can't be accepted yet (result-acts.ts). */
     acts: ResultActs;
     /** Run checks on this result's commit: the project's check, when it didn't run. */

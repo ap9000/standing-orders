@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { acceptWordsOf, lastErrorLineOf, reportMismatchesOf } from "./workspace-ui.js";
-import { failedAttemptSentence, NO_REASON_RECORDED } from "./needs-you.js";
+import { failedAttemptSentence, latestFailedAttempt, NO_REASON_RECORDED, RUN_REASON_WORDS } from "./needs-you.js";
 
 describe("the result's Accept words", () => {
   test("Accept only when every requirement is met and the checks passed, and never says it publishes", () => {
@@ -54,14 +54,47 @@ describe("a report that doesn't match its saved changes, said plainly", () => {
     const [row] = reportMismatchesOf(["caveat 1 names no criterion — every caveat is an exception to exactly one signed criterion, named by its exact id (an unrelated idea belongs in the handoff's follow-ups): Captured against fixtures."], criteria, changes);
     expect(row).toMatchObject({ text: "The agent left a note without saying which requirement it affects: Captured against fixtures.", path: null, lines: null, note: 1 });
   });
+
+  test("a requirement whose evidence doesn't hold is listed too, beside a failed check that the checks row already says", () => {
+    const failing = [criteria[0]!, { ...criteria[1]!, state: "failed", detail: ['criterion "c2"\'s screenshot evidence "evidence/a.png" could not be verified: not a PNG'] }];
+    expect(reportMismatchesOf(["the repository's approved verification command exited 1"], failing, changes)).toEqual([
+      { text: "“The console still renders payout dashboards.”: screenshot evidence \"evidence/a.png\" could not be verified: not a PNG", path: null, lines: null, inChanges: null, note: null,
+        reason: 'criterion "c2"\'s screenshot evidence "evidence/a.png" could not be verified: not a PNG' },
+    ]);
+    const [unsigned] = reportMismatchesOf(['caveat 2 names "c9", which is no signed or answered criterion — every caveat names an exact criterion id: skipped the ledger'], criteria, changes);
+    expect(unsigned).toMatchObject({ text: "The report's note 2 is about \"c9\", which isn't one of the signed requirements: skipped the ledger", note: 2 });
+  });
 });
 
 describe("what went wrong with a failed attempt, in one line", () => {
   test("the run's recorded reason, or that none was recorded — never a pointer elsewhere", () => {
     expect(failedAttemptSentence("timeout")).toBe("Ran out of time.");
-    expect(failedAttemptSentence("acceptance")).toBe("Stopped with the recorded reason “acceptance”.");
+    expect(failedAttemptSentence("acceptance")).toBe("The result didn't meet its signed requirements.");
     expect(failedAttemptSentence(null)).toBe(NO_REASON_RECORDED);
     expect(failedAttemptSentence(" ")).toBe("No reason was recorded for this attempt.");
+  });
+
+  test("a recorded code is never shown as stored; a reason already in words is said as written", () => {
+    for (const code of [...Object.keys(RUN_REASON_WORDS), "some-new-code", "decision:12"]) {
+      const sentence = failedAttemptSentence(code);
+      expect(sentence.toLowerCase()).not.toBe(`${code}.`);
+      if (/[-:]/.test(code)) expect(sentence).not.toContain(code);
+      expect(sentence).toMatch(/^[A-Z].*\.$/);
+    }
+    expect(failedAttemptSentence("some-new-code")).toBe("The attempt stopped unexpectedly.");
+    expect(failedAttemptSentence("lane 3 binary drifted out of its attested range")).toBe("Lane 3 binary drifted out of its attested range.");
+  });
+
+  test("the latest failed attempt, whatever order the runs come in; planning and reviewing are not attempts", () => {
+    const runs = [
+      { id: 7, role: "builder", outcome: "failed", reason: "timeout" },
+      { id: 9, role: "reviewer", outcome: "failed", reason: "reviewer-error" },
+      { id: 8, role: "builder", outcome: "failed", reason: "acceptance" },
+      { id: 10, role: "builder", outcome: "built", reason: null },
+    ];
+    expect(latestFailedAttempt(runs)?.id).toBe(8);
+    expect(latestFailedAttempt([...runs].reverse())?.id).toBe(8);
+    expect(latestFailedAttempt(runs.filter(one => one.outcome !== "failed"))).toBeNull();
   });
 
   test("a failing check ends on its last error line, numbered as in the saved log", () => {

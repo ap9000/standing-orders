@@ -77,7 +77,7 @@ import { leadBriefHtml, LEAD_CONTEXT_CSS } from './lead-context.js';
 import { assignmentCatchUp } from './assignment-brief.js';
 import { assignmentActionHref, assignmentCardOf, assignmentStatusOf, assignmentSummaryHtml, assignmentWithEvidence, ASSIGNMENT_CSS } from './assignment-ui.js';
 import { assignmentStageOf, pullRequestFactOf, stageOfCode, stageOfDispatch, statusDetailsHtml, statusIconSvg, statusWhyHtml, taskStatusOf, TASK_STATUS_CSS, type PullRequestFact, type TaskStatus } from './task-status.js';
-import { ASKS, ASK_LABEL, NEEDS, NO_REASON_RECORDED, failedAttemptSentence, runReasonWords, type Ask } from './needs-you.js';
+import { ASKS, ASK_LABEL, NEEDS, NO_REASON_RECORDED, failedAttemptSentence, latestFailedAttempt, runReasonWords, type Ask } from './needs-you.js';
 import { assignmentPresentationOf, historicalAssessmentReason, shortenedMaterialReason } from './assignment-presentation.js';
 import type { TaskFamily } from "./store.js";
 import { ledgerBody } from "./ledger-view.js";
@@ -6080,24 +6080,24 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     return { taskId: rootId, view: null, offer: { taskId: receipt.taskId, runId: receipt.runId, digest: receipt.digest }, target };
   }
 
-  /** What went wrong with the last attempt, in one line: a failing check's last error line (linked to that line in
-   * its saved log), else the run's recorded reason (linked to its record), else that no reason was recorded. */
-  function failureOf(taskId: string, runs: readonly Run[], assignment: AssignmentSnapshot | null): { line: string; link: { label: string; href: string } | null } {
-    const last = runs.filter(run => run.role !== "planner" && run.role !== "reviewer" && run.finishedAt !== null).sort((a, b) => b.id - a.id)[0];
-    if (last === undefined) return { line: NO_REASON_RECORDED, link: null };
-    const build = { label: `Build #${last.id}`, href: `/r/${last.id}` };
-    const checks = assignment?.receipt?.runId === last.id ? assignment.receipt.checks : null;
-    if (checks?.status === "failed" && checks.logArtifactId !== null) {
-      const artifact = store.artifactsFor(last.id).find(one => one.id === checks.logArtifactId) ?? null;
+  /** What went wrong with the latest failed attempt, in one line: a failing check's last error line (linked to that
+   * line in its saved log), else the attempt's recorded reason in plain words, else that no reason was recorded. Only
+   * log lines are linked: never the run record, which for a failed attempt is this task's own page. */
+  function failureOf(runs: readonly Run[], assignment: AssignmentSnapshot | null): { line: string; link: { label: string; href: string } | null } {
+    const last = latestFailedAttempt(runs);
+    if (last === null) return { line: NO_REASON_RECORDED, link: null };
+    const receipt = assignment?.receipt?.runId === last.id ? assignment.receipt : null;
+    if (receipt !== null && receipt.checks.status === "failed" && receipt.checks.logArtifactId !== null) {
+      const artifact = store.artifactsFor(last.id).find(one => one.id === receipt.checks.logArtifactId) ?? null;
       let read: ReturnType<typeof readVerifiedArtifact> | null = null;
       try { read = artifact === null ? null : readVerifiedArtifact(evidenceRoot, artifact); } catch { read = null; }
       const found = read !== null && read.ok ? lastErrorLineOf(read.content.toString("utf8")) : null;
       if (found !== null) {
         return { line: oneLineOf(found.text, 240), link: { label: `Check output, line ${found.line}`,
-          href: `${reviewHref(assignment?.receipt?.taskId ?? taskId)}&run=${last.id}&tab=checks#check-log-L${found.line}` } };
+          href: `${reviewHref(receipt.taskId)}&run=${last.id}&tab=checks#check-log-L${found.line}` } };
       }
     }
-    return { line: last.outcome === "failed" ? failedAttemptSentence(last.reason) : NO_REASON_RECORDED, link: build };
+    return { line: failedAttemptSentence(last.reason), link: null };
   }
 
   function taskScreen(
@@ -6121,7 +6121,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     if (scopeDraft !== undefined) presentedData.scopeDraft = scopeDraft;
     if (cancelDraft !== undefined) presentedData.cancelDraft = cancelDraft;
     (presentedData as { pullRequest?: TaskPullRequest | null }).pullRequest = taskPullRequestOf(taskId, who);
-    presentedData.failure = failureOf(data.task.id, data.runs, data.assignment ?? null);
+    presentedData.failure = failureOf(data.runs, data.assignment ?? null);
     // The thread reads the whole family: the original, its revisions, and every attempt across them.
     if (family !== null && family.problem === null) {
       presentedData.family = { root: { id: family.root.id, title: family.root.title, createdAt: family.root.createdAt, goal: store.getScope(family.root.id)?.goal ?? null },
@@ -22279,9 +22279,20 @@ function taskBodyParts(data: {
   // needs a person, then facts, then folds; the mechanics under Manage.
   const MANAGE = new Set(["steering", "waits-for", "holds"]);
   const finished = task.state === "done" || task.state === "cancelled";
-  // Failed: the card says what went wrong in one line, and its one act is Retry itself (the same requeue), never a link to this page.
+  // Failed: the card says what went wrong in one line, and its one act is Retry itself (the same requeue), never a link to
+  // this page; someone who can't retry here (a viewer, a live claim) gets no act at all.
   const statusCard = data.assignment != null && assignmentOptions !== null ? assignmentCardOf(data.assignment, assignmentOptions) : null;
   const failedCard = statusCard?.status.headline === "Failed";
+  // A link to this very page, with no section to open, goes nowhere: a card never offers one.
+  const bareSelfLink = (href: string): boolean => {
+    if (href.includes("#")) return false;
+    const [path, query = ""] = href.split("?");
+    const version = new URLSearchParams(query).get("version");
+    return [data.assignment?.rootId, data.rootId, task.id].some(id => id != null && path === `/t/${encodeURIComponent(id)}`) && (version === null || version === task.id);
+  };
+  // Build again, in place, names its form after the card's own act.
+  const rebuild = data.csrf !== "" && data.assignment?.primaryAction?.code === "retry-task" && data.assignment.need != null && "key" in data.assignment.need && data.assignment.need.key === "rebuild"
+    ? { action: `${taskHref(data.assignment.rootId)}/requeue` } : null;
   const retry = failedCard && task.state === "failed" && !data.claimed && !stopControlsActive && data.csrf !== "" ? { action: `${taskHref(task.id)}/requeue` } : null;
   const view: BrowserTaskView = {
     kind: "task",
@@ -22294,15 +22305,15 @@ function taskBodyParts(data: {
       { label: "Ask", href: taskChatHref(data.rootId ?? task.id), active: false },
     ],
     version: data.versionLabel == null ? null : { label: data.versionLabel, current: { label: "Current work", href: taskHref(data.rootId ?? task.id) } },
-    status: statusCard === null ? null : failedCard ? { ...statusCard, action: retry === null ? statusCard.action : null, status: { ...statusCard.status, sentence: data.failure?.line ?? statusCard.status.sentence } } : statusCard,
+    status: statusCard === null ? null : failedCard ? { ...statusCard, action: null, status: { ...statusCard.status, sentence: data.failure?.line ?? statusCard.status.sentence } }
+      : statusCard.action !== null && rebuild === null && bareSelfLink(statusCard.action.href) ? { ...statusCard, action: null } : statusCard,
     statusHtml,
     failure: failedCard ? data.failure ?? null : null,
     retry,
     approval: approvalHtml,
     confirmStopped: data.csrf !== "" && data.assignment?.primaryAction?.code === "confirm-stopped" && data.assignment.primaryAction.target.runId !== null
       ? { action: `${taskHref(data.assignment.rootId)}/confirm-stopped`, run: data.assignment.primaryAction.target.runId, checked: needsCheck(data.assignment) } : null,
-    rebuild: data.csrf !== "" && data.assignment?.primaryAction?.code === "retry-task" && data.assignment.need != null && "key" in data.assignment.need && data.assignment.need.key === "rebuild"
-      ? { action: `${taskHref(data.assignment.rootId)}/requeue` } : null,
+    rebuild,
     // The plan, progress and plan changes are thread entries now; the rest still needs a person here.
     lead: [
       { key: "history", html: data.history ?? "" }, { key: "control", html: controlHtml }, { key: "problem", html: problemHtml },
@@ -22996,8 +23007,9 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
     next: nextKind === "revise" || nextKind === "draft-repair" ? nextKind : null,
   });
 
-  // The report disagrees with its saved changes: the status card says so first, each disagreement tied to its lines.
-  const mismatch = proof === null || accepted || proof.verdict !== "refuted" || evidenceProblemOf(proof.verdict, proof.reasons) !== "mismatched" ? null : (() => {
+  // A refuted result's card lists every recorded disagreement, each tied to its lines; when the report itself doesn't
+  // match the changes (not a failed check), that is the headline.
+  const mismatch = proof === null || accepted || proof.verdict !== "refuted" ? null : (() => {
     const patch = view.detail?.terminal?.patch ?? null;
     const files = patch === null || "problem" in patch ? [] : parseReviewDiff(patch.text).files;
     // Each file's first change: the lines it added (else every line it shows), and where that change starts (its link target).
@@ -23010,16 +23022,20 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
       return [file.path, lines.length === 0 ? null : { from: Math.min(...lines), to: Math.max(...lines) }] as const;
     }));
     const changesHref = `${here}&run=${run.id}&tab=changes`;
+    const found = reportMismatchesOf(proof.reasons, proof.proofProblem === null ? proof.matrix : [], changes);
+    // The saved report itself can't be read: that is the evidence problem, said once.
+    if (proof.proofProblem !== null) found.push({ text: `The saved report can't be read: ${proof.proofProblem}`, path: null, lines: null, inChanges: null, note: null, reason: proof.proofProblem });
+    if (found.length === 0) return null;
     return {
-      headline: MISMATCH_HEADLINE,
-      rows: reportMismatchesOf(proof.reasons, proof.matrix, changes).map(one => ({
+      headline: evidenceProblemOf(proof.verdict, proof.reasons) === "mismatched" ? MISMATCH_HEADLINE : null,
+      rows: found.map(one => ({
         text: one.text, path: one.path, absent: one.inChanges === false,
         lines: one.lines === null ? null : one.lines.from === one.lines.to ? `line ${one.lines.from}` : `lines ${one.lines.from}–${one.lines.to}`,
         href: one.path !== null && one.inChanges === true ? `${changesHref}#${diffFileAnchor(one.path)}${hunkStart.has(one.path) ? `-L${hunkStart.get(one.path)}` : ""}`
           : one.note !== null && (proof.proof?.caveats.length ?? 0) >= one.note ? `${here}&run=${run.id}#report-note-${one.note}` : null,
         noteLabel: one.path === null && one.note !== null ? `The report, note ${one.note}` : null,
       })),
-      said: [...new Set(proof.reasons.flatMap(reason => [reason, plainReasonWords(reason)]))],
+      said: [...new Set([...proof.reasons, ...found.map(one => one.reason)].flatMap(reason => [reason, plainReasonWords(reason)]))],
     };
   })();
 

@@ -1450,6 +1450,23 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(changes).toContain(`<section class="diff-hunk" id="${diffFileAnchor("src/a.ts")}-L1">`);
   });
 
+  test("every refuted result lists what went wrong in its card: a failed check keeps its own headline, and a requirement whose evidence doesn't hold is named", async () => {
+    const ref = seed("t-refuted-check", "Fix the payout rounding drift", "/repo/main", { acceptance: [{ id: "c1", statement: "It works", evidence: ["check", "changed-path"] }, { id: "c2", statement: "The dashboard renders", evidence: ["screenshot"] }] });
+    const shot = 'criterion "c2"\'s screenshot evidence "evidence/dash.png" could not be verified: not a PNG';
+    const run = build("t-refuted-check", ref, {
+      ...RICH,
+      verdict: { verdict: "refuted" as const, matrix: [row("c1", "It works", "pass", [{ kind: "changed-path", ref: "src/a.ts" }]), row("c2", "The dashboard renders", "failed", [{ kind: "screenshot", ref: "evidence/dash.png" }], [shot])],
+        reasons: ["the repository's approved verification command exited 1"] },
+    });
+    await boot();
+    const cookie = await login();
+    const view = ((await (await fetch(url(`/review?result=t-refuted-check&run=${run}&format=workspace`), { headers: { cookie } })).json()) as import("./browser-workspace.js").BrowserWorkspace).view as import("./browser-workspace.js").BrowserResultView;
+    const mismatch = view.selected!.mismatch!;
+    expect(mismatch.headline).toBeNull();
+    expect(mismatch.rows).toEqual([{ text: "“The dashboard renders”: screenshot evidence \"evidence/dash.png\" could not be verified: not a PNG", path: null, lines: null, href: null, absent: false, noteLabel: null }]);
+    expect(mismatch.said).toContain(shot);
+  });
+
   test("package 3 c2: a tampered screenshot, a shortened check log, a failed change-summary capture, and an unverifiable report are named in the open, never rendered, never called validated; an investigation's report is escaped text", async () => {
     const ref = seed("t-damaged", "evidence damaged after sealing", "/repo/main", { acceptance: [{ id: "c1", statement: "It works", evidence: ["check", "screenshot"] }] });
     const run = build("t-damaged", ref, { ...RICH, checkLog: "x".repeat(170 * 1024), stat: undefined });

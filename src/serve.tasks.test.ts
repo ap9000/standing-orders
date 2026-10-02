@@ -1955,16 +1955,25 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
   test("a failed task says what went wrong in one line, its one ink act is Retry itself, and nothing links back to its own page", async () => {
     const ref = seed("t-broke", "broke");
     // The agent never started, so nothing of it can still be running: the page reads plain Failed.
-    const failedRun = store.startRun({ taskRef: ref, leaseId: "lease-broke", runner: "night-shift-1", provider: "claude", branch: "standing-orders/t-broke", worktree: "/pool/t-broke", now: T0, ...presented(store, ref, "builder") });
-    store.finishRun(failedRun, { outcome: "failed", reason: "agent", now: T0 });
+    const earlier = store.startRun({ taskRef: ref, leaseId: "lease-broke-1", runner: "night-shift-1", provider: "claude", branch: "standing-orders/t-broke", worktree: "/pool/t-broke", now: T0, ...presented(store, ref, "builder") });
+    store.finishRun(earlier, { outcome: "failed", reason: "timeout", now: T0 });
+    const failedRun = store.startRun({ taskRef: ref, leaseId: "lease-broke-2", runner: "night-shift-1", provider: "claude", branch: "standing-orders/t-broke", worktree: "/pool/t-broke", now: T0, ...presented(store, ref, "builder") });
+    store.finishRun(failedRun, { outcome: "failed", reason: "acceptance", now: T0 });
     store.setTaskState("t-broke", "failed", T0);
     await boot();
     const cookie = await login();
     const html = await (await fetch(url("/t/t-broke"), { headers: { cookie } })).text();
     const view = workspaceOf(html).view as import("./browser-workspace.js").BrowserTaskView;
-    expect(view.status).toMatchObject({ status: { headline: "Failed", sentence: "The agent failed." }, action: null });
-    expect(view.failure).toEqual({ line: "The agent failed.", link: { label: `Build #${failedRun}`, href: `/r/${failedRun}` } });
+    // The latest failed attempt's reason, in words: never the code as stored, never an earlier attempt's.
+    const said = "The result didn't meet its signed requirements.";
+    expect(view.status).toMatchObject({ status: { headline: "Failed", sentence: said }, action: null });
+    // No check log, so no log lines to link: never the run record, which would bring the person back here.
+    expect(view.failure).toEqual({ line: said, link: null });
+    expect(renderedHtmlOf(html)).not.toMatch(/“acceptance”|recorded reason “/);
     expect(view.retry).toEqual({ action: "/t/t-broke/requeue" });
+    // The Tasks list says the same, in vermilion's problem line.
+    const rows = (workspaceOf(await (await fetch(url("/work"), { headers: { cookie } })).text()).view as import("./browser-workspace.js").BrowserTasksView).rows;
+    expect(rows.find(row => row.id === "t-broke")?.detail).toBe(said);
     // No "review its incident", said once: Task options names the reason without its own Review and retry link, and offers no second ink retry.
     const options = view.manage.find(one => one.id === "task-diagnostics")!.html;
     expect(html).not.toContain("review its incident");

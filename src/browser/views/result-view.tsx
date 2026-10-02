@@ -92,7 +92,7 @@ function StatusCard({ selected }: { selected: Selected }) {
   return <Card data-result-status={selected.status.token} data-headline={status?.headline ?? selected.status.label} aria-label="Result status">
     <div className="min-w-0">
       {/* The blocking fact is the headline: the report doesn't match the changes. */}
-      {mismatch !== null ? <h2 className="flex items-center gap-2.5 text-lg font-semibold leading-snug" data-mismatch-headline>
+      {mismatch?.headline != null ? <h2 className="flex items-center gap-2.5 text-lg font-semibold leading-snug" data-mismatch-headline>
             <span aria-hidden="true" className={cn("size-2.5 shrink-0 rounded-full", status === null ? DOT[tone] : HEADLINE_DOT[status.tone])} />{mismatch.headline}
           </h2>
         : status !== null ? <StatusHeadline status={status} />
