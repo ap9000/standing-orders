@@ -706,7 +706,8 @@ const report = { startedAt: new Date(started).toISOString(), minutes: Math.round
 writeFileSync(join(out, "report.json"), JSON.stringify(report, null, 2) + "\n");
 writeFileSync(join(out, "report.md"), [`# Flows end to end${group === null ? "" : `: ${group}`} — ${passed} passed, ${failed} failed, ${skipped} skipped (${report.minutes} min)`, "",
   ...results.map(one => `- ${one.state === "passed" ? "✅" : one.state === "failed" ? "❌" : "⏭️"} ${one.name}${one.seconds === undefined ? "" : ` — ${one.seconds} s`}${one.error ? `\n  - ${one.error.split("\n")[0]}` : ""}`),
-  "", `Workspace: ${root}`, `Logs and screenshots: ${out}`, ""].join("\n"));
+  "", `Workspace: ${root}${flag("--keep") ? "" : " (removed; --keep keeps it)"}`, `Logs and screenshots: ${out}`, ""].join("\n"));
 say(`${passed} passed, ${failed} failed, ${skipped} skipped — ${join(out, "report.md")}`);
-if (!flag("--keep") && failed === 0) rmSync(root, { recursive: true, force: true });
+// The world goes whatever the outcome (the report stays in the output folder); --keep keeps it.
+if (!flag("--keep")) rmSync(root, { recursive: true, force: true, maxRetries: 3 });
 process.exitCode = failed === 0 && unstopped === null ? 0 : 1;

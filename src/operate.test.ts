@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { openStore } from "./store.js";
 import { presetTerms, modeTermsJson, modeDigestOf } from "./modes.js";
 import { DEFAULT_LIVENESS_MS, register } from "./runner.js";
@@ -9,7 +9,7 @@ import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { runOperate, EXIT } from "./operate.js";
 
 
@@ -2117,6 +2117,7 @@ describe("explainable phase routing from the command line (v47)", () => {
   const ROUTED_REPO = "/repo/routed";
   let token = "";
 
+  afterEach(() => { rmSync(dirname(db), { recursive: true, force: true }); });
   beforeEach(async () => {
     db = join(mkdtempSync(join(tmpdir(), "so-route-cli-")), "db.sqlite");
     await run(["approver", "add", "alex", "--json"]);

@@ -6,13 +6,18 @@
  * Only the working copy goes: its branch, and so every commit, stays, and a later lease of the branch makes a new one.
  *
  * Always kept: a checkout in use, one whose task isn't finished (on hold, failed, a revision under way), a result
- * still waiting for review, a release candidate for a week after it was done (a deploy installs from it), a checkout
- * with changes (files Toolroll wrote itself aside), and one with commits on no branch. A checkout no task names
- * (adopted after a crash) goes only in a clean-up by hand. Every removal is in the ledger.
+ * still waiting for review, a checkout with changes (files Toolroll wrote itself aside), and one with commits on no
+ * branch. A release candidate's checkout (a deploy installs from it) is kept only while it is the newest gate for its
+ * release (for a week after it was done) or the one deployed; a superseded or cancelled gate goes at once, whatever
+ * its task's state (staged releases keep the rollback copy). A checkout no task names (adopted after a crash) goes only
+ * in a clean-up by hand. Every removal is in the ledger.
+ *
+ * A kept checkout waiting for review or with changes drops its dependencies and build output once its run ends
+ * (`slimKeptCheckouts`); the next run's setup restores them.
  */
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
-import { basename } from "node:path";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { taskBranches } from "./names.js";
 import { COMPLETION_ACTION } from "./result-completion.js";
 import { CLEANUP_CHOICES, bytesWords, diskBytes, type CheckoutCleanup } from "./storage.js";
@@ -47,22 +52,73 @@ export type CheckoutPlan = {
   waitingReview: number; withChanges: number;
 };
 
-type Status = { keep: KeepWhy | null; taskId: string; finishedAt: string | null; dueAt?: string };
+type Status = { keep: KeepWhy | null; taskId: string; finishedAt: string | null; dueAt?: string; atOnce?: boolean };
+
+/** The release a deploy installed last (staged-upgrades/<stage>/deployment.json at phase "deployed"): its commit and
+ * builder run. A deploy runs from the gate's checkout, so that checkout stays while it is what runs. */
+export type Deployed = { head: string | null; run: number | null };
+
+export function deployedRelease(stateDir: string | null): Deployed | null {
+  if (stateDir === null) return null;
+  const root = join(stateDir, "staged-upgrades");
+  let newest: { at: string; head: string | null; run: number | null } | null = null;
+  let names: string[] = [];
+  try { names = readdirSync(root); } catch { return null; }
+  for (const name of names) {
+    let journal: Record<string, unknown>;
+    try { journal = JSON.parse(readFileSync(join(root, name, "deployment.json"), "utf8")) as Record<string, unknown>; } catch { continue; }
+    if (journal["phase"] !== "deployed") continue;
+    const at = typeof journal["deployedAt"] === "string" ? journal["deployedAt"] : typeof journal["updatedAt"] === "string" ? journal["updatedAt"] : "";
+    if (newest !== null && newest.at >= at) continue;
+    newest = { at, head: typeof journal["candidate"] === "string" ? journal["candidate"] : null, run: Number.isSafeInteger(journal["builder"]) ? Number(journal["builder"]) : null };
+  }
+  return newest === null ? null : { head: newest.head, run: newest.run };
+}
+
+/** The folder beside the database (where staged releases live), or null for a database in memory. */
+function stateDirOf(store: Store): string | null {
+  const main = store.handle.prepare("PRAGMA database_list").all().find(row => row["name"] === "main");
+  return typeof main?.["file"] === "string" && main["file"] !== "" ? dirname(main["file"]) : null;
+}
+
+/**
+ * Which release a gate belongs to: a failed gate is re-filed as the same name plus a letter (`release-x`, then
+ * `release-xb`, `release-xc` …), so a gate whose name is another gate's in the same project plus one letter is that
+ * release's.
+ */
+export function releaseOf(id: string, gates: ReadonlySet<string>): string {
+  return /[b-z]$/.test(id) && gates.has(id.slice(0, -1)) ? id.slice(0, -1) : id;
+}
 const STRENGTH: Record<string, number> = { "in use": 5, "task not finished": 4, "waiting for review": 3, "release candidate": 2 };
 const strength = (one: Status | undefined) => one === undefined ? -1 : one.keep === null ? 0 : STRENGTH[one.keep] ?? 1;
 const stronger = (a: Status | undefined, b: Status | undefined) =>
   strength(b) > strength(a) || (strength(b) === 0 && strength(a) === 0 && (b!.finishedAt ?? "") > (a!.finishedAt ?? "")) ? b : a;
 
 /** Where every task stands for cleanup, by task_ref id and by each branch it or its runs used. */
-export function taskStatuses(store: Store, now: Date): { byRef: Map<number, Status>; byBranch: Map<string, Status> } {
+export function taskStatuses(store: Store, now: Date, deployed?: Deployed | null): { byRef: Map<number, Status>; byBranch: Map<string, Status> } {
   const db = store.handle;
   const refs = db.prepare(`SELECT r.id AS ref, r.external_id AS id, r.revision_of AS revision_of, t.state AS state, t.updated_at AS updated_at,
       EXISTS (SELECT 1 FROM hold h WHERE h.task_ref = r.id) AS held,
       EXISTS (SELECT 1 FROM run live WHERE live.task_ref = r.id AND live.finished_at IS NULL) AS live,
-      EXISTS (SELECT 1 FROM task_scope s WHERE s.task_id = r.external_id AND s.candidate IS NOT NULL) AS candidate
+      (SELECT MAX(s.candidate) FROM task_scope s WHERE s.task_id = r.external_id) AS candidate, r.repo AS repo
     FROM task_ref r LEFT JOIN task t ON t.id = r.external_id AND r.backend = 'built-in'`).all();
   const runs = db.prepare("SELECT id, task_ref, branch FROM run").all();
   const refOfRun = new Map(runs.map(row => [Number(row["id"]), Number(row["task_ref"])]));
+  // Release candidates: per project and release, the newest gate not cancelled; and the one deployed.
+  const gates = refs.filter(row => row["candidate"] !== null);
+  const gateIds = new Map<string, Set<string>>();
+  for (const row of gates) { const repo = String(row["repo"]); gateIds.set(repo, (gateIds.get(repo) ?? new Set()).add(String(row["id"]))); }
+  const releaseKey = (row: Record<string, unknown>) => `${String(row["repo"])}\u0000${releaseOf(String(row["id"]), gateIds.get(String(row["repo"]))!)}`;
+  const newestGate = new Map<string, number>();
+  for (const row of gates) {
+    if (row["state"] === "cancelled") continue;
+    const key = releaseKey(row);
+    newestGate.set(key, Math.max(newestGate.get(key) ?? -1, Number(row["ref"])));
+  }
+  const live = deployed === undefined ? deployedRelease(stateDirOf(store)) : deployed;
+  const deployedRef = live === null ? undefined : live.run !== null ? refOfRun.get(live.run) : undefined;
+  const isDeployed = (row: Record<string, unknown>) => live !== null &&
+    (Number(row["ref"]) === deployedRef || (live.head !== null && String(row["candidate"]) === live.head));
   // The completion names its family's root; its run names the result it completes.
   const completed = new Map<string, string>();
   const completedRef = new Map<number, string>();
@@ -80,13 +136,17 @@ export function taskStatuses(store: Store, now: Date): { byRef: Map<number, Stat
     const id = String(row["id"]);
     const state = row["state"] === null ? null : String(row["state"]);
     const updated = row["updated_at"] === null ? null : String(row["updated_at"]);
+    const gate = row["candidate"] !== null;
     let status: Status;
     if (Number(row["live"]) === 1) status = { keep: "in use", taskId: id, finishedAt: null };
+    else if (gate && isDeployed(row)) status = { keep: "release candidate", taskId: id, finishedAt: updated };
+    // A superseded or cancelled gate goes at once, whatever its task's state: a newer gate (or none) is the release.
+    else if (gate && (state === "cancelled" || newestGate.get(releaseKey(row)) !== ref)) status = { keep: null, taskId: id, finishedAt: updated, atOnce: true };
     else if (state === null || Number(row["held"]) === 1 || (state !== "done" && state !== "cancelled")) status = { keep: "task not finished", taskId: id, finishedAt: null };
     else if (state === "cancelled") status = { keep: null, taskId: id, finishedAt: updated };
     else {
       const completedAt = [completed.get(id), completedRef.get(ref)].filter((one): one is string => one !== undefined).sort().at(-1) ?? null;
-      if (Number(row["candidate"]) === 1) {
+      if (gate) {
         const since = completedAt ?? updated ?? now.toISOString();
         const until = new Date(Date.parse(since) + CANDIDATE_KEEP_MS).toISOString();
         status = until > now.toISOString() ? { keep: "release candidate", taskId: id, finishedAt: since, dueAt: until } : { keep: null, taskId: id, finishedAt: since };
@@ -128,6 +188,17 @@ function statusOf(row: WorktreeRow, statuses: ReturnType<typeof taskStatuses>): 
   return found;
 }
 
+/** The let-go checkouts whose task is complete or cancelled, and when it finished. Not a release candidate's that
+ * stays: a deploy runs from it. */
+export function finishedCheckouts(store: Store, now: Date, repo?: string): { row: WorktreeRow; taskId: string | null; finishedAt: string }[] {
+  const statuses = taskStatuses(store, now);
+  return store.listWorktrees().filter(row => row.releasedAt !== null && row.runner === null && (repo === undefined || row.repo === repo)).flatMap(row => {
+    const status = statusOf(row, statuses);
+    if (status === undefined || status.finishedAt === null || status.keep !== null) return [];
+    return [{ row, taskId: status.taskId, finishedAt: status.finishedAt }];
+  });
+}
+
 /** Why a checkout stays before anyone looks at its files, or null: it may go (as far as its task and the setting say). */
 function keptFor(pool: WorktreePool, row: WorktreeRow, statuses: ReturnType<typeof taskStatuses>, now: Date, cleanup: CheckoutCleanup | "manual"): { why: KeepWhy | null; dueAt?: string; taskId: string | null } {
   const status = statusOf(row, statuses);
@@ -139,6 +210,7 @@ function keptFor(pool: WorktreePool, row: WorktreeRow, statuses: ReturnType<type
   if (status === undefined) return { why: "no task", taskId };
   if (cleanup === "finished") return { why: null, taskId };
   if (cleanup === "never") return { why: "cleanup is off", taskId };
+  if (status.atOnce === true) return { why: null, taskId };
   const days = CLEANUP_CHOICES.find(one => one.value === cleanup)!.days!;
   const since = [status.finishedAt, row.releasedAt].filter((one): one is string => one !== null).sort().at(-1)!;
   const dueAt = new Date(Date.parse(since) + days * DAY_MS).toISOString();
@@ -216,6 +288,40 @@ export async function cleanCheckouts(store: Store, pool: WorktreePool, now: () =
   return { removed, kept: pruned.kept, freed: removed.reduce((sum, one) => sum + one.bytes, 0) };
 }
 
+export type SlimResult = { slimmed: { path: string; taskId: string | null; dropped: string[]; bytes: number }[] };
+
+/** Checkouts this process already looked at since they were let go (path and release time): looked at once. */
+const looked = new Set<string>();
+
+/**
+ * A kept checkout (its result waiting for review, or with changes) drops its dependencies and build output once its
+ * run has ended; the next run's setup restores them (node_modules only goes where the project has a setup to restore
+ * it). Never one in use or a release candidate (a deploy installs from it). Each in the ledger.
+ */
+export async function slimKeptCheckouts(store: Store, pool: WorktreePool, now: () => Date, options: { actor: string; repo?: string }): Promise<SlimResult> {
+  const rows = store.listWorktrees().filter(row => row.releasedAt !== null && row.runner === null && (options.repo === undefined || row.repo === options.repo)
+    && !looked.has(`${row.path}\u0000${row.releasedAt}`) && existsSync(row.path));
+  const slimmed: SlimResult["slimmed"] = [];
+  if (rows.length === 0) return { slimmed };
+  const keptAs = (row: WorktreeRow) => keptFor(pool, row, taskStatuses(store, now()), now(), "manual");
+  const statuses = taskStatuses(store, now());
+  for (const row of rows) {
+    const kept = keptFor(pool, row, statuses, now(), "manual");
+    if (kept.why === "in use") continue;
+    looked.add(`${row.path}\u0000${row.releasedAt}`);
+    if (kept.why === "release candidate") continue;
+    if (kept.why !== "waiting for review" && await pool.inspect(row.path) !== "has changes") continue;
+    const wanted = (fresh: WorktreeRow) => { const why = keptAs(fresh).why; return why !== "in use" && why !== "release candidate"; };
+    const done = await pool.slim(row, wanted, store.liveWorktreeSetup(row.repo) !== null);
+    if (!done.ok || done.dropped.length === 0) continue;
+    const bytes = done.bytes;
+    slimmed.push({ path: row.path, taskId: kept.taskId, dropped: done.dropped, bytes });
+    store.recordAction({ at: now().toISOString(), actor: options.actor, repo: row.repo, taskId: kept.taskId, runId: null, action: "checkout slimmed", outcome: "removed", source: "work",
+      detail: `${basename(row.path)}: dropped ${done.dropped.join(", ")}${bytes > 0 ? ` (about ${bytesWords(bytes)})` : ""}; the next run's setup restores them` });
+  }
+  return { slimmed };
+}
+
 /** Throw away a checkout kept for its changes, on purpose; its branch stays. In the ledger. */
 export async function discardCheckout(store: Store, pool: WorktreePool, path: string, now: Date, actor: string): Promise<{ ok: true; bytes: number } | { ok: false; message: string }> {
   const bytes = existsSync(path) ? diskBytes([path]).get(path) ?? 0 : 0;
@@ -234,7 +340,7 @@ export function whyWords(item: Pick<CheckoutItem, "why" | "dueAt">): string {
     case "in use": return "in use";
     case "task not finished": return "its task isn't finished";
     case "waiting for review": return "its result is waiting for review";
-    case "release candidate": return `release candidate, kept until ${item.dueAt?.slice(0, 10) ?? "a week after"}`;
+    case "release candidate": return item.dueAt === undefined ? "the deployed release candidate" : `newest release candidate, kept until ${item.dueAt.slice(0, 10)}`;
     case "has changes": return "has changes";
     case "has commits": return "has commits on no branch";
     case "unreadable": return "git couldn't read it";

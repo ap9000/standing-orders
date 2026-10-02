@@ -7,8 +7,10 @@ import { parseProtectedPaths } from "./approval-policy.js";
 import { rulesSummary } from "./approval-rules-ui.js";
 import { evidencePack, exportDay, ledgerExportChunks, standaloneEvidenceHtml, type LedgerExport } from "./evidence-pack.js";
 import { matchesOutsideCheckpoint } from "./ledger-chain.js";
-import { CLEANUP_CHOICES, bytesWords, cleanupWords, parseCleanup, storageReport } from "./storage.js";
-import { checkoutPlan, cleanCheckouts, discardCheckout, whyWords, type CheckoutItem, type CheckoutPlan } from "./checkout-cleanup.js";
+import { CLEANUP_CHOICES, bytesWords, cleanupWords, diskBytes, parseCleanup, storageReport } from "./storage.js";
+import { removeStaleTestTemp, tempRoots, testTempFolders } from "./test-temp.js";
+import { checkoutPlan, cleanCheckouts, discardCheckout, finishedCheckouts, slimKeptCheckouts, whyWords, type CheckoutItem, type CheckoutPlan } from "./checkout-cleanup.js";
+import { closeOutCheckouts, closeOutRuns, stoppedWords } from "./run-closeout.js";
 import { MIN_DAYS, RETENTION_KINDS, countWords, dailyRetention, isRetentionKind, lastSweepAt, parsePeriod, periodLabel, periodWords, retentionPlan, sweepWords, type RetentionKind, type RetentionSweep } from "./retention.js";
 import { checkPolicy, parseList, policyParts, type SavedPolicy } from "./policy.js";
 import { billingOf, budgetHoldWords, budgetLabel, budgetStates, monthNamed, monthOf, spendItems, teammateNames, usd as spendUsd, type BudgetAgent, type BudgetHold } from "./spend.js";
@@ -335,6 +337,8 @@ export type OperateOptions = {
   releaseIo?: ReleaseIo;
   /** Injected by tests: the bin whose real path says how Toolroll was installed. */
   installBin?: string;
+  /** Injected by tests: where `storage` looks for leftover test temp folders (default: the temp folder and /tmp). */
+  tempRoots?: readonly string[];
   openDatabase?: (file: string) => Store;
   now?: Date;
   /**
@@ -398,8 +402,8 @@ export const OPERATE_HELP = `toolroll — operating the queue
                                         how many of a project's tasks build at once (default 2, never past the
                                         worker's capacity); an approver changes it with <n>
   toolroll task evidence <id>        the task's evidence pack as JSON (--html for a printable page; --out <file>)
-  toolroll storage                   where the disk goes: database, build checkouts, releases, evidence
-  toolroll storage clean [--yes]     preview removing finished tasks' clean checkouts (their branches stay); --yes removes them
+  toolroll storage                   where the disk goes: database, build checkouts, releases, evidence, leftover test temp folders
+  toolroll storage clean [--yes]     preview removing finished tasks' clean checkouts (their branches stay) and test temp folders older than a day; --yes removes them
   toolroll storage cleanup <when>    remove a finished task's clean checkout: finished|2d|7d|never (instance operator)
   toolroll storage discard <path> --yes   throw away a checkout kept for its changes; its branch stays
   toolroll integrations [--json]     which integrations work: Connected, Not set up or Broken, and what to do (--saved: no new checks)
@@ -994,6 +998,7 @@ export async function runOperate(
       // it matters.
       evidenceRoot: join(dirname(file), "evidence"),
       databaseFile: file,
+      ...(options.tempRoots === undefined ? {} : { tempRoots: options.tempRoots }),
       // The bot token's file home. Never a column; see telegram.ts.
       telegramTokenFile: join(dirname(file), "telegram-token"),
       ...(options.desktopIdentity === undefined ? {} : { desktopIdentity: options.desktopIdentity }),
@@ -1048,6 +1053,8 @@ type Context = {
   evidenceRoot: string;
   /** The directory holding the database — where credential files live. */
   databaseFile: string;
+  /** Where `storage` looks for leftover test temp folders; default the temp folder and /tmp. */
+  tempRoots?: readonly string[];
   telegramTokenFile: string;
   agentRunner?: CommandRunner;
   gitRunner?: CommandRunner;
@@ -4882,6 +4889,9 @@ async function reconcileCommand(
   }
 
   const recovered = recoverDead(store, clock());
+  // A run that ended, whatever its outcome, leaves nothing running: what is still in its process groups is stopped
+  // (SIGTERM, then SIGKILL after 10 s) and the ledger names it. Never the live service.
+  const closedRuns = await closeOutRuns(store, clock, { repo });
   // A witness reserved for a spawn that never made a process (a crash or a
   // thrown spawn) settles once its run's process groups are proven gone.
   store.settleUnspawnedWitnesses(clock());
@@ -4945,7 +4955,11 @@ async function reconcileCommand(
 
   // Checkout cleanup (Settings → Storage): finished work's clean checkouts go as the setting says (by default when
   // the task is complete or cancelled); their branches stay. Each removal is in the ledger.
+  // Completing or cancelling a task stops anything still running from its checkout first.
+  const closedCheckouts = await closeOutCheckouts(store, clock, finishedCheckouts(store, clock(), repo));
   const pruned = await cleanCheckouts(store, worktrees, clock, { manual: false, actor: "worker", repo });
+  // What stays for review or for its changes drops its dependencies and build output; the next run's setup restores them.
+  const slimmed = await slimKeptCheckouts(store, worktrees, clock, { actor: "worker", repo });
 
   // Retention (Settings → Retention): once a day, what's older than its setting goes; one ledger entry says what.
   let retention: RetentionSweep | null = null;
@@ -4959,6 +4973,9 @@ async function reconcileCommand(
     adoption.adopted.length === 0 &&
     adoption.forgotten.length === 0 &&
     pruned.removed.length === 0 &&
+    closedRuns.length === 0 &&
+    closedCheckouts.length === 0 &&
+    slimmed.slimmed.length === 0 &&
     liveSwept.removed.length === 0;
 
   return succeed(
@@ -4972,6 +4989,8 @@ async function reconcileCommand(
       forgotten: adoption.forgotten,
       checkoutsRemoved: pruned.removed.map(one => one.path),
       checkoutsKept: pruned.kept,
+      processesStopped: [...closedRuns.map(one => ({ run: one.runId, pids: one.done.stopped.map(row => row.pid) })), ...closedCheckouts.map(one => ({ checkout: one.path, pids: one.done.stopped.map(row => row.pid) }))],
+      checkoutsSlimmed: slimmed.slimmed.map(one => one.path),
       liveViewsSwept: liveSwept.removed.length,
       retention: retention === null ? null : { counts: retention.counts, freedBytes: retention.freed },
     },
@@ -4987,6 +5006,9 @@ async function reconcileCommand(
             ...adoption.adopted.map(path => `Adopted ${path} — released, unverified, somebody should look.`),
             ...adoption.forgotten.map(path => `Forgot ${path} — its directory is gone.`),
             ...(pruned.removed.length === 0 ? [] : [`Removed ${pruned.removed.length} finished task checkout(s), about ${bytesWords(pruned.freed)}; their branches stay.`]),
+            ...closedRuns.map(one => `Run #${one.runId} ended; stopped ${stoppedWords(one.done)}.`),
+            ...closedCheckouts.map(one => `${one.path}: its task finished; stopped ${stoppedWords(one.done)}.`),
+            ...(slimmed.slimmed.length === 0 ? [] : [`Dropped dependencies and build output from ${slimmed.slimmed.length} kept checkout(s), about ${bytesWords(slimmed.slimmed.reduce((sum, one) => sum + one.bytes, 0))}.`]),
             ...(liveSwept.removed.length === 0 ? [] : [`Cleared ${liveSwept.removed.length} finished live view(s).`]),
             ...(retention === null || retained.length === 0 ? [] : [`Retention removed ${sweepWords(retention.counts, retention.freed)}.`]),
           ],
@@ -13361,14 +13383,26 @@ async function storageCommand(positional: readonly string[], flags: Map<string, 
     `A finished task's clean checkout is removed ${cleanupWords(plan.cleanup)}; its branch stays.`,
   ];
   const itemLine = (one: CheckoutItem) => `  ${bytesWords(one.bytes).padStart(8)}  ${one.path}${one.why === null ? "" : `  (${whyWords(one)})`}`;
+  // Test temp folders the tests, journeys and scripts left (a killed run, an older version): those nothing touched for a day go.
+  const roots = context.tempRoots ?? tempRoots();
+  // Counting is quick; sizing thousands of folders isn't, so only a clean-up measures them.
+  const leftovers = (measure: boolean) => {
+    const found = testTempFolders(roots, context.clock());
+    const sizes = measure ? diskBytes(found.stale.map(one => one.path)) : new Map<string, number>();
+    return { count: found.all.length, stale: found.stale.length, staleBytes: [...sizes.values()].reduce((sum, one) => sum + one, 0) };
+  };
+  const leftoverLine = (temp: ReturnType<typeof leftovers>) => temp.count === 0 ? "Test temp folders: none." :
+    `Test temp folders: ${temp.count}; ${temp.stale === 0 ? "none older than a day." : `${temp.stale} older than a day: toolroll storage clean removes them.`}`;
 
   if (action === undefined) {
     const plan = await checkoutPlan(store, pool, context.clock(), { manual: true });
     const report = storageReport(store, context.databaseFile, plan.go.length === 0 ? "nothing to clean up" : `about ${bytesWords(plan.freeBytes)} to clean up`);
-    return succeed(context.write, context.json, "storage", { ...report, checkouts: checkoutSummary(plan) }, () => [
+    const { staleBytes: _, ...temp } = leftovers(false);
+    return succeed(context.write, context.json, "storage", { ...report, checkouts: checkoutSummary(plan), testTemp: temp }, () => [
       `${report.folder}: ${bytesWords(report.total)}`,
       ...report.lines.map(one => `  ${one.what.padEnd(17)} ${bytesWords(one.bytes).padStart(8)}${one.count === undefined ? "" : `  (${one.count})`}${one.note === undefined ? "" : `  ${one.note}`}`),
       ...summary(plan),
+      leftoverLine({ ...temp, staleBytes: 0 }),
     ]);
   }
   if (action === "cleanup") {
@@ -13387,19 +13421,30 @@ async function storageCommand(positional: readonly string[], flags: Map<string, 
     if (rest.length > 0) return fail(context.write, context.json, command, "usage", "Use storage clean to preview, then storage clean --yes.", EXIT.usage);
     if (!flags.has("yes")) {
       const plan = await checkoutPlan(store, pool, context.clock(), { manual: true });
-      return succeed(context.write, context.json, command, { preview: true, go: plan.go, stay: plan.stay, freeBytes: plan.freeBytes }, () => [
-        ...(plan.go.length === 0 ? ["Nothing to clean up."] : [`Would remove ${plan.go.length} checkout${plan.go.length === 1 ? "" : "s"}, freeing about ${bytesWords(plan.freeBytes)} (their branches stay):`, ...plan.go.map(itemLine)]),
+      const temp = leftovers(true);
+      const anything = plan.go.length > 0 || temp.stale > 0;
+      return succeed(context.write, context.json, command, { preview: true, go: plan.go, stay: plan.stay, freeBytes: plan.freeBytes, testTemp: temp }, () => [
+        ...(plan.go.length === 0 ? [anything ? "No checkouts to clean up." : "Nothing to clean up."] : [`Would remove ${plan.go.length} checkout${plan.go.length === 1 ? "" : "s"}, freeing about ${bytesWords(plan.freeBytes)} (their branches stay):`, ...plan.go.map(itemLine)]),
         ...(plan.stay.length === 0 ? [] : [`Stays (${plan.stay.length}):`, ...plan.stay.map(itemLine)]),
-        plan.go.length === 0 ? "Nothing was removed." : "Nothing was removed. Run toolroll storage clean --yes to remove them.",
+        ...(temp.stale === 0 ? [] : [`Would remove ${temp.stale} test temp folder${temp.stale === 1 ? "" : "s"} older than a day, about ${bytesWords(temp.staleBytes)}.`]),
+        anything ? "Nothing was removed. Run toolroll storage clean --yes to remove them." : "Nothing was removed.",
       ]);
     }
     const actor = await operator();
     if (actor === null) return refused("cleans up checkouts");
     const done = await cleanCheckouts(store, pool, context.clock, { manual: true, actor });
-    return succeed(context.write, context.json, command, { removed: done.removed, kept: done.kept, freedBytes: done.freed }, () => [
-      done.removed.length === 0 ? "Nothing to clean up." : `Removed ${done.removed.length} checkout${done.removed.length === 1 ? "" : "s"}, about ${bytesWords(done.freed)}; their branches stay.`,
+    const temp = leftovers(true);
+    const swept = removeStaleTestTemp(roots, context.clock());
+    if (swept.removed.length > 0) {
+      store.recordAction({ at: context.clock().toISOString(), actor, repo: null, taskId: null, runId: null, action: "test temp folders removed", outcome: "removed", source: "request",
+        detail: `${swept.removed.length} older than a day, about ${bytesWords(temp.staleBytes)}${swept.failed.length === 0 ? "" : `; ${swept.failed.length} couldn't be removed`}` });
+    }
+    return succeed(context.write, context.json, command, { removed: done.removed, kept: done.kept, freedBytes: done.freed, testTempRemoved: swept.removed.length, testTempFailed: swept.failed }, () => [
+      done.removed.length === 0 ? (swept.removed.length === 0 ? "Nothing to clean up." : "No checkouts to clean up.") : `Removed ${done.removed.length} checkout${done.removed.length === 1 ? "" : "s"}, about ${bytesWords(done.freed)}; their branches stay.`,
       ...done.removed.map(itemLine),
       ...done.kept.map(one => `  kept ${one.path} (${whyWords({ why: one.why })})`),
+      ...(swept.removed.length === 0 ? [] : [`Removed ${swept.removed.length} test temp folder${swept.removed.length === 1 ? "" : "s"} older than a day, about ${bytesWords(temp.staleBytes)}.`]),
+      ...(swept.failed.length === 0 ? [] : [`Couldn't remove ${swept.failed.length} test temp folder${swept.failed.length === 1 ? "" : "s"}: ${swept.failed.slice(0, 3).join(", ")}${swept.failed.length > 3 ? " …" : ""}`]),
     ]);
   }
   if (action === "discard") {

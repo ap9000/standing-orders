@@ -17,7 +17,9 @@
  * Everything starts at once: typecheck, build and the unit tests (whose setup
  * waits for this build rather than building again); the journeys start when
  * the build is done, flows-e2e and app-e2e each in parallel groups
- * (scripts/e2e-parallel.mjs).
+ * (scripts/e2e-parallel.mjs). Together they run at most as many browser groups
+ * at once as the memory available allows (~400 MB each, at most 6;
+ * check-memory.mjs), and the summary records the peak memory.
  *
  * The base is origin/main, fetched fresh; files are compared, not ancestry.
  * No difference from main (or no main) means everything runs. `--full` (or TOOLROLL_FULL_CHECK=1) runs
@@ -29,6 +31,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { availableMemory, browserSlots, memoryWords, watchMemory } from "./check-memory.mjs";
 
 const args = process.argv.slice(2);
 const full = args.includes("--full") || process.env.TOOLROLL_FULL_CHECK === "1";
@@ -106,6 +109,16 @@ const run = (label, command, argv, dir, env = {}) => new Promise(done => {
   for (const stream of [child.stdout, child.stderr]) stream.on("data", chunk => chunks.push(chunk));
   child.on("close", code => { writeFileSync(log, Buffer.concat(chunks)); done({ label, code: code ?? 1, log, ms: Date.now() - at }); });
 });
+/**
+ * The browser groups the two journey runs may hold at once, shared out: each gets at least one, and with room for
+ * only one in all they run one after the other.
+ */
+export function journeyShares(slots) {
+  if (slots <= 1) return { flows: 1, app: 1, together: false };
+  const flows = Math.floor(slots / 2);
+  return { flows, app: slots - flows, together: true };
+}
+
 const took = ms => ms < 60_000 ? `${Math.round(ms / 1000)} s` : `${Math.round(ms / 6000) / 10} min`;
 
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
@@ -118,6 +131,7 @@ if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).
   console.log(`Release check against ${base === null ? "nothing (origin/main unknown)" : `origin/main ${base.slice(0, 12)}`} (${changed.length} changed files): ${plan.why}.`);
   if (planOnly) process.exit(0);
 
+  const memory = watchMemory();
   const dir = mkdtempSync(join(tmpdir(), "release-check-"));
   // The unit tests' setup (test/ensure-build.ts) waits for this file: the build's outcome.
   const built = join(dir, "build-outcome");
@@ -141,10 +155,10 @@ if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).
   const journeys = build.then(one => {
     held = plan.browser && (one.code !== 0 || (typed !== null && typed.code !== 0));
     if (!plan.browser || held) return [];
-    return Promise.all([
-      run("flows", process.execPath, ["scripts/e2e-parallel.mjs", "scripts/flows-e2e.mjs"], dir),
-      run("app", process.execPath, ["scripts/e2e-parallel.mjs", "scripts/app-e2e.mjs", "--skip-build"], dir),
-    ]);
+    const shares = journeyShares(browserSlots(availableMemory()));
+    const flows = () => run("flows", process.execPath, ["scripts/e2e-parallel.mjs", "scripts/flows-e2e.mjs", "--at-once", String(shares.flows)], dir);
+    const app = () => run("app", process.execPath, ["scripts/e2e-parallel.mjs", "scripts/app-e2e.mjs", "--skip-build", "--at-once", String(shares.app)], dir);
+    return shares.together ? Promise.all([flows(), app()]) : flows().then(async one => [one, await app()]);
   });
   const first = await Promise.all([typecheck, build]);
   const results = [...await Promise.all(units), ...await journeys];
@@ -160,5 +174,6 @@ if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).
   if (held) console.log("browser journeys not run: the typecheck or build failed");
   if (results.length === 0 && first.every(one => one.code === 0)) console.log("typecheck and build passed; nothing else to run");
   console.log(`took: ${[...first, ...results].map(one => `${one.label} ${took(one.ms)}`).join(", ")}; whole check ${took(Date.now() - started)}`);
+  console.log(memoryWords(memory.stop()));
   process.exitCode = [...first, ...results].some(one => one.code !== 0) ? 1 : 0;
 }

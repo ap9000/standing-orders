@@ -1,4 +1,4 @@
-import { describe, test, expect } from "vitest";
+import { afterAll, describe, test, expect } from "vitest";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +15,10 @@ import type { CapturedBuild } from "./builder.js";
 import type { HeldSessionStart, HeldSessionHandle } from "./exec.js";
 
 const T0 = new Date("2026-08-25T22:00:00.000Z");
+/** Temp folders the held-session fixtures make; gone when the file's tests are done. */
+const tempRoots: string[] = [];
+const removedAfter = (path: string): string => { tempRoots.push(path); return path; };
+afterAll(() => { for (const one of tempRoots.splice(0)) rmSync(one, { recursive: true, force: true }); });
 const later = (seconds: number): Date => new Date(T0.getTime() + seconds * 1000);
 
 /** The runner gate (MCP spec v6): every claiming runner is registered and
@@ -256,7 +260,7 @@ describe("the coordinator: final proof, custody, settlement through the shared m
       effective: { model: "sonnet", maxTurns: 40, timeoutMs: 60_000, skipPermissions: false, profile: PROFILE },
       answers: [],
       timeoutMs: 60_000,
-      root: mkdtempSync(join(tmpdir(), "so-held-root-")),
+      root: removedAfter(mkdtempSync(join(tmpdir(), "so-held-root-"))),
       mailbox: "SO-MAILBOX-test.json",
       done: "SO-DONE-test.json",
       clock: () => new Date(),

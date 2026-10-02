@@ -4,7 +4,7 @@
  * person's work, a clean-up by hand previews first, and every removal is in the ledger.
  */
 import { afterEach, beforeEach, expect, test } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openStore, type Store } from "./store.js";
@@ -15,7 +15,7 @@ import { runOperate } from "./operate.js";
 import { run } from "./exec.js";
 import { COMPLETION_ACTION } from "./result-completion.js";
 import { WorktreePool } from "./worktree.js";
-import { checkoutPlan, cleanCheckouts, taskStatuses } from "./checkout-cleanup.js";
+import { checkoutPlan, cleanCheckouts, deployedRelease, releaseOf, slimKeptCheckouts, taskStatuses, whyWords } from "./checkout-cleanup.js";
 import { parseCleanup } from "./storage.js";
 
 const DAY = 86_400_000;
@@ -167,8 +167,16 @@ test("toolroll storage clean previews without removing anything, and --yes remov
   writeFileSync(join(kept, "draft.md"), "unfinished thought\n");
   store.setCheckoutCleanup("never", "alex", T0);
   store.close();
+  // Leftover test temp folders: two nothing touched for two days, one still in use, and somebody else's.
+  const temp = join(dir, "temp");
+  const old = new Date(Date.now() - 2 * DAY);
+  for (const name of ["so-route-cli-a1b2c3", "playwright_chromiumdev_profile-Xy12", "no-wt-fresh1", "someone-elses-folder"]) {
+    mkdirSync(join(temp, name), { recursive: true });
+    writeFileSync(join(temp, name, "file"), "x\n");
+    if (name !== "no-wt-fresh1") { utimesSync(join(temp, name, "file"), old, old); utimesSync(join(temp, name), old, old); }
+  }
   let lines: string[] = [];
-  const cli = async (argv: string[]) => { lines = []; const code = await runOperate("storage", argv, line => { lines.push(line); }, { databaseFile: file, evidenceRoot: join(dir, "evidence") }); return { code, out: lines.join("\n") }; };
+  const cli = async (argv: string[]) => { lines = []; const code = await runOperate("storage", argv, line => { lines.push(line); }, { databaseFile: file, evidenceRoot: join(dir, "evidence"), tempRoots: [temp] }); return { code, out: lines.join("\n") }; };
   try {
     const preview = await cli(["clean"]);
     expect(preview.code).toBe(0);
@@ -179,8 +187,11 @@ test("toolroll storage clean previews without removing anything, and --yes remov
     expect(preview.out).toContain("Nothing was removed.");
     for (const path of [first, second, kept]) expect(existsSync(path)).toBe(true);
     expect(JSON.parse((await cli(["clean", "--json"])).out)).toMatchObject({ ok: true, preview: true, go: [{}, {}], stay: [{ path: kept, why: "has changes" }] });
+    expect(preview.out).toMatch(/Would remove 2 test temp folders older than a day, about \d+ KB\./);
     const summary = await cli([]);
     expect(summary.out).toContain("1 kept because they have changes");
+    expect(summary.out).toContain("Test temp folders: 3; 2 older than a day: toolroll storage clean removes them.");
+    expect(JSON.parse((await cli(["--json"])).out)).toMatchObject({ testTemp: { count: 3, stale: 2 } });
     expect(summary.out).toMatch(/A clean up now would free about .+ \(2 checkouts\)/);
 
     expect((await cli(["clean", "--yes"])).code).toBe(3);
@@ -190,6 +201,8 @@ test("toolroll storage clean previews without removing anything, and --yes remov
     expect(removed.out).toContain("Removed 2 checkouts");
     for (const path of [first, second]) expect(existsSync(path)).toBe(false);
     expect(existsSync(join(kept, "draft.md"))).toBe(true);
+    expect(removed.out).toMatch(/Removed 2 test temp folders older than a day/);
+    expect(["so-route-cli-a1b2c3", "playwright_chromiumdev_profile-Xy12", "no-wt-fresh1", "someone-elses-folder"].map(name => existsSync(join(temp, name)))).toEqual([false, false, true, true]);
 
     expect((await cli(["cleanup", "7d", "--as", "alex", "--token", alex.token])).out).toContain("a week after its task is complete or cancelled");
     expect((await cli(["discard", kept])).code).toBe(2);
@@ -200,6 +213,7 @@ test("toolroll storage clean previews without removing anything, and --yes remov
   }
   expect(removals().map(one => [one.taskId, one.actor, one.source]).sort()).toEqual([["one", "alex", "request"], ["two", "alex", "request"]]);
   expect(store.actionLedger({ repos: null }).filter(one => one.action === "checkout discarded").map(one => one.taskId)).toEqual(["three"]);
+  expect(store.actionLedger({ repos: null }).find(one => one.action === "test temp folders removed")).toMatchObject({ actor: "alex", source: "request", detail: expect.stringContaining("2 older than a day") });
   expect(store.checkoutCleanup()).toBe("7d");
   expect(await branchExists("toolroll/three")).toBe(true);
 });
@@ -251,4 +265,97 @@ test("Settings → Storage shows checkout space and what a clean-up frees; Clean
   } finally {
     await new Promise<void>(resolve => server.close(() => resolve()));
   }
+});
+
+/** A release gate: a task whose scope names a prepared candidate commit. */
+async function gate(id: string, finish: Finish, head: string): Promise<string> {
+  const path = await task(id, finish);
+  store.handle.prepare("INSERT INTO task_scope (task_id, goal, proposed_at, digest, candidate) VALUES (?, 'Verify the release check passes.', ?, 'd', ?)").run(id, T0.toISOString(), head);
+  return path;
+}
+
+test("only the newest gate of a release and the deployed one keep a checkout; superseded and cancelled gates go at once", async () => {
+  expect(releaseOf("release-xb", new Set(["release-x", "release-xb"]))).toBe("release-x");
+  expect(releaseOf("release-lean-plane", new Set(["release-lean-plane"]))).toBe("release-lean-plane");
+  store.setCheckoutCleanup("7d", "alex", T0);
+  const failedFirst = await gate("release-one", "queued", "sha-1a");
+  const newest = await gate("release-oneb", "completed", "sha-1b");
+  const deployed = await gate("release-two", "completed", "sha-2a");
+  const next = await gate("release-twob", "completed", "sha-2b");
+  const cancelled = await gate("release-three", "cancelled", "sha-3a");
+  // The deploy journal beside the database names what runs now.
+  mkdirSync(join(dir, "staged-upgrades", "browser-2a"), { recursive: true });
+  writeFileSync(join(dir, "staged-upgrades", "browser-2a", "deployment.json"), JSON.stringify({ phase: "deployed", candidate: "sha-2a", builder: 9999, deployedAt: at(500).toISOString() }));
+  mkdirSync(join(dir, "staged-upgrades", "browser-1b"), { recursive: true });
+  writeFileSync(join(dir, "staged-upgrades", "browser-1b", "deployment.json"), JSON.stringify({ phase: "rehearse", candidate: "sha-1b", builder: 9998 }));
+  expect(deployedRelease(dir)).toEqual({ head: "sha-2a", run: 9999 });
+
+  const plan = await checkoutPlan(store, pool, at(1000), { manual: false });
+  expect(plan.go.map(one => one.path).sort()).toEqual([cancelled, failedFirst].sort());
+  const stay = Object.fromEntries(plan.stay.map(one => [one.path, whyWords(one)]));
+  expect(stay[deployed]).toBe("the deployed release candidate");
+  expect(stay[newest]).toMatch(/^newest release candidate, kept until \d{4}-\d{2}-\d{2}$/);
+  expect(stay[next]).toMatch(/^newest release candidate/);
+  const done = await cleanCheckouts(store, pool, () => at(1000), { manual: false, actor: "worker", repo });
+  expect(done.removed.map(one => one.path).sort()).toEqual([cancelled, failedFirst].sort());
+  // Deployed stays past the week; the newest of a release that isn't deployed goes after it.
+  const later = await checkoutPlan(store, pool, at(8 * DAY), { manual: false });
+  expect(later.go.map(one => one.path).sort()).toEqual([newest, next].sort());
+  expect(later.stay.map(one => one.path)).toEqual([deployed]);
+});
+
+test("a kept checkout drops its dependencies and build output once its run ends; the next run's setup restores them", async () => {
+  writeFileSync(join(repo, ".gitignore"), "node_modules/\ndist/\n");
+  await run("git", ["add", ".gitignore"], { cwd: repo });
+  await run("git", ["commit", "-qm", "ignore build output"], { cwd: repo });
+  const review = await task("in-review", "ready");
+  const changed = await task("hand-edited", "completed");
+  const shipped = await task("shipped", "completed");
+  const unfinished = await task("unfinished", "queued");
+  const candidate = await gate("release-four", "completed", "sha-4a");
+  for (const path of [review, changed, shipped, unfinished, candidate]) {
+    mkdirSync(join(path, "node_modules", "left-pad"), { recursive: true });
+    writeFileSync(join(path, "node_modules", "left-pad", "index.js"), "module.exports = 1;\n");
+    mkdirSync(join(path, "dist"));
+    writeFileSync(join(path, "dist", "app.js"), "built\n");
+    store.stampWorktreeSetup(path, "setup-1");
+  }
+  writeFileSync(join(changed, "notes.md"), "a person's change\n");
+  store.setCheckoutCleanup("never", "alex", T0);
+  store.setWorktreeSetup({ repo, command: "npm ci", timeoutMs: 600_000, approvedBy: "alex" }, T0);
+
+  const done = await slimKeptCheckouts(store, pool, () => at(1000), { actor: "worker", repo });
+  expect(done.slimmed.map(one => one.path).sort()).toEqual([changed, review].sort());
+  for (const path of [review, changed]) {
+    expect(existsSync(join(path, "node_modules"))).toBe(false);
+    expect(existsSync(join(path, "dist"))).toBe(false);
+    expect(existsSync(join(path, "README.md"))).toBe(true);
+    // No setup stamp: the next lease runs the project's setup again.
+    expect(store.getWorktree(path)?.setupDigest).toBeNull();
+  }
+  expect(existsSync(join(changed, "notes.md"))).toBe(true);
+  // A clean finished checkout (cleanup removes it whole), an unfinished task's and a release candidate's stay as they are.
+  for (const path of [shipped, unfinished, candidate]) {
+    expect(existsSync(join(path, "node_modules", "left-pad", "index.js"))).toBe(true);
+    expect(store.getWorktree(path)?.setupDigest).toBe("setup-1");
+  }
+  const entries = store.actionLedger({ repos: null }).filter(one => one.action === "checkout slimmed");
+  expect(entries.map(one => one.taskId).sort()).toEqual(["hand-edited", "in-review"]);
+  expect(entries[0]!.detail).toMatch(/dropped (dist, node_modules|node_modules, dist).*the next run's setup restores them/);
+  // Once per let-go.
+  expect((await slimKeptCheckouts(store, pool, () => at(2000), { actor: "worker", repo })).slimmed).toEqual([]);
+});
+
+test("without a setup to restore them, a kept checkout keeps its dependencies and drops only build output", async () => {
+  writeFileSync(join(repo, ".gitignore"), "node_modules/\ndist/\n");
+  await run("git", ["add", ".gitignore"], { cwd: repo });
+  await run("git", ["commit", "-qm", "ignore build output"], { cwd: repo });
+  const review = await task("no-setup", "ready");
+  mkdirSync(join(review, "node_modules"));
+  writeFileSync(join(review, "node_modules", "x.js"), "1\n");
+  mkdirSync(join(review, "dist"));
+  writeFileSync(join(review, "dist", "x.js"), "1\n");
+  expect((await slimKeptCheckouts(store, pool, () => at(1000), { actor: "worker", repo })).slimmed).toMatchObject([{ path: review, dropped: ["dist"] }]);
+  expect(existsSync(join(review, "node_modules", "x.js"))).toBe(true);
+  expect(existsSync(join(review, "dist"))).toBe(false);
 });

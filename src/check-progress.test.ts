@@ -119,7 +119,7 @@ describe("check output progress", () => {
     tracker.feed("[build   ] [flows]    90s  PASS  A real build (80 s)\n[build   ] [flows]    91s  2 passed, 0 failed, 0 skipped — r\n");
     tracker.feed("✅ build     1.5 min\n✅ triggers  0.8 min\n\n2 of 2 groups passed in 1.5 min — /tmp/flows\n");
     expect(tracker.snapshot().line).toBe("unit ✓ 2 · flows ✓ 4 · 2/2 groups · app …");
-    tracker.feed("== app\nRunning 2 groups at once: mail, follow-ups\n[mail      ] [app]  9s  PASS  Email inbox (9 s)\n[mail      ] [app]  10s  1 passed, 0 failed, 0 skipped — r\n");
+    tracker.feed("== app\nRunning 2 groups, at most 1 at once (0.7 GB available, about 400 MB each): mail, follow-ups\n[mail      ] [app]  9s  PASS  Email inbox (9 s)\n[mail      ] [app]  10s  1 passed, 0 failed, 0 skipped — r\n");
     tracker.feed("[follow-ups] [app]  9s  FAIL  Follow-ups: timed out\n[follow-ups] [app]  10s  0 passed, 1 failed, 0 skipped — r\n");
     tracker.feed("✅ mail        0.2 min\n❌ follow-ups  0.2 min\n\n1 of 2 groups passed in 0.2 min — /tmp/app\n");
     tracker.feed("== summary\nplan: a full check was asked for\nunit: exit 0\n Test Files  2 passed (2)\nflows: exit 0\napp: exit 1\n");
