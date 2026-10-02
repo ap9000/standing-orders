@@ -3,20 +3,21 @@ import { spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, randomUUID, sign, type KeyObject } from "node:crypto";
 import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { openStore } from "./store.js";
 import { updateAdmissionPaused, UPDATE_PAUSED } from "./desktop-update-gate.js";
 import {
   checkProvenance, findSigstoreVerifier, lastCompletedUpdate, launchRuntimeUpdate, machineSystem, prepareRuntimeUpdate, pruneRuntimes, readRuntimeUpdate, releaseNotes, requestRuntimeUpdateCancel, resumeRuntimeUpdate, runtimeUpdateStatus, markWhatsNewSeen,
-  startRuntimeRollback, startRuntimeUpdate, PROVENANCE_ISSUER, PROVENANCE_REPOSITORY, PROVENANCE_WORKFLOW, UPDATE_JOB_LABEL, UPDATE_STEPS, type RuntimePhase, type UpdateSystem,
+  startRuntimeRollback, startRuntimeUpdate, updateWaitingOf, PROVENANCE_ISSUER, PROVENANCE_REPOSITORY, PROVENANCE_WORKFLOW, UPDATE_JOB_LABEL, UPDATE_STEPS, type RuntimePhase, type UpdateSystem,
 } from "./toolroll-update.js";
 import { REGISTRY, setUpdateChecks } from "./releases.js";
 import { runUpdateCommand } from "./toolroll-update-cli.js";
 import { updatesHtml } from "./toolroll-update-ui.js";
 import { addApprover } from "./scope.js";
 import { createDecisionServer } from "./serve.js";
+import { runOperate } from "./operate.js";
 
 const TARBALL = new TextEncoder().encode("the toolroll 0.7.0 package bytes");
 const sha512 = (bytes: Uint8Array) => createHash("sha512").update(bytes).digest();
@@ -1332,3 +1333,116 @@ test("the Toolroll app is never offered an npm update", async () => {
     expect(readRuntimeUpdate(f.stateDir)).toBeNull();
   } finally { f.close(); }
 });
+
+// ---- a finished run's leftover process record never strands an update ----
+
+/** A finished run with a process record that has no pid (a spawn refused, say, out of memory). `withExitedGroup`: the
+ * run's other process started, ran and exited, so the reconcile can prove nothing of it is alive. */
+function leftoverRecord(f: ReturnType<typeof fixture>, withExitedGroup: boolean): number {
+  const d = f.db();
+  try {
+    const at = new Date().toISOString();
+    d.exec("INSERT OR IGNORE INTO task_ref(backend,external_id) VALUES('built-in','T-1')");
+    const ref = Number(d.prepare("SELECT id FROM task_ref WHERE external_id='T-1'").get()!["id"]);
+    const run = Number(d.prepare("INSERT INTO run(task_ref,lease_id,runner,role,started_at,outcome,finished_at) VALUES(?,'lease-c','fixture','reviewer',?,'failed',?)").run(ref, at, at).lastInsertRowid);
+    if (withExitedGroup) {
+      const gone = spawnSync("true").pid!;
+      d.prepare("INSERT INTO run_process(run,pid,host,process_group,observed_at,exited_at) VALUES(?,?,?,1,?,?)").run(run, gone, hostname(), at, at);
+    }
+    d.prepare("INSERT INTO run_process(run,pid,host,process_group,observed_at) VALUES(?,NULL,?,1,?)").run(run, hostname(), at);
+    return run;
+  } finally { d.close(); }
+}
+const openRecords = (f: ReturnType<typeof fixture>) => { const d = f.db(); try { return Number(d.prepare("SELECT count(*) n FROM run_process WHERE exited_at IS NULL").get()!["n"]); } finally { d.close(); } };
+const stillInTheWay = (f: ReturnType<typeof fixture>) => (run: number) => { const s = openStore(f.databaseFile); try { return s.stopQuiescenceProblem(run) !== null; } finally { s.close(); } };
+
+test("u1: the update settles a finished run's leftover record itself, then updates", async () => {
+  const f = fixture();
+  try {
+    leftoverRecord(f, true);
+    const outcome = await f.start();
+    expect(outcome.phase).toBe("complete");
+    expect(openRecords(f)).toBe(0);
+    const d = f.db();
+    try { expect(d.prepare("SELECT outcome FROM action_ledger WHERE action='process witness settled'").all().map(r => r["outcome"])).toEqual(["never started"]); } finally { d.close(); }
+    expect(readRuntimeUpdate(f.stateDir)!.waiting).toBeUndefined();
+  } finally { f.close(); }
+});
+
+test("u1: a record nothing can prove: within 2 minutes it stops waiting, new work resumes, and it says the one command", async () => {
+  const f = fixture();
+  try {
+    const run = leftoverRecord(f, false);
+    const seen: string[] = [];
+    // The real clock never moves here: only the update's own waits do.
+    const outcome = await f.start({ sleep: async ms => {
+      expect(f.paused()).toBe(true);
+      const waiting = updateWaitingOf(f.stateDir, stillInTheWay(f));
+      seen.push(waiting!.words);
+      await f.system.sleep(ms);
+    } });
+    expect(outcome.phase).toBe("refused");
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.length).toBeLessThanOrEqual(61);
+    expect(seen[0]).toBe(`Update to 0.7.0 is waiting: Run #${run} finished, but Toolroll has no process ID for one of its processes, so it can't confirm that process ended. If nothing of it is running, run toolroll run settle ${run} --why "it is not running".`);
+    expect(outcome.message).toBe(`Stopped waiting after 2 minutes. Run #${run} finished, but Toolroll has no process ID for one of its processes, so it can't confirm that process ended. If nothing of it is running, run toolroll run settle ${run} --why "it is not running", then update again. New work resumed; nothing was changed.`);
+    expect(f.paused()).toBe(false);
+    const j = readRuntimeUpdate(f.stateDir)!;
+    for (const words of [outcome.message, j.detail, ...seen, ...j.steps.map(s => s.phase)]) expect(words).not.toMatch(/witness|unproven/i);
+    // Status and the console say the same thing while it is still in the way.
+    expect(updateWaitingOf(f.stateDir, stillInTheWay(f))).toMatchObject({ stopped: true, run, action: `toolroll run settle ${run} --why "it is not running"` });
+    const html = updatesHtml({ current: "0.6.0", latest: { version: "0.7.0" }, method: { kind: "npm", updateCommand: "npm install -g toolroll@latest" }, journal: j, running: false, whatsNew: null, rollbackTo: null, csrf: "x" }, {});
+    expect(html).toContain(`Update to 0.7.0 is waiting on run #${run}`);
+    expect(html).toContain(`<code>toolroll run settle ${run} --why &quot;it is not running&quot;</code>`);
+    expect(html).not.toMatch(/witness|unproven/i);
+    // Once settled, nothing is in the way and nothing more is said.
+    const s = openStore(f.databaseFile);
+    try { expect(s.settleRunWitnessesByApprover({ runId: run, by: "ada", why: "it is not running" }, new Date()).ok).toBe(true); } finally { s.close(); }
+    expect(updateWaitingOf(f.stateDir, stillInTheWay(f))).toBeNull();
+    expect((await f.start()).phase).toBe("complete");
+  } finally { f.close(); }
+});
+
+test("u1: --now settles what it can, and otherwise refuses at once in plain words", async () => {
+  const f = fixture();
+  try {
+    const run = leftoverRecord(f, false);
+    const outcome = await f.start({}, "now");
+    expect(outcome.phase).toBe("refused");
+    expect(outcome.message).toBe(`Run #${run} finished, but Toolroll has no process ID for one of its processes, so it can't confirm that process ended. If nothing of it is running, run toolroll run settle ${run} --why "it is not running", then update again. Nothing was changed.`);
+    expect(f.paused()).toBe(false);
+  } finally { f.close(); }
+});
+
+test("u2: toolroll status and every console page show a waiting update, what it waits on and the action", async () => {
+  const f = fixture();
+  const store = openStore(f.databaseFile);
+  const alex = addApprover(store, "alex", new Date());
+  if (!alex.ok) throw new Error("alex");
+  const server = createDecisionServer({ store, evidenceRoot: join(f.root, "evidence") });
+  try {
+    const run = leftoverRecord(f, false);
+    expect((await f.start()).phase).toBe("refused");
+    const lines: string[] = [];
+    expect(await runOperate("status", [], line => lines.push(line), { databaseFile: f.databaseFile, releaseIo: { fetch: async () => { throw new Error("offline"); } } } as never)).toBe(0);
+    expect(lines.join("\n").split("\n")[0]).toBe(`Update to 0.7.0 stopped waiting: Run #${run} finished, but Toolroll has no process ID for one of its processes, so it can't confirm that process ended. If nothing of it is running, run toolroll run settle ${run} --why "it is not running", then update again.`);
+    const json: string[] = [];
+    await runOperate("status", ["--json"], line => json.push(line), { databaseFile: f.databaseFile, releaseIo: { fetch: async () => { throw new Error("offline"); } } } as never);
+    expect(JSON.parse(json.join("\n")).updateWaiting).toMatchObject({ version: "0.7.0", stopped: true, run, action: `toolroll run settle ${run} --why "it is not running"` });
+    await new Promise<void>(done => server.listen(0, "127.0.0.1", done));
+    const address = server.address();
+    if (address === null || typeof address !== "object") throw new Error("listen");
+    const base = `http://127.0.0.1:${address.port}`;
+    const cookie = (await fetch(`${base}/login`, { method: "POST", body: new URLSearchParams({ name: "alex", token: alex.token }), redirect: "manual" }))
+      .headers.getSetCookie().map(one => one.split(";")[0]!).find(one => one.startsWith("standing-orders_session="))!;
+    const page = await (await fetch(`${base}/settings`, { headers: { cookie } })).text();
+    expect(page).toContain(`Update to 0.7.0 is waiting on run #${run}. If nothing of it is running, run toolroll run settle ${run} --why &quot;it is not running&quot;, then update again.`);
+    // Settings → Updates says it once, in its card, not again in a banner.
+    const updates = await (await fetch(`${base}/settings/updates`, { headers: { cookie } })).text();
+    expect(updates).toContain(`Update to 0.7.0 is waiting on run #${run}`);
+    expect(updates).not.toContain("update-waiting");
+  } finally {
+    if (server.listening) await new Promise<void>(done => server.close(() => done()));
+    store.close(); f.close();
+  }
+}, 30_000);

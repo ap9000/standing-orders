@@ -7,7 +7,7 @@
  *
  * Playwright is not a dependency: imported from `playwright`, PLAYWRIGHT_MODULE, or the npx cache. */
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { homedir, hostname, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -36,6 +36,15 @@ const root = mkdtempSync(join(tmpdir(), 'toolroll-update-screens-'));
 const stateDir = join(root, 'state'); mkdirSync(stateDir);
 const store = openStore(join(stateDir, 'orders.db'));
 const alex = addApprover(store, 'alex', new Date());
+// A finished release check that left a process record with no pid.
+const leftover = (() => {
+  const db = store.handle, now = new Date().toISOString();
+  db.exec("INSERT INTO task_ref(backend,external_id) VALUES('built-in','release-check')");
+  const ref = Number(db.prepare("SELECT id FROM task_ref WHERE external_id='release-check'").get().id);
+  const run = Number(db.prepare("INSERT INTO run(task_ref,lease_id,runner,role,started_at,outcome,finished_at) VALUES(?,'l','builder-1','reviewer',?,'failed',?)").run(ref, now, now).lastInsertRowid);
+  db.prepare("INSERT INTO run_process(run,pid,host,process_group,observed_at) VALUES(?,NULL,?,1,?)").run(run, hostname(), now);
+  return run;
+})();
 let installed = '0.6.0';
 const server = createDecisionServer({ store, evidenceRoot: join(root, 'evidence'), updates: { latest: async () => ({ version: '0.7.0' }), method: 'global', get current() { return installed; }, launch: async () => {} } });
 await new Promise(done => server.listen(0, '127.0.0.1', done));
@@ -78,6 +87,13 @@ try {
     await page.goto(`${base}/settings/updates`);
     await shot('updates-live', 'Live steps while updating: package verified, running work finished, backing up now');
     lock.close();
+
+    // Stopped on a finished run whose leftover process record nothing can prove: the card and the banner on every page.
+    journal('refused', ['verifying', 'draining', 'refused'], 'Stopped waiting after 2 minutes.', { waiting: { run: leftover, on: `Run #${leftover} finished, but Toolroll has no process ID for one of its processes, so it can't confirm that process ended`, action: `toolroll run settle ${leftover} --why "it is not running"`, since: t(1) } });
+    await page.goto(`${base}/settings/updates`);
+    await shot('updates-waiting', 'An update stopped on a finished run: what is in the way and the one command, on the page and in the banner');
+    await page.goto(`${base}/tasks`);
+    await shot('updates-waiting-banner', 'The waiting update named on an everyday page (Tasks)');
 
     journal('complete', ['verifying', 'draining', 'backing-up', 'rehearsing', 'switching', 'restarting', 'health', 'complete'], 'Toolroll 0.7.0 is running.', { finishedAt: t(9),
       notes: ['Update from the console', 'Undo an update with toolroll update --rollback', 'Scheduled updates run tonight at 03:00'] });

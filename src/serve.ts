@@ -303,7 +303,7 @@ import { STORAGE_CSS, storageHtml } from "./storage-ui.js";
 import { bytesWords, parseCleanup } from "./storage.js";
 import { checkoutPlan, cleanCheckouts, discardCheckout, previewDigest } from "./checkout-cleanup.js";
 import { UPDATES_CSS, newerThan, updateStepsHtml, updatesHtml, updatesScript } from "./toolroll-update-ui.js";
-import { abandonRuntimeUpdate, launchRuntimeUpdate, markWhatsNewSeen, prepareRuntimeUpdate, requestRuntimeUpdateCancel, runningWorkWords, runtimeUpdateStatus, runtimeUpdateTerminal, currentRuntime, type When } from "./toolroll-update.js";
+import { abandonRuntimeUpdate, launchRuntimeUpdate, markWhatsNewSeen, prepareRuntimeUpdate, requestRuntimeUpdateCancel, runningWorkWords, runtimeUpdateStatus, runtimeUpdateTerminal, currentRuntime, updateWaitingOf, type When } from "./toolroll-update.js";
 import { latestVersionNow } from "./releases.js";
 import { RETENTION_KINDS, lastSweepAt, parsePeriod, periodChoices, retentionPlan, type RetentionKind } from "./retention.js";
 import { EXPORT_CSS, dataExportHtml } from "./export-ui.js";
@@ -5074,6 +5074,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       const notices = [...(extras.notices ?? [])];
       if (s.chrome.demo) notices.unshift(DEMO_BANNER);
       if (s.chrome.modeBanner) notices.push(s.chrome.modeBanner.words);
+      if (s.chrome.updateWaiting) notices.push(s.chrome.updateWaiting.words);
       let crew: Pick<BrowserWorkspace, 'crew' | 'crewTruncated'> = { crew: [], crewTruncated: false };
       try {
         const project = s.chrome.active === 'chat' ? null : s.chrome.project;
@@ -5281,6 +5282,13 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
         const update = updateFacts();
         if (update === null || !update.newer || update.release === null || facts.updateSeen === update.release.version) return {};
         return { update: { version: update.release.version, security: update.release.security, href: "/settings#updates", dismissHref: "/settings/updates/dismiss" } };
+      })(),
+      ...(() => {
+        const databaseFile = store.databaseFile();
+        // Settings → Updates says it in full; every other page names it once.
+        if (!actor || databaseFile === null || !store.isInstanceOperator(actor) || facts?.returnTo?.startsWith("/settings/updates")) return {};
+        const waiting = updateWaitingOf(dirname(databaseFile), run => store.stopQuiescenceProblem(run) !== null);
+        return waiting === null ? {} : { updateWaiting: { words: waiting.short } };
       })(),
       ...(liveMode === null || liveModeTerms === null
         ? {}
@@ -15075,6 +15083,8 @@ type Chrome = {
   signIn?: BrowserSignIn[];
   /** A newer Toolroll: a quiet notice for an operator until they dismiss this version. */
   update?: BrowserUpdateNotice;
+  /** An update waiting on something, what, and the action that clears it: every page, for an operator. */
+  updateWaiting?: { words: string };
   /** The chat tab renders only where chat could ever be allowed. */
   chat?: boolean;
   code?: boolean;
@@ -15583,6 +15593,9 @@ function shell(
       : `<div class="banner"><span class="badge badge-running">mode</span>${escape(chrome.modeBanner.words)} \u00b7 <a href="/mode">the terms \u00b7 end it</a></div>`) +
     (chrome.signIn ?? []).map(one => `<div class="banner sign-in-banner" data-sign-in="${escape(one.provider)}"><strong>${escape(one.title)}</strong> \u00b7 run <code>${escape(one.command)}</code> on this computer, then resume.${one.detail === "" ? "" : ` ${escape(one.detail)}`}` +
       `<form method="post" action="${escape(one.resumeHref)}" class="inline"><input type="hidden" name="csrf" value="${escape(chrome.csrf ?? "")}"><button type="submit">${escape(one.resumeLabel)}</button></form></div>`).join("") +
+    (chrome.updateWaiting === undefined
+      ? ""
+      : `<div class="banner update-waiting" role="status">${escape(chrome.updateWaiting.words)} \u00b7 <a href="/settings/updates">Update status</a></div>`) +
     (chrome.update === undefined
       ? ""
       : `<div class="banner update-banner" data-update="${escape(chrome.update.version)}">${escape(updateNoticeWords(chrome.update))} \u00b7 <a href="${escape(chrome.update.href)}">What's new</a>` +

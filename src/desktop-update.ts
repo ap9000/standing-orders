@@ -38,6 +38,8 @@ export type UpdateHooks = {
   healthy?: (bundle: DesktopBundle, journal: UpdateJournal, since: string) => Promise<boolean>;
   swap?: (journal: UpdateJournal) => Promise<void>;
   sleep?: (ms: number) => Promise<void>;
+  /** The clock the drain's two-minute limit reads (tests). */
+  now?: () => Date;
   healthTimeoutMs?: number;
   /** Fault injection for state-machine tests, never selectable by a CLI flag. */
   checkpoint?: (phase: Phase) => void;
@@ -130,13 +132,52 @@ async function otherControllers(app: DesktopBundle, stateDir: string): Promise<b
   const command = `${join(resources(app), "runtime", "node")} ${join(resources(app), "dist", "desktop-host.js")} serve --state `;
   return result.stdout.split("\n").some(line => line.trim().startsWith(command) && line.trim() !== command + resolve(stateDir));
 }
-export function lingeringWork(db: DatabaseSync): string | null {
+/** A finished run whose end Toolroll cannot show yet: in plain words, with the one command that clears it when a
+ * person can. */
+export type LingeringRun = { run: number; on: string; action: string | null };
+/** How long an update waits on a finished run it cannot show has ended before it stops waiting and says why. */
+export const LINGERING_LIMIT_MS = 120_000;
+
+export function lingeringRun(db: DatabaseSync): LingeringRun | null {
   const store = new Store(db);
   for (const row of db.prepare("SELECT DISTINCT run FROM run_process WHERE exited_at IS NULL").all()) {
     const problem = store.stopQuiescenceProblem(Number(row.run));
-    if (problem) return problem;
+    if (problem) return plainLingering(Number(row.run), problem);
   }
   return null;
+}
+export function lingeringWork(db: DatabaseSync): string | null {
+  const lingering = lingeringRun(db);
+  return lingering && lingeringWords(lingering);
+}
+export const lingeringWords = (l: LingeringRun) => l.action ? `${l.on}. If nothing of it is running, run: ${l.action}` : `${l.on}.`;
+/** What an update says when it stops waiting on `l`: what is in the way, the command, and that new work resumed. */
+export const stoppedWaitingWords = (l: LingeringRun) => `Stopped waiting after 2 minutes. ${l.on}. ${clearWords(l)} New work resumed; nothing was changed.`;
+/** The next step once an update has stopped on `l`. */
+export const clearWords = (l: LingeringRun) => l.action ? `If nothing of it is running, run ${l.action}, then update again.` : "Update again once it has stopped.";
+
+/** The same settling reconcile the background worker runs: a finished run's leftover record of a process that never
+ * started settles once the run's process groups are proven gone. A record nothing can prove either way stays. */
+export function settleLeftoverRecords(db: DatabaseSync, now: Date): number {
+  return new Store(db).settleUnspawnedWitnesses(now);
+}
+
+/** Store.stopQuiescenceProblem's reasons, said for a person: no internal terms, and `toolroll run settle` only where it
+ * can clear the record (it refuses while anything of the run is alive). */
+export function plainLingering(fallbackRun: number, problem: string): LingeringRun {
+  const run = Number(/run #(\d+)/.exec(problem)?.[1] ?? fallbackRun);
+  const settle = `toolroll run settle ${run} --why "it is not running"`;
+  const pid = /process (\d+)/.exec(problem)?.[1];
+  if (/incomplete spawn witness|before its process witness was recorded/.test(problem)) return { run, on: `Run #${run} finished, but Toolroll has no process ID for one of its processes, so it can't confirm that process ended`, action: settle };
+  if (/belongs to another host|another host/.test(problem)) return { run, on: `Run #${run} finished on another computer, and Toolroll can only confirm its processes ended there`, action: `${settle} (on that computer)` };
+  if (/incomplete native containment custody|cannot be proven empty/.test(problem)) return { run, on: `Run #${run} finished, but Toolroll can't confirm its sandbox is empty`, action: settle };
+  if (/still has members/.test(problem)) return { run, on: `Run #${run} finished, but processes are still running in its sandbox`, action: null };
+  if (/workspace is still held/.test(problem)) return { run, on: `Run #${run} finished, but process ${pid ?? "?"} is still using its folder`, action: null };
+  if (/workspace occupancy/.test(problem)) return { run, on: `Run #${run} finished, but Toolroll can't check whether its folder is still in use`, action: null };
+  if (/may still be running|owned subprocess/.test(problem)) return { run, on: `Run #${run} finished, but ${pid ? `its process ${pid}` : "one of its processes"} is still running`, action: null };
+  if (/held supervisor/.test(problem)) return { run, on: `Run #${run} is still shutting down`, action: null };
+  if (/still open/.test(problem)) return { run, on: `Run #${run} is still running`, action: null };
+  return { run, on: `Run #${run} hasn't finished shutting down`, action: null };
 }
 
 export async function previewDesktopUpdate(stateDir: string, installed: string, candidate: string, label: string, hooks: UpdateHooks = {}) {
@@ -457,17 +498,27 @@ export async function runDesktopUpdate(stateDir: string, hooks: UpdateHooks = {}
       await restore(); return;
     }
     checkpoint("draining", "Waiting for current work to finish. New work is paused; no task will be killed for this update.");
+    const now = hooks.now ?? (() => new Date());
+    let lingeringSince: number | null = null;
     for (;;) {
       if (restoreRequested(j) || updateStopRequested(j)) { await cancel(); return; }
       assertConfig(j);
       assertCodingCatalogPresent(j);
       const checking = connect(j.databaseFile);
+      let stuck: LingeringRun | null = null;
       try {
         const active = activeUpdateWork(checking);
-        const lingering = Object.values(active).every(n => n === 0) ? lingeringWork(checking) : null;
-        if (!lingering && Object.values(active).every(n => n === 0) && freezeUpdateGate(checking, j.id)) break;
-        save(j, "draining", lingering ? `Waiting for a worker to finish shutdown: ${lingering}. No process is being killed.` : `Waiting for current work: ${active.runs} runs, ${active.claims} leases, ${active.conversations} chat requests, ${active.sessions} sessions, ${active.stopping} shutdowns, ${active.coding} coding sessions, ${active.codingDeliveries} unconfirmed messages. Nothing is being cancelled.`);
+        const idle = Object.values(active).every(n => n === 0);
+        // A finished run's leftover record settles here first, as the background worker would settle it.
+        if (idle) settleLeftoverRecords(checking, now());
+        const lingering = idle ? lingeringRun(checking) : null;
+        if (!lingering && idle && freezeUpdateGate(checking, j.id)) break;
+        lingeringSince = lingering ? lingeringSince ?? now().getTime() : null;
+        if (lingering && now().getTime() - lingeringSince! >= LINGERING_LIMIT_MS) stuck = lingering;
+        else save(j, "draining", lingering ? `New work is paused. Waiting for run #${lingering.run}: ${lingeringWords(lingering)} No process is being killed.` : `Waiting for current work: ${active.runs} runs, ${active.claims} leases, ${active.conversations} chat requests, ${active.sessions} sessions, ${active.stopping} shutdowns, ${active.coding} coding sessions, ${active.codingDeliveries} unconfirmed messages. Nothing is being cancelled.`);
       } finally { checking.close(); }
+      // Waiting longer proves nothing more: new work resumes, and the one thing in the way is named.
+      if (stuck) { await release("cancelled", stoppedWaitingWords(stuck)); return; }
       assertCodingCatalogPresent(j);
       await sleep(1000);
     }

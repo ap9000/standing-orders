@@ -767,6 +767,32 @@ test("an ended run with a live process witness still drains, and cancellation ne
   } finally { f.close(); }
 });
 
+test("a finished run's leftover record with no process id: the app update stops waiting within 2 minutes and says the one command", async () => {
+  const f = fixture();
+  try {
+    const j = await f.prepare();
+    const db = f.db();
+    db.exec("INSERT INTO task_ref(backend,external_id) VALUES('builtin','retained')");
+    const ref = db.prepare("SELECT id FROM task_ref WHERE external_id='retained'").get()!.id;
+    const at = new Date().toISOString();
+    const id = Number(db.prepare("INSERT INTO run(task_ref,lease_id,runner,role,started_at,finished_at,outcome) VALUES(?,'finished','fixture','reviewer',?,?,'failed')").run(ref, at, at).lastInsertRowid);
+    db.prepare("INSERT INTO run_process(run,pid,host,process_group,observed_at) VALUES(?,NULL,?,1,?)").run(id, hostname(), at); db.close();
+    let clock = Date.now(), waits = 0;
+    await runDesktopUpdate(f.state, { ...f.hooks, now: () => new Date(clock), sleep: async ms => {
+      waits++;
+      expect(readUpdateJournal(f.state)?.detail).toContain(`toolroll run settle ${id} --why "it is not running"`);
+      clock += ms;
+    } });
+    const done = readUpdateJournal(f.state)!;
+    expect(done.phase).toBe("cancelled");
+    expect(waits).toBeLessThanOrEqual(120);
+    expect(done.detail).toBe(`Stopped waiting after 2 minutes. Run #${id} finished, but Toolroll has no process ID for one of its processes, so it can't confirm that process ended. If nothing of it is running, run toolroll run settle ${id} --why "it is not running", then update again. New work resumed; nothing was changed.`);
+    expect(done.detail).not.toMatch(/witness|unproven/i);
+    expect(bundleHash(f.installed)).toBe(j.old.hash); expect(f.calls).toEqual([]);
+    const after = f.db(); expect(updateAdmissionPaused(after)).toBe(false); after.close();
+  } finally { f.close(); }
+});
+
 test.each([
   "single reused PID", "absent group", "populated group", "unknown group", "unknown birth",
   "reused populated group", "EPERM PID", "EPERM group", "orphan group", "denied birth group", "same-second group",

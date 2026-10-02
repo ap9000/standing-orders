@@ -21,7 +21,7 @@ export const UPDATES_CSS = `.updates{max-width:640px;min-width:0;overflow-wrap:a
   `.updates ol.update-steps li[data-state=failed]{color:var(--so-danger);font-weight:600}.updates ol.update-steps li[data-state=failed]::before{background:var(--so-danger);border-color:var(--so-danger)}` +
   `.updates ol.update-steps .step-detail{grid-column:2;font-weight:400;color:var(--so-muted);font-size:.8125rem;margin-top:2px}` +
   `.updates .whats-new ul{margin:10px 0 0;padding-left:18px}.updates .whats-new li{margin:4px 0}.updates .whats-new form{margin:14px 0 0}` +
-  `.updates .update-problem{color:var(--so-danger)}.updates .stamp{margin:10px 0 0}.updates code{white-space:nowrap}` +
+  `.updates .update-problem{color:var(--so-danger)}.updates .stamp{margin:10px 0 0}.updates code{white-space:nowrap}.updates [data-update-outcome=waiting] code,.updates .step-detail code{white-space:normal;overflow-wrap:anywhere}` +
   `@media (prefers-reduced-motion:no-preference){.updates ol.update-steps li[data-state=now]::before{animation:update-pulse 1.6s ease-in-out infinite}}@keyframes update-pulse{50%{box-shadow:0 0 0 7px color-mix(in srgb,var(--so-info) 6%,transparent)}}` +
   `@media (max-width:600px){.updates .update-actions{display:grid}.updates .update-actions button{width:100%;min-height:44px}.updates .step-up{max-width:none}.updates .step-up input{min-height:44px}}`;
 
@@ -46,7 +46,8 @@ export function updateStepsHtml(j: RuntimeUpdateJournal, running: boolean): stri
   const items = UPDATE_STEPS.map((step: UpdateStep, i) => {
     const state = j.phase === "complete" || i < last ? "done" : i > last ? "waiting" : failed ? "failed" : finished ? "waiting" : "now";
     // Only where it adds something: which work it waits for, or what went wrong.
-    const detail = (state === "now" && step === "draining") || (state === "failed" && j.phase === "rolling-back") ? `<span class="step-detail">${e(j.detail)}</span>` : "";
+    const detail = state === "now" && step === "draining" && j.waiting ? `<span class="step-detail">${e(j.waiting.on)}.${j.waiting.action ? ` If nothing of it is running, run <code>${e(j.waiting.action)}</code>.` : ""}</span>`
+      : (state === "now" && step === "draining") || (state === "failed" && j.phase === "rolling-back") ? `<span class="step-detail">${e(j.detail)}</span>` : "";
     return `<li data-step="${step}" data-state="${state}">${e(STEP_WORDS[step])}${detail}</li>`;
   }).join("");
   const title = j.phase === "scheduled" ? `Update to ${e(j.to.version)} scheduled for ${e(clock(j.at ?? j.startedAt))}`
@@ -60,6 +61,9 @@ export function updateStepsHtml(j: RuntimeUpdateJournal, running: boolean): stri
 function outcomeHtml(j: RuntimeUpdateJournal): string {
   if (j.phase === "complete") return j.kind === "rollback" ? `<div class="card" data-update-outcome="rolled-back"><h2>Back on ${e(j.to.version)}</h2><p class="meta">${e(j.detail)}</p></div>` : "";
   if (j.phase === "cancelled") return `<div class="card" data-update-outcome="cancelled"><h2>Update cancelled</h2><p class="meta">Nothing changed.</p></div>`;
+  // Stopped on a finished run it can't show has ended: what is in the way and the one command, nothing more.
+  if (j.phase === "refused" && j.waiting) return `<div class="card" data-update-outcome="waiting"><h2>Update to ${e(j.to.version)} is waiting on run #${e(j.waiting.run)}</h2>` +
+    `<p>${e(j.waiting.on)}. New work resumed.</p>` + (j.waiting.action ? `<p class="meta">If nothing of it is running, run <code>${e(j.waiting.action)}</code>, then update again.</p>` : `<p class="meta">Update again once it has stopped.</p>`) + `</div>`;
   const title = j.phase === "refused" ? `Didn't update to ${e(j.to.version)}` : j.phase === "restored" ? `Update to ${e(j.to.version)} didn't finish` : "The update needs attention";
   return `<div class="card" data-update-outcome="${e(j.phase)}"><h2>${title}</h2><p class="${j.phase === "needs-attention" ? "update-problem" : ""}" role="alert">${e(j.detail)}</p>` +
     `<details><summary>Steps</summary>${updateStepsHtml(j, false).replace(/<h2>.*?<\/h2>/, "")}</details></div>`;

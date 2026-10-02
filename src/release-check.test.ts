@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { planFor, versionOnly } from "../scripts/release-check.mjs";
+import { completionProblems, lastPublished, missingTables } from "../scripts/upgrade-path.mjs";
 
 const pkg = (version: string, dependencies: Record<string, string> = { zod: "^3.23.0" }) => JSON.stringify({ name: "toolroll", version, type: "module", dependencies }, null, 2) + "\n";
 const lock = (version: string, zod = "3.23.8") => JSON.stringify({
@@ -87,5 +88,25 @@ describe("node scripts/release-check.mjs --plan", () => {
   test("a real dependency change still runs everything", () => {
     expect(planOf({ "package.json": pkg("0.9.6", { zod: "^3.24.0" }), "package-lock.json": lock("0.9.6", "3.24.1") }))
       .toMatch(/\(2 changed files\): every unit test \(package-lock\.json changed\); browser journeys \(package-lock\.json changed\)\.$/);
+  });
+});
+
+describe("the upgrade path step", () => {
+  test("runs whenever code changed, never for docs alone", () => {
+    expect(planFor(["src/store.ts"])).toMatchObject({ upgrade: true });
+    expect(planFor(["docs/x.md", "CHANGELOG.md"])).toMatchObject({ upgrade: false });
+    expect(planFor(["docs/x.md"], { full: true })).toMatchObject({ upgrade: true });
+  });
+
+  test("the last 3 published releases, oldest first; a prerelease is not one", () => {
+    expect(lastPublished(["0.9.10", "0.9.4", "0.9.9-beta.1", "0.9.8", "0.10.0", "0.9.9"])).toEqual(["0.9.9", "0.9.10", "0.10.0"]);
+  });
+
+  test("a completed task must stay complete under the same digest, and every fresh table must exist", () => {
+    const before = [{ task: "a", digest: "d1" }, { task: "b", digest: "d2" }, { task: "c", digest: "d3" }];
+    expect(completionProblems(before, { a: { state: "complete", digest: "d1" }, b: { state: "complete", digest: "d2" }, c: { state: "complete", digest: "d3" } })).toEqual([]);
+    expect(completionProblems(before, { a: { state: "ready-to-check", digest: null }, b: { state: "complete", digest: "other" } }))
+      .toEqual(["a is ready-to-check, not complete", "b's completed result changed digest (d2 → other)", "c is gone"]);
+    expect(missingTables(["build_review", "run", "task"], ["run", "task"])).toEqual(["build_review"]);
   });
 });

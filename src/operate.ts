@@ -75,6 +75,7 @@ import { pullRequestLines, runTaskMergeCommand, runTaskOutcomeCommand } from "./
 
 import { homedir, hostname, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { updateWaitingOf } from "./toolroll-update.js";
 import {
   openStore,
   openStoreNoMigrate,
@@ -10605,10 +10606,13 @@ async function statusCommand(
   const brokenIntegrations = await savedIntegrations(context).then(list => list.filter(one => one.state === "broken"), () => []);
   const brokenLine = integrationsBrokenLine(brokenIntegrations);
   const integrations = brokenIntegrations.length === 0 ? {} : { integrations: { broken: brokenIntegrations.map(one => ({ key: one.key, name: one.name, fix: one.action.kind === "fix" ? one.action.words : null })) } };
+  // An update waiting, on what, and the action: before anything else, as it holds up new work.
+  const waiting = updateWaitingOf(dirname(context.databaseFile), run => context.store.stopQuiescenceProblem(run) !== null);
+  const updateWaiting = waiting === null ? {} : { updateWaiting: { version: waiting.version, stopped: waiting.stopped, run: waiting.run, on: waiting.on, action: waiting.action } };
   const projects = projectBuildsStatus(context);
   const projectsLine = projects.length === 0 ? null
     : `Builds by project: ${projects.slice(0, 8).map(one => `${one.name} ${one.running} of ${one.limit}`).join(", ")}${projects.length > 8 ? ", …" : ""}`;
-  return succeed(context.write, context.json, command, { ...status, projects, ...update, ...integrations }, () => [...renderInstallationStatus(status), ...(projectsLine === null ? [] : [projectsLine]), ...(line === null ? [] : [line]), ...(brokenLine === null ? [] : [brokenLine])]);
+  return succeed(context.write, context.json, command, { ...status, projects, ...update, ...integrations, ...updateWaiting }, () => [...(waiting === null ? [] : [waiting.words]), ...renderInstallationStatus(status), ...(projectsLine === null ? [] : [projectsLine]), ...(line === null ? [] : [line]), ...(brokenLine === null ? [] : [brokenLine])]);
 }
 
 /** Each known project's running builds against its limit: its own number, never past its workers' capacity. */
