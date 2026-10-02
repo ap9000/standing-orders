@@ -1847,8 +1847,15 @@ describe("Telegram conversation: the same chat, from the phone", () => {
         answers.push({ text: "Pointing.", calls: [{ id: `w${update}`, name: "show_control", args: { control: "publish", task: "z" } }] }, { text });
         script.updates.push([textUpdate(update, "publish z")]);
         const lines: string[] = [];
-        const code = await runOperate("watch", ["--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", join(dir, "pool"), "--public-url", publicUrl, "--for", "1500", "--tick-every", "3600000", "--bridge-every", "3600000", "--reconcile-every", "3600000"],
-          line => lines.push(line), { databaseFile: file, now: new Date(), telegramTransport: script.transport, mateSeams: { subscriptionRunner: runner } });
+        // The watch stops once this message's conversation is done and its answer and link are sent, not after a
+        // fixed window a loaded machine can outrun; --for is only a safety cap.
+        const observer = openStore(file);
+        const answered = () => {
+          const at = script.texts().lastIndexOf(text);
+          return at !== -1 && script.sends().length > at + 1 && observer.listTelegramConversations(BOT).filter(one => one.state === "done").length === update - 1;
+        };
+        const code = await runOperate("watch", ["--runner", "builder-1", "--token", runnerToken, "--repo", repo, "--pool", join(dir, "pool"), "--public-url", publicUrl, "--for", "60000", "--tick-every", "3600000", "--bridge-every", "3600000", "--reconcile-every", "3600000"],
+          line => lines.push(line), { databaseFile: file, now: new Date(), telegramTransport: script.transport, mateSeams: { subscriptionRunner: runner }, shouldStop: answered }).finally(() => observer.close());
         expect(code, lines.join("\n")).toBe(EXIT.ok);
         expect(script.texts().at(-2), lines.join("\n")).toBe(text);
         return urlButtons(script.sends().at(-1));

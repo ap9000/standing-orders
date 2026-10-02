@@ -549,9 +549,9 @@ describe("schema 62 compatibility without manual refresh", () => {
       const store = openStore(file); store.raw().prepare("UPDATE schema_version SET version=?").run(version); store.close();
       const before = readFileSync(file);
       expect(() => openStore(file)).toThrow(/newer build/);
-      expect(readFileSync(file)).toEqual(before);
+      expect(readFileSync(file).equals(before)).toBe(true);
       expect(openStoreNoMigrate(file).ok).toBe(false);
-      expect(readFileSync(file)).toEqual(before);
+      expect(readFileSync(file).equals(before)).toBe(true);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
   test("the negative current version is an impossible marker: an upgrade never begins at the version it upgrades to", () => {
@@ -560,7 +560,7 @@ describe("schema 62 compatibility without manual refresh", () => {
       const store = openStore(file); store.raw().prepare("UPDATE schema_version SET version=?").run(-SCHEMA_VERSION); store.close();
       const before = readFileSync(file);
       expect(() => openStore(file)).toThrow(/mid-flight marker no build ever wrote/);
-      expect(readFileSync(file)).toEqual(before);
+      expect(readFileSync(file).equals(before)).toBe(true);
       expect(openStoreNoMigrate(file).ok).toBe(false);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });

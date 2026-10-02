@@ -8755,7 +8755,8 @@ async function watchCommand(
       token,
       repo,
       progress,
-      isStopping: () => stopping,
+      // An injected fence (tests) stops admission exactly as a signal does.
+      isStopping: () => stopping || context.shouldStop?.() === true,
       onFollowController: controller => {
         followAbort = controller;
       },
@@ -9874,6 +9875,9 @@ async function bridgeCommand(
     const runFor = text(flags, "for");
     const timer = runFor === undefined ? null : setTimeout(() => controller.abort(), Number(runFor));
     timer?.unref?.();
+    // An injected fence (tests) ends the follow exactly as a signal does.
+    const fence = context.shouldStop === undefined ? null : setInterval(() => { if (context.shouldStop?.() === true) controller.abort(); }, 50);
+    fence?.unref?.();
     if (!json) write(`Following bot ${source.botId} — taps apply as they arrive. Ctrl-C stops it.`);
     try {
       const report = await followBridge(store, {
@@ -9902,6 +9906,7 @@ async function bridgeCommand(
       ]);
     } finally {
       if (timer !== null) clearTimeout(timer);
+      if (fence !== null) clearInterval(fence);
       process.removeListener("SIGINT", stop);
       process.removeListener("SIGTERM", stop);
     }
