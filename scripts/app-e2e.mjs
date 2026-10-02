@@ -1643,9 +1643,9 @@ await journey("pages", "The demo lead: type a request, approve, see it build to 
         await Promise.all([visitor.waitForNavigation(), visitor.press('input[name="token"]', "Enter")]);
         await visitor.goto(`${started.url}/chat`);
         const banner = await visitor.locator("body").innerText();
-        if (!/Nothing calls a model, reaches outside or spends\./.test(banner)) throw new Error(`the demo banner: ${banner.slice(0, 300)}`);
-        // The demo hands off: its banner says how to start on a real project.
-        if (!/For your own project, run npx toolroll up in its folder\./.test(banner)) throw new Error(`the demo banner doesn't hand off: ${banner.slice(0, 300)}`);
+        // A phone gets the one-line banner (a terminal command is no use there); a desk gets the full one, which hands off.
+        if (!(width === 1440 ? /Nothing calls a model, reaches outside or spends\./ : /Nothing calls a model or spends\./).test(banner)) throw new Error(`the demo banner: ${banner.slice(0, 300)}`);
+        if (width === 1440 && !/For your own project, run npx toolroll up in its folder\./.test(banner)) throw new Error(`the demo banner doesn't hand off: ${banner.slice(0, 300)}`);
         if (width === 1440) {
           await visitor.locator(".demo-hint").waitFor();
           if (await visitor.locator(".demo-suggestions button").count() < 2) throw new Error("the first visit shows no suggestions");
