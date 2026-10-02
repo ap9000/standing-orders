@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.9.9 — 2026-10-02
+
+- **Faster, lighter tests.** The unit suite runs about three times faster
+  (the biggest test files are split by area), tests use at most 4 workers,
+  and a project's Quick check can be a typecheck plus the tests for the
+  changed files.
+- **Toolroll cleans up after itself.** When a run ends, it stops what the run
+  left running. Tests delete their temp folders, and `toolroll storage clean`
+  removes leftovers. Replaced release checks give up their checkouts, and
+  kept checkouts drop their dependencies until they're needed.
+- **Checkouts share dependencies.** One install per lockfile, linked into
+  each checkout: about 1,900 files instead of 20,000, set up in under a second.
+- **Every "Needs you" says what it needs, with the button that does it.**
+  Anything you can't act on shows as Waiting instead.
+- **Finished tasks read Complete everywhere.** Status, the console and chat
+  agree, and old "process exit not recorded" entries clear themselves.
+- **Updates never hang.** The updater settles leftover records itself, stops
+  waiting after 2 minutes otherwise, and says the one command that clears it.
+  Release checks now test upgrading from the last three releases.
+- **Screenshots stay out of the repository.** Images under `evidence/` are
+  left out of commits and show as one line in the review.
+
 ## 0.9.8 — 2026-10-01
 
 - **One automatic review per build.** When a build's checks pass (or it

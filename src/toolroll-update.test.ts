@@ -3,21 +3,20 @@ import { spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, randomUUID, sign, type KeyObject } from "node:crypto";
 import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
-import { hostname, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { openStore } from "./store.js";
 import { updateAdmissionPaused, UPDATE_PAUSED } from "./desktop-update-gate.js";
 import {
   checkProvenance, findSigstoreVerifier, lastCompletedUpdate, launchRuntimeUpdate, machineSystem, prepareRuntimeUpdate, pruneRuntimes, readRuntimeUpdate, releaseNotes, requestRuntimeUpdateCancel, resumeRuntimeUpdate, runtimeUpdateStatus, markWhatsNewSeen,
-  releaseStalledUpdate, startRuntimeRollback, startRuntimeUpdate, updateWaitingOf, waitingUpdate, PROVENANCE_ISSUER, PROVENANCE_REPOSITORY, PROVENANCE_WORKFLOW, UPDATE_JOB_LABEL, UPDATER_START_MS, UPDATE_STEPS, type RuntimePhase, type UpdateSystem,
+  startRuntimeRollback, startRuntimeUpdate, PROVENANCE_ISSUER, PROVENANCE_REPOSITORY, PROVENANCE_WORKFLOW, UPDATE_JOB_LABEL, UPDATE_STEPS, type RuntimePhase, type UpdateSystem,
 } from "./toolroll-update.js";
 import { REGISTRY, setUpdateChecks } from "./releases.js";
 import { runUpdateCommand } from "./toolroll-update-cli.js";
 import { updatesHtml } from "./toolroll-update-ui.js";
 import { addApprover } from "./scope.js";
 import { createDecisionServer } from "./serve.js";
-import { runOperate } from "./operate.js";
 import { TARBALL, sha512, der, seq, oid, utf8, extension, SIGNING, OTHER_KEY, signingCertificate, provenance, fixture, scriptedLaunchctl, scriptedNpm, failingHealth } from "../test/toolroll-update-kit.js";
 
 test("c1: a scripted update runs verify, drain, backup, rehearse, switch, restart and health in order", async () => {
