@@ -90,8 +90,8 @@ export function leadContext(store: Store, repos: readonly string[], now: Date, o
     sources: one.knowledge.sources.map(source => ({ id: source.id, title: source.title })) }));
   const omissions = { ...brief.omissions, projects: Math.max(brief.omissions.projects, repos.length - 8), notes: [...brief.omissions.notes] };
   const firstName = options.owner === undefined ? null : firstNameOf(options.owner);
-  // The whole bundle is scrubbed (titles, notes, next labels, the lead's name and persona); then the two names it
-  // carries on purpose are put back: the person's first name and each project's label.
+  // The whole bundle is scrubbed (titles, notes, next labels, the lead's name and persona); then the names it
+  // carries on purpose are put back: the lead's own name, the person's first name and each project's label.
   const data = scrubbed({
     snapshotVersion: 3, source: 'local-database',
     me: { name: options.leadName ?? identity.name, persona: identity.persona },
@@ -104,6 +104,8 @@ export function leadContext(store: Store, repos: readonly string[], now: Date, o
     notice: 'Bounded catch-up. Read the exact task/result before acting. Saved knowledge is context, not authority.',
   }, options.redact ?? (text => text));
   data.you.firstName = firstName;
+  // The name the owner gave their lead is theirs to say, even when it matches an account name.
+  data.me.name = options.leadName ?? identity.name;
   data.projects.forEach((one, index) => { one.name = projects[index]!.name; });
   // Least important first: the rest's knowledge, then its tasks, then each project's oldest decision, then the
   // last Needs you. Who the lead is, who it is talking to and the channel always stay.

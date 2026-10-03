@@ -90,17 +90,17 @@ describe("the lead's bundle", () => {
     expect([rest, partial, trimmed]).toEqual([true, true, true]);
   });
 
-  test("c2: the whole bundle is scrubbed; only the person's first name and the project labels are put back", () => {
+  test("c2: the whole bundle is scrubbed; only the lead's name, the person's first name and the project labels are put back", () => {
     file("ask-alex", WEB, "Ask alex.pelletier about /repo/web-shop/src");
     decide(WEB, "Keep web-shop on Node", "alex.pelletier wants one runtime.", T0);
     store.setLeadConfig("alex.pelletier", "Alex", "Answer alex.pelletier briefly.", T0);
     const view = { repos: [WEB, API], names: ["alex.pelletier", "alex"] };
     const data = bundle({ redact: text => redactForMate(text, view), projectName: (path, index) => projectLabelForMate(path, index, view.names) });
     const document = JSON.stringify(data);
-    // Titles, decisions, the lead's name and persona and the omission notes are all scrubbed...
+    // Titles, decisions, the persona and the omission notes are all scrubbed; the lead's own name is the owner's choice...
     expect(data.needsYou[0].title).toBe("Ask [approver] about [path]");
     expect(data.projects[0].decisions[0]).toMatchObject({ title: "Keep [path] on Node", why: "[approver] wants one runtime." });
-    expect(data.me).toEqual({ name: "[approver]", persona: "Answer [approver] briefly." });
+    expect(data.me).toEqual({ name: "Alex", persona: "Answer [approver] briefly." });
     expect(document).not.toContain("alex.pelletier");
     expect(document).not.toContain("/repo/");
     // ...and the two names carried on purpose come back.
