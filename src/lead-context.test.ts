@@ -42,7 +42,7 @@ describe("the lead's bundle", () => {
     decide(WEB, "Use Stripe Checkout", "Hosted pages keep card data off our servers.\nWe looked at Adyen too.", T0);
     decide(WEB, "Ship on Tuesdays", "Support is fully staffed then. Fridays are quiet.", new Date(T0.getTime() + 60_000));
     const data = bundle();
-    expect(Object.keys(data).slice(2, 8)).toEqual(["me", "you", "channel", "needsYou", "projects", "rest"]);
+    expect(Object.keys(data).slice(2, 10)).toEqual(["me", "you", "aboutYou", "people", "channel", "needsYou", "projects", "rest"]);
     expect(data.me).toEqual({ name: DEFAULT_LEAD_NAME, persona: DEFAULT_LEAD_PERSONA });
     expect(data.you).toEqual({ firstName: "Alex", timeZone: "Europe/London", today: "Friday 2026-10-02 14:05" });
     expect(data.channel).toMatchObject({ id: "telegram", fit: expect.stringContaining("Telegram") });

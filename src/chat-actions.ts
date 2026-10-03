@@ -56,6 +56,7 @@ import { kitInstalled, kitOf, KITS, setUpKitNow } from "./kits.js";
 import { starterFlowOf, starterOf, startersFor, starterTerms, STARTER_FLOWS, switchOnStarter } from "./flow-starters.js";
 import { answerTeammateQuestion } from "./teammate-work.js";
 import { callWords, checkRule, defaultRule, grantListed, revokeTool, ruleWords, setToolRules } from "./teammate-tools.js";
+import { aboutYouOf, checkAboutYouLine, saveAboutYou, withAboutYouLine } from "./lead-about.js";
 
 /** A tool from the lead's card: a common tool by its id, or the operator's own program or address. */
 function toolSpecFromRequest(input: Record<string, unknown>): ToolSpec {
@@ -132,6 +133,8 @@ export const CHAT_ACTIONS = {
   kit_setup: { label: "Set up kit", protected: false, password: false },
   decision_record: { label: "Record decision", protected: false, password: false },
   decision_retire: { label: "Retire decision", protected: false, password: false },
+  // What the owner's own lead knows about them: theirs alone, in no project (lead-about.ts).
+  lead_about_you: { label: "Remember", protected: false, password: false },
   scope_approve: { label: "Approve work", protected: true, password: true },
   result_accept: { label: "Accept and finish", protected: true, password: false },
   task_cancel: { label: "Cancel task", protected: true, password: false },
@@ -142,6 +145,8 @@ export type ChatAction = keyof typeof CHAT_ACTIONS;
  * yes/cancel challenge instead of the console's secure screen. Password
  * actions and long or redacted terms never qualify. */
 export const CHALLENGE_ACTIONS: ReadonlySet<ChatAction> = new Set<ChatAction>(["result_accept"]);
+/** Actions about the person themselves, in no project: their card carries no project (repo ""). */
+export const OWNER_ACTIONS: ReadonlySet<ChatAction> = new Set<ChatAction>(["lead_about_you"]);
 export function isChatAction(value: unknown): value is ChatAction {
   return typeof value === "string" && Object.hasOwn(CHAT_ACTIONS, value);
 }
@@ -196,6 +201,7 @@ export const CHAT_ACTION_FIELDS: Record<ChatAction, readonly string[]> = {
   kit_setup: ["repo", "kit"],
   decision_record: ["repo", "claim", "why", "supersedes", "source"],
   decision_retire: ["repo", "decision", "reason"],
+  lead_about_you: ["line", "replaces"],
   scope_approve: ["task"],
   result_accept: ["task", "run"],
   task_cancel: ["task"],
@@ -203,16 +209,17 @@ export const CHAT_ACTION_FIELDS: Record<ChatAction, readonly string[]> = {
 };
 const nonceHash = (value: string) =>
   createHash("sha256").update(value).digest("hex");
-function requireActor(store: Store, who: VerifiedApprover, repo: string) {
+function requireActor(store: Store, who: VerifiedApprover, repo: string, operation?: ChatAction) {
   if (!store.schemaCurrent())
     throw Error(
       "The running build changed. Reload before proposing an action.",
     );
+  // An action about the person themselves names no project; every other one names one they can reach.
+  const owned = repo === "" && operation !== undefined && OWNER_ACTIONS.has(operation);
   if (
     !isVerifiedApprover(who) ||
     !reproveApprover(store, who).ok ||
-    !who.repos.includes(repo) ||
-    !store.accountCanAccess(who.name, repo)
+    (!owned && (!who.repos.includes(repo) || !store.accountCanAccess(who.name, repo)))
   )
     throw Error("This project is outside your current access.");
 }
@@ -322,6 +329,26 @@ export function prepareSharedAction(
   const allowed = CHAT_ACTION_FIELDS[operation];
   if (Object.keys(input).some((key) => !allowed.includes(key)))
     throw Error("This action contains an unsupported field.");
+  if (operation === "lead_about_you") {
+    // The owner's own note: the card shows the line, and the line it replaces beside it.
+    const checked = checkAboutYouLine(input["line"]);
+    if (!checked.ok) throw Error(checked.message);
+    const lines = aboutYouOf(store, who.name);
+    const replaces = input["replaces"] === undefined || input["replaces"] === 0 ? 0 : integer(input, "replaces");
+    const next = withAboutYouLine(lines, checked.line, replaces);
+    if (!next.ok) throw Error(next.message);
+    requireActor(store, who, "", operation);
+    const request = { line: checked.line, ...(replaces === 0 ? {} : { replaces }) };
+    const terms = replaces === 0
+      ? [checked.line, "Your lead keeps this about you in every project. Change it in Settings → Lead."]
+      : [`Was: ${lines[replaces - 1]}`, `Now: ${checked.line}`, "Replaces that line in what your lead knows about you. Change it in Settings → Lead."];
+    // An added line goes on the end, so it holds whatever else changed; a replacing card holds only while the line
+    // it replaces is still that line.
+    const state = replaces === 0 ? {} : { was: lines[replaces - 1] };
+    const title = replaces === 0 ? "Remember about you" : "Update what your lead knows about you";
+    const stamp = hash({ operation, request, repo: "", state, terms, actor: who.name, generation: who.generation, ceiling: who.ceilingDigest });
+    return { operation, request, repo: "", title, terms, stamp, state };
+  }
   const task =
     operation.startsWith("skill_") || operation.startsWith("knowledge_") || operation.startsWith("decision_") || operation.startsWith("tool_") || operation.startsWith("flow_") || operation.startsWith("teammate_") || operation.startsWith("kit_")
       ? null
@@ -999,7 +1026,7 @@ function savedActionContext(
     throw Error(
       "This conversation ended or its project access changed. Ask for a fresh proposal.",
     );
-  requireActor(store, who, payload.repo);
+  requireActor(store, who, payload.repo, payload.operation);
   return payload;
 }
 export function mintSharedActionReview(
@@ -1136,6 +1163,12 @@ export function executeSharedAction(
         repo = payload.repo,
         actor = who.name;
       let taskId = task;
+      if (payload.operation === "lead_about_you") {
+        const next = withAboutYouLine(aboutYouOf(store, actor), String(req["line"]), Number(req["replaces"] ?? 0));
+        if (!next.ok) throw Error(next.message);
+        saveAboutYou(store, actor, next.lines, now);
+        return { ok: true as const, taskId: null, said: req["replaces"] === undefined ? "Your lead will remember this." : "Updated what your lead knows about you.", href: "/settings/lead" };
+      }
       if (payload.operation === "skill_import")
         importSkill(
           store,

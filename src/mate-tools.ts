@@ -106,6 +106,8 @@ import { deskOf, routinesOf } from "./teammate-desk.js";
 import { KITS } from "./kits.js";
 import { STARTER_IDS } from "./flow-starters.js";
 import { undoFor, weekOf, weekWords } from "./teammate-week.js";
+import { PERSON_ID, personEntry, teamRoomOf } from "./lead-people.js";
+import { aboutYouOf, checkAboutYouLine } from "./lead-about.js";
 
 const REPO_ID = /^r[0-9]{1,3}$/;
 const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -1240,10 +1242,11 @@ export const MATE_TOOLS: MateTool[] = [
   },
   {
     name: "remember",
-    description: "When the operator corrects you or states a lasting preference ('don't run full checks on this project'), propose it at once as a card: kind decision (a settled choice with its reason) or instruction (added to the project's standing instructions; pass the instructions revision from your catch-up, 0 when it has none). Once confirmed it is in your next turn's catch-up.",
-    inputSchema: schema({ repo: REPO_ARG, kind: { type: "string", enum: ["decision", "instruction"] }, text: { type: "string", minLength: 3, maxLength: 240 }, why: { type: "string", maxLength: 2000 }, source: { type: "string", maxLength: 200 },
-      revision: { type: "integer", minimum: 0 } }, ["repo", "kind", "text"]),
+    description: "When the operator corrects you or states a lasting preference ('don't run full checks on this project'), propose it at once as a card: kind decision (a settled choice with its reason) or instruction (added to the project's standing instructions; pass the instructions revision from your catch-up, 0 when it has none). kind about-you is about the owner themselves in every project ('keep copy terse', 'I test myself', 'don't ping me for releases'): text is one line under 200 characters, no repo; when it changes or contradicts a line in your catch-up's aboutYou, pass replaces with that line's number (1 is the first): the card shows both and replaces it; without replaces the line is added. Only what they said, never a guess. Once confirmed it is in your next turn's catch-up.",
+    inputSchema: schema({ repo: REPO_ARG, kind: { type: "string", enum: ["decision", "instruction", "about-you"] }, text: { type: "string", minLength: 3, maxLength: 240 }, why: { type: "string", maxLength: 2000 }, source: { type: "string", maxLength: 200 },
+      revision: { type: "integer", minimum: 0 }, replaces: { type: "integer", minimum: 1, maximum: 20 } }, ["kind", "text"]),
     handle: (ctx, args) => {
+      if (args["kind"] === "about-you") return rememberAboutYou(ctx, args);
       const repo = repoPathOf(ctx.who, args["repo"]);
       if (repo === null) return { ok: false, message: "Choose a project from list_repos." };
       if (!honest(args["text"], 240)) return { ok: false, message: "Say the correction in one sentence." };
@@ -1278,6 +1281,20 @@ export const MATE_TOOLS: MateTool[] = [
       const id = ctx.draft("action", { ...action });
       return id === null ? tooMany() : { ok: true, body: { proposal: id, label: action.title, awaiting: "confirmation", executed: false,
         next: "Once confirmed it is in your next catch-up. Then re-check the open proposals and promises it affects and say what you changed." } };
+    },
+  },
+  {
+    name: "get_person",
+    description: "One person, AI teammate or team chat from your catch-up's people index, in full, with their open tasks: its id as the index shows it (p3fa91c2e, t5, c07b1d9a4) or a name. Read it before answering a question about that person, teammate or team. Read-only.",
+    inputSchema: schema({ id: { type: "string", pattern: PERSON_ID.source }, name: { type: "string", minLength: 1, maxLength: 80 } }),
+    handle: (ctx, args) => {
+      const id = typeof args["id"] === "string" && PERSON_ID.test(args["id"]) ? args["id"] : undefined;
+      const name = typeof args["name"] === "string" && args["name"].trim() !== "" ? args["name"] : undefined;
+      if (id === undefined && name === undefined) return { ok: false, message: "Give an id from your catch-up's people index or a name." };
+      // In a team chat, the same people the room's catch-up lists: that room and its members.
+      const found = personEntry(ctx.store, ctx.who.name, ctx.who.repos, { ...(id === undefined ? {} : { id }), ...(name === undefined ? {} : { name }) }, teamRoomOf(ctx.store, ctx.thread));
+      if (found === null) return { ok: false, message: "No one by that name or id works with you. Your catch-up's people index lists who does." };
+      return { ok: true, body: "several" in found ? { several: found.several, next: "Ask which one, or call get_person with an id." } : { person: found.found } };
     },
   },
   {
@@ -1917,6 +1934,45 @@ function capabilitiesUnread(ctx: MateToolContext, name: string, args: Record<str
   return { ok: false, message: CAPABILITIES_UNREAD };
 }
 
+/** remember about-you: a card for one line about the owner. It replaces a line only when the lead names it with
+ * replaces, and then the card shows both; otherwise the line is added. */
+function rememberAboutYou(ctx: MateToolContext, args: Record<string, unknown>): MateToolResult {
+  const checked = checkAboutYouLine(args["text"]);
+  if (!checked.ok || !honest(args["text"], 240)) return { ok: false, message: checked.ok ? "Say it in one plain line." : checked.message };
+  // A shared team chat's lead speaks for the room; what the owner's own lead knows about them is theirs.
+  if (teamRoomOf(ctx.store, ctx.thread) !== null)
+    return { ok: false, message: "What your lead knows about someone is kept in their own chat with it, not a team chat." };
+  const lines = aboutYouOf(ctx.store, ctx.who.name);
+  if (args["replaces"] !== undefined && (!Number.isSafeInteger(args["replaces"]) || Number(args["replaces"]) < 1 || Number(args["replaces"]) > lines.length))
+    return { ok: false, message: `replaces is a line number from your catch-up's aboutYou (1 to ${lines.length}).` };
+  const replaces = args["replaces"] !== undefined ? Number(args["replaces"]) : 0;
+  const waiting = ctx.thread === undefined ? [] : ctx.store.listMateProposals(ctx.thread, ["drafting", "pending", "confirming"])
+    .filter(one => one.kind === "action" && one.payload["operation"] === "lead_about_you");
+  const twin = waiting.find(one => String((one.payload["request"] as Record<string, unknown> | undefined)?.["line"] ?? "").toLowerCase() === checked.line.toLowerCase());
+  if (twin !== undefined) return { ok: false, message: `Card ${twin.id} already proposes this; it is waiting to be confirmed.` };
+  let action: ReturnType<typeof prepareSharedAction>;
+  try { action = prepareSharedAction(ctx.store, ctx.who, "lead_about_you", { line: checked.line, ...(replaces === 0 ? {} : { replaces }) }, ctx.evidenceRoot, ctx.now); }
+  catch (error) { return { ok: false, message: error instanceof Error ? error.message : "That card could not be prepared." }; }
+  const id = ctx.draft("action", { ...action });
+  return id === null ? tooMany() : { ok: true, body: { proposal: id, label: action.title, awaiting: "confirmation", executed: false,
+    ...(replaces === 0 ? {} : { replaces: { line: replaces, was: lines[replaces - 1] } }),
+    next: "Once confirmed it is in your next catch-up's aboutYou." } };
+}
+
+/** get_person names people, teammates and team chat members on purpose; the scrub took them out with the rest. */
+function personNamesBack(raw: MateToolResult, scrubbed: MateToolResult): MateToolResult {
+  if (!raw.ok || !scrubbed.ok) return scrubbed;
+  const before = raw.body as Record<string, unknown>, after = scrubbed.body as Record<string, unknown>;
+  const person = before["person"] as Record<string, unknown> | undefined, shown = after["person"] as Record<string, unknown> | undefined;
+  if (person !== undefined && shown !== undefined) {
+    if (person["kind"] !== "team chat") shown["name"] = person["name"];
+    if ("members" in person) shown["members"] = person["members"];
+  }
+  const several = before["several"] as { name: string; kind: string }[] | undefined, listed = after["several"] as { name: string }[] | undefined;
+  several?.forEach((one, index) => { if (one.kind !== "team chat" && listed?.[index] !== undefined) listed[index]!.name = one.name; });
+  return scrubbed;
+}
+
 export const MATE_TOOL_SCHEMAS: MateToolSchema[] = MATE_TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
 
 export function isMateTool(name: string): boolean {
@@ -1936,7 +1992,7 @@ export function executeMateTool(ctx: MateToolContext, name: string, args: Record
   } catch {
     result = { ok: false, message: "that tool refused — the plane could not answer it right now" };
   }
-  const sanitized = mateView(result, scrub);
+  const sanitized = name === "get_person" ? personNamesBack(result, mateView(result, scrub)) : mateView(result, scrub);
   if (name === "list_repos" && sanitized.ok) {
     return { ok: true, body: { repos: ctx.who.repos.map((path, index) => ({
       repo: `r${index + 1}`, name: projectLabelForMate(path, index, scrub.names),

@@ -220,13 +220,15 @@ CREATE TABLE IF NOT EXISTS chat_batch_item (
 `;
 
 /** Settings → Lead (no version bump: additive only): what one person calls their lead and the short persona it
- * speaks with. No row reads as the defaults (lead-identity.ts). */
+ * speaks with, and what their lead knows about them (`about_json`: the confirmed lines, lead-about.ts). No row reads
+ * as the defaults (lead-identity.ts). */
 const LEAD_CONFIG_SCHEMA = `
 CREATE TABLE IF NOT EXISTS lead_config (
   account    TEXT PRIMARY KEY,
   name       TEXT NOT NULL,
   persona    TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  about_json TEXT NOT NULL DEFAULT '[]'
 );
 `;
 
@@ -5189,6 +5191,8 @@ function initializeStore(db: Database, file: string): Store {
   addColumn(db, "chat_batch_item", "notification", "INTEGER");
   db.exec(LEAD_QUIET_SCHEMA);
   db.exec(LEAD_CONFIG_SCHEMA);
+  // What a person's lead knows about them, beside its name and persona (an older lead_config gains it).
+  addColumn(db, "lead_config", "about_json", "TEXT NOT NULL DEFAULT '[]'");
   db.exec(LEAD_COMMITMENT_SCHEMA);
   mergeCheckTables(db);
   addColumn(db, "monitoring_status", "target", "TEXT");
@@ -26708,9 +26712,10 @@ export class Store {
 
   // ---- pings follow responsibility: the lead, who acted, replacements and muted projects ----
 
-  /** What this person named their lead and its persona, or null when they never saved one. */
+  /** What this person named their lead and its persona, or null when they never saved one. An empty name or persona
+   * (a row saved only for what the lead knows about them) reads as the default. */
   leadConfig(account: string): { name: string; persona: string } | null {
-    const row = this.db.prepare("SELECT name, persona FROM lead_config WHERE account = ?").get(account);
+    const row = this.db.prepare("SELECT name, persona FROM lead_config WHERE account = ? AND (name <> '' OR persona <> '')").get(account);
     return row === undefined ? null : { name: String(row["name"]), persona: String(row["persona"]) };
   }
 
@@ -26718,6 +26723,23 @@ export class Store {
   setLeadConfig(account: string, name: string, persona: string, now: Date): void {
     this.db.prepare(`INSERT INTO lead_config (account, name, persona, updated_at) VALUES (?, ?, ?, ?)
       ON CONFLICT(account) DO UPDATE SET name = excluded.name, persona = excluded.persona, updated_at = excluded.updated_at`).run(account, name, persona, now.toISOString());
+  }
+
+  /** What this person's lead knows about them: their confirmed lines, in order (none when they never saved any). */
+  leadAbout(account: string): string[] {
+    const row = this.db.prepare("SELECT about_json FROM lead_config WHERE account = ?").get(account);
+    if (row === undefined) return [];
+    try {
+      const lines = JSON.parse(String(row["about_json"]));
+      return Array.isArray(lines) ? lines.filter((one): one is string => typeof one === "string") : [];
+    } catch { return []; }
+  }
+
+  /** Save what this person's lead knows about them (checked by the caller: lead-about.ts). A person who never named
+   * their lead gets an empty name and persona, so they keep following the defaults. */
+  setLeadAbout(account: string, lines: readonly string[], now: Date): void {
+    this.db.prepare(`INSERT INTO lead_config (account, name, persona, updated_at, about_json) VALUES (?, '', '', ?, ?)
+      ON CONFLICT(account) DO UPDATE SET about_json = excluded.about_json, updated_at = excluded.updated_at`).run(account, now.toISOString(), JSON.stringify(lines));
   }
 
   /** A lead token for one person, shown once. A new one ends their earlier ones; the ledger names it "lead for <owner>". */

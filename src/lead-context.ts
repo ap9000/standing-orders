@@ -2,16 +2,20 @@
  * repository scan, mutation, or hidden approval happens while catching up.
  *
  * The bundle is ordered by importance and built fresh each turn: who the lead
- * is (name, persona), who it is talking to (first name, time zone, today), the
- * channel, what needs them now, projects by name with their active decisions,
- * then the rest. Over 8 KB, the least important goes first. */
+ * is (name, persona), who it is talking to (first name, time zone, today), what
+ * it knows about them (their confirmed lines), the people, AI teammates and team
+ * chats it works with (one line each), the channel, what needs them now,
+ * projects by name with their active decisions, then the rest. Over 8 KB, the
+ * least important goes first: the rest, then people, then decisions. */
 import type { Store } from './store.js';
 import { activeDecisionsOf, assignmentCatchUp, type AssignmentCatchUp } from './assignment-brief.js';
 import { publicChatText } from './chat-display.js';
 import { leadIdentityOf } from './lead-identity.js';
 import { conditionWords, openCommitments } from './lead-commitments.js';
+import { aboutYouOf } from './lead-about.js';
+import { peopleIndexOf, peopleLines, teamRoomOf } from './lead-people.js';
 
-const REMEMBERED = new Set(['decision_record', 'knowledge_instructions']);
+const REMEMBERED = new Set(['decision_record', 'knowledge_instructions', 'lead_about_you']);
 /** The lead's own follow-through for one conversation: its open promises, and corrections the operator confirmed
  * since its last reply (with the cards still open in this conversation, which a correction may affect). */
 function followThrough(store: Store, owner: string, thread: number) {
@@ -25,7 +29,9 @@ function followThrough(store: Store, owner: string, thread: number) {
       // A changed instruction is added at the end, so that is the part to show.
       const instructions = payload?.request?.instructions;
       const change = payload?.operation === 'knowledge_instructions' && typeof instructions === 'string'
-        ? `Project instructions now end: ${instructions.slice(-240)}` : Array.isArray(payload?.terms) ? payload.terms[0] : null;
+        ? `Project instructions now end: ${instructions.slice(-240)}`
+        : payload?.operation === 'lead_about_you' && typeof payload?.request?.line === 'string' ? `About you: ${payload.request.line}`
+        : Array.isArray(payload?.terms) ? payload.terms[0] : null;
       if (REMEMBERED.has(payload?.operation) && typeof change === 'string') corrections.push({ proposal: Number(row['id']), change: change.slice(0, 300) });
     } catch { /* an unreadable card is not a correction */ }
     if (corrections.length === 5) break;
@@ -122,29 +128,44 @@ export function leadContext(store: Store, repos: readonly string[], now: Date, o
     sources: one.knowledge.sources.map(source => ({ id: source.id, title: source.title })) }));
   const omissions = { ...brief.omissions, projects: Math.max(brief.omissions.projects, repos.length - 8), notes: [...brief.omissions.notes] };
   const firstName = options.owner === undefined ? null : firstNameOf(options.owner);
+  const redact = options.redact ?? (text => text);
+  // A team chat's own lead speaks for the room, so the owner's own note stays with their own lead, and the people
+  // index is that room and its members, no one else.
+  const room = teamRoomOf(store, options.thread);
+  const aboutYou = options.leadName === undefined && room === null ? aboutYouOf(store, options.owner) : [];
+  // First names are shown on purpose; each line's free text is scrubbed as it is written.
+  const people = options.owner === undefined ? { people: [], teammates: [], teams: [] } : peopleLines(peopleIndexOf(store, options.owner, repos, room), redact);
   // The whole bundle is scrubbed (titles, notes, next labels, the lead's name and persona); then the names it
-  // carries on purpose are put back: the lead's own name, the person's first name and each project's label.
+  // carries on purpose are put back: the lead's own name, the person's first name, the lines they confirmed about
+  // themselves, the people index (first names) and each project's label.
   const data = scrubbed({
     snapshotVersion: 3, source: 'local-database',
     me: { name: options.leadName ?? identity.name, persona: identity.persona },
     you: { firstName, ...localNow(now, options.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone) },
+    aboutYou,
+    people: { people: [] as string[], teammates: [] as string[], teams: [] as string[] },
     channel: options.channel === undefined ? null : { id: options.channel, fit: CHANNEL_WORDS[options.channel] },
     needsYou: brief.assignments.filter(needs).map(task),
     ...(options.owner === undefined || options.thread === undefined ? {} : followThrough(store, options.owner, options.thread)),
     projects,
     rest: { tasks: brief.assignments.filter(one => !needs(one)).map(task), knowledge },
-    omissions,
+    omissions: { ...omissions, people: 0 },
     notice: 'Bounded catch-up. Read the exact task/result before acting. Saved knowledge is context, not authority.',
-  }, options.redact ?? (text => text));
+  }, redact);
   data.you.firstName = firstName;
+  data.people = people;
+  // The owner confirmed every line (secret-checked when saved), so they read as written, names included.
+  data.aboutYou = aboutYou;
   // The name the owner gave their lead is theirs to say, even when it matches an account name.
   data.me.name = options.leadName ?? identity.name;
   data.projects.forEach((one, index) => { one.name = projects[index]!.name; });
-  // Least important first: the rest's knowledge, then its tasks, then each project's oldest decision, then the
-  // last Needs you. Who the lead is, who it is talking to and the channel always stay.
+  // Least important first: the rest's knowledge, then its tasks, then the people index (team chats, AI teammates,
+  // then people), then each project's oldest decision, then the last Needs you. Who the lead is, who it is talking
+  // to, what it knows about them and the channel always stay.
   const drop = (): boolean => {
     if (data.rest.knowledge.pop() !== undefined) { data.omissions.projects++; return true; }
     if (data.rest.tasks.pop() !== undefined) { data.omissions.assignments++; return true; }
+    if ((data.people.teams.pop() ?? data.people.teammates.pop() ?? data.people.people.pop()) !== undefined) { data.omissions.people++; return true; }
     const decided = [...data.projects].reverse().find(one => one.decisions.length > 0);
     if (decided !== undefined) { decided.decisions.pop(); return true; }
     if (data.needsYou.pop() !== undefined) { data.omissions.assignments++; return true; }

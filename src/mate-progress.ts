@@ -43,6 +43,7 @@ const TOOL_LABELS: Record<string, string> = {
   commit_to: "Noting what I promised",
   release_commitment: "Updating what I promised",
   remember: "Preparing a card for you to confirm",
+  get_person: "Looking them up",
 };
 
 export function mateToolLabel(name: string): string {

@@ -1,4 +1,5 @@
 import { checkLeadIdentity, leadIdentityOf, leadNameOf, LEAD_NAME_MAX, LEAD_PERSONA_MAX, type LeadIdentity } from "./lead-identity.js";
+import { aboutYouOf, checkAboutYou, saveAboutYou, ABOUT_YOU_LINE_MAX, ABOUT_YOU_MAX_LINES } from "./lead-about.js";
 import { withActor } from "./actor.js";
 import { repositoryContext, repositoryContextRead } from './repository-context.js';
 import { ADD_TESTS_ACTION, followUpChecksOf, requestFollowUpChecks, fileAddTestsTask, resultCheckLevel, type FollowUpCheck } from './result-follow-ups.js';
@@ -20,7 +21,7 @@ import {ChatState} from "./chat-delivery-state.js";
 import { slackSettingsHtml } from "./slack-settings.js";
 import { checkSlackCredentials, loadSlackCredentials, saveSlackCredentials, clearSlackCredentials, SLACK_MANIFEST, SlackError } from "./slack-api.js";
 import { SlackState } from "./slack-state.js";
-import { CHAT_ACTIONS, sharedActionPayload, sharedActionNeedsReview, sharedActionReviewPath, mintSharedActionReview } from './chat-actions.js';
+import { CHAT_ACTIONS, OWNER_ACTIONS, sharedActionPayload, sharedActionNeedsReview, sharedActionReviewPath, mintSharedActionReview } from './chat-actions.js';
 import { changeSkills, githubSkill, importSkill, readSkillsSnapshot, reviseSkillTest, skillTestResult, skillsView, testSkill, type SkillFile } from "./project-skills.js";
 import { skillsHtml, skillsScript, skillsSnapshotHtml, skillTestFeedbackHtml, SKILLS_CSS } from "./skills-ui.js";
 import { toolsHtml, TOOLS_CSS, type ToolsView } from "./tools-ui.js";
@@ -1828,7 +1829,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       }
       if (admitted && proposal) {
         const taskId = typeof action?.request['task'] === 'string' ? action.request['task'] : typeof proposal.payload['task'] === 'string' ? proposal.payload['task'] : null;
-        const repo = action?.repo ?? (taskId ? store.lookupRef(taskId)?.repo : null) ?? (typeof proposal.payload['repo'] === 'string' ? proposal.payload['repo'] : null);
+        const repo = (action?.repo || null) ?? (taskId ? store.lookupRef(taskId)?.repo : null) ?? (typeof proposal.payload['repo'] === 'string' ? proposal.payload['repo'] : null);
         return { repo, taskId, runId: typeof action?.request['run'] === 'number' ? action.request['run'] : null, action: action?.operation ?? `chat ${proposal.kind}` };
       }
     }
@@ -1877,6 +1878,8 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
         catch { /* The same scoped refusal below also covers revoked membership. */ }
       }
       if(action&&proposal&&store.getMateThread(proposal.thread)?.approver===who.name&&visible(action.repo)&&store.accountCanAccess(who.name,action.repo))return true;
+      // A card about the person themselves (what their lead knows about them) is in no project.
+      if(action&&proposal&&action.repo===''&&OWNER_ACTIONS.has(action.operation)&&store.getMateThread(proposal.thread)?.approver===who.name)return true;
       refuse(response,who,404,'No such action in your projects.','/projects');return false;
     }
     const read = new Set(["/settings/flows", "/settings/skills", "/settings/knowledge", "/settings", "/settings/learning", "/recipes", "/recipes/run", "/recipes/start", "/recipes/new", "/recipes/edit", "/recipes/from-task", "/recipes/preview", "/recipes/export", "/", "/inbox", "/work", "/projects", "/people", "/ledger", "/ledger/export", "/next", "/board", "/tasks", "/tasks/new", "/runs", "/review", "/done", "/routines", "/menu"]);
@@ -4341,7 +4344,8 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       const signedIn = localSignIn?.states.claude === "connected" ? "Claude Code" : localSignIn?.states.codex === "connected" ? "Codex" : null;
       const promises = openCommitments(store, who.name, 50).map(one => ({ id: one.id, what: one.what, when: conditionWords(store, one.condition), until: one.expiresAt }));
       return sendScreen(response, 200, screen("Lead", leadSettingsHtml({ config, facts, words: leadWords(), signedIn, command: agentSignInCommand(),
-        said: url.searchParams.get("said"), saved: url.searchParams.get("saved") === "1", identity: leadIdentityOf(store, who.name), promises }), { chrome: chromeFor(project, "settings") }));
+        said: url.searchParams.get("said"), saved: url.searchParams.get("saved") === "1", identity: leadIdentityOf(store, who.name), promises,
+        about: aboutYouOf(store, who.name), aboutSaved: url.searchParams.get("saved") === "about" }), { chrome: chromeFor(project, "settings") }));
     }
     if (url.pathname === "/settings/telegram") {
       // Any approver pairs their OWN phone here; the bot token stays on /settings.
@@ -9078,6 +9082,14 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       if (!checked.ok) return redirect(response, chatReturnWithSaid("/settings/lead", checked.message));
       store.setLeadConfig(who.name, checked.identity.name, checked.identity.persona, now);
       return redirect(response, "/settings/lead?saved=1");
+    }
+    // Settings → Lead: what this person's lead knows about them, one line each.
+    if (url.pathname === "/settings/lead/about") {
+      if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "An approver edits what their lead knows about them.", "/settings/lead");
+      const checked = checkAboutYou(body.get("about") ?? "");
+      if (!checked.ok) return redirect(response, chatReturnWithSaid("/settings/lead", checked.message));
+      saveAboutYou(store, who.name, checked.lines, now);
+      return redirect(response, "/settings/lead?saved=about");
     }
     // Settings → Lead: stop the lead following up on one of your promises.
     if (url.pathname === "/settings/lead/promise/cancel") {
@@ -18001,6 +18013,7 @@ type LeadFormFacts = {
 /** Settings → Lead: one line for what runs the lead and one action; the full form, turning it off and stored keys under Advanced. */
 function leadSettingsHtml(data: { config: import("./store.js").ChatConfig | null; facts: LeadFormFacts; words: string | null; signedIn: string | null; command: string; said: string | null;
   saved?: boolean; identity?: LeadIdentity;
+  about?: string[]; aboutSaved?: boolean;
   promises?: { id: number; what: string; when: string; until: string }[] }): string {
   const { config, facts } = data;
   const hidden = `<input type="hidden" name="csrf" value="${escape(facts.csrf)}"><input type="hidden" name="return" value="/settings/lead">`;
@@ -18023,6 +18036,12 @@ function leadSettingsHtml(data: { config: import("./store.js").ChatConfig | null
       `<label>Name your lead<input name="name" value="${escape(data.identity.name)}" maxlength="${LEAD_NAME_MAX}" autocomplete="off" required></label>` +
       `<label>Persona<textarea name="persona" rows="4" maxlength="${LEAD_PERSONA_MAX}">${escape(data.identity.persona)}</textarea></label>` +
       `<button type="submit">Save</button>${data.saved === true ? ` <span class="meta" role="status">Saved.</span>` : ""}</form>`,
+    // What the lead knows about this person: lines they confirmed in chat or wrote here. Every project, every chat.
+    data.about === undefined ? "" : `<form method="post" action="/settings/lead/about" class="card lead-about" data-lead-about>` +
+      `<input type="hidden" name="csrf" value="${escape(facts.csrf)}">` +
+      `<label>What your lead knows about you<textarea name="about" rows="${Math.min(10, Math.max(4, data.about.length + 1))}" maxlength="${ABOUT_YOU_MAX_LINES * (ABOUT_YOU_LINE_MAX + 1)}" placeholder="Keep copy terse.&#10;I test changes myself.">${escape(data.about.join("\n"))}</textarea></label>` +
+      `<p class="meta">One per line, up to ${ABOUT_YOU_MAX_LINES}.</p>` +
+      `<button type="submit">Save</button>${data.aboutSaved === true ? ` <span class="meta" role="status">Saved.</span>` : ""}</form>`,
     // What the lead promised to follow up on; it reports each once, here in chat, and drops it after 7 days.
     (data.promises ?? []).length === 0 ? "" : `<section class="card lead-promises" data-lead-promises><h2>Promises</h2><ul class="lead-promise-list">${data.promises!.map(one =>
       `<li data-promise="${one.id}"><p>${escape(one.what)}</p><p class="meta">${escape(one.when.charAt(0).toUpperCase() + one.when.slice(1))} · <span class="nowrap">until ${escape(new Date(one.until).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" }))}</span></p>` +

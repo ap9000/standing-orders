@@ -14,7 +14,7 @@ export function leadIdentityOf(store: Store, account: string | null | undefined)
   if (account == null || account === "") return { name: DEFAULT_LEAD_NAME, persona: DEFAULT_LEAD_PERSONA };
   try {
     const saved = store.leadConfig(account);
-    if (saved !== null) return { name: saved.name, persona: saved.persona };
+    if (saved !== null) return { name: saved.name || DEFAULT_LEAD_NAME, persona: saved.persona || DEFAULT_LEAD_PERSONA };
   } catch { /* no lead_config yet: the defaults */ }
   return { name: DEFAULT_LEAD_NAME, persona: DEFAULT_LEAD_PERSONA };
 }
