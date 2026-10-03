@@ -317,6 +317,30 @@ describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
   });
 
 
+  test("Settings → Lead names the lead and edits its persona; the console's chat then says that name", async () => {
+    await boot();
+    const cookie = await login();
+    const html = await (await fetch(url("/settings/lead"), { headers: { cookie } })).text();
+    expect(html).toContain("Name your lead");
+    expect(html).toContain('name="name" value="Lead"');
+    expect(html).toContain("Be genuinely helpful, not performative.");
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(html)?.[1] as string;
+    const save = (fields: Record<string, string>) => fetch(url("/settings/lead/identity"), { method: "POST", headers: { cookie, origin: base }, redirect: "manual", body: new URLSearchParams({ csrf, ...fields }) });
+    // A name that isn't plain words is refused and nothing is saved.
+    const refused = await save({ name: "<b>Maya</b>", persona: "x" });
+    expect(refused.headers.get("location")).toContain("said=");
+    expect(store.leadConfig("alex")).toBeNull();
+    const saved = await save({ name: "Maya", persona: "Dry humour. Keep it short." });
+    expect(saved.status).toBe(303);
+    expect(saved.headers.get("location")).toBe("/settings/lead?saved=1");
+    expect(store.leadConfig("alex")).toEqual({ name: "Maya", persona: "Dry humour. Keep it short." });
+    const again = await (await fetch(url("/settings/lead?saved=1"), { headers: { cookie } })).text();
+    expect(again).toContain('name="name" value="Maya"');
+    expect(again).toContain("Saved.");
+    const workspace = await (await fetch(url("/chat?format=workspace"), { headers: { cookie } })).json() as { leadName?: string };
+    expect(workspace.leadName).toBe("Maya");
+  });
+
   test("chat is configurable from the console itself — password-gated, key stays environment-only", async () => {
     store.clearChatConfig();
     await boot();

@@ -64,7 +64,7 @@ export type AssignmentSnapshot = {
   deployment: { status: "not-recorded" };
   /** What this assignment asks of a person, or waits for when no person can act (needs-you.ts). */
   need?: { key: NeedKey; build: number | null } | { wait: WaitKey; build: number | null } | null;
-  /** The person's lead took it on (lead-voice.ts): "Your lead is on it" until done, handed on, or two quiet hours. */
+  /** The person's lead took it on (lead-voice.ts): "<name> is on it" until done, handed on, or two quiet hours. */
   lead?: LeadClaim | null;
   /** How many earlier versions of this task are still queued or running; absent when none. */
   earlierActive?: number;

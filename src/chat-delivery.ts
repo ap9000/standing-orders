@@ -35,7 +35,8 @@ import { triggerConfigOf } from "./flow-triggers.js";
 import { telegramProgressCard } from "./telegram-progress.js";
 import { enqueueEveningDigests, finishedView, isTaskFact, joinsBatch, needsPerson, quietCardView } from "./chat-quiet.js";
 import { BATCH_MS, chatText, chatTitle } from "./chat-voice.js";
-import { LEAD_SAY_KIND, enqueueLeadLapses, leadSayEarlier, leadSayText } from "./lead-voice.js";
+import { LEAD_SAY_KIND, enqueueLeadLapses, leadSayEarlier, leadSayText, leadSubjectOf } from "./lead-voice.js";
+import { leadChannelOf } from "./lead-context.js";
 import { phoneText, PHONE_HELP, phoneCommand, phoneStatus, phoneTaskView, phoneTaskChoices, phoneTaskListText, resolvePhoneTask, phoneFocusText, PHONE_NO_MATCH, PHONE_BACK_TO_LEAD } from "./telegram-status.js";
 import { applyRoomInbound, conversationRow, roomCardApprover, roomCommand, roomGrantAllowed, roomMessagesAfter, roomMessageText, teamDomain } from "./chat-rooms.js";
 import { isTelegramProgressNotification, proposalTaskOf, type Store } from "./store.js";
@@ -370,6 +371,8 @@ export async function processChatEvent(
           .prepare("UPDATE chat_event SET payload=? WHERE id=? AND state='queued'")
           .run(JSON.stringify({ ...input, about }), event.id);
       }
+      // An unknown surface names no channel rather than a guess.
+      const channel = leadChannelOf(options.label);
       const outcome = await runMateTurn({
         store,
         who: resolved.who,
@@ -388,6 +391,7 @@ export async function processChatEvent(
         clock: () => nowOf(options),
         evidenceRoot: options.evidenceRoot,
         mediaDelivery: "documents",
+        ...(channel === undefined ? {} : { channel }),
         revalidate: async () => {
           try {
             await channelAccess(options, binding, resolved.who.ceilingDigest);
@@ -852,7 +856,7 @@ export async function planChatNotifications(
         const quiet = !personal && isTaskFact(notification) && store.notificationPreference(binding.approver).mode === "quiet";
         if (notification.kind === LEAD_SAY_KIND) {
           // The lead's words (lead-voice.ts): one message, repainted in place when a later say joins it.
-          const content: ChatContent = { text: leadSayText(notification),
+          const content: ChatContent = { text: leadSayText(store, notification),
             ...(notification.link ? { link: { label: "Open", path: notification.link } } : {}) };
           const earlier = leadSayEarlier(store, notification).map(one => state.prepare("SELECT id FROM chat_part WHERE event=?")
             .get(chatHash(`${options.state.channel}:notice:${binding.id}:${one}`))).find(one => one !== undefined);
@@ -971,7 +975,7 @@ export async function planChatNotifications(
               {
                 // Never the task's id or a "— revision" suffix (chat-voice.ts).
                 text: chatText(phoneText(
-                  notification.body === "" ? notification.subject : `${notification.subject}\n\n${notification.body}`,
+                  notification.body === "" ? leadSubjectOf(store, notification, binding.approver) : `${leadSubjectOf(store, notification, binding.approver)}\n\n${notification.body}`,
                   2500,
                 ), notification.taskId === null ? [] : [{ id: notification.taskId, title: chatTitle(store, notification.taskId) }]),
                 ...(notification.taskId ? { task: notification.taskId } : {}),

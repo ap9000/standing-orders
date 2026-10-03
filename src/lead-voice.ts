@@ -1,6 +1,6 @@
 /** The lead's voice: what the person's lead (an agent under their lead token) is doing, in their chat and on the
- * console. `lead say` posts one short message from "Your lead"; several within two minutes are one message, edited
- * in place as it grows. `assignment claim` marks a task the lead's: it reads "Your lead is on it" and leaves Needs
+ * console. `lead say` posts one short message from the lead, by the name its person gave it (Settings → Lead); several within two minutes are one message, edited
+ * in place as it grows. `assignment claim` marks a task the lead's: it reads "<name> is on it" and leaves Needs
  * you until the lead completes it, hands it to a person, or two hours pass with no lead act on it.
  *
  * Every fact is an append-only ledger row under "lead for <owner>"; no table of its own. The chat message is an
@@ -9,11 +9,10 @@ import { actorLabel, withActor, type Actor } from "./actor.js";
 import { chatControlHref } from "./chat-controls.js";
 import { BATCH_MS, chatText, chatTitle } from "./chat-voice.js";
 import { BUILT_IN, type Notification, type Store } from "./store.js";
-import { LEAD_LAPSED } from "./task-status.js";
+import { leadNameOf } from "./lead-identity.js";
+import { leadLapsed } from "./task-status.js";
 import { phoneText as plain } from "./telegram-status.js";
 
-/** Who the person's chat says the lead's messages are from. */
-export const LEAD_NAME = "Your lead";
 export const LEAD_SAY_KIND = "lead-say";
 /** Repaints the owner's task card when the lead takes a task on: it never makes a new message in quiet chat. */
 export const LEAD_ON_IT_KIND = "lead-on-it";
@@ -45,7 +44,7 @@ export const LEAD_CLAIM_SQL = `COALESCE((SELECT CASE
     FROM action_ledger claim WHERE claim.id = (SELECT MAX(id) FROM action_ledger WHERE task_id = c.root_id AND action = '${LEAD_CLAIMED}' AND actor = $leadOf)), 0)`;
 
 export type LeadClaim = { state: "on-it" | "lapsed"; owner: string; since: string; lastActedAt: string };
-export type LeadActivity = { owner: string; doing: string; at: string; taskId: string | null };
+export type LeadActivity = { owner: string; doing: string; at: string; taskId: string | null; /** What the owner calls their lead. */ name: string };
 
 type Failure = { ok: false; reason: "usage" | "unknown-task" | "refused"; message: string };
 
@@ -100,16 +99,26 @@ export function leadSay(store: Store, actor: Actor, text: string, taskId: string
     const lines = [...(joined ? String(open!["body"]).split("\n") : []), said].slice(-BATCH_LINES);
     if (joined) store.handle.prepare("UPDATE notification SET resolved_at = ? WHERE id = ? AND resolved_at IS NULL").run(stamp, Number(open!["id"]));
     const key = `lead-say:${joined ? opened : stamp}:${ledger}`;
-    store.enqueueNotification({ dedupeKey: key, kind: LEAD_SAY_KIND, subject: LEAD_NAME, body: lines.join("\n"),
+    store.enqueueNotification({ dedupeKey: key, kind: LEAD_SAY_KIND, subject: leadNameOf(store, actor.account), body: lines.join("\n"),
       recipient: actor.account, source: { installation: true }, ...(taskId === null ? {} : { link: chatControlHref("task", taskId) }) }, now);
     const row = store.handle.prepare("SELECT id FROM notification WHERE dedupe_key = ?").get(key);
     return { ok: true as const, joined, notification: row === undefined ? null : Number(row["id"]) };
   });
 }
 
-/** The words a chat shows for a lead-say row: "Your lead", then each line, plain, with no task id. */
-export function leadSayText(row: Pick<Notification, "subject" | "body">): string {
-  return chatText([plain(row.subject, 60), "", ...row.body.split("\n").map(line => plain(line, LEAD_SAY_MAX)).filter(line => line !== "")].join("\n"));
+/** A lead row's subject in its owner's current name for their lead, read when it is shown, so a rename reaches
+ * earlier cards too; any other row's own subject. `reader`: who the chat belongs to, for a row with no recipient
+ * (only its owner ever receives a lead row). */
+export function leadSubjectOf(store: Store, row: Pick<Notification, "kind" | "subject" | "recipient">, reader?: string | null): string {
+  const owner = row.recipient ?? reader ?? null;
+  if (owner === null || (row.kind !== LEAD_SAY_KIND && row.kind !== LEAD_ON_IT_KIND && row.kind !== LEAD_LAPSED_KIND)) return row.subject;
+  const name = leadNameOf(store, owner);
+  return row.kind === LEAD_SAY_KIND ? name : row.kind === LEAD_ON_IT_KIND ? `${name} is on it` : leadLapsed(name);
+}
+
+/** The words a chat shows for a lead-say row: the lead's name, then each line, plain, with no task id. */
+export function leadSayText(store: Store, row: Pick<Notification, "kind" | "subject" | "body" | "recipient">): string {
+  return chatText([plain(leadSubjectOf(store, row), 60), "", ...row.body.split("\n").map(line => plain(line, LEAD_SAY_MAX)).filter(line => line !== "")].join("\n"));
 }
 
 /** The earlier rows of a lead-say message (newest first): a chat that showed one edits it rather than sending again. */
@@ -131,9 +140,9 @@ export function leadClaim(store: Store, actor: Actor, taskId: string, now: Date)
   store.transact(() => {
     const ledger = store.recordAction({ at: now.toISOString(), actor: actorLabel(actor), repo: task.repo, taskId: root, runId: null,
       action: LEAD_CLAIMED, outcome: "recorded", source: "work" });
-    // The owner's card for this task repaints to "Your lead is on it": quiet chat edits its card, and every-update
+    // The owner's card for this task repaints to "<name> is on it": quiet chat edits its card, and every-update
     // chat edits the attempt's own card (the Failed alert), or follows it up when that message is gone.
-    store.enqueueNotification({ dedupeKey: `lead-on-it:${ledger}`, kind: LEAD_ON_IT_KIND, subject: "Your lead is on it", body: "",
+    store.enqueueNotification({ dedupeKey: `lead-on-it:${ledger}`, kind: LEAD_ON_IT_KIND, subject: `${leadNameOf(store, actor.account)} is on it`, body: "",
       link: chatControlHref("task", taskId), source: cardSource(store, root) ?? { taskRef: task.refId } }, now);
   });
   return { ok: true, root, claim: leadClaimOf(store, taskId, now, actor.account)! };
@@ -205,7 +214,7 @@ export function enqueueLeadLapses(store: Store, now: Date): number {
       if (source === null) continue;
       // The owner's lead let it go: only its owner's card hears of it (store.pingAllowed).
       if (withActor({ account: owner, lead: true }, () => store.enqueueNotification({ dedupeKey: `lead-lapsed:${root}:${owner}:${claim.lastActedAt}`,
-        kind: LEAD_LAPSED_KIND, subject: LEAD_LAPSED, body: "", link: chatControlHref("task", root), source }, now))) count++;
+        kind: LEAD_LAPSED_KIND, subject: leadLapsed(leadNameOf(store, owner)), body: "", link: chatControlHref("task", root), source }, now))) count++;
     }
   } catch {
     // An older store being read by a newer build: nothing to repaint.
@@ -227,7 +236,7 @@ const ACT_WORDS: Readonly<Record<string, string>> = {
 };
 
 /** What `owner`'s own lead is doing now and when it last acted, both from its one newest act: its words when that
- * was a say, else the act in words. Nobody (null) has no lead line: another person's lead is never "Your lead". */
+ * was a say, else the act in words. Nobody (null) has no lead line: another person's lead is never theirs. */
 export function leadActivity(store: Store, owner: string | null | undefined): LeadActivity | null {
   if (owner == null || owner === "") return null;
   try {
@@ -237,7 +246,7 @@ export function leadActivity(store: Store, owner: string | null | undefined): Le
     const title = task === null ? "" : (() => { try { return ` ${chatTitle(store, task)}`; } catch { return ""; } })();
     const doing = last["action"] === LEAD_SAID && last["detail"] != null ? chatText(String(last["detail"]), task === null ? [] : [{ id: task, title: title.trim() }])
       : `${ACT_WORDS[String(last["action"])] ?? String(last["action"]).replace(/^lead /, "")}${title}`;
-    return { owner, doing: doing.replace(/[.\s]+$/u, ""), at: String(last["at"]), taskId: task };
+    return { owner, doing: doing.replace(/[.\s]+$/u, ""), at: String(last["at"]), taskId: task, name: leadNameOf(store, owner) };
   } catch {
     return null;
   }
@@ -254,7 +263,7 @@ export function agoWords(at: string, now: Date): string {
   return days === 1 ? "yesterday" : `${days} days ago`;
 }
 
-/** The one line `toolroll status` and the console say: "Your lead: fixing 0.9.12's release check · 3 min ago". */
+/** The one line `toolroll status` and the console say: "Lead: fixing 0.9.12's release check · 3 min ago". */
 export function leadActivityLine(activity: LeadActivity, now: Date): string {
-  return `${LEAD_NAME}: ${activity.doing} · ${agoWords(activity.at, now)}`;
+  return `${activity.name}: ${activity.doing} · ${agoWords(activity.at, now)}`;
 }

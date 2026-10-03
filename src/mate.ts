@@ -39,10 +39,10 @@ import {
 import { redactSecretLines, scanForSecrets } from "./evidence.js";
 import { redactSecretAssignments } from "./builder.js";
 import { MATE_CONTRACT } from "./mate-contract.js";
-import { MATE_MAX_PROPOSALS_PER_TURN, MATE_TOOL_SCHEMAS, executeMateTool, isMateTool, mateViewContextFor, redactForMate, toolResultBytes } from "./mate-tools.js";
+import { MATE_MAX_PROPOSALS_PER_TURN, MATE_TOOL_SCHEMAS, executeMateTool, isMateTool, mateViewContextFor, projectLabelForMate, redactForMate, toolResultBytes } from "./mate-tools.js";
 import type { ReviewSnapshot } from "./chat-review.js";
 import { composeSubscriptionMatePrompt, performSubscriptionMateRequest, type SubscriptionMateRunner } from "./subscription-chat.js";
-import { leadContext } from './lead-context.js';
+import { leadContext, type LeadChannel } from './lead-context.js';
 import { envValue } from "./names.js";
 
 export const MATE_MESSAGE_MAX_CHARS = 2_000;
@@ -82,6 +82,10 @@ export type MateTurnInput = {
   clock?: () => Date;
   /** Where evidence lives — get_task reads a scout's report from here. */
   evidenceRoot?: string;
+  /** Where this conversation happens, so the lead fits its replies to it. */
+  channel?: LeadChannel;
+  /** A shared team conversation's own lead name, in place of this person's (Settings → Lead). */
+  leadName?: string;
   /** How this surface delivers the images a turn selects: Telegram sends them as documents after the reply; absent means identity only. */
   mediaDelivery?: "documents";
   /**
@@ -233,7 +237,10 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
   store.sweepStaleMateTurns(now);
 
   const view = mateViewContextFor(store, who);
-  const document = redactForMate(leadContext(store, who.repos, now, input.evidenceRoot), view);
+  // Names in the bundle are deliberate (the lead's, the person's first name, project labels); everything else is scrubbed.
+  const document = leadContext(store, who.repos, now, { owner: who.name, redact: text => redactForMate(text, view),
+    projectName: (path, index) => projectLabelForMate(path, index, view.names),
+    ...(input.evidenceRoot === undefined ? {} : { evidenceRoot: input.evidenceRoot }), ...(input.channel === undefined ? {} : { channel: input.channel }), ...(input.leadName === undefined ? {} : { leadName: input.leadName }) });
   const authoredMessage = input.queuedMessageId === undefined ? message : `From ${who.name}:\n${message}`;
   const historyMessage = input.context === undefined ? authoredMessage : `${redactForMate(input.context, view)}\n\n${authoredMessage}`;
   const history: MateHistoryMessage[] = [...historyFor(store, thread.id, input.queuedMessageId), { role: "operator", text: historyMessage }];

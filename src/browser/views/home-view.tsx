@@ -64,7 +64,7 @@ export function Home({ home }: { home: BrowserHome }) {
     <section aria-labelledby="home-now" data-home-now>
       <h2 id="home-now" className="mb-2.5 text-[14px] font-semibold tracking-[-0.01em]">Now</h2>
       {home.lead != null && <p data-home-lead className="mb-2.5 flex min-w-0 items-baseline gap-1.5 text-[13px] leading-snug">
-        <span className="shrink-0 font-medium">Your lead:</span>
+        <span className="shrink-0 font-medium">{home.lead.name ?? "Lead"}:</span>
         {home.lead.href === null ? <span className="min-w-0 truncate">{home.lead.doing}</span>
           : <a href={home.lead.href} className="min-w-0 truncate hover:underline hover:underline-offset-4">{home.lead.doing}</a>}
         <span className="shrink-0 text-muted-foreground">· <time dateTime={home.lead.at} className="tabular-nums">{ago(home.lead.at)}</time></span>

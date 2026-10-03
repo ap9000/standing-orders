@@ -23,10 +23,28 @@ export type AssignmentCatchUp = {
   }[];
   projects: { repo: string; knowledge: {
     status: "stored" | "none" | "unavailable"; revision: number | null; identity: string | null; sha256: string | null;
-    instructions: string; sources: { id: string; title: string; kind: "saved-note" | "repository-document"; path: string | null; sourceRevision: string | null; sourceSha: string | null }[]; decisions: { id: number; claim: string }[];
+    instructions: string; sources: { id: string; title: string; kind: "saved-note" | "repository-document"; path: string | null; sourceRevision: string | null; sourceSha: string | null }[]; decisions: { id: number; claim: string; why: string }[];
   } }[];
   omissions: { assignments: number; decisions: number; projects: number; textFields: number; candidateScanLimited: boolean; notes: string[] };
 };
+
+/** A sentence's end: not an abbreviation's full stop ("e.g.", "i.e.", "etc."), and followed by a new sentence. */
+const SENTENCE_END = /(?<!\b(?:e\.g|i\.e|etc|vs|cf|approx|incl|Mr|Mrs|Ms|Dr|St|No))[.!?](?=\s+["'“(]?[\p{Lu}\p{N}])/u;
+/** A reason's first sentence, or its first line. */
+export function firstSentenceOf(text: string): string {
+  const line = text.split("\n")[0]!.trim();
+  const end = SENTENCE_END.exec(line);
+  return end === null ? line : line.slice(0, end.index + 1);
+}
+
+/** A project's active decisions, newest first: each one's title and its reason in one line (first sentence or
+ * line). Memory absent on an older database reads as no decisions. */
+export function activeDecisionsOf(store: Store, repo: string, text: (value: string, cap: number) => string = publicChatText): { id: number; claim: string; why: string }[] {
+  try {
+    return store.handle.prepare("SELECT id,claim,why FROM project_decision WHERE repo=? AND status='active' ORDER BY id DESC LIMIT 8").all(repo).map(row => ({
+      id: Number(row["id"]), claim: text(String(row["claim"]), 160), why: text(firstSentenceOf(String(row["why"])), 160) }));
+  } catch { return []; }
+}
 
 /** A current snapshot, never a receipt to acknowledge. Full assignment reads
  * remain the place to inspect exact saved work and obtain its current digest. */
@@ -47,7 +65,7 @@ export function assignmentCatchUp(store: Store, now: Date, access: AssignmentAcc
   if (access.principal === "coordinator" && access.repos === null || query.repo !== undefined && access.repos !== null && !access.repos.includes(query.repo)) return result;
   const repos = query.repo === undefined ? access.repos : [query.repo];
   const includeUnplaced = query.repo === undefined && access.principal === "operator" && access.includeUnplaced === true;
-  const scopedAccess: AssignmentAccess = access.principal === "operator" ? { principal: "operator", repos, includeUnplaced } : { principal: "coordinator", repos: repos ?? [] };
+  const scopedAccess: AssignmentAccess = access.principal === "operator" ? { principal: "operator", repos, includeUnplaced, ...(access.viewer == null ? {} : { viewer: access.viewer }) } : { principal: "coordinator", repos: repos ?? [] };
   const text = (value: string, cap: number) => {
     const rendered = publicChatText(value, cap);
     if (rendered !== value) result.omissions.textFields++;
@@ -124,7 +142,7 @@ export function assignmentCatchUp(store: Store, now: Date, access: AssignmentAcc
         });
         Object.assign(knowledge, { status: "stored", revision, identity: /^[a-f0-9]{64}$/.test(identity) ? identity : null, sha256: String(row["sha"]), instructions: text(saved.instructions, 600), sources });
       } catch { /* Integrity failures are explicit; never replay an older version as current. */ }
-      try { knowledge.decisions = store.handle.prepare("SELECT id,claim FROM project_decision WHERE repo=? AND status='active' ORDER BY id DESC LIMIT 8").all(repo).map(row => ({ id: Number(row["id"]), claim: text(String(row["claim"]), 160) })); } catch { /* memory absent on an older database reads as no decisions */ }
+      knowledge.decisions = activeDecisionsOf(store, repo, text);
       result.projects.push({ repo, knowledge });
       if (!fits()) { result.projects.pop(); result.omissions.projects++; }
     }

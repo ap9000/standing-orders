@@ -18,6 +18,8 @@ export const CHAT_CONTROLS = {
   workers: { label: "Manage workers", href: "/fleet" },
   slack: { label: "Manage Slack", href: "/settings/slack" },
   discord: { label: "Manage Discord", href: "/settings/discord" },
+  // Settings → Lead: the lead's name and persona, changed there by its person.
+  lead: { label: "Name your lead", href: "/settings/lead" },
   settings: { label: "Open settings", href: "/settings" },
   permissions: { label: "Review permissions", href: "/settings" },
   providers: { label: "Connect an agent", href: "/settings#providers" },

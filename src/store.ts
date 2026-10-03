@@ -219,6 +219,17 @@ CREATE TABLE IF NOT EXISTS chat_batch_item (
 );
 `;
 
+/** Settings → Lead (no version bump: additive only): what one person calls their lead and the short persona it
+ * speaks with. No row reads as the defaults (lead-identity.ts). */
+const LEAD_CONFIG_SCHEMA = `
+CREATE TABLE IF NOT EXISTS lead_config (
+  account    TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  persona    TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+`;
+
 /** Pings follow responsibility (no version bump: additive only). `lead_credential` is a lead token: an agent acting
  * for `owner`, only its hash kept. `task_act` is who filed, approved, cancelled, completed or handed on a task
  * (`lead` 1: the owner's lead; `person`/`why`: who the lead asked, and why). `notification_actor` is whose act made
@@ -5131,6 +5142,7 @@ function initializeStore(db: Database, file: string): Store {
   // The update a batch line speaks for: its newest fact about that task (null: a finished result).
   addColumn(db, "chat_batch_item", "notification", "INTEGER");
   db.exec(LEAD_QUIET_SCHEMA);
+  db.exec(LEAD_CONFIG_SCHEMA);
   mergeCheckTables(db);
   addColumn(db, "monitoring_status", "target", "TEXT");
   // v105: how a teammate's turn was billed (this computer's Claude sign-in, as last seen).
@@ -26593,6 +26605,18 @@ export class Store {
   }
 
   // ---- pings follow responsibility: the lead, who acted, replacements and muted projects ----
+
+  /** What this person named their lead and its persona, or null when they never saved one. */
+  leadConfig(account: string): { name: string; persona: string } | null {
+    const row = this.db.prepare("SELECT name, persona FROM lead_config WHERE account = ?").get(account);
+    return row === undefined ? null : { name: String(row["name"]), persona: String(row["persona"]) };
+  }
+
+  /** Save this person's lead name and persona (checked by the caller: lead-identity.ts). */
+  setLeadConfig(account: string, name: string, persona: string, now: Date): void {
+    this.db.prepare(`INSERT INTO lead_config (account, name, persona, updated_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT(account) DO UPDATE SET name = excluded.name, persona = excluded.persona, updated_at = excluded.updated_at`).run(account, name, persona, now.toISOString());
+  }
 
   /** A lead token for one person, shown once. A new one ends their earlier ones; the ledger names it "lead for <owner>". */
   mintLeadCredential(owner: string, by: string, now: Date): { id: string; token: string } {

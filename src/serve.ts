@@ -1,3 +1,4 @@
+import { checkLeadIdentity, leadIdentityOf, leadNameOf, LEAD_NAME_MAX, LEAD_PERSONA_MAX, type LeadIdentity } from "./lead-identity.js";
 import { withActor } from "./actor.js";
 import { repositoryContext, repositoryContextRead } from './repository-context.js';
 import { ADD_TESTS_ACTION, followUpChecksOf, requestFollowUpChecks, fileAddTestsTask, resultCheckLevel, type FollowUpCheck } from './result-follow-ups.js';
@@ -4338,7 +4339,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       };
       const signedIn = localSignIn?.states.claude === "connected" ? "Claude Code" : localSignIn?.states.codex === "connected" ? "Codex" : null;
       return sendScreen(response, 200, screen("Lead", leadSettingsHtml({ config, facts, words: leadWords(), signedIn, command: agentSignInCommand(),
-        said: url.searchParams.get("said") }), { chrome: chromeFor(project, "settings") }));
+        said: url.searchParams.get("said"), saved: url.searchParams.get("saved") === "1", identity: leadIdentityOf(store, who.name) }), { chrome: chromeFor(project, "settings") }));
     }
     if (url.pathname === "/settings/telegram") {
       // Any approver pairs their OWN phone here; the bot token stays on /settings.
@@ -5158,7 +5159,8 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       try {
         const project = s.chrome.active === 'chat' ? null : s.chrome.project;
         crew = extras.team?.tasks ? browserCrewFromIndex(extras.team.tasks, extras.team.selected?.id) : requestFacts.workCrew?.project === project ? browserCrewFromIndex(requestFacts.workCrew.page)
-          : browserCrewOf(store, clock(), { principal: 'operator', repos: managedRepos(), includeUnplaced: false }, { evidenceRoot, project });
+          // The reader's own lead's claims read "<name> is on it" here too.
+          : browserCrewOf(store, clock(), { principal: 'operator', repos: managedRepos(), includeUnplaced: false, viewer: requestFacts.actor ?? null }, { evidenceRoot, project });
       } catch { notices.push('Crew updates are unavailable. Open Tasks to inspect saved work.'); }
       // "Wake me only for these": the navigation carries the count of tasks
       // waiting on a person behind its Tasks link — the open project's, or
@@ -5190,6 +5192,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       const request = requestFacts.workspaceRequest;
       const workspace: BrowserWorkspace = {
         version: 1, path: currentPath, title: s.title, user: requestFacts.actor ?? '', csrf: requestFacts.csrf, sensitive,
+        ...(requestFacts.actor ? { leadName: leadNameOf(store, requestFacts.actor) } : {}),
         refreshUrl: path.pathname + path.search,
         receipt: conversation !== null && request && REQUEST_TOKEN.test(request)
           ? { request, received: store.mateRequestReceipt(conversation.sessionId, request) !== null } : null,
@@ -5296,7 +5299,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     // One line: what this person's lead is doing now and when it last acted.
     const activity = leadActivity(store, who.name);
     const leadTask = activity?.taskId == null ? null : store.lookupRef(activity.taskId);
-    const lead = activity === null ? null : { doing: activity.doing, at: activity.at,
+    const lead = activity === null ? null : { name: activity.name, doing: activity.doing, at: activity.at,
       href: leadTask == null || !admitted(leadTask.repo) ? null : taskHref(familyOf(activity.taskId!)?.root.id ?? activity.taskId!) };
     return {
       agents, counts, catchUp, allHref: "/work", ...(lead === null ? {} : { lead }),
@@ -5401,7 +5404,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
   }
 
   function workAccess() {
-    // The reader's own lead's claims read "Your lead is on it" (lead-voice.ts); nobody else's.
+    // The reader's own lead's claims read "<name> is on it" (lead-voice.ts); nobody else's.
     return { principal: 'operator' as const, repos: admissionList(), includeUnplaced: visible(null), viewer: requestContext.getStore()?.actor ?? null };
   }
   // All project counts are read together. No task artifacts or processes are
@@ -9058,6 +9061,14 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     }
     // Turn the lead on with the agent signed in on this computer: its membership spends no dollars, so like starting a
     // conversation it needs no second password; the full form (Advanced) still asks for one.
+    // Settings → Lead: the name and persona this person's lead speaks with.
+    if (url.pathname === "/settings/lead/identity") {
+      if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "An approver names their lead.", "/settings/lead");
+      const checked = checkLeadIdentity(body.get("name") ?? "", body.get("persona") ?? "");
+      if (!checked.ok) return redirect(response, chatReturnWithSaid("/settings/lead", checked.message));
+      store.setLeadConfig(who.name, checked.identity.name, checked.identity.persona, now);
+      return redirect(response, "/settings/lead?saved=1");
+    }
     if (url.pathname === "/settings/lead/on") {
       if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "An approver turns the lead on.", "/settings/lead");
       await checkLocalAgents(true);
@@ -9346,7 +9357,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
         }
         const opened = store.openMateThread(who.name, principal.ceilingDigest, now, chatScopeOf(focusTask, chatProject));
         const onProgress = beginLiveTurn(opened.thread.id);
-        void runMateTurn({ store, who: principal, session: mateSession, thread: opened.thread, config: enabled.config, key: enabled.key, message, onProgress, ...(requestId === null ? {} : { requestId }), ...(focusTask === null && chatProject !== null ? { context: `Current project: ${projectName(chatProject)} (${chatProject}). Keep this conversation about that project unless the operator explicitly asks to broaden it; use it as the repo for project tools.` } : {}), ...(focusTask === null ? {} : { context: `Current task: ${focusTask.id}. Read it with get_task before answering or proposing changes. Read its currentExecution next and bind new actions to that exact execution. Never replace the target of a prior proposal with a newer revision. Keep this turn about that task unless the operator explicitly asks to broaden it.${resultContext}${modeContext}` }), fetcher: chatFetcher, ...(options.subscriptionChatRunner === undefined ? {} : { subscriptionRunner: options.subscriptionChatRunner }), clock, evidenceRoot })
+        void runMateTurn({ store, who: principal, session: mateSession, thread: opened.thread, config: enabled.config, key: enabled.key, message, onProgress, channel: "console", ...(requestId === null ? {} : { requestId }), ...(focusTask === null && chatProject !== null ? { context: `Current project: ${projectName(chatProject)} (${chatProject}). Keep this conversation about that project unless the operator explicitly asks to broaden it; use it as the repo for project tools.` } : {}), ...(focusTask === null ? {} : { context: `Current task: ${focusTask.id}. Read it with get_task before answering or proposing changes. Read its currentExecution next and bind new actions to that exact execution. Never replace the target of a prior proposal with a newer revision. Keep this turn about that task unless the operator explicitly asks to broaden it.${resultContext}${modeContext}` }), fetcher: chatFetcher, ...(options.subscriptionChatRunner === undefined ? {} : { subscriptionRunner: options.subscriptionChatRunner }), clock, evidenceRoot })
           .then(outcome => {
             if (!outcome.ok) noteMate(who.session.csrf, "turn" in outcome ? outcome.turn : null, outcome.message);
             endLiveTurn(opened.thread.id, outcome.ok);
@@ -17970,7 +17981,8 @@ type LeadFormFacts = {
 };
 
 /** Settings → Lead: one line for what runs the lead and one action; the full form, turning it off and stored keys under Advanced. */
-function leadSettingsHtml(data: { config: import("./store.js").ChatConfig | null; facts: LeadFormFacts; words: string | null; signedIn: string | null; command: string; said: string | null }): string {
+function leadSettingsHtml(data: { config: import("./store.js").ChatConfig | null; facts: LeadFormFacts; words: string | null; signedIn: string | null; command: string; said: string | null;
+  saved?: boolean; identity?: LeadIdentity }): string {
   const { config, facts } = data;
   const hidden = `<input type="hidden" name="csrf" value="${escape(facts.csrf)}"><input type="hidden" name="return" value="/settings/lead">`;
   const summary = config === null
@@ -17987,6 +17999,11 @@ function leadSettingsHtml(data: { config: import("./store.js").ChatConfig | null
     `<p><a href="/settings">Settings</a></p><h1>Lead</h1>`,
     data.said === null ? "" : `<p class="problem" role="status">${escape(data.said)}</p>`,
     `<section class="card lead-settings" data-lead-settings>${summary}</section>`,
+    data.identity === undefined ? "" : `<form method="post" action="/settings/lead/identity" class="card lead-identity" data-lead-identity>` +
+      `<input type="hidden" name="csrf" value="${escape(facts.csrf)}">` +
+      `<label>Name your lead<input name="name" value="${escape(data.identity.name)}" maxlength="${LEAD_NAME_MAX}" autocomplete="off" required></label>` +
+      `<label>Persona<textarea name="persona" rows="4" maxlength="${LEAD_PERSONA_MAX}">${escape(data.identity.persona)}</textarea></label>` +
+      `<button type="submit">Save</button>${data.saved === true ? ` <span class="meta" role="status">Saved.</span>` : ""}</form>`,
     `<details class="lead-advanced" data-lead-advanced><summary>Advanced</summary>`,
     leadConfigForm(config, facts),
     config === null ? "" : `<form method="post" action="/chat/config" class="inline">${hidden}<input type="hidden" name="off" value="1">` +

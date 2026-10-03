@@ -3,6 +3,7 @@
  * Discord, Teams) takes its titles and its finished-work lines from here, so a
  * task id, a "— revision" suffix or a person's own act never reaches a chat.
  * The console keeps every exact name and fact. */
+import { leadOnIt } from "./task-status.js";
 import type { TelegramTransport } from "./telegram.js";
 import { phoneText } from "./telegram-status.js";
 import type { Store } from "./store.js";
@@ -67,8 +68,10 @@ export type FinishedFact = {
   /** Not a finished result but another update about the task: its own words when it stands alone, and a few
    * words for a list ("has a plan to review"). */
   update?: { words: string; phrase: string } | null;
-  /** The person's lead took it on (lead-voice.ts): "Your lead is on it", never "It waits for you". */
+  /** The person's lead took it on (lead-voice.ts): "<name> is on it", never "It waits for you". */
   leadOnIt?: boolean;
+  /** What the person calls their lead (Settings → Lead); "Lead" when unnamed. */
+  leadName?: string;
 };
 
 /** The two buttons under a result ready for a person: the real next step, then a look first. */
@@ -85,7 +88,7 @@ export function finishedLine(fact: FinishedFact): string {
   const name = fact.summary, lower = inSentence(fact.summary);
   const ready = fact.lead === true ? `I finished ${lower}` : `${name} is ready`;
   // What waited on the person and the lead has taken on (Needs you reads Waiting then).
-  if (fact.leadOnIt === true && (fact.headline === "Needs you" || fact.headline === "Waiting" || fact.headline === "Stopped")) return `${name}: your lead is on it.`;
+  if (fact.leadOnIt === true && (fact.headline === "Needs you" || fact.headline === "Waiting" || fact.headline === "Stopped")) return `${name}: ${leadOnIt(fact.leadName)}`;
   switch (fact.headline) {
     case "Ready for review":
       if (fact.report) return fact.lead === true ? `I wrote up ${lower}. The report is ready to read.` : `${name}: the report is ready to read.`;
@@ -93,7 +96,7 @@ export function finishedLine(fact: FinishedFact): string {
       if (fact.checks === "off") return `${ready}. Checks are off for this project, so look it over first.`;
       return `${ready}, but no tests ran. Look it over first.`;
     case "Failed":
-      if (fact.leadOnIt === true) return fact.checks === "failed" ? `${name} is built, but its tests failed. Your lead is on it.` : `${name} stopped before it finished. Your lead is on it.`;
+      if (fact.leadOnIt === true) return fact.checks === "failed" ? `${name} is built, but its tests failed. ${leadOnIt(fact.leadName)}` : `${name} stopped before it finished. ${leadOnIt(fact.leadName)}`;
       if (fact.checks === "failed") return fact.lead === true
         ? `I built ${lower}, but its tests failed. It waits for you: retry or ask for changes.`
         : `${name} is built, but its tests failed. It waits for you: retry or ask for changes.`;
