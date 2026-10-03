@@ -35,8 +35,8 @@ One sentence under the headline says why and what's next, in plain words (e.g. "
 
 **2. Details as a quiet list underneath**, one row each, neutral text with a small icon. Colour only on the icon, and only when it matters:
 
-- Checks: passed / failed / running / couldn't run. A quick check says so ("Quick checks passed on a1b2c3d"); Off reads "Off" with **Run checks**; a follow-up check reads "Full checks running"
-- Pull request: none · opening · #12 open, CI running · #12 merged · couldn't open
+- Project checks: passed / failed / running / couldn't run. A quick check says so ("Quick checks passed on a1b2c3d"); Off reads "Off" with **Run checks**; a follow-up check reads "Full checks running"
+- Pull request: none · opening · #12 open · PR CI running · #12 merged · couldn't open
 - Requirements: "3 of 3 met" · "You check 1" (not "Not assessed")
 - Saved evidence: complete · some output shortened
 
@@ -47,7 +47,7 @@ One sentence under the headline says why and what's next, in plain words (e.g. "
 
 **4. One primary action**, chosen from the headline and details (Approve, Review, Mark complete, Merge, Retry the pull request…). Secondary actions stay quiet.
 
-**5. Plain words.** No grant, criterion, evidence, operator, verify, publication, assessment in anything a person reads by default; the exact technical reason stays one tap away (a "Details" disclosure and the run log).
+**5. Plain words.** No grant, criterion, evidence, operator, verify, publication, assessment in anything a person reads by default; the exact technical reason stays one tap away (the status card's "More" fold and the run log).
 
 ## Check levels
 

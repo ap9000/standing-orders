@@ -377,7 +377,7 @@ describe("lifecycle facts through the Telegram transport", () => {
     expect(edits.length).toBeGreaterThanOrEqual(2);
     expect(new Set(edits.map(call => call.params["message_id"]))).toEqual(new Set([100]));
     // The card speaks the shared status (task-status.ts): one headline, then quiet rows.
-    expect(edits.at(-1)?.params["text"]).toContain("○ Checks · Didn't run");
+    expect(edits.at(-1)?.params["text"]).toContain("○ Project checks · Didn't run");
     expect(edits.at(-1)?.params["text"]).toContain("○ Pull request · None");
     expect(edits.at(-1)?.params["text"]).not.toMatch(/Review|reviewer/);
     expect(script.buttons(edits.at(-1)!)).toEqual([{ text: "Open result", url: `${ORIGIN}/chat?task=clear-acceptance&result=${run}` }]);
@@ -567,7 +567,7 @@ describe("lifecycle facts through the Telegram transport", () => {
     const { ref, run } = progressAttempt();
     store.finishRun(run, { outcome: "built", committed: true, now });
     const view = (strict = false) => telegramProgressCard(store, { ...store.getRun(run)!, qualityMode: strict ? "strict" : "default" }, "clear-acceptance", ALPHA).text;
-    expect(view()).toContain("⚠ Checks · Couldn't be read");
+    expect(view()).toContain("⚠ Project checks · Couldn't be read");
     const matrix = [{ id: "c1", statement: "Readable progress", requiredEvidence: ["check"], state: "pass", detail: [], answered: [], review: null }];
     store.saveProofVerdict(run, "verified", [], now, matrix as never);
     expect(view()).toContain("✓ Requirements · 1 of 1 met");
@@ -598,13 +598,13 @@ describe("lifecycle facts through the Telegram transport", () => {
     storeEvidence(store, dir, run, "check-log", "checks.txt", Buffer.from("1 test passed"), "npm test", now, { captureStatus: "ok" });
     sealVerificationReceipt(store, dir, run, "a".repeat(40), store.liveVerifyCommand(ALPHA)!, { configured: true, ran: true, exitCode: 0 }, now);
     const view = () => telegramProgressCard(store, store.getRun(run)!, "ready-1", ALPHA, now, dir);
-    expect(view().text).toContain("✅ Ready for review\nChecks passed on aaaaaaa. Review the change, then mark it complete.\n\n✓ Checks · Passed on aaaaaaa");
+    expect(view().text).toContain("✅ Ready for review\nChecks passed on aaaaaaa. Review the change, then mark it complete.\n\n✓ Project checks · Passed on aaaaaaa");
     expect(view().link).toEqual({ label: "Open result", path: `/chat?task=ready-1&result=${run}` });
     const who = verifyApproverStanding(store, "alex", store.accountOf("alex")!.generation, [ALPHA]);
     if (!who.ok) throw new Error("approver fixture");
     const receipt = assignmentOf(store, "ready-1", now, { principal: "operator", repos: [ALPHA] }, dir)!.receipt!;
     expect(checkAssignmentAsOperator(store, "ready-1", receipt.digest, who.who, now, dir).ok).toBe(true);
-    expect(view().text).toContain("✅ Complete\nMarked complete by alex.\n\n✓ Checks · Passed on aaaaaaa");
+    expect(view().text).toContain("✅ Complete\nMarked complete by alex.\n\n✓ Project checks · Passed on aaaaaaa");
     expect(view().text).not.toMatch(/Review|reviewer/);
   });
 
@@ -862,7 +862,7 @@ describe("lifecycle facts through the Telegram transport", () => {
     ]);
     // The card ends with its project; no task or attempt id.
     expect(script.texts().at(-1)!.split("\n").at(-1)).toBe("alpha");
-    expect(script.texts().at(-1)).toContain("○ Checks · Didn't run");
+    expect(script.texts().at(-1)).toContain("○ Project checks · Didn't run");
     expect(script.calls.filter(call => call.method === "editMessageText")).toHaveLength(1);
     expect(script.buttons(script.sends().at(-1)!)).toEqual([{ text: "Open result", url: `${ORIGIN}/chat?task=alpha-1&result=${run}` }]);
     expect(script.calls.filter(call => ["sendMessage", "editMessageText"].includes(call.method)).slice(-4).every(send => String(send.params["chat_id"]) === String(CHAT + 1))).toBe(true);

@@ -120,7 +120,7 @@ describe("the operations console", () => {
 
     // The stall is the inbox's business now: one retry card per task.
     const inbox = await (await fetch(url("/inbox"), { headers: { cookie } })).text();
-    expect(inbox).toContain("retry stalled work");
+    expect(inbox).toContain("Retry stalled work");
     expect(inbox).toContain("t-1");
   });
 
@@ -168,7 +168,7 @@ describe("the operations console", () => {
     expect(posted.status).toBe(303);
 
     const page = await (await fetch(url(`/r/${run}`), { headers: { cookie } })).text();
-    expect(page).toContain("operator notes");
+    expect(page).toContain("Operator notes");
     expect(page).toContain("suspect — the fix touched the wrong module");
 
     // An empty note is refused by the shared validator, not stored blank.
@@ -1009,7 +1009,7 @@ describe("the operations console", () => {
     const inbox = await (await fetch(url("/inbox"), { headers: { cookie } })).text();
     // The approval card links to the step-up screen; it never carries a
     // password field or a nonce of its own.
-    expect(inbox).toContain("approve a scope");
+    expect(inbox).toContain("Approve a scope");
     expect(inbox).toContain("awaiting yes");
     expect(inbox).not.toContain('name="nonce"');
     expect(inbox).not.toContain('type="password"');
@@ -1049,7 +1049,7 @@ describe("the operations console", () => {
 
     const list = await (await fetch(url("/runs"), { headers: { cookie } })).text();
     expect(list).toContain(`/r/${run}`);
-    expect(list).toContain('class="badge badge-built">built</span>');
+    expect(list).toContain('class="badge badge-built">Built</span>');
     expect(list).not.toMatch(/<p class="row"><span class="dot /);
     const tasks = await (await fetch(url("/tasks"), { headers: { cookie } })).text();
     expect(tasks).not.toMatch(/<a class="row"[^>]*><span class="dot /);
@@ -1067,7 +1067,7 @@ describe("the operations console", () => {
     // agent's own account of its checks sits under Checks.
     expect(screen).toContain('class="card result-panel" id="result" data-result-panel data-result-place="run"');
     expect(screen).toContain("Added the payout boundary");
-    expect(screen).toContain("the agent's own account");
+    expect(screen).toContain("The agent's own account");
     expect(screen).toContain("Focused tests pass");
     expect(screen).toContain("Watch the first production run");
   });
@@ -1295,7 +1295,7 @@ describe("the operations console", () => {
     const caps = await (await fetch(url("/caps"), { headers: { cookie } })).text();
     expect(caps).toContain("cli:gh");
     expect(caps).toContain("unprobed");
-    expect(caps).toContain("read-only");
+    expect(caps).toContain("Read-only");
   });
 });
 
@@ -1391,7 +1391,7 @@ describe("console v2: projects, the ceiling, and the workspace", () => {
     const home = await (await fetch(url("/inbox"), { headers: { cookie } })).text();
     expect(home).toContain('class="side"');
     expect(home).toContain('<a href="/projects" aria-label="Projects" title="Projects"><span class="glyph"><svg');
-    expect(home).toContain("+ new task");
+    expect(home).toContain("+ New task");
     // The sole configured repo opened itself — no forced detour.
     expect(home).toContain("inbox");
     expect(home).toContain(">Tasks<");
@@ -1697,9 +1697,9 @@ describe("the board — the pipeline as lanes, live in place", () => {
     expect(created.status).toBe(303);
     expect(store.lookupRef("planned-from-create")?.plan).toBe("requested");
     const page = await (await fetch(url("/t/planned-from-create"), { headers: { cookie } })).text();
-    expect(page).toContain("planning requested");
+    expect(page).toContain("Planning requested");
     expect(page).not.toContain("approval-sheet");
-    expect(page).toContain('<details class="section" id="scope"><summary><h2>scope</h2></summary>');
+    expect(page).toContain('<details class="section" id="scope"><summary><h2>Scope</h2></summary>');
   });
 
   test("a requested plan blocks an approval submitted from a stale form", async () => {
@@ -1752,7 +1752,7 @@ describe("the board — the pipeline as lanes, live in place", () => {
     expect(store.refFor("built-in", "t-plan").plan).toBe("requested");
 
     const screen = await (await fetch(url("/t/t-plan"), { headers: { cookie } })).text();
-    expect(screen).toContain("planning requested");
+    expect(screen).toContain("Planning requested");
     expect(screen).not.toContain(">plan first<");
     expect(screen).not.toContain("approval-sheet");
 
@@ -2380,7 +2380,7 @@ describe("routines on the console", () => {
   test("filing from the console lands on the approval ceremony; a bad definition names every problem", async () => {
     const cookie = await login();
     const screen = await (await fetch(url("/routines"), { headers: { cookie } })).text();
-    expect(screen).toContain("file a standing order");
+    expect(screen).toContain("File a standing order");
     const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(screen)?.[1] as string;
     const revision = /name="projectRevision" value="([0-9]+)"/.exec(screen)?.[1] as string;
 
@@ -2432,7 +2432,7 @@ describe("routines on the console", () => {
     expect(list).toContain("weekly");
     expect(list).toContain("live");
     const screen = await (await fetch(url(`/routines/${id}`), { headers: { cookie } })).text();
-    expect(screen).toContain("firings");
+    expect(screen).toContain("Firings");
     expect(screen).toContain("weekly-");
   });
 
@@ -2547,7 +2547,7 @@ describe("the agents card — configuration, readable at a glance", () => {
       const html = await (await fetch(`${base}/system`, { headers: { cookie } })).text();
       // Plain sentences, provenance in words, the honest cost note — and
       // no form anywhere near it: changing routing is the terminal's act.
-      expect(html).toContain("agents");
+      expect(html).toContain("Agents");
       expect(html).toContain("chosen for this project by alex");
       expect(html).toContain("set for the whole installation by alex");
       expect(html).toContain("gpt-5-codex");
@@ -2642,7 +2642,7 @@ describe("/next — clearing the queue one thing at a time", () => {
 
     const second = await (await fetch(url("/next"), { headers: { cookie } })).text();
     expect(second).toContain("the last thing waiting on you");
-    expect(second).toContain("approve exactly this:");
+    expect(second).toContain("Approve exactly this:");
     expect(second).toContain("not the other thing");
     expect(second).toContain('type="password"');
     const nonce = /name="nonce" value="([0-9a-f]{32})"/.exec(second)?.[1] as string;
@@ -2730,7 +2730,7 @@ describe("since you last looked", () => {
       await fetch(`${base}/board?fragment=1`, { headers: { cookie } });
 
       const back = await (await fetch(`${base}/board`, { headers: { cookie } })).text();
-      expect(back).toContain("since you last looked");
+      expect(back).toContain("Since you last looked");
       expect(back).toContain("1 built");
     } finally {
       await new Promise<void>(resolve => server.close(() => resolve()));
@@ -2760,7 +2760,7 @@ describe("quick capture — from thought to the approve card in two steps", () =
       });
       const cookie = (login.headers.get("set-cookie") ?? "").split(";")[0] as string;
       const inbox = await (await fetch(`${base}/inbox`, { headers: { cookie } })).text();
-      expect(inbox).toContain("capture new work");
+      expect(inbox).toContain("Capture new work");
       const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(inbox)?.[1] as string;
       const revision = /name="projectRevision" value="([0-9]+)"/.exec(inbox)?.[1] as string;
 
@@ -3042,7 +3042,7 @@ describe("the fleet — runner lanes as the agents × projects surface", () => {
     expect(html).not.toContain('<div class="board" data-queue-revision='); // not the 5-track board container
     expect(html).toContain("builder-1");
     expect(html).toContain("builder-2");
-    expect(html).toContain("shared queue");
+    expect(html).toContain("Shared queue");
     expect(html).toContain("being built");             // the live claim
     expect(html).toContain("reserved work");           // the queued reservation
     // The register/retire ceremonies are the only forms here.
@@ -3256,7 +3256,7 @@ describe("the workbench (attended A1) and the live substrate", () => {
     const cookie = await login();
     const html = await (await fetch(url("/workbench?t=needs-scope"), { headers: { cookie } })).text();
     expect(html).toContain("No approved scope yet");
-    expect(html).toContain("write the scope");
+    expect(html).toContain("Write the scope");
     // The poll targets the rail region, not the pane.
     expect(html).toContain('"wb-rail"');
     expect(html).not.toContain('"wb-detail"');
@@ -3404,29 +3404,29 @@ describe("round 4 — liveness is proved from the current lease, never guessed f
     const plain = await (await fetch(url("/t/alive"), { headers: { cookie } })).text();
     // The panel (slice 1c) names the run by its one unambiguous identity
     // and always carries the door to the full build view.
-    expect(plain).toContain(`build #${liveRun} · night-shift-1 · running`);
+    expect(plain).toContain(`Build #${liveRun} · night-shift-1 · running`);
     expect(plain).toContain(`href="/r/${liveRun}">full build view →`);
     // Without --runner the panel says the view is off — no poller, no
     // region, and no promise of a live look.
-    expect(plain).toContain("the live file view is off");
+    expect(plain).toContain("The live file view is off");
     expect(plain).not.toContain('id="run-peek"');
     expect(plain).not.toContain("?fragment=peek");
 
     // The run page still shows the section, saying why it is empty — the
     // click must never land on silence.
     const runPlain = await (await fetch(url(`/r/${liveRun}`), { headers: { cookie } })).text();
-    expect(runPlain).toContain("what is changing right now");
-    expect(runPlain).toContain("the live file view is off");
+    expect(runPlain).toContain("What is changing right now");
+    expect(runPlain).toContain("The live file view is off");
 
     await boot({ localRunner: "night-shift-1" });
     const cookieOn = await login();
     const watching = await (await fetch(url("/t/alive"), { headers: { cookie: cookieOn } })).text();
-    expect(watching).toContain(`build #${liveRun} · night-shift-1 · running`);
+    expect(watching).toContain(`Build #${liveRun} · night-shift-1 · running`);
     expect(watching).toContain('id="run-peek"');
-    expect(watching).toContain("watching…");
+    expect(watching).toContain("Watching…");
     expect(watching).not.toContain("the live file view is off");
     const runOn = await (await fetch(url(`/r/${liveRun}`), { headers: { cookie: cookieOn } })).text();
-    expect(runOn).toContain("watching…");
+    expect(runOn).toContain("Watching…");
     expect(runOn).not.toContain("the live file view is off");
 
     // The orphan's task page has no panel at all — there is nothing live.
@@ -3479,9 +3479,9 @@ describe("round 4 — liveness is proved from the current lease, never guessed f
     // api waits for schema — created, visible, removable.
     expect((await post("/t/t-api/block", { on: "t-schema" })).status).toBe(303);
     const page = await (await fetch(url("/t/t-api"), { headers: { cookie } })).text();
-    expect(page).toContain("waits for");
+    expect(page).toContain("Waits for");
     expect(page).toContain("t-schema");
-    expect(page).toContain("don't wait for this");
+    expect(page).toContain("Don't wait for this");
 
     // The loop refuses with the store's own sentence, on the page.
     const loop = await post("/t/t-schema/block", { on: "t-api" });
@@ -3551,7 +3551,7 @@ describe("round 4 — liveness is proved from the current lease, never guessed f
     store.refFor("built-in", "t-before", "ours");
     const cookie = await login();
     const form = await (await fetch(url("/tasks/new"), { headers: { cookie } })).text();
-    expect(form).toContain("starts after");
+    expect(form).toContain("Starts after");
     const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(form)?.[1] as string;
 
     const created = await fetch(url("/tasks/add"), {
@@ -3562,7 +3562,7 @@ describe("round 4 — liveness is proved from the current lease, never guessed f
     });
     expect(created.status).toBe(303);
     const page = await (await fetch(url("/t/t-after"), { headers: { cookie } })).text();
-    expect(page).toContain("waits for");
+    expect(page).toContain("Waits for");
     expect(page).toContain("t-before");
 
     // A vanished "after" still files the task — the page says what failed.

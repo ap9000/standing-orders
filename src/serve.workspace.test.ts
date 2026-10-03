@@ -178,7 +178,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     const review = await response.text();
     expect(review).toContain(`data-result-run="${run}"`);
     // The project switch keeps the person's own choice (All projects), not the result's project.
-    expect(review).toContain('<span class="name">all projects');
+    expect(review).toContain('<span class="name">All projects');
     expect(review).not.toContain("Check completed builds against their approved scope and evidence.");
     expect(review).not.toContain(`<span class="eyebrow">Build #${run}</span>`);
     expect(review).toContain(`Build #${run}`);
@@ -196,7 +196,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     expect(queueLink).toBe(link);
     const reviewCss = await stylesOf(review, base);
     expect(reviewCss).toContain('.result-panel .pick-file, .result-panel .pick-line, .diff-modes button { min-height: 44px; min-width: 44px; white-space: nowrap; }');
-    expect(await page(cookie, "/work")).toContain('<span class="name">all projects');
+    expect(await page(cookie, "/work")).toContain('<span class="name">All projects');
     // Old task-only links also resolve their authorized project without a switch.
     const old = await fetch(url("/review?result=t-navigation"), { headers: { cookie }, redirect: "manual" });
     expect(old.status).toBe(200);
@@ -270,7 +270,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     // admin group carried before.
     const fleet = await page(cookie, "/fleet");
     expect(/<details class="nav-group" data-group="settings"([^>]*)>/.exec(fleet)?.[1]).toBe(" open");
-    expect(fleet).toContain('<a href="/fleet" aria-label="fleet" title="fleet" class="active">fleet</a>');
+    expect(fleet).toContain('<a href="/fleet" aria-label="Fleet" title="Fleet" class="active">Fleet</a>');
     const menu = await page(cookie, "/menu");
     expect([...menu.matchAll(/<a class="menu-row" href="([^"]+)">/g)].map(m => m[1])).toEqual(["/code", "/inbox", "/board", "/tasks", "/recipes", "/routines", "/workbench", "/ledger", "/spend", "/settings", "/fleet", "/caps", "/people", "/mode", "/system"]);
     // The queue's old address still answers as before.
@@ -414,7 +414,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     };
     await agree(id, "needs-approval", "Approve plan", "Approve & start");
     const beforeApproval = await page(cookie, `/t/${id}`);
-    expect(beforeApproval).toContain(`<p class="scope-paths"><strong>touches</strong> ${allowed}</p>`);
+    expect(beforeApproval).toContain(`<p class="scope-paths"><strong>Touches</strong> ${allowed}</p>`);
     const css = await stylesOf(beforeApproval, base);
     expect(css).toContain('#scope .recap, #scope .scope-paths, .approval-goal { overflow-wrap: anywhere; }');
     expect(beforeApproval).toContain('<h1 class="task-main-title">Keep the full allowed path visible</h1>');
@@ -773,7 +773,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     store.finishRun(outsideRun, { outcome: "built", committed: true, now });
     const cookie = await login();
     // A fresh session with two served projects has none open.
-    expect(/<span class="name">all projects/.test(await page(cookie, "/work"))).toBe(true);
+    expect(/<span class="name">All projects/.test(await page(cookie, "/work"))).toBe(true);
     // A builder's result opens on its one result page (titled with the task); its run record stays at ?record=1.
     for (const [path, status, location] of [[`/r/${alphaRun}`, 303, `/review?result=t-alpha&run=${alphaRun}`], [`/r/${betaRun}`, 303, `/review?result=t-beta&run=${betaRun}`],
       [`/r/${alphaRun}?record=1`, 200, null], [`/r/${outsideRun}`, 404, null], [`/r/${outsideRun}?record=1`, 404, null], ["/r/999999", 404, null]] as const) {
@@ -782,7 +782,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
       expect(response.headers.get("location"), path).toBe(location);
     }
     const resultPage = await page(cookie, `/r/${alphaRun}`);
-    expect(resultPage).toContain('<span class="name">all projects');
+    expect(resultPage).toContain('<span class="name">All projects');
     expect(resultPage).toContain("alpha result");
     const runPage = await page(cookie, `/r/${alphaRun}?record=1`);
     expect(runPage).toContain(`build #${alphaRun}`);
@@ -888,7 +888,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
       }
     });
     const all = await login();
-    expect(/<span class="name">all projects/.test(await page(all, "/work"))).toBe(true);
+    expect(/<span class="name">All projects/.test(await page(all, "/work"))).toBe(true);
     const rollup = await page(all, "/work");
     const rollupRows = rowsOf(rollup).map(row => row.id);
     expect(rollupRows).toHaveLength(40);
@@ -1064,7 +1064,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
       historyWindow.document.body.innerHTML = liveTask;
       const attempts = historyWindow.document.querySelector('#attempts')!;
       expect(attempts.textContent).not.toContain("never finished");
-      expect(attempts.querySelector('.badge-running')?.textContent).toBe("running");
+      expect(attempts.querySelector('.badge-running')?.textContent).toBe("Running");
       expect(liveTask).toContain(`review #${admitted.reviewerRunId}</a> · running`);
     } finally { await historyWindow.happyDOM.close(); }
     expect(await page(cookie, "/chat?task=t-rev")).not.toContain('class="card task-journey"');
@@ -1207,7 +1207,7 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     // project only through the ceiling, so drive the intro with alpha.
     await openProject(cookie, alpha);
     const tasks = await page(cookie, "/tasks");
-    expect(tasks).toContain(`work you want done in <strong>alpha</strong>`);
+    expect(tasks).toContain(`Work you want done in <strong>alpha</strong>`);
     expect(tasks).toContain(`<p class="meta path-words"><span class="mono">${alpha}</span></p>`);
     expect(await stylesOf(tasks, base)).toContain(".path-words { overflow-wrap: anywhere; word-break: break-word; }");
     expect(tasks).not.toContain(`in <span class="mono">${alpha}</span> —`);

@@ -17,7 +17,7 @@ import { historicalAssessmentReason } from "./assignment-presentation.js";
 import { runCheckLevel, type CheckLevel } from "./check-levels.js";
 import { followUpChecksOf, withFollowUps } from "./result-follow-ups.js";
 import { buildReviewOf, findingWords, type BuildReviewView } from "./review-switch.js";
-import { NEEDS, WAITS, processNeedOf, type NeedKey, type WaitKey } from "./needs-you.js";
+import { NEEDS, WAITS, processNeedOf, resultHoldUpSentence, type NeedKey, type WaitKey } from "./needs-you.js";
 import { assignmentStageOf } from "./task-status.js";
 import { leadClaimOf, type LeadClaim } from "./lead-voice.js";
 
@@ -272,7 +272,7 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
     detail = completionKind === "research-report" ? "The research report is ready for the lead to read."
       : completionKind === "accepted-exception" ? "An operator accepted this result with its recorded limitations. The lead can inspect that decision; the recorded checks are unchanged."
       : receipt.checks.detail;
-    primaryAction = { code: "open-result", label: completionKind === "research-report" ? "Read report" : receipt.checks.status === "failed" ? "Inspect failed check" : completionKind === "accepted-exception" ? "Review acceptance" : "Open result", target: { taskId: current.id, runId: result!.id, decisionId: null }, access: "read", retry: "read-again" };
+    primaryAction = { code: "open-result", label: completionKind === "research-report" ? "Read report" : "Open result", target: { taskId: current.id, runId: result!.id, decisionId: null }, access: "read", retry: "read-again" };
     const checked = store.handle.prepare("SELECT actor,at FROM action_ledger WHERE task_id = ? AND run_id = ? AND action = ? AND outcome = ? AND source = 'work' ORDER BY id DESC")
       .all(family.root.id, result!.id, CHECK_ACTION, receipt.digest).find(row => /^(operator|coordinator|lead):.+/.test(String(row["actor"])));
     // This ledger fact was authorized when written. Credential rotation,
@@ -293,7 +293,11 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
     if (current.state === "done" && work.status.tone !== "attention" && work.status.tone !== "problem") detail = result?.role === "scout"
       ? completionKind === null ? "The research report is missing or incomplete. Inspect the saved report before checking this handoff."
         : "The saved report is awaiting resolution of its current scope or hold."
-      : "Inspect the saved result and resolve its remaining execution or scope issue.";
+      : resultHoldUpSentence({ hold: store.activeHolds(current.refId, now)[0]?.reason ?? null,
+          planChanged: result !== null && scope !== null && !!result.scopeDigest && scope.digest !== result.scopeDigest,
+          unapproved: scope === null || scope.termsProblem != null || !approvalOf(scope).approved, question: questions.length > 0,
+          running: store.currentLiveLease(current.refId, now) !== null, unfinished: unfinished !== null,
+          noCommit: result === null || completionKind === null });
     // Built to an earlier plan: the result page can't resolve it (accepting would leave it stuck), building again can.
     if (current.state === "done" && result !== null && scope !== null && scope.termsProblem == null && approvalOf(scope).approved && !!result.scopeDigest && scope.digest !== result.scopeDigest &&
       store.activeHolds(current.refId, now).length === 0 && unfinished === null && store.currentLiveLease(current.refId, now) === null && store.finalResultReason(result.id) === null) {

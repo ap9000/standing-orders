@@ -669,13 +669,13 @@ describe("provider keys & auth mode, over HTTP", () => {
     const page = await (await fetch(`${base}/projects`, { headers: { cookie } })).text();
     // The richer card structure and the unified add affordance render.
     expect(page).toContain("project-card");
-    expect(page).toContain("add a project");
+    expect(page).toContain("Add a project");
     expect(page).toContain("project-add-actions");
     expect(page).toContain("Choose a local folder");
     expect(page).toContain("Add from GitHub");
     // The path-typing road is still reachable (now behind a details).
     expect(page).toContain("Enter an exact path instead");
-    expect(page).toContain("path on this server");
+    expect(page).toContain("Path on this server");
     const window = new Window();
     try {
       window.document.body.innerHTML = page;
@@ -1140,7 +1140,7 @@ describe("the onboarding ceremony over real HTTP, and root-mode placement proofs
     // The absent one pre-fills the EXISTING clone ceremony — preview,
     // password, and size check all still stand behind that form.
     expect(page).toContain('value="alex/not-yet"');
-    expect(page).toContain("clone here");
+    expect(page).toContain("Clone here");
     expect(page).toContain("private");
     // No cookie session, no listing.
     const anon = await fetch(url("/projects/github"), { redirect: "manual" });
@@ -1176,8 +1176,8 @@ describe("the onboarding ceremony over real HTTP, and root-mode placement proofs
     const page = await (await fetch(url("/projects/github"), { headers: { cookie } })).text();
     // Neither local directory mapped: both rows offer the clone ceremony.
     expect(page).not.toContain("add + open");
-    expect((renderedHtmlOf(page).match(/clone here/g) ?? []).length).toBe(2);
-    expect((workspaceOf(page).pageHtml!.match(/clone here/g) ?? []).length).toBe(2);
+    expect((renderedHtmlOf(page).match(/Clone here/g) ?? []).length).toBe(2);
+    expect((workspaceOf(page).pageHtml!.match(/Clone here/g) ?? []).length).toBe(2);
     // The hostile description reached the page dead, not live.
     expect(page).not.toContain("<script>alert(1)</script>");
     expect(page).toContain("&lt;script&gt;");
@@ -1596,7 +1596,7 @@ describe("the attended authorization ceremony (Phase 2E)", () => {
 
     // the open card renders with the revoke, and revoke closes it
     const withOpen = await (await fetch(url("/t/t-att"), { headers: { cookie } })).text();
-    expect(withOpen).toContain("attended session");
+    expect(withOpen).toContain("Attended session");
     expect(withOpen).toContain("revoke");
     const revoked = await fetch(url("/t/t-att/attend-revoke"), {
       method: "POST",

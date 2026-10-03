@@ -24,7 +24,7 @@ describe("the brief's states", () => {
     expect(status.tone).toBe("success");
     expect(status.sentence).toBe("Marked complete by sam.");
     expect(status.details.map(one => [one.label, one.text, one.mark])).toEqual([
-      ["Checks", "Passed on a1b2c3d", "ok"],
+      ["Project checks", "Passed on a1b2c3d", "ok"],
       ["Pull request", "Couldn't open", "note"],
       ["Requirements", "1 of 1 met", "ok"],
       ["Saved evidence", "Complete", "ok"],
@@ -62,7 +62,7 @@ describe("the brief's states", () => {
   test("checks passed, pull request open, CI running", () => {
     const status = taskStatusOf({ stage: "finished", checks: passed, pullRequest: pr("open", "running") });
     expect(status.headline).toBe("Ready for review");
-    expect(row(status, "pull-request")).toMatchObject({ text: "#12 open, CI running", mark: "running", href: "https://github.com/acme/shop/pull/12" });
+    expect(row(status, "pull-request")).toMatchObject({ text: "#12 open · PR CI running", mark: "running", href: "https://github.com/acme/shop/pull/12" });
   });
 
   test("complete with a merged pull request", () => {

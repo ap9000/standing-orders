@@ -8,17 +8,18 @@ import type { BrowserTasksView } from "../browser-workspace.js";
 import { TasksView, usageSummary } from "./views/tasks-view.js";
 
 type Row = BrowserTasksView["rows"][number];
-const row = (id: string, ask: Row["ask"], group: Row["group"], label: string, tone: Row["status"]["tone"]): Row => ({
+const row = (id: string, ask: Row["ask"], group: Row["group"], label: string, tone: Row["status"]["tone"], chip: Row["chip"] = null): Row => ({
   id, title: `Task ${id}`, href: `/t/${id}`, project: null, age: "4h ago", status: { label, tone, token: "assignment-working" },
-  ask, group, action: { label: "Open", href: `/t/${id}` }, detail: null, problem: null, notes: [],
+  ask, chip, group, action: { label: "Open", href: `/t/${id}` }, detail: null, problem: null, notes: [],
 });
 const tile = (key: string, name: string, window: string, percent: number, tone: "neutral" | "warning" | "danger" = "neutral") =>
   ({ key, name, window, value: String(percent), unit: "%", percent, detail: "Resets soon", tone, marks: [], title: null, href: null });
 const view = (over: Partial<BrowserTasksView> = {}): BrowserTasksView => ({
   kind: "tasks", tabs: [{ label: "All", href: "/work", count: 5, active: true }, { label: "Needs you", href: "/work?view=needs-you", count: 3, active: false }],
-  needsYou: 3,
-  groups: [{ key: "decide", label: "Decide", count: 1 }, { key: "review", label: "Review", count: 1 }, { key: "unblock", label: "Unblock", count: 1 }, { key: "building", label: "Building", count: 1 }, { key: "rest", label: "Recent", count: 1 }],
-  rows: [row("plan", "decide", "decide", "Needs you", "attention"), row("result", "review", "review", "Ready", "ready"), row("offline", "unblock", "unblock", "Needs you", "attention"),
+  needsYou: 4,
+  groups: [{ key: "decide", label: "Decide", count: 2 }, { key: "review", label: "Review", count: 1 }, { key: "unblock", label: "Unblock", count: 1 }, { key: "building", label: "Building", count: 1 }, { key: "rest", label: "Recent", count: 1 }],
+  rows: [row("plan", "decide", "decide", "Needs you", "attention", "Plan"), row("result", "review", "review", "Ready for review", "ready", "Result"),
+    row("offline", "unblock", "unblock", "Needs you", "attention", "Builder offline"), row("answer", "decide", "decide", "Needs you", "attention"),
     row("live", null, "building", "Building", "live"), row("old", null, "rest", "Stopped", "attention")],
   empty: null, pages: { first: null, next: null }, tools: [], newTask: { label: "New task", href: "/tasks/new" },
   limits: { tiles: [tile("claude:5h", "Claude", "5-hour", 48), tile("claude:week", "Claude", "Weekly", 83, "warning"), tile("codex:week", "Codex", "Weekly", 12)] },
@@ -31,21 +32,21 @@ describe("the Tasks list", () => {
     const page = html(view());
     expect(page).toMatch(/<h1 class="[^"]*">Tasks<\/h1>/);
     expect(page).not.toContain("sr-only\">Tasks");
-    expect(page).toMatch(/data-needs-you-count[^>]*><span[^>]*>3<\/span> need you/);
+    expect(page).toMatch(/data-needs-you-count[^>]*><span[^>]*>4<\/span> need you/);
     const groups = [...page.matchAll(/data-task-group="([a-z]+)"/g)].map(match => match[1]);
     expect(groups).toEqual(["decide", "review", "unblock", "building", "rest"]);
-    expect(page).toMatch(/<h2[^>]*>Decide<span[^>]*>1<\/span><\/h2>/);
+    expect(page).toMatch(/<h2[^>]*>Decide<span[^>]*>2<\/span><\/h2>/);
     // One plain list where the view isn't grouped.
     expect(html(view({ groups: null }))).not.toContain("data-task-group");
   });
 
-  test("a waiting row wears a solid ink chip naming the ask and a heavier title; other rows stay quiet", () => {
+  test("a waiting row wears a solid ink chip naming the specific ask (never its group's word) and a heavier title; other rows stay quiet", () => {
     const page = html(view());
-    for (const [id, word] of [["plan", "Decide"], ["result", "Review"], ["offline", "Unblock"]]) {
+    for (const [id, word, headline] of [["plan", "Plan", "Needs you"], ["result", "Result", "Ready for review"], ["offline", "Builder offline", "Needs you"]]) {
       const one = page.match(new RegExp(`<li data-task="${id}"[^]*?</li>`))![0];
-      expect(one).toMatch(new RegExp(`data-ask="[a-z]+"[^>]*class="[^"]*bg-primary[^"]*text-primary-foreground[^"]*">${word}</span>`));
+      expect(one).toMatch(new RegExp(`data-ask="[a-z]+"[^>]*data-headline="${headline}"[^>]*class="[^"]*bg-primary[^"]*text-primary-foreground[^"]*"><span class="sr-only">${headline}: </span>${word}</span>`));
       expect(one).toMatch(/<a href="\/t\/[a-z]+" class="[^"]*font-semibold/);
-      expect(one).not.toContain(">Needs you<");
+      expect(one).not.toMatch(/>(?:Decide|Review|Unblock)</);
       // Ink, not the signal colour an accent preset can turn magenta.
       expect(one).not.toContain("bg-attention");
     }
@@ -57,6 +58,10 @@ describe("the Tasks list", () => {
       expect(one).toContain("bg-neutral-soft");
       expect(one).toMatch(/<a href="\/t\/[a-z]+" class="[^"]*font-medium/);
     }
+    // No specific ask: no chip under its heading, the headline only for a screen reader.
+    const answer = page.match(/<li data-task="answer"[^]*?<\/li>/)![0];
+    expect(answer).not.toContain("bg-primary");
+    expect(answer).toMatch(/<span class="sr-only[^"]*" data-headline="Needs you">Needs you<\/span>/);
     // No coloured border announces a wait.
     expect(page).not.toMatch(/border-l-/);
   });

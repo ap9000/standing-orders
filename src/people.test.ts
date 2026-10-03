@@ -496,7 +496,7 @@ describe("the join road and the People screen, over HTTP", () => {
     const cookie = await login("alex", approverToken);
     const csrf = await csrfOf(cookie);
     const people = await (await fetch(url("/people"), { headers: { cookie } })).text();
-    expect(people).toContain("invite someone");
+    expect(people).toContain("Invite someone");
 
     // Without the password, no invite.
     const refused = await fetch(url("/people/invite"), {

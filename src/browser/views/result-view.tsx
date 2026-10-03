@@ -15,6 +15,7 @@ import {
 } from "../components/ui/index.js";
 import { ACCEPT_NEEDS_REASON, type ResultActKind } from "../../result-acts.js";
 import { toneOf } from "./tone.js";
+import { threadWhen, whenTitle } from "./task-view.js";
 import { ConfirmStoppedForm, HEADLINE_DOT, RebuildForm, StatusDetails, StatusHeadline, statusWhyLines } from "./status-summary.js";
 
 type Selected = NonNullable<BrowserResultView["selected"]>;
@@ -27,15 +28,8 @@ function Html({ html, className }: { html: string; className?: string }) {
   return <GuardedHtml html={html} immutable {...(className === undefined ? {} : { className })} />;
 }
 
-/** Local time: the clock for today, otherwise the date. */
-function shortWhen(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "";
-  const today = new Date();
-  return date.toDateString() === today.toDateString()
-    ? new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(date)
-    : new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", ...(date.getFullYear() === today.getFullYear() ? {} : { year: "numeric" }) }).format(date);
-}
+/** The one formatter (when-html.ts), in the viewer's zone. */
+const shortWhen = (iso: string): string => threadWhen(iso);
 
 function ResultsMenu({ view }: { view: BrowserResultView }) {
   if (view.results.length === 0) return null;
@@ -311,8 +305,9 @@ function Details({ selected }: { selected: Selected }) {
   const panel = selected.panel;
   const why = panel?.status == null ? [] : statusWhyLines(panel.status);
   const record = selected.record;
-  const rows: { id: string; title: string; hint: string | null; count?: number; body: ReactNode }[] = [
-    { id: "intent", title: "Approved scope", hint: selected.intent?.approval ?? null,
+  const rows: { id: string; title: string; hint: ReactNode; count?: number; body: ReactNode }[] = [
+    { id: "intent", title: "Approved scope", hint: selected.intent === null ? null
+      : <>{selected.intent.approval}{selected.intent.approvedAt != null && <> · <time dateTime={selected.intent.approvedAt} title={whenTitle(selected.intent.approvedAt)}>{threadWhen(selected.intent.approvedAt)}</time></>}</>,
       body: selected.intent === null ? <p className="text-sm text-muted-foreground">No scope was filed for this task, so there is no approved goal or boundary to review.</p> : <Html html={selected.intent.html} className="so-result-intent" /> },
     ...(selected.notes.length === 0 ? [] : [{ id: "notes", title: "Notes", hint: null, count: selected.notes.length,
       body: <ul className="flex flex-col gap-2 text-sm">{selected.notes.map((one, index) => <li key={index}><span className="text-muted-foreground">{one.author} · {shortWhen(one.at)}</span> {one.note}</li>)}</ul> }]),
@@ -333,14 +328,14 @@ function Details({ selected }: { selected: Selected }) {
         </p>
       </div> }]),
   ];
-  return <Card aria-label="Result details" className="gap-0 divide-y divide-border overflow-hidden p-0 phone:p-0">
+  return <Card aria-label="Result record" className="gap-0 divide-y divide-border overflow-hidden p-0 phone:p-0">
     {learning !== "" && <div data-cockpit-section="learning"><Html html={learning} className="so-result-learning" /></div>}
     {rows.map(row => <details key={row.id} id={row.id} className="group scroll-mt-4" data-cockpit-section={row.id}>
       <summary className="flex cursor-pointer list-none items-center gap-2 px-5 py-3.5 hover:bg-accent/50 phone:min-h-12 phone:px-4 [&::-webkit-details-marker]:hidden">
         <ChevronRight className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-90" aria-hidden="true" />
         <h2 className="text-[15px] font-semibold">{row.title}</h2>
         {row.count !== undefined && <Badge>{row.count}</Badge>}
-        {row.hint !== null && <span className="min-w-0 truncate text-[13px] text-muted-foreground">{row.hint}</span>}
+        {row.hint != null && <span className="min-w-0 truncate text-[13px] text-muted-foreground">{row.hint}</span>}
       </summary>
       <div className="px-5 pb-5 pt-1 phone:px-4">{row.body}</div>
     </details>)}

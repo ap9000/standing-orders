@@ -12,6 +12,7 @@ import { GuardedHtml } from "../guarded-html.js";
 import { Journey } from "../first-run.js";
 import { Badge, Button, Card, Input, cn } from "../components/ui/index.js";
 import { ConfirmStoppedForm, RebuildForm, StatusDetails, StatusHeadline, StatusWhy } from "./status-summary.js";
+import { fullWhen, shortWhen, viewerZone } from "../../when-html.js";
 
 /** A link to a fold (#scope, #holds, #task-actions) opens it and every fold
  * around it, on arrival and on in-page links alike. */
@@ -96,7 +97,7 @@ function FactValue({ fact }: { fact: BrowserTaskFact }) {
   return <>{fact.parts.map((part, index) => typeof part === "string"
     ? <span key={index}>{part}</span>
     : "at" in part
-      ? <time key={index} dateTime={part.at} title={part.at.slice(0, 16).replace("T", " ")} className="tabular-nums">{threadWhen(part.at)}</time>
+      ? <time key={index} dateTime={part.at} title={whenTitle(part.at)} className="tabular-nums">{threadWhen(part.at)}</time>
     : "seal" in part
       ? <code key={index} className="mr-1 rounded bg-muted px-1.5 py-0.5 font-mono text-xs">{part.seal}</code>
       : <a key={index} href={part.href} className="font-medium underline decoration-border underline-offset-4 hover:decoration-muted-foreground phone:relative phone:z-[1] phone:-my-3 phone:inline-flex phone:min-h-11 phone:items-center">{part.label}</a>)}</>;
@@ -119,17 +120,12 @@ function Sections({ sections, label }: { sections: BrowserTaskSection[]; label: 
     : <Card aria-label={label} className="gap-0 divide-y divide-border overflow-hidden p-0 phone:p-0">{sections.map(one => <Section key={one.id} section={one} />)}</Card>;
 }
 
-/** "16:39" today, "Yesterday 16:39", else "Sep 28"; the full stamp in the title. */
+/** "16:39" today, "Yesterday 16:39", else "Sep 28", in the viewer's zone: the one formatter every time on every
+ * surface goes through (when-html.ts); the exact minute in the title (`whenTitle`). */
 export function threadWhen(iso: string, now = new Date()): string {
-  const at = new Date(iso);
-  if (Number.isNaN(at.getTime())) return "";
-  const time = at.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
-  const day = (d: Date) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
-  const yesterday = new Date(now.getTime() - 86_400_000);
-  if (day(at) === day(now)) return time;
-  if (day(at) === day(yesterday)) return `Yesterday ${time}`;
-  return at.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return Number.isNaN(new Date(iso).getTime()) ? "" : shortWhen(iso, now, viewerZone());
 }
+export const whenTitle = (iso: string): string => fullWhen(iso, viewerZone());
 
 /** A thread entry's mark: neutral, except the status hues on a live step (blue), a result (green) and a failure (red). */
 function ThreadMark({ item }: { item: BrowserTaskThreadItem }) {
@@ -151,7 +147,7 @@ function ThreadEntry({ item }: { item: BrowserTaskThreadItem }) {
       <p className="flex min-h-6 flex-wrap items-baseline gap-x-2 text-[13px] leading-6">
         <span className="font-medium text-foreground">{item.title}</span>
         {item.author !== "" && <span className="text-muted-foreground">{item.author}</span>}
-        <time dateTime={item.at} title={item.at.slice(0, 16).replace("T", " ")} className="ml-auto text-xs tabular-nums text-muted-foreground">{threadWhen(item.at)}</time>
+        <time dateTime={item.at} title={whenTitle(item.at)} className="ml-auto text-xs tabular-nums text-muted-foreground">{threadWhen(item.at)}</time>
       </p>
       {item.text !== null && <p className={cn("mt-1 whitespace-pre-line text-sm leading-relaxed [overflow-wrap:anywhere]",
         item.who === "person" && "w-fit max-w-full rounded-xl bg-[var(--so-user-bubble)] px-3 py-2")}>{item.text}</p>}

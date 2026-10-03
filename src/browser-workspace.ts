@@ -9,7 +9,7 @@ import type { Store } from './store.js';
 import type { WorkSummaryAccess } from './work-summary.js';
 import { workIndexPage, type WorkIndexItem, type WorkIndexPage } from './work-index.js';
 import type { StatusTone } from './workspace-ui.js';
-import type { Ask } from './needs-you.js';
+import type { Ask, AskChip } from './needs-you.js';
 import type { WorkIndexGroup } from './work-index.js';
 import type { AssignmentCard } from './assignment-ui.js';
 import type { TaskStatus } from './task-status.js';
@@ -63,8 +63,10 @@ export type BrowserTasksView = {
   rows: {
     id: string; title: string; href: string; project: string | null; age: string;
     status: { label: string; tone: StatusTone; token: string };
-    /** What a Needs you row asks (its chip); null for every other row. */
+    /** What a Needs you row asks: its group. */
     ask: Ask | null;
+    /** The row's chip under its group: the specific ask (Plan, Result, Mismatch, Failed, Builder offline), or none. */
+    chip: AskChip | null;
     group: BrowserTaskGroup;
     action: BrowserLink | null; detail: string | null; problem: string | null; notes: string[];
   }[];
@@ -281,7 +283,7 @@ export type BrowserResultView = {
     /** The raw run record, under Details: its facts and the full record. */
     record: { build: number; href: string; facts: { label: string; value: string }[] } | null;
     /** The signed scope; null when none was filed. */
-    intent: { approval: string; html: string } | null;
+    intent: { approval: string; approvedAt: string | null; html: string } | null;
     noRun: string | null;
     panel: BrowserResultPanel | null;
     contest: string;

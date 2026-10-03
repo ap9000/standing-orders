@@ -76,7 +76,7 @@ import { checkPublishing, completeAndOpenPullRequest, mergeAsPerson, pullRequest
 import { leadBriefHtml, LEAD_CONTEXT_CSS } from './lead-context.js';
 import { assignmentCatchUp } from './assignment-brief.js';
 import { assignmentActionHref, assignmentCardOf, assignmentStatusOf, assignmentSummaryHtml, assignmentWithEvidence, ASSIGNMENT_CSS } from './assignment-ui.js';
-import { assignmentStageOf, pullRequestFactOf, stageOfCode, stageOfDispatch, statusDetailsHtml, statusIconSvg, statusWhyHtml, taskStatusOf, TASK_STATUS_CSS, type PullRequestFact, type TaskStatus } from './task-status.js';
+import { assignmentStageOf, requirementWordOf, STATUS_MORE, pullRequestFactOf, stageOfCode, stageOfDispatch, statusDetailsHtml, statusIconSvg, statusWhyHtml, taskStatusOf, TASK_STATUS_CSS, type PullRequestFact, type TaskStatus } from './task-status.js';
 import { ASKS, ASK_LABEL, NEEDS, NO_REASON_RECORDED, failedAttemptSentence, isInternalErrorReason, latestFinishedAttempt, runReasonWords, type Ask } from './needs-you.js';
 import { assignmentPresentationOf, historicalAssessmentReason, shortenedMaterialReason } from './assignment-presentation.js';
 import type { TaskFamily } from "./store.js";
@@ -89,6 +89,7 @@ import { createResultRevision, requestResultChanges } from "./result-actions.js"
 import { CHAT_CONTROLS, chatControlHref, chatResultHref as sharedResultHref, isChatControl } from "./chat-controls.js";
 import { CHAT_TASK_ACTIONS, isChatTaskAction } from "./chat-task-actions.js";
 import { WORKSPACE_MOTION_CSS, WORKSPACE_MOTION_SCRIPT } from "./workspace-motion.js";
+import { DISCLOSURE_CSS } from "./disclosure.js";
 import { styleAsset } from "./style-asset.js";
 import { MOBILE_VIEWPORT_SCRIPT } from "./mobile-viewport.js";
 import { authorizePlanUnderMode, applyModeToNewFiling, planAutoPending } from "./plan-auto.js";
@@ -2406,7 +2407,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       if (selected !== null) {
         const view = taskViewData(selected, who, null);
         detail = view === null
-          ? `<p class="workbench-mobile-back"><a href="/workbench">← all work</a></p><div class="card"><p class="meta">no such task — it may have been outside this console's view</p></div>`
+          ? `<p class="workbench-mobile-back"><a href="/workbench">← all work</a></p><div class="card"><p class="meta">No such task — it may have been outside this console's view</p></div>`
           : `<p class="workbench-mobile-back"><a href="/workbench">← all work</a></p>${taskBody({ ...view, degraded: "pane" })}`;
       }
       return sendScreen(
@@ -2752,7 +2753,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       const hasGrant = store.hasMergeCapableGrant(project, now);
       const current =
         live === null || liveTerms === null
-          ? `<div class="card"><h2>locked</h2><p class="meta">no mode is signed — every action asks for your password. That is the default.</p></div>`
+          ? `<div class="card"><h2>Locked</h2><p class="meta">No mode is signed — every action asks for your password. That is the default.</p></div>`
           : [
               `<div class="card">`,
               `<h2 style="margin-top:0">${escape(live.name)} <span class="meta">signed by ${personChip(live.signedBy)}</span></h2>`,
@@ -2762,7 +2763,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
               who.role === "approver"
                 ? `<form method="post" action="/mode/revoke" class="row">` +
                   `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
-                  `<button type="submit">end this mode now</button>` +
+                  `<button type="submit">End this mode now</button>` +
                   `<span class="meta">one click — every act it covered falls back to its own ceremony</span></form>`
                 : "",
               `</div>`,
@@ -2775,34 +2776,34 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
               `<h2 style="margin-top:0">${live === null ? "sign a mode" : "replace it — a renewal is a new signature"}</h2>`,
               `<form method="post" action="/mode/confirm">`,
               `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
-              `<label>preset<select name="name"><option value="standard">standard — approvals stay with me</option><option value="hands-off">hands-off — your filings auto-approve, full permissions</option></select></label>`,
-              `<label>days <span class="meta">(1\u2013${MODE_MAX_DAYS})</span><input type="number" name="days" value="1" min="1" max="${MODE_MAX_DAYS}"></label>`,
-              `<label>merges<select name="publication">` +
+              `<label>Preset<select name="name"><option value="standard">standard — approvals stay with me</option><option value="hands-off">hands-off — your filings auto-approve, full permissions</option></select></label>`,
+              `<label>Days <span class="meta">(1\u2013${MODE_MAX_DAYS})</span><input type="number" name="days" value="1" min="1" max="${MODE_MAX_DAYS}"></label>`,
+              `<label>Merges<select name="publication">` +
                 `<option value="notify">wait for me — even under a merge grant</option>` +
                 (hasGrant ? `<option value="automerge">merge themselves when CI is green on the exact commit</option>` : "") +
                 `</select></label>` +
                 (hasGrant ? "" : `<span class="meta">self-merging needs a merge-capable publication grant first</span>`),
-              `<label>my filings<select name="auto-approve">` +
+              `<label>My filings<select name="auto-approve">` +
                 `<option value="">the preset's default (standard: wait for approval; hands-off: auto-approve)</option>` +
                 `<option value="1">approve the moment I file them</option>` +
                 `<option value="0">wait for their own approval</option>` +
                 `</select></label>`,
-              `<label>planner approval<select name="plan-auto">` +
+              `<label>Planner approval<select name="plan-auto">` +
                 `<option value="0">wait for my approval</option>` +
                 `<option value="1">auto-approve plans that preserve my filed contract</option>` +
                 `</select><span class="meta">Requires automatic filing approval. File the goal, paths, and acceptance criteria upfront. Changed scope and unanswered questions still pause.</span></label>`,
-              `<label>if a subscription runs out<select name="allow-paid-fallback">` +
+              `<label>If a subscription runs out<select name="allow-paid-fallback">` +
                 `<option value="">never switch to a paid API key on its own (the default, every preset)</option>` +
                 `<option value="1">allow the approved fallback — spend moves to that account</option>` +
                 `</select></label>`,
-              `<button type="submit">read the full terms</button>`,
+              `<button type="submit">Read the full terms</button>`,
               `</form>`,
               `</div>`,
             ].join("\n");
       return sendScreen(
         response,
         200,
-        screen("mode", [`<h1>operating mode</h1><p>Authorize this project's automatic approvals once, for up to ${MODE_MAX_DAYS} days. Select the touchpoints below; the signature covers the exact choices. Existing modes keep their original terms.</p><p class="meta">Scope changes, agent questions, and requested revisions still require your attention. Automatic merging also needs a publication grant.</p>`, current, signForm].join("\n"), { chrome: chromeFor(project, "mode") }),
+        screen("mode", [`<h1>Operating mode</h1><p>Authorize this project's automatic approvals once, for up to ${MODE_MAX_DAYS} days. Select the touchpoints below; the signature covers the exact choices. Existing modes keep their original terms.</p><p class="meta">Scope changes, agent questions, and requested revisions still require your attention. Automatic merging also needs a publication grant.</p>`, current, signForm].join("\n"), { chrome: chromeFor(project, "mode") }),
       );
     }
 
@@ -2847,13 +2848,13 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
             ? ""
             : `<p class="row">watching now: ${attended.map(session => `<a href="/t/${escape(session.taskId)}">${escape(session.taskId)}</a>`).join(", ")}</p>`,
           acts.length === 0
-            ? `<p class="meta">no recorded acts yet</p>`
+            ? `<p class="meta">No recorded acts yet</p>`
             : acts.map(act => `<p class="row meta">${escape(act.kind)} ${escape(act.subject)} \u00b7 ${escape(act.at.slice(0, 16).replace("T", " "))}</p>`).join("\n"),
           approverView && one.revokedAt === null && one.name !== who.name
             ? `<form method="post" action="/people/revoke" class="row">` +
               `<input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="name" value="${escape(one.name)}">` +
-              `<label>your password<input type="password" name="token" autocomplete="current-password"></label>` +
-              `<button type="submit">remove ${escape(one.name)}'s sign-in</button>` +
+              `<label>Your password<input type="password" name="token" autocomplete="current-password"></label>` +
+              `<button type="submit">Remove ${escape(one.name)}'s sign-in</button>` +
               `<span class="meta">ends their access and everything it signed \u2014 history stays</span></form>`
             : "",
           `</div>`,
@@ -2864,21 +2865,21 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
         `<p class="row">${escape(one.role)} invite · ${one.projects === null ? "all projects" : one.projects.map(repo => escape(projectName(repo))).join(", ")} \u00b7 from ${personChip(one.mintedBy)} \u00b7 expires ${escape(one.expiresAt.slice(0, 16).replace("T", " "))}${one.attempts > 0 ? ` \u00b7 ${one.attempts} failed attempt${one.attempts === 1 ? "" : "s"}` : ""}` +
         ` <form method="post" action="/people/invite-revoke" style="display:inline">` +
         `<input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="id" value="${one.id}">` +
-        `<label>password <input type="password" name="token" autocomplete="current-password" style="width:8rem"></label>` +
-        `<button type="submit">cancel it</button></form></p>`,
+        `<label>Password <input type="password" name="token" autocomplete="current-password" style="width:8rem"></label>` +
+        `<button type="submit">Cancel it</button></form></p>`,
       );
       const inviteCard = !approverView
         ? ""
         : [
             `<div class="card">`,
-            `<h2 style="margin-top:0">invite someone</h2>`,
-            inviteRows.length === 0 ? `<p class="meta">no open invites</p>` : inviteRows.join("\n"),
+            `<h2 style="margin-top:0">Invite someone</h2>`,
+            inviteRows.length === 0 ? `<p class="meta">No open invites</p>` : inviteRows.join("\n"),
             `<form method="post" action="/people/invite" class="row">`,
             `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
-            `<label>they can<select name="role"><option value="viewer">Viewer — read work</option><option value="approver">Operator — create, manage and approve work</option></select></label>`,
+            `<label>They can<select name="role"><option value="viewer">Viewer — read work</option><option value="approver">Operator — create, manage and approve work</option></select></label>`,
             accessFields(project === null ? [] : [project]),
-            `<label>your password<input type="password" name="token" autocomplete="current-password"></label>`,
-            `<button type="submit">make an invite link</button>`,
+            `<label>Your password<input type="password" name="token" autocomplete="current-password"></label>`,
+            `<button type="submit">Make an invite link</button>`,
             `<span class="meta">single-use, expires in 72 hours</span>`,
             `</form>`,
             `</div>`,
@@ -3031,7 +3032,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
           `<p class="row"><a href="/r/${run.id}" class="mono">#${run.id}</a> <a href="${taskHref(run.taskId)}"><strong>${escape(run.title)}</strong></a>${projectChip(run.repo)} ` +
             `<span class="right meta mono">${escape(run.runner)} \u00b7 ${escape(run.role)} \u00b7 ${escape(stage)} \u00b7 ${escape(relativeAge(run.startedAt, now))}</span></p>`,
           options.localRunner === undefined
-            ? `<p class="meta">the transcript is readable on the machine that runs the worker \u2014 start the console there with <code>toolroll up</code></p>`
+            ? `<p class="meta">The transcript is readable on the machine that runs the worker \u2014 start the console there with <code>toolroll up</code></p>`
             : `<pre class="recap plan-doc live-pane" id="live-transcript-${run.id}" data-initial-offset="0">${escape(tail)}</pre><p class="meta" id="live-transcript-${run.id}-state"></p>`,
           `</section>`,
         ].join("\n");
@@ -3050,7 +3051,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
           [
             `<h1>Peek</h1>`,
             panes.length === 0
-              ? `<p class="meta">no agent is working right now \u2014 this page follows them the moment one starts</p>`
+              ? `<p class="meta">No agent is working right now \u2014 this page follows them the moment one starts</p>`
               : panes.join("\n"),
           ].join("\n"),
           { chrome: chromeFor(project, "runs"), functional: { script, fetches: true } },
@@ -3080,19 +3081,19 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
           ...(said === null ? [] : [`<p class="meta">${escape(said)}</p>`]),
           `<div id="fleet-region">${body}</div>`,
           `<p class="meta" id="fleet-region-stamp"></p>`,
-          `<h2>register a worker</h2>`,
+          `<h2>Register a worker</h2>`,
           `<form method="post" action="/fleet/runner/register" class="card">` +
             `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
-            `<label>name<input type="text" name="name" placeholder="builder-2" maxlength="60" required></label>` +
-            `<label>capacity<input type="text" name="capacity" inputmode="numeric" value="1" aria-label="capacity"></label>` +
-            `<label>your password, typed again<input type="password" name="token" autocomplete="current-password" required></label>` +
-            `<button type="submit">register — its token is shown once</button></form>`,
-          `<details class="arm-danger"><summary>retire a worker</summary>` +
+            `<label>Name<input type="text" name="name" placeholder="builder-2" maxlength="60" required></label>` +
+            `<label>Capacity<input type="text" name="capacity" inputmode="numeric" value="1" aria-label="capacity"></label>` +
+            `<label>Your password, typed again<input type="password" name="token" autocomplete="current-password" required></label>` +
+            `<button type="submit">Register — its token is shown once</button></form>`,
+          `<details class="arm-danger"><summary>Retire a worker</summary>` +
             `<form method="post" action="/fleet/runner/retire" class="card">` +
             `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
-            `<label>which worker<input type="text" name="name" placeholder="builder-1" required></label>` +
-            `<label>your password, typed again<input type="password" name="token" autocomplete="current-password" required></label>` +
-            `<button type="submit" class="danger">retire it</button></form></details>`,
+            `<label>Which worker<input type="text" name="name" placeholder="builder-1" required></label>` +
+            `<label>Your password, typed again<input type="password" name="token" autocomplete="current-password" required></label>` +
+            `<button type="submit" class="danger">Retire it</button></form></details>`,
         ].join("\n"),
         // The password fields make this screen sensitive: sendScreen strips
         // the chrome additions and keeps the reorder poller — the named
@@ -5495,7 +5496,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
           `<span class="t">${escape(task.title)}</span></a>`,
       )
       .join("\n");
-    return `<h2>tasks</h2>\n${items === "" ? `<p class="meta">none yet</p>` : items}`;
+    return `<h2>Tasks</h2>\n${items === "" ? `<p class="meta">None yet</p>` : items}`;
   }
 
   /**
@@ -5534,7 +5535,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
           `<span class="mono">${whenTime(run.startedAt)}</span></span></a>`,
       )
       .join("\n");
-    return `<h2>builds</h2>\n${items === "" ? `<p class="meta">none yet</p>` : items}`;
+    return `<h2>Builds</h2>\n${items === "" ? `<p class="meta">None yet</p>` : items}`;
   }
 
   /**
@@ -6329,7 +6330,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       if (!seen.ok) return peekSay(seen.reason);
       const stamp = clock().toISOString().slice(11, 19);
       const parts: string[] = [
-        `<p class="meta">best-effort look at ${escape(stamp)} UTC — files can change mid-read</p>`,
+        `<p class="meta">Best-effort look at ${escape(stamp)} UTC — files can change mid-read</p>`,
       ];
       const changed = seen.rows.filter(one => one.kind === "changed");
       const deleted = seen.rows.filter(one => one.kind === "deleted");
@@ -6352,7 +6353,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       for (const row of changed) parts.push(line(row, "~"));
       for (const row of deleted) parts.push(line(row, "−"));
       if (fresh.total > 0) {
-        parts.push(`<p class="meta">new files · ${fresh.total}</p>`);
+        parts.push(`<p class="meta">New files · ${fresh.total}</p>`);
         for (const row of fresh.rows) {
           parts.push(
             row.collapsed
@@ -6365,7 +6366,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
         }
       }
       if (unchecked.length > 0) {
-        parts.push(`<p class="meta">not verified this look — absence above does not mean unchanged:</p>`);
+        parts.push(`<p class="meta">Not verified this look — absence above does not mean unchanged:</p>`);
         for (const row of unchecked) parts.push(line(row, "?"));
       }
       if (seen.partial !== null) parts.push(`<p class="meta">${escape(seen.partial)}</p>`);
@@ -6374,7 +6375,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
         // The byte cap is enforced AFTER escaping (finding 32): an oversize
         // rendering is replaced whole by its exact counts.
         fragment =
-          `<p class="meta">best-effort look at ${escape(stamp)} UTC</p>` +
+          `<p class="meta">Best-effort look at ${escape(stamp)} UTC</p>` +
           `<p class="row">${changed.length} changed · ${deleted.length} deleted · ${fresh.total} new · ${unchecked.length} unverified — too much to render live; the final diff will hold the detail</p>`;
       }
       peekCache.set(key, { fragment, at: Date.now() });
@@ -8459,7 +8460,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
         // signs exactly this digest — a drifted form refuses at /mode/sign.
         const nonce = mintApprovalNonce(who.name, "mode-sign", `${project}:${digest}`);
         const bodyHtml =
-          `<h1 style="overflow-wrap:anywhere">sign the ${escape(name)} mode for ${escape(project)}</h1>` +
+          `<h1 style="overflow-wrap:anywhere">Sign the ${escape(name)} mode for ${escape(project)}</h1>` +
           `<form method="post" action="/mode/sign" class="card approve-form">` +
           `<input type="hidden" name="csrf" value="${escape(who.session.csrf)}">` +
           `<input type="hidden" name="nonce" value="${escape(nonce)}">` +
@@ -8468,12 +8469,12 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
             .map(field => `<input type="hidden" name="${field}" value="${escape(body.get(field) ?? "")}">`)
             .join("") +
           `<input type="hidden" name="expiry" value="${escape(expiry)}">` +
-          `<p><strong>your password signs exactly this:</strong></p>` +
+          `<p><strong>Your password signs exactly this:</strong></p>` +
           modeWords(terms)
             .map(words => `<p class="recap" style="margin-top:.4rem">${escape(words)}</p>`)
             .join("") +
-          `<label>your password, typed again<input type="password" name="token" autocomplete="current-password"></label>` +
-          `<div class="sticky-actions"><button type="submit">sign it</button></div>` +
+          `<label>Your password, typed again<input type="password" name="token" autocomplete="current-password"></label>` +
+          `<div class="sticky-actions"><button type="submit">Sign it</button></div>` +
           `</form>` +
           `<p class="meta"><a href="/mode">back — sign nothing</a></p>`;
         return sendScreen(response, 200, screen("mode", bodyHtml, { chrome: chromeFor(project, "mode") }));
@@ -9995,7 +9996,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     const quickTerms = quickMode === null ? null : modeTermsFromJson(quickMode.termsJson);
     const quick = quickTerms?.quickMint === true && quickMode !== null && quickMode.signedBy === who.name;
     const body =
-      `<h1>run ${escape(terms.taskId)} once, while you watch</h1>` +
+      `<h1>Run ${escape(terms.taskId)} once, while you watch</h1>` +
       `<form method="post" action="${taskHref(terms.taskId)}/attend" class="card approve-form">` +
       `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
       `<input type="hidden" name="nonce" value="${escape(nonce)}">` +
@@ -10008,10 +10009,10 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       (inputs.posture === undefined ? "" : `<input type="hidden" name="posture" value="${escape(inputs.posture)}">`) +
       (terms.parentRun == null ? "" : `<input type="hidden" name="parent" value="${terms.parentRun}">`) +
       (terms.followup == null ? "" : `<input type="hidden" name="followup" value="${escape(terms.followup)}">`) +
-      `<p><strong>your password signs exactly this:</strong></p>` +
-      `<p class="meta">goal</p><p class="recap" style="margin-top:0">${escape(scope?.goal ?? "")}</p>` +
-      `<p class="meta">not this</p><p class="recap" style="margin-top:0">${scope?.outOfScope == null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p>` +
-      `<p class="meta">touches · ${scope === null || scope.touches.length === 0 ? "anything" : scope.touches.map(one => escape(one)).join(", ")}</p>` +
+      `<p><strong>Your password signs exactly this:</strong></p>` +
+      `<p class="meta">Goal</p><p class="recap" style="margin-top:0">${escape(scope?.goal ?? "")}</p>` +
+      `<p class="meta">Not this</p><p class="recap" style="margin-top:0">${scope?.outOfScope == null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p>` +
+      `<p class="meta">Touches · ${scope === null || scope.touches.length === 0 ? "anything" : scope.touches.map(one => escape(one)).join(", ")}</p>` +
       (() => {
         const profile = (JSON.parse(terms.profileJson) as { profile?: { model?: string; permissionArgv?: string } }).profile;
         const posture =
@@ -10020,21 +10021,21 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
             : profile?.permissionArgv === "auto"
               ? "safe unattended permissions — routine project commands and edits proceed; risky acts stop"
               : "legacy acceptEdits — edits proceed, commands that ask are denied unattended";
-        return `<p class="meta">runs on</p><p class="recap" style="margin-top:0">claude · ${escape(String(profile?.model ?? ""))} — ${posture}</p>`;
+        return `<p class="meta">Runs on</p><p class="recap" style="margin-top:0">claude · ${escape(String(profile?.model ?? ""))} — ${posture}</p>`;
       })() +
       (terms.parentRun == null
         ? ""
-        : `<p class="meta">continues</p><p class="recap" style="margin-top:0">attempt <a href="/r/${terms.parentRun}" class="mono">#${terms.parentRun}</a>, from exactly where it finished</p>` +
-          `<p class="meta">the follow-up — this is the instruction</p><p class="recap" style="margin-top:0">${escape(terms.followup ?? "")}</p>`) +
-      `<p class="meta">repository · head</p><p class="recap mono" style="margin-top:0">${escape(terms.repo)} @ ${escape(terms.head.slice(0, 12))}</p>` +
-      `<p class="meta">worker</p><p class="recap" style="margin-top:0">${escape(terms.runner)} (this machine)</p>` +
-      `<p class="meta">spending</p><p class="recap" style="margin-top:0">up to about $${(terms.budgetMicrousd / 1_000_000).toFixed(2)} — the agent stops as soon as its total crosses this; the final step may run a little past it</p>` +
-      `<p class="meta">conversation</p><p class="recap" style="margin-top:0">at most ${terms.maxSessionTurns} messages to the agent, this whole session; each may work up to ${Math.round(terms.turnTimeoutSeconds / 60)} minutes — one that runs past that ends the whole session. If it needs a repair, the repair uses the same session, model, and clock.</p>` +
-      `<p class="meta">while you watch — a signed term</p><p class="recap" style="margin-top:0">your console being open is what keeps it running — any page of it, this one included; close the console and the session winds down within a minute. Everything ends by ${whenTime(terms.absoluteExpiry)} regardless. One attempt; it never converts into unattended work.</p>` +
+        : `<p class="meta">Continues</p><p class="recap" style="margin-top:0">attempt <a href="/r/${terms.parentRun}" class="mono">#${terms.parentRun}</a>, from exactly where it finished</p>` +
+          `<p class="meta">The follow-up — this is the instruction</p><p class="recap" style="margin-top:0">${escape(terms.followup ?? "")}</p>`) +
+      `<p class="meta">Repository · head</p><p class="recap mono" style="margin-top:0">${escape(terms.repo)} @ ${escape(terms.head.slice(0, 12))}</p>` +
+      `<p class="meta">Worker</p><p class="recap" style="margin-top:0">${escape(terms.runner)} (this machine)</p>` +
+      `<p class="meta">Spending</p><p class="recap" style="margin-top:0">up to about $${(terms.budgetMicrousd / 1_000_000).toFixed(2)} — the agent stops as soon as its total crosses this; the final step may run a little past it</p>` +
+      `<p class="meta">Conversation</p><p class="recap" style="margin-top:0">at most ${terms.maxSessionTurns} messages to the agent, this whole session; each may work up to ${Math.round(terms.turnTimeoutSeconds / 60)} minutes — one that runs past that ends the whole session. If it needs a repair, the repair uses the same session, model, and clock.</p>` +
+      `<p class="meta">While you watch — a signed term</p><p class="recap" style="margin-top:0">your console being open is what keeps it running — any page of it, this one included; close the console and the session winds down within a minute. Everything ends by ${whenTime(terms.absoluteExpiry)} regardless. One attempt; it never converts into unattended work.</p>` +
       (quick
-        ? `<p class="meta">your signed mode covers this mint — no password; the mode is re-proved as you confirm, and the session is stamped with its signature</p>`
-        : `<label>your password, typed again — a signed-in session alone cannot authorize work<input type="password" name="token" autocomplete="current-password"></label>`) +
-      `<div class="sticky-actions"><button type="submit">run it while I watch</button></div>` +
+        ? `<p class="meta">Your signed mode covers this mint — no password; the mode is re-proved as you confirm, and the session is stamped with its signature</p>`
+        : `<label>Your password, typed again — a signed-in session alone cannot authorize work<input type="password" name="token" autocomplete="current-password"></label>`) +
+      `<div class="sticky-actions"><button type="submit">Run it while I watch</button></div>` +
       `</form>` +
       `<p class="meta"><a href="${taskHref(terms.taskId)}">back to the task</a></p>`;
     // The chrome binds to the AUTHORITY repository (surfaces round 1,
@@ -11765,8 +11766,8 @@ export function editorFileHref(worktree: string, path: string, line?: number | n
 function matrixStateBadge(state: CriterionMatrixRow["state"]): string {
   // Red belongs to a Failed headline alone (task-status.ts); an unmet requirement is an amber note.
   const cls = state === "pass" ? "badge-done" : state === "failed" ? "badge-note" : state === "missing" ? "badge-note" : "badge-manual-review";
-  const word = state === "pass" ? "pass" : state === "missing" ? "missing" : state === "failed" ? "failed" : "manual review";
-  return `<span class="badge ${cls}" data-matrix-state="${escape(state)}">${escape(word)}</span>`;
+  // The same words as the Checks tab and the card's Requirements row (task-status.ts).
+  return `<span class="badge ${cls}" data-matrix-state="${escape(state)}">${escape(requirementWordOf({ state }))}</span>`;
 }
 
 /** v40: the bounded repair chain's own line — presented as the user-facing
@@ -11860,7 +11861,7 @@ function evidenceLinksFor(artifacts: readonly Artifact[]): EvidenceLinkMap {
  * Warnings stay outside the disclosure, including on compact surfaces. */
 function criterionMatrixHtml(
   matrix: readonly CriterionMatrixRow[],
-  options: { compact?: boolean; runId?: number; links?: EvidenceLinkMap; fileAnchors?: ReadonlyMap<string, string> } = {},
+  options: { compact?: boolean; runId?: number; links?: EvidenceLinkMap; fileAnchors?: ReadonlyMap<string, string>; verdict?: string | null } = {},
 ): string {
   if (matrix.length === 0) return "";
   const kinds: Record<CriterionEvidenceRef["kind"], string> = {
@@ -11880,8 +11881,9 @@ function criterionMatrixHtml(
     const awaitingAssessment = row.assessment?.evidenceState === "pass" && row.review === null;
     const confirmed = row.assessment !== undefined && state === "pass";
     // Plain words (task-status brief): the retired assessment step is not a state a person acts on.
-    const label = awaitingAssessment ? "Met" : confirmed ? "Confirmed" : state === "pass" ? "Met" : state === "manual-review" ? "You check" : state === "missing" ? "Not shown yet" : "Not met";
-    const cls = awaitingAssessment ? "badge-done" : state === "pass" ? "badge-done" : state === "manual-review" ? "badge-manual-review" : "badge-note";
+    // The card's Requirements row reads the same words from the same source (task-status.ts), so they agree.
+    const label = requirementWordOf(row, options.verdict);
+    const cls = label === "Met" ? "badge-done" : label === "You check" ? "badge-manual-review" : "badge-note";
     const warnings: string[] = [];
     // Only replace the known boilerplate. Other recorded failure details
     // remain verbatim, so concision cannot hide a different problem.
@@ -11973,10 +11975,10 @@ function planContractHtml(view: PlanContractView | null, mode: "full" | "ceremon
   if ("problem" in view) {
     return `<div class="contract-panel contract-problem"><p class="approval-label">filed contract</p><p class="meta">${escape(view.problem)} · <a href="/r/${view.run}">run ${view.run}</a></p></div>`;
   }
-  const stale = view.current ? "" : `<p class="meta">the scope was edited after this draft landed — the record below describes the draft as the planner proposed it</p>`;
+  const stale = view.current ? "" : `<p class="meta">The scope was edited after this draft landed — the record below describes the draft as the planner proposed it</p>`;
   if (!view.filed) {
     return mode === "full"
-      ? `<div class="contract-panel contract-drafted"><p class="approval-label">filed contract</p><p class="meta">no scope was filed before planning — the planner drafted this contract from the title and the repository; review every term as new</p>${stale}</div>`
+      ? `<div class="contract-panel contract-drafted"><p class="approval-label">filed contract</p><p class="meta">No scope was filed before planning — the planner drafted this contract from the title and the repository; review every term as new</p>${stale}</div>`
       : `<p class="meta contract-note">no scope was filed before planning — every term above is the planner's proposal</p>`;
   }
   if (view.revision === true) {
@@ -11987,21 +11989,21 @@ function planContractHtml(view: PlanContractView | null, mode: "full" | "ceremon
     return (
       `<div class="contract-panel contract-amended"${mode === "full" ? ` id="contract-amendment"` : ""}><p class="approval-label">updated plan</p>` +
       `<p><strong>${view.changes.length} change${view.changes.length === 1 ? "" : "s"} from your notes</strong> <span class="meta">— approving accepts the updated terms ${mode === "full" ? "in the scope" : "above"} · <a href="/r/${view.run}">run ${view.run}</a></span></p>` +
-      (view.amendment === null ? "" : `<p class="recap contract-reason"><strong>why:</strong> ${escape(view.amendment)}</p>`) +
+      (view.amendment === null ? "" : `<p class="recap contract-reason"><strong>Why:</strong> ${escape(view.amendment)}</p>`) +
       `<ul class="recap contract-changes">${view.changes.map(contractChangeHtml).join("")}</ul>` +
       stale +
       `</div>`
     );
   }
   if (view.changes.length === 0) {
-    return `<div class="contract-panel contract-preserved"><p class="approval-label">filed contract</p><p><strong>preserved exactly</strong> <span class="meta">the plan reproduces the filed goal, exclusions, touches, and acceptance criteria — approving binds the terms you filed · <a href="/r/${view.run}">run ${view.run}</a></span></p>${stale}</div>`;
+    return `<div class="contract-panel contract-preserved"><p class="approval-label">filed contract</p><p><strong>Preserved exactly</strong> <span class="meta">the plan reproduces the filed goal, exclusions, touches, and acceptance criteria — approving binds the terms you filed · <a href="/r/${view.run}">run ${view.run}</a></span></p>${stale}</div>`;
   }
   return (
     `<div class="contract-panel contract-amended"${mode === "full" ? ` id="contract-amendment"` : ""}><p class="approval-label">filed contract · amendment proposed</p>` +
     `<p><strong>${view.changes.length} change${view.changes.length === 1 ? "" : "s"} to what you filed</strong> <span class="meta">— approving binds the AMENDED terms shown ${mode === "full" ? "in the scope" : "above"}, not the ones you filed · <a href="/r/${view.run}">run ${view.run}</a></span></p>` +
     (view.amendment === null
-      ? `<p class="meta">the planner stated no reason for the amendment</p>`
-      : `<p class="recap contract-reason"><strong>why:</strong> ${escape(view.amendment)}</p>`) +
+      ? `<p class="meta">The planner stated no reason for the amendment</p>`
+      : `<p class="recap contract-reason"><strong>Why:</strong> ${escape(view.amendment)}</p>`) +
     `<ul class="recap contract-changes">${view.changes.map(contractChangeHtml).join("")}</ul>` +
     stale +
     `</div>`
@@ -12032,7 +12034,7 @@ function approvalPathsHtml(touches: readonly string[]): string {
 function acceptanceCeremonyHtml(criteria: readonly AcceptanceCriterion[]): string {
   if (criteria.length === 0) return "";
   return (
-    `<p class="meta">acceptance</p><ul class="recap acceptance-rubric">` +
+    `<p class="meta">Acceptance</p><ul class="recap acceptance-rubric">` +
     criteria
       .map(
         c =>
@@ -12219,7 +12221,7 @@ function approvalSheetHtml(input: {
     `<p class="meta">Checks level: ${escape(qualityModeTitle(scope.qualityMode ?? "default"))}${permission === null ? "" : ` · ${escape(permission)}`}</p>` +
     (scope.budgetMicrousd === null ? "" : `<p class="meta">Each build attempt has a ${money(scope.budgetMicrousd)} agent-reported usage cap. On a subscription this limits work; it is not an API charge.</p>`);
   const details =
-    `<details class="approval-details"><summary>Details</summary>` +
+    `<details class="approval-details"><summary>Plan details</summary>` +
     revisionDetail +
     (repairText === null ? "" : detail("Signed goal", `<p>${escape(scope.goal)}</p>`)) +
     detail("Plan record", contractDetail) +
@@ -12324,18 +12326,18 @@ function consentClosedHtml(taskId: string, door: ConsentDoor & { open: false }, 
 
 function profileWords(scope: Pick<Scope, "profile" | "profileState" | "unresolvedReason" | "digestVersion" | "proposedChainJson">): string {
   if (scope.profileState === "unresolved") {
-    return `<p class="meta"><strong>filed but unapprovable</strong> — ${escape(scope.unresolvedReason ?? "the scope cannot say exactly what would run")}. Restate the scope to fix it.</p>`;
+    return `<p class="meta"><strong>Filed but unapprovable</strong> — ${escape(scope.unresolvedReason ?? "the scope cannot say exactly what would run")}. Restate the scope to fix it.</p>`;
   }
   const profile = scope.profile ?? null;
   if (profile === null) {
     return (scope.digestVersion ?? 1) < 2
-      ? `<p class="meta">approved before routing was bound — pinned at upgrade to the configuration of that day</p>`
+      ? `<p class="meta">Approved before routing was bound — pinned at upgrade to the configuration of that day</p>`
       : "";
   }
   const repair = profile.repairModel === "inherit" ? "same model" : profile.repairModel;
   const base =
     profile.provider === "claude"
-      ? `<p class="meta">runs on <span class="mono">claude · ${escape(profile.model)}</span> — ${
+      ? `<p class="meta">Runs on <span class="mono">claude · ${escape(profile.model)}</span> — ${
           profile.permissionArgv === "bypassPermissions"
             ? "FULL permissions; claude runs with --dangerously-skip-permissions and nothing asks"
             : profile.permissionArgv === "auto"
@@ -12343,8 +12345,8 @@ function profileWords(scope: Pick<Scope, "profile" | "profileState" | "unresolve
               : "legacy acceptEdits; edits proceed, commands that ask are denied unattended"
         }, ${profile.maxTurns}-turn runaway breaker, ${Math.round(profile.timeoutSeconds / 60)} min ${profile.timeoutKind === "idle" ? "without progress" : "per attempt"}; repairs on ${escape(repair)}, ${profile.repairMaxTurns} turns / ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`
       : profile.provider === "gemini"
-        ? `<p class="meta">runs on <span class="mono">gemini · ${escape(profile.model)}</span> — ${profile.approvalArgv === "yolo" ? "Full access via --approval-mode yolo; every tool auto-approved" : "Auto via --approval-mode auto_edit; edits auto-approved, other tools refused"}, no turn limit (${Math.round(profile.timeoutSeconds / 60)} min ${profile.timeoutKind === "idle" ? "without progress" : "per attempt"}), spend reported in tokens only; repairs on ${escape(repair)}, ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`
-        : `<p class="meta">runs on <span class="mono">${escape(profile.provider)} · ${escape(profile.model)}</span> — ${profile.sandboxMode === "danger-full-access" ? "FULL permissions via --dangerously-bypass-approvals-and-sandbox; nothing asks" : "workspace-write sandbox"}, no turn limit (${Math.round(profile.timeoutSeconds / 60)} min ${profile.timeoutKind === "idle" ? "without progress" : "per attempt"}); repairs on ${escape(repair)}, ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`;
+        ? `<p class="meta">Runs on <span class="mono">gemini · ${escape(profile.model)}</span> — ${profile.approvalArgv === "yolo" ? "Full access via --approval-mode yolo; every tool auto-approved" : "Auto via --approval-mode auto_edit; edits auto-approved, other tools refused"}, no turn limit (${Math.round(profile.timeoutSeconds / 60)} min ${profile.timeoutKind === "idle" ? "without progress" : "per attempt"}), spend reported in tokens only; repairs on ${escape(repair)}, ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`
+        : `<p class="meta">Runs on <span class="mono">${escape(profile.provider)} · ${escape(profile.model)}</span> — ${profile.sandboxMode === "danger-full-access" ? "FULL permissions via --dangerously-bypass-approvals-and-sandbox; nothing asks" : "workspace-write sandbox"}, no turn limit (${Math.round(profile.timeoutSeconds / 60)} min ${profile.timeoutKind === "idle" ? "without progress" : "per attempt"}); repairs on ${escape(repair)}, ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`;
   // The fallback chain rides EVERY surface these words sign (F+G review,
   // finding 2): the digest binds the whole chain, so the password form —
   // task page and /next alike — states every entry, credential included.
@@ -12352,7 +12354,7 @@ function profileWords(scope: Pick<Scope, "profile" | "profileState" | "unresolve
   const chainLine =
     chain === null || chain.length < 2
       ? ""
-      : `<p class="meta">if its subscription runs out: ${chain
+      : `<p class="meta">If its subscription runs out: ${chain
           .slice(1)
           .map(
             one =>
@@ -12419,9 +12421,9 @@ function agentsSummaryWords(view: RouteView): string {
 function agentsBadgesHtml(view: RouteView): string {
   const p = view.projection;
   return (
-    `<span class="badge">${escape(riskTitle(view.riskLevel))}</span>` +
-    (p === null ? "" : `<span class="badge">${escape(p.postureWords)}</span>`) +
-    `<span class="badge">${escape(agentsStandingWords(view))}</span>`
+    `<span class="badge">${escape(sentenceCase(riskTitle(view.riskLevel)))}</span>` +
+    (p === null ? "" : `<span class="badge">${escape(sentenceCase(p.postureWords))}</span>`) +
+    `<span class="badge">${escape(sentenceCase(agentsStandingWords(view)))}</span>`
   );
 }
 
@@ -12449,7 +12451,7 @@ function agentsWhyHtml(projection: RouteProjection, summaryLabel = "Why these ag
         const chosen = chosenWords(leg);
         return (
           `<dt>${escape(ROLE_NOUN[leg.phase])}</dt>` +
-          `<dd><span class="mono">${escape(leg.provider)} · ${escape(leg.model)}</span> <span class="badge">${escape(chosen)}</span>` +
+          `<dd><span class="mono">${escape(leg.provider)} · ${escape(leg.model)}</span> <span class="badge">${escape(sentenceCase(chosen))}</span>` +
           `<ul class="agents-reasons">${leg.reasons.map(reason => `<li>${escape(reason)}</li>`).join("")}${leg.problem === null ? "" : `<li><strong>${escape(leg.problem)}</strong></li>`}</ul></dd>`
         );
       })
@@ -12473,7 +12475,7 @@ function agentsCeremonyHtml(view: RouteView | null | undefined): string {
   return (
     `<div class="agents-ceremony"><p class="approval-label">agents</p>` +
     `<p class="agents-summary">${escape(view.projection.summary)}</p>` +
-    `<div class="agents-badges"><span class="badge">${escape(riskTitle(view.riskLevel))}</span><span class="badge">${escape(view.projection.postureWords)}</span></div>` +
+    `<div class="agents-badges"><span class="badge">${escape(sentenceCase(riskTitle(view.riskLevel)))}</span><span class="badge">${escape(sentenceCase(view.projection.postureWords))}</span></div>` +
     `<p class="meta agents-risk-line">${escape(riskTitle(view.riskLevel))}: ${escape(riskConsequence(view.riskLevel))}.</p>` +
     agentsWhyHtml(view.projection) +
     `<p class="meta">These exact agents are part of what you approve; changing any of them asks for a fresh approval.</p></div>`
@@ -12504,7 +12506,7 @@ function routineAgentsHtml(routine: Routine, approved: boolean, ceremony = false
   return (
     `<div class="agents-ceremony"><p class="approval-label">agents</p>` +
     `<p class="agents-summary">${escape(agentsSummary(route))}</p>` +
-    `<div class="agents-badges"><span class="badge">${escape(riskTitle(route.risk))}</span><span class="badge">${escape(postureWords(route))}</span><span class="badge">${approved ? "frozen by the approval" : "frozen when you approve"}</span></div>` +
+    `<div class="agents-badges"><span class="badge">${escape(sentenceCase(riskTitle(route.risk)))}</span><span class="badge">${escape(sentenceCase(postureWords(route)))}</span><span class="badge">${approved ? "frozen by the approval" : "frozen when you approve"}</span></div>` +
     (ceremony ? agentsWhyHtml(projection) : "") +
     `<p class="meta">${approved ? "Every firing runs on exactly these agents; a configuration change cannot re-route it." : "Approving freezes exactly these agents for every firing; a configuration change afterwards cannot re-route one."}</p></div>`
   );
@@ -12537,7 +12539,7 @@ function agentsCardHtml(taskId: string, view: RouteView | null | undefined, csrf
           .map(
             one =>
               `<li><span>${escape(ROLE_NOUN[one.phase])} → <span class="mono">${escape(one.provider)} · ${escape(one.model)}</span> <span class="meta">by ${escape(one.by)} ${whenTime(one.at)}</span></span>` +
-              (canEdit && view.editable ? `<form method="post" action="${taskHref(taskId)}/route" class="agents-clear">${hidden}<input type="hidden" name="clear-phase" value="${escape(one.phase)}"><button type="submit" class="secondary" aria-label="clear the ${escape(ROLE_NOUN[one.phase].toLowerCase())} choice">clear</button></form>` : "") +
+              (canEdit && view.editable ? `<form method="post" action="${taskHref(taskId)}/route" class="agents-clear">${hidden}<input type="hidden" name="clear-phase" value="${escape(one.phase)}"><button type="submit" class="secondary" aria-label="clear the ${escape(ROLE_NOUN[one.phase].toLowerCase())} choice">Clear</button></form>` : "") +
               `</li>`,
           )
           .join("")}</ul>`;
@@ -12570,7 +12572,7 @@ function agentsCardHtml(taskId: string, view: RouteView | null | undefined, csrf
       ? `<p class="meta">${escape(view.editableWhy ?? "the agents cannot change right now")}</p>`
       : `<details class="agents-change"><summary>Change agents</summary>` +
         `<form method="post" action="${taskHref(taskId)}/route" class="agents-form-risk">${hidden}` +
-        `<label>risk<select name="risk" aria-label="declared risk">${RISK_LEVELS.map(one => `<option value="${one}"${one === view.riskLevel ? " selected" : ""}>${escape(riskTitle(one))}</option>`).join("")}</select></label>` +
+        `<label>Risk<select name="risk" aria-label="declared risk">${RISK_LEVELS.map(one => `<option value="${one}"${one === view.riskLevel ? " selected" : ""}>${escape(riskTitle(one))}</option>`).join("")}</select></label>` +
         `<button type="submit" class="secondary">Set risk</button></form>` +
         riskGuide +
         `<div class="agents-role-forms">${roleForms.join("")}</div>` +
@@ -15444,7 +15446,7 @@ const INBOX_TABS_CSS = '.inbox-tabs{display:inline-flex;gap:2px;max-width:100%;o
   '.inbox-ask{margin:18px 0 0}.inbox-ask>h2{display:flex;align-items:baseline;gap:8px;margin:0 0 4px;font-size:15px;font-weight:600}.inbox-ask>h2 .count{font:500 12px var(--so-mono,ui-monospace,monospace);font-variant-numeric:tabular-nums;color:var(--so-muted)}.inbox-ask h3{font-size:13px;font-weight:600;margin:12px 0 4px}' +
   '.inbox-unread{display:none;position:absolute;top:4px;right:3px;width:6px;height:6px;border-radius:50%;background:var(--so-signal)}' +
   '@media (max-width:760px){.inbox-tabs{display:flex;width:100%}.inbox-tabs a{flex:1;justify-content:center;min-height:44px;padding:0 6px}.inbox-unread{display:block}}';
-const WORKSPACE_STYLE = styleAsset(STYLE + INBOX_TABS_CSS + APPROVAL_RULES_CSS + SPEND_CSS + RETENTION_CSS + STORAGE_CSS + UPDATES_CSS + LIMITS_CSS + MONITORING_CSS + INTEGRATIONS_CSS + BACKUP_CSS + EXPORT_CSS + PROJECT_DELETE_CSS + POLICY_CSS + EVIDENCE_PACK_CSS + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KITS_CSS + STARTERS_CSS + GALLERY_CSS + SSO_CSS + CREDENTIALS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + TASK_STATUS_CSS + LEAD_CONTEXT_CSS + PULL_REQUEST_SETTINGS_CSS + CHECK_SETTINGS_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
+const WORKSPACE_STYLE = styleAsset(STYLE + INBOX_TABS_CSS + APPROVAL_RULES_CSS + SPEND_CSS + RETENTION_CSS + STORAGE_CSS + UPDATES_CSS + LIMITS_CSS + MONITORING_CSS + INTEGRATIONS_CSS + BACKUP_CSS + EXPORT_CSS + PROJECT_DELETE_CSS + POLICY_CSS + EVIDENCE_PACK_CSS + THEME_CONTROLS_CSS + CODING_CSS + CODING_SHIPPING_CSS + RECIPE_CSS + SKILLS_CSS + TOOLS_CSS + FLOWS_CSS + TEAMMATE_CSS + KITS_CSS + STARTERS_CSS + GALLERY_CSS + SSO_CSS + CREDENTIALS_CSS + KNOWLEDGE_CSS + MODELS_CSS + CHAT_POLISH_CSS + TRANSITIONS_CSS + WORKSPACE_MOTION_CSS + ASSIGNMENT_CSS + TASK_STATUS_CSS + LEAD_CONTEXT_CSS + PULL_REQUEST_SETTINGS_CSS + CHECK_SETTINGS_CSS + DISCLOSURE_CSS + '.learning{min-width:0;overflow-wrap:anywhere}.learning .card{min-width:0}.learning code,.learning blockquote,.learning pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.learning button,.learning summary,.learning .button-link{min-height:44px}.learning button{white-space:nowrap}.learning summary{padding:12px 0;cursor:pointer}.learning form{margin:12px 0}.learning select{max-width:100%}.learning blockquote{margin:8px 0}.learning ul{padding-left:20px}');
 
 /** Everything the sidebar needs to draw itself for one request. */
 type Chrome = {
@@ -15791,7 +15793,7 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
  * ever posts. */
 const KBD_HELP =
   `<div class="kbd-help" hidden role="dialog" aria-label="keyboard shortcuts" tabindex="-1">` +
-  `<h2>keyboard shortcuts</h2><table>` +
+  `<h2>Keyboard shortcuts</h2><table>` +
   `<tr><td><kbd>/</kbd></td><td>jump to a page or an open task</td></tr>` +
   `<tr><td><kbd>g</kbd> then <kbd>i</kbd></td><td>go to the inbox</td></tr>` +
   `<tr><td><kbd>g</kbd> then <kbd>b</kbd></td><td>go to the board</td></tr>` +
@@ -15893,7 +15895,7 @@ function shell(
     : `<span class="scope-status">` +
       (peekCounts.waiting > 0 ? `<a class="hot" href="/work?view=needs-you">${peekCounts.waiting} needs you</a>` : `<a href="/work?view=needs-you">0 needs you</a>`) +
       `<a href="/runs">${peekCounts.running} live</a><a href="/board?view=order">${peekCounts.queued} queued</a></span>`;
-  const scopeName = effectiveScope === "project" && chrome.project !== null ? escape(projectName(chrome.project)) : "all projects";
+  const scopeName = effectiveScope === "project" && chrome.project !== null ? escape(projectName(chrome.project)) : "All projects";
   // The switcher (board pass): the scope's name opens a menu of every
   // enrolled project — one tap to open one, or to widen to all — as plain
   // POST forms carrying the session's csrf, returning to this screen.
@@ -15909,7 +15911,7 @@ function shell(
     const allCurrent = effectiveScope !== "project";
     const rows = [
       `<form method="post" action="/projects/select">${hidden}<input type="hidden" name="path" value="">` +
-        `<button type="submit"${allCurrent ? ' class="current" aria-current="true"' : ""}>all projects</button></form>`,
+        `<button type="submit"${allCurrent ? ' class="current" aria-current="true"' : ""}>All projects</button></form>`,
       ...(chrome.projects ?? []).map(
         one =>
           `<form method="post" action="/projects/open">${hidden}<input type="hidden" name="path" value="${escape(one.path)}">` +
@@ -15959,10 +15961,10 @@ function shell(
     primaryItem("flows", "/flows", "Flows"),
     primaryItem("projects", "/projects", "Projects"),
     `</nav>`,
-    ...(chrome.active === "code" ? [] : [`<a class="new-task" href="/tasks/new" aria-label="new task">+ new task</a>`]),
+    ...(chrome.active === "code" ? [] : [`<a class="new-task" href="/tasks/new" aria-label="New task">+ New task</a>`]),
     `<nav class="nav-groups">`,
-    navGroup("tools", "work tools", workToolRows(chrome.projectScoped, chrome.chat, chrome.code), TOOL_KEYS.has(chrome.active)),
-    navGroup("settings", "settings", settingsRows(chrome.projectScoped, chrome.settings), SETTINGS_KEYS.has(chrome.active)),
+    navGroup("tools", "Work tools", workToolRows(chrome.projectScoped, chrome.chat, chrome.code), TOOL_KEYS.has(chrome.active)),
+    navGroup("settings", "Settings", settingsRows(chrome.projectScoped, chrome.settings), SETTINGS_KEYS.has(chrome.active)),
     `</nav>`,
     `<span class="grow"></span>`,
     `</aside>`,
@@ -15973,11 +15975,11 @@ function shell(
   // the refuseDemo gate in operate.ts, this is the honest label).
   const demoBanner =
     (chrome.demo === true
-      ? `<div class="banner"><span class="badge">demo</span>${escape(DEMO_BANNER.replace(/^Demo: /, ""))}</div>`
+      ? `<div class="banner"><span class="badge">Demo</span>${escape(DEMO_BANNER.replace(/^Demo: /, ""))}</div>`
       : "") +
     (chrome.modeBanner === undefined
       ? ""
-      : `<div class="banner"><span class="badge badge-running">mode</span>${escape(chrome.modeBanner.words)} \u00b7 <a href="/mode">the terms \u00b7 end it</a></div>`) +
+      : `<div class="banner"><span class="badge badge-running">Mode</span>${escape(chrome.modeBanner.words)} \u00b7 <a href="/mode">the terms \u00b7 end it</a></div>`) +
     (chrome.signIn ?? []).map(one => `<div class="banner sign-in-banner" data-sign-in="${escape(one.provider)}"><strong>${escape(one.title)}</strong> \u00b7 run <code>${escape(one.command)}</code> on this computer, then resume.${one.detail === "" ? "" : ` ${escape(one.detail)}`}` +
       `<form method="post" action="${escape(one.resumeHref)}" class="inline"><input type="hidden" name="csrf" value="${escape(chrome.csrf ?? "")}"><button type="submit">${escape(one.resumeLabel)}</button></form></div>`).join("") +
     (chrome.updateWaiting === undefined
@@ -16257,7 +16259,7 @@ function inboxPage(chrome: Chrome, data: {
    * said as such, never a silent missing chip (finding 13). */
   const chip = (repo: string | null | undefined): string =>
     !data.rollup ? "" : repo === null || repo === undefined
-      ? ` <span class="badge">unplaced</span>`
+      ? ` <span class="badge">Unplaced</span>`
       : ` <span class="badge">${escape(projectName(repo))}</span>`;
   const empty =
     data.decisions.length + data.approvals.length + data.requeueables.length +
@@ -16269,7 +16271,7 @@ function inboxPage(chrome: Chrome, data: {
   const decisions =
     data.decisions.length === 0
       ? ""
-      : `<h2>answer a question</h2><p class="hint">an agent stopped mid-build to ask — nothing proceeds until you answer</p>` +
+      : `<h2>Answer a question</h2><p class="hint">an agent stopped mid-build to ask — nothing proceeds until you answer</p>` +
         data.decisions
           .map(decision =>
             data.interactive && !data.rollup
@@ -16277,7 +16279,7 @@ function inboxPage(chrome: Chrome, data: {
               : `<a class="decide-card" href="/d/${decision.id}">` +
                 `<p class="q">${escape(decision.question)}</p>` +
                 `<span class="mono meta">${escape(decision.taskId)}</span>${chip(decision.repo)}` +
-                `${isOverdue(decision, data.now) ? ` <span class="badge badge-overdue">overdue</span>` : ""}` +
+                `${isOverdue(decision, data.now) ? ` <span class="badge badge-overdue">Overdue</span>` : ""}` +
                 `</a>`,
           )
           .join("\n");
@@ -16285,7 +16287,7 @@ function inboxPage(chrome: Chrome, data: {
   const approvals =
     data.approvals.length === 0
       ? ""
-      : `<h2>approve a scope</h2><p class="hint">scopes waiting for your approval — each binds to the exact wording you sign</p>` +
+      : `<h2>Approve a scope</h2><p class="hint">scopes waiting for your approval — each binds to the exact wording you sign</p>` +
         data.approvals
           .map(
             one =>
@@ -16300,7 +16302,7 @@ function inboxPage(chrome: Chrome, data: {
   const requeueables =
     data.requeueables.length === 0
       ? ""
-      : `<h2>retry stalled work</h2><p class="hint">failed builds waiting for a person — retry clears the incidents and requeues</p>` +
+      : `<h2>Retry stalled work</h2><p class="hint">failed builds waiting for a person — retry clears the incidents and requeues</p>` +
         data.requeueables
           .map(
             one =>
@@ -16312,14 +16314,14 @@ function inboxPage(chrome: Chrome, data: {
                 : `<span class="right"><form method="post" action="${taskHref(one.taskId)}/requeue" class="inline">` +
                   `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
                   `<input type="hidden" name="return" value="inbox">` +
-                  `<button type="submit">retry</button></form></span></p>`),
+                  `<button type="submit">Retry</button></form></span></p>`),
           )
           .join("\n");
 
   const needsVerification =
     data.needsVerification.length === 0
       ? ""
-      : `<h2>needs review</h2><p class="hint">finished, but the evidence needs your attention before accepting</p>` +
+      : `<h2>Needs review</h2><p class="hint">finished, but the evidence needs your attention before accepting</p>` +
         data.needsVerification
           .map(
             one =>
@@ -16333,7 +16335,7 @@ function inboxPage(chrome: Chrome, data: {
   const cancelled =
     data.cancelledBlockers.length === 0
       ? ""
-      : `<h2>choose how waiting tasks continue</h2><p class="hint">these tasks were waiting for work that was cancelled — open one and choose what happens next</p>` +
+      : `<h2>Choose how waiting tasks continue</h2><p class="hint">these tasks were waiting for work that was cancelled — open one and choose what happens next</p>` +
         data.cancelledBlockers
           .map(
             one =>
@@ -16346,7 +16348,7 @@ function inboxPage(chrome: Chrome, data: {
   const gaps =
     data.gaps.length === 0
       ? ""
-      : `<h2>supply a requirement</h2><p class="hint">approved work is ready except for these — fill one and its tasks start</p>` +
+      : `<h2>Supply a requirement</h2><p class="hint">approved work is ready except for these — fill one and its tasks start</p>` +
         data.gaps
           .map(
             gap =>
@@ -16390,8 +16392,8 @@ function inboxPage(chrome: Chrome, data: {
   const shows = (one: Exclude<InboxTab, "all">): boolean => tab === "all" || tab === one;
   const listRows = (rows: { taskId: string; title: string; detail: string; repo: string | null }[]): string =>
     rows.map(one => `<p class="row"><a href="${taskHref(one.taskId)}">${escape(one.title)}</a>${chip(one.repo)} <span class="meta">${escape(one.detail)}</span></p>`).join("\n");
-  const ready = (data.ready ?? []).length === 0 ? "" : `<h2>ready to review</h2>` + listRows(data.ready ?? []);
-  const running = (data.running ?? []).length === 0 ? "" : `<h2>running now</h2>` + listRows(data.running ?? []);
+  const ready = (data.ready ?? []).length === 0 ? "" : `<h2>Ready to review</h2>` + listRows(data.ready ?? []);
+  const running = (data.running ?? []).length === 0 ? "" : `<h2>Running now</h2>` + listRows(data.running ?? []);
   const asks = { decide: data.decisions.length + data.approvals.length, unblock: data.requeueables.length + data.cancelledBlockers.length + data.gaps.length };
   const counts: Record<InboxTab, number> & typeof asks = { ...asks,
     "needs-you": asks.decide + asks.unblock,
@@ -16411,7 +16413,7 @@ function inboxPage(chrome: Chrome, data: {
     ? `<div class="card"><p class="meta">${tab === "needs-you" ? "Nothing needs you." : tab === "ready" ? "No results are waiting for review." : "Nothing is running."}</p></div>` : "";
   return screen("inbox", [
     `<h1>Inbox</h1>`,
-    `<p class="meta">everything that waits on you \u2014 empty means the fleet is working</p>`,
+    `<p class="meta">Everything that waits on you \u2014 empty means the fleet is working</p>`,
     tabs,
     noWorker,
     wizard,
@@ -16423,21 +16425,21 @@ function inboxPage(chrome: Chrome, data: {
     shows("needs-you") ? askGroup("unblock", counts.unblock, [requeueables, cancelled, gaps]) : "",
     shows("running") ? running : "",
     data.rollup
-      ? `<p class="meta">requirement gaps are checked one project at a time \u2014 open a project to see and fill its gaps · <a href="/projects">open a project</a></p>`
+      ? `<p class="meta">Requirement gaps are checked one project at a time \u2014 open a project to see and fill its gaps · <a href="/projects">open a project</a></p>`
       : "",
     // Quick capture: the shortest path from "I want this done" to the
     // approve card — title and goal here, the yes on the next screen. The
     // one-shot form posts to the same guarded handler as the full page.
-    data.rollup ? "" : `<h2>capture new work</h2>`,
+    data.rollup ? "" : `<h2>Capture new work</h2>`,
     data.rollup ? "" : `<form method="post" action="/tasks/add" class="card">`,
     ...(data.rollup
       ? []
       : [
           `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
           `<input type="hidden" name="projectRevision" value="${data.revision}">`,
-          `<label>what should get done<input type="text" name="title" placeholder="task title" maxlength="200"></label>`,
-          `<label>what success looks like <span class="meta">(becomes the scope you approve on the next screen)</span><textarea name="goal" rows="2"></textarea></label>`,
-          `<button type="submit">queue it \u2192 approve its scope next</button>`,
+          `<label>What should get done<input type="text" name="title" placeholder="task title" maxlength="200"></label>`,
+          `<label>What success looks like <span class="meta">(becomes the scope you approve on the next screen)</span><textarea name="goal" rows="2"></textarea></label>`,
+          `<button type="submit">Queue it \u2192 approve its scope next</button>`,
           `</form>`,
         ]),
   ].join("\n"), {
@@ -16512,7 +16514,7 @@ function systemPage(chrome: Chrome, data: {
   const agentLines = data.agents
     .map(one => {
       if (one.problem !== undefined) {
-        return `<p class="row"><span class="mono">${escape(one.phase)}</span> <span class="badge badge-failed">misconfigured</span> <span class="meta">${escape(one.problem)}</span></p>`;
+        return `<p class="row"><span class="mono">${escape(one.phase)}</span> <span class="badge badge-failed">Misconfigured</span> <span class="meta">${escape(one.problem)}</span></p>`;
       }
       const who =
         one.source === "project"
@@ -16531,10 +16533,10 @@ function systemPage(chrome: Chrome, data: {
     })
     .join("\n");
   const agentsCard =
-    `<h2>agents</h2>` +
-    `<p class="meta">which AI provider runs each phase — changed from the terminal with your credentials (<code>toolroll config</code>), never by a browser click</p>` +
+    `<h2>Agents</h2>` +
+    `<p class="meta">Which AI provider runs each phase — changed from the terminal with your credentials (<code>toolroll config</code>), never by a browser click</p>` +
     `<div class="card">${agentLines}` +
-    `<p class="meta">repair always stays on the provider that built — only its model can differ. A routine pins its agent the moment it fires; nothing after that can re-route it.</p>` +
+    `<p class="meta">Repair always stays on the provider that built — only its model can differ. A routine pins its agent the moment it fires; nothing after that can re-route it.</p>` +
     `</div>`;
 
   return screen("system", [
@@ -16544,18 +16546,18 @@ function systemPage(chrome: Chrome, data: {
     cards.length === 0
       ? `<p class="meta">No builder is connected yet. On the machine where the project lives, open that folder and run <code>toolroll up</code>.</p>`
       : `<div class="cards">${cards.join("")}</div>`,
-    data.outboxPending > 0 ? `<p class="meta">notifications: ${data.outboxPending} pending delivery</p>` : "",
+    data.outboxPending > 0 ? `<p class="meta">Notifications: ${data.outboxPending} pending delivery</p>` : "",
     (data.externalWork ?? []).length === 0
       ? ""
-      : `<h2>external work</h2>` +
+      : `<h2>External work</h2>` +
         (data.externalWork ?? [])
           .map(
             one =>
               `<p class="row"><span class="mono">${escape(one.remoteRepo)}</span> ` +
               (one.blocked !== null
-                ? `<span class="badge badge-failed">dispatch blocked</span> <span class="meta">the tracker connection needs repair — \`toolroll sync\` says why</span>`
+                ? `<span class="badge badge-failed">Dispatch blocked</span> <span class="meta">the tracker connection needs repair — \`toolroll sync\` says why</span>`
                 : one.openEpisode !== null
-                  ? `<span class="badge badge-failed">sync failing</span> <span class="meta">${escape(one.openEpisode)}</span>`
+                  ? `<span class="badge badge-failed">Sync failing</span> <span class="meta">${escape(one.openEpisode)}</span>`
                   : `<span class="meta">syncing normally</span>`) +
               `</p>`,
           )
@@ -16686,7 +16688,7 @@ function boardBody(
       queuedHeads.get(`${card.assignedRunner ?? ""}|${card.repo ?? ""}`) === card.taskId
         ? `<span class="badge">${card.assignedRunner === null ? "next up" : `next for ${escape(card.assignedRunner)}`}</span>`
         : "",
-      card.assignedRunner === null ? "" : `<span class="badge">reserved</span>`,
+      card.assignedRunner === null ? "" : `<span class="badge">Reserved</span>`,
       card.routineName === null ? "" : `<span class="badge">${escape(card.routineName)}</span>`,
       chip(card.repo).trim(),
     ]) +
@@ -16715,7 +16717,7 @@ function boardBody(
         ...(claim.branch === null ? [] : [["branch", `${claim.branch}${workspace === null ? "" : ` · ${workspace}`}`] as [string, string]]),
       ]) +
       chips([
-        card.attempt === null ? "" : `<span class="badge">attempt ${card.attempt}</span>`,
+        card.attempt === null ? "" : `<span class="badge">Attempt ${card.attempt}</span>`,
         chip(card.repo).trim(),
       ]) +
       `</a>`
@@ -16742,7 +16744,7 @@ function boardBody(
                 ["usage", runCostWords({ authMode: row.authMode, costUsd: row.costUsd, tokensIn: null, tokensOut: null })],
               ]) +
               chips([
-                `<span class="badge badge-done">${row.outcome === "no-change" ? "no change" : "built"}</span>`,
+                `<span class="badge badge-done">${row.outcome === "no-change" ? "No change" : "Built"}</span>`,
                 pr.trim(),
                 data.all && row.repo !== null ? `<span class="badge">${escape(projectName(row.repo))}</span>` : "",
               ]) +
@@ -16757,7 +16759,7 @@ function boardBody(
       : `<p class="meta board-scope">` +
         (data.all
           ? (data.project === null
-              ? `<strong>all projects</strong>`
+              ? `<strong>All projects</strong>`
               : `<a href="/board">${escape(projectName(data.project))}</a> \u00b7 <strong>all projects</strong>`) +
             ` \u2014 every project this server serves, each card wearing its project`
           : `<strong>${escape(projectName(data.project as string))}</strong> \u00b7 <a href="/board?scope=all">all projects</a>`) +
@@ -16779,7 +16781,7 @@ function boardBody(
   const deltaLine =
     data.delta === null
       ? ""
-      : `<p class="meta"><strong>since you last looked</strong> (${ago(data.delta.agoMinutes)} ago): ` +
+      : `<p class="meta"><strong>Since you last looked</strong> (${ago(data.delta.agoMinutes)} ago): ` +
         [
           data.delta.built > 0 ? `<span class="good">${data.delta.built} built</span>` : "",
           data.delta.failed > 0 ? `<span class="bad">${data.delta.failed} failed</span>` : "",
@@ -16791,7 +16793,7 @@ function boardBody(
 
   return [
     `<h1>Board</h1>`,
-    data.all ? "" : `<p class="meta board-view"><strong>state</strong> \u00b7 <a href="/board?view=order">order \u2192</a> <span class="meta">drag to reorder, or to reserve a task for one worker</span></p>`,
+    data.all ? "" : `<p class="meta board-view"><strong>State</strong> \u00b7 <a href="/board?view=order">order \u2192</a> <span class="meta">drag to reorder, or to reserve a task for one worker</span></p>`,
     deltaLine,
     toggle,
     `<div class="board">`,
@@ -16820,7 +16822,7 @@ function donePage(
               row.prNumber === null
                 ? row.publicationState === null
                   ? ""
-                  : ` <span class="badge">${escape(row.publicationState)}</span>`
+                  : ` <span class="badge">${escape(sentenceCase(row.publicationState))}</span>`
                 : ` <a href="${escape(row.prUrl ?? "#")}" class="badge badge-open">PR #${row.prNumber}</a>` +
                   (ciRed(row.prNumber) ? ` <span class="badge badge-failed">CI failing</span>` : "");
             const needsVerification =
@@ -16829,7 +16831,7 @@ function donePage(
                 : "";
             return (
               `<div class="card"><p><a href="${taskHref(row.taskId)}"><strong>${escape(row.title)}</strong></a>` +
-              `${row.outcome === "no-change" ? ` <span class="badge">no change needed</span>` : ""}${pr}${needsVerification}${criterionMatrixSummary(row.proofMatrix)}</p>` +
+              `${row.outcome === "no-change" ? ` <span class="badge">No change needed</span>` : ""}${pr}${needsVerification}${criterionMatrixSummary(row.proofMatrix)}</p>` +
               `${row.handoff === null ? "" : `<p class="meta">${escape(row.handoff.length > 200 ? row.handoff.slice(0, 200) + "\u2026" : row.handoff)}</p>`}` +
               `<p class="meta mono">${escape(row.taskId)} \u00b7 ${whenTime(row.completedAt)}${row.ranMinutes === null ? "" : ` \u00b7 ran ${row.ranMinutes}m`}${row.provider === null ? "" : ` \u00b7 ${escape(runCostWords({ authMode: row.authMode, costUsd: row.costUsd, tokensIn: null, tokensOut: null }))}`}` +
               ` \u00b7 <a href="${reviewHref(row.taskId)}">review \u2192</a></p></div>`
@@ -16908,9 +16910,9 @@ function trackRow(track: Track, all: boolean): string {
     `<p>${trackStrip(fires)}` +
     `<span class="right meta">$${spend.costUsd.toFixed(2)} this week${spend.unmeasuredRuns > 0 ? ` — measured on ${spend.totalRuns - spend.unmeasuredRuns} of ${spend.totalRuns} builds` : ""}${routine.costCeilingUsd === null ? "" : ` of $${routine.costCeilingUsd.toFixed(2)}`}</span></p>` +
     (blocker !== null
-      ? `<p class="meta">stopped behind <a href="${taskHref(blocker.taskId)}" class="mono">${escape(blocker.taskId)}</a> (${escape(blocker.state)})</p>`
+      ? `<p class="meta">Stopped behind <a href="${taskHref(blocker.taskId)}" class="mono">${escape(blocker.taskId)}</a> (${escape(blocker.state)})</p>`
       : latest?.instanceTaskId !== undefined && latest.instanceTaskId !== null
-        ? `<p class="meta">latest: <a href="${taskHref(latest.instanceTaskId)}" class="mono">${escape(latest.instanceTaskId)}</a>${latest.instanceState === null ? "" : ` (${escape(latest.instanceState)})`}</p>`
+        ? `<p class="meta">Latest: <a href="${taskHref(latest.instanceTaskId)}" class="mono">${escape(latest.instanceTaskId)}</a>${latest.instanceState === null ? "" : ` (${escape(latest.instanceState)})`}</p>`
         : "") +
     `</div>`
   );
@@ -17171,7 +17173,7 @@ function resumeCeremonyPage(chrome: Chrome, data: {
     `<p class="row">Continues saved work${control.committed ? " and its commit" : ""} under the current approved scope. The next attempt needs fresh evidence; the earlier handoff cannot count as a new result.</p>`,
     `<p class="row">Resuming grants no new approval or publishing permission. Scope, budget, agents, risk, fallback, verification, and review limits still apply.</p>`,
     `<details><summary>Stop record and saved work</summary><p>Run #${control.run} was stopped by <span class="mono">${escape(control.stop.requestedBy)}</span> at ${escape(stopWhen(control.stop.requestedAt))}${control.stop.settledAt === null ? "" : ` and settled ${escape(stopWhen(control.stop.settledAt))} (${escape(control.stop.settlement ?? "?")})`}.</p>${control.worktree === null ? "" : `<p class="mono">${escape(control.worktree)}</p>`}</details>`,
-    data.approved ? "" : `<p class="row problem-words"><strong>the scope is not approved as it stands</strong> — resuming lifts the pause, but no worker spends until the scope is approved again</p>`,
+    data.approved ? "" : `<p class="row problem-words"><strong>The scope is not approved as it stands</strong> — resuming lifts the pause, but no worker spends until the scope is approved again</p>`,
     data.gate === null ? "" : `<p class="row"><strong>Before work starts:</strong> ${escape(data.gate.summary)} — ${escape(data.gate.detail)}</p>`,
     `</div>`,
     `<form method="post" action="${taskHref(data.taskId)}/resume" class="card resume-form">`,
@@ -17416,7 +17418,7 @@ function chatFleetOverview(
     `<section class="card chat-overview" aria-label="live portfolio overview" data-card-kind="fleet-overview">` +
     `<div class="chat-overview-head"><h2>${projects.length} project${projects.length === 1 ? "" : "s"}</h2>` +
     (interactive
-      ? `<form method="post" action="/chat" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}"><button type="submit" name="message" value="${escape(briefing)}" class="quiet">brief me</button></form>`
+      ? `<form method="post" action="/chat" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}"><button type="submit" name="message" value="${escape(briefing)}" class="quiet">Brief me</button></form>`
       : `<a href="/board?scope=all" class="chat-overview-link">open board</a>`) +
     `</div>` +
     `<div class="chat-overview-stats">` +
@@ -17455,9 +17457,9 @@ function chatProjectRail(projects: readonly ChatProjectPulse[], csrf: string, in
     return (
       `<div class="chat-project-card">` +
       `<div class="chat-project-name"><span class="mono">${escape(one.id)}</span><strong>${escape(one.label)}</strong>` +
-      `<span class="badge">${escape(statusOf(peek))}</span></div>` +
+      `<span class="badge">${escape(sentenceCase(statusOf(peek)))}</span></div>` +
       (peek === null
-        ? `<p class="meta">pulse unavailable</p>`
+        ? `<p class="meta">Pulse unavailable</p>`
         : `<div class="chat-project-stats">` +
           `<span${peek.waiting > 0 ? ' class="hot"' : ""}><b>${peek.waiting}</b> need you</span>` +
           `<span><b>${peek.running}</b> live</span><span><b>${peek.queued}</b> queued</span>` +
@@ -17466,15 +17468,15 @@ function chatProjectRail(projects: readonly ChatProjectPulse[], csrf: string, in
       (inert
         ? ""
         : `<form method="post" action="/chat" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}">` +
-          `<button type="submit" name="message" value="${escape(ask)}" class="quiet" aria-label="ask about ${escape(one.label)}">ask</button></form>`) +
+          `<button type="submit" name="message" value="${escape(ask)}" class="quiet" aria-label="ask about ${escape(one.label)}">Ask</button></form>`) +
       `<form method="post" action="/projects/open" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}">` +
       `<input type="hidden" name="path" value="${escape(one.path)}"><input type="hidden" name="return" value="/board">` +
-      `<button type="submit" class="quiet" aria-label="open ${escape(one.label)} board">board</button></form></div></div>`
+      `<button type="submit" class="quiet" aria-label="open ${escape(one.label)} board">Board</button></form></div></div>`
     );
   }).join("");
   return (
     `<aside class="chat-projects" id="chat-project-panel" aria-label="projects in this conversation">` +
-    `<div class="chat-projects-head"><h2>projects</h2><span class="badge">${projects.length}</span>` +
+    `<div class="chat-projects-head"><h2>Projects</h2><span class="badge">${projects.length}</span>` +
     `<button type="button" class="chat-project-close quiet" aria-label="close projects">×</button></div>` +
     `<div class="chat-project-list">${rows}</div></aside>`
   );
@@ -17489,9 +17491,9 @@ function matePromptStarters(csrf: string, focus: TaskChatFocus | null = null): s
         ["new task", "Help me define a new task. Ask only about choices that materially change the result; otherwise use your judgment and sensible reversible defaults."],
       ] as const
     : [
-        ["what’s happening", "Read this task and explain its current status, what is blocking it, and what should happen next."],
-        ["review results", "Review the evidence recorded for this task and tell me what is proven and what is still unverified."],
-        ["adjust the plan", "Read this task and propose a tighter scope if that would improve the outcome. Explain why before I confirm anything."],
+        ["What’s happening", "Read this task and explain its current status, what is blocking it, and what should happen next."],
+        ["Review results", "Review the evidence recorded for this task and tell me what is proven and what is still unverified."],
+        ["Adjust the plan", "Read this task and propose a tighter scope if that would improve the outcome. Explain why before I confirm anything."],
       ] as const;
   return `<div class="chat-prompts" aria-label="suggested questions">${prompts.map(([label, message]) =>
     `<form method="post" action="/chat" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}">` +
@@ -17653,23 +17655,23 @@ function leadConfigForm(current: import("./store.js").ChatConfig | null, data: L
     `<form method="post" action="/chat/config" class="card">`,
     `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
     `<input type="hidden" name="return" value="${escape(data.returnTo)}">`,
-    `<label>provider<select name="provider">`,
+    `<label>Provider<select name="provider">`,
     `<option value="codex-subscription"${current?.provider === "codex-subscription" ? " selected" : ""}>Codex membership (logged-in CLI)</option>`,
     `<option value="claude-subscription"${current?.provider === "claude-subscription" ? " selected" : ""}>Anthropic membership (logged-in CLI)</option>`,
     `<option value="anthropic-api"${current?.provider === "anthropic-api" ? " selected" : ""}>anthropic-api (direct API)</option>`,
     `<option value="openrouter-api"${current?.provider === "openrouter-api" ? " selected" : ""}>openrouter-api (direct API)</option>`,
     `</select></label>`,
-    `<label>model <span class="meta">(use default for your membership's current model; direct API models need a pinned price)</span>` +
+    `<label>Model <span class="meta">(use default for your membership's current model; direct API models need a pinned price)</span>` +
       `<input name="model" list="chat-models" value="${escape(current?.model ?? "default")}"><datalist id="chat-models">` +
       `${models.map(model => `<option value="${escape(model)}">${escape(labels.get(model) ?? "")}</option>`).join("")}</datalist></label>`,
     data.openrouterModels === null
-      ? `<p class="meta">with OPENROUTER_API_KEY in the serve environment, this list becomes OpenRouter's full live catalog — each model priced by the party that bills it</p>`
+      ? `<p class="meta">With OPENROUTER_API_KEY in the serve environment, this list becomes OpenRouter's full live catalog — each model priced by the party that bills it</p>`
       : `<p class="meta">${data.openrouterModels.length} models live from OpenRouter's catalog; saving pins today's price — re-save to re-pin</p>`,
     currentSubscription
-      ? `<p class="meta"><strong>no dollar maximum.</strong> Membership chat uses the plan attached to the logged-in CLI; the conversation stays live until you end it, and the daily turn limit still applies.</p>`
-      : `<label>weekly ceiling <span class="meta">(direct API only; leave blank when choosing a membership)</span>` +
+      ? `<p class="meta"><strong>No dollar maximum.</strong> Membership chat uses the plan attached to the logged-in CLI; the conversation stays live until you end it, and the daily turn limit still applies.</p>`
+      : `<label>Weekly ceiling <span class="meta">(direct API only; leave blank when choosing a membership)</span>` +
         `<input type="text" name="weekly-usd" inputmode="decimal" style="width:8rem" value="${current === null ? "" : (current.weeklyCeilingMicrousd / 1_000_000).toFixed(2)}"></label>`,
-    `<label>daily turns <span class="meta">(default 50)</span>` +
+    `<label>Daily turns <span class="meta">(default 50)</span>` +
       `<input type="text" name="daily-turns" inputmode="numeric" style="width:8rem" value="${current === null ? "" : String(current.dailyTurns)}"></label>`,
     currentSubscription
       ? `<p class="meta">Authenticate on this machine first with ${current?.provider === "codex-subscription" ? `<span class="mono">codex login</span>` : `the <span class="mono">claude</span> CLI`}. Toolroll reuses that cached login and never stores it.</p>`
@@ -17683,13 +17685,13 @@ function leadConfigForm(current: import("./store.js").ChatConfig | null, data: L
         )
         .join(" · ")})</span>` +
         `<input type="password" name="key" placeholder="direct API only — leave empty to keep" autocomplete="off"></label>`,
-    `<label>your password <span class="meta">(typed again to change the provider)</span>` +
+    `<label>Your password <span class="meta">(typed again to change the provider)</span>` +
       `<input type="password" name="token" autocomplete="current-password"></label>`,
     `<button type="submit">${current === null ? "turn chat on" : "save"}</button>`,
     `</form>`,
     currentSubscription
       ? `<p class="meta">The membership provider runs without repository tools in a temporary directory; Toolroll remains the only layer that can turn a proposed action into a confirmation card.</p>`
-      : `<p class="meta">a pasted key is written once to a mode-0600 file beside the database — never INTO the database, never shown again beyond its last characters; an environment variable (` +
+      : `<p class="meta">A pasted key is written once to a mode-0600 file beside the database — never INTO the database, never shown again beyond its last characters; an environment variable (` +
         `<span class="mono">ANTHROPIC_API_KEY</span> / <span class="mono">OPENROUTER_API_KEY</span>) always wins when set</p>`,
   ].join("\n");
 }
@@ -17751,7 +17753,7 @@ function chatPage(chrome: Chrome, data: {
           ? `<div class="card" id="latest" data-lead-off><p><strong>The lead is off.</strong></p><p class="meta">${data.canManage ? `Turn it on in${settingsLink}.` : "An approver can turn it on."}</p></div>`
           : code === "unpriced" || code === "no-key"
             ? `<div class="card" id="latest"><p><strong>The lead can’t run yet.</strong></p><p class="meta">${escape(data.enabled.why)}${data.canManage ? ` ·${settingsLink}` : ""}</p></div>`
-            : `<div class="card" id="latest"><p><strong>chat is off.</strong></p><p class="meta">${escape(data.enabled.why)}</p></div>`,
+            : `<div class="card" id="latest"><p><strong>Chat is off.</strong></p><p class="meta">${escape(data.enabled.why)}</p></div>`,
     );
     return screen("chat", chatWorkspace(parts.join("\n"), data.projects, data.csrf, true, data.focusTask, data.resultPanel ?? null), { chrome, functional: { script: CHAT_UI_SCRIPT + (data.focusTask === null ? "" : RESULT_REVIEW_SCRIPT), fetches: data.focusTask !== null } });
   }
@@ -17770,7 +17772,7 @@ function chatPage(chrome: Chrome, data: {
   );
   for (const turn of data.latched) {
     parts.push(
-      `<div class="problem"><strong>unknown spend blocks chat.</strong> turn #${turn.id} may have cost up to ${chatMoney(turn.reservedMicrousd)} — ` +
+      `<div class="problem"><strong>Unknown spend blocks chat.</strong> turn #${turn.id} may have cost up to ${chatMoney(turn.reservedMicrousd)} — ` +
         `<a href="/chat/ack/${turn.id}">read and acknowledge it</a> to re-enable this credential.</div>`,
     );
   }
@@ -17785,7 +17787,7 @@ function chatPage(chrome: Chrome, data: {
       parts.push(`<div class="card" id="latest"><p class="meta">${escape(last.staticError)}</p></div>`);
     } else if (last.reply !== null) {
       parts.push(`<div class="card" id="latest">${renderChatText(last.reply)}` +
-        (last.proposalsDiscarded ? `<p class="meta">a draft block in this answer was malformed and was discarded whole</p>` : "") +
+        (last.proposalsDiscarded ? `<p class="meta">A draft block in this answer was malformed and was discarded whole</p>` : "") +
         `</div>`);
     }
   }
@@ -17794,28 +17796,28 @@ function chatPage(chrome: Chrome, data: {
     const draft = one.draft;
     parts.push(
       `<div class="card">` +
-        `<p><strong>${draft.kind === "task" ? escape(draft.title) : escape(draft.name)}</strong> <span class="badge">draft ${escape(draft.kind)}</span></p>` +
-        `<p class="meta">drafted by the model from fleet context — nothing is filed; drafts do not survive a restart</p>` +
+        `<p><strong>${draft.kind === "task" ? escape(draft.title) : escape(draft.name)}</strong> <span class="badge">Draft ${escape(draft.kind)}</span></p>` +
+        `<p class="meta">Drafted by the model from fleet context — nothing is filed; drafts do not survive a restart</p>` +
         `<p style="white-space:pre-wrap">${escape(draft.goal)}</p>` +
-        (draft.outOfScope === null ? "" : `<p class="meta">not: ${escape(draft.outOfScope)}</p>`) +
-        (draft.touches.length > 0 ? `<p class="meta">touches: ${escape(draft.touches.join(", "))}</p>` : "") +
-        (draft.kind === "routine" ? `<p class="meta">schedule: ${escape(draft.schedule)}</p>` : "") +
-        `<p class="meta">repo: <span class="mono">${escape(projectName(one.repoPath))}</span></p>` +
+        (draft.outOfScope === null ? "" : `<p class="meta">Not: ${escape(draft.outOfScope)}</p>`) +
+        (draft.touches.length > 0 ? `<p class="meta">Touches: ${escape(draft.touches.join(", "))}</p>` : "") +
+        (draft.kind === "routine" ? `<p class="meta">Schedule: ${escape(draft.schedule)}</p>` : "") +
+        `<p class="meta">Repo: <span class="mono">${escape(projectName(one.repoPath))}</span></p>` +
         `<form method="post" action="/chat/file/${escape(one.key)}" class="inline">` +
         `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
         `<input type="password" name="token" placeholder="your password" autocomplete="current-password">` +
-        `<button type="submit">file unapproved</button></form>` +
+        `<button type="submit">File unapproved</button></form>` +
         `</div>`,
     );
   }
   if (!subscription && data.canManage && data.focusTask === null) {
     parts.push(
-      `<h2>ask</h2>`,
+      `<h2>Ask</h2>`,
       `<form method="post" action="/chat" class="card">`,
       `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
-      `<label>message<textarea name="message" rows="3" maxlength="2000"></textarea></label>`,
-      `<label>your password <span class="meta">(every message — chat spends)</span><input type="password" name="token" autocomplete="current-password"></label>`,
-      `<button type="submit">ask</button>`,
+      `<label>Message<textarea name="message" rows="3" maxlength="2000"></textarea></label>`,
+      `<label>Your password <span class="meta">(every message — chat spends)</span><input type="password" name="token" autocomplete="current-password"></label>`,
+      `<button type="submit">Ask</button>`,
       `</form>`,
     );
   }
@@ -17845,12 +17847,12 @@ function chatAckPage(chrome: Chrome, turn: ChatTurn, nonce: string, csrf: string
     `<p>Turn <span class="mono">#${turn.id}</span> on <span class="mono">${escape(turn.provider)} · ${escape(turn.model)}</span> ` +
       `may have started before it failed (${escape(turn.failureReason ?? "crashed")}), and its cost could not be measured.</p>`,
     `<p><strong>Acknowledging charges the reserved worst case, ${chatMoney(turn.reservedMicrousd)}, to the ledger and re-enables chat on this credential.</strong></p>`,
-    `<p class="meta">check the provider's own usage dashboard if you want the exact figure first; the ledger keeps whichever is known.</p>`,
+    `<p class="meta">Check the provider's own usage dashboard if you want the exact figure first; the ledger keeps whichever is known.</p>`,
     `<form method="post" action="/chat/ack/${turn.id}">`,
     `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
     `<input type="hidden" name="nonce" value="${escape(nonce)}">`,
-    `<label>your password<input type="password" name="token" autocomplete="current-password"></label>`,
-    `<button type="submit">accept the charge — re-enable chat</button>`,
+    `<label>Your password<input type="password" name="token" autocomplete="current-password"></label>`,
+    `<button type="submit">Accept the charge — re-enable chat</button>`,
     `</form>`,
     `</div>`,
   ].join("\n"), { chrome });
@@ -18082,12 +18084,12 @@ function proposalCardParts(view: ProposalCardView, csrf: string, inert: boolean,
     const pick = text("option");
     const options =
       decision === null
-        ? `<p class="meta">the decision is gone</p>`
+        ? `<p class="meta">The decision is gone</p>`
         : `<ul class="answer-options">` +
           decision.options
             .map(
               one =>
-                `<li${one.id === pick ? ' class="picked"' : ""}><strong>${escape(one.label)}</strong>${one.reversible ? "" : ' <span class="badge">irreversible</span>'}` +
+                `<li${one.id === pick ? ' class="picked"' : ""}><strong>${escape(one.label)}</strong>${one.reversible ? "" : ' <span class="badge">Irreversible</span>'}` +
                 `${one.id === decision.recommendation ? ' <span class="meta">— the builder recommends this</span>' : ""}` +
                 `${one.id === pick ? ' <span class="meta">— proposed</span>' : ""}` +
                 `<p class="meta">${escape(one.consequence)}</p></li>`,
@@ -18117,13 +18119,13 @@ function proposalCardParts(view: ProposalCardView, csrf: string, inert: boolean,
         : view.kind === "control"
         ? (isChatControl(payload["control"]) ? `<a class="button-link" href="${escape(chatControlHref(payload["control"], task, payload["run"], payload["project"]))}">${escape(CHAT_CONTROLS[payload["control"]].label)}</a>` : `<p>Control unavailable.</p>`)
         : view.kind === "cancel"
-        ? `<p class="meta">cancelling is armed on the task itself — <a href="${taskHref(task)}">open ${escape(task)}</a></p>` +
-          `<form method="post" action="${view.actionBase}/${view.id}/dismiss" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}">${returnField}<button type="submit" class="quiet">dismiss</button></form>`
+        ? `<p class="meta">Cancelling is armed on the task itself — <a href="${taskHref(task)}">open ${escape(task)}</a></p>` +
+          `<form method="post" action="${view.actionBase}/${view.id}/dismiss" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}">${returnField}<button type="submit" class="quiet">Dismiss</button></form>`
         : `<div class="acts">` +
           `<form method="post" action="${view.actionBase}/${view.id}/confirm" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}">${returnField}` +
           (irreversible ? `<label class="arm"><input type="checkbox" name="confirm" value="yes"> I understand this cannot be undone</label>` : "") +
           `<button type="submit">${escape(presentation.action)}</button></form>` +
-          `<form method="post" action="${view.actionBase}/${view.id}/dismiss" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}">${returnField}<button type="submit" class="quiet">dismiss</button></form>` +
+          `<form method="post" action="${view.actionBase}/${view.id}/dismiss" class="inline"><input type="hidden" name="csrf" value="${escape(csrf)}">${returnField}<button type="submit" class="quiet">Dismiss</button></form>` +
           `</div>`;
   } else if (view.state === "pending") {
     acts = `<p class="meta proposal-wait">Available when the current turn finishes.</p>`;
@@ -18151,7 +18153,7 @@ function proposalCardParts(view: ProposalCardView, csrf: string, inert: boolean,
     `<article class="card proposal proposal-${escape(view.kind)} ${escape(view.state)}" data-card-kind="${escape(view.kind)}">` +
     `<header class="proposal-head"><span class="proposal-icon">${strokeIcon(presentation.icon)}</span>` +
     `<span><strong>${escape(presentation.label)}</strong><small>proposed by ${provenance}</small></span>` +
-    `<span class="badge ${stateClass}">${escape(view.state)}</span></header>` +
+    `<span class="badge ${stateClass}">${escape(sentenceCase(view.state))}</span></header>` +
     `<div class="proposal-body">${what}</div>` +
     `<footer class="proposal-actions">${acts}</footer></article>`
   );
@@ -18209,7 +18211,7 @@ function relativeAge(iso: string, now: Date): string {
 function coordinatorProposalsSection(proposals: readonly CoordinatorProposal[], decisions: Map<number, Decision>, csrf: string, now: Date, heading = true, returnTo: string | null = null): string {
   if (proposals.length === 0) return "";
   return (
-    (heading ? `<h2>proposed by coordinators <span class="meta">${proposals.length}</span></h2>` : "") +
+    (heading ? `<h2>Proposed by coordinators <span class="meta">${proposals.length}</span></h2>` : "") +
     `<div class="coordinator-proposals">` +
     proposals.map(one => coordinatorProposalCard(one, csrf, now, decisions.get(typeof one.payload["decision"] === "number" ? one.payload["decision"] : -1) ?? null, returnTo)).join("") +
     `</div>`
@@ -18371,10 +18373,10 @@ function matePage(chrome: Chrome, data: MateThreadRows & {
           `<span>this week ${chatMoney(data.weeklySpent)} of ${chatMoney(data.config.weeklyCeilingMicrousd)}</span>`) +
       `</div>`,
     `<p class="meta">Started ${escape(data.session.mintedAt.slice(0, 16).replace("T", " "))}Z. It stays open until you end it; only bounded recent context is sent to the model.</p>`,
-    `<form method="post" action="/chat/mate/end" class="inline"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="return" value="${escape(returnTo)}"><button type="submit" class="quiet">end the conversation and forget the thread</button></form>`,
+    `<form method="post" action="/chat/mate/end" class="inline"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="return" value="${escape(returnTo)}"><button type="submit" class="quiet">End the conversation and forget the thread</button></form>`,
     data.recent.length === 0
       ? ""
-      : `<p class="meta">recent turns: ${data.recent
+      : `<p class="meta">Recent turns: ${data.recent
           .map(turn => `<span class="mono">#${turn.id}</span> ${escape(turn.state)}${turn.failureReason === null ? "" : ` · ${escape(turn.failureReason)}`} · ${subscription ? "membership" : chatMoney(turn.settledMicrousd ?? turn.reservedMicrousd)}`)
           .join(" · ")}</p>`,
     `<p class="meta"><a href="/settings/lead">Lead settings</a> · provider, model and limits</p>`,
@@ -18391,7 +18393,7 @@ function matePage(chrome: Chrome, data: MateThreadRows & {
   if (data.problem !== null) conversation.push(`<div class="problem">${escape(data.problem)}</div>`);
   for (const turn of data.latched) {
     conversation.push(
-      `<div class="problem"><strong>unknown spend blocks chat.</strong> turn #${turn.id} may have cost up to ${chatMoney(turn.reservedMicrousd)} — ` +
+      `<div class="problem"><strong>Unknown spend blocks chat.</strong> turn #${turn.id} may have cost up to ${chatMoney(turn.reservedMicrousd)} — ` +
         `<a href="/chat/ack/${turn.id}">read and acknowledge it</a> to re-enable this credential.</div>`,
     );
   }
@@ -18409,8 +18411,8 @@ function matePage(chrome: Chrome, data: MateThreadRows & {
     data.focusTask === null ? "" : `<input type="hidden" name="task" value="${escape(data.focusTask.id)}">`,
     chatProject === null ? "" : `<input type="hidden" name="project" value="${escape(chatProject)}">`,
     data.resultRunId == null ? "" : `<input type="hidden" name="result" value="${data.resultRunId}">`,
-    `<label>message<textarea name="message" rows="1" maxlength="${MATE_MESSAGE_MAX_CHARS}" placeholder="${data.focusTask !== null ? "Ask about this task…" : chatProject !== null ? `Ask about ${escape(projectName(chatProject))}…` : "Describe what you want done…"}"></textarea></label>`,
-    `<button type="submit" aria-label="${data.pending === null ? "send message" : "wait for the current reply before sending"}"${data.pending === null ? "" : " disabled"}>send</button>`,
+    `<label>Message<textarea name="message" rows="1" maxlength="${MATE_MESSAGE_MAX_CHARS}" placeholder="${data.focusTask !== null ? "Ask about this task…" : chatProject !== null ? `Ask about ${escape(projectName(chatProject))}…` : "Describe what you want done…"}"></textarea></label>`,
+    `<button type="submit" aria-label="${data.pending === null ? "send message" : "wait for the current reply before sending"}"${data.pending === null ? "" : " disabled"}>Send</button>`,
     `</form>`,
     // Concise pass (2026-09-13): the status line speaks only when there is
     // a state to report — a reply in progress here, the connection from
@@ -18463,25 +18465,25 @@ function routinesPage(
     chrome.project === null
       ? ""
       : [
-          `<h2>file a standing order</h2>`,
+          `<h2>File a standing order</h2>`,
           form.problem === null ? "" : `<div class="problem">${escape(form.problem)}</div>`,
           `<form method="post" action="/routines/add" class="card">`,
           `<input type="hidden" name="csrf" value="${escape(form.csrf)}">`,
           `<input type="hidden" name="projectRevision" value="${form.revision}">`,
           fill === null
-            ? `<p class="meta">start from a template: ${TEMPLATES.filter(one => one.kind === "routine")
+            ? `<p class="meta">Start from a template: ${TEMPLATES.filter(one => one.kind === "routine")
                 .map(one => `<a href="/routines?template=${escape(one.name)}">${escape(one.name)}</a>`)
                 .join(" · ")}</p>`
             : `<p class="meta">${form.values === undefined ? "pre-filled from a template — edit anything" : "Your entries are kept below"}; nothing fires until you approve the standing order</p>`,
-          `<label>name <span class="meta">(lowercase-with-dashes — it names each instance)</span><input type="text" name="name" placeholder="nightly-deps" maxlength="41" value="${fill === null ? "" : escape(fill.name)}"></label>`,
-          `<label>goal <span class="meta">(what every firing is allowed to do)</span><textarea name="goal" rows="2">${fill === null ? "" : escape(fill.goal)}</textarea></label>`,
-          `<label>not this <span class="meta">(optional)</span><input type="text" name="not" value="${fill === null ? "" : escape(fill.not)}"></label>`,
-          `<label>touches <span class="meta">(paths, comma-separated, optional)</span><input type="text" name="touches" value="${fill === null ? "" : escape(fill.touches)}"></label>`,
-          `<label>acceptance <span class="meta">(required — one criterion per line: <code>statement | evidence,kinds | how</code>; evidence kinds are check, screenshot, changed-path, manual-review; id is optional and auto-numbered)</span><textarea name="acceptance" rows="3" placeholder="The full test suite passes | check">${fill === null ? "" : escape(fill.acceptance)}</textarea></label>`,
+          `<label>Name <span class="meta">(lowercase-with-dashes — it names each instance)</span><input type="text" name="name" placeholder="nightly-deps" maxlength="41" value="${fill === null ? "" : escape(fill.name)}"></label>`,
+          `<label>Goal <span class="meta">(what every firing is allowed to do)</span><textarea name="goal" rows="2">${fill === null ? "" : escape(fill.goal)}</textarea></label>`,
+          `<label>Not this <span class="meta">(optional)</span><input type="text" name="not" value="${fill === null ? "" : escape(fill.not)}"></label>`,
+          `<label>Touches <span class="meta">(paths, comma-separated, optional)</span><input type="text" name="touches" value="${fill === null ? "" : escape(fill.touches)}"></label>`,
+          `<label>Acceptance <span class="meta">(required — one criterion per line: <code>statement | evidence,kinds | how</code>; evidence kinds are check, screenshot, changed-path, manual-review; id is optional and auto-numbered)</span><textarea name="acceptance" rows="3" placeholder="The full test suite passes | check">${fill === null ? "" : escape(fill.acceptance)}</textarea></label>`,
           scheduleEditorHtml(fill?.schedule ?? null, form.values),
-          `<label>budget <span class="meta">(dollars per rolling 7 days, optional — needs a provider that reports cost)</span><input type="text" name="ceiling" inputmode="decimal" style="width:8rem" value="${escape(form.values?.get("ceiling") ?? "")}"></label>`,
-          `<button type="submit">file it \u2192 approve the standing order next</button>`,
-          `<p class="meta">filing is cheap — nothing fires until you approve the template on the next screen, password and all</p>`,
+          `<label>Budget <span class="meta">(dollars per rolling 7 days, optional — needs a provider that reports cost)</span><input type="text" name="ceiling" inputmode="decimal" style="width:8rem" value="${escape(form.values?.get("ceiling") ?? "")}"></label>`,
+          `<button type="submit">File it \u2192 approve the standing order next</button>`,
+          `<p class="meta">Filing is cheap — nothing fires until you approve the template on the next screen, password and all</p>`,
           `</form>`,
         ].join("\n");
   const list =
@@ -18514,19 +18516,19 @@ function routineScreenPage(chrome: Chrome, data: {
 
   const terms =
     `<div class="card">` +
-    `<p class="meta">goal</p><p class="recap" style="margin-top:0">${escape(routine.goal)}</p>` +
-    `<p class="meta">not this</p><p class="recap" style="margin-top:0">${routine.outOfScope === null ? "<em>no exclusions</em>" : escape(routine.outOfScope)}</p>` +
-    `<p class="meta">touches · ${routine.touches.length === 0 ? "anything" : routine.touches.map(one => escape(one)).join(", ")}</p>` +
+    `<p class="meta">Goal</p><p class="recap" style="margin-top:0">${escape(routine.goal)}</p>` +
+    `<p class="meta">Not this</p><p class="recap" style="margin-top:0">${routine.outOfScope === null ? "<em>no exclusions</em>" : escape(routine.outOfScope)}</p>` +
+    `<p class="meta">Touches · ${routine.touches.length === 0 ? "anything" : routine.touches.map(one => escape(one)).join(", ")}</p>` +
     (routine.acceptance.length === 0
       ? ""
-      : `<p class="meta">acceptance</p><ul class="recap">${routine.acceptance
+      : `<p class="meta">Acceptance</p><ul class="recap">${routine.acceptance
           .map(c => `<li><code>${escape(c.id)}</code> ${escape(c.statement)} <span class="meta">[requires: ${c.evidence.map(escape).join(", ")}]</span></li>`)
           .join("")}</ul>`) +
-    `<p class="meta">needs · ${routine.requirements.length === 0 ? "nothing beyond the repository" : routine.requirements.map(one => escape(one)).join(", ")}</p>` +
+    `<p class="meta">Needs · ${routine.requirements.length === 0 ? "nothing beyond the repository" : routine.requirements.map(one => escape(one)).join(", ")}</p>` +
     routineAgentsHtml(routine, approved) +
-    `<p class="meta">schedule · ${escape(scheduleSaid)}</p>` +
-    `<p class="meta">budget · ${routine.costCeilingUsd === null ? "no ceiling" : `$${routine.costCeilingUsd.toFixed(2)} per rolling 7 days`}</p>` +
-    `<p class="meta">one at a time — a firing skips while the previous instance is unfinished</p>` +
+    `<p class="meta">Schedule · ${escape(scheduleSaid)}</p>` +
+    `<p class="meta">Budget · ${routine.costCeilingUsd === null ? "no ceiling" : `$${routine.costCeilingUsd.toFixed(2)} per rolling 7 days`}</p>` +
+    `<p class="meta">One at a time — a firing skips while the previous instance is unfinished</p>` +
     `</div>`;
 
   // THE CONSENT DOOR (v48): the password and the approve act exist only
@@ -18564,13 +18566,13 @@ function routineScreenPage(chrome: Chrome, data: {
         `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
         `<input type="hidden" name="nonce" value="${escape(data.nonce)}">`,
         `<input type="hidden" name="digest" value="${escape(routine.digest)}">`,
-        `<p><strong>approve this standing order:</strong></p>`,
+        `<p><strong>Approve this standing order:</strong></p>`,
         `<p class="recap">Each firing creates a task under exactly the terms above and BUILDS IT WITHOUT ASKING — ${escape(scheduleSaid)}, until you pause it. Questions and failures still reach you like any other work.</p>`,
         // The agents the yes freezes (v48): the same concise block every
         // approval shows, before the password.
         routineAgentsHtml(routine, false, true),
-        `<label>your password, typed again — a signed-in session alone cannot agree to standing work<input type="password" name="token" autocomplete="current-password"></label>` +
-          `<button type="submit">approve this routine</button>`,
+        `<label>Your password, typed again — a signed-in session alone cannot agree to standing work<input type="password" name="token" autocomplete="current-password"></label>` +
+          `<button type="submit">Approve this routine</button>`,
         `</form>`,
       ].join("\n");
 
@@ -18584,7 +18586,7 @@ function routineScreenPage(chrome: Chrome, data: {
       ? `<form method="post" action="${routineHref(routine.id)}/run-now" class="inline">` +
         `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
         `<input type="password" name="token" autocomplete="current-password" class="inline" placeholder="your password" aria-label="password for run now" style="width:11rem"> ` +
-        `<button type="submit">run now</button></form>`
+        `<button type="submit">Run now</button></form>`
       : "";
   const acts =
     `<div class="card">` +
@@ -18602,7 +18604,7 @@ function routineScreenPage(chrome: Chrome, data: {
               fire.outcome === "fired"
                 ? fire.instanceTaskId === null
                   ? "fired"
-                  : `<a href="${taskHref(fire.instanceTaskId)}" class="mono">${escape(fire.instanceTaskId)}</a>${fire.instanceState === null ? "" : ` <span class="badge badge-${escape(fire.instanceState)}">${escape(fire.instanceState)}</span>`}`
+                  : `<a href="${taskHref(fire.instanceTaskId)}" class="mono">${escape(fire.instanceTaskId)}</a>${fire.instanceState === null ? "" : ` <span class="badge badge-${escape(fire.instanceState)}">${escape(sentenceCase(fire.instanceState))}</span>`}`
                 : `<span class="meta">skipped — ${escape(fire.reason ?? "")}</span>`;
             const slot = fire.scheduledFor.replace(/^manual:/, "");
             return `<p class="row">${said}<span class="right meta mono">${fire.reason === "manual" ? "run now · " : ""}${whenTime(slot)}</span></p>`;
@@ -18618,14 +18620,14 @@ function routineScreenPage(chrome: Chrome, data: {
       ? `<div class="problem">stopped behind <a href="${taskHref(data.blocker.taskId)}" class="mono">${escape(data.blocker.taskId)}</a> (${escape(data.blocker.state)}) — the track resumes when it finishes or is cancelled</div>`
       : "",
     approved && !routine.paused && routine.nextFireAt !== null
-      ? `<p class="meta">next fire ${whenTime(routine.nextFireAt)}</p>`
+      ? `<p class="meta">Next fire ${whenTime(routine.nextFireAt)}</p>`
       : "",
-    "<h2>the standing order</h2>",
+    "<h2>The standing order</h2>",
     terms,
     approveForm,
-    "<h2>acts</h2>",
+    "<h2>Acts</h2>",
     acts,
-    "<h2>firings</h2>",
+    "<h2>Firings</h2>",
     ledger,
   ].join("\n"), { chrome });
 }
@@ -18668,7 +18670,7 @@ function homePage(chrome: Chrome, data: {
               `<a class="decide-card" href="/d/${decision.id}">` +
               `<p class="q">${escape(decision.question)}</p>` +
               `<span class="mono meta">${escape(decision.taskId)}</span>` +
-              `${isOverdue(decision, data.now) ? ` <span class="badge badge-overdue">overdue</span>` : ""}` +
+              `${isOverdue(decision, data.now) ? ` <span class="badge badge-overdue">Overdue</span>` : ""}` +
               `</a>`,
           )
           .join("\n");
@@ -18676,21 +18678,21 @@ function homePage(chrome: Chrome, data: {
   const incidents =
     data.incidents.length === 0
       ? ""
-      : `<h2>incidents</h2><p class="hint">builds that stopped and need a person — resolve here, or open the task to retry it</p>` +
+      : `<h2>Incidents</h2><p class="hint">builds that stopped and need a person — resolve here, or open the task to retry it</p>` +
         data.incidents
           .map(
             one =>
               `<p class="row"><a href="${taskHref(one.taskId)}">${escape(one.taskId)}</a> — ${escape(incidentWords(one.kind))}` +
               `<span class="right"><form method="post" action="/i/${one.id}/resolve" class="inline">` +
               `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
-              `<button type="submit">resolve</button></form></span></p>`,
+              `<button type="submit">Resolve</button></form></span></p>`,
           )
           .join("\n");
 
   const stranded =
     data.stranded.length === 0
       ? ""
-      : `<h2>tasks waiting on failed work</h2><p class="hint">open a task and choose whether to try the failed work again, wait for something else, or continue without it</p>` +
+      : `<h2>Tasks waiting on failed work</h2><p class="hint">open a task and choose whether to try the failed work again, wait for something else, or continue without it</p>` +
         data.stranded
           .map(
             one =>
@@ -18705,7 +18707,7 @@ function homePage(chrome: Chrome, data: {
       ? ""
       : data.gaps.length === 0
         ? ""
-        : `<h2>missing requirements</h2><p class="hint">tools or credentials builds need — checked before any money is spent</p>` +
+        : `<h2>Missing requirements</h2><p class="hint">tools or credentials builds need — checked before any money is spent</p>` +
           data.gaps
             .map(gap => `<p class="row"><a href="/caps">${escape(gap.key)}</a> — ${escape(gap.state)}<span class="right meta">how to fix →</span></p>`)
             .join("\n") +
@@ -18720,7 +18722,7 @@ function homePage(chrome: Chrome, data: {
   const building =
     data.building.length === 0
       ? ""
-      : `<h2>building now</h2><p class="hint">live builds — this page refreshes itself every 10 seconds while anything runs</p><div class="cards">` +
+      : `<h2>Building now</h2><p class="hint">live builds — this page refreshes itself every 10 seconds while anything runs</p><div class="cards">` +
         data.building
           .map(
             claim =>
@@ -18768,8 +18770,8 @@ function homePage(chrome: Chrome, data: {
   const fleetCards = [...runnerCards, watchCard, ...worktreeCards].filter(one => one !== "");
   const fleet =
     fleetCards.length === 0
-      ? `<h2>system status</h2><p class="hint">No builder is connected yet. On the machine where the project lives, open that folder and run <code>toolroll up</code>.</p>`
-      : `<h2>system status</h2><p class="hint">builders execute tasks in isolated temporary copies of each project</p><div class="cards">${fleetCards.join("")}</div>`;
+      ? `<h2>System status</h2><p class="hint">No builder is connected yet. On the machine where the project lives, open that folder and run <code>toolroll up</code>.</p>`
+      : `<h2>System status</h2><p class="hint">builders execute tasks in isolated temporary copies of each project</p><div class="cards">${fleetCards.join("")}</div>`;
 
   const startHere =
     data.taskCount === 0
@@ -18792,10 +18794,10 @@ function homePage(chrome: Chrome, data: {
       : `<p class="meta"><strong>${escape(projectName(data.repo))}</strong> — the last 24 hours, honestly labeled: a rolling window, whatever your hours are</p>`,
     startHere,
     ledger,
-    `<p class="meta">spend: ${escape(consoleSpend(summary))}</p>`,
-    data.outboxPending > 0 ? `<p class="meta">notifications: ${data.outboxPending} pending delivery</p>` : "",
+    `<p class="meta">Spend: ${escape(consoleSpend(summary))}</p>`,
+    data.outboxPending > 0 ? `<p class="meta">Notifications: ${data.outboxPending} pending delivery</p>` : "",
     building,
-    `<h2>needs your decision</h2><p class="hint">an agent stopped mid-build to ask — nothing proceeds until you answer</p>`,
+    `<h2>Needs your decision</h2><p class="hint">an agent stopped mid-build to ask — nothing proceeds until you answer</p>`,
     decide,
     incidents,
     stranded,
@@ -18876,21 +18878,21 @@ function taskComposerHtml(data: {
     `<details class="task-options"${prefill === null ? "" : " open"}>`,
     `<summary><span>Edit details</span><small>optional · defaults are remembered</small></summary>`,
     `<div class="task-options-grid">`,
-    `<label class="wide">goal <span class="meta">— provide upfront for automatic approval of an unchanged plan</span>` +
+    `<label class="wide">Goal <span class="meta">— provide upfront for automatic approval of an unchanged plan</span>` +
       `<textarea name="goal" rows="3" placeholder="What success looks like">${prefill === null ? "" : escape(prefill.goal)}</textarea></label>`,
-    `<label class="wide">acceptance <span class="meta">— required with a goal; one per line: <code>statement | evidence,kinds | how</code></span>` +
+    `<label class="wide">Acceptance <span class="meta">— required with a goal; one per line: <code>statement | evidence,kinds | how</code></span>` +
       `<textarea name="acceptance" rows="3" placeholder="Requests over the limit return 429 | check">${prefill === null ? "" : escape(prefill.acceptance)}</textarea></label>`,
-    `<label>not this <span class="meta">— optional boundary</span><input type="text" name="not" value="${prefill === null ? "" : escape(prefill.not)}"></label>`,
-    `<label>likely touches <span class="meta">— paths, comma-separated</span><input type="text" name="touches" value="${prefill === null ? "" : escape(prefill.touches)}"></label>`,
+    `<label>Not this <span class="meta">— optional boundary</span><input type="text" name="not" value="${prefill === null ? "" : escape(prefill.not)}"></label>`,
+    `<label>Likely touches <span class="meta">— paths, comma-separated</span><input type="text" name="touches" value="${prefill === null ? "" : escape(prefill.touches)}"></label>`,
     `<label class="wide task-check"><input type="checkbox" name="plan-first" value="1"${values === undefined || values.get("plan-first") === "1" ? " checked" : ""}><span><strong>Let the planner inspect first</strong><small class="meta">Recommended. It drafts the goal, acceptance criteria, and implementation approach, and asks only when a missing answer materially changes the work.</small></span></label>`,
     `<label class="wide task-check"><input type="checkbox" name="scout" value="1"${values?.get("scout") === "1" ? " checked" : ""}><span><strong>Research only</strong><small class="meta">Deliver a read-only report instead of changing the repository.</small></span></label>`,
-    `<label>task id <span class="meta">— optional</span><input type="text" name="id" value="${escape(values?.get("id") ?? "")}" placeholder="made from the request"></label>`,
+    `<label>Task id <span class="meta">— optional</span><input type="text" name="id" value="${escape(values?.get("id") ?? "")}" placeholder="made from the request"></label>`,
     candidates.length === 0
       ? ""
-      : `<label>starts after <span class="meta">— optional</span><select name="after"><option value="">right away</option>` +
+      : `<label>Starts after <span class="meta">— optional</span><select name="after"><option value="">right away</option>` +
         candidates.map(one => `<option value="${escape(one.id)}"${one.id === after ? " selected" : ""}>${escape(one.id)} — ${escape(one.title)}</option>`).join("") +
         `</select></label>`,
-    `<fieldset class="permission-field"><legend>agent permissions</legend>${permissionModeChoices("permission-mode", values?.get("permission-mode") === "bypassPermissions" ? "bypassPermissions" : values?.get("permission-mode") === "auto" ? "auto" : data.permissionDefault)}` +
+    `<fieldset class="permission-field"><legend>Agent permissions</legend>${permissionModeChoices("permission-mode", values?.get("permission-mode") === "bypassPermissions" ? "bypassPermissions" : values?.get("permission-mode") === "auto" ? "auto" : data.permissionDefault)}` +
       `<p class="meta permission-note">Inherited from Settings. You can still change it on the proposed scope before approval.</p></fieldset>`,
     `</div>`,
     `</details>`,
@@ -18996,7 +18998,7 @@ function workPage(
         project: data.multiProject || row.repo === null ? (row.repo === null ? 'Unplaced' : projectName(row.repo)) : null,
         age: relativeAge(row.updatedAt, data.now),
         status: { label: row.status.label, tone: row.status.tone, token: row.status.token },
-        ask: row.ask, group: row.ask ?? (row.status.rank === 1 ? 'building' : 'rest'),
+        ask: row.ask, chip: row.chip, group: row.ask ?? (row.status.rank === 1 ? 'building' : 'rest'),
         action: actionHref === null || row.primaryAction === null ? null : { label: row.primaryAction.label, href: actionHref },
         detail: needsYouDetail ? row.status.detail : null,
         problem: row.familyProblem,
@@ -19046,12 +19048,12 @@ function tasksPage(
           .join("\n");
   return screen("tasks", [
     "<h1>Tasks</h1>",
-    `<p class="meta">work you want done${repo === null ? "" : ` in <strong>${escape(projectName(repo))}</strong>`} \u2014 a task builds unattended only after its scope is approved; open one to write or approve its scope</p>`,
+    `<p class="meta">Work you want done${repo === null ? "" : ` in <strong>${escape(projectName(repo))}</strong>`} \u2014 a task builds unattended only after its scope is approved; open one to write or approve its scope</p>`,
     repo === null ? "" : `<p class="meta path-words"><span class="mono">${escape(repo)}</span></p>`,
     problem === null ? "" : `<div class="problem">${escape(problem)}</div>`,
-    `<p class="meta">filter: <a href="/tasks">all</a> · ${filters}</p>`,
+    `<p class="meta">Filter: <a href="/tasks">all</a> · ${filters}</p>`,
     rows,
-    `<h2>add a task</h2>`,
+    `<h2>Add a task</h2>`,
     taskComposerHtml({ csrf, project: repo, prefill, permissionDefault, qualityDefault }),
   ].join("\n"), { chrome });
 }
@@ -19071,7 +19073,7 @@ function browsePage(chrome: Chrome, data: {
       `<form method="post" action="/projects/open" class="inline">`,
       `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
       `<input type="hidden" name="path" value="${escape(path)}">`,
-      `<button type="submit">open</button>`,
+      `<button type="submit">Open</button>`,
       `</form>`,
     ].join("");
   return screen("projects", [
@@ -19080,14 +19082,14 @@ function browsePage(chrome: Chrome, data: {
       data.roots.length === 1 ? `<span class="mono">${escape(projectName(data.root))}</span>` : "the configured roots"
     } are visible here</p>`,
     data.roots.length > 1
-      ? `<p class="meta">roots: ${data.roots.map(one => `<a href="/projects/browse?at=${encodeURIComponent(one)}" class="mono">${escape(projectName(one))}</a>`).join(" · ")}</p>`
+      ? `<p class="meta">Roots: ${data.roots.map(one => `<a href="/projects/browse?at=${encodeURIComponent(one)}" class="mono">${escape(projectName(one))}</a>`).join(" · ")}</p>`
       : "",
     `<p class="mono meta">${escape(crumb)}</p>`,
     data.parent === null
       ? ""
       : `<p class="row"><a href="/projects/browse?at=${encodeURIComponent(data.parent)}">\u2190 up one level</a></p>`,
     data.entries.length === 0
-      ? `<p class="meta">no folders here</p>`
+      ? `<p class="meta">No folders here</p>`
       : data.entries
           .map(
             one =>
@@ -19122,7 +19124,7 @@ function workbenchRail(data: {
   saturated: boolean;
 }): string {
   const workspace = (repo: string | null): string =>
-    `<span class="badge">${repo === null ? "unplaced" : escape(projectName(repo))}</span>`;
+    `<span class="badge">${repo === null ? "Unplaced" : escape(projectName(repo))}</span>`;
   const row = (card: BoardCard, reason: string): string =>
     `<a class="wb-row${card.taskId === data.selected ? " wb-selected" : ""}" href="/workbench?t=${encodeURIComponent(card.taskId)}"` +
     `${card.taskId === data.selected ? ` aria-current="true"` : ""}>` +
@@ -19135,7 +19137,7 @@ function workbenchRail(data: {
     `</section>`;
   const parts: string[] = [];
   parts.push(
-    `<div class="wb-rail-head"><div><span class="eyebrow">portfolio</span><h2>all projects</h2></div>` +
+    `<div class="wb-rail-head"><div><span class="eyebrow">portfolio</span><h2>All projects</h2></div>` +
     `<a href="/projects">manage →</a></div>`,
   );
   parts.push(group("needs you", data.attention, "Nothing needs your input.", card => row(card, escape(card.reason))));
@@ -19154,7 +19156,7 @@ function workbenchRail(data: {
     `${escape(card.reason)}${card.assignedRunner === null ? "" : ` · reserved for ${escape(card.assignedRunner)}`}`,
   )));
   if (data.done.length > 0) {
-    parts.push(`<section class="wb-group"><h2>just finished <span class="lane-count">${data.done.length}</span></h2>`);
+    parts.push(`<section class="wb-group"><h2>Just finished <span class="lane-count">${data.done.length}</span></h2>`);
     parts.push(
       data.done
         .map(
@@ -19162,20 +19164,20 @@ function workbenchRail(data: {
             `<a class="wb-row${one.taskId === data.selected ? " wb-selected" : ""}" href="/workbench?t=${encodeURIComponent(one.taskId)}">` +
             `<span class="wb-title">${escape(one.title)}</span>` +
             `<span class="wb-meta"><span class="mono meta">${escape(one.taskId)}</span>${workspace(one.repo)} ` +
-            `<span class="badge badge-${one.outcome === "built" || one.outcome === "no-change" ? "done" : "failed"}">${escape(one.outcome ?? "?")}</span></span></a>`,
+            `<span class="badge badge-${one.outcome === "built" || one.outcome === "no-change" ? "done" : "failed"}">${escape(sentenceCase(one.outcome ?? "?"))}</span></span></a>`,
         )
         .join("\n"),
     );
     parts.push(`</section>`);
   }
-  if (data.saturated) parts.push(`<p class="meta">more exists — this rail is capped; the <a href="/board?scope=all">board</a> holds the rest</p>`);
+  if (data.saturated) parts.push(`<p class="meta">More exists — this rail is capped; the <a href="/board?scope=all">board</a> holds the rest</p>`);
   return parts.join("\n");
 }
 
 /** The project chip every all-scope row wears: null is UNPLACED, said so. */
 function projectChip(repo: string | null | undefined): string {
   return repo === null || repo === undefined
-    ? ` <span class="badge">unplaced</span>`
+    ? ` <span class="badge">Unplaced</span>`
     : ` <span class="badge">${escape(projectName(repo))}</span>`;
 }
 
@@ -19200,12 +19202,12 @@ function decisionAnswerCard(
   const options = decision.options
     .map(option => {
       const recommended = option.id === decision.recommendation
-        ? ` <span class="badge">recommended</span>`
+        ? ` <span class="badge">Recommended</span>`
         : "";
       if (!option.reversible) {
         return (
           `<p class="decide-option"><a href="/d/${decision.id}${returnTo === null ? "" : `?return=${encodeURIComponent(returnTo)}`}">${escape(option.label)}</a>` +
-          ` <span class="badge badge-overdue">irreversible</span>${recommended}` +
+          ` <span class="badge badge-overdue">Irreversible</span>${recommended}` +
           ` <span class="meta">${escape(option.consequence)}</span></p>`
         );
       }
@@ -19224,7 +19226,7 @@ function decisionAnswerCard(
     `<p class="q">${escape(decision.question)}</p>` +
     `<details class="decision-context"><summary>Context</summary><p class="meta">${escape(decision.recap)}</p><span class="meta mono">${escape(decision.taskId)}</span></details>` +
     `<p class="meta">${chip ? projectChip(decision.repo) : ""}` +
-    `${isOverdue(decision, now) ? ` <span class="badge badge-overdue">overdue</span>` : ""}` +
+    `${isOverdue(decision, now) ? ` <span class="badge badge-overdue">Overdue</span>` : ""}` +
     ` <a href="/d/${decision.id}${returnTo === null ? "" : `?return=${encodeURIComponent(returnTo)}`}">View details →</a></p>` +
     `<div class="decide-options">${options}</div></div>`
   );
@@ -19336,11 +19338,11 @@ function portfolioOverview(data: {
           `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
           `<input type="hidden" name="path" value="${escape(one.repo)}">` +
           `<input type="hidden" name="return" value="/board">` +
-          `<button type="submit">board →</button></form>`;
+          `<button type="submit">Board →</button></form>`;
     return (
       `<div class="workspace-card${one.attention > 0 ? " hot" : ""}">` +
       `<div class="workspace-head"><span class="workspace-name">${escape(workspace(one.repo))}</span>` +
-      `<span class="badge ${status.cls}">${status.word}</span>${boardForm}${one.repo === null || data.csrf === "" ? "" : `<form method="post" action="/projects/open" class="inline">${hiddenFields({ csrf: data.csrf, path: one.repo, return: "/control" })}<button>set up →</button></form>`}</div>` +
+      `<span class="badge ${status.cls}">${sentenceCase(status.word)}</span>${boardForm}${one.repo === null || data.csrf === "" ? "" : `<form method="post" action="/projects/open" class="inline">${hiddenFields({ csrf: data.csrf, path: one.repo, return: "/control" })}<button>Set up →</button></form>`}</div>` +
       `<div class="workspace-stats">` +
       `<span class="pulse-stat${one.attention > 0 ? " hot" : ""}"><b>${one.attention}</b> need you</span>` +
       `<span class="pulse-stat"><b>${one.building}</b> live</span>` +
@@ -19411,7 +19413,7 @@ function portfolioOverview(data: {
     .map(
       one =>
         `<p class="row"><a href="${taskHref(one.taskId)}">${escape(one.taskId)}</a>${projectChip(one.repo)} ` +
-        `<span class="badge badge-running">running</span> ` +
+        `<span class="badge badge-running">Running</span> ` +
         `<span class="mono meta">${escape(one.runner)}${one.model === null ? "" : ` · ${escape(one.model)}`} · ` +
         `<time data-elapsed-since="${escape(one.claimedAt)}"></time></span></p>`,
     )
@@ -19424,8 +19426,8 @@ function portfolioOverview(data: {
     .map(
       one =>
         `<p class="row"><a href="/r/${one.runId}">${escape(one.title)}</a>${projectChip(one.repo)} ` +
-        `<span class="badge ${chipClass(one.outcome)}">${escape(one.outcome)}</span> ` +
-        `${one.role === "scout" ? `<a class="badge" href="${taskHref(one.taskId)}#report">report</a> ` : ""}` +
+        `<span class="badge ${chipClass(one.outcome)}">${escape(sentenceCase(one.outcome))}</span> ` +
+        `${one.role === "scout" ? `<a class="badge" href="${taskHref(one.taskId)}#report">Report</a> ` : ""}` +
         `<span class="mono meta">${one.provider === null ? "" : escape(one.provider)}${one.model === null ? "" : ` · ${escape(one.model)}`}` +
         `${one.ranMinutes === null ? "" : ` · ${one.ranMinutes}m`}` +
         ` · ${escape(runCostWords({ authMode: one.authMode, costUsd: one.costUsd, tokensIn: null, tokensOut: null }))}` +
@@ -19440,11 +19442,11 @@ function portfolioOverview(data: {
     .join("\n");
 
   return [
-    `<div class="control-room-head"><div><h1>portfolio</h1>` +
-      `<p class="meta">every project and live build in one place</p></div>` +
-      `<div class="actions"><a class="badge" href="/tasks/new">+ new task</a><a class="badge" href="/board?scope=all">full board →</a></div></div>`,
+    `<div class="control-room-head"><div><h1>Portfolio</h1>` +
+      `<p class="meta">Every project and live build in one place</p></div>` +
+      `<div class="actions"><a class="badge" href="/tasks/new">+ New task</a><a class="badge" href="/board?scope=all">Full board →</a></div></div>`,
     data.saturated ? `<div class="problem">This overview reached its 200-task display cap; the task list holds the rest.</div>` : "",
-    `<h2>waits on you</h2>`,
+    `<h2>Waits on you</h2>`,
     waitCount === 0
       ? `<div class="answered"><strong>Nothing needs you.</strong> <span class="meta">You can leave this open; live state updates in the rail.</span></div>`
       : [
@@ -19456,17 +19458,17 @@ function portfolioOverview(data: {
           `<p class="meta"><a href="/next">clear the queue → one thing at a time</a></p>`,
         ].filter(part => part !== "").join("\n"),
     data.gapsProject === null
-      ? `<p class="meta">requirement gaps are checked one project at a time — open a project to see and fill its gaps · <a href="/projects">open a project</a></p>`
+      ? `<p class="meta">Requirement gaps are checked one project at a time — open a project to see and fill its gaps · <a href="/projects">open a project</a></p>`
       : "",
-    `<h2>project pulse</h2>`,
+    `<h2>Project pulse</h2>`,
     `<p class="hint">one row per repository</p>`,
     pulseRows.length === 0
       ? `<div class="card"><p><strong>No active work yet.</strong></p><p class="meta">Queue a task and its progress will show here across every workspace.</p></div>`
       : `<div class="workspace-pulse">${workspaceRows}</div>`,
-    `<h2>the last 24 hours</h2>`,
+    `<h2>The last 24 hours</h2>`,
     `<p class="hint">runs started in the last 24 hours</p>`,
     data.runs24.length === 0
-      ? `<p class="meta">no runs started in the window</p>`
+      ? `<p class="meta">No runs started in the window</p>`
       : `<p class="row"><span class="meta">runs started</span> <span class="mono">${data.runs24.length}</span></p>` +
         `<p class="row"><span class="meta">outcomes</span> <span class="mono">${escape(outcomeWords)}</span></p>` +
         `<p class="row"><span class="meta">spend</span> <span class="mono">${escape(spendLine(summary))}</span></p>` +
@@ -19476,10 +19478,10 @@ function portfolioOverview(data: {
         (summary.tokens > 0
           ? `<p class="row"><span class="meta">tokens</span> <span class="mono">${summary.tokens.toLocaleString()}</span></p>`
           : ""),
-    `<h2>running</h2>`,
-    data.live.length === 0 ? `<p class="meta">no agent is working right now</p>` : liveRows,
-    `<h2>terminal runs started in the last 24 hours</h2>`,
-    data.ledger.length === 0 ? `<p class="meta">none yet</p>` : ledgerRows,
+    `<h2>Running</h2>`,
+    data.live.length === 0 ? `<p class="meta">No agent is working right now</p>` : liveRows,
+    `<h2>Terminal runs started in the last 24 hours</h2>`,
+    data.ledger.length === 0 ? `<p class="meta">None yet</p>` : ledgerRows,
   ].join("\n");
 }
 
@@ -19599,7 +19601,7 @@ function contestPage(chrome: Chrome, data: {
     summaries.length < 2
       ? ""
       : `<div class="scroll-x"><table class="contest-glance">` +
-        `<tr><td></td>${summaries.map(one => `<th>agent ${one.contestant.ordinal}<span class="meta"> · ${escape(one.contestant.provider)} · ${escape(one.contestant.model)}</span>${one.winner ? ` <span class="badge badge-done">picked</span>` : ""}</th>`).join("")}</tr>` +
+        `<tr><td></td>${summaries.map(one => `<th>Agent ${one.contestant.ordinal}<span class="meta"> · ${escape(one.contestant.provider)} · ${escape(one.contestant.model)}</span>${one.winner ? ` <span class="badge badge-done">Picked</span>` : ""}</th>`).join("")}</tr>` +
         `<tr><td class="meta">outcome</td>${summaries.map(one => `<td>${escape(one.outcome)}</td>`).join("")}</tr>` +
         `<tr><td class="meta">changed</td>${summaries.map(one => `<td>${escape(one.diffWords)}</td>`).join("")}</tr>` +
         `<tr><td class="meta">time</td>${summaries.map(one => `<td>${one.minutes === null ? "—" : `${one.minutes} min`}</td>`).join("")}</tr>` +
@@ -19613,15 +19615,15 @@ function contestPage(chrome: Chrome, data: {
     const agent = summary.agent;
     const parts = [
       `<div class="card${winner ? " picked" : ""}">`,
-      `<p><strong>agent ${contestant.ordinal}</strong> <span class="meta">${escape(contestant.provider)} · ${escape(contestant.model)}</span>` +
-        `${winner ? ` <span class="badge badge-done">picked</span>` : ""}</p>`,
+      `<p><strong>Agent ${contestant.ordinal}</strong> <span class="meta">${escape(contestant.provider)} · ${escape(contestant.model)}</span>` +
+        `${winner ? ` <span class="badge badge-done">Picked</span>` : ""}</p>`,
       `<p class="row">${escape(outcome)}` +
         `${minutes === null ? "" : ` <span class="meta">· ${minutes} min</span>`}` +
         `${asked > 0 ? ` <span class="meta">· asked ${asked} question${asked > 1 ? "s" : ""}</span>` : ""}` +
         `${run === null ? "" : ` <span class="meta">· <a href="/r/${run.id}">the build</a></span>`}</p>`,
-      `<p class="row"><strong>cost</strong> ${escape(cost)}</p>`,
-      run === null || run.handoff === null ? "" : `<p><strong>its own conclusion</strong></p><p class="recap">${escape(run.handoff)}</p>`,
-      diff === null ? `<p class="meta">no diff was captured</p>` : terminalDiffCard(diff, run === null ? 0 : run.id),
+      `<p class="row"><strong>Cost</strong> ${escape(cost)}</p>`,
+      run === null || run.handoff === null ? "" : `<p><strong>Its own conclusion</strong></p><p class="recap">${escape(run.handoff)}</p>`,
+      diff === null ? `<p class="meta">No diff was captured</p>` : terminalDiffCard(diff, run === null ? 0 : run.id),
     ];
     if (picking) {
       if (agent.pickable) {
@@ -19629,12 +19631,12 @@ function contestPage(chrome: Chrome, data: {
           `<form method="post" action="/contest/${contest.id}/arm" class="inline">`,
           `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
           `<input type="hidden" name="choice" value="${contestant.id}">`,
-          `<button type="submit">pick this result…</button>`,
+          `<button type="submit">Pick this result…</button>`,
           `</form>`,
-          `<p class="meta">picking continues to a confirmation screen — nothing happens yet</p>`,
+          `<p class="meta">Picking continues to a confirmation screen — nothing happens yet</p>`,
         );
       } else {
-        parts.push(`<p class="meta">cannot be picked — ${escape(agent.unpickableReason ?? "")}</p>`);
+        parts.push(`<p class="meta">Cannot be picked — ${escape(agent.unpickableReason ?? "")}</p>`);
       }
     }
     parts.push(`</div>`);
@@ -19647,11 +19649,11 @@ function contestPage(chrome: Chrome, data: {
       `only one result will be kept as the task's outcome; the rest stay archived with their evidence</p>`,
     data.problem === null ? "" : `<div class="problem">${escape(data.problem)}</div>`,
     `<p class="row"><strong>${escape((CONTEST_STATE_WORDS[contest.state] ?? "the tournament is in an unexpected state — the records have the detail").replace(/tournament/g, contestNoun(contest.kind)))}</strong></p>`,
-    contest.pickedBy === null ? "" : `<p class="meta">picked by ${escape(contest.pickedBy)} at ${whenTime(contest.pickedAt ?? "")}</p>`,
+    contest.pickedBy === null ? "" : `<p class="meta">Picked by ${escape(contest.pickedBy)} at ${whenTime(contest.pickedAt ?? "")}</p>`,
     contest.kind === "comparison"
-      ? `<p class="row"><strong>spend</strong> ${escape(contestDollars(data.totalMicrousd))} measured on the lanes that report dollars` +
+      ? `<p class="row"><strong>Spend</strong> ${escape(contestDollars(data.totalMicrousd))} measured on the lanes that report dollars` +
         `${data.anyUnknown ? ` <span class="meta">— the rest report tokens only</span>` : ""}</p>`
-      : `<p class="row"><strong>charged so far</strong> ${escape(contestDollars(data.totalMicrousd))}` +
+      : `<p class="row"><strong>Charged so far</strong> ${escape(contestDollars(data.totalMicrousd))}` +
         `${data.anyUnknown ? ` <span class="meta">— includes at least one agent charged its full reservation because the exact figure was unknowable</span>` : ""}</p>`,
     glance,
     `<div class="contest-compare">${summaries.map(agentCard).join("\n")}</div>`,
@@ -19661,9 +19663,9 @@ function contestPage(chrome: Chrome, data: {
           `<form method="post" action="/contest/${contest.id}/arm" class="inline">`,
           `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
           `<input type="hidden" name="act" value="abandon">`,
-          `<button type="submit">abandon the ${contestNoun(contest.kind)}…</button>`,
+          `<button type="submit">Abandon the ${contestNoun(contest.kind)}…</button>`,
           `</form>`,
-          `<p class="meta">abandoning picks nothing: the task is marked failed (it can be re-queued), and every agent's branch and evidence is kept</p>`,
+          `<p class="meta">Abandoning picks nothing: the task is marked failed (it can be re-queued), and every agent's branch and evidence is kept</p>`,
           `</div>`,
         ].join("\n")
       : "",
@@ -19694,7 +19696,7 @@ function contestCeremonyPage(chrome: Chrome, data: {
   const back = `<p class="meta"><a href="/contest/${data.contestId}">back — decide nothing</a></p>`;
   if (data.kind === "abandon") {
     return screen("tournament", [
-      `<h1>abandon this ${contestNoun(data.contestKind)}?</h1>`,
+      `<h1>Abandon this ${contestNoun(data.contestKind)}?</h1>`,
       `<div class="card">`,
       `<p class="row">${data.agents} agents ${data.contestKind === "comparison" ? "built independently" : "raced"} on <strong>${escape(data.taskTitle)}</strong>. Abandoning picks nothing:</p>`,
       `<p class="row">— the task is marked <strong>failed</strong> and can be re-queued later</p>`,
@@ -19706,19 +19708,19 @@ function contestCeremonyPage(chrome: Chrome, data: {
       `<form method="post" action="/contest/${data.contestId}/abandon" class="card">`,
       `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
       `<input type="hidden" name="nonce" value="${escape(data.nonceValue)}">`,
-      `<label>your password, typed again<input type="password" name="token" autocomplete="current-password"></label>`,
-      `<button type="submit" class="danger">abandon the ${contestNoun(data.contestKind)}</button>`,
+      `<label>Your password, typed again<input type="password" name="token" autocomplete="current-password"></label>`,
+      `<button type="submit" class="danger">Abandon the ${contestNoun(data.contestKind)}</button>`,
       `</form>`,
       back,
     ].join("\n"), { chrome });
   }
   const agent = data.chosen;
-  if (agent === undefined || agent.run === null) return screen("tournament", `<p class="meta">nothing to confirm</p>`, { chrome });
+  if (agent === undefined || agent.run === null) return screen("tournament", `<p class="meta">Nothing to confirm</p>`, { chrome });
   const run = agent.run;
   return screen("tournament", [
-    `<h1>pick agent ${agent.contestant.ordinal}'s result?</h1>`,
+    `<h1>Pick agent ${agent.contestant.ordinal}'s result?</h1>`,
     `<div class="card">`,
-    `<p class="row"><strong>agent ${agent.contestant.ordinal}</strong> — ${escape(agent.contestant.provider)} · ${escape(agent.contestant.model)}</p>`,
+    `<p class="row"><strong>Agent ${agent.contestant.ordinal}</strong> — ${escape(agent.contestant.provider)} · ${escape(agent.contestant.model)}</p>`,
     `<p class="row">its result becomes the outcome of <strong>${escape(data.taskTitle)}</strong> — the task is marked done, keyed to <a href="/r/${run.id}">this build</a></p>`,
     run.outcome === "no-change"
       ? `<p class="row">the result is a verified <strong>no change</strong> — the agent concluded nothing needed doing, and its checkout still matches the starting point</p>`
@@ -19728,8 +19730,8 @@ function contestCeremonyPage(chrome: Chrome, data: {
       ? ""
       : `<p class="row">the diff being picked: <span class="mono">${escape(agent.diff.sha256.slice(0, 12))}</span> · ${agent.diff.bytesStored} bytes, verified</p>`,
     data.publication === null || data.publication === undefined
-      ? `<p class="row"><strong>nothing is published</strong> — the branch stays local to this machine</p>`
-      : `<p class="row"><strong>a ${data.publication.draft ? "draft " : ""}pull request will be opened</strong> on ` +
+      ? `<p class="row"><strong>Nothing is published</strong> — the branch stays local to this machine</p>`
+      : `<p class="row"><strong>A ${data.publication.draft ? "draft " : ""}pull request will be opened</strong> on ` +
         `<span class="mono">${escape(data.publication.githubRepo)}</span> from <span class="mono">${escape(data.publication.branch)}</span></p>`,
     data.contestKind === "comparison"
       ? `<p class="row">this agent's spend: ${agent.contestant.unknownSpend ? "unmeasured — its harness reports tokens, not dollars" : `${escape(contestDollars(agent.contestant.measuredMicrousd))} measured`}` +
@@ -19743,8 +19745,8 @@ function contestCeremonyPage(chrome: Chrome, data: {
     `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
     `<input type="hidden" name="nonce" value="${escape(data.nonceValue)}">`,
     `<input type="hidden" name="choice" value="${agent.contestant.id}">`,
-    `<label>your password, typed again<input type="password" name="token" autocomplete="current-password"></label>`,
-    `<div class="sticky-actions"><button type="submit">yes — pick this result</button></div>`,
+    `<label>Your password, typed again<input type="password" name="token" autocomplete="current-password"></label>`,
+    `<div class="sticky-actions"><button type="submit">Yes — pick this result</button></div>`,
     `</form>`,
     back,
   ].filter(one => one !== "").join("\n"), { chrome });
@@ -19848,20 +19850,20 @@ function githubReposPage(
       `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
       `<input type="hidden" name="repo" value="${escape(nameWithOwner)}">`,
       `<input type="hidden" name="root" value="0">`,
-      `<button type="submit">clone here →</button>`,
+      `<button type="submit">Clone here →</button>`,
       `</form>`,
     ].join("");
   const rows =
     !data.listed.ok
       ? `<p class="meta">${escape(data.listed.message)}</p>`
       : data.listed.repos.length === 0
-        ? `<p class="meta">the signed-in GitHub account has no repositories to list</p>`
+        ? `<p class="meta">The signed-in GitHub account has no repositories to list</p>`
         : data.listed.repos
             .map(repo => {
               const localPath = data.local.get(repo.nameWithOwner.toLowerCase()) ?? null;
               const action =
                 localPath !== null && data.openProject === localPath
-                  ? `<span class="badge badge-done">open now</span>`
+                  ? `<span class="badge badge-done">Open now</span>`
                   : localPath !== null
                     ? openForm(localPath, data.registered.has(localPath) ? "open →" : "add + open →")
                     : data.cloneReady
@@ -19869,10 +19871,10 @@ function githubReposPage(
                       : `<span class="meta">choose a projects folder first</span>`;
               return [
                 `<div class="card project-card">`,
-                `<div class="row"><strong>${escape(repo.nameWithOwner)}</strong>${repo.isPrivate ? ` <span class="badge">private</span>` : ""}`,
+                `<div class="row"><strong>${escape(repo.nameWithOwner)}</strong>${repo.isPrivate ? ` <span class="badge">Private</span>` : ""}`,
                 `<span class="right">${action}</span></div>`,
                 localPath === null
-                  ? `<p class="meta">not on this machine yet${/^\d{4}-\d{2}-\d{2}T/.test(repo.updatedAt) ? ` · pushed ${whenTime(repo.updatedAt)}` : ""}</p>`
+                  ? `<p class="meta">Not on this machine yet${/^\d{4}-\d{2}-\d{2}T/.test(repo.updatedAt) ? ` · pushed ${whenTime(repo.updatedAt)}` : ""}</p>`
                   : `<p class="meta mono" style="overflow-wrap:anywhere;margin:.2rem 0">${escape(localPath)}</p>`,
                 repo.description === "" ? "" : `<p class="meta">${escape(repo.description)}</p>`,
                 `</div>`,
@@ -19880,8 +19882,8 @@ function githubReposPage(
             })
             .join("\n");
   return screen("projects", [
-    `<h1>your GitHub repositories</h1>`,
-    `<p class="meta">repositories available to the GitHub account signed in on this machine — open one you already have, or clone a new one after a quick preview.</p>`,
+    `<h1>Your GitHub repositories</h1>`,
+    `<p class="meta">Repositories available to the GitHub account signed in on this machine — open one you already have, or clone a new one after a quick preview.</p>`,
     rows,
     `<p class="row" style="margin-top:.6rem"><a class="badge" href="/projects">← back to projects</a></p>`,
   ].join("\n"), { chrome });
@@ -19912,16 +19914,16 @@ function projectsPage(
         ? `<p class="meta">${escape(onboard.why)}</p>`
         : [
             `<details class="project-add-more"${onboard.record === null ? '' : ' open'}><summary>${onboard.record === null ? 'Paste a GitHub link' : 'Review repository'}</summary>`,
-            `<p class="meta">paste a GitHub repository — you will preview it before anything is downloaded. It goes into your saved projects folder and the builder connects automatically. Large-file (LFS) objects are not downloaded.</p>`,
+            `<p class="meta">Paste a GitHub repository — you will preview it before anything is downloaded. It goes into your saved projects folder and the builder connects automatically. Large-file (LFS) objects are not downloaded.</p>`,
             onboard.record === null
               ? [
                   `<form method="post" action="/projects/onboard-preview" class="card">`,
                   `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
-                  `<label>repository <input type="text" name="repo" placeholder="owner/name or https://github.com/owner/name"></label>`,
+                  `<label>Repository <input type="text" name="repo" placeholder="owner/name or https://github.com/owner/name"></label>`,
                   onboard.roots.length > 1
-                    ? `<label>into <select name="root">${onboard.roots.map((one, index) => `<option value="${index}">${escape(one)}</option>`).join("")}</select></label>`
-                    : `<input type="hidden" name="root" value="0"><p class="meta">into ${escape(onboard.roots[0] ?? "")}</p>`,
-                  `<button type="submit">preview</button>`,
+                    ? `<label>Into <select name="root">${onboard.roots.map((one, index) => `<option value="${index}">${escape(one)}</option>`).join("")}</select></label>`
+                    : `<input type="hidden" name="root" value="0"><p class="meta">Into ${escape(onboard.roots[0] ?? "")}</p>`,
+                  `<button type="submit">Preview</button>`,
                   `</form>`,
                 ].join("\n")
               : [
@@ -19935,8 +19937,8 @@ function projectsPage(
                   onboard.record[1].large
                     ? `<label class="row"><input type="checkbox" name="big-ok" value="1"> this is a large repository (or its size is unknown) — clone it anyway</label>`
                     : "",
-                  `<label>your password, typed again <input type="password" name="token" autocomplete="current-password"></label>`,
-                  `<div class="sticky-actions"><button type="submit">clone and open</button></div>`,
+                  `<label>Your password, typed again <input type="password" name="token" autocomplete="current-password"></label>`,
+                  `<div class="sticky-actions"><button type="submit">Clone and open</button></div>`,
                   `</form>`,
                   `</div>`,
                 ].join("\n"),
@@ -19980,7 +19982,7 @@ function projectsPage(
           : openForm(one.path, one.name, returnTo, "project-name")
       }`,
       `<span class="right">${
-        open !== null && open === one.path ? `<span class="badge badge-done">open now</span>` : openForm(one.path, "Open", returnTo, "button-link")
+        open !== null && open === one.path ? `<span class="badge badge-done">Open now</span>` : openForm(one.path, "Open", returnTo, "button-link")
       }</span></div>`,
       `<p class="meta mono" style="overflow-wrap:anywhere;margin:.2rem 0">${escape(one.path)}</p>`,
       `<p class="row" style="gap:.35rem;flex-wrap:wrap">${peekChips(one.path, one.peek)}</p>`,
@@ -20027,13 +20029,13 @@ function projectsPage(
     `<form method="post" action="/projects/open" class="card">`,
     `<input type="hidden" name="csrf" value="${escape(csrf)}">`,
     `<input type="hidden" name="return" value="${escape(returnTo)}">`,
-    `<label>path on this server<input type="text" name="path" placeholder="/Users/you/code/your-repo"></label>`,
-    `<button type="submit">open project</button>`,
+    `<label>Path on this server<input type="text" name="path" placeholder="/Users/you/code/your-repo"></label>`,
+    `<button type="submit">Open project</button>`,
     `</form></details>`,
   ].join("\n");
   const addCard = [
     `<div class="card project-add-card">`,
-    `<h2 class="project-add-title">add a project</h2>`,
+    `<h2 class="project-add-title">Add a project</h2>`,
     `<div class="project-add-actions">`,
     browsable
       ? addAction("/projects/browse", FOLDER_PATHS, "Choose a local folder", "Browse the project folders on this machine")
@@ -20060,8 +20062,8 @@ function projectsPage(
     recentItems.length === 0 && candidateItems.length === 0
       ? `<div class="card"><p><strong>Nothing to open yet.</strong></p><p class="meta">Add one below \u2014 opening it registers it here for next time.</p></div>`
       : "",
-    recentItems.length > 0 ? `<h2>recent</h2>${cards(recentItems)}` : "",
-    candidateItems.length > 0 ? `<h2>available</h2>${cards(candidateItems)}` : "",
+    recentItems.length > 0 ? `<h2>Recent</h2>${cards(recentItems)}` : "",
+    candidateItems.length > 0 ? `<h2>Available</h2>${cards(candidateItems)}` : "",
     addCard,
   ].join("\n"), { chrome, workspace: { view: {
     kind: "projects", choosing, problem, returnTo,
@@ -20233,25 +20235,25 @@ type NavRow = { key: Chrome["active"]; href: string; label: string; hint: string
 function workToolRows(scoped = false, _offersChat = false, offersCode = false): NavRow[] {
   const rows: NavRow[] = [
     ...(offersCode ? [{ key: "code" as const, href: "/code", label: "Coding sessions", hint: "Direct coding sessions and their saved results" }] : []),
-    { key: "inbox", href: "/inbox", label: "inbox", hint: "questions, approvals, and repairs to act on" },
-    { key: "board", href: "/board", label: "board", hint: "lanes by state, with the order view" },
-    { key: "tasks", href: "/tasks", label: "task list", hint: "everything, filterable by state" },
-    { key: "recipes", href: "/recipes", label: "recipes", hint: "choose, customize, and reuse a workflow" },
-    { key: "routines", href: "/routines", label: "routines", hint: "scheduled tracks and their firings" },
-    { key: "workbench", href: "/workbench", label: "portfolio", hint: "every project and live build in one place" },
-    { key: "ledger", href: "/ledger", label: "action ledger", hint: "who acted, what happened, and the result" },
-    { key: "spend", href: "/spend", label: "spend", hint: "what agent work cost, and monthly budgets" },
+    { key: "inbox", href: "/inbox", label: "Inbox", hint: "questions, approvals, and repairs to act on" },
+    { key: "board", href: "/board", label: "Board", hint: "lanes by state, with the order view" },
+    { key: "tasks", href: "/tasks", label: "Task list", hint: "everything, filterable by state" },
+    { key: "recipes", href: "/recipes", label: "Recipes", hint: "choose, customize, and reuse a workflow" },
+    { key: "routines", href: "/routines", label: "Routines", hint: "scheduled tracks and their firings" },
+    { key: "workbench", href: "/workbench", label: "Portfolio", hint: "every project and live build in one place" },
+    { key: "ledger", href: "/ledger", label: "Action ledger", hint: "who acted, what happened, and the result" },
+    { key: "spend", href: "/spend", label: "Spend", hint: "what agent work cost, and monthly budgets" },
   ];
   return scoped ? rows.filter(row => row.key !== "workbench" && row.key !== "spend") : rows;
 }
 function settingsRows(scoped = false, offersSettings = false): NavRow[] {
   const rows: NavRow[] = [
-    ...(offersSettings ? [{ key: "settings" as const, href: "/settings", label: "settings", hint: "agent defaults, alerts, credentials" }] : []),
-    { key: "fleet", href: "/fleet", label: "fleet", hint: "who is working, and on what" },
-    { key: "caps", href: "/caps", label: "requirements", hint: "tools and credentials builds need" },
-    { key: "people", href: "/people", label: "people", hint: "who can sign in, and what they have done" },
-    { key: "mode", href: "/mode", label: "operating mode", hint: "the signed posture this repository runs under" },
-    { key: "system", href: "/system", label: "system", hint: "workers, providers, and grants" },
+    ...(offersSettings ? [{ key: "settings" as const, href: "/settings", label: "Settings", hint: "agent defaults, alerts, credentials" }] : []),
+    { key: "fleet", href: "/fleet", label: "Fleet", hint: "who is working, and on what" },
+    { key: "caps", href: "/caps", label: "Requirements", hint: "tools and credentials builds need" },
+    { key: "people", href: "/people", label: "People", hint: "who can sign in, and what they have done" },
+    { key: "mode", href: "/mode", label: "Operating mode", hint: "the signed posture this repository runs under" },
+    { key: "system", href: "/system", label: "System", hint: "workers, providers, and grants" },
   ];
   return scoped ? rows.filter(row => row.key === "people" || row.key === "settings") : rows;
 }
@@ -20287,10 +20289,10 @@ function queueCard(one: QueueCardTask, csrf: string, revision: number, queueRevi
   // and the reservation owner. Money is not in this query and is not
   // invented here — it stays on the task page, labeled.
   const state = one.taken
-    ? `<span class="badge">being taken — keeps its claim</span>`
+    ? `<span class="badge">Being taken — keeps its claim</span>`
     : column === "anyone"
-      ? `<span class="badge">queued</span>`
-      : `<span class="badge">reserved for ${escape(column)}</span>`;
+      ? `<span class="badge">Queued</span>`
+      : `<span class="badge">Reserved for ${escape(column)}</span>`;
   const chips =
     ` ${state}` +
     `${one.dispatch === null || one.dispatch === undefined ? "" : ` <a class="badge" href="${taskHref(one.id)}" title="${escape(one.dispatch.summary)}">${escape(dispatchHeadline(one.dispatch))}</a>`}`;
@@ -20309,7 +20311,7 @@ function queueCard(one: QueueCardTask, csrf: string, revision: number, queueRevi
       `<select name="column" aria-label="reserve for">` +
       `<option value="anyone"${column === "anyone" ? " selected" : ""}>anyone</option>` +
       workers.filter(worker => !worker.retired).map(worker => `<option value="${escape(worker.name)}"${column === worker.name ? " selected" : ""}>${escape(worker.name)}</option>`).join("") +
-      `</select><button type="submit">move</button></form>`;
+      `</select><button type="submit">Move</button></form>`;
   return (
     `<div class="card queue-card" data-task="${escape(one.id)}" data-taken="${one.taken ? "1" : "0"}"${one.dispatch === null || one.dispatch === undefined ? "" : ` data-dispatch-status="${escape(one.dispatch.code)}"`}>` +
     `<p class="row">${one.taken ? "" : `${GRIP_HANDLE}`}` +
@@ -20347,7 +20349,7 @@ function queueBody(
                   "</p>",
                 ).replace(
                   `<p class="row meta">`,
-                  `<p class="meta">every worker has reserved work — this waits until a column empties</p><p class="row meta">`,
+                  `<p class="meta">Every worker has reserved work — this waits until a column empties</p><p class="row meta">`,
                 )
               : queueCard(one, csrf, revision, queueRevision, workers, key),
           )
@@ -20355,18 +20357,18 @@ function queueBody(
     `</section>`;
   const noteForm = (worker: { name: string; retired: boolean; note: string | null; capacity: number; building: number }): string =>
     worker.retired
-      ? `<p class="meta">this worker is retired — drag these elsewhere, or register the name again</p>`
+      ? `<p class="meta">This worker is retired — drag these elsewhere, or register the name again</p>`
       : `<p class="meta mono">${worker.building} building in this project · unattended capacity ${worker.capacity}</p>` +
         `<form method="post" action="/queue/note" class="row">` +
         `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
         `<input type="hidden" name="projectRevision" value="${revision}">` +
         `<input type="hidden" name="runner" value="${escape(worker.name)}">` +
         `<input type="text" name="note" value="${worker.note === null ? "" : escape(worker.note)}" data-initial="${worker.note === null ? "" : escape(worker.note)}" placeholder="what this worker is working through" aria-label="column note" maxlength="200">` +
-        `<button type="submit">save</button></form>` +
-        `<p class="meta">takes from the shared queue when this column is empty</p>`;
+        `<button type="submit">Save</button></form>` +
+        `<p class="meta">Takes from the shared queue when this column is empty</p>`;
   return (
     `<div class="lanes" data-queue-revision="${queueRevision}">` +
-    column("shared queue", "anyone", `<p class="meta">workers take from here when their column is empty — top card first</p>`, shared, "nothing waiting — every task is reserved or running") +
+    column("shared queue", "anyone", `<p class="meta">Workers take from here when their column is empty — top card first</p>`, shared, "nothing waiting — every task is reserved or running") +
     workers
       .map(worker => column(worker.name + (worker.retired ? " (retired)" : ""), worker.name, noteForm(worker), columnOf(worker.name), "nothing queued — this worker will take from the shared queue"))
       .join("\n") +
@@ -20399,7 +20401,7 @@ function fleetBody(
     const retired = runner.retiredAt !== null;
     const head =
       retired
-        ? `<p class="meta">this worker is retired — drag these elsewhere, or register the name again</p>`
+        ? `<p class="meta">This worker is retired — drag these elsewhere, or register the name again</p>`
         : `<form method="post" action="/queue/note" class="row">` +
           `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
           `<input type="hidden" name="from" value="fleet">` +
@@ -20421,9 +20423,9 @@ function fleetBody(
           `<p class="row">${one.taken ? "" : `${GRIP_HANDLE}`}` +
           `<a href="${taskHref(one.id)}">${escape(one.title)}</a></p>` +
           `<p class="row meta"><span class="mono">${escape(one.id)}</span>${chip(one.repo)}` +
-          `${one.approved ? "" : ` <span class="badge">unapproved scope</span>`}` +
-          `${one.blockers > 0 ? ` <span class="badge">waits for ${one.blockers}</span>` : ""}` +
-          `${one.taken ? ` <span class="badge">being taken</span>` : ""}</p></div>`,
+          `${one.approved ? "" : ` <span class="badge">Unapproved scope</span>`}` +
+          `${one.blockers > 0 ? ` <span class="badge">Waits for ${one.blockers}</span>` : ""}` +
+          `${one.taken ? ` <span class="badge">Being taken</span>` : ""}</p></div>`,
       )
       .join("\n");
     const empty =
@@ -20444,14 +20446,14 @@ function fleetBody(
         `<p class="row">${one.taken ? "" : `${GRIP_HANDLE}`}` +
         `<a href="${taskHref(one.id)}">${escape(one.title)}</a></p>` +
         `<p class="row meta"><span class="mono">${escape(one.id)}</span>${chip(one.repo)}` +
-        `${one.approved ? "" : ` <span class="badge">unapproved scope</span>`}` +
-        `${one.blockers > 0 ? ` <span class="badge">waits for ${one.blockers}</span>` : ""}` +
-        `${one.taken ? ` <span class="badge">being taken</span>` : ""}</p></div>`,
+        `${one.approved ? "" : ` <span class="badge">Unapproved scope</span>`}` +
+        `${one.blockers > 0 ? ` <span class="badge">Waits for ${one.blockers}</span>` : ""}` +
+        `${one.taken ? ` <span class="badge">Being taken</span>` : ""}</p></div>`,
     )
     .join("\n");
   const sharedLane =
-    `<section class="lane queue-column" data-column="anyone"><h2>shared queue</h2>` +
-    `<p class="meta">any free worker takes from here, top first</p>${sharedCards}` +
+    `<section class="lane queue-column" data-column="anyone"><h2>Shared queue</h2>` +
+    `<p class="meta">Any free worker takes from here, top first</p>${sharedCards}` +
     (shared.length === 0 ? `<p class="meta lane-empty">nothing waiting — every task is reserved or running</p>` : "") +
     `</section>`;
   return (
@@ -20613,14 +20615,17 @@ function newTaskPage(
  * brief, but the console renders its known structure as a useful control
  * surface. Historical free-form plans keep their safe plain-text fallback. */
 const MILESTONE_STATE_WORDS: Record<MilestoneState, string> = {
-  pending: "pending",
-  current: "in progress",
-  completed: "completed",
-  blocked: "blocked",
+  pending: "Pending",
+  current: "In progress",
+  completed: "Completed",
+  blocked: "Blocked",
 };
 
+/** Badges, labels and buttons read in sentence case, whatever word a record stores. */
+const sentenceCase = (word: string): string => word.charAt(0).toUpperCase() + word.slice(1);
+
 function milestoneStateWord(state: MilestoneState): string {
-  return MILESTONE_STATE_WORDS[state] ?? "pending";
+  return MILESTONE_STATE_WORDS[state] ?? "Pending";
 }
 
 /** Adaptive execution plans (v44): the live milestone projection a running
@@ -20684,11 +20689,11 @@ function planRevisionLedgerHtml(ledger: PlanRevisionLedgerView | null | undefine
   const history =
     ledger.history.length <= 1
       ? ""
-      : `<details class="plan-revision-history"><summary>revision history (${ledger.history.length})</summary>` +
+      : `<details class="plan-revision-history"><summary>Revision history (${ledger.history.length})</summary>` +
         ledger.history
           .map(
             one =>
-              `<p class="row"><span class="mono">rev ${one.revision}</span> <span class="badge">${escape(one.status)}</span> ` +
+              `<p class="row"><span class="mono">rev ${one.revision}</span> <span class="badge">${escape(sentenceCase(one.status))}</span> ` +
               `<span class="meta">${escape(one.author)} · ${whenTime(one.createdAt)}</span> — ${escape(one.reason)}</p>`,
           )
           .join("\n") +
@@ -21023,7 +21028,7 @@ function taskBodyParts(data: {
     if (liveRunId === null || liveRun === undefined) return "";
     const minutes = Math.max(0, Math.round((data.now.getTime() - new Date(liveRun.startedAt).getTime()) / 60_000));
     const head =
-      `<p><strong>build #${liveRun.id} · ${escape(liveRun.runner)} · running ` +
+      `<p><strong>Build #${liveRun.id} · ${escape(liveRun.runner)} · running ` +
       `<time data-elapsed-since="${escape(liveRun.startedAt)}">${minutes}m</time></strong></p>`;
     const door = `<p class="row"><a href="/r/${liveRun.id}">full build view →</a></p>`;
     if (data.degraded !== undefined) {
@@ -21032,16 +21037,16 @@ function taskBodyParts(data: {
     }
     const peek =
       data.peekable === true
-        ? `<p class="meta">what is changing right now</p>` +
-          `<div id="run-peek"><p class="meta">watching\u2026 the first look lands within 15 seconds</p></div>` +
+        ? `<p class="meta">What is changing right now</p>` +
+          `<div id="run-peek"><p class="meta">Watching\u2026 the first look lands within 15 seconds</p></div>` +
           `<p class="meta" id="run-peek-stamp"></p>`
-        : `<p class="meta">the live file view is off \u2014 start serve with ${escape("--runner <name>")} naming this machine's worker, and it appears here</p>`;
+        : `<p class="meta">The live file view is off \u2014 start serve with ${escape("--runner <name>")} naming this machine's worker, and it appears here</p>`;
     const transcript =
       data.peekable !== true
         ? ""
         : liveRun.provider !== "claude"
-          ? `<p class="meta">the live transcript needs the claude harness for now \u2014 this build runs on ${escape(liveRun.provider)}</p>`
-          : `<p class="meta">what the agent is saying · display only \u2014 this is not evidence, and the machine running the agent could alter it</p>` +
+          ? `<p class="meta">The live transcript needs the claude harness for now \u2014 this build runs on ${escape(liveRun.provider)}</p>`
+          : `<p class="meta">What the agent is saying · display only \u2014 this is not evidence, and the machine running the agent could alter it</p>` +
             `<pre id="live-transcript" class="mono" style="max-height:18rem;overflow:auto;white-space:pre-wrap"></pre>` +
             `<p class="meta" id="live-transcript-state"></p>`;
     return `<div class="card attempt-live" data-live-run="${liveRun.id}">${head}${peek}${transcript}${door}</div>`;
@@ -21158,7 +21163,7 @@ function taskBodyParts(data: {
           `<p class="meta">Saved assessment history. Current task status and checks are shown above.</p>` +
           (accepted === null ? "" : `<p class="meta">Accepted with an exception by ${escape(accepted.approver)}. Check results are unchanged.${accepted.note === null ? "" : ` ${escape(accepted.note)}`}</p>`) +
           (proof.proofReasons.length === 0 ? "" : `<ul>${[...new Set(proof.proofReasons.map(plainReasonWords))].map(reason => `<li>${escape(reason)}</li>`).join("")}</ul>`) +
-          criterionMatrixHtml(proof.proofMatrix, { compact: true, runId: proof.runId, links: proof.proofMatrixLinks }) +
+          criterionMatrixHtml(proof.proofMatrix, { compact: true, runId: proof.runId, links: proof.proofMatrixLinks, verdict: proof.proofVerdict }) +
           semanticCoverageHtml(proof.proofMatrix, proof.qualityMode ?? "default") + `</div></details>`;
       }
       // v50: the independent review's own card — attempt counts, what is
@@ -21223,7 +21228,7 @@ function taskBodyParts(data: {
         proof.proofMatrix.length === 0 && machineNote === "" && chainHtml === ""
           ? ""
           : `<details class="dispatch-proof-details"><summary>${proof.proofMatrix.length === 0 ? "Verification details" : `${proof.proofMatrix.length} requirement${proof.proofMatrix.length === 1 ? "" : "s"}`} · View details</summary>` +
-            `<div class="dispatch-proof-body">${criterionMatrixHtml(proof.proofMatrix, { compact: true, runId: proof.runId, links: proof.proofMatrixLinks })}${coverageHtml}${machineNote}${chainHtml}</div></details>`;
+            `<div class="dispatch-proof-body">${criterionMatrixHtml(proof.proofMatrix, { compact: true, runId: proof.runId, links: proof.proofMatrixLinks, verdict: proof.proofVerdict })}${coverageHtml}${machineNote}${chainHtml}</div></details>`;
       // The publication fact is separate from the evidence fact: a PR or
       // an observed merge is named from its record; nothing is "deployed".
       const publicationWords =
@@ -21308,15 +21313,15 @@ function taskBodyParts(data: {
       : `<form method="post" action="${taskHref(task.id)}/steer" class="row">` +
         `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
         `<input type="text" name="note" placeholder="guidance for the next attempt" aria-label="steering note" style="width:100%;max-width:28rem">` +
-        `<button type="submit">steer</button></form>` +
-        `<p class="meta">lands when the next attempt starts — a running agent is not interrupted, and a note cannot widen the approved scope</p>`;
+        `<button type="submit">Steer</button></form>` +
+        `<p class="meta">Lands when the next attempt starts — a running agent is not interrupted, and a note cannot widen the approved scope</p>`;
   const steeringCard =
-    steerRows === "" && steerForm === "" ? "" : `<h2>steering</h2>${steerRows}${steerForm}`;
+    steerRows === "" && steerForm === "" ? "" : `<h2>Steering</h2>${steerRows}${steerForm}`;
 
   const holds =
     data.holds.length === 0
       ? ""
-      : `<h2>holds</h2>` +
+      : `<h2>Holds</h2>` +
         data.holds
           .map(
             hold =>
@@ -21324,25 +21329,25 @@ function taskBodyParts(data: {
               `${hold.until === null ? "" : ` <span class="meta">until ${whenTime(hold.until)}</span>`}</p>`,
           )
           .join("\n") +
-        `<p class="meta">only your hold can be lifted here — waits caused by questions, incidents, or retry delays clear on their own</p>`;
+        `<p class="meta">Only your hold can be lifted here — waits caused by questions, incidents, or retry delays clear on their own</p>`;
 
   const approval = approvalOf(scope);
   const scopeCard =
     scope === null
-      ? `<p class="meta">no scope proposed — nothing builds this until one is approved</p>`
+      ? `<p class="meta">No scope proposed — nothing builds this until one is approved</p>`
       : [
           `<div class="card">`,
-          `<p><strong>goal</strong></p><p class="recap">${escape(scope.goal)}</p>`,
-          scope.outOfScope === null ? "" : `<p><strong>not this</strong></p><p class="recap">${escape(scope.outOfScope)}</p>`,
-          scope.touches.length === 0 ? "" : `<p class="scope-paths"><strong>touches</strong> ${scope.touches.map(one => escape(one)).join(", ")}</p>`,
-          `<p><strong>quality</strong> ${escape(qualityModeTitle(scope.qualityMode ?? "default"))}</p>`,
+          `<p><strong>Goal</strong></p><p class="recap">${escape(scope.goal)}</p>`,
+          scope.outOfScope === null ? "" : `<p><strong>Not this</strong></p><p class="recap">${escape(scope.outOfScope)}</p>`,
+          scope.touches.length === 0 ? "" : `<p class="scope-paths"><strong>Touches</strong> ${scope.touches.map(one => escape(one)).join(", ")}</p>`,
+          `<p><strong>Quality</strong> ${escape(qualityModeTitle(scope.qualityMode ?? "default"))}</p>`,
           // The fallback chain, on the card the yes reads (Layer F): the
           // digest binds the WHOLE chain, so every entry — credential
           // included — is said before anyone signs.
           (() => {
             const chain = chainFromJson(scope.proposedChainJson ?? null);
             if (chain === null || chain.length < 2) return "";
-            return `<p><strong>if its subscription runs out</strong></p><p class="recap">${chain
+            return `<p><strong>If its subscription runs out</strong></p><p class="recap">${chain
               .slice(1)
               .map(
                 one =>
@@ -21367,10 +21372,10 @@ function taskBodyParts(data: {
   const reportCard =
     data.report === null || data.report === undefined
       ? data.deliverable === "report"
-        ? `<div class="card"><p><strong>scout task</strong> <span class="meta">delivers a report, never a branch — a read-only session investigates the goal and its report appears here when it finishes</span></p></div>`
+        ? `<div class="card"><p><strong>Scout task</strong> <span class="meta">delivers a report, never a branch — a read-only session investigates the goal and its report appears here when it finishes</span></p></div>`
         : ""
       : !data.report.ok
-        ? `<div class="card"><p><strong>the report</strong></p><p class="meta">${escape(data.report.problem)} · <a href="/r/${data.report.run}">run ${data.report.run}</a></p></div>`
+        ? `<div class="card"><p><strong>The report</strong></p><p class="meta">${escape(data.report.problem)} · <a href="/r/${data.report.run}">run ${data.report.run}</a></p></div>`
         : [
             `<div class="card report">`,
             `<p><strong>${escape(data.report.report.title)}</strong> <span class="meta">the scout's report · <a href="/r/${data.report.run}">run ${data.report.run}</a></span></p>`,
@@ -21379,13 +21384,13 @@ function taskBodyParts(data: {
             ...(data.report.report.followUps.length === 0
               ? []
               : [
-                  `<p><strong>follow-ups the scout proposes</strong> <span class="meta">each files as a task in this repository; its scope still needs your approval</span></p>`,
+                  `<p><strong>Follow-ups the scout proposes</strong> <span class="meta">each files as a task in this repository; its scope still needs your approval</span></p>`,
                   ...data.report.report.followUps.map(
                     (one, index) =>
                       `<div class="follow-up"><p><strong>${escape(one.title)}</strong></p><p class="meta">${escape(one.goal)}</p>` +
                       (data.csrf === "" || data.repo === null
                         ? `<p class="meta">${data.repo === null ? "this task has no repository — file it by hand" : ""}</p>`
-                        : `<form method="post" action="${taskHref(task.id)}/follow-up" class="inline"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="index" value="${index}"><button type="submit">file this follow-up</button></form>`) +
+                        : `<form method="post" action="${taskHref(task.id)}/follow-up" class="inline"><input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="index" value="${index}"><button type="submit">File this follow-up</button></form>`) +
                       `</div>`,
                   ),
                 ]),
@@ -21422,7 +21427,7 @@ function taskBodyParts(data: {
         ? data.revision != null && !("problem" in data.revision)
           ? `<div class="card planner-status"><span class="planner-orb" aria-hidden="true"></span><p><strong>Updating the plan</strong>` +
             `<span class="meta">Adding your notes to the plan. You approve any change before it builds.</span></p></div>`
-          : `<div class="card planner-status"><span class="planner-orb" aria-hidden="true"></span><p><strong>planning requested</strong>` +
+          : `<div class="card planner-status"><span class="planner-orb" aria-hidden="true"></span><p><strong>Planning requested</strong>` +
             `<span class="meta">${data.planAuto ? "Automatic approval is enabled for a verified plan that preserves your filed contract. Amendments and unanswered questions still pause." : "The agent is inspecting the repository and drafting the goal, acceptance criteria, and approach. It will ask only if a missing answer changes the work."}</span></p></div>`
         : ""
       : `${approval.approved ? `<details class="card planner-plan planner-plan-collapsed"><summary class="execution-plan-head">` : `<section class="card planner-plan"><div class="execution-plan-head">`}` +
@@ -21435,7 +21440,7 @@ function taskBodyParts(data: {
           ? ""
           : `<details class="plan-editor" id="plan-edit"><summary>Edit plan</summary><form method="post" action="${taskHref(task.id)}/plan-edit">` +
             `<input type="hidden" name="csrf" value="${escape(data.csrf)}"><input type="hidden" name="saw-plan" value="${escape(data.planSha)}">` +
-            `<label>plan details <span class="meta">Keep the five headings. Approval locks this version for the build.</span>` +
+            `<label>Plan details <span class="meta">Keep the five headings. Approval locks this version for the build.</span>` +
             `<textarea name="plan-document" rows="14">${escape(data.planDocument)}</textarea></label>` +
             `<button type="submit">Save plan</button></form></details>`) +
         `${approval.approved ? `</div></details>` : `</section>`}`;
@@ -21450,7 +21455,7 @@ function taskBodyParts(data: {
     data.revision === null || data.revision === undefined
       ? ""
       : "problem" in data.revision
-        ? `<div class="card"><p><strong>revision brief</strong></p><p class="meta">${escape(data.revision.problem)}</p></div>`
+        ? `<div class="card"><p><strong>Revision brief</strong></p><p class="meta">${escape(data.revision.problem)}</p></div>`
         : [
             `<div class="revision-card" data-revision-feedback>`,
             `<p><strong>${data.revision.kind === "ci-repair" ? "CI repair" : data.revision.kind === "criterion-repair" ? "Criterion repair" : "Revision feedback"}</strong> <span class="meta">from <a href="/r/${data.revision.sourceRun}">build #${data.revision.sourceRun}</a></span></p>`,
@@ -21483,7 +21488,7 @@ function taskBodyParts(data: {
         : scope.profileState === "unresolved"
           ? `<div class="card approve-form" id="approve"><p><strong>This task is waiting on you: its scope cannot be approved yet.</strong></p>` +
             profileWords(scope) +
-            `<p class="ceremony-road"><a class="button-link" href="#scope">edit the scope to fix it →</a></p></div>`
+            `<p class="ceremony-road"><a class="button-link" href="#scope">Edit the scope to fix it →</a></p></div>`
         : !consentDoor.open
           ? consentClosedHtml(task.id, consentDoor, "task")
         : approvalSheetHtml({
@@ -21520,12 +21525,12 @@ function taskBodyParts(data: {
       : attended.open !== null
         ? [
             `<div class="card" data-attended="${escape(attended.open.id)}">`,
-            `<p><strong>attended session</strong> <span class="meta">${escape(attended.open.state)}</span></p>`,
+            `<p><strong>Attended session</strong> <span class="meta">${escape(attended.open.state)}</span></p>`,
             `<p class="meta">${attended.open.running ? "the agent is running — your open console keeps it live" : "waiting to dispatch to this machine"} · ${attended.open.turnsUsed}/${attended.open.cap} messages · $${(attended.open.spentMicrousd / 1_000_000).toFixed(2)} of $${(attended.open.budgetMicrousd / 1_000_000).toFixed(2)} · everything ends by ${whenTime(attended.open.expiresAt)}</p>`,
-            `<p class="meta">this page being open keeps it alive — close it and the session winds down within a minute</p>`,
+            `<p class="meta">This page being open keeps it alive — close it and the session winds down within a minute</p>`,
             `<form method="post" action="${taskHref(task.id)}/attend-revoke" class="inline">`,
             `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
-            `<button type="submit">revoke — stop the session</button>`,
+            `<button type="submit">Revoke — stop the session</button>`,
             `</form>`,
             `</div>`,
           ].join("\n")
@@ -21533,41 +21538,41 @@ function taskBodyParts(data: {
           ? [
               `<form method="post" action="${taskHref(task.id)}/attend-preview" class="card">`,
               `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
-              `<p><strong>or run it once while you watch</strong></p>`,
-              `<p class="meta">no approval filed: one attempt, on this machine, only while this page is open. You will read every term before ${attended.mint?.quick === true ? "you confirm it" : "your password signs it"}.</p>`,
+              `<p><strong>Or run it once while you watch</strong></p>`,
+              `<p class="meta">No approval filed: one attempt, on this machine, only while this page is open. You will read every term before ${attended.mint?.quick === true ? "you confirm it" : "your password signs it"}.</p>`,
               attended.mint === undefined || attended.mint.models.length <= 1
                 ? ""
-                : `<label>model <span class="meta">(watched sessions run claude only)</span><select name="model">` +
+                : `<label>Model <span class="meta">(watched sessions run claude only)</span><select name="model">` +
                   attended.mint.models
                     .map(model => `<option value="${escape(model)}"${model === attended.mint?.pinnedModel ? " selected" : ""}>${escape(model)}</option>`)
                     .join("") +
                   `</select></label>`,
               attended.mint === undefined
                 ? ""
-                : `<label>permissions<select name="posture">` +
+                : `<label>Permissions<select name="posture">` +
                   `<option value="auto"${attended.mint.posture === "auto" ? " selected" : ""}>safe unattended — routine project commands and edits proceed</option>` +
                   `<option value="acceptEdits"${attended.mint.posture === "acceptEdits" ? " selected" : ""}>legacy acceptEdits — commands that ask are denied unattended</option>` +
                   `<option value="bypassPermissions"${attended.mint.posture === "bypassPermissions" ? " selected" : ""}>full permissions — nothing asks</option>` +
                   `</select></label>`,
-              `<button type="submit">read the terms</button>`,
+              `<button type="submit">Read the terms</button>`,
               `</form>`,
             ].join("\n")
           : "";
 
   const scopeForm = [
-    `<details${scope === null || data.scopeDraft !== undefined ? " open" : ""}><summary>${scope === null ? "write the scope" : "edit the scope"}${
+    `<details${scope === null || data.scopeDraft !== undefined ? " open" : ""}><summary>${scope === null ? "Write the scope" : "Edit the scope"}${
       approval.approved ? " (editing voids the approval)" : ""
     }</summary>`,
     `<form method="post" action="${taskHref(task.id)}/scope" class="scope-editor">`,
     data.scopeDraft === undefined || data.problem === null ? "" : `<div class="problem" role="alert" id="scope-error">${escape(data.problem)}</div>`,
     `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
     `<input type="hidden" name="sawDigest" value="${escape(data.scopeDraft?.get("sawDigest") ?? scope?.digest ?? "")}">`,
-    `<label>goal<textarea name="goal" rows="3"${data.scopeDraft === undefined ? "" : ' autofocus aria-describedby="scope-error"'}>${escape(data.scopeDraft?.get("goal") ?? scope?.goal ?? "")}</textarea></label>`,
-    `<label>not this<textarea name="not" rows="2">${escape(data.scopeDraft?.get("not") ?? scope?.outOfScope ?? "")}</textarea></label>`,
-    `<label>touches <span class="meta">(one per line)</span><textarea name="touches" rows="2">${escape(
+    `<label>Goal<textarea name="goal" rows="3"${data.scopeDraft === undefined ? "" : ' autofocus aria-describedby="scope-error"'}>${escape(data.scopeDraft?.get("goal") ?? scope?.goal ?? "")}</textarea></label>`,
+    `<label>Not this<textarea name="not" rows="2">${escape(data.scopeDraft?.get("not") ?? scope?.outOfScope ?? "")}</textarea></label>`,
+    `<label>Touches <span class="meta">(one per line)</span><textarea name="touches" rows="2">${escape(
       data.scopeDraft?.get("touches") ?? (scope?.touches ?? []).join("\n"),
     )}</textarea></label>`,
-    `<label>acceptance <span class="meta">(required — one criterion per line: <code>statement | evidence,kinds | how</code>; evidence kinds are check, screenshot, changed-path, manual-review; id is optional and auto-numbered)</span><textarea name="acceptance" rows="3" placeholder="The button opens the settings panel | screenshot">${escape(
+    `<label>Acceptance <span class="meta">(required — one criterion per line: <code>statement | evidence,kinds | how</code>; evidence kinds are check, screenshot, changed-path, manual-review; id is optional and auto-numbered)</span><textarea name="acceptance" rows="3" placeholder="The button opens the settings panel | screenshot">${escape(
       data.scopeDraft?.get("acceptance") ?? acceptanceToLines(scope?.acceptance ?? []).join("\n"),
     )}</textarea></label>`,
     (() => {
@@ -21578,7 +21583,7 @@ function taskBodyParts(data: {
           : defaults?.buildPerRunMicrousd != null
             ? (defaults.buildPerRunMicrousd / 1_000_000).toFixed(2)
             : "";
-      return `<label>agent-reported usage cap <span class="meta">(optional — leave blank for uncapped subscription work)</span>` +
+      return `<label>Agent-reported usage cap <span class="meta">(optional — leave blank for uncapped subscription work)</span>` +
         `<input type="number" name="budget-usd" step="0.01" min="0.01" value="${escape(data.scopeDraft?.get("budget-usd") ?? budgetPrefill)}" placeholder="no cap"></label>` +
         `<p class="meta">Claude expresses this limiter in API-equivalent dollars even on a membership. It does not switch the run to API billing.</p>`;
     })(),
@@ -21592,13 +21597,13 @@ function taskBodyParts(data: {
               ? scope.profile.sandboxMode === "danger-full-access" ? "bypassPermissions" : "auto"
               : null;
       const selected: UnattendedPermissionMode = data.scopeDraft?.get("permission-mode") === "bypassPermissions" ? "bypassPermissions" : data.scopeDraft?.get("permission-mode") === "auto" ? "auto" : data.permissionMode ?? profileMode ?? data.permissionDefault ?? "auto";
-      return `<fieldset class="permission-field"><legend>agent permissions</legend>` +
+      return `<fieldset class="permission-field"><legend>Agent permissions</legend>` +
         permissionModeChoices("permission-mode", selected) +
         `<p class="meta permission-note">This task’s choice is sealed into its scope. Full access prevents permission prompts or sandbox limits from pausing supported unattended agents.</p></fieldset>`;
     })(),
     (() => {
       const selected: QualityMode = data.scopeDraft?.get("quality-mode") === "strict" ? "strict" : data.scopeDraft?.get("quality-mode") === "default" ? "default" : scope?.qualityMode ?? data.qualityMode ?? data.qualityDefault ?? "default";
-      return `<fieldset class="permission-field"><legend>quality</legend>` +
+      return `<fieldset class="permission-field"><legend>Quality</legend>` +
         qualityModeChoices("quality-mode", selected) +
         `<p class="meta permission-note">This choice is signed into the scope. Inspect the saved work and actual check results when it is ready. Publication and deployment need their own authorization.</p></fieldset>`;
     })(),
@@ -21624,33 +21629,33 @@ function taskBodyParts(data: {
             ? (defaults.raceTotalMicrousd / 1_000_000).toFixed(2)
             : "";
       return [
-        `<details class="more-agents"${selectedCount > 0 ? " open" : ""}><summary>more than one agent (optional)</summary>`,
-        `<label>how many agents compete <span class="meta">(a tournament builds the task independently N times — you compare and pick one)</span>` +
+        `<details class="more-agents"${selectedCount > 0 ? " open" : ""}><summary>More than one agent (optional)</summary>`,
+        `<label>How many agents compete <span class="meta">(a tournament builds the task independently N times — you compare and pick one)</span>` +
           `<select name="race-count">` +
           `<option value=""${selectedCount === 0 ? " selected" : ""}>one agent — no tournament</option>` +
           [2, 3, 4].map(count => `<option value="${count}"${selectedCount === count ? " selected" : ""}>${count} agents</option>`).join("") +
           `</select></label>`,
-        `<label>competing model <select name="race-model">` +
+        `<label>Competing model <select name="race-model">` +
           PRICED_BUILD_MODELS.map(model => `<option value="${escape(model)}"${model === selectedModel ? " selected" : ""}>${escape(model)}</option>`).join("") +
           `</select></label>`,
-        `<label>each competing agent may spend ($)<input type="number" name="race-per-usd" step="0.01" min="0.01" value="${escape(data.scopeDraft?.get("race-per-usd") ?? perPrefill)}"></label>`,
-        `<label>the whole tournament may spend ($)<input type="number" name="race-total-usd" step="0.01" min="0.01" value="${escape(data.scopeDraft?.get("race-total-usd") ?? totalPrefill)}"></label>`,
+        `<label>Each competing agent may spend ($)<input type="number" name="race-per-usd" step="0.01" min="0.01" value="${escape(data.scopeDraft?.get("race-per-usd") ?? perPrefill)}"></label>`,
+        `<label>The whole tournament may spend ($)<input type="number" name="race-total-usd" step="0.01" min="0.01" value="${escape(data.scopeDraft?.get("race-total-usd") ?? totalPrefill)}"></label>`,
         // The comparison lanes (Phase 3 slice B): 2-4 rows, any registered
         // provider, exact model required — no dollar fields exist. Blank
         // rows are unused; filling any row files a comparison INSTEAD of a
         // tournament, and mixing the two refuses in words.
         `<p class="meta" style="margin-top:.75rem">or compare different agents side by side — no dollar caps; each agent's clock is its bound, and spend lands measured only where the harness reports dollars:</p>`,
         ...[1, 2, 3, 4].map(lane =>
-          `<div class="row"><label>agent ${lane} <select name="compare-provider-${lane}">` +
+          `<div class="row"><label>Agent ${lane} <select name="compare-provider-${lane}">` +
             `<option value="">—</option>` +
             PROVIDER_IDS.map(provider => `<option value="${escape(provider)}"${data.scopeDraft?.get(`compare-provider-${lane}`) === provider ? " selected" : ""}>${escape(provider)}</option>`).join("") +
             `</select></label>` +
-            `<label>its exact model<input type="text" name="compare-model-${lane}" value="${escape(data.scopeDraft?.get(`compare-model-${lane}`) ?? "")}" placeholder="e.g. gemini-2.5-pro"></label></div>`,
+            `<label>Its exact model<input type="text" name="compare-model-${lane}" value="${escape(data.scopeDraft?.get(`compare-model-${lane}`) ?? "")}" placeholder="e.g. gemini-2.5-pro"></label></div>`,
         ),
         `</details>`,
       ].join("\n");
     })(),
-    `<button type="submit">save scope</button>`,
+    `<button type="submit">Save scope</button>`,
     `</form></details>`,
   ].join("\n");
 
@@ -21676,7 +21681,7 @@ function taskBodyParts(data: {
   const runs =
     data.runs.length === 0
       ? ""
-      : `<h2>attempts</h2>` +
+      : `<h2>Attempts</h2>` +
         data.runs
           .map(run => {
             const bits = [
@@ -21875,7 +21880,7 @@ function taskBodyParts(data: {
   const decisions =
     data.decisions.length === 0
       ? ""
-      : `<h2>decisions</h2>` +
+      : `<h2>Decisions</h2>` +
         data.decisions
           .map(
             decision =>
@@ -21887,14 +21892,14 @@ function taskBodyParts(data: {
   const incidents =
     data.incidents.length === 0
       ? ""
-      : `<h2>incidents</h2>` +
+      : `<h2>Incidents</h2>` +
         data.incidents
           .map(one =>
             one.resolvedAt === null
               ? `<p class="row">${escape(incidentWords(one.kind))} ` +
                 `<form method="post" action="/i/${one.id}/resolve" class="inline">` +
                 `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
-                `<button type="submit">resolve</button></form></p>`
+                `<button type="submit">Resolve</button></form></p>`
               : `<p class="row meta">${escape(incidentWords(one.kind))} — resolved by ${escape(one.resolvedBy ?? "?")}</p>`,
           )
           .join("\n");
@@ -21914,11 +21919,11 @@ function taskBodyParts(data: {
       one =>
         `<p class="row">${
           one.admitted ? `<a href="${taskHref(one.id)}" class="mono">${escape(one.id)}</a>` : `<span class="mono">${escape(one.id)}</span>`
-        }${one.state === null ? "" : ` <span class="badge badge-${escape(one.state)}">${escape(one.state)}</span>`}` +
+        }${one.state === null ? "" : ` <span class="badge badge-${escape(one.state)}">${escape(sentenceCase(one.state))}</span>`}` +
         `<form method="post" action="${taskHref(task.id)}/unblock" class="inline">` +
         `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
         `<input type="hidden" name="on" value="${escape(one.id)}">` +
-        `<button type="submit">don't wait for this</button></form></p>`,
+        `<button type="submit">Don't wait for this</button></form></p>`,
     )
     .join("\n");
   const waitAdd =
@@ -21929,12 +21934,12 @@ function taskBodyParts(data: {
         `<select name="on" aria-label="task to wait for">` +
         candidates.map(one => `<option value="${escape(one.id)}">${escape(one.id)} — ${escape(one.title)}</option>`).join("") +
         `</select>` +
-        `<button type="submit">wait for this task</button>` +
+        `<button type="submit">Wait for this task</button>` +
         `<span class="meta"> — this task starts only after it finishes</span></form>`;
   const waitsForCard =
     waitRows === "" && waitAdd === ""
       ? ""
-      : `<h2>waits for</h2>${waitRows === "" ? `<p class="meta">nothing — it starts when a worker is free</p>` : waitRows}${waitAdd}`;
+      : `<h2>Waits for</h2>${waitRows === "" ? `<p class="meta">Nothing — it starts when a worker is free</p>` : waitRows}${waitAdd}`;
 
   // The acts bar (task page pass): every verb in one row under the title,
   // the one that resolves this task's state first and primary — retry on a
@@ -22001,9 +22006,10 @@ function taskBodyParts(data: {
   const sectionParts: BrowserTaskSection[] = [];
   const section = (title: string, html: string, open: boolean, count?: number, id = title.replace(/\s+/g, "-")): string => {
     if (html === "") return "";
-    const inner = html.replace(`<h2>${title}</h2>`, "");
-    sectionParts.push({ id, title: title[0]!.toUpperCase() + title.slice(1), html: inner, open, count: count ?? null });
-    return `<details class="section" id="${id}"${open ? " open" : ""}><summary><h2>${title}${count === undefined ? "" : ` <span class="lane-count">${count}</span>`}</h2></summary>` + inner + `</details>`;
+    const heading = sentenceCase(title);
+    const inner = html.replace(`<h2>${title}</h2>`, "").replace(`<h2>${heading}</h2>`, "");
+    sectionParts.push({ id, title: heading, html: inner, open, count: count ?? null });
+    return `<details class="section" id="${id}"${open ? " open" : ""}><summary><h2>${heading}${count === undefined ? "" : ` <span class="lane-count">${count}</span>`}</h2></summary>` + inner + `</details>`;
   };
 
   const receiptLeads = data.assignment == null && task.state === "done" && data.completion?.receipt != null;
@@ -22018,7 +22024,7 @@ function taskBodyParts(data: {
           : data.filedVia === null || data.filedVia === undefined
             ? ""
             : ` · filed via ${escape(data.filedVia)}`
-      }${data.deliverable === "report" ? ` · <span class="badge">scout</span>` : ""}</p>`;
+      }${data.deliverable === "report" ? ` · <span class="badge">Scout</span>` : ""}</p>`;
   // A pull request that can be merged (or opened) owns the one primary action; the result stays in its section.
   const pullRequestActs = data.csrf !== "" && (data.pullRequest?.view?.canMerge === true || (data.pullRequest?.view == null && data.pullRequest?.offer != null));
   const pullRequestFact = data.pullRequest?.fact != null && data.pullRequest.view?.runId === data.assignment?.receipt?.runId ? data.pullRequest.fact : undefined;
@@ -22062,12 +22068,12 @@ function taskBodyParts(data: {
       mirror.remoteState === "open" && !mirror.dispatchOk && mirror.closeGeneration !== null &&
       mirror.syncGeneration > mirror.closeGeneration && ["cancelled", "failed", "queued"].includes(task.state) && data.csrf !== "";
     return (
-      `<div class="card"><p><strong>external work</strong> <span class="meta">${link} · ${escape(state)}</span></p>` +
+      `<div class="card"><p><strong>External work</strong> <span class="meta">${link} · ${escape(state)}</span></p>` +
       (reopenable
         ? `<form method="post" action="${taskHref(task.id)}/reopen" class="row">` +
           `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
           `<input type="password" name="token" placeholder="your password" aria-label="your password" autocomplete="current-password">` +
-          `<button type="submit">reopen — the approved scope stands</button></form>`
+          `<button type="submit">Reopen — the approved scope stands</button></form>`
         : "") +
       `</div>`
     );
@@ -22083,7 +22089,7 @@ function taskBodyParts(data: {
         // is as fenced as the builder on a coordinator filing, so "plan
         // first" would recommend a road that refuses.
         ? `<div class="card"><p><strong>This task is waiting on you: an agent filed it, and it has no scope.</strong></p>` +
-          `<p class="meta">filed by <span class="mono">${escape(data.coordinator.label)}</span> — nothing plans, claims, or runs until you write a scope below and sign it. Your signature runs their request.</p></div>`
+          `<p class="meta">Filed by <span class="mono">${escape(data.coordinator.label)}</span> — nothing plans, claims, or runs until you write a scope below and sign it. Your signature runs their request.</p></div>`
         : `<div class="card task-scope-needed"><p><strong>No approved scope yet</strong></p>` +
           `<p class="meta"><strong>Plan first</strong> drafts it from the repository, or <a href="#scope">write it yourself</a>.</p></div>`
       : "";
@@ -22120,7 +22126,7 @@ function taskBodyParts(data: {
       ? ""
       : section(
           "proposals",
-          `<h2>proposed by coordinators</h2>` +
+          `<h2>Proposed by coordinators</h2>` +
             coordinatorProposalsSection(
               data.coordinatorProposals.rows,
               data.coordinatorProposals.decisions,
@@ -22145,14 +22151,14 @@ function taskBodyParts(data: {
             : " · no checks observed"
         }</span></p>`,
     section("report", reportCard, true),
-    data.assignment == null ? section("attempts", runs, true, data.runs.length) : section("Build activity", runs.replace("<h2>attempts</h2>", ""), false, data.runs.length, "attempts"),
+    data.assignment == null ? section("attempts", runs, true, data.runs.length) : section("Build activity", runs.replace("<h2>Attempts</h2>", ""), false, data.runs.length, "attempts"),
     section("usage", spendCard, false),
     section("steering", steeringCard, (data.steering ?? []).length > 0, (data.steering ?? []).length),
     section(
       "scope",
       // The recipe road rides with the scope it reuses (UI polish
       // 2026-09-13), off the title-to-action path.
-      ["<h2>scope</h2>", scopeCard, data.repo !== null && data.scope !== null ? `<p class="meta"><a href="/recipes/from-task?task=${encodeURIComponent(task.id)}">Reuse this scope as a recipe →</a></p>` : "", agentsCardHtml(task.id, data.route, data.csrf, data.canEditRoute === true), revisionInApproval ? "" : revisionCard, data.completion != null ? "" : repairChainHtml(data.repairChain ?? null), attendedCard, scopeForm].join("\n"),
+      ["<h2>Scope</h2>", scopeCard, data.repo !== null && data.scope !== null ? `<p class="meta"><a href="/recipes/from-task?task=${encodeURIComponent(task.id)}">Reuse this scope as a recipe →</a></p>` : "", agentsCardHtml(task.id, data.route, data.csrf, data.canEditRoute === true), revisionInApproval ? "" : revisionCard, data.completion != null ? "" : repairChainHtml(data.repairChain ?? null), attendedCard, scopeForm].join("\n"),
       data.scopeDraft !== undefined || (data.plan !== "requested" && approveForm === "" && !(scope === null && canPlan)),
     ),
     dependencyChoiceNeeded ? "" : section("waits for", waitsForCard, (data.waitsFor ?? []).length > 0, (data.waitsFor ?? []).length),
@@ -22201,7 +22207,7 @@ function taskBodyParts(data: {
     thread.push({ key: `run-${run.id}`, at: run.finishedAt ?? run.startedAt, kind: "result", who: "agent", author: run.runner,
       title: `${title}${revision}`, text: run.handoff === null ? (run.outcome === "failed" ? failedAttemptSentence(run.reason) : run.reason === null || run.outcome === "built" ? null : reasonWords(run.reason)) : oneLineOf(run.handoff, 600),
       link: href, html: "",
-      more: previousResult !== null && run.id === newestBuilt?.id && run.taskId === task.id ? { summary: "Result details", html: previousResult.html } : null });
+      more: previousResult !== null && run.id === newestBuilt?.id && run.taskId === task.id ? { summary: STATUS_MORE, html: previousResult.html } : null });
   }
   // What the agent is working through now, and how its plan changed.
   const liveAt = liveRun?.startedAt ?? task.updatedAt;
@@ -22892,28 +22898,29 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
 
   // Approved intent: the signed scope's words, the plan's approach.
   const intent = view.intent;
-  let intentView: { approval: string; html: string } | null = null;
+  let intentView: { approval: string; approvedAt: string | null; html: string } | null = null;
   if (intent === null) {
-    parts.push(`<section class="card cockpit-section" data-cockpit-section="intent"><h3>approved scope</h3><p class="meta">No scope was filed for this task, so there is no approved goal or boundary to review.</p></section>`);
+    parts.push(`<section class="card cockpit-section" data-cockpit-section="intent"><h3>Approved scope</h3><p class="meta">No scope was filed for this task, so there is no approved goal or boundary to review.</p></section>`);
   } else {
+    // The time itself goes to the page as a stamp: the one formatter words it in the viewer's zone.
     const approvalWords = intent.approval.approved
-      ? `approved by ${intent.approvedBy ?? "an operator"} · ${when(intent.approval.at)}`
+      ? `Approved by ${intent.approvedBy ?? "an operator"}`
       : intent.approval.reason === "changed"
-        ? "the scope changed after approval — the words below are the current text, not the signed one"
-        : "never approved — the result was built without a signed scope";
+        ? "The scope changed after approval. The words below are the current text, not the signed one."
+        : "Never approved. The result was built without a signed scope.";
     const approval = intent.approval.approved
-      ? `approved by ${escape(intent.approvedBy ?? "an operator")} · ${whenTime(intent.approval.at)}`
-      : approvalWords;
+      ? `Approved by ${escape(intent.approvedBy ?? "an operator")} · ${whenTime(intent.approval.at)}`
+      : escape(approvalWords);
     const body =
-      `<p class="recap" style="margin-top:.25rem"><strong>goal</strong> ${escape(intent.goal)}</p>` +
-      (intent.outOfScope === null ? `<p class="meta">no boundary was stated</p>` : `<p class="recap"><strong>not this</strong> ${escape(intent.outOfScope)}</p>`) +
+      `<p class="recap" style="margin-top:.25rem"><strong>Goal</strong> ${escape(intent.goal)}</p>` +
+      (intent.outOfScope === null ? `<p class="meta">No boundary was stated</p>` : `<p class="recap"><strong>Not this</strong> ${escape(intent.outOfScope)}</p>`) +
       (intent.touches.length === 0
-        ? `<p class="meta">no expected paths were signed — every changed file reads as in bounds</p>`
-        : `<p class="row"><span class="meta">expected to touch</span> ${intent.touches.map(one => `<span class="mono">${escape(one)}</span>`).join(" ")}</p>`) +
+        ? `<p class="meta">No expected paths were signed — every changed file reads as in bounds</p>`
+        : `<p class="row"><span class="meta">Expected to touch</span> ${intent.touches.map(one => `<span class="mono">${escape(one)}</span>`).join(" ")}</p>`) +
       (view.plan === null
         ? ""
-        : `<p class="meta">plan revision ${view.plan.revision} · <span class="mono" title="${escape(view.plan.sha256)}">${escape(view.plan.sha256.slice(0, 12))}…</span>${view.plan.approach === null ? "" : ` — ${escape(view.plan.approach)}`}</p>`);
-    intentView = { approval: approvalWords, html: body };
+        : `<p class="meta">Plan revision ${view.plan.revision} · <span class="mono" title="${escape(view.plan.sha256)}">${escape(view.plan.sha256.slice(0, 12))}…</span>${view.plan.approach === null ? "" : ` — ${escape(view.plan.approach)}`}</p>`);
+    intentView = { approval: approvalWords, approvedAt: intent.approval.approved ? intent.approval.at ?? null : null, html: body };
     parts.push(
       `<details class="card cockpit-section cockpit-disclosure" data-cockpit-section="intent"><summary><h3>Approved scope<small>What this build was asked to do · ${approval}</small></h3><span class="cockpit-disclosure-action">View</span></summary>` +
         `<div class="cockpit-disclosure-body">` + body + `</div></details>`,
@@ -22940,7 +22947,7 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
 
   if (run === null || view.detail === null) {
     parts.push(
-      `<section class="card cockpit-section" id="verification" data-cockpit-section="proof"><h3>verification</h3>` +
+      `<section class="card cockpit-section" id="verification" data-cockpit-section="proof"><h3>Verification</h3>` +
         `<p class="meta">This task has no finished build record, so there are no captured changes or checks to review.</p>` +
         `<p class="row"><a href="${taskHref(view.taskId)}">Open the task →</a></p></section>`,
     );
@@ -23044,7 +23051,7 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
 
   if (view.notes.length > 0) {
     parts.push(
-      `<section class="card cockpit-section" data-cockpit-section="notes"><h3>operator notes</h3>` +
+      `<section class="card cockpit-section" data-cockpit-section="notes"><h3>Operator notes</h3>` +
         view.notes.map(one => `<p class="row"><span class="meta">${escape(one.author)} · ${whenTime(one.createdAt)}</span> ${escape(one.note)}</p>`).join("\n") +
         `</section>`,
     );
@@ -23216,12 +23223,12 @@ function shortDigest(digest: string): string {
  * orphaned run keeps saying what actually became of it. */
 function runOutcomeBadge(run: Run, live: boolean): string {
   if (!live && run.role === "planner" && run.reason === "plan-drafted") {
-    return `<span class="badge">planned</span>`;
+    return `<span class="badge">Planned</span>`;
   }
-  if (!live && run.reason === "interrupted") return `<span class="badge">interrupted</span>`;
+  if (!live && run.reason === "interrupted") return `<span class="badge">Interrupted</span>`;
   return live
-    ? `<span class="badge badge-running">running</span>`
-    : `<span class="badge badge-${escape(run.outcome ?? "cut")}">${escape(run.outcome ?? "never finished")}</span>`;
+    ? `<span class="badge badge-running">Running</span>`
+    : `<span class="badge badge-${escape(run.outcome ?? "cut")}">${escape(sentenceCase(run.outcome ?? "never finished"))}</span>`;
 }
 
 const runNoun = (run: Pick<Run, "role">): string =>
@@ -23250,7 +23257,7 @@ function runsPage(
               `<p class="row"><a href="/r/${run.id}" class="mono">#${run.id}</a> ` +
               `<a href="${taskHref(run.taskId)}" class="mono">${escape(run.taskId)}</a> ` +
               runOutcomeBadge(run, liveIds.has(run.id)) +
-              `${run.qualityMode === "strict" ? ` <span class="badge">strict review</span>` : ""}` +
+              `${run.qualityMode === "strict" ? ` <span class="badge">Strict review</span>` : ""}` +
               needsVerification +
               criterionMatrixSummary(verdicts.get(run.id)?.matrix ?? []) +
               `${run.provider === "claude" ? "" : ` <span class="meta mono">${escape(run.provider)}</span>`}` +
@@ -23260,7 +23267,7 @@ function runsPage(
           })
           .join("\n");
   const older = nextCursor === null ? "" : `<p><a href="/runs?before=${nextCursor}">older →</a></p>`;
-  return screen("builds", [`<h1>builds <a class="badge" href="/peek">peek at the live ones \u2192</a></h1>`, buildsViews("builds"), `<p class="hint">one build = one attempt by an agent to complete a task, on its own branch</p>`, list, older].join("\n"), { chrome });
+  return screen("builds", [`<h1>Builds <a class="badge" href="/peek">Peek at the live ones \u2192</a></h1>`, buildsViews("builds"), `<p class="hint">one build = one attempt by an agent to complete a task, on its own branch</p>`, list, older].join("\n"), { chrome });
 }
 
 /** What the run page shows of the terminal diff — verified bytes or a named problem, never silence. */
@@ -23754,7 +23761,7 @@ function reviewDiffHtml(
   const structured = parsed.files.some(file => file.hunks.length > 0);
   if (!structured) {
     return (
-      `<details><summary>the patch${patch.truncated ? " (TRUNCATED — the raw record says how much was cut)" : ""}</summary>` +
+      `<details><summary>The patch${patch.truncated ? " (TRUNCATED — the raw record says how much was cut)" : ""}</summary>` +
       `<pre class="mono" style="overflow-x:auto">${escape(patch.text)}</pre></details>` +
       storedDownloadLink(runId, patch.artifactId, "diff", patch.truncated)
     );
@@ -23845,12 +23852,12 @@ function terminalDiffCard(
   editor: { worktree: string } | null = null,
   commentable = false,
 ): string {
-  const parts: string[] = ["<h2>what changed</h2>"];
+  const parts: string[] = ["<h2>What changed</h2>"];
 
   if (view.stat === null) {
-    parts.push(`<p class="meta">no change summary was captured for this build</p>`);
+    parts.push(`<p class="meta">No change summary was captured for this build</p>`);
   } else if ("problem" in view.stat) {
-    parts.push(`<p class="meta">stat: ${escape(view.stat.problem)}</p>`);
+    parts.push(`<p class="meta">Stat: ${escape(view.stat.problem)}</p>`);
   } else {
     const s = view.stat;
     const zero = s.fileCount === 0;
@@ -23876,24 +23883,24 @@ function terminalDiffCard(
               file =>
                 `<p class="row mono">${fileName(file.path)}${file.renamedFrom === undefined ? "" : ` (was ${escape(file.renamedFrom)})`} ` +
                 `<span class="meta">${file.additions === null || file.deletions === null ? "binary" : `+${file.additions} −${file.deletions}`}</span>` +
-                `${commentable ? ` <button type="button" class="pick-file" data-path="${escape(file.path)}">comment</button>` : ""}</p>`,
+                `${commentable ? ` <button type="button" class="pick-file" data-path="${escape(file.path)}">Comment</button>` : ""}</p>`,
             )
             .join("\n") +
           (s.files.length > 40 ? `<p class="meta">…and ${s.files.length - 40} more file(s)</p>` : "") +
           `</div>`,
       );
       if (editor !== null) {
-        parts.push(`<p class="meta">file links open in VS Code on THIS device — if the build's worktree is gone, a link opens nothing</p>`);
+        parts.push(`<p class="meta">File links open in VS Code on THIS device — if the build's worktree is gone, a link opens nothing</p>`);
       }
     }
   }
 
   if (view.patch === null) {
-    parts.push(`<p class="meta">the final diff was not captured for this build</p>`);
+    parts.push(`<p class="meta">The final diff was not captured for this build</p>`);
   } else if ("problem" in view.patch) {
-    parts.push(`<p class="meta">patch: ${escape(view.patch.problem)}</p>`);
+    parts.push(`<p class="meta">Patch: ${escape(view.patch.problem)}</p>`);
   } else if (view.patch.text.trim() === "") {
-    parts.push(`<p class="meta">empty diff — captured successfully, nothing changed</p>`);
+    parts.push(`<p class="meta">Empty diff — captured successfully, nothing changed</p>`);
   } else {
     parts.push(reviewDiffHtml(view.patch, view.stat, runId, commentable));
   }
@@ -23912,7 +23919,7 @@ function terminalDiffCard(
 function evidenceBundleCard(view: ProofBundleView | null, run: Pick<Run, "id" | "role" | "outcome">, publication: PublicationFacts = null, review: ReviewFacts | null = null): string {
   if (view === null) return "";
   const runId = run.id;
-  const parts: string[] = ["<h2>verification and evidence</h2>"];
+  const parts: string[] = ["<h2>Verification and evidence</h2>"];
 
   if (view.verdict !== null) {
     // The same status line every other surface renders for this run
@@ -23926,7 +23933,7 @@ function evidenceBundleCard(view: ProofBundleView | null, run: Pick<Run, "id" | 
     );
   }
 
-  parts.push(criterionMatrixHtml(view.matrix, { runId, links: view.matrixLinks }));
+  parts.push(criterionMatrixHtml(view.matrix, { runId, links: view.matrixLinks, verdict: view.verdict }));
   parts.push(semanticCoverageHtml(view.matrix, view.qualityMode));
   if (reviewConflict(view.matrix, view.machineVerdict, view.verdict)) {
     parts.push(`<p class="meta">An independent review found conflicting evidence.</p>`);
@@ -23938,22 +23945,22 @@ function evidenceBundleCard(view: ProofBundleView | null, run: Pick<Run, "id" | 
   } else if (view.proof !== null) {
     if (view.proof.criteria.length > 0) {
       parts.push(
-        `<div class="result-section"><strong>acceptance criteria</strong><ul>` +
+        `<div class="result-section"><strong>Acceptance criteria</strong><ul>` +
           view.proof.criteria
-            .map(one => `<li><span class="badge${one.verdict === "met" ? " badge-done" : one.verdict === "not-met" ? " badge-failed" : ""}">${escape(one.verdict)}</span> ${escape(one.statement)} <span class="meta">— ${escape(one.how)}</span></li>`)
+            .map(one => `<li><span class="badge${one.verdict === "met" ? " badge-done" : one.verdict === "not-met" ? " badge-failed" : ""}">${escape(sentenceCase(one.verdict))}</span> ${escape(one.statement)} <span class="meta">— ${escape(one.how)}</span></li>`)
             .join("") +
           `</ul></div>`,
       );
     }
     if (view.proof.checks.length > 0) {
       parts.push(
-        `<div class="result-section"><strong>checks reported by the agent</strong><ul>` +
+        `<div class="result-section"><strong>Checks reported by the agent</strong><ul>` +
           view.proof.checks.map(one => `<li><span class="mono">${escape(one.command)}</span> <span class="meta">(exit ${one.exitCode}) — ${escape(one.summary)}</span></li>`).join("") +
           `</ul></div>`,
       );
     }
     if (view.proof.caveats.length > 0) {
-      parts.push(`<div class="result-section"><strong>caveats</strong><ul>${view.proof.caveats.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`);
+      parts.push(`<div class="result-section"><strong>Caveats</strong><ul>${view.proof.caveats.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`);
     }
   }
 
@@ -23961,7 +23968,7 @@ function evidenceBundleCard(view: ProofBundleView | null, run: Pick<Run, "id" | 
 
   if (view.screenshots.length > 0) {
     parts.push(
-      `<div class="result-section"><strong>screenshots</strong>` +
+      `<div class="result-section"><strong>Screenshots</strong>` +
         view.screenshots
           .map(
             shot =>
@@ -24098,7 +24105,7 @@ function completionReceiptCard(view: CompletionReceiptView, taskId: string, plac
     (view.publication?.state === "failed" ? `<p class="receipt-note">${statusIconSvg("note")} Pull request couldn't open. The commit is safe locally.</p>` : "") +
     caveats +
     coverage +
-    `<details class="receipt-details"><summary>Result details</summary>` +
+    `<details class="receipt-details"><summary>${STATUS_MORE}</summary>` +
     (view.summary !== null && view.summary !== conciseOutcomeOf(view.summary) ? `<p class="recap">${escape(view.summary)}</p>` : "") +
     `<p class="receipt-publication" data-receipt-publication="${escape(facts.publicationState)}">${escape(facts.publicationWords)}</p>` +
     // A review in flight is the receipt's primary status too (its chip
@@ -24439,9 +24446,9 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
           detail.files
             .map(file => {
               const counts = file.additions === null || file.deletions === null ? "binary" : `+${file.additions} −${file.deletions}`;
-              const flags = (file.outsideTouches ? ` <span class="badge badge-failed" data-outside-touches="1">outside touches</span>` : "") + (file.cited ? ` <span class="badge badge-done">cited</span>` : "");
+              const flags = (file.outsideTouches ? ` <span class="badge badge-failed" data-outside-touches="1">Outside touches</span>` : "") + (file.cited ? ` <span class="badge badge-done">Cited</span>` : "");
               const why = file.priority.reasons.length === 0 ? "" : ` <span class="meta">— ${file.priority.reasons.map(escape).join("; ")}</span>`;
-              return `<li data-file-priority="${file.priority.band}">${fileName(file)}${file.renamedFrom === null ? "" : ` <span class="meta">(was ${escape(file.renamedFrom)})</span>`} <span class="meta">${counts}</span>${flags}${detail.canAnnotate ? ` <button type="button" class="pick-file" data-path="${escape(file.path)}">comment</button>` : ""}${why}</li>`;
+              return `<li data-file-priority="${file.priority.band}">${fileName(file)}${file.renamedFrom === null ? "" : ` <span class="meta">(was ${escape(file.renamedFrom)})</span>`} <span class="meta">${counts}</span>${flags}${detail.canAnnotate ? ` <button type="button" class="pick-file" data-path="${escape(file.path)}">Comment</button>` : ""}${why}</li>`;
             })
             .join("") +
           `</ol>` +
@@ -24473,14 +24480,14 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
     if (proof.matrix.length === 0) {
       checkParts.push(detail.signedCriteria > 0 ? `<p class="meta">The approved scope has ${detail.signedCriteria} requirement${detail.signedCriteria === 1 ? "" : "s"}, but this build has no requirement-by-requirement verification.</p>` : `<p class="meta">This scope signed no acceptance checks.</p>`);
     } else {
-      checkParts.push(criterionMatrixHtml(proof.matrix, { runId, links: proof.matrixLinks, fileAnchors: detail.fileAnchors }));
+      checkParts.push(criterionMatrixHtml(proof.matrix, { runId, links: proof.matrixLinks, fileAnchors: detail.fileAnchors, verdict: proof.verdict }));
     }
     checkParts.push(semanticCoverageHtml(proof.matrix, proof.qualityMode));
     if (reviewConflict(proof.matrix, proof.machineVerdict, proof.verdict)) checkParts.push(`<p class="meta">An independent review found conflicting evidence.</p>`);
     checkParts.push(repairChainHtml(proof.repairChain));
     if (detail.reviewerFindings.length > 0) {
       checkParts.push(
-        `<div class="result-section" data-cockpit-source="reviewer"><strong>independent review</strong><ul>` +
+        `<div class="result-section" data-cockpit-source="reviewer"><strong>Independent review</strong><ul>` +
           reviewerNotes +
           `</ul></div>`,
       );
@@ -24513,7 +24520,7 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
   if (followUps !== null && run.role === "builder") checkParts.push(followUpsHtml(followUps, runId, o));
   // The handoff's own account of its checks — the agent's words, labeled
   // as such, whether or not a proof exists.
-  if (!directAssessment && handoff !== null && handoff.verification.length > 0) checkParts.push(`<div class="result-section" data-cockpit-source="agent-words"><strong>the agent's own account</strong><ul>${handoff.verification.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`);
+  if (!directAssessment && handoff !== null && handoff.verification.length > 0) checkParts.push(`<div class="result-section" data-cockpit-source="agent-words"><strong>The agent's own account</strong><ul>${handoff.verification.map(one => `<li>${escape(one)}</li>`).join("")}</ul></div>`);
   if (o.extraChecks !== undefined) checkParts.push(o.extraChecks);
 
   // ---- request changes: both feedback styles, one sealed road ------------
@@ -24561,8 +24568,8 @@ function resultPanelParts(detail: ResultDetail, o: ResultPanelOptions): { html: 
         `<textarea name="note" rows="2" maxlength="${LIMITS.note}" placeholder="Describe the change…" aria-label="review comment" aria-describedby="comment-note-limit"${o.noted ? " autofocus" : ""}></textarea>` +
         `<span class="meta diff-comment-limit" id="comment-note-limit">up to ${LIMITS.note} characters</span>` +
         `<details class="result-pin"><summary>Attach to a file or line</summary>` +
-        `<div class="diff-comment-target"><label>file<input type="text" name="path" placeholder="src/…" aria-label="file" class="mono"></label>` +
-        `<label>line<input type="text" name="line" placeholder="—" aria-label="line" inputmode="numeric"></label></div></details>` +
+        `<div class="diff-comment-target"><label>File<input type="text" name="path" placeholder="src/…" aria-label="file" class="mono"></label>` +
+        `<label>Line<input type="text" name="line" placeholder="—" aria-label="line" inputmode="numeric"></label></div></details>` +
         `<div class="result-feedback-actions"><button type="submit" name="intent" value="revise" data-request-changes>Request changes</button><button type="submit" name="intent" value="note" class="quiet" data-save-feedback>Save for later</button></div></form></details>`,
     );
   }
@@ -24836,9 +24843,9 @@ function runPage(
   const conversation =
     heldTurns === null
       ? ""
-      : `<h2>conversation</h2>` +
+      : `<h2>Conversation</h2>` +
         (heldTurns.turns.length === 0
-          ? `<p class="meta">nothing said yet</p>`
+          ? `<p class="meta">Nothing said yet</p>`
           : heldTurns.turns
               .map(
                 turn =>
@@ -24857,11 +24864,11 @@ function runPage(
           ? `<form method="post" action="/r/${run.id}/turn" class="row">` +
             `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
             `<input type="text" name="text" maxlength="500" placeholder="say something to the agent — it reads this as its next instruction, inside the approved scope" aria-label="turn" style="width:100%;max-width:34rem">` +
-            `<button type="submit">send</button></form>` +
+            `<button type="submit">Send</button></form>` +
             `<p class="meta">${escape(heldTurns.state)} · ${heldTurns.turns.length}/${heldTurns.cap} messages · a waiting question must be answered before free-form messages</p>`
           : heldTurns.open
             ? ""
-            : `<p class="meta">the session has ended — the record above is complete</p>`);
+            : `<p class="meta">The session has ended — the record above is complete</p>`);
   // The live peek region (A2): the poller fills it only on a serve that
   // asserted its runner. Without the assertion the section still appears
   // for a running build and says honestly why it is empty \u2014 a page that
@@ -24870,24 +24877,24 @@ function runPage(
   const peek = !running
     ? ""
     : peekable
-      ? `<h2>what is changing right now</h2>` +
-        `<div id="run-peek"><p class="meta">watching\u2026 the first look lands within 15 seconds</p></div>` +
+      ? `<h2>What is changing right now</h2>` +
+        `<div id="run-peek"><p class="meta">Watching\u2026 the first look lands within 15 seconds</p></div>` +
         `<p class="meta" id="run-peek-stamp"></p>`
-      : `<h2>what is changing right now</h2>` +
-        `<p class="meta">the live file view is off \u2014 start serve with ${escape("--runner <name>")} naming this machine's worker, and it appears here</p>`;
+      : `<h2>What is changing right now</h2>` +
+        `<p class="meta">The live file view is off \u2014 start serve with ${escape("--runner <name>")} naming this machine's worker, and it appears here</p>`;
   // The live transcript (arc 1): the agent's own words, streamed to a file
   // beside the run and polled as raw text. Honesty stated on the surface:
   // this is display only, and the machine running the agent could alter it.
   const transcript = !running
     ? ""
     : !peekable
-      ? `<h2>what the agent is saying</h2>` +
-        `<p class="meta">the live transcript is off \u2014 start serve with ${escape("--runner <name>")} naming this machine's worker, and it appears here</p>`
+      ? `<h2>What the agent is saying</h2>` +
+        `<p class="meta">The live transcript is off \u2014 start serve with ${escape("--runner <name>")} naming this machine's worker, and it appears here</p>`
       : run.provider !== "claude"
-        ? `<h2>what the agent is saying</h2>` +
-          `<p class="meta">the live transcript needs the claude harness for now \u2014 this build runs on ${escape(run.provider)}</p>`
-        : `<h2>what the agent is saying</h2>` +
-          `<p class="meta">display only \u2014 this is not evidence, and the machine running the agent could alter it</p>` +
+        ? `<h2>What the agent is saying</h2>` +
+          `<p class="meta">The live transcript needs the claude harness for now \u2014 this build runs on ${escape(run.provider)}</p>`
+        : `<h2>What the agent is saying</h2>` +
+          `<p class="meta">Display only \u2014 this is not evidence, and the machine running the agent could alter it</p>` +
           `<pre id="live-transcript" class="mono" style="max-height:24rem;overflow:auto;white-space:pre-wrap"></pre>` +
           `<p class="meta" id="live-transcript-state"></p>`;
   const resultSummary = structuredHandoff?.conclusion ?? run.handoff;
@@ -24898,7 +24905,7 @@ function runPage(
   const handoff =
     resultSummary === null
       ? ""
-      : `<section class="card result-card"><h2>result</h2><p class="recap">${escape(resultSummary)}</p>` +
+      : `<section class="card result-card"><h2>Result</h2><p class="recap">${escape(resultSummary)}</p>` +
         (structuredHandoff === null
           ? ""
           : resultList("completed", structuredHandoff.changes) +
@@ -24942,9 +24949,9 @@ function runPage(
       ? ""
       : `<form method="post" action="/r/${run.id}/comment" class="card diff-comment-form" id="comment-form">` +
         `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
-        `<div class="diff-comment-target"><label>file<input type="text" name="path" placeholder="select a line above" aria-label="file" class="mono"></label>` +
-        `<label>line<input type="text" name="line" placeholder="—" aria-label="line" inputmode="numeric"></label></div>` +
-        `<label>change requested<textarea name="note" rows="2" maxlength="${LIMITS.note}" placeholder="Explain what should change and why" aria-label="review comment" aria-describedby="comment-note-limit"${noted ? " autofocus" : ""}></textarea></label>` +
+        `<div class="diff-comment-target"><label>File<input type="text" name="path" placeholder="select a line above" aria-label="file" class="mono"></label>` +
+        `<label>Line<input type="text" name="line" placeholder="—" aria-label="line" inputmode="numeric"></label></div>` +
+        `<label>Change requested<textarea name="note" rows="2" maxlength="${LIMITS.note}" placeholder="Explain what should change and why" aria-label="review comment" aria-describedby="comment-note-limit"${noted ? " autofocus" : ""}></textarea></label>` +
         `<span class="meta diff-comment-limit" id="comment-note-limit">up to ${LIMITS.note} characters</span>` +
         `<button type="submit">Add annotation</button></form>`;
   // The device-side half of the editor-link activation (arc 6, finding 1):
@@ -24975,7 +24982,7 @@ function runPage(
       : `<div class="card"><p><strong>CI is failing on PR #${ciRepair.pr}</strong> <span class="meta">observed by the episode watcher</span></p>` +
         `<form method="post" action="/r/${run.id}/draft-repair">` +
         `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
-        `<button type="submit">draft a repair task</button>` +
+        `<button type="submit">Draft a repair task</button>` +
         `<span class="meta"> — one unapproved task; you approve its scope before anything builds</span></form></div>`;
 
   const reviewCard =
@@ -24999,8 +25006,8 @@ function runPage(
       : `<form method="post" action="/r/${run.id}/note" class="row">` +
         `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
         `<input type="text" name="note" placeholder="a note for whoever reads this run next" aria-label="run note" style="width:100%;max-width:28rem">` +
-        `<button type="submit">add note</button></form>`;
-  const notesCard = noteRows === "" && noteForm === "" ? "" : `<h2>operator notes</h2>${noteRows}${noteForm}`;
+        `<button type="submit">Add note</button></form>`;
+  const notesCard = noteRows === "" && noteForm === "" ? "" : `<h2>Operator notes</h2>${noteRows}${noteForm}`;
 
   // Continuation (Phase 2E, A4): a finished attempt offers a watched
   // follow-up — the text you type here enters the SIGNED terms on the
@@ -25157,7 +25164,7 @@ function capsPage(chrome: Chrome, caps: Capability[] | null, gaps: Gap[], repo: 
   if (caps === null) {
     return screen("requirements", [
       `<h1>Requirements</h1>`,
-      `<p class="meta">open a project to see its requirements — <a href="/projects">projects</a></p>`,
+      `<p class="meta">Open a project to see its requirements — <a href="/projects">projects</a></p>`,
     ].join("\n"), { chrome });
   }
   const list =
@@ -25172,7 +25179,7 @@ function capsPage(chrome: Chrome, caps: Capability[] | null, gaps: Gap[], repo: 
           .join("\n");
   const blocked =
     gaps.length === 0
-      ? `<p class="meta">no gaps — everything recorded is verified</p>`
+      ? `<p class="meta">No gaps — everything recorded is verified</p>`
       : gaps
           .map(
             gap =>
@@ -25184,7 +25191,7 @@ function capsPage(chrome: Chrome, caps: Capability[] | null, gaps: Gap[], repo: 
                     ? `part of what holds: ${gap.alsoBlocks.map(one => escape(one)).join(", ")}`
                     : "nothing queued needs it yet"
               }</p>` +
-              `<p class="meta">verify: ${escape(gap.verify)}</p>` +
+              `<p class="meta">Verify: ${escape(gap.verify)}</p>` +
               `<p class="meta">${escape(gap.instructions)}</p></div>`,
           )
           .join("\n");
@@ -25192,9 +25199,9 @@ function capsPage(chrome: Chrome, caps: Capability[] | null, gaps: Gap[], repo: 
     `<h1>Requirements</h1>`,
     `<p class="hint">tools and credentials builds need — each is probed on the worker before any build spends money; values never leave your machine</p>`,
     list,
-    `<h2>missing, ranked by what filling them frees</h2>`,
+    `<h2>Missing, ranked by what filling them frees</h2>`,
     blocked,
-    `<p class="meta">read-only here: checks are shell commands you wrote, and a web button that runs shell would need its own security review</p>`,
+    `<p class="meta">Read-only here: checks are shell commands you wrote, and a web button that runs shell would need its own security review</p>`,
   ].join("\n"), { chrome });
 }
 
@@ -25243,7 +25250,7 @@ function settingsPage(
               `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
               permissionModeChoices("permission-mode", permissionDefault.mode) +
               `<button type="submit">Save default</button></form>`
-            : `<div class="card"><p><strong>${permissionDefault.mode === "bypassPermissions" ? "Full access" : "Auto"}</strong></p><p class="meta">an approver can change this default</p></div>`,
+            : `<div class="card"><p><strong>${permissionDefault.mode === "bypassPermissions" ? "Full access" : "Auto"}</strong></p><p class="meta">An approver can change this default</p></div>`,
           permissionDefault.updatedAt === null
             ? ""
             : `<p class="meta settings-changed">Changed ${whenTime(permissionDefault.updatedAt)}${permissionDefault.updatedBy === null ? "" : ` by ${escape(permissionDefault.updatedBy)}`}</p>`,
@@ -25258,7 +25265,7 @@ function settingsPage(
               `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
               qualityModeChoices("quality-mode", qualityDefault.mode) +
               `<button type="submit">Save default</button></form>`
-            : `<div class="card"><p><strong>${escape(qualityModeTitle(qualityDefault.mode))}</strong></p><p class="meta">an approver can change this default</p></div>`,
+            : `<div class="card"><p><strong>${escape(qualityModeTitle(qualityDefault.mode))}</strong></p><p class="meta">An approver can change this default</p></div>`,
           qualityDefault.updatedAt === null
             ? ""
             : `<p class="meta settings-changed">Changed ${whenTime(qualityDefault.updatedAt)}${qualityDefault.updatedBy === null ? "" : ` by ${escape(qualityDefault.updatedBy)}`}</p>`,
@@ -25693,18 +25700,18 @@ function nextPage(chrome: Chrome, data: {
       `<p>${escape(item.approval.title)}</p>` +
       (data.planDocument === null
         ? ""
-        : `<div class="card"><p><strong>the plan</strong> <span class="meta">drafted by a planning session</span></p>${executionPlanHtml(data.planDocument, true)}${planContractHtml(data.planContract ?? null, "ceremony")}</div>`) +
+        : `<div class="card"><p><strong>The plan</strong> <span class="meta">drafted by a planning session</span></p>${executionPlanHtml(data.planDocument, true)}${planContractHtml(data.planContract ?? null, "ceremony")}</div>`) +
       `<form method="post" action="${taskHref(item.approval.taskId)}/approve" class="card approve-form">` +
       `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
       `<input type="hidden" name="nonce" value="${escape(data.nonce)}">` +
       `<input type="hidden" name="digest" value="${escape(data.approvalDigest ?? item.approval.digest)}">` +
       `<input type="hidden" name="return" value="next">` +
-      `<p><strong>approve exactly this:</strong></p>` +
-      (data.deliverable === "report" ? `<p class="meta"><span class="badge">scout</span> a read-only session investigates this goal and delivers a report — no branch, nothing changes in the repository</p>` : "") +
+      `<p><strong>Approve exactly this:</strong></p>` +
+      (data.deliverable === "report" ? `<p class="meta"><span class="badge">Scout</span> a read-only session investigates this goal and delivers a report — no branch, nothing changes in the repository</p>` : "") +
       (scope === null || scope.profileState !== "unresolved" ? "" : profileWords(scope)) +
-      `<p class="meta">goal</p><p class="recap" style="margin-top:0">${escape(scope?.goal ?? item.approval.goal)}</p>` +
-      `<p class="meta">not this</p><p class="recap" style="margin-top:0">${scope?.outOfScope == null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p>` +
-      `<p class="meta">touches · ${scope === null || scope.touches.length === 0 ? "anything" : scope.touches.map(one => escape(one)).join(", ")}</p>` +
+      `<p class="meta">Goal</p><p class="recap" style="margin-top:0">${escape(scope?.goal ?? item.approval.goal)}</p>` +
+      `<p class="meta">Not this</p><p class="recap" style="margin-top:0">${scope?.outOfScope == null ? "<em>no exclusions</em>" : escape(scope.outOfScope)}</p>` +
+      `<p class="meta">Touches · ${scope === null || scope.touches.length === 0 ? "anything" : scope.touches.map(one => escape(one)).join(", ")}</p>` +
       (scope === null ? "" : acceptanceCeremonyHtml(scope.acceptance)) +
       (data.raceTerms === null
         ? ""
@@ -25714,29 +25721,29 @@ function nextPage(chrome: Chrome, data: {
       // tap away, never in the way.
       agentsCeremonyHtml(data.route) +
       (scope === null ? "" : runtimeDetailsHtml(scope)) +
-      `<label>your password, typed again — a signed-in session alone cannot agree to work<input type="password" name="token" autocomplete="current-password"></label>` +
-      `<div class="sticky-actions"><button type="submit">approve this scope</button></div>` +
+      `<label>Your password, typed again — a signed-in session alone cannot agree to work<input type="password" name="token" autocomplete="current-password"></label>` +
+      `<div class="sticky-actions"><button type="submit">Approve this scope</button></div>` +
       `</form>` +
       `<p class="meta"><a href="${taskHref(item.approval.taskId)}">open the full task</a> to edit the scope first</p>`;
   } else if (item.kind === "requeue") {
     card =
       `<h1>${escape(item.stalled.taskId)}</h1>` +
       `<p>${escape(item.stalled.title)}</p>` +
-      `<p class="meta">stopped — ${item.stalled.incidentCount} incident(s)${item.stalled.strikes > 0 ? ` after ${item.stalled.strikes} attempt(s)` : ""}</p>` +
+      `<p class="meta">Stopped — ${item.stalled.incidentCount} incident(s)${item.stalled.strikes > 0 ? ` after ${item.stalled.strikes} attempt(s)` : ""}</p>` +
       `<form method="post" action="${taskHref(item.stalled.taskId)}/requeue" class="card">` +
       `<input type="hidden" name="csrf" value="${escape(data.csrf)}">` +
       `<input type="hidden" name="return" value="next">` +
-      `<p class="meta">requeue resolves the incidents, clears the failed attempts, and puts it back in line</p>` +
-      `<button type="submit">retry this work</button>` +
+      `<p class="meta">Requeue resolves the incidents, clears the failed attempts, and puts it back in line</p>` +
+      `<button type="submit">Retry this work</button>` +
       `</form>` +
       `<p class="meta"><a href="${taskHref(item.stalled.taskId)}">open the full task</a> to read the runs first</p>`;
   } else {
     const { gap } = item;
     card =
-      `<h1>supply ${escape(gap.key)}</h1>` +
+      `<h1>Supply ${escape(gap.key)}</h1>` +
       `<p class="meta">${escape(gap.state)}</p>` +
       `<p>Filling this starts ${gap.unblocks.length} task(s): ${gap.unblocks.map(one => `<span class="mono">${escape(one)}</span>`).join(", ")}</p>` +
-      `<div class="card"><p class="meta">prove it filled from the terminal:</p><pre class="recap">${escape(gap.verify)}</pre></div>`;
+      `<div class="card"><p class="meta">Prove it filled from the terminal:</p><pre class="recap">${escape(gap.verify)}</pre></div>`;
   }
 
   return screen("next", [header, card].join("\n"), { chrome });
@@ -25759,9 +25766,9 @@ function decisionOptionForms(decision: Decision, csrf: string, returnTo: string 
         `<input type="hidden" name="choice" value="${escape(option.id)}">`,
         ...(returnTo === null ? [] : [`<input type="hidden" name="return" value="${escape(returnTo)}">`]),
         ...(option.reversible ? [] : [`<input type="hidden" name="confirm" value="yes">`]),
-        recommended ? `<p class="meta" style="margin:0 0 .375rem"><span class="badge">recommended</span></p>` : "",
+        recommended ? `<p class="meta" style="margin:0 0 .375rem"><span class="badge">Recommended</span></p>` : "",
         `<p class="consequence">${escape(option.consequence)}</p>`,
-        `<button type="submit">${escape(option.label)}${option.reversible ? "" : ` <span class="badge badge-overdue">irreversible</span>`}</button>`,
+        `<button type="submit">${escape(option.label)}${option.reversible ? "" : ` <span class="badge badge-overdue">Irreversible</span>`}</button>`,
         `<input type="text" name="note" placeholder="optional note — travels with this answer" aria-label="optional note">`,
         `</form>`,
       ].join("\n");
@@ -25794,7 +25801,7 @@ function decisionPage(
   const evidence =
     artifacts.length === 0
       ? ""
-      : `<div class="evidence"><strong>evidence</strong>` +
+      : `<div class="evidence"><strong>Evidence</strong>` +
         artifacts
           .map(
             artifact =>
@@ -25806,7 +25813,7 @@ function decisionPage(
 
   return screen(`decide \u00b7 ${taskId}`, [
     `<h1>${escape(taskId)} <span class="badge badge-${escape(decision.state)}">${escape(decision.state)}</span>${
-      isOverdue(decision, now) ? ` <span class="badge badge-overdue">overdue</span>` : ""
+      isOverdue(decision, now) ? ` <span class="badge badge-overdue">Overdue</span>` : ""
     }${decision.deadline === null ? "" : ` <span class="meta">deadline ${escape(decision.deadline)}</span>`}</h1>`,
     `<div class="recap">${escape(decision.recap)}</div>`,
     `<div class="question">${escape(decision.question)}</div>`,
