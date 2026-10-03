@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.9.16 — 2026-10-03
+
+- **Name your lead.** Settings → Lead takes a name and a short persona. The
+  lead uses them wherever it speaks.
+- **The lead knows who it's talking to.** Every turn it sees your first name,
+  today's date, the channel it's on, what needs you, and your projects by name
+  with their decisions.
+- **It checks before it speaks.** It says what it checked and marks guesses.
+  It searches project memory before recommending anything, and it checks an
+  integration before promising work that needs it.
+- **Questions with buttons.** When it needs an answer, it asks one question
+  with tap-to-answer options in the console, Telegram, Slack, Discord and
+  Teams.
+- **It keeps its promises.** "I'll tell you when the checks pass" is recorded
+  and reported once, on the chat where you asked. Corrections become a card
+  you confirm, and it remembers them from the next reply.
+- Accepting a result that doesn't match its report needs a reason, enforced by
+  the server. Every time on a page shows in your time zone.
+
 ## 0.9.15 — 2026-10-02
 
 - **Accept finishes the task.** One step, Accept and finish, after the

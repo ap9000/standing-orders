@@ -18,7 +18,8 @@ describe("cancellation floor", () => {
       if (!name.endsWith(".ts") || name.endsWith(".test.ts")) continue;
       const text = readFileSync(join(src, name), "utf8");
       let at = -1;
-      while ((at = text.indexOf("SET state = 'cancelled'", at + 1)) !== -1) hits.push(name);
+      // The floor is a task's: the lead's own promises (lead_commitment) close with their own cancelled state.
+      while ((at = text.indexOf("SET state = 'cancelled'", at + 1)) !== -1) if (!text.slice(Math.max(0, at - 40), at).includes("UPDATE lead_commitment")) hits.push(name);
     }
     expect(hits).toEqual(["store.ts"]);
   });
