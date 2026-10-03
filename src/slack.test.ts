@@ -15,7 +15,8 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { openStore, type Store } from "./store.js";
+import { MATE_ASK_TTL_MS, openStore, type Store } from "./store.js";
+import { chatAskButtons } from "./chat-ask.js";
 import { addApprover, propose, approve } from "./scope.js";
 import { SlackState, slackHash, type SlackContent } from "./slack-state.js";
 import {
@@ -1137,6 +1138,111 @@ describe("Slack shared chat", () => {
     await drain();
     expect(store.teammateQuestion(second)).toMatchObject({ state: "answered", choice: null, answer: "Refund $50 and send a coupon for the rest.", answeredVia: "slack" });
     expect(String(sends().at(-1)!.args.text)).toContain("It picks the card up again now.");
+  });
+
+  test("the lead's question arrives with its options and Something else; a tap sends the option as the owner's next message, once", async () => {
+    const buttonsOf = (call: { args: Record<string, unknown> }) =>
+      ((call.args.blocks as Array<{ type: string; elements?: Array<{ text: { text: string }; value?: string; action_id: string }> }>).find(block => block.type === "actions")?.elements ?? []);
+    const press = async (id: string, token: string, ts: string) => {
+      receiveSlack(state, ID, "interactive", { ...action(token, ts), message: {}, actions: [{ action_id: id, value: token, action_ts: `1789700001.${String(++serial).padStart(6, "0")}` }] }, now);
+      await processSlackEvent(options);
+      await drain();
+    };
+    const asked = () => {
+      const request = (runner as unknown as { mock: { calls: [{ history: { role: string; text?: string }[] }][] } }).mock.calls.at(-1)![0];
+      return String(request.history.filter((one) => one.role === "operator").at(-1)?.text);
+    };
+    answers.push(
+      { text: "", calls: [{ id: "q1", name: "ask_owner", args: { question: "Which page first?", options: ["Login", "Signup"] } }] },
+      { text: "One choice changes the plan." },
+    );
+    expect(receive("Fix the sign-in pages")).toBe(true);
+    await processSlackEvent(options);
+    await drain();
+    const question = sends().at(-1)!;
+    expect(String(question.args.text)).toContain("Which page first?");
+    const buttons = buttonsOf(question);
+    expect(buttons.map(one => one.text.text)).toEqual(["Login", "Signup", "Something else"]);
+    const askTs = String(state.db.prepare("SELECT message FROM slack_part WHERE json_extract(payload,'$.ask') IS NOT NULL ORDER BY id DESC LIMIT 1").get()!.message);
+    // Something else asks for words and keeps the buttons.
+    await press("toolroll_question_words", buttons[2]!.value!, askTs);
+    expect(String(sends().at(-1)!.args.text)).toContain("Type your answer here");
+    // A tap is the owner's next message: the lead reads "Login" as what they said.
+    const turns = (runner as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
+    answers.push({ text: "Starting with the login page." });
+    await press("toolroll_question_choice", buttons[0]!.value!, askTs);
+    expect(sends().some(one => one.method === "chat.update" && one.args.ts === askTs && String(one.args.text).includes("You chose: Login") && buttonsOf(one).length === 0)).toBe(true);
+    await processSlackEvent(options);
+    await drain();
+    expect((runner as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(turns + 1);
+    expect(asked()).toBe("Login");
+    expect(String(sends().at(-1)!.args.text)).toContain("Starting with the login page.");
+    // A second tap changes nothing.
+    await press("toolroll_question_choice", buttons[1]!.value!, askTs);
+    await processSlackEvent(options);
+    expect((runner as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(turns + 1);
+  });
+
+  test("the lead's question works in a thread of the owner's own chat, says expired when too old, and its buttons never block a purge", async () => {
+    const buttonsOf = (call: { args: Record<string, unknown> }) =>
+      ((call.args.blocks as Array<{ type: string; elements?: Array<{ text: { text: string }; value?: string; action_id: string }> }>).find(block => block.type === "actions")?.elements ?? []);
+    const THREAD = "1789699999.000001";
+    const press = async (token: string, ts: string) => {
+      receiveSlack(state, ID, "interactive", { ...action(token, ts), message: { thread_ts: THREAD }, actions: [{ action_id: "toolroll_question_choice", value: token, action_ts: `1789700001.${String(++serial).padStart(6, "0")}` }] }, now);
+      await processSlackEvent(options);
+      await drain();
+    };
+    const askPart = () => state.db.prepare("SELECT id,message FROM slack_part WHERE json_extract(payload,'$.ask') IS NOT NULL ORDER BY id DESC LIMIT 1").get()!;
+    // Asked in a thread: the buttons are drawn there, and a tap's answer comes back in the same thread.
+    answers.push(
+      { text: "", calls: [{ id: "q1", name: "ask_owner", args: { question: "Which page first?", options: ["Login", "Signup"] } }] },
+      { text: "One choice changes the plan." },
+    );
+    expect(receive("Fix the sign-in pages", { thread_ts: THREAD })).toBe(true);
+    await processSlackEvent(options);
+    await drain();
+    const question = sends().at(-1)!;
+    expect(question.args.thread_ts).toBe(THREAD);
+    const buttons = buttonsOf(question);
+    expect(buttons.map(one => one.text.text)).toEqual(["Login", "Signup", "Something else"]);
+    answers.push({ text: "Starting with the login page." });
+    await press(buttons[0]!.value!, String(askPart().message));
+    await processSlackEvent(options);
+    await drain();
+    expect(sends().at(-1)!.args).toMatchObject({ text: expect.stringContaining("Starting with the login page."), thread_ts: THREAD });
+    // A question left past its time: the tap says it expired, not that it was answered, and sends nothing to the lead.
+    answers.push(
+      { text: "", calls: [{ id: "q2", name: "ask_owner", args: { question: "Which test first?", options: ["Unit", "Browser"] } }] },
+      { text: "Pick one." },
+    );
+    expect(receive("Add tests", { ts: "1789700000.000201" })).toBe(true);
+    await processSlackEvent(options);
+    await drain();
+    const second = askPart();
+    const unit = buttonsOf(sends().at(-1)!)[0]!.value!;
+    const turns = (runner as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
+    now = new Date(now.getTime() + MATE_ASK_TTL_MS);
+    state.lease(ID.installation, "test", now);
+    await press(unit, String(second.message));
+    expect(sends().at(-1)!).toMatchObject({ method: "chat.postMessage", args: { text: "This question expired. If it still matters, send your answer as a message." } });
+    await processSlackEvent(options);
+    expect((runner as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(turns);
+    // Deleting a part (and the turn) is never blocked by its buttons.
+    expect(Number(state.db.prepare("SELECT COUNT(*) AS n FROM slack_ask_action WHERE part=?").get(Number(second.id))!.n)).toBe(3);
+    state.db.prepare("DELETE FROM slack_part WHERE id=?").run(Number(second.id));
+    expect(Number(state.db.prepare("SELECT COUNT(*) AS n FROM slack_ask_action WHERE part=?").get(Number(second.id))!.n)).toBe(0);
+  });
+
+  test("in a room the lead's question has no buttons: a tap there would not be the owner's own message", () => {
+    const binding = state.bindingFor(ID.installation, MEMBER)!;
+    state.enqueue({ id: "room-event", installation: ID.installation, binding: binding.id, kind: "message", channel: "CROOM", member: MEMBER, ts: TS, thread: TS, payload: JSON.stringify({ text: "hi" }), created: now.toISOString() });
+    state.plan("room-event", [{ text: "Which page first?", ask: { turn: 1, options: ["Login", "Signup"] } }], now);
+    const part = Number(state.db.prepare("SELECT id FROM slack_part WHERE event='room-event'").get()!.id);
+    expect(chatAskButtons(state, part, now)).toEqual([]);
+    state.enqueue({ id: "dm-event", installation: ID.installation, binding: binding.id, kind: "message", channel: CHANNEL, member: MEMBER, ts: TS, thread: TS, payload: JSON.stringify({ text: "hi" }), created: now.toISOString() });
+    state.plan("dm-event", [{ text: "Which page first?", ask: { turn: 1, options: ["Login", "Signup"] } }], now);
+    const own = Number(state.db.prepare("SELECT id FROM slack_part WHERE event='dm-event'").get()!.id);
+    expect(chatAskButtons(state, own, now).map(one => one.label)).toEqual(["Login", "Signup", "Something else"]);
   });
 
   test("a message to a teammate by name lands on its desk instead of the lead, and its answer comes back in Slack (v96)", async () => {

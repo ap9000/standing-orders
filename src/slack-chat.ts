@@ -1,5 +1,6 @@
 import { chatFlowButtons } from "./chat-flow.js";
 import { chatQuestionButtons } from "./teammate-question.js";
+import { chatAskButtons } from "./chat-ask.js";
 import { channelInbox } from "./chat-inbox.js";
 import { roomCommand } from "./chat-rooms.js";
 import {
@@ -514,6 +515,15 @@ export async function deliverSlackPart(
         // A teammate's question (v93): its options, then "Answer in words".
         ...(content.question
           ? chatQuestionButtons(state, row.id, now).map((one) => ({
+              type: "button",
+              text: { type: "plain_text", text: one.label },
+              action_id: one.words ? "toolroll_question_words" : "toolroll_question_choice",
+              value: one.token,
+            }))
+          : []),
+        // The lead's question to its owner: its options, then "Something else".
+        ...(content.ask
+          ? chatAskButtons(state, row.id, now).map((one) => ({
               type: "button",
               text: { type: "plain_text", text: one.label },
               action_id: one.words ? "toolroll_question_words" : "toolroll_question_choice",

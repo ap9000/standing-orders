@@ -28,6 +28,8 @@ const TOOL_LABELS: Record<string, string> = {
   get_flow_insights: "Looking at how the flows are doing",
   get_project_knowledge: "Reading project knowledge",
   search_project_memory: "Searching project memory",
+  get_integrations: "Checking integrations",
+  ask_owner: "Preparing a question",
   get_models: "Checking the models",
   list_tasks: "Listing tasks",
   get_task: "Reading the task",

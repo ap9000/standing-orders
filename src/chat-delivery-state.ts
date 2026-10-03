@@ -1,6 +1,6 @@
 /** Durable private-chat receipts. Each transport has its own tables and lease. */
 import { createHash, randomBytes } from "node:crypto";
-import type { Store } from "./store.js";
+import { MATE_ASK_TTL_MS, type Store } from "./store.js";
 
 const CHAT_SCHEMA = `
 CREATE TABLE IF NOT EXISTS chat_binding (
@@ -95,6 +95,15 @@ CREATE TABLE IF NOT EXISTS chat_question_prompt (
 );
 CREATE INDEX IF NOT EXISTS chat_question_prompt_open ON chat_question_prompt(binding, consumed);
 `;
+/** The lead's question to its owner (ask_owner) in the chat app: one button per option (choice is its index) and one for
+ * "Something else" (choice NULL). A tap sends the option as the owner's next message. Never in CHAT_TABLES. */
+const CHAT_ASK_SCHEMA = `
+CREATE TABLE IF NOT EXISTS chat_ask_action (
+ token TEXT PRIMARY KEY, part INTEGER NOT NULL REFERENCES chat_part(id) ON DELETE CASCADE,
+ turn INTEGER NOT NULL, choice INTEGER, expires TEXT NOT NULL, consumed TEXT
+);
+CREATE INDEX IF NOT EXISTS chat_ask_action_turn ON chat_ask_action(turn);
+`;
 const CHAT_TABLES = [
   "chat_binding",
   "chat_pair",
@@ -170,6 +179,8 @@ export type ChatContent = {
   flow?: { card: number; entry: number; actions: Array<"approve" | "edit" | "send-back"> };
   /** A teammate's question's buttons ride this part (v93): each option, then one to answer in words (choice null). */
   question?: { id: number; choices: Array<{ choice: string | null; label: string }> };
+  /** The lead's question to its owner rides this part: its options, then "Something else". */
+  ask?: { turn: number; options: string[] };
 };
 export const chatHash = (text: string): string =>
   createHash("sha256").update(text).digest("hex");
@@ -182,7 +193,7 @@ export class ChatState {
   prepare(sql: string) {
     return this.db.prepare(
       sql.replace(
-        /\bchat_(binding|pair|event|part|action|progress|runtime|room|meta|flow_action|flow_prompt|question_action|question_prompt)\b/g,
+        /\bchat_(binding|pair|event|part|action|progress|runtime|room|meta|flow_action|flow_prompt|question_action|question_prompt|ask_action)\b/g,
         `${this.channel}_$1`,
       ),
     );
@@ -448,6 +459,11 @@ export class ChatState {
             this.prepare("INSERT INTO chat_question_action(token,part,question,choice,expires) VALUES(?,?,?,?,?)").run(
               randomBytes(16).toString("hex"), Number(inserted.lastInsertRowid), part.question.id, one.choice,
               new Date(now.getTime() + 7 * 86_400_000).toISOString());
+        if (Number(inserted.changes) && part.ask)
+          for (const choice of [...part.ask.options.map((_, index) => index), null])
+            this.prepare("INSERT INTO chat_ask_action(token,part,turn,choice,expires) VALUES(?,?,?,?,?)").run(
+              randomBytes(16).toString("hex"), Number(inserted.lastInsertRowid), part.ask.turn, choice,
+              new Date(now.getTime() + MATE_ASK_TTL_MS).toISOString());
         if (Number(inserted.changes) && part.flow)
           for (const action of part.flow.actions)
             this.prepare("INSERT INTO chat_flow_action(token,part,card,entry,action,expires) VALUES(?,?,?,?,?,?)").run(
@@ -504,7 +520,7 @@ export class ChatState {
 }
 
 export const chatSchema = (channel: "slack" | "discord" | "teams"): string =>
-  (CHAT_SCHEMA + CHAT_ROOM_SCHEMA + CHAT_FLOW_SCHEMA + CHAT_QUESTION_SCHEMA).replaceAll("chat_", `${channel}_`);
+  (CHAT_SCHEMA + CHAT_ROOM_SCHEMA + CHAT_FLOW_SCHEMA + CHAT_QUESTION_SCHEMA + CHAT_ASK_SCHEMA).replaceAll("chat_", `${channel}_`);
 export const chatTables = (channel: "slack" | "discord" | "teams"): string[] =>
   CHAT_TABLES.map((name) => name.replace("chat_", `${channel}_`));
 export class ChatDeliveryError extends Error {

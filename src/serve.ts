@@ -254,7 +254,7 @@ import { dirname } from "node:path";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { loadOrCreateVapidKeys, validatePushEndpoint } from "./push.js";
 import { parseGithubRepo, previewGithubRepo, cloneGithubRepo, listGithubRepos, isLargeRepo, type ListOutcome } from "./onboard.js";
-import { verifiedAuthor, LEAD_THREAD, isDigestTime, type MateThreadScope } from "./store.js";
+import { verifiedAuthor, LEAD_THREAD, isDigestTime, MATE_ASK_OTHER, type MateAsk, type MateThreadScope } from "./store.js";
 import { digestTimes } from "./digest-times.js";
 import type { MateProgress } from "./mate-progress.js";
 import { updateRepos, addRepos, removeRepos } from "./repos.js";
@@ -3734,7 +3734,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       const fragments = known === version
         ? null
         : {
-            thread: mateThreadHtml({ ...rows, focusTask, csrf, now, problem: takeMateNote(csrf, session.id) }),
+            thread: mateThreadHtml({ ...rows, focusTask, csrf, now, problem: takeMateNote(csrf, session.id), chatProject }),
             after: mateAfterComposerHtml({ messages: rows.messages, pending: rows.pending, focusTask, csrf }),
             live: focusTask === null ? null : taskChatLiveRegion(focusTask, csrf, true, rows.pending !== null),
           };
@@ -4626,7 +4626,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
    * keeps only that task's coordinator cards; the mate's own thread is one
    * thread regardless of lens. */
   function mateConversationRows(who: Who & { via: "cookie" }, principal: VerifiedApprover, focusTask: TaskChatFocus | null, now: Date, chatProject: string | null = null): {
-    messages: MateMessage[]; proposals: MateProposal[]; decisions: Map<number, Decision>; coordinatorProposals: CoordinatorProposal[]; pending: MateTurn | null; recent: MateTurn[];
+    messages: MateMessage[]; proposals: MateProposal[]; decisions: Map<number, Decision>; coordinatorProposals: CoordinatorProposal[]; pending: MateTurn | null; recent: MateTurn[]; ask: MateAsk | null; asks: Map<number, MateAsk>;
   } {
     const allCoordinatorRows = store.listCoordinatorProposals({ repos: managedRepos(), states: ["pending", "confirmed", "refused"], limit: 30 });
     const coordinatorProposals = focusTask !== null ? allCoordinatorRows.filter(one => focusTask.family.versions.some(version => version.id === one.payload["task"]))
@@ -4636,8 +4636,16 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     // One reply runs at a time per person; this thread shows it only when
     // the reply is its own.
     const live = store.liveMateTurnFor(who.name);
+    const messages = store.listMateMessages(opened.thread.id, 40);
+    // The lead's question with buttons, while its reply is the last word in the thread.
+    const last = messages.at(-1);
+    const ask = last?.role === "assistant" && last.turn !== null && store.getMateTurn(last.turn)?.approver === who.name ? store.mateAskOpen(last.turn, now) : null;
+    // Answered questions stay readable above the answer; only their buttons go.
+    const asks = new Map(messages.flatMap(one => { const asked = one.role === "assistant" && one.turn !== null ? store.mateAsk(one.turn) : null; return asked === null ? [] : [[asked.turn, asked] as const]; }));
     return {
-      messages: store.listMateMessages(opened.thread.id, 40),
+      messages,
+      ask,
+      asks,
       proposals,
       decisions: decisionsFor(store, [...proposals, ...coordinatorProposals]),
       coordinatorProposals,
@@ -4704,7 +4712,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     const rows = mateConversationRows(who, principal, focusTask, now, chatProject);
     return {
       sessionId: session.id, user: session.approver, version: mateChatVersion({ ...rows, focusTask }),
-      messages: mateBrowserMessages(rows, who.session.csrf, back),
+      messages: mateBrowserMessages(rows, who.session.csrf, back, { task: focusTask?.id ?? null, project: chatProject }),
       pendingTurnId: rows.pending?.id ?? null, requestId: randomBytes(16).toString("hex"), maxChars: MATE_MESSAGE_MAX_CHARS,
       taskId: focusTask?.id ?? null, resultRunId, project: focusTask === null ? chatProject : null,
     };
@@ -18612,15 +18620,36 @@ type MateThreadRows = {
   recent: MateTurn[];
   /** Optional task lens into the same unified thread. */
   focusTask: TaskChatFocus | null;
+  /** The lead's open question to this reader, drawn as buttons under its reply. */
+  ask?: MateAsk | null;
+  /** Every question the lead asked in these messages, by turn: answered ones show their words without buttons. */
+  asks?: Map<number, MateAsk>;
 };
+
+/** The lead's question as buttons: each option sends itself as the next message (the same POST as a typed one);
+ * "Something else" moves to the composer. Nothing shows while a reply is running. */
+function mateAskHtml(ask: MateAsk, csrf: string, target: { task: string | null; project: string | null }, composer: string, open = true): string {
+  if (!open) return `<div class="so-owner-ask" data-ask="${ask.turn}"><p class="so-owner-ask-question"><strong>${escape(ask.question)}</strong></p></div>`;
+  const hidden = `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
+    (target.task !== null ? `<input type="hidden" name="task" value="${escape(target.task)}">` : target.project !== null ? `<input type="hidden" name="project" value="${escape(target.project)}">` : "");
+  return `<div class="so-owner-ask" data-ask="${ask.turn}"><p class="so-owner-ask-question"><strong>${escape(ask.question)}</strong></p>` +
+    `<div class="so-owner-ask-options" role="group" aria-label="Answer options">` +
+    ask.options.map(option => `<form method="post" action="/chat" class="inline">${hidden}<button type="submit" name="message" value="${escape(option)}" class="so-suggestion quiet">${escape(option)}</button></form>`).join("") +
+    `<label for="${escape(composer)}" class="so-suggestion so-owner-ask-other">${escape(MATE_ASK_OTHER)}</label></div></div>`;
+}
 
 /** The thread's messages as the React conversation renders them, each
  * with the proposal cards its turn produced; `back` is where a card's
  * confirm or dismiss returns. */
-function mateBrowserMessages(rows: Pick<MateThreadRows, "messages" | "proposals" | "decisions" | "pending">, csrf: string, back: string | null): import("./browser-workspace.js").BrowserMessage[] {
+function mateBrowserMessages(rows: Pick<MateThreadRows, "messages" | "proposals" | "decisions" | "pending" | "ask" | "asks">, csrf: string, back: string | null, target: { task: string | null; project: string | null } = { task: null, project: null }): import("./browser-workspace.js").BrowserMessage[] {
+  const open = rows.pending === null ? rows.ask?.turn ?? null : null;
+  const asked = (turn: number | null): string => {
+    const ask = turn === null ? undefined : rows.asks?.get(turn);
+    return ask === undefined ? "" : mateAskHtml(ask, csrf, target, target.task === null ? "lead-message" : "task-message", ask.turn === open);
+  };
   return rows.messages.map(message => ({
     id: message.id, role: message.role, text: message.text,
-    html: message.role === 'operator' ? `<p>${escape(message.text)}</p>` : renderChatText(message.text),
+    html: message.role === 'operator' ? `<p>${escape(message.text)}</p>` : renderChatText(message.text) + asked(message.turn),
     activity: message.activity, createdAt: message.createdAt,
     ...(() => {
       const parts = message.turn === null ? [] : rows.proposals.filter(one => one.turn === message.turn)
@@ -18644,6 +18673,7 @@ function mateChatVersion(rows: MateThreadRows): string {
     rows.coordinatorProposals.map(one => [one.id, one.state, one.outcome === null ? null : JSON.stringify(one.outcome)]),
     [...rows.decisions.values()].map(one => [one.id, one.state, one.choice ?? null]),
     rows.pending === null ? null : [rows.pending.id, rows.pending.steps],
+    rows.ask?.turn ?? null,
     rows.recent[0] === undefined ? null : [rows.recent[0].id, rows.recent[0].state, rows.recent[0].failureReason],
     focus === null
       ? null
@@ -18670,7 +18700,7 @@ function mateChatVersion(rows: MateThreadRows): string {
  * populated thread. Every child carries a stable `data-key` so the page
  * keeps an unchanged node (its open disclosures, its focus) and replaces
  * only what the server rendered differently. The composer is never here. */
-function mateThreadHtml(data: MateThreadRows & { csrf: string; now: Date; problem: string | null }): string {
+function mateThreadHtml(data: MateThreadRows & { csrf: string; now: Date; problem: string | null; chatProject?: string | null }): string {
   const returnTo = data.focusTask === null ? "/chat" : taskChatHref(data.focusTask.id);
   const parts: string[] = [];
   if (data.problem !== null) parts.push(`<div class="problem" data-key="said">${escape(data.problem)}</div>`);
@@ -18701,6 +18731,10 @@ function mateThreadHtml(data: MateThreadRows & { csrf: string; now: Date; proble
     parts.push(
       `<div class="msg mate" data-message-role="assistant" data-key="m${message.id}"${message.id === latestReply ? ' id="latest"' : ""}>` +
         renderChatText(message.text) +
+        (() => {
+          const ask = message.turn === null ? undefined : data.asks?.get(message.turn);
+          return ask === undefined ? "" : mateAskHtml(ask, data.csrf, { task: data.focusTask?.id ?? null, project: data.chatProject ?? null }, "chat-message", data.pending === null && data.ask?.turn === ask.turn);
+        })() +
         cards.map(one => mateProposalCard(one, data.csrf, inert, data.decisions.get(typeof one.payload["decision"] === "number" ? one.payload["decision"] : -1) ?? null, data.focusTask === null ? null : returnTo)).join("") +
         `<div class="chat-message-foot">${chatActivity(message.activity)}<time datetime="${escape(message.createdAt)}">${escape(relativeAge(message.createdAt, data.now))}</time></div>` +
         `</div>`,
@@ -18783,7 +18817,7 @@ function matePage(chrome: Chrome, data: MateThreadRows & {
   }
   const lastMessage = data.messages.at(-1);
   const latestReply = data.pending === null && lastMessage?.role === "assistant" ? lastMessage.id : null;
-  conversation.push(mateThreadHtml({ ...data, problem: null }));
+  conversation.push(mateThreadHtml({ ...data, problem: null, chatProject }));
   conversation.push(
     // The New update action (package 2): hidden until a live update lands
     // while the reader is above the latest message; a real button, so the
@@ -18795,7 +18829,7 @@ function matePage(chrome: Chrome, data: MateThreadRows & {
     data.focusTask === null ? "" : `<input type="hidden" name="task" value="${escape(data.focusTask.id)}">`,
     chatProject === null ? "" : `<input type="hidden" name="project" value="${escape(chatProject)}">`,
     data.resultRunId == null ? "" : `<input type="hidden" name="result" value="${data.resultRunId}">`,
-    `<label>Message<textarea name="message" rows="1" maxlength="${MATE_MESSAGE_MAX_CHARS}" placeholder="${data.focusTask !== null ? "Ask about this task…" : chatProject !== null ? `Ask about ${escape(projectName(chatProject))}…` : "Describe what you want done…"}"></textarea></label>`,
+    `<label>Message<textarea id="chat-message" name="message" rows="1" maxlength="${MATE_MESSAGE_MAX_CHARS}" placeholder="${data.focusTask !== null ? "Ask about this task…" : chatProject !== null ? `Ask about ${escape(projectName(chatProject))}…` : "Describe what you want done…"}"></textarea></label>`,
     `<button type="submit" aria-label="${data.pending === null ? "send message" : "wait for the current reply before sending"}"${data.pending === null ? "" : " disabled"}>Send</button>`,
     `</form>`,
     // Concise pass (2026-09-13): the status line speaks only when there is
@@ -18816,7 +18850,7 @@ function matePage(chrome: Chrome, data: MateThreadRows & {
       workspace: {
         conversation: {
           sessionId: data.session.id, user: data.session.approver, version: mateChatVersion(data),
-          messages: mateBrowserMessages(data, data.csrf, data.focusTask === null && chatProject === null ? null : returnTo),
+          messages: mateBrowserMessages(data, data.csrf, data.focusTask === null && chatProject === null ? null : returnTo, { task: data.focusTask?.id ?? null, project: chatProject }),
           pendingTurnId: data.pending?.id ?? null, requestId: randomBytes(16).toString('hex'), maxChars: MATE_MESSAGE_MAX_CHARS,
           taskId: data.focusTask?.id ?? null, resultRunId: data.resultRunId ?? null, project: chatProject,
         },

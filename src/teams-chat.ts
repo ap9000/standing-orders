@@ -1,6 +1,7 @@
 /** Microsoft Teams on the shared chat layer: activities in, Adaptive Cards
  * out, the same durable receipts, rooms and commands as every other channel. */
 import { chatQuestionButtons } from "./teammate-question.js";
+import { chatAskButtons } from "./chat-ask.js";
 import { ChatState, chatHash, type ChatContent, type ChatIdentity, type ChatPart } from "./chat-delivery-state.js";
 import { channelAccess, chatObject as object, planChatNotifications, planRoomMessages, processChatEvent, type ChatDeliveryOptions } from "./chat-delivery.js";
 import { roomCommand } from "./chat-rooms.js";
@@ -173,7 +174,9 @@ export async function deliverTeamsPart(options: TeamsChatOptions): Promise<boole
       const flow = content.flow ? chatFlowButtons(state, row.id, now).map(one => ({ type: "Action.Submit", title: one.label, data: { so: one.token }, ...(one.action === "approve" ? { style: "positive" } : {}) })) : [];
       // A teammate's question (v93): its options, then "Answer in words".
       const asked = content.question ? chatQuestionButtons(state, row.id, now).map(one => ({ type: "Action.Submit", title: one.label.slice(0, 80), data: { so: one.token } })) : [];
-      actions = [...flow, ...asked, ...openUrlAction(options.origin(), content.link), ...(content.also ?? []).flatMap(one => openUrlAction(options.origin(), one))];
+      // The lead's question to its owner: its options, then "Something else".
+      const owner = content.ask ? chatAskButtons(state, row.id, now).map(one => ({ type: "Action.Submit", title: one.label.slice(0, 80), data: { so: one.token } })) : [];
+      actions = [...flow, ...asked, ...owner, ...openUrlAction(options.origin(), content.link), ...(content.also ?? []).flatMap(one => openUrlAction(options.origin(), one))];
     }
     const target = content.edit ?? row.message;
     const body = actions.length || content.proposal ? teamsCard(text, actions) : { type: "message", text, textFormat: "plain" };

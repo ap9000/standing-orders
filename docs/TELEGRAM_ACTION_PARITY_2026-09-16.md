@@ -54,6 +54,8 @@ configuration and pairing. Slack transport tests also use scripted responses.
 | `commit_to` | direct | Records what the lead promised to follow up on (a task, attempt, check or time; 7 days at most). The follow pass says one line when it is met, in the shared conversation and on the chat the promise was made on. | lead promises (`lead-commitments.test.ts`) | none |
 | `release_commitment` | direct | Stops following up on one of the person's open promises, with the reason. | lead promises (`lead-commitments.test.ts`) | none |
 | `remember` | direct | Proposes a correction or lasting preference as a decision or project instruction card, through the shared confirm door. | remember cards (`lead-commitments.test.ts`) | none |
+| `get_integrations` | direct | Read during a turn: which chat apps, email, GitHub, project tools and monitoring are Connected, Not set up or Broken, as Settings → Integrations shows them. | integration status (`mate-lead-checks.test.ts`), same turn path | none |
+| `ask_owner` | direct | One question with 2-4 options and Something else, drawn as buttons under the reply; the tapped option is sent as the person's next message. | tap is the next message (`telegram-mate.test.ts`, `slack.test.ts`, `discord.test.ts`, `teams.test.ts`) | none |
 | `search_project_memory` | direct | Read during a turn: one search over decisions, references, lessons and the conversations the person may read. | project memory search (`project-memory.test.ts`), same turn path | none |
 | `list_tasks` | direct | Read during a turn. | engine read tools (`mate.test.ts`), same turn path | none |
 | `get_task` | direct | Read during a turn; a reply to a result message pins the exact execution. | reply-to-result test | none |

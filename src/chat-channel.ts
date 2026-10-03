@@ -178,7 +178,7 @@ export function mirrorToTaskChat(store: Store, who: VerifiedApprover, taskId: st
 
 /** The one short message a person gets when their question could not be answered. */
 export function couldNotAnswerText(reason: string): string {
-  return `I couldn't answer that just now: ${reason}. Ask again, or open the console.`;
+  return `I couldn't answer that just now: ${reason.replace(/\.$/, "")}. Ask again, or open the console.`;
 }
 
 export function tooLongText(length: number): string {
@@ -719,6 +719,8 @@ export const CHAT_ACTION_PARITY: Record<
   commit_to: { support: "direct", how: "Records what the lead promised to follow up on (a task, attempt, check or time; 7 days at most). The follow pass says one line when it is met, in the shared conversation and on the chat the promise was made on.", gap: null },
   release_commitment: { support: "direct", how: "Stops following up on one of the person's open promises, with the reason.", gap: null },
   remember: { support: "direct", how: "Proposes a correction or lasting preference as a decision or project instruction card, through the shared confirm door.", gap: null },
+  get_integrations: { support: "direct", how: "Read during a turn: which chat apps, email, GitHub, project tools and monitoring are Connected, Not set up or Broken, as Settings → Integrations shows them.", gap: null },
+  ask_owner: { support: "direct", how: "One question with 2-4 options and Something else, drawn as buttons under the reply; the tapped option is sent as the person's next message.", gap: null },
   search_project_memory: { support: "direct", how: "Read during a turn: one search over decisions, references, lessons and the conversations the person may read.", gap: null },
   list_tasks: { support: "direct", how: "Read during a turn.", gap: null },
   get_task: {

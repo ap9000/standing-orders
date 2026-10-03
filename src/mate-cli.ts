@@ -10,7 +10,7 @@ import { configureLeadFollow, leadFollowStatus } from './lead-follow.js';
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { ChatConfig, DirectChatProviderId, MateProposal, Store, SubscriptionChatProviderId } from "./store.js";
+import { MATE_ASK_OTHER, type ChatConfig, type DirectChatProviderId, type MateProposal, type Store, type SubscriptionChatProviderId } from "./store.js";
 import { CHAT_KEY_ENV, credentialKeyOf, isDirectChatProvider, priceForConfig, subscriptionCredentialKey } from "./converse.js";
 import { verifyApproverByPassword, type VerifiedApprover } from "./principal.js";
 import { runMateTurn, type MateTurnOutcome } from "./mate.js";
@@ -273,9 +273,13 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
       return;
     }
     if (outcome.ok) {
-      emit({ ok: true, turn: outcome.turn, reply: outcome.reply, activity: outcome.activity, steps: outcome.steps, settledMicrousd: outcome.settledMicrousd, proposals: pendingProposals().map(one => ({ id: one.id, ordinal: ordinalOf(one), kind: one.kind, payload: one.payload })) });
+      const ask = store.mateAsk(outcome.turn);
+      emit({ ok: true, turn: outcome.turn, reply: outcome.reply, activity: outcome.activity, steps: outcome.steps, settledMicrousd: outcome.settledMicrousd, proposals: pendingProposals().map(one => ({ id: one.id, ordinal: ordinalOf(one), kind: one.kind, payload: one.payload })),
+        ...(ask === null ? {} : { ask: { question: ask.question, options: [...ask.options, MATE_ASK_OTHER] } }) });
       say(`  ${outcome.activity}`);
       say(outcome.reply);
+      // The lead's question: the terminal has no buttons, so the options are listed to type back.
+      if (ask !== null) say(`${ask.question}\n${ask.options.map(one => `  · ${one}`).join("\n")}\n  · ${MATE_ASK_OTHER} (type your answer)`);
       printProposals();
       return;
     }
