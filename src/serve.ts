@@ -288,7 +288,7 @@ import { tally, spendLine, runCostWords } from "./summary.js";
 import { classify, holdOwnerWords, attentionCardForUnverifiedDone } from "./board.js";
 import type { BoardCard } from "./board.js";
 import { approveRoutine, describeSchedule, fireRoutine, parseSchedule, refreshRoutineAgents, routineAgentsState, routineDigestOf, validateRoutineTerms, ROUTINE_NAME, type RoutineTerms } from "./routine.js";
-import { effectivePrimary, isMessagingChannel, savePrimary } from "./webhooks.js";
+import { effectivePrimary, isMessagingChannel, loadConsoleUrl, savePrimary } from "./webhooks.js";
 import { resolvePhaseAgent, resolveRoutineAuthority, INSTALLATION_SCOPE, routeOfTask, agentChoicesFor, type AgentChoice } from "./agentconfig.js";
 import { isRiskLevel, projectRoute, riskTitle, riskConsequence, chosenWords, agentsSummary, postureWords, RISK_CHOICES, RISK_LEVELS, PHASES as ROUTE_PHASES, type PhaseRoute, type RouteProjection, type RouteOverride, type RouteStamp, type RiskLevel } from "./phase-routing.js";
 import { ALL_CREDENTIAL_ENV, isProviderId, reportsCost, PROVIDER_IDS, validModelId, validateSpec, type Phase, type ProviderId } from "./provider.js";
@@ -1737,6 +1737,8 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       actor: who.name,
       csrf: who.via === "cookie" ? who.session.csrf : "",
       returnTo: safeReturn(url.pathname + url.search),
+      // This console's own addresses: a lead reply's links there read as "the task", "the result", "Settings → Lead".
+      appOrigins: [consoleOrigin(request.headers.host), publicOrigin?.origin ?? null, options.configDir === undefined ? null : loadConsoleUrl(process.env, options.configDir)],
       // Every signed-in page shares the workspace shell; pages showing a one-time secret opt out (forceSensitive).
       browser: who.via === 'cookie',
       // v100: signed in with the identity provider: its label, and whether it checked them recently enough to stand in for a password.
@@ -17901,7 +17903,7 @@ function chatHeading(copy: string, projectCount: number, showProjectToggle = tru
  * presentation only—never executable HTML. */
 function renderChatText(raw: string, asked?: string): string {
   const inline = replyHtmlInline;
-  const text = shapeReply(raw, asked === undefined ? {} : { asked });
+  const text = shapeReply(raw, { appOrigin: requestContext.getStore()?.appOrigins ?? null, ...(asked === undefined ? {} : { asked }) });
   const lines = text.replace(/\r\n?/g, "\n").split("\n");
   const out: string[] = [];
   let paragraph: string[] = [];
@@ -20519,7 +20521,7 @@ function accentHead(): string {
   const accent = requestContext.getStore()?.accent ?? null;
   return accent === null ? "" : `<style data-accent="${accent}">${accentStyle(accent)}</style>`;
 }
-const requestContext = new AsyncLocalStorage<{ sso?: { label: string; fresh: boolean } | undefined; refusal?: (response: ServerResponse, status: number, body: string) => void; theme?: "light" | "dark" | null; accent?: string | null; updateSeen?: string | null; csrf: string; returnTo: string; actor?: string; createdTask?: string; browser?: boolean; workspaceRead?: boolean; workspaceRequest?: string | null; workCounts?: ReturnType<typeof workCountsByProject>; workCrew?: { project: string | null; page: WorkIndexPage }; workspaceValidator?: { key: string; revision: string; expiresAt: number; etag: string } }>();
+const requestContext = new AsyncLocalStorage<{ appOrigins?: readonly (string | null)[]; sso?: { label: string; fresh: boolean } | undefined; refusal?: (response: ServerResponse, status: number, body: string) => void; theme?: "light" | "dark" | null; accent?: string | null; updateSeen?: string | null; csrf: string; returnTo: string; actor?: string; createdTask?: string; browser?: boolean; workspaceRead?: boolean; workspaceRequest?: string | null; workCounts?: ReturnType<typeof workCountsByProject>; workCrew?: { project: string | null; page: WorkIndexPage }; workspaceValidator?: { key: string; revision: string; expiresAt: number; etag: string } }>();
 
 /** A same-site path or "/": never a scheme, a host, or a protocol-relative road. */
 /** The words a result page shows for a refusal its own form led to, by the fixed code a redirect carries. */

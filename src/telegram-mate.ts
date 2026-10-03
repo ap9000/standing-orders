@@ -23,13 +23,13 @@ export { channelRepos as telegramConversationRepos, resolveChannelMate as resolv
  * the console and CLI state), and the door re-proves everything again.
  */
 import { createHash, randomBytes } from "node:crypto";
-import { MATE_MESSAGE_MAX_CHARS, mateFailureText, runMateTurn } from "./mate.js";
+import { MATE_MESSAGE_MAX_CHARS, mateFailureText, runMateTurn, type MateChannelProblem } from "./mate.js";
 import { confirmMateProposal, dismissMateProposal, type DoorOptions, type DoorOutcome } from "./mate-doors.js";
 import { ceilingDigestOf, verifyApproverStanding } from "./principal.js";
 import { MATE_ASK_OTHER, type MateAsk, type MateProposal, type Store, type TelegramBinding, type TelegramConversation } from "./store.js";
 import type { SubscriptionMateRunner } from "./subscription-chat.js";
 import { phoneText } from "./telegram-status.js";
-import { shapeReply, telegramReply } from "./reply-shape.js";
+import { shapeReplyParts, telegramReply } from "./reply-shape.js";
 import { WARM_EMOJI, warmTurn } from "./chat-warmth.js";
 import { TeamLeads } from "./team-leads.js";
 import { chatResultHref } from "./chat-controls.js";
@@ -45,7 +45,7 @@ export const CONVERSATION_MAX_AGE_MS = 10 * 60_000;
 export const CARD_TTL_MS = 24 * 3_600_000;
 export const CHALLENGE_TTL_MS = 10 * 60_000;
 /** Telegram's own message ceiling, with room for our part headers (the same bound telegram.ts splits at). */
-const PART_CAP = 3_900;
+export const PART_CAP = 3_900;
 
 export type TelegramConversationOptions = {
   /** Where evidence lives — the same root the console and CLI read results from. */
@@ -633,7 +633,7 @@ async function runTelegramConversation(row: TelegramConversation, args: TurnArgs
     try {
       return store.transact(() => {
         const now = clock();
-        const parts: Parameters<Store["planTelegramConversationParts"]>[3][number][] = splitParts(shapeReply(reply, { asked: row.text, appOrigin: options.phoneOrigin?.() ?? null })).map((text, index) => ({ kind: "reply", text, replyTo: index === 0 ? row.messageId : null }));
+        const parts: Parameters<Store["planTelegramConversationParts"]>[3][number][] = shapeReplyParts(reply, PART_CAP, { asked: row.text, appOrigin: options.phoneOrigin?.() ?? null }).map((text, index) => ({ kind: "reply", text, replyTo: index === 0 ? row.messageId : null }));
         // The lead's question to its owner: one tap per option, then "Something else".
         const ask = store.mateAsk(turn);
         if (ask !== null) parts.push({ kind: "reply", text: phoneText(ask.question, 1_000), keyboard: askKeyboard(ask) });
@@ -713,9 +713,14 @@ async function runTelegramConversation(row: TelegramConversation, args: TurnArgs
     return;
   }
   const { who, session, thread, config } = resolved;
-  const revalidate = async (): Promise<{ ok: true } | { ok: false; reason: string }> => {
+  const revalidate = async (): Promise<{ ok: true } | { ok: false; reason: MateChannelProblem }> => {
     const problem = await telegramChannelProblem(store, { botId, bindingId: binding.id, approverGeneration: binding.approverGeneration, repos: who.repos }, readProjects);
-    return problem === null ? { ok: true } : { ok: false, reason: problem };
+    if (problem === null) return { ok: true };
+    const reason: MateChannelProblem = problem === UNREADABLE_REGISTRY ? "projects-unreadable"
+      : problem === "this chat is no longer paired" ? "unpaired"
+        : problem === "the paired account is no longer an approver" ? "not-approver"
+          : problem === "the connected projects changed" ? "projects-changed" : "access-changed";
+    return { ok: false, reason };
   };
   // Bound BEFORE the dispatch, under the claim: a crash from here on finds
   // the receipt in this session, not in whichever session is live later.

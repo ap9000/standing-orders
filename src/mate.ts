@@ -107,8 +107,11 @@ export type MateTurnInput = {
    * generation alone cannot see an unpairing or a project removed from
    * enrollment. A refusal ends the turn with nothing kept.
    */
-  revalidate?: () => Promise<{ ok: true } | { ok: false; reason: string }>;
+  revalidate?: () => Promise<{ ok: true } | { ok: false; reason: MateChannelProblem }>;
 };
+
+/** Why a chat's standing changed under a turn: each has its own plain words (MATE_CHANNEL_COPY). */
+export type MateChannelProblem = "unpaired" | "not-approver" | "projects-changed" | "projects-unreadable" | "member-changed" | "access-changed";
 
 export type MateRefusal =
   | "empty-message"
@@ -160,6 +163,16 @@ export const MATE_REFUSAL_COPY: Record<MateRefusal, string> = {
   "invalid-request": "This message couldn't be matched to your conversation. Reload the conversation, then send it again.",
   "request-changed": "That send was already received with different text or task context. Reload the conversation before sending a new message.",
   channel: "This conversation's connection changed, so the message wasn't sent. Reconnect it, then send again.",
+};
+
+/** A turn stopped because its chat's standing changed: what happened, what it means, one next step. */
+export const MATE_CHANNEL_COPY: Record<MateChannelProblem, string> = {
+  unpaired: "This chat is no longer connected to your account, so the reply was stopped. Nothing it proposed was kept. Connect the chat again in Settings, then send your message again.",
+  "not-approver": "Your account can no longer approve work here, so the reply was stopped. Nothing it proposed was kept. Ask an owner to restore your access, then send your message again.",
+  "projects-changed": "The projects this chat can see changed while the lead was answering, so the reply was stopped. Nothing it proposed was kept. Send your message again.",
+  "projects-unreadable": "Your project list couldn't be read just now, so the reply was stopped. Nothing it proposed was kept. Send your message again in a minute.",
+  "member-changed": "Your account in this chat app no longer has access, so the reply was stopped. Nothing it proposed was kept. Ask the app's admin to add you back, then send your message again.",
+  "access-changed": "This chat's access changed while the lead was answering, so the reply was stopped. Nothing it proposed was kept. Reconnect the chat, then send your message again.",
 };
 
 /** Why a reply did not finish, in the same three parts: what happened, what it means, one next step. */
@@ -390,9 +403,9 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
   };
   // The channel lookup can await external state. Re-read all local authority
   // AFTER it resolves, immediately before sending context or using a tool.
-  const guard = (channel: { ok: true } | { ok: false; reason: string }): MateTurnOutcome | null => {
+  const guard = (channel: { ok: true } | { ok: false; reason: MateChannelProblem }): MateTurnOutcome | null => {
     if (!stillOurs()) return { ok: false, turn: turnId, failed: "superseded", message: MATE_FAILURE_COPY.stopped, unknownSpend: false };
-    if (!channel.ok) return fail("revoked", `This chat's connection changed (${channel.reason}), so the reply was stopped. Nothing it proposed was kept. Reconnect the chat, then send your message again.`, false);
+    if (!channel.ok) return fail("revoked", MATE_CHANNEL_COPY[channel.reason] ?? MATE_CHANNEL_COPY["access-changed"], false);
     const standing = reproveApprover(store, who);
     const liveSession = store.getMateSession(session.id);
     const liveThread = store.getMateThread(thread.id);

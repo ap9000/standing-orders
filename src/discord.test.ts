@@ -422,6 +422,20 @@ test("the lead's voice in Discord: a tool turn gets one 👍 on the owner's mess
   await expect(discordApi(TOKEN, fetcher)("PUT", `/channels/${CHANNEL}/messages/${body.id}/reactions/%F0%9F%92%A9/@me`)).rejects.toThrow("Invalid Discord request");
 });
 
+test("a long reply is split as written before it is shaped: the link that straddles a part's limit arrives whole, named, in one part", async () => {
+  answers.push({ text: `${"word ".repeat(355)}**Ready** see https://console.example/chat?task=payout now. ${"more ".repeat(100)}` });
+  receive("tell me everything");
+  await processDiscordEvent(options);
+  await drain();
+  const descriptions = sends().filter((c) => c.path === `/channels/${CHANNEL}/messages`).map((c) => String(c.body.embeds?.[0]?.description ?? ""));
+  expect(descriptions.length).toBeGreaterThan(1);
+  for (const one of descriptions) {
+    expect(one.length).toBeLessThanOrEqual(1800);
+    expect(one.split("**").length % 2).toBe(1);
+  }
+  expect(descriptions.filter((one) => one.includes("[the task](https://console.example/chat?task=payout)"))).toHaveLength(1);
+});
+
 test("replayed DM creates one model turn and lost send receipt reconciles by nonce", async () => {
   const body = message("What needs my attention?");
   answers.push({ text: "One result needs review." });

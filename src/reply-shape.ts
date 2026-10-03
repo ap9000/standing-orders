@@ -7,7 +7,8 @@
  * - Markdown headers become plain lines.
  * - Bold stays on at most three short anchors; the rest is plain.
  * - Bare URLs become labelled links, named from their target: "the task", "the result", "Settings → Lead", else the host.
- * - Internal ids (run #12, digests, r1-style project ids) are removed unless the owner asked for them.
+ * - Internal ids (run #12, digests, r1-style project ids) are removed unless the owner asked for them. When a reply names
+ *   several of one kind (two runs, two projects), they stay: two items must never read the same.
  * - Runs of blank lines collapse to one.
  * Code (inline or fenced) is left exactly as written.
  */
@@ -16,9 +17,10 @@ export type ReplyChannel = "console" | "terminal" | "telegram" | "slack" | "disc
 export type ShapeOptions = {
   /** The owner's message this reply answers: when it asks for ids, the ids stay. */
   asked?: string;
-  /** This app's own https origin. Only a link there is named as the app's page ("the task"); every other link is named by
-   * its real host, whatever label the model wrote, so a reply can never dress a foreign link up as ours. */
-  appOrigin?: string | null;
+  /** This app's own origin (or origins: the console's address and its public one). Only a link there is named as the
+   * app's page ("the task"); every other link is named by its real host, whatever label the model wrote, so a reply can
+   * never dress a foreign link up as ours. */
+  appOrigin?: string | readonly (string | null)[] | null;
 };
 
 export const BOLD_ANCHORS = 3;
@@ -37,13 +39,19 @@ export function askedForIds(asked: string | undefined): boolean {
 }
 
 /** Is this link on the app's own origin? Without a known origin, nothing is. */
-function ownLink(url: string, appOrigin: string | null | undefined): boolean {
+function ownLink(url: string, appOrigin: ShapeOptions["appOrigin"]): boolean {
   if (appOrigin === null || appOrigin === undefined) return false;
-  try { return new URL(url).origin === new URL(appOrigin).origin; } catch { return false; }
+  const origins = typeof appOrigin === "string" ? [appOrigin] : appOrigin;
+  let target: string;
+  try { target = new URL(url).origin; } catch { return false; }
+  return origins.some(origin => {
+    if (origin === null || origin === "") return false;
+    try { return new URL(origin).origin === target; } catch { return false; }
+  });
 }
 
 /** What a link is called, from where it goes: the app's own task, result and settings pages by name (only on `appOrigin`); anything else by host. */
-export function linkLabel(url: string, appOrigin?: string | null): string {
+export function linkLabel(url: string, appOrigin?: ShapeOptions["appOrigin"]): string {
   let parsed: URL;
   try { parsed = new URL(url); } catch { return url; }
   if (!ownLink(url, appOrigin)) return parsed.hostname.replace(/^www\./, "");
@@ -71,31 +79,57 @@ function theRun(match: string): string {
   return /^[A-Z]/.test(match) ? "The run" : "the run";
 }
 
-function dropIds(text: string): string {
-  return text
-    // "(run #12)", "(r1)", "(digest 4f2a…)" — an aside that only carries the id goes entirely.
-    .replace(/[ \t]*\((?:run\s*#\s*\d+|turn\s*#\s*\d+|r\d{1,3}|(?:digest|sha(?:256)?|hash)?[\s:=]*[0-9a-f]{12,64})\)/gi, "")
+type IdKind = "run" | "project" | "digest";
+const RUN_ID = /\b(run|turn)\s*#\s*(\d+)\b/gi;
+const PROJECT_ID = /(?:^|[\s(])(r\d{1,3})\b(?![-\w/]|\.\w)/g;
+const NAMED_DIGEST = /\b(?:digest|sha(?:256)?|hash|commit|revision|build)\b[ \t:=]*\b((?=[0-9a-f]*\d)[0-9a-f]{7,64})\b/gi;
+const BARE_DIGEST = /\b((?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{16,64})\b/g;
+
+/** The kinds of id a reply names more than one of: those stay, so two runs (or projects, or digests) never read the same. */
+function severalIds(text: string): Set<IdKind> {
+  const distinct = (pattern: RegExp, key: (match: RegExpMatchArray) => string): number =>
+    new Set([...text.matchAll(pattern)].map(key)).size;
+  const several = new Set<IdKind>();
+  if (distinct(RUN_ID, one => `${one[1]!.toLowerCase()}${one[2]}`) > 1) several.add("run");
+  if (distinct(PROJECT_ID, one => one[1]!.toLowerCase()) > 1) several.add("project");
+  const digests = new Set([...text.matchAll(NAMED_DIGEST), ...text.matchAll(BARE_DIGEST)].map(one => one[1]!.toLowerCase()));
+  if (digests.size > 1) several.add("digest");
+  return several;
+}
+
+function dropIds(text: string, keep: Set<IdKind>): string {
+  let body = text;
+  // "(run #12)", "(r1)", "(digest 4f2a…)" — an aside that only carries the id goes entirely.
+  if (!keep.has("run")) body = body
+    .replace(/[ \t]*\((?:run|turn)\s*#\s*\d+\)/gi, "")
     // "the run #12", "run #12" → "the run".
-    .replace(/\b(?:the\s+)?run\s*#\s*\d+\b/gi, theRun)
+    .replace(/\b(?:the\s+)?run\s*#\s*\d+\b/gi, theRun);
+  if (!keep.has("digest")) body = body
+    .replace(/[ \t]*\((?:(?:digest|sha(?:256)?|hash)?[\s:=]*[0-9a-f]{12,64})\)/gi, "")
     // "digest 4f2a…", "commit 4f2a…" — the thing stays named, its value goes: "the digest".
     .replace(/\b(?:the\s+)?(digest|sha(?:256)?|hash|commit|revision|build)\b[ \t:=]*\b(?=[0-9a-f]*\d)[0-9a-f]{7,64}\b/gi,
       (match: string, noun: string) => `${/^[A-Z]/.test(match) ? "The" : "the"} ${noun.toLowerCase()}`)
     // A bare long hex value with digits and letters is a digest.
-    .replace(/[ \t]*\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{16,64}\b/g, "")
+    .replace(/[ \t]*\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{16,64}\b/g, "");
+  if (!keep.has("project")) body = body
+    .replace(/[ \t]*\(r\d{1,3}\)/gi, "")
     // "project r1", "r1" → "the project".
     .replace(/\b(?:the\s+)?project\s+r\d{1,3}\b(?![-\w/]|\.\w)/gi, match => /^[A-Z]/.test(match) ? "The project" : "the project")
-    .replace(/(^|[\s(])r\d{1,3}\b(?![-\w/]|\.\w)/g, (_, before: string) => `${before}the project`)
-    // Tidy what a removal left behind.
+    .replace(/(^|[\s(])r\d{1,3}\b(?![-\w/]|\.\w)/g, (_, before: string) => `${before}the project`);
+  // Tidy what a removal left behind.
+  return body
     .replace(/[ \t]+([,.;:!?)])/g, "$1")
     .replace(/[ \t]{2,}/g, " ");
 }
 
-function limitBold(text: string): string {
-  let kept = 0;
+/** What shaping one part of a reply shares with the rest: the bold anchors left, and which ids the whole reply keeps. */
+type ShapeState = { boldLeft: number; keepIds: Set<IdKind> | "all" };
+
+function limitBold(text: string, state: ShapeState): string {
   const anchor = (inner: string): string => {
     const words = inner.trim();
-    if (words !== "" && words.length <= BOLD_ANCHOR_CHARS && kept < BOLD_ANCHORS) {
-      kept++;
+    if (words !== "" && words.length <= BOLD_ANCHOR_CHARS && state.boldLeft > 0) {
+      state.boldLeft--;
       return `**${words}**`;
     }
     return inner;
@@ -106,14 +140,10 @@ function limitBold(text: string): string {
     .replace(/(^|[^*\w])\*(?![\s*])([^*\n]*?[^\s*])\*(?![*\w])/g, "$1$2");
 }
 
-/**
- * The canonical shaped reply: plain lines, at most three bold anchors, labelled links, no internal ids unless asked,
- * single blank lines. Idempotent: shaping a shaped reply changes nothing.
- */
-export function shapeReply(text: string, options: ShapeOptions = {}): string {
+/** Code and links held aside so no rule rewrites inside them; a bare URL is labelled as it is held. */
+function holdAside(text: string, options: ShapeOptions): { body: string; held: string[] } {
   const held: string[] = [];
-  // Code and links are held aside so no rule rewrites inside them; a bare URL is labelled as it is held.
-  let body = text.replace(/\r\n?/g, "\n").replace(PROTECTED, (match: string) => {
+  const body = text.replace(/\r\n?/g, "\n").replace(PROTECTED, (match: string) => {
     if (match.startsWith("`")) { held.push(match); return HOLD(held.length - 1); }
     if (match.startsWith("[")) {
       LINK.lastIndex = 0;
@@ -129,6 +159,17 @@ export function shapeReply(text: string, options: ShapeOptions = {}): string {
     held.push(`[${linkLabel(url, options.appOrigin)}](${url})`);
     return HOLD(held.length - 1) + rest;
   });
+  return { body, held };
+}
+
+function stateFor(text: string, options: ShapeOptions): ShapeState {
+  return { boldLeft: BOLD_ANCHORS, keepIds: askedForIds(options.asked) ? "all" : severalIds(holdAside(text, options).body) };
+}
+
+function shapeWith(text: string, options: ShapeOptions, state: ShapeState): string {
+  const aside = holdAside(text, options);
+  const held = aside.held;
+  let body = aside.body;
   // Headers become plain lines: ATX ("## Next steps") and setext underlines.
   body = body
     .replace(/^[ \t]{0,3}#{1,6}[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$/gm, "$1")
@@ -136,13 +177,77 @@ export function shapeReply(text: string, options: ShapeOptions = {}): string {
     .replace(/^([^\n]*\S[^\n]*)\n[ \t]{0,3}=+[ \t]*$/gm, "$1")
     // A "* " bullet reads the same as "- ", and never as emphasis.
     .replace(/^([ \t]*)\*[ \t]+/gm, "$1- ");
-  body = limitBold(body);
-  if (!askedForIds(options.asked)) body = dropIds(body);
+  body = limitBold(body, state);
+  if (state.keepIds !== "all") body = dropIds(body, state.keepIds);
   body = body
     .split("\n").map(line => line.replace(/[ \t]+$/, "")).join("\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
   return body.replace(/\u0000(\d+)\u0000/g, (_, index: string) => held[Number(index)] ?? "");
+}
+
+/**
+ * The canonical shaped reply: plain lines, at most three bold anchors, labelled links, no internal ids unless asked
+ * (or unless several of a kind would otherwise read the same), single blank lines. Idempotent: shaping a shaped reply
+ * changes nothing.
+ */
+export function shapeReply(text: string, options: ShapeOptions = {}): string {
+  return shapeWith(text, options, stateFor(text, options));
+}
+
+/** Where a long reply may be cut: never inside code, a link, a URL or a bold anchor; best at a paragraph, then a line, then a space. */
+function cutAt(text: string, from: number, size: number): number {
+  const limit = from + size;
+  if (limit >= text.length) return text.length;
+  const tokens = [...text.matchAll(new RegExp(String.raw`${PROTECTED.source}|\*\*[^*\n]+?\*\*`, "g"))]
+    .map(one => ({ start: one.index ?? 0, end: (one.index ?? 0) + one[0].length }));
+  const inside = (at: number): boolean => tokens.some(token => token.start < at && at < token.end);
+  for (const gap of [/\n\n/g, /\n/g, /[ \t]/g]) {
+    let best = -1;
+    for (const one of text.slice(from, limit).matchAll(gap)) {
+      const at = from + (one.index ?? 0) + one[0].length;
+      if (at > from && at <= limit && !inside(at)) best = at;
+    }
+    if (best > from) return best;
+  }
+  // No gap: cut before the token that crosses the limit, else at the limit itself (a token longer than a part).
+  const crossing = tokens.find(token => token.start < limit && limit < token.end);
+  let end = crossing !== undefined && crossing.start > from ? crossing.start : limit;
+  if (/[\uD800-\uDBFF]/.test(text[end - 1]!)) end--;
+  return end;
+}
+
+/**
+ * A long reply split into parts of at most `size` characters, then each part shaped: the cut is made on the reply as
+ * written, at a paragraph or line where possible and never inside code, a link or a bold anchor, so no part carries
+ * half of one. The parts share one bold budget and one rule for ids, as if the reply were shaped whole.
+ */
+export function shapeReplyParts(text: string, size: number, options: ShapeOptions = {}): string[] {
+  const state = stateFor(text, options);
+  const normal = text.replace(/\r\n?/g, "\n");
+  const raw: string[] = [];
+  for (let at = 0; at < normal.length;) {
+    const end = cutAt(normal, at, size);
+    raw.push(normal.slice(at, end));
+    at = end;
+  }
+  const parts: string[] = [];
+  while (raw.length > 0) {
+    const part = raw.shift()!;
+    const before = state.boldLeft;
+    const shaped = shapeWith(part, options, state);
+    // A labelled link can lengthen a part: cut that part again, smaller, and shape the pieces.
+    if (shaped.length > size && part.length > 1) {
+      state.boldLeft = before;
+      const smaller = Math.max(1, Math.floor(part.length * size / shaped.length) - 1);
+      const pieces: string[] = [];
+      for (let at = 0; at < part.length;) { const end = cutAt(part, at, smaller); pieces.push(part.slice(at, end)); at = end; }
+      raw.unshift(...pieces);
+      continue;
+    }
+    if (shaped !== "") parts.push(shaped);
+  }
+  return parts;
 }
 
 export type ReplyPiece =
@@ -243,23 +348,68 @@ export function voiceReply(text: string, channel: ReplyChannel, options: ShapeOp
 // ---- deliverables: a reply never claims an attachment the turn did not attach ----------------------------------
 
 const DETERMINER = String.raw`(?:(?:the|a|an|your|my|this|that|these|those|both|two|three|\d+|new|latest|full|updated|requested|fresh|final)\s+){0,2}`;
-const DELIVERABLE = String.raw`(?:screenshots?|screen\s?shots?|images?|pictures?|photos?|files?|logs?|reports?|pdfs?|diffs?|documents?|docs?|links?|recordings?|videos?|csvs?|spreadsheets?|zips?|attachments?)`;
+/** Things that can only arrive attached: a reply's text can never be them. */
+const ATTACHMENT_ONLY = String.raw`(?:screenshots?|screen\s?shots?|images?|pictures?|photos?|recordings?|videos?|pdfs?|zips?|attachments?|spreadsheets?|csvs?)`;
+/** Things a reply can also list in its text (file names, log lines, a report's points). */
+const LISTABLE = String.raw`(?:files?|logs?|reports?|diffs?|documents?|links?)`;
+const NOUN = String.raw`(?:${ATTACHMENT_ONLY}|${LISTABLE})`;
+const SEND = String.raw`(?:\bi(?:'ve|’ve|\s+have)\s+(?:just\s+)?(?:attached|included|shared|uploaded|sent|enclosed)|\bi(?:'m|’m|\s+am)\s+(?:now\s+)?(?:attaching|sending|sharing|uploading|enclosing)|\bi(?:'ll|’ll|\s+will)\s+(?:now\s+)?(?:attach|send|share|upload|enclose)|^\s*(?:attaching|sending|sharing|uploading|enclosing))\s+(?:you\s+)?`;
+/** A claim is an attachment noun plus a send verb, in one sentence. */
 const CLAIMS = [
-  // "Here's the screenshot", "Attached is the log", "Below are the files".
-  new RegExp(String.raw`\b(?:here(?:'s|’s|\s+is|\s+are)|attached\s+(?:is|are)|below\s+(?:is|are))\s+${DETERMINER}${DELIVERABLE}\b`, "i"),
   // "I've attached the report", "I'm sending you the log", "I'll share the link", "Sending the file now".
-  new RegExp(String.raw`(?:\bi(?:'ve|’ve|\s+have)\s+(?:just\s+)?(?:attached|included|shared|uploaded|sent)|\bi(?:'m|’m|\s+am)\s+(?:attaching|sending|sharing|uploading)|\bi(?:'ll|’ll|\s+will)\s+(?:now\s+)?(?:attach|send|share|upload)|^\s*(?:attaching|sending|sharing|uploading))\s+(?:you\s+)?${DETERMINER}${DELIVERABLE}\b`, "im"),
-  // "The screenshot is attached", "Logs attached", "see attached".
-  new RegExp(String.raw`\b${DELIVERABLE}\s+(?:(?:is|are)\s+)?(?:attached|enclosed|included\s+below)\b|\bsee\s+(?:the\s+)?attached\b`, "i"),
+  new RegExp(String.raw`${SEND}${DETERMINER}(${NOUN})\b`, "i"),
+  // "The screenshot is attached", "Logs attached", "the report is enclosed".
+  new RegExp(String.raw`\b(${NOUN})\s+(?:(?:is|are|was|were)\s+)?(?:attached|enclosed|uploaded|included\s+below)\b`, "i"),
+  // "Here's the screenshot (of the payout page)." — presenting something that can only be attached, and nothing listed after it.
+  new RegExp(String.raw`^\s*(?:here(?:'s|’s|\s+is|\s+are)|attached\s+(?:is|are))\s+${DETERMINER}(${ATTACHMENT_ONLY})(?:\s+(?:of|for|from|showing)\s+[^:]+?)?[.!:]?\s*$`, "i"),
 ];
 
-/** The words in a reply that say something is being sent or attached ("here's the screenshot"), or null. */
-export function deliverableClaim(text: string): string | null {
+const SENTENCE = /(?<=[.!?])\s+/;
+const LIST_LINE = /^\s*(?:[-*•]|\d{1,3}[.)])\s+\S|^\s*```/;
+
+/** One sentence's claim, if it makes one: the words, and whether its noun is something the text could list. */
+function claimOf(sentence: string): { words: string; listable: boolean; tail: string } | null {
   for (const claim of CLAIMS) {
-    const found = claim.exec(text);
-    if (found !== null) return found[0].trim();
+    const found = claim.exec(sentence);
+    if (found === null) continue;
+    const end = (found.index ?? 0) + found[0].length;
+    return { words: found[0].trim(), listable: new RegExp(String.raw`^${LISTABLE}$`, "i").test(found[1]!), tail: sentence.slice(end) };
   }
   return null;
+}
+
+/** The content a claim sentence lists itself: text after its colon ("…the files I changed: a.ts, b.ts"). */
+function listedAfterColon(tail: string): string | null {
+  const colon = /:\s*(\S[\s\S]*)$/.exec(tail);
+  return colon === null ? null : colon[1]!;
+}
+
+type ClaimAt = { line: number; sentence: number; words: string; listed: boolean; tail: string };
+
+/** Every claim in a reply, with whether the reply lists what it names (after a colon, or as the list that follows). */
+function claimsIn(text: string): ClaimAt[] {
+  const lines = text.split("\n");
+  const out: ClaimAt[] = [];
+  lines.forEach((line, lineIndex) => {
+    const next = lines.slice(lineIndex + 1).find(one => one.trim() !== "");
+    line.split(SENTENCE).forEach((sentence, sentenceIndex, sentences) => {
+      const claim = claimOf(sentence);
+      if (claim === null) return;
+      const last = sentenceIndex === sentences.length - 1;
+      const listed = claim.listable && (listedAfterColon(claim.tail) !== null || (last && /:\s*$/.test(sentence) && next !== undefined && LIST_LINE.test(next)));
+      out.push({ line: lineIndex, sentence: sentenceIndex, words: claim.words, listed, tail: claim.tail });
+    });
+  });
+  return out;
+}
+
+/**
+ * The words in a reply that say something is being sent or attached ("I've attached the log", "here's the
+ * screenshot"), or null. A claim needs an attachment noun and a send verb; one whose content the reply lists itself
+ * ("I've included the files I changed: a.ts") is not a claim.
+ */
+export function deliverableClaim(text: string): string | null {
+  return claimsIn(text).find(one => !one.listed)?.words ?? null;
 }
 
 /** Does the reply carry the thing itself: a link, or content quoted in a code block? */
@@ -269,11 +419,17 @@ export function replyCarriesDeliverable(text: string): boolean {
 
 export const NOTHING_ATTACHED = "I couldn't attach that to this reply.";
 
-/** The reply without the sentences that claim an attachment, said plainly once; never the claim alone. */
+/** The reply without its claims of an attachment, said plainly once; whatever a claim listed stays; never the claim alone. */
 export function dropDeliverableClaims(text: string): string {
+  const claims = claimsIn(text).filter(one => !one.listed);
   let said = false;
-  const lines = text.split("\n").map(line => line.split(/(?<=[.!?])\s+/).map(sentence => {
-    if (deliverableClaim(sentence) === null) return sentence;
+  const lines = text.split("\n").map((line, lineIndex) => line.split(SENTENCE).map((sentence, sentenceIndex) => {
+    const claim = claims.find(one => one.line === lineIndex && one.sentence === sentenceIndex);
+    if (claim === undefined) return sentence;
+    // Listed content is never dropped: it follows the plain words instead of the claim.
+    const listed = listedAfterColon(claim.tail);
+    if (listed !== null) { said = true; return `${NOTHING_ATTACHED.slice(0, -1)}: ${listed}`; }
+    if (/:\s*$/.test(sentence)) { said = true; return `${NOTHING_ATTACHED.slice(0, -1)}:`; }
     if (said) return "";
     said = true;
     return NOTHING_ATTACHED;

@@ -4,7 +4,7 @@ import { fileTaskProposal } from "./proposal.js";
 import { propose } from "./scope.js";
 import { ceilingDigestOf, isVerifiedApprover, reproveApprover, verifyApproverStanding, type VerifiedApprover } from "./principal.js";
 import { MATE_MAX_STEPS, MATE_STEP_TEXT_CAP_BYTES, MATE_TOOL_CALL_CAP_BYTES, MATE_TOOL_RESULT_CAP_BYTES, MAX_OUTPUT_TOKENS, credentialKeyOf, mateWorstCaseForPrice, parseMateProviderWrapper, subscriptionCredentialKey } from "./converse.js";
-import { runMateTurn, historyFor, MATE_FAILURE_COPY, MATE_REFUSAL_COPY } from "./mate.js";
+import { runMateTurn, historyFor, MATE_CHANNEL_COPY, MATE_FAILURE_COPY, MATE_REFUSAL_COPY } from "./mate.js";
 import { NOTHING_ATTACHED, deliverableClaim } from "./reply-shape.js";
 import { MATE_MAX_PROPOSALS_PER_TURN, executeMateTool, redactForMate } from "./mate-tools.js";
 import { MATE_CONTRACT, MATE_CONTRACT_VERSION } from "./mate-contract.js";
@@ -431,7 +431,7 @@ describe("the mate's turn", () => {
   });
 
   test("chat error copy is plain: what happened, what it means and one next step, with no internal words", () => {
-    for (const words of [...Object.values(MATE_REFUSAL_COPY), ...Object.values(MATE_FAILURE_COPY)]) {
+    for (const words of [...Object.values(MATE_REFUSAL_COPY), ...Object.values(MATE_FAILURE_COPY), ...Object.values(MATE_CHANNEL_COPY)]) {
       expect(words).not.toMatch(/\b(?:lease[sd]?|digests?|latch(?:ed)?|mint(?:ed)?|ceilings?|sessions?|reservations?|credentials?|dispatch(?:ed)?|this turn|turn #|steps?|superseded|malformed)\b/i);
       expect(words.split(/(?<=[.!?])\s+/).length).toBeGreaterThanOrEqual(2);
       expect(words).toMatch(/[.!?]$/);
@@ -457,6 +457,11 @@ describe("the mate's turn", () => {
       expect(script.bodies).toHaveLength(2);
       expect(words).toBe(`The guard is fixed. ${NOTHING_ATTACHED}`);
       expect(deliverableClaim(words)).toBeNull();
+    });
+    test("a reply that lists what it names is not a claim: no repair step, nothing dropped", async () => {
+      const listed = scripted([text("Here are the files I changed: a.ts, b.ts. I've included the logs I read:\n- build.log\n- test.log")]);
+      expect(reply(await turn("what did you change?", listed.fetcher))).toBe("Here are the files I changed: a.ts, b.ts. I've included the logs I read:\n- build.log\n- test.log");
+      expect(listed.bodies).toHaveLength(1);
     });
     test("a claim the turn backs — a link in the reply, or a page shown — goes out as written, with no repair step", async () => {
       const linked = scripted([text("Here's the link to the task: https://so.example.com/chat?task=in-1")]);
@@ -892,7 +897,7 @@ describe("the mate's turn", () => {
     const live = session();
     const t = thread();
     // Before admission: a typed refusal, no turn, no row.
-    const closed = await turn("hello", scripted([text("hi")]).fetcher, { session: live, thread: t, revalidate: async () => ({ ok: false, reason: "this chat is no longer paired" }) });
+    const closed = await turn("hello", scripted([text("hi")]).fetcher, { session: live, thread: t, revalidate: async () => ({ ok: false, reason: "unpaired" }) });
     expect(closed).toMatchObject({ ok: false, refused: "channel", message: MATE_REFUSAL_COPY.channel });
     expect(store.listMateMessages(t.id, 10)).toEqual([]);
     expect(store.raw().prepare("SELECT COUNT(*) AS n FROM mate_turn").get()?.["n"]).toBe(0);
@@ -904,9 +909,10 @@ describe("the mate's turn", () => {
     ]);
     const outcome = await turn("hello", script.fetcher, {
       session: live, thread: t,
-      revalidate: async () => channelOk ? { ok: true } : { ok: false, reason: "the connected projects changed" },
+      revalidate: async () => channelOk ? { ok: true } : { ok: false, reason: "projects-changed" },
     });
-    expect(outcome).toMatchObject({ ok: false, failed: "revoked", message: expect.stringContaining("the connected projects changed") });
+    // Plain words for the reason, never the reason's own code.
+    expect(outcome).toMatchObject({ ok: false, failed: "revoked", message: MATE_CHANNEL_COPY["projects-changed"] });
     expect(script.bodies).toHaveLength(1);
     expect(store.getMateTurn((outcome as { turn: number }).turn)).toMatchObject({ state: "failed", failureReason: "revoked" });
     expect(store.listMateProposals(t.id)).toEqual([]);
@@ -931,11 +937,11 @@ describe("the mate's turn", () => {
         },
       } : {}),
       revalidate: async () => {
-        if (calls > 0 && ++checksAfterFirst > 1) return { ok: false, reason: "project removed before the next dispatch" };
+        if (calls > 0 && ++checksAfterFirst > 1) return { ok: false, reason: "projects-changed" };
         return { ok: true };
       },
     });
-    expect(outcome).toMatchObject({ ok: false, failed: "revoked", message: expect.stringContaining("project removed") });
+    expect(outcome).toMatchObject({ ok: false, failed: "revoked", message: MATE_CHANNEL_COPY["projects-changed"] });
     expect(calls).toBe(1);
     expect(store.raw().prepare("SELECT COUNT(*) AS n FROM chat_turn").get()?.["n"]).toBe(1);
   });

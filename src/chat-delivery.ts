@@ -14,8 +14,8 @@ import {
   taskInCeiling,
   tooLongText,
 } from "./chat-channel.js";
-import { MATE_MESSAGE_MAX_CHARS, mateFailureText, runMateTurn } from "./mate.js";
-import { shapeReply } from "./reply-shape.js";
+import { MATE_MESSAGE_MAX_CHARS, mateFailureText, runMateTurn, type MateChannelProblem } from "./mate.js";
+import { shapeReplyParts } from "./reply-shape.js";
 import { warmTurn, type WarmHooks } from "./chat-warmth.js";
 import {
   confirmMateProposal,
@@ -73,7 +73,8 @@ export type ChatDeliveryOptions = {
   warm?: (event: ChatEvent, binding: ChatBinding) => WarmHooks;
 };
 const nowOf = (options: ChatDeliveryOptions) => options.clock?.() ?? new Date();
-export const splitChatText = (text: string, size = 2800): string[] => {
+const CHAT_PART_SIZE = 2800;
+export const splitChatText = (text: string, size = CHAT_PART_SIZE): string[] => {
   const parts: string[] = [];
   for (let at = 0; at < text.length; ) {
     let end = Math.min(at + size, text.length);
@@ -406,11 +407,11 @@ export async function processChatEvent(
           try {
             await channelAccess(options, binding, resolved.who.ceilingDigest);
             return { ok: true };
-          } catch {
-            return {
-              ok: false,
-              reason: `${options.label} access could not be verified`,
-            };
+          } catch (error) {
+            const code = error instanceof ChatDeliveryError ? error.code : "";
+            const reason: MateChannelProblem = code === "Connected projects changed" ? "projects-changed"
+              : code.endsWith("account access changed") ? "member-changed" : "access-changed";
+            return { ok: false, reason };
           }
         },
       }).finally(warm.stop);
@@ -484,7 +485,9 @@ export async function processChatEvent(
           (message) => message.turn === turn.id && message.role === "assistant",
         )?.text ?? "The reply is no longer in the saved thread.";
     // The lead's answer about one task names it: a reply to it stays on that task.
-    const parts: ChatContent[] = splitChatText(shapeReply(reply, { asked: text, appOrigin: options.origin() }), options.partSize).map(
+    // Split as written, then shape each part: no cut ever lands inside a link, code or a bold anchor.
+    const shapedParts = shapeReplyParts(reply, options.partSize ?? CHAT_PART_SIZE, { asked: text, appOrigin: options.origin() });
+    const parts: ChatContent[] = (shapedParts.length > 0 ? shapedParts : splitChatText("")).map(
       (text) => (about === null ? { text, voice: true } : { text, voice: true, task: about.task, ...(about.run === null ? {} : { run: about.run }) }),
     );
     // The lead's question to its owner: its options as buttons, then "Something else", in their own chat (any thread);
@@ -756,7 +759,10 @@ export async function planRoomMessages(options: ChatDeliveryOptions): Promise<vo
       }
       if (carrier === null) break;
       const parts: ChatContent[] = [];
-      if (text !== null) parts.push(message.role === "assistant" ? { text: shapeReply(text, { appOrigin: options.origin() }), voice: true, channel: room.chat } : { text, channel: room.chat });
+      if (text !== null) {
+        if (message.role === "assistant") for (const part of shapeReplyParts(text, options.partSize ?? CHAT_PART_SIZE, { appOrigin: options.origin() })) parts.push({ text: part, voice: true, channel: room.chat });
+        else parts.push({ text, channel: room.chat });
+      }
       if (message.role === "assistant" && message.turn !== null)
         for (const proposal of store.listMateProposals(row.thread, ["pending"]).filter(one => one.turn === message.turn)) parts.push({ text: "", proposal: proposal.id, channel: room.chat });
       const id = chatHash(`${state.channel}:room:${room.id}:${message.id}`);

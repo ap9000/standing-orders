@@ -1,7 +1,7 @@
 import { describe, expect, test, vi } from "vitest";
 import {
   NOTHING_ATTACHED, deliverableClaim, dropDeliverableClaims, linkLabel, renderReply, replyHtmlInline, replyCarriesDeliverable,
-  shapeReply, telegramReply, type ReplyChannel,
+  shapeReply, shapeReplyParts, telegramReply, voiceReply, type ReplyChannel,
 } from "./reply-shape.js";
 import { warmTurn } from "./chat-warmth.js";
 
@@ -72,13 +72,21 @@ describe("one reply shaper, every channel", () => {
     });
 
     test("internal ids are removed unless the owner asked for them", () => {
-      const reply = `The payout fix (run #42) failed in r1. Digest ${"4f2a9c1b".repeat(4)} is stale, and run #43 is queued.`;
+      const reply = `The payout fix (run #42) failed in r1. Digest ${"4f2a9c1b".repeat(4)} is stale, and run #42 is queued again.`;
       const plain = seen(reply, channel);
       expect(plain.text).not.toMatch(/#4\d|r1\b|4f2a9c1b/);
-      expect(plain.text).toContain("The payout fix failed in the project. The digest is stale, and the run is queued.");
+      expect(plain.text).toContain("The payout fix failed in the project. The digest is stale, and the run is queued again.");
       const asked = seen(reply, channel, "what's the run id and digest?");
       expect(asked.text).toMatch(/#42/);
       expect(asked.text).toContain("4f2a9c1b");
+    });
+
+    test("several ids of one kind stay, so two items never read the same", () => {
+      const shown = seen(`Run #42 passed in r1 and run #43 failed in r2. Digests ${"4f2a9c1b".repeat(2)} and ${"9c1b4f2a".repeat(2)} differ.`, channel);
+      // Discord and Teams show an escaped "\#" as "#".
+      const text = shown.text.replace(/\\(.)/g, "$1");
+      expect(text).toContain("Run #42 passed in r1 and run #43 failed in r2.");
+      expect(text).toContain(`Digests ${"4f2a9c1b".repeat(2)} and ${"9c1b4f2a".repeat(2)} differ.`);
     });
 
     test("three or more blank lines collapse to one", () => {
@@ -105,6 +113,33 @@ describe("one reply shaper, every channel", () => {
     expect(shapeReply(`See [the payout fix](${ORIGIN}/t/a)`, { appOrigin: ORIGIN })).toBe(`See [the payout fix](${ORIGIN}/t/a)`);
   });
 
+  test("the console's and terminal's several addresses all count as the app's own", () => {
+    const origins = ["http://localhost:4400", null, ORIGIN];
+    expect(shapeReply("Open http://localhost:4400/chat?task=a or https://so.example.com/settings/lead", { appOrigin: origins }))
+      .toBe("Open [the task](http://localhost:4400/chat?task=a) or [Settings → Lead](https://so.example.com/settings/lead)");
+    expect(voiceReply(`See ${ORIGIN}/chat?task=a&result=2`, "terminal", { appOrigin: origins })).toBe(`See the result (${ORIGIN}/chat?task=a&result=2)`);
+  });
+
+  test("a long reply is split as written, then each part shaped: no cut inside a link or a bold anchor, one bold budget", () => {
+    const filler = "word ".repeat(30).trim();
+    const reply = `**One** ${filler} ${ORIGIN}/chat?task=payout **Two** ${filler} **Three** ${filler} **Four** ${filler}`;
+    for (const size of [60, 90, 150]) {
+      const parts = shapeReplyParts(reply, size, { appOrigin: ORIGIN });
+      expect(parts.length).toBeGreaterThan(1);
+      for (const part of parts) {
+        expect(part.length).toBeLessThanOrEqual(size);
+        expect(part.split("**").length % 2, part).toBe(1);
+        expect(part).not.toMatch(/\[the task\]\([^)]*$|^[^[]*\]\(/);
+      }
+      const joined = parts.join(" ");
+      expect([...joined.matchAll(/\*\*(\w+)\*\*/g)].map(one => one[1])).toEqual(["One", "Two", "Three"]);
+      expect(joined).toContain(`[the task](${ORIGIN}/chat?task=payout)`);
+      expect(joined.replace(/\*\*|\s+/g, " ").replace(/\s+/g, " ")).toContain("Four");
+    }
+    expect(shapeReplyParts("Short.", 100)).toEqual(["Short."]);
+    expect(shapeReplyParts("Para one.\n\nPara two is here.", 20)).toEqual(["Para one.", "Para two is here."]);
+  });
+
   test("each channel escapes its own syntax around what the shaper keeps", () => {
     expect(renderReply(shapeReply("a <b> & c"), "slack")).toBe("a &lt;b&gt; &amp; c");
     expect(renderReply(shapeReply("use @here and _x_"), "discord")).toBe("use @​here and \\_x\\_");
@@ -114,18 +149,31 @@ describe("one reply shaper, every channel", () => {
 });
 
 describe("deliverables", () => {
-  test("a reply that says it is sending or attaching something is recognised", () => {
-    for (const claim of ["Here's the screenshot.", "I've attached the log.", "I'm sending you the report now.", "Sending the file.", "The screenshots are attached.", "Here is a link to the result."])
+  test("a claim is an attachment noun plus a send verb", () => {
+    for (const claim of ["I've attached the log.", "I'm sending you the report now.", "Sending the file.", "The screenshots are attached.", "I'll share a link to the result.", "Here's the screenshot."])
       expect(deliverableClaim(claim), claim).not.toBeNull();
-    for (const plain of ["Here's what the log shows: the build failed.", "Want me to send the screenshot?", "The report is ready to review.", "I can attach the log if you like."])
+    for (const plain of ["Here's what the log shows: the build failed.", "Want me to send the screenshot?", "The report is ready to review.", "I can attach the log if you like.",
+      "Here are the files I changed: a.ts, b.ts.", "Here's the report.", "I sent the reminder.", "Here's the screenshot I'd take next: the login page."])
       expect(deliverableClaim(plain), plain).toBeNull();
+  });
+  test("a claim whose content the reply lists itself is not a claim", () => {
+    expect(deliverableClaim("I've included the files I changed: a.ts, b.ts.")).toBeNull();
+    expect(deliverableClaim("I've attached the files I changed:\n- a.ts\n- b.ts")).toBeNull();
+    // A screenshot can't be listed in words: naming one is still a claim.
+    expect(deliverableClaim("I've attached the screenshots: login page, settings page.")).toBe("I've attached the screenshots");
   });
   test("a link or quoted content backs a claim; dropping a claim says so once and keeps the rest", () => {
     expect(replyCarriesDeliverable(`Here's the link: ${ORIGIN}/t/a`)).toBe(true);
     expect(replyCarriesDeliverable("Here's the log:\n```\nerror\n```")).toBe(true);
     expect(replyCarriesDeliverable("Here's the screenshot.")).toBe(false);
-    expect(dropDeliverableClaims("Checks pass. Here's the screenshot. Here's the log.\nShip it?")).toBe(`Checks pass. ${NOTHING_ATTACHED}\nShip it?`);
+    expect(dropDeliverableClaims("Checks pass. I've attached the screenshot. I've attached the log.\nShip it?")).toBe(`Checks pass. ${NOTHING_ATTACHED}\nShip it?`);
     expect(dropDeliverableClaims("Here's the screenshot.")).toBe(NOTHING_ATTACHED);
+  });
+  test("dropping a claim never drops what it listed", () => {
+    expect(dropDeliverableClaims("I've attached the screenshots: login page, settings page.")).toBe("I couldn't attach that to this reply: login page, settings page.");
+    expect(dropDeliverableClaims("I've attached the screenshots:\n- login page\n- settings page")).toBe("I couldn't attach that to this reply:\n- login page\n- settings page");
+    const listed = "Here are the files I changed: a.ts, b.ts. I've attached the screenshot.";
+    expect(dropDeliverableClaims(listed)).toBe(`Here are the files I changed: a.ts, b.ts. ${NOTHING_ATTACHED}`);
   });
 });
 

@@ -142,7 +142,7 @@ export async function runLeadFollowPass(input: LeadFollowInput): Promise<void> {
       if (!provider) continue;
       const result = await (input.runTurn ?? runMateTurn)({ store, ...access, ...provider, evidenceRoot: input.evidenceRoot, clock,
         requestId: batch.request, message: 'Automatic crew update: inspect the saved results or decisions and tell me what needs attention. Do not rerun work.',
-        context: batch.context, revalidate: async () => !updateAdmissionPaused(store.raw()) && authorized(store, grant, input.repos()) !== null ? { ok: true as const } : { ok: false as const, reason: 'Lead authorization ended.' },
+        context: batch.context, revalidate: async () => !updateAdmissionPaused(store.raw()) && authorized(store, grant, input.repos()) !== null ? { ok: true as const } : { ok: false as const, reason: 'access-changed' as const },
         ...(input.fetcher ? { fetcher: input.fetcher } : {}), ...(input.subscriptionRunner ? { subscriptionRunner: input.subscriptionRunner } : {}) });
       if (!result.ok && 'refused' in result) {
         const status = `Crew updates are waiting: ${result.message}`;

@@ -14,7 +14,7 @@ import { MATE_ASK_OTHER, type ChatConfig, type DirectChatProviderId, type MatePr
 import { CHAT_KEY_ENV, credentialKeyOf, isDirectChatProvider, priceForConfig, subscriptionCredentialKey } from "./converse.js";
 import { verifyApproverByPassword, type VerifiedApprover } from "./principal.js";
 import { runMateTurn, type MateTurnOutcome } from "./mate.js";
-import { voiceReply } from "./reply-shape.js";
+import { voiceReply, type ShapeOptions } from "./reply-shape.js";
 import { confirmMateProposal, dismissMateProposal } from "./mate-doors.js";
 import { projectName } from "./project.js";
 import type { SubscriptionMateRunner } from "./subscription-chat.js";
@@ -46,6 +46,8 @@ export type MateCliInput = {
   seams?: MateCliSeams;
   /** Where evidence lives — a scout's report reads from here. */
   evidenceRoot?: string;
+  /** The console's address(es): a reply's links there are named as its pages ("the task"), not by host. */
+  appOrigin?: ShapeOptions["appOrigin"];
 };
 
 export type MateCliResult = { code: number; reason?: string; message?: string };
@@ -278,7 +280,7 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
       emit({ ok: true, turn: outcome.turn, reply: outcome.reply, activity: outcome.activity, steps: outcome.steps, settledMicrousd: outcome.settledMicrousd, proposals: pendingProposals().map(one => ({ id: one.id, ordinal: ordinalOf(one), kind: one.kind, payload: one.payload })),
         ...(ask === null ? {} : { ask: { question: ask.question, options: [...ask.options, MATE_ASK_OTHER] } }) });
       say(`  ${outcome.activity}`);
-      say(voiceReply(outcome.reply, "terminal", message === undefined ? {} : { asked: message }));
+      say(voiceReply(outcome.reply, "terminal", { appOrigin: input.appOrigin ?? null, ...(message === undefined ? {} : { asked: message }) }));
       // The lead's question: the terminal has no buttons, so the options are listed to type back.
       if (ask !== null) say(`${ask.question}\n${ask.options.map(one => `  · ${one}`).join("\n")}\n  · ${MATE_ASK_OTHER} (type your answer)`);
       printProposals();

@@ -24,7 +24,7 @@ import { addApprover, approve, propose } from "./scope.js";
 import { bridgePass, createTransport, followBridge, hashPairingCode, mintPairingCode, PAIRING_TTL_MS, saveBotToken, TOKEN_ENV, type TelegramTransport, type TelegramUpload } from "./telegram.js";
 import { ceilingDigestOf, verifyApproverStanding } from "./principal.js";
 import { subscriptionCredentialKey } from "./converse.js";
-import { MATE_FAILURE_COPY, mateFailureText } from "./mate.js";
+import { MATE_CHANNEL_COPY, MATE_FAILURE_COPY, mateFailureText } from "./mate.js";
 import { knowledgeView } from './project-knowledge.js';
 import { mintSharedActionReview, prepareSharedAction } from './chat-actions.js';
 import { assignmentOf } from './assignment.js';
@@ -603,7 +603,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     // Unenrolled: the pairing still stands, so the truth is said; unpaired or downgraded: nothing may be sent at all.
     if (change === "unenroll") {
       expect(script.texts()).toHaveLength(1);
-      expect(script.texts()[0]).toContain("the connected projects changed");
+      expect(script.texts()[0]).toBe(MATE_CHANNEL_COPY["projects-changed"]);
     } else {
       expect(script.sends()).toEqual([]);
     }
@@ -631,7 +631,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     expect(store.handle.prepare("SELECT COUNT(*) AS n FROM mate_proposal").get()?.["n"]).toBe(0);
     expect(store.activeHolds(store.lookupRef("a")!.id, now)).toEqual([]);
     expect(store.listTelegramConversationParts(row.id)).toEqual([]);
-    if (change === "unenroll") expect(script.texts()).toEqual([expect.stringContaining("the connected projects changed")]);
+    if (change === "unenroll") expect(script.texts()).toEqual([MATE_CHANNEL_COPY["projects-changed"]]);
     else expect(script.sends()).toEqual([]);
   });
 
@@ -879,13 +879,15 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       script.updates.push([textUpdate(2, "how is the queue?")]);
       expect(await pass()).toMatchObject({ ok: true, report: { problems: [expect.stringContaining("power cut")] } });
       dying.mockRestore();
-      expect(script.texts()).toEqual([long.slice(0, 3_900)]);
+      // Split as written at the last sentence that fits, then shaped: neither part ends mid-word.
+      const first = "The queue is quiet. ".repeat(195).trimEnd(), rest = "The queue is quiet. ".repeat(25).trimEnd();
+      expect(script.texts()).toEqual([first]);
       expect(parts().map(one => [one.state, one.messageId])).toEqual([["sent", "100"], ["pending", null]]);
       expect(row()).toMatchObject({ state: "running", replyMessageId: "100" });
       store.close(); store = openStore(file);
       later(CONVERSATION_CLAIM_MS + 1_000);
       expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1, problems: [] } });
-      expect(script.texts()).toEqual([long.slice(0, 3_900), long.trimEnd().slice(3_900)]);
+      expect(script.texts()).toEqual([first, rest]);
       expect(parts().map(one => [one.state, one.messageId])).toEqual([["sent", "100"], ["sent", "101"]]);
       expect(row()).toMatchObject({ state: "done", outcome: "replayed", attempts: 2 });
       expect(requests).toHaveLength(1);
@@ -1896,6 +1898,17 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       store = openStore(file);
       expect(store.listTelegramConversations(BOT)[0]).toMatchObject({ state: "done", outcome: "answered" });
       expect(store.activeMateSession("alex")).toMatchObject({ ceilingDigest: ceilingDigestOf([repo]) });
+    });
+
+    test("`chat --say` in the terminal names a link to this console as its page, and a foreign one by its host", async () => {
+      await saveRepos(join(dir, "repos.json"), [repo]);
+      store.close();
+      expect(saveConsoleUrl(dir, "https://console.example:8443/")).toMatchObject({ ok: true });
+      answers.push({ text: "It's at https://console.example:8443/chat?task=z and the PR is https://github.com/acme/app/pull/9." });
+      const lines: string[] = [];
+      expect(await operate(["chat", "--as", "alex", "--token", token, "--say", "where is z?"], lines)).toBe(EXIT.ok);
+      expect(lines.join("\n")).toContain("It's at the task (https://console.example:8443/chat?task=z) and the PR is github.com (https://github.com/acme/app/pull/9).");
+      store = openStore(file);
     });
 
     test("the pass links handoff cards and `/task` from the console-url setting only when it is an https origin, re-read every time: an http, path-prefixed or removed setting sends no link", async () => {
