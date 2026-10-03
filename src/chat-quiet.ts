@@ -11,6 +11,7 @@ import { assignmentStatusFacts, headlineEmoji, taskStatusOf, type Headline } fro
 import { asksToFinish, batchLine, chatText, chatTitle, factLinkLabel, mentions, READY_ACTIONS, type FinishedFact } from "./chat-voice.js";
 import { phoneText, projectLabel, type PhoneTaskLink } from "./telegram-status.js";
 import { isLifecycleNotification, type ChatBatch, type Notification, type Run, type Store } from "./store.js";
+import { leadSubjectOf } from "./lead-voice.js";
 
 /** `also`: more buttons after `link`, such as [Look first] beside [Merge]. */
 export type QuietView = { text: string; entities: ProgressEntity[]; link: PhoneTaskLink; also?: PhoneTaskLink[] };
@@ -133,7 +134,8 @@ function lineOf(store: Store, item: ChatBatch["items"][number], now: Date, root?
   const row = item.notification === null ? null : store.notificationById(item.notification);
   if (row !== null && row.kind !== "run-finished") {
     // Never the task's id or a "— revision" suffix; the title once, in front unless the words already name it.
-    const words = chatText(phoneText(row.body === "" ? row.subject : `${row.subject}\n\n${row.body}`, 2500), [{ id: ref.externalId, title: summary }]);
+    const subject = leadSubjectOf(store, row, viewer);
+    const words = chatText(phoneText(row.body === "" ? subject : `${subject}\n\n${row.body}`, 2500), [{ id: ref.externalId, title: summary }]);
     const { phrase, headline } = updatePhrase(row);
     return { also: [], link: row.link === null ? { label: "Open task", path: chatControlHref("task", ref.externalId) } : { label: factLinkLabel(row.link), path: row.link },
       fact: { summary, headline, checks: null, report: false, completedBy: null, update: { words: mentions(words, summary) ? words : `${summary} · ${words}`, phrase } } };

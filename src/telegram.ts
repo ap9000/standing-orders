@@ -32,7 +32,7 @@ import { isLifecycleNotification, isTelegramProgressNotification, TELEGRAM_HOLD_
 import { telegramProgressCard, type ProgressEntity } from "./telegram-progress.js";
 import { enqueueEveningDigests, finishedView, isTaskFact, joinsBatch, needsPerson, quietCardView, type QuietView } from "./chat-quiet.js";
 import { BATCH_MS, chatText, chatTitle, factLinkLabel, mentions, nameTelegramBot } from "./chat-voice.js";
-import { LEAD_SAY_KIND, enqueueLeadLapses, leadSayEarlier, leadSayText } from "./lead-voice.js";
+import { LEAD_SAY_KIND, enqueueLeadLapses, leadSayEarlier, leadSayText, leadSubjectOf } from "./lead-voice.js";
 import { applyTeamInbound, deliverTeamChats, teamCommand } from "./telegram-team.js";
 import { applyFlowReply, applyFlowTap, FLOW_DECIDE_KEY, flowButtons, flowDecisionAt } from "./telegram-flow.js";
 import { connectChannel, FLOW_WORDS, takeChannelMessage, watchedChannel } from "./chat-inbox.js";
@@ -971,7 +971,7 @@ async function deliverOutboxTo(
     };
     /** The lead's words (lead-voice.ts): one message; a later say within two minutes edits it in place. */
     const leadSayOutcome = async (fact: TelegramDelivery): Promise<{ ok: true; receipt: string | null } | { ok: false; error: string }> => {
-      const words = leadSayText(fact);
+      const words = leadSayText(store, fact);
       const button = fact.link === null ? null : factButton(phoneOrigin, fact.link);
       const keyboard = button === null ? [] : [button];
       const earlier = leadSayEarlier(store, fact).map(id => store.telegramMessageOf(id, fact.destination)).find(one => one !== null) ?? null;
@@ -1114,7 +1114,7 @@ async function deliverOne(
     // A short title, never the task's id or a "— revision" suffix (chat-voice.ts).
     const title = notification.taskId === null ? undefined : chatTitle(store, notification.taskId);
     const task = notification.taskId === null ? [] : [{ id: notification.taskId, ...(title === undefined ? {} : { title }) }];
-    const words = chatText(`${alreadyAccepted ? "Acceptance recorded" : notification.subject}${body === "" ? "" : `\n\n${body}`}`, task);
+    const words = chatText(`${alreadyAccepted ? "Acceptance recorded" : leadSubjectOf(store, notification, binding.approver)}${body === "" ? "" : `\n\n${body}`}`, task);
     // The task's title once: in front, unless the words already name it.
     const parts = split(`${notificationIdentity(notification, title !== undefined && mentions(words, title) ? undefined : title)}${words}`);
     const button = notification.link !== null && !alreadyAccepted && current ? factButton(phoneOrigin, notification.link) : null;

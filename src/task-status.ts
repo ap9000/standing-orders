@@ -84,7 +84,7 @@ export type TaskStatusFacts = {
   links?: { result?: string | null; checks?: string | null; pullRequest?: string | null; runChecks?: string | null };
   /** Exact technical reasons, shown only on request. */
   why?: readonly string[];
-  /** The person's lead took this on (lead-voice.ts): "on-it" reads "Your lead is on it" and needs nobody; "lapsed"
+  /** The person's lead took this on (lead-voice.ts): "on-it" reads "<name> is on it" and needs nobody; "lapsed"
    * (two hours without a lead act) is back with the person, and says so. */
   lead?: "on-it" | "lapsed" | null;
   /** What the person calls their lead (Settings → Lead); "Lead" when unnamed. */

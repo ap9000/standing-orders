@@ -6,10 +6,14 @@
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { openStore, type Store } from "./store.js";
 import { fileTaskProposal } from "./proposal.js";
-import { firstNameOf, leadContext, LEAD_CONTEXT_MAX_BYTES } from "./lead-context.js";
+import { firstNameOf, leadChannelOf, leadContext, LEAD_CONTEXT_MAX_BYTES } from "./lead-context.js";
+import { firstSentenceOf } from "./assignment-brief.js";
+import { register } from "./runner.js";
+import { acquire, completeFenced } from "./claim.js";
+import { leadClaim } from "./lead-voice.js";
 import { checkLeadIdentity, DEFAULT_LEAD_NAME, DEFAULT_LEAD_PERSONA, leadIdentityOf } from "./lead-identity.js";
 import { MATE_CONTRACT, MATE_CONTRACT_VERSION } from "./mate-contract.js";
-import { MATE_TOOL_SCHEMAS } from "./mate-tools.js";
+import { MATE_TOOL_SCHEMAS, projectLabelForMate, redactForMate } from "./mate-tools.js";
 
 const T0 = new Date("2026-10-02T13:05:00.000Z");
 const WEB = "/repo/web-shop", API = "/repo/payments-api";
@@ -86,6 +90,55 @@ describe("the lead's bundle", () => {
     expect([rest, partial, trimmed]).toEqual([true, true, true]);
   });
 
+  test("c2: the whole bundle is scrubbed; only the person's first name and the project labels are put back", () => {
+    file("ask-alex", WEB, "Ask alex.pelletier about /repo/web-shop/src");
+    decide(WEB, "Keep web-shop on Node", "alex.pelletier wants one runtime.", T0);
+    store.setLeadConfig("alex.pelletier", "Alex", "Answer alex.pelletier briefly.", T0);
+    const view = { repos: [WEB, API], names: ["alex.pelletier", "alex"] };
+    const data = bundle({ redact: text => redactForMate(text, view), projectName: (path, index) => projectLabelForMate(path, index, view.names) });
+    const document = JSON.stringify(data);
+    // Titles, decisions, the lead's name and persona and the omission notes are all scrubbed...
+    expect(data.needsYou[0].title).toBe("Ask [approver] about [path]");
+    expect(data.projects[0].decisions[0]).toMatchObject({ title: "Keep [path] on Node", why: "[approver] wants one runtime." });
+    expect(data.me).toEqual({ name: "[approver]", persona: "Answer [approver] briefly." });
+    expect(document).not.toContain("alex.pelletier");
+    expect(document).not.toContain("/repo/");
+    // ...and the two names carried on purpose come back.
+    expect(data.you.firstName).toBe("Alex");
+    expect(data.projects.map((one: { name: string }) => one.name)).toEqual(["web-shop", "payments-api"]);
+  });
+
+  test("c2: failed and stopped tasks waiting on the person are in Needs you; one their lead is on is not", () => {
+    register(store, { name: "w", host: "t", capacity: 9, repos: [WEB], now: T0, newToken: () => "tok" });
+    const failed = (id: string, title: string) => {
+      file(id, WEB, title);
+      const ref = store.refFor("built-in", id).id;
+      const took = acquire(store, ref, "w", { now: T0, token: "tok", newLeaseId: () => `lease-${id}`, ttlMs: 3_600_000 });
+      if (!took.ok) throw new Error(took.reason);
+      const run = store.startRun({ taskRef: ref, leaseId: `lease-${id}`, runner: "w", branch: "so/t", worktree: "/pool/t",
+        route: { routeDigest: "legacy", phase: "build", provider: "claude", model: null, chosen: "legacy" }, now: T0 });
+      store.finishRun(run, { outcome: "failed", reason: "agent", now: T0 });
+      expect(completeFenced(store, `lease-${id}`, "failed", T0).ok).toBe(true);
+    };
+    failed("release", "Release 0.9.16");
+    failed("flags", "Drop old flags");
+    file("paused", WEB, "Paused migration");
+    store.hold(store.refFor("built-in", "paused").id, "Paused by alex.pelletier", null, T0);
+    expect(leadClaim(store, { account: "alex.pelletier", lead: true }, "flags", T0).ok).toBe(true);
+    const data = bundle();
+    expect(data.needsYou.map((one: { title: string }) => one.title).sort()).toEqual(["Paused migration", "Release 0.9.16"]);
+    // The lead took this one on: it waits on nobody, so it is the rest.
+    expect(data.rest.tasks.map((one: { title: string }) => one.title)).toEqual(["Drop old flags"]);
+  });
+
+  test("c2: a decision's reason is its first sentence, never cut at an abbreviation", () => {
+    expect(firstSentenceOf("Small payment providers, e.g. Stripe or Adyen, keep card data off our servers. We looked at more.")).toBe("Small payment providers, e.g. Stripe or Adyen, keep card data off our servers.");
+    expect(firstSentenceOf("Faster builds, i.e. under 5 minutes. Also cheaper.")).toBe("Faster builds, i.e. under 5 minutes.");
+    expect(firstSentenceOf("One line\nsecond line")).toBe("One line");
+    decide(API, "Use Postgres", "Mature tooling, e.g. Postgres has pg_dump. Also familiar.", T0);
+    expect(bundle().projects[1].decisions[0].why).toBe("Mature tooling, e.g. Postgres has pg_dump.");
+  });
+
   test("c1: the name and persona the owner saved are who the lead is; a shared team conversation keeps its own lead's name", () => {
     store.setLeadConfig("alex.pelletier", "Maya", "Dry humour. Keep it short.", T0);
     expect(bundle().me).toEqual({ name: "Maya", persona: "Dry humour. Keep it short." });
@@ -101,6 +154,10 @@ describe("the lead's bundle", () => {
 
   test("c3: the lead is told the channel, and the flow detail lives in the flow tools' descriptions", () => {
     expect(bundle({ channel: "console" }).channel.id).toBe("console");
+    // Each chat surface names its own channel; an unknown one names none rather than being called Teams.
+    expect(["Slack", "Discord", "Teams", "Telegram"].map(leadChannelOf)).toEqual(["slack", "discord", "teams", "telegram"]);
+    expect(leadChannelOf("Mattermost")).toBeUndefined();
+    expect(bundle({ channel: undefined }).channel).toBeNull();
     expect(MATE_CONTRACT_VERSION).toBe(44);
     expect(MATE_CONTRACT).toContain("channel: where this conversation is; fit your replies to it");
     // The contract names the flow tools and no longer carries their detail.

@@ -24,6 +24,8 @@ export type BrowserCrewItem = {
   id: string; title: string; project: string | null;
   state: AssignmentSnapshot['state']; label: string; tone: StatusTone;
   href: string; resultHref: string | null; action: { label: string; href: string } | null;
+  /** "<name> is on it.": the person's own lead took it on, by the name they gave it. */
+  lead?: string;
 };
 export type BrowserMessage = {
   id: number; role: 'operator' | 'assistant'; text: string; html: string;

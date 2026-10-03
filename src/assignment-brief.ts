@@ -28,12 +28,21 @@ export type AssignmentCatchUp = {
   omissions: { assignments: number; decisions: number; projects: number; textFields: number; candidateScanLimited: boolean; notes: string[] };
 };
 
+/** A sentence's end: not an abbreviation's full stop ("e.g.", "i.e.", "etc."), and followed by a new sentence. */
+const SENTENCE_END = /(?<!\b(?:e\.g|i\.e|etc|vs|cf|approx|incl|Mr|Mrs|Ms|Dr|St|No))[.!?](?=\s+["'“(]?[\p{Lu}\p{N}])/u;
+/** A reason's first sentence, or its first line. */
+export function firstSentenceOf(text: string): string {
+  const line = text.split("\n")[0]!.trim();
+  const end = SENTENCE_END.exec(line);
+  return end === null ? line : line.slice(0, end.index + 1);
+}
+
 /** A project's active decisions, newest first: each one's title and its reason in one line (first sentence or
  * line). Memory absent on an older database reads as no decisions. */
 export function activeDecisionsOf(store: Store, repo: string, text: (value: string, cap: number) => string = publicChatText): { id: number; claim: string; why: string }[] {
   try {
     return store.handle.prepare("SELECT id,claim,why FROM project_decision WHERE repo=? AND status='active' ORDER BY id DESC LIMIT 8").all(repo).map(row => ({
-      id: Number(row["id"]), claim: text(String(row["claim"]), 160), why: text(String(row["why"]).split(/\n|(?<=[.!?])\s/)[0]!.trim(), 160) }));
+      id: Number(row["id"]), claim: text(String(row["claim"]), 160), why: text(firstSentenceOf(String(row["why"])), 160) }));
   } catch { return []; }
 }
 
@@ -56,7 +65,7 @@ export function assignmentCatchUp(store: Store, now: Date, access: AssignmentAcc
   if (access.principal === "coordinator" && access.repos === null || query.repo !== undefined && access.repos !== null && !access.repos.includes(query.repo)) return result;
   const repos = query.repo === undefined ? access.repos : [query.repo];
   const includeUnplaced = query.repo === undefined && access.principal === "operator" && access.includeUnplaced === true;
-  const scopedAccess: AssignmentAccess = access.principal === "operator" ? { principal: "operator", repos, includeUnplaced } : { principal: "coordinator", repos: repos ?? [] };
+  const scopedAccess: AssignmentAccess = access.principal === "operator" ? { principal: "operator", repos, includeUnplaced, ...(access.viewer == null ? {} : { viewer: access.viewer }) } : { principal: "coordinator", repos: repos ?? [] };
   const text = (value: string, cap: number) => {
     const rendered = publicChatText(value, cap);
     if (rendered !== value) result.omissions.textFields++;

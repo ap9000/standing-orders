@@ -18,7 +18,8 @@ import { quietCardView } from "./chat-quiet.js";
 import { workIndexPage } from "./work-index.js";
 import { installationStatus, renderInstallationStatus } from "./lead-status.js";
 import { runOperate } from "./operate.js";
-import { LEAD_IDLE_MS, agoWords, enqueueLeadLapses, leadActivity, leadActivityLine, leadClaimOf } from "./lead-voice.js";
+import { LEAD_IDLE_MS, agoWords, enqueueLeadLapses, leadActivity, leadActivityLine, leadClaimOf, leadSubjectOf } from "./lead-voice.js";
+import { browserCrewOf } from "./browser-workspace.js";
 import { withActor } from "./actor.js";
 import { leadLapsed, leadOnIt } from "./task-status.js";
 
@@ -303,6 +304,32 @@ describe("your lead tells you what it's doing", () => {
     expect(installationStatus(store, now, "alex").lead).toMatchObject({ line: "Maya: Fixing the release check · just now" });
     // Bob's view never borrows Alex's name for his own lead.
     expect(row("release-0912", "bob").status.detail).not.toContain("Maya");
+  });
+
+  test("c1: Crew says the lead's chosen name, and a rename reaches messages and cards saved before it", async () => {
+    store.setLeadConfig("alex", "Maya", "Keep it short.", now);
+    const token = await mintLead();
+    const script = scriptedTelegram();
+    failedTask("release-0912", "Release 0.9.12");
+    expect((await cli(["assignment", "claim", "release-0912", "--token", token, "--json"])).code).toBe(0);
+    // Crew: the row keeps its own headline and says who took it on, for its owner only.
+    const crew = (viewer: string) => browserCrewOf(store, now, { ...operator(viewer), includeUnplaced: false }).crew.find(one => one.id === "release-0912")!;
+    expect(crew("alex")).toMatchObject({ label: "Failed", lead: "Maya is on it." });
+    expect(crew("bob").lead).toBeUndefined();
+    // Saved under the old name, shown under the new one: the say, the claim's card and the lapse.
+    expect((await cli(["lead", "say", "Fixing the release check", "--token", token, "--json"])).code).toBe(0);
+    store.setLeadConfig("alex", "Sam", "Keep it short.", now);
+    await pass(script);
+    const texts = script.shown(ALEX_CHAT).map(one => String(one.params["text"]));
+    expect(texts).toContain("Sam\n\nFixing the release check");
+    expect(texts.join("\n")).not.toContain("Maya");
+    expect(crew("alex").lead).toBe("Sam is on it.");
+    const saved = (kind: string) => store.handle.prepare("SELECT kind, subject, recipient FROM notification WHERE kind = ? ORDER BY id DESC LIMIT 1").get(kind) as { kind: string; subject: string; recipient: string | null };
+    expect(saved("lead-on-it").subject).toBe("Maya is on it");
+    expect(leadSubjectOf(store, saved("lead-on-it"), "alex")).toBe("Sam is on it");
+    expect(leadSubjectOf(store, { kind: "lead-lapsed", subject: LEAD_LAPSED, recipient: null }, "alex")).toBe(leadLapsed("Sam"));
+    // Any other row keeps its own words.
+    expect(leadSubjectOf(store, { kind: "run-finished", subject: "Maya's build finished", recipient: "alex" }, "alex")).toBe("Maya's build finished");
   });
 
   test("c2: a claim and the lead line count only for the viewer's own lead, never another person's", async () => {

@@ -12,7 +12,7 @@ import { scopeTermsProblem, stopFactOf, type Store, type TaskState } from './sto
 import type { AssignmentSnapshot } from './assignment.js';
 import type { WorkAction, WorkSummaryAccess } from './work-summary.js';
 import type { WorkStatus, WorkView } from './workspace-ui.js';
-import { plainReasonOf, replacedWords, stageOfCode, taskStatusOf, workToneOf, type ChecksFact } from './task-status.js';
+import { leadOnIt, plainReasonOf, replacedWords, stageOfCode, taskStatusOf, workToneOf, type ChecksFact } from './task-status.js';
 import { isCheckLevel } from './check-levels.js';
 import { MARKER } from './worktree.js';
 import { withFollowUps } from './result-follow-ups.js';
@@ -46,6 +46,8 @@ export type WorkIndexItem = {
   primaryAction: WorkAction | null;
   completion: { actor: string; at: string; digest: string } | null;
   evidence: 'recorded';
+  /** The viewer's own lead took it on (lead-voice.ts): "<name> is on it.", by the name they gave it, read now. */
+  lead?: string;
 };
 export type WorkIndexOptions = { view?: WorkView; limit?: number; cursor?: string | null; project?: string | null; state?: TaskState; leadId?: string };
 /** How the list is grouped: the Needs you rows by their ask, then building, then the rest. */
@@ -591,5 +593,5 @@ function itemOf(row: Row, principal: WorkSummaryAccess['principal'], probe?: (ta
     ask: need ? ASKS[n(row, 'ask_rank')] ?? 'unblock' : null,
     chip: need ? askChipOf({ headline: shared.headline, need: shared.need?.key ?? null, planChanged, mismatch: verdict === 'refuted' && n(row, 'proof_failed_check') !== 1, ask: ASKS[n(row, 'ask_rank')] ?? 'unblock' }) : null,
     primaryAction, completion: code === 'complete' ? { actor: String(row['checked_actor']), at: String(row['checked_at']), digest: String(row['checked_digest']) } : null,
-    evidence: 'recorded' };
+    evidence: 'recorded', ...(lead === 'on-it' ? { lead: leadOnIt(leadName) } : {}) };
 }

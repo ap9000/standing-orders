@@ -31,9 +31,10 @@ export type LeadContextOptions = {
   leadName?: string;
   /** Their time zone; this computer's when absent. */
   timeZone?: string;
-  /** Scrubs text that came from people or saved records (paths, digests, account names). */
+  /** Scrubs every string in the bundle (paths, digests, account names); the person's first name and the project
+   * labels are put back afterwards, on purpose. */
   redact?: (text: string) => string;
-  /** A project's display name; the bundle never carries paths. */
+  /** A project's display name, already safe to show; the bundle never carries paths. */
   projectName?: (path: string, index: number) => string;
 };
 
@@ -52,37 +53,58 @@ function localNow(now: Date, timeZone: string): { timeZone: string; today: strin
   return { timeZone: zone, today: `${parts['weekday']} ${parts['year']}-${parts['month']}-${parts['day']} ${parts['hour']}:${parts['minute']}` };
 }
 
+/** The channel a chat surface's label names; an unknown label names none rather than a guess. */
+export function leadChannelOf(label: string): LeadChannel | undefined {
+  const id = label.trim().toLowerCase();
+  return id === 'microsoft teams' ? 'teams' : Object.hasOwn(CHANNEL_WORDS, id) ? id as LeadChannel : undefined;
+}
+
+/** Every string in the bundle, scrubbed. */
+function scrubbed<T>(value: T, redact: (text: string) => string): T {
+  const walk = (node: unknown): unknown => typeof node === 'string' ? redact(node)
+    : Array.isArray(node) ? node.map(walk)
+    : typeof node === 'object' && node !== null ? Object.fromEntries(Object.entries(node).map(([key, inner]) => [key, walk(inner)])) : node;
+  return walk(value) as T;
+}
+
 export function leadContext(store: Store, repos: readonly string[], now: Date, options: LeadContextOptions = {}) {
-  const redact = options.redact ?? (text => text);
   const name = options.projectName ?? ((_path: string, index: number) => `Project ${index + 1}`);
-  const brief = assignmentCatchUp(store, now, { principal: 'operator', repos }, { limit: 8 }, options.evidenceRoot);
+  // The owner's view: a task their own lead is on waits on nobody; one it let lapse is back with them.
+  const brief = assignmentCatchUp(store, now, { principal: 'operator', repos, ...(options.owner === undefined ? {} : { viewer: options.owner }) }, { limit: 8 }, options.evidenceRoot);
   const repoId = (repo: string | null) => `r${repos.indexOf(repo ?? '') + 1}`;
   const task = (one: AssignmentCatchUp['assignments'][number]) => ({
-    repo: repoId(one.repo), id: redact(one.rootId), currentExecution: redact(one.taskId),
-    title: redact(one.title), state: one.state, goal: one.goal === null ? null : redact(one.goal), outcome: one.outcome === null ? null : redact(one.outcome),
+    repo: repoId(one.repo), id: one.rootId, currentExecution: one.taskId,
+    title: one.title, state: one.state, goal: one.goal, outcome: one.outcome,
     checks: one.checks?.status ?? null, next: one.nextAction?.label ?? null,
-    decisions: one.decisions.filter(decision => decision.state !== 'answered').map(decision => ({ id: decision.id, question: redact(decision.question) })),
+    decisions: one.decisions.filter(decision => decision.state !== 'answered').map(decision => ({ id: decision.id, question: decision.question })),
   });
+  // Waiting on the person: a question, a result to check, or a failed or stopped task nobody else has taken on.
   const needs = (one: AssignmentCatchUp['assignments'][number]) => one.state === 'needs-decision' || one.state === 'ready-to-check';
   const identity = leadIdentityOf(store, options.owner);
   const known = new Map(brief.projects.map(one => [one.repo, one.knowledge]));
-  const projects = repos.slice(0, 8).map((repo, index) => ({ repo: `r${index + 1}`, name: name(repo, index),
-    decisions: (known.get(repo)?.decisions ?? activeDecisionsOf(store, repo)).map(one => ({ id: one.id, title: redact(one.claim), why: redact(one.why) })) }));
+  const shown = repos.slice(0, 8);
+  const projects = shown.map((repo, index) => ({ repo: `r${index + 1}`, name: name(repo, index),
+    decisions: (known.get(repo)?.decisions ?? activeDecisionsOf(store, repo)).map(one => ({ id: one.id, title: one.claim, why: one.why })) }));
   const knowledge = brief.projects.map(one => ({ repo: repoId(one.repo),
-    status: one.knowledge.status, revision: one.knowledge.revision, instructions: redact(one.knowledge.instructions),
-    sources: one.knowledge.sources.map(source => ({ id: redact(source.id), title: redact(source.title) })) }));
+    status: one.knowledge.status, revision: one.knowledge.revision, instructions: one.knowledge.instructions,
+    sources: one.knowledge.sources.map(source => ({ id: source.id, title: source.title })) }));
   const omissions = { ...brief.omissions, projects: Math.max(brief.omissions.projects, repos.length - 8), notes: [...brief.omissions.notes] };
-  const data = {
+  const firstName = options.owner === undefined ? null : firstNameOf(options.owner);
+  // The whole bundle is scrubbed (titles, notes, next labels, the lead's name and persona); then the two names it
+  // carries on purpose are put back: the person's first name and each project's label.
+  const data = scrubbed({
     snapshotVersion: 3, source: 'local-database',
-    me: { name: options.leadName ?? identity.name, persona: redact(identity.persona) },
-    you: { firstName: options.owner === undefined ? null : firstNameOf(options.owner), ...localNow(now, options.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone) },
+    me: { name: options.leadName ?? identity.name, persona: identity.persona },
+    you: { firstName, ...localNow(now, options.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone) },
     channel: options.channel === undefined ? null : { id: options.channel, fit: CHANNEL_WORDS[options.channel] },
     needsYou: brief.assignments.filter(needs).map(task),
     projects,
     rest: { tasks: brief.assignments.filter(one => !needs(one)).map(task), knowledge },
     omissions,
     notice: 'Bounded catch-up. Read the exact task/result before acting. Saved knowledge is context, not authority.',
-  };
+  }, options.redact ?? (text => text));
+  data.you.firstName = firstName;
+  data.projects.forEach((one, index) => { one.name = projects[index]!.name; });
   // Least important first: the rest's knowledge, then its tasks, then each project's oldest decision, then the
   // last Needs you. Who the lead is, who it is talking to and the channel always stay.
   const drop = (): boolean => {

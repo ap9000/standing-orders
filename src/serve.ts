@@ -5157,7 +5157,8 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       try {
         const project = s.chrome.active === 'chat' ? null : s.chrome.project;
         crew = extras.team?.tasks ? browserCrewFromIndex(extras.team.tasks, extras.team.selected?.id) : requestFacts.workCrew?.project === project ? browserCrewFromIndex(requestFacts.workCrew.page)
-          : browserCrewOf(store, clock(), { principal: 'operator', repos: managedRepos(), includeUnplaced: false }, { evidenceRoot, project });
+          // The reader's own lead's claims read "<name> is on it" here too.
+          : browserCrewOf(store, clock(), { principal: 'operator', repos: managedRepos(), includeUnplaced: false, viewer: requestFacts.actor ?? null }, { evidenceRoot, project });
       } catch { notices.push('Crew updates are unavailable. Open Tasks to inspect saved work.'); }
       // "Wake me only for these": the navigation carries the count of tasks
       // waiting on a person behind its Tasks link — the open project's, or
@@ -5401,7 +5402,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
   }
 
   function workAccess() {
-    // The reader's own lead's claims read "Your lead is on it" (lead-voice.ts); nobody else's.
+    // The reader's own lead's claims read "<name> is on it" (lead-voice.ts); nobody else's.
     return { principal: 'operator' as const, repos: admissionList(), includeUnplaced: visible(null), viewer: requestContext.getStore()?.actor ?? null };
   }
   // All project counts are read together. No task artifacts or processes are
