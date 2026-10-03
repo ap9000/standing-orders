@@ -178,7 +178,7 @@ export function mirrorToTaskChat(store: Store, who: VerifiedApprover, taskId: st
 
 /** The one short message a person gets when their question could not be answered. */
 export function couldNotAnswerText(reason: string): string {
-  return `I couldn't answer that just now: ${reason}. Ask again, or open the console.`;
+  return `I couldn't answer that just now: ${reason.replace(/\.$/, "")}. Ask again, or open the console.`;
 }
 
 export function tooLongText(length: number): string {
@@ -716,6 +716,11 @@ export const CHAT_ACTION_PARITY: Record<
   propose_teammate: { support: "direct", how: "Adds a teammate from a template or a soul file, changes one section of its soul file (or the whole short file), pauses, resumes or removes it, passes it a note, or answers its question for the person asked, through the shared confirm door.", gap: "Soul files longer than one message are edited on the console's teammate page; the phone changes one section at a time." },
   get_flow_insights: { support: "direct", how: "Read during a turn: where each flow's cards pass, fail or are sent back, how long they wait, how its scripts did, and a run's log.", gap: null },
   propose_flow: { support: "direct", how: "Creates or changes a flow, adds, moves, approves, sends back or cancels its cards, comments on them (@name pings that person), sets their owner, follows them, saves the project's scripts, and adds, pauses or removes its triggers, through the shared confirm door; a long drawing opens the secure review. Work a card files is an ordinary task under the usual approvals.", gap: "The flow canvas itself is on the console; the phone confirms cards but draws nothing. Webhook addresses and the Linear key are set on the console's Triggers panel." },
+  commit_to: { support: "direct", how: "Records what the lead promised to follow up on (a task, attempt, check or time; 7 days at most). The follow pass says one line when it is met, in the shared conversation and on the chat the promise was made on.", gap: null },
+  release_commitment: { support: "direct", how: "Stops following up on one of the person's open promises, with the reason.", gap: null },
+  remember: { support: "direct", how: "Proposes a correction or lasting preference as a decision or project instruction card, through the shared confirm door.", gap: null },
+  get_integrations: { support: "direct", how: "Read during a turn: which chat apps, email, GitHub, project tools and monitoring are Connected, Not set up or Broken, as Settings → Integrations shows them.", gap: null },
+  ask_owner: { support: "direct", how: "One question with 2-4 options and Something else, drawn as buttons under the reply; the tapped option is sent as the person's next message.", gap: null },
   search_project_memory: { support: "direct", how: "Read during a turn: one search over decisions, references, lessons and the conversations the person may read.", gap: null },
   list_tasks: { support: "direct", how: "Read during a turn.", gap: null },
   get_task: {

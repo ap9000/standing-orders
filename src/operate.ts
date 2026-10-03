@@ -1,4 +1,5 @@
 import { UNSENT_REPLY_MS } from "./telegram-settings.js";
+import { leadNameOf } from "./lead-identity.js";
 import { maybeTriggerRepair } from "./dispose.js";
 import { CHECK_LEVEL_HINTS, CHECK_LEVEL_WORDS, isCheckLevel, liveQuickCommand, projectCheckLevel, quickVerifyKey, setProjectCheckLevel, setTaskCheckLevel, suggestQuickCommand } from "./check-levels.js";
 import { fileAddTestsTask, followUpChecksOf, requestFollowUpChecks, runFollowUpCheck, runWaitingChecks } from "./result-follow-ups.js";
@@ -11848,7 +11849,7 @@ function leadClaimCommand(positional: readonly string[], flags: Map<string, stri
   const claimed = leadClaim(store, actor, id, context.clock());
   if (!claimed.ok) return fail(write, json, command, claimed.reason, claimed.message, claimed.reason === "usage" ? EXIT.usage : EXIT.refused);
   return succeed(write, json, command, { task: id, root: claimed.root, lead: claimed.claim },
-    () => [`${id} is yours: it reads "Your lead is on it" until you complete it, hand it on with task ask, or go two hours without acting on it.`]);
+    () => [`${id} is yours: it reads "${leadNameOf(store, actor.account)} is on it" until you complete it, hand it on with task ask, or go two hours without acting on it.`]);
 }
 
 function blockTask(

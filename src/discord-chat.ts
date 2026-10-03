@@ -1,5 +1,6 @@
 /** Discord messages and buttons transport the shared assistant's saved actions. */
 import { chatQuestionButtons } from "./teammate-question.js";
+import { chatAskButtons } from "./chat-ask.js";
 import { chatFlowButtons } from "./chat-flow.js";
 import { channelInbox } from "./chat-inbox.js";
 import { roomCommand } from "./chat-rooms.js";
@@ -386,6 +387,15 @@ export async function deliverDiscordPart(
           ? chatQuestionButtons(state, row.id, now).map((one) => ({
               type: 2,
               style: one.words ? 1 : 2,
+              label: one.label.slice(0, 80),
+              custom_id: `so_${one.token}`,
+            }))
+          : []),
+        // The lead's question to its owner: its options, then "Something else".
+        ...(content.ask
+          ? chatAskButtons(state, row.id, now).map((one) => ({
+              type: 2,
+              style: one.words ? 2 : 1,
               label: one.label.slice(0, 80),
               custom_id: `so_${one.token}`,
             }))

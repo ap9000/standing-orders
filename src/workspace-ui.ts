@@ -18,12 +18,13 @@
  */
 
 import type { DispatchAction, DispatchDiagnosis } from "./dispatch.js";
-import { ACCEPT_NEEDS_REASON, type AcceptLabel } from "./result-acts.js";
-export { ACCEPT_NEEDS_REASON };
+import { ACCEPT_NEEDS_REASON, FAILED_CHECK, cantAcceptYetOf, evidenceProblemOf, type AcceptLabel, type EvidenceProblem } from "./result-acts.js";
+export { ACCEPT_NEEDS_REASON, cantAcceptYetOf, evidenceProblemOf, type EvidenceProblem };
 import { GOAL_ASSESSMENT_PENDING, manualReviewOnly, plainReasonWords, type ProofVerdict } from "./proof.js";
 import type { ReviewRetryState, TaskState } from "./store.js";
 import type { TaskControlView } from "./task-control.js";
 import { OPEN_RESULT, plainReasonOf, stageOfCode, taskStatusOf, workToneOf } from "./task-status.js";
+import { whenUtc } from "./when-html.js";
 
 /** The Work destination's views — shortcuts over the same rows, never a
  * persisted state. All is the default. */
@@ -153,22 +154,6 @@ export type DisplayStatus = {
   tone: StatusTone;
   action: NextAction | null;
 };
-
-/** What kind of evidence problem a verdict records: a check the machine
- * actually ran and saw fail, evidence that contradicts the sealed record
- * (a mismatched changed-path claim, an altered criterion, a caveat that
- * contradicts a met verdict), or evidence that is simply absent. A generic
- * refuted verdict is NOT a failed test claim — only the verify-command
- * reasons say a check failed. */
-export type EvidenceProblem = "checks-failed" | "mismatched" | "missing" | "none";
-
-const FAILED_CHECK = /^the repository's approved verification command exited (-?[0-9]+)/;
-
-export function evidenceProblemOf(verdict: ProofVerdict | null, reasons: readonly string[]): EvidenceProblem {
-  if (verdict === "verified" || verdict === "attested") return "none";
-  if (verdict === "refuted") return reasons.some(reason => FAILED_CHECK.test(reason)) ? "checks-failed" : "mismatched";
-  return "missing";
-}
 
 /** The exit code of the failed check, when the recorded reason names one. */
 export function failedCheckExit(reasons: readonly string[]): number | null {
@@ -440,17 +425,6 @@ const VERIFIED_RESULT = new Set(["ready-to-review", "pr-opened", "merge-observed
 /** A finished result's display status in the shared headline's words: a
  * failed project check is Failed, a result missing its record needs a
  * person, every other saved result is Ready for review. Token and action stay. */
-/** Why a result can't be accepted as it stands, in one plain line, or null
- * when nothing refutes it (a person's acceptance settles it). The result page
- * shows it before Request changes, its one ink act. */
-export function cantAcceptYetOf(verdict: ProofVerdict | null, reasons: readonly string[], accepted: boolean): string | null {
-  if (accepted || verdict !== "refuted") return null;
-  // A mismatch is the status card's own headline; here only what accepting takes.
-  return evidenceProblemOf(verdict, reasons) === "checks-failed"
-    ? "Can't accept yet: the project's check failed on these changes."
-    : ACCEPT_NEEDS_REASON;
-}
-
 /** The result's headline while its report disagrees with its saved changes. */
 export const MISMATCH_HEADLINE = "The report doesn't match the changes";
 
@@ -704,7 +678,7 @@ export function learningHtml(view: import('./project-learning.js').LearningView,
   const lessons = view.lessons.filter(l => source === undefined || l.source === source);
   const cards = lessons.map(l => `<article class="card" data-lesson="${l.id}"><p><strong>${e(l.payload.observation)}</strong></p><p>${e(l.payload.action)}</p><p class="meta">${l.payload.kind === 'system' ? 'System suggestion · No change applied' : e(l.status === 'adopted' ? 'Adopted advice' : l.status === 'disabled' ? 'Disabled' : 'Proposed lesson')}</p><details><summary>Source and use</summary><p><a href="/r/${l.source}">Result #${l.source}</a> · <a href="/r/${l.reviewer}">Review #${l.reviewer}</a></p><p>${e(l.payload.paths.join(', '))} · ${e(l.payload.phases.join(', '))} · ${e(({ darwin: "macOS", win32: "Windows", linux: "Linux" } as Record<string,string>)[l.payload.platform] ?? l.payload.platform)}</p><ul>${evidence(l.payload.evidence, l.source)}</ul>${l.payload.kind !== 'project' ? '' : `<p class="meta">${l.status === 'proposed' ? 'Save permits advisory reuse when enabled and applicable. It does not prove a remedy works.' : 'Disabling affects future runs. Active snapshots, code and approvals stay unchanged.'}</p>${l.status === 'proposed' ? act('adopt', 'Save lesson', l) : ''}`}</details>${l.payload.kind === 'project' && l.status === 'adopted' ? act('disable', 'Disable lesson', l) : ''}</article>`).join('');
   if (source !== undefined) return lessons.length ? `<details class="learning result-learning"><summary>Learned from this task</summary>${cards}<a href="/settings/learning?repo=${encodeURIComponent(view.repo)}">Learning settings</a></details>` : '';
-  const history = view.events.map(ev => `<article class="card" data-learning-event="${e(ev.action)}"><p><strong>${e(({ assessment: ({ propose: 'Learning suggested', none: 'No lesson needed', unassessed: 'Learning not assessed', invalid: 'Learning assessment invalid' } as Record<string,string>)[ev.after] ?? 'Learning not assessed', proposal: 'Suggestion recorded', adopt: 'Lesson adopted', disable: 'Lesson disabled', reset: 'Learning reset', enable: 'Reuse enabled', pause: 'Reuse paused', reuse: 'Run context saved', failure: 'Learning issue', capture: 'Capture finished' } as Record<string,string>)[ev.action] ?? ev.action)}</strong>${ev.action === "reuse" ? ` · ${e(ev.after)}` : ""}</p><p class="meta"><time datetime="${e(ev.at)}">${e(ev.at.replace("T", " ").replace(/\.\d+Z$/, " UTC"))}</time> · ${e(ev.actor)}${ev.run === null ? '' : ` · <a href="/r/${ev.run}">Run #${ev.run}</a>${ev.outcome === null ? "" : ` · ${e(ev.outcome)}`}`}</p><details><summary>Details</summary><p>${e(ev.before)} → ${e(ev.after)}</p><p>${e(ev.reason)}</p>${ev.lesson === null ? '' : `<p>Lesson #${ev.lesson}</p>`}<ul>${evidence(ev.evidence, ev.run)}</ul>${ev.snapshot === null ? "" : `<details><summary>Exact context</summary><pre>${e(ev.snapshot)}</pre></details>`}</details></article>`).join('');
+  const history = view.events.map(ev => `<article class="card" data-learning-event="${e(ev.action)}"><p><strong>${e(({ assessment: ({ propose: 'Learning suggested', none: 'No lesson needed', unassessed: 'Learning not assessed', invalid: 'Learning assessment invalid' } as Record<string,string>)[ev.after] ?? 'Learning not assessed', proposal: 'Suggestion recorded', adopt: 'Lesson adopted', disable: 'Lesson disabled', reset: 'Learning reset', enable: 'Reuse enabled', pause: 'Reuse paused', reuse: 'Run context saved', failure: 'Learning issue', capture: 'Capture finished' } as Record<string,string>)[ev.action] ?? ev.action)}</strong>${ev.action === "reuse" ? ` · ${e(ev.after)}` : ""}</p><p class="meta">${whenUtc(ev.at)} · ${e(ev.actor)}${ev.run === null ? '' : ` · <a href="/r/${ev.run}">Run #${ev.run}</a>${ev.outcome === null ? "" : ` · ${e(ev.outcome)}`}`}</p><details><summary>Details</summary><p>${e(ev.before)} → ${e(ev.after)}</p><p>${e(ev.reason)}</p>${ev.lesson === null ? '' : `<p>Lesson #${ev.lesson}</p>`}<ul>${evidence(ev.evidence, ev.run)}</ul>${ev.snapshot === null ? "" : `<details><summary>Exact context</summary><pre>${e(ev.snapshot)}</pre></details>`}</details></article>`).join('');
   return `<section class="learning">${view.damaged ? '<p class="problem" role="alert">Some lessons no longer verify and are excluded from reuse.</p>' : ''}<p>${view.enabled ? 'Use adopted lessons: on' : 'Use adopted lessons: off'}</p>${act(view.enabled ? 'pause' : 'enable', view.enabled ? 'Pause reuse' : 'Enable reuse')}${cards || '<p>No lessons yet. Reviews may suggest useful advice here.</p>'}<details><summary>Reset learning</summary><p>Disable all adopted lessons and future reuse. Keep history, code, approvals and active run snapshots.</p>${act('reset', 'Reset learning')}</details><h2>Changes</h2>${history || '<p>No learning changes yet.</p>'}${view.next === null ? '' : `<a class="button-link" href="/settings/learning?repo=${encodeURIComponent(view.repo)}&before=${view.next}">Older changes</a>`}</section>`;
 }
 

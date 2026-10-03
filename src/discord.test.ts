@@ -1098,3 +1098,28 @@ test("a Discord channel feeds a flow: 'flow N' connects it, anyone's message is 
   await processDiscordEvent(options); await drain();
   expect(store.flowComments(card.id).map(one => one.body)).toEqual(["It's the Dell."]);
 });
+
+test("the lead's question arrives as buttons with Something else, and a tap is the owner's next message (ask_owner)", async () => {
+  type Button = { label: string; custom_id?: string; style: number };
+  const buttonsOf = (call: { body: Record<string, unknown> }) => ((call.body.components as Array<{ components: Button[] }> | undefined)?.[0]?.components ?? []);
+  const runner = vi.mocked(options.subscriptionRunner!);
+  answers.push(
+    { text: "", calls: [{ id: "q1", name: "ask_owner", args: { question: "Ship it today or Friday?", options: ["Today", "Friday"] } }] },
+    { text: "It depends on one thing." },
+  );
+  expect(receive("When should the release go out?")).toBe(true);
+  await processDiscordEvent(options);
+  await drain();
+  expect(sentText()).toContain("Ship it today or Friday?");
+  const buttons = buttonsOf(sends().at(-1)!);
+  expect(buttons.map(one => one.label)).toEqual(["Today", "Friday", "Something else"]);
+  const askId = String(state.prepare("SELECT message FROM chat_part WHERE json_extract(payload,'$.ask') IS NOT NULL ORDER BY id DESC LIMIT 1").get()!.message);
+  answers.push({ text: "Friday it is." });
+  await tap(buttons[1]!.custom_id!.slice(3), askId);
+  expect(sentText()).toContain("You chose: Friday");
+  await processDiscordEvent(options);
+  await drain();
+  const history = runner.mock.calls.at(-1)![0].history;
+  expect(history.filter(one => one.role === "operator").at(-1)).toMatchObject({ text: "Friday" });
+  expect(sentText()).toContain("Friday it is.");
+});

@@ -24,6 +24,8 @@ export type BrowserCrewItem = {
   id: string; title: string; project: string | null;
   state: AssignmentSnapshot['state']; label: string; tone: StatusTone;
   href: string; resultHref: string | null; action: { label: string; href: string } | null;
+  /** "<name> is on it.": the person's own lead took it on, by the name they gave it. */
+  lead?: string;
 };
 export type BrowserMessage = {
   id: number; role: 'operator' | 'assistant'; text: string; html: string;
@@ -436,6 +438,8 @@ export type BrowserView = BrowserTasksView | BrowserSettingsView | BrowserTaskVi
 
 export type BrowserWorkspace = {
   version: 1; path: string; title: string; user: string; csrf: string; sensitive: boolean;
+  /** What this person named their lead (Settings → Lead): the chat header and every lead message say it. */
+  leadName?: string;
   refreshUrl: string; receipt: { request: string; received: boolean } | null;
   projects: BrowserProject[]; crew: BrowserCrewItem[]; crewTruncated: boolean;
   conversation: BrowserConversation | null;
@@ -479,7 +483,7 @@ export type BrowserHome = {
   planUse: { name: string; window: string; percent: number; detail: string; tone: 'neutral' | 'warning' | 'danger' }[];
   catchUp: BrowserCatchUpItem[]; allHref: string;
   /** What this person's lead is doing now and when it last acted (lead-voice.ts); its task when it named one. */
-  lead?: { doing: string; at: string; href: string | null } | null;
+  lead?: { name?: string; doing: string; at: string; href: string | null } | null;
 };
 
 /** `sandbox`: the demo command, offered beside the sign-in command while no agent is signed in. `intro`: how it works,

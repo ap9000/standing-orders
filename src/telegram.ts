@@ -32,7 +32,7 @@ import { isLifecycleNotification, isTelegramProgressNotification, TELEGRAM_HOLD_
 import { telegramProgressCard, type ProgressEntity } from "./telegram-progress.js";
 import { enqueueEveningDigests, finishedView, isTaskFact, joinsBatch, needsPerson, quietCardView, type QuietView } from "./chat-quiet.js";
 import { BATCH_MS, chatText, chatTitle, factLinkLabel, mentions, nameTelegramBot } from "./chat-voice.js";
-import { LEAD_SAY_KIND, enqueueLeadLapses, leadSayEarlier, leadSayText } from "./lead-voice.js";
+import { LEAD_SAY_KIND, enqueueLeadLapses, leadSayEarlier, leadSayText, leadSubjectOf } from "./lead-voice.js";
 import { applyTeamInbound, deliverTeamChats, teamCommand } from "./telegram-team.js";
 import { applyFlowReply, applyFlowTap, FLOW_DECIDE_KEY, flowButtons, flowDecisionAt } from "./telegram-flow.js";
 import { connectChannel, FLOW_WORDS, takeChannelMessage, watchedChannel } from "./chat-inbox.js";
@@ -971,7 +971,7 @@ async function deliverOutboxTo(
     };
     /** The lead's words (lead-voice.ts): one message; a later say within two minutes edits it in place. */
     const leadSayOutcome = async (fact: TelegramDelivery): Promise<{ ok: true; receipt: string | null } | { ok: false; error: string }> => {
-      const words = leadSayText(fact);
+      const words = leadSayText(store, fact);
       const button = fact.link === null ? null : factButton(phoneOrigin, fact.link);
       const keyboard = button === null ? [] : [button];
       const earlier = leadSayEarlier(store, fact).map(id => store.telegramMessageOf(id, fact.destination)).find(one => one !== null) ?? null;
@@ -1114,7 +1114,7 @@ async function deliverOne(
     // A short title, never the task's id or a "— revision" suffix (chat-voice.ts).
     const title = notification.taskId === null ? undefined : chatTitle(store, notification.taskId);
     const task = notification.taskId === null ? [] : [{ id: notification.taskId, ...(title === undefined ? {} : { title }) }];
-    const words = chatText(`${alreadyAccepted ? "Acceptance recorded" : notification.subject}${body === "" ? "" : `\n\n${body}`}`, task);
+    const words = chatText(`${alreadyAccepted ? "Acceptance recorded" : leadSubjectOf(store, notification, binding.approver)}${body === "" ? "" : `\n\n${body}`}`, task);
     // The task's title once: in front, unless the words already name it.
     const parts = split(`${notificationIdentity(notification, title !== undefined && mentions(words, title) ? undefined : title)}${words}`);
     const button = notification.link !== null && !alreadyAccepted && current ? factButton(phoneOrigin, notification.link) : null;
@@ -2040,6 +2040,34 @@ function applyCallback(context: Context, update: Update, effects: Effect[]): voi
         if (answer.ok && Number.isSafeInteger(id)) store.recordTelegramFlowPrompt({ ...effect.prompt, messageId: String(id) }, clock());
       });
     }
+    return;
+  }
+  // The lead's question to its owner: an option is sent as their next message; "Something else" asks them to type it.
+  const askTap = /^ask:([1-9][0-9]{0,14}):([0-3]|x)$/.exec(token);
+  if (askTap !== null) {
+    if (tapChat !== binding.chatId || context.conversation === undefined) { report.ignored++; return; }
+    const turn = Number(askTap[1]);
+    const found = store.getMateTurn(turn)?.approver === binding.approver ? store.mateAskState(turn, clock()) : { state: "expired" as const };
+    if (found.state !== "open") {
+      const line = found.state === "answered" ? "That question was already answered." : "That question expired. Send your answer as a message.";
+      ack(line);
+      editText(`${message.text ?? ""}\n\n${line}`.trim().slice(0, 4000));
+      return;
+    }
+    const ask = found.ask;
+    if (store.telegramConversationWaitingOn(binding.id, String(message.message_id))) { ack("Your answer is on its way."); return; }
+    if (askTap[2] === "x") { ack("Type your answer as a message."); return; }
+    const option = ask.options[Number(askTap[2])];
+    if (option === undefined) { ack("That option is no longer there."); return; }
+    const focused = store.chatFocus("telegram", binding.id);
+    store.enqueueTelegramConversation({
+      binding, updateId: update.update_id, messageId: String(message.message_id), replyTo: null,
+      request: telegramRequestId(botId, binding.id, update.update_id), text: option,
+      context: focused === null ? null : focusContextFor(focused), taskId: focused, sourceRun: null,
+    }, clock());
+    report.chatQueued = (report.chatQueued ?? 0) + 1;
+    ack(`Sent: ${option}`.slice(0, 190));
+    editText(`${message.text ?? ask.question}\n\nYou chose: ${option}`.slice(0, 4000));
     return;
   }
   const action = store.getTelegramAction(token);

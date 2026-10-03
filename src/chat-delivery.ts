@@ -1,5 +1,6 @@
 /** Shared saved replies, explicit confirmations and progress for private chat transports. */
 import { answerChatQuestionPrompt, applyChatQuestionTap, questionParts } from "./teammate-question.js";
+import { applyChatAskTap, chatAskText } from "./chat-ask.js";
 import {
   channelRepos,
   resolveChannelMate,
@@ -35,7 +36,9 @@ import { triggerConfigOf } from "./flow-triggers.js";
 import { telegramProgressCard } from "./telegram-progress.js";
 import { enqueueEveningDigests, finishedView, isTaskFact, joinsBatch, needsPerson, quietCardView } from "./chat-quiet.js";
 import { BATCH_MS, chatText, chatTitle } from "./chat-voice.js";
-import { LEAD_SAY_KIND, enqueueLeadLapses, leadSayEarlier, leadSayText } from "./lead-voice.js";
+import { LEAD_SAY_KIND, enqueueLeadLapses, leadSayEarlier, leadSayText, leadSubjectOf } from "./lead-voice.js";
+import { leadChannelOf } from "./lead-context.js";
+import { promiseChannelOf } from "./lead-commitments.js";
 import { phoneText, PHONE_HELP, phoneCommand, phoneStatus, phoneTaskView, phoneTaskChoices, phoneTaskListText, resolvePhoneTask, phoneFocusText, PHONE_NO_MATCH, PHONE_BACK_TO_LEAD } from "./telegram-status.js";
 import { applyRoomInbound, conversationRow, roomCardApprover, roomCommand, roomGrantAllowed, roomMessagesAfter, roomMessageText, teamDomain } from "./chat-rooms.js";
 import { isTelegramProgressNotification, proposalTaskOf, type Store } from "./store.js";
@@ -370,6 +373,8 @@ export async function processChatEvent(
           .prepare("UPDATE chat_event SET payload=? WHERE id=? AND state='queued'")
           .run(JSON.stringify({ ...input, about }), event.id);
       }
+      // An unknown surface names no channel rather than a guess.
+      const channel = leadChannelOf(options.label);
       const outcome = await runMateTurn({
         store,
         who: resolved.who,
@@ -388,6 +393,7 @@ export async function processChatEvent(
         clock: () => nowOf(options),
         evidenceRoot: options.evidenceRoot,
         mediaDelivery: "documents",
+        ...(channel === undefined ? {} : { channel }),
         revalidate: async () => {
           try {
             await channelAccess(options, binding, resolved.who.ceilingDigest);
@@ -473,6 +479,12 @@ export async function processChatEvent(
     const parts: ChatContent[] = splitChatText(reply, options.partSize).map(
       (text) => (about === null ? { text } : { text, task: about.task, ...(about.run === null ? {} : { run: about.run }) }),
     );
+    // The lead's question to its owner: its options as buttons, then "Something else", in their own chat (any thread);
+    // in a room a tap is not their message, so the question and its options go out as text.
+    const ask = store.mateAsk(turn.id);
+    if (ask !== null)
+      parts.push({ ...(event.channel === binding.channel ? { text: phoneText(ask.question, 1000), ask: { turn: ask.turn, options: ask.options } } : { text: phoneText(chatAskText(ask), 1000) }),
+        ...(about === null ? {} : { task: about.task, ...(about.run === null ? {} : { run: about.run }) }) });
     for (const image of store.listMateTurnEvidence(turn.id))
       parts.push({
         text: image.caption,
@@ -576,6 +588,8 @@ export function applyChatAction(
     if (applyChatFlowTap({ store, state, label: options.label }, event, binding, token, repos, now)) return;
     // A teammate's question's button (v93) is answered by the question's own door.
     if (applyChatQuestionTap({ store, state, label: options.label }, event, binding, token, now)) return;
+    // The lead's question to its owner: the tapped option becomes their next message.
+    if (applyChatAskTap({ store, state }, event, binding, token, now)) return;
     const action = state
       .prepare(
         "SELECT a.*,p.message,e.binding,e.channel,e.thread FROM chat_action a JOIN chat_part p ON p.id=a.part JOIN chat_event e ON e.id=p.event WHERE token=?",
@@ -833,6 +847,8 @@ export async function planChatNotifications(
       if (
         notification.createdAt >= binding.created &&
         notification.resolvedAt === null &&
+        // A promise the lead made on another chat is reported there (lead-commitments.ts).
+        (promiseChannelOf(notification) ?? state.channel) === state.channel &&
         // Pings follow responsibility: the lead's work, this person's own act and a muted project stay in the console.
         store.pingAllowed(notification, binding.approver) &&
         // A flow decision for "anyone who approves" reaches every approver who can see the project.
@@ -852,7 +868,7 @@ export async function planChatNotifications(
         const quiet = !personal && isTaskFact(notification) && store.notificationPreference(binding.approver).mode === "quiet";
         if (notification.kind === LEAD_SAY_KIND) {
           // The lead's words (lead-voice.ts): one message, repainted in place when a later say joins it.
-          const content: ChatContent = { text: leadSayText(notification),
+          const content: ChatContent = { text: leadSayText(store, notification),
             ...(notification.link ? { link: { label: "Open", path: notification.link } } : {}) };
           const earlier = leadSayEarlier(store, notification).map(one => state.prepare("SELECT id FROM chat_part WHERE event=?")
             .get(chatHash(`${options.state.channel}:notice:${binding.id}:${one}`))).find(one => one !== undefined);
@@ -971,7 +987,7 @@ export async function planChatNotifications(
               {
                 // Never the task's id or a "— revision" suffix (chat-voice.ts).
                 text: chatText(phoneText(
-                  notification.body === "" ? notification.subject : `${notification.subject}\n\n${notification.body}`,
+                  notification.body === "" ? leadSubjectOf(store, notification, binding.approver) : `${leadSubjectOf(store, notification, binding.approver)}\n\n${notification.body}`,
                   2500,
                 ), notification.taskId === null ? [] : [{ id: notification.taskId, title: chatTitle(store, notification.taskId) }]),
                 ...(notification.taskId ? { task: notification.taskId } : {}),

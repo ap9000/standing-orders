@@ -1,3 +1,4 @@
+import { checkLeadIdentity, leadIdentityOf, leadNameOf, LEAD_NAME_MAX, LEAD_PERSONA_MAX, type LeadIdentity } from "./lead-identity.js";
 import { withActor } from "./actor.js";
 import { repositoryContext, repositoryContextRead } from './repository-context.js';
 import { ADD_TESTS_ACTION, followUpChecksOf, requestFollowUpChecks, fileAddTestsTask, resultCheckLevel, type FollowUpCheck } from './result-follow-ups.js';
@@ -6,6 +7,7 @@ import { repositoryContextHtml } from './repository-context-ui.js';
 import { browserAssetsAvailable, browserWorkspaceDocument, serveBrowserAsset } from './browser-shell.js';
 import { browserCrewOf, browserCrewFromIndex, browserWorkActionHref, browserProjectsOf, browserNavigationOf, type BrowserWorkspace, type BrowserChatLink, type BrowserTasksView, type BrowserLimits, type BrowserSettingsView, type BrowserTaskView, type BrowserTaskFact, type BrowserTaskSection, type BrowserTaskThreadItem, type BrowserTaskDetailGroup, type BrowserHome, type BrowserHomeCount, type BrowserCatchUpItem, type BrowserProjectsView, type BrowserProjectRow, type BrowserResultPanel, type BrowserCheckItem, type BrowserResultView, type BrowserNeedAction, type BrowserActionCard, type BrowserSignIn, type BrowserUpdateNotice, type BrowserUpdates, type BrowserFirstRun, type BrowserPhoneCard } from './browser-workspace.js';
 import { configureLeadFollow, leadFollowStatus, runLeadFollowPass } from './lead-follow.js';
+import { cancelCommitment, conditionWords, openCommitments } from './lead-commitments.js';
 import { startMaintenance } from './maintenance.js';
 import { codingHandoffPreview, createCodingHandoff } from './coding-handoff.js';
 import { codingShippingHtml, CODING_SHIPPING_CSS } from './coding-shipping-ui.js';
@@ -65,7 +67,7 @@ import { prepareWorkspaceRevision, WorkspaceValidatorCache } from "./workspace-r
 import { workIndexPage, workCountsByProject, WorkIndexCursorError, WORK_INDEX_MAX_LIMIT, type WorkIndexPage, type WorkIndexItem, type WorkIndexGroup } from "./work-index.js";
 import { leadActivity } from "./lead-voice.js";
 import { openWorkDecisionOf } from "./work-summary.js";
-import { acceptAndCompleteAsOperator, assignmentOf, checkAssignmentAsOperator, personCheckPending, type AssignmentSnapshot } from './assignment.js';
+import { acceptAndCompleteAsOperator, assignmentOf, checkAssignmentAsOperator, owedAcceptance, type AssignmentSnapshot } from './assignment.js';
 import type { DemoExchange, DemoLead } from "./demo.js";
 import { demoChatHtml, demoThreadHtml, DEMO_CHAT_SCRIPT, type DemoResultView } from "./demo-chat.js";
 import type { PublishExec } from './publish.js';
@@ -252,7 +254,7 @@ import { dirname } from "node:path";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { loadOrCreateVapidKeys, validatePushEndpoint } from "./push.js";
 import { parseGithubRepo, previewGithubRepo, cloneGithubRepo, listGithubRepos, isLargeRepo, type ListOutcome } from "./onboard.js";
-import { verifiedAuthor, LEAD_THREAD, isDigestTime, type MateThreadScope } from "./store.js";
+import { verifiedAuthor, LEAD_THREAD, isDigestTime, MATE_ASK_OTHER, type MateAsk, type MateThreadScope } from "./store.js";
 import { digestTimes } from "./digest-times.js";
 import type { MateProgress } from "./mate-progress.js";
 import { updateRepos, addRepos, removeRepos } from "./repos.js";
@@ -2664,6 +2666,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
           csrf,
           canRetryReview: who.via === "cookie" && who.role === "approver",
           noted: url.searchParams.get("noted") !== null,
+          refusal: Object.hasOwn(RESULT_REFUSALS, url.searchParams.get("refused") ?? "") ? RESULT_REFUSALS[url.searchParams.get("refused")!]! : null,
           tab: parseResultTab(url.searchParams.get("tab")),
           user: who.name,
           now,
@@ -3169,7 +3172,8 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       if (family === null) return refuse(response, who, 404, "no such task", "/tasks");
       const version = url.searchParams.get("version");
       if (version !== null && !family.versions.some(one => one.id === version)) return refuse(response, who, 404, "That version is not available for this task.", taskHref(family.root.id));
-      if (task.taskId !== family.root.id) return redirect(response, `${taskHref(family.root.id)}?version=${encodeURIComponent(task.taskId)}`);
+      // A version's own address lands on its family's page, still asking for the plan editor when it did (Chat's Edit plan).
+      if (task.taskId !== family.root.id) return redirect(response, `${taskHref(family.root.id)}?version=${encodeURIComponent(task.taskId)}${url.searchParams.get("edit") === "plan" ? "&edit=plan" : ""}`);
       return taskScreen(response, who, version ?? family.current.id, null, 200, undefined, undefined, url.searchParams.get("edit") === "plan");
     }
 
@@ -3730,7 +3734,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       const fragments = known === version
         ? null
         : {
-            thread: mateThreadHtml({ ...rows, focusTask, csrf, now, problem: takeMateNote(csrf, session.id) }),
+            thread: mateThreadHtml({ ...rows, focusTask, csrf, now, problem: takeMateNote(csrf, session.id), chatProject }),
             after: mateAfterComposerHtml({ messages: rows.messages, pending: rows.pending, focusTask, csrf }),
             live: focusTask === null ? null : taskChatLiveRegion(focusTask, csrf, true, rows.pending !== null),
           };
@@ -4335,8 +4339,9 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
         returnTo: "/settings/lead",
       };
       const signedIn = localSignIn?.states.claude === "connected" ? "Claude Code" : localSignIn?.states.codex === "connected" ? "Codex" : null;
+      const promises = openCommitments(store, who.name, 50).map(one => ({ id: one.id, what: one.what, when: conditionWords(store, one.condition), until: one.expiresAt }));
       return sendScreen(response, 200, screen("Lead", leadSettingsHtml({ config, facts, words: leadWords(), signedIn, command: agentSignInCommand(),
-        said: url.searchParams.get("said") }), { chrome: chromeFor(project, "settings") }));
+        said: url.searchParams.get("said"), saved: url.searchParams.get("saved") === "1", identity: leadIdentityOf(store, who.name), promises }), { chrome: chromeFor(project, "settings") }));
     }
     if (url.pathname === "/settings/telegram") {
       // Any approver pairs their OWN phone here; the bot token stays on /settings.
@@ -4621,7 +4626,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
    * keeps only that task's coordinator cards; the mate's own thread is one
    * thread regardless of lens. */
   function mateConversationRows(who: Who & { via: "cookie" }, principal: VerifiedApprover, focusTask: TaskChatFocus | null, now: Date, chatProject: string | null = null): {
-    messages: MateMessage[]; proposals: MateProposal[]; decisions: Map<number, Decision>; coordinatorProposals: CoordinatorProposal[]; pending: MateTurn | null; recent: MateTurn[];
+    messages: MateMessage[]; proposals: MateProposal[]; decisions: Map<number, Decision>; coordinatorProposals: CoordinatorProposal[]; pending: MateTurn | null; recent: MateTurn[]; ask: MateAsk | null; asks: Map<number, MateAsk>;
   } {
     const allCoordinatorRows = store.listCoordinatorProposals({ repos: managedRepos(), states: ["pending", "confirmed", "refused"], limit: 30 });
     const coordinatorProposals = focusTask !== null ? allCoordinatorRows.filter(one => focusTask.family.versions.some(version => version.id === one.payload["task"]))
@@ -4631,8 +4636,16 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     // One reply runs at a time per person; this thread shows it only when
     // the reply is its own.
     const live = store.liveMateTurnFor(who.name);
+    const messages = store.listMateMessages(opened.thread.id, 40);
+    // The lead's question with buttons, while its reply is the last word in the thread.
+    const last = messages.at(-1);
+    const ask = last?.role === "assistant" && last.turn !== null && store.getMateTurn(last.turn)?.approver === who.name ? store.mateAskOpen(last.turn, now) : null;
+    // Answered questions stay readable above the answer; only their buttons go.
+    const asks = new Map(messages.flatMap(one => { const asked = one.role === "assistant" && one.turn !== null ? store.mateAsk(one.turn) : null; return asked === null ? [] : [[asked.turn, asked] as const]; }));
     return {
-      messages: store.listMateMessages(opened.thread.id, 40),
+      messages,
+      ask,
+      asks,
       proposals,
       decisions: decisionsFor(store, [...proposals, ...coordinatorProposals]),
       coordinatorProposals,
@@ -4699,7 +4712,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     const rows = mateConversationRows(who, principal, focusTask, now, chatProject);
     return {
       sessionId: session.id, user: session.approver, version: mateChatVersion({ ...rows, focusTask }),
-      messages: mateBrowserMessages(rows, who.session.csrf, back),
+      messages: mateBrowserMessages(rows, who.session.csrf, back, { task: focusTask?.id ?? null, project: chatProject }),
       pendingTurnId: rows.pending?.id ?? null, requestId: randomBytes(16).toString("hex"), maxChars: MATE_MESSAGE_MAX_CHARS,
       taskId: focusTask?.id ?? null, resultRunId, project: focusTask === null ? chatProject : null,
     };
@@ -5156,7 +5169,8 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       try {
         const project = s.chrome.active === 'chat' ? null : s.chrome.project;
         crew = extras.team?.tasks ? browserCrewFromIndex(extras.team.tasks, extras.team.selected?.id) : requestFacts.workCrew?.project === project ? browserCrewFromIndex(requestFacts.workCrew.page)
-          : browserCrewOf(store, clock(), { principal: 'operator', repos: managedRepos(), includeUnplaced: false }, { evidenceRoot, project });
+          // The reader's own lead's claims read "<name> is on it" here too.
+          : browserCrewOf(store, clock(), { principal: 'operator', repos: managedRepos(), includeUnplaced: false, viewer: requestFacts.actor ?? null }, { evidenceRoot, project });
       } catch { notices.push('Crew updates are unavailable. Open Tasks to inspect saved work.'); }
       // "Wake me only for these": the navigation carries the count of tasks
       // waiting on a person behind its Tasks link — the open project's, or
@@ -5188,6 +5202,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       const request = requestFacts.workspaceRequest;
       const workspace: BrowserWorkspace = {
         version: 1, path: currentPath, title: s.title, user: requestFacts.actor ?? '', csrf: requestFacts.csrf, sensitive,
+        ...(requestFacts.actor ? { leadName: leadNameOf(store, requestFacts.actor) } : {}),
         refreshUrl: path.pathname + path.search,
         receipt: conversation !== null && request && REQUEST_TOKEN.test(request)
           ? { request, received: store.mateRequestReceipt(conversation.sessionId, request) !== null } : null,
@@ -5294,7 +5309,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     // One line: what this person's lead is doing now and when it last acted.
     const activity = leadActivity(store, who.name);
     const leadTask = activity?.taskId == null ? null : store.lookupRef(activity.taskId);
-    const lead = activity === null ? null : { doing: activity.doing, at: activity.at,
+    const lead = activity === null ? null : { name: activity.name, doing: activity.doing, at: activity.at,
       href: leadTask == null || !admitted(leadTask.repo) ? null : taskHref(familyOf(activity.taskId!)?.root.id ?? activity.taskId!) };
     return {
       agents, counts, catchUp, allHref: "/work", ...(lead === null ? {} : { lead }),
@@ -5399,7 +5414,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
   }
 
   function workAccess() {
-    // The reader's own lead's claims read "Your lead is on it" (lead-voice.ts); nobody else's.
+    // The reader's own lead's claims read "<name> is on it" (lead-voice.ts); nobody else's.
     return { principal: 'operator' as const, repos: admissionList(), includeUnplaced: visible(null), viewer: requestContext.getStore()?.actor ?? null };
   }
   // All project counts are read together. No task artifacts or processes are
@@ -9056,6 +9071,22 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     }
     // Turn the lead on with the agent signed in on this computer: its membership spends no dollars, so like starting a
     // conversation it needs no second password; the full form (Advanced) still asks for one.
+    // Settings → Lead: the name and persona this person's lead speaks with.
+    if (url.pathname === "/settings/lead/identity") {
+      if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "An approver names their lead.", "/settings/lead");
+      const checked = checkLeadIdentity(body.get("name") ?? "", body.get("persona") ?? "");
+      if (!checked.ok) return redirect(response, chatReturnWithSaid("/settings/lead", checked.message));
+      store.setLeadConfig(who.name, checked.identity.name, checked.identity.persona, now);
+      return redirect(response, "/settings/lead?saved=1");
+    }
+    // Settings → Lead: stop the lead following up on one of your promises.
+    if (url.pathname === "/settings/lead/promise/cancel") {
+      if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "An approver manages the lead's promises.", "/settings/lead");
+      const id = Number(body.get("promise"));
+      const done = Number.isSafeInteger(id) && cancelCommitment(store, who.name, id, who.name, "Cancelled in Settings.", now);
+      // The promise leaving the list says it was cancelled; only a refusal needs words.
+      return redirect(response, done ? "/settings/lead" : chatReturnWithSaid("/settings/lead", "That promise was already closed."));
+    }
     if (url.pathname === "/settings/lead/on") {
       if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "An approver turns the lead on.", "/settings/lead");
       await checkLocalAgents(true);
@@ -9344,7 +9375,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
         }
         const opened = store.openMateThread(who.name, principal.ceilingDigest, now, chatScopeOf(focusTask, chatProject));
         const onProgress = beginLiveTurn(opened.thread.id);
-        void runMateTurn({ store, who: principal, session: mateSession, thread: opened.thread, config: enabled.config, key: enabled.key, message, onProgress, ...(requestId === null ? {} : { requestId }), ...(focusTask === null && chatProject !== null ? { context: `Current project: ${projectName(chatProject)} (${chatProject}). Keep this conversation about that project unless the operator explicitly asks to broaden it; use it as the repo for project tools.` } : {}), ...(focusTask === null ? {} : { context: `Current task: ${focusTask.id}. Read it with get_task before answering or proposing changes. Read its currentExecution next and bind new actions to that exact execution. Never replace the target of a prior proposal with a newer revision. Keep this turn about that task unless the operator explicitly asks to broaden it.${resultContext}${modeContext}` }), fetcher: chatFetcher, ...(options.subscriptionChatRunner === undefined ? {} : { subscriptionRunner: options.subscriptionChatRunner }), clock, evidenceRoot })
+        void runMateTurn({ store, who: principal, session: mateSession, thread: opened.thread, config: enabled.config, key: enabled.key, message, onProgress, channel: "console", ...(requestId === null ? {} : { requestId }), ...(focusTask === null && chatProject !== null ? { context: `Current project: ${projectName(chatProject)} (${chatProject}). Keep this conversation about that project unless the operator explicitly asks to broaden it; use it as the repo for project tools.` } : {}), ...(focusTask === null ? {} : { context: `Current task: ${focusTask.id}. Read it with get_task before answering or proposing changes. Read its currentExecution next and bind new actions to that exact execution. Never replace the target of a prior proposal with a newer revision. Keep this turn about that task unless the operator explicitly asks to broaden it.${resultContext}${modeContext}` }), fetcher: chatFetcher, ...(options.subscriptionChatRunner === undefined ? {} : { subscriptionRunner: options.subscriptionChatRunner }), clock, evidenceRoot })
           .then(outcome => {
             if (!outcome.ok) noteMate(who.session.csrf, "turn" in outcome ? outcome.turn : null, outcome.message);
             endLiveTurn(opened.thread.id, outcome.ok);
@@ -10864,7 +10895,13 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
           if (!(error instanceof PermissionsWouldChange)) throw error;
           saved = { ok: false, status: 409, message: "Not saved: this would change what the agent may do. Change permissions in Details, under edit the scope." };
         }
-        if (!saved.ok) return taskScreen(response, who, taskId, saved.message, saved.status, body);
+        if (!saved.ok) {
+          // Refused because the plan moved on: the draft comes back with the version now on file, so saving it
+          // again (having read the reason) can succeed instead of being refused the same way.
+          const draft = new URLSearchParams(body);
+          if (saved.status === 409) draft.set("sawDigest", store.getScope(taskId)?.digest ?? "");
+          return taskScreen(response, who, taskId, saved.message, saved.status, draft);
+        }
         return redirect(response, taskHref(taskId));
       }
       case "approve": {
@@ -10976,7 +11013,12 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
           note = validated.note;
         }
         // A failed task's result is accepted only anyway, on purpose: with a reason.
-        if (note === null && store.getTask(taskId)?.state === "failed") return taskScreen(response, who, taskId, "Accepting anyway needs a reason.", 400);
+        if (note === null && store.getTask(taskId)?.state === "failed") {
+          // Posted from the result page: back there, where the reason field is, with the refusal said on it.
+          const back = body.get("return") === null ? null : safeReturn(body.get("return"));
+          if (back !== null && back.startsWith("/review?")) return redirect(response, withRefusal(back, "reason"));
+          return taskScreen(response, who, taskId, ACCEPT_ANYWAY_NEEDS_REASON, 400);
+        }
         store.acceptProof(latest.id, verifiedAuthor(who.name), note, now);
         return redirect(response, body.get("return") === null ? taskHref(taskId) : safeReturn(body.get("return")));
       }
@@ -11003,7 +11045,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
           const publish = body.get("publish") === "1";
           const finished = acceptAndCompleteAsOperator(store, taskId, { runId: Number(namedRun), receiptDigest: digest, note }, principal, now, evidenceRoot,
             publish ? accepted => completeAndOpenPullRequest(store, { taskId, digest: accepted, runId: Number(namedRun), who: principal, root: evidenceRoot }, now) : undefined);
-          if (!finished.ok) return taskScreen(response, who, taskId, finished.message, 409);
+          if (!finished.ok) return taskScreen(response, who, taskId, finished.message, finished.reason === "needs-reason" ? 400 : 409);
           return redirect(response, publish ? `${taskHref(familyOf(taskId)?.root.id ?? taskId)}#merge` : body.get("return") === null ? reviewHref(taskId, Number(namedRun)) : safeReturn(body.get("return")));
         }
         if (body.get("publish") === "1") {
@@ -17957,7 +17999,9 @@ type LeadFormFacts = {
 };
 
 /** Settings → Lead: one line for what runs the lead and one action; the full form, turning it off and stored keys under Advanced. */
-function leadSettingsHtml(data: { config: import("./store.js").ChatConfig | null; facts: LeadFormFacts; words: string | null; signedIn: string | null; command: string; said: string | null }): string {
+function leadSettingsHtml(data: { config: import("./store.js").ChatConfig | null; facts: LeadFormFacts; words: string | null; signedIn: string | null; command: string; said: string | null;
+  saved?: boolean; identity?: LeadIdentity;
+  promises?: { id: number; what: string; when: string; until: string }[] }): string {
   const { config, facts } = data;
   const hidden = `<input type="hidden" name="csrf" value="${escape(facts.csrf)}"><input type="hidden" name="return" value="/settings/lead">`;
   const summary = config === null
@@ -17974,6 +18018,15 @@ function leadSettingsHtml(data: { config: import("./store.js").ChatConfig | null
     `<p><a href="/settings">Settings</a></p><h1>Lead</h1>`,
     data.said === null ? "" : `<p class="problem" role="status">${escape(data.said)}</p>`,
     `<section class="card lead-settings" data-lead-settings>${summary}</section>`,
+    data.identity === undefined ? "" : `<form method="post" action="/settings/lead/identity" class="card lead-identity" data-lead-identity>` +
+      `<input type="hidden" name="csrf" value="${escape(facts.csrf)}">` +
+      `<label>Name your lead<input name="name" value="${escape(data.identity.name)}" maxlength="${LEAD_NAME_MAX}" autocomplete="off" required></label>` +
+      `<label>Persona<textarea name="persona" rows="4" maxlength="${LEAD_PERSONA_MAX}">${escape(data.identity.persona)}</textarea></label>` +
+      `<button type="submit">Save</button>${data.saved === true ? ` <span class="meta" role="status">Saved.</span>` : ""}</form>`,
+    // What the lead promised to follow up on; it reports each once, here in chat, and drops it after 7 days.
+    (data.promises ?? []).length === 0 ? "" : `<section class="card lead-promises" data-lead-promises><h2>Promises</h2><ul class="lead-promise-list">${data.promises!.map(one =>
+      `<li data-promise="${one.id}"><p>${escape(one.what)}</p><p class="meta">${escape(one.when.charAt(0).toUpperCase() + one.when.slice(1))} · <span class="nowrap">until ${escape(new Date(one.until).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" }))}</span></p>` +
+      `<form method="post" action="/settings/lead/promise/cancel" class="inline">${hidden}<input type="hidden" name="promise" value="${one.id}"><button type="submit" class="secondary">Cancel</button></form></li>`).join("")}</ul></section>`,
     `<details class="lead-advanced" data-lead-advanced><summary>Advanced</summary>`,
     leadConfigForm(config, facts),
     config === null ? "" : `<form method="post" action="/chat/config" class="inline">${hidden}<input type="hidden" name="off" value="1">` +
@@ -18567,15 +18620,36 @@ type MateThreadRows = {
   recent: MateTurn[];
   /** Optional task lens into the same unified thread. */
   focusTask: TaskChatFocus | null;
+  /** The lead's open question to this reader, drawn as buttons under its reply. */
+  ask?: MateAsk | null;
+  /** Every question the lead asked in these messages, by turn: answered ones show their words without buttons. */
+  asks?: Map<number, MateAsk>;
 };
+
+/** The lead's question as buttons: each option sends itself as the next message (the same POST as a typed one);
+ * "Something else" moves to the composer. Nothing shows while a reply is running. */
+function mateAskHtml(ask: MateAsk, csrf: string, target: { task: string | null; project: string | null }, composer: string, open = true): string {
+  if (!open) return `<div class="so-owner-ask" data-ask="${ask.turn}"><p class="so-owner-ask-question"><strong>${escape(ask.question)}</strong></p></div>`;
+  const hidden = `<input type="hidden" name="csrf" value="${escape(csrf)}">` +
+    (target.task !== null ? `<input type="hidden" name="task" value="${escape(target.task)}">` : target.project !== null ? `<input type="hidden" name="project" value="${escape(target.project)}">` : "");
+  return `<div class="so-owner-ask" data-ask="${ask.turn}"><p class="so-owner-ask-question"><strong>${escape(ask.question)}</strong></p>` +
+    `<div class="so-owner-ask-options" role="group" aria-label="Answer options">` +
+    ask.options.map(option => `<form method="post" action="/chat" class="inline">${hidden}<button type="submit" name="message" value="${escape(option)}" class="so-suggestion quiet">${escape(option)}</button></form>`).join("") +
+    `<label for="${escape(composer)}" class="so-suggestion so-owner-ask-other">${escape(MATE_ASK_OTHER)}</label></div></div>`;
+}
 
 /** The thread's messages as the React conversation renders them, each
  * with the proposal cards its turn produced; `back` is where a card's
  * confirm or dismiss returns. */
-function mateBrowserMessages(rows: Pick<MateThreadRows, "messages" | "proposals" | "decisions" | "pending">, csrf: string, back: string | null): import("./browser-workspace.js").BrowserMessage[] {
+function mateBrowserMessages(rows: Pick<MateThreadRows, "messages" | "proposals" | "decisions" | "pending" | "ask" | "asks">, csrf: string, back: string | null, target: { task: string | null; project: string | null } = { task: null, project: null }): import("./browser-workspace.js").BrowserMessage[] {
+  const open = rows.pending === null ? rows.ask?.turn ?? null : null;
+  const asked = (turn: number | null): string => {
+    const ask = turn === null ? undefined : rows.asks?.get(turn);
+    return ask === undefined ? "" : mateAskHtml(ask, csrf, target, target.task === null ? "lead-message" : "task-message", ask.turn === open);
+  };
   return rows.messages.map(message => ({
     id: message.id, role: message.role, text: message.text,
-    html: message.role === 'operator' ? `<p>${escape(message.text)}</p>` : renderChatText(message.text),
+    html: message.role === 'operator' ? `<p>${escape(message.text)}</p>` : renderChatText(message.text) + asked(message.turn),
     activity: message.activity, createdAt: message.createdAt,
     ...(() => {
       const parts = message.turn === null ? [] : rows.proposals.filter(one => one.turn === message.turn)
@@ -18599,6 +18673,7 @@ function mateChatVersion(rows: MateThreadRows): string {
     rows.coordinatorProposals.map(one => [one.id, one.state, one.outcome === null ? null : JSON.stringify(one.outcome)]),
     [...rows.decisions.values()].map(one => [one.id, one.state, one.choice ?? null]),
     rows.pending === null ? null : [rows.pending.id, rows.pending.steps],
+    rows.ask?.turn ?? null,
     rows.recent[0] === undefined ? null : [rows.recent[0].id, rows.recent[0].state, rows.recent[0].failureReason],
     focus === null
       ? null
@@ -18625,7 +18700,7 @@ function mateChatVersion(rows: MateThreadRows): string {
  * populated thread. Every child carries a stable `data-key` so the page
  * keeps an unchanged node (its open disclosures, its focus) and replaces
  * only what the server rendered differently. The composer is never here. */
-function mateThreadHtml(data: MateThreadRows & { csrf: string; now: Date; problem: string | null }): string {
+function mateThreadHtml(data: MateThreadRows & { csrf: string; now: Date; problem: string | null; chatProject?: string | null }): string {
   const returnTo = data.focusTask === null ? "/chat" : taskChatHref(data.focusTask.id);
   const parts: string[] = [];
   if (data.problem !== null) parts.push(`<div class="problem" data-key="said">${escape(data.problem)}</div>`);
@@ -18656,6 +18731,10 @@ function mateThreadHtml(data: MateThreadRows & { csrf: string; now: Date; proble
     parts.push(
       `<div class="msg mate" data-message-role="assistant" data-key="m${message.id}"${message.id === latestReply ? ' id="latest"' : ""}>` +
         renderChatText(message.text) +
+        (() => {
+          const ask = message.turn === null ? undefined : data.asks?.get(message.turn);
+          return ask === undefined ? "" : mateAskHtml(ask, data.csrf, { task: data.focusTask?.id ?? null, project: data.chatProject ?? null }, "chat-message", data.pending === null && data.ask?.turn === ask.turn);
+        })() +
         cards.map(one => mateProposalCard(one, data.csrf, inert, data.decisions.get(typeof one.payload["decision"] === "number" ? one.payload["decision"] : -1) ?? null, data.focusTask === null ? null : returnTo)).join("") +
         `<div class="chat-message-foot">${chatActivity(message.activity)}<time datetime="${escape(message.createdAt)}">${escape(relativeAge(message.createdAt, data.now))}</time></div>` +
         `</div>`,
@@ -18738,7 +18817,7 @@ function matePage(chrome: Chrome, data: MateThreadRows & {
   }
   const lastMessage = data.messages.at(-1);
   const latestReply = data.pending === null && lastMessage?.role === "assistant" ? lastMessage.id : null;
-  conversation.push(mateThreadHtml({ ...data, problem: null }));
+  conversation.push(mateThreadHtml({ ...data, problem: null, chatProject }));
   conversation.push(
     // The New update action (package 2): hidden until a live update lands
     // while the reader is above the latest message; a real button, so the
@@ -18750,7 +18829,7 @@ function matePage(chrome: Chrome, data: MateThreadRows & {
     data.focusTask === null ? "" : `<input type="hidden" name="task" value="${escape(data.focusTask.id)}">`,
     chatProject === null ? "" : `<input type="hidden" name="project" value="${escape(chatProject)}">`,
     data.resultRunId == null ? "" : `<input type="hidden" name="result" value="${data.resultRunId}">`,
-    `<label>Message<textarea name="message" rows="1" maxlength="${MATE_MESSAGE_MAX_CHARS}" placeholder="${data.focusTask !== null ? "Ask about this task…" : chatProject !== null ? `Ask about ${escape(projectName(chatProject))}…` : "Describe what you want done…"}"></textarea></label>`,
+    `<label>Message<textarea id="chat-message" name="message" rows="1" maxlength="${MATE_MESSAGE_MAX_CHARS}" placeholder="${data.focusTask !== null ? "Ask about this task…" : chatProject !== null ? `Ask about ${escape(projectName(chatProject))}…` : "Describe what you want done…"}"></textarea></label>`,
     `<button type="submit" aria-label="${data.pending === null ? "send message" : "wait for the current reply before sending"}"${data.pending === null ? "" : " disabled"}>Send</button>`,
     `</form>`,
     // Concise pass (2026-09-13): the status line speaks only when there is
@@ -18771,7 +18850,7 @@ function matePage(chrome: Chrome, data: MateThreadRows & {
       workspace: {
         conversation: {
           sessionId: data.session.id, user: data.session.approver, version: mateChatVersion(data),
-          messages: mateBrowserMessages(data, data.csrf, data.focusTask === null && chatProject === null ? null : returnTo),
+          messages: mateBrowserMessages(data, data.csrf, data.focusTask === null && chatProject === null ? null : returnTo, { task: data.focusTask?.id ?? null, project: chatProject }),
           pendingTurnId: data.pending?.id ?? null, requestId: randomBytes(16).toString('hex'), maxChars: MATE_MESSAGE_MAX_CHARS,
           taskId: data.focusTask?.id ?? null, resultRunId: data.resultRunId ?? null, project: chatProject,
         },
@@ -20442,6 +20521,17 @@ function accentHead(): string {
 const requestContext = new AsyncLocalStorage<{ sso?: { label: string; fresh: boolean } | undefined; refusal?: (response: ServerResponse, status: number, body: string) => void; theme?: "light" | "dark" | null; accent?: string | null; updateSeen?: string | null; csrf: string; returnTo: string; actor?: string; createdTask?: string; browser?: boolean; workspaceRead?: boolean; workspaceRequest?: string | null; workCounts?: ReturnType<typeof workCountsByProject>; workCrew?: { project: string | null; page: WorkIndexPage }; workspaceValidator?: { key: string; revision: string; expiresAt: number; etag: string } }>();
 
 /** A same-site path or "/": never a scheme, a host, or a protocol-relative road. */
+/** The words a result page shows for a refusal its own form led to, by the fixed code a redirect carries. */
+const ACCEPT_ANYWAY_NEEDS_REASON = "Accepting anyway needs a reason.";
+const RESULT_REFUSALS: Record<string, string> = { reason: ACCEPT_ANYWAY_NEEDS_REASON };
+
+/** A same-site page address with a refusal code added, before any fragment. */
+function withRefusal(href: string, code: keyof typeof RESULT_REFUSALS): string {
+  const at = href.indexOf("#");
+  const [path, hash] = at === -1 ? [href, ""] : [href.slice(0, at), href.slice(at)];
+  return `${path}${path.includes("?") ? "&" : "?"}refused=${code}${hash}`;
+}
+
 function safeReturn(raw: string | null | undefined): string {
   if (raw === null || raw === undefined) return "/";
   // A backslash is a slash to a browser's URL parser (`/\evil` → `//evil`), so it is refused too (v3 review, finding 10).
@@ -23185,6 +23275,8 @@ function reviewCockpitPage(
     /** v50: an approver's session may ask for a review retry here. */
     canRetryReview: boolean;
     noted: boolean;
+    /** What this person's last post from this page was refused for, in words (`refused=` on the address). */
+    refusal?: string | null;
     /** Package 3: the selected local result view and the panel's draft keys. */
     tab: ResultTab;
     user: string;
@@ -23250,12 +23342,13 @@ function reviewCockpitPage(
     capped: queue.length >= data.queueCap ? data.queueCap : null,
     missing: data.missing === null ? null : `No completed task ${data.missing} is in view here — it may not be finished, or it is outside this console's projects.`,
     beyond: data.beyondQueue && selected !== null,
-    selected: detailParts === null ? null : detailParts.selected,
+    selected: detailParts === null ? null : data.refusal == null ? detailParts.selected : { ...detailParts.selected, problem: data.refusal },
   };
   return screen("review", [
     selected === null ? `<h1>Results</h1>` : "",
     missingNote,
     beyondNote,
+    data.refusal == null || selected === null ? "" : `<p class="problem" data-result-refusal>${escape(data.refusal)}</p>`,
     `<div class="cockpit">${queuePane}${detail}</div>`,
   ].join("\n"), {
     chrome,
@@ -23496,12 +23589,11 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
   };
 }
 
-/** What Accept and finish owes before it completes, as the form asks for it: the person's own check (no
- * reason), an exception a report that doesn't match its changes needs a reason for, or nothing. */
+/** What Accept and finish owes before it completes, as the form asks for it: the server's own rule
+ * (owedAcceptance), so the form asks for exactly what the completion requires. */
 function owedAcceptanceOf(receipt: AssignmentSnapshot["receipt"]): { note: string | null } | null {
-  if (receipt === null || receipt.proofAcceptance !== null) return null;
-  if (personCheckPending(receipt)) return { note: null };
-  return cantAcceptYetOf(receipt.proof?.verdict ?? null, receipt.proof?.reasons ?? [], false) === ACCEPT_NEEDS_REASON ? { note: "Why is this safe to accept?" } : null;
+  const owed = owedAcceptance(receipt);
+  return owed === null ? null : owed === "person-check" ? { note: null } : { note: "Why is this safe to accept?" };
 }
 
 function completionForm(taskId: string, runId: number, digest: string, csrf: string, pullRequestTo: string | null = null, accept: { note: string | null } | null = null): string {

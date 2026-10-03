@@ -317,6 +317,30 @@ describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
   });
 
 
+  test("Settings → Lead names the lead and edits its persona; the console's chat then says that name", async () => {
+    await boot();
+    const cookie = await login();
+    const html = await (await fetch(url("/settings/lead"), { headers: { cookie } })).text();
+    expect(html).toContain("Name your lead");
+    expect(html).toContain('name="name" value="Lead"');
+    expect(html).toContain("Be genuinely helpful, not performative.");
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(html)?.[1] as string;
+    const save = (fields: Record<string, string>) => fetch(url("/settings/lead/identity"), { method: "POST", headers: { cookie, origin: base }, redirect: "manual", body: new URLSearchParams({ csrf, ...fields }) });
+    // A name that isn't plain words is refused and nothing is saved.
+    const refused = await save({ name: "<b>Maya</b>", persona: "x" });
+    expect(refused.headers.get("location")).toContain("said=");
+    expect(store.leadConfig("alex")).toBeNull();
+    const saved = await save({ name: "Maya", persona: "Dry humour. Keep it short." });
+    expect(saved.status).toBe(303);
+    expect(saved.headers.get("location")).toBe("/settings/lead?saved=1");
+    expect(store.leadConfig("alex")).toEqual({ name: "Maya", persona: "Dry humour. Keep it short." });
+    const again = await (await fetch(url("/settings/lead?saved=1"), { headers: { cookie } })).text();
+    expect(again).toContain('name="name" value="Maya"');
+    expect(again).toContain("Saved.");
+    const workspace = await (await fetch(url("/chat?format=workspace"), { headers: { cookie } })).json() as { leadName?: string };
+    expect(workspace.leadName).toBe("Maya");
+  });
+
   test("chat is configurable from the console itself — password-gated, key stays environment-only", async () => {
     store.clearChatConfig();
     await boot();
@@ -449,6 +473,25 @@ describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
     } finally {
       rmSync(configDir, { recursive: true, force: true });
     }
+  });
+
+  test("Settings → Lead lists the lead's open promises, and the owner cancels one", async () => {
+    await boot();
+    const cookie = await login();
+    const thread = store.openMateThread("alex", "ceiling", T0).thread.id;
+    const { recordCommitment, getCommitment } = await import("./lead-commitments.js");
+    const made = recordCommitment(store, { owner: "alex", repo: null, thread, turn: null, what: "Tell you when the release check passes",
+      condition: { kind: "time", at: new Date(T0.getTime() + 3_600_000).toISOString() } }, T0);
+    let html = await (await fetch(url("/settings/lead"), { headers: { cookie } })).text();
+    expect(html).toContain("<h2>Promises</h2>");
+    expect(html).toContain("Tell you when the release check passes");
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(html)?.[1] as string;
+    const cancelled = await fetch(url("/settings/lead/promise/cancel"), { method: "POST", headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, promise: String(made.id) }), redirect: "manual" });
+    expect(cancelled.status).toBe(303);
+    expect(getCommitment(store, made.id)).toMatchObject({ state: "cancelled", closedBy: "alex" });
+    html = await (await fetch(url("/settings/lead"), { headers: { cookie } })).text();
+    expect(html).not.toContain("<h2>Promises</h2>");
   });
 
   test("bearer callers are refused — drafts have nowhere to live", async () => {
@@ -595,6 +638,31 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(store.recentMateTurns('alex', 10)).toHaveLength(1);
     expect((await fetch(url('/chat?format=workspace'), { headers: { authorization: `Bearer alex:${approverToken}` } })).status).toBe(403);
     expect((await fetch(url('/chat?format=workspace'), { redirect: 'manual' })).status).toBe(303);
+  });
+
+  test("the lead's question shows its options as buttons that send themselves, plus Something else, until the owner answers (ask_owner)", async () => {
+    const cookie = await login(); const csrf = await mint(cookie);
+    const read = async () => (await (await fetch(url('/chat?format=workspace'), { headers: { cookie } })).json()) as import('./browser-workspace.js').BrowserWorkspace;
+    script.push(
+      () => answer([{ type: 'tool_use', id: 'q1', name: 'ask_owner', input: { question: 'Ship today or Friday?', options: ['Today', 'Friday'] } }]),
+      () => answer([{ type: 'text', text: 'It depends on one thing.' }]),
+    );
+    expect((await sendJson(cookie, { csrf, message: 'When should the release go out?' })).status).toBe(202);
+    await settle();
+    const asked = (await read()).conversation!.messages.at(-1)!.html;
+    expect(asked).toContain('It depends on one thing.');
+    expect(asked).toContain('<strong>Ship today or Friday?</strong>');
+    expect([...asked.matchAll(/<form method="post" action="\/chat"[^>]*>.*?name="message" value="([^"]+)"/g)].map(one => one[1])).toEqual(['Today', 'Friday']);
+    expect(asked).toContain('<label for="lead-message" class="so-suggestion so-owner-ask-other">Something else</label>');
+    // A tap is the same POST as a typed message; once answered, the buttons are gone.
+    script.push(() => answer([{ type: 'text', text: 'Friday it is.' }]));
+    expect((await sendJson(cookie, { csrf, message: 'Friday' })).status).toBe(202);
+    await settle();
+    const after = (await read()).conversation!.messages;
+    expect(after.map(one => one.text).slice(-2)).toEqual(['Friday', 'Friday it is.']);
+    // The question stays readable above the answer; only its buttons are gone.
+    expect(after.at(-3)!.html).toContain('<strong>Ship today or Friday?</strong>');
+    expect(after.some(one => one.html.includes('name="message"') || one.html.includes('Something else'))).toBe(false);
   });
 
   test('React projects page lists the same projects as compact rows', async () => {

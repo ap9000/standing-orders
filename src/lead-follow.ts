@@ -6,6 +6,7 @@ import { isVerifiedApprover, reproveApprover, verifyApproverStanding, type Verif
 import { assignmentOf } from './assignment.js';
 import { runMateTurn, type MateTurnInput, type MateTurnOutcome } from './mate.js';
 import { updateAdmissionPaused } from './desktop-update-gate.js';
+import { checkLeadCommitments } from './lead-commitments.js';
 
 const CONFIG = 'lead follow configured';
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -123,6 +124,8 @@ export async function runLeadFollowPass(input: LeadFollowInput): Promise<void> {
   const { store } = input, clock = input.clock ?? (() => new Date());
   if (store.isDemo() || updateAdmissionPaused(store.raw())) return;
   store.sweepStaleMateTurns(clock());
+  // The lead's own promises are kept whether or not automatic crew updates are on: no model, one line when met.
+  checkLeadCommitments(store, clock(), input.evidenceRoot);
   const grants = store.handle.prepare("SELECT a.* FROM action_ledger a WHERE a.action=? AND a.source='work' AND a.id=(SELECT MAX(b.id) FROM action_ledger b WHERE b.actor=a.actor AND b.action=a.action AND b.source=a.source) ORDER BY a.id").all(CONFIG).map(readGrant).filter((one): one is Grant => one !== null && one.enabled);
   for (const grant of grants) {
     const access = authorized(store, grant, input.repos());

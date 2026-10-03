@@ -225,6 +225,7 @@ function deleteRows(store: Store, repo: string, d: Doomed, now: Date): number {
     del(`${surface}_flow_prompt`, IN("card"), C);
     del(`${surface}_question_action`, IN("question"), questions);
     del(`${surface}_question_prompt`, IN("question"), questions);
+    del(`${surface}_ask_action`, IN("turn"), U);
   }
   del("telegram_action", IN("decision"), decisions);
   del("telegram_decision_message", IN("decision"), decisions);
@@ -249,6 +250,7 @@ function deleteRows(store: Store, repo: string, d: Doomed, now: Date): number {
   del("team_mate_session", IN("thread"), H);
   del("mate_turn_evidence", `${IN("turn")} OR ${IN("run")} OR ${IN("task_ref")} OR ${IN("artifact")}`, U, R, T, A);
   del("chat_turn", IN("mate_turn"), U);
+  del("mate_ask", IN("turn"), U);
   del("mate_turn", IN("id"), U);
   del("mate_proposal", IN("id"), proposals);
   del("mate_message", IN("thread"), H);
@@ -321,7 +323,7 @@ function deleteRows(store: Store, repo: string, d: Doomed, now: Date): number {
   del("routine_fire", "routine_id IN (SELECT id FROM routine WHERE repo = ?)", repo);
   for (const [table, column] of SETTINGS) del(table, `${column} = ?`, repo);
   del("project_mute", "repo = ?", repo);
-  for (const table of ["knowledge_change", "project_skill_change", "memory_gap", "memory_proposal", "memory_rejection", "memory_session", "memory_search", "mode_rail", "side_spend", "watch_episode", "worktree", "coordinator_proposal"]) del(table, "repo = ?", repo);
+  for (const table of ["knowledge_change", "project_skill_change", "memory_gap", "memory_proposal", "memory_rejection", "memory_session", "memory_search", "mode_rail", "side_spend", "watch_episode", "worktree", "coordinator_proposal", "lead_commitment"]) del(table, "repo = ?", repo);
   // A builder watching the project keeps its lease until it stops; an ended one goes.
   del("watch_lease", "repo = ? AND expires_at <= ?", repo, now.toISOString());
   del("project", "path = ?", repo);

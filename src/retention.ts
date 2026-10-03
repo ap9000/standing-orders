@@ -259,9 +259,16 @@ export function sweepRetention(store: Store, evidenceRoot: string, now: Date, ac
     if (periods.chat !== null) {
       const team = db.prepare("DELETE FROM team_message WHERE message = ? AND status NOT IN ('queued', 'running', 'uncertain')");
       const message = db.prepare("DELETE FROM mate_message WHERE id = ? AND NOT EXISTS (SELECT 1 FROM team_message WHERE message = ?)");
+      const asked = db.prepare("SELECT turn FROM mate_message WHERE id = ? AND role = 'assistant' AND turn IS NOT NULL");
+      // The lead's question goes with the reply that asked it; its buttons then say it expired.
+      const ask = db.prepare("DELETE FROM mate_ask WHERE turn = ? AND NOT EXISTS (SELECT 1 FROM mate_message WHERE turn = ? AND role = 'assistant')");
       for (const one of plan.items.chat) {
         team.run(one.id);
-        if (Number(message.run(one.id, one.id).changes) === 1) { done.chat.count++; done.chat.bytes += one.bytes; }
+        const turn = asked.get(one.id)?.["turn"];
+        if (Number(message.run(one.id, one.id).changes) === 1) {
+          done.chat.count++; done.chat.bytes += one.bytes;
+          if (turn !== undefined && turn !== null) ask.run(Number(turn), Number(turn));
+        }
       }
     }
     if (periods.notifications !== null) {

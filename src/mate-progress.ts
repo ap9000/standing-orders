@@ -28,6 +28,8 @@ const TOOL_LABELS: Record<string, string> = {
   get_flow_insights: "Looking at how the flows are doing",
   get_project_knowledge: "Reading project knowledge",
   search_project_memory: "Searching project memory",
+  get_integrations: "Checking integrations",
+  ask_owner: "Preparing a question",
   get_models: "Checking the models",
   list_tasks: "Listing tasks",
   get_task: "Reading the task",
@@ -37,6 +39,9 @@ const TOOL_LABELS: Record<string, string> = {
   get_decision: "Reading a decision",
   queue: "Checking the queue",
   show_control: "Finding the right control",
+  commit_to: "Noting what I promised",
+  release_commitment: "Updating what I promised",
+  remember: "Preparing a card for you to confirm",
 };
 
 export function mateToolLabel(name: string): string {

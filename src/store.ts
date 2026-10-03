@@ -219,6 +219,17 @@ CREATE TABLE IF NOT EXISTS chat_batch_item (
 );
 `;
 
+/** Settings → Lead (no version bump: additive only): what one person calls their lead and the short persona it
+ * speaks with. No row reads as the defaults (lead-identity.ts). */
+const LEAD_CONFIG_SCHEMA = `
+CREATE TABLE IF NOT EXISTS lead_config (
+  account    TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  persona    TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+`;
+
 /** Pings follow responsibility (no version bump: additive only). `lead_credential` is a lead token: an agent acting
  * for `owner`, only its hash kept. `task_act` is who filed, approved, cancelled, completed or handed on a task
  * (`lead` 1: the owner's lead; `person`/`why`: who the lead asked, and why). `notification_actor` is whose act made
@@ -263,6 +274,31 @@ CREATE TABLE IF NOT EXISTS project_mute (
   PRIMARY KEY (account, repo)
 );
 `;
+/** What the lead promised to follow up on (lead-commitments.ts; no version bump: additive only, so a build that
+ * predates it still opens the store). `condition_json` is a task, attempt, check or time; `check_at` is when to look
+ * next; `channel` is where it reports (`chat`: the conversation it was promised in); a promise lapses at `expires_at`. */
+export const LEAD_COMMITMENT_SCHEMA = `
+CREATE TABLE IF NOT EXISTS lead_commitment (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  owner          TEXT NOT NULL,
+  repo           TEXT,
+  thread         INTEGER NOT NULL,
+  turn           INTEGER,
+  channel        TEXT NOT NULL DEFAULT 'chat',
+  what           TEXT NOT NULL,
+  condition_json TEXT NOT NULL,
+  check_at       TEXT NOT NULL,
+  expires_at     TEXT NOT NULL,
+  state          TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open', 'done', 'cancelled', 'expired')),
+  created_at     TEXT NOT NULL,
+  checked_at     TEXT,
+  closed_at      TEXT,
+  closed_by      TEXT,
+  outcome        TEXT
+);
+CREATE INDEX IF NOT EXISTS lead_commitment_due ON lead_commitment (state, check_at);
+CREATE INDEX IF NOT EXISTS lead_commitment_owner ON lead_commitment (owner, state, id);
+`;
 /** What still pings on the lead's own work: a security alert. */
 const SECURITY_KINDS = new Set(["secret-detected", "security-release"]);
 /** A failure that leaves nothing for the lead to try: the attempts are spent. */
@@ -283,6 +319,24 @@ export function stopFactOf(store: Pick<Store, "stopQuiescenceProblem"> & Partial
   return { run: Number(/run #(\d+)/.exec(problem)?.[1] ?? runId), kind, problem };
 }
 export type TaskActRow = { act: TaskAct; account: string; lead: boolean; person: string | null; why: string | null; at: string };
+
+/** The lead's one question to its owner (no version bump): at most one per answered turn, two to four short options;
+ * "Something else" is implied. The tapped option comes back as the owner's next message, so nothing here is an answer:
+ * a question is open while no later message from the owner sits in its thread. */
+export const MATE_ASK_SCHEMA = `
+CREATE TABLE IF NOT EXISTS mate_ask (
+  turn         INTEGER PRIMARY KEY REFERENCES mate_turn(id) ON DELETE CASCADE,
+  thread       INTEGER NOT NULL REFERENCES mate_thread(id) ON DELETE CASCADE,
+  question     TEXT NOT NULL,
+  options_json TEXT NOT NULL,
+  created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS mate_ask_thread ON mate_ask (thread, turn);
+`;
+export type MateAsk = { turn: number; thread: number; question: string; options: string[]; createdAt: string };
+export const MATE_ASK_OTHER = "Something else";
+/** How long the question's buttons work, on every channel. */
+export const MATE_ASK_TTL_MS = 7 * 86_400_000;
 
 /** Settings → Integrations (no version bump): each integration's last check. `outcome` is ok, failed, or absent (the check found
  * nothing set up, such as no `gh` sign-in). `ok_at` and `error`/`error_at` keep the last success and the last
@@ -1892,7 +1946,7 @@ export type TelegramConversationPart = {
 
 /** What one outbound part is planned from: a reply slice, a card with its minted keyboard, or an image by typed identity. */
 export type TelegramConversationPartPlan =
-  | { kind: "reply"; text: string; replyTo?: string | null }
+  | { kind: "reply"; text: string; replyTo?: string | null; keyboard?: TelegramConversationPart["keyboard"] }
   | { kind: "card"; text: string; proposal: number; keyboard: TelegramConversationPart["keyboard"] }
   | { kind: "image"; text: string; taskId: string; run: number; artifact: number; sha256: string };
 
@@ -5113,6 +5167,7 @@ function initializeStore(db: Database, file: string): Store {
   db.exec(LEDGER_CHAIN_SCHEMA);
   db.exec(MONITORING_SCHEMA);
   db.exec(INTEGRATIONS_SCHEMA);
+  db.exec(MATE_ASK_SCHEMA);
   db.exec(SPEND_SCHEMA);
   // Sign-in pauses: one row per incident of a provider's sign-in no longer working.
   db.exec(PROVIDER_AUTH_SCHEMA);
@@ -5131,6 +5186,8 @@ function initializeStore(db: Database, file: string): Store {
   // The update a batch line speaks for: its newest fact about that task (null: a finished result).
   addColumn(db, "chat_batch_item", "notification", "INTEGER");
   db.exec(LEAD_QUIET_SCHEMA);
+  db.exec(LEAD_CONFIG_SCHEMA);
+  db.exec(LEAD_COMMITMENT_SCHEMA);
   mergeCheckTables(db);
   addColumn(db, "monitoring_status", "target", "TEXT");
   // v105: how a teammate's turn was billed (this computer's Claude sign-in, as last seen).
@@ -23686,6 +23743,47 @@ export class Store {
     return Number(inserted.lastInsertRowid);
   }
 
+  // ---- the lead's question to its owner (ask_owner) -----------------------------
+
+  /** Record this turn's one question; false when the turn already asked one. */
+  recordMateAsk(ask: { turn: number; thread: number; question: string; options: readonly string[] }, now: Date): boolean {
+    const inserted = this.db.prepare("INSERT OR IGNORE INTO mate_ask (turn, thread, question, options_json, created_at) VALUES (?, ?, ?, ?, ?)")
+      .run(ask.turn, ask.thread, ask.question, JSON.stringify(ask.options), now.toISOString());
+    return Number(inserted.changes) === 1;
+  }
+
+  /** A failed turn keeps no question, as it keeps no drafts. */
+  dropMateAsk(turn: number): void {
+    this.db.prepare("DELETE FROM mate_ask WHERE turn = ?").run(turn);
+  }
+
+  /** The question an ANSWERED turn asked; null when it asked none or did not answer. */
+  mateAsk(turn: number): MateAsk | null {
+    const row = this.db.prepare("SELECT a.* FROM mate_ask a JOIN mate_turn t ON t.id = a.turn WHERE a.turn = ? AND t.state = 'answered'").get(turn);
+    if (row === undefined) return null;
+    const options = JSON.parse(String(row["options_json"])) as unknown;
+    return { turn: Number(row["turn"]), thread: Number(row["thread"]), question: String(row["question"]), options: Array.isArray(options) ? options.map(String) : [], createdAt: String(row["created_at"]) };
+  }
+
+  /** What a tap on the question finds: open; answered (the owner has written in its thread since the reply that asked it);
+   * or expired (older than MATE_ASK_TTL_MS, or the question or the reply that asked it is gone, as after a retention purge). */
+  mateAskState(turn: number, now: Date): { state: "open"; ask: MateAsk } | { state: "answered" | "expired" } {
+    const ask = this.mateAsk(turn);
+    if (ask === null) return { state: "expired" };
+    const asking = this.db.prepare("SELECT MAX(id) AS id FROM mate_message WHERE thread = ? AND turn = ? AND role = 'assistant'").get(ask.thread, turn);
+    if (asking === undefined || asking["id"] === null) return { state: "expired" };
+    const later = this.db.prepare("SELECT 1 AS hit FROM mate_message WHERE thread = ? AND role = 'operator' AND id > ? LIMIT 1").get(ask.thread, Number(asking["id"]));
+    if (later !== undefined) return { state: "answered" };
+    if (new Date(ask.createdAt).getTime() + MATE_ASK_TTL_MS <= now.getTime()) return { state: "expired" };
+    return { state: "open", ask };
+  }
+
+  /** The question while it is open (see mateAskState); null otherwise. */
+  mateAskOpen(turn: number, now: Date): MateAsk | null {
+    const found = this.mateAskState(turn, now);
+    return found.state === "open" ? found.ask : null;
+  }
+
   // ---- the screenshots a turn selected (v64) ------------------------------------
 
   /**
@@ -25976,6 +26074,11 @@ export class Store {
     return Number(inserted.lastInsertRowid);
   }
 
+  /** Whether a message from this chat is already waiting on, or being answered from, this bot message (a tapped question). */
+  telegramConversationWaitingOn(binding: number, messageId: string): boolean {
+    return this.db.prepare("SELECT 1 AS hit FROM telegram_conversation WHERE binding = ? AND message_id = ? AND state IN ('queued', 'running') LIMIT 1").get(binding, messageId) !== undefined;
+  }
+
   getTelegramConversation(id: number): TelegramConversation | null {
     const row = this.db.prepare("SELECT * FROM telegram_conversation WHERE id = ?").get(id);
     return row === undefined ? null : readTelegramConversation(row);
@@ -26140,7 +26243,7 @@ export class Store {
         const image = part.kind === "image" ? part : null;
         insert.run(
           id, ordinal, part.kind, part.text, part.kind === "reply" ? part.replyTo ?? null : null, part.kind === "card" ? part.proposal : null,
-          part.kind === "card" && part.keyboard != null ? JSON.stringify(part.keyboard) : null, stamp,
+          (part.kind === "card" || part.kind === "reply") && part.keyboard != null ? JSON.stringify(part.keyboard) : null, stamp,
           image?.taskId ?? null, image?.run ?? null, image?.artifact ?? null, image?.sha256 ?? null,
         );
       });
@@ -26354,6 +26457,10 @@ export class Store {
       this.db.prepare(`UPDATE notification_delivery SET receipt = '${TELEGRAM_SKIPPED_ELSEWHERE}'
         WHERE destination = ? AND delivered_at IS NULL AND receipt IS NULL
           AND notification IN (SELECT id FROM notification WHERE recipient IS NOT NULL AND recipient <> ?)`).run(destination, binding.approver);
+      // A promise the lead made on another chat is reported there (lead-commitments.ts), not here.
+      this.db.prepare(`UPDATE notification_delivery SET receipt = '${TELEGRAM_SKIPPED_OTHER_CHAT}'
+        WHERE destination = ? AND delivered_at IS NULL AND receipt IS NULL
+          AND notification IN (SELECT id FROM notification WHERE dedupe_key LIKE 'lead-promise:%' AND dedupe_key NOT LIKE 'lead-promise:telegram:%')`).run(destination);
       // Pings follow responsibility (the lead's work, this person's own act, a muted project): settled here, unsent.
       for (const raw of this.db.prepare(`SELECT n.* FROM notification n JOIN notification_delivery d ON d.notification = n.id AND d.destination = ?
           WHERE n.resolved_at IS NULL AND d.delivered_at IS NULL AND d.receipt IS NULL AND (d.claim_owner IS NULL OR d.claim_expires_at <= ?)`).all(destination, now.toISOString())) {
@@ -26593,6 +26700,18 @@ export class Store {
   }
 
   // ---- pings follow responsibility: the lead, who acted, replacements and muted projects ----
+
+  /** What this person named their lead and its persona, or null when they never saved one. */
+  leadConfig(account: string): { name: string; persona: string } | null {
+    const row = this.db.prepare("SELECT name, persona FROM lead_config WHERE account = ?").get(account);
+    return row === undefined ? null : { name: String(row["name"]), persona: String(row["persona"]) };
+  }
+
+  /** Save this person's lead name and persona (checked by the caller: lead-identity.ts). */
+  setLeadConfig(account: string, name: string, persona: string, now: Date): void {
+    this.db.prepare(`INSERT INTO lead_config (account, name, persona, updated_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT(account) DO UPDATE SET name = excluded.name, persona = excluded.persona, updated_at = excluded.updated_at`).run(account, name, persona, now.toISOString());
+  }
 
   /** A lead token for one person, shown once. A new one ends their earlier ones; the ledger names it "lead for <owner>". */
   mintLeadCredential(owner: string, by: string, now: Date): { id: string; token: string } {
@@ -27421,6 +27540,8 @@ function readHold(row: Record<string, unknown>): Hold {
 export const TELEGRAM_SKIPPED_RECEIPT = "skipped:before-pairing";
 /** v83: a notification for another person, settled for this destination without sending. */
 export const TELEGRAM_SKIPPED_ELSEWHERE = "skipped:for-another-person";
+/** A met promise the lead made on another chat: reported there, settled here without sending. */
+export const TELEGRAM_SKIPPED_OTHER_CHAT = "skipped:for-another-chat";
 /** A fact this person is not messaged about: the lead's work, their own act, or a project they muted. */
 export const TELEGRAM_SKIPPED_QUIET = "skipped:quiet";
 

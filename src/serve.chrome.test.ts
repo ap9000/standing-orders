@@ -1136,8 +1136,8 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     expect((await save(capped.hidden, "guard the payout path, again")).status).toBe(303);
     expect(store.getScope("t-keep")?.budgetMicrousd).toBe(1_234_567);
 
-    // A draft edited from an older version is refused, and stays bound to
-    // that version when it reopens: saving it again is refused again.
+    // A draft edited from an older version is refused; it reopens bound to
+    // the version now on file, so saving it again, having read why, succeeds.
     const stale = await editorOf();
     propose(store, { taskId: "t-keep", goal: "someone else's wording", acceptance, now: T0 });
     const current = store.getScope("t-keep")!.digest;
@@ -1147,10 +1147,11 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     expect(reopened).toContain('<details class="approval-edit" id="plan-editor" open>');
     const retried = /<form method="post" action="\/t\/t-keep\/scope" id="plan-editor-form"[^]*?<\/form>/.exec(reopened)?.[0] ?? "";
     const again = [...retried.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)">/g)].map(one => [one[1]!, one[2]!] as [string, string]);
-    expect(Object.fromEntries(again)["sawDigest"]).toBe(Object.fromEntries(stale.hidden)["sawDigest"]);
-    expect(Object.fromEntries(again)["sawDigest"]).not.toBe(current);
-    expect((await save(again, "my wording")).status).toBe(409);
+    expect(Object.fromEntries(again)["sawDigest"]).toBe(current);
+    expect(Object.fromEntries(again)["sawDigest"]).not.toBe(Object.fromEntries(stale.hidden)["sawDigest"]);
     expect(store.getScope("t-keep")).toMatchObject({ goal: "someone else's wording", digest: current });
+    expect((await save(again, "my wording")).status).toBe(303);
+    expect(store.getScope("t-keep")?.goal).toBe("my wording");
 
     // A legacy accept-edits plan: saving in place never raises what the agent may do.
     const resolved = store.getScope("t-keep")!.profile!;
