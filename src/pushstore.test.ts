@@ -53,6 +53,21 @@ describe("enrollment", () => {
     expect(store.seedPushPairs(later(1_000))).toBe(1);
   });
 
+  test.each(["telegram", "slack", "discord", "teams"])("a met promise made on %s is said there: a phone's push pair for it is settled, never sent", channel => {
+    enroll();
+    store.enqueueNotification({ dedupeKey: `lead-promise:${channel}:1`, kind: "lead-say", subject: "Lead", body: "It is time.", pushClass: "attention", recipient: "alex" }, later(1_000));
+    expect(store.seedPushPairs(later(1_000))).toBe(1);
+    expect(store.handle.prepare("SELECT state, last_error FROM push_delivery").all()).toEqual([{ state: "retired", last_error: "skipped:for-another-chat" }]);
+    expect(store.claimPushPairs("o", 60_000, 10, later(2_000))).toEqual([]);
+  });
+
+  test("a met promise made in the console or app still reaches the phone", () => {
+    enroll();
+    store.enqueueNotification({ dedupeKey: "lead-promise:chat:1", kind: "lead-say", subject: "Lead", body: "It is time.", pushClass: "attention", recipient: "alex" }, later(1_000));
+    expect(store.seedPushPairs(later(1_000))).toBe(1);
+    expect(store.claimPushPairs("o", 60_000, 10, later(2_000))).toHaveLength(1);
+  });
+
   test("identical live enrollment is idempotent; a conflicting binding is replaced", () => {
     const first = enroll();
     if (!first.ok) throw new Error("enroll");

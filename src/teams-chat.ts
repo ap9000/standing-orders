@@ -6,6 +6,7 @@ import { ChatState, chatHash, type ChatContent, type ChatIdentity, type ChatPart
 import { channelAccess, chatObject as object, planChatNotifications, planRoomMessages, processChatEvent, type ChatDeliveryOptions } from "./chat-delivery.js";
 import { roomCommand } from "./chat-rooms.js";
 import { MATE_MESSAGE_MAX_CHARS } from "./mate.js";
+import { renderReply } from "./reply-shape.js";
 import { armedCardText, armedYesLabel, proposalLink, proposalOutcomeText, proposalPreview } from "./chat-channel.js";
 import { chatFlowButtons } from "./chat-flow.js";
 import { channelInbox } from "./chat-inbox.js";
@@ -42,6 +43,13 @@ export const teamsDelivery = (options: TeamsChatOptions): ChatDeliveryOptions =>
     state,
     label: "Teams",
     member: (member, channel) => teamsMember(options.api, state, options.identity.installation, member, channel),
+    // "Typing…" while the lead works; Teams gives bots no reactions, so there is no 👍 here.
+    warm: (event) => ({
+      typing: async () => {
+        const serviceUrl = state.meta(options.identity.installation, serviceKey(event.channel));
+        if (serviceUrl !== null) await options.api("POST", serviceUrl, `/v3/conversations/${encodeURIComponent(event.channel)}/activities`, { type: "typing" });
+      },
+    }),
     partSize: 3500,
     maxProposal: 6000,
   };
@@ -179,7 +187,9 @@ export async function deliverTeamsPart(options: TeamsChatOptions): Promise<boole
       actions = [...flow, ...asked, ...owner, ...openUrlAction(options.origin(), content.link), ...(content.also ?? []).flatMap(one => openUrlAction(options.origin(), one))];
     }
     const target = content.edit ?? row.message;
-    const body = actions.length || content.proposal ? teamsCard(text, actions) : { type: "message", text, textFormat: "plain" };
+    // The lead's own reply goes out in Teams' Markdown (bold anchors, labelled links); everything else stays plain.
+    const voiced = content.voice === true && !content.proposal && !content.image ? renderReply(text, "teams") : null;
+    const body = actions.length || content.proposal ? teamsCard(voiced ?? text, actions) : voiced !== null ? { type: "message", text: voiced, textFormat: "markdown" } : { type: "message", text, textFormat: "plain" };
     const answer = await options.api(target ? "PUT" : "POST", serviceUrl, `/v3/conversations/${encodeURIComponent(destination)}/activities${target ? `/${encodeURIComponent(target)}` : ""}`, body);
     const messageId = target ?? (typeof answer.id === "string" ? answer.id : null);
     if (messageId === null) throw new TeamsError("Teams did not confirm the message", 15_000, true);

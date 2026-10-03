@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { MATE_ASK_TTL_MS, openStore, type Store } from "./store.js";
+import { LEAD_FOLLOW_MESSAGE, MATE_ASK_TTL_MS, openStore, type Store } from "./store.js";
 import { sweepRetention } from "./retention.js";
 import { fileTaskProposal } from "./proposal.js";
 import { verifyApproverStanding, type VerifiedApprover } from "./principal.js";
@@ -58,6 +58,15 @@ describe("the lead checks before it speaks", () => {
     // In a later step it does.
     expect(executeMateTool(ctx(3, { searchedMemory: searched }), "propose_task", { repo: "r1", ...TASK_ARGS })).toMatchObject({ ok: true });
     expect(executeMateTool(ctx(3, { searchedMemory: searched }), "propose_steer", { task: "s1", note: "Start with the form." })).toMatchObject({ ok: true });
+  });
+
+  test("c1: propose_steer on a task resolves its project from the task: one search of that project is enough", () => {
+    recordDecision(store, { repo: OPEN, actor: "alex", draft: { claim: "Sign-up stays email only", why: "Fewer accounts to recover." } }, T0);
+    const searched = new Map<string, number>();
+    executeMateTool(ctx(1, { searchedMemory: searched }), "search_project_memory", { query: "refunds", repo: "r1" });
+    expect(executeMateTool(ctx(2, { searchedMemory: searched }), "propose_steer", { task: "s1", note: "Start with the form." })).toMatchObject({ ok: true });
+    // The other project's task still needs its own project searched.
+    expect(executeMateTool(ctx(2, { searchedMemory: searched }), "propose_steer", { task: "o1", note: "Start with the form." })).toMatchObject({ ok: false, message: expect.stringContaining("This project has recorded decisions") });
   });
 
   test("c1: a search over another project does not count; a search over every project does; a project without decisions needs none", () => {
@@ -150,6 +159,19 @@ describe("the lead checks before it speaks", () => {
     expect(store.mateAsk(first)).not.toBeNull();
     const failed = turn(false);
     expect(store.mateAsk(failed)).toBeNull();
+    // A turn the lead started itself (automatic crew updates) is no answer; only the owner's own reply is.
+    const asked = turn(true);
+    const at = new Date(T0.getTime() + 60_000);
+    const opened = store.openMateTurn({ approver: "alex", session: session.id, thread: thread.id, credentialKey: "k", reservedMicrousd: 10, dailyTurns: 50, weeklyCeilingMicrousd: 25_000_000, deadlineMs: 60_000 }, at);
+    if (!opened.ok) throw new Error(opened.reason);
+    store.appendMateMessage({ thread: thread.id, turn: opened.id, role: "operator", text: LEAD_FOLLOW_MESSAGE }, at);
+    expect(store.mateAskState(asked, at).state).toBe("open");
+    const answer = store.appendMateMessage({ thread: thread.id, turn: null, role: "operator", text: "Signup" }, at);
+    expect(store.mateAskState(asked, at).state).toBe("answered");
+    // Once retention removed the reply that asked and the answer, the question reads expired, never open again.
+    const asking = Number(store.handle.prepare("SELECT MAX(id) AS id FROM mate_message WHERE turn = ? AND role = 'assistant'").get(asked)!["id"]);
+    store.handle.prepare("DELETE FROM mate_message WHERE id IN (?, ?)").run(asking, answer);
+    expect(store.mateAskState(asked, at).state).toBe("expired");
   });
 
   test("c2: a question is open, then answered or expired; its rows never block a purge of the turn or the reply", () => {
@@ -198,8 +220,8 @@ describe("the lead checks before it speaks", () => {
       "say 'I don't know', then check with a tool",
       "never make up an answer, and never present a guess as something you remember",
       "call search_project_memory for it this turn",
-      "read get_integrations",
-      "show_control integrations",
+      "call get_capabilities this turn",
+      "open its link with show_control",
       "use ask_owner: one question, 2-4 short options",
       "only when the answer changes the work",
     ]) expect(MATE_CONTRACT).toContain(rule);

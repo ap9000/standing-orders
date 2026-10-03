@@ -655,7 +655,7 @@ export function canonicalOverridesJson(overrides: readonly RouteOverride[]): str
 
 // ---- the shared projection -----------------------------------------------
 
-export type ReadinessLookup = (provider: ProviderId) => Pick<ReadinessObservation, "state" | "reason" | "runner" | "observedAt"> | null;
+export type ReadinessLookup = (provider: ProviderId) => (Pick<ReadinessObservation, "state" | "reason" | "runner" | "observedAt"> & Partial<Pick<ReadinessObservation, "probe">>) | null;
 
 export type RouteLegProjection = RouteLeg & {
   readiness: ReadinessState;

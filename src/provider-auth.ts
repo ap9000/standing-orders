@@ -77,7 +77,7 @@ export function signInCommand(pause: Pick<AuthPause, "provider" | "authMode">): 
 /** The same command for a chat message: the phone scrub hides anything shaped
  * like a path (`/login` included), so a message names Claude's equivalent
  * `claude auth login`. */
-function messageCommand(pause: Pick<AuthPause, "provider" | "authMode">): string {
+export function messageCommand(pause: Pick<AuthPause, "provider" | "authMode">): string {
   const command = signInCommand(pause);
   return command === "claude /login" ? "claude auth login" : command;
 }

@@ -24,6 +24,7 @@ import { addApprover, approve, propose } from "./scope.js";
 import { bridgePass, createTransport, followBridge, hashPairingCode, mintPairingCode, PAIRING_TTL_MS, saveBotToken, TOKEN_ENV, type TelegramTransport, type TelegramUpload } from "./telegram.js";
 import { ceilingDigestOf, verifyApproverStanding } from "./principal.js";
 import { subscriptionCredentialKey } from "./converse.js";
+import { MATE_CHANNEL_COPY, MATE_FAILURE_COPY, mateFailureText } from "./mate.js";
 import { knowledgeView } from './project-knowledge.js';
 import { mintSharedActionReview, prepareSharedAction } from './chat-actions.js';
 import { assignmentOf } from './assignment.js';
@@ -298,6 +299,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
   });
   test("ordinary text runs the shared engine on the shared thread; the card confirms through the shared door as telegram; web and CLI read the same rows; a replay does nothing twice", async () => {
     answers.push(
+      { text: "", calls: [{ id: "g0", name: "get_capabilities", args: { repo: "r1" } }] },
       { text: "Let me draft that.", calls: [{ id: "c1", name: "propose_task", args: { repo: "r1", title: "Tighten the payout guard", goal: "Refuse a payout over the limit.", acceptance: [{ id: "c1", statement: "Over-limit payouts are refused.", evidence: ["manual-review"] }] } }] },
       { text: "Proposed a task to tighten the payout guard. Confirm it to file it." },
     );
@@ -312,8 +314,8 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     expect(rows[0]).toMatchObject({ updateId: 2, messageId: "1002", state: "done", outcome: "answered", request: telegramRequestId(BOT, binding().id, 2), approver: "alex", text: "Please tighten the payout guard so an over-limit payout is refused" });
     expect(rows[0]!.turn).not.toBeNull();
     expect(Number(store.handle.prepare("SELECT cursor FROM bridge_lease WHERE bot_id = ?").get(BOT)?.["cursor"])).toBe(2);
-    // The engine ran twice (a tool step, then text); the session is a membership session over the enrolled ceiling.
-    expect(requests).toHaveLength(2);
+    // The engine ran three times (a capabilities read, a tool step, then text); the session is a membership session over the enrolled ceiling.
+    expect(requests).toHaveLength(3);
     expect(requests[0]!.history.filter(one => one.role === "operator").at(-1)).toMatchObject({ role: "operator", text: "Please tighten the payout guard so an over-limit payout is refused" });
     const session = store.activeMateSession("alex")!;
     expect(session).toMatchObject({ credentialKey: subscriptionCredentialKey("claude-subscription"), ceilingMicrousd: 0, ceilingDigest: ceilingDigestOf([repo]), approverGeneration: who().generation });
@@ -369,10 +371,56 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     const replayed = await pass();
     expect(replayed.ok && replayed.report.chatQueued).toBeFalsy();
     expect(replayed.ok && replayed.report.chatConfirmed).toBeFalsy();
-    expect(requests).toHaveLength(2);
+    expect(requests).toHaveLength(3);
     expect(script.sends()).toHaveLength(sendsBefore);
     expect(store.handle.prepare("SELECT COUNT(*) AS n FROM task").get()?.["n"]).toBe(tasksBefore);
     expect(store.listTelegramConversations(BOT)).toHaveLength(1);
+  });
+
+  test("the lead's voice on the phone: a tool turn gets one 👍 on the owner's message and typing; the reply is shaped, its bold and links sent as entities", async () => {
+    origin = "https://so.example.com";
+    answers.push(
+      { text: "Checking.", calls: [{ id: "q1", name: "list_tasks", args: {} }, { id: "q2", name: "list_repos", args: {} }] },
+      { text: "## Payout\n**Ready**: see https://so.example.com/chat?task=payout (run #4)." },
+    );
+    script.updates.push([textUpdate(2, "how is the payout fix?")]);
+    expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1 } });
+    const reactions = script.calls.filter(call => call.method === "setMessageReaction");
+    expect(reactions).toHaveLength(1);
+    expect(reactions[0]!.params).toMatchObject({ message_id: 1002, reaction: [{ type: "emoji", emoji: "👍" }] });
+    expect(script.calls.filter(call => call.method === "sendChatAction").map(call => call.params["action"])).toContain("typing");
+    const reply = script.sends()[0]!;
+    expect(reply.params["text"]).toBe("Payout\nReady: see the task.");
+    expect(reply.params["entities"]).toEqual([{ type: "bold", offset: 7, length: 5 }, { type: "text_link", offset: 18, length: 8, url: "https://so.example.com/chat?task=payout" }]);
+    // A quick answer (no tool step) gets neither; the lead never reacts to its own messages.
+    answers.push({ text: "All quiet." });
+    script.updates.push([textUpdate(3, "anything else?")]);
+    expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1 } });
+    expect(script.calls.filter(call => call.method === "setMessageReaction")).toHaveLength(1);
+    expect(script.texts().at(-1)).toBe("All quiet.");
+    expect(script.sends().at(-1)!.params["entities"]).toBeUndefined();
+  });
+
+  test("a long reply full of links, bold and & or < goes out in parts Telegram accepts, each link whole as an entity", async () => {
+    origin = "https://so.example.com";
+    const urls = Array.from({ length: 200 }, (_, index) => `https://docs.example.org/guide/${index}?a=1&b=2`);
+    answers.push({ text: urls.map((url, index) => `**Step ${index}** a<b & c: ${url}`).join(" ") });
+    script.updates.push([textUpdate(2, "send me the guide links")]);
+    expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1 } });
+    const sent = script.sends().filter(call => call.method === "sendMessage");
+    expect(sent.length).toBeGreaterThan(1);
+    const links: string[] = [];
+    for (const call of sent) {
+      const text = String(call.params["text"]);
+      expect(text.length).toBeLessThanOrEqual(4096);
+      expect(text).not.toMatch(/\*\*|\]\(/);
+      for (const entity of (call.params["entities"] ?? []) as Array<{ type: string; offset: number; length: number; url?: string }>) {
+        expect(entity.offset + entity.length).toBeLessThanOrEqual(text.length);
+        if (entity.type === "text_link") { expect(text.slice(entity.offset, entity.offset + entity.length)).toBe("docs.example.org"); links.push(entity.url!); }
+      }
+    }
+    expect(links).toEqual(urls);
+    expect(sent.map(call => String(call.params["text"])).join(" ").match(/a<b & c/g)).toHaveLength(200);
   });
 
   test("a teammate's question arrives with its options and Answer in words; a tap answers it once, a stale tap changes nothing, and a reply answers in words (v93)", async () => {
@@ -578,7 +626,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     // Unenrolled: the pairing still stands, so the truth is said; unpaired or downgraded: nothing may be sent at all.
     if (change === "unenroll") {
       expect(script.texts()).toHaveLength(1);
-      expect(script.texts()[0]).toContain("the connected projects changed");
+      expect(script.texts()[0]).toBe(MATE_CHANNEL_COPY["projects-changed"]);
     } else {
       expect(script.sends()).toEqual([]);
     }
@@ -606,7 +654,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     expect(store.handle.prepare("SELECT COUNT(*) AS n FROM mate_proposal").get()?.["n"]).toBe(0);
     expect(store.activeHolds(store.lookupRef("a")!.id, now)).toEqual([]);
     expect(store.listTelegramConversationParts(row.id)).toEqual([]);
-    if (change === "unenroll") expect(script.texts()).toEqual([expect.stringContaining("the connected projects changed")]);
+    if (change === "unenroll") expect(script.texts()).toEqual([MATE_CHANNEL_COPY["projects-changed"]]);
     else expect(script.sends()).toEqual([]);
   });
 
@@ -716,12 +764,13 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     now = new Date(T0.getTime() + TURN_WALL_CLOCK_MS + CONVERSATION_CLAIM_MS + 60_000);
     expect(await pass()).toMatchObject({ ok: true, report: { chatRefused: 1 } });
     expect(requests).toHaveLength(1);
-    expect(script.texts()).toEqual(["I couldn't answer that just now: the assistant's reply did not complete (crashed). Ask again, or open the console."]);
+    expect(script.texts()).toEqual([mateFailureText("crashed")]);
     expect(store.listTelegramConversations(BOT)[0]).toMatchObject({ state: "failed", outcome: "replayed:crashed" });
   });
 
   describe("outgoing replies and cards are durable before they are sent", () => {
     const draft = () => answers.push(
+      { text: "", calls: [{ id: "g0", name: "get_capabilities", args: { repo: "r1" } }] },
       { text: "Drafting.", calls: [{ id: "c1", name: "propose_task", args: { repo: "r1", title: "Add the limit", goal: "Add a payout limit.", acceptance: [{ id: "c1", statement: "The limit holds.", evidence: ["manual-review"] }] } }] },
       { text: "Proposed. Confirm to file." },
     );
@@ -749,13 +798,13 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       expect(await pass({ transport })).toMatchObject({ ok: true, report: { problems: [expect.stringContaining("delivery may be uncertain")] } });
       expect(row().state).toBe("queued");
       expect(parts()[0]).toMatchObject({ state: "pending", attempts: 1, uncertain: 1, messageId: null });
-      expect(requests).toHaveLength(2);
+      expect(requests).toHaveLength(3);
       store.close(); store = openStore(file);
       later(PART_RETRY_MS[0]);
       expect(await pass({ transport })).toMatchObject({ ok: true, report: { chatAnswered: 1, problems: [] } });
       expect(row().state).toBe("done");
       expect(parts()[0]).toMatchObject({ state: "sent", attempts: 2, uncertain: 1 });
-      expect(requests).toHaveLength(2);
+      expect(requests).toHaveLength(3);
       expect(turns()).toBe(1);
     });
 
@@ -777,7 +826,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       const tokens = parts()[1]!.keyboard!.flat().map(one => one.callback_data);
       expect(tokens.map(one => store.getTelegramProposalAction(one)?.messageId)).toEqual([null, null]);
       expect(script.attempts()).toHaveLength(2);
-      expect(requests).toHaveLength(2);
+      expect(requests).toHaveLength(3);
       // Too early: nothing is claimed. Then a second lost answer, counted again, with the longer wait — and no second notice.
       later(1_000);
       expect(await pass()).toMatchObject({ ok: true, report: { problems: [] } });
@@ -794,7 +843,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       expect(script.sends()[0]!.params["reply_parameters"]).toEqual({ message_id: 1002 });
       expect(parts().map(one => [one.state, one.messageId, one.attempts])).toEqual([["sent", "100", 3], ["sent", "101", 1]]);
       expect(row()).toMatchObject({ state: "done", outcome: "replayed", replyMessageId: "100" });
-      expect(requests).toHaveLength(2);
+      expect(requests).toHaveLength(3);
       expect(turns()).toBe(1);
       // The card that finally went out carries the tokens minted with the part, now placed on the confirmed message; a tap confirms once.
       expect(script.card().rows.flat().map(one => one.callback_data)).toEqual(tokens);
@@ -825,7 +874,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       expect(script.card().rows.flat().map(one => one.callback_data)).toEqual(planned);
       expect(parts()[1]).toMatchObject({ state: "sent", messageId: String(script.card().messageId), attempts: 2 });
       expect(row()).toMatchObject({ state: "done", outcome: "replayed" });
-      expect(requests).toHaveLength(2);
+      expect(requests).toHaveLength(3);
       expect(turns()).toBe(1);
       expect(await tapPass(planned[0]!, script.card().messageId)).toMatchObject({ ok: true, report: { chatConfirmed: 1 } });
     });
@@ -854,13 +903,15 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       script.updates.push([textUpdate(2, "how is the queue?")]);
       expect(await pass()).toMatchObject({ ok: true, report: { problems: [expect.stringContaining("power cut")] } });
       dying.mockRestore();
-      expect(script.texts()).toEqual([long.slice(0, 3_900)]);
+      // Split as written at the last sentence that fits, then shaped: neither part ends mid-word.
+      const first = "The queue is quiet. ".repeat(195).trimEnd(), rest = "The queue is quiet. ".repeat(25).trimEnd();
+      expect(script.texts()).toEqual([first]);
       expect(parts().map(one => [one.state, one.messageId])).toEqual([["sent", "100"], ["pending", null]]);
       expect(row()).toMatchObject({ state: "running", replyMessageId: "100" });
       store.close(); store = openStore(file);
       later(CONVERSATION_CLAIM_MS + 1_000);
       expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1, problems: [] } });
-      expect(script.texts()).toEqual([long.slice(0, 3_900), long.slice(3_900)]);
+      expect(script.texts()).toEqual([first, rest]);
       expect(parts().map(one => [one.state, one.messageId])).toEqual([["sent", "100"], ["sent", "101"]]);
       expect(row()).toMatchObject({ state: "done", outcome: "replayed", attempts: 2 });
       expect(requests).toHaveLength(1);
@@ -943,7 +994,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       expect(await pass()).toMatchObject({ ok: true, report: { chatRefused: 1 } });
       expect(requests).toHaveLength(1);
       // Ending the session from the console superseded the running turn; that is the word the phone gets, not a silent restart.
-      expect(script.texts()).toEqual(["I couldn't answer that just now: the assistant's reply did not complete (superseded). Ask again, or open the console."]);
+      expect(script.texts()).toEqual([MATE_FAILURE_COPY.stopped]);
       expect(store.listTelegramConversations(BOT)[0]).toMatchObject({ state: "failed", outcome: "replayed:superseded", session: original.id });
       expect(store.handle.prepare("SELECT COUNT(*) AS n FROM mate_turn").get()?.["n"]).toBe(1);
       expect(store.listTelegramConversationParts(store.listTelegramConversations(BOT)[0]!.id)).toEqual([]);
@@ -952,6 +1003,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
 
   test("a console confirmation racing the tap wins once: the tap shows the recorded outcome and files nothing", async () => {
     answers.push(
+      { text: "", calls: [{ id: "g0", name: "get_capabilities", args: { repo: "r1" } }] },
       { text: "Drafting.", calls: [{ id: "c1", name: "propose_task", args: { repo: "r1", title: "Add the limit", goal: "Add a payout limit.", acceptance: [{ id: "c1", statement: "The limit holds.", evidence: ["manual-review"] }] } }] },
       { text: "Proposed. Confirm to file." },
     );
@@ -982,6 +1034,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
 
   test("the other order: the tap confirms first, and a console confirmation of the same card afterwards is refused as already acted on", async () => {
     answers.push(
+      { text: "", calls: [{ id: "g0", name: "get_capabilities", args: { repo: "r1" } }] },
       { text: "Drafting.", calls: [{ id: "c1", name: "propose_task", args: { repo: "r1", title: "Add the limit", goal: "Add a payout limit.", acceptance: [{ id: "c1", statement: "The limit holds.", evidence: ["manual-review"] }] } }] },
       { text: "Proposed. Confirm to file." },
     );
@@ -1426,6 +1479,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     test("a filed task links Review & start while its scope waits, and a duplicate tap neither files nor links twice; `/task` follows the recorded state", async () => {
       origin = "https://console.example";
       answers.push(
+        { text: "", calls: [{ id: "g0", name: "get_capabilities", args: { repo: "r1" } }] },
         { text: "Drafting.", calls: [{ id: "c1", name: "propose_task", args: { repo: "r1", title: "Tighten the payout guard", goal: "Refuse a payout over the limit.", acceptance: [{ id: "c1", statement: "Over-limit payouts are refused.", evidence: ["manual-review"] }] } }] },
         { text: "Confirm it to file it." },
       );
@@ -1707,7 +1761,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       expect(Number(store.handle.prepare("SELECT COUNT(*) AS n FROM mate_turn_evidence").get()?.["n"])).toBe(0);
       expect(parts()).toEqual([]);
       expect(script.documents()).toHaveLength(0);
-      expect(script.texts().at(-1)).toMatch(/^I couldn't answer that just now: the assistant's reply did not complete \(.+\)\. Ask again, or open the console\.$/);
+      expect(script.texts().at(-1)).toBe(MATE_FAILURE_COPY.signIn);
       // The same ask, answered: the model is told which records cannot travel and why; only the verified image is sent.
       askForImages(run, "One screenshot follows; five saved captures could not be verified.");
       expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1, problems: [] } });
@@ -1871,6 +1925,17 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       store = openStore(file);
       expect(store.listTelegramConversations(BOT)[0]).toMatchObject({ state: "done", outcome: "answered" });
       expect(store.activeMateSession("alex")).toMatchObject({ ceilingDigest: ceilingDigestOf([repo]) });
+    });
+
+    test("`chat --say` in the terminal names a link to this console as its page, and a foreign one by its host", async () => {
+      await saveRepos(join(dir, "repos.json"), [repo]);
+      store.close();
+      expect(saveConsoleUrl(dir, "https://console.example:8443/")).toMatchObject({ ok: true });
+      answers.push({ text: "It's at https://console.example:8443/chat?task=z and the PR is https://github.com/acme/app/pull/9." });
+      const lines: string[] = [];
+      expect(await operate(["chat", "--as", "alex", "--token", token, "--say", "where is z?"], lines)).toBe(EXIT.ok);
+      expect(lines.join("\n")).toContain("It's at the task (https://console.example:8443/chat?task=z) and the PR is github.com (https://github.com/acme/app/pull/9).");
+      store = openStore(file);
     });
 
     test("the pass links handoff cards and `/task` from the console-url setting only when it is an https origin, re-read every time: an http, path-prefixed or removed setting sends no link", async () => {

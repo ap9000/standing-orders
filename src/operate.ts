@@ -12875,6 +12875,8 @@ async function chatCommand(flags: Map<string, string | true>, context: Context):
     ceilingUsd: ceilingGiven === undefined ? undefined : Number(ceilingGiven),
     ...(context.mateSeams === undefined ? {} : { seams: { ...context.mateSeams, clock: context.mateSeams.clock ?? context.clock } }),
     ...(context.evidenceRoot === undefined ? {} : { evidenceRoot: context.evidenceRoot }),
+    // The console's own address (and its public one): links there read as "the task", "the result", "Settings → Lead".
+    appOrigin: [loadConsoleUrl(process.env, dirname(context.databaseFile)), phoneOrigin(process.env, dirname(context.databaseFile))],
   });
   return result.code;
 }

@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.9.17 — 2026-10-03
+
+- **The lead checks before it promises.** One check covers agents (signed in
+  or not), workers, tools and skills, integrations and checks. It won't
+  propose work that needs one until it has looked. If something isn't ready,
+  it says so with the next step and a link.
+- **Replies read like a person wrote them.** On every channel: no headers,
+  links with plain labels, no internal ids, and little bold. A reply that
+  says it's attaching something has to attach it. Errors are in plain words,
+  and you see a 👍 and typing while it works.
+- **It knows you and your people.** "What your lead knows about you" is a
+  short list you confirm line by line, editable in Settings → Lead. The lead
+  also keeps an index of the people, teammates and team chats you work with,
+  and looks a person up before answering about them.
+- Promises made on Slack, Discord and Teams are delivered there. Long
+  Telegram replies split safely.
+
 ## 0.9.16 — 2026-10-03
 
 - **Name your lead.** Settings → Lead takes a name and a short persona. The

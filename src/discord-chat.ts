@@ -22,6 +22,8 @@ import {
 } from "./chat-delivery.js";
 import { chatResultHref } from "./chat-controls.js";
 import { MATE_MESSAGE_MAX_CHARS } from "./mate.js";
+import { discordPlain, renderReply } from "./reply-shape.js";
+import { WARM_EMOJI } from "./chat-warmth.js";
 import {
   proposalPreview,
   proposalLink,
@@ -51,6 +53,11 @@ export const discordDelivery = (
   state: new ChatState(options.store, "discord"),
   label: "Discord",
   member: (member, channel) => discordMember(options.api, member, channel),
+  // A 👍 on the owner's message and "typing…" while the lead works; a missing permission is skipped silently.
+  warm: (event) => ({
+    react: () => options.api("PUT", `/channels/${event.channel}/messages/${event.ts}/reactions/${encodeURIComponent(WARM_EMOJI)}/@me`),
+    typing: () => options.api("POST", `/channels/${event.channel}/typing`),
+  }),
   partSize: 1800,
   maxProposal: 3400,
 });
@@ -204,12 +211,20 @@ function link(
   }
 }
 /** Escape Discord's presentation syntax; allowed_mentions also prevents actual pings. */
-export const discordPlain = (text: string): string =>
-  text.replace(/([\\`*_~|>#\[\]])/g, "\\$1").replace(/@/g, "@\u200b");
+export { discordPlain };
 export function discordCard(
   text: string,
   buttons: Record<string, unknown>[] = [],
+  voice = false,
 ): Record<string, unknown> {
+  // The lead's own reply: one description in Discord's Markdown (bold anchors, labelled links), no title line promoted to a header.
+  if (voice)
+    return {
+      content: "",
+      embeds: [{ description: renderReply(text, "discord").slice(0, 4096), color: 0x297b70 }],
+      components: Array.from({ length: Math.min(5, Math.ceil(buttons.length / 5)) }, (_, row) => ({ type: 1, components: buttons.slice(row * 5, row * 5 + 5) })),
+      allowed_mentions: { parse: [], replied_user: false },
+    };
   const lines = text.split("\n"),
     first = lines[0] ?? "Toolroll",
     title =
@@ -477,7 +492,7 @@ export async function deliverDiscordPart(
         throw new DiscordError("Screenshot evidence changed before upload");
       file.bytes = fresh.bytes;
     }
-    const args = discordCard(text, buttons);
+    const args = discordCard(text, buttons, content.voice === true && !content.proposal && !content.image);
     if (file)
       args.attachments = [
         { id: 0, filename: file.name, description: text.slice(0, 1024) },

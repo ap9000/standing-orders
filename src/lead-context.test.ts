@@ -42,7 +42,7 @@ describe("the lead's bundle", () => {
     decide(WEB, "Use Stripe Checkout", "Hosted pages keep card data off our servers.\nWe looked at Adyen too.", T0);
     decide(WEB, "Ship on Tuesdays", "Support is fully staffed then. Fridays are quiet.", new Date(T0.getTime() + 60_000));
     const data = bundle();
-    expect(Object.keys(data).slice(2, 8)).toEqual(["me", "you", "channel", "needsYou", "projects", "rest"]);
+    expect(Object.keys(data).slice(2, 10)).toEqual(["me", "you", "aboutYou", "people", "channel", "needsYou", "projects", "rest"]);
     expect(data.me).toEqual({ name: DEFAULT_LEAD_NAME, persona: DEFAULT_LEAD_PERSONA });
     expect(data.you).toEqual({ firstName: "Alex", timeZone: "Europe/London", today: "Friday 2026-10-02 14:05" });
     expect(data.channel).toMatchObject({ id: "telegram", fit: expect.stringContaining("Telegram") });
@@ -135,6 +135,12 @@ describe("the lead's bundle", () => {
     expect(firstSentenceOf("Small payment providers, e.g. Stripe or Adyen, keep card data off our servers. We looked at more.")).toBe("Small payment providers, e.g. Stripe or Adyen, keep card data off our servers.");
     expect(firstSentenceOf("Faster builds, i.e. under 5 minutes. Also cheaper.")).toBe("Faster builds, i.e. under 5 minutes.");
     expect(firstSentenceOf("One line\nsecond line")).toBe("One line");
+    // Abbreviations in any case; "No." ends a sentence unless a number follows it.
+    expect(firstSentenceOf("Card data stays off our servers, E.g. Stripe holds it. We looked at more.")).toBe("Card data stays off our servers, E.g. Stripe holds it.");
+    expect(firstSentenceOf("Faster builds, I.E. Under 5 minutes. Also cheaper.")).toBe("Faster builds, I.E. Under 5 minutes.");
+    expect(firstSentenceOf("No. The old page confuses people.")).toBe("No.");
+    expect(firstSentenceOf("We said no. It confuses people.")).toBe("We said no.");
+    expect(firstSentenceOf("Ticket No. 5 settled it. Also cheaper.")).toBe("Ticket No. 5 settled it.");
     decide(API, "Use Postgres", "Mature tooling, e.g. Postgres has pg_dump. Also familiar.", T0);
     expect(bundle().projects[1].decisions[0].why).toBe("Mature tooling, e.g. Postgres has pg_dump.");
   });
@@ -158,7 +164,7 @@ describe("the lead's bundle", () => {
     expect(["Slack", "Discord", "Teams", "Telegram"].map(leadChannelOf)).toEqual(["slack", "discord", "teams", "telegram"]);
     expect(leadChannelOf("Mattermost")).toBeUndefined();
     expect(bundle({ channel: undefined }).channel).toBeNull();
-    expect(MATE_CONTRACT_VERSION).toBe(45);
+    expect(MATE_CONTRACT_VERSION).toBe(47);
     expect(MATE_CONTRACT).toContain("channel: where this conversation is; fit your replies to it");
     // The contract names the flow tools and no longer carries their detail.
     expect(MATE_CONTRACT).toContain("Read get_flows");

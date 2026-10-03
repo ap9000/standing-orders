@@ -110,9 +110,13 @@ export function getCommitment(store: Store, id: number): Commitment | null {
   return row === undefined ? null : readCommitment(row);
 }
 
-/** A promise only counts once the reply that made it was answered: one from a reply still being written, or one
- * that never finished, was never heard. */
-const HEARD = "(c.turn IS NULL OR EXISTS (SELECT 1 FROM mate_turn t WHERE t.id = c.turn AND t.state = 'answered'))";
+/** The reply that made a promise was shown: its turn is over, and it was answered or its text reached the conversation
+ * before it failed. A turn still running has shown nothing yet, whatever it has written so far. */
+const SHOWN = (turn: string) => `EXISTS (SELECT 1 FROM mate_turn t WHERE t.id = ${turn} AND (t.state = 'answered'
+  OR t.state = 'failed' AND EXISTS (SELECT 1 FROM mate_message m WHERE m.turn = t.id AND m.role = 'assistant')))`;
+/** A promise only counts once the reply that made it was shown: one from a reply still being written, or one that
+ * failed without reaching the owner, was never heard. */
+const HEARD = `(c.turn IS NULL OR ${SHOWN('c.turn')})`;
 
 /** The owner's open promises that they heard, oldest first. */
 export function openCommitments(store: Store, owner: string, limit = 20): Commitment[] {
@@ -178,10 +182,12 @@ export function checkLeadCommitments(store: Store, now: Date, root?: string): nu
   const at = now.toISOString();
   let reported = 0;
   store.handle.prepare("UPDATE lead_commitment SET state = 'expired', closed_at = ?, outcome = 'Expired after 7 days without the condition being met.' WHERE state = 'open' AND expires_at <= ?").run(at, at);
-  // A promise made in a reply that was not delivered (it failed, or its turn is gone) was never heard: drop it now,
-  // whenever it was next due, so nothing waits on it.
+  // A promise made in a reply that was not delivered (it failed before any text was shown, or its turn is gone) was
+  // never heard: drop it now, whenever it was next due, so nothing waits on it. An interrupted reply whose text was
+  // shown keeps its promises.
   store.handle.prepare(`UPDATE lead_commitment SET state = 'cancelled', closed_at = ?, closed_by = 'lead', outcome = 'The reply that made this promise was not delivered.'
-    WHERE state = 'open' AND turn IS NOT NULL AND NOT EXISTS (SELECT 1 FROM mate_turn t WHERE t.id = lead_commitment.turn AND t.state IN ('queued', 'running', 'answered'))`).run(at);
+    WHERE state = 'open' AND turn IS NOT NULL AND NOT EXISTS (SELECT 1 FROM mate_turn t WHERE t.id = lead_commitment.turn AND t.state IN ('queued', 'running'))
+      AND NOT ${SHOWN('lead_commitment.turn')}`).run(at);
   const due = store.handle.prepare("SELECT * FROM lead_commitment WHERE state = 'open' AND check_at <= ? ORDER BY check_at, id LIMIT ?").all(at, PASS_LIMIT);
   for (const row of due) {
     const one = readCommitment(row);
@@ -191,7 +197,7 @@ export function checkLeadCommitments(store: Store, now: Date, root?: string): nu
     if (one === null) { close('cancelled', 'Its condition could not be read.'); continue; }
     // A reply still being written may yet be delivered; one that was not is dropped above.
     const turn = one.turn === null ? null : store.getMateTurn(one.turn);
-    if (turn !== null && turn.state !== 'answered') continue;
+    if (turn !== null && (turn.state === 'queued' || turn.state === 'running')) continue;
     const account = store.accountOf(one.owner);
     if (account === null || account.revokedAt !== null || one.repo !== null && !store.accountCanAccess(one.owner, one.repo)) { close('cancelled', 'Access to this project ended.'); continue; }
     const thread = store.getMateThread(one.thread);

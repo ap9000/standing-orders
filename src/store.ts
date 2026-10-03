@@ -220,13 +220,15 @@ CREATE TABLE IF NOT EXISTS chat_batch_item (
 `;
 
 /** Settings → Lead (no version bump: additive only): what one person calls their lead and the short persona it
- * speaks with. No row reads as the defaults (lead-identity.ts). */
+ * speaks with, and what their lead knows about them (`about_json`: the confirmed lines, lead-about.ts). No row reads
+ * as the defaults (lead-identity.ts). */
 const LEAD_CONFIG_SCHEMA = `
 CREATE TABLE IF NOT EXISTS lead_config (
   account    TEXT PRIMARY KEY,
   name       TEXT NOT NULL,
   persona    TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  about_json TEXT NOT NULL DEFAULT '[]'
 );
 `;
 
@@ -337,6 +339,8 @@ export type MateAsk = { turn: number; thread: number; question: string; options:
 export const MATE_ASK_OTHER = "Something else";
 /** How long the question's buttons work, on every channel. */
 export const MATE_ASK_TTL_MS = 7 * 86_400_000;
+/** What a turn the lead starts itself for automatic crew updates says in the owner's place (lead-follow.ts): never their answer. */
+export const LEAD_FOLLOW_MESSAGE = "Automatic crew update: inspect the saved results or decisions and tell me what needs attention. Do not rerun work.";
 
 /** Settings → Integrations (no version bump): each integration's last check. `outcome` is ok, failed, or absent (the check found
  * nothing set up, such as no `gh` sign-in). `ok_at` and `error`/`error_at` keep the last success and the last
@@ -5187,6 +5191,8 @@ function initializeStore(db: Database, file: string): Store {
   addColumn(db, "chat_batch_item", "notification", "INTEGER");
   db.exec(LEAD_QUIET_SCHEMA);
   db.exec(LEAD_CONFIG_SCHEMA);
+  // What a person's lead knows about them, beside its name and persona (an older lead_config gains it).
+  addColumn(db, "lead_config", "about_json", "TEXT NOT NULL DEFAULT '[]'");
   db.exec(LEAD_COMMITMENT_SCHEMA);
   mergeCheckTables(db);
   addColumn(db, "monitoring_status", "target", "TEXT");
@@ -16197,6 +16203,7 @@ export class Store {
         reason: String(row["reason"]),
         runner: String(row["runner"]),
         observedAt: String(row["observed_at"]),
+        probe: String(row["probe"]),
       };
     };
   }
@@ -23765,14 +23772,18 @@ export class Store {
     return { turn: Number(row["turn"]), thread: Number(row["thread"]), question: String(row["question"]), options: Array.isArray(options) ? options.map(String) : [], createdAt: String(row["created_at"]) };
   }
 
-  /** What a tap on the question finds: open; answered (the owner has written in its thread since the reply that asked it);
-   * or expired (older than MATE_ASK_TTL_MS, or the question or the reply that asked it is gone, as after a retention purge). */
+  /** What a tap on the question finds: open; answered (its owner has written in its thread since the reply that asked
+   * it, typed or tapped; a turn the lead started itself, or another person's message, is no answer); or expired (older
+   * than MATE_ASK_TTL_MS, or the question or the reply that asked it is gone, as after a retention purge). */
   mateAskState(turn: number, now: Date): { state: "open"; ask: MateAsk } | { state: "answered" | "expired" } {
     const ask = this.mateAsk(turn);
     if (ask === null) return { state: "expired" };
     const asking = this.db.prepare("SELECT MAX(id) AS id FROM mate_message WHERE thread = ? AND turn = ? AND role = 'assistant'").get(ask.thread, turn);
     if (asking === undefined || asking["id"] === null) return { state: "expired" };
-    const later = this.db.prepare("SELECT 1 AS hit FROM mate_message WHERE thread = ? AND role = 'operator' AND id > ? LIMIT 1").get(ask.thread, Number(asking["id"]));
+    const owner = String(this.getMateTurn(turn)!.approver);
+    const later = this.db.prepare(`SELECT 1 AS hit FROM mate_message m LEFT JOIN mate_turn t ON t.id = m.turn LEFT JOIN team_message tm ON tm.message = m.id
+        WHERE m.thread = ? AND m.role = 'operator' AND m.id > ? AND m.text <> ? AND COALESCE(tm.author, t.approver, ?) = ? LIMIT 1`)
+      .get(ask.thread, Number(asking["id"]), LEAD_FOLLOW_MESSAGE, owner, owner);
     if (later !== undefined) return { state: "answered" };
     if (new Date(ask.createdAt).getTime() + MATE_ASK_TTL_MS <= now.getTime()) return { state: "expired" };
     return { state: "open", ask };
@@ -26701,9 +26712,10 @@ export class Store {
 
   // ---- pings follow responsibility: the lead, who acted, replacements and muted projects ----
 
-  /** What this person named their lead and its persona, or null when they never saved one. */
+  /** What this person named their lead and its persona, or null when they never saved one. An empty name or persona
+   * (a row saved only for what the lead knows about them) reads as the default. */
   leadConfig(account: string): { name: string; persona: string } | null {
-    const row = this.db.prepare("SELECT name, persona FROM lead_config WHERE account = ?").get(account);
+    const row = this.db.prepare("SELECT name, persona FROM lead_config WHERE account = ? AND (name <> '' OR persona <> '')").get(account);
     return row === undefined ? null : { name: String(row["name"]), persona: String(row["persona"]) };
   }
 
@@ -26711,6 +26723,23 @@ export class Store {
   setLeadConfig(account: string, name: string, persona: string, now: Date): void {
     this.db.prepare(`INSERT INTO lead_config (account, name, persona, updated_at) VALUES (?, ?, ?, ?)
       ON CONFLICT(account) DO UPDATE SET name = excluded.name, persona = excluded.persona, updated_at = excluded.updated_at`).run(account, name, persona, now.toISOString());
+  }
+
+  /** What this person's lead knows about them: their confirmed lines, in order (none when they never saved any). */
+  leadAbout(account: string): string[] {
+    const row = this.db.prepare("SELECT about_json FROM lead_config WHERE account = ?").get(account);
+    if (row === undefined) return [];
+    try {
+      const lines = JSON.parse(String(row["about_json"]));
+      return Array.isArray(lines) ? lines.filter((one): one is string => typeof one === "string") : [];
+    } catch { return []; }
+  }
+
+  /** Save what this person's lead knows about them (checked by the caller: lead-about.ts). A person who never named
+   * their lead gets an empty name and persona, so they keep following the defaults. */
+  setLeadAbout(account: string, lines: readonly string[], now: Date): void {
+    this.db.prepare(`INSERT INTO lead_config (account, name, persona, updated_at, about_json) VALUES (?, '', '', ?, ?)
+      ON CONFLICT(account) DO UPDATE SET about_json = excluded.about_json, updated_at = excluded.updated_at`).run(account, now.toISOString(), JSON.stringify(lines));
   }
 
   /** A lead token for one person, shown once. A new one ends their earlier ones; the ledger names it "lead for <owner>". */
@@ -27162,8 +27191,12 @@ export class Store {
           JOIN push_subscription s ON s.id = p.subscription JOIN notification n ON n.id = p.notification
           WHERE p.state = 'pending' AND p.attempts = 0 AND p.created_at = ?`).all(now.toISOString());
       for (const raw of fresh) {
-        if (!this.pingAllowed(readNotification(raw), String(raw["approver"]))) {
-          this.db.prepare("UPDATE push_delivery SET state = 'retired', last_error = 'quiet' WHERE id = ? AND state = 'pending'").run(Number(raw["pair"]));
+        // A met promise made on a chat app is said there (lead-commitments.ts), not as a push: settled here, unsent. One
+        // made in the console or app is this phone's own.
+        const elsewhere = /^lead-promise:(telegram|slack|discord|teams):/.test(String(raw["dedupe_key"]));
+        if (elsewhere || !this.pingAllowed(readNotification(raw), String(raw["approver"]))) {
+          this.db.prepare("UPDATE push_delivery SET state = 'retired', last_error = ? WHERE id = ? AND state = 'pending'")
+            .run(elsewhere ? TELEGRAM_SKIPPED_OTHER_CHAT : "quiet", Number(raw["pair"]));
         }
       }
     }

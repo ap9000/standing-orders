@@ -341,6 +341,27 @@ describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
     expect(workspace.leadName).toBe("Maya");
   });
 
+  test("c1: Settings → Lead edits what your lead knows about you, one line each, and refuses a note that is too long", async () => {
+    await boot();
+    const cookie = await login();
+    const html = await (await fetch(url("/settings/lead"), { headers: { cookie } })).text();
+    expect(html).toContain("What your lead knows about you");
+    expect(html).toContain('action="/settings/lead/about"');
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(html)?.[1] as string;
+    const save = (about: string) => fetch(url("/settings/lead/about"), { method: "POST", headers: { cookie, origin: base }, redirect: "manual", body: new URLSearchParams({ csrf, about }) });
+    const refused = await save(Array.from({ length: 21 }, (_, index) => `Line ${index}`).join("\n"));
+    expect(decodeURIComponent(refused.headers.get("location") ?? "")).toContain("Keep it to 20 lines.");
+    expect(store.leadAbout("alex")).toEqual([]);
+    const saved = await save("Keep copy terse.\n\nI test changes myself.\n");
+    expect(saved.headers.get("location")).toBe("/settings/lead?saved=about");
+    expect(store.leadAbout("alex")).toEqual(["Keep copy terse.", "I test changes myself."]);
+    // Saving the name and persona keeps the note.
+    await fetch(url("/settings/lead/identity"), { method: "POST", headers: { cookie, origin: base }, redirect: "manual", body: new URLSearchParams({ csrf, name: "Maya", persona: "Short." }) });
+    expect(store.leadAbout("alex")).toEqual(["Keep copy terse.", "I test changes myself."]);
+    const again = await (await fetch(url("/settings/lead?saved=about"), { headers: { cookie } })).text();
+    expect(again).toContain(">Keep copy terse.\nI test changes myself.</textarea>");
+  });
+
   test("chat is configurable from the console itself — password-gated, key stays environment-only", async () => {
     store.clearChatConfig();
     await boot();
@@ -1171,6 +1192,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     const cookie = await login();
     const csrf = await mint(cookie, "5");
     script.push(
+      () => answer([{ type: "tool_use", id: "g0", name: "get_capabilities", input: { repo: "r1" } }]),
       () => answer([{ type: "tool_use", id: "p1", name: "propose_task", input: {
         repo: "r1",
         title: "Polish the result cockpit",
@@ -1248,14 +1270,15 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     // path is a separate case. Keep this exact path in both message roles.
     const path = "docs/assessments/WORKSPACE_5_REAL_WORK_PILOT_2026-09-14.md";
     const message = `Read AGENTS.md and ${path}.`;
-    subscriptionAnswers.push({ text: `## Fleet status\n\n- **Queue:** calm\n- Run \`smoke\` next.\n\n<script>bad()</script>\n\n${message}\n\nKeep \`${path}\` visible.`, calls: [], tokensIn: 21, tokensOut: 5, reportedCostMicrousd: null });
+    subscriptionAnswers.push({ text: `## Fleet status\n\n- **Queue:** calm\n- Run \`smoke\` next.\n\n<script>bad()</script>\n\n${message}\n\nKeep \`${path}\` visible. Rename me at https://so.example.com/settings/lead (run #3). Your settings: ${base}/settings/lead`, calls: [], tokensIn: 21, tokensOut: 5, reportedCostMicrousd: null });
     const sent = await post(cookie, "/chat", { csrf, message });
     expect(sent.status).toBe(303);
     await settle();
 
     html = await page(cookie);
     expect(html).toContain(`<p style="white-space:pre-wrap">${message}</p>`);
-    expect(html).toContain(`<div class="chat-copy"><h3>Fleet status</h3><ul><li><strong>Queue:</strong> calm</li><li>Run <code>smoke</code> next.</li></ul><p>&lt;script&gt;bad()&lt;/script&gt;</p><p>${message}</p><p>Keep <code>${path}</code> visible.</p></div>`);
+    // The lead's voice, enforced: the header is a plain line, a foreign URL a link named by its host, this console's own link named as its page, the run number gone.
+    expect(html).toContain(`<div class="chat-copy"><p>Fleet status</p><ul><li><strong>Queue:</strong> calm</li><li>Run <code>smoke</code> next.</li></ul><p>&lt;script&gt;bad()&lt;/script&gt;</p><p>${message}</p><p>Keep <code>${path}</code> visible. Rename me at <a href="https://so.example.com/settings/lead" rel="noopener noreferrer" target="_blank">so.example.com</a>. Your settings: <a href="${base}/settings/lead" rel="noopener noreferrer" target="_blank">Settings → Lead</a></p></div>`);
     expect(await stylesOf(html, base)).toContain('.thread .msg { max-width: 48rem; line-height: 1.65; overflow-wrap: anywhere; }');
     expect(html).not.toContain("<script>bad()</script>");
     expect(html).toContain("membership login · no dollar ceiling");
@@ -1621,7 +1644,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     await settle();
     let html = await page(cookie);
     expect(html).toContain("malformed");
-    expect(html).toContain("Unknown spend blocks chat");
+    expect(html).toContain("Chat is paused.");
     html = await page(cookie);
     expect(html).not.toContain("malformed and was discarded");
     const bearer = await fetch(url("/chat/mate/mint"), { method: "POST", headers: { authorization: `Bearer ${approverToken}`, origin: base }, body: new URLSearchParams({ "ceiling-usd": "5", token: approverToken }), redirect: "manual" });
