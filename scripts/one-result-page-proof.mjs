@@ -3,7 +3,8 @@
  * Details; every result state shows exactly one ink act that resolves it, never
  * navigation, and a result that can't be accepted says why in one line; phone
  * meta links are 44px, the page gutter is 16px, the decision is a full-width
- * dock (ink over outline), and the Tasks tab strip shows that it scrolls.
+ * dock that starts compact (More opens ink over outline), and the Tasks tab
+ * strip shows that it scrolls. Accept reads "Accept and finish".
  *
  * Driven against the isolated synthetic fixture (`scripts/ui-polish-fixture.mjs`)
  * in headless Chromium. Its `range-filter` result claims a changed file its
@@ -153,7 +154,7 @@ const actsOf = page => page.evaluate(() => {
 });
 
 const STATES = [
-  { key: 'mismatch', task: 'range-filter', run: mismatchRun, ink: 'request-changes', line: "Accepting needs a reason", second: 'accept', secondText: 'Accept' },
+  { key: 'mismatch', task: 'range-filter', run: mismatchRun, ink: 'request-changes', line: "Accepting needs a reason", second: 'accept', secondText: 'Accept and finish', reason: true },
   { key: 'run-checks', task: 'rounding-check', run: checkRun, ink: 'run-checks', line: null, second: 'accept', secondText: 'Accept without checks' },
   { key: 'accept', task: 'csv-header', run: csvRun, ink: 'accept', line: null, second: 'request-changes' },
 ];
@@ -163,9 +164,13 @@ for (const state of STATES) {
     for (const scheme of ['light', 'dark']) {
       const { ctx, page } = await signedIn(viewport, scheme);
       await openResult(page, `/review?result=${state.task}&run=${state.run}`);
+      // A phone's dock starts compact (the ink act and More): More opens the outline act beside it.
+      const compact = where === 'phone' ? await actsOf(page) : null;
+      if (where === 'phone') await page.locator('[data-dock-more]').click();
       const f = await actsOf(page);
       const label = `${state.key} ${where} ${scheme}`;
       if (scheme === 'light') {
+        if (compact !== null) check(`${label}: the dock starts compact, the ink act alone in its row`, compact.row.length === 1 && compact.row[0].act === state.ink, compact.row.map(one => one.act).join(','));
         check(`${label}: exactly one ink act, ${state.ink}, never navigation`, f.ink.length === 1 && f.ink[0].act === state.ink && f.primaries === 1 && (f.ink[0].tag !== 'A' || f.ink[0].href === '#request-changes'), JSON.stringify(f.ink));
         check(`${label}: the outline act beside it is ${state.second}`, f.row.length === 2 && f.row[1].act === state.second && (state.secondText === undefined || f.row[1].text === state.secondText), f.row.map(one => `${one.act} "${one.text}"`).join(','));
         check(`${label}: ${state.line === null ? 'no can\'t-accept line' : 'one line says why first'}`, state.line === null ? !f.cantAccept : f.cantAccept && f.line === state.line, f.line ?? '');
@@ -173,10 +178,13 @@ for (const state of STATES) {
         check(`${label}: titled with the task; no sideways scroll`, f.title !== null && !/^Build #/.test(f.title) && !f.wide, f.title ?? '');
         if (where === 'desk') {
           const [a, b] = f.row;
-          check(`${label}: acts in one row, 8px apart`, a.top === b.top && b.left - a.right === 8, `${a.right}→${b.left}`);
+          // An Accept that takes a reason stacks under its field; otherwise the acts share one row.
+          if (state.reason) check(`${label}: the reason field sits directly above Accept`, await page.locator('[data-accept-with-reason] #accept-reason').count() === 1 && b.top > a.top, `${a.top}→${b.top}`);
+          else check(`${label}: acts in one row, 8px apart`, a.top === b.top && b.left - a.right === 8, `${a.right}→${b.left}`);
         } else {
           const [a, b] = f.row;
-          check(`${label}: full-width dock, ink over outline`, f.dock.width === PHONE.width && f.dock.left === 0 && f.dock.position === 'sticky' && a.bottom <= b.top && a.width === b.width, JSON.stringify({ dock: f.dock, a, b }));
+          // Opened, the ink act keeps its row beside Less and the outline act takes the full row under it.
+          check(`${label}: full-width dock, ink over outline`, f.dock.width === PHONE.width && f.dock.left === 0 && f.dock.position === 'sticky' && a.bottom <= b.top && a.left === b.left && b.width === PHONE.width - 32, JSON.stringify({ dock: f.dock, a, b }));
         }
       }
       if (where === 'phone') await page.locator('[data-result-decision]').scrollIntoViewIfNeeded();
@@ -200,6 +208,7 @@ for (const state of STATES) {
     for (const scheme of ['light', 'dark']) {
       const { ctx, page } = await signedIn(viewport, scheme);
       await openResult(page, `/review?result=rounding-check&run=${checkRun}`);
+      if (where === 'phone') await page.locator('[data-dock-more]').click();
       const f = await actsOf(page);
       const label = `checks-running ${where} ${scheme}`;
       if (scheme === 'light') {

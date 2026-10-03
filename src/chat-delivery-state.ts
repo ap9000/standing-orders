@@ -164,7 +164,7 @@ export type ChatContent = {
   edit?: string;
   phase?: "armed";
   link?: { label: string; path: string };
-  /** More link buttons after `link`: [Look first] beside [Merge] or [Mark complete]. */
+  /** More link buttons after `link`: [Look first] beside [Merge] or [Accept and finish]. */
   also?: Array<{ label: string; path: string }>;
   /** A flow decision's buttons ride this part (v88): minted when it is planned. */
   flow?: { card: number; entry: number; actions: Array<"approve" | "edit" | "send-back"> };

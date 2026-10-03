@@ -13,12 +13,14 @@
  * Writes to a fresh temporary directory unless --out names one; never to
  * ./evidence by default. Report paths are under that directory as given.
  *
- * Checks: the item, its evidence and Looks right / Not right come before the
- * decision; Accept reads "Accept without checks" with one line naming what
- * and says what accepting does, or "Accept" in ink when all is met; the
+ * Checks: the item, its evidence and Looks right / Not right come after the
+ * Summary / Changes / Checks tabs and before the decision; Accept reads
+ * "Accept without your check" with one line naming it and says what
+ * accepting does, or "Accept and finish" in ink when all is met; the
  * excerpt and the Changes diff wrap on a phone (no sideways scroll); text is
  * at least 12px; the decision's controls are 44px; Not right opens Request
- * changes quoting the item; the decision sticks to the bottom on a phone.
+ * changes quoting the item; on a phone the decision stays in view while the
+ * person reads their check; Accept and finish completes it in one request.
  * Build first. Exits 1 when a check fails. */
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -150,9 +152,9 @@ const facts = page => page.evaluate(() => {
   const small = [...document.querySelectorAll('[data-result-status] *, [data-result-you-check] *, [data-result-decision] *, [data-result-view] *')]
     .filter(one => one.childNodes.length > 0 && [...one.childNodes].some(n => n.nodeType === 3 && n.textContent.trim() !== '') && one.getClientRects().length > 0 && parseFloat(getComputedStyle(one).fontSize) < 12)
     .map(one => `${one.tagName.toLowerCase()}.${one.className} "${one.textContent.trim().slice(0, 24)}":${getComputedStyle(one).fontSize}`);
-  const targets = [...document.querySelectorAll('[data-result-decision] button, [data-result-decision] a, [data-looks-right], [data-not-right]')].map(one => Math.round(one.getBoundingClientRect().height));
+  const targets = [...document.querySelectorAll('[data-result-decision] button, [data-result-decision] a, [data-looks-right], [data-not-right]')].filter(one => one.getClientRects().length > 0).map(one => Math.round(one.getBoundingClientRect().height));
   return {
-    order: before(status, items) && before(items, decision) && before(decision, tabs), orderNoItems: before(status, decision) && before(decision, tabs),
+    order: before(status, tabs) && before(tabs, items) && before(items, decision), orderNoItems: before(status, tabs) && before(tabs, decision),
     doc: document.documentElement.scrollWidth <= window.innerWidth + 1, wide, panes, small: [...new Set(small)].slice(0, 8), targets,
     label: decision?.querySelector('button[type="submit"]')?.textContent?.trim() ?? null, why: q('[data-decision-why]')?.textContent?.trim() ?? null,
     effect: q('[data-decision-effect]')?.textContent?.trim() ?? null, sentence: q('[data-result-sentence]')?.textContent?.trim() ?? null,
@@ -167,16 +169,16 @@ for (const scheme of ['light', 'dark']) {
   const { ctx, page } = await open(DESK, scheme, 'empty-state-copy', emptyRun);
   const f = await facts(page);
   if (scheme === 'light') {
-    check('c1 desk: status, then the item with its evidence and Looks right / Not right, then the decision, then the tabs', f.order);
+    check('c1 desk: status, then the tabs, then the item with its evidence and Looks right / Not right, then the decision', f.order);
     check('c1 desk: the item shows its changed lines and screenshot', f.excerpt.includes('Nothing to review yet') && f.shots === 1, `shots ${f.shots}`);
     check('c1 desk: Looks right and Not right are on the item', await page.locator('[data-check-item="c1"] [data-looks-right]').count() === 1 && await page.locator('[data-check-item="c1"] [data-not-right]').count() === 1);
-    check('c2 desk: Accept without checks, naming what', f.label === 'Accept without checks' && f.why === "Checks didn't run and 1 item still needs your check.", `${f.label} / ${f.why}`);
-    check('c2 desk: says what accepting does', f.effect === "Marks it complete. The branch stays; publishing isn't set up.", f.effect);
+    check('c2 desk: Accept without your check, naming which', f.label === 'Accept without your check' && f.why === 'Not checked yet: “The empty Results page tells a first-time user where results come from, readable on a phone”.', `${f.label} / ${f.why}`);
+    check('c2 desk: says what accepting does', f.effect === "Finishes the task. The branch stays; publishing isn't set up.", f.effect);
     check('the status card says what happened in one sentence', f.sentence === 'Rewrote the empty Results copy so a first-time user knows results arrive when a build finishes.', f.sentence);
     check('desk: no text under 12px in the result', f.small.length === 0, f.small.join(', '));
     check('desk: decision and item controls are 44px', f.targets.every(h => h >= 44), f.targets.join(','));
   }
-  await shot(page, `desk-${scheme}-you-check`, `Desktop ${scheme}: the item to check with its changed lines and screenshot, then Accept without checks and what it does (synthetic)`);
+  await shot(page, `desk-${scheme}-you-check`, `Desktop ${scheme}: the item to check with its changed lines and screenshot, then Accept without your check and what it does (synthetic)`);
   await ctx.close();
 }
 for (const scheme of ['light', 'dark']) {
@@ -185,8 +187,9 @@ for (const scheme of ['light', 'dark']) {
   const f = await facts(page);
   if (scheme === 'light') {
     check('c3 phone: the cited changed line wraps (no sideways scroll)', f.doc && f.wide.length === 0 && f.panes.length === 0, `wide: ${f.wide.join(',')} panes: ${f.panes.join(',')}`);
-    const sticky = await page.evaluate(() => { const d = document.querySelector('[data-result-decision]'); const r = d.getBoundingClientRect(); return { position: getComputedStyle(d).position, bottom: Math.round(r.bottom), height: window.innerHeight }; });
-    check('phone: the decision sticks to the bottom', sticky.position === 'sticky' && Math.abs(sticky.bottom - sticky.height) <= 1, JSON.stringify(sticky));
+    // Reading the person's check, the decision stays in view: it sticks within the checks and the decision, never over the facts above.
+    const sticky = await page.evaluate(() => { const d = document.querySelector('[data-result-decision]'); const r = d.getBoundingClientRect(); return { position: getComputedStyle(d).position, top: Math.round(r.top), bottom: Math.round(r.bottom), height: window.innerHeight }; });
+    check('phone: the decision stays in view while reading the check', sticky.position === 'sticky' && sticky.top >= 0 && sticky.bottom <= sticky.height, JSON.stringify(sticky));
     check('phone: no text under 12px; controls 44px', f.small.length === 0 && f.targets.every(h => h >= 44), `${f.small.join(', ')} ${f.targets.join(',')}`);
   }
   await shot(page, `phone-${scheme}-you-check`, `Phone ${scheme}: the long changed line wrapped beside the item, the decision pinned at the bottom (synthetic)`);
@@ -210,28 +213,26 @@ for (const scheme of ['light', 'dark']) {
   await ctx.close();
 }
 
-// ---- everything met, checks passed: plain Accept in ink ---------------------
+// ---- everything met, checks passed: Accept and finish in ink ----------------
 {
   const { ctx, page } = await open(DESK, 'light', 'csv-header', csvRun);
   const f = await facts(page);
-  check('c2 desk: Accept in ink when everything is met and checks passed', f.label === 'Accept' && f.why === null && f.orderNoItems && f.ink !== 'rgb(255, 255, 255)', `${f.label} ${f.ink}`);
-  await shot(page, 'desk-light-accept', 'Desktop light: all met and checks passed, so Accept in ink with what it does (synthetic)');
+  check('c2 desk: Accept and finish in ink when everything is met and checks passed', f.label === 'Accept and finish' && f.why === null && f.orderNoItems && f.ink !== 'rgb(255, 255, 255)', `${f.label} ${f.ink}`);
+  await shot(page, 'desk-light-accept', 'Desktop light: all met and checks passed, so Accept and finish in ink with what it does (synthetic)');
   await ctx.close();
 }
 
-// ---- semantics: Looks right records the acceptance; Accept completes the exact receipt --
+// ---- semantics: Looks right counts at once; Accept and finish accepts and completes the exact receipt --
 {
   const { ctx, page } = await open(DESK, 'light', 'empty-state-copy', emptyRun);
-  await Promise.all([page.waitForNavigation(), page.locator('[data-check-item="c1"] [data-looks-right]').click()]);
-  await page.locator('[data-result-decision]').waitFor({ timeout: 10_000 });
-  const accepted = store.proofAcceptance(emptyRun);
+  await page.locator('[data-check-item="c1"] [data-looks-right]').click();
   const f = await facts(page);
-  check('Looks right records the person\'s acceptance (accept-proof)', accepted?.approver === fixture.name && await page.locator('[data-result-you-check]').count() === 0, JSON.stringify(accepted));
-  check('after it, Accept without checks names only the checks', f.why === "Checks didn't run.", f.why);
+  check('Looks right records nothing yet; Accept without checks then names only the checks', store.proofAcceptance(emptyRun) === null && f.why === "Checks didn't run.", f.why);
   const verdict = JSON.stringify(store.proofVerdictFor(emptyRun));
-  await Promise.all([page.waitForNavigation(), page.locator('[data-result-decision] button[type="submit"]').click()]);
-  check('c3 Accept marks the exact result complete and leaves the verdict unchanged', /Complete/.test(await page.locator('[data-result-status]').first().innerText()) && JSON.stringify(store.proofVerdictFor(emptyRun)) === verdict);
-  check('c3 Accept publishes nothing: no pull request is started', store.publicationForRun(emptyRun) === null);
+  await Promise.all([page.waitForNavigation(), page.locator('[data-result-decision] button[type="submit"][data-accept-result]').click()]);
+  await page.locator('[data-result-status]').first().waitFor({ timeout: 15_000 });
+  check('c3 Accept and finish records the acceptance and completes the exact result, the verdict unchanged', store.proofAcceptance(emptyRun)?.approver === fixture.name && /Complete/.test(await page.locator('[data-result-status]').first().innerText()) && JSON.stringify(store.proofVerdictFor(emptyRun)) === verdict);
+  check('c3 Accept and finish publishes nothing: no pull request is started', store.publicationForRun(emptyRun) === null);
   await ctx.close();
 }
 

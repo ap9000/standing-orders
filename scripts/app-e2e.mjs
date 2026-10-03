@@ -531,12 +531,20 @@ await journey("task", "Claude builds it, the project's checks pass, and the resu
   const status = await page.locator('[data-result-status] [data-status-detail="checks"]').first().innerText();
   if (!/Passed/.test(status)) throw new Error(`the result's checks say: ${status.slice(0, 200)}`);
   const checks = "passed";
+  // A requirement the planner left for a person: each Looks right counts at once, and Accept waits on them.
+  for (const looks of await page.locator("[data-check-item] button[data-looks-right]").all()) await looks.click();
   const decision = await page.locator("[data-result-decision]").first().innerText();
-  if (!/^Accept( without checks)?$/m.test(decision) || !/Marks it complete/.test(decision)) throw new Error(`the decision says: ${decision.slice(0, 200)}`);
+  if (!/^Accept (and finish|without checks)$/m.test(decision) || !/Finishes the task/.test(decision)) throw new Error(`the decision says: ${decision.slice(0, 200)}`);
   await page.locator('a[data-result-tab="changes"]').click();
   await until("the changed files", async () => /src\/math\.js/.test(await page.locator("body").innerText()), { timeoutMs: 10_000, everyMs: 500 });
   await shot("result-changes");
-  await Promise.all([page.waitForNavigation(), page.locator(`[data-result-decision] form[action="/t/${firstTask}/complete"] button`).click()]);
+  // Accept and finish: one request accepts and completes it; no Mark complete follows.
+  const posts = [];
+  const counted = request => { if (request.method() === "POST") posts.push(new URL(request.url()).pathname); };
+  page.on("request", counted);
+  await Promise.all([page.waitForNavigation(), page.locator(`[data-result-decision] form[action="/t/${firstTask}/complete"] button[data-accept-result]`).click()]);
+  page.off("request", counted);
+  if (posts.length !== 1 || posts[0] !== `/t/${firstTask}/complete`) throw new Error(`accepting took ${posts.length} requests: ${posts.join(", ")}`);
   await until("the result to read complete", async () => (await page.locator('[data-result-status="assignment-complete"]').count()) > 0, { timeoutMs: 15_000, everyMs: 500 });
   const ledger = rows(`SELECT action, source FROM action_ledger WHERE task_id = '${firstTask}' AND action = 'assignment handoff checked'`);
   if (ledger.length !== 1) throw new Error(`the ledger has ${ledger.length} completion rows`);
